@@ -310,15 +310,18 @@ const (
 // window pinned and nothing else changed: 9 straddles out of 24.
 //
 // So the WIDTH is controlled too. Every [boltDecodeSwarmWideEvery]-th honest
-// exchange is a WIDE one: it sends its RUN, holds the open stream for
-// [boltDecodeSwarmWideHold] without pulling, and only then drains. The exchange is
-// genuinely in flight for that whole time — the server has acknowledged the
-// statement and is holding a cursor for it.
+// exchange is a WIDE one: it sends its RUN, holds the open stream without pulling,
+// and only then drains. The exchange is genuinely in flight for that whole time —
+// the server has acknowledged the statement and is holding a cursor for it.
 //
 // The hold is NOT set by waiting for a refusal to be counted. That would make
 // any clause resting on it true by construction of the HARNESS instead of by
 // behaviour of the SERVER, which is the failure mode a coverage gate exists to
-// prevent. It is a fixed duration, chosen against a measured rate.
+// prevent. It is [boltDecodeSwarmWideHold] of wall time and then a wait on the
+// FLEET'S OWN PROGRESS — round trips completed, of any outcome — which is a
+// different thing entirely: see [boltDecodeSwarm.wideHold] for the distinction and
+// for why a hold fixed in milliseconds cannot hold its meaning on a machine that
+// slows the fleet down (rmp #2611).
 //
 // # What the width does NOT buy, measured (rmp #2596)
 //
@@ -331,16 +334,45 @@ const (
 // gate failures in the sweep. The cause is arithmetic: a wide window can only
 // contain a refusal if one arrives inside it, and under load the fleet's refusals
 // become both rarer (10 to 87 per run) and spread over a honest window that
-// dilates with the load while the 50 ms hold does not.
+// dilates with the load while the 50 ms hold, as it then stood, did not.
 //
 // So no COUNT of wide exchanges is adjudicated any more. The wide exchanges
-// themselves stay, and they stay load-bearing: at 50 ms each they are most of the
-// honest client's total in-flight time, and that in-flight time is what an abusive
-// round trip has to overlap for nv-swarm-overlap to count it. What went is the
-// threshold on how many of them individually contained an event.
+// themselves stay, and they stay load-bearing: they are most of the honest client's
+// total in-flight time, and that in-flight time is what an abusive round trip has
+// to overlap for nv-swarm-overlap to count it. What went is the threshold on how
+// many of them individually contained an event.
+//
+// What #2596 diagnosed and did not fix is that the hold's 50 ms did not dilate with
+// the load while the fleet's round trip did, so under load a wide exchange stopped
+// being able to contain a complete abusive round trip at all. rmp #2611 made the
+// hold wait on the fleet's progress as well as on the clock; the 50 ms is now the
+// floor rather than the whole hold.
 const (
 	boltDecodeSwarmWideEvery = 6
-	boltDecodeSwarmWideHold  = 50 * time.Millisecond
+	// boltDecodeSwarmWideHold is the wall-clock FLOOR of a wide exchange's hold. It
+	// is what decides the hold on an idle host, where an abusive round trip is
+	// single-figure milliseconds and the fleet progress below is reached long before
+	// this elapses.
+	boltDecodeSwarmWideHold = 50 * time.Millisecond
+	// boltDecodeSwarmWideFleetRounds is how many further abusive round trips the
+	// fleet must COMPLETE before a wide exchange stops holding. One per abuser is
+	// the smallest count that means "the whole fleet got a turn inside this
+	// exchange" rather than "one member did", and it is what makes the hold dilate
+	// with the fleet instead of against it (rmp #2611). See
+	// [boltDecodeSwarm.wideHold].
+	boltDecodeSwarmWideFleetRounds = boltDecodeSwarmAbusers
+	// boltDecodeSwarmWideHoldStep is how often the hold samples the fleet's round
+	// counter. It is coarser than [boltDecodeSwarmBarrierStep] because the quantity
+	// it waits on is coarser: an abusive round trip is milliseconds at best and
+	// hundreds of milliseconds under load, so a 100 us step would cost thousands of
+	// timer wake-ups per hold to resolve an event that cannot arrive that often.
+	boltDecodeSwarmWideHoldStep = time.Millisecond
+	// boltDecodeSwarmWideHoldMax caps one hold. It bounds a wide exchange that is
+	// waiting on a fleet which has stopped making progress; it is not a pace, being
+	// two orders of magnitude above a measured abusive round trip and a thirtieth of
+	// the [boltDecodeHonestBound] starvation bound the same exchange is charged
+	// against. Expiries are counted and rendered.
+	boltDecodeSwarmWideHoldMax = 1 * time.Second
 )
 
 // boltDecodeHonestBound is the liveness bound on ONE honest exchange under
@@ -575,24 +607,78 @@ type BoltDecodeEvidence struct {
 	// [checkBoltDecodeSwarmNonVacuity] for what the clause may and may not read
 	// into it.
 	RefusalsConcurrentWithHonest int64
-	// RejectionsDuringHonest is how many abusive messages were refused between the
-	// first honest exchange starting and the last one finishing.
+	// RejectionsSpanningHonestWindow is how many abusive messages were refused on a
+	// round trip that INTERSECTED the honest window — the interval from the first
+	// honest exchange starting to the last one finishing.
+	//
+	// It is the quantity nv-swarm-pressure-density adjudicates, and it is an
+	// interval intersection rather than a counter differenced across the window: the
+	// abuser samples the honest window's published phase immediately before it
+	// writes and again at the moment it counts the refusal. See
+	// [boltDecodeSwarm.honestPhase] for the three phases and
+	// [checkBoltDecodeSwarmNonVacuity] for why the counter difference it replaced
+	// could not carry the claim.
 	//
 	// No FLOOR is ever put on it beyond nonzero. It is a count of events over an
 	// interval whose length the machine controls, so any floor above that passes on
 	// an idle host and fails on a busy one — which is exactly what two earlier
-	// versions of nv-swarm-pressure-density did (rmp #2587). What the clause asks
-	// of it is only that it is not zero: pressure was still live once honest
-	// service had begun. Where those refusals fell inside the window is REPORTED
-	// per segment and adjudicated nowhere; see [boltDecodeSwarmPressureSegments].
+	// versions of nv-swarm-pressure-density did (rmp #2587).
 	//
-	// It is the TOTAL over the window and cannot carry the overlap claim on its own:
-	// a fleet that took turns with the honest client, never once refusing on a round
-	// trip that overlapped honest work, would produce a large count here and witness
-	// nothing about concurrency. Overlap is adjudicated on
-	// RefusalsConcurrentWithHonest above, and this total is what gates it — a window
-	// that held no refusals at all is this clause's own subject, not that one's.
+	// It cannot carry the overlap claim on its own: a fleet that took turns with the
+	// honest client, never once refusing on a round trip that overlapped honest
+	// work, would produce a large count here and witness nothing about concurrency.
+	// Overlap is adjudicated on RefusalsConcurrentWithHonest above, and this total is
+	// what gates it — a window that held no refusals at all is this clause's own
+	// subject, not that one's.
+	RefusalsSpanningHonestWindow int64
+	// RejectionsDuringHonest is how many abusive messages the fleet-wide counter
+	// ADVANCED BY between the honest client's own sample after the start barrier and
+	// its deferred sample once the last exchange had finished.
+	//
+	// DIAGNOSTIC ONLY — no clause reads it any more, and rmp #2611 is why. It was
+	// the density clause's instrument through two earlier versions, and a nonzero
+	// floor on it was described here as the one floor that was safe. It is not: the
+	// quantity is not a count of refusals drawn inside the window, it is a
+	// difference between two reads of a counter an abuser increments only after
+	// decoding its refusal reply. A refusal drawn on a round trip that straddles the
+	// window's close is therefore counted AFTER the window and missed entirely, and
+	// under load — where an abusive round trip outlasts the whole honest window —
+	// that case stops being rare. Measured on a coverage-instrumented sweep of 100
+	// seeds, 2 seeds per sweep read zero here while the fleet had drawn 3 refusals
+	// and the overlap instrument had attributed 2 of them to honest FLIGHT: the
+	// pressure was demonstrably live and this instrument could not see it.
+	//
+	// So this is the THIRD iteration of one defect. #2587 removed a numeric floor
+	// (eight refusals) and then a positional one (one per segment) after both failed
+	// on clean engines; what it left was a nonzero floor on this counter, which is
+	// scheduler-dependent for a different reason — not the RATE of refusals but
+	// WHERE the counter records them. The floor is gone with the instrument: the
+	// claim now rests on RefusalsSpanningHonestWindow above.
+	//
+	// It is still rendered, and [boltDecodeSwarmInFlightRefusals] plus
+	// [boltDecodeSwarmGapRefusals] is still exactly this number minus its tail, so
+	// the three together keep showing where the counter recorded the pressure
+	// relative to the honest client's own samples.
 	RejectionsDuringHonest int64
+	// WideHoldExpiries is how many WIDE honest exchanges reached
+	// [boltDecodeSwarmWideHoldMax] before the fleet had completed the round trips
+	// their hold was waiting for (see [boltDecodeSwarm.wideHold]).
+	//
+	// RENDERED and adjudicated nowhere, for the same reason as GateTimeouts below: a
+	// threshold on it would be another floor that machine load moves. Zero is the
+	// ordinary reading; a nonzero one says the fleet stalled, and the refusals that
+	// run drew inside honest flight were coincidences again.
+	WideHoldExpiries int64
+	// GateTimeouts is how many times an abuser gave up waiting for a partner at the
+	// fleet's rendezvous (see [boltDecodeSwarmGate]).
+	//
+	// It is RENDERED and adjudicated nowhere. Zero is the ordinary reading and every
+	// regime measured for rmp #2611 returned zero; a nonzero one says the fleet
+	// stopped pairing, so the refusals that run drew were coincidences again rather
+	// than consequences of the construction. Thresholding it would put back exactly
+	// the kind of load-moved floor this surface has now removed three times, so it
+	// is reported as data and read by a human.
+	GateTimeouts int64
 	// PressureStarted records whether the honest client saw a refusal counted
 	// before it began, i.e. whether the start barrier was satisfied rather than
 	// expiring. It is what tells a failing run apart: honest exchanges that did not
@@ -1435,9 +1521,10 @@ func boltDecodeCountLabel(c *WireClient, label string) (int, error) {
 //     was served (the pool is not simply broken — a pool stuck at zero would
 //     satisfy "every refusal is typed" perfectly);
 //   - every honest exchange returned the value the harness computed for it, and a
-//     refusal was counted while one of them was IN FLIGHT, so honest service
-//     demonstrably overlapped the pressure window rather than merely preceding or
-//     following it (see [boltDecodeSwarmInFlightRefusals]);
+//     refusal was drawn on an abusive round trip that overlapped one of them IN
+//     FLIGHT, so honest service demonstrably overlapped the pressure window rather
+//     than merely preceding or following it (see [boltDecodeSwarmInFlightRefusals]
+//     for the instrument that could NOT carry that claim, and why);
 //   - the pool comes back: a message sized to the whole ceiling is admitted once
 //     the swarm quiesces.
 //
@@ -1468,7 +1555,12 @@ func RunBoltDecodeSwarm(ctx context.Context, seed uint64) (*BoltDecodeEvidence, 
 	abuseN := boltDecodeModelElementsAt(boltDecodeProbeQuery, boltDecodeParamKey, ev.Budget,
 		boltDecodeSwarmChargeNum, boltDecodeSwarmChargeDen)
 
-	s := &boltDecodeSwarm{srv: srv, ev: ev, abuseN: abuseN}
+	s := &boltDecodeSwarm{
+		srv:    srv,
+		ev:     ev,
+		abuseN: abuseN,
+		gate:   newBoltDecodeSwarmGate(boltDecodeSwarmAbusers),
+	}
 
 	// MEASURE the boundary before the fleet starts, so the leak probe below is
 	// sized to what this server actually admits rather than to what the model
@@ -1483,6 +1575,9 @@ func RunBoltDecodeSwarm(ctx context.Context, seed uint64) (*BoltDecodeEvidence, 
 	}
 	// Read after every goroutine has joined, so no further increment is possible.
 	ev.RefusalsConcurrentWithHonest = s.concurrent.Load()
+	ev.RefusalsSpanningHonestWindow = s.spanning.Load()
+	ev.GateTimeouts = s.gate.timeouts.Load()
+	ev.WideHoldExpiries = s.wideHoldExpiries.Load()
 
 	// The pool must be whole again. This runs after every abuser and the honest
 	// client have joined, so nothing else can be holding a reservation.
@@ -1520,14 +1615,17 @@ type boltDecodeSwarm struct {
 	// rejected is the fleet-wide count of typed pool refusals, sampled by the honest
 	// client either side of every exchange and once at each end of its whole run.
 	//
-	// It is the DENSITY instrument: the difference across the run is what tells
-	// nv-swarm-pressure-density whether the pressure was still live once honest
-	// service had begun. It is not the overlap instrument, and the difference across
-	// a single exchange does not prove a refusal was issued while that exchange was
-	// in flight — an abuser increments it only after decoding its reply, which the
-	// injected experiment on [boltDecodeSwarmInFlightRefusals] shows is late enough
-	// to make that reading wrong. Overlap is measured by the fleet instead; see
-	// [boltDecodeSwarm.concurrent].
+	// It is a DIAGNOSTIC instrument and no longer an adjudicated one. The difference
+	// across a single exchange does not prove a refusal was issued while that
+	// exchange was in flight — an abuser increments it only after decoding its
+	// reply, which the injected experiment on [boltDecodeSwarmInFlightRefusals]
+	// shows is late enough to make that reading wrong — and rmp #2611 established
+	// that the difference across the whole RUN carries the same lag: a refusal drawn
+	// on a round trip that straddled the honest window's close is counted after the
+	// window, so the difference reads zero on runs where the fleet demonstrably WAS
+	// being refused alongside honest service. Both adjudicated quantities are
+	// measured by the fleet instead; see [boltDecodeSwarm.concurrent] and
+	// [boltDecodeSwarm.spanning].
 	rejected atomic.Int64
 	// honestDone is set once the honest client has finished its exchanges. The
 	// abusers read it every round and stop, so the pressure window is guaranteed to
@@ -1543,6 +1641,41 @@ type boltDecodeSwarm struct {
 	// concurrent counts refusals whose round trip overlapped honest flight. It is
 	// the quantity nv-swarm-overlap adjudicates.
 	concurrent atomic.Int64
+	// honestPhase is the honest WINDOW's state, published by the honest client and
+	// read by the fleet either side of every message: 0 before its first exchange
+	// has begun, 1 while the window is open, 2 once it has closed. It only ever
+	// moves forward, and it moves to 2 only from 1 — a run whose honest client never
+	// opened a window leaves it at 0, so nothing can be attributed to a window that
+	// does not exist.
+	//
+	// It is the density instrument's other endpoint. Sampling it before the write
+	// and again at the moment a refusal is counted turns "was this refusal drawn
+	// inside the honest window?" into an intersection of two intervals, each
+	// endpoint published by the goroutine that owns it, instead of a comparison
+	// against a counter that is incremented late (rmp #2611).
+	honestPhase atomic.Int64
+	// spanning counts refusals whose round trip INTERSECTED the honest window. It is
+	// the quantity nv-swarm-pressure-density adjudicates.
+	//
+	// It dominates both of the other two by construction: a refusal counted inside
+	// the window has its round trip ending inside the window, and a round trip that
+	// overlapped honest FLIGHT necessarily overlapped the window that contains that
+	// flight. So moving the clause onto it can only ever admit runs the counter
+	// difference rejected, never reject runs it admitted.
+	spanning atomic.Int64
+	// fleetRounds counts abusive round trips COMPLETED, of any outcome. It is the
+	// honest client's clock for a wide exchange's hold: see
+	// [boltDecodeSwarm.wideHold] for why the hold is measured in fleet progress
+	// rather than only in wall time.
+	fleetRounds atomic.Int64
+	// wideHoldExpiries counts wide holds that reached their wall-clock cap before
+	// the fleet had made the progress they were waiting for.
+	wideHoldExpiries atomic.Int64
+	// gate is the fleet's rendezvous. Every abuser waits at it before every message
+	// so that two of them are released together and the pool's arithmetic — not the
+	// scheduler — decides that one of the two is refused. See
+	// [boltDecodeSwarmGate].
+	gate *boltDecodeSwarmGate
 	// mu guards the evidence slices the abusers append to. The abusers' own results
 	// are order-independent (the report is a census, never a sequence), so a plain
 	// mutex is the right primitive and the ordering it does not provide is not
@@ -1691,14 +1824,172 @@ func (s *boltDecodeSwarm) run(ctx context.Context, rng *Seed) error {
 	return <-errs
 }
 
+// The fleet's rendezvous, which is what makes an abusive refusal arithmetic rather
+// than a coincidence. See [boltDecodeSwarmGate].
+const (
+	// boltDecodeSwarmGatePairs is how many abusers are released together. Two is
+	// what the pool's arithmetic needs — 2 x 55% is 110% of the ceiling — and no
+	// more than the fleet can spare: a wider barrier would run every round at the
+	// pace of the slowest member.
+	boltDecodeSwarmGatePairs = 2
+	// boltDecodeSwarmGateBound bounds one wait at the gate. It exists so a stalled
+	// abuser cannot stall the fleet, not to pace it: a measured abusive round trip
+	// is ~2 ms on an idle host and ~170 ms under 16 concurrent coverage-instrumented
+	// binaries, so this bound is 2500x and 29x those, far above any pace it could
+	// set. Expiries are counted in [BoltDecodeEvidence.GateTimeouts] and
+	// rendered, because a fleet that stopped pairing is a fleet whose pressure went
+	// back to being drawn rather than constructed.
+	boltDecodeSwarmGateBound = 5 * time.Second
+)
+
+// The three states of [boltDecodeSwarm.honestPhase], which is the honest WINDOW's
+// published endpoint pair. They are ordered and the phase only moves forward, so a
+// pair of samples taken either side of an abusive round trip decides an interval
+// intersection exactly: see [boltDecodeSwarm.abuser].
+const (
+	// boltDecodeHonestWindowPending is before the honest client's first exchange has
+	// begun. A run that stays here never opened a window at all.
+	boltDecodeHonestWindowPending int64 = 0
+	// boltDecodeHonestWindowOpen is from the first exchange's wire operations
+	// starting until the honest client returns.
+	boltDecodeHonestWindowOpen int64 = 1
+	// boltDecodeHonestWindowClosed is once the honest client has returned. It is
+	// reached only from Open.
+	boltDecodeHonestWindowClosed int64 = 2
+)
+
 // boltDecodeSwarmHonestPauseMaxUs bounds the honest client's inter-exchange
 // pause, in microseconds. It exists so the honest exchanges SPREAD across the
 // abusers' rounds instead of finishing in a burst before the pressure builds;
 // the overlap clause still has to observe the spread rather than assume it.
 const boltDecodeSwarmHonestPauseMaxUs = 2000
 
+// boltDecodeSwarmGate is the fleet's rendezvous: an abuser waits at it before
+// every message until [boltDecodeSwarmGatePairs] of them are waiting together, and
+// they are then released in the same instant.
+//
+// # Why the fleet needs one at all (rmp #2611)
+//
+// The abusers already keep pushing until the honest client has finished, so the
+// honest window is guaranteed to be crossed by abusive TRAFFIC. It was never
+// guaranteed to be crossed by abusive PRESSURE, and those are not the same thing:
+// each message models a hold of 55% of the pool, so a refusal needs two charges
+// outstanding at once, and whether two free-running abusers overlap is the
+// scheduler's decision. Measured on a coverage-instrumented sweep, a free-running
+// fleet drew 3 refusals in 30 messages — a tenth of its traffic — and 2 seeds in
+// every 100 had none of them land inside the honest window.
+//
+// Releasing two abusers together makes the refusal arithmetic rather than
+// coincidence: 55% + 55% is 110% of the pool, so of any two messages the pool has
+// admitted together at most one can stand. The gate constructs the CO-RESIDENCE;
+// the server's refusal is still what the clause adjudicates, and a pool that
+// admitted both would fail nv-swarm-rejections' sizing argument by name.
+//
+// # Why two and not the whole fleet
+//
+// Two is what the arithmetic needs, and it is what costs the fleet least. A
+// four-way barrier would run the fleet at the pace of its slowest member every
+// round, which under load is exactly when the honest window can least afford a
+// slower fleet. A pair gate trips as soon as any two of the four are ready, so the
+// other two keep moving.
+//
+// # Deadlock, and the bound
+//
+// An abuser that leaves — a transport fault, a cancelled context, the round floor
+// reached with the honest client finished — calls [boltDecodeSwarmGate.leave],
+// which lowers the live count and releases anyone the smaller fleet can no longer
+// pair. A fleet of one never blocks. The wait is bounded anyway, because a bound
+// that is never reached costs nothing and a missing one would turn a stalled
+// abuser into a stalled scenario. The bound is generous against a measured round
+// trip (single-figure milliseconds idle, under a second at 16x oversubscription)
+// so it is not itself a scheduling gate, and every expiry is COUNTED and rendered:
+// a run whose fleet never managed to pair is a run whose pressure was drawn rather
+// than constructed, and that has to be visible rather than silent.
+type boltDecodeSwarmGate struct {
+	release  chan struct{}
+	mu       sync.Mutex
+	parties  int
+	waiting  int
+	timeouts atomic.Int64
+}
+
+// newBoltDecodeSwarmGate returns a gate for parties live abusers.
+func newBoltDecodeSwarmGate(parties int) *boltDecodeSwarmGate {
+	return &boltDecodeSwarmGate{release: make(chan struct{}), parties: parties}
+}
+
+// arrive blocks until enough abusers are waiting together, the context ends, or
+// [boltDecodeSwarmGateBound] expires.
+func (g *boltDecodeSwarmGate) arrive(ctx context.Context) {
+	g.mu.Lock()
+	ch := g.release
+	g.waiting++
+	if g.waiting >= g.threshold() {
+		g.trip()
+		g.mu.Unlock()
+		return
+	}
+	g.mu.Unlock()
+
+	timer := time.NewTimer(boltDecodeSwarmGateBound)
+	defer timer.Stop()
+	select {
+	case <-ch:
+	case <-ctx.Done():
+		g.withdraw(ch)
+	case <-timer.C:
+		g.timeouts.Add(1)
+		g.withdraw(ch)
+	}
+}
+
+// leave drops one abuser from the live count and releases whoever the smaller
+// fleet can no longer pair.
+func (g *boltDecodeSwarmGate) leave() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.parties--
+	if g.parties > 0 && g.waiting >= g.threshold() {
+		g.trip()
+	}
+}
+
+// threshold is how many arrivals trip the gate: the pair the arithmetic needs, or
+// the whole fleet when fewer than that are left alive. The caller holds g.mu.
+func (g *boltDecodeSwarmGate) threshold() int {
+	if g.parties < boltDecodeSwarmGatePairs {
+		return g.parties
+	}
+	return boltDecodeSwarmGatePairs
+}
+
+// trip releases the current generation and opens the next. The caller holds g.mu.
+func (g *boltDecodeSwarmGate) trip() {
+	g.waiting = 0
+	ch := g.release
+	g.release = make(chan struct{})
+	close(ch)
+}
+
+// withdraw removes a waiter that gave up, but only from the generation it was
+// actually waiting on: if that generation has already been released the waiter was
+// counted out by trip, and decrementing again would let a later arrival trip the
+// gate one short.
+func (g *boltDecodeSwarmGate) withdraw(ch chan struct{}) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.release == ch && g.waiting > 0 {
+		g.waiting--
+	}
+}
+
 // abuser drives one connection's rounds of oversized parameters.
 func (s *boltDecodeSwarm) abuser(ctx context.Context, id int) error {
+	// Drop out of the rendezvous however this returns, registered BEFORE the dial:
+	// an abuser that never got a connection is one the rest of the fleet must stop
+	// counting on, exactly like one that stopped pushing.
+	defer s.gate.leave()
+
 	c, err := s.srv.Dial()
 	if err != nil {
 		return fmt.Errorf("sim: bolt-decode swarm abuser %d dial: %w", id, err)
@@ -1722,11 +2013,18 @@ func (s *boltDecodeSwarm) abuser(ctx context.Context, id int) error {
 		if round >= boltDecodeSwarmMinRounds && s.honestDone.Load() {
 			break
 		}
+		// Rendezvous, so this message and another abuser's are outstanding together
+		// and the pool's arithmetic decides that one of them is refused. It is taken
+		// BEFORE the samples below, so the sampled interval is the round trip itself
+		// and never the wait for a partner.
+		s.gate.arrive(ctx)
 		// Sampled immediately before the write and again at the moment the refusal is
 		// counted. Their disjunction below is exact: honest work was in flight at the
 		// start of this round trip, or at its end, or an exchange began and ended
-		// entirely inside it.
+		// entirely inside it. phaseBefore is the same sampling for the honest WINDOW
+		// rather than for a single exchange's flight.
 		flightBefore, startsBefore := s.honestFlight.Load(), s.honestStarts.Load()
+		phaseBefore := s.honestPhase.Load()
 		resp, err := c.Run(boltDecodeProbeQuery, boltDecodeParams(s.abuseN))
 		if err != nil {
 			// A transport fault is recorded, not returned: a reassembly-layer budget
@@ -1746,6 +2044,16 @@ func (s *boltDecodeSwarm) abuser(ctx context.Context, id int) error {
 			if flightBefore > 0 || s.honestFlight.Load() > 0 || s.honestStarts.Load() > startsBefore {
 				s.concurrent.Add(1)
 			}
+			// The window intersection, on the same two samples. The window was open
+			// when this round trip started, or when its refusal was counted, or it
+			// opened and closed entirely inside the round trip — which is the case the
+			// counter difference cannot see at all, because the increment below lands
+			// after the window has closed.
+			if phaseAfter := s.honestPhase.Load(); phaseBefore == boltDecodeHonestWindowOpen ||
+				phaseAfter == boltDecodeHonestWindowOpen ||
+				(phaseBefore == boltDecodeHonestWindowPending && phaseAfter == boltDecodeHonestWindowClosed) {
+				s.spanning.Add(1)
+			}
 		}
 		s.mu.Lock()
 		s.ev.AbuserReplies[key]++
@@ -1764,6 +2072,9 @@ func (s *boltDecodeSwarm) abuser(ctx context.Context, id int) error {
 				return nil
 			}
 		}
+		// Published last, so the round trip this counts is finished: it is the honest
+		// client's clock for how long a wide exchange holds its stream open.
+		s.fleetRounds.Add(1)
 	}
 
 	// The connection must still work once this abuser has stopped pushing: a
@@ -1794,8 +2105,13 @@ func (s *boltDecodeSwarm) honest(ctx context.Context, pauses []time.Duration) er
 	}
 
 	// Signal completion however this returns, so a honest client that stops early
-	// cannot leave the abusers pushing until their safety bound.
+	// cannot leave the abusers pushing until their safety bound. The window closes
+	// with it, and only if it was ever opened: CompareAndSwap rather than Store, so
+	// a honest client that never ran an exchange leaves the phase at
+	// [boltDecodeHonestWindowPending] and no refusal can be attributed to a window
+	// that never existed.
 	defer s.honestDone.Store(true)
+	defer s.honestPhase.CompareAndSwap(boltDecodeHonestWindowOpen, boltDecodeHonestWindowClosed)
 
 	s.ev.PressureStarted = s.awaitPressure(ctx)
 	firstSample := s.rejected.Load()
@@ -1818,10 +2134,12 @@ func (s *boltDecodeSwarm) honest(ctx context.Context, pauses []time.Duration) er
 		)
 		// Published for the fleet, around the wire operations alone: the pause before
 		// this exchange is NOT honest work in flight and must not be claimed as it.
+		// The window opens with the FIRST exchange, for the same reason.
+		s.honestPhase.CompareAndSwap(boltDecodeHonestWindowPending, boltDecodeHonestWindowOpen)
 		s.honestStarts.Add(1)
 		s.honestFlight.Add(1)
 		if h.Wide {
-			ok, got = boltDecodeWideExchange(c, int64(i))
+			ok, got = boltDecodeWideExchange(c, int64(i), func() { s.wideHold(ctx) })
 		} else {
 			ok, got = boltDecodeFollowUp(c, int64(i))
 		}
@@ -1841,6 +2159,65 @@ func (s *boltDecodeSwarm) honest(ctx context.Context, pauses []time.Duration) er
 	return nil
 }
 
+// wideHold is how long a WIDE honest exchange keeps its stream open: at least
+// [boltDecodeSwarmWideHold] of wall time, and then until the fleet has completed
+// [boltDecodeSwarmWideFleetRounds] more round trips than it had when the hold
+// began, capped at [boltDecodeSwarmWideHoldMax].
+//
+// # Why the hold is measured in fleet progress and not only in wall time
+//
+// rmp #2596 diagnosed the erosion precisely and then only half-fixed it: "a wide
+// window can only contain a refusal if one arrives inside it, and under load the
+// fleet's refusals become both rarer and spread over a honest window that dilates
+// with the load while the 50 ms hold does not". A fixed hold is a fixed number of
+// MILLISECONDS offered to a fleet whose round trip takes a load-dependent number of
+// milliseconds, so the number of abusive round trips a wide exchange can contain
+// falls as the machine fills. Measured under 16 concurrent coverage-instrumented
+// binaries: a run drew 13 refusals from 24 abusive messages — the fleet was being
+// refused more than half the time it spoke — and exactly ONE of those refusals fell
+// inside a honest window holding four 50 ms exchanges. The window had stopped being
+// long enough to contain the fleet's round trips, and the clause that fired was not
+// this arm's rate but an EXISTENCE claim, on a clean engine serving 24 of 24 honest
+// exchanges correctly.
+//
+// Waiting on the fleet's own progress makes the hold dilate exactly as the fleet
+// does. On an idle host an abusive round trip is single-figure milliseconds, so the
+// wall-clock floor still decides and the arm behaves as it did; under load the hold
+// grows with the thing it is meant to overlap.
+//
+// # What it deliberately does NOT wait for
+//
+// It waits for round trips COMPLETED, of any outcome — never for a refusal. Waiting
+// for a refusal would make every clause resting on this hold true by construction
+// of the HARNESS instead of by behaviour of the SERVER, which is the failure mode a
+// coverage gate exists to prevent and is why the hold has never been set that way.
+// What the construction supplies is the CO-RESIDENCE the pool's arithmetic needs;
+// what the server supplies, and what the clauses adjudicate, is the refusal.
+//
+// The cap is a bound, not a pace: it is far above the round trip it waits on at
+// every load measured — a factor of about 500 on an idle host, where an abusive
+// round trip runs at ~2 ms, and of about 6 under 16 concurrent
+// coverage-instrumented binaries, where it runs at ~170 ms — it is a thirtieth of
+// the [boltDecodeHonestBound] starvation bound this hold is charged against, and
+// every expiry is counted into
+// [BoltDecodeEvidence.WideHoldExpiries] and rendered so a run whose holds gave up
+// waiting is visible rather than silent.
+func (s *boltDecodeSwarm) wideHold(ctx context.Context) {
+	want := s.fleetRounds.Load() + boltDecodeSwarmWideFleetRounds
+	time.Sleep(boltDecodeSwarmWideHold)
+	deadline := time.Now().Add(boltDecodeSwarmWideHoldMax)
+	for s.fleetRounds.Load() < want {
+		if ctx.Err() != nil {
+			return
+		}
+		if !time.Now().Before(deadline) {
+			s.wideHoldExpiries.Add(1)
+			return
+		}
+		time.Sleep(boltDecodeSwarmWideHoldStep)
+	}
+}
+
 // boltDecodeWideExchange runs one honest exchange that deliberately holds its
 // stream open between RUN and PULL, so the exchange is in flight for a window
 // wide enough to contain several refusals.
@@ -1851,7 +2228,7 @@ func (s *boltDecodeSwarm) honest(ctx context.Context, pauses []time.Duration) er
 // RUN and PULL makes it exactly [boltDecodeSwarmWideHold] on any machine, while
 // leaving the exchange genuinely open: the server has acknowledged the statement
 // and is holding a cursor for it the whole time.
-func boltDecodeWideExchange(c *WireClient, want int64) (bool, int64) {
+func boltDecodeWideExchange(c *WireClient, want int64, hold func()) (bool, int64) {
 	resp, err := c.Run("RETURN "+strconv.FormatInt(want, 10)+" AS v", nil)
 	if err != nil {
 		return false, -1
@@ -1859,7 +2236,7 @@ func boltDecodeWideExchange(c *WireClient, want int64) (bool, int64) {
 	if kind, _, _ := boltDecodeReplyKind(resp); kind != "SUCCESS" {
 		return false, -1
 	}
-	time.Sleep(boltDecodeSwarmWideHold)
+	hold()
 	return boltDecodeDrainOne(c, want)
 }
 
@@ -2655,8 +3032,10 @@ func boltDecodeSwarmSegmentRefusals(honest []BoltDecodeHonest) []int64 {
 //
 // It is reported because it is the visible half of the arithmetic a reader expects:
 // this quantity plus [boltDecodeSwarmGapRefusals] is exactly
-// `RejectionsDuringHonest`, so the three together show where the pressure fell
-// relative to the honest client's own samples.
+// `RejectionsDuringHonest` minus whatever the counter recorded after the last
+// exchange closed, so the three together show where the counter recorded the
+// pressure relative to the honest client's own samples. None of the three is
+// adjudicated; see [BoltDecodeEvidence.RejectionsDuringHonest] (rmp #2611).
 //
 // # Why nothing thresholds it: measured on the shape it replaced
 //
@@ -2688,9 +3067,12 @@ func boltDecodeSwarmSegmentRefusals(honest []BoltDecodeHonest) []int64 {
 // exchange, so refusals it produced land in the counter well after the exchange
 // they were concurrent with has closed.
 //
-// So this counter cannot carry the claim. What replaced it does not ask WHEN a
+// So this counter cannot carry the claim — and rmp #2611 established that neither
+// can the same counter differenced across the whole honest window, which is what
+// nv-swarm-pressure-density read until then. What replaced BOTH does not ask WHEN a
 // refusal was counted at all: each abuser samples the honest client's in-flight
-// state immediately before it writes and again at the moment it counts the refusal,
+// state (and the honest window's phase) immediately before it writes and again at
+// the moment it counts the refusal,
 // and a refusal is attributed to honest work only when those two samples bracket a
 // honest exchange's own flight. That is an intersection of two intervals, each
 // endpoint published by the goroutine that owns it, instead of an event compared
@@ -2740,18 +3122,47 @@ func boltDecodeSwarmGapRefusals(honest []BoltDecodeHonest) int64 {
 // # What nv-swarm-pressure-density asserts, and what it deliberately does not
 //
 // It asserts only that the honest window lay INSIDE the pressure window: the start
-// barrier was satisfied, and at least one abusive message was refused while honest
-// service was in flight. That is weaker than two earlier versions of this clause,
-// and the weakening is deliberate and measured (rmp #2587).
+// barrier was satisfied, and at least one abusive round trip that overlapped the
+// honest window was refused. That is weaker than two earlier versions of this
+// clause, and the weakening is deliberate and measured (rmp #2587).
+//
+// # The instrument, and why the counter difference it replaced could not carry it
+//
+// The clause reads [BoltDecodeEvidence.RefusalsSpanningHonestWindow], which the
+// FLEET measures: each abuser samples the honest window's published phase
+// immediately before it writes and again at the moment it counts a refusal, and
+// the refusal is attributed to the window when those two samples intersect it.
+//
+// It used to read the difference between two samples of the fleet-wide refusal
+// counter taken by the honest client itself, and rmp #2611 established that this
+// cannot work. An abuser increments that counter only after decoding its refusal
+// reply, so a refusal drawn on a round trip that straddles the window's CLOSE is
+// recorded after the window and missed. Under load an abusive round trip outlasts
+// the entire honest window, so the case is not rare: on a coverage-instrumented
+// sweep of 100 seeds, 2 seeds per sweep read ZERO across the window while the
+// fleet had drawn 3 refusals and the overlap instrument — which was already an
+// interval intersection, because rmp #2596 had fixed exactly this lag for the
+// overlap claim and did not touch the density one — had attributed 2 of them to
+// honest FLIGHT. Every honest exchange was served correctly and every abuser
+// connection survived. That is a clean engine failing a coverage gate for the
+// third time on one root cause.
+//
+// The new quantity DOMINATES both of the others by construction: a refusal counted
+// inside the window ended inside the window, and a round trip overlapping honest
+// FLIGHT overlaps the window containing it. So the move can only admit runs the
+// old instrument rejected and can never reject one it admitted.
 //
 // The clause used to threshold HOW MANY refusals landed in the honest window
 // (eight), and then WHERE they landed (at least one in each of four segments).
 // Both are density claims, and density here is a rate over an interval whose
-// length the machine partly controls: the honest window contains four
-// [boltDecodeSwarmWideHold] sleeps, which do not dilate under load, while the
-// fleet's refusal rate does. Both versions therefore failed `make ci` on an engine
-// that had done nothing wrong. Measured on the reference host under -race, same
-// 12 seeds per regime:
+// length the machine partly controls: the honest window then contained four
+// FIXED [boltDecodeSwarmWideHold] sleeps, which did not dilate under load, while
+// the fleet's refusal rate did. (rmp #2611 has since made those holds wait on the
+// fleet's own progress too — see [boltDecodeSwarm.wideHold] — which is why the
+// window now dilates with the fleet; it does not bring the thresholds back, because
+// a rate over an interval is still a rate.) Both versions therefore failed
+// `make ci` on an engine that had done nothing wrong. Measured on the reference
+// host under -race, same 12 seeds per regime:
 //
 //	regime                          wall/run    fleet msgs   refused during honest
 //	idle                            0.67 s      73..82       56..65
@@ -2770,9 +3181,11 @@ func boltDecodeSwarmGapRefusals(honest []BoltDecodeHonest) int64 {
 // — the trade docs/test-layers.md already forces for wall clock.
 //
 // What it CAN still detect is the vacuity it was written for: a run whose honest
-// client was served entirely outside the pressure window. `RejectionsDuringHonest`
-// never fell below 2 in any regime measured above, including the two runs that
-// failed the old clauses, so the floor of "nonzero" is not near the noise.
+// client was served entirely outside the pressure window — no abusive round trip
+// overlapping it drew a refusal at all. On the instrument it now reads, that
+// requires the fleet to have been admitted (or to have stopped) throughout a window
+// it is pushing across by construction, which is a statement about the SERVER
+// rather than about when the scheduler ran the fleet.
 //
 // The per-segment distribution and the total are RENDERED on every failing run
 // (see [BoltDecodeEvidence.renderSwarm]) so the erosion stays visible as data.
@@ -2838,7 +3251,7 @@ func checkBoltDecodeSwarmNonVacuity(e *BoltDecodeEvidence) []Violation {
 	// reporting it here as well would name one cause twice while looking like two
 	// findings. This clause answers only the next question: given that the window
 	// held refusals, did any of them coincide with honest work in flight?
-	if e.RefusalsConcurrentWithHonest <= 0 && e.RejectionsDuringHonest > 0 {
+	if e.RefusalsConcurrentWithHonest <= 0 && e.RefusalsSpanningHonestWindow > 0 {
 		v = append(v, boltDecodeViolation(ViolationOracleDeviation, "nv-swarm-overlap",
 			fmt.Sprintf("NOT ONE of the %d refusals drawn while the honest client was running was drawn "+
 				"on a round trip that OVERLAPPED a honest exchange's own flight: every one of them "+
@@ -2847,7 +3260,7 @@ func checkBoltDecodeSwarmNonVacuity(e *BoltDecodeEvidence) []Violation {
 				"per segment %v; start barrier satisfied: %v). The fleet and the honest client then took "+
 				"turns instead of overlapping, and this arm exists precisely to drive them at the same "+
 				"time — a deterministic script can reach everything else it asserts",
-				e.RejectionsDuringHonest, boltDecodeSwarmInFlightRefusals(e.Honest),
+				e.RefusalsSpanningHonestWindow, boltDecodeSwarmInFlightRefusals(e.Honest),
 				boltDecodeSwarmGapRefusals(e.Honest), wide, boltDecodeSwarmWideHold,
 				boltDecodeSwarmSegmentRefusals(e.Honest), e.PressureStarted)))
 	}
@@ -2863,13 +3276,16 @@ func checkBoltDecodeSwarmNonVacuity(e *BoltDecodeEvidence) []Violation {
 				"window at all. Every clause about honest traffic staying live under backpressure is "+
 				"then a statement about an UNPRESSURED server", boltDecodeSwarmStartBarrier)))
 	}
-	if e.RejectionsDuringHonest <= 0 {
+	if e.RefusalsSpanningHonestWindow <= 0 {
 		v = append(v, boltDecodeViolation(ViolationOracleDeviation, "nv-swarm-pressure-density",
-			fmt.Sprintf("NO abusive message was refused between the first honest exchange starting and "+
-				"the last one finishing (per segment: %v; start barrier satisfied: %v; the fleet drew %d "+
-				"refusals in total). The pressure had stopped by the time honest service ran, so "+
-				"'honest traffic stays live under backpressure' was never actually put to the test",
-				boltDecodeSwarmSegmentRefusals(e.Honest), e.PressureStarted, e.AbuserRejected)))
+			fmt.Sprintf("NOT ONE abusive round trip that overlapped the honest window — from the first "+
+				"exchange starting to the last one finishing — was refused (the counter difference across "+
+				"the window read %d; per segment: %v; start barrier satisfied: %v; the fleet drew %d "+
+				"refusals in total, %d of them on a round trip overlapping a honest exchange's own "+
+				"flight). The pressure had stopped by the time honest service ran, so 'honest traffic "+
+				"stays live under backpressure' was never actually put to the test",
+				e.RejectionsDuringHonest, boltDecodeSwarmSegmentRefusals(e.Honest), e.PressureStarted,
+				e.AbuserRejected, e.RefusalsConcurrentWithHonest)))
 	}
 	if wide < boltDecodeSwarmMinWide {
 		v = append(v, boltDecodeViolation(ViolationOracleDeviation, "nv-swarm-wide-exchanges",
@@ -3002,8 +3418,11 @@ func (e *BoltDecodeEvidence) renderSwarm() string {
 		served, len(e.Honest), straddled, wideStraddled, wide, minWideRefusals,
 		e.RejectionsDuringHonest, boltDecodeSwarmInFlightRefusals(e.Honest),
 		boltDecodeSwarmGapRefusals(e.Honest), boltDecodeSwarmSegmentRefusals(e.Honest))
-	fmt.Fprintf(&b, "  overlap: %d of those %d refusals were drawn on a round trip overlapping a "+
-		"honest exchange in flight\n", e.RefusalsConcurrentWithHonest, e.RejectionsDuringHonest)
+	fmt.Fprintf(&b, "  window: %d refusals were drawn on a round trip overlapping the honest window; "+
+		"%d of those overlapped a honest exchange's own flight (fleet rendezvous: %d of %d released "+
+		"together, %d wait(s) expired; %d wide hold(s) gave up waiting for the fleet)\n",
+		e.RefusalsSpanningHonestWindow, e.RefusalsConcurrentWithHonest,
+		boltDecodeSwarmGatePairs, e.Abusers, e.GateTimeouts, e.WideHoldExpiries)
 	for _, te := range e.TransportErrors {
 		b.WriteString("  transport loss: " + te + "\n")
 	}

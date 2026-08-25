@@ -62,7 +62,8 @@ func TestBoltDecodePressure_SoakSeedSweep(t *testing.T) {
 func TestBoltDecodeSwarm_SoakSeedSweep(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	const seeds = 100
-	worstWide, worstOverlap := -1, int64(-1)
+	worstWide, worstOverlap, worstDensity := -1, int64(-1), int64(-1)
+	violating := 0
 	for i := uint64(0); i < seeds; i++ {
 		seed := 0x2487_A000 + i
 		ctx, cancel := context.WithTimeout(context.Background(), boltDecodeTestTimeout)
@@ -73,10 +74,22 @@ func TestBoltDecodeSwarm_SoakSeedSweep(t *testing.T) {
 		}
 		v := append(checkBoltDecodePressure(ev), checkBoltDecodePressureNonVacuity(ev)...)
 		if len(v) > 0 {
-			t.Fatalf("seed %#x:\n%s%s", seed, ev, renderViolations(v))
+			// The whole POPULATION is swept, not just the first offender. A gate that
+			// stops at seed one reports a single sample of a distribution, and the two
+			// prior visits to this surface (rmp #2587, #2596) both misread a
+			// scheduling-dependent margin from exactly that sample. The first failing
+			// run is rendered in full; the rest are counted, and the margin lines below
+			// are computed over every seed either way.
+			violating++
+			if violating == 1 {
+				t.Errorf("seed %#x:\n%s%s", seed, ev, renderViolations(v))
+			}
 		}
 		if n := ev.RefusalsConcurrentWithHonest; worstOverlap < 0 || n < worstOverlap {
 			worstOverlap = n
+		}
+		if n := ev.RefusalsSpanningHonestWindow; worstDensity < 0 || n < worstDensity {
+			worstDensity = n
 		}
 		for j := range ev.Honest {
 			h := &ev.Honest[j]
@@ -88,18 +101,45 @@ func TestBoltDecodeSwarm_SoakSeedSweep(t *testing.T) {
 			}
 		}
 	}
-	// The MARGIN is the point of the sweep, not the pass, and rmp #2596 moved which
-	// margin matters. nv-swarm-overlap now reads how many refusals were drawn on a
-	// round trip overlapping honest flight, so THAT is the quantity whose worst case
-	// over 100 seeds says whether the clause rests on a construction or on luck.
+	if violating > 1 {
+		t.Errorf("%d of %d seeds violated the contract or the coverage gate; the first is rendered above",
+			violating, seeds)
+	}
+	// The MARGIN is the point of the sweep, not the pass, and rmp #2596 and #2611
+	// each moved which margin matters. Both adjudicated quantities are now measured
+	// by the fleet as interval intersections, and both worst cases are logged: the
+	// refusals overlapping honest FLIGHT (nv-swarm-overlap) and the refusals
+	// overlapping the honest WINDOW (nv-swarm-pressure-density). Each clause fires at
+	// zero, so its worst case over 100 seeds is what says whether it rests on a
+	// construction or on luck.
 	//
-	// The narrowest wide window is logged beside it and no longer asserted: it is
+	// Measured for rmp #2611 on the reference host, worst case per 100-seed sweep:
+	//
+	//	regime                                  density   overlap
+	//	before the fix, coverage-instrumented       0         1   (1-2 seeds/sweep RED)
+	//	after, coverage-instrumented                4         4
+	//	after, 16 concurrent coverage binaries      6         6
+	//
+	// The density column is the quantity that reached zero and reddened a clean
+	// engine; it is now the column with the most room, which is the point.
+	//
+	// Only the OVERLAP margin is asserted, and deliberately: a refusal drawn on a
+	// round trip that overlapped honest FLIGHT necessarily overlapped the window
+	// holding that flight, so every run's overlap count is at most its density count
+	// and the worst case over the sweep is too. A second threshold on the density
+	// margin could therefore never be the one that fires — it would be implied by
+	// the guard below, and a clause that cannot fail alone is a clause that is not
+	// really there. The density margin is logged instead, which is what makes its
+	// erosion readable.
+	//
+	// The narrowest wide window is logged beside them and no longer asserted: it is
 	// the old clause's margin, and it is expected to reach 0 under load — 9 to 13 of
 	// every 96 runs measured under 32 concurrent coverage-instrumented binaries had
 	// three of their four wide windows empty on a clean engine, which is exactly why
 	// nothing thresholds it any more.
-	t.Logf("across %d seeds the FEWEST overlapping refusals in any run was %d, and the narrowest wide "+
-		"honest window held %d refusals (hold %s)", seeds, worstOverlap, worstWide, boltDecodeSwarmWideHold)
+	t.Logf("across %d seeds the FEWEST overlapping refusals in any run was %d, the fewest refusals "+
+		"inside any honest window was %d, and the narrowest wide honest window held %d refusals (hold %s)",
+		seeds, worstOverlap, worstDensity, worstWide, boltDecodeSwarmWideHold)
 	if worstOverlap <= 1 {
 		t.Errorf("the fewest refusals overlapping honest flight in any of %d seeds was %d. "+
 			"nv-swarm-overlap fires at zero, so a worst case of one is a single scheduling decision from "+

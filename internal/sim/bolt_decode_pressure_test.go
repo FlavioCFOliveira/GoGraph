@@ -54,6 +54,16 @@ func TestBoltDecodePressure_Clean(t *testing.T) {
 
 // TestBoltDecodeSwarm_Clean requires the concurrent surface to satisfy both
 // adjudicators at several seeds.
+//
+// It also pins the ORDERING of the two fleet-measured instruments on real runs. A
+// refusal drawn on a round trip that overlapped a honest exchange's own flight
+// necessarily overlapped the window holding that flight, so the overlapping count
+// can never exceed the window count. The gate depends on it: nv-swarm-overlap is
+// gated on the window count being nonzero precisely so that one cause is never
+// reported as two findings, and an instrument change that let overlap exceed the
+// window would silently turn that gate into a filter that hides the harder clause.
+// The evidence fixtures cannot pin it — they set both numbers by hand — so it is
+// checked here, where the fleet produces them.
 func TestBoltDecodeSwarm_Clean(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	for _, seed := range boltDecodeTestSeeds {
@@ -68,6 +78,13 @@ func TestBoltDecodeSwarm_Clean(t *testing.T) {
 		}
 		if v := checkBoltDecodePressureNonVacuity(ev); len(v) > 0 {
 			t.Errorf("seed %#x fails the coverage gate:\n%s%s", seed, ev, renderViolations(v))
+		}
+		if ev.RefusalsConcurrentWithHonest > ev.RefusalsSpanningHonestWindow {
+			t.Errorf("seed %#x measured %d refusals overlapping honest FLIGHT but only %d overlapping "+
+				"the honest WINDOW that contains it. The second must dominate the first by "+
+				"construction, and nv-swarm-overlap is gated on it, so a run in this state would have "+
+				"the gate suppress the harder clause:\n%s",
+				seed, ev.RefusalsConcurrentWithHonest, ev.RefusalsSpanningHonestWindow, ev)
 		}
 	}
 }
@@ -322,8 +339,11 @@ func healthyBoltDecodeSwarmEvidence() *BoltDecodeEvidence {
 	e.RejectionsDuringHonest = rejected
 	// Every refusal was drawn on a round trip overlapping honest flight, which is
 	// what a healthy concurrent run looks like: the honest client is in flight for
-	// most of its own window, and an abusive round trip carries 4.5 MiB.
+	// most of its own window, and an abusive round trip carries 4.5 MiB. A round
+	// trip that overlapped honest flight necessarily overlapped the window holding
+	// that flight, so the window count is the same number here.
 	e.RefusalsConcurrentWithHonest = rejected
+	e.RefusalsSpanningHonestWindow = rejected
 	return e
 }
 
@@ -938,7 +958,8 @@ func TestBoltDecodeSwarm_NonVacuityCanFail(t *testing.T) {
 			// The fleet and the honest client took turns: the pressure was there for the
 			// whole honest window, but every refusal was drawn on a round trip that
 			// started and finished between two honest exchanges. Fires this clause alone
-			// — RejectionsDuringHonest is untouched, so the density clause is satisfied.
+			// — RefusalsSpanningHonestWindow is untouched, so the density clause is
+			// satisfied.
 			name:    "the fleet and the honest client took turns instead of overlapping",
 			perturb: func(e *BoltDecodeEvidence) { e.RefusalsConcurrentWithHonest = 0 },
 			clause:  "nv-swarm-overlap",
@@ -946,10 +967,10 @@ func TestBoltDecodeSwarm_NonVacuityCanFail(t *testing.T) {
 		{
 			// Half one of the density clause: honest service ran entirely outside the
 			// pressure window, so nothing it observed was under backpressure. Fires
-			// this clause alone — the fixture's wide exchanges still straddle, so
-			// nv-swarm-overlap is satisfied.
-			name:    "NO abusive message was refused while honest service was in flight",
-			perturb: func(e *BoltDecodeEvidence) { e.RejectionsDuringHonest = 0 },
+			// this clause alone — nv-swarm-overlap is GATED on this same quantity, so
+			// zeroing it silences overlap rather than firing it too.
+			name:    "NO abusive round trip overlapping the honest window was refused",
+			perturb: func(e *BoltDecodeEvidence) { e.RefusalsSpanningHonestWindow = 0 },
 			clause:  "nv-swarm-pressure-density",
 		},
 		{
@@ -1076,6 +1097,12 @@ func TestBoltDecodeSwarm_DensityAcceptsLoadedRuns(t *testing.T) {
 				}
 			}
 			e.RejectionsDuringHonest = rejected
+			// Every refusal the counter recorded inside the window was drawn on a round
+			// trip that ENDED inside the window, so it also overlapped the window. The
+			// transcribed runs predate the instrument the clause now reads, and this is
+			// the faithful floor their recorded numbers imply — never a larger number
+			// invented to make the fixture pass.
+			e.RefusalsSpanningHonestWindow = rejected
 			e.PressureStarted = true
 
 			// The fixture must really carry the measured shape, or it would pass for
@@ -1093,6 +1120,10 @@ func TestBoltDecodeSwarm_DensityAcceptsLoadedRuns(t *testing.T) {
 			if e.RejectionsDuringHonest != total || total == 0 {
 				t.Fatalf("fixture models %d refusals during honest service, want %d (nonzero)",
 					e.RejectionsDuringHonest, total)
+			}
+			if e.RefusalsSpanningHonestWindow != total {
+				t.Fatalf("fixture models %d refusals overlapping the honest window, want %d",
+					e.RefusalsSpanningHonestWindow, total)
 			}
 
 			// The claim under test: this clause must NOT fire on any of these.
@@ -1150,6 +1181,17 @@ func (sh boltDecodeSwarmShape) apply(e *BoltDecodeEvidence) *BoltDecodeEvidence 
 	}
 	e.RejectionsDuringHonest = counter - e.Honest[0].RejectionsBefore + sh.tail
 	e.RefusalsConcurrentWithHonest = sh.concurrent
+	// The window count is DERIVED, not transcribed, because every run below predates
+	// the instrument that measures it. Both of the recorded numbers are lower bounds
+	// on it — a refusal the counter recorded inside the window ended inside the
+	// window, and a round trip overlapping honest FLIGHT overlaps the window holding
+	// that flight — so their maximum is the faithful floor the recorded evidence
+	// implies. Deriving it keeps the fixture from passing on a number chosen to make
+	// it pass.
+	e.RefusalsSpanningHonestWindow = e.RejectionsDuringHonest
+	if sh.concurrent > e.RefusalsSpanningHonestWindow {
+		e.RefusalsSpanningHonestWindow = sh.concurrent
+	}
 	e.PressureStarted = true
 	return e
 }
