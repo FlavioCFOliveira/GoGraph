@@ -383,6 +383,37 @@ would have to sit above 9.10 s, while the regression it guards costs about
 ceiling is the right short-layer shape only for a quantity the machine's load
 cannot inflate.
 
+### Resolution (rmp #2589): allocation volume is the instrument these gates needed
+
+The delete-scaling gates no longer measure time at all, and therefore no longer
+need `RequireQuietMachine`. They assert on **allocation volume**, which returned
+all three to asserting in `test-short` on every push — strictly more coverage than
+the serial phase gave them, and `cypher` left `TIMING_PKGS` entirely.
+
+Allocation was previously rejected for these gates on a precise ground, recorded in
+#2589: it is load-invariant here (mallocs differed 0.5% across a 35.9× wall
+inflation) but *"nothing establishes that the pre-fix O(k·n) Mapper.Walk allocated
+in proportion to the nodes it scanned. An oracle whose power against the actual
+defect is unknown is cover, not a gate."* Invariance was established; **power was
+not**.
+
+The missing experiment was then run, using the method #2572 had supplied — model
+the defect and measure whether the instrument sees it:
+
+| workload | per-cycle allocated bytes, last/first |
+|---|---|
+| flat (healthy, fixed work per cycle) | **0.87×** |
+| degrading (6× more work in the last cycle) | **8.66×** |
+
+A 10× separation, with the existing 2.5× threshold sitting between them — 2.9× of
+headroom below and 3.5× of margin above. Against the CPU ratio, which read 2.90× on
+the *flat* workload (a false red) and 1.52× on the *degrading* one (a false pass).
+The threshold did not change; only the instrument did.
+
+**The general lesson.** When a load-invariant instrument is rejected for unknown
+power, that is a missing measurement, not a dead end. Build a control that models
+the defect and measure the separation.
+
 ### Correction (rmp #2517, 2026-08-25): process CPU time is NOT load-invariant
 
 The rule below used to read "in the short layer, assert on an instrument load
@@ -472,8 +503,8 @@ The delete-scaling gates are split accordingly:
 
 | Test | Layer | Asserts |
 |---|---|---|
-| `TestDeleteDoesNotDegradeAcrossCycles`, `TestDetachDeleteDoesNotDegradeAcrossCycles` | short, **`test-timing`** | last/first **CPU** ratio ≤ 2.5× (rmp #2400 / #2418). Guarded by `RequireQuietMachine` since #2517: the CPU ratio is not load-invariant, so it asserts in `test-timing` and skips loudly under `test-short`/`cover-gate` |
-| `TestDeleteCycleGateDetectsDegradation` | short, **`test-timing`** | that the 2.5× gate still **fires** on a workload engineered to degrade (6.48×–6.77× idle, 5.82× under 300 competing CPU-bound processes, 8.80× under a rising load). Guarded with the two gates above, and it must be: this control needs the ratio to EXCEED the threshold, so load that inflates their ratios can equally compress this one below its floor (#2589) |
+| `TestDeleteDoesNotDegradeAcrossCycles`, `TestDetachDeleteDoesNotDegradeAcrossCycles` | short | last/first **ALLOCATION** ratio ≤ 2.5× (rmp #2400 / #2418, instrument changed by #2589). Measures 0.97× and 0.88×; **no guard needed** — see below |
+| `TestDeleteCycleGateDetectsDegradation` | short | that the 2.5× gate still **fires** on a workload engineered to degrade: allocation ratio **8.84×** against the 2.5× limit |
 | `TestDeleteWallTimeDoesNotDegradeAcrossCycles`, `TestDetachDeleteWallTimeDoesNotDegradeAcrossCycles` | soak | last/first **wall** ratio ≤ 2.5×, on a quiet machine |
 | `TestSingleStatementDeleteOfNinetyThousandNodes` | soak | an absolute 10 s budget for a 90 000-node single-statement delete |
 
