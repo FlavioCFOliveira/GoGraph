@@ -665,9 +665,20 @@ func TestGraphIOSurface_MutationAllocOracleCatchesOverAllocation(t *testing.T) {
 
 	const injectPerMutation = 1 << 20
 	var held [][]byte
+	// insideWindow counts injections that happened while the measurement window
+	// was OPEN, and outsideWindow those that did not. Interval containment is the
+	// gated property (rmp #2555); the byte difference below is kept only as a
+	// diagnostic. Both counters are plain ints because the replay loop is
+	// sequential and holds graphIOAllocMu throughout.
+	insideWindow, outsideWindow := 0, 0
 	inflated, ierr := runGraphIOSurface(ctx, graphIOTestSeed, graphIOSurfaceOpts{
 		measureAlloc: true,
 		inflate: func() {
+			if graphIOAllocWindowOpen.Load() {
+				insideWindow++
+			} else {
+				outsideWindow++
+			}
 			b := make([]byte, injectPerMutation)
 			b[0] = 1 // written, so the allocation cannot be optimised away
 			held = append(held, b)
@@ -714,13 +725,38 @@ func TestGraphIOSurface_MutationAllocOracleCatchesOverAllocation(t *testing.T) {
 	// injected amount and never against the total, so it does not widen as
 	// unrelated allocation grows. Verified in both directions: losing exactly
 	// one mutation's injection failed this clause by 907972 B (rmp #2591).
-	const allocTolerancePercent = 1
-	injected := uint64(injectPerMutation) * uint64(len(inflated.Mutations))
-	tolerance := injected * allocTolerancePercent / 100
-	if want := control.MutationAllocBytes + injected - tolerance; inflated.MutationAllocBytes < want {
-		t.Errorf("the inflated run measured %d B, want at least %d B (control %d B + %d B injected across %d mutations, less a %d B tolerance) — the window does not enclose the replay",
-			inflated.MutationAllocBytes, want, control.MutationAllocBytes, injected, len(inflated.Mutations), tolerance)
+	// THE GATED PROPERTY IS INTERVAL CONTAINMENT, NOT A BYTE DIFFERENCE (rmp #2555).
+	//
+	// This clause used to assert `inflated >= control + injected - tolerance`,
+	// differencing two separately-taken readings of a process-global counter. The
+	// counter is per-process and monotonic, so no other process can pollute it —
+	// but this process's own allocation varies between the two runs through map
+	// growth, size-class rounding and GC timing, and under CPU contention that
+	// variance grew enough to flip the comparison. Measured: with a tolerance of 1%
+	// of the injected amount (167772 B at 16 MiB), the clause still failed **1 run
+	// in 20** against six concurrent allocation-load processes. Widening further was
+	// refused by the task: the arm exists to prove the oracle condemns a genuine
+	// over-allocation, and a bound wide enough to survive any contention would stop
+	// failing when the injection was not measured at all.
+	//
+	// The property was never really "the difference is at least the injection". It
+	// is "each injection happened INSIDE the measurement window", which the window
+	// flag answers exactly, with no tolerance and no dependence on how much
+	// anything allocated.
+	if want := len(inflated.Mutations); insideWindow != want || outsideWindow != 0 {
+		t.Errorf("%d of %d injections landed inside the measurement window and %d landed outside "+
+			"(want %d inside, 0 outside) — the window does not enclose the replay, so the injected "+
+			"bytes are not in the figure the oracle adjudicates",
+			insideWindow, want, outsideWindow, want)
 	}
+	// Logged, deliberately NOT asserted: see above for why the byte difference is
+	// not a sound gate. It stays visible because it is what a reader wants to see
+	// when the containment check fails.
+	injected := uint64(injectPerMutation) * uint64(len(inflated.Mutations))
+	t.Logf("byte diagnostic (not asserted): inflated %d B, control %d B, injected %d B, "+
+		"difference less injection %+d B",
+		inflated.MutationAllocBytes, control.MutationAllocBytes, injected,
+		int64(inflated.MutationAllocBytes)-int64(control.MutationAllocBytes)-int64(injected))
 	t.Logf("witness: control %d B over %d B (%.1fx); inflated %d B over %d B (%.1fx) after injecting %d B across %d mutations",
 		control.MutationAllocBytes, control.MutationInputBytes,
 		float64(control.MutationAllocBytes)/float64(control.MutationInputBytes),

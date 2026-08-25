@@ -60,6 +60,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph"
@@ -921,12 +922,34 @@ var graphIOAllocMu sync.Mutex
 func measureProcessAlloc(fn func()) uint64 {
 	graphIOAllocMu.Lock()
 	defer graphIOAllocMu.Unlock()
+	graphIOAllocWindowOpen.Store(true)
+	defer graphIOAllocWindowOpen.Store(false)
 	var m0, m1 runtime.MemStats
 	runtime.ReadMemStats(&m0)
 	fn()
 	runtime.ReadMemStats(&m1)
 	return m1.TotalAlloc - m0.TotalAlloc
 }
+
+// graphIOAllocWindowOpen is true while [measureProcessAlloc] is between its two
+// ReadMemStats calls.
+//
+// It exists so the falsifiability proof can assert INTERVAL CONTAINMENT — that
+// each injected allocation happened while the window was open — instead of
+// differencing two separately-taken readings of a process-global counter
+// (rmp #2555).
+//
+// The difference matters because the counter is per-PROCESS and monotonic, so the
+// only thing that can perturb the difference is this process's own allocation
+// varying between the control and the inflated run: map growth, size-class
+// rounding, GC timing. Under CPU contention that variance grew enough to flip the
+// comparison, measured at 1 failure in 20 runs against six concurrent
+// allocation-load processes even with a tolerance of 1% of the injected amount.
+// A boolean read at the moment of injection has no such variance.
+//
+// Written only under graphIOAllocMu, so windows cannot nest or overlap; read
+// without it by the injection hook, which is why it is atomic.
+var graphIOAllocWindowOpen atomic.Bool
 
 // -----------------------------------------------------------------------------
 // The mutated-export sweep
