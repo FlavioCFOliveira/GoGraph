@@ -136,6 +136,7 @@ near-instant; the cost is the `t.Skip` call itself.
 | `-tags=nightly` | activates the nightly layer at compile time (and implies soak) |
 | `SOAK_FULL=1` | activates the soak layer at runtime via the helpers |
 | `GOGRAPH_NIGHTLY=1` | activates the nightly layer at runtime via the helpers (and implies soak) |
+| `GOGRAPH_PARALLEL_SUITE=1` | declares that packages are being tested **in parallel**, so `testlayers.RequireQuietMachine` skips wall-clock/throughput/CPU-time assertions. Set by `test-short` and `cover-gate`; deliberately NOT set by `test-timing`. Detected by PRESENCE, not value — an empty expansion still counts as set, so a Makefile slip cannot silently re-enable a timing gate under load (rmp #2517) |
 
 `SOAK_FULL` is preserved verbatim from the pre-existing toolchain so
 existing scripts and developer aliases continue to work.
@@ -189,9 +190,16 @@ discipline is enforced by tooling, not folklore.
 
 | Target | Layer | Equivalent command |
 |---|---|---|
-| `make test-short` | short | `go test -race -count=1 -timeout=$(SHORT_TIMEOUT) ./...` |
+| `make test-short` | short | `GOGRAPH_PARALLEL_SUITE=1 go test -race -count=1 -timeout=$(SHORT_TIMEOUT) ./...` |
+| `make test-timing` | short (serial phase) | `go test -race -count=1 -p 1 -timeout=$(TIMING_TIMEOUT) -run '$(TIMING_RUN)' $(TIMING_PKGS)` |
 | `make test-soak` | soak | `go test -race -count=1 -timeout=$(SOAK_TIMEOUT) -tags=soak ./...` |
 | `make test-nightly` | nightly | `go test -race -count=1 -timeout=$(NIGHTLY_TIMEOUT) -tags=nightly ./...` |
+
+`test-timing` is not a fourth layer. It is the **same** short layer re-run
+serially for the subset of tests whose assertion is a duration, a rate, or a
+ratio of them — the phase in which that measurement is valid. `make ci`,
+`make ci-soak` and `make ci-nightly` all invoke it, so those assertions gate
+every push. See [`RequireQuietMachine` and the `test-timing` phase](#requirequietmachine-and-the-test-timing-phase).
 
 ### Why every layer passes an explicit `-timeout`
 
@@ -375,12 +383,74 @@ would have to sit above 9.10 s, while the regression it guards costs about
 ceiling is the right short-layer shape only for a quantity the machine's load
 cannot inflate.
 
+### Correction (rmp #2517, 2026-08-25): process CPU time is NOT load-invariant
+
+The rule below used to read "in the short layer, assert on an instrument load
+cannot move — process CPU time is the load-invariant analogue of wall time",
+and quoted a worst-case CPU noise of 1.50× from the table above. **That rule was
+wrong, and following it is what produced rmp #2517 and #2589.**
+
+Measured on the same flat engine under `make ci`:
+
+| Test | Under `make ci` | In isolation |
+|---|---|---|
+| `TestDetachDeleteDoesNotDegradeAcrossCycles` | **2.90×** CPU ratio against a 2.5× limit; per-cycle 852 ms → 2.48 s | **0.94×**; per-cycle 19.3, 17.8, 18.5, 18.9, 18.2, 18.1 ms |
+
+The cycles ran 45–130× slower under the gate, and 2.90× is well past the 1.50×
+the table records as CPU's worst case — that figure was measured against
+synthetic `yes` workers, not against sibling Go test binaries under `-race`,
+which contend for cache, TLB, and the scheduler in ways that charge real CPU to
+the measured goroutine. Its sibling power control fails the mirror way: contention
+*compresses* the ratio it must exceed, so the control stops firing (#2589).
+
+Contention inflates CPU time. There is no cheap load-invariant proxy for a
+duration; the honest options are a genuinely invariant *different* quantity
+(allocation counts, operation counts, a fitted complexity exponent) or a quiet
+machine.
+
 The rules this yields:
 
-- **Assert on wall clock only where the machine is quiet** — the soak layer.
-- **In the short layer, assert on an instrument load cannot move.** Process CPU
-  time (`syscall.Getrusage(RUSAGE_SELF)`) is the load-invariant analogue of wall
-  time, and for a CPU-bound regression it is also the more faithful one.
+- **Assert on a duration, a rate, or a ratio of them only where the machine is
+  quiet.** Two places qualify: the soak layer, and the `test-timing` phase
+  described below.
+- **In the short layer, prefer a quantity that is invariant by construction** —
+  allocation counts, operation counts, fitted exponents — and only where its
+  power against the actual defect is established. `bench/cyclicjoin` is the
+  worked example: its per-point win is asserted in allocations (2.7×–27× margin,
+  run-to-run spread below 0.01%) while its wall-clock arm is only a coarse guard.
+- **Where no invariant quantity exists, guard the timing assertion with
+  `testlayers.RequireQuietMachine`** rather than widening its tolerance. For
+  roughly a third of the audited assertions — the plain "elapsed vs a constant"
+  hang detectors — the duration *is* the claim, and there is nothing to substitute.
+
+### `RequireQuietMachine` and the `test-timing` phase
+
+`testlayers.RequireQuietMachine(tb, detail)` skips a timing assertion when
+`GOGRAPH_PARALLEL_SUITE` is set. `test-short` and `cover-gate` set it, because
+both run packages concurrently; `test-timing` deliberately does not.
+
+**The default is to ASSERT.** The variable's presence is what causes a skip, so a
+single-package run — `go test ./cypher/`, or a `-run` filter while investigating —
+still checks the gate. No gate silently disappears from a developer's own runs.
+
+**Nothing moves out of the pre-push gate.** `make ci` invokes `test-timing` as its
+own phase, which re-runs exactly the guarded gates serially (`-p 1`) and without
+the variable, so every one of them still gates every push — in the phase where the
+measurement means something. Measured cost: **59 s** for the gates guarded so far,
+against 193 s for the `cypher` package alone under `-race` in the same `make ci`.
+
+`TIMING_PKGS` and `TIMING_RUN` in the `Makefile` list only the gates actually
+guarded today. The complete inventory of affected assertions — 39 across 12
+packages, with the measurement that motivated each — is
+[`short-layer-wallclock-audit.md`](short-layer-wallclock-audit.md).
+
+The skip is **loud by contract**: every caller passes the quantity it was about to
+assert on, and the message names `test-timing` as the place the assertion still
+runs, so a skipped gate can never be mistaken for a passing one. This is the same
+contract `RequireUninstrumented` carries for coverage instrumentation, and the two
+compose — `bench/mvccwrite`'s instrument controls call both, because the same
+precondition is defeated by two different causes.
+
 - **A test that measures process CPU must not call `t.Parallel()`.** `getrusage`
   is process-scoped, so a concurrent sibling is charged to the measurement. Go
   runs non-parallel top-level tests to completion before resuming any test that
@@ -402,8 +472,8 @@ The delete-scaling gates are split accordingly:
 
 | Test | Layer | Asserts |
 |---|---|---|
-| `TestDeleteDoesNotDegradeAcrossCycles`, `TestDetachDeleteDoesNotDegradeAcrossCycles` | short | last/first **CPU** ratio ≤ 2.5× (rmp #2400 / #2418) |
-| `TestDeleteCycleGateDetectsDegradation` | short | that the 2.5× gate still **fires** on a workload engineered to degrade (6.48×–6.77× idle, 5.82× under 300 competing CPU-bound processes, 8.80× under a rising load) |
+| `TestDeleteDoesNotDegradeAcrossCycles`, `TestDetachDeleteDoesNotDegradeAcrossCycles` | short, **`test-timing`** | last/first **CPU** ratio ≤ 2.5× (rmp #2400 / #2418). Guarded by `RequireQuietMachine` since #2517: the CPU ratio is not load-invariant, so it asserts in `test-timing` and skips loudly under `test-short`/`cover-gate` |
+| `TestDeleteCycleGateDetectsDegradation` | short, **`test-timing`** | that the 2.5× gate still **fires** on a workload engineered to degrade (6.48×–6.77× idle, 5.82× under 300 competing CPU-bound processes, 8.80× under a rising load). Guarded with the two gates above, and it must be: this control needs the ratio to EXCEED the threshold, so load that inflates their ratios can equally compress this one below its floor (#2589) |
 | `TestDeleteWallTimeDoesNotDegradeAcrossCycles`, `TestDetachDeleteWallTimeDoesNotDegradeAcrossCycles` | soak | last/first **wall** ratio ≤ 2.5×, on a quiet machine |
 | `TestSingleStatementDeleteOfNinetyThousandNodes` | soak | an absolute 10 s budget for a 90 000-node single-statement delete |
 
@@ -482,6 +552,14 @@ of GoGraph's public surface.
 | `RequireNightly(tb testing.TB)` | function | skips `tb` unless the nightly layer is active |
 | `IsSoak` | constant `bool` | compile-time flag, true under `-tags=soak` |
 | `IsNightly` | constant `bool` | compile-time flag, true under `-tags=nightly` |
+| `RequireUninstrumented(tb, detail)` | function | skips `tb` when built with coverage instrumentation, which compresses the arms a concurrency-**effect control** compares. For controls only (rmp #2319) |
+| `Instrumented() bool` | function | reports whether coverage instrumentation is active, for a caller that adjusts rather than skips |
+| `RequireQuietMachine(tb, detail)` | function | skips `tb` when `GOGRAPH_PARALLEL_SUITE` is set, i.e. when packages are being tested in parallel and a **timing** assertion would measure machine load. Defaults to ASSERTING; the assertion still runs in `make test-timing` (rmp #2517) |
+| `InParallelSuite() bool` | function | reports whether this is a parallel whole-suite run, for a test with BOTH load-independent and timing arms that must guard only the timing one — `bench/cyclicjoin` is the worked example |
+
+`detail` is mandatory on both `Require*` guards above and must name the quantity
+the caller was about to assert on. That is what makes a skip self-explaining, so a
+skipped gate can never be mistaken for a passing one.
 
 The two constants are useful when a test must branch its body on
 layer membership rather than skip wholesale, for example to enlarge a

@@ -59,6 +59,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
 	cmetrics "github.com/FlavioCFOliveira/GoGraph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/internal/testlayers"
 )
 
 // timeTolerance is how much slower the fused arm may be at any single point before
@@ -240,6 +241,28 @@ func TestCyclicJoin_FittedExponents(t *testing.T) {
 	// so that a fusion which became dramatically slower while still allocating less
 	// cannot pass. The tolerance is far outside the scheduler noise that made the
 	// strict form flaky.
+	//
+	// ONLY THIS ARM is conditional (rmp #2506, #2517). The two arms above — the
+	// fitted exponents and the per-point ALLOCATION win — are load-independent and
+	// keep asserting in the short layer, which is why this test is guarded with
+	// [testlayers.InParallelSuite] rather than skipped wholesale by
+	// RequireQuietMachine: skipping the test would take the exponent and allocation
+	// claims down with it, and those are what the default-enable recommendation
+	// actually rests on.
+	//
+	// The tolerance being "far outside the scheduler noise" turned out not to be
+	// true under `make ci`: the guard tripped at its SMALLEST data point, where the
+	// per-point cost is smallest and the noise proportionally largest, while the
+	// allocation ratios were a healthy 2.7x to 27.4x against their 1.5x floor. The
+	// tolerance is deliberately UNCHANGED — the measurement was invalid, not the
+	// threshold.
+	if testlayers.InParallelSuite() {
+		t.Logf("wall-clock arm NOT asserted: %s is set, so packages are being tested in "+
+			"parallel and a per-point time comparison measures machine load. It asserts in "+
+			"`make test-timing`. Observed anyway, for the record: two=%v fused=%v ns",
+			"GOGRAPH_PARALLEL_SUITE", twoCosts, fusedCosts)
+		return
+	}
 	for i := range ms {
 		if fusedCosts[i] > twoCosts[i]*timeTolerance {
 			t.Fatalf("at m=%d the fused arm took %.0f ns against two-Expand's %.0f ns "+

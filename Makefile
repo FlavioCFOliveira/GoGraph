@@ -96,9 +96,50 @@ race: ## Run unit tests with the race detector (SHORT_TIMEOUT overridable)
 # See docs/test-layers.md for the same measurements.
 SHORT_TIMEOUT ?= 30m
 
+# GOGRAPH_PARALLEL_SUITE declares to the test binaries that packages are being
+# tested IN PARALLEL, so any wall-clock, throughput, or CPU-time assertion is
+# measuring the machine's load rather than the code (rmp #2517).
+# testlayers.RequireQuietMachine reads it and skips those assertions LOUDLY, each
+# printing the quantity it would have measured. Nothing stops being gated: the
+# same assertions run and ASSERT in `make test-timing`, which `ci` invokes.
+# The variable is exported by presence, not value, so an empty expansion cannot
+# silently re-enable a gate under load.
 .PHONY: test-short
 test-short: ## [layer: short]   local default — race detector, no build tags (SHORT_TIMEOUT overridable)
-	$(GO) test $(RACE_FLAGS) -count=1 -timeout=$(SHORT_TIMEOUT) $(PACKAGES)
+	GOGRAPH_PARALLEL_SUITE=1 $(GO) test $(RACE_FLAGS) -count=1 -timeout=$(SHORT_TIMEOUT) $(PACKAGES)
+
+# TIMING_PKGS are the packages holding short-layer assertions whose subject is a
+# duration, a throughput, or a ratio of them. The full inventory, with the
+# measurement that motivated each, is docs/short-layer-wallclock-audit.md.
+#
+# The list is explicit rather than `./...` on purpose: a serial run of the whole
+# repository would cost far more than the ~101 s these packages need, and the
+# point of the phase is to give the timing gates a quiet machine, not to re-run
+# the suite.
+# It lists ONLY the packages whose gates are actually guarded today. The audit
+# found 39 instances across 12 packages; the three filed as #2499, #2506 and #2517
+# are guarded here, and each remaining instance extends this list and TIMING_RUN
+# as its own task lands (#2568, #2569, #2572, #2573, #2574, #2588 are filed).
+# Listing a package before its gates are guarded only buys `[no tests to run]` and
+# the build time to discover it.
+TIMING_PKGS = \
+	./bench/cyclicjoin \
+	./bench/mvccwrite \
+	./cypher
+
+# TIMING_RUN selects only the guarded gates. Running the whole package serially
+# would reintroduce exactly the co-tenancy the phase exists to remove — the
+# gate's neighbours are as capable of loading the machine as another package is.
+TIMING_RUN ?= TestCyclicJoin_FittedExponents|TestWriteScalingGate|TestWALWriteScalingGate|TestWriteConcurrencyGate|TestWriteScalingInstrument_SeesConcurrency|TestWriteScalingInstrument_SeesSerialisation|TestDeleteDoesNotDegradeAcrossCycles|TestDetachDeleteDoesNotDegradeAcrossCycles|TestDeleteCycleGateDetectsDegradation
+
+TIMING_TIMEOUT ?= 20m
+
+# test-timing deliberately does NOT set GOGRAPH_PARALLEL_SUITE, and runs with
+# -p 1 so the packages do not compete with each other. This is the phase in which
+# every guarded wall-clock assertion actually asserts.
+.PHONY: test-timing
+test-timing: ## [layer: short] Serially re-run the wall-clock/throughput gates on a quiet machine, where their measurement is valid (rmp #2517)
+	$(GO) test $(RACE_FLAGS) -count=1 -p 1 -timeout=$(TIMING_TIMEOUT) -run '$(TIMING_RUN)' $(TIMING_PKGS)
 
 # test-short-timings runs the IDENTICAL short layer, so it carries the identical
 # timeout: without it, the target that exists to report per-package timings
@@ -205,7 +246,7 @@ cover: ## Run tests with coverage
 
 .PHONY: cover-gate
 cover-gate: ## Enforce aggregate (>=85%) and per-package (>=75%) coverage gates
-	GO=$(GO) MIN_TOTAL=85.0 MIN_PER_PKG=75.0 bash scripts/cover_gate.sh
+	GOGRAPH_PARALLEL_SUITE=1 GO=$(GO) MIN_TOTAL=85.0 MIN_PER_PKG=75.0 bash scripts/cover_gate.sh
 
 .PHONY: bench
 bench: ## Run benchmarks ($(BENCH_PATTERN), count=$(BENCH_COUNT))
@@ -220,13 +261,13 @@ lint: ## Run golangci-lint (auto-install if missing)
 	golangci-lint run $(PACKAGES)
 
 .PHONY: ci
-ci: tidy fmt vet build test-short lint cover-gate ## Full CI pipeline: tidy + fmt + vet + build + test-short + lint + cover-gate
+ci: tidy fmt vet build test-short test-timing lint cover-gate ## Full CI pipeline: tidy + fmt + vet + build + test-short + test-timing + lint + cover-gate
 
 .PHONY: ci-soak
-ci-soak: tidy fmt vet build test-soak lint cover-gate ## CI pipeline with soak layer: like ci but runs test-soak
+ci-soak: tidy fmt vet build test-soak test-timing lint cover-gate ## CI pipeline with soak layer: like ci but runs test-soak
 
 .PHONY: ci-nightly
-ci-nightly: tidy fmt vet build test-nightly lint cover-gate ## CI pipeline with nightly layer: like ci but runs test-nightly
+ci-nightly: tidy fmt vet build test-nightly test-timing lint cover-gate ## CI pipeline with nightly layer: like ci but runs test-nightly
 
 .PHONY: smoke
 smoke: ## Quick PR pre-flight: tidy + fmt + vet + build + short unit tests (no race, no lint, no cover-gate)

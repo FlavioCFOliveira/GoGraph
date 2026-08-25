@@ -294,6 +294,7 @@ const maxCycleRatio = 2.5
 //
 // Deliberately NOT parallel — see the file header.
 func TestDeleteDoesNotDegradeAcrossCycles(t *testing.T) {
+	testlayers.RequireQuietMachine(t, "a last-over-first CPU growth ratio against the 2.5x maxCycleRatio")
 	got := deleteCycles(t, 20_000, 5_000, 6, false, false)
 	cpu, wall := cpuOf(got), wallOf(got)
 	r := ratio(cpu)
@@ -312,6 +313,9 @@ func TestDeleteDoesNotDegradeAcrossCycles(t *testing.T) {
 //
 // Deliberately NOT parallel — see the file header.
 func TestDetachDeleteDoesNotDegradeAcrossCycles(t *testing.T) {
+	testlayers.RequireQuietMachine(t, "a last-over-first CPU growth ratio against the 2.5x maxCycleRatio; "+
+		"measured 2.90x under `make ci` parallel load with per-cycle times of 852ms rising to 2.48s, "+
+		"against 0.94x and 18ms cycles in isolation (rmp #2517)")
 	got := deleteCycles(t, 5_000, 1_000, 6, true, false)
 	cpu, wall := cpuOf(got), wallOf(got)
 	r := ratio(cpu)
@@ -343,6 +347,14 @@ func TestDetachDeleteDoesNotDegradeAcrossCycles(t *testing.T) {
 //
 // Deliberately NOT parallel — see the file header.
 func TestDeleteCycleGateDetectsDegradation(t *testing.T) {
+	// Guarded for the MIRROR reason to the two gates above, and it must be
+	// guarded with them or the pair becomes incoherent: this control requires the
+	// ratio to EXCEED the threshold, so where load inflates the gates' ratios it
+	// can equally compress this one below the floor it needs (rmp #2589). A
+	// control that fires or not according to machine load proves nothing about
+	// the gates' power either way.
+	testlayers.RequireQuietMachine(t, "a CPU growth ratio that must EXCEED the 2.5x maxCycleRatio "+
+		"on a workload engineered to degrade 6x (rmp #2589)")
 	got := deleteCycles(t, 2_000, 1_000, 6, true, true)
 	cpu, wall := cpuOf(got), wallOf(got)
 	r := ratio(cpu)
