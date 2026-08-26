@@ -508,7 +508,41 @@ func checkMVCCSubstrate(tick int64, e *mvccSubstrateEvidence) []Violation {
 	// substrate obeying isolation rather than failing to sweep. Measured: with
 	// one reader held open across 6000 writes the vacuum ran 18 passes and freed
 	// 16 records, and an unguarded clause here would have called that a defect.
-	if e.reclamationPressured() && e.maxActiveSnapshots == 0 && e.unregistered == 0 && e.reclaimedRecords() == 0 {
+	//
+	// # The gate is crossedBound and NOT reclamationPressured (rmp #2620)
+	//
+	// This clause used to be gated on [mvccSubstrateEvidence.reclamationPressured],
+	// which is `crossedBound || sweeps() > 0`. That made ONE SWEEP sufficient to
+	// fire it, while the message it prints asserts that "churn reached the
+	// vacuum's wake threshold" — a claim the trigger never established. The
+	// full-scale production profile failed on exactly that gap: high-water 12
+	// records against a bound of 4096, so the threshold was never approached, and
+	// the clause still reported version memory "growing without bound".
+	//
+	// Three facts settle it as an over-eager oracle rather than an engine defect,
+	// and all three are in this package's own sources:
+	//
+	//   - the vacuum EXITS once consecutive passes free nothing (see this file's
+	//     header), so the last sweep of any run frees nothing BY DESIGN — a run
+	//     that observes only that sweep observes the exit path, not a failure;
+	//   - Backlog is documented as "the reclamation debt not yet swept — versions
+	//     created since the last pass began" ([lpg.VacuumStats.Backlog]), so the
+	//     12 records the message offered as evidence of a failure to reclaim are
+	//     by definition versions the observed pass could not have swept;
+	//   - a sweep is not evidence of pressure. It is evidence the vacuum ran.
+	//
+	// So the trigger now requires what the message claims: churn actually reached
+	// the wake threshold. The aliasing that `crossedBound` alone suffers — the
+	// sweeper clearing the debt between two samples — does not weaken THIS clause,
+	// and that is the point rather than an oversight: aliasing hides a crossing
+	// only while the sweeper is keeping up, which is exactly when there is no
+	// defect. A substrate that has genuinely stopped reclaiming ACCUMULATES, and
+	// an accumulating substrate cannot stay sampled below its own bound.
+	//
+	// reclamationPressured is deliberately KEPT for the non-vacuity gate below,
+	// where "a sweep ran" IS the right question: there it asks whether the run
+	// exercised the substrate at all, not whether reclamation was owed.
+	if e.crossedBound && e.maxActiveSnapshots == 0 && e.unregistered == 0 && e.reclaimedRecords() == 0 {
 		fail(ViolationACIDConsistency, "churn reached the vacuum's wake threshold (bound %d, high-water %d"+
 			" records, backlog %d) and the vacuum released NOTHING across %d sweep(s), with no snapshot"+
 			" registered at any reading to hold a version back: version memory is growing without bound",

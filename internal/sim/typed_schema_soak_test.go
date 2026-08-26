@@ -51,15 +51,35 @@ func TestTypedSchema_SoakSeedSweep(t *testing.T) {
 		if report != nil {
 			t.Fatalf("seed %d reported a violation:\n%s", seed, report)
 		}
-		// The pure-store PIN is the scenario's one measurement of behaviour it does
-		// not endorse, so the sweep says out loud, per seed, that the resurrection
-		// is still what happens. If a future change fixes the fsync/validate
-		// ordering, the run itself fails first (the pin's clause is unconditional);
-		// this line is what makes the state of the finding legible in the soak log
-		// without reading the source.
-		if ev.PureStoreResurrected == 0 {
-			t.Fatalf("seed %d: the pure-store arm no longer observes the resurrection, yet the run "+
-				"passed: %s", seed, ev.String())
+		// The pure-store arm asserts, per seed, that a schema-refused value does
+		// NOT come back from a crash.
+		//
+		// It used to assert the opposite. It was the scenario's one measurement of
+		// behaviour it did not endorse, and this line said out loud that the
+		// resurrection was still what happened — with a note that "if a future
+		// change fixes the fsync/validate ordering, the run itself fails first".
+		// rmp #2602 IS that change: validation moved to buffer time, so a refused
+		// op never reaches the WAL and a validator-less replay has nothing to
+		// materialise. Its own measurement after the fix was refusedAtBuffer=true,
+		// resurrected=false.
+		//
+		// #2602 inverted the SHORT-layer clause (typed_schema_test.go) and this
+		// soak sibling was left asserting the old behaviour, so the soak layer had
+		// been red ever since — invisible because no task's acceptance gate runs
+		// it. That is the same gap rmp #2609 left in this package and rmp #2620
+		// found both.
+		if ev.PureStoreResurrected != 0 {
+			t.Fatalf("seed %d: the pure-store arm observed a refused value coming back from a "+
+				"crash %d time(s). Since #2602 the refusal happens before the op is buffered, so "+
+				"the WAL cannot contain it: %s", seed, ev.PureStoreResurrected, ev.String())
+		}
+		// ARMING GATE. "The value did not come back" is also true of a seed whose
+		// arm never ran or never saw a refusal, so the absence is only evidence
+		// once the arm is known to have done its work.
+		if ev.PureStoreArms == 0 || ev.PureStoreRefusedAtBuffer == 0 {
+			t.Fatalf("seed %d: the pure store/txn arm did not run, or never saw a buffer-time "+
+				"refusal, so it reports nothing attributable about the durable image: %s",
+				seed, ev.String())
 		}
 		// The gates already ran inside RunTypedSchema; logging what each seed
 		// exercised is what makes a future budget change that quietly stops

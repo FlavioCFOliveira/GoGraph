@@ -542,3 +542,78 @@ func renderViolations(vs []Violation) string {
 	}
 	return b.String()
 }
+
+// TestMVCCSubstrate_VacuumClauseNeedsTheWakeThreshold pins the fix for rmp
+// #2620 from both sides.
+//
+// The clause used to be gated on reclamationPressured — `crossedBound ||
+// sweeps() > 0` — so ONE SWEEP fired it while the message it prints asserts
+// that "churn reached the vacuum's wake threshold". The full-scale production
+// profile failed on exactly that gap: high-water 12 records against a bound of
+// 4096, one sweep, and a verdict of version memory "growing without bound".
+//
+// Three facts settle that as an over-eager oracle rather than an engine defect:
+// the vacuum EXITS once consecutive passes free nothing, so the last sweep of
+// any run frees nothing by design; Backlog is documented as "versions created
+// since the last pass began", so the records the message offered as evidence are
+// by definition ones the observed pass could not have swept; and a sweep is
+// evidence the vacuum ran, not that reclamation was owed.
+func TestMVCCSubstrate_VacuumClauseNeedsTheWakeThreshold(t *testing.T) {
+	const clause = "released NOTHING"
+
+	t.Run("does NOT fire when a sweep ran but churn never reached the bound", func(t *testing.T) {
+		// The shape the production profile actually produced: tiny churn, one
+		// sweep, nothing released, nothing pinning.
+		e := newMVCCSubstrateEvidence("under-threshold run")
+		base := mvccSubstrateSample{
+			label: "first", quiescent: true,
+			total: 8, bound: 4096, ceiling: 16384,
+			watermark: 10, now: 10, capacity: 1024,
+			write: mvcc.WriteCounts{Commits: 4},
+		}
+		e.fold(&base)
+		last := base
+		last.label, last.quiescent = "last", true
+		last.total, last.backlog = 12, 12
+		last.watermark, last.now = 40, 40
+		last.write = mvcc.WriteCounts{Commits: 12}
+		last.passes, last.reclaimed = 1, 0
+		e.fold(&last)
+
+		if e.crossedBound {
+			t.Fatalf("the fixture crossed the bound, so it is not the shape #2620 failed on")
+		}
+		for _, v := range checkMVCCSubstrate(1, e) {
+			if strings.Contains(v.Message, clause) {
+				t.Errorf("the vacuum clause fired on a run whose high-water was %d against a bound "+
+					"of %d — churn never reached the wake threshold the message claims, and one "+
+					"sweep releasing nothing is the vacuum's documented EXIT condition (#2620):\n%s",
+					e.maxTotal, e.last.bound, v.Message)
+			}
+		}
+	})
+
+	t.Run("STILL fires when churn crossed the bound and nothing was released", func(t *testing.T) {
+		// The falsifiability proof the acceptance criterion asks for: a
+		// deliberately non-releasing vacuum on a run that genuinely woke it.
+		e := healthySubstrateEvidence()
+		e.first.reclaimed, e.last.reclaimed = 0, 0
+
+		if !e.crossedBound {
+			t.Fatalf("the control fixture does not cross the bound, so this arm proves nothing")
+		}
+		var got string
+		for _, v := range checkMVCCSubstrate(1, e) {
+			if strings.Contains(v.Message, clause) {
+				got = v.Message
+			}
+		}
+		if got == "" {
+			t.Fatalf("a vacuum that released NOTHING across %d sweeps, on a run that crossed the "+
+				"wake threshold with no snapshot registered, did not fire the clause. Narrowing "+
+				"the gate to crossedBound must not have cost the clause its power (#2620)",
+				e.sweeps())
+		}
+		t.Logf("fires as required: %s", got)
+	})
+}
