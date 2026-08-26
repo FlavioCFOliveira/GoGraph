@@ -103,28 +103,24 @@ package sim
 // a seed-shuffled order. The seed decides the order and the base band; it never
 // decides the coverage.
 //
-// # Three defects this file WITNESSES rather than fixes
+// # One defect this file FIXED, and two it still WITNESSES
 //
-// All three are latent — neither range method has a production caller, so no
-// production label is ever built the way any of them requires — and all three
-// are pinned to their MEASURED behaviour with a clause that says so, so that
-// fixing one fires loudly here instead of passing silently.
+// The boundary defect is FIXED (#2607): `to == math.MaxUint64` used to drop the
+// WHOLE range in both directions, because `to+1` wrapped to 0 and roaring treats
+// `start >= end` as a no-op, and the two tiers disagreed about it because
+// `RemoveRange`'s inline branches filter on the closed interval directly.
+// `graph/index/nodeset.go` now converts through `addRangeClosed` /
+// `removeRangeClosed`, which split the call at the top of the range.
+// [liDriveBoundary] is therefore a REGRESSION arm: it asserts the closed
+// interval is honoured at `math.MaxUint64` on BOTH tiers, with the same range
+// one id shorter as its control.
 //
-//  1. `to == math.MaxUint64` silently drops the WHOLE range on the BITMAP tier,
-//     in both directions. `NodeSet.AddRange` passes `to+1` to roaring, which
-//     wraps to 0, and roaring treats `start >= end` as a no-op. MEASURED:
-//     `AddRange(max-5, max)` yields cardinality 0, not 6 — not "loses the last
-//     element", loses all of them — and `RemoveRange(max-3, max)` over a
-//     five-element BITMAP-tier set removes nothing. Every `to` below `max` is
-//     exact: `AddRange(max-5, max-1)` yields 5. The tier qualifier is load-
-//     bearing for `RemoveRange` only, and the two tiers DISAGREE: the inline
-//     branches filter on the closed interval with no `+1`
-//     (`graph/index/nodeset.go:349-370`), so MEASURED the same call over a
-//     five-element INLINE-tier set leaves 1, which is correct. `AddRange`
-//     promotes before it looks at the interval, so it has no inline branch to
-//     disagree with. [liDriveBoundary] pins the bitmap-tier behaviour, with
-//     that exactness as its control.
-//  2. An inverted or empty `AddRange` on a label with no entry CREATES one,
+// The two that remain are latent — neither range method has a production caller,
+// so no production label is ever built the way either requires — and both are
+// pinned to their MEASURED behaviour with a clause that says so, so that fixing
+// one fires loudly here instead of passing silently.
+//
+//  1. An inverted or empty `AddRange` on a label with no entry CREATES one,
 //     holding an empty bitmap, and it is permanent and serialized. MEASURED:
 //     1 000 inverted `AddRange` calls on distinct labels produce a 20 016-byte
 //     image against 16 bytes for an empty index — 20 bytes and one `labelCount`
@@ -132,7 +128,7 @@ package sim
 //     godoc promises the opposite for its own direction ("Empty bitmaps are
 //     deleted so the map does not grow unboundedly"). [liDriveWithPhantom] pins
 //     it.
-//  3. The serialized form is NOT idempotent for a run-encoded label small enough
+//  2. The serialized form is NOT idempotent for a run-encoded label small enough
 //     to be down-converted on the way back in. MEASURED: an AddRange-built label
 //     of 8 ids serializes to 55 bytes and, after one Serialize/Deserialize
 //     cycle, to 72 — because [index.NodeSetFromBitmap] moves a bitmap of at most
@@ -160,7 +156,7 @@ package sim
 // graphs carry the same labels.
 //
 // The same mistake nearly reached the round-trip clause. `image ==
-// round-tripped image` is FALSE for the band in defect 3, and the sweep can
+// round-tripped image` is FALSE for the band in defect 2, and the sweep can
 // reach that band — an AddRange followed by a RemoveRange that trims the label
 // to a handful of ids — so the clause would have passed on this seed and flaked
 // on another. What is asserted instead is that the form is a FIXPOINT after at
@@ -687,7 +683,8 @@ type liScopeEvidence struct {
 }
 
 // liBoundaryEvidence records the measured behaviour at the top of the NodeID
-// range. It is a PIN on a defect, not a contract: see the file header.
+// range. Since #2607 it is a CONTRACT: the closed interval must be honoured at
+// math.MaxUint64, identically on both tiers. See the file header.
 type liBoundaryEvidence struct {
 	// AddNaive / AddGot are what a naive reading of the closed interval says the
 	// cardinality should be, and what the index produced, for a range ending at
@@ -705,6 +702,13 @@ type liBoundaryEvidence struct {
 	RemoveBefore uint64
 	RemoveNaive  uint64
 	RemoveGot    uint64
+	// RemoveInlineBefore / RemoveInlineGot repeat the RemoveRange experiment over
+	// an INLINE-tier label holding the identical membership. The tier a set
+	// occupies is not observable through the public surface, so the two must
+	// agree; before #2607 they did not, and that divergence was the sharper half
+	// of the defect.
+	RemoveInlineBefore uint64
+	RemoveInlineGot    uint64
 }
 
 // liPhantomEvidence records the measured cost of an inverted AddRange on a label
@@ -1087,10 +1091,10 @@ const (
 	// liPerturbScopeRouting flips one Apply routing outcome, reproducing a
 	// subscriber that consumed a change kind outside its scope.
 	liPerturbScopeRouting
-	// liPerturbBoundaryFixed reports the math.MaxUint64 range as having been
-	// added in full. It is the tripwire direction: this is what the evidence will
-	// look like the day the overflow is fixed, and the clause must notice.
-	liPerturbBoundaryFixed
+	// liPerturbBoundaryWraps reports the math.MaxUint64 range as having been
+	// dropped whole, in both directions. It reproduces the pre-#2607 `to+1`
+	// overflow, so the regression arm has a demonstrated way to fail.
+	liPerturbBoundaryWraps
 	// liPerturbPhantomGone reports the inverted-AddRange experiment as leaving no
 	// entry behind, which is both the pin's failure and its arming gate's.
 	liPerturbPhantomGone
@@ -1156,8 +1160,8 @@ func (p liPerturb) String() string {
 		return "scope-swap"
 	case liPerturbScopeRouting:
 		return "scope-routing"
-	case liPerturbBoundaryFixed:
-		return "boundary-fixed"
+	case liPerturbBoundaryWraps:
+		return "boundary-wraps"
 	case liPerturbPhantomGone:
 		return "phantom-gone"
 	case liPerturbEntryFloor:
@@ -2519,41 +2523,37 @@ const liBoundarySpan = 5
 // liDriveBoundary measures what the range methods do when the CLOSED interval
 // ends at math.MaxUint64.
 //
-// # This clause pins a defect, and says so
+// # This clause was a defect pin and is now a REGRESSION arm (#2607)
 //
-// [index.NodeSet.AddRange] converts the inclusive upper endpoint to roaring's
-// exclusive one with `to+1` (`graph/index/nodeset.go:339`), and
-// [index.NodeSet.RemoveRange] does the same in its BITMAP branch (`:378`). At
-// `to == math.MaxUint64` that wraps to 0, and roaring treats `start >= end` as a
-// no-op — so the whole range is silently dropped, not merely its last id.
-// MEASURED: `AddRange(max-5, max)` yields cardinality 0 where a naive reading of
-// "[from, to] inclusive" says 6, and `RemoveRange(max-3, max)` over a
-// five-element BITMAP-tier set removes nothing at all.
+// [index.NodeSet.AddRange] used to convert the inclusive upper endpoint to
+// roaring's exclusive one with a plain `to+1`, and [index.NodeSet.RemoveRange]
+// did the same in its BITMAP branch. At `to == math.MaxUint64` that wraps to 0,
+// and roaring returns immediately on `start >= end` — so the whole range was
+// silently dropped, not merely its last id. MEASURED at the time:
+// `AddRange(max-5, max)` yielded cardinality 0 where the closed interval says 6,
+// and `RemoveRange(max-3, max)` over a five-element BITMAP-tier set removed
+// nothing at all.
 //
-// The tier matters, and only for `RemoveRange`. Its singleton and small branches
-// filter on the closed interval directly (`v < from || v > to`,
-// `graph/index/nodeset.go:349-370`) with no `+1` and therefore no wrap, so
-// MEASURED the identical call over a five-element INLINE-tier set leaves 1 — the
-// correct answer. So the same logical operation on the same membership answers
-// differently depending on which tier the set happens to occupy, which is
-// invisible from the public surface. `AddRange` has no such split: it promotes
-// to the bitmap tier BEFORE looking at the interval, so it is uniformly wrong at
-// the boundary. This arm drives the bitmap tier, which is the defective one.
+// The tier mattered, and only for `RemoveRange`. Its singleton and small
+// branches filter on the closed interval directly (`v < from || v > to`) with no
+// `+1` and therefore no wrap, so the identical call over an INLINE-tier set left
+// the correct answer. The same logical operation on the same membership answered
+// differently depending on which tier the set happened to occupy — state the
+// public surface does not expose. `AddRange` had no such split: it promotes to
+// the bitmap tier BEFORE looking at the interval, so it was uniformly wrong.
 //
-// The defect is LATENT: neither range method has any production caller (see the
-// file header), and no graph in this module mints a NodeID at the top of the
-// uint64 space. It is reported rather than fixed because the fix is a design
-// choice — split the call, saturate, or refuse — that changes behaviour at the
-// boundary and belongs to whoever owns the type.
+// `graph/index/nodeset.go` now routes both directions through `addRangeClosed` /
+// `removeRangeClosed`, which split the call at the top of the range rather than
+// relying on a bound that the uint64 element type cannot name. This arm asserts
+// the repaired contract: the closed interval is honoured at the boundary, and
+// BOTH tiers answer identically. It drives the RemoveRange experiment twice over
+// identical membership — once on a bitmap-tier label, once on an inline-tier one
+// — because tier agreement is the half that a single-tier arm cannot see.
 //
-// So this arm asserts the MEASURED behaviour, deliberately. It is a tripwire in
-// the honest direction: the day the overflow is repaired, this clause fires and
-// names itself, the naive model in [liModel] becomes correct at the boundary,
-// and both are updated together. What it must never do is quietly agree with
-// whatever the code happens to do — which is why the arm also carries a CONTROL
-// one id lower, where the conversion is exact. Without that control "the range
-// vanished" would be consistent with the whole top of the id space being
-// unusable, and the loss would not be attributable to the final id.
+// The arm keeps its CONTROL one id lower, where the conversion was always exact.
+// Without it, "the range was handled" would be consistent with the whole top of
+// the id space behaving in some other uniform way, and a future regression at
+// the final id would not be attributable to the final id.
 func liDriveBoundary(cfg *LabelIndexScopedConfig, ev *LabelIndexScopedEvidence) {
 	const maxU64 = uint64(math.MaxUint64)
 	const lbl uint32 = 0xB0
@@ -2564,8 +2564,8 @@ func liDriveBoundary(cfg *LabelIndexScopedConfig, ev *LabelIndexScopedEvidence) 
 	add.AddRange(lbl, graph.NodeID(maxU64-liBoundarySpan), graph.NodeID(maxU64))
 	b.AddNaive = liBoundarySpan + 1
 	b.AddGot = add.Count(lbl)
-	if cfg.Perturb == liPerturbBoundaryFixed {
-		b.AddGot = b.AddNaive
+	if cfg.Perturb == liPerturbBoundaryWraps {
+		b.AddGot = 0
 	}
 
 	// The control: the same interval one id shorter, which must be exact.
@@ -2577,18 +2577,30 @@ func liDriveBoundary(cfg *LabelIndexScopedConfig, ev *LabelIndexScopedEvidence) 
 		b.AddBelowGot--
 	}
 
-	// The same experiment for RemoveRange, over a set the control path built.
+	// The same experiment for RemoveRange, over a BITMAP-tier set the control
+	// path built. A closed removal of [max-3, max] from {max-5 .. max-1} leaves
+	// the two ids below it.
+	b.RemoveNaive = 2
 	rem := label.NewIndex()
 	rem.AddRange(lbl, graph.NodeID(maxU64-liBoundarySpan), graph.NodeID(maxU64-1))
 	b.RemoveBefore = rem.Count(lbl)
 	rem.RemoveRange(lbl, graph.NodeID(maxU64-3), graph.NodeID(maxU64))
-	// A naive removal of the closed interval [max-3, max] from {max-5 .. max-1}
-	// leaves the two ids below it.
-	b.RemoveNaive = 2
 	b.RemoveGot = rem.Count(lbl)
-	if cfg.Perturb == liPerturbBoundaryFixed {
-		b.RemoveGot = b.RemoveNaive
+	if cfg.Perturb == liPerturbBoundaryWraps {
+		b.RemoveGot = b.RemoveBefore
 	}
+
+	// And again over an INLINE-tier set holding the identical membership, built
+	// with Add so it never crosses the promotion threshold. This is the tier the
+	// defect answered correctly, so it is the arm's cross-check rather than its
+	// treatment: the two must agree whatever the answer is.
+	inl := label.NewIndex()
+	for id := maxU64 - liBoundarySpan; id <= maxU64-1; id++ {
+		inl.Add(lbl, graph.NodeID(id))
+	}
+	b.RemoveInlineBefore = inl.Count(lbl)
+	inl.RemoveRange(lbl, graph.NodeID(maxU64-3), graph.NodeID(maxU64))
+	b.RemoveInlineGot = inl.Count(lbl)
 }
 
 // -----------------------------------------------------------------------------
@@ -2968,31 +2980,47 @@ func liCheckScope(e *LabelIndexScopedEvidence) []Violation {
 	return v
 }
 
-// liCheckPins adjudicates the two defect pins.
+// liCheckPins adjudicates the boundary contract and the two remaining defect
+// pins.
 //
-// Both clauses assert MEASURED behaviour that is wrong, and both say so in their
-// message. They are tripwires in the honest direction: they fire the day the
-// behaviour changes, which is exactly when the naive model and the docs need
-// updating together. Neither is a claim that the current behaviour is correct.
+// The boundary clauses assert the CORRECT answer: since #2607 the closed
+// interval is honoured at math.MaxUint64 and both tiers agree. The phantom
+// clauses still assert MEASURED behaviour that is wrong, and say so in their
+// message — tripwires in the honest direction, firing the day the behaviour
+// changes, which is exactly when the naive model and the docs need updating
+// together. They are not a claim that the current behaviour is correct.
 func liCheckPins(e *LabelIndexScopedEvidence) []Violation {
 	var v []Violation
 	b := &e.Boundary
-	if b.AddGot != 0 {
-		v = append(v, liViolation(ViolationOracleDeviation, "boundary-pin",
-			"AddRange over the closed interval [max-%d, max] yielded cardinality %d, and this pin "+
-				"records the MEASURED behaviour of 0 (the `to+1` conversion at "+
-				"graph/index/nodeset.go:339 wraps to zero and roaring treats start>=end as a no-op). "+
-				"A naive reading says %d. If this fired because the overflow was FIXED, that is good "+
-				"news: update this pin, liModel's range methods are already correct, and drop the "+
-				"exclusion note in the file header",
+	if b.AddGot != b.AddNaive {
+		v = append(v, liViolation(ViolationGraphIntegrity, "boundary-pin",
+			"AddRange over the closed interval [max-%d, max] yielded cardinality %d, want %d. "+
+				"The closed interval must be honoured at math.MaxUint64: the half-open conversion "+
+				"cannot name one-past-max, so graph/index/nodeset.go splits the call through "+
+				"addRangeClosed (#2607). A plain `to+1` wraps to zero and roaring treats "+
+				"start>=end as a no-op, dropping the whole range",
 			liBoundarySpan, b.AddGot, b.AddNaive))
 	}
-	if b.RemoveGot != b.RemoveBefore {
+	if b.RemoveGot != b.RemoveNaive {
+		v = append(v, liViolation(ViolationGraphIntegrity, "boundary-pin",
+			"RemoveRange over the closed interval [max-3, max] left %d of %d ids on the BITMAP "+
+				"tier, want %d. Same conversion, same wrap, repaired the same way through "+
+				"removeRangeClosed (#2607)",
+			b.RemoveGot, b.RemoveBefore, b.RemoveNaive))
+	}
+	if b.RemoveInlineGot != b.RemoveGot {
+		v = append(v, liViolation(ViolationGraphIntegrity, "boundary-pin",
+			"the same RemoveRange over the same membership left %d ids on the INLINE tier and %d "+
+				"on the BITMAP tier. The tier a set occupies is not observable through the public "+
+				"surface, so the two cannot disagree; before #2607 they did, because the inline "+
+				"branches filter on the closed interval directly and never wrapped",
+			b.RemoveInlineGot, b.RemoveGot))
+	}
+	if b.RemoveInlineBefore != b.RemoveBefore {
 		v = append(v, liViolation(ViolationOracleDeviation, "boundary-pin",
-			"RemoveRange over the closed interval [max-3, max] left %d of %d ids, and this pin "+
-				"records the MEASURED behaviour of removing nothing at all (%d). A naive reading "+
-				"says %d survive. Same conversion, same wrap, at graph/index/nodeset.go:378",
-			b.RemoveGot, b.RemoveBefore, b.RemoveBefore, b.RemoveNaive))
+			"the inline and bitmap fixtures started from %d and %d ids, so the tier comparison "+
+				"above is not over identical membership and proves nothing",
+			b.RemoveInlineBefore, b.RemoveBefore))
 	}
 	p := &e.Phantom
 	if int(p.AfterLabelCount) != p.Labels {

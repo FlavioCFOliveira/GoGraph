@@ -255,14 +255,27 @@ func TestLabelIndexScoped_EvidenceIsSubstantive(t *testing.T) {
 			control, raw, restamp, trunc, len(liRegionOrder()), liRestampTrials, liTruncateTrialsMin)
 	}
 
-	// The three pins, asserted as the measured numbers the file header quotes.
-	if ev.Boundary.AddGot != 0 || ev.Boundary.AddNaive != liBoundarySpan+1 {
-		t.Errorf("boundary: AddRange over [max-%d, max] yielded %d, naive %d; the pin records 0",
+	// The boundary CONTRACT (#2607) and the two remaining pins, asserted as the
+	// numbers the file header quotes.
+	if ev.Boundary.AddGot != liBoundarySpan+1 || ev.Boundary.AddNaive != liBoundarySpan+1 {
+		t.Errorf("boundary: AddRange over [max-%d, max] yielded %d, naive %d; the closed interval "+
+			"must be honoured at math.MaxUint64",
 			liBoundarySpan, ev.Boundary.AddGot, ev.Boundary.AddNaive)
 	}
 	if ev.Boundary.AddBelowGot != ev.Boundary.AddBelowNaive {
-		t.Errorf("the boundary control yielded %d, want %d — the loss must be attributable to the "+
-			"final id", ev.Boundary.AddBelowGot, ev.Boundary.AddBelowNaive)
+		t.Errorf("the boundary control yielded %d, want %d — behaviour at the boundary must be "+
+			"attributable to the final id", ev.Boundary.AddBelowGot, ev.Boundary.AddBelowNaive)
+	}
+	if ev.Boundary.RemoveGot != ev.Boundary.RemoveNaive {
+		t.Errorf("boundary: RemoveRange over [max-3, max] left %d of %d ids on the bitmap tier, "+
+			"want %d", ev.Boundary.RemoveGot, ev.Boundary.RemoveBefore, ev.Boundary.RemoveNaive)
+	}
+	if ev.Boundary.RemoveInlineGot != ev.Boundary.RemoveGot ||
+		ev.Boundary.RemoveInlineBefore != ev.Boundary.RemoveBefore {
+		t.Errorf("boundary: the inline tier went %d -> %d and the bitmap tier %d -> %d; the same "+
+			"operation over the same membership cannot depend on the tier",
+			ev.Boundary.RemoveInlineBefore, ev.Boundary.RemoveInlineGot,
+			ev.Boundary.RemoveBefore, ev.Boundary.RemoveGot)
 	}
 	if int(ev.Phantom.AfterLabelCount) != liPhantomLabels ||
 		ev.Phantom.AfterBytes <= ev.Phantom.EmptyBytes || ev.Phantom.QueryVisible {
@@ -342,7 +355,7 @@ func liPerturbTargets() map[liPerturb]string {
 		liPerturbWrongGuard:         "corrupt-guard",
 		liPerturbScopeSwap:          "scope-constructor",
 		liPerturbScopeRouting:       "scope-routing",
-		liPerturbBoundaryFixed:      "boundary-pin",
+		liPerturbBoundaryWraps:      "boundary-pin",
 		liPerturbPhantomGone:        "phantom-pin",
 		liPerturbEntryFloor:         "entry-floor",
 		liPerturbDenseSmallStable:   "dense-small-pin",

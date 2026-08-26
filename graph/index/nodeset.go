@@ -104,6 +104,7 @@ package index
 // half-promoted set.
 
 import (
+	"math"
 	"unsafe"
 
 	"github.com/RoaringBitmap/roaring/v2/roaring64"
@@ -336,7 +337,7 @@ func (s *NodeSet) AddRange(from, to uint64) {
 		}
 		s.setBitmap(bm)
 	}
-	s.bitmapRef().AddRange(from, to+1)
+	addRangeClosed(s.bitmapRef(), from, to)
 }
 
 // RemoveRange removes every id in [from, to] (inclusive). On an inline
@@ -375,9 +376,47 @@ func (s *NodeSet) RemoveRange(from, to uint64) (nowEmpty bool) {
 		}
 	default: // stateBitmap
 		bm := s.bitmapRef()
-		bm.RemoveRange(from, to+1)
+		removeRangeClosed(bm, from, to)
 		return bm.IsEmpty()
 	}
+}
+
+// addRangeClosed adds every id in the CLOSED interval [from, to] to bm.
+//
+// roaring64's own AddRange is half-open and its bound is a uint64, so there is
+// no value that names "one past MaxUint64": the obvious `to+1` wraps to zero and
+// roaring returns immediately on start >= end, silently dropping the whole
+// range (#2607). The library's 32-bit sibling avoids this by widening the bound
+// to uint64 so it can name MaxUint32+1; at 64 bits no wider type exists, so the
+// top element is added separately. An inverted interval adds nothing.
+func addRangeClosed(bm *roaring64.Bitmap, from, to uint64) {
+	if from > to {
+		return
+	}
+	if to == math.MaxUint64 {
+		// [from, MaxUint64) followed by the top element itself. The half-open
+		// call is a no-op when from == to == MaxUint64, which is correct.
+		bm.AddRange(from, to)
+		bm.Add(to)
+		return
+	}
+	bm.AddRange(from, to+1)
+}
+
+// removeRangeClosed removes every id in the CLOSED interval [from, to] from bm.
+// It mirrors [addRangeClosed] and exists for the same reason: the half-open
+// RemoveRange cannot name a range ending at MaxUint64 (#2607). An inverted
+// interval removes nothing.
+func removeRangeClosed(bm *roaring64.Bitmap, from, to uint64) {
+	if from > to {
+		return
+	}
+	if to == math.MaxUint64 {
+		bm.RemoveRange(from, to)
+		bm.Remove(to)
+		return
+	}
+	bm.RemoveRange(from, to+1)
 }
 
 // Contains reports whether node is in the set. O(1) for the singleton
