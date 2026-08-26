@@ -98,31 +98,73 @@ impractical for an example and orthogonal to what this one measures
 go run ./examples/26_social_scale_bench
 ```
 
-With **no flags** the example builds the full specification: **1,000,000
-users**, **30,000 articles**, **150–200 friends per user**, and **up to
-300 likes per user** — roughly 1.03M nodes and ~3.2 × 10⁸ edges.
+With **no flags** the example builds **50,000 users**, **30,000 articles**,
+**150–200 friends per user**, and **up to 300 likes per user** — about 80,000
+nodes and **16.3 million edges** — and completes in roughly **three minutes**
+using about **4.8 GiB** of peak RSS.
 
-> **Resource warning.** Each edge carries a mandatory date property. At this
-> model's degrees the graph needs on the order of **~62 bytes of live heap per
-> edge** (measured at 20k/2k, explicit types — see below), so the full run needs
-> roughly **~20 GiB of live heap** and a few minutes to build. The implicit-type
-> mode (`-rel-types=false`) does not change this materially — the date-property
-> columns are identical in both modes and the relationship-label column is already
-> negligible. Run the full specification only on a machine sized for it. On a
-> laptop, scale down first:
->
-> ```sh
-> go run ./examples/26_social_scale_bench -users 20000 -articles 2000
-> ```
->
-> See [Memory profile and optimizations](#memory-profile-and-optimizations)
+### What each scale costs
+
+Measured on the reference machine (Apple M4, 10 cores, 32 GiB, `go1.26.5`),
+`-friends-min 150 -friends-max 200 -likes-max 300 -seed 1`, wall-clock and peak
+RSS from `/usr/bin/time -l`:
+
+| `-users` | `-articles` | edges | wall-clock | peak RSS |
+|---:|---:|---:|---:|---:|
+| 20,000 | 2,000 | 6.5 M | 71.7 s | 1.88 GiB |
+| 40,000 | 4,000 | 13.0 M | 149.6 s | 3.74 GiB |
+| **50,000** (default) | **30,000** | **16.3 M** | **183.6 s** | **4.81 GiB** |
+| 1,000,000 | 30,000 | ~325 M | **does not complete** | ~93 GiB (projected) |
+
+Peak RSS scales linearly with the user count, which is what rules the last row
+out: it is not a matter of waiting longer. The million-user scale was the default
+until rmp #2385 and it was never once run to completion — killed at twelve
+minutes having printed nothing past its config block, and at seven minutes at
+150,000 users. An example exists to yield measurements, and one that never
+finishes yields none.
+
+The large scale is still one flag away, on a machine sized for it:
+
+```sh
+go run ./examples/26_social_scale_bench -users 1000000
+```
+
+> **Where the time goes.** At the default, building the graph takes 14 s and the
+> read battery takes 154 s of the 184 — this example is dominated by its queries,
+> not by its ingest. The two typed relationship counts alone are ~19 s of that
+> (rmp #2625), and the build allocates 37 GiB to leave 641 MiB resident
+> (rmp #2624). Both are filed as their own defects with their evidence.
+
+> **Memory shape.** Each edge carries a mandatory date property; at this model's
+> degrees the graph needs on the order of **40 bytes of live heap per edge**
+> (`bytes_per_edge`, stable at 40.0–40.1 across scales). The implicit-type mode
+> (`-rel-types=false`) does not change this materially — the date-property columns
+> are identical in both modes and the relationship-label column is already
+> negligible. See [Memory profile and optimizations](#memory-profile-and-optimizations)
 > for the per-edge breakdown and how these figures were measured.
+
+### Progress output
+
+Results go to **stdout** and phase progress to **stderr**, so a pipe capturing
+results gets exactly the pinned facts while a reader watching the run can tell a
+slow phase from a hung one:
+
+```
+[    0.0s] build: creating nodes and edges
+[   14.2s] compact: right-sizing adjacency backing arrays
+[   16.1s] queries: running the read battery
+[  169.8s] statistics: exercising the estimate providers
+[  169.9s] csr-ordering: measuring the ordered neighbour runs
+[  178.9s] done
+```
+
+At larger scales the build loops also report their own progress within a phase.
 
 ### Flags
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `-users` | `1000000` | number of `USER` nodes |
+| `-users` | `50000` | number of `USER` nodes |
 | `-articles` | `30000` | number of `ARTICLE` nodes |
 | `-friends-min` | `150` | minimum `FRIEND` out-degree per user |
 | `-friends-max` | `200` | maximum `FRIEND` out-degree per user |
