@@ -9922,6 +9922,38 @@ func tryBuildParallelScanProject(
 		// on that label's own cardinality (#2187), so a small label inside a large graph
 		// stays serial.
 		if leafLabel != "" {
+			// The min-cardinality re-anchor (#2077) decides the row source FIRST, when
+			// it would fire (#2431).
+			//
+			// This is the argument [tryBuildColumnarFilterChain] already makes for
+			// itself, applied to the operator sitting directly behind it: the re-anchor
+			// replaces the scanned label with the smallest one in the conjunction, which
+			// reduces the number of rows SCANNED, whereas parallel execution only
+			// divides the cost of each scanned row by the worker count. A constant
+			// factor must never pre-empt a cardinality reduction.
+			//
+			// Without this the yield in the columnar chain was INERT: it declines
+			// exactly the `(n:A:B)` shapes the re-anchor exists for, and this
+			// recogniser — tried immediately after it — then claimed every one of them
+			// and anchored on Labels[0] anyway. MEASURED on 100 000 :Common of which
+			// 1 000 are also :Rare, `MATCH (n:Common:Rare) RETURN n.k`: 4.611 ms here
+			// against 0.186 ms for the serial re-anchored plan, and worse than the
+			// 4.280 ms legacy full-:Common scan the re-anchor was written to replace.
+			// The gate flipped at exactly |Common| > 50 000 with |Rare| held at 1 000,
+			// which is what proved it was judging the FIRST label rather than the
+			// anchor (rmp #2431).
+			//
+			// Adopting the anchor rather than merely declining keeps the shapes the
+			// parallel scan legitimately wins: when the smallest label is itself above
+			// the threshold this still parallelises, and over FEWER rows than before.
+			// The Selection is retained — unlike the intersection branch above, whose
+			// bitmap subsumes it — because the min-label walker guarantees only the
+			// chosen label and the residual ones must still be re-checked per row.
+			if bopts.minLabelScanEnabled && sel != nil {
+				if _, chosen, _, wouldReanchor := pickMinLabel(sel, labelSrc); wouldReanchor {
+					leafLabel = chosen
+				}
+			}
 			// Screen on the CHEAP count before materialising anything.
 			//
 			// A gate must cost less than the decision it informs — the same rule

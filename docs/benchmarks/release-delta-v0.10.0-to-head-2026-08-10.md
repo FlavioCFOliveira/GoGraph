@@ -356,6 +356,22 @@ chains are being reclaimed rather than retained: **MVCC did not cost steady-stat
 
 ## 6. One regression that is a defect, not a trade-off
 
+> **RESOLVED 2026-08-26 (rmp #2431).** Everything below stood, and the root cause was the
+> precedence this section identified as "what remains open". `tryBuildParallelScanProject` now
+> judges the anchor the serial path would choose and anchors on it, so the default
+> configuration plans the re-anchored scan: **4.611 ms → 0.196 ms**, and
+> `BenchmarkMinLabelScanSelective_MinLabel` **4 980 µs → 204.7 µs**, which is faster than the
+> v0.10.0 baseline of 230.3 µs rather than merely level with it. No shape regresses and the two
+> shapes where the parallel scan legitimately wins get 19.9% and 44.2% faster, because the gate
+> now anchors the parallel scan on the smaller label instead of ignoring the anchor. Full
+> measurement, including the sweep that proved which label the gate was judging, in
+> [`min-label-anchor-vs-parallel-scan-2026-08-26.md`](min-label-anchor-vs-parallel-scan-2026-08-26.md);
+> pinned by `cypher/parallel_scan_min_label_precedence_test.go`.
+>
+> The other two arm pairs this section names — `RangeSeekSelective_IndexSeek` and
+> `HashJoinDisconnectedEquiJoin_NestedLoop` — were **not** investigated by #2431 and remain
+> open.
+
 `BenchmarkMinLabelScanSelective_MinLabel` moved from 230.3 µs to 5 519.4 µs — **+2 296%** —
 with 128× more allocations. Its fixture is 100 000 `:Common` nodes of which the first 1 000
 also carry `:Rare`; the query `MATCH (n:Common:Rare) RETURN n.k` returns exactly 1 000 rows,
