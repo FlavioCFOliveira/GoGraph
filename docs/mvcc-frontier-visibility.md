@@ -1,7 +1,15 @@
 # The contiguous frontier and cross-statement visibility (rmp #2369 RETRACTED, #2368 open)
 
-**Status: RETRACTED as a defect. The mechanism below is real and correctly described;
-the "defect" framing was wrong and is corrected here.**
+**Status: RETRACTED as a defect, and `Session`'s guarantee is now MEASURED as delivered.**
+The mechanism below is real and correctly described; the "defect" framing was wrong and
+is corrected here.
+
+The mechanism is also pinned deterministically, on a bare `mvcc.Clock` with no
+goroutines and no timing, by `graph/mvcc.TestClock_FrontierStallsBehindOneInFlightCommit`:
+two finished, acknowledged commits stay invisible while one older commit is in flight,
+and the frontier jumps past all three the moment it finishes. That test carries a
+control requiring the frontier to advance immediately when nothing is in flight, so it
+cannot pass on a clock that simply never advances.
 
 `cypher/session.go` states the observed behaviour as the INTENDED contract, verbatim:
 *"Engine gives every statement SNAPSHOT ISOLATION ... It promises nothing ACROSS
@@ -18,9 +26,27 @@ it uses a floor plus a **wait** rather than an assignment — deliberately, beca
 *"the snapshot is still taken at a contiguous frontier point, so it can never observe a
 state no serial order produced. A snapshot pinned ABOVE the frontier could."*
 
-What remains genuinely open is narrower, and is tracked on rmp #2369: whether `Session`
-DELIVERS that guarantee under load (NOT established — the attempt to test it was
-broken), and whether the DEFAULT surface should give read-your-own-writes without the
+**`Session` DOES deliver its guarantee under load — ESTABLISHED 2026-08-26 (rmp #2369).**
+The first attempt to test it was broken (the count was extracted positionally through a
+type assertion that never matched, so every read yielded 0) and was discarded. The
+re-test reads the count by column name and runs 16 concurrent writers:
+
+| Surface | Acknowledged commits | Concurrent background commits | Stale reads |
+|---|---:|---:|---:|
+| `Session` | 4 000 (x4 runs = 16 000) | ~100 000 per run | **0** |
+| bare `Engine` | 4 000 | ~100 000 | **1–4** |
+
+The bare arm is the control that makes the Session result mean something: under the
+IDENTICAL load the documented Engine contract does go stale, at 1–4 per 4 000 rounds —
+about 0.05%, corroborating the 2-of-400 the original probe recorded. So the load is
+demonstrably capable of exposing the failure, and `Session` prevented it.
+
+The subject arm runs 4 000 rounds rather than the 400 the task asked for, because at
+that rate 400 rounds would expect ~0.2 stale reads from a BROKEN Session and would
+usually miss it — roughly 20% power. 4 000 raises the expected count to ~2.
+
+What remains open is ONE question, and it is about API ergonomics rather than
+correctness: whether the DEFAULT surface should give read-your-own-writes without the
 caller opting in, since every reference engine does so on an ordinary connection. The
 livelock in rmp #2368 is unaffected by this retraction: a write that cannot progress
 after 64 fresh attempts is not explained by any isolation contract.
