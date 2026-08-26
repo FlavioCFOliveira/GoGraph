@@ -35,7 +35,22 @@ package sim
 //	vector                         code                                          session afterwards
 //	aggregate pool breach          Neo.TransientError.General.OutOfMemoryError    READY   (usable with NO RESET)
 //	wire nesting cap (>=128)       Neo.ClientError.Request.Invalid                READY   (usable with NO RESET)
-//	engine param cap (>32)         Neo.DatabaseError.General.UnknownError         FAILED  (next message IGNORED)
+//	engine param cap (>32)         Neo.ClientError.Statement.ArgumentError        FAILED  (next message IGNORED)
+//
+// The third row was Neo.DatabaseError.General.UnknownError when this scenario
+// first measured it, and saying so in a report is what got it FIXED: rmp #2570
+// reclassified it as a client fault. This family's arms are what pinned the old
+// answer, so the correction failed them on purpose and they were updated with the
+// ticket rather than deleted.
+//
+// The two READY rows and the one FAILED row do NOT disagree, and the reason is
+// worth stating because it looks like an inconsistency. The first two refuse
+// during decode, in the serve loop, before the message reaches a session at all —
+// there is no request to fail, so the session is untouched. The third refuses
+// inside handleRun, after a message that decoded correctly was dispatched, which
+// the Bolt state machine puts in FAILED. Staying READY is reserved for
+// back-pressure, where retrying the same request can succeed (state.go); a depth
+// refusal is deterministic, so retrying it cannot.
 //
 // The classification segment is load-bearing and is asserted on its own:
 // neo4j-go-driver's IsRetriableTransient tests `classification == "TransientError"`
@@ -146,12 +161,18 @@ const (
 	// boltDecodeCodeInvalid is what any decode fault returns, the WIRE nesting cap
 	// among them (serve.go:1289).
 	boltDecodeCodeInvalid = "Neo.ClientError.Request.Invalid"
-	// boltDecodeCodeInternal is what the ENGINE'S parameter nesting cap returns,
-	// via the failure sanitiser. It is a DatabaseError, so a driver does not retry
-	// it — correct, since retrying an over-nested parameter fails identically —
-	// though the code says "server bug" about what is a client fault. See the
-	// scenario's report note.
-	boltDecodeCodeInternal = "Neo.DatabaseError.General.UnknownError"
+	// boltDecodeCodeParamDepth is what the ENGINE'S parameter nesting cap returns.
+	// It is a ClientError, so a driver does not retry it — correct, since retrying
+	// an over-nested parameter fails identically — and it names the fault as the
+	// client's, which is what rmp #2570 corrected: it was
+	// Neo.DatabaseError.General.UnknownError, sanitised to generic internal-error
+	// text, so the code said "server bug" about a wholly client-supplied payload.
+	//
+	// The Statement family rather than the Request family, because the message
+	// DECODED and the statement was dispatched: what is invalid is the statement's
+	// argument, not the form of the request. Request.Invalid belongs to the wire cap
+	// above, which refuses a frame that will not decode.
+	boltDecodeCodeParamDepth = "Neo.ClientError.Statement.ArgumentError"
 )
 
 // The exact message texts the two decode-layer refusals carry. A code alone is
@@ -160,9 +181,17 @@ const (
 const (
 	boltDecodeMsgBudget  = "server inbound decode memory limit reached; retry later"
 	boltDecodeMsgInvalid = "malformed Bolt message"
-	// boltDecodeMsgInternalPrefix is the STABLE prefix of the sanitised internal
-	// error; the remainder names a per-session id and is redacted before recording.
-	boltDecodeMsgInternalPrefix = "An internal error occurred."
+	// boltDecodeMsgParamDepth is the WHOLE message the parameter cap now carries.
+	// It used to be pinned as a PREFIX ("An internal error occurred.") because the
+	// sanitised text ended in a per-session id that had to be redacted before
+	// recording. Since rmp #2570 the message is a client-fault message that bypasses
+	// the sanitiser, is a pure function of the parameter key and the limit, and
+	// carries no session id — so it is pinned in full, which is strictly stronger.
+	//
+	// It names the key this family binds under, so a change to [boltDecodeParamKey]
+	// must change this literal too. The nesting-message clause is what would catch
+	// that, by name.
+	boltDecodeMsgParamDepth = `cypher: ArgumentError.ParameterNestedTooDeep: parameter "d" is nested deeper than the supported limit of 32 levels`
 )
 
 // boltDecodeRetriableClassification is the second dot-segment a Bolt status code
@@ -743,12 +772,20 @@ func boltDecodeParams(n int) map[string]any {
 // appends to its internal-error text with a fixed marker.
 //
 // The sanitised message reads "An internal error occurred. See server logs for
-// details (session: <16 hex>)." (bolt/server/session.go:1946). The id is minted
-// per connection and is NOT a function of the seed, so recording it verbatim
-// would make the rendering vary run to run — the exact trap rmp #2486's own
-// determinism test caught. The
-// STABLE prefix is what the oracle pins; the id is replaced rather than dropped
-// so the report still shows that a session id was present.
+// details (session: <16 hex>)." (bolt/server/session.go). The id is minted per
+// connection and is NOT a function of the seed, so recording it verbatim would make
+// the rendering vary run to run — the exact trap rmp #2486's own determinism test
+// caught. The id is replaced rather than dropped so the report still shows that a
+// session id was present.
+//
+// It is currently a NO-OP on every arm, and that is a consequence of rmp #2570: the
+// parameter cap was the only refusal in this family that reached the sanitiser, and
+// it now answers with a client-fault message that bypasses it. Every message this
+// family records is therefore a pure function of the seed by construction. This is
+// kept as insurance for a future arm that does draw a sanitised message, and the
+// determinism test says so where its "the redaction really fired" clause used to be
+// — that clause was retired rather than left to fail, because nothing can satisfy
+// it any more.
 func boltDecodeRedactSession(msg string) string {
 	i := strings.Index(msg, "(session: ")
 	if i < 0 {
@@ -954,7 +991,7 @@ func boltDecodeExpectedNesting(vehicle string, depth int) (kind, code string, se
 	if vehicle == "run" && depth > boltDecodeParamDepthCap {
 		// Decoded fine; cypher.BindParams then refuses the parameter and the
 		// sanitiser turns that into a DatabaseError, which enters the FAILED state.
-		return "FAILURE", boltDecodeCodeInternal, false
+		return "FAILURE", boltDecodeCodeParamDepth, false
 	}
 	return "SUCCESS", "", true
 }
@@ -2622,10 +2659,14 @@ func checkBoltDecodeNesting(e *BoltDecodeEvidence) []Violation {
 			v = append(v, boltDecodeViolation(ViolationOracleDeviation, "nesting-message",
 				fmt.Sprintf("%s carries message %q, want %q", a.Name, a.Message, boltDecodeMsgInvalid)))
 		}
-		if wantCode == boltDecodeCodeInternal && !strings.HasPrefix(a.Message, boltDecodeMsgInternalPrefix) {
+		// The WHOLE message, not a prefix. Before rmp #2570 the sanitised text ended
+		// in a per-session id, so only its prefix could be pinned; the client-fault
+		// message that replaced it is a pure function of the parameter key and the
+		// limit, so pinning it entire is strictly stronger and catches a message that
+		// named the wrong key or the wrong number.
+		if wantCode == boltDecodeCodeParamDepth && a.Message != boltDecodeMsgParamDepth {
 			v = append(v, boltDecodeViolation(ViolationOracleDeviation, "nesting-message",
-				fmt.Sprintf("%s carries message %q, want a message beginning %q",
-					a.Name, a.Message, boltDecodeMsgInternalPrefix)))
+				fmt.Sprintf("%s carries message %q, want %q", a.Name, a.Message, boltDecodeMsgParamDepth)))
 		}
 		// Only the OBSERVED code is tested. boltDecodeExpectedNesting can never
 		// return the budget code, so a disjunct on wantCode would be a dead guard
@@ -2893,7 +2934,7 @@ func checkBoltDecodePressureNonVacuity(e *BoltDecodeEvidence) []Violation {
 			outcomes["served"]++
 		case a.Code == boltDecodeCodeInvalid:
 			outcomes["wire cap"]++
-		case a.Code == boltDecodeCodeInternal:
+		case a.Code == boltDecodeCodeParamDepth:
 			outcomes["engine cap"]++
 		}
 		if a.Vehicle == "hello" && a.Reply == "FAILURE" {

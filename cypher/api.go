@@ -4284,6 +4284,20 @@ func (e *Engine) RunInTxAny(ctx context.Context, query string, params map[string
 // about internal server state.
 var ErrUnsupportedParamType = errors.New("cypher: unsupported parameter type")
 
+// ErrParamNestedTooDeep is the sentinel wrapped by [BindParams] when a parameter
+// nests lists or maps deeper than [maxParamBindDepth]. Like
+// [ErrUnsupportedParamType] it is a CLIENT fault — the request carried a value the
+// engine will not bind — and a front-end classifies it via [errors.Is]. The Bolt
+// server maps it to Neo.ClientError.Statement.ArgumentError: the payload decoded
+// correctly and the statement was dispatched, so what is wrong is the statement's
+// ARGUMENT, not the form of the request (rmp #2570).
+//
+// It is deliberately NOT the packstream wire nesting cap, which is a separate and
+// much higher bound enforced during decode, before a message reaches a session at
+// all. The two are different limits at different layers and answer differently by
+// design.
+var ErrParamNestedTooDeep = errors.New("nested deeper than the supported limit")
+
 // BindParams converts a map[string]any to map[string]expr.Value using the
 // following type mapping:
 //
@@ -4307,6 +4321,24 @@ func BindParams(params map[string]any) (map[string]expr.Value, error) {
 	for k, v := range params {
 		converted, err := bindAny(v)
 		if err != nil {
+			// A DEPTH refusal is reported without the accumulated path. Every other
+			// bind error names the position that offended — which element of which
+			// list carried the wrong type — and that position is what makes it
+			// actionable. For a depth refusal the path IS the depth, so carrying it
+			// restates the same limit once per level: measured 405 bytes for a
+			// 33-deep map chain, of which 396 were `map["k"]:` framing, all of it
+			// forwarded to the client because a ClientError code bypasses the
+			// sanitiser (rmp #2570). The key and the limit are the whole actionable
+			// content.
+			//
+			// The "cypher: ArgumentError." prefix is what the Bolt layer classifies
+			// on — the module's TCK-pinned convention for an engine error that
+			// carries its own category (bolt/server/errors.go) — so this message
+			// shape is load-bearing, not decoration.
+			if errors.Is(err, ErrParamNestedTooDeep) {
+				return nil, fmt.Errorf("cypher: ArgumentError.ParameterNestedTooDeep: parameter %q is %w of %d levels",
+					k, ErrParamNestedTooDeep, maxParamBindDepth)
+			}
 			return nil, fmt.Errorf("cypher: BindParams: key %q: %w", k, err)
 		}
 		out[k] = converted
@@ -4325,7 +4357,7 @@ func bindAny(v any) (expr.Value, error) { return bindAnyDepth(v, 0) }
 // class open through the other.
 func bindAnyDepth(v any, depth int) (expr.Value, error) {
 	if depth > maxParamBindDepth {
-		return nil, fmt.Errorf("cypher: parameter nested deeper than %d levels", maxParamBindDepth)
+		return nil, ErrParamNestedTooDeep
 	}
 	if v == nil {
 		return expr.Null, nil
@@ -4395,7 +4427,7 @@ const maxParamBindDepth = 32
 // GoGraph a real bytes value is a type-system change and is tracked separately.
 func bindReflect(v any, depth int) (expr.Value, error) {
 	if depth > maxParamBindDepth {
-		return nil, fmt.Errorf("cypher: parameter nested deeper than %d levels", maxParamBindDepth)
+		return nil, ErrParamNestedTooDeep
 	}
 	rv := reflect.ValueOf(v)
 	switch rv.Kind() {
@@ -4442,7 +4474,7 @@ func bindReflect(v any, depth int) (expr.Value, error) {
 // genuinely unknown containers pay for reflection.
 func bindReflectElem(rv reflect.Value, depth int) (expr.Value, error) {
 	if depth > maxParamBindDepth {
-		return nil, fmt.Errorf("cypher: parameter nested deeper than %d levels", maxParamBindDepth)
+		return nil, ErrParamNestedTooDeep
 	}
 	if !rv.IsValid() {
 		return expr.Null, nil

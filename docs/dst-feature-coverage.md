@@ -4042,8 +4042,8 @@ CWE-770 the pool exists to close. The **wire nesting cap** (`packstream maxValue
 crafted message can request millions of stack frames and kill the process, and it is
 reachable during the FIRST HELLO decode. And a third that this task found by measurement
 rather than by reading: the engine's **own parameter nesting cap** (`cypher
-maxParamBindDepth = 32`, declared at `cypher/api.go:4303` and enforced at `:4256`), a
-second, lower, independent cap on the same axis.
+maxParamBindDepth = 32`, in `cypher/api.go`), a second, lower, independent cap on the
+same axis, which nothing had documented as Bolt-visible.
 
 **The load-bearing oracle is a closed-form model of the pool, not the server's word.** The
 harness re-derives what a RUN's decode holds from the shared pool out of packstream's
@@ -4092,13 +4092,37 @@ against it:
 |---|---|---|
 | aggregate pool breach | `Neo.TransientError.General.OutOfMemoryError` | READY (usable with NO RESET) |
 | wire nesting cap (>= 128) | `Neo.ClientError.Request.Invalid` / `malformed Bolt message` | READY (usable with NO RESET) |
-| engine parameter cap (> 32) | `Neo.DatabaseError.General.UnknownError` | FAILED (next message IGNORED) |
+| engine parameter cap (> 32) | `Neo.ClientError.Statement.ArgumentError` / `cypher: ArgumentError.ParameterNestedTooDeep: parameter "d" is nested deeper than the supported limit of 32 levels` | FAILED (next message IGNORED) |
+
+The third row read `Neo.DatabaseError.General.UnknownError`, sanitised to "An internal
+error occurred", when this scenario first measured it — and **reporting that is what got it
+fixed**: rmp #2570 reclassified it as the client fault it always was, since the payload is
+entirely client-supplied. It is the **`Statement`** family rather than the `Request` family
+because the message decoded correctly and the statement was dispatched: what is invalid is
+the statement's ARGUMENT, not the form of the request, and `Request.Invalid` is what the
+row above answers for a frame that will not decode at all. The classification is reached
+through the module's own TCK-pinned convention — an engine error whose message carries
+`cypher: ArgumentError.` — so no `bolt/server` change was needed. The arms of this family
+were what pinned the old answer, so the correction failed them on purpose and they were
+updated with the ticket rather than deleted.
 
 The first two are answered ABOVE the session state machine — the serve loop rejects them
-between the read and `sess.HandleMessage` (`serve.go:1258` and `:1289`) — which is why the
-session survives them intact; the third travels through it into `cypher.BindParams`, so it
-fails the session. That state-after difference is a **third discriminator, independent of
-the codes**, and it is asserted separately. The classification segment is asserted on its
+between the read and `sess.HandleMessage` — which is why the session survives them intact;
+the third travels through it into `cypher.BindParams`, so it fails the session. That
+state-after difference is a **third discriminator, independent of the codes**, and it is
+asserted separately. The three answers do NOT disagree about the session, which is worth
+saying because it reads like an inconsistency: staying READY is reserved for
+back-pressure, where retrying the same request can succeed (`bolt/server/state.go`), and a
+depth refusal is deterministic — retrying the identical RUN fails identically forever.
+
+One consequence of the fix landed inside this scenario's own instruments. The parameter cap
+was the ONLY arm here whose failure went through the sanitiser, so
+`boltDecodeRedactSession` — which strips the per-session id that would otherwise make the
+rendering vary run to run — became a no-op on every arm. The determinism test's clause
+requiring that the redaction had really fired was therefore **unsatisfiable, and was
+retired rather than left to fail**; the redaction itself is kept as insurance for a future
+arm that does draw a sanitised message, and every message this family records is now a pure
+function of the seed by construction. The classification segment is asserted on its
 own too, read out of the OBSERVED code rather than compared to the literal this file
 declares: neo4j-go-driver's `IsRetriableTransient` tests `classification ==
 "TransientError"` (`bolt/server/errors.go:129-131`), so "typed RETRYABLE backpressure" is a
