@@ -119,6 +119,15 @@ var _ walFile = (*SimFileHandle)(nil)
 //	                EXISTING directory still changes nothing, because it creates
 //	                nothing and needs no fsync.
 //
+//	Sync failure    MODELLED since rmp #2540. A failed fsync freezes the file's
+//	                durable prefix for good: every later Sync RETURNS SUCCESS and
+//	                advances nothing, because a failed write-back marks the pages
+//	                clean and drops them (Rebello et al., USENIX ATC 2020;
+//	                PostgreSQL's fsyncgate response was to PANIC rather than
+//	                retry). It used to leave the data intact so a retry simply
+//	                worked, which would have made a "retry once before poisoning"
+//	                optimisation look safe under simulation.
+//
 //	DirSync         FIXED (rmp #2537), and NARROWER THAN REALITY in the safe
 //	                direction. It could not FAIL: the body ended in an
 //	                unconditional return nil while its sibling ParentDirSync
@@ -593,6 +602,9 @@ type simFile struct {
 	// and only its first tornTailKeep bytes landed intact. See
 	// [SimDisk.ArmTornAppendAt] for why this cannot emerge from the durable
 	// shadow alone.
+	// writebackLost records that an fsync on this file FAILED. Once set, the
+	// durable prefix can never advance again: see [SimFileHandle.Sync].
+	writebackLost bool
 	tornTailSet   bool
 	tornTailStart int64
 	tornTailKeep  int64
@@ -3131,10 +3143,51 @@ func (h *SimFileHandle) Truncate(size int64) error {
 	return nil
 }
 
-// Sync models flushing OS buffers to stable storage. With probability
-// faultRate (drawn from the disk's seed) it fails with [ErrSimFault], modelling
-// a durability fault. Each call consumes exactly one draw from the seed so the
-// fault sequence is reproducible.
+// Sync fsyncs the file, granting durability to everything written before the
+// call returns.
+//
+// # A FAILED fsync is permanent, and a retry is a lie (rmp #2540)
+//
+// When Sync fails, this file's durable prefix is frozen for good: every later
+// Sync on it RETURNS SUCCESS AND ADVANCES NOTHING. That is not a simplification;
+// it is the behaviour the sources describe.
+//
+// On Linux, a write-back error marks the affected pages CLEAN and reports the
+// error to exactly one fsync caller, after which it is gone — so the dirty data
+// is discarded and a retried fsync returns success over bytes that no longer
+// exist anywhere. The canonical write-up is Rebello et al., "Can Applications
+// Recover from fsync Failures?" (USENIX ATC 2020), which measured this across
+// ext4, XFS and Btrfs and found the page state after a failure differs per
+// filesystem but is never "still dirty and retryable" on ext4 data=ordered.
+// PostgreSQL reached the same conclusion the expensive way and now PANICs rather
+// than retrying (its fsync failure handling, commit 9ccdd7f6 and the
+// "fsyncgate" thread of 2018).
+//
+// The audit that filed this was explicit that NO man page warns against retrying
+// fsync, so the behaviour is sourced to the measurements and to PostgreSQL's
+// response, never to a man page.
+//
+// # Why the model freezes the whole prefix
+//
+// The durable image is a contiguous PREFIX. The bytes the failed write-back was
+// carrying are gone, so nothing after them can be made durable either — there is
+// no way to express "durable, then a hole, then durable" in a watermark, and a
+// real reader stopping at the hole would see exactly the same thing.
+//
+// Bound: a caller that SEEKS BACK and rewrites the lost region could legitimately
+// make it durable again, and that is not modelled. No caller in this module does
+// — the WAL only appends — and modelling it would require tracking which bytes
+// were rewritten after the failure.
+//
+// # There is no live defect this protects against; it protects against a future one
+//
+// No current caller retries: the WAL poisons fail-stop, and RocksDB's equivalent
+// is structural, with seen_error short-circuiting every later call on the writer.
+// What the model could not express before was the consequence of INTRODUCING a
+// retry. An optimisation of the form "retry the fsync once before poisoning"
+// would have looked perfectly safe under DST and been a data-loss bug in
+// production. [TestSyncRetryAfterFailureLosesData] writes exactly that
+// optimisation and observes the loss.
 func (h *SimFileHandle) Sync() error {
 	if err := h.dead(); err != nil {
 		return err
@@ -3154,6 +3207,15 @@ func (h *SimFileHandle) Sync() error {
 	if err != nil {
 		// A failed fsync advances nothing: the bytes it was carrying are still
 		// only in the page cache, so a crash still loses them.
+		//
+		// It also POISONS the file's durable prefix permanently. On Linux a
+		// failed write-back marks the affected pages CLEAN and reports the error
+		// once, so the dirty data is discarded and a retried fsync returns
+		// SUCCESS over data that is already gone. Modelling the retry as a plain
+		// success would make "retry the fsync once before poisoning" look safe
+		// under simulation while being a data-loss bug in production (rmp #2540,
+		// audit finding F6).
+		h.disk.markWritebackLost(h.file)
 		return err
 	}
 	// The durability lands when the fsync RETURNS, not when it was issued. That
@@ -3212,7 +3274,23 @@ func (d *SimDisk) completeSync(f *simFile, req syncRequest) {
 	if d.hostCrashGen != req.gen {
 		return
 	}
+	if f.writebackLost {
+		// A retry after a failed fsync RETURNS SUCCESS AND GRANTS NOTHING. The
+		// pages the failed write-back was carrying were marked clean and dropped,
+		// so the bytes between the old watermark and here are gone; a durable
+		// prefix is contiguous, so nothing beyond them can become durable either,
+		// however many times the caller retries.
+		return
+	}
 	f.markSyncedTo(req.covers)
+}
+
+// markWritebackLost records that an fsync on f failed, freezing its durable
+// prefix for good. The caller must not hold d.mu.
+func (d *SimDisk) markWritebackLost(f *simFile) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	f.writebackLost = true
 }
 
 // syncResultLocked returns the outcome the arms select for the Sync just
