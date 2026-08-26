@@ -3717,22 +3717,43 @@ advance to the abort reaching the client, so a stall reads as a failure rather t
 a pass; and it requires the injected clock to have registered at least one timer,
 because a reap is attributable to the reaper only if the reaper was armed.
 
-**The `mode` coercion FAILS OPEN, and that is measured on two independent
-observables.** `handleBegin` selects read-only for the exact string `"r"` and for
-nothing else (`bolt/server/session.go:1560-1566`): a non-string value, a misspelling,
-the uppercase `"R"`, an absent key — every one of them silently yields a WRITE
-transaction, and the client is told nothing. Five arms drive `"r"`, `"w"`, `"R"`,
-`"bogus"` and no key at all, in a seed-drawn order, and each is adjudicated on two
-observables: the server's own `server.TransactionInfo.Mode`, read off
-`Server.Transactions()` while the transaction is open, and whether a `CREATE` inside
-that transaction is accepted. One observable alone could not tell a mis-recorded mode
-from a mis-enforced one. The read-only arm's refusal is pinned to the exact code
-`Neo.ClientError.Request.Invalid`, while its message is required only to CONTAIN
-"read-only transaction": that text comes from `cypher`, not from `bolt/server`, so
-pinning it verbatim would couple the scenario to a message the engine owns. `"R"` is
-in the roster because it is the plausible misspelling, and the clause that matters is
-that its write is ACCEPTED. No earlier scenario had ever attempted a write inside a
-Bolt read-only transaction, so the refusal itself is new coverage too.
+**The `mode` coercion FAILED OPEN. This scenario measured it, and rmp #2564 fixed
+it.** `handleBegin` selected read-only for the exact string `"r"` and for nothing
+else: a non-string value, a misspelling, the uppercase `"R"` — every one of them
+silently yielded a WRITE transaction, so a client that asked for read-only received
+write authority and was told nothing. That is a fail-open coercion on a field this
+server treats as a capability restriction, which the project's
+fail-stop-never-fail-silent rule forbids.
+
+**The contract since rmp #2564:** the two canonical spellings and the ABSENT key
+behave as before, and any other value is REFUSED at the BEGIN with
+`Neo.ClientError.Request.Invalid`, in a message that NAMES the offending value. The
+decision was taken on evidence rather than preference — the Bolt specification is
+silent on invalid `mode` values and frames the field as a routing hint ("what kind of
+server the RUN message is targeting") rather than as authorisation, so the contract is
+GoGraph's to choose, and it chose the fail-stop direction its own rules require.
+Compatibility risk is low by construction: the official drivers send exactly `"r"` or
+`"w"`, so a refusal can only reach a client that was previously being granted write
+authority it did not ask for.
+
+Five arms drive `"r"`, `"w"`, `"R"`, `"bogus"` and no key at all, in a seed-drawn
+order. Each accepted arm is adjudicated on two observables — the server's own
+`server.TransactionInfo.Mode`, read off `Server.Transactions()` while the transaction
+is open, and whether a `CREATE` inside it is accepted — because one alone could not
+tell a mis-recorded mode from a mis-enforced one. For a REFUSED arm the second
+observable is that no transaction reached the registry at all. The read-only arm's
+refusal is pinned to the exact code `Neo.ClientError.Request.Invalid`, while its
+message is required only to CONTAIN "read-only transaction": that text comes from
+`cypher`, not from `bolt/server`, so pinning it verbatim would couple the scenario to
+a message the engine owns. No earlier scenario had ever attempted a write inside a
+Bolt read-only transaction, so that refusal is new coverage too.
+
+The clause that pinned the fail-open said, in its own failure message, that a refusal
+would mean the coercion had been hardened and that it and this document must be
+rewritten. Both were. The clause is INVERTED rather than deleted: accepting an
+unrecognised mode is now an `ACID_CONSISTENCY` violation, and a non-vacuity clause
+requires at least one arm to have been refused, so the new contract cannot go
+unexercised.
 
 **`db` is echoed unvalidated, agrees across both replies, and is never empty.**
 `selectDatabaseFrom` (`bolt/server/session.go:322-324`) records the extra verbatim,

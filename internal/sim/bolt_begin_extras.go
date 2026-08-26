@@ -238,6 +238,10 @@ const beginBookmarkWrongTypeValue = int64(0x2485)
 // The mode values driven. Only "r" is special (handleBegin,
 // bolt/server/session.go:1561-1566); the rest are here to pin that the coercion to
 // "w" is silent.
+// beginUnknownModeRefusalCode is what a BEGIN carrying an unrecognised `mode`
+// is refused with since rmp #2564.
+const beginUnknownModeRefusalCode = "Neo.ClientError.Request.Invalid"
+
 const (
 	beginModeRead      = "r"
 	beginModeWrite     = "w"
@@ -454,6 +458,14 @@ type BoltModeArm struct {
 	// answered SUCCESS; WriteCode and WriteMessage carry the refusal when it was not.
 	WriteAccepted           bool
 	WriteCode, WriteMessage string
+	// BeginRefused records that the BEGIN ITSELF was refused, with its code and
+	// message. It is separate from WriteCode because the two are different events
+	// and were previously conflated: before rmp #2564 no arm could be refused at
+	// BEGIN, so the driver reused the write fields, and a clause reading them
+	// could not tell "the transaction never opened" from "the write inside it was
+	// refused".
+	BeginRefused            bool
+	BeginCode, BeginMessage string
 }
 
 // BoltDBArm is one probe of the `db` extra: the name sent on BEGIN and the name
@@ -984,7 +996,14 @@ func (r *beginExtrasRunner) driveModeArm(ctx context.Context, name string) (Bolt
 		return arm, fmt.Errorf("sim: bolt-begin-extras: %s BEGIN: %w", arm.Name, err)
 	}
 	if !isSuccess(resp) {
-		arm.WriteCode, arm.WriteMessage = failureCode(resp), failureMessage(resp)
+		// Since rmp #2564 an unrecognised `mode` is refused HERE, at the BEGIN,
+		// rather than coerced to write. RESET returns the session from FAILED so
+		// the connection teardown is clean and the next arm starts from READY.
+		arm.BeginRefused = true
+		arm.BeginCode, arm.BeginMessage = failureCode(resp), failureMessage(resp)
+		if _, err := c.Reset(); err != nil {
+			return arm, fmt.Errorf("sim: bolt-begin-extras: %s RESET after refused BEGIN: %w", arm.Name, err)
+		}
 		return arm, nil
 	}
 	// handleBegin registers the transaction BEFORE the response loop writes the
@@ -1886,16 +1905,57 @@ func beginCheckAbortShape(a *BoltTimeoutArm) []Violation {
 
 // checkBoltBeginMode adjudicates the `mode` family.
 //
-// The finding it pins is that the coercion FAILS OPEN. handleBegin selects read-only
-// only for the exact string "r" (bolt/server/session.go:1561-1566); every other value
-// — a misspelling, the uppercase "R", a non-string, an absent key — silently yields a
-// WRITE transaction. That is asserted on TWO independent observables: the server's own
-// [server.TransactionInfo.Mode], and whether a write inside the transaction is allowed.
-// One observable alone could not tell a mis-recorded mode from a mis-enforced one.
+// UNTIL rmp #2564 IT PINNED A FAIL-OPEN COERCION: handleBegin selected read-only only
+// for the exact string "r", so every other value — a misspelling, the uppercase "R", a
+// non-string — silently yielded a WRITE transaction, and a client that asked for
+// read-only received write authority and was told nothing. The pin's own message said
+// that a refusal would mean the coercion had been hardened and that it, and
+// docs/dst-feature-coverage.md, must be rewritten. That is what happened.
+//
+// The contract now: the two canonical spellings and the ABSENT key behave as before,
+// and any other value is REFUSED at the BEGIN with Neo.ClientError.Request.Invalid.
+//
+// Each arm is still adjudicated on TWO independent observables — the server's own
+// [server.TransactionInfo.Mode] and whether a write inside the transaction is allowed
+// — because one alone could not tell a mis-recorded mode from a mis-enforced one. For
+// a refused arm the second observable is that NO transaction reached the registry.
 func checkBoltBeginMode(e *BoltBeginExtrasEvidence) []Violation {
 	var v []Violation
 	for i := range e.Modes {
 		a := &e.Modes[i]
+		// An arm whose value is neither canonical spelling must be refused at the
+		// BEGIN (rmp #2564), and nothing else about it is adjudicated: there is no
+		// transaction to have a mode, and no write to accept or refuse.
+		if a.SentKey && a.SentMode != beginModeRead && a.SentMode != beginModeWrite {
+			if !a.BeginRefused {
+				v = append(v, boltBeginViolation(ViolationACIDConsistency, "mode-unknown-refused",
+					fmt.Sprintf("arm %q sent mode %q and the BEGIN was ACCEPTED, opening a transaction the "+
+						"server recorded as Mode=%q. An access-mode token the server does not recognise must "+
+						"not be resolved in the MORE privileged direction (rmp #2564)",
+						a.Name, a.SentMode, a.RegistryMode)))
+				continue
+			}
+			if a.BeginCode != beginUnknownModeRefusalCode {
+				v = append(v, boltBeginViolation(ViolationOracleDeviation, "mode-unknown-refused",
+					fmt.Sprintf("arm %q was refused with code %q, want %q",
+						a.Name, a.BeginCode, beginUnknownModeRefusalCode)))
+			}
+			// The message must NAME the offending value, or a client cannot fix its
+			// own request without guessing.
+			if !strings.Contains(a.BeginMessage, a.SentMode) {
+				v = append(v, boltBeginViolation(ViolationOracleDeviation, "mode-unknown-refused",
+					fmt.Sprintf("arm %q: the refusal message %q does not contain the offending value %q",
+						a.Name, a.BeginMessage, a.SentMode)))
+			}
+			continue
+		}
+		if a.BeginRefused {
+			v = append(v, boltBeginViolation(ViolationOracleDeviation, "mode-canonical-accepted",
+				fmt.Sprintf("arm %q sent mode %q (present=%t) and the BEGIN was REFUSED with %q / %q. The two "+
+					"canonical spellings and the absent key must keep their behaviour",
+					a.Name, a.SentMode, a.SentKey, a.BeginCode, a.BeginMessage)))
+			continue
+		}
 		wantRead := a.SentKey && a.SentMode == beginModeRead
 		wantMode := beginModeWrite
 		if wantRead {
@@ -1930,15 +1990,13 @@ func checkBoltBeginMode(e *BoltBeginExtrasEvidence) []Violation {
 			}
 			continue
 		}
-		// CLAUSE mode-unknown-fails-open. Every non-"r" value must ACCEPT the write.
-		// This is the deliberate pin of the fail-open coercion: a driver that sends "R"
-		// gets write authority and is told nothing.
+		// CLAUSE mode-write-accepts-write. A write transaction — "w", or the absent
+		// key — must ACCEPT a write, or the mode is being enforced in the wrong
+		// direction.
 		if !a.WriteAccepted {
-			v = append(v, boltBeginViolation(ViolationOracleDeviation, "mode-unknown-fails-open",
+			v = append(v, boltBeginViolation(ViolationACIDConsistency, "mode-write-accepts-write",
 				fmt.Sprintf("arm %q sent mode %q (present=%t) and the write inside it was REFUSED with %q / %q. "+
-					"Every value other than the exact string \"r\" is currently coerced to a WRITE transaction, so a "+
-					"refusal means the coercion changed — which would be a HARDENING of a fail-open path, and this "+
-					"pin and docs/dst-feature-coverage.md must be rewritten to record it",
+					"A write transaction must accept a write",
 					a.Name, a.SentMode, a.SentKey, a.WriteCode, a.WriteMessage)))
 		}
 	}
@@ -2305,11 +2363,17 @@ func checkBoltModeDBNonVacuity(e *BoltBeginExtrasEvidence) []Violation {
 			fmt.Sprintf("the mode roster ran %v, want %v", gotModes, wantModes)))
 	}
 	// CLAUSE nv-mode-both-sides. The family needs a transaction the server recorded as
-	// READ-ONLY and one it recorded as WRITE. Without the read-only side the fail-open
-	// clause is satisfiable by a server that never enforces anything; without the write
-	// side, by one that refuses everything.
-	readModes, writeModes := 0, 0
+	// READ-ONLY and one it recorded as WRITE, AND at least one BEGIN refused for an
+	// unrecognised mode. Without the read-only side the enforcement clauses are
+	// satisfiable by a server that never enforces anything; without the write side, by
+	// one that refuses everything; and without a refusal the rmp #2564 clause never
+	// fires at all.
+	readModes, writeModes, refusedBegins := 0, 0, 0
 	for i := range e.Modes {
+		if e.Modes[i].BeginRefused {
+			refusedBegins++
+			continue
+		}
 		switch e.Modes[i].RegistryMode {
 		case beginModeRead:
 			readModes++
@@ -2320,8 +2384,13 @@ func checkBoltModeDBNonVacuity(e *BoltBeginExtrasEvidence) []Violation {
 	if readModes < 1 || writeModes < 1 {
 		v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-mode-both-sides",
 			fmt.Sprintf("the mode family produced %d read-only and %d write transaction(s) by the server's own "+
-				"registry; it needs at least one of each, or the fail-open pin and the read-only refusal are each "+
-				"one-sided", readModes, writeModes)))
+				"registry; it needs at least one of each, or the enforcement clauses and the read-only refusal "+
+				"are each one-sided", readModes, writeModes)))
+	}
+	if refusedBegins < 1 {
+		v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-mode-unknown-driven",
+			"no mode arm was refused at the BEGIN, so the rmp #2564 clause — that an unrecognised access mode "+
+				"must not be resolved in the more privileged direction — was never exercised"))
 	}
 	// CLAUSE nv-mode-write-observed. The read-only refusal is only meaningful if the
 	// same statement SUCCEEDS somewhere: a write refused everywhere would satisfy it for

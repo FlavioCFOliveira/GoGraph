@@ -1557,11 +1557,40 @@ func (s *Session) handleBegin(ctx context.Context, m *proto.Begin) ([]any, error
 		effective = s.maxStmtTimeout
 	}
 
-	// Determine transaction mode (default: "w").
+	// Determine transaction mode (default: "w" when the key is absent).
+	//
+	// AN UNRECOGNISED VALUE IS REFUSED, NOT COERCED (rmp #2564). This read used
+	// to be `if modeStr == "r" { mode = "r" }`, so every other value — "R",
+	// "read", or a non-string — fell through to the WRITE default: a client that
+	// asked for read-only silently received write authority and its writes
+	// succeeded. That is a fail-open coercion on a field this server treats as a
+	// capability restriction, and the project's fail-stop-never-fail-silent rule
+	// forbids it.
+	//
+	// The Bolt specification is SILENT on invalid mode values, and frames `mode`
+	// as a routing hint — "what kind of server the RUN message is targeting" —
+	// rather than as authorisation. GoGraph gives it the stronger meaning: mode
+	// "r" makes the transaction read-only and refuses writes. A token this server
+	// does not understand therefore must not be resolved in the MORE privileged
+	// direction, and refusing is what tells the client at the BEGIN rather than
+	// through a puzzling write refusal later.
+	//
+	// Compatibility risk is low by construction: the official drivers send
+	// exactly "r" or "w", so a refusal can only reach a client that is today
+	// receiving write authority it did not ask for.
 	mode := "w"
 	if v, ok := m.Extra["mode"]; ok {
-		if modeStr, ok := v.(string); ok && modeStr == "r" {
-			mode = "r"
+		modeStr, isStr := v.(string)
+		switch {
+		case isStr && modeStr == boltAccessModeRead:
+			mode = boltAccessModeRead
+		case isStr && modeStr == boltAccessModeWrite:
+			mode = boltAccessModeWrite
+		default:
+			return []any{&proto.Failure{
+				Code:    "Neo.ClientError.Request.Invalid",
+				Message: unsupportedAccessModeMessage(v),
+			}}, nil
 		}
 	}
 
@@ -2240,4 +2269,29 @@ func dateTimeToPackstream(x expr.DateTimeValue, boltMajor uint8) packstream.Valu
 		return packstream.Struct{Tag: 0x66, Fields: []packstream.Value{localEpochSec, nano, locName}}
 	}
 	return packstream.Struct{Tag: 0x46, Fields: []packstream.Value{localEpochSec, nano, int64(offsetSec)}}
+}
+
+// The two access-mode tokens the Bolt BEGIN `mode` extra accepts. They are named
+// rather than spelled inline so the accepted spelling lives in one place; rmp
+// #2564 was reachable partly because the comparison and the default were written
+// as separate literals.
+const (
+	boltAccessModeRead  = "r"
+	boltAccessModeWrite = "w"
+)
+
+// unsupportedAccessModeMessage renders the refusal for a BEGIN whose `mode` extra
+// the server does not recognise.
+//
+// It NAMES the offending value, so a client can fix its own request without
+// guessing, and includes the Go type for a non-string because a driver sending
+// an integer 0 would otherwise read the message as being about the string "0".
+// The value is the client's own input, so echoing it discloses nothing internal.
+func unsupportedAccessModeMessage(v any) string {
+	if s, ok := v.(string); ok {
+		return fmt.Sprintf("unsupported access mode %q: the BEGIN `mode` extra accepts only %q or %q",
+			s, boltAccessModeRead, boltAccessModeWrite)
+	}
+	return fmt.Sprintf("unsupported access mode of type %T: the BEGIN `mode` extra accepts only "+
+		"the strings %q or %q", v, boltAccessModeRead, boltAccessModeWrite)
 }
