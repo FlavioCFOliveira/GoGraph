@@ -315,12 +315,17 @@ func unknownFunctionError(name string, pos ast.Position) *ScopeError {
 
 // relationshipUniquenessError constructs a KindRelationshipUniqueness
 // ScopeError for a relationship variable introduced twice within the
-// same path pattern.
+// same CLAUSE — whether twice in one path pattern
+// (`MATCH (a)-[r]->()-[r]->(a)`) or once in each of two comma-separated
+// patterns of the same clause (`MATCH (a)-[r]->(b), (b)-[r]->(a)`).
+// The message says "clause" rather than "path pattern" because the
+// scope is the clause: saying otherwise misdescribed the sibling case
+// when rmp #2252 brought it under the same check.
 func relationshipUniquenessError(name string, pos ast.Position) *ScopeError {
 	return &ScopeError{
 		Kind:    KindRelationshipUniqueness,
 		Pos:     pos,
-		Message: fmt.Sprintf("relationship variable %q cannot be used twice in the same path pattern", name),
+		Message: fmt.Sprintf("relationship variable %q cannot be used twice in the same clause", name),
 	}
 }
 
