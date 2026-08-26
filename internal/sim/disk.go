@@ -119,6 +119,14 @@ var _ walFile = (*SimFileHandle)(nil)
 //	                EXISTING directory still changes nothing, because it creates
 //	                nothing and needs no fsync.
 //
+//	Remove(dir)     MODELLED since rmp #2545. Remove follows os.Remove, which
+//	                tries unlink and then rmdir: an EMPTY directory is removed
+//	                and a NON-EMPTY one returns ENOTEMPTY. It used to succeed
+//	                silently on both, so a caller that meant to delete a
+//	                directory got success and no deletion. Remove on an ABSENT
+//	                path still succeeds, deliberately — the snapshot writer's
+//	                best-effort cleanup relies on it.
+//
 //	Truncation      MODELLED since rmp #2542. O_TRUNC, the handle Truncate and
 //	                TruncatePath all shorten the VISIBLE data at once and the
 //	                DURABLE image only at the next successful fsync, so a crash
@@ -2119,6 +2127,23 @@ func dirComponents(dir string) []string {
 	return out
 }
 
+// dirHasChildrenLocked reports whether the directory at path holds anything —
+// a file, or a tracked subdirectory. The caller holds d.mu.
+func (d *SimDisk) dirHasChildrenLocked(path string) bool {
+	prefix := path + "/"
+	for p := range d.files {
+		if strings.HasPrefix(p, prefix) {
+			return true
+		}
+	}
+	for dp := range d.dirs {
+		if strings.HasPrefix(dp, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // dirExistsLocked reports whether path names a directory that already exists,
 // either tracked explicitly or implied by a file beneath it. The caller holds
 // d.mu.
@@ -2151,8 +2176,24 @@ func (d *SimDisk) Remove(path string) error {
 	defer d.mu.Unlock()
 	f, ok := d.files[path]
 	if !ok {
-		// Nothing was unlinked, so there is no metadata mutation to record and
-		// no cleanup to count as having found anything.
+		// Not a file. It may still be a DIRECTORY, and os.Remove handles that by
+		// falling back to rmdir: an EMPTY directory is removed and a non-empty one
+		// returns ENOTEMPTY (os/file_unix.go, Remove — unlink then rmdir).
+		//
+		// This used to return nil for both, so a caller that meant to delete a
+		// directory received success and no deletion, and the model would never
+		// have revealed the mistake (audit finding F11, rmp #2545). Directories
+		// only became distinguishable from absent paths with #2543.
+		if d.dirExistsLocked(path) {
+			if d.dirHasChildrenLocked(path) {
+				return &fs.PathError{Op: "remove", Path: path, Err: syscall.ENOTEMPTY}
+			}
+			return d.removeAllLocked(path)
+		}
+		// ABSENT: tolerated, deliberately. The snapshot writer's best-effort
+		// cleanup relies on it, and that half of the behaviour is preserved
+		// unchanged. Nothing was unlinked, so there is no metadata mutation to
+		// record and no cleanup to count as having found anything.
 		return nil
 	}
 	d.noteRemoveHitLocked(path)
@@ -2269,6 +2310,13 @@ func (d *SimDisk) hasSubtreeLocked(dir string) bool {
 func (d *SimDisk) RemoveAll(path string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	return d.removeAllLocked(path)
+}
+
+// removeAllLocked is [SimDisk.RemoveAll]'s body. It is factored out so
+// [SimDisk.Remove] can reuse it for the rmdir half of its contract without
+// re-taking the lock. The caller holds d.mu.
+func (d *SimDisk) removeAllLocked(path string) error {
 	files, dirs := d.captureSubtreeLocked(path)
 	if len(files) == 0 && len(dirs) == 0 {
 		return nil
@@ -2298,8 +2346,9 @@ func (d *SimDisk) RemoveAll(path string) error {
 // Stat reports a minimal [fs.FileInfo] for a file at path. It returns an error
 // wrapping fs.ErrNotExist when no file is present, which is exactly the probe
 // the snapshot and recovery paths rely on (testing for manifest.json / wal
-// presence). Directories have no standalone entry in the opaque-key model;
-// Stat reports a directory when any child key is prefixed path+"/".
+// presence). Stat reports a directory when any child key is prefixed path+"/",
+// and — since rmp #2543 — also when the directory was created explicitly through
+// MkdirAll, which is what makes an EMPTY directory representable.
 func (d *SimDisk) Stat(path string) (fs.FileInfo, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
