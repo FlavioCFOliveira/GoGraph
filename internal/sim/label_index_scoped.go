@@ -103,7 +103,7 @@ package sim
 // a seed-shuffled order. The seed decides the order and the base band; it never
 // decides the coverage.
 //
-// # Two defects this file FIXED, and one it still WITNESSES
+// # Three defects this file FIXED, all now covered by regression arms
 //
 // The boundary defect is FIXED (#2607): `to == math.MaxUint64` used to drop the
 // WHOLE range in both directions, because `to+1` wrapped to 0 and roaring treats
@@ -127,20 +127,24 @@ package sim
 // unboundedly"). [liDriveWithPhantom] is a REGRESSION arm, with a range naming
 // five ids as its control.
 //
-// The one that remains is latent — neither range method has a production caller,
-// so no production label is ever built the way it requires — and it is pinned to
-// its MEASURED behaviour with a clause that says so, so that fixing it fires
-// loudly here instead of passing silently.
+// The idempotence defect is FIXED as well (#2609): the serialized form used to
+// change for a run-encoded label small enough to be down-converted on the way
+// back in. MEASURED at the time, an AddRange-built label of 8 ids serialized to
+// 55 bytes and, after one Serialize/Deserialize cycle, to 72 — because
+// [index.NodeSetFromBitmap] moves a bitmap of at most smallSetMax ids to the
+// inline tier, which re-materialises through `AddMany` as an ARRAY container
+// where `AddRange` had built a RUN one. No content was ever lost, but a
+// checkpoint, reload and re-checkpoint cycle produced different bytes for the
+// same logical state. `Serialize` now writes through
+// [index.NodeSet.CanonicalBitmap], which run-optimises the container so the
+// encoding follows the contents, BOUNDED at smallSetMax — the band the reader
+// down-converts, and so the only band where a cycle could change the bytes.
+// [liDriveDenseSmall] is the regression arm, with the same construction one id
+// above the threshold as its control.
 //
-//  1. The serialized form is NOT idempotent for a run-encoded label small enough
-//     to be down-converted on the way back in. MEASURED: an AddRange-built label
-//     of 8 ids serializes to 55 bytes and, after one Serialize/Deserialize
-//     cycle, to 72 — because [index.NodeSetFromBitmap] moves a bitmap of at most
-//     smallSetMax ids to the inline tier, which re-materialises through
-//     `AddMany` as an ARRAY container where `AddRange` had built a RUN one. The
-//     control one id above the threshold stays at 55. No content is ever lost,
-//     but a checkpoint, reload and re-checkpoint cycle produces different bytes
-//     for the same logical state. [liDriveDenseSmall] pins it.
+// So all three arms now assert repaired contracts, and each carries a
+// perturbation that reproduces its old defect, so none of them can pass by
+// measuring nothing.
 //
 // # An over-strong assertion of this harness's own, corrected
 //
@@ -157,14 +161,19 @@ package sim
 // ([liDriveRangeTier]), because the consequence is easy to assume away and is
 // real: two indexes that answer every query identically can have different
 // images, so byte-comparing two snapshots is not a valid way to ask whether two
-// graphs carry the same labels.
+// graphs carry the same labels. #2609 moved the crossover from width 4 to
+// smallSetMax rather than removing it, and the measurement's widths moved with
+// it so the gate still brackets both answers.
 //
 // The same mistake nearly reached the round-trip clause. `image ==
-// round-tripped image` is FALSE for the band in defect 1, and the sweep can
-// reach that band — an AddRange followed by a RemoveRange that trims the label
-// to a handful of ids — so the clause would have passed on this seed and flaked
-// on another. What is asserted instead is that the form is a FIXPOINT after at
-// most one cycle, which is true across every width probed.
+// round-tripped image` WAS false for the down-convert band before #2609, and the
+// sweep can reach that band — an AddRange followed by a RemoveRange that trims
+// the label to a handful of ids — so the clause would have passed on this seed
+// and flaked on another. What is asserted instead is that the form is a FIXPOINT
+// after at most one cycle, which was true across every width probed then and is
+// true a fortiori now that the band is byte-stable from the first cycle. The
+// weaker formulation is KEPT deliberately: it is what the module actually
+// promises above smallSetMax, where the normalisation does not reach.
 //
 // # What the corruption arm can and cannot reach
 //
@@ -1135,10 +1144,10 @@ const (
 	// liPerturbRangeTierFlat reports every Add-versus-AddRange width as
 	// identical, so the measurement no longer brackets the crossover.
 	liPerturbRangeTierFlat
-	// liPerturbDenseSmallStable reports the dense-small round trip as
-	// byte-stable. It is the tripwire direction: this is what the evidence will
-	// look like the day the down-convert stops re-encoding the container.
-	liPerturbDenseSmallStable
+	// liPerturbDenseSmallUnstable reports the dense-small round trip as changing
+	// its bytes. It reproduces the pre-#2609 55-to-72 re-encoding, so the
+	// regression arm has a demonstrated way to fail.
+	liPerturbDenseSmallUnstable
 	// liPerturbDenseSmallCtrl reports the dense-small CONTROL as unstable, so the
 	// instability stops being attributable to the smallSetMax threshold.
 	liPerturbDenseSmallCtrl
@@ -1197,8 +1206,8 @@ func (p liPerturb) String() string {
 		return "boundary-control-bad"
 	case liPerturbRangeTierFlat:
 		return "range-tier-flat"
-	case liPerturbDenseSmallStable:
-		return "dense-small-stable"
+	case liPerturbDenseSmallUnstable:
+		return "dense-small-unstable"
 	case liPerturbDenseSmallCtrl:
 		return "dense-small-ctrl"
 	default:
@@ -1837,27 +1846,36 @@ func liDriveTierIdentity(cfg *LabelIndexScopedConfig, ev *LabelIndexScopedEviden
 }
 
 // liRangeTierWidths brackets the width at which an AddRange-built label stops
-// serializing like an Add-built one. 1..3 are below the crossover and 4..8 above
-// it, so the measurement contains both answers and the gate can require that.
-func liRangeTierWidths() []uint64 { return []uint64{1, 2, 3, 4, 6, 8} }
+// serializing like an Add-built one. Since #2609 that crossover sits at
+// smallSetMax: 1..8 are normalised to a common encoding and 9..16 are not, so
+// the measurement contains both answers and the gate can require that.
+func liRangeTierWidths() []uint64 { return []uint64{1, 2, 3, 4, 6, 8, 9, 12, 16} }
 
 // liDriveRangeTier MEASURES, and does not assert, how an AddRange-built label's
 // image compares with an Add-built one holding the identical ids.
 //
-// They diverge from width 4 upwards: roaring encodes a four-or-longer contiguous
-// run as a RUN container, where `AddMany` of the same ids builds an ARRAY
-// container. MEASURED on the reference host: identical at widths 1, 2 and 3
-// (58, 60 and 62 bytes), and 64/66/68/70/72 bytes against a flat 55 from width 4
-// to width 8 — flat because a run container costs the same whatever the run's
+// The two used to diverge from width 4 upwards: roaring encodes a four-or-longer
+// contiguous run as a RUN container, where `AddMany` of the same ids builds an
+// ARRAY container. MEASURED at the time: identical at widths 1, 2 and 3 (58, 60
+// and 62 bytes), then 64/66/68/70/72 bytes against a flat 55 from width 4 to
+// width 8 — flat because a run container costs the same whatever the run's
 // length.
 //
-// This is NOT a defect and there is no clause on it. `Serialize`'s godoc
-// promises that the on-disk form is deterministic "for a given in-memory state",
-// which is exactly what holds; it never promised the bytes were a function of
-// the logical contents alone. The measurement is recorded because the
-// consequence is easy to assume away and is real: two indexes that answer every
-// query identically can have different images, so byte-comparing two snapshots
-// is not a valid way to ask whether two graphs carry the same labels.
+// #2609 moved the crossover to smallSetMax. `Serialize` now normalises the
+// container for sets of at most that many ids, so widths 1 to 8 agree and 9
+// upwards still do not. The normalisation is bounded because normalising an
+// arbitrary set means CLONING it first, which measured 6.55 to 90 microseconds
+// and 1 289 to 218 065 bytes per serialize on a sparse 100 000-id label to
+// produce a byte-identical image.
+//
+// This is still NOT a defect above the bound and there is still no clause on it.
+// `Serialize`'s godoc promises that the on-disk form is deterministic "for a
+// given in-memory state", which is exactly what holds; it never promised the
+// bytes were a function of the logical contents alone. The measurement is
+// recorded because the consequence is easy to assume away and is real: two
+// indexes that answer every query identically can have different images, so
+// byte-comparing two snapshots is not a valid way to ask whether two graphs
+// carry the same labels.
 func liDriveRangeTier(cfg *LabelIndexScopedConfig, ev *LabelIndexScopedEvidence) {
 	const base = uint64(8192)
 	for _, w := range liRangeTierWidths() {
@@ -1882,40 +1900,43 @@ func liDriveRangeTier(cfg *LabelIndexScopedConfig, ev *LabelIndexScopedEvidence)
 	}
 }
 
-// liDriveDenseSmall pins the round-trip NON-IDEMPOTENCE this scenario found.
+// liDriveDenseSmall is the REGRESSION arm for the round-trip non-idempotence
+// this scenario found (#2609).
 //
 // # What it measures
 //
 // A label built by `AddRange` sits on the bitmap tier holding a run container.
 // If its cardinality is at most smallSetMax, [index.NodeSetFromBitmap]
 // down-converts it to the inline tier when the image is read back, and the
-// inline tier re-materialises through `AddMany` as an array container. So the
-// image the reader produces on the way OUT is not the image it was handed on the
-// way IN. MEASURED: 55 bytes in, 72 bytes out at a cardinality of 8; the third
-// image equals the second, so the form converges after exactly one cycle.
+// inline tier re-materialises through `AddMany` as an array container. Run and
+// array encode the same ids in different bytes, so the image the reader produced
+// on the way OUT was not the image it was handed on the way IN. MEASURED at the
+// time: 55 bytes in, 72 bytes out at a cardinality of 8, converging after
+// exactly one cycle.
 //
-// The CONTROL is the same construction one id above the threshold. It stays on
-// the bitmap tier, keeps its run container, and MEASURED comes back at 55 bytes
-// unchanged. Without it the instability would be consistent with round trips
-// changing bytes in general, and would not be attributable to the down-convert.
-//
-// # It is a defect, it is latent, and it is reported rather than fixed
-//
-// Content is never lost — every membership query agrees before and after — but a
-// checkpoint, reload and re-checkpoint cycle produces different bytes for the
+// Content was never lost — every membership query agreed before and after — but
+// a checkpoint, reload and re-checkpoint cycle produced different bytes for the
 // same logical state, which is exactly what a fixture diff, a content-addressed
 // store, or an incremental backup's deduplication relies on not happening.
 //
-// It is unreachable in production today: `AddRange` has no production caller, so
-// no production label is ever a run container, and every Add-built label is
-// MEASURED stable from the first cycle at every width. The fix — teaching
-// `NodeSetFromBitmap` not to down-convert a run-encoded bitmap, or teaching the
-// inline tier to re-materialise the container it came from — is a design choice
-// for whoever owns the type.
+// `label.Index.Serialize` now writes through `index.NodeSet.CanonicalBitmap`,
+// which run-optimises the container so its encoding follows the set's contents
+// rather than its construction history. The normalisation is BOUNDED at
+// smallSetMax, which is exactly the band the reader down-converts and therefore
+// the only band where a cycle could change the bytes. It is bounded rather than
+// universal because normalising an arbitrary set means cloning it first, and
+// that measured 6.55 to 90 microseconds and 1 289 to 218 065 bytes per serialize
+// on a sparse 100 000-id label to produce a BYTE-IDENTICAL image.
 //
-// So this arm asserts the MEASURED behaviour, and the clause says so. It fires
-// the day the behaviour changes, which is when this note and the fixpoint
-// formulation above need revisiting together.
+// The CONTROL is the same construction one id ABOVE the threshold. It stays on
+// the bitmap tier and keeps its run container, so it never took the
+// down-convert; it was byte-stable before the fix and must stay so. Without it,
+// "the fixture is stable" would be consistent with round trips having stopped
+// changing bytes for some unrelated reason, and would not be attributable to the
+// down-convert band.
+//
+// So this arm asserts the REPAIRED contract, and its perturbation reproduces the
+// old instability so the arm keeps a demonstrated way to fail.
 func liDriveDenseSmall(cfg *LabelIndexScopedConfig, ev *LabelIndexScopedEvidence) error {
 	const base = uint64(16384)
 	run := func(w int) (first, second, third int, stable bool, err error) {
@@ -1966,8 +1987,8 @@ func liDriveDenseSmall(cfg *LabelIndexScopedConfig, ev *LabelIndexScopedEvidence
 			"fixpoint either (%d then %d bytes); the arm cannot attribute anything",
 			d.CtrlWidth, d.CtrlSecond, ctrlThird)
 	}
-	if cfg.Perturb == liPerturbDenseSmallStable {
-		d.Stable = true
+	if cfg.Perturb == liPerturbDenseSmallUnstable {
+		d.Stable = false
 	}
 	if cfg.Perturb == liPerturbDenseSmallCtrl {
 		d.CtrlStable = false
@@ -3409,28 +3430,26 @@ func runLabelIndexScopedScenario(ctx context.Context, seed uint64) (*SimReport, 
 
 // liCheckDenseSmallPin adjudicates the round-trip non-idempotence pin.
 //
-// Like the boundary and phantom pins, this clause asserts MEASURED behaviour
-// that is wrong, and says so in its message. It fires the day the behaviour
-// changes, which is exactly when the fixpoint formulation in [liDriveRoundTrip]
-// and the note in the file header need revisiting.
+// Since #2609 this clause asserts the REPAIRED contract rather than a measured
+// defect: the image of an unchanged logical state must not move across a cycle.
 func liCheckDenseSmallPin(e *LabelIndexScopedEvidence) []Violation {
 	var v []Violation
 	d := &e.DenseSmall
-	if d.Stable {
-		v = append(v, liViolation(ViolationOracleDeviation, "dense-small-pin",
-			"an AddRange-built label of %d ids round-tripped byte-stably (%d -> %d bytes), and this "+
-				"pin records the MEASURED instability (55 -> 72 on the reference host): "+
-				"index.NodeSetFromBitmap down-converts a bitmap of at most smallSetMax=%d ids to the "+
-				"inline tier, which re-materialises through AddMany as an ARRAY container where "+
-				"AddRange had built a RUN container. If this fired because the down-convert now "+
-				"preserves the encoding, that is good news: update this pin and the fixpoint note in "+
-				"liDriveRoundTrip", d.Width, d.First, d.Second, liSmallSetMaxMirror))
+	if !d.Stable {
+		v = append(v, liViolation(ViolationGraphIntegrity, "dense-small-pin",
+			"an AddRange-built label of %d ids changed its image across a Serialize/Deserialize "+
+				"cycle (%d -> %d bytes). index.NodeSetFromBitmap down-converts a bitmap of at most "+
+				"smallSetMax=%d ids to the inline tier, which re-materialises through AddMany as an "+
+				"ARRAY container where AddRange had built a RUN container; Serialize normalises the "+
+				"encoding within that band so the bytes follow the contents (#2609). An unchanged "+
+				"logical state that does not reproduce its own bytes defeats fixture diffing and "+
+				"content-addressed comparison", d.Width, d.First, d.Second, liSmallSetMaxMirror))
 	}
 	if d.Second != d.Third {
 		v = append(v, liViolation(ViolationGraphIntegrity, "dense-small-pin",
-			"the dense-small fixture never converges: %d, then %d, then %d bytes. The re-tiering is "+
-				"supposed to happen at most ONCE, and a form that keeps changing is a different and "+
-				"worse defect than the one this pin records", d.First, d.Second, d.Third))
+			"the dense-small fixture never converges: %d, then %d, then %d bytes. Whatever the "+
+				"first cycle does, a form that keeps changing is a worse defect still",
+			d.First, d.Second, d.Third))
 	}
 	return v
 }

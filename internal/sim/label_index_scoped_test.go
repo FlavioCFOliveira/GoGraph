@@ -291,10 +291,10 @@ func TestLabelIndexScoped_EvidenceIsSubstantive(t *testing.T) {
 			ev.Phantom.Labels, ev.Phantom.CtrlCount, ev.Phantom.CtrlLabelCount, liPhantomLabels)
 	}
 	d := &ev.DenseSmall
-	if d.Stable || !d.CtrlStable || d.Second != d.Third || d.Second <= d.First {
+	if !d.Stable || !d.CtrlStable || d.Second != d.Third || d.Second != d.First {
 		t.Errorf("dense-small: width %d went %d -> %d -> %d (stable=%v); control width %d went "+
-			"%d -> %d (stable=%v). The pin records an unstable first cycle that converges, against "+
-			"a stable control", d.Width, d.First, d.Second, d.Third, d.Stable, d.CtrlWidth,
+			"%d -> %d (stable=%v). Since #2609 both must be byte-stable across the cycle",
+			d.Width, d.First, d.Second, d.Third, d.Stable, d.CtrlWidth,
 			d.CtrlFirst, d.CtrlSecond, d.CtrlStable)
 	}
 	same, differ := 0, 0
@@ -366,7 +366,7 @@ func liPerturbTargets() map[liPerturb]string {
 		liPerturbPhantomKept:        "phantom-pin",
 		liPerturbPhantomCtrlBad:     "gate:phantom-armed",
 		liPerturbEntryFloor:         "entry-floor",
-		liPerturbDenseSmallStable:   "dense-small-pin",
+		liPerturbDenseSmallUnstable: "dense-small-pin",
 		liPerturbEmptySweep:         "gate:cells",
 		liPerturbUnionSingleShape:   "gate:union-shapes",
 		liPerturbSkipRegions:        "gate:corrupt-regions",

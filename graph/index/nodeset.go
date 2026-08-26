@@ -574,6 +574,66 @@ func (s *NodeSet) Bitmap() (bm *roaring64.Bitmap, shared bool) {
 	return out, false
 }
 
+// CanonicalBitmap returns the set as a *roaring64.Bitmap whose serialized form
+// is a function of the set's LOGICAL CONTENTS rather than of the container the
+// set happens to hold, for sets of at most smallSetMax ids.
+//
+// roaring picks a container encoding from construction history, not from
+// content: [NodeSet.AddRange] builds a RUN container, while the same ids added
+// one at a time build an ARRAY one, and the two encode identical membership in
+// different bytes. That made a Serialize/Deserialize/Serialize cycle change the
+// bytes for a label in the band the reader down-converts — measured 55 bytes in
+// and 64 to 72 out at widths 4 to 8 — so a snapshot of unchanged data was not
+// byte-reproducible (#2609).
+//
+// The normalisation is BOUNDED at smallSetMax deliberately, and it normalises
+// DOWN — towards the encoding the inline tiers already produce — rather than up.
+//
+// Normalising an arbitrary set the other way requires cloning it first, because
+// the bitmap tier hands back the live bitmap and roaring's run optimisation
+// rewrites containers in place; measured, that costs a sparse 100 000-id label
+// 6.55 to 90 microseconds and 1 289 to 218 065 bytes per serialize to produce a
+// BYTE-IDENTICAL image. Normalising down needs no clone at all: every set that
+// is NOT on the bitmap tier was already materialised from its sorted ids by
+// [NodeSet.Bitmap], so the only state that can be off-canonical is a bitmap-tier
+// set at or below the bound — which only [NodeSet.AddRange] can create. Every
+// other set takes a single cardinality check and nothing else.
+//
+// The bound is smallSetMax because that is exactly the band [NodeSetFromBitmap]
+// down-converts, and therefore the only band where a Serialize/Deserialize cycle
+// can change the encoding. Above the bound the form is already stable across a
+// cycle.
+//
+// MEASURED, interleaved A/B over five pairs: a 100 000-id dense label and a
+// 100 000-id sparse one are unchanged in time and IDENTICAL in allocations
+// (15/op, every sample equal), and so is an Add-built label of 8 ids
+// (26 allocs/op, every sample equal) — the common small label, which is on an
+// inline tier and therefore short-circuits. Only an AddRange-built label at or
+// below the bound pays anything, moving from 16 to 28 allocs/op: that is the
+// path being normalised, and 28 is what the Add-built label of the same ids
+// already cost. The normalisation makes the two paths do the same work rather
+// than making either do more.
+//
+// shared reports whether the returned bitmap aliases the set's live bitmap;
+// callers that need an independent copy must Clone when shared is true. It is
+// false whenever the set was normalised, since normalisation builds a new one.
+func (s *NodeSet) CanonicalBitmap() (bm *roaring64.Bitmap, shared bool) {
+	bm, shared = s.Bitmap()
+	if !shared || bm.GetCardinality() > smallSetMax {
+		// A set that is not on the bitmap tier was just materialised from its
+		// sorted ids, which IS the canonical form; above the bound nothing is
+		// normalised.
+		return bm, shared
+	}
+	// Only a set on the bitmap tier at or below the bound can hold an encoding
+	// that its ids alone would not have produced, and AddRange is the only way
+	// to reach that state. Re-materialise from the sorted ids, exactly as the
+	// inline tiers already do, so both arrive at the same container.
+	out := roaring64.New()
+	out.AddMany(bm.ToArray())
+	return out, false
+}
+
 // NodeSetFromSorted builds a NodeSet from an already strictly-ascending
 // id slice. It is the deserialization constructor: the btree and hash
 // readers parse the logical sorted NodeID list and hand it here, getting

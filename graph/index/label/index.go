@@ -416,16 +416,23 @@ func (i *Index) Serialize(w io.Writer) error {
 	for _, k := range keys {
 		set := i.bits[k]
 		// Materialise a roaring bitmap from the set's logical contents and
-		// write its native binary form. roaring64.WriteTo is a
-		// content-deterministic pure function of the final set (it never
-		// implicitly RunOptimizes), so a bitmap built here via AddMany of
-		// the sorted ids is BYTE-IDENTICAL to one that held the same ids all
-		// along — the inline small-set tier produces exactly the bytes the
-		// pre-refactor per-label *roaring64.Bitmap produced, keeping the
-		// on-disk format unchanged with zero migration (storage-engine-
-		// auditor, #1585). A dense (AddRange) label is already a bitmap, so
-		// Bitmap returns it directly with no materialisation cost.
-		bm, _ := set.Bitmap()
+		// write its native binary form. roaring64.WriteTo is deterministic for
+		// a given in-memory state, so a bitmap built here via AddMany of the
+		// sorted ids is BYTE-IDENTICAL to one that held the same ids all along
+		// IN THE SAME CONTAINER ENCODING — the inline small-set tier produces
+		// exactly the bytes the pre-refactor per-label *roaring64.Bitmap
+		// produced, keeping the on-disk format unchanged with zero migration
+		// (storage-engine-auditor, #1585). A dense (AddRange) label is already
+		// a bitmap, so no materialisation cost is paid.
+		//
+		// The encoding itself is NOT determined by the contents: AddRange
+		// builds a run container where the same ids added one at a time build
+		// an array one. CanonicalBitmap normalises that for sets of at most
+		// smallSetMax ids — the band the reader down-converts, and so the only
+		// band where a Serialize/Deserialize cycle could change the bytes
+		// (#2609). It is bounded because normalising a large set means cloning
+		// it, for no change in the image; see its godoc for the measurement.
+		bm, _ := set.CanonicalBitmap()
 		if err := binary.Write(tee, binary.LittleEndian, k); err != nil {
 			return err
 		}
