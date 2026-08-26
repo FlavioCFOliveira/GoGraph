@@ -3078,16 +3078,17 @@ both server kinds to prove the distinction is real rather than decorative.
 
 `server.CertReloader` had unit tests for its happy path, a parse failure and
 missing files; what it had never been driven through is the sequence an operator
-actually produces. The scenario runs seven steps — initial load, clean rotation,
-torn key, garbled key, absent key, mismatched pair, completed rotation — and
-three things about it are worth recording.
+actually produces. The scenario runs nine steps — initial load, clean rotation,
+torn key, garbled key, absent key, mismatched pair, completed rotation, expired
+leaf, not-yet-valid leaf — plus the background-poller arm, and four things about
+it are worth recording.
 
 **The oracle is a real TLS handshake, because the dangerous failure mode parses
 cleanly.** A cert rotated without its key leaves two files that both decode
 perfectly and no longer belong together. `crypto/tls` is the independent
 reference that can see it: the verifier completes a genuine TLS 1.3 handshake
-over a `net.Pipe` against whatever `GetCertificate` currently serves, with the
-client trusting exactly that certificate and verifying the SAN. A successful
+over a loopback TCP pair against whatever `GetCertificate` currently serves, with
+the client trusting exactly that certificate and verifying the SAN. A successful
 handshake proves the certificate parses, the name matches, and the private key
 corresponds to the certificate's public key. It deliberately does NOT trust a
 pre-agreed root, so it cannot by itself detect that the WRONG pair went live —
@@ -3111,6 +3112,46 @@ only operator-visible signal that an unattended rotation failed and a stale
 certificate is still in service. It is the same defect class as the
 `Options.Logger` bypass this sprint fixed, and it is now evidence: measured 2
 deliveries per broken-pair arm.
+
+**A pair can parse, pair, and still be unable to serve — rmp #2557.** Every arm
+above breaks the *material*: bytes missing, bytes corrupted, or the wrong key
+beside the certificate. The commonest real rotation incident breaks none of them.
+A renewal that produced an already-expired leaf, or a clock skew on the renewing
+host that produced a not-yet-valid one, yields two files that decode perfectly and
+belong to each other — and `tls.LoadX509KeyPair`, which inspects neither
+`NotBefore` nor `NotAfter`, accepted them. `Reload` then swapped the doomed leaf
+into service and the previous, working certificate was gone: a recoverable
+condition (stale but functioning) converted into a total outage of the Bolt
+listener, against a godoc that promised the previous certificate stays in service
+"until the new pair is fully validated". Two arms now install exactly that
+material and require the swap to be REFUSED.
+
+The refusal is adjudicated by **cause**, not by failure. Each step records
+`errors.Is(err, server.ErrCertOutsideValidity)` where the error is returned — not
+a substring of a message — and the oracle fails in both directions: a validity arm
+refused for any other reason, and a parse fault reported as a validity refusal.
+Without that, "the reload failed" would have been satisfied by a torn key, and the
+arms would have proved nothing about the window. A non-vacuity clause requires at
+least one validity refusal to have been observed anywhere in the run, and a
+distinctness clause requires both arms to have installed INTACT key material —
+otherwise they would silently duplicate the torn and absent arms. `CertReloader`
+also grew a module-internal `SetClock` seam, pinned here to the same instant
+`tls.Config.Time` uses: a leaf's window is now read by the ENGINE as well as by
+`crypto/tls`, so leaving the engine on the real clock would have made the fixed
+fixture bounds a time bomb on both sides rather than one.
+
+**The handshake oracle could not report the failure it exists to report.** Finding
+the #2557 arms meant running them against the unfixed engine, and that run did not
+fail — it HUNG, to the 40s test timeout, with both TLS peers parked in
+`crypto/tls.(*Conn).flush`. `net.Pipe` is synchronous and unbuffered, so a failing
+handshake deadlocks it: the server is still flushing its flight while the client,
+having already rejected the certificate, flushes its alert, and neither side is
+reading. Every earlier arm hid this, because in every earlier arm the reload was
+refused and the handshake therefore SUCCEEDED; the one condition the oracle exists
+to detect was the one condition that hung the run. The verifier now uses a
+loopback TCP pair, whose kernel buffer absorbs the flight, plus a deliberately
+generous 60s deadline as a deadlock breaker rather than a latency gate. The same
+broken-engine state is now reported in 0.03s as nine attributed violations.
 
 One latent defect in the scenario itself was found the same way and fixed. The
 fixtures carry fixed validity bounds so their bytes are seed-reproducible, but the

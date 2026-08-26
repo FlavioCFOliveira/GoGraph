@@ -74,6 +74,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -84,6 +85,7 @@ import (
 	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/bolt/server"
+	"github.com/FlavioCFOliveira/GoGraph/internal/clock"
 )
 
 // certRotationHost is the SAN every generated certificate carries, and the name
@@ -108,14 +110,36 @@ var (
 	certRotationVerifyAt  = time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 )
 
+// The two windows that lie OUTSIDE [certRotationVerifyAt], for the arms that
+// prove a well-formed but unusable pair is refused rather than swapped in
+// (rmp #2557). Each is outside the window at the pinned instant AND at any
+// plausible real clock, so neither arm depends on the pin to mean what it says:
+// the expired pair is in the past of both, the not-yet-valid pair in the future
+// of both.
+var (
+	certRotationExpiredNotBefore = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	certRotationExpiredNotAfter  = time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	certRotationFutureNotBefore  = time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	certRotationFutureNotAfter   = time.Date(2036, 1, 1, 0, 0, 0, 0, time.UTC)
+)
+
 // certRotationWatchInterval / certRotationWatchBudget bound the Watch arm: a
-// short REAL poll period (Watch owns its own time.Ticker and exposes no clock
-// seam) and a generous ceiling, so the arm fails loudly rather than hanging if
-// onError never fires.
+// short REAL poll period (Watch owns its own time.Ticker; the SetClock seam added
+// by rmp #2557 governs the validity comparison only, deliberately NOT the
+// poller — a poller driven by a frozen fake clock would never tick) and a
+// generous ceiling, so the arm fails loudly rather than hanging if onError never
+// fires.
 const (
 	certRotationWatchInterval = 5 * time.Millisecond
 	certRotationWatchBudget   = 5 * time.Second
 )
+
+// certRotationHandshakeBudget bounds one verifying handshake over the loopback
+// pair. It is deliberately far larger than the ~1 ms an Ed25519 TLS 1.3 handshake
+// costs, because it is a DEADLOCK BREAKER and not a latency gate: a value tight
+// enough to be a performance assertion would erode under the parallel load of a
+// full-suite run, which is the failure mode this sprint spent thirteen tasks on.
+const certRotationHandshakeBudget = 60 * time.Second
 
 // certRotationSeedMix and certRotationDiskSeedMix decorrelate this scenario's two
 // seeded streams — the key material and the simulated disk — from the scenario
@@ -167,6 +191,14 @@ func newSimCertPair(seed *Seed, cn string) (simCertPair, error) {
 // the wrong name is what proves the handshake oracle in [certRotationVerify] is
 // able to fail at all. The scenario itself always passes [certRotationHost].
 func newSimCertPairForHost(seed *Seed, cn, host string) (simCertPair, error) {
+	return newSimCertPairInWindow(seed, cn, host, certRotationNotBefore, certRotationNotAfter)
+}
+
+// newSimCertPairInWindow is [newSimCertPairForHost] with the validity window as a
+// parameter, so an EXPIRED or NOT-YET-VALID pair is a fixture with fixed dates
+// rather than a wait for real time to pass. Everything else — the deterministic
+// Ed25519 key, the serial drawn from the seed, the SAN — is unchanged.
+func newSimCertPairInWindow(seed *Seed, cn, host string, notBefore, notAfter time.Time) (simCertPair, error) {
 	rd := deterministicReader{seed: seed}
 	pub, priv, err := ed25519.GenerateKey(rd)
 	if err != nil {
@@ -176,8 +208,8 @@ func newSimCertPairForHost(seed *Seed, cn, host string) (simCertPair, error) {
 		SerialNumber:          big.NewInt(int64(seed.Uint64N(1 << 40))),
 		Subject:               pkix.Name{CommonName: cn},
 		DNSNames:              []string{host},
-		NotBefore:             certRotationNotBefore,
-		NotAfter:              certRotationNotAfter,
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		IsCA:                  true,
@@ -226,6 +258,14 @@ type CertRotationStep struct {
 	WantReloadOK bool
 	// ReloadOK records what actually happened.
 	ReloadOK bool
+	// ValidityRefused records whether the reload was refused BECAUSE the leaf on
+	// disk was outside its validity window — matched with [errors.Is] against
+	// [server.ErrCertOutsideValidity], not by reading the message. Without it the
+	// expired arms would be satisfied by ANY refusal, including a parse failure,
+	// and a shared failure signal cannot attribute a refusal to its cause.
+	ValidityRefused bool
+	// WantValidityRefused is the step's INTENT for [CertRotationStep.ValidityRefused].
+	WantValidityRefused bool
 	// Handshook records whether a real TLS handshake completed against the served
 	// certificate. It must be true after EVERY step, successful or not: a broken
 	// rotation may not change the certificate, and may not break the one in
@@ -281,6 +321,18 @@ func RunBoltCertRotation(ctx context.Context, seed uint64) (BoltCertRotationEvid
 	if err != nil {
 		return BoltCertRotationEvidence{}, err
 	}
+	// Two pairs that are perfectly formed and perfectly paired, and still cannot
+	// serve: one whose window has closed, one whose window has not opened.
+	pairExpired, err := newSimCertPairInWindow(s, "rotation-expired", certRotationHost,
+		certRotationExpiredNotBefore, certRotationExpiredNotAfter)
+	if err != nil {
+		return BoltCertRotationEvidence{}, err
+	}
+	pairFuture, err := newSimCertPairInWindow(s, "rotation-not-yet-valid", certRotationHost,
+		certRotationFutureNotBefore, certRotationFutureNotAfter)
+	if err != nil {
+		return BoltCertRotationEvidence{}, err
+	}
 
 	dir, err := os.MkdirTemp("", "sim-cert-rotation-*")
 	if err != nil {
@@ -302,7 +354,7 @@ func RunBoltCertRotation(ctx context.Context, seed uint64) (BoltCertRotationEvid
 		// os.Chtimes near the zero time is not portable.
 		projectedMTime: certRotationNotBefore,
 	}
-	if err := r.drive(pairA, pairB, pairC); err != nil {
+	if err := r.drive(pairA, pairB, pairC, pairExpired, pairFuture); err != nil {
 		return BoltCertRotationEvidence{}, err
 	}
 	return *r.ev, nil
@@ -474,18 +526,36 @@ func (r *certRotationRunner) writeTornImage(realPath string, content []byte, kee
 // of the key the mutation was writing (0 when the step writes no key), against
 // which the size actually on disk is recorded.
 func (r *certRotationRunner) step(name, wantCN string, wantReloadOK bool, keyWant int, mutate func() error) error {
+	return r.stepWithIntent(name, wantCN, wantReloadOK, false, keyWant, mutate)
+}
+
+// stepValidityRefusal runs a step whose material parses and pairs perfectly and
+// must be refused for its VALIDITY WINDOW alone: the reload fails, the previous
+// certificate stays in service, and the recorded cause is
+// [server.ErrCertOutsideValidity] rather than any parse error.
+func (r *certRotationRunner) stepValidityRefusal(name, wantCN string, keyWant int, mutate func() error) error {
+	return r.stepWithIntent(name, wantCN, false, true, keyWant, mutate)
+}
+
+// stepWithIntent is the shared body behind [certRotationRunner.step] and
+// [certRotationRunner.stepValidityRefusal].
+func (r *certRotationRunner) stepWithIntent(name, wantCN string, wantReloadOK, wantValidityRefused bool, keyWant int, mutate func() error) error {
 	if err := r.ctx.Err(); err != nil {
 		return fmt.Errorf("sim: cert rotation step %q: %w", name, err)
 	}
 	if err := mutate(); err != nil {
 		return err
 	}
-	st := CertRotationStep{Name: name, WantCN: wantCN, WantReloadOK: wantReloadOK, KeyWantBytes: keyWant}
+	st := CertRotationStep{
+		Name: name, WantCN: wantCN, WantReloadOK: wantReloadOK,
+		WantValidityRefused: wantValidityRefused, KeyWantBytes: keyWant,
+	}
 	if fi, statErr := os.Stat(r.keyPath); statErr == nil {
 		st.KeyBytes = int(fi.Size())
 	}
 	if err := r.reloader.Reload(); err != nil {
 		st.ReloadErr = err.Error()
+		st.ValidityRefused = errors.Is(err, server.ErrCertOutsideValidity)
 	} else {
 		st.ReloadOK = true
 	}
@@ -516,7 +586,7 @@ func (r *certRotationRunner) recordWatchErr(err error) {
 //
 // The wait is bounded and the goroutine always joined, so the arm can neither hang
 // nor leak. The poll interval is small REAL time because Watch takes a
-// time.Ticker of its own and exposes no clock seam; the assertion is on the
+// time.Ticker of its own, which no clock seam governs; the assertion is on the
 // callback firing, never on how many times.
 func (r *certRotationRunner) driveWatch(broken simCertPair) error {
 	// Break the key on disk, then let the poller find it.
@@ -556,7 +626,7 @@ func (r *certRotationRunner) driveWatch(broken simCertPair) error {
 }
 
 // drive runs the whole rotation sequence.
-func (r *certRotationRunner) drive(pairA, pairB, pairC simCertPair) error {
+func (r *certRotationRunner) drive(pairA, pairB, pairC, pairExpired, pairFuture simCertPair) error {
 	// The unloaded contract first: a zero-value reloader must REFUSE to serve, not
 	// hand the TLS stack a nil certificate.
 	var unloaded server.CertReloader
@@ -584,6 +654,14 @@ func (r *certRotationRunner) drive(pairA, pairB, pairC simCertPair) error {
 	if err != nil {
 		return fmt.Errorf("sim: cert rotation initial load of a VALID pair failed: %w", err)
 	}
+	// Pin the instant the reloader evaluates a leaf's validity window against, to
+	// the SAME instant the handshake oracle uses. Since rmp #2557 Reload refuses a
+	// leaf outside its window, so without the pin the fixed fixture bounds above
+	// would be a time bomb in the ENGINE as well as in crypto/tls: every rotation
+	// in this scenario would begin failing on 2036-01-01 for a reason having
+	// nothing to do with the code under test. Pinned, the verdict stays a function
+	// of the seed alone.
+	rl.SetClock(clock.NewFake(certRotationVerifyAt))
 	r.reloader = rl
 	r.live = pairA
 	if err := r.step("initial-load", pairA.CN, true, len(pairA.KeyPEM), func() error { return nil }); err != nil {
@@ -662,6 +740,26 @@ func (r *certRotationRunner) drive(pairA, pairB, pairC simCertPair) error {
 	}); err != nil {
 		return err
 	}
+
+	// An EXPIRED pair: the most common real rotation incident, a renewal that
+	// produced material already past its NotAfter. Both files are whole and the
+	// key matches the certificate, so every parse-based check passes it; only the
+	// validity window says no. C must stay live and keep handshaking.
+	if err := r.stepValidityRefusal("expired-leaf", pairC.CN, len(pairExpired.KeyPEM), func() error {
+		return r.installPair(pairExpired)
+	}); err != nil {
+		return err
+	}
+
+	// A NOT-YET-VALID pair: the same incident produced by a clock skew on the
+	// renewing host instead. Refused for the mirror reason, and — because a refusal
+	// does not stamp the reloader's mtime bookkeeping — it would be picked up on a
+	// later poll once its NotBefore passed, with no operator action.
+	if err := r.stepValidityRefusal("not-yet-valid-leaf", pairC.CN, len(pairFuture.KeyPEM), func() error {
+		return r.installPair(pairFuture)
+	}); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -688,9 +786,18 @@ func certRotationVerify(r *server.CertReloader) (cn string, err error) {
 
 	roots := x509.NewCertPool()
 	roots.AddCert(leaf)
-	clientConn, serverConn := net.Pipe()
+	clientConn, serverConn, err := certRotationLoopbackPair()
+	if err != nil {
+		return cn, err
+	}
 	defer func() { _ = clientConn.Close() }()
 	defer func() { _ = serverConn.Close() }()
+	// A deadlock breaker, not a performance assertion: it is never reached by a
+	// handshake that either completes or fails, and it converts any pathological
+	// stall into a reported error instead of a hung swarm run.
+	stop := time.Now().Add(certRotationHandshakeBudget)
+	_ = clientConn.SetDeadline(stop)
+	_ = serverConn.SetDeadline(stop)
 
 	srvErr := make(chan error, 1)
 	go func() {
@@ -731,6 +838,49 @@ func certRotationVerify(r *server.CertReloader) (cn string, err error) {
 	return cn, nil
 }
 
+// certRotationLoopbackPair returns a connected pair of loopback TCP conns.
+//
+// It exists because [net.Pipe] CANNOT be used here. net.Pipe is synchronous and
+// unbuffered, so a FAILING handshake deadlocks it: the server is still flushing
+// its flight while the client, having already rejected the certificate, is
+// flushing its alert, and neither side is reading. Measured on 2026-08-26 with
+// rmp #2557's refusal disabled — the state this scenario's new arms are there to
+// detect — [RunBoltCertRotation] hung to the 40s test timeout with both peers
+// parked in crypto/tls.(*Conn).flush at conn.go:963.
+//
+// That made the handshake oracle unable to fail: the one condition it exists to
+// report was the one condition that hung the run instead of reporting it. A
+// kernel socket buffer absorbs the whole flight, so both peers make progress and
+// the failure becomes evidence.
+func certRotationLoopbackPair() (clientEnd, serverEnd net.Conn, err error) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, nil, fmt.Errorf("sim: cert rotation loopback listen: %w", err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	type accepted struct {
+		conn net.Conn
+		err  error
+	}
+	ch := make(chan accepted, 1)
+	go func() {
+		c, aerr := ln.Accept()
+		ch <- accepted{conn: c, err: aerr}
+	}()
+	clientEnd, err = net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		<-ch // the accept goroutine unblocks on the deferred listener close
+		return nil, nil, fmt.Errorf("sim: cert rotation loopback dial: %w", err)
+	}
+	got := <-ch
+	if got.err != nil {
+		_ = clientEnd.Close()
+		return nil, nil, fmt.Errorf("sim: cert rotation loopback accept: %w", got.err)
+	}
+	return clientEnd, got.conn, nil
+}
+
 // ── oracles ─────────────────────────────────────────────────────────────────
 
 // certRotationExpectedSteps is the step roster the run must produce, in order. It
@@ -745,6 +895,8 @@ var certRotationExpectedSteps = []string{
 	"mismatched-pair",
 	"watch-reports-failure",
 	"rotation-completed",
+	"expired-leaf",
+	"not-yet-valid-leaf",
 }
 
 // checkBoltCertRotation adjudicates the evidence against the reloader's contract.
@@ -791,6 +943,25 @@ func checkCertRotationStep(st *CertRotationStep) []Violation {
 		v = append(v, Violation{
 			Kind: ViolationOracleDeviation, Op: op,
 			Message: fmt.Sprintf("step %q: Reload ACCEPTED broken material and reported success", st.Name),
+		})
+	}
+	// A refusal must be attributable. An arm that installs a well-formed pair
+	// outside its validity window is only meaningful if THAT is why it was
+	// refused: a parse error would satisfy "reload failed" while proving nothing
+	// about the validity check. The reverse direction matters equally — a parse
+	// fault reported as a validity refusal would mean the sentinel had been
+	// wrapped around the wrong condition.
+	if st.WantValidityRefused && !st.ValidityRefused {
+		v = append(v, Violation{
+			Kind: ViolationOracleDeviation, Op: op,
+			Message: fmt.Sprintf("step %q: the pair was NOT refused for its validity window (server.ErrCertOutsideValidity absent); reload said: %s",
+				st.Name, st.ReloadErr),
+		})
+	}
+	if !st.WantValidityRefused && st.ValidityRefused {
+		v = append(v, Violation{
+			Kind: ViolationOracleDeviation, Op: op,
+			Message: fmt.Sprintf("step %q: a fault that is not a validity-window fault was reported as one: %s", st.Name, st.ReloadErr),
 		})
 	}
 	if st.ServedCN != st.WantCN {
@@ -847,6 +1018,18 @@ func checkBoltCertRotationNonVacuity(e *BoltCertRotationEvidence) []Violation {
 			Message: fmt.Sprintf("run observed %d successful and %d failed reload(s); both must be non-zero or the oracle cannot fail", ok, failed),
 		})
 	}
+	var validityRefusals int
+	for _, st := range e.Steps {
+		if st.ValidityRefused {
+			validityRefusals++
+		}
+	}
+	if validityRefusals == 0 {
+		v = append(v, Violation{
+			Kind: ViolationVacuousRun, Op: "<cert-rotation-nonvacuity>",
+			Message: "no reload was refused for its VALIDITY WINDOW: the expired and not-yet-valid arms either did not run or were refused for some other reason, so the rmp #2557 surface was not exercised",
+		})
+	}
 	if len(distinct) < 2 {
 		v = append(v, Violation{
 			Kind: ViolationVacuousRun, Op: "<cert-rotation-nonvacuity>",
@@ -885,6 +1068,18 @@ func checkCertRotationFaultsDistinct(e *BoltCertRotationEvidence) []Violation {
 			Kind: ViolationVacuousRun, Op: "<cert-rotation-nonvacuity>",
 			Message: fmt.Sprintf("absent-key left %d key bytes on disk: the file was not removed", absent.KeyBytes),
 		})
+	}
+	// The validity arms must install INTACT material: their whole claim is that a
+	// pair which passes every parse-based check is still refused. A short or
+	// missing key would make them duplicates of the torn and absent arms.
+	for _, name := range []string{"expired-leaf", "not-yet-valid-leaf"} {
+		if st, ok := byName[name]; ok && st.KeyBytes != st.KeyWantBytes {
+			v = append(v, Violation{
+				Kind: ViolationVacuousRun, Op: "<cert-rotation-nonvacuity>",
+				Message: fmt.Sprintf("%s left %d of %d key bytes on disk: the validity arms must install INTACT material, or they prove nothing a parse check does not already catch",
+					name, st.KeyBytes, st.KeyWantBytes),
+			})
+		}
 	}
 	return v
 }

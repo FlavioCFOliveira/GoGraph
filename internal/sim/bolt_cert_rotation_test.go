@@ -146,6 +146,8 @@ func cleanRotationEvidence() BoltCertRotationEvidence {
 		{Name: "mismatched-pair", WantCN: live, ServedCN: live, Handshook: true, ReloadErr: "mismatch", KeyBytes: full, KeyWantBytes: full},
 		{Name: "watch-reports-failure", WantCN: live, ServedCN: live, Handshook: true, ReloadErr: "torn", KeyBytes: full / 2, KeyWantBytes: full},
 		{Name: "rotation-completed", WantCN: "rotation-C", ServedCN: "rotation-C", WantReloadOK: true, ReloadOK: true, Handshook: true, KeyBytes: full, KeyWantBytes: full},
+		{Name: "expired-leaf", WantCN: "rotation-C", ServedCN: "rotation-C", Handshook: true, ReloadErr: "expired", WantValidityRefused: true, ValidityRefused: true, KeyBytes: full, KeyWantBytes: full},
+		{Name: "not-yet-valid-leaf", WantCN: "rotation-C", ServedCN: "rotation-C", Handshook: true, ReloadErr: "not yet valid", WantValidityRefused: true, ValidityRefused: true, KeyBytes: full, KeyWantBytes: full},
 	}
 	return BoltCertRotationEvidence{
 		Steps:              steps,
@@ -273,6 +275,46 @@ func TestBoltCertRotation_OracleCanFail(t *testing.T) {
 			mutate:  func(e *BoltCertRotationEvidence) { rotationStep(e, "absent-key").KeyBytes = 119 },
 			check:   checkBoltCertRotationNonVacuity,
 			wantSub: "was not removed",
+		},
+		{
+			name:    "an expired pair was swapped into service",
+			mutate:  func(e *BoltCertRotationEvidence) { rotationStep(e, "expired-leaf").ReloadOK = true },
+			check:   checkBoltCertRotation,
+			wantSub: "ACCEPTED broken material",
+		},
+		{
+			name: "the expired pair was refused for the wrong reason",
+			mutate: func(e *BoltCertRotationEvidence) {
+				rotationStep(e, "expired-leaf").ValidityRefused = false
+			},
+			check:   checkBoltCertRotation,
+			wantSub: "NOT refused for its validity window",
+		},
+		{
+			name: "a parse fault was reported as a validity refusal",
+			mutate: func(e *BoltCertRotationEvidence) {
+				rotationStep(e, "torn-key").ValidityRefused = true
+			},
+			check:   checkBoltCertRotation,
+			wantSub: "reported as one",
+		},
+		{
+			name: "no validity refusal was observed anywhere",
+			mutate: func(e *BoltCertRotationEvidence) {
+				for i := range e.Steps {
+					e.Steps[i].ValidityRefused = false
+				}
+			},
+			check:   checkBoltCertRotationNonVacuity,
+			wantSub: "refused for its VALIDITY WINDOW",
+		},
+		{
+			name: "the not-yet-valid arm installed torn material",
+			mutate: func(e *BoltCertRotationEvidence) {
+				rotationStep(e, "not-yet-valid-leaf").KeyBytes = 40
+			},
+			check:   checkBoltCertRotationNonVacuity,
+			wantSub: "must install INTACT material",
 		},
 	}
 	for _, tc := range cases {

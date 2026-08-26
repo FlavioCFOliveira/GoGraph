@@ -3,13 +3,26 @@ package server
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
+	"errors"
 	"fmt"
 	"os"
 	"runtime/pprof"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/FlavioCFOliveira/GoGraph/internal/clock"
 )
+
+// ErrCertOutsideValidity is the sentinel wrapped by every [CertReloader.Reload]
+// refusal caused by the validity window of the leaf on disk: it has expired, or
+// it is not valid yet. Callers that distinguish a doomed renewal from unreadable
+// or mismatched material — an alerting hook, say — match it with [errors.Is].
+//
+// It is NOT returned for a pair that fails to read, parse or pair; those keep
+// their own wrapped errors.
+var ErrCertOutsideValidity = errors.New("bolt/server: certificate outside its validity window")
 
 // CertReloader watches a (certificate, key) PEM file pair on disk
 // and serves the most recent successfully loaded pair via the
@@ -20,9 +33,12 @@ import (
 // (e.g. cert-manager / Let's Encrypt) without restarting the Bolt
 // server. The previous certificate stays in service until the new
 // pair is fully validated and only then is the swap performed
-// atomically via [sync/atomic.Pointer]. A reload that fails to
-// parse leaves the live certificate untouched and surfaces the
-// error via the provided OnError callback (or via stderr when nil).
+// atomically via [sync/atomic.Pointer]. "Fully validated" means the
+// pair reads, parses, pairs, AND its leaf is valid at the current
+// instant: a reload that fails any of those leaves the live
+// certificate untouched and surfaces the error via the provided
+// OnError callback (or via stderr when nil). See
+// [CertReloader.Reload] for the exact rule and [ErrCertOutsideValidity].
 //
 // CertReloader is safe for concurrent use; the hot path is a
 // single atomic.Pointer.Load.
@@ -31,6 +47,7 @@ type CertReloader struct {
 	lastKeyModTime    time.Time
 	current           atomic.Pointer[tls.Certificate]
 	onError           func(error)
+	clk               clock.Clock // validity-window clock; nil means [clock.Real]
 	certPath, keyPath string
 	mu                sync.Mutex // serialises reload work; does NOT block readers
 }
@@ -42,8 +59,14 @@ type CertReloader struct {
 // a broken TLS config).
 //
 // onError is invoked when a later reload (triggered by Reload or by
-// the optional Watch goroutine) fails to parse the new pair. A nil
+// the optional Watch goroutine) is REFUSED — whether because the new
+// pair cannot be read, parsed or paired, or because its leaf is
+// outside its validity window (see [ErrCertOutsideValidity]). A nil
 // onError defaults to printing to stderr via fmt.Fprintln.
+//
+// The initial load performed here is gated on read, parse and pair
+// only; see [CertReloader.Reload] for why the validity check applies
+// to the SWAP and not to construction.
 func NewCertReloader(certPath, keyPath string, onError func(error)) (*CertReloader, error) {
 	r := &CertReloader{
 		certPath: certPath,
@@ -60,10 +83,39 @@ func NewCertReloader(certPath, keyPath string, onError func(error)) (*CertReload
 }
 
 // Reload re-reads the certificate + key from disk and atomically
-// swaps the live certificate when the parse succeeds. A parse
+// swaps the live certificate when the new pair is fully validated. A
 // failure leaves the live certificate untouched and returns the
 // error so the caller (or the OnError callback installed via
 // NewCertReloader) can record the incident.
+//
+// Validation is two-part. The pair must read, parse and pair — that
+// is [tls.LoadX509KeyPair] — and, when a certificate is already in
+// service, the new leaf must also be valid AT THE CURRENT INSTANT.
+// A leaf that has expired, or whose NotBefore is still in the
+// future, is refused with an error wrapping [ErrCertOutsideValidity]
+// and the live certificate stays in service. Without that second
+// part a routine renewal that produced expired material — or a clock
+// skew on the renewing host — would replace a working certificate
+// with one that fails every handshake, converting a recoverable
+// condition into a total outage of the listener (rmp #2557).
+//
+// Three properties of that refusal matter operationally:
+//
+//   - It does NOT stamp the mtime bookkeeping, so the very next
+//     Reload re-examines the same files. A pair refused for being
+//     not-yet-valid is therefore picked up by the Watch poller as
+//     soon as its NotBefore passes, with no operator action.
+//   - It checks the LEAF only, never the rest of the chain. An
+//     expired issuer deliberately kept in a bundle is a real,
+//     working deployment pattern — the Let's Encrypt DST Root CA X3
+//     cross-sign after 2021-09-30 is the canonical case — and
+//     refusing it would break rotations that serve clients fine.
+//   - It gates the SWAP, not the initial load. The contract being
+//     protected is that a WORKING certificate is never replaced by a
+//     broken one; at construction there is nothing to protect, and
+//     refusing there would make a host whose clock has not yet
+//     synchronised unable to start at all, which is strictly worse
+//     than serving material its clients may well accept.
 func (r *CertReloader) Reload() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -89,10 +141,89 @@ func (r *CertReloader) Reload() error {
 	if err != nil {
 		return fmt.Errorf("load X509 key pair: %w", err)
 	}
+	// A pair that parses is not necessarily a pair that can serve. Only
+	// refuse when there is a live certificate to protect: see the
+	// "gates the SWAP" note above.
+	if r.current.Load() != nil {
+		if err := r.checkLeafValidity(&cert); err != nil {
+			return err
+		}
+	}
 	r.current.Store(&cert)
 	r.lastCertModTime = certInfo.ModTime()
 	r.lastKeyModTime = keyInfo.ModTime()
 	return nil
+}
+
+// checkLeafValidity reports whether cert's leaf is valid at the instant the
+// reloader's clock reads, wrapping [ErrCertOutsideValidity] when it is not.
+//
+// The leaf is taken from [tls.Certificate.Leaf] when the standard library has
+// already populated it and parsed from the first DER block otherwise, so the
+// check costs nothing on the common path and stays correct if that changes.
+func (r *CertReloader) checkLeafValidity(cert *tls.Certificate) error {
+	leaf := cert.Leaf
+	if leaf == nil {
+		if len(cert.Certificate) == 0 {
+			return fmt.Errorf("bolt/server: TLS reload: the pair carries no certificate")
+		}
+		parsed, err := x509.ParseCertificate(cert.Certificate[0])
+		if err != nil {
+			return fmt.Errorf("parse leaf certificate: %w", err)
+		}
+		leaf = parsed
+	}
+	now := r.now()
+	switch {
+	case now.Before(leaf.NotBefore):
+		return fmt.Errorf("%w: leaf %q is not valid until %s (%s from now); keeping the certificate in service",
+			ErrCertOutsideValidity, leaf.Subject.CommonName,
+			leaf.NotBefore.UTC().Format(time.RFC3339), leaf.NotBefore.Sub(now).Round(time.Second))
+	case now.After(leaf.NotAfter):
+		return fmt.Errorf("%w: leaf %q expired at %s (%s ago); keeping the certificate in service",
+			ErrCertOutsideValidity, leaf.Subject.CommonName,
+			leaf.NotAfter.UTC().Format(time.RFC3339), now.Sub(leaf.NotAfter).Round(time.Second))
+	}
+	return nil
+}
+
+// now reads the reloader's validity clock, defaulting to real wall time. A
+// zero-value CertReloader has no clock, so the nil check is load-bearing rather
+// than defensive.
+func (r *CertReloader) now() time.Time {
+	if r.clk == nil {
+		return time.Now()
+	}
+	return r.clk.Now()
+}
+
+// SetClock overrides the clock the VALIDITY WINDOW is evaluated against, so a
+// harness can express an expired or not-yet-valid certificate as a fixture with
+// fixed dates instead of waiting for real time to pass. A nil clock is ignored.
+// Call it before the first [CertReloader.Reload] that must observe it; the
+// initial load performed by [NewCertReloader] never consults the clock, so
+// setting it immediately after construction is in time for every swap.
+//
+// It governs the validity comparison and NOTHING else. In particular
+// [CertReloader.Watch] keeps its own [time.Ticker] on real time deliberately: a
+// poller driven by a frozen fake clock would never tick, and the harness arm
+// that proves onError fires over a broken pair depends on real polling.
+//
+// # Why this is exported, and why it is still not a public API
+//
+// It is a MODULE-INTERNAL seam, exactly as [Server.SetClock] is. [clock.Clock]
+// lives under internal/ and its method set returns internal types
+// ([clock.Timer], [clock.Ticker]), so no package outside this module can name
+// the parameter type or structurally implement it: the method is unreachable
+// from outside GoGraph even though its name is capitalised. An export_test.go
+// wrapper would not do — a _test.go file is compiled only into its own
+// package's test binary, so internal/sim could never reach it.
+func (r *CertReloader) SetClock(clk clock.Clock) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if clk != nil {
+		r.clk = clk
+	}
 }
 
 // GetCertificate is the hook to install on [tls.Config.GetCertificate].
