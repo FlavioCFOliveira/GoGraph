@@ -947,8 +947,10 @@ func (s *Session) handleLogon(m *proto.Logon) ([]any, error) {
 	// (Bolt >= 5.1 deferred-auth flow). A FIRST authentication that fails must
 	// terminate the connection per the Bolt 5.1 spec: respond FAILURE then close,
 	// exactly like a failed <= 5.0 HELLO — the client never reached an
-	// authenticated state, so there is nothing to recover. A RE-authentication
-	// failure (from READY/TX_READY) stays recoverable via RESET, unchanged. (task #1470)
+	// authenticated state, so there is nothing to recover. Since rmp #2556 a
+	// RE-authentication failure terminates the connection as well, for the reason
+	// recorded at that branch; firstAuth now only selects WHICH reclaim path runs
+	// on the way to DEFUNCT, not whether the connection survives. (tasks #1470, #2556)
 	firstAuth := s.state == StateAuthentication
 
 	scheme, _ := extractString(m.Auth, "scheme")
@@ -967,10 +969,34 @@ func (s *Session) handleLogon(m *proto.Logon) ([]any, error) {
 			s.log.Error("bolt: authentication failed", slog.String("session", s.id), slog.String("err", err.Error()))
 			return []any{&proto.Failure{Code: authErrorCode(err), Message: s.sanitiseErr(err)}}, nil
 		}
-		// LOGON re-authentication is legal in TX_READY, so a failed auth here can
-		// leave an explicit transaction open; enterFailed reclaims it (#1312).
+		// A FAILED RE-AUTHENTICATION TERMINATES THE CONNECTION TOO (rmp #2556).
+		//
+		// It used to leave the session recoverable, and that left the connection
+		// operating as the PREVIOUS principal: this branch is the only exit that
+		// set neither s.identity nor s.authenticated — the assignments sit after
+		// the error return — so a refused identity switch changed nothing, and
+		// RESET took the authenticated path back to READY with full write
+		// capability. Measured end to end over a real socket: LOGON(alice, ok),
+		// LOGON(bob, WRONG) -> FAILURE, RESET, CREATE -> SUCCESS as alice.
+		//
+		// The Bolt specification's LOGON section says a failed authentication
+		// closes the connection and carves out no exception for re-authentication,
+		// which is the same sentence the firstAuth branch above already cites. It
+		// also removes the surviving-identity question rather than managing it, and
+		// it makes a failed guess COST the connection — the threat shape here is a
+		// non-conforming client that skips LOGOFF, because the official driver
+		// always sends it, so skipping it was how a failed guess cost nothing.
+		//
+		// enterFailed first, then DEFUNCT: LOGON is legal in TX_READY, so this path
+		// can have an explicit transaction open, and enterFailed is the audited
+		// reclaim (drains the cursor, rolls the transaction back, releases what it
+		// holds) rather than a duplicate of it here (#1312).
 		s.enterFailed()
-		s.log.Error("bolt: authentication failed", slog.String("session", s.id), slog.String("err", err.Error()))
+		s.identity = Identity{}
+		s.authenticated = false
+		s.state = StateDefunct
+		s.log.Error("bolt: re-authentication failed, terminating connection",
+			slog.String("session", s.id), slog.String("err", err.Error()))
 		return []any{&proto.Failure{Code: authErrorCode(err), Message: s.sanitiseErr(err)}}, nil
 	}
 	s.identity = id

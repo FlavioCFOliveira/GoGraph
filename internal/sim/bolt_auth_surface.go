@@ -296,6 +296,7 @@ func (r *boltAuthRunner) driveAll(ctx context.Context) error {
 		r.armCommitAfterLogoff,
 		r.armRollbackAfterLogoff,
 		r.armReauthWrongPassword,
+		r.armReauthWrongPasswordNoLogoff,
 		r.armRouteAfterLogoff,
 		r.armLogoffInTxStreaming,
 		r.armResetAfterLogoffWithOpenTx,
@@ -605,11 +606,16 @@ func boltAuthStagedTxThenLogoff(ctx context.Context, r *boltAuthRunner, name str
 	return false, failureCode(resp), failureMessage(resp), "", nil
 }
 
-// armReauthWrongPassword de-authorises a good session and then presents a WRONG
-// password. This is the RE-authentication path (`firstAuth` false in
-// `handleLogon`), which is a different branch from a first LOGON: it does not
-// terminate the connection, it fails the session. Either way the write that
-// follows must be refused.
+// armReauthWrongPassword de-authorises a good session with LOGOFF and then
+// presents a WRONG password. This is the RE-authentication path (`firstAuth`
+// false in `handleLogon`), reached with `authenticated` already FALSE because the
+// LOGOFF cleared it.
+//
+// Since rmp #2556 a failed LOGON terminates the connection whichever branch it
+// took, so this arm no longer distinguishes the two; the branch where
+// `authenticated` is TRUE on entry is what
+// [boltAuthRunner.armReauthWrongPasswordNoLogoff] drives, and that is the one
+// that was untested at every level.
 func (r *boltAuthRunner) armReauthWrongPassword(ctx context.Context) error {
 	return r.arm("reauth-wrong-password", authCodeUnauthorized, "", false, func() (bool, string, string, string, error) {
 		c, err := r.dial()
@@ -643,6 +649,66 @@ func (r *boltAuthRunner) armReauthWrongPassword(ctx context.Context) error {
 			detail += "IGNORED (session is FAILED)"
 		} else {
 			return true, "", "", "server EXECUTED a write after a refused re-authentication", nil
+		}
+		return false, failureCode(resp), failureMessage(resp), detail, nil
+	})
+}
+
+// armReauthWrongPasswordNoLogoff presents a WRONG password on a session that is
+// STILL AUTHENTICATED — no LOGOFF first — and then tries RESET and a write.
+//
+// This is the branch rmp #2556 was about, and the reason nothing caught it: every
+// other arm and test sends LOGOFF first, which pre-clears `authenticated`, so the
+// path where it is TRUE on entry was exercised nowhere. That path was the only
+// exit from handleLogon that set neither `s.identity` nor `s.authenticated` — the
+// assignments sit after the error return — so a REFUSED identity switch changed
+// nothing and RESET took the authenticated route back to READY with full write
+// capability. Measured end to end before the fix: LOGON(good), LOGON(wrong) ->
+// FAILURE, RESET, CREATE -> SUCCESS as the PREVIOUS principal.
+//
+// The threat shape is precisely a client that skips the LOGOFF: the official
+// driver always sends one, so skipping it was how a failed credential guess cost
+// nothing.
+//
+// The write is attempted AFTER a RESET, because RESET is where the recovery
+// happened. An arm that only checked the reply to the LOGON would have passed
+// against the defect.
+func (r *boltAuthRunner) armReauthWrongPasswordNoLogoff(ctx context.Context) error {
+	return r.arm("reauth-wrong-password-no-logoff", authCodeUnauthorized, "", false, func() (bool, string, string, string, error) {
+		c, err := r.dial()
+		if err != nil {
+			return false, "", "", "", err
+		}
+		defer func() { _ = c.Close() }()
+		if err := boltAuthLogin(ctx, c); err != nil {
+			return false, "", "", "", err
+		}
+		// NO LOGOFF. The session is authenticated when the wrong password arrives.
+		resp, err := c.LogonWith(basicAuthToken(simAuthPrincipal, simAuthWrongPassword))
+		if err != nil {
+			return false, "", "", "", err
+		}
+		if isSuccess(resp) {
+			return true, "", "", "server ADMITTED a wrong password on re-authentication without LOGOFF", nil
+		}
+		detail := "after refused re-auth without LOGOFF: "
+		if _, resetErr := c.Reset(); resetErr != nil {
+			// The connection is gone, which is the contract since rmp #2556.
+			detail += "RESET failed (connection terminated)"
+			return false, failureCode(resp), failureMessage(resp), detail, nil
+		}
+		detail += "RESET accepted; write -> "
+		if _, runErr := c.Run(boltAuthCreate(abuseGhostLabel, "reauth-wrong-password-no-logoff"), nil); runErr != nil {
+			detail += "connection closed"
+		} else if _, term, pullErr := c.PullAll(); pullErr != nil {
+			detail += "connection closed mid-stream"
+		} else if code := failureCode(term); code != "" {
+			detail += code
+		} else if isIgnored(term) {
+			detail += "IGNORED (session is FAILED)"
+		} else {
+			return true, "", "", "server EXECUTED a write after a refused re-authentication " +
+				"that was NOT preceded by LOGOFF: the connection continued as the previous principal", nil
 		}
 		return false, failureCode(resp), failureMessage(resp), detail, nil
 	})
@@ -1028,6 +1094,7 @@ var boltAuthExpectedArms = []string{
 	"commit-after-logoff",
 	"rollback-after-logoff",
 	"reauth-wrong-password",
+	"reauth-wrong-password-no-logoff",
 	"route-after-logoff",
 	"logoff-in-tx-streaming",
 	"reset-after-logoff-open-tx",
