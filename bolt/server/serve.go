@@ -335,7 +335,7 @@ type Options struct {
 
 	// MaxOpenTxPerPrincipal caps how many explicit transactions one authenticated
 	// principal may hold open at once across all of its connections. Exceeding it
-	// fails the BEGIN with Neo.ClientError.General.LimitExceeded rather than
+	// fails the BEGIN with Neo.TransientError.Transaction.MaximumTransactionLimitReached rather than
 	// queueing. Zero defaults to [DefaultMaxOpenTxPerPrincipal]; a NEGATIVE value
 	// disables enforcement, which is deliberate and visible at the call site.
 	MaxOpenTxPerPrincipal int
@@ -392,7 +392,9 @@ type Options struct {
 	// accumulated in tx.results since BEGIN; auto-commit cursors are
 	// not counted (the Bolt v5 state machine already prevents two
 	// concurrent auto-commit streams). The cap surfaces as a typed
-	// Bolt FAILURE with code "Neo.ClientError.General.LimitExceeded".
+	// Bolt FAILURE with code
+	// "Neo.TransientError.Transaction.MaximumTransactionLimitReached" — TRANSIENT, so a
+	// driver retries, and the session stays in READY so it can (rmp #2561).
 	MaxInFlightPerConnection int
 
 	// ConnTimeout is the per-connection idle read deadline applied throughout

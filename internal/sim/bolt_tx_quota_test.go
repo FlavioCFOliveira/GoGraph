@@ -704,7 +704,7 @@ func TestBoltTxQuota_ControlCapDisabledAdmitsTheOverCapBegin(t *testing.T) {
 	v := checkBoltTxQuota(ev)
 	for _, want := range []string{
 		"was ACCEPTED",
-		"want \"Neo.ClientError.General.LimitExceeded\"",
+		"want \"Neo.TransientError.Transaction.MaximumTransactionLimitReached\"",
 		"recomputed from the principal and the cap",
 	} {
 		if !anyViolationMentions(v, want) {

@@ -3476,7 +3476,8 @@ by two readings of `wal.Writer.Stats`:
   is observed MOVING, without which "the doomed transaction appended no frame" would
   be a statement about a dead instrument.
 - **Over the cap.** The same cycles, then one more RUN, which must draw
-  `Neo.ClientError.General.LimitExceeded` naming `cap=3, open=3`. The `open=` figure
+  `Neo.TransientError.Transaction.MaximumTransactionLimitReached` naming `cap=3, open=3`.
+  The `open=` figure
   is parsed back out of the message and cross-checked against the harness's own
   cycle count, so two independent accountings of the same quantity must agree. The
   decisive RUN runs under an armed read deadline, so a stall becomes a harness error

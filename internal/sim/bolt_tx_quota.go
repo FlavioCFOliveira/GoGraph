@@ -20,7 +20,8 @@ package sim
 //
 // # Why the refusal MESSAGE is recomputed and not merely code-matched
 //
-// The refusal reaches the client as Neo.ClientError.General.LimitExceeded with
+// The refusal reaches the client as
+// Neo.TransientError.Transaction.MaximumTransactionLimitReached with
 // the quota error's own text, VERBATIM: bolt/server/session.go:1602-1605 returns
 // qerr.Error() and does NOT route it through Session.sanitiseErr, unlike every
 // neighbouring failure in that handler. The text names the principal and the
@@ -131,7 +132,7 @@ const (
 const (
 	// txQuotaRefusalCode is what a BEGIN over the cap is answered with
 	// (bolt/server/session.go:1603).
-	txQuotaRefusalCode = "Neo.ClientError.General.LimitExceeded"
+	txQuotaRefusalCode = "Neo.TransientError.Transaction.MaximumTransactionLimitReached"
 	// txQuotaLogoffRefusalCode is what a COMMIT from a de-authorised session is
 	// answered with: handleCommit's !s.authenticated gate routes to failTransition
 	// (bolt/server/session.go:1656-1657), which returns

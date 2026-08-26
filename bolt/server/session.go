@@ -1661,8 +1661,34 @@ func (s *Session) handleBegin(ctx context.Context, m *proto.Begin) ([]any, error
 		incCounter(metricTxQuotaRejected)
 		s.log.Warn("bolt: BEGIN refused; principal is at its open-transaction cap",
 			slog.String("session", s.id), slog.String("err", qerr.Error()))
+		// THE SESSION DELIBERATELY STAYS IN READY, and the code is deliberately
+		// TRANSIENT (rmp #2561).
+		//
+		// A cap is back-pressure, not a protocol error: the slot frees when some
+		// other transaction of this principal closes, so retrying the same BEGIN is
+		// exactly the right response and a RESET round trip to earn the right to
+		// retry would be pure cost. That is why this path returns before the
+		// [Transition] call below and does NOT go through [Session.enterFailed],
+		// unlike the newTx failure a few lines above — that one is a genuine
+		// failure to open a transaction and FAILED is right for it.
+		//
+		// The two adjacent paths therefore differ ON PURPOSE. Until rmp #2561 they
+		// differed by accident: this branch simply returned early, nothing said so,
+		// and no test asserted the resulting state at any level.
+		//
+		// The code is Neo4j's own, and the previous one was not:
+		// Neo.ClientError.General.LimitExceeded does not exist in Neo4j's status
+		// codes at all, and its ClientError class tells a driver the request is
+		// wrong and must not be retried — the opposite of what a cap wants.
+		// Neo.TransientError.Transaction.MaximumTransactionLimitReached is real and
+		// means exactly this ("unable to start new transaction since the maximum
+		// number of concurrently executing transactions is reached"), and its
+		// Transient class is what makes a driver retry.
+		//
+		// The in-flight CURSOR cap keeps LimitExceeded: it is a different limit,
+		// reached inside one transaction, and it is not this ticket's subject.
 		return []any{&proto.Failure{
-			Code:    "Neo.ClientError.General.LimitExceeded",
+			Code:    txQuotaRefusalCode,
 			Message: qerr.Error(),
 		}}, nil
 	}

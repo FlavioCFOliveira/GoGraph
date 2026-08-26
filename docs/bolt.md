@@ -78,7 +78,7 @@ fall back to a default when left at the zero value:
 | `ConnTimeout` | 0 (disabled) | Per-connection idle read deadline, reset before each message read. |
 | `DatabaseName` | `DefaultDatabaseName` (`neo4j`) | The name reported in result metadata for a client that selects no database. A client that names one has its own name echoed back. See the `db` note under [Protocol conformance notes](#protocol-conformance-notes). |
 | `MaxTxIdleTime` | `DefaultMaxTxIdleTime` (5 s) | How long an **open** explicit transaction may go without the client sending a message, after which it is rolled back. Distinct from `DefaultTxTimeout`, which caps total lifetime however busy the transaction is. Cannot be disabled. |
-| `MaxOpenTxPerPrincipal` | `DefaultMaxOpenTxPerPrincipal` (16) | How many explicit transactions one authenticated principal may hold **open** at once, across all its connections. Exceeding it fails the `BEGIN` with `Neo.ClientError.General.LimitExceeded`. A negative value disables it. |
+| `MaxOpenTxPerPrincipal` | `DefaultMaxOpenTxPerPrincipal` (16) | How many explicit transactions one authenticated principal may hold **open** at once, across all its connections. Exceeding it fails the `BEGIN` with `Neo.TransientError.Transaction.MaximumTransactionLimitReached` — Neo4j's own TRANSIENT code, so a driver retries — and the session stays in **READY**, so the retry needs no `RESET` (rmp #2561). A negative value disables it. |
 
 ### Abandoned transactions
 

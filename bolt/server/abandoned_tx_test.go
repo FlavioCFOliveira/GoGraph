@@ -37,6 +37,13 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/bolt/server"
 )
 
+// wantTxQuotaCode mirrors server.txQuotaRefusalCode, which is unexported and so
+// unreachable from this external test package. It is Neo4j's own TRANSIENT code
+// for a refused BEGIN at the open-transaction cap; rmp #2561 replaced the
+// invented Neo.ClientError.General.LimitExceeded, whose ClientError class told a
+// driver not to retry a limit that frees itself.
+const wantTxQuotaCode = "Neo.TransientError.Transaction.MaximumTransactionLimitReached"
+
 // TestAbandonedTx_IdleReaperBoundsTheReaderStall is the acceptance test for the
 // idle bound: a client that sends BEGIN and goes silent must not stall readers
 // for the full transaction timeout.
@@ -164,9 +171,11 @@ func TestAbandonedTx_PerPrincipalCapRejectsWithTypedError(t *testing.T) {
 	over.negotiate(t)
 	over.hello(t)
 	failure := over.beginReadExpectFailure(t)
-	if failure.Code != "Neo.ClientError.General.LimitExceeded" {
-		t.Fatalf("BEGIN over the cap returned code %q, want Neo.ClientError.General.LimitExceeded",
-			failure.Code)
+	// The code changed with rmp #2561: it is now Neo4j's own TRANSIENT code for
+	// this exact condition, because a cap frees itself and a driver should retry.
+	if failure.Code != wantTxQuotaCode {
+		t.Fatalf("BEGIN over the cap returned code %q, want %q",
+			failure.Code, wantTxQuotaCode)
 	}
 	if failure.Message == "" {
 		t.Fatal("the refusal carried no message")
@@ -216,7 +225,7 @@ func TestAbandonedTx_CapIsPerPrincipalNotPerServer(t *testing.T) {
 	alice2.negotiate(t)
 	alice2.helloAs(t, "alice")
 	f := alice2.beginReadExpectFailure(t)
-	if f.Code != "Neo.ClientError.General.LimitExceeded" {
-		t.Fatalf("alice's second BEGIN returned %q, want Neo.ClientError.General.LimitExceeded", f.Code)
+	if f.Code != wantTxQuotaCode {
+		t.Fatalf("alice's second BEGIN returned %q, want %q", f.Code, wantTxQuotaCode)
 	}
 }
