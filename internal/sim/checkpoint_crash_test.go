@@ -43,16 +43,22 @@ type liveCkptStack struct {
 // openLiveCkptStack recovers the full stack from the SimDisk through the REAL
 // recovery.OpenFS (which promotes the last fully-published snapshot and replays
 // the WAL tail on top of it), then reopens the WAL for append at the recovered
-// tail and binds a real cypher.Engine. Snapshot lives under "snapshot"; the WAL
-// stays at the root-level key "wal" (retaining SimDisk's dirent-durability
-// exemption for a root file — otherwise a Crash would revoke the WAL itself).
+// tail and binds a real cypher.Engine.
+//
+// The whole layout lives under [simWALDir]: the WAL at simWALDir/wal and the
+// snapshot beside it. It used to sit at the root and rely on [isRootLevel]'s
+// dirent-durability exemption — "otherwise a Crash would revoke the WAL itself"
+// — which is exactly the blindness #2539 removes. With a real parent directory
+// the WAL's name is governed by the dirent model like any other, so this helper
+// must fsync that directory, which is what wal.OpenFS does unconditionally and
+// what this helper bypasses by opening the handle itself.
 func openLiveCkptStack(t *testing.T, disk *SimDisk) *liveCkptStack {
 	t.Helper()
 	codec := txn.NewStringCodec()
 	wcodec := txn.NewFloat64WeightCodec()
 
 	res, err := recovery.OpenFS[string, float64](
-		simRecoveryFS{disk: disk}, "",
+		simRecoveryFS{disk: disk}, simWALDir,
 		recovery.Options[string, float64]{Codec: codec, WeightCodec: wcodec},
 	)
 	if err != nil {
@@ -69,6 +75,13 @@ func openLiveCkptStack(t *testing.T, disk *SimDisk) *liveCkptStack {
 	wh, err := disk.OpenFile(simWALPath, os.O_CREATE|os.O_RDWR|os.O_APPEND)
 	if err != nil {
 		t.Fatalf("open WAL for append: %v", err)
+	}
+	// Make the WAL's own NAME durable, as wal.OpenFS does for every caller that
+	// does not hand it a ready handle. Without it the dirent model would revoke
+	// the WAL on the next crash — correctly, because nothing had fsynced the
+	// directory that holds it.
+	if err := disk.DirSync(simWALDir); err != nil {
+		t.Fatalf("fsync the WAL's parent directory: %v", err)
 	}
 	wlog, err := wal.OpenWith(wh)
 	if err != nil {
@@ -93,7 +106,7 @@ func (s *liveCkptStack) publishSnapshot(t *testing.T, disk *SimDisk) {
 	t.Helper()
 	cs := csr.BuildFromAdjList(s.graph.AdjList())
 	if err := snapshot.WriteSnapshotFullWithMapperCodecAndConstraintsFS(
-		simSnapshotFS{disk: disk}, "snapshot", cs, s.graph, txn.NewStringCodec(), nil,
+		simSnapshotFS{disk: disk}, simWALDir+"/"+simSnapshotName, cs, s.graph, txn.NewStringCodec(), nil,
 	); err != nil {
 		t.Fatalf("publish snapshot: %v", err)
 	}

@@ -169,9 +169,11 @@ package sim
 // # Why the published path is a SUBDIRECTORY key
 //
 // [SimDisk] treats any path whose parent is "." or "/" as having a DURABLE
-// dirent from the instant of creation (see `isRootLevel`), because the
-// root-level WAL is governed by the data-durability model rather than the
-// dirent model. Publishing to a root-level key would therefore make the rename
+// dirent from the instant of creation (see `isRootLevel`), because a file at the
+// root has no parent directory whose fsync could make its name durable. (The WAL
+// used to rely on that exemption too; since rmp #2539 it lives under a real
+// directory and is governed by the dirent model like everything else.)
+// Publishing to a root-level key would therefore make the rename
 // un-rollbackable and the parent-directory fsync unobservable, and every "the
 // name survived the crash" assertion below would pass while proving nothing.
 // [bulkOraclePath] is a subdirectory key for exactly that reason, and

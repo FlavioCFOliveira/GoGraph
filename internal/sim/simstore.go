@@ -15,14 +15,29 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
+// simWALDir is the directory a WAL-ONLY [SimStore] lays its WAL out under.
+//
+// It exists so the WAL has a REAL PARENT. [isRootLevel] treats a name whose
+// parent is "." as durably linked from creation, and the WAL-only layout used to
+// put the WAL at the bare key "wal" — so it was fully exempt from the dirent
+// model, and wal.OpenFS's unconditional ParentDirSync was INERT: the call
+// happened, changed nothing, and deleting it could not have failed a run. The
+// exposure was bounded, because full-stack mode already put the WAL under a
+// directory and the fsync was load-bearing there, but the gap was invisible at
+// the scenario level: a WAL-only scenario appeared to cover the WAL dirent fsync
+// and did not (audit finding F5, rmp #2539).
+//
+// Giving the WAL-only layout a directory makes that fsync load-bearing in EVERY
+// mode, which is what the audit asked for, and it leaves the root-level
+// exemption itself in place for names that genuinely sit at the root.
+const simWALDir = "waldir"
+
 // simWALPath is the fixed key under which the WAL byte image of a WAL-ONLY
-// [SimStore] lives inside a [SimDisk]. The in-memory filesystem treats paths as
-// opaque keys, so a single stable root-level key is sufficient for the legacy
-// WAL-only recovery path ([recovery.ReplayWAL]). A full-stack [SimStore] (one
-// opened with a checkpoint directory) instead lays the WAL out under that
-// directory at dir/"wal" so a snapshot can sit beside it at dir/"snapshot" and
-// recovery goes through the full [recovery.OpenFS] snapshot+WAL path.
-const simWALPath = "wal"
+// [SimStore] lives inside a [SimDisk]. A full-stack [SimStore] (one opened with
+// a checkpoint directory) instead lays the WAL out under that directory at
+// dir/"wal" so a snapshot can sit beside it at dir/"snapshot" and recovery goes
+// through the full [recovery.OpenFS] snapshot+WAL path.
+const simWALPath = simWALDir + "/wal"
 
 // simWALName / simSnapshotName are the file-name components the full-stack
 // layout uses inside the checkpoint directory, matching the production
@@ -34,7 +49,7 @@ const (
 )
 
 // walPathFor returns the SimDisk key of the WAL for a store opened with dir. An
-// empty dir selects the legacy root-level WAL-only key ([simWALPath]); a
+// empty dir selects the WAL-only key ([simWALPath]); a
 // non-empty dir places the WAL under it (dir/wal) so the full snapshot+WAL
 // recovery path applies.
 func walPathFor(dir string) string {
@@ -54,7 +69,7 @@ type simStoreConfig struct {
 	// dir/wal, a checkpoint publishes a self-sufficient snapshot at dir/snapshot
 	// and truncates the WAL prefix it folded, and recovery reconstructs the graph
 	// through the full snapshot+WAL path ([recovery.OpenFS]). An empty dir keeps
-	// the legacy WAL-only layout (root-level [simWALPath], recovered via
+	// the legacy WAL-only layout ([simWALPath], recovered via
 	// [recovery.ReplayWAL]).
 	dir         string
 	graphConfig adjlist.Config

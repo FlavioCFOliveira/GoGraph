@@ -2695,10 +2695,25 @@ func (d *SimDisk) undoRenameLocked(rec *renameUndo) {
 func baseName(p string) string { return pathpkg.Base(p) }
 
 // isRootLevel reports whether p sits at the filesystem root (its parent is "."
-// or "/" or itself). Root-level names — notably the WAL at [simWALPath] — are
-// treated as durably linked on creation, so the long-standing WAL data-
-// durability model (per-Sync fault) is unaffected by the dirent model the
-// snapshot/csrfile publish protocol exercises in subdirectories.
+// or "/" or itself). Root-level names are treated as durably linked on creation.
+//
+// # Why the exemption exists, and why it is no longer a blind spot
+//
+// A file at the root has no parent directory that anything could fsync, so
+// without the exemption its name could never become durable and every crash
+// would revoke it. MEASURED: with isRootLevel forced to false, 16 tests fail for
+// exactly that reason. The exemption is therefore a necessity of the model, not
+// a simplification of it — retiring it outright was tried and rejected.
+//
+// What WAS a blind spot is that the WAL-only layout used to sit at the bare key
+// "wal" and take this exemption, which made wal.OpenFS's unconditional
+// ParentDirSync inert in that mode: the call happened, changed nothing, and
+// deleting it could not have failed a run. The WAL now lives under [simWALDir]
+// and is governed by the dirent model like any other name, so the fsync is
+// load-bearing in every mode. [TestWALDirentFsyncIsLoadBearing] proves it by
+// withholding the fsync and requiring the crash to punish the omission, and
+// [TestWALOnlyLayoutIsNotRootExempt] pins the layout so a move back to the root
+// cannot restore the blindness silently (rmp #2539, audit finding F5).
 func isRootLevel(p string) bool {
 	dir := pathpkg.Dir(p)
 	return dir == "." || dir == "/" || dir == p
