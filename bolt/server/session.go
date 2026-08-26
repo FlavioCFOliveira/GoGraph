@@ -1935,26 +1935,84 @@ func (s *Session) drainResult() {
 //
 // In particular the context-cancellation early return in [Session.HandleMessage]
 // — which never reaches a handler — still reclaims the transaction.
-// reapTimedOutTx rolls back an explicit transaction that has exceeded its
-// wall-clock deadline while the connection was kept alive (idle, or by no-op
-// pings), releasing the engine's global writer lock, and moves the session to
-// FAILED so the client's next message receives a FAILURE and must RESET. It is
-// invoked by the serve loop on a read-deadline timeout, on the session's own
-// goroutine, so it never races the single-threaded session. enterFailed drains
-// any cursor and rolls back the transaction (clearing txActive); txDeadline is
-// cleared here so the serve loop stops tightening the read deadline. (task #1346)
-func (s *Session) reapTimedOutTx() {
-	incCounter(metricTxTimedOut)
+// The two reasons a server-initiated termination gives the client. They are
+// SEPARATE because the two events are separate, and telling them apart from the
+// failure alone is the whole point (rmp #2560): an expired bound and a
+// deliberate human intervention need different responses from whoever reads the
+// client's logs.
+//
+// CLASSIFICATION. Both are ClientError rather than TransientError, and for
+// Terminated that is a deliberate, evidence-backed choice rather than the
+// obvious-looking one. github.com/neo4j/neo4j-go-driver/v5 v5.28.4 — the version
+// in go.mod — carries a reclassify() (neo4j/db/errors.go:132-139) whose stated
+// job is to classify "errors coming from pre-5.x servers into their 5.x
+// classifications", and one of its two entries is exactly:
+//
+//	Neo.TransientError.Transaction.Terminated -> Neo.ClientError.Transaction.Terminated
+//
+// So Neo.ClientError.Transaction.Terminated IS the modern classification for
+// this condition, the Transient spelling is the legacy one the driver rewrites
+// forward, and because reclassify() runs BEFORE IsRetriableTransient() reads the
+// classification, emitting the Transient form would NOT make a driver retry —
+// it would only put a code on the wire that claims a retriability the driver
+// does not honour.
+//
+// It is also the code [FailureCode] already returns for context.Canceled, which
+// makes one operator termination report ONE reason rather than two: Server
+// .TerminateTransaction cancels the transaction's context, so a statement caught
+// in flight is failed through that path while the next request-phase message
+// gets the armed reason below. Two different codes for one event would be
+// distinguishable only by timing.
+const (
+	txTimedOutCode    = "Neo.ClientError.Transaction.TransactionTimedOut"
+	txTimedOutMessage = "the transaction has been terminated because it exceeded its timeout"
+
+	txTerminatedCode    = "Neo.ClientError.Transaction.Terminated"
+	txTerminatedMessage = "the transaction has been terminated by an operator request"
+)
+
+// endTxWithReason is the shared server-initiated-termination teardown: it moves
+// the session to FAILED — which drains any cursor and rolls the transaction back,
+// clearing txActive — clears txDeadline so the serve loop stops tightening the
+// read deadline, and arms reason as the typed FAILURE the client's next
+// request-phase message receives instead of a silent IGNORED (#1784). The armed
+// failure is cleared when delivered (dispatch) or on RESET.
+//
+// The REASON is the caller's, not this function's. Three distinct events end a
+// transaction from the server side — the total bound, the idle bound, and an
+// operator's [Server.TerminateTransaction] — and the serve loop is where they are
+// already told apart, because that is where each one's log line and metric live.
+// Before rmp #2560 this teardown chose the reason itself, so all three told the
+// client the same thing: that it had timed out. Two thirds of the time that was
+// simply false.
+//
+// Called on the session's own goroutine, so it never races the single-threaded
+// session. (task #1346)
+func (s *Session) endTxWithReason(reason *proto.Failure) {
 	s.enterFailed()
 	s.txDeadline = time.Time{}
-	// Server-initiated termination: arm a typed FAILURE for the client's next
-	// request-phase message so it learns the transaction timed out, rather than
-	// silently receiving IGNORED (#1784). Cleared when delivered (dispatch) or
-	// on RESET.
-	s.pendingTermErr = &proto.Failure{
-		Code:    "Neo.ClientError.Transaction.TransactionTimedOut",
-		Message: "the transaction has been terminated because it exceeded its timeout; the writer lock was released",
-	}
+	s.pendingTermErr = reason
+}
+
+// reapTimedOutTx ends an explicit transaction that has exceeded one of its
+// wall-clock bounds while the connection was kept alive (idle, or by no-op
+// pings). The client's next request-phase message is told it timed out.
+//
+// It does NOT increment metricTxTimedOut. That counter is the serve loop's,
+// because only the serve loop knows WHICH bound fired: metricTxTimedOut is
+// documented as counting transactions that exceeded their total lifetime
+// "however busy they were", as distinct from metricTxIdleReaped. Incrementing it
+// here made it a superset of all three termination events, which defeated the
+// separation the idle counter exists to provide (rmp #2175, corrected by #2560).
+func (s *Session) reapTimedOutTx() {
+	s.endTxWithReason(&proto.Failure{Code: txTimedOutCode, Message: txTimedOutMessage})
+}
+
+// terminateTxByOperator ends an explicit transaction because an operator called
+// [Server.TerminateTransaction]. The client's next request-phase message is told
+// exactly that, rather than being told about a timeout that never elapsed.
+func (s *Session) terminateTxByOperator() {
+	s.endTxWithReason(&proto.Failure{Code: txTerminatedCode, Message: txTerminatedMessage})
 }
 
 func (s *Session) enterFailed() {

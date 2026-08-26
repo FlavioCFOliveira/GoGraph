@@ -3680,11 +3680,18 @@ than drawn because an arm and its control are comparable only as the same script
   reaper.
   The checker requires its code AND its message to be byte-identical to the subject's,
   which is how the shared-failure finding is ASSERTED rather than restated. Reading
-  `bolt/server` widens rmp #2560 from two paths to three — the idle reaper, the
-  total-lifetime reaper and `Server.TerminateTransaction` all funnel through
-  `Session.reapTimedOutTx` (`bolt/server/session.go:1831`), which arms a single
-  `pendingTermErr` carrying one code and one message (`:1839-1842`). A client cannot
-  tell the three apart.
+  `bolt/server` widened rmp #2560 from two paths to three — the idle reaper, the
+  total-lifetime reaper and `Server.TerminateTransaction` all funnelled through one
+  teardown that armed a single `pendingTermErr`, so a client could tell none of the
+  three apart.
+  **rmp #2560 split that PARTLY, and the surviving half is what these arms now pin.**
+  The operator path was given its own reason (`Session.terminateTxByOperator`, pinned
+  separately as `txTerminateFailureCode`/`txTerminateFailureMessage` and adjudicated by
+  the terminate arm); the two DEADLINE bounds still share one, deliberately, because a
+  client's correct response to either is identical whereas an operator's is not. The
+  idle-bound control therefore still asserts a byte-identical answer — but it now
+  asserts a two-way collision that is intended, rather than recording a three-way one
+  that was not.
 - `overflow-tx-timeout` is the hostile arm, and its mechanism is worth stating exactly
   because the obvious reading of it is wrong. It sends `tx_timeout = 1<<62`
   milliseconds, and that value never reaches a multiplication: `clientMillisToDuration`
@@ -3707,9 +3714,10 @@ is adjudicated by one shared checker, so the three cannot drift apart, and the c
 is skipped entirely for an arm that was not reaped — an arm with nothing to report
 must not be able to satisfy a clause about a report. It pins the exact code
 `Neo.ClientError.Transaction.TransactionTimedOut` and the exact message "the
-transaction has been terminated because it exceeded its timeout; the writer lock was
-released" against the named constants of rmp #2482
-(`internal/sim/bolt_tx_registry.go:517-518`); it requires the SECOND request-phase
+transaction has been terminated because it exceeded its timeout" against the named
+constants `txReapFailureCode`/`txReapFailureMessage` (`internal/sim/bolt_tx_registry.go`)
+— the message shed its trailing "; the writer lock was released" in rmp #2560, since
+rmp #2305/#2306 had retired the hold that clause named; it requires the SECOND request-phase
 message after the abort to draw `*proto.Ignored`, because `pendingTermErr` is
 delivered on the first such message and cleared there
 (`bolt/server/session.go:594-597`), after which the switch falls through to
@@ -4405,8 +4413,8 @@ The coverage work exercised the engine against these scenarios and found:
    to fail without the fix.
 9. **An OPERATOR termination tells the client its transaction timed out and that
    a writer lock was released** (fail-misleading; no data loss).
-   `Server.TerminateTransaction` routes through `Session.reapTimedOutTx`, which
-   is shared with the idle/total reaper, so the client is answered
+   `Server.TerminateTransaction` routed through `Session.reapTimedOutTx`, which
+   was shared with the idle/total reaper, so the client was answered
    `Neo.ClientError.Transaction.TransactionTimedOut` with "the transaction has
    been terminated because it exceeded its timeout; the writer lock was
    released". BOTH halves are false for a termination on demand: it exceeded no
@@ -4414,11 +4422,37 @@ The coverage work exercised the engine against these scenarios and found:
    rmp #2305/#2306 retired it (`Engine.beginTxSession` acquires no writer
    serialisation, `cypher/exectx.go`). A driver cannot distinguish an operator
    ending a transaction from a transaction that ran too long, which is exactly
-   the distinction an operator needs the client's logs to preserve. Filed as
-   **rmp #2560**; both strings are PINNED against named constants in
-   `internal/sim/bolt_tx_registry.go`, and both the abandoned-registry and the
-   operator-terminate arms adjudicate against them, so the eventual correction
-   fails those arms deliberately instead of slipping through.
+   the distinction an operator needs the client's logs to preserve. Both strings
+   were PINNED against named constants so the eventual correction would fail those
+   arms deliberately instead of slipping through.
+   **Fixed (rmp #2560), and the pin did its job — it fired, and was updated rather
+   than deleted.** The teardown now takes the reason from its caller: the operator
+   path arms `Neo.ClientError.Transaction.Terminated` / "the transaction has been
+   terminated by an operator request", and the two deadline bounds keep the timeout
+   code with the stale writer-lock clause dropped. The DST constants split into a
+   deadline pair and a terminate pair, and the operator-terminate arm adjudicates
+   against the latter with a named case for the specific regression of borrowing the
+   deadline reason back.
+   The code is `ClientError`, not `TransientError`, on primary evidence:
+   `neo4j-go-driver` v5.28.4's `reclassify()` (`neo4j/db/errors.go:132-139`) rewrites
+   `Neo.TransientError.Transaction.Terminated` to exactly this code, and its stated
+   job is mapping "errors coming from pre-5.x servers into their 5.x
+   classifications" — so this IS the modern classification and the Transient
+   spelling is the legacy one. Because `reclassify()` runs BEFORE the classification
+   is parsed, emitting the Transient form would not make a driver retry either; it
+   would only claim a retriability the driver does not honour.
+   **The same teardown also carried a metric defect the filed report called
+   correct.** `incCounter(metricTxTimedOut)` was unconditional, so an idle reap and
+   an operator termination were each counted as a total-lifetime timeout too, making
+   that counter a superset of all three events. `metricTxIdleReaped`'s own godoc
+   promises the opposite — that an abandoned `BEGIN` "shows up here, whereas a
+   legitimately long transaction shows up there (rmp #2175)" — so the separation the
+   idle counter exists to draw was nominal. Measured on the unfixed build:
+   `tx.terminated=1` **and** `tx.timedout=1` for one operator termination;
+   `tx.idlereaped=1` **and** `tx.timedout=1` for one idle reap. The counter now
+   belongs to the total-bound branch of the serve loop alone, beside its log line.
+   `bolt/server/terminate_reason_test.go` is the regression guard and was verified to
+   fail on the unfixed build in all four shapes.
 10. **A quota-refused `BEGIN` leaves the session READY** (behavioural
     inconsistency; no data loss). `handleBegin`'s per-principal-cap branch
     returns before `Transition` and never calls `enterFailed`

@@ -127,14 +127,22 @@ package sim
 // "advance and the transaction died" is satisfiable by any timer at all; with it,
 // the single difference between the two arms is the extra.
 //
-// # A tx_timeout abort is NOT distinguishable on the wire, and that is asserted
+// # The TWO deadline bounds are not distinguishable on the wire, and that is asserted
 //
-// rmp #2482 pinned that an operator termination and a timeout deliver one shared
-// code and message (filed as rmp #2560). Reading bolt/server widens that: the idle
-// reaper, the total-lifetime reaper and Server.TerminateTransaction ALL funnel
-// through [Session.reapTimedOutTx] (bolt/server/session.go:1831), which arms a
-// single pendingTermErr with one code and one message (:1839-1842). The collision is
-// three-way, not two-way.
+// rmp #2482 pinned that an operator termination and a timeout delivered one shared
+// code and message, and filed the collision as rmp #2560. Reading bolt/server
+// widened it: all THREE server-initiated terminations — the idle bound, the total
+// bound, and Server.TerminateTransaction — funnelled through one teardown that
+// armed a single pendingTermErr, so the collision was three-way.
+//
+// rmp #2560 split it PARTLY, and the part it left alone is what these arms now
+// pin. The operator path was given its own reason
+// ([Session.terminateTxByOperator], adjudicated by the terminate arm against
+// [txTerminateFailureCode]); the two DEADLINE bounds still share one, because a
+// client's correct response to either is identical — only the operator's differs.
+// So the remaining collision is two-way and DELIBERATE, and these arms assert it
+// rather than merely tolerating it: were the idle and total reasons ever split, the
+// control below would fail and the change would have to be argued for.
 //
 // It is asserted rather than described: the idle-bound arm below is a CONSTRUCTED
 // control that reaches the same reap through the idle bound instead, and the checker
@@ -1899,7 +1907,9 @@ func beginCheckAbortShape(a *BoltTimeoutArm) []Violation {
 	}
 	var v []Violation
 	// CLAUSE txtimeout-abort-typed. The EXACT code and message, not merely "some
-	// failure": these are the constants rmp #2482 pinned (bolt_tx_registry.go:517-518).
+	// failure": these are [txReapFailureCode] and [txReapFailureMessage], the DEADLINE
+	// pair. An operator termination no longer answers with them (rmp #2560), so every
+	// arm reaching this check must have been reaped by a bound.
 	if a.GotCode != txReapFailureCode {
 		v = append(v, boltBeginViolation(ViolationOracleDeviation, "txtimeout-abort-typed",
 			fmt.Sprintf("arm %q: after the reap the client's next request-phase message was answered code %q, "+

@@ -442,7 +442,7 @@ func TestBoltTxQuota_OracleCanFail(t *testing.T) {
 		{
 			name:    "the reaper's failure text changed under the arm",
 			mutate:  func(e *BoltTxQuotaEvidence) { e.ReapMessage = "the transaction was idle for too long" },
-			wantSub: "rmp #2560",
+			wantSub: "txReapFailureMessage",
 		},
 		{
 			name:    "the operator termination was refused",

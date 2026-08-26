@@ -1202,7 +1202,7 @@ func checkBoltTxQuotaReclamation(e *BoltTxQuotaEvidence) []Violation {
 		v = append(v, Violation{
 			Kind: ViolationOracleDeviation, Op: txOp(e.Arm, "reap-attribution"),
 			Message: fmt.Sprintf("the reaped connection was told %q, want the text pinned in txReapFailureMessage "+
-				"(rmp #2560); if that text has been corrected, update this arm with the ticket", e.ReapMessage),
+				"(%q)", e.ReapMessage, txReapFailureMessage),
 		})
 	}
 	if e.TerminateOutcome != txTermOutcomeOK {

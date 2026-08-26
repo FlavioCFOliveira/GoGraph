@@ -1208,7 +1208,7 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 				s.log.Warn("bolt: explicit transaction terminated by operator request",
 					slog.String("remote", remote))
 				incCounter(metricTxTerminated)
-				sess.reapTimedOutTx()
+				sess.terminateTxByOperator()
 				syncTxTimer()
 			}
 			continue
@@ -1224,14 +1224,27 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 				// audit demonstrated (rmp #2175).
 				idle := !sess.txIdleDeadline.IsZero() &&
 					(sess.txDeadline.IsZero() || sess.txIdleDeadline.Before(sess.txDeadline))
+				//
+				// The metric is emitted HERE, not inside the teardown, for the
+				// same reason the log line is: only this branch knows which bound
+				// fired. metricTxTimedOut used to be incremented by the teardown
+				// itself, which made it a superset of the idle reaps AND the
+				// operator terminations and so erased the very distinction the
+				// idle counter was added to draw (rmp #2560).
+				//
+				// Neither log line says "rolled back to release the writer lock"
+				// any more: rmp #2305/#2306 retired that hold, and txregistry.go
+				// records at length what an abandoned transaction actually costs
+				// now — version memory, not other clients' progress.
 				if idle {
-					s.log.Warn("bolt: explicit transaction idle too long; rolled back to release the writer lock",
+					s.log.Warn("bolt: explicit transaction idle too long; rolled back",
 						slog.String("remote", remote),
 						slog.Duration("max_idle", s.opts.MaxTxIdleTime))
 					incCounter(metricTxIdleReaped)
 				} else {
-					s.log.Warn("bolt: explicit transaction timed out; rolled back to release the writer lock",
+					s.log.Warn("bolt: explicit transaction timed out; rolled back",
 						slog.String("remote", remote))
+					incCounter(metricTxTimedOut)
 				}
 				sess.reapTimedOutTx()
 			}
