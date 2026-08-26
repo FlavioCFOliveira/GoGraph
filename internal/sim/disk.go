@@ -110,10 +110,14 @@ var _ walFile = (*SimFileHandle)(nil)
 //	                image (power failure), [SimDisk.CrashProcess] keeps the
 //	                bytes and the names (SIGKILL). [SimDisk.Crash] is CrashHost.
 //
-//	MkdirAll        NOT MODELLED, negligible. Directories are opaque keys and
-//	                MkdirAll is a no-op, so a directory creation can never be
-//	                lost. A real mkdir without a parent fsync can be. Nothing in
-//	                the store depends on an empty directory existing.
+//	MkdirAll        MODELLED since rmp #2543. A created directory is registered
+//	                in the dirent model and is durable only once its parent is
+//	                fsynced, like any other name; an EMPTY directory is
+//	                representable and both Stat and Exists report it. It used to
+//	                be a no-op, so a directory creation could never be lost and a
+//	                partial-publish state was unreachable. MkdirAll over an
+//	                EXISTING directory still changes nothing, because it creates
+//	                nothing and needs no fsync.
 //
 //	DirSync         FIXED (rmp #2537), and NARROWER THAN REALITY in the safe
 //	                direction. It could not FAIL: the body ended in an
@@ -158,7 +162,8 @@ type SimDisk struct {
 	// a directory rename (the snapshot publish renames a whole staging
 	// directory onto the live name). The value is whether the directory's own
 	// name in its parent is durable; a directory absent from this map is
-	// implicitly durable (it was created in place via MkdirAll, never via a
+	// implicitly durable (it came into being under a file that was written
+	// there, never via MkdirAll or a
 	// publish rename). A [SimDisk.Crash] drops every directory whose dirent is
 	// not yet durable, taking its entire subtree with it.
 	dirs map[string]bool
@@ -1976,10 +1981,83 @@ func (d *SimDisk) removeSubtreeLocked(path string) {
 	}
 }
 
-// MkdirAll is a no-op for the in-memory filesystem: there is no directory tree,
-// paths are opaque keys. It exists to satisfy the filesystem surface the WAL
-// and snapshot writers expect. perm is ignored.
-func (d *SimDisk) MkdirAll(_ string, _ fs.FileMode) error { return nil }
+// MkdirAll creates dir and every missing parent, registering each newly created
+// component in the dirent model. perm is ignored.
+//
+// # What it used to be, and what that cost
+//
+// It returned nil and registered nothing. Two consequences followed (audit
+// finding F9, rmp #2543). A newly created directory was IMPLICITLY DURABLE,
+// needing no parent fsync, unlike every other name in the model — so a crash
+// could never take one away. And an EMPTY directory was UNREPRESENTABLE, because
+// [SimDisk.Stat] inferred a directory purely from a key prefix and
+// [SimDisk.Exists] never saw directories at all — so the state "the snapshot
+// directory exists but is empty or incomplete" could not be reached.
+//
+// Neither was a live defect: today's recovery probe keys on the manifest FILE
+// rather than on the directory (store/recovery), so it is robust to the gap. The
+// exposure was prospective — any future check of the form "does the snapshot
+// directory exist" would have been silently inert under simulation, and
+// partial-publish states stayed out of reach.
+//
+// # Why only NEWLY created components are registered
+//
+// A component that already exists — tracked in d.dirs, or implied by a file
+// beneath it — is left exactly as it was. MkdirAll on an existing directory
+// creates nothing and needs no fsync, and registering it afresh as not-yet-
+// durable would let a crash delete a subtree that was already durable. That is
+// not a stricter model; it is a wrong one.
+func (d *SimDisk) MkdirAll(dir string, _ fs.FileMode) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if dir == "" || dir == "." || dir == "/" {
+		return nil
+	}
+	for _, c := range dirComponents(dir) {
+		if d.dirExistsLocked(c) {
+			continue
+		}
+		// A created directory's own name lives in its parent, so it is durable
+		// only once that parent is fsynced — exactly like a file. Root-level
+		// names keep the exemption settled by #2539: nothing can fsync the root.
+		d.dirs[c] = isRootLevel(c)
+	}
+	return nil
+}
+
+// dirComponents returns dir and every ancestor of it, outermost first, so
+// MkdirAll can register each one it creates.
+func dirComponents(dir string) []string {
+	dir = pathpkg.Clean(dir)
+	var out []string
+	for p := dir; p != "." && p != "/" && p != ""; p = pathpkg.Dir(p) {
+		out = append(out, p)
+		if pathpkg.Dir(p) == p {
+			break
+		}
+	}
+	// Reverse: outermost first, so a parent is registered before its child.
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out
+}
+
+// dirExistsLocked reports whether path names a directory that already exists,
+// either tracked explicitly or implied by a file beneath it. The caller holds
+// d.mu.
+func (d *SimDisk) dirExistsLocked(path string) bool {
+	if _, tracked := d.dirs[path]; tracked {
+		return true
+	}
+	prefix := path + "/"
+	for p := range d.files {
+		if strings.HasPrefix(p, prefix) {
+			return true
+		}
+	}
+	return false
+}
 
 // Remove deletes the file at path. Removing an absent path is a no-op, matching
 // the tolerant cleanup the snapshot writer relies on.
@@ -2152,11 +2230,12 @@ func (d *SimDisk) Stat(path string) (fs.FileInfo, error) {
 	if f, ok := d.files[path]; ok {
 		return simFileInfo{name: baseName(path), size: int64(len(f.data))}, nil
 	}
-	prefix := path + "/"
-	for p := range d.files {
-		if strings.HasPrefix(p, prefix) {
-			return simFileInfo{name: baseName(path), dir: true}, nil
-		}
+	// A directory is reported when it holds a file (the prefix inference every
+	// implicitly-created directory relies on) OR when it was created explicitly
+	// through MkdirAll — which is what makes an EMPTY directory representable
+	// (#2543).
+	if d.dirExistsLocked(path) {
+		return simFileInfo{name: baseName(path), dir: true}, nil
 	}
 	return nil, &fs.PathError{Op: "stat", Path: path, Err: fs.ErrNotExist}
 }
@@ -2743,8 +2822,13 @@ func (fi simFileInfo) Sys() any           { return nil }
 func (d *SimDisk) Exists(path string) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	_, ok := d.files[path]
-	return ok
+	if _, ok := d.files[path]; ok {
+		return true
+	}
+	// Directories exist too, including empty ones (#2543). Before this, Exists
+	// never saw a directory at all, so "the snapshot directory exists but is
+	// incomplete" was not a state a scenario could observe.
+	return d.dirExistsLocked(path)
 }
 
 // Snapshot returns an independent deep copy of every file's contents keyed by
