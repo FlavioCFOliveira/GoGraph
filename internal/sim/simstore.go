@@ -583,6 +583,25 @@ func resolveSimMaxTxnOps(maxTxnOps int) int {
 // SimDisk handle. It is the in-memory analogue of the OS truncate the WAL writer
 // performs on a torn tail; off is the last durable frame boundary reported by
 // recovery.
+//
+// # Its relationship to SimDisk.ArmTornAppendAt, settled (rmp #2541)
+//
+// The two are NOT alternatives and cannot disagree, because they sit on opposite
+// sides of recovery:
+//
+//   - [SimDisk.ArmTornAppendAt] CREATES a torn tail. It is a fault the simulated
+//     crash produces, before recovery runs.
+//   - truncateSimWALAt REPAIRS one. It runs AFTER recovery has read the image and
+//     is passed recovery's own `replay.WALTailOffset` — never an offset the
+//     harness chose — so it models exactly what a real WAL writer does when it
+//     reopens a log whose tail was torn.
+//
+// #2541 was filed on the reading that this function "manufactures the tail out
+// of band", which was true of an earlier shape and is NOT true here: both of its
+// call sites pass an offset derived from recovery. Keeping it is therefore not a
+// scripted primitive duplicating an emergent one — removing it would leave new
+// frames being appended behind junk that every reader stops at, which is the
+// defect it was added for (auditor finding F1).
 func truncateSimWALAt(disk *SimDisk, path string, off int64) error {
 	h, err := disk.OpenFile(path, os.O_RDWR)
 	if err != nil {

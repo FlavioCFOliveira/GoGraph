@@ -205,8 +205,16 @@ type SimDisk struct {
 	// progress rather than on wall-clock time. It is mutated only under d.mu.
 	syncCount   int64
 	syncFaultAt int64
-	faultRate   float64
-	mu          sync.Mutex
+	// tornAppendArmed / tornAppendAt / tornAppendKeep implement a ONE-SHOT torn
+	// append: the tornAppendAt-th GROWING write on this disk is marked so that
+	// the next crash leaves only its first tornAppendKeep bytes intact, with the
+	// remainder garbled. appendCount counts growing writes since the arm was set.
+	tornAppendArmed bool
+	tornAppendAt    int64
+	tornAppendKeep  int64
+	appendCount     int64
+	faultRate       float64
+	mu              sync.Mutex
 	// syncFaultArmed / syncFaultAt implement a ONE-SHOT deterministic Sync
 	// fault: when armed, the syncFaultAt-th Sync call returns [ErrSimFault]
 	// exactly once (then disarms). Unlike the probabilistic faultRate path it
@@ -573,7 +581,17 @@ type simFile struct {
 	// [SimFileHandle.Sync] has placed on stable storage. It is meaningful only
 	// while durableData is nil; use [simFile.durableSize] rather than reading it
 	// directly. It advances ONLY when a Sync returns nil (rmp #2535).
-	durableLen    int64
+	durableLen int64
+	// tornTail* describe a PARTIAL trailing append that reached the platter
+	// without a completed fsync: the write-back was in flight when the power
+	// went. tornTailSet arms it; the record occupies [tornTailStart, tornTailEnd)
+	// and only its first tornTailKeep bytes landed intact. See
+	// [SimDisk.ArmTornAppendAt] for why this cannot emerge from the durable
+	// shadow alone.
+	tornTailSet   bool
+	tornTailStart int64
+	tornTailKeep  int64
+	tornTailEnd   int64
 	direntDurable bool
 }
 
@@ -683,13 +701,58 @@ func (f *simFile) markSyncedTo(n int64) {
 // pre-existing modelling choice — audit finding F13.)
 func (f *simFile) revertToDurable() int64 {
 	img := f.durableImage()
-	discarded := int64(len(f.data)) - int64(len(img))
 	buf := make([]byte, len(img))
 	copy(buf, img)
+
+	// A TORN APPEND survives the revert, because it describes bytes that reached
+	// the platter without a completed fsync — which is more than the durable
+	// image holds, not less. The record's first tornTailKeep bytes are the real
+	// payload; the remainder is GARBAGE rather than zeroes, because zero-fill is
+	// an unrealistically benign model of an interrupted write-back (ALICE,
+	// Pillai et al., OSDI '14) and a reader that only ever sees zeros can pass
+	// while mishandling the bytes a real platter would hold.
+	//
+	// It is applied only when it would EXTEND the durable image. A torn tail
+	// below the durable watermark would mean discarding bytes an fsync already
+	// hardened, which is not what an interrupted write-back does.
+	if f.tornTailSet {
+		if head := f.tornTailStart + f.tornTailKeep; head >= int64(len(buf)) &&
+			f.tornTailEnd <= int64(len(f.data)) {
+			out := make([]byte, f.tornTailEnd)
+			copy(out, f.data[:head])
+			fillGarbage(out[head:f.tornTailEnd], head)
+			buf = out
+		}
+		f.tornTailSet = false
+	}
+
+	discarded := int64(len(f.data)) - int64(len(buf))
 	f.data = buf
 	f.durableData = nil
 	f.durableLen = int64(len(buf))
 	return discarded
+}
+
+// fillGarbage writes deterministic non-zero bytes into dst, as the residue of an
+// interrupted write-back. off is the file offset dst starts at, so the pattern is
+// a pure function of position and a run is reproducible without drawing from the
+// disk's fault stream — the same rule [SimDisk.SetCapacity] follows.
+//
+// It never produces a zero byte: a zero is exactly the value a benign model would
+// leave, and the point of this residue is to be the value a benign model would
+// not.
+func fillGarbage(dst []byte, off int64) {
+	x := uint64(off)*0x9E3779B97F4A7C15 + 0xDEAD_BEEF_CAFE_F00D
+	for i := range dst {
+		x ^= x << 13
+		x ^= x >> 7
+		x ^= x << 17
+		b := byte(x >> 24)
+		if b == 0 {
+			b = 0xA5
+		}
+		dst[i] = b
+	}
 }
 
 // direntCrashSeedMix decorrelates the dirent crash-outcome sub-stream from the
@@ -1022,6 +1085,57 @@ func (d *SimDisk) ArmSyncFaultAt(at int64) {
 	}
 	d.syncFaultArmed = true
 	d.syncFaultAt = at
+}
+
+// ArmTornAppendAt schedules a ONE-SHOT TORN APPEND: the at-th growing write on
+// this disk (counting from the current append total) is marked so that the next
+// crash leaves only its first keepBytes intact, with the remainder of that
+// record filled with garbage. A non-positive at disarms.
+//
+// # Why this cannot emerge from the durable shadow
+//
+// A truncated trailing frame is the single most important crash state a
+// write-ahead log must survive, and before this the simulator could not produce
+// one by any route (audit finding F7, rmp #2541). The durable shadow added for
+// F1 does not deliver it: [SimDisk.CrashHost] reverts each file to
+// data[:durableLen], and durableLen moves only on a SUCCESSFUL Sync — so a crash
+// truncates a file at its last sync boundary, which for a WAL is a FRAME
+// boundary. That is a cleanly LOST trailing frame, never a partial one, and the
+// two exercise different branches of recovery: a reader that handles a clean
+// truncation can still mishandle a frame whose header declares one length and
+// whose body stops short.
+//
+// The short-count contract in [SimFileHandle.Write] makes a partial record
+// emergent under a full disk; this arm makes one reachable at any capacity and
+// at a chosen record, which is what a targeted recovery scenario needs.
+//
+// The kept bytes are the real payload and the remainder is GARBAGE rather than
+// zeroes, per the ALICE finding that zero-fill is an unrealistically benign
+// model of an interrupted write-back. It draws nothing from the seed, so it
+// never perturbs the reproducible fault stream.
+func (d *SimDisk) ArmTornAppendAt(at, keepBytes int64) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.appendCount = 0
+	if at <= 0 {
+		d.tornAppendArmed = false
+		return
+	}
+	if keepBytes < 0 {
+		keepBytes = 0
+	}
+	d.tornAppendArmed = true
+	d.tornAppendAt = at
+	d.tornAppendKeep = keepBytes
+}
+
+// AppendCount returns the number of growing writes performed across every handle
+// of this disk since the last [SimDisk.ArmTornAppendAt] reset (or since
+// construction). A scenario reads it to choose which append to tear.
+func (d *SimDisk) AppendCount() int64 {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.appendCount
 }
 
 // SyncCount returns the number of [SimFileHandle.Sync] calls performed across
@@ -2737,12 +2851,39 @@ func (h *SimFileHandle) Write(p []byte) (int, error) {
 
 	end := h.pos + int64(len(p))
 	oldLen := int64(len(h.file.data))
+	partial := false
 	if end > oldLen {
-		// Disk full: in eager mode a growing write that would breach the budget
-		// returns ENOSPC and grows nothing (no partial write), matching real
-		// allocate-on-write and the internal/testfs ReturnENOSPC contract.
+		// Disk full. A partially-satisfiable write TRANSFERS THE BYTES THAT FIT
+		// and reports ENOSPC alongside the short count — it does not refuse
+		// wholesale.
+		//
+		// This matters because returning (0, ENOSPC) meant a partial record could
+		// never exist, which made a torn trailing WAL frame — the single most
+		// important crash state a write-ahead log must survive — unreachable by
+		// any route (rmp #2541, audit finding F7).
+		//
+		// The SHORT COUNT WITH A NON-NIL ERROR is the exact shape os.File.Write
+		// produces, and the shape is not optional: SimFileHandle is used as an
+		// io.Writer, and io.Writer's contract is that "Write must return a
+		// non-nil error if it returns n < len(p)". The task prescribed returning
+		// the count with a NIL error, on the POSIX write(2) reading; that was
+		// tried and REFUTED by a real caller in this tree — the CSV export path
+		// in the io-roundtrip-fault scenario detected the short write and
+		// reported "short write, want a typed ENOSPC error". POSIX describes the
+		// syscall; os.File is the layer that maps it to Go, and it attaches
+		// io.ErrShortWrite or the wrapped errno to every short count
+		// (os/file.go, File.Write).
+		//
+		// The partial record is emergent either way, because the bytes that fit
+		// are in the file before the error is returned.
 		if h.disk.wouldExceedLocked(oldLen, end) {
-			return 0, enospc("write", h.path)
+			fits := h.disk.bytesThatFitLocked(oldLen, h.pos)
+			if fits <= 0 {
+				return 0, enospc("write", h.path)
+			}
+			partial = true
+			p = p[:fits]
+			end = h.pos + fits
 		}
 		grown := make([]byte, end)
 		copy(grown, h.file.data)
@@ -2768,8 +2909,53 @@ func (h *SimFileHandle) Write(p []byte) (int, error) {
 			h.corruptSector(sec)
 		}
 	}
+	// Count growing writes and, when this is the armed one, mark the tail as
+	// torn so the next crash leaves it partial. The mark is taken AFTER the
+	// bytes are in place, so the kept prefix is the real payload.
+	if end > oldLen {
+		h.disk.appendCount++
+		if h.disk.tornAppendArmed && h.disk.appendCount == h.disk.tornAppendAt {
+			h.disk.tornAppendArmed = false
+			keep := h.disk.tornAppendKeep
+			if keep < 0 {
+				keep = 0
+			}
+			if n := end - h.pos; keep > n {
+				keep = n
+			}
+			h.file.tornTailSet = true
+			h.file.tornTailStart = h.pos
+			h.file.tornTailKeep = keep
+			h.file.tornTailEnd = end
+		}
+	}
+
 	h.pos = end
+	if partial {
+		return len(p), enospc("write", h.path)
+	}
 	return len(p), nil
+}
+
+// bytesThatFitLocked returns how many bytes a write starting at pos can still
+// transfer before the disk budget is reached, given the file's current length.
+// It is never negative. The caller holds disk.mu.
+//
+// A write may start BEYOND the current end of file (a seek past the end), in
+// which case the hole it creates counts against the budget too, exactly as the
+// allocation would on a real filesystem.
+func (d *SimDisk) bytesThatFitLocked(oldLen, pos int64) int64 {
+	if d.capacityBytes <= 0 || d.enospcOnSync {
+		return 1<<62 - 1
+	}
+	// The write consumes budget only for the bytes it adds beyond oldLen.
+	headroom := d.capacityBytes - (d.totalBytesLocked() - oldLen)
+	// headroom is the largest length this file may reach; the write may fill up
+	// to that, starting from pos.
+	if fits := headroom - pos; fits > 0 {
+		return fits
+	}
+	return 0
 }
 
 // corruptSector flips the first byte of the given sector deterministically.
