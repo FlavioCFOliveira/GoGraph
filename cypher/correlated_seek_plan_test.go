@@ -77,19 +77,30 @@ func namesOf(t *testing.T, eng *cypher.Engine, q string, params map[string]any) 
 // TestBoundKeySeek_ExplainAccessPath is acceptance criterion (1) of task #2182: a
 // key bound by WITH reaches the index instead of a full label scan.
 //
-// The UNWIND case is asserted to STILL scan. That is not the finished state — it
-// is the boundary of this task. Serving a key SET needs one index probe per
-// distinct key with the postings OR-ed into a single bitmap, plus a cost gate,
-// which is task #2183. Asserting the current verdict here makes #2183's arrival
-// visible as a change to this test rather than as a silent behavioural drift.
+// The UNWIND case was asserted to STILL scan, as the boundary of #2182: serving a
+// key SET needs one index probe per distinct key with the postings OR-ed into a
+// single bitmap, plus a cost gate, which was task #2183. That arrival is now
+// visible here, exactly as intended — the UNWIND case plans a NodeByIndexSeekSet.
+// It became visible when #2367 lowered rangeSeekMinLabelPopulation to 64 and this
+// 200-node fixture rose above the floor.
+//
+// The operator check is EXACT rather than a substring, which is what the arrival
+// exposed: `strings.Contains(plan, "NodeByIndexSeek")` is also satisfied by
+// "NodeByIndexSeekSet", so the UNWIND case failed reporting a single-key seek that
+// was not there. The two are separate access paths and the table distinguishes
+// them.
 func TestBoundKeySeek_ExplainAccessPath(t *testing.T) {
 	eng := boundSeekFixture(t)
 	params := map[string]expr.Value{"p": expr.StringValue("name-7")}
 
 	cases := []struct {
-		name     string
-		query    string
-		wantSeek bool
+		name  string
+		query string
+		// wantSeek is the SINGLE-KEY NodeByIndexSeek; wantSeekSet is the key-set
+		// NodeByIndexSeekSet (#2183). They are different operators and a plan
+		// carrying one must not be reported as carrying the other.
+		wantSeek    bool
+		wantSeekSet bool
 	}{
 		{
 			name:     "literal key seeks (pre-existing behaviour, the control)",
@@ -112,9 +123,10 @@ func TestBoundKeySeek_ExplainAccessPath(t *testing.T) {
 			wantSeek: true,
 		},
 		{
-			name:     "UNWIND-bound key still scans; the key SET is task #2183",
-			query:    `UNWIND ['name-7', 'name-9'] AS k MATCH (a:P {name: k}) RETURN a.name AS nm`,
-			wantSeek: false,
+			name:        "UNWIND-bound key takes the key-SET path (#2183), not the single-key seek",
+			query:       `UNWIND ['name-7', 'name-9'] AS k MATCH (a:P {name: k}) RETURN a.name AS nm`,
+			wantSeek:    false,
+			wantSeekSet: true,
 		},
 		{
 			name:     "data-bound key still scans: not row-invariant, must not be pushed",
@@ -129,8 +141,12 @@ func TestBoundKeySeek_ExplainAccessPath(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Explain: %v", err)
 			}
-			if got := strings.Contains(plan, "NodeByIndexSeek"); got != tc.wantSeek {
+			if got := planHasSingleKeySeek(plan); got != tc.wantSeek {
 				t.Errorf("NodeByIndexSeek present = %v, want %v\nplan:\n%s", got, tc.wantSeek, plan)
+			}
+			if got := strings.Contains(plan, "NodeByIndexSeekSet"); got != tc.wantSeekSet {
+				t.Errorf("NodeByIndexSeekSet present = %v, want %v\nplan:\n%s",
+					got, tc.wantSeekSet, plan)
 			}
 		})
 	}
@@ -370,5 +386,28 @@ func TestBoundKeySeek_RewriteIsIdempotent(t *testing.T) {
 		if again != first {
 			t.Fatalf("plan changed on call %d\nfirst:\n%s\nagain:\n%s", i+2, first, again)
 		}
+	}
+}
+
+// planHasSingleKeySeek reports whether plan contains the SINGLE-KEY
+// NodeByIndexSeek operator, and not merely a name it is a prefix of.
+//
+// "NodeByIndexSeekSet" contains "NodeByIndexSeek", so a substring test cannot
+// tell the two apart — and once the key-set path started firing on this fixture,
+// that ambiguity reported a single-key seek in a plan that had none. The operator
+// name is followed by a space, a newline or the end of the line whenever it is
+// really the single-key one.
+func planHasSingleKeySeek(plan string) bool {
+	const op = "NodeByIndexSeek"
+	for i := 0; ; {
+		j := strings.Index(plan[i:], op)
+		if j < 0 {
+			return false
+		}
+		end := i + j + len(op)
+		if end == len(plan) || plan[end] == ' ' || plan[end] == '\n' || plan[end] == '[' {
+			return true
+		}
+		i = end
 	}
 }

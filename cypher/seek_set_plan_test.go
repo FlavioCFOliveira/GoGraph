@@ -17,7 +17,7 @@ import (
 // least 1024 nodes, and the merged posting count must stay within 10 % of the
 // label population.
 const (
-	seekSetPopulation = 4000 // > 1024, so the population floor is cleared
+	seekSetPopulation = 4000 // >> rangeSeekMinLabelPopulation, so the floor is cleared
 	seekSetBudget     = 400  // 10 % of the population
 )
 
@@ -257,14 +257,23 @@ func TestSeekSet_SizeGateDeclinesBeforeExtracting(t *testing.T) {
 }
 
 // TestSeekSet_PopulationFloor asserts the other half of the gate: below the
-// population floor no seek is attempted, because a scan of a few hundred nodes is
-// a few microseconds and an index descent cannot win.
+// population floor no seek is attempted, so a trivial label never pays an exact
+// count to decide something it cannot win.
+//
+// The fixture was 500 nodes, chosen under the floor when the floor was 1024, and
+// its premise was that "a scan of a few hundred nodes is a few microseconds and an
+// index descent cannot win". MEASURED, that premise is false by a wide margin on
+// this very shape: at 500 nodes the scan cost 6 484 allocations against 164 for
+// the seek set, and at 1023 nodes 13 239 against 168 — 39.5x and 78.8x. #2367
+// lowered the floor to 64 on that evidence, so the fixture moved below the new
+// floor rather than the assertion being relaxed. What the floor buys is not speed
+// at 500 nodes; it is not taking a count for a label too small to win.
 func TestSeekSet_PopulationFloor(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
 	eng := cypher.NewEngine(g)
 	for _, q := range []string{
-		// 500 nodes: under the 1024 floor.
-		`UNWIND range(1, 500) AS i CREATE (:S {name: 'n-' + toString(i)})`,
+		// Under rangeSeekMinLabelPopulation, so the floor is what declines the seek.
+		`UNWIND range(1, 32) AS i CREATE (:S {name: 'n-' + toString(i)})`,
 		`CREATE INDEX s_name FOR (n:S) ON (n.name)`,
 	} {
 		res, err := eng.RunAny(context.Background(), q, nil)
@@ -281,7 +290,7 @@ func TestSeekSet_PopulationFloor(t *testing.T) {
 		t.Fatalf("Explain: %v", err)
 	}
 	if strings.Contains(plan, "NodeByIndexSeekSet") {
-		t.Errorf("a 500-node label is below the population floor; want a scan\n%s", plan)
+		t.Errorf("a 32-node label is below the population floor; want a scan\n%s", plan)
 	}
 }
 

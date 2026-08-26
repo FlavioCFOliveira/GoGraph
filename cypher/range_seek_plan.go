@@ -65,10 +65,38 @@ const (
 	// expert, #1505).
 	rangeSeekMaxSelectivity = 0.10
 
-	// rangeSeekMinLabelPopulation is the minimum label population below which
-	// the engine always scans: a sub-1024-node label scan is a few microseconds
-	// on a warm cache and the index-descent + bitmap overhead cannot beat it.
-	rangeSeekMinLabelPopulation = 1024
+	// rangeSeekMinLabelPopulation is the minimum label population below which the
+	// engine always scans, so a trivial label never pays for a count that cannot
+	// change the verdict.
+	//
+	// It was 1024, on the premise that "a sub-1024-node label scan is a few
+	// microseconds on a warm cache and the index-descent + bitmap overhead cannot
+	// beat it". MEASURED at its own boundary, that premise is false by more than an
+	// order of magnitude: `MATCH (n:Account {id: $id}) RETURN n.v` over a label of
+	// 1023 nodes cost 68.7 us on the scan against 5.5 us for the seek one node
+	// higher — a 12.6x cliff at a constant, reproduced ascending AND descending so
+	// it is not an artefact of warm-up (rmp #2367). The scan is linear in the label
+	// population and the seek is flat at ~5 us, so the floor was suppressing the
+	// index across the whole range where it wins.
+	//
+	// 64 is where the measurement stops being able to tell the two apart. From 128
+	// nodes upward the seek is decisively cheaper; below ~128 the per-operation cost
+	// is dominated by fixed statement overhead and the two arms differ by less than
+	// the run-to-run spread (8 nodes measured 8.9 us one way and 13.0 us the other),
+	// so nothing is claimed there. Keeping a floor at all is what stops a trivial
+	// label from paying an exact RangeCount to decide something it cannot win —
+	// the same "a gate must cost less than the decision it informs" rule that #2380
+	// and #2392 imposed on the parallel-scan gate.
+	//
+	// Neither reference engine has an analogue of this floor, which is why it is a
+	// floor and not a rule. PostgreSQL's cost_seqscan/cost_index
+	// (src/backend/optimizer/path/costsize.c) carry no minimum table size — the only
+	// suppression is disable_cost, added when an enable_* GUC is off — and Neo4j's
+	// NodeIndexLeafPlanner.findIndexMatches yields an index match for every
+	// compatible predicate with no population gate anywhere in the file. Both leave
+	// the choice to a cost model. GoGraph has none, so this constant is the whole
+	// decision, and it is set from measurement rather than from intuition.
+	rangeSeekMinLabelPopulation = 64
 )
 
 // boundStringRange is satisfied by a bound string btree index: it exposes the
