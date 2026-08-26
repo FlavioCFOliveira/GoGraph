@@ -88,10 +88,26 @@ var ErrPublishedNotDurable = errors.New("csrfile: published but durability unpro
 // platforms without a directory-fsync primitive (Windows); see
 // [parentDirFsync].
 //
-// W must be one of the supported weight kinds (int32/uint32/float32
-// for 4-byte; int/uint/int64/uint64/float64/uintptr for 8-byte) or
-// struct{} for unweighted graphs. Unsupported types produce
-// [ErrUnknownWeightKind].
+// W must be one of the supported weight kinds, which are the same set
+// store/snapshot persists so a weight type accepted by one durable path is
+// accepted by the other (rmp #2529):
+//
+//	struct{}                       unweighted, 0 bytes
+//	int8, uint8, bool              1 byte
+//	int16, uint16                  2 bytes
+//	int32, uint32, float32         4 bytes
+//	int, uint, uintptr             8 bytes — see the note below
+//	int64, uint64, float64         8 bytes
+//
+// Any other type produces an error wrapping [ErrUnknownWeightKind] and NAMING
+// the type, so the limit is discoverable without reading this list.
+//
+// int, uint and uintptr are PLATFORM-DEPENDENT widths, persisted at 8 bytes
+// deliberately. They are 8 bytes on every platform GoGraph builds for today and
+// store/snapshot already made this choice, so the two formats agree. The cost is
+// stated rather than hidden: such a file, written on a 64-bit build, would be
+// misread by a 32-bit one. Use an explicitly-sized weight type for a file that
+// must cross word sizes.
 func WriteToFile[W any](path string, c *csr.CSR[W]) (Header, error) {
 	return writeToFileWith(osFS{}, path, c)
 }
@@ -228,7 +244,10 @@ func writeSections[W any](w io.Writer, h hash.Hash32, header Header, verts []uin
 		if err := writePadding(w, h, header.WeightsOffset-wrote); err != nil {
 			return err
 		}
-		if err := binary.Write(w, binary.LittleEndian, weights); err != nil {
+		// The raw view, not binary.Write, which refuses int/uint/uintptr/bool
+		// (rmp #2529). Byte-identical on a little-endian host for every kind that
+		// already worked.
+		if err := streamLE(w, weightsAsBytes(weights, header.Weight.Size())); err != nil {
 			return err
 		}
 		wrote = header.WeightsOffset + uint64(header.Weight.Size())*uint64(len(edges))
@@ -257,14 +276,25 @@ func weightKindOf[W any]() (WeightKind, error) {
 	switch any(zero).(type) {
 	case struct{}:
 		return WeightAbsent, nil
+	case int8, uint8, bool:
+		return WeightUint8, nil
+	case int16, uint16:
+		return WeightUint16, nil
 	case int32, uint32:
 		return WeightUint32, nil
 	case float32:
 		return WeightFloat32, nil
 	case int, uint, int64, uint64, uintptr:
+		// PLATFORM-DEPENDENT WIDTHS, persisted at 8 bytes DELIBERATELY (rmp
+		// #2529). int, uint and uintptr are 8 bytes on every platform GoGraph
+		// builds for today, and store/snapshot already made the same choice, so
+		// the two durable paths accept the same set. The cost is stated rather
+		// than hidden: a csrfile carrying these weights, written on a 64-bit
+		// build, would be misread by a 32-bit one. A caller who needs a file that
+		// crosses word sizes should use an explicitly-sized weight type.
 		return WeightUint64, nil
 	case float64:
 		return WeightFloat64, nil
 	}
-	return WeightAbsent, ErrUnknownWeightKind
+	return WeightAbsent, fmt.Errorf("%w: %T", ErrUnknownWeightKind, zero)
 }
