@@ -44,11 +44,62 @@ type SimReport struct {
 	Seed        uint64
 	FailedTick  int64
 	Mode        ExecMode
+	// Repro is an explicit reproduction instruction for a run whose state is
+	// NOT determined by the seed alone — typically a scenario driven from a test
+	// with a configuration that has no command-line form. When it is set,
+	// [SimReport.String] prints it verbatim instead of synthesising a command.
+	//
+	// It exists because the synthesised line was actively misleading: see
+	// [SimReport.reproLine].
+	Repro string
+}
+
+// reproLine returns the "Reproduce with:" body, or an explanation of why no
+// command can be given.
+//
+// # The line used to be a lie, and a green one (rmp #2621)
+//
+// It was always `go run ./cmd/sim <seed>`, unconditionally. That command runs
+// cmd/sim's DEFAULT workload, so for any failure raised from a NAMED scenario it
+// re-ran something else entirely — and reported SUCCESS. MEASURED on the #2620
+// soak failure: the report said `Reproduce with: go run ./cmd/sim 2516635845`
+// and that command printed "Simulation passed. Seed: 2516635845, Ticks: 100000".
+//
+// A reproduction that passes is the most convincing lie an instrument can tell,
+// because it is evidence for the wrong conclusion — that the failure was a
+// flake. A report with NO reproduction line is strictly better.
+//
+// Three cases, and the line now distinguishes them:
+//
+//   - no scenario name: the default workload, which the seed does determine.
+//     The original line was correct here and keeps it.
+//   - a scenario in the catalogue: reproducible, but only with the selector the
+//     old line omitted. cmd/sim has -scenario for exactly this.
+//   - anything else, or an explicit Repro: the run carries state the command
+//     line cannot express, so the caller supplies the instruction or the report
+//     says plainly that it cannot be reproduced from the seed.
+func (r *SimReport) reproLine() string {
+	if r.Repro != "" {
+		return r.Repro
+	}
+	if r.Scenario == "" {
+		return fmt.Sprintf("go run ./cmd/sim %d", r.Seed)
+	}
+	if reg, err := DefaultRegistry(); err == nil {
+		if _, ok := reg.Lookup(r.Scenario); ok {
+			return fmt.Sprintf("go run ./cmd/sim -scenario=%s %d", r.Scenario, r.Seed)
+		}
+	}
+	return fmt.Sprintf("NOT REPRODUCIBLE FROM THE SEED ALONE: scenario %q is not in the "+
+		"cmd/sim catalogue, so it was driven from a test with a configuration the command line "+
+		"cannot express. Re-run that test. (No command is printed rather than one that would "+
+		"run a different workload and report success — rmp #2621.)", r.Scenario)
 }
 
 // String renders a human-readable failure report. It always includes a
-// "Reproduce with:" line carrying the seed so a failure can be replayed
-// verbatim.
+// "Reproduce with:" line, which either reproduces the failure or says why it
+// cannot — never a command that runs a different workload (see
+// [SimReport.reproLine]).
 //
 // IT CAN NEVER RENDER EMPTY, and a report that carries no violation says so
 // LOUDLY rather than rendering a bare header (rmp #2347). A non-nil report
@@ -76,7 +127,7 @@ func (r *SimReport) String() string {
 			fmt.Fprintf(&b, "    - %s\n", v.String())
 		}
 	}
-	fmt.Fprintf(&b, "Reproduce with: go run ./cmd/sim %d\n", r.Seed)
+	fmt.Fprintf(&b, "Reproduce with: %s\n", r.reproLine())
 	if r.Shrunk != nil {
 		fmt.Fprintf(&b, "Minimal reproducer: %d ops (shrunk from %d, ratio %.1fx, %d replay iterations)\n",
 			r.Shrunk.MinimalLen, r.Shrunk.OriginalLen, r.Shrunk.Ratio(), r.Shrunk.Iterations)
