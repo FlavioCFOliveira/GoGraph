@@ -559,13 +559,14 @@ func TestSimDisk_CorruptRangeSurvivesAHostCrash(t *testing.T) {
 	}
 }
 
-// TestSimDisk_TruncationRemainsInstantlyDurable pins the boundary of this change.
-// The durable shadow makes an unsynced TRUNCATION expressible for the first time,
-// but modelling it is audit finding F8 (rmp #2542), not this task. Until that
-// lands a shrink lowers the durable image with the live one, and this gate says
-// so out loud so the behaviour is a recorded decision rather than an oversight —
-// and so #2542 has a test that must be updated when it changes the model.
-func TestSimDisk_TruncationRemainsInstantlyDurable(t *testing.T) {
+// TestSimDisk_UnsyncedTruncationDoesNotSurviveACrash is the F8 contract (rmp
+// #2542): a truncation is a metadata-and-data change that does not reach stable
+// storage until an fsync, so a crash in between restores the longer prior image.
+//
+// This test used to assert the OPPOSITE and named #2542 as the place it would
+// change. It is inverted rather than deleted, because the boundary it marks is
+// still worth pinning — it is simply on the other side of it now.
+func TestSimDisk_UnsyncedTruncationDoesNotSurviveACrash(t *testing.T) {
 	d := NewSimDisk(NewSeed(0x2535_08), 0)
 
 	h, err := d.OpenFile("wal", os.O_CREATE|os.O_WRONLY|os.O_APPEND)
@@ -590,24 +591,77 @@ func TestSimDisk_TruncationRemainsInstantlyDurable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
-	t.Logf("watermark-after-truncate=%d after-crash=%q (F8/rmp #2542 will make this "+
-		"restore the longer prior image)", watermark, after)
+	t.Logf("watermark-after-truncate=%d after-crash=%q", watermark, after)
 
-	// (i) UNCONDITIONAL verdict gate for the CURRENT, deliberate model.
+	// A truncation is a metadata-and-data change that does not reach stable
+	// storage until an fsync, so a crash in between restores the LONGER prior
+	// image (#2542). This test pinned the opposite until that landed, and named
+	// #2542 as the place it would change.
+	const prior = "LONG-PREVIOUS-CONTENT"
+	if string(after) != prior {
+		t.Errorf("after truncate+crash the file is %q (%d bytes), want the longer prior image "+
+			"%q (%d bytes): the truncation was never fsynced, so it did not happen",
+			after, len(after), prior, len(prior))
+	}
+	if watermark != int64(len(prior)) {
+		t.Errorf("durable watermark is %d after an unsynced truncation to 4, want %d — the "+
+			"durable image legitimately EXCEEDS the live length here, because the platter still "+
+			"holds the previous generation's bytes", watermark, len(prior))
+	}
+}
+
+// TestSimDisk_TruncationBecomesDurableOnTheNextSync is the other half: once the
+// truncation is fsynced it is real, so the crash keeps the SHORT file. Without
+// this arm the test above is satisfied by a model in which a truncation never
+// becomes durable at all.
+func TestSimDisk_TruncationBecomesDurableOnTheNextSync(t *testing.T) {
+	d := NewSimDisk(NewSeed(0x2542_01), 0)
+
+	h, err := d.OpenFile("wal", os.O_CREATE|os.O_WRONLY|os.O_APPEND)
+	if err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+	if _, err := h.Write([]byte("LONG-PREVIOUS-CONTENT")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := h.Sync(); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if err := h.Truncate(4); err != nil {
+		t.Fatalf("Truncate: %v", err)
+	}
+	// THIS is what makes the truncation real.
+	if err := h.Sync(); err != nil {
+		t.Fatalf("Sync after truncate: %v", err)
+	}
+	watermark, _ := d.DurableSize("wal")
+	d.Crash()
+	_ = h.Close()
+
+	after, err := d.ReadFile("wal")
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
 	if len(after) != 4 {
-		t.Errorf("after truncate+crash the file is %d bytes, want 4; a truncation is still "+
-			"modelled as instantly durable (audit F8 / rmp #2542 is where that changes)", len(after))
+		t.Errorf("after truncate+SYNC+crash the file is %d bytes (%q), want 4: an fsync flushes "+
+			"metadata, so it is what makes a truncation durable", len(after), after)
 	}
 	if watermark != 4 {
-		t.Errorf("durable watermark is %d after a truncation to 4, want 4 — the watermark must "+
-			"never exceed the live length or the durable image reads past the buffer", watermark)
+		t.Errorf("durable watermark is %d after a SYNCED truncation to 4, want 4", watermark)
 	}
 }
 
 // TestSimDisk_DurableWatermarkNeverExceedsTheLiveLength is a cheap invariant
-// sweep over the operations that can shorten a file. A watermark above the live
-// length would make durableImage slice past the buffer, so this guards the
-// representation itself rather than any one scenario.
+// sweep over the operations that can shorten a file, run with the shortening
+// FSYNCED so the truncation is durable.
+//
+// The invariant it guards is representational: while the durable image is the
+// watermark form (data[:durableLen]) a watermark above the live length would
+// slice past the buffer. An UNSYNCED truncation deliberately breaks that
+// relationship — the platter still holds the longer previous generation, which
+// is the whole point of #2542 — and the representation handles it by pinning an
+// explicit durable image instead of a watermark. So this sweep syncs, which is
+// what makes the watermark form the live representation again.
 func TestSimDisk_DurableWatermarkNeverExceedsTheLiveLength(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -647,6 +701,10 @@ func TestSimDisk_DurableWatermarkNeverExceedsTheLiveLength(t *testing.T) {
 				t.Fatalf("Sync: %v", err)
 			}
 			tc.shrink(t, d, h)
+			// Make the shortening DURABLE, so the watermark form applies. Without
+			// this the durable image is the longer prior one by design (#2542) and
+			// the invariant below would be measuring the wrong model.
+			syncPathForTest(t, d, "wal")
 			watermark, ok := d.DurableSize("wal")
 			live, err := d.ReadFile("wal")
 			if err != nil {
@@ -815,4 +873,148 @@ func TestWALPhantomCommit_CrashInsideTheLeaderFsyncLosesTheFlushedSuffix(t *test
 	// Tear the writer down without letting its Close fsync anything back: the
 	// process it belonged to is dead.
 	_ = w.Close()
+}
+
+// syncPathForTest fsyncs the file at path through a fresh handle, so a test can
+// make a change durable without holding on to the handle that made it.
+func syncPathForTest(t *testing.T, d *SimDisk, path string) {
+	t.Helper()
+	sh, err := d.OpenFile(path, os.O_WRONLY)
+	if err != nil {
+		t.Fatalf("open %s to fsync it: %v", path, err)
+	}
+	if err := sh.Sync(); err != nil {
+		t.Fatalf("Sync %s: %v", path, err)
+	}
+	if err := sh.Close(); err != nil {
+		t.Fatalf("Close %s: %v", path, err)
+	}
+}
+
+// TestSimDisk_UnsyncedTruncationAtEverySite is acceptance criterion 1: the same
+// outcome at all THREE truncation sites, which is what proves they share one
+// mechanism rather than three.
+//
+// The staging-file creators in this codebase all open with O_TRUNC
+// (store/snapshot/safe_create.go, store/csrfile/fs.go) as does the WAL suffix
+// temporary (store/wal/writer.go), so "the .tmp I truncated still holds a
+// previous generation's bytes" is a state this module can genuinely reach.
+func TestSimDisk_UnsyncedTruncationAtEverySite(t *testing.T) {
+	const prior = "PREVIOUS-GENERATION-BYTES"
+
+	for _, tc := range []struct {
+		name  string
+		trunc func(t *testing.T, d *SimDisk, h *SimFileHandle)
+	}{
+		{"handle-truncate", func(t *testing.T, _ *SimDisk, h *SimFileHandle) {
+			if err := h.Truncate(5); err != nil {
+				t.Fatalf("Truncate: %v", err)
+			}
+		}},
+		{"truncate-path", func(t *testing.T, d *SimDisk, _ *SimFileHandle) {
+			if err := d.TruncatePath("stage.tmp", 5); err != nil {
+				t.Fatalf("TruncatePath: %v", err)
+			}
+		}},
+		{"reopen-o-trunc", func(t *testing.T, d *SimDisk, _ *SimFileHandle) {
+			h2, err := d.OpenFile("stage.tmp", os.O_WRONLY|os.O_TRUNC)
+			if err != nil {
+				t.Fatalf("OpenFile O_TRUNC: %v", err)
+			}
+			if _, err := h2.Write([]byte("NEW")); err != nil {
+				t.Fatalf("Write: %v", err)
+			}
+			if err := h2.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := NewSimDisk(NewSeed(0x2542_02), 0)
+			h, err := d.OpenFile("stage.tmp", os.O_CREATE|os.O_RDWR|os.O_APPEND)
+			if err != nil {
+				t.Fatalf("OpenFile: %v", err)
+			}
+			if _, err := h.Write([]byte(prior)); err != nil {
+				t.Fatalf("Write: %v", err)
+			}
+			if err := h.Sync(); err != nil {
+				t.Fatalf("Sync: %v", err)
+			}
+
+			tc.trunc(t, d, h)
+			live, err := d.ReadFile("stage.tmp")
+			if err != nil {
+				t.Fatalf("ReadFile (live): %v", err)
+			}
+			// Read-your-writes: the truncation is visible to this process at once.
+			if len(live) >= len(prior) {
+				t.Fatalf("the live file is %d bytes after truncating a %d-byte file; the "+
+					"truncation must be visible immediately", len(live), len(prior))
+			}
+
+			d.Crash()
+			_ = h.Close()
+
+			after, err := d.ReadFile("stage.tmp")
+			if err != nil {
+				t.Fatalf("ReadFile (after crash): %v", err)
+			}
+			if string(after) != prior {
+				t.Errorf("after an UNSYNCED truncation and a crash the file is %q (%d bytes), "+
+					"want the longer prior image %q (%d bytes). All three truncation sites go "+
+					"through one rule, so a difference here means they have drifted (#2542)",
+					after, len(after), prior, len(prior))
+			}
+		})
+	}
+}
+
+// TestSimDisk_TruncatePathDropsFaultMarks settles F13. TruncatePath used to keep
+// the fault marks for sectors past the new end of file while the handle Truncate
+// dropped them, with no reason recorded for the difference.
+//
+// Keeping them is wrong: a fault mark names a SECTOR OF THIS FILE, and a sector
+// past the end of file does not exist. A later grow that happens to place bytes
+// there would be corrupted by a fault that never touched them.
+func TestSimDisk_TruncatePathDropsFaultMarks(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		trunc func(t *testing.T, d *SimDisk, h *SimFileHandle)
+	}{
+		{"handle-truncate", func(t *testing.T, _ *SimDisk, h *SimFileHandle) {
+			if err := h.Truncate(0); err != nil {
+				t.Fatalf("Truncate: %v", err)
+			}
+		}},
+		{"truncate-path", func(t *testing.T, d *SimDisk, _ *SimFileHandle) {
+			if err := d.TruncatePath("f", 0); err != nil {
+				t.Fatalf("TruncatePath: %v", err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// faultRate 1.0: every written sector is marked.
+			d := NewSimDisk(NewSeed(0x2542_03), 1.0)
+			h, err := d.OpenFile("f", os.O_CREATE|os.O_RDWR|os.O_APPEND)
+			if err != nil {
+				t.Fatalf("OpenFile: %v", err)
+			}
+			if _, err := h.Write(bytes.Repeat([]byte{'x'}, 3*sectorSize)); err != nil {
+				t.Fatalf("Write: %v", err)
+			}
+			if n := d.FaultedSectorCount("f"); n == 0 {
+				t.Fatalf("no sector was faulted, so this test cannot observe the marks being " +
+					"dropped")
+			}
+
+			tc.trunc(t, d, h)
+
+			if n := d.FaultedSectorCount("f"); n != 0 {
+				t.Errorf("%d fault marks survive a truncation to zero. A mark names a sector of "+
+					"this file, and no sector exists past the end of it; keeping the mark would "+
+					"corrupt bytes a later grow places there (F13, #2542)", n)
+			}
+		})
+	}
 }

@@ -119,6 +119,14 @@ var _ walFile = (*SimFileHandle)(nil)
 //	                EXISTING directory still changes nothing, because it creates
 //	                nothing and needs no fsync.
 //
+//	Truncation      MODELLED since rmp #2542. O_TRUNC, the handle Truncate and
+//	                TruncatePath all shorten the VISIBLE data at once and the
+//	                DURABLE image only at the next successful fsync, so a crash
+//	                in between restores the longer prior generation. All three go
+//	                through [simFile.truncatePendingTo], so they cannot drift.
+//	                They also drop the fault marks for sectors past the new end
+//	                of file uniformly (F13); TruncatePath used to keep them.
+//
 //	Sync failure    MODELLED since rmp #2540. A failed fsync freezes the file's
 //	                durable prefix for good: every later Sync RETURNS SUCCESS and
 //	                advances nothing, because a failed write-back marks the pages
@@ -602,6 +610,11 @@ type simFile struct {
 	// and only its first tornTailKeep bytes landed intact. See
 	// [SimDisk.ArmTornAppendAt] for why this cannot emerge from the durable
 	// shadow alone.
+	// truncPending / truncPendingTo record a truncation that is VISIBLE but not
+	// yet DURABLE: the durable image still holds the longer prior content until
+	// the next successful Sync. See [simFile.truncatePendingTo].
+	truncPending   bool
+	truncPendingTo int64
 	// writebackLost records that an fsync on this file FAILED. Once set, the
 	// durable prefix can never advance again: see [SimFileHandle.Sync].
 	writebackLost bool
@@ -653,14 +666,42 @@ func (f *simFile) preserveDurableBelow(off int64) {
 	f.durableData = buf
 }
 
-// truncateDurableTo shortens the durable image to size.
+// truncatePendingTo records a truncation to size that is VISIBLE IMMEDIATELY
+// but NOT YET DURABLE.
 //
-// It models a truncation as INSTANTLY durable, which is the pre-existing
-// behaviour of [SimFileHandle.Truncate], [SimDisk.TruncatePath] and O_TRUNC and
-// is deliberately left unchanged here: making a truncation itself survivable —
-// so that a crash restores the longer prior image — is audit finding F8, filed
-// separately as rmp #2542. This is the single seam that change needs.
-func (f *simFile) truncateDurableTo(size int64) {
+// A truncation is a metadata-and-data change like any other: it does not reach
+// stable storage until an fsync, so a crash in between legitimately restores the
+// longer prior image — "the .tmp I truncated still holds a previous generation's
+// bytes, and my new shorter content sits in front of them". That state was
+// unreachable while all three truncation sites shortened the durable image on
+// the spot (audit finding F8, rmp #2542), and it is not hypothetical for this
+// codebase: both staging-file creators open with O_TRUNC
+// (store/snapshot/safe_create.go, store/csrfile/fs.go), as does the WAL suffix
+// temporary (store/wal/writer.go). A reader that trusted a length header over
+// the real file length would be exposed in production and could not be caught
+// here.
+//
+// The caller shortens f.data itself, so read-your-writes is preserved: the
+// truncation is visible to this process at once. Only the DURABLE image lags,
+// and [simFile.markSyncedTo] applies the pending truncation on the next
+// successful fsync.
+//
+// All three sites — O_TRUNC, [SimFileHandle.Truncate] and [SimDisk.TruncatePath]
+// — go through here, which is the point: three sites with one rule cannot drift.
+func (f *simFile) truncatePendingTo(size int64) {
+	// Pin the longer image BEFORE the caller shortens f.data, or the watermark
+	// representation would clamp to the new length and the prior bytes would be
+	// lost. preserveDurableBelow is a no-op when nothing durable lies beyond
+	// size, which is the common case and costs nothing.
+	f.preserveDurableBelow(size)
+	f.truncPending = true
+	f.truncPendingTo = size
+}
+
+// applyDurableTruncate shortens the durable image to size. It is called when a
+// successful fsync makes a pending truncation durable, and on the O_TRUNC path
+// for a file with no durable content to lose.
+func (f *simFile) applyDurableTruncate(size int64) {
 	if f.durableData != nil {
 		if int64(len(f.durableData)) > size {
 			f.durableData = f.durableData[:size]
@@ -685,6 +726,13 @@ func (f *simFile) truncateDurableTo(size int64) {
 // out of order, and an earlier, smaller round completing last must not un-harden
 // what a later one already made durable.
 func (f *simFile) markSyncedTo(n int64) {
+	// A successful fsync flushes metadata, so it is what makes a pending
+	// truncation durable. Applied FIRST, so the watermark logic below sees the
+	// shortened image (#2542).
+	if f.truncPending {
+		f.truncPending = false
+		f.applyDurableTruncate(f.truncPendingTo)
+	}
 	if n > int64(len(f.data)) {
 		n = int64(len(f.data))
 	}
@@ -747,6 +795,9 @@ func (f *simFile) revertToDurable() int64 {
 	f.data = buf
 	f.durableData = nil
 	f.durableLen = int64(len(buf))
+	// A truncation that never reached stable storage did not happen (#2542).
+	f.truncPending = false
+	f.truncPendingTo = 0
 	return discarded
 }
 
@@ -975,6 +1026,19 @@ func NewSimDisk(seed *Seed, faultRate float64) *SimDisk {
 		// stream (see the direntSeed field docs).
 		direntSeed: NewSeed(seed.Value() ^ direntCrashSeedMix),
 	}
+}
+
+// FaultedSectorCount returns how many sectors of the file at path currently
+// carry a fault mark. It exists so a test can observe the marks being dropped by
+// a truncation (F13, rmp #2542) without reaching into simFile.
+func (d *SimDisk) FaultedSectorCount(path string) int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	f, ok := d.files[path]
+	if !ok {
+		return 0
+	}
+	return len(f.faulted)
 }
 
 // FaultRate returns the per-sector / per-Sync fault probability the disk was
@@ -1224,11 +1288,11 @@ func (d *SimDisk) OpenFile(path string, flag int) (*SimFileHandle, error) {
 		d.files[path] = f
 	}
 	if flag&os.O_TRUNC != 0 {
+		// Visible at once, durable only at the next successful fsync — the same
+		// rule the other two truncation sites take (#2542).
+		f.truncatePendingTo(0)
 		f.data = f.data[:0]
 		f.faulted = make(map[int]bool)
-		// The truncation is modelled as instantly durable, exactly as it was
-		// before the durable shadow existed; see [simFile.truncateDurableTo].
-		f.truncateDurableTo(0)
 	}
 	h := &SimFileHandle{disk: d, file: f, path: path, crashGen: d.crashGen}
 	if flag&os.O_APPEND != 0 {
@@ -2281,8 +2345,17 @@ func (d *SimDisk) TruncatePath(path string, size int64) error {
 		return errors.New("sim: negative truncate size")
 	}
 	if size <= int64(len(f.data)) {
+		f.truncatePendingTo(size)
 		f.data = f.data[:size]
-		f.truncateDurableTo(size)
+		// F13, settled: drop the fault marks for sectors that no longer exist,
+		// exactly as [SimFileHandle.Truncate] does. The audit recorded the two
+		// paths disagreeing — TruncatePath kept the marks, the handle dropped
+		// them — with no reason for the difference. A fault mark names a SECTOR
+		// of this file; a sector past the new end of file does not exist, so
+		// keeping its mark would corrupt bytes that a later grow happens to
+		// place there, attributing damage to a sector the fault never touched.
+		// The handle's behaviour is the correct one and is now the only one.
+		dropFaultMarksAbove(f, size)
 		return nil
 	}
 	if d.wouldExceedLocked(int64(len(f.data)), size) {
@@ -3124,8 +3197,8 @@ func (h *SimFileHandle) Truncate(size int64) error {
 		return err
 	}
 	if size <= int64(len(h.file.data)) {
+		h.file.truncatePendingTo(size)
 		h.file.data = h.file.data[:size]
-		h.file.truncateDurableTo(size)
 	} else {
 		if h.disk.wouldExceedLocked(int64(len(h.file.data)), size) {
 			return enospc("truncate", h.path)
@@ -3134,13 +3207,20 @@ func (h *SimFileHandle) Truncate(size int64) error {
 		copy(grown, h.file.data)
 		h.file.data = grown
 	}
+	dropFaultMarksAbove(h.file, size)
+	return nil
+}
+
+// dropFaultMarksAbove deletes the fault marks for sectors that no longer exist
+// after a truncation to size. It is shared by [SimFileHandle.Truncate] and
+// [SimDisk.TruncatePath] so the two cannot disagree about it again (F13, #2542).
+func dropFaultMarksAbove(f *simFile, size int64) {
 	lastSector := int((size - 1) / sectorSize)
-	for sec := range h.file.faulted {
-		if int64(size) == 0 || sec > lastSector {
-			delete(h.file.faulted, sec)
+	for sec := range f.faulted {
+		if size == 0 || sec > lastSector {
+			delete(f.faulted, sec)
 		}
 	}
-	return nil
 }
 
 // Sync fsyncs the file, granting durability to everything written before the
