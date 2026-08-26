@@ -34,7 +34,7 @@ const validityTestHost = "reload.test.local"
 // The window is a parameter because that is the whole point: a fixture whose
 // NotAfter is already past is how an EXPIRED rotation is expressed without
 // waiting for real time to pass.
-func writeValidityPair(t *testing.T, dir, cn string, notBefore, notAfter time.Time) (string, string) {
+func writeValidityPair(t testing.TB, dir, cn string, notBefore, notAfter time.Time) (string, string) {
 	t.Helper()
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -69,7 +69,7 @@ func writeValidityPair(t *testing.T, dir, cn string, notBefore, notAfter time.Ti
 // writeFileOrFail writes content to path and bumps its mtime one second into the
 // future, so the reloader's mtime short-circuit cannot mistake a rewrite for "no
 // change" on a coarse-grained filesystem.
-func writeFileOrFail(t *testing.T, path string, content []byte) {
+func writeFileOrFail(t testing.TB, path string, content []byte) {
 	t.Helper()
 	if err := os.WriteFile(path, content, 0o600); err != nil {
 		t.Fatalf("write %s: %v", path, err)
@@ -83,7 +83,7 @@ func writeFileOrFail(t *testing.T, path string, content []byte) {
 // copyPairOnto overwrites the (cert, key) files the reloader watches with the
 // contents of another pair — the file-level equivalent of a cert-manager
 // rotation landing on disk.
-func copyPairOnto(t *testing.T, dstCert, dstKey, srcCert, srcKey string) {
+func copyPairOnto(t testing.TB, dstCert, dstKey, srcCert, srcKey string) {
 	t.Helper()
 	for _, m := range []struct{ dst, src string }{{dstCert, srcCert}, {dstKey, srcKey}} {
 		b, err := os.ReadFile(m.src)
@@ -102,7 +102,7 @@ func copyPairOnto(t *testing.T, dstCert, dstKey, srcCert, srcKey string) {
 // served certificate parses, its name matches, and its private key genuinely
 // corresponds to the public key inside it. It is the oracle the acceptance
 // criteria ask for — "still handshaking", not merely "still installed".
-func handshakeServed(t *testing.T, r *CertReloader, at time.Time) (string, error) {
+func handshakeServed(t testing.TB, r *CertReloader, at time.Time) (string, error) {
 	t.Helper()
 	cert, err := r.GetCertificate(&tls.ClientHelloInfo{ServerName: validityTestHost})
 	if err != nil {
@@ -309,5 +309,104 @@ func TestCertReloader_InitialLoadIsNotGatedOnValidity(t *testing.T) {
 	}
 	if _, err := r.GetCertificate(nil); err != nil {
 		t.Fatalf("GetCertificate after an accepted initial load: %v", err)
+	}
+}
+
+// TestCertReloader_ReloadDetectsContentChangeWithUnchangedMtime is the rmp #2558
+// regression: the reload skip must be keyed on the file CONTENT, never on its
+// mtime.
+//
+// Before the fix Reload short-circuited on "neither mtime is after the last
+// successful load", so a rotation that preserved the mtime — a rename from
+// another directory, cp -p, a restore from an archive, or two rotations inside
+// one filesystem timestamp tick — returned nil having loaded NOTHING. The stale
+// certificate kept serving, and because the call reported success, onError never
+// fired: an operator rotating to REVOKE a certificate was told it had been
+// replaced when it had not.
+//
+// The arm restores the original mtime after writing the new bytes, which is what
+// every one of those real rotations looks like from the reloader's side.
+func TestCertReloader_ReloadDetectsContentChangeWithUnchangedMtime(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	now := time.Now()
+	certPath, keyPath := writeValidityPair(t, dir, "revoked", now.Add(-time.Hour), now.Add(time.Hour))
+	r, err := NewCertReloader(certPath, keyPath, func(error) {})
+	if err != nil {
+		t.Fatalf("NewCertReloader: %v", err)
+	}
+	before, _ := r.GetCertificate(nil)
+
+	// The mtimes the reloader has just seen. Everything after this point keeps
+	// them frozen.
+	certStat, err := os.Stat(certPath)
+	if err != nil {
+		t.Fatalf("stat cert: %v", err)
+	}
+	keyStat, err := os.Stat(keyPath)
+	if err != nil {
+		t.Fatalf("stat key: %v", err)
+	}
+	freeze := func() {
+		t.Helper()
+		if err := os.Chtimes(certPath, certStat.ModTime(), certStat.ModTime()); err != nil {
+			t.Fatalf("restore cert mtime: %v", err)
+		}
+		if err := os.Chtimes(keyPath, keyStat.ModTime(), keyStat.ModTime()); err != nil {
+			t.Fatalf("restore key mtime: %v", err)
+		}
+	}
+
+	// The replacement lands with the OLD mtime.
+	replCert, replKey := writeValidityPair(t, dir, "replacement", now.Add(-time.Hour), now.Add(time.Hour))
+	copyPairOnto(t, certPath, keyPath, replCert, replKey)
+	freeze()
+
+	if err := r.Reload(); err != nil {
+		t.Fatalf("Reload of a valid replacement failed: %v", err)
+	}
+	after, _ := r.GetCertificate(nil)
+	if after == before {
+		t.Fatal("Reload reported success and loaded NOTHING: the replacement was ignored because the mtime had not advanced, and the caller was told the rotation had taken effect")
+	}
+	cn, hsErr := handshakeServed(t, r, now)
+	if hsErr != nil {
+		t.Fatalf("the replacement does not handshake: %v", hsErr)
+	}
+	if cn != "replacement" {
+		t.Errorf("certificate in service is %q, want %q", cn, "replacement")
+	}
+}
+
+// TestCertReloader_ReloadStillSkipsAnIdenticalPair is the control for the test
+// above: replacing the mtime heuristic must not have turned the skip off
+// altogether, or every Watch tick would re-parse the PEM payload for nothing.
+//
+// It advances the mtime — the ONE signal the old heuristic keyed on — while
+// leaving the bytes identical, and requires the live *tls.Certificate to be the
+// same pointer afterwards. A reloader that re-parsed would hand back a new one.
+func TestCertReloader_ReloadStillSkipsAnIdenticalPair(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	now := time.Now()
+	certPath, keyPath := writeValidityPair(t, dir, "stable", now.Add(-time.Hour), now.Add(time.Hour))
+	r, err := NewCertReloader(certPath, keyPath, func(error) {})
+	if err != nil {
+		t.Fatalf("NewCertReloader: %v", err)
+	}
+	before, _ := r.GetCertificate(nil)
+
+	// Same bytes, later mtime: writeFileOrFail stamps mtime one second ahead.
+	certPEM, err := os.ReadFile(certPath)
+	if err != nil {
+		t.Fatalf("read cert: %v", err)
+	}
+	writeFileOrFail(t, certPath, certPEM)
+
+	if err := r.Reload(); err != nil {
+		t.Fatalf("Reload of an identical pair failed: %v", err)
+	}
+	if after, _ := r.GetCertificate(nil); after != before {
+		t.Fatal("Reload re-parsed a byte-identical pair: the content-keyed skip is not working, so every Watch tick pays for a full load")
 	}
 }

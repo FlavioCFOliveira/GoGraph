@@ -3078,10 +3078,10 @@ both server kinds to prove the distinction is real rather than decorative.
 
 `server.CertReloader` had unit tests for its happy path, a parse failure and
 missing files; what it had never been driven through is the sequence an operator
-actually produces. The scenario runs nine steps — initial load, clean rotation,
-torn key, garbled key, absent key, mismatched pair, completed rotation, expired
-leaf, not-yet-valid leaf — plus the background-poller arm, and four things about
-it are worth recording.
+actually produces. The scenario runs ten steps — initial load, clean rotation,
+torn key, garbled key, absent key, mismatched pair, completed rotation,
+preserved-mtime rotation, expired leaf, not-yet-valid leaf — plus the
+background-poller arm, and five things about it are worth recording.
 
 **The oracle is a real TLS handshake, because the dangerous failure mode parses
 cleanly.** A cert rotated without its key leaves two files that both decode
@@ -3190,12 +3190,44 @@ least one reload to have succeeded, at least one to have failed, and the
 certificate in service to have genuinely changed, since a reloader that ignored
 every rotation would pass every retention clause.
 
-One projection detail is load-bearing and easy to lose: the mtimes are stamped
-**explicitly**, one second apart. `CertReloader.Reload` short-circuits when
-neither file's mtime has advanced past the last successful load, so on a
-filesystem whose timestamp granularity is coarser than the time two consecutive
-projections take, an honest rotation would be silently skipped and the scenario
-would be measuring the clock instead of the reloader.
+**A rotation that does not advance the mtime must still take effect — rmp
+#2558.** `Reload` short-circuited on "neither file's mtime is After the last
+successful load", which is a cheap heuristic for "nothing changed" and an unsound
+one: mtime is not a content hash. Every rotation that replaces content without
+advancing the timestamp — a rename from another directory, `cp -p`, a restore
+from an archive, two rotations inside one filesystem timestamp tick — returned
+nil having loaded NOTHING, and because the call reported success `onError` never
+fired. A rotation performed to REVOKE a certificate could therefore be ignored in
+silence while the operator believed the material had been replaced, which is the
+worst shape this component can fail in. The skip is now keyed on a SHA-256 digest
+of each file's bytes, recorded only on a load that succeeded, so a skip is
+provably a no-op and a refused pair is always re-examined.
+
+The skip was measured rather than assumed, and the measurement contradicted the
+intuition that motivated it: 20.6 µs and 2.0 kB per call against 37.8 µs and
+9.4 kB for the full load (best of 5, darwin/arm64,
+`BenchmarkCertReloader_ReloadUnchanged` against
+`BenchmarkCertReloader_ParseCostAvoidedBySkip`). The two file reads dominate BOTH
+paths, so the skip is a 1.8x saving on a call that happens once per poll interval
+— it is kept because it does not recompute and re-publish a certificate that has
+not changed, not because it is fast.
+
+The DST arm carries two structural guards, because its fault is a timestamp and
+nothing else. The mtimes it leaves on disk are recorded in the evidence and may
+not exceed the previous step's, or the rotation advanced the clock after all. And
+it must FOLLOW a step whose reload SUCCEEDED: the fault is a timestamp
+indistinguishable from "nothing has changed since the last successful load", so
+placed after a refused step the same rotation would carry a newer timestamp than
+the reloader's bookkeeping and even the defective code would have loaded it — the
+arm would pass everywhere and prove nothing. Measured against the pre-fix code it
+reports exactly the bug's shape: `preserved-mtime-rotation reload-ok
+serving=rotation-C`, where `rotation-preserved` was expected.
+
+One projection detail remains load-bearing and easy to lose: the mtimes are
+stamped **explicitly**, one second apart, so the timestamp is a deterministic
+property of the run rather than a property of the filesystem's granularity. Until
+#2558 that mattered because an honest rotation could otherwise be skipped; it now
+matters because it is what makes the preserved-mtime arm expressible at all.
 
 ### The transaction registry, the idle reaper and the per-principal cap (rmp #2482)
 

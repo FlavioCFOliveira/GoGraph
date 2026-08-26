@@ -28,9 +28,11 @@ package sim
 // WHICH pair is in service is settled by the Common Name of the served leaf,
 // compared against the pair the step was expected to leave live. THAT the served
 // pair is usable at all is settled by completing a genuine TLS 1.3 handshake
-// through crypto/tls over a net.Pipe against whatever GetCertificate currently
-// returns, with the client trusting exactly that certificate and verifying the
-// name. crypto/tls is the independent reference for the second half: it proves the
+// through crypto/tls over a LOOPBACK TCP pair against whatever GetCertificate
+// currently returns, with the client trusting exactly that certificate and
+// verifying the name. (A loopback socket and not net.Pipe, for the reason set out
+// on certRotationLoopbackPair: an unbuffered pipe DEADLOCKS on a failing
+// handshake, which is the one case the oracle exists to report.) crypto/tls is the independent reference for the second half: it proves the
 // certificate parses, the name matches, and — decisively — that the private key
 // really corresponds to the certificate's public key, which is the property a
 // mismatched rotation destroys and a byte comparison cannot see.
@@ -258,6 +260,13 @@ type CertRotationStep struct {
 	WantReloadOK bool
 	// ReloadOK records what actually happened.
 	ReloadOK bool
+	// CertMTimeUnixNano / KeyMTimeUnixNano are the mtimes the step's mutation left
+	// on disk, or 0 when the file is absent. They exist for the preserved-mtime arm:
+	// that arm's whole claim is that the rotation did NOT advance the mtime, and
+	// without recording it the arm would silently degrade into an ordinary rotation
+	// the moment the projection changed.
+	CertMTimeUnixNano int64
+	KeyMTimeUnixNano  int64
 	// ValidityRefused records whether the reload was refused BECAUSE the leaf on
 	// disk was outside its validity window — matched with [errors.Is] against
 	// [server.ErrCertOutsideValidity], not by reading the message. Without it the
@@ -333,6 +342,11 @@ func RunBoltCertRotation(ctx context.Context, seed uint64) (BoltCertRotationEvid
 	if err != nil {
 		return BoltCertRotationEvidence{}, err
 	}
+	// A perfectly ordinary pair, installed in a way that leaves the mtimes alone.
+	pairPreserved, err := newSimCertPair(s, "rotation-preserved")
+	if err != nil {
+		return BoltCertRotationEvidence{}, err
+	}
 
 	dir, err := os.MkdirTemp("", "sim-cert-rotation-*")
 	if err != nil {
@@ -354,7 +368,7 @@ func RunBoltCertRotation(ctx context.Context, seed uint64) (BoltCertRotationEvid
 		// os.Chtimes near the zero time is not portable.
 		projectedMTime: certRotationNotBefore,
 	}
-	if err := r.drive(pairA, pairB, pairC, pairExpired, pairFuture); err != nil {
+	if err := r.drive(pairA, pairB, pairC, pairExpired, pairFuture, pairPreserved); err != nil {
 		return BoltCertRotationEvidence{}, err
 	}
 	return *r.ev, nil
@@ -411,12 +425,14 @@ func (r *certRotationRunner) writeImage(realPath string, content []byte) error {
 // project copies the simulated image onto the real path, advancing its mtime past
 // every previous projection.
 //
-// The mtime is set EXPLICITLY rather than left to the filesystem because
-// CertReloader short-circuits a reload when neither file's mtime has advanced
-// past the last successful load. On a filesystem whose timestamp granularity is
-// coarser than the time two consecutive projections take, an honest rotation
-// would be skipped and the scenario would be measuring the clock instead of the
-// reloader.
+// The mtime is set EXPLICITLY rather than left to the filesystem so that it is a
+// deterministic property of the run. Until rmp #2558 this was load-bearing for a
+// different reason — Reload short-circuited when neither mtime had advanced, so on
+// a filesystem with coarse timestamp granularity an honest rotation would have
+// been skipped and the scenario would have been measuring the clock. That skip is
+// now keyed on a content digest, and the explicit stamping is what makes the
+// opposite arm expressible instead: a rotation that deliberately does NOT advance
+// the mtime (see [certRotationRunner.installPairPreservingMTime]).
 func (r *certRotationRunner) project(realPath string) error {
 	img, err := r.disk.ReadFile(simPath(realPath))
 	if err != nil {
@@ -456,6 +472,36 @@ func (r *certRotationRunner) installPair(p simCertPair) error {
 		return err
 	}
 	return r.writeImage(r.keyPath, p.KeyPEM)
+}
+
+// installPairPreservingMTime installs a pair and then puts both files' mtimes
+// back to what they were BEFORE the write, modelling every rotation that replaces
+// content without advancing the timestamp: a rename from another directory,
+// cp -p, a restore from an archive, or two rotations inside one filesystem
+// timestamp tick.
+//
+// It is the fault rmp #2558 fixed. Reload used to short-circuit on "neither mtime
+// is after the last successful load" and report SUCCESS having loaded nothing, so
+// a rotation performed to revoke a certificate could be silently ignored while
+// the operator believed the material had been replaced.
+func (r *certRotationRunner) installPairPreservingMTime(p simCertPair) error {
+	certBefore, err := os.Stat(r.certPath)
+	if err != nil {
+		return fmt.Errorf("sim: cert rotation stat cert before preserved-mtime install: %w", err)
+	}
+	keyBefore, err := os.Stat(r.keyPath)
+	if err != nil {
+		return fmt.Errorf("sim: cert rotation stat key before preserved-mtime install: %w", err)
+	}
+	if err := r.installPair(p); err != nil {
+		return err
+	}
+	for path, was := range map[string]os.FileInfo{r.certPath: certBefore, r.keyPath: keyBefore} {
+		if err := os.Chtimes(path, was.ModTime(), was.ModTime()); err != nil {
+			return fmt.Errorf("sim: cert rotation restore mtime of %s: %w", path, err)
+		}
+	}
+	return nil
 }
 
 // tornPrefixLen returns the seed-chosen length a crash will leave durable: at
@@ -537,6 +583,13 @@ func (r *certRotationRunner) stepValidityRefusal(name, wantCN string, keyWant in
 	return r.stepWithIntent(name, wantCN, false, true, keyWant, mutate)
 }
 
+// stepPreservedMTime runs a step whose material is perfect and whose ONLY
+// unusual property is that the rotation left the file mtimes untouched. The
+// reload must SUCCEED and the new pair must reach service.
+func (r *certRotationRunner) stepPreservedMTime(name, wantCN string, keyWant int, mutate func() error) error {
+	return r.stepWithIntent(name, wantCN, true, false, keyWant, mutate)
+}
+
 // stepWithIntent is the shared body behind [certRotationRunner.step] and
 // [certRotationRunner.stepValidityRefusal].
 func (r *certRotationRunner) stepWithIntent(name, wantCN string, wantReloadOK, wantValidityRefused bool, keyWant int, mutate func() error) error {
@@ -552,6 +605,10 @@ func (r *certRotationRunner) stepWithIntent(name, wantCN string, wantReloadOK, w
 	}
 	if fi, statErr := os.Stat(r.keyPath); statErr == nil {
 		st.KeyBytes = int(fi.Size())
+		st.KeyMTimeUnixNano = fi.ModTime().UnixNano()
+	}
+	if fi, statErr := os.Stat(r.certPath); statErr == nil {
+		st.CertMTimeUnixNano = fi.ModTime().UnixNano()
 	}
 	if err := r.reloader.Reload(); err != nil {
 		st.ReloadErr = err.Error()
@@ -626,7 +683,7 @@ func (r *certRotationRunner) driveWatch(broken simCertPair) error {
 }
 
 // drive runs the whole rotation sequence.
-func (r *certRotationRunner) drive(pairA, pairB, pairC, pairExpired, pairFuture simCertPair) error {
+func (r *certRotationRunner) drive(pairA, pairB, pairC, pairExpired, pairFuture, pairPreserved simCertPair) error {
 	// The unloaded contract first: a zero-value reloader must REFUSE to serve, not
 	// hand the TLS stack a nil certificate.
 	var unloaded server.CertReloader
@@ -741,11 +798,31 @@ func (r *certRotationRunner) drive(pairA, pairB, pairC, pairExpired, pairFuture 
 		return err
 	}
 
+	// A rotation that does NOT advance the mtime must still take effect (rmp
+	// #2558). This is the only arm whose fault is invisible to every parse: both
+	// files are perfect and the pair is valid, and the reloader's own bookkeeping
+	// is what used to discard it — silently, while reporting success.
+	//
+	// It runs HERE, directly after a reload that SUCCEEDED, and that placement is
+	// load-bearing. The fault is a timestamp indistinguishable from "nothing has
+	// changed since the last successful load", so it only reproduces when the
+	// preserved timestamp is the one the last successful load recorded. Placed
+	// after a REFUSED step the same rotation would carry a newer timestamp than the
+	// reloader's bookkeeping and even the pre-#2558 code would have loaded it —
+	// the arm would pass everywhere and prove nothing. [checkCertRotationFaultsDistinct]
+	// enforces the placement.
+	if err := r.stepPreservedMTime("preserved-mtime-rotation", pairPreserved.CN, len(pairPreserved.KeyPEM), func() error {
+		r.live = pairPreserved
+		return r.installPairPreservingMTime(pairPreserved)
+	}); err != nil {
+		return err
+	}
+
 	// An EXPIRED pair: the most common real rotation incident, a renewal that
 	// produced material already past its NotAfter. Both files are whole and the
 	// key matches the certificate, so every parse-based check passes it; only the
 	// validity window says no. C must stay live and keep handshaking.
-	if err := r.stepValidityRefusal("expired-leaf", pairC.CN, len(pairExpired.KeyPEM), func() error {
+	if err := r.stepValidityRefusal("expired-leaf", pairPreserved.CN, len(pairExpired.KeyPEM), func() error {
 		return r.installPair(pairExpired)
 	}); err != nil {
 		return err
@@ -755,11 +832,12 @@ func (r *certRotationRunner) drive(pairA, pairB, pairC, pairExpired, pairFuture 
 	// renewing host instead. Refused for the mirror reason, and — because a refusal
 	// does not stamp the reloader's mtime bookkeeping — it would be picked up on a
 	// later poll once its NotBefore passed, with no operator action.
-	if err := r.stepValidityRefusal("not-yet-valid-leaf", pairC.CN, len(pairFuture.KeyPEM), func() error {
+	if err := r.stepValidityRefusal("not-yet-valid-leaf", pairPreserved.CN, len(pairFuture.KeyPEM), func() error {
 		return r.installPair(pairFuture)
 	}); err != nil {
 		return err
 	}
+
 	return nil
 }
 
@@ -895,6 +973,7 @@ var certRotationExpectedSteps = []string{
 	"mismatched-pair",
 	"watch-reports-failure",
 	"rotation-completed",
+	"preserved-mtime-rotation",
 	"expired-leaf",
 	"not-yet-valid-leaf",
 }
@@ -989,8 +1068,8 @@ func checkCertRotationStep(st *CertRotationStep) []Violation {
 func checkBoltCertRotationNonVacuity(e *BoltCertRotationEvidence) []Violation {
 	var v []Violation
 	seen := make(map[string]bool, len(e.Steps))
-	for _, st := range e.Steps {
-		seen[st.Name] = true
+	for i := range e.Steps {
+		seen[e.Steps[i].Name] = true
 	}
 	for _, want := range certRotationExpectedSteps {
 		if !seen[want] {
@@ -1002,7 +1081,8 @@ func checkBoltCertRotationNonVacuity(e *BoltCertRotationEvidence) []Violation {
 	}
 	var ok, failed int
 	distinct := make(map[string]bool)
-	for _, st := range e.Steps {
+	for i := range e.Steps {
+		st := &e.Steps[i]
 		if st.ReloadOK {
 			ok++
 		} else {
@@ -1019,8 +1099,8 @@ func checkBoltCertRotationNonVacuity(e *BoltCertRotationEvidence) []Violation {
 		})
 	}
 	var validityRefusals int
-	for _, st := range e.Steps {
-		if st.ValidityRefused {
+	for i := range e.Steps {
+		if e.Steps[i].ValidityRefused {
 			validityRefusals++
 		}
 	}
@@ -1045,9 +1125,9 @@ func checkBoltCertRotationNonVacuity(e *BoltCertRotationEvidence) []Violation {
 // ever applied.
 func checkCertRotationFaultsDistinct(e *BoltCertRotationEvidence) []Violation {
 	var v []Violation
-	byName := make(map[string]CertRotationStep, len(e.Steps))
-	for _, st := range e.Steps {
-		byName[st.Name] = st
+	byName := make(map[string]*CertRotationStep, len(e.Steps))
+	for i := range e.Steps {
+		byName[e.Steps[i].Name] = &e.Steps[i]
 	}
 	if torn, ok := byName["torn-key"]; ok && torn.KeyBytes >= torn.KeyWantBytes {
 		v = append(v, Violation{
@@ -1069,6 +1149,27 @@ func checkCertRotationFaultsDistinct(e *BoltCertRotationEvidence) []Violation {
 			Message: fmt.Sprintf("absent-key left %d key bytes on disk: the file was not removed", absent.KeyBytes),
 		})
 	}
+	// The preserved-mtime arm's fault IS the timestamp, so the timestamp is what
+	// has to be checked. Its mtimes must not exceed the ones the step before it
+	// left, or the rotation advanced the clock after all and the arm degenerated
+	// into an ordinary rotation that the pre-#2558 reloader would also have passed.
+	if idx := certRotationStepIndex(e.Steps, "preserved-mtime-rotation"); idx > 0 {
+		prev, cur := e.Steps[idx-1], e.Steps[idx]
+		if !prev.ReloadOK {
+			v = append(v, Violation{
+				Kind: ViolationVacuousRun, Op: "<cert-rotation-nonvacuity>",
+				Message: fmt.Sprintf("preserved-mtime-rotation follows %q, whose reload FAILED: a preserved timestamp only reproduces the #2558 fault when it is the one the last SUCCESSFUL load recorded, so placed here the arm would pass even on the defective code",
+					prev.Name),
+			})
+		}
+		if cur.CertMTimeUnixNano > prev.CertMTimeUnixNano || cur.KeyMTimeUnixNano > prev.KeyMTimeUnixNano {
+			v = append(v, Violation{
+				Kind: ViolationVacuousRun, Op: "<cert-rotation-nonvacuity>",
+				Message: fmt.Sprintf("preserved-mtime-rotation ADVANCED an mtime (cert %d then %d, key %d then %d): the arm must rotate WITHOUT advancing the timestamp, or it proves nothing the clean-rotation arm does not",
+					prev.CertMTimeUnixNano, cur.CertMTimeUnixNano, prev.KeyMTimeUnixNano, cur.KeyMTimeUnixNano),
+			})
+		}
+	}
 	// The validity arms must install INTACT material: their whole claim is that a
 	// pair which passes every parse-based check is still refused. A short or
 	// missing key would make them duplicates of the torn and absent arms.
@@ -1084,10 +1185,21 @@ func checkCertRotationFaultsDistinct(e *BoltCertRotationEvidence) []Violation {
 	return v
 }
 
+// certRotationStepIndex returns the position of the named step, or -1.
+func certRotationStepIndex(steps []CertRotationStep, name string) int {
+	for i := range steps {
+		if steps[i].Name == name {
+			return i
+		}
+	}
+	return -1
+}
+
 // String renders the evidence for a report: one line per step.
 func (e BoltCertRotationEvidence) String() string {
 	out := fmt.Sprintf("bolt-cert-rotation evidence (seed %d, %d steps):", e.Seed, len(e.Steps))
-	for _, st := range e.Steps {
+	for i := range e.Steps {
+		st := &e.Steps[i]
 		verdict := "reload-FAILED"
 		if st.ReloadOK {
 			verdict = "reload-ok"

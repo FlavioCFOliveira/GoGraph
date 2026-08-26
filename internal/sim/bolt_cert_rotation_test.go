@@ -145,9 +145,10 @@ func cleanRotationEvidence() BoltCertRotationEvidence {
 		{Name: "absent-key", WantCN: live, ServedCN: live, Handshook: true, ReloadErr: "absent", KeyBytes: 0, KeyWantBytes: 0},
 		{Name: "mismatched-pair", WantCN: live, ServedCN: live, Handshook: true, ReloadErr: "mismatch", KeyBytes: full, KeyWantBytes: full},
 		{Name: "watch-reports-failure", WantCN: live, ServedCN: live, Handshook: true, ReloadErr: "torn", KeyBytes: full / 2, KeyWantBytes: full},
-		{Name: "rotation-completed", WantCN: "rotation-C", ServedCN: "rotation-C", WantReloadOK: true, ReloadOK: true, Handshook: true, KeyBytes: full, KeyWantBytes: full},
-		{Name: "expired-leaf", WantCN: "rotation-C", ServedCN: "rotation-C", Handshook: true, ReloadErr: "expired", WantValidityRefused: true, ValidityRefused: true, KeyBytes: full, KeyWantBytes: full},
-		{Name: "not-yet-valid-leaf", WantCN: "rotation-C", ServedCN: "rotation-C", Handshook: true, ReloadErr: "not yet valid", WantValidityRefused: true, ValidityRefused: true, KeyBytes: full, KeyWantBytes: full},
+		{Name: "rotation-completed", WantCN: "rotation-C", ServedCN: "rotation-C", WantReloadOK: true, ReloadOK: true, Handshook: true, KeyBytes: full, KeyWantBytes: full, CertMTimeUnixNano: 900, KeyMTimeUnixNano: 900},
+		{Name: "preserved-mtime-rotation", WantCN: "rotation-preserved", ServedCN: "rotation-preserved", WantReloadOK: true, ReloadOK: true, Handshook: true, KeyBytes: full, KeyWantBytes: full, CertMTimeUnixNano: 900, KeyMTimeUnixNano: 900},
+		{Name: "expired-leaf", WantCN: "rotation-preserved", ServedCN: "rotation-preserved", Handshook: true, ReloadErr: "expired", WantValidityRefused: true, ValidityRefused: true, KeyBytes: full, KeyWantBytes: full, CertMTimeUnixNano: 1000, KeyMTimeUnixNano: 1000},
+		{Name: "not-yet-valid-leaf", WantCN: "rotation-preserved", ServedCN: "rotation-preserved", Handshook: true, ReloadErr: "not yet valid", WantValidityRefused: true, ValidityRefused: true, KeyBytes: full, KeyWantBytes: full, CertMTimeUnixNano: 1100, KeyMTimeUnixNano: 1100},
 	}
 	return BoltCertRotationEvidence{
 		Steps:              steps,
@@ -307,6 +308,30 @@ func TestBoltCertRotation_OracleCanFail(t *testing.T) {
 			},
 			check:   checkBoltCertRotationNonVacuity,
 			wantSub: "refused for its VALIDITY WINDOW",
+		},
+		{
+			name: "the preserved-mtime arm was placed after a failed reload",
+			mutate: func(e *BoltCertRotationEvidence) {
+				rotationStep(e, "rotation-completed").ReloadOK = false
+			},
+			check:   checkBoltCertRotationNonVacuity,
+			wantSub: "whose reload FAILED",
+		},
+		{
+			name: "the preserved-mtime arm advanced the timestamp after all",
+			mutate: func(e *BoltCertRotationEvidence) {
+				rotationStep(e, "preserved-mtime-rotation").CertMTimeUnixNano = 1000
+			},
+			check:   checkBoltCertRotationNonVacuity,
+			wantSub: "ADVANCED an mtime",
+		},
+		{
+			name: "a preserved-mtime rotation was silently discarded",
+			mutate: func(e *BoltCertRotationEvidence) {
+				rotationStep(e, "preserved-mtime-rotation").ServedCN = "rotation-C"
+			},
+			check:   checkBoltCertRotation,
+			wantSub: "certificate in service is",
 		},
 		{
 			name: "the not-yet-valid arm installed torn material",
