@@ -90,16 +90,21 @@ import (
 //	"-danger"    — a leading '-' is a live spreadsheet formula, so it is the
 //	               cell csv.Options.SanitizeFormulae rewrites
 //	""           — the empty identifier the engine accepts (rmp #2043)
+//	"#hash"      — begins with the CSV reader's comment character, and is the
+//	               one id the CSV writer emits as a FORCE-QUOTED record
 //	"plain0"...  — ordinary ids, so the bare (unquoted) DOT path also runs
 //
-// A '#'-leading id is deliberately ABSENT: the CSV reader treats a leading
-// comment character as a comment line, so such an id does not survive a CSV
-// round-trip. That is a graph/io property, outside this task's scope (which
-// changes nothing outside internal/sim and docs), and is recorded rather than
-// papered over.
+// The '#'-leading id used to be deliberately ABSENT, on the recorded ground that
+// "the CSV reader treats a leading comment character as a comment line, so such
+// an id does not survive a CSV round-trip". Re-validating that claim under rmp
+// #2533 REFUTED it: rmp #2042 had already made the CSV writer force-quote any
+// cell whose first rune is the active comment rune, so the id round-trips
+// intact, and the exclusion was preserving a claim that had stopped being true.
+// It is now in the set, where it asserts the force-quoting path end to end
+// instead of documenting a defect that no longer exists.
 var graphIOHostileNames = []string{
 	"graph", "node with space", "héllo", `a"b`, `a\b`, "x->y", "p,q", "-danger", "",
-	"plain0", "plain1", "plain2", "plain3",
+	"#hash", "plain0", "plain1", "plain2", "plain3",
 }
 
 // graphIOIsolatedName is the vertex that carries no incident edge. It exists to

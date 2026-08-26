@@ -1979,6 +1979,40 @@ provoked and matched with `errors.Is`** on every run, and the verdict fails when
 a cap declared reachable was not reached, so deleting a probe cannot quietly
 reduce the coverage.
 
+**The '#'-leading id was excluded from the hostile-name set on a claim that had
+stopped being true — rmp #2533.** The set carried a note saying a `#`-leading id
+"does not survive a CSV round-trip", because the CSV reader treats a leading
+comment character as a comment line, and the id was left out on that basis.
+Re-validating the claim REFUTED it: rmp #2042 had already made the CSV writer
+force-quote any cell whose first rune is the ACTIVE comment rune, so the id
+round-trips intact. The exclusion was preserving a defect record that the code
+had outgrown, which is worse than no record at all — it discourages exactly the
+assertion that would have caught a regression. `"#hash"` is now in
+`graphIOHostileNames`, where it drives the force-quoting path end to end.
+
+The class it belongs to — a node identifier whose FIRST character is significant
+to the format's own syntax — is now asserted across all four formats in
+`graph/io/prefix_significant_id_roundtrip_test.go`, and the answer per format is
+recorded rather than assumed. **CSV** is the only one exposed, and it is closed by
+force-quoting; the test also drives a NON-DEFAULT comment rune (`/` and `-`), so
+the writer is held to keying on the configured rune rather than a hard-coded `#`
+— coverage nothing had before, and it fails on different ids than the default arm
+does. **JSONL** has no comment convention at all and every id travels inside a
+JSON string that `encoding/json` escapes, so the class does not arise. **GraphML**
+puts ids in XML attribute values, where the hazard is markup rather than a line
+prefix; the probe ids are `<xml>`, which would break the document if emitted raw,
+and `&amp;`, which must come back as the five characters it is and not be decoded
+to `&`, a double-unescape being the silent-corruption shape of this class in XML.
+**DOT** is write-only, so there is no importer to lose anything; what is asserted
+instead is the property a third-party parser depends on — every hazardous id is
+emitted inside double quotes and no emitted line begins with `#`, `//` or `/*`.
+
+Non-vacuity was established by disabling the writer's force-quote branch: all
+four CSV arms fail, the two configured-comment-rune arms failing on `-danger` and
+`/*block*/` rather than on `#hash`, and the DST cross-format verdict fails with
+them (`<io-csv>`: the CSV round-trip did not reproduce the modelled edge
+multiset), which is what putting the id INTO the battery bought.
+
 **The two size caps and the two depth caps need DIFFERENT payloads, and a single
 one would reach only one of them.** The encoders check depth on the way DOWN and
 size after serialising on the way back UP, and the nested-list wire grows ~2x per

@@ -1500,9 +1500,14 @@ halves that are separated on purpose.
 The **seed-driven half** (`RunGraphIOSurface`) is folded into ST8, so the swarm
 drives it across seeds. It exports one model built to be hostile — a DOT reserved
 keyword, identifiers carrying a space, a quote, a backslash, `->`, a comma and a
-leading `-`, the empty identifier, zero and non-zero weights, and one isolated
-vertex — as DOT, CSV and JSONL, and requires the three to describe the same
-graph. `graph/io/dot` has no reader, which is why it was imported nowhere in the
+leading `-`, an identifier beginning with the CSV comment character, the empty
+identifier, zero and non-zero weights, and one isolated vertex — as DOT, CSV and
+JSONL, and requires the three to describe the same graph. The `#`-leading
+identifier was excluded until rmp #2533, on a recorded claim that such an id
+cannot survive a CSV round-trip; re-validating it refuted the claim (rmp #2042
+had already made the writer force-quote such a cell) and the id is now in the set,
+where it drives that path end to end — disabling the force-quote branch makes the
+`<io-csv>` verdict fail, which the exclusion had been preventing. `graph/io/dot` has no reader, which is why it was imported nowhere in the
 simulator; the agreement check is what adjudicates it, with a character scanner
 in this file reading the DOT text back. The same half round-trips the JSONL
 property path (`WriteWithProps` / `ReadWithProps`) over every property kind the
