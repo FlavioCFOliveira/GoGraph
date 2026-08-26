@@ -142,6 +142,7 @@ func (i *Index) Remove(label uint32, node graph.NodeID) {
 // AddRange records that all nodes in [fromNode, toNode] (inclusive) carry
 // label. It uses [roaring64.Bitmap.AddRange] which represents dense ranges in
 // O(1) space, making bulk ingestion of contiguous NodeID bands efficient.
+// An interval naming no ids leaves no entry behind, mirroring RemoveRange.
 func (i *Index) AddRange(label uint32, fromNode, toNode graph.NodeID) {
 	i.mu.Lock()
 	// AddRange promotes the label's NodeSet to (or keeps it on) the roaring
@@ -150,7 +151,18 @@ func (i *Index) AddRange(label uint32, fromNode, toNode graph.NodeID) {
 	// one-way, so a dense label stays optimal.
 	set := i.bits[label]
 	set.AddRange(uint64(fromNode), uint64(toNode))
-	i.bits[label] = set
+	if set.IsEmpty() {
+		// An inverted or empty interval names no ids, so there is nothing to
+		// record. Storing the set back would mint a permanent entry that
+		// Serialize then writes out — 20 bytes and one labelCount apiece — while
+		// Count, Scan and Has all report the label as carrying nothing (#2608).
+		// This mirrors RemoveRange's delete-on-empty in the opposite direction.
+		// The branch is only reachable when the label had no entry: AddRange
+		// cannot empty a set that already held ids.
+		delete(i.bits, label)
+	} else {
+		i.bits[label] = set
+	}
 	i.mu.Unlock()
 }
 

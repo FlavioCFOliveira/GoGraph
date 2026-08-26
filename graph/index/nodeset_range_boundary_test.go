@@ -213,3 +213,73 @@ func TestNodeSetRemoveRangeAtMaxUint64BothTiers(t *testing.T) {
 		})
 	}
 }
+
+// TestNodeSetAddRangeEmptyIntervalDoesNotPromote is regression cover for #2608.
+//
+// AddRange promoted to the bitmap tier BEFORE it looked at the interval, so a
+// range naming no ids still left a bitmap behind. Promotion is one-way, so the
+// cost is permanent — and it is invisible from outside the package, because the
+// serialized form of an inline set is byte-identical to that of a bitmap holding
+// the same ids (#1585). The tier tag is the only honest probe.
+func TestNodeSetAddRangeEmptyIntervalDoesNotPromote(t *testing.T) {
+	tests := []struct {
+		name     string
+		from, to uint64
+	}{
+		{"inverted by a wide margin", 100, 50},
+		{"inverted by one", 51, 50},
+		{"inverted at the top of the range", math.MaxUint64, math.MaxUint64 - 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Run("on an empty set", func(t *testing.T) {
+				var s NodeSet
+				s.AddRange(tt.from, tt.to)
+				if s.tag() == stateBitmap {
+					t.Error("an interval naming no ids promoted an empty set to the bitmap tier")
+				}
+				if !s.IsEmpty() {
+					t.Errorf("the set holds %d ids after an interval naming none", s.Cardinality())
+				}
+			})
+
+			t.Run("on a singleton set", func(t *testing.T) {
+				var s NodeSet
+				s.Add(42)
+				s.AddRange(tt.from, tt.to)
+				if s.tag() == stateBitmap {
+					t.Error("an interval naming no ids promoted a singleton to the bitmap tier")
+				}
+				if got, want := s.Cardinality(), uint64(1); got != want {
+					t.Errorf("Cardinality = %d, want %d", got, want)
+				}
+			})
+
+			t.Run("on a small set", func(t *testing.T) {
+				var s NodeSet
+				s.Add(10)
+				s.Add(11)
+				s.Add(12)
+				s.AddRange(tt.from, tt.to)
+				if s.tag() == stateBitmap {
+					t.Error("an interval naming no ids promoted a small set to the bitmap tier")
+				}
+				if got, want := s.Cardinality(), uint64(3); got != want {
+					t.Errorf("Cardinality = %d, want %d", got, want)
+				}
+			})
+		})
+	}
+
+	// Control: a range naming at least one id must still promote, which is the
+	// documented dense-label fast path.
+	t.Run("control: a non-empty interval still promotes", func(t *testing.T) {
+		var s NodeSet
+		s.Add(10)
+		s.AddRange(100, 100)
+		if s.tag() != stateBitmap {
+			t.Error("a range naming one id did not promote; AddRange is the dense-label fast path")
+		}
+	})
+}

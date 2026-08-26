@@ -103,7 +103,7 @@ package sim
 // a seed-shuffled order. The seed decides the order and the base band; it never
 // decides the coverage.
 //
-// # One defect this file FIXED, and two it still WITNESSES
+// # Two defects this file FIXED, and one it still WITNESSES
 //
 // The boundary defect is FIXED (#2607): `to == math.MaxUint64` used to drop the
 // WHOLE range in both directions, because `to+1` wrapped to 0 and roaring treats
@@ -115,20 +115,24 @@ package sim
 // interval is honoured at `math.MaxUint64` on BOTH tiers, with the same range
 // one id shorter as its control.
 //
-// The two that remain are latent — neither range method has a production caller,
-// so no production label is ever built the way either requires — and both are
-// pinned to their MEASURED behaviour with a clause that says so, so that fixing
-// one fires loudly here instead of passing silently.
+// The empty-interval defect is FIXED too (#2608): an inverted or empty
+// `AddRange` on a label with no entry used to CREATE one holding an empty
+// bitmap, permanently and in the serialized image — MEASURED at the time, 1 000
+// such calls on distinct labels produced a 20 016-byte image against 16 bytes
+// for an empty index, 20 bytes and one `labelCount` apiece, while `Count`
+// reported 0 for every one. `NodeSet.AddRange` now returns before promoting when
+// the interval is inverted, and `label.Index.AddRange` deletes rather than
+// stores a set that is empty after the call — mirroring `RemoveRange`'s own
+// godoc promise ("Empty bitmaps are deleted so the map does not grow
+// unboundedly"). [liDriveWithPhantom] is a REGRESSION arm, with a range naming
+// five ids as its control.
 //
-//  1. An inverted or empty `AddRange` on a label with no entry CREATES one,
-//     holding an empty bitmap, and it is permanent and serialized. MEASURED:
-//     1 000 inverted `AddRange` calls on distinct labels produce a 20 016-byte
-//     image against 16 bytes for an empty index — 20 bytes and one `labelCount`
-//     apiece — while `Count` reports 0 for every one of them. `RemoveRange`'s
-//     godoc promises the opposite for its own direction ("Empty bitmaps are
-//     deleted so the map does not grow unboundedly"). [liDriveWithPhantom] pins
-//     it.
-//  2. The serialized form is NOT idempotent for a run-encoded label small enough
+// The one that remains is latent — neither range method has a production caller,
+// so no production label is ever built the way it requires — and it is pinned to
+// its MEASURED behaviour with a clause that says so, so that fixing it fires
+// loudly here instead of passing silently.
+//
+//  1. The serialized form is NOT idempotent for a run-encoded label small enough
 //     to be down-converted on the way back in. MEASURED: an AddRange-built label
 //     of 8 ids serializes to 55 bytes and, after one Serialize/Deserialize
 //     cycle, to 72 — because [index.NodeSetFromBitmap] moves a bitmap of at most
@@ -156,7 +160,7 @@ package sim
 // graphs carry the same labels.
 //
 // The same mistake nearly reached the round-trip clause. `image ==
-// round-tripped image` is FALSE for the band in defect 2, and the sweep can
+// round-tripped image` is FALSE for the band in defect 1, and the sweep can
 // reach that band — an AddRange followed by a RemoveRange that trims the label
 // to a handful of ids — so the clause would have passed on this seed and flaked
 // on another. What is asserted instead is that the form is a FIXPOINT after at
@@ -722,13 +726,18 @@ type liPhantomEvidence struct {
 	AfterLabelCount uint32
 	// Labels is N.
 	Labels int
-	// QueryVisible records whether the phantom is observable through the query
-	// surface at all: Count, Scan and Has must ALL say the label is empty, which
-	// is what makes the serialized form the only place it shows.
+	// QueryVisible records whether an empty-interval label is observable through
+	// the query surface at all: Count, Scan and Has must ALL say the label is
+	// empty. This was true of the old phantom and must stay true.
 	QueryVisible bool
-	// SurvivesRoundTrip records whether the phantom entry is still declared after
-	// a Serialize/Deserialize cycle.
-	SurvivesRoundTrip bool
+	// RoundTripLabelCount is the labelCount the image declares after a
+	// Serialize/Deserialize/Serialize cycle. It must equal AfterLabelCount.
+	RoundTripLabelCount uint32
+	// CtrlLabelCount / CtrlCount are the CONTROL: a range naming at least one id
+	// must still be recorded, so that "no entry was created" cannot be satisfied
+	// by AddRange having stopped working altogether.
+	CtrlLabelCount uint32
+	CtrlCount      uint64
 }
 
 // liTierRow is one width of the Add-versus-AddRange byte comparison. It is
@@ -935,7 +944,9 @@ func (e *LabelIndexScopedEvidence) computeDigest() uint64 {
 		h = liMix(h, uint64(v))
 	}
 	h = liMix(h, liBoolBits(p.QueryVisible))
-	h = liMix(h, liBoolBits(p.SurvivesRoundTrip))
+	h = liMix(h, uint64(p.RoundTripLabelCount))
+	h = liMix(h, uint64(p.CtrlLabelCount))
+	h = liMix(h, p.CtrlCount)
 	return h
 }
 
@@ -967,9 +978,11 @@ func (e *LabelIndexScopedEvidence) String() string {
 	fmt.Fprintf(&b, "boundary add %d/%d (control %d/%d) remove %d->%d/%d; ",
 		e.Boundary.AddGot, e.Boundary.AddNaive, e.Boundary.AddBelowGot, e.Boundary.AddBelowNaive,
 		e.Boundary.RemoveBefore, e.Boundary.RemoveGot, e.Boundary.RemoveNaive)
-	fmt.Fprintf(&b, "phantom %d labels %dB->%dB count=%d query-visible=%v survives-rt=%v; ",
+	fmt.Fprintf(&b, "empty-interval %d labels %dB->%dB count=%d rt-count=%d query-visible=%v "+
+		"(control count=%d labels=%d); ",
 		e.Phantom.Labels, e.Phantom.EmptyBytes, e.Phantom.AfterBytes, e.Phantom.AfterLabelCount,
-		e.Phantom.QueryVisible, e.Phantom.SurvivesRoundTrip)
+		e.Phantom.RoundTripLabelCount, e.Phantom.QueryVisible,
+		e.Phantom.CtrlCount, e.Phantom.CtrlLabelCount)
 	fmt.Fprintf(&b, "perturb=%s; digest=%#016x", e.Perturb, e.Digest)
 	for i := range e.Cells {
 		c := &e.Cells[i]
@@ -1095,9 +1108,13 @@ const (
 	// dropped whole, in both directions. It reproduces the pre-#2607 `to+1`
 	// overflow, so the regression arm has a demonstrated way to fail.
 	liPerturbBoundaryWraps
-	// liPerturbPhantomGone reports the inverted-AddRange experiment as leaving no
-	// entry behind, which is both the pin's failure and its arming gate's.
-	liPerturbPhantomGone
+	// liPerturbPhantomKept reports the empty-interval experiment as leaving one
+	// entry behind apiece. It reproduces the pre-#2608 measurement, so the
+	// regression arm has a demonstrated way to fail.
+	liPerturbPhantomKept
+	// liPerturbPhantomCtrlBad zeroes the non-empty CONTROL's labelCount, so the
+	// arm cannot be satisfied by an AddRange that records nothing at all.
+	liPerturbPhantomCtrlBad
 	// liPerturbEntryFloor reports a serialized labelCount below the number of
 	// labels the model says carry a member, reproducing a lost entry.
 	liPerturbEntryFloor
@@ -1162,8 +1179,10 @@ func (p liPerturb) String() string {
 		return "scope-routing"
 	case liPerturbBoundaryWraps:
 		return "boundary-wraps"
-	case liPerturbPhantomGone:
-		return "phantom-gone"
+	case liPerturbPhantomKept:
+		return "phantom-kept"
+	case liPerturbPhantomCtrlBad:
+		return "phantom-control-bad"
 	case liPerturbEntryFloor:
 		return "entry-floor"
 	case liPerturbEmptySweep:
@@ -2619,30 +2638,35 @@ const liPhantomBase uint32 = 0x0100_0000
 // liDriveWithPhantom measures what an inverted (or empty) AddRange does to a
 // label that has no entry.
 //
-// # This clause pins a defect too
+// # This clause was a defect pin and is now a REGRESSION arm (#2608)
 //
-// [label.Index.AddRange] reads the label's [index.NodeSet] out of the map,
-// calls `AddRange` on it, and stores it back UNCONDITIONALLY
-// (`graph/index/label/index.go:151-153`). `NodeSet.AddRange` promotes to the
-// bitmap tier BEFORE looking at the interval (`graph/index/nodeset.go:326-339`),
-// so an interval that names no ids still leaves a bitmap behind, and the
-// store-back creates a map entry for a label with nothing in it.
+// [label.Index.AddRange] used to read the label's [index.NodeSet] out of the
+// map, call `AddRange` on it, and store it back UNCONDITIONALLY, while
+// `NodeSet.AddRange` promoted to the bitmap tier BEFORE looking at the interval.
+// An interval that named no ids therefore left a bitmap behind, and the
+// store-back created a map entry for a label with nothing in it.
 //
-// The entry is invisible through the query surface — `Count` is 0, `Scan` is
-// nil, `Has` is false — and permanent: nothing removes it except a `Remove` or
-// `RemoveRange` that happens to find the set already empty. It is also
-// SERIALIZED, so it costs on-disk bytes and inflates the image's `labelCount`.
-// MEASURED, and pinned here as numbers: 1 000 inverted `AddRange` calls on
-// distinct labels turn a 16-byte empty image into a 20 016-byte one declaring
-// 1 000 labels, none of which carries a single id.
+// The entry was invisible through the query surface — `Count` 0, `Scan` nil,
+// `Has` false — and permanent. It was also SERIALIZED, so it cost on-disk bytes
+// and inflated the image's `labelCount`. MEASURED at the time: 1 000 inverted
+// `AddRange` calls on distinct labels turned a 16-byte empty image into a
+// 20 016-byte one declaring 1 000 labels, none carrying a single id.
 //
-// [label.Index.RemoveRange]'s own godoc promises the opposite for its direction
-// — "Empty bitmaps are deleted so the map does not grow unboundedly after
-// bulk-remove operations" — and MEASURED it keeps that promise. AddRange has no
-// such clause and does not behave that way.
+// [label.Index.RemoveRange]'s godoc has always promised the opposite for its own
+// direction — "Empty bitmaps are deleted so the map does not grow unboundedly
+// after bulk-remove operations" — and MEASURED it kept that promise. `AddRange`
+// now mirrors it: `NodeSet.AddRange` returns before promoting when the interval
+// is inverted, and `label.Index.AddRange` deletes rather than stores an entry
+// whose set is empty after the call. The two halves fix different things and
+// neither alone suffices — without the first an existing inline label is still
+// promoted one-way for nothing; without the second the zero-value set is still
+// stored back and the entry is still minted.
 //
-// Like the boundary arm, this is latent (no production caller) and is reported
-// rather than fixed, and the pin fires the day it changes.
+// So this arm now asserts the repaired contract: an interval naming no ids
+// leaves the image byte-identical to an empty index. It keeps the query-surface
+// probe, because "invisible to every query path" was true before the fix and
+// must stay true after it, and it keeps the round-trip check, which now asserts
+// that nothing is re-declared on the way back in.
 func liDriveWithPhantom(cfg *LabelIndexScopedConfig, ev *LabelIndexScopedEvidence) error {
 	p := &ev.Phantom
 	p.Labels = liPhantomLabels
@@ -2661,17 +2685,19 @@ func liDriveWithPhantom(cfg *LabelIndexScopedConfig, ev *LabelIndexScopedEvidenc
 	}
 	img, err := liSerialize(idx)
 	if err != nil {
-		return fmt.Errorf("serialize the phantom index: %w", err)
+		return fmt.Errorf("serialize the empty-interval index: %w", err)
 	}
 	p.AfterBytes = len(img)
 	p.AfterLabelCount = liImageLabelCount(img)
-	if cfg.Perturb == liPerturbPhantomGone {
-		p.AfterBytes = p.EmptyBytes
-		p.AfterLabelCount = 0
+	if cfg.Perturb == liPerturbPhantomKept {
+		// Reproduce the pre-#2608 measurement: one 20-byte entry apiece.
+		p.AfterBytes = p.EmptyBytes + 20*liPhantomLabels
+		p.AfterLabelCount = uint32(liPhantomLabels)
 	}
 
-	// The phantom must be invisible to every query path, which is what makes the
-	// serialized form the only place it shows.
+	// The entry must be invisible to every query path. This was true of the
+	// phantom too, and it is what confined the old defect to the serialized
+	// form; it must not regress into a VISIBLE empty label.
 	p.QueryVisible = false
 	for k := 0; k < liPhantomLabels; k++ {
 		lbl := liPhantomBase + uint32(k)
@@ -2681,17 +2707,34 @@ func liDriveWithPhantom(cfg *LabelIndexScopedConfig, ev *LabelIndexScopedEvidenc
 		}
 	}
 
-	// And it survives the round trip: the entry is re-declared on the way back in.
+	// And nothing is re-declared on the way back in.
 	fresh := label.NewIndex()
 	if derr := fresh.Deserialize(bytes.NewReader(img)); derr != nil {
-		return fmt.Errorf("deserialize the phantom image: %w", derr)
+		return fmt.Errorf("deserialize the empty-interval image: %w", derr)
 	}
 	back, err := liSerialize(fresh)
 	if err != nil {
-		return fmt.Errorf("re-serialize the phantom image: %w", err)
+		return fmt.Errorf("re-serialize the empty-interval image: %w", err)
 	}
-	p.SurvivesRoundTrip = liImageLabelCount(back) == p.AfterLabelCount &&
-		cfg.Perturb != liPerturbPhantomGone
+	p.RoundTripLabelCount = liImageLabelCount(back)
+	if cfg.Perturb == liPerturbPhantomKept {
+		p.RoundTripLabelCount = uint32(liPhantomLabels)
+	}
+
+	// The CONTROL: a label built by a range that names at least one id must
+	// still be recorded. Without it, "no entry was created" would be consistent
+	// with AddRange having stopped working altogether.
+	ctrl := label.NewIndex()
+	ctrl.AddRange(liPhantomBase, 10, 14)
+	cimg, err := liSerialize(ctrl)
+	if err != nil {
+		return fmt.Errorf("serialize the non-empty control: %w", err)
+	}
+	p.CtrlLabelCount = liImageLabelCount(cimg)
+	p.CtrlCount = ctrl.Count(liPhantomBase)
+	if cfg.Perturb == liPerturbPhantomCtrlBad {
+		p.CtrlLabelCount = 0
+	}
 	return nil
 }
 
@@ -3023,31 +3066,34 @@ func liCheckPins(e *LabelIndexScopedEvidence) []Violation {
 			b.RemoveInlineBefore, b.RemoveBefore))
 	}
 	p := &e.Phantom
-	if int(p.AfterLabelCount) != p.Labels {
-		v = append(v, liViolation(ViolationOracleDeviation, "phantom-pin",
-			"%d inverted AddRange calls on distinct labels left an image declaring %d labels, and "+
-				"this pin records the MEASURED behaviour of one phantom entry apiece (%d). "+
-				"label.Index.AddRange stores the NodeSet back unconditionally and NodeSet.AddRange "+
-				"promotes to the bitmap tier before it looks at the interval, so an interval naming "+
-				"no ids still leaves an entry. If this fired because the entry is no longer created, "+
-				"update the pin", p.Labels, p.AfterLabelCount, p.Labels))
+	if p.AfterLabelCount != 0 {
+		v = append(v, liViolation(ViolationGraphIntegrity, "phantom-pin",
+			"%d AddRange calls over an interval naming NO ids left an image declaring %d labels, "+
+				"want 0. An interval that names nothing must leave no entry: label.Index.AddRange "+
+				"deletes rather than stores a set that is empty after the call, mirroring "+
+				"RemoveRange's own godoc promise (#2608)", p.Labels, p.AfterLabelCount))
 	}
-	if p.AfterBytes <= p.EmptyBytes {
-		v = append(v, liViolation(ViolationOracleDeviation, "phantom-pin",
-			"the phantom image is %d bytes against %d for an empty index, so the entries cost "+
-				"nothing on disk; the pin records that they DO cost bytes (measured 20 apiece)",
+	if p.AfterBytes != p.EmptyBytes {
+		v = append(v, liViolation(ViolationGraphIntegrity, "phantom-pin",
+			"the empty-interval image is %d bytes against %d for an empty index; the entries must "+
+				"cost nothing on disk (they used to cost 20 apiece)",
 			p.AfterBytes, p.EmptyBytes))
 	}
 	if p.QueryVisible {
 		v = append(v, liViolation(ViolationGraphIntegrity, "phantom-pin",
-			"a phantom entry was observable through Count, Scan or Has; it must be invisible to "+
-				"every query path, which is what confines the defect to the serialized form"))
+			"an empty-interval label was observable through Count, Scan or Has; it must be "+
+				"invisible to every query path, which was true of the old phantom too and must "+
+				"not regress into a visible empty label"))
 	}
-	if !p.SurvivesRoundTrip {
+	if p.RoundTripLabelCount != p.AfterLabelCount {
 		v = append(v, liViolation(ViolationOracleDeviation, "phantom-pin",
-			"the phantom entries did not survive a Serialize/Deserialize cycle; the pin records "+
-				"that they do (the reader re-declares an entry for every labelID in the image, and "+
-				"NodeSetFromBitmap of an empty bitmap yields the empty tier)"))
+			"the image declared %d labels and %d after a Serialize/Deserialize cycle; the reader "+
+				"re-declares an entry for every labelID in the image, so the two must agree",
+			p.AfterLabelCount, p.RoundTripLabelCount))
+	}
+	if p.CtrlCount != 5 {
+		v = append(v, liViolation(ViolationOracleDeviation, "phantom-pin",
+			"the non-empty CONTROL recorded %d ids over a five-id range, want 5", p.CtrlCount))
 	}
 	return v
 }
@@ -3250,9 +3296,11 @@ const (
 )
 
 // liGateScopeAndPins certifies the scope table is complete and both directions
-// of the routing rule are represented, and that the boundary arm's control is
-// exact — without which the loss at math.MaxUint64 would not be attributable to
-// the final id.
+// of the routing rule are represented, that the boundary arm's control is exact
+// — without which behaviour at math.MaxUint64 would not be attributable to the
+// final id — and that the empty-interval arm's control actually recorded
+// something, without which its "no entry" assertion is satisfied by a harness
+// that measured nothing.
 func liGateScopeAndPins(e *LabelIndexScopedEvidence) []Violation {
 	var v []Violation
 	wantRows := 3 * len(liScopeOps())
@@ -3282,9 +3330,13 @@ func liGateScopeAndPins(e *LabelIndexScopedEvidence) []Violation {
 				"attributable to the final id rather than to the whole top of the id space",
 			e.Boundary.AddBelowGot, e.Boundary.AddBelowNaive))
 	}
-	if e.Phantom.AfterLabelCount == 0 {
+	if e.Phantom.Labels == 0 || e.Phantom.CtrlLabelCount == 0 {
 		v = append(v, liViolation(ViolationVacuousRun, "gate:phantom-armed",
-			"the phantom experiment produced no entries at all, so the pin adjudicated nothing"))
+			"the empty-interval experiment drove %d labels and its CONTROL — a range naming five "+
+				"ids — left %d entries in the image. With either at zero, "+
+				"\"no entry was created\" is satisfied by a harness that called nothing, or by an "+
+				"AddRange that records nothing at all",
+			e.Phantom.Labels, e.Phantom.CtrlLabelCount))
 	}
 	return v
 }

@@ -324,7 +324,14 @@ func (s *NodeSet) Remove(node uint64) (nowEmpty bool) {
 // labels; it is intentionally the ONLY entry point that can create a
 // bitmap without first crossing smallSetMax, and a set that takes an
 // AddRange is permanently a bitmap (#1585).
+//
+// An INVERTED interval (from > to) names no ids and is a no-op: it does not
+// promote, because promotion is one-way and a set that gained nothing must not
+// pay for a tier it never needed (#2608).
 func (s *NodeSet) AddRange(from, to uint64) {
+	if from > to {
+		return
+	}
 	if s.tag() != stateBitmap {
 		bm := roaring64.New()
 		// Fold any existing inline state into the new bitmap so the range

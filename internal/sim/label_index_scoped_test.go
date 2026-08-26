@@ -277,11 +277,18 @@ func TestLabelIndexScoped_EvidenceIsSubstantive(t *testing.T) {
 			ev.Boundary.RemoveInlineBefore, ev.Boundary.RemoveInlineGot,
 			ev.Boundary.RemoveBefore, ev.Boundary.RemoveGot)
 	}
-	if int(ev.Phantom.AfterLabelCount) != liPhantomLabels ||
-		ev.Phantom.AfterBytes <= ev.Phantom.EmptyBytes || ev.Phantom.QueryVisible {
-		t.Errorf("phantom: %d labels declared in %d bytes (empty index %d), query-visible=%v",
+	if ev.Phantom.AfterLabelCount != 0 || ev.Phantom.AfterBytes != ev.Phantom.EmptyBytes ||
+		ev.Phantom.QueryVisible || ev.Phantom.RoundTripLabelCount != 0 {
+		t.Errorf("empty-interval: %d labels declared in %d bytes (empty index %d), "+
+			"round-trip %d labels, query-visible=%v; an interval naming no ids must leave nothing",
 			ev.Phantom.AfterLabelCount, ev.Phantom.AfterBytes, ev.Phantom.EmptyBytes,
-			ev.Phantom.QueryVisible)
+			ev.Phantom.RoundTripLabelCount, ev.Phantom.QueryVisible)
+	}
+	if ev.Phantom.Labels != liPhantomLabels || ev.Phantom.CtrlLabelCount != 1 ||
+		ev.Phantom.CtrlCount != 5 {
+		t.Errorf("empty-interval arm drove %d labels with a control of %d ids in %d entries; "+
+			"want %d, 5 and 1, else the arm asserts nothing",
+			ev.Phantom.Labels, ev.Phantom.CtrlCount, ev.Phantom.CtrlLabelCount, liPhantomLabels)
 	}
 	d := &ev.DenseSmall
 	if d.Stable || !d.CtrlStable || d.Second != d.Third || d.Second <= d.First {
@@ -356,7 +363,8 @@ func liPerturbTargets() map[liPerturb]string {
 		liPerturbScopeSwap:          "scope-constructor",
 		liPerturbScopeRouting:       "scope-routing",
 		liPerturbBoundaryWraps:      "boundary-pin",
-		liPerturbPhantomGone:        "phantom-pin",
+		liPerturbPhantomKept:        "phantom-pin",
+		liPerturbPhantomCtrlBad:     "gate:phantom-armed",
 		liPerturbEntryFloor:         "entry-floor",
 		liPerturbDenseSmallStable:   "dense-small-pin",
 		liPerturbEmptySweep:         "gate:cells",
@@ -736,7 +744,7 @@ func liGateKnockouts() []struct {
 			}
 		}},
 		{"gate:boundary-control", func(e *LabelIndexScopedEvidence) { e.Boundary.AddBelowGot++ }},
-		{"gate:phantom-armed", func(e *LabelIndexScopedEvidence) { e.Phantom.AfterLabelCount = 0 }},
+		{"gate:phantom-armed", func(e *LabelIndexScopedEvidence) { e.Phantom.CtrlLabelCount = 0 }},
 		{"gate:dense-small-control", func(e *LabelIndexScopedEvidence) {
 			e.DenseSmall.CtrlStable = false
 		}},
