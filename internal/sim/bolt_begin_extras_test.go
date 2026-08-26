@@ -105,11 +105,15 @@ func TestBoltBeginExtras_ScenarioPasses(t *testing.T) {
 func cleanBeginExtrasEvidence() BoltBeginExtrasEvidence {
 	const committed = 5
 	ev := BoltBeginExtrasEvidence{
-		Seed:                          1,
-		CommittedNodes:                committed,
-		IssuedBookmarks:               []string{"FB:k00000001", "FB:k00000002"},
-		AutocommitBookmarkFresh:       "",
-		AutocommitBookmarkAfterCommit: "FB:k00000002",
+		Seed:            1,
+		CommittedNodes:  committed,
+		IssuedBookmarks: []string{"FB:k00000001", "FB:k00000002"},
+		// Since rmp #2563 an autocommit statement mints its OWN token, so the
+		// reference evidence carries a fresh non-empty one that differs from what
+		// the earlier COMMIT returned. It used to be the inverse — empty, then the
+		// COMMIT's token repeated — because the arm pinned the defect.
+		AutocommitBookmarkFresh:       "FB:k00000007",
+		AutocommitBookmarkAfterCommit: "FB:k00000008",
 		AutocommitAfterCommitExpected: "FB:k00000002",
 		AutocommitStatsSeen:           true,
 	}
@@ -321,17 +325,28 @@ func TestBoltBeginExtras_OracleCanFail(t *testing.T) {
 			wantOp: "bookmark-strictly-advances",
 		},
 		{
-			name:   "an autocommit statement minted its own bookmark",
-			mutate: func(e *BoltBeginExtrasEvidence) { e.AutocommitBookmarkFresh = "FB:k00000009" },
-			wantOp: "autocommit-bookmark-is-empty",
+			// INVERTED by rmp #2563: minting its own token is now the contract, and
+			// the clause fires when the autocommit statement mints NOTHING.
+			name:   "an autocommit statement minted no bookmark",
+			mutate: func(e *BoltBeginExtrasEvidence) { e.AutocommitBookmarkFresh = "" },
+			wantOp: "autocommit-bookmark-is-fresh",
 		},
 		{
-			name:   "the autocommit bookmark stopped echoing the prior COMMIT's",
-			mutate: func(e *BoltBeginExtrasEvidence) { e.AutocommitBookmarkAfterCommit = "FB:k0000000a" },
-			wantOp: "autocommit-bookmark-is-stale",
+			name: "the autocommit bookmark echoes the prior COMMIT's",
+			mutate: func(e *BoltBeginExtrasEvidence) {
+				e.AutocommitBookmarkAfterCommit = e.AutocommitAfterCommitExpected
+			},
+			wantOp: "autocommit-bookmark-not-stale",
 		},
 		{
-			name:   "the autocommit statement wrote nothing, so the empty bookmark is unattributable",
+			name: "the post-commit autocommit bookmark is empty",
+			mutate: func(e *BoltBeginExtrasEvidence) {
+				e.AutocommitBookmarkAfterCommit = ""
+			},
+			wantOp: "autocommit-bookmark-not-stale",
+		},
+		{
+			name:   "the autocommit statement wrote nothing, so its bookmark is unattributable",
 			mutate: func(e *BoltBeginExtrasEvidence) { e.AutocommitStatsSeen = false },
 			wantOp: "autocommit-did-write",
 		},

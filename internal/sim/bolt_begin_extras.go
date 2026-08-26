@@ -57,31 +57,47 @@ package sim
 //
 // [server.NextBookmark] (bolt/server/bookmark.go:20) returns "FB:k" followed by the
 // value of a PROCESS-GLOBAL atomic counter as 8 zero-padded hex digits. It is
-// assigned to the session in exactly ONE place — s.bookmark = NextBookmark() in
-// handleCommit, bolt/server/session.go:1694 — and delivered in three:
+// minted in TWO places, and until rmp #2563 in only one:
 //
-//   - the COMMIT SUCCESS, whose metadata is that bookmark and nothing else (:1696);
-//   - the terminal PULL SUCCESS, i.e. the one with has_more false (:1397);
-//   - the terminal DISCARD SUCCESS (:1500).
+//   - handleCommit, for an explicit transaction, delivered on the COMMIT SUCCESS
+//     whose metadata is that bookmark and nothing else;
+//   - the terminal PULL / DISCARD SUCCESS of an AUTOCOMMIT statement, added by rmp
+//     #2563.
 //
 // rmp #2484 established that the terminal reply is also the durability
 // acknowledgement, so the bookmark rides on the ack.
 //
-// Two consequences follow from "assigned only in handleCommit", and this scenario
-// pins both because they are what a driver sees:
+// # What this scenario measured, and what it now asserts
 //
-//   - An AUTOCOMMIT statement's terminal PULL SUCCESS carries a bookmark that was
-//     NOT minted for it. On a session that has never committed an explicit
-//     transaction the field is the EMPTY STRING — measured, on a write whose own
-//     stats in the same SUCCESS report nodes-created=1 and contains-updates=true.
-//   - On a session that HAS committed one, a later autocommit write's terminal PULL
-//     SUCCESS carries that EARLIER transaction's bookmark — measured equal to it,
-//     not merely similar. A driver chaining causality from an autocommit
-//     ResultSummary is therefore chaining a strictly earlier transaction's token.
+// While the assignment lived ONLY in handleCommit, both terminal-SUCCESS sites
+// published s.bookmark unconditionally, and this scenario pinned the two
+// consequences a driver actually sees:
 //
-// Neither is asserted anywhere in bolt/server: the only bookmark-key assertion in
-// that package is on a COMMIT SUCCESS and checks existence and non-emptiness only
-// (bolt/server/tx_test.go:82-88).
+//   - on a session that had never committed an explicit transaction, an autocommit
+//     write's terminal PULL SUCCESS carried the EMPTY STRING — measured on a write
+//     whose own stats in the same SUCCESS reported nodes-created=1 and
+//     contains-updates=true, so it could not be explained away as a statement that
+//     wrote nothing;
+//   - on a session that HAD committed one, a later autocommit write carried that
+//     EARLIER transaction's bookmark — measured equal to it, not merely similar. A
+//     driver chaining causality from an autocommit ResultSummary was chaining a
+//     strictly earlier transaction's token, and could not tell.
+//
+// rmp #2563 fixed it from the specification, which describes the field as "the
+// bookmark after committing this transaction (Autocommit Transaction only)": an
+// autocommit statement now mints its own, and inside an EXPLICIT transaction the
+// terminal SUCCESS omits the field entirely, because there the bookmark belongs on
+// the COMMIT SUCCESS. Publishing it in both places is what leaked the stale token.
+//
+// The two pins are INVERTED accordingly, not deleted: a fresh non-empty token is
+// now required, and repeating the earlier COMMIT's token is a violation. Each pin's
+// own message had said that a change meant an improvement and that the pin and its
+// documentation must be rewritten; that is what happened.
+//
+// Neither consequence was asserted anywhere in bolt/server at the time: the only
+// bookmark-key assertion in that package was on a COMMIT SUCCESS and checked
+// existence and non-emptiness only (bolt/server/tx_test.go:82-88). rmp #2563 added
+// the server-level tests as well.
 //
 // # The bookmark VALUE is not reachable from the seed
 //
@@ -1725,33 +1741,49 @@ func checkBoltBookmarkDelivery(e *BoltBeginExtrasEvidence) []Violation {
 		prev, havePrev = n, true
 	}
 
-	// CLAUSE autocommit-bookmark-is-empty. On a session that never committed an
-	// explicit transaction, an autocommit WRITE's terminal PULL SUCCESS carries an
-	// EMPTY bookmark. Pinned as measured.
-	if e.AutocommitBookmarkFresh != "" {
-		v = append(v, boltBeginViolation(ViolationOracleDeviation, "autocommit-bookmark-is-empty",
-			fmt.Sprintf("an autocommit write on a session with no prior explicit COMMIT reported bookmark %q in its "+
-				"terminal PULL SUCCESS, not the empty string. s.bookmark is assigned ONLY in handleCommit "+
-				"(bolt/server/session.go:1694), so this can only mean the server now mints one per autocommit "+
-				"statement — which would be an IMPROVEMENT, and this pin and its documentation must be rewritten "+
-				"rather than the reading dismissed", e.AutocommitBookmarkFresh)))
+	// INVERTED BY rmp #2563. These two clauses PINNED the defect: the terminal PULL
+	// SUCCESS echoed s.bookmark, which handleCommit alone ever assigned, so an
+	// autocommit statement reported the EMPTY string on a fresh session and the
+	// EARLIER transaction's token once one had committed. Each pin's own message
+	// said that a change meant an improvement and that the pin and its
+	// documentation must be rewritten. They were.
+	//
+	// The contract now comes from the specification, which describes this field as
+	// "the bookmark after committing this transaction (Autocommit Transaction
+	// only)": an autocommit statement's terminal SUCCESS carries a FRESHLY MINTED
+	// token, and inside an explicit transaction the field is absent entirely
+	// because the bookmark belongs on the COMMIT SUCCESS.
+	//
+	// CLAUSE autocommit-bookmark-is-fresh. A non-empty token, and one the earlier
+	// COMMIT did not already return.
+	if e.AutocommitBookmarkFresh == "" {
+		v = append(v, boltBeginViolation(ViolationACIDConsistency, "autocommit-bookmark-is-fresh",
+			"an autocommit write on a session with no prior explicit COMMIT reported an EMPTY bookmark in its "+
+				"terminal PULL SUCCESS. The specification puts this field under \"Autocommit Transaction only\", "+
+				"so it is precisely this case that must carry a token naming the work just committed (rmp #2563)"))
 	}
-	// CLAUSE autocommit-bookmark-is-stale. On a session that HAS committed one, the
-	// autocommit terminal PULL SUCCESS carries that earlier transaction's bookmark.
-	if e.AutocommitBookmarkAfterCommit != e.AutocommitAfterCommitExpected {
-		v = append(v, boltBeginViolation(ViolationOracleDeviation, "autocommit-bookmark-is-stale",
-			fmt.Sprintf("an autocommit write following an explicit COMMIT reported bookmark %q; the COMMIT had "+
-				"returned %q. They must be EQUAL: the terminal PULL echoes s.bookmark and nothing mints a fresh one "+
-				"for an autocommit statement. A difference means the behaviour changed and the pin must be rewritten",
-				e.AutocommitBookmarkAfterCommit, e.AutocommitAfterCommitExpected)))
+	// CLAUSE autocommit-bookmark-not-stale. The token must NOT be the one the
+	// earlier COMMIT returned: a driver cannot tell a repeated token from a fresh
+	// one and would chain causality on work it does not describe.
+	if e.AutocommitBookmarkAfterCommit == e.AutocommitAfterCommitExpected {
+		v = append(v, boltBeginViolation(ViolationACIDConsistency, "autocommit-bookmark-not-stale",
+			fmt.Sprintf("an autocommit write following an explicit COMMIT reported bookmark %q, which is exactly "+
+				"what that COMMIT returned. A repeated token is worse than an empty one: a driver cannot tell it "+
+				"is stale and treats it as naming the autocommit write (rmp #2563)",
+				e.AutocommitBookmarkAfterCommit)))
+	}
+	if e.AutocommitBookmarkAfterCommit == "" {
+		v = append(v, boltBeginViolation(ViolationACIDConsistency, "autocommit-bookmark-not-stale",
+			"an autocommit write following an explicit COMMIT reported an EMPTY bookmark: not stale, but not a "+
+				"token for its own work either"))
 	}
 	// CLAUSE autocommit-did-write. The empty bookmark above must not be explainable by
 	// the statement having written nothing: the SAME reply must report it as an update.
 	if !e.AutocommitStatsSeen {
 		v = append(v, boltBeginViolation(ViolationOracleDeviation, "autocommit-did-write",
-			"the autocommit write's terminal SUCCESS did not report contains-updates, so the empty bookmark it "+
+			"the autocommit write's terminal SUCCESS did not report contains-updates, so the bookmark it "+
 				"carried cannot be attributed to the bookmark machinery: the statement may simply have written "+
-				"nothing, and the two pins above would be measuring the wrong thing"))
+				"nothing, and the two clauses above would be measuring the wrong thing"))
 	}
 	return v
 }

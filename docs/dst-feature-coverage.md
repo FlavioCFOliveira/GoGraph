@@ -3830,8 +3830,9 @@ so a positive count is guaranteed by construction); fewer than one real and two
 fabricated tokens, without which "the token changed nothing" compares nothing; fewer
 than two arms that completed a read, which would compare a value with itself; fewer
 than two issued bookmarks, because one event is not a sequence a strict-advance clause
-can falsify; an EMPTY reference bookmark, which would collapse the stale-autocommit
-equality into "both are empty"; a timeout family with no reaped arm or no surviving
+can falsify; an EMPTY reference bookmark, which would collapse the
+not-stale autocommit comparison into "both are empty"; a timeout family with no reaped
+arm or no surviving
 one; any timeout arm whose injected clock registered no timer, which is what separates
 "the reaper declined" from "there was no reaper"; a `client-tx-timeout` whose server
 bounds are not strictly beyond its advance; a mode family missing either the read-only
@@ -3844,22 +3845,30 @@ no keys, which would make "no reply echoed one" vacuously true.
 Measured at the catalogue seed 612741132: 3 nodes under `:BeginCausal` committed across
 2 transactions; all five causal arms accepted and each observing 3 of 3, with
 `ExtractBookmarks` keeping one token on three of them and zero on the other two; the
-autocommit bookmark EMPTY on a fresh session and equal to the prior COMMIT's on a
-session that had committed one, on a reply reporting `contains-updates`; the four
+autocommit bookmark `FB:k00000003` on a fresh session and `FB:k00000005` on a session
+that had already committed `FB:k00000004` — a freshly minted token in both cases, on a
+reply reporting `contains-updates`. **Re-measured after rmp #2563**, which fixed this:
+the same seed previously read EMPTY on the fresh session and equal to the prior
+COMMIT's token on the other; the four
 timeout arms reaped after advance ordinals 0, never, 0 and 1 respectively, each with
 exactly one timer armed on its injected clock, and all three reaped arms answering the
 byte-identical code and message with IGNORED on the message after it; the registry
-reporting mode `"w"` for `"w"`, `"R"`, `"bogus"` and the absent key with the write
-ACCEPTED in every one, and `"r"` for `"r"` with the write refused
-`Neo.ClientError.Request.Invalid` / "cypher: write or DDL statement not allowed in a
-read-only transaction"; `db` reported as `neo4j` for the arm that sent no key and as
+reporting mode `"w"` for `"w"` and for the absent key with the write ACCEPTED in both,
+`"r"` for `"r"` with the write refused `Neo.ClientError.Request.Invalid` / "cypher:
+write or DDL statement not allowed in a read-only transaction", and `"R"` and `"bogus"`
+REFUSED at the BEGIN with `Neo.ClientError.Request.Invalid`, opening no transaction at
+all. **Re-measured after rmp #2564**, which fixed this: the same seed previously read
+mode `"w"` with the write ACCEPTED for `"R"` and `"bogus"` too; `db` reported as `neo4j` for the arm that sent no key and as
 `not-this-server`, `neo4j` and `system` verbatim for the three that named one, with
 the COMMIT SUCCESS carrying exactly `[bookmark]` in all four; the
 routing table advertising `[WRITE READ ROUTE]` over three entries at the listener's own
 address with `ttl=300` and `db=""`, the populated and zero ROUTE answered identically;
 and the `tx_metadata` BEGIN SUCCESS carrying no metadata keys at all, its terminal PULL
-carrying `[bookmark db has_more]` and its COMMIT `[bookmark]`, none of them a key the
-client sent. A serial sweep of seeds 1 to 100 was clean on all 100.
+carrying `[db has_more]` and its COMMIT `[bookmark]`, none of them a key the client
+sent. **Re-measured after rmp #2563**: that terminal PULL is INSIDE an explicit
+transaction, where the specification puts the bookmark on the COMMIT SUCCESS and not on
+the stream's terminal SUCCESS, so the field is now absent there; the same seed
+previously read `[bookmark db has_more]`, carrying the stale token. A serial sweep of seeds 1 to 100 was clean on all 100.
 
 ### The protocol version matrix: 4.4, 5.0 and 5.x side by side (rmp #2486)
 

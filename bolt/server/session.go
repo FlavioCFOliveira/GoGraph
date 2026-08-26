@@ -119,9 +119,19 @@ type Session struct {
 	// identity is populated after a successful HELLO/LOGON.
 	identity Identity
 
-	// bookmark holds the last committed transaction bookmark (server-generated
-	// placeholder for this sprint).
+	// bookmark holds the last bookmark this session minted — on an explicit
+	// COMMIT, or on the terminal SUCCESS of an autocommit statement.
 	bookmark string
+
+	// autocommitStmt records that the statement currently streaming was run in
+	// AUTOCOMMIT mode rather than inside an explicit transaction.
+	//
+	// It exists because the Bolt specification puts the `bookmark` field of a
+	// terminal PULL/DISCARD SUCCESS under "Autocommit Transaction only": inside an
+	// explicit transaction the bookmark belongs on the COMMIT SUCCESS and must not
+	// appear on the stream's terminal SUCCESS at all. Publishing it there
+	// unconditionally is how a stale token reached the wire (rmp #2563).
+	autocommitStmt bool
 
 	// localAddr is the listener address of the server that accepted this
 	// connection; used to populate the routing table in ROUTE responses.
@@ -1198,8 +1208,10 @@ func (s *Session) handleRun(ctx context.Context, m *proto.Run) ([]any, error) {
 	if s.txActive && s.tx != nil {
 		// Run inside the explicit transaction so that index-buffer writes are
 		// scoped to the transaction lifecycle (commit/rollback in tx.go).
+		s.autocommitStmt = false
 		result, runErr = s.tx.Run(m.Query, params)
 	} else {
+		s.autocommitStmt = true
 		// Autocommit mode (or defensive fallback when txActive is unexpectedly
 		// false in StateTxReady): route through RunAny so that reads take the
 		// lock-free Engine.Run path and, since rmp #2306, not even writes acquire a single-writer
@@ -1420,7 +1432,25 @@ func (s *Session) handlePull(ctx context.Context, m *proto.Pull) ([]any, error) 
 		"has_more": hasMore,
 	}
 	if !hasMore {
-		meta["bookmark"] = s.bookmark
+		// The bookmark is minted HERE for an autocommit statement, and OMITTED
+		// inside an explicit transaction (rmp #2563).
+		//
+		// The Bolt specification puts this field under "Autocommit Transaction
+		// only": for an explicit transaction the bookmark belongs on the COMMIT
+		// SUCCESS. Publishing s.bookmark unconditionally produced two wrong
+		// answers — the EMPTY string on a fresh session's autocommit write, since
+		// nothing but handleCommit ever assigned it, and the PREVIOUS
+		// transaction's token verbatim once an explicit commit had happened, which
+		// is worse because a driver cannot tell it is stale and chains causality
+		// on it.
+		//
+		// The autocommit statement has already committed by the time this SUCCESS
+		// is written — csess.RunAny commits internally — so a token minted here
+		// names work that is durable, not work in flight.
+		if s.autocommitStmt {
+			s.bookmark = NextBookmark()
+			meta["bookmark"] = s.bookmark
+		}
 		// This is the SUCCESS the driver turns into the ResultSummary, so `db`
 		// must be here or ResultSummary.Database() hands back a nil
 		// DatabaseInfo and summary.Database().Name() panics (rmp #2172).
@@ -1523,7 +1553,11 @@ func (s *Session) handleDiscard(m *proto.Discard) ([]any, error) {
 
 	meta := map[string]packstream.Value{"has_more": hasMore}
 	if !hasMore {
-		meta["bookmark"] = s.bookmark
+		// Same contract as the PULL terminal SUCCESS; see the note there (rmp #2563).
+		if s.autocommitStmt {
+			s.bookmark = NextBookmark()
+			meta["bookmark"] = s.bookmark
+		}
 		// A DISCARD terminates the stream just as a PULL does, and the driver
 		// builds its ResultSummary from whichever SUCCESS ends it (rmp #2172).
 		meta["db"] = s.databaseName()
