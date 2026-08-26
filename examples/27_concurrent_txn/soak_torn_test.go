@@ -56,6 +56,20 @@ const soakTornBudget = 4 * time.Minute
 // this defect can give it hours without editing the source.
 const soakTornBudgetEnv = "GOGRAPH_TORN_SEARCH_BUDGET"
 
+// soakTornProgressEvery is how often the search reports its running denominator.
+//
+// It exists because the denominator used to be logged ONCE, when the budget
+// expired. A search given hours therefore had nothing to show until it finished,
+// so an operator who stopped it early — or whose machine was needed for something
+// else — lost the whole run: not the finding, which would have failed loudly, but
+// the observation COUNT, which is the only thing a clean run produces. That
+// happened, and cost an hour of clean search that could not be quoted.
+//
+// The interval is coarse on purpose. The line is telemetry for a human watching a
+// multi-hour run, not a measurement anything depends on, and logging per run would
+// bury the result line it exists to support.
+const soakTornProgressEvery = 30 * time.Second
+
 // tornSearchBudget resolves the wall-clock budget for the search.
 func tornSearchBudget(tb testing.TB) time.Duration {
 	tb.Helper()
@@ -92,11 +106,23 @@ func TestSoak_TornTotalSearch(t *testing.T) {
 		runs         int
 		observations int64
 	)
+	started := time.Now()
+	nextProgress := started.Add(soakTornProgressEvery)
 	for time.Now().Before(deadline) {
 		var buf bytes.Buffer
 		err := run(ctx, &buf, &cfg)
 		runs++
 		observations += readerObservations(&buf)
+
+		// Report the running denominator, so a run that is stopped before its
+		// budget expires still yields the number a rate can be quoted against.
+		if now := time.Now(); now.After(nextProgress) {
+			elapsed := now.Sub(started)
+			t.Logf("progress: %d runs / %d observations in %s (%.0f obs/s)",
+				runs, observations, elapsed.Round(time.Second),
+				float64(observations)/elapsed.Seconds())
+			nextProgress = now.Add(soakTornProgressEvery)
+		}
 
 		if err == nil {
 			continue
@@ -110,7 +136,9 @@ func TestSoak_TornTotalSearch(t *testing.T) {
 	}
 
 	// Clean. The denominator is the product; state it.
-	t.Logf("no torn total in %d runs / %d observations over %s", runs, observations, budget)
+	elapsed := time.Since(started)
+	t.Logf("no torn total in %d runs / %d observations over %s (%.0f obs/s)",
+		runs, observations, elapsed.Round(time.Second), float64(observations)/elapsed.Seconds())
 	if observations == 0 {
 		t.Fatalf("the search made %d runs but counted 0 observations — the harness is not measuring what it claims", runs)
 	}
