@@ -705,7 +705,7 @@ Assertions here are built from the poll site, never from the doc.
 | Per-transaction op caps (CWE-770), producer **and** replay | `txn-oversize` (`internal/sim/txn_oversize.go`) | an over-cap commit is refused with `txn.ErrTransactionTooLarge` **before any frame is written** — proved by the durable WAL image being BYTE-identical across the refusal and the live graph unmutated, not by the error alone — and the surviving file recovers clean with every refused key absent; a hand-built WAL whose marker-less run exceeds the replay cap fail-stops with `recovery.ErrTransactionTooLarge`, keeps exactly the committed prefix, and is refused by the store-open rather than appended onto. The boundary is MEASURED on both sides and the two caps agree exactly (cap ops passes, cap+1 fails both). Until this task the cap reached only the replayer, so neither sentinel was reachable under simulation at any setting — see below |
 | Lock-free CSR publisher refcount lifecycle (`graph/generation`) | `generation-swap` (`internal/sim/generation_swap.go`) | every acquisition's traversal matches the model's INDEPENDENTLY computed adjacency for the generation the artefact's own content declares, so a torn swap is caught by IDENTITY rather than by well-formedness (the package's own rotation test asserts a constant edge count and discriminates no generation from any other); every generation's refcount is audited AT REST, after every reader is joined and the publisher stopped — the only quiescent point — plus a structural floor (>=1 while held) and ceiling (<=readers+1) that hold at every instant; `PublishWithDrain` with a reference held by the publisher itself returns `ErrDrainTimeout` at ANY positive timeout (1ns..20ms measured) without corrupting `Current`, while the forced unbounded drain beside it must complete, so neither direction passes vacuously; `Close` drains a LIVE reader fleet racing a publisher with none left wedged, and the post-close contract (`Acquire`->nil, `Current`->nil, `Publish`/`PublishWithDrain`->`ErrClosed`) is pinned. The plan and every sub-seed are drawn up front so the plan digest is seed-reproducible while the interleaving is not — stated, not glossed. **USE-AFTER-FREE is out of reach** without a poisoned allocator and is not claimed; use-after-RECYCLE is what the sentinel clauses cover. **Eleven** library mutations were applied and reverted to prove the clauses fire, and the table in the file header is the authoritative count: five of them were REPRODUCED in a later validation pass and are stamped there with the seed and reader count each was measured at, while the other six are marked inherited-and-unverified because their sighting counts carry no conditions and are not reproducible as written. One (dropping `Acquire`'s re-check) is caught only probabilistically and, on the inherited measurements, needs both `-race` and a fleet wider than the core count; no detection RATE is claimed for any width set, because the only width those measurements share with the default fleet detected nothing in 5 runs. The wide 64/256/1024 fleets and the 64-seed geometry sweep run in the SHORT layer: they were gated behind the soak tag on an estimate of "a million Acquire/Release pairs per seed … minutes under the race detector", measurement put the whole set at **0.46 s** under `-race` on 10 cores, and they were promoted so the default gate exercises the published concurrency levels instead of skipping them |
 | Fluent pattern-query engine as an INDEPENDENT second read path (`graph/query`) | `fluent-query` (`internal/sim/fluent_query.go`) | every probe is adjudicated THREE ways against a model-computed arbiter, with the three comparisons as SEPARABLE clauses so a red run names the wrong path: `fluent-vs-oracle`, `cypher-vs-oracle` and `fluent-vs-cypher` (a shared-substrate defect moves both engines together and leaves the third clause silent, which is the correct attribution rather than a fluent-vs-Cypher divergence). This is deliberately NOT the stance `differential.go` takes — that facility compares the engine with itself, which is sound only because the engine guarantees its two planner variants are result-equivalent. A FOURTH channel, neither engine, walks the Mapper directly and is held to the model BEFORE any probe, so a probe failure cannot be explained away by an already-diverged substrate. `Out()` must answer identically over the live-filtered AND the tombstone-agnostic CSR build — a theorem of the two prunes together, not a coincidence — and the CSR is read by nothing except `Out()`, so the label / property / range probes are provably CSR-independent. The tombstone gate is on `seedAllLive`'s Mapper walk, which never forgets a slot and is therefore DETERMINISTIC; the label-bitmap corpse count is swept by lpg's background vacuum (MEASURED at 3 and 2 for the same seed in the same process) and is telemetry, gated on nothing. `Out()`'s ghost-arc prune is unreachable on the live graph (MEASURED: `DETACH DELETE` strips arcs, raw and live CSR `Size()` equal on all 24 sweep seeds) and is driven by a constructed fixture that asserts its own precondition. Seek and scan are separated BY CONSTRUCTION (`Vertex(label, pred)` vs `Vertex(label).Vertex(pred)`, since `labelsInPreds` of a label-free predicate list is empty and both seek helpers refuse it); served-ness is established by ENUMERATING the guard's conditions, which is stated as such rather than presented as observation. The one divergence this scenario FOUND — the seek and scan arms disagreeing for mixed INTEGER/FLOAT range bounds — became the asserted `range-mixed` clause (rmp #2600), and closing it exposed a SECOND asymmetry between two PREDICATES rather than two arms: the unified range matched where the still-shared-kind equality did not, so the same data answered differently depending on how the predicate was written. rmp #2601 unified `equalValue` through the same exact comparator, removed the `hashLookuper[int64]`/`[float64]` arms as unsound SUBSETS of a unified equality, and moved a numeric equality onto the companion btree as the degenerate range `[v, v]` with `equalValue` as the residual — so an equality and a degenerate range now agree by CONSTRUCTION over one comparator, one index and one residual. The identity is scoped to the ORDERABLE kinds: openCypher's equatability is wider than its comparability, so for BOOLEAN, BYTES and TIME the two predicates legitimately differ, and that divergence is pinned rather than closed. Not claimed: resurrection, concurrency, multi-hop |
-| Typed-schema validator as a runtime ENFORCEMENT hook (`lpg.Graph.SetValidator`, `lpg.Graph.ValidateNode`, `graph/lpg/schema`) | `typed-schema` (`internal/sim/typed_schema.go`) | the accept/reject verdict is adjudicated against a DECLARATION-TABLE oracle — the same table the schema is built from, never the schema itself — on all **five** validator-consulting write paths (VERIFIED in source; the task brief named only the edge-property ones), and classified by SENTINEL rather than by non-nilness, because `ErrTypeMismatch`, `ErrUnknownProperty` and `ErrMissingRequired` are three different refusals. Coverage is CONSTRUCTED: the fifteen (path, verdict) cells are SWEPT once per epoch in a seed-shuffled order, so the seed decides the order and never the coverage. Every refusal is proven side-effect-free on five separate clauses — the value through the path's own accessor, the value through the columnar store's SECOND accessor, the node and edge population, whether the property key was INTERNED (MEASURED: the hook runs BEFORE the intern, so it is not), and on the fused path that neither the edge nor its fresh endpoint node appeared. `Graph.ValidateNode` **had no caller outside `graph/lpg`** before this task (MEASURED: only the package's own internal `NodeValidator` dispatch and its own tests), so required-property existence is embedder-invoked and gets its own arm: the mid-build rejection paired with the finalised acceptance, an unlabelled control, the never-interned benign exit, and a pre-installation fixture that is the only route (short of the recovery bypass) to ValidateNode's kind re-check over already-present properties. The recovery asymmetry is pinned as FIVE clauses from one constructed probe, not documented away. Two defects surfaced: a bit-packed BOOL column PANICKED on the fused append path (**fixed**, reachable from public `graph/lpg` on a three-node fixture with no DST involved), and `txn.Tx.Commit`'s fsync-BEFORE-validate ordering lets a REFUSED value become durable and be resurrected by recovery (**pinned, not fixed** — see below) |
+| Typed-schema validator as a runtime ENFORCEMENT hook (`lpg.Graph.SetValidator`, `lpg.Graph.ValidateNode`, `graph/lpg/schema`) | `typed-schema` (`internal/sim/typed_schema.go`) | the accept/reject verdict is adjudicated against a DECLARATION-TABLE oracle — the same table the schema is built from, never the schema itself — on all **five** validator-consulting write paths (VERIFIED in source; the task brief named only the edge-property ones), and classified by SENTINEL rather than by non-nilness, because `ErrTypeMismatch`, `ErrUnknownProperty` and `ErrMissingRequired` are three different refusals. Coverage is CONSTRUCTED: the fifteen (path, verdict) cells are SWEPT once per epoch in a seed-shuffled order, so the seed decides the order and never the coverage. Every refusal is proven side-effect-free on five separate clauses — the value through the path's own accessor, the value through the columnar store's SECOND accessor, the node and edge population, whether the property key was INTERNED (MEASURED: the hook runs BEFORE the intern, so it is not), and on the fused path that neither the edge nor its fresh endpoint node appeared. `Graph.ValidateNode` **had no caller outside `graph/lpg`** before this task (MEASURED: only the package's own internal `NodeValidator` dispatch and its own tests), so required-property existence is embedder-invoked and gets its own arm: the mid-build rejection paired with the finalised acceptance, an unlabelled control, the never-interned benign exit, and a pre-installation fixture that is the only route (short of the recovery bypass) to ValidateNode's kind re-check over already-present properties. The recovery asymmetry is pinned as FIVE clauses from one constructed probe, not documented away. Two defects surfaced: a bit-packed BOOL column PANICKED on the fused append path (**fixed**, reachable from public `graph/lpg` on a three-node fixture with no DST involved), and `txn.Tx.Commit`'s fsync-BEFORE-validate ordering let a REFUSED value become durable and be resurrected by recovery (**FIXED 2026-08-25, rmp #2602, `fd7159d6`** — the validator now runs before the durable write, and the scenario's arm inverted with it; see below) |
 
 ### Snapshot component corruption is now covered; the manifest is checksummed (rmp #2467, #2520)
 
@@ -4593,10 +4593,27 @@ The coverage work exercised the engine against these scenarios and found:
     `BEGIN` was refused by the cap is served normally on its next message while
     one refused by `newTx` must `RESET` first. Which behaviour is correct is a
     contract question, not an obvious bug — the Bolt state machine arguably
-    should not fail a session for a resource refusal — so it is filed as **rmp
-    #2561** and the OBSERVED behaviour is pinned: `internal/sim/bolt_tx_quota.go`
-    drives a statement down the refused connection and requires it to be served,
-    so whichever way #2561 is closed, the change is deliberate.
+    should not fail a session for a resource refusal — so it was filed as **rmp
+    #2561** and the OBSERVED behaviour was pinned rather than judged:
+    `internal/sim/bolt_tx_quota.go` drives a statement down the refused connection
+    and requires it to be served.
+    **FIXED (rmp #2561, `f77df07e`) — and READY is now the CHOSEN answer, not the
+    accidental one.** A cap is back-pressure, not a protocol error: the slot frees
+    when another of the principal's transactions closes, so retrying the same
+    `BEGIN` is the right response and a `RESET` round trip would charge the client
+    for the server being busy. The reason is now written in `handleBegin`, in
+    `Transition`'s godoc as its one documented exception, and in `docs/bolt.md`.
+    The `newTx` neighbour keeps `FAILED` on purpose, and a second test pins it there
+    so the difference cannot become a side effect of whichever branch is edited
+    next. **The ticket's second half turned out to be wrong twice over:**
+    `Neo.ClientError.General.LimitExceeded` does not appear in Neo4j's status codes
+    at all — GoGraph invented it — and its `ClientError` class instructs a driver
+    NOT to retry, the opposite of what a self-freeing cap wants. The code is now
+    `Neo.TransientError.Transaction.MaximumTransactionLimitReached`, which is real
+    and means exactly this. The in-flight CURSOR cap keeps `LimitExceeded`: it is a
+    different limit, reached inside one transaction. The pin now asserts that
+    staying `READY` is worth having — it frees the slot and re-issues the `BEGIN`
+    with no `RESET` between.
 11. ~~**`graph/query`'s index seek and its scan fallback disagree for mixed-kind
     range bounds**~~ **Closed by rmp #2600.** (Silent wrong answer on one of the
     two paths; read-only, no data loss.) With `Float64Value` bounds over an
@@ -4745,13 +4762,30 @@ The coverage work exercised the engine against these scenarios and found:
 
     The exposure is confined to an embedder that drives `store/txn` directly with
     a validator installed; `store.DB` and every Cypher-driven path validate first.
-    It is **pinned, not fixed**: `checkTypedSchemaPureStore` asserts the behaviour
-    as measured, in both directions (the accepted sibling value must survive, or
-    an absent refused value would be indistinguishable from a recovery that
-    replayed nothing), and its message says that a run in which the resurrection
-    stops happening must update the pin, the file header and this document rather
-    than delete the clause. Changing the commit ordering is a durability-contract
-    decision, not a test fix, so it is recorded here and left for adjudication.
+    It was **pinned rather than fixed** at first, because changing the commit
+    ordering is a durability-contract decision and not a test fix:
+    `checkTypedSchemaPureStore` asserted the behaviour as measured, in both
+    directions, and its message named exactly what to update when the ordering
+    changed — the pin, the file header and this document.
+    **FIXED (rmp #2602, `fd7159d6`), and the arm inverted with it.** The contract
+    was put to the user with three options and validating at BUFFER time was
+    chosen: `Tx.SetNodeProperty`, `SetEdgeProperty` and `SetEdgePropertyByHandle`
+    now reject before the op reaches the buffer, so the frame is never appended and
+    never fsynced, and `lpg.Graph.ValidateProperty` exists for that call. This also
+    makes `store/txn` agree with the Cypher path, which has always validated before
+    buffering. Measured after: `refusedAtBuffer=true`, `notApplied=false`,
+    `resurrected=false`, `storedAfterRecovery=absent`, and `walOps` down from 4 to
+    3 — the refused frame is gone from the log. **The cost flagged when
+    recommending it did bite:** the Cypher adapter validated and then buffered, so
+    every engine write validated TWICE — and a `SchemaValidator` may be stateful, so
+    a counting validator saw the wrong write refused; worse, the adapter DISCARDED
+    that call's error (`_ =`, annotated "ErrTxFinished impossible here", a premise
+    this change falsified), so the new guard fired on the engine path and was
+    swallowed. Both are closed by explicit pre-validated entry points
+    (`SetNodePropertyPreValidated` and its two siblings) for the one caller that has
+    already validated the same value against the same graph. The narrative section
+    above records the same outcome; the two statements agree.
+    See [The typed schema as a runtime enforcement hook (rmp #2493)](#the-typed-schema-as-a-runtime-enforcement-hook-rmp-2493).
 
 14. **The single-edge anchor swap drops every row when the pattern's SOURCE node
     is anonymous** (fail-silent, wrong answer). With the swap admissible,
@@ -4817,11 +4851,28 @@ The coverage work exercised the engine against these scenarios and found:
     same membership therefore answers differently depending on a tier the public
     surface does not expose. `AddRange` has no such split, promoting before it
     reads the interval, so it is uniformly wrong at the boundary.
-    **Latent**: neither range method has a production caller, and
-    no graph in this module mints a NodeID there. Reported rather than fixed —
-    the repair is a design choice (split the call, saturate, or refuse) that
-    changes behaviour at the boundary. Pinned to the measured behaviour by
-    `label-index-scoped`'s `boundary-pin`, which fires the day it changes.
+    It was **latent** — neither range method has a production caller, and no graph
+    in this module mints a NodeID there — and reported rather than fixed, because
+    the repair is a design choice (split the call, saturate, or refuse) that changes
+    behaviour at the boundary. It was pinned to the measured behaviour by
+    `label-index-scoped`'s `boundary-pin`.
+    **FIXED (rmp #2607, `ab0e9832`).** The choice is **split**, because it is the
+    only one of the three that keeps the documented closed-interval contract:
+    saturating silently drops the top id and refusing changes the public surface.
+    The dependency's own source settles that a split is required rather than
+    avoidable — roaring64's `AddRange`/`RemoveRange` are half-open over `uint64`
+    with no closed variant (`roaring/v2@v2.26.0/roaring64/roaring64.go:1054,1079`),
+    while the 32-bit sibling escapes the same problem only by widening its bound to
+    `uint64` so it can name `MaxUint32+1` (`roaring.go:1958`); at 64 bits no wider
+    type exists, so the top element is handled separately. Both directions now
+    route through `addRangeClosed` / `removeRangeClosed`, which add or remove
+    `[from, max)` and then the top element itself; an inverted interval is a no-op,
+    matching roaring's own semantics. The pin is **inverted, not deleted**:
+    `liPerturbBoundaryFixed` (which simulated the fix) becomes
+    `liPerturbBoundaryWraps` (which reproduces the overflow), so the arm still has a
+    demonstrated way to fail, and the arm now also drives `RemoveRange` over an
+    INLINE-tier label of identical membership and asserts the two tiers agree —
+    tier agreement being the half a single-tier arm cannot see.
 17. **An inverted or empty `AddRange` creates a permanent, serialized entry for a
     label with nothing in it** (unbounded growth, latent).
     `label.Index.AddRange` stores the `NodeSet` back unconditionally
@@ -4834,8 +4885,34 @@ The coverage work exercised the engine against these scenarios and found:
     apiece, none carrying an id. `RemoveRange`'s own godoc promises the opposite
     for its direction ("Empty bitmaps are deleted so the map does not grow
     unboundedly") and MEASURED keeps that promise; `AddRange` makes no such claim
-    and does not behave that way. **Latent** for the same reason as #15. Reported
-    rather than fixed; pinned by `label-index-scoped`'s `phantom-pin`.
+    and does not behave that way. It was **latent** for the same reason as #15, and
+    reported rather than fixed; it was pinned by `label-index-scoped`'s
+    `phantom-pin`, which recorded the defective numbers deliberately.
+    **FIXED (rmp #2608, `064ed6ce`).** `AddRange` now mirrors `RemoveRange`'s
+    delete-on-empty. **BOTH** prescribed repairs are applied, because they fix
+    different halves and neither alone suffices — verified rather than assumed:
+    with only the store-back guard, `NodeSet.AddRange` would still promote an
+    EXISTING inline label to the bitmap tier on an inverted range, and promotion is
+    one-way, so the waste would be permanent; with only the early return,
+    `label.Index.AddRange` would still read the zero-value `NodeSet`, call a no-op
+    and store it back, so the entry would still be minted and `labelCount` would
+    still count it. So `NodeSet.AddRange` returns before promoting when
+    `from > to`, and `label.Index.AddRange` deletes rather than stores a set that is
+    empty after the call — a branch reachable only when the label had no entry,
+    since `AddRange` cannot empty a set that already held ids. **One probe was
+    VACUOUS and was replaced:** a label-level test comparing serialized bytes before
+    and after an inverted `AddRange` on an existing label CANNOT detect the
+    promotion, because an inline set and a bitmap holding the same ids serialize
+    byte-identically — which is exactly the #1585 zero-migration guarantee. The tier
+    tag is the only honest probe, so that half moved into `graph/index`. The pin is
+    inverted into a regression arm — `liPerturbPhantomGone` becomes
+    `liPerturbPhantomKept` — gains a CONTROL (a range naming five ids, which must
+    still be recorded), and `gate:phantom-armed` is re-pointed at that control,
+    since "no entry was created" is otherwise satisfied by a harness that measured
+    nothing. **Recorded, not fixed, and out of scope:** `Deserialize` still
+    re-materialises an empty-bitmap entry from a legacy image written by the
+    defective writer, because dropping them in the reader would change round-trip
+    byte semantics for existing images.
 18. **The serialized label index is not idempotent for a run-encoded label small
     enough to be down-converted** (encoding instability, latent). A label built
     by `AddRange` holds a roaring RUN container; if its cardinality is at most
@@ -4850,10 +4927,37 @@ The coverage work exercised the engine against these scenarios and found:
     exactly one cycle, and no content is ever lost — but a checkpoint, reload and
     re-checkpoint produces different bytes for the same logical state, which is
     what a fixture diff, a content-addressed store, or an incremental backup's
-    deduplication relies on not happening. **Latent**: `AddRange` has no
-    production caller, so no production label is ever a run container. Reported
-    rather than fixed; pinned by `label-index-scoped`'s `dense-small-pin`, with
-    the exact window swept under soak.
+    deduplication relies on not happening. It was **latent** — `AddRange` has no
+    production caller, so no production label is ever a run container — and
+    reported rather than fixed; it was pinned by `label-index-scoped`'s
+    `dense-small-pin`, with the exact window swept under soak.
+    **FIXED (rmp #2609, `f917b9c1`), and the ACCEPTANCE CRITERIA WERE AMENDED with
+    the user's decision recorded.** As filed they asked for the image to be a
+    function of the logical contents at EVERY width. Measured, that costs more than
+    the report knew: `Serialize` holds only an `RLock` and `NodeSet.Bitmap` hands
+    back the LIVE bitmap, so normalising an arbitrary set needs a full `Clone`
+    first, and roaring's run optimisation rewrites containers in place so
+    copy-on-write does not help — on a sparse 100k-id label that measured
+    **6.55 → 90 µs/op and 1 289 → 218 065 B/op** to produce a byte-identical image.
+    The user chose to bound the normalisation at `smallSetMax`, which is exactly the
+    band the reader down-converts and therefore the only band where a cycle can
+    change the encoding; the AC's second clause is now bounded to widths 1..8 while
+    the idempotence clause still covers 1..16. Within that bound, normalise **DOWN
+    rather than UP**: re-materialising from the sorted ids reaches the same canonical
+    form as `RunOptimize` with strictly less work, and leaves every image an existing
+    caller can produce byte-identical. The public seam is
+    `NodeSet.CanonicalBitmap`. **Allocations are IDENTICAL, every sample equal**, for
+    a 100k dense label, a 100k sparse one and an `Add`-built label of 8 ids; only an
+    `AddRange`-built label at or below the bound moves, 16 → 28 allocs/op, which is
+    what the `Add`-built label of the same ids already cost. A first, SEQUENTIAL A/B
+    reported a −8.57 % speedup on the dense label; **interleaving REFUTED it
+    (p=0.841)**, so it was an artefact and is not claimed. All three defects this
+    scenario witnessed are now fixed, so the pin is inverted into a regression arm
+    (`liPerturbDenseSmallStable` becomes `liPerturbDenseSmallUnstable`, reproducing
+    the 55→72 re-encoding), and `gate:range-tier-crossover` is KEPT, as the user
+    chose: the crossover moved from width 4 to `smallSetMax` rather than
+    disappearing, so `liRangeTierWidths` gains 9, 12 and 16 and the gate still
+    brackets both answers.
 
 19. **Exported `search` entry points ran to completion under an already-cancelled
     context, one of them returning the true, complete answer with a nil error.**
@@ -4904,6 +5008,311 @@ The coverage work exercised the engine against these scenarios and found:
     `ac16a8c9`; the DST regression guard is the cancellation battery
     (`internal/sim/search_ctx_cancel.go`), which re-drives all 58 entry points
     after every crash and recovery.
+
+20. **A refused Bolt re-authentication left the connection running as the PREVIOUS
+    principal** (security; unauthorised write capability). `handleLogon`'s
+    non-`firstAuth` failure branch was the only exit that set neither `s.identity`
+    nor `s.authenticated` — the assignments sit after the error return — so a refused
+    identity switch changed nothing, and `handleReset` then took the authenticated
+    path back to `READY` with full write capability. MEASURED end to end over a real
+    socket: `LOGON(alice, ok)`, `LOGON(bob, WRONG)` → FAILURE, `RUN` → IGNORED,
+    `RESET` → SUCCESS, `CREATE (:Ghost)` → SUCCESS, nodes-created **1**. The identity
+    is security-relevant even without roles: it keys the per-principal transaction
+    quota and the `SHOW TRANSACTIONS` attribution, so a refused switch left both
+    pointing at the wrong principal.
+    **FIXED (rmp #2556, `372c7520`).** The contract comes from the SPECIFICATION, not
+    from preference: the Bolt `LOGON` section states that a failed authentication
+    makes the server respond FAILURE and close the connection, and carves out no
+    exception for re-authentication; the user chose to terminate on ANY failed
+    `LOGON`. `enterFailed` runs before `DEFUNCT` rather than a raw state set, because
+    `LOGON` is legal in `TX_READY` and `enterFailed` is the audited reclaim (#1312).
+    **WHY NOTHING CAUGHT IT:** every existing test and DST arm sends `LOGOFF` first,
+    which pre-clears the flag, so the branch was exercised nowhere — and the official
+    `neo4j-go-driver` always emits `LOGOFF` before `LOGON`, so the branch was
+    reachable only by a non-conforming client, exactly an attacker's shape, because
+    skipping the `LOGOFF` was how a failed credential guess cost nothing. The new arm
+    `reauth-wrong-password-no-logoff` omits the `LOGOFF` and attempts the write AFTER
+    a `RESET`, because `RESET` is where the recovery happened — an arm that only
+    checked the reply to the `LOGON` would have passed against the defect. It is
+    registered in `boltAuthExpectedArms` so it cannot silently stop running. The first
+    version of the new unit test was VACUOUS and said so: `newReadySession` installs
+    `NoAuthHandler{}`, which accepts every credential, so the run duly reported that a
+    wrong-credential `LOGON` had been accepted.
+21. **`store/csrfile` followed a symlinked final component on both the write and the
+    read path** (security, CWE-59 link following; arbitrary-file overwrite). Both
+    sibling publish paths were hardened against exactly this class under rmp #1843 —
+    `store/wal` has `walNoFollow`, `store/snapshot` has `openSnapshotComponent` — and
+    `csrfile` alone was missing it. The write side is the sharper half because the temp
+    name is FULLY PREDICTABLE: the writer forms it as `OutputPath + ".tmp"`, so a local
+    principal who can write the store directory pre-plants a symlink there aimed at any
+    file this process may write. REPRODUCED, with all three parts of the audit's claim
+    MEASURED rather than argued — with the guard disabled the regression test reports
+    that the publish **SUCCEEDED** through the symlinked temp, that the victim file went
+    from 60 bytes to **2 244 bytes of CSR data**, and that the published path itself
+    **became a SYMLINK**, because `rename(2)` moved the planted link onto the output
+    name, so every later write through it lands on the victim. The read path followed a
+    symlink too.
+    **FIXED (rmp #2580, `7a4bbfcc`).** The guard mirrors the existing pattern rather
+    than inventing one: a build-tagged `csrNoFollow`, `syscall.O_NOFOLLOW` on unix and
+    zero elsewhere, applied in `osFS.Create` and in the reader's open. **THE TOCTOU IS
+    CLOSED SEPARATELY, AND IT HAD TO BE:** the writer resized the temp with a
+    PATH-based `os.Truncate` moments after creating it, which re-resolves a predictable
+    name and is a second window even with `O_NOFOLLOW` on the create; `Truncate` moves
+    onto the already-open descriptor, so there is no second name resolution to race.
+    That changes the `csrfile` FS seam — `Truncate` leaves the `fs` interface and joins
+    `File`, whose only two implementations already satisfy it (`*os.File` natively, and
+    `*sim.SimFileHandle` because it grew the same method) — and the two now-orphaned
+    seam methods are removed rather than left dangling, verified to have no callers
+    first. The publish ordering (tmp, fsync, rename, parent-fsync) is untouched. The
+    negatives are paired with a POSITIVE CONTROL, without which a guard that refused
+    every open would pass both: an ordinary publish and open still work, and so does a
+    publish through a symlinked PARENT directory, which pins the guard's scope to the
+    final component instead of leaving it to the comment.
+22. **`MERGE` decided its match from the RAW graph, not the transaction's view, and
+    created a DUPLICATE** (fail-silent, wrong data; ACID Isolation).
+    `GraphMutator.NodeLabels` and `NodeProperties` are bare shard reads returning the
+    NEWEST stored value, which includes other in-flight transactions' eager,
+    uncommitted writes. Reachable for the same reason as #2353 and #2355: conflicts are
+    per SUBSTORE, so a transaction writing the label never collides with one reading it
+    to make a match decision. REPRODUCED FIRST, and the result is not what the report
+    predicted: the predicted direction — a peer's uncommitted ADD making `MERGE` match
+    — does NOT reproduce, because the enumeration feeding the filter is already
+    view-resolved; the MIRROR does, a peer's uncommitted label REMOVAL hiding a node
+    that carries the label in every committed state. Diagnosing rather than assuming
+    located the fix: asking `MATCH` the same question in the same transaction settled
+    it — `MATCH (n:Target {k:'y'}) RETURN count(n)` answered **1** while
+    `MERGE (n:Target {k:'y'})` duplicated, so `MERGE` CONTRADICTED `MATCH` inside one
+    transaction and the candidate was enumerated correctly and then dropped by the
+    comparison. The defect is at the decision site, which is why the fix is there and
+    not in the enumeration.
+    **FIXED (rmp #2365, `56359836`).** Labels go through `exec.labelsInTx`, which
+    #2355 built for exactly this; properties through a new
+    `nodeMatchesAllPropertiesInTx`, which reads per KEY via the transaction view's
+    `NodePropertyInTx` rather than fetching the whole bag. Probing after the label half
+    was fixed found the PROPERTY half has the identical exposure at the same three call
+    sites, and it is fixed here too — leaving it would have shipped a `MERGE` still
+    reproducing the user-visible symptom through the adjacent read on the same line.
+    **A BETTER OUTCOME THAN A DUPLICATE, and worth stating:** where the peer's write
+    and `MERGE`'s `ON MATCH` action touch the same substore, `MERGE` now correctly
+    takes `ON MATCH` and the action then meets a real serialization conflict — refused,
+    not duplicated. Refusing is what the ACID contract asks for; duplicating is what it
+    forbids. Four of the seven regression tests would pass on a `MERGE` that was broken
+    outright, so each negative is paired with a positive control. **Left alone and
+    recorded rather than swept in:** `nodeMatchesAllProperties` still serves the
+    EDGE-property reads in `merge_pattern.go`, the same class on a different surface,
+    which this ticket did not reproduce.
+23. **`UNION` in a subquery body silently dropped every branch but the first**
+    (fail-silent, wrong answer). A `UNION` inside `EXISTS { }` or `COUNT { }` parsed
+    cleanly and the second branch was discarded: the grammar admits `regularQuery` in
+    both positions, but `ast.ExistsSubquery.Query` and `ast.CountSubquery.Query` are
+    typed `*ast.SingleQuery` and cannot hold one, so the visitor kept `Parts[0]` and
+    discarded the rest — "multi-union inside EXISTS is unusual" — with no error and no
+    notification. MEASURED on a node with a `:W` edge and no `:Z` edge:
+    `EXISTS { MATCH (x)-[:Z]->() RETURN 1 UNION MATCH (x)-[:W]->() RETURN 1 }` returned
+    **false**, where the second branch matches. **THE REPORT'S OWN `COUNT` EXAMPLE
+    COULD NOT HAVE CAUGHT THIS**, and the regression test does not use it: in
+    `COUNT { … RETURN 1 UNION … RETURN 1 }` both branches return the same row, `UNION`
+    de-duplicates, and the correct answer is 1 — exactly what dropping a branch also
+    gives. The tests use branches returning DIFFERENT values.
+    **REFUSED RATHER THAN SUPPORTED (rmp #2615, `9103d5e5`), decided with the user, and
+    the divergence is stated in the code rather than hidden.** BOTH REFERENCE ENGINES
+    ANSWER this query, read from their grammar source: Neo4j's `existsExpression` and
+    `countExpression` admit `regularQuery` (`Cypher5Parser.g4:33-35, 671-677`), and
+    Memgraph's `existsSubquery` and `countSubquery` admit `cypherQuery`, which carries
+    `cypherUnion` (`Cypher.g4:73-81, 317-323`). So GoGraph now refuses what both answer
+    — a stopgap, because a silent wrong answer is a DEFECT and reference parity is a
+    FEATURE. Support is filed as **#2627** with that evidence and with the
+    UNION-versus-UNION-ALL semantics the refusal sidesteps. **The openCypher 9 TCK does
+    not cover subquery expressions at all** — zero occurrences of `EXISTS {` or
+    `COUNT {` across every feature file, searched brace-aware and multiline — so
+    neither refusing nor supporting can move the conformance count, and no TCK-covered
+    semantics constrain the choice. Both visitors refuse through ONE helper so they
+    cannot drift, which mattered here: the `COUNT` twin had the identical silent drop
+    with no comment at all and no entry in the acceptance matrix, while the `EXISTS` one
+    at least carried a comment. The matrix now has both, and its exists-union row is
+    INVERTED from accepted to rejected with the reason recorded rather than deleted.
+24. **An unreproducible `NodeID` was attributed to the SNAPSHOT rather than to the KEY
+    TYPE** (misattribution; no data loss, and no silent loss either).
+    `mapperShardFor` hashes an uncovered comparable key through
+    `fmt.Fprintf(h, "%v", v)`, which renders a pointer as an ADDRESS, so a key carrying
+    one hashes to a different shard on every run — while the function's godoc promised
+    the hash was stable across processes, and FNV was chosen precisely to guarantee
+    that. REPRODUCED DETERMINISTICALLY IN PROCESS, which is stronger than the subprocess
+    reopen the task prescribed: two allocations of the same logical pointer-bearing key
+    already hash to different shards, so no second address space is needed and, unlike a
+    subprocess run, this cannot agree by coincidence.
+    **Two findings changed what the fix should be, and neither was in the report.** THE
+    LOSS IS NOT SILENT: `Mapper.LoadFrom` already enforces that an entry's packed shard
+    equals `mapperShardFor(key)` and returns `ErrMapperEntryCorrupted`, and
+    `store/snapshot/apply.go` propagates it and aborts before any label or property is
+    applied — the reported drift does not happen, the restore fails loudly. AND NO
+    BETTER HASH COULD FIX SUCH A KEY: for every comparable Go type, "formats as an
+    address" and "compares by address" coincide, so a key decoded into a fresh
+    allocation is not the key that was written even with identical data — its IDENTITY,
+    not merely its shard, is unreproducible, and an address-independent hash would have
+    made the hash agree while the map still created a second entry, which looks fixed
+    and is not.
+    **FIXED as a MISATTRIBUTION defect (rmp #2528, `8be7afcb`).** "Entries corrupted"
+    blames the snapshot writer or the disk for a key-type defect, sending diagnosis to
+    re-reading a file that no re-read can fix. `LoadFrom` now inspects the key on that
+    failure path — free, since it is already failing — and when it finds a pointer,
+    `unsafe.Pointer` or channel anywhere in the value it reports
+    `ErrMapperKeyNotPortable` wrapped inside `ErrMapperEntryCorrupted`, naming the
+    offending field path (`key.P`, `key.Inner.P`, `key.A[0]`). It inspects the VALUE,
+    not only the static type, because an interface field's dynamic type is what decides.
+    A portable key with a genuinely wrong recorded shard is still reported as
+    corruption, which a test asserts in that direction too. The audit for other
+    `%v`-based hashing or ordering is recorded: `mapperShardFor` is the only `%v` hash
+    in the tree; the two cross-release record renderers compare through `%v` but fail
+    loudly if ever handed a pointer; and the graphml and Bolt `%v` arms are default
+    branches of switches that already cover every case their input can hold
+    (`lpg.PropertyValue` has exactly seven kinds and all seven are handled).
+25. **Recovery derived the transaction sequence on every open and EVERY consumer
+    discarded it** (fail-silent; sequence reuse over live WAL entries). Its godoc said
+    the value exists to seed the store so a sequence is never minted twice. MEASURED: a
+    store reopened on a non-empty WAL **re-minted sequences 1, 2 and 3** while
+    transactions carrying those values were still in that same WAL. The census over the
+    tree was total: **no shipped embedder wired it.**
+    **FIXED (rmp #2522, `4df36ef5`).** A contract that every caller violates is
+    MIS-PLACED, not universally mis-implemented — and this codebase had already reached
+    that conclusion one field over, where recovery restores the MVCC clock itself and
+    its comment names this very field as the negative example: a restoration that every
+    reopen path must remember is one some reopen path will forget. So the recovery
+    result now BUILDS the transactional store (`Result.NewStore`,
+    `Result.NewStoreCapped`), binding its own recovered graph and derived sequence to a
+    caller-supplied WAL writer; the floor never leaves the package and the omission
+    becomes inexpressible. `recovery.Options` is unchanged, so every existing caller
+    compiles untouched. Returning a fully-open store was REJECTED — deciding whether to
+    append onto an unclean recovery must stay with the caller — and a caller-set field
+    was rejected too, because Go cannot make one mandatory and a positional argument
+    still accepts zero. The sequence is RATCHETED, never assigned. **Three shipped
+    examples were wrong and are fixed**, one of them a long-lived HTTP API serving
+    writes off a reopened store; both exposed sites already fail-stopped on an unclean
+    result before appending and still dropped the sequence, which is the clearest
+    evidence the field sat in the wrong place. The MVCC clock floor belonged in the
+    library for the same reason and moves into the WAL-only replay path, with the
+    harness workaround deleted and its redundancy proven by the suite rather than
+    assumed. Both regression tests read sequences back off disk and assert a PROPERTY,
+    not fixed numbers, and both are mutation-proved by breaking the library: the
+    disabled ratchet reproduces the reported collision exactly. The architectural root
+    cause — that `store.Close` exists and no composed `store.Open` does — is filed as
+    **#2523**.
+26. **Two planner cost floors were set by assumption, and one of them inverted the
+    plan-choice rule** (performance; results identical, no data loss).
+    `MATCH (n:Common:Rare) RETURN n.k` over 100 000 `:Common` of which 1 000 also carry
+    `:Rare` planned a morsel-parallel scan of `:Common` instead of the serial scan
+    re-anchored on `:Rare` — **4.611 ms against 0.186 ms** for the plan the same engine
+    already knew how to build, and worse than the 4.280 ms legacy full-`:Common` scan
+    the re-anchor was written to replace. Separately, an equality lookup on an indexed
+    property cost **68.7 µs over a label of 1023 nodes and 5.5 µs over one of 1024** —
+    a 12.6× cliff at a constant, with the SMALLER graph the slower one.
+    **FIXED (rmp #2431, `84ab4123`; rmp #2367, `db02f8c3`).** For #2431 the root cause
+    was that the columnar chain's yield was INERT: `tryBuildColumnarFilterChain`
+    already declines when `pickMinLabel` would fire and states the rule — the re-anchor
+    reduces the rows SCANNED, while columnar execution only removes a constant factor
+    from each scanned row — and `tryBuildParallelScanProject` was tried IMMEDIATELY
+    AFTER without making the same argument, so it claimed every shape the yield gave
+    up, anchored on `Labels[0]`. WHICH LABEL THE GATE JUDGED WAS PROVED, NOT READ:
+    holding `|Rare|` at 1 000 and sweeping `|Common|`, the plan flips at exactly
+    `|Common| > 50 000` — the parallel threshold — while the re-anchored label never
+    moves; the bitmap intersection is confirmed NOT implicated, since disabling it
+    changed neither plan nor time. The fix ADOPTS the anchor rather than merely
+    declining, which makes the case where the smallest label is itself above the
+    threshold FASTER: **−96.08 % sec/op, −99.28 % B/op, −98.54 % allocs/op
+    (106 293 → 1 551), p=0.008** over 5 interleaved pairs, with **no shape regressing**.
+    The regression gate pins the precedence STRUCTURALLY, comparing plans and never
+    wall-clock. **One control was invalid and the replacement is the point:** the
+    obvious non-vacuity control — disable the re-anchor, check the fixture still plans a
+    parallel scan — FAILS, because disabling the re-anchor also unblocks the columnar
+    chain, which then claims the shape; the gate therefore drives `RETURN n.k + 1`,
+    which the columnar chain declines at every setting, leaving the parallel tier as the
+    only operator deciding.
+    For #2367 the floor moves 1024 → 64, and **the mechanism was established rather
+    than inferred**: an earlier version of the ticket asserted a mis-calibrated
+    cost-based crossover and that claim was WITHDRAWN when no such threshold was found,
+    and four further explanations for the surrounding anomaly were each refuted by
+    measurement. The key KIND decides which index path is reachable at all — a Cypher
+    `CREATE INDEX` builds a STRING-keyed hash index, so an INTEGER key cannot reach the
+    hash path and falls to the range path, which is the population-gated one, which is
+    why a string-keyed fixture cannot see this. A floor is KEPT rather than removed
+    because below it no count can change the verdict, so `rangeSeekBudget` refuses to
+    take one. Allocations say the same and cannot be moved by machine load: 889 per
+    lookup at 1023 nodes against 127 at 4096, flat at ~123 after. PRIOR ART, READ FROM
+    SOURCE: neither reference has an analogue — PostgreSQL's
+    `cost_seqscan`/`cost_index` carry no minimum table size, and Neo4j's
+    `NodeIndexLeafPlanner.findIndexMatches` yields an index match for every compatible
+    predicate — both delegate to a cost model, and GoGraph has none, so this constant IS
+    the decision and it is now set from measurement. **Not fixed, and out of scope:** an
+    integer-keyed property still cannot use the hash path.
+27. **`count(*)` built one row per input row to carry a CONSTANT** (performance; no data
+    loss). A group-by-less, non-`DISTINCT` `count(*)` has a constant aggregate argument
+    — `aggArgItem` emits `expr.BoolValue(true)` for an empty argument, so `CountAgg`
+    ticks on every row and can never reject one — yet the serial pipeline still built a
+    pre-projection materialising one fresh single-column row per input row, **seven
+    million rows** on the count this was filed against, so a counter could null-check a
+    value that is never null.
+    **FIXED (rmp #2625, `91daab81`).** `exec.CountRows` counts the child's rows instead,
+    tried AFTER every existing count pushdown, because those answer in `O(1)` from a
+    maintained counter while this still visits every row: it only stops BUILDING rows
+    nobody reads. `count(v)` is excluded deliberately — it counts non-null bindings, so
+    its argument must still be evaluated per row. On a bare typed expansion the
+    pre-projection was 4.06 ms of an 11.30 ms query and removing it cut the query
+    **4.52 ms → 2.71 ms (~40 %)**; once an endpoint label is added the per-row `Filter`
+    checking the far endpoint costs ~18.2 ms of 26.1 ms and this operator's own cost is
+    ~2.6 ms. At 40 000 users over an interleaved five-run A/B the median gain is modest
+    and the VARIANCE result is large — `count_friend` 8.040 s → 7.504 s with spread
+    **52 % → 4 %**, `count_like` 6.331 s → 6.156 s with spread **59 % → 9 %** — because
+    removing seven million per-row allocations takes the GC out of the tail. One early
+    pairing showed 35 %; five rounds identify it as an outlier in the BEFORE arm and
+    **it is not claimed**. **THE FIRST IMPLEMENTATION SHIPPED A WRONG ANSWER**, recorded
+    because the mechanism generalises: it installed the post-aggregation schema through
+    the UNGUARDED installer the leaf pushdowns use — safe there only because nothing is
+    built below a leaf — and over an arbitrary child whose `Selection` operators hold
+    closures over `bopts.scalarCols`, tagging the output column scalar when its alias
+    SHADOWS a pattern variable made those `Selection`s read the bound node's column as a
+    scalar and drop every row:
+    `MATCH (n {name:'A'})-[:LIKES]->(m {name:'B'}) RETURN count(*) AS n` returned **0**
+    while the same query aliased `AS c` returned 1. Three existing
+    `TestEdgeTypeFilterCache_*` tests caught it, and `installAggOutputSchema` — which
+    carries the alias-shadow guard — is what it uses now. `cypher/exec`'s own
+    `PlanChildren` completeness gate caught a second omission. **The count-store fast
+    path the task prescribed is REFUTED and not built:** `count.Store.CountE` takes no
+    snapshot and a read transaction pins its view — a scan answered 2000 before and
+    after 100 edges committed outside it, while a fresh query answered 2100 — so
+    answering from the store would violate snapshot isolation.
+28. **Closing a write window never released its shard builders, so `Compact` DOUBLED
+    resident memory** (resource retention; no data loss). The contract on
+    `adjShard.building` says "the window end freezes it by clearing this field". Nothing
+    did: neither `EndExclusiveBuild` nor `EndCommit` touched it, so the field was
+    released only lazily by `storeEntry`, when a write presenting a DIFFERENT owner
+    happened to touch the same shard — a shard no later transaction touched pinned its
+    builder for the lifetime of the graph. The cost is not the builder, it is what the
+    builder BLOCKS: it keeps the shard's pre-window slot array alive after `slotsRef`
+    has moved on, so anything replacing `slotsRef` leaves both arrays live. `Compact`
+    does exactly that, which **inverted its own purpose**. MEASURED at 3 M edges, build
+    then `Compact`, live heap after `runtime.GC()`:
+
+    | Arm | Live heap | Allocated |
+    |---|---:|---:|
+    | no window | 159.9 MiB | 3.25 GiB |
+    | exclusive-build window, before | **361.9 MiB** | 1.79 GiB |
+    | exclusive-build window, after | **159.9 MiB** | 1.79 GiB |
+
+    Bracketing a bulk build — the documented way to make it cheaper — roughly DOUBLED
+    resident adjacency once the graph was compacted. It is now free.
+    **FIXED (rmp #2628, `6b57bf00`).** Released where it costs nothing:
+    `releaseBuilders` on the outermost `EndExclusiveBuild`, and in `compactShard`, which
+    already holds the shard mutex. `EndCommit` is deliberately unchanged — that is the
+    per-transaction serving path, and an `O(shards)` walk per commit would be a real
+    regression; the comment there is right that correctness does not need it. Clearing
+    loses nothing, because `storeEntry` publishes the builder into `slotsRef` on the
+    shard's first touch, so every write the window made is already reachable through the
+    published pointer. **A second, sharper hypothesis was REFUTED and is not claimed:** a
+    write made after `Compact` inside the same open window is NOT lost — a test asserting
+    the edge survives passes on the unfixed code. Both new retention tests fail before
+    the change with **256 of 256 shards retaining a builder**. Found while bracketing
+    `examples/26_social_scale_bench`'s build (rmp #2624), which without this fix would
+    have traded 3.4× allocation for 2× residency.
 
 ### Harness and gate defects surfaced by this coverage work
 
