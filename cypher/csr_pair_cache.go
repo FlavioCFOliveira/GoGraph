@@ -2,6 +2,7 @@ package cypher
 
 import (
 	"sync"
+	"sync/atomic"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
@@ -214,6 +215,9 @@ func csrPairCachedAt(
 	cache *csrPairCache, g *lpg.ReadView[string, float64],
 ) (fwd, rev *csr.CSR[float64], at csrPairKey) {
 	if cache == nil || g == nil || viewCarriesOwnWrites(g) {
+		if cache == nil {
+			csrPairAbsentCacheBuildCount.Add(1)
+		}
 		f, r, built := csrPairFromGraphAt(g)
 		return f, r, built
 	}
@@ -268,10 +272,24 @@ func csrPairCachedForAt(
 	bopts *buildOpts, g *lpg.ReadView[string, float64],
 ) (fwd, rev *csr.CSR[float64], at csrPairKey) {
 	if bopts == nil {
+		csrPairAbsentCacheBuildCount.Add(1)
 		return csrPairFromGraphAt(g)
 	}
 	return csrPairCachedAt(bopts.csrPairCache, g)
 }
+
+// csrPairAbsentCacheBuildCount counts the subset of [csrPairUncachedBuildCount]
+// whose cause is that THERE WAS NO CACHE TO CONSULT — a nil bopts, or a bopts
+// whose csrPairCache field was never threaded — as distinct from a cache that was
+// consulted and missed, or from the deliberate [viewCarriesOwnWrites] bypass.
+//
+// The distinction is the whole of the root cause when a rebuild turns out to be
+// unamortised, and no timing and no profile can supply it: a per-row rebuild
+// caused by an absent cache is a WIRING defect, one caused by misses is an
+// INVALIDATION defect, and the two have nothing in common but their symptom.
+// Process-global and monotonic, like [csrPairUncachedBuildCount]; bracket a drive
+// to read a delta.
+var csrPairAbsentCacheBuildCount atomic.Uint64
 
 // expandAdjacencySource returns an [exec.AdjacencySource] that resolves the CSR
 // pair AND the relationship-type filter keyed to it at EXECUTION time rather than

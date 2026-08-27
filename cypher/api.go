@@ -10322,9 +10322,53 @@ func (b *buildOpts) forWorker() *buildOpts {
 // variable NAME, so an inner shortestPath() binding a path variable the outer plan
 // also named would consume the OUTER clause's pending predicate.
 //
+// # Why the adjacency caches ARE carried
+//
+// csrPairCache and edgeTypeFilterCache were added to the allowlist by rmp #2646,
+// and the reason they are safe is precisely the reason the fields below are not:
+// THEY ARE NOT KEYED TO A SCOPE. Every field this function omits is keyed either
+// to the OUTER ROW LAYOUT (a column index, or a path-variable name) or to *ir node
+// pointers belonging to the OUTER plan, so carrying it would have the inner build
+// read the wrong slot or gate on the wrong node. These two are keyed to
+// [csrPairKey] — {epoch, startTS, versioned} — which describes GRAPH STATE. A
+// scope has no bearing on it: the pair the inner Expand needs at a given epoch and
+// start timestamp IS the pair the outer one needs. Both types are documented safe
+// for concurrent use, so sharing them across the boundary adds no new contract.
+//
+// What this fixes is a per-outer-row Θ(V+E) rebuild. [exec.Expand.Init] runs once
+// per outer row under Apply and resolves its adjacency through the closure
+// [expandAdjacencySource] returns, so with both fields nil every outer row rebuilt
+// the forward CSR, its reverse transpose, and the whole position-keyed type filter.
+// MEASURED on a fixture with out-degree pinned at 1:
+// `MATCH (a:P) RETURN a.sid, COUNT { MATCH (a)-[:R]->(:P) }` performed exactly one
+// pair build and one filter build PER ROW — 250 of each at n=250, 500 at n=500 —
+// which fitted a complexity exponent of 1.924 against the 1.0 every sibling shape
+// fits. TestSubqueryAdjacencyRebuild_ScalesWithGraph is the structural gate.
+//
+// Three properties survive the change, and none of them rests on the caches being
+// absent:
+//
+//   - FRESHNESS (#2317) is unaffected because resolution still happens at
+//     EXECUTION time — this changes what the closure finds in the cache, never
+//     when the closure runs — and because the cache key IS the freshness token: a
+//     write bumps [lpg.Graph.TopoGeneration], the epoch component changes, and the
+//     pair and its position-keyed filter miss and rebuild TOGETHER, which is what
+//     keeps #2293 sound.
+//   - A WRITE TRANSACTION still shares nothing (#2446). Both entry points refuse
+//     independently of this allowlist: [csrPairCachedAt] and [edgeTypeFilterFor]
+//     each test [viewCarriesOwnWrites] before consulting their cache. A statement
+//     that writes therefore keeps the per-row rebuild, which is also why the
+//     freshness case above is protected by EXCLUSION and not merely by the key.
+//   - PLAN SHAPE is untouched. Neither field is read by any recogniser or gate,
+//     and every consumer of either runs after the plan exists. edgeTypeFilterCache
+//     is reached only from the adjacency closures [expandAdjacencySource] and
+//     [intersectAdjacencySource] return; csrPairCache is reached from those and
+//     from [ensureEdgeIDResolver], which derives the path-reconstruction resolver
+//     from the same pair at eval time.
+//
 // # What it carries, and what it deliberately does not
 //
-// Only the three scope-independent services above. Everything else is left at its
+// Only the five scope-independent services above. Everything else is left at its
 // zero value, which is exactly the state the inner build saw before this existed —
 // so this fix cannot change the shape of any inner plan, only what its predicates
 // can see. Four omissions are load-bearing rather than incidental:
@@ -10355,6 +10399,10 @@ func (b *buildOpts) forSubquery() *buildOpts {
 		subEval:  b.subEval,
 		patEval:  b.patEval,
 		queryCtx: b.queryCtx,
+		// The two adjacency caches (rmp #2646). Keyed to graph state, not to this
+		// scope — see "Why the adjacency caches ARE carried" above.
+		csrPairCache:        b.csrPairCache,
+		edgeTypeFilterCache: b.edgeTypeFilterCache,
 	}
 }
 
@@ -19265,9 +19313,26 @@ func csrPairFromGraph(g *lpg.ReadView[string, float64]) (fwd, rev *csr.CSR[float
 	return f, r
 }
 
+// csrPairUncachedBuildCount counts how many times a forward+reverse CSR pair was
+// actually CONSTRUCTED — the O(V+E) pass — as opposed to served from
+// [csrPairCache]. Every route into an uncached build funnels through
+// [csrPairFromGraphAt]: a cache miss, a nil cache (no Engine behind the build, a
+// [buildOpts] whose csrPairCache field was never threaded), and a write-transaction
+// view that must not share ([viewCarriesOwnWrites]).
+//
+// It is the STRUCTURAL instrument for "is this rebuild amortised?", and it answers
+// that question without reference to a clock: bracket a query drive between two
+// reads and the delta is an absolute count of O(V+E) passes. A count that tracks
+// the number of rows a plan processes is a per-row rebuild whatever the wall time
+// says; a count that stays put as the graph grows is amortised whatever the wall
+// time says. Like [parallelCountScanBuildCount] it is process-global and
+// monotonic, so tests snapshot it before/after rather than resetting it.
+var csrPairUncachedBuildCount atomic.Uint64
+
 // csrPairFromGraphAt is [csrPairFromGraph] also returning the cache key the
 // pair may be filed under; see [csrPairKey] for why the key has two components.
 func csrPairFromGraphAt(g *lpg.ReadView[string, float64]) (fwd, rev *csr.CSR[float64], key csrPairKey) {
+	csrPairUncachedBuildCount.Add(1)
 	adj := g.AdjList()
 	// Build live: omit arcs incident to a node that was not live AT THIS
 	// READER'S INSTANT, so search never traverses a logically-deleted node
@@ -19411,6 +19476,14 @@ func nodeIDOrNodeValue(v expr.Value) (uint64, bool) {
 	return 0, false
 }
 
+// edgeTypeFilterBuildCount counts how many times the edge-type filter map was
+// actually CONSTRUCTED — the O(V+E) pass in [buildEdgeTypeFilter] — as opposed to
+// served from [edgeTypeFilterCache]. It is the companion structural instrument to
+// [csrPairUncachedBuildCount]: the filter is keyed to a specific CSR pair's arc
+// positions, so the two are rebuilt together and an unamortised path shows in both.
+// Process-global and monotonic; bracket a drive to read a delta.
+var edgeTypeFilterBuildCount atomic.Uint64
+
 // buildEdgeTypeFilter constructs an edge-type filter map against fwdCSR, a
 // forward CSR already built by the caller (normally [csrPairFromGraph]'s
 // fwd result — every call site already needs one for its own traversal, so
@@ -19437,6 +19510,7 @@ func nodeIDOrNodeValue(v expr.Value) (uint64, bool) {
 // rather than calling this directly, so a repeat query against an unchanged
 // graph reuses a cached result instead of re-paying this cost.
 func buildEdgeTypeFilter(g *lpg.ReadView[string, float64], fwdCSR *csr.CSR[float64], relTypes []string) map[uint64]string {
+	edgeTypeFilterBuildCount.Add(1)
 	adj := g.AdjList()
 	verts := fwdCSR.VerticesSlice()
 	edges := fwdCSR.EdgesSlice()
