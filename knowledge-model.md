@@ -3908,3 +3908,62 @@ The per-execution compile is **1.59 %** of CPU at one outer row and **0.38 %** a
 equivalent `OPTIONAL MATCH` at 200 rows, 30× the allocations, attributed by
 `pprof -top -cum` to per-row expression evaluation and operator re-drive. Filed
 as #2616.
+
+### Sprint 352 sync — the subquery adjacency caches were never wired (2026-08-27)
+
+Incrementally synced at commit `1f760482` (2026-08-27, task #2646, sprint 352 —
+`COUNT { }` rebuilt both CSRs and the edge-type filter once per outer row):
+**+10 nodes** (`Commit` `1f760482`; `Sprint` `352` OPEN; `Task` `2646` BUG
+COMPLETED; 4 `Test` and 1 `Benchmark` in
+`cypher/subquery_adjacency_rebuild_diff_test.go`; plus the two fidelity repairs
+below), **+11 edges** (`Sprint 352 -[CONTAINS]-> Commit`; `Task 2646
+-[IMPLEMENTED_IN]-> Commit`, direction verified — the reversed-direction count
+across the whole graph is 0; `Commit -[FIXES]-> Cypher Engine` (12659);
+`Commit -[TOUCHES]-> Package cypher` (73); 7 `CONTAINS` from `cypher` to the new
+symbols). Provenance bumped on Package `cypher`, Type `csrPairCache`, and
+Functions `csrPairCachedAt`, `csrPairCachedForAt`, `csrPairFromGraphAt`,
+`buildEdgeTypeFilter`.
+
+**The defect.** `(*buildOpts).forSubquery()` is a deliberate allowlist and it
+omitted `csrPairCache` and `edgeTypeFilterCache`. `exec.Expand.Init` runs once
+per outer row under Apply and resolves adjacency through a closure (#2317), so
+with both nil every outer row rebuilt the forward CSR, its reverse transpose and
+the whole position-keyed type filter — Θ(V+E) per row. The allowlist now carries
+both: unlike every field it omits, which is keyed to the outer row layout or to
+outer `*ir` node pointers, these two are keyed to `csrPairKey{epoch, startTS,
+versioned}` — graph state, which no scope owns.
+
+**Measured, interleaved A/B ×5 on one tree and host:** complexity exponent
+**1.927 → 1.001** (r² 0.99957); at n=4000 sec/op −99.91 % (p=0.008), B/op
+−99.86 %, allocs/op −99.23 %; per output row 928,181 B → 1,290 B and 4,090.8 →
+31.7 allocs. Proven **structurally** rather than by the clock: uncached CSR-pair
+builds per query go from exactly *n* to 0 (250 → 0 at n=250, 500 → 0 at n=500).
+Three unexported process-global `atomic.Uint64` counters ship as the permanent
+instruments and are **not** materialised as nodes, per the modelling rule.
+
+**Three corrections this sync records, because each contradicts something
+previously written down:**
+
+* The task text claimed #2317 freshness survives because the cache key *is* the
+  freshness token. Measured, it never gets that far: a write statement records
+  **zero cache lookups — neither hit nor miss**. Protection is by **exclusion**
+  (`viewCarriesOwnWrites` at both entry points, and the write path's `buildOpts`
+  never carried the cache to hand down). Key-freshness is the **third** line of
+  defence, not the first.
+* `COUNT { }` and `WHERE EXISTS { }` are **not comparable shapes**. EXISTS is
+  planned into the outer pipeline (`SemiApply → CorrelatedApply → Expand`) and
+  initialised once; COUNT in a `RETURN` projection is a projection-time
+  expression whose subquery is absent from the plan entirely. The residual
+  **~2.25× constant factor, flat across n**, is plan asymmetry, not caching.
+* The contingent single-entry memo was **refuted by measurement, not built**: the
+  two Engine-global mutex acquisitions it would remove cost 36 ns/row serial and
+  112 ns/row under 10-goroutine contention, against the ~1,169,462 ns/row of
+  rebuild they replaced. Prior art on cache scoping was therefore **not** read —
+  the number said it was not warranted.
+
+**Fidelity gap found and repaired by this sync.** `csrPairCache` was modelled but
+its sibling `edgeTypeFilterCache` (Type, `cypher/edge_type_filter_cache.go`) and
+`edgeTypeFilterFor` (Function, `cypher/api.go`) had **no nodes at all**, despite
+being half of this defect. Both created and wired with `CONTAINS`. A `MATCH … SET`
+that binds nothing still reports `ok`, so each stamp in this sync was verified by
+reading it back; that read is what surfaced the gap.
