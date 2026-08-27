@@ -31,6 +31,38 @@ package main
 // denominator of the rate anybody may later quote, and quoting a rate without it is
 // how rmp #2333's original arithmetic came to be believed. It is therefore always
 // logged, pass or fail.
+//
+// # The sighting was RETIRED on 2026-08-27, and this harness was KEPT
+//
+// rmp #2336 closed the sighting as unexplained-but-retired. The evidence: roughly
+// 245 million observations clean; the contiguous frontier, commit log, session read
+// floor, horizon Enter/Publish ordering, per-shard property gate, aborted-version
+// withdrawal and the type-enforced snapshot binding of the read path all audited
+// sound by code reading; the run was not CPU-starved (2.29s against 3.41-5.21s for
+// every starved arm); the delta is not one transfer; and no recurrence in three
+// weeks. Added at closure: the delta is provably UNATTRIBUTABLE — see
+// [TestTornDeltaCarriesNoAttribution], which shows 941758 is reachable as a net
+// flow by 3 of 32 accounts against a chance mean of 3.81, so the total carries no
+// information about the mechanism.
+//
+// BE CLEAR ABOUT WHAT THAT IS. The sighting was retired on the ABSENCE of evidence,
+// not on an explanation. It was real, it is still unexplained, and the tail beyond
+// ~245 million observations was never searched: the nightly-scale run rmp #2336's
+// first acceptance criterion asked for was capped by the user at the hour already
+// spent, and that criterion was amended to record the cap rather than marked met.
+//
+// This harness is therefore kept deliberately as a STANDING GUARD rather than
+// removed, which is the choice rmp #2336's fifth acceptance criterion demanded be
+// made rather than left to drift. If the tear is real it is rare, and the only
+// instrument that can still catch it is one that runs for as long as it is given.
+// Run it when there are hours to spare:
+//
+//	SOAK_FULL=1 GOGRAPH_TORN_SEARCH_BUDGET=3h go test -tags=soak \
+//	  -run TestSoak_TornTotalSearch ./examples/27_concurrent_txn/
+//
+// and prefer the coverage arm (-coverpkg=./... -covermode=atomic, no -race), since
+// that is the only arm whose runtime matches the sighting. A firing here REOPENS
+// rmp #2336; do not treat this file as decorative because the sighting is closed.
 
 import (
 	"bytes"
