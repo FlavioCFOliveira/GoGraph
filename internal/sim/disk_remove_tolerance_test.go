@@ -68,6 +68,16 @@ func strandStagingDirectory(t *testing.T, disk *SimDisk, dir string, order int) 
 	if !disk.Exists(dir + "/snapshot.tmp/manifest.json") {
 		t.Fatal("the aborted publish left no staging directory behind")
 	}
+	// The staging DIRECTORY's own name has to be on the platter for the scenario
+	// below to exist at all. Since #2543 a directory created by MkdirAll is
+	// governed by the dirent model like any other name, so it is durable only
+	// once its parent is fsynced — and the aborted publish never reached its
+	// post-rename ParentDirSync. Without this the crash takes the whole staging
+	// tree and the question the test asks, whether an unlink that missed stable
+	// storage leaves the artefact behind, never arises.
+	if err := disk.DirSync(dir); err != nil {
+		t.Fatalf("fsync %s so the stranded staging directory is itself durable: %v", dir, err)
+	}
 }
 
 // TestRemoveTolerance_RecoveryStaleStagingCleanupIsReachedFromTheRemovalSide

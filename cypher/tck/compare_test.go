@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cucumber/godog"
@@ -25,7 +26,95 @@ import (
 // that a hung goroutine (e.g. from a parallel scan worker that panics and
 // leaves the coordinator goroutine waiting on a drained channel) does not
 // block the entire test run.
+//
+// Exceeding it is NOT a conformance failure. See [queryWedgeGrace] for the
+// distinction and rmp #2568 for why it matters.
 const queryTimeout = 10 * time.Second
+
+// queryWedgeGrace is how long AFTER its deadline a query is still allowed to
+// return before the engine is judged wedged.
+//
+// # Why a duration alone cannot tell a slow host from a hung engine (rmp #2568)
+//
+// A scenario that exceeds [queryTimeout] used to store context.DeadlineExceeded
+// in w.err, which failed the scenario and lowered the count
+// [tckExecutionBaseline] gates on. That reports a LOADED MACHINE as a loss of
+// openCypher conformance — the single most serious false signal this project can
+// emit, because CLAUDE.md makes 100% TCK compliance non-negotiable and an
+// engineer meeting that red would reasonably conclude the engine had regressed.
+// For scale, measured on this box during rmp #2567: a cypher security test ran
+// 17.76 s idle under -race and 537.36 s under saturation, a factor above 30.
+//
+// Widening the timeout is not the answer; that is what the cartesian test did and
+// it merely moved the cliff. The two outcomes have to be SEPARATED, and the
+// discriminator is not how long the query took — it is whether the engine
+// HONOURED CANCELLATION:
+//
+//   - The context deadline fires and RunAny returns promptly with
+//     context.DeadlineExceeded. The engine is responsive; the host was just slow.
+//     This is INCONCLUSIVE: it carries no evidence either way about conformance,
+//     so it must not be scored as a failure, and must be reported as such.
+//   - The context deadline fires and RunAny DOES NOT RETURN AT ALL. The engine
+//     ignored cancellation, which is a defect against CLAUDE.md's context-aware
+//     blocking mandate and is exactly the wedged coordinator the timeout exists
+//     to catch. This still FAILS, loudly.
+//
+// The grace is generous relative to the work: TCK scenarios are individually
+// tiny, so an engine that honours cancellation returns in microseconds once the
+// deadline fires, even on a saturated host. A wedge is unbounded and will always
+// exceed it.
+const queryWedgeGrace = 30 * time.Second
+
+// errInconclusive marks a scenario whose query exceeded [queryTimeout] while the
+// engine honoured cancellation. It is wrapped into w.err so the existing Then
+// steps need no change, and identified by the gate so such a scenario is never
+// counted as a conformance regression (rmp #2568).
+var errInconclusive = errors.New("TCK scenario INCONCLUSIVE (slow host, engine responsive)")
+
+// errWedged marks a query whose engine ignored its cancelled context. Unlike
+// [errInconclusive] it IS a real failure and is never credited by the gate; the
+// sentinel exists only so that it cannot satisfy an error-expecting scenario. A
+// wedged engine producing a non-nil error used to make 695 error scenarios "pass"
+// — measured during the rmp #2568 demonstration — which is a false pass on top of
+// a genuine defect.
+var errWedged = errors.New("TCK scenario FAILED: engine ignored cancellation")
+
+// tckInconclusive records the scenarios whose query exceeded [queryTimeout]
+// while the engine honoured cancellation. It is read by the gate so a timeout can
+// never be scored as a conformance regression, and rendered so a run that was
+// partly inconclusive can never be mistaken for a clean one.
+//
+// Concurrency: guarded by its own mutex. godog runs scenarios sequentially here,
+// but the value is also read by the gate after the run, so the lock is not
+// optional.
+var tckInconclusive = struct {
+	mu      sync.Mutex
+	reasons []string
+}{}
+
+// recordInconclusive notes one inconclusive scenario. detail must say what timed
+// out, so the rendered inventory is actionable rather than a bare count.
+func recordInconclusive(detail string) {
+	tckInconclusive.mu.Lock()
+	defer tckInconclusive.mu.Unlock()
+	tckInconclusive.reasons = append(tckInconclusive.reasons, detail)
+}
+
+// inconclusiveCount returns how many scenarios were inconclusive.
+func inconclusiveCount() int {
+	tckInconclusive.mu.Lock()
+	defer tckInconclusive.mu.Unlock()
+	return len(tckInconclusive.reasons)
+}
+
+// inconclusiveReasons returns a copy of the recorded reasons.
+func inconclusiveReasons() []string {
+	tckInconclusive.mu.Lock()
+	defer tckInconclusive.mu.Unlock()
+	out := make([]string, len(tckInconclusive.reasons))
+	copy(out, tckInconclusive.reasons)
+	return out
+}
 
 // whenExecutingQuery runs the test query and stores the result (or error) in
 // the world. Errors are stored in w.err rather than returned so that scenarios
@@ -49,16 +138,85 @@ func (w *world) whenExecutingQuery(ctx context.Context, query *godog.DocString) 
 	w.snapshotCounts()
 	qctx, cancel := context.WithTimeout(ctx, queryTimeout)
 	w.queryCancel = cancel // stored so result iteration can be aborted
-	res, err := w.eng.RunAny(qctx, query.Content, w.params)
-	if err != nil {
-		cancel()
+
+	// RunAny is driven on its own goroutine so that a query which IGNORES its
+	// cancelled context can be distinguished from one that honours it — see
+	// [queryWedgeGrace]. The panic recovery is duplicated inside the goroutine
+	// because the deferred recover above only covers THIS goroutine; without it,
+	// an engine panic would take the process down instead of failing the scenario.
+	type outcome struct {
+		res *cypher.Result
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				done <- outcome{nil, fmt.Errorf("engine panic: %v", r)}
+			}
+		}()
+		res, err := w.eng.RunAny(qctx, query.Content, w.params)
+		done <- outcome{res, err}
+	}()
+
+	select {
+	case o := <-done:
+		if o.err != nil {
+			cancel()
+			w.queryCancel = nil
+			w.result = nil
+			// The engine honoured cancellation, so a deadline error says the HOST
+			// was slow and says nothing about conformance. Record it as
+			// inconclusive and leave w.err nil, so the Then steps do not report a
+			// conformance failure the evidence does not support (rmp #2568).
+			if errors.Is(o.err, context.DeadlineExceeded) && ctx.Err() == nil {
+				detail := fmt.Sprintf("query exceeded %s but the engine honoured cancellation "+
+					"(slow host, not a conformance signal): %s", queryTimeout, firstLine(query.Content))
+				if !w.inconclusiveRecorded {
+					w.inconclusiveRecorded = true
+					recordInconclusive(detail)
+				}
+				// Stored in w.err, wrapping errInconclusive, so that every existing
+				// Then step keeps working unchanged: the scenario still does not
+				// pass, because it genuinely was not verified. What changes is that
+				// the GATE can now tell this apart from a conformance failure and
+				// declines to score it as one.
+				w.err = fmt.Errorf("%w: %s", errInconclusive, detail)
+				return nil
+			}
+			w.err = o.err
+			return nil
+		}
+		w.result = o.res
+		return nil
+
+	case <-time.After(queryTimeout + queryWedgeGrace):
+		// The deadline fired at queryTimeout and RunAny still has not returned
+		// queryWedgeGrace later. The engine is ignoring its context, which is the
+		// wedged coordinator this bound exists to catch. This is a REAL failure and
+		// is reported as one. The goroutine is deliberately left running: it is
+		// wedged by definition, and there is nothing to wait for.
 		w.queryCancel = nil
-		w.err = err
 		w.result = nil
+		w.err = fmt.Errorf("%w: engine WEDGED: RunAny did not return %s after its %s context deadline "+
+			"fired, so it is ignoring cancellation (CLAUDE.md context-aware blocking). This is NOT a "+
+			"slow host — a responsive engine returns context.DeadlineExceeded immediately (rmp #2568). "+
+			"Query: %s", errWedged, queryWedgeGrace, queryTimeout, firstLine(query.Content))
 		return nil
 	}
-	w.result = res
-	return nil
+}
+
+// firstLine returns s truncated to its first line and 120 characters, so a
+// multi-line TCK query can be named in a one-line diagnostic.
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	s = strings.TrimSpace(s)
+	if len(s) > 120 {
+		return s[:120] + "…"
+	}
+	return s
 }
 
 // whenExecutingControlQuery is an alias for whenExecutingQuery used in some TCK

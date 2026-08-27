@@ -143,7 +143,7 @@ func runCSRFilePublishFault(_ context.Context, seed uint64) (*SimReport, error) 
 	disk.SetCapacity(0, false) // lift the bound for the next arm
 	if errENOSPC == nil {
 		return storageFaultReport(seed, []Violation{{
-			Kind: ViolationOracleDeviation, Op: "<csrfile-enospc-nonvacuity>",
+			Kind: ViolationVacuousRun, Op: "<csrfile-enospc-nonvacuity>",
 			Message: "republish under an ENOSPC bound unexpectedly succeeded — the fault did not bite",
 		}}), nil
 	}
@@ -158,7 +158,7 @@ func runCSRFilePublishFault(_ context.Context, seed uint64) (*SimReport, error) 
 	_, errSync := csrfile.WriteToFileWith[float64](fsys, csrFilePath, c2)
 	if errSync == nil {
 		return storageFaultReport(seed, []Violation{{
-			Kind: ViolationOracleDeviation, Op: "<csrfile-sync-nonvacuity>",
+			Kind: ViolationVacuousRun, Op: "<csrfile-sync-nonvacuity>",
 			Message: "republish under an armed Sync fault unexpectedly succeeded — the fault did not bite",
 		}}), nil
 	}
@@ -180,7 +180,7 @@ func runCSRFilePublishFault(_ context.Context, seed uint64) (*SimReport, error) 
 	_, errFirst := csrfile.WriteToFileWith[float64](fsys2, csrFilePath, c3)
 	if errFirst == nil {
 		return storageFaultReport(seed, []Violation{{
-			Kind: ViolationOracleDeviation, Op: "<csrfile-first-nonvacuity>",
+			Kind: ViolationVacuousRun, Op: "<csrfile-first-nonvacuity>",
 			Message: "first publish under a tiny capacity unexpectedly succeeded — the fault did not bite",
 		}}), nil
 	}
@@ -267,7 +267,7 @@ func csrfileFaultAtDrawnWeightKind(seed uint64) ([]Violation, error) {
 	disk.SetCapacity(0, false)
 	if republishErr == nil {
 		return []Violation{{
-			Kind: ViolationOracleDeviation, Op: "<csrfile-drawn-weight-nonvacuity>",
+			Kind: ViolationVacuousRun, Op: "<csrfile-drawn-weight-nonvacuity>",
 			Message: fmt.Sprintf("the republish of a %s csrfile under an ENOSPC bound succeeded —"+
 				" the fault did not bite, so the atomicity assertion below is vacuous", arm.label()),
 		}}, nil
@@ -556,13 +556,13 @@ func runWALCorruptionFailStopWith(ctx context.Context, seed uint64, opts walCorr
 	// survived and a non-empty suffix was lost.
 	if kExpected < 1 {
 		v = append(v, Violation{
-			Kind: ViolationOracleDeviation, Op: "<wal-corruption-nonvacuity>",
+			Kind: ViolationVacuousRun, Op: "<wal-corruption-nonvacuity>",
 			Message: "no committed transaction survived before the corrupt frame — the fault was not interior",
 		})
 	}
 	if kExpected >= walCorruptTxns {
 		v = append(v, Violation{
-			Kind: ViolationOracleDeviation, Op: "<wal-corruption-nonvacuity>",
+			Kind: ViolationVacuousRun, Op: "<wal-corruption-nonvacuity>",
 			Message: fmt.Sprintf("the corrupt frame was past every commit (prefix %d >= %d) — no committed transaction was lost", kExpected, walCorruptTxns),
 		})
 	}
@@ -679,7 +679,7 @@ func runCheckpointDirFsyncFault(ctx context.Context, seed uint64) (*SimReport, e
 	if cpErr == nil {
 		st.Crash()
 		return storageFaultReport(seed, []Violation{{
-			Kind: ViolationOracleDeviation, Op: "<dirfsync-nonvacuity>",
+			Kind: ViolationVacuousRun, Op: "<dirfsync-nonvacuity>",
 			Message: "the checkpoint succeeded despite the armed post-rename dir-fsync fault — the fault did not bite",
 		}}), nil
 	}
@@ -974,7 +974,7 @@ func graphmlExportFaultFailsClean(seed uint64) ([]Violation, error) {
 	var v []Violation
 	if werr == nil {
 		return []Violation{{
-			Kind: ViolationOracleDeviation, Op: "<io-graphml-nonvacuity>",
+			Kind: ViolationVacuousRun, Op: "<io-graphml-nonvacuity>",
 			Message: "GraphML export under a sub-full ENOSPC bound unexpectedly succeeded — the fault did not bite",
 		}}, nil
 	}
@@ -1067,7 +1067,7 @@ func ioExportFaultFailsClean(f ioFormat, model *adjlist.AdjList[string, int64], 
 	var v []Violation
 	if werr == nil {
 		return []Violation{{
-			Kind: ViolationOracleDeviation, Op: "<io-" + f.name + "-nonvacuity>",
+			Kind: ViolationVacuousRun, Op: "<io-" + f.name + "-nonvacuity>",
 			Message: "export under a sub-full ENOSPC bound unexpectedly succeeded — the fault did not bite",
 		}}, nil
 	}

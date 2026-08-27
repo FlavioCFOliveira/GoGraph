@@ -160,8 +160,50 @@ func TestSEC14c_ConcurrentWriteRead_NoRace_NoPartialReads(t *testing.T) {
 	}
 
 	wg.Wait()
+
+	// wg.Wait() RETURNING is itself the proof that no barrier deadlock occurred: a
+	// deadlocked worker never reaches its wg.Done(), so this line would not be
+	// reached at all and the package -timeout would fail the run. The
+	// `if ctx.Err() != nil { t.Fatalf("possible barrier deadlock") }` that used to
+	// sit here therefore COULD NOT detect the deadlock it named, and could only
+	// ever fire on a machine under load — reporting a slow host as an ACID
+	// violation, which is the most alarming false signal this file can emit
+	// (rmp #2569).
+	//
+	// What the deadline genuinely can do is TRUNCATE the workload, because the
+	// same ctx is also the workers' escape hatch. The invariants below are valid
+	// on any prefix — each compares what was committed against what the graph
+	// holds — so a truncated run is still sound. It simply certifies less, and a
+	// run that certified almost nothing must not read as a clean pass. That is
+	// what the non-vacuity floor below is for, and it is the honest replacement
+	// for a deadline check that never worked.
+	committed := 0
+	for _, c := range commitOK {
+		committed += c
+	}
 	if ctx.Err() != nil {
-		t.Fatalf("test exceeded deadline (possible barrier deadlock): %v", ctx.Err())
+		t.Logf("the 30s deadline expired, so the workers took their escape hatch and this run "+
+			"exercised LESS than the full workload: %d of %d commits succeeded. The invariants "+
+			"below still hold on that prefix. This is NOT a deadlock — wg.Wait() returned, which "+
+			"a deadlocked worker would have prevented (rmp #2569).",
+			committed, writers*commitsPerWriter)
+	}
+	// Non-vacuity floor, deliberately STRUCTURAL rather than proportional: at
+	// least one commit must have landed, so the invariants below are not compared
+	// on an empty graph where 0 == 0 holds for any engine.
+	//
+	// A PROPORTIONAL floor ("a quarter of the intended commits") was written here
+	// first and was wrong for the same reason this whole task exists: commitOK
+	// counts SUCCESSFUL commits, so under contention legitimate write conflicts
+	// lower it, and a fraction of a fixed workload inside a fixed 30s window is a
+	// RATE over a non-dilating window — the exact defect shape rmp #2588 and
+	// rmp #2517 were filed for. It would have turned a loaded machine red all over
+	// again, one layer down. "Something was observed" is structural; "enough was
+	// observed" is a rate.
+	if committed < 1 {
+		t.Fatalf("NOT ONE of the %d intended commits succeeded, so the invariants below compare "+
+			"0 against 0 and would hold on any engine: this run certifies nothing about "+
+			"concurrent write/read atomicity", writers*commitsPerWriter)
 	}
 
 	// Invariant 1+2: no partial read was ever observed.
@@ -237,8 +279,24 @@ func TestSEC14c_ConcurrentBeginWriters_SingleWriterSerialised(t *testing.T) {
 		}(w)
 	}
 	wg.Wait()
+
+	// Same reasoning as the sibling test above: wg.Wait() returning proves no
+	// deadlock, so a post-wait ctx.Err() check could only ever report a slow host
+	// as one (rmp #2569). The invariant below holds on any prefix; the floor is
+	// what stops a truncated run passing vacuously.
 	if ctx.Err() != nil {
-		t.Fatalf("writers exceeded deadline (possible deadlock or livelock): %v", ctx.Err())
+		t.Logf("the 30s deadline expired, so the writers took their escape hatch and this run "+
+			"exercised LESS than the full workload: %d of %d commits succeeded. The invariant "+
+			"below still holds on that prefix. This is NOT a deadlock or a livelock — wg.Wait() "+
+			"returned (rmp #2569).", okCount.Load(), writers*commitsPerWriter)
+	}
+	// Structural, not proportional — see the sibling test above for why a fraction
+	// of a fixed workload in a fixed window is a rate and would reintroduce the
+	// very defect this task removes.
+	if okCount.Load() < 1 {
+		t.Fatalf("NOT ONE of the %d intended commits succeeded, so the visibility invariant "+
+			"below compares 0 against 0 and would hold on any engine: this run certifies "+
+			"nothing about commit visibility under contention", writers*commitsPerWriter)
 	}
 
 	// Every successful commit must be fully and exactly visible.

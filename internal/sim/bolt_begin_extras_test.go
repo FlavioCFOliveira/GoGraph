@@ -3,6 +3,7 @@ package sim
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
@@ -104,11 +105,15 @@ func TestBoltBeginExtras_ScenarioPasses(t *testing.T) {
 func cleanBeginExtrasEvidence() BoltBeginExtrasEvidence {
 	const committed = 5
 	ev := BoltBeginExtrasEvidence{
-		Seed:                          1,
-		CommittedNodes:                committed,
-		IssuedBookmarks:               []string{"FB:k00000001", "FB:k00000002"},
-		AutocommitBookmarkFresh:       "",
-		AutocommitBookmarkAfterCommit: "FB:k00000002",
+		Seed:            1,
+		CommittedNodes:  committed,
+		IssuedBookmarks: []string{"FB:k00000001", "FB:k00000002"},
+		// Since rmp #2563 an autocommit statement mints its OWN token, so the
+		// reference evidence carries a fresh non-empty one that differs from what
+		// the earlier COMMIT returned. It used to be the inverse — empty, then the
+		// COMMIT's token repeated — because the arm pinned the defect.
+		AutocommitBookmarkFresh:       "FB:k00000007",
+		AutocommitBookmarkAfterCommit: "FB:k00000008",
 		AutocommitAfterCommitExpected: "FB:k00000002",
 		AutocommitStatsSeen:           true,
 	}
@@ -156,10 +161,20 @@ func cleanBeginExtrasEvidence() BoltBeginExtrasEvidence {
 		if name != beginModeAbsentTag {
 			a.SentKey, a.SentMode = true, name
 		}
-		if name == beginModeRead {
+		switch {
+		case name == beginModeRead:
 			a.RegistryMode, a.WriteAccepted = beginModeRead, false
 			a.WriteCode = beginReadOnlyRefusalCode
 			a.WriteMessage = "cypher: write or DDL statement not allowed in a read-only transaction"
+		case a.SentKey && name != beginModeWrite:
+			// Since rmp #2564 an unrecognised value is refused at the BEGIN, so no
+			// transaction opens and there is no write to accept. The reference
+			// evidence says so; it used to say the opposite.
+			a.BeginRefused = true
+			a.BeginCode = beginUnknownModeRefusalCode
+			a.BeginMessage = fmt.Sprintf("unsupported access mode %q: the BEGIN `mode` extra accepts only %q or %q",
+				name, beginModeRead, beginModeWrite)
+			a.RegistryMode, a.WriteAccepted = "", false
 		}
 		ev.Modes = append(ev.Modes, a)
 	}
@@ -310,17 +325,28 @@ func TestBoltBeginExtras_OracleCanFail(t *testing.T) {
 			wantOp: "bookmark-strictly-advances",
 		},
 		{
-			name:   "an autocommit statement minted its own bookmark",
-			mutate: func(e *BoltBeginExtrasEvidence) { e.AutocommitBookmarkFresh = "FB:k00000009" },
-			wantOp: "autocommit-bookmark-is-empty",
+			// INVERTED by rmp #2563: minting its own token is now the contract, and
+			// the clause fires when the autocommit statement mints NOTHING.
+			name:   "an autocommit statement minted no bookmark",
+			mutate: func(e *BoltBeginExtrasEvidence) { e.AutocommitBookmarkFresh = "" },
+			wantOp: "autocommit-bookmark-is-fresh",
 		},
 		{
-			name:   "the autocommit bookmark stopped echoing the prior COMMIT's",
-			mutate: func(e *BoltBeginExtrasEvidence) { e.AutocommitBookmarkAfterCommit = "FB:k0000000a" },
-			wantOp: "autocommit-bookmark-is-stale",
+			name: "the autocommit bookmark echoes the prior COMMIT's",
+			mutate: func(e *BoltBeginExtrasEvidence) {
+				e.AutocommitBookmarkAfterCommit = e.AutocommitAfterCommitExpected
+			},
+			wantOp: "autocommit-bookmark-not-stale",
 		},
 		{
-			name:   "the autocommit statement wrote nothing, so the empty bookmark is unattributable",
+			name: "the post-commit autocommit bookmark is empty",
+			mutate: func(e *BoltBeginExtrasEvidence) {
+				e.AutocommitBookmarkAfterCommit = ""
+			},
+			wantOp: "autocommit-bookmark-not-stale",
+		},
+		{
+			name:   "the autocommit statement wrote nothing, so its bookmark is unattributable",
 			mutate: func(e *BoltBeginExtrasEvidence) { e.AutocommitStatsSeen = false },
 			wantOp: "autocommit-did-write",
 		},
@@ -422,7 +448,10 @@ func TestBoltBeginExtras_OracleCanFail(t *testing.T) {
 		{
 			name: "the registry recorded a write transaction as read-only",
 			mutate: func(e *BoltBeginExtrasEvidence) {
-				e.Modes[modeArmIndex(e, beginModeUpperR)].RegistryMode = beginModeRead
+				// The canonical "w" arm, not "R": since rmp #2564 an unrecognised
+				// value is refused at the BEGIN and never reaches the registry
+				// clause, so mutating it would leave this case unable to fire.
+				e.Modes[modeArmIndex(e, beginModeWrite)].RegistryMode = beginModeRead
 			},
 			wantOp: "mode-registry-agrees",
 		},
@@ -442,12 +471,37 @@ func TestBoltBeginExtras_OracleCanFail(t *testing.T) {
 			wantOp: "mode-read-refuses-write",
 		},
 		{
-			name: "an unknown mode stopped failing open",
+			// INVERTED by rmp #2564: an unknown mode used to be coerced to write and
+			// the clause pinned that; it is now refused at the BEGIN, and the clause
+			// fires when it is ACCEPTED instead.
+			name: "an unknown mode was accepted instead of refused",
 			mutate: func(e *BoltBeginExtrasEvidence) {
 				a := &e.Modes[modeArmIndex(e, beginModeNonsense)]
-				a.WriteAccepted, a.WriteCode = false, beginReadOnlyRefusalCode
+				a.BeginRefused, a.BeginCode, a.BeginMessage = false, "", ""
+				a.RegistryMode, a.WriteAccepted = beginModeWrite, true
 			},
-			wantOp: "mode-unknown-fails-open",
+			wantOp: "mode-unknown-refused",
+		},
+		{
+			name: "an unknown mode was refused with the wrong code",
+			mutate: func(e *BoltBeginExtrasEvidence) {
+				e.Modes[modeArmIndex(e, beginModeNonsense)].BeginCode = "Neo.ClientError.Statement.SemanticError"
+			},
+			wantOp: "mode-unknown-refused",
+		},
+		{
+			name: "the refusal does not name the offending value",
+			mutate: func(e *BoltBeginExtrasEvidence) {
+				e.Modes[modeArmIndex(e, beginModeNonsense)].BeginMessage = "unsupported access mode"
+			},
+			wantOp: "mode-unknown-refused",
+		},
+		{
+			name: "a canonical mode was refused",
+			mutate: func(e *BoltBeginExtrasEvidence) {
+				e.Modes[modeArmIndex(e, beginModeWrite)].BeginRefused = true
+			},
+			wantOp: "mode-canonical-accepted",
 		},
 		// --- db ---
 		{

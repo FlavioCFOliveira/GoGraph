@@ -1900,12 +1900,12 @@ func checkBoltStreamSemanticsNonVacuity(e *BoltStreamEvidence) []Violation {
 	v = append(v, checkBoltStreamPagingNonVacuity(e)...)
 	v = append(v, checkBoltStreamRefusalNonVacuity(e)...)
 	if got := e.EffectStats["nodes-created"]; got == 0 {
-		v = append(v, boltStreamViolation(ViolationOracleDeviation, "nonvacuity-effect",
+		v = append(v, boltStreamViolation(ViolationVacuousRun, "nonvacuity-effect",
 			"the discarded statement reported no write counter, so it had no EFFECT to confirm and "+
 				"\"DISCARD abandons delivery, not the statement\" is a claim about a read"))
 	}
 	if under := boltStreamTxArm(e, "cursors-under-cap"); under == nil || under.framesAppended() == 0 {
-		v = append(v, boltStreamViolation(ViolationOracleDeviation, "nonvacuity-wal-instrument",
+		v = append(v, boltStreamViolation(ViolationVacuousRun, "nonvacuity-wal-instrument",
 			"no transaction was observed appending a WAL frame: the frame counter is not a live "+
 				"instrument, so \"the doomed transaction appended none\" proves nothing"))
 	}
@@ -1916,13 +1916,13 @@ func checkBoltStreamSemanticsNonVacuity(e *BoltStreamEvidence) []Violation {
 func checkBoltStreamPagingNonVacuity(e *BoltStreamEvidence) []Violation {
 	var v []Violation
 	if len(e.Reference) != boltStreamRows {
-		v = append(v, boltStreamViolation(ViolationOracleDeviation, "nonvacuity-reference",
+		v = append(v, boltStreamViolation(ViolationVacuousRun, "nonvacuity-reference",
 			fmt.Sprintf("the reference drain produced %d row(s), want %d: with an empty reference every "+
 				"equivalence clause is a statement about two empty slices",
 				len(e.Reference), boltStreamRows)))
 	}
 	if len(e.Pages) < 3 {
-		v = append(v, boltStreamViolation(ViolationOracleDeviation, "nonvacuity-pages",
+		v = append(v, boltStreamViolation(ViolationVacuousRun, "nonvacuity-pages",
 			fmt.Sprintf("the drain took %d page(s): a single page is a pull-all by another name and "+
 				"says nothing about paging", len(e.Pages))))
 	}
@@ -1941,19 +1941,19 @@ func checkBoltStreamPagingNonVacuity(e *BoltStreamEvidence) []Violation {
 		}
 	}
 	if !sawMore || !sawDone {
-		v = append(v, boltStreamViolation(ViolationOracleDeviation, "nonvacuity-has_more",
+		v = append(v, boltStreamViolation(ViolationVacuousRun, "nonvacuity-has_more",
 			fmt.Sprintf("has_more was observed true=%v false=%v across the drain; both readings are "+
 				"needed or \"has_more is true on exactly the non-final pages\" is unfalsifiable",
 				sawMore, sawDone)))
 	}
 	if !sawBounded {
-		v = append(v, boltStreamViolation(ViolationOracleDeviation, "nonvacuity-bounded-page",
+		v = append(v, boltStreamViolation(ViolationVacuousRun, "nonvacuity-bounded-page",
 			"no page delivered exactly its requested n with rows still remaining, so the n field was "+
 				"never shown to BOUND a page"))
 	}
 	k, d := len(e.WindowPrefix), int(e.WindowDiscardN)
 	if k == 0 || d <= 0 || k+d >= len(e.Reference) {
-		v = append(v, boltStreamViolation(ViolationOracleDeviation, "nonvacuity-window",
+		v = append(v, boltStreamViolation(ViolationVacuousRun, "nonvacuity-window",
 			fmt.Sprintf("the discard window (prefix %d, n=%d, reference %d) is not strictly interior: "+
 				"with nothing before or nothing after it, the removal oracle degenerates into the "+
 				"paging oracle", k, d, len(e.Reference))))
@@ -1972,13 +1972,13 @@ func checkBoltStreamRefusalNonVacuity(e *BoltStreamEvidence) []Violation {
 	}
 	for _, want := range boltStreamExpectedRefusals {
 		if !seen[want] {
-			v = append(v, boltStreamViolation(ViolationOracleDeviation, "nonvacuity-refusal-roster",
+			v = append(v, boltStreamViolation(ViolationVacuousRun, "nonvacuity-refusal-roster",
 				fmt.Sprintf("probe %q did not run: the surface was not fully driven", want)))
 		}
 	}
 	for i := range e.Refusals {
 		if !e.Refusals[i].PriorAck {
-			v = append(v, boltStreamViolation(ViolationOracleDeviation, "nonvacuity-prior-ack",
+			v = append(v, boltStreamViolation(ViolationVacuousRun, "nonvacuity-prior-ack",
 				fmt.Sprintf("probe %q never acknowledged a statement before its decisive message, so "+
 					"\"the message was refused\" is equally explained by a connection that never worked",
 					e.Refusals[i].Name)))
@@ -1986,22 +1986,22 @@ func checkBoltStreamRefusalNonVacuity(e *BoltStreamEvidence) []Violation {
 	}
 	for _, q := range e.ProbedQIDs {
 		if q <= 0 {
-			v = append(v, boltStreamViolation(ViolationOracleDeviation, "nonvacuity-qid-positive",
+			v = append(v, boltStreamViolation(ViolationVacuousRun, "nonvacuity-qid-positive",
 				fmt.Sprintf("a qid probe sent qid=%d: only a NON-NEGATIVE qid names a stream that does "+
 					"not exist, so a probe at -1 asserts the refusal of the current stream", q)))
 		}
 	}
 	if len(e.ProbedQIDs) == 0 {
-		v = append(v, boltStreamViolation(ViolationOracleDeviation, "nonvacuity-qid-positive",
+		v = append(v, boltStreamViolation(ViolationVacuousRun, "nonvacuity-qid-positive",
 			"no explicit qid was ever sent"))
 	}
 	if e.QIDControlRows == 0 {
-		v = append(v, boltStreamViolation(ViolationOracleDeviation, "nonvacuity-qid-control",
+		v = append(v, boltStreamViolation(ViolationVacuousRun, "nonvacuity-qid-control",
 			"the qid=-1 control delivered no row, so the qid refusals are indistinguishable from a "+
 				"server that refuses every PULL"))
 	}
 	if len(e.RunQIDs) < boltStreamMinRunQIDs {
-		v = append(v, boltStreamViolation(ViolationOracleDeviation, "nonvacuity-run-qids",
+		v = append(v, boltStreamViolation(ViolationVacuousRun, "nonvacuity-run-qids",
 			fmt.Sprintf("the qid census inspected %d RUN reply/replies, want at least %d",
 				len(e.RunQIDs), boltStreamMinRunQIDs)))
 	}
@@ -2012,7 +2012,7 @@ func checkBoltStreamRefusalNonVacuity(e *BoltStreamEvidence) []Violation {
 		}
 	}
 	if recovered == 0 {
-		v = append(v, boltStreamViolation(ViolationOracleDeviation, "nonvacuity-reset-recovery",
+		v = append(v, boltStreamViolation(ViolationVacuousRun, "nonvacuity-reset-recovery",
 			"no probe recovered after RESET, so the refusal clauses cannot distinguish a scoped refusal "+
 				"from a connection that was dead from the start"))
 	}
@@ -2024,25 +2024,25 @@ func checkBoltStreamRefusalNonVacuity(e *BoltStreamEvidence) []Violation {
 func checkBoltStreamStallNonVacuity(e *BoltStreamEvidence) []Violation {
 	var v []Violation
 	if e.StallRecordsPulled == 0 {
-		v = append(v, boltStreamViolation(ViolationOracleDeviation, "nonvacuity-stall-open",
+		v = append(v, boltStreamViolation(ViolationVacuousRun, "nonvacuity-stall-open",
 			"the slow consumer drained no record at all, so the stream was never opened and the "+
 				"backpressure clauses adjudicate nothing"))
 	}
 	if e.StallBufferedPeak < simConnBufferSize {
-		v = append(v, boltStreamViolation(ViolationOracleDeviation, "nonvacuity-stall-parked",
+		v = append(v, boltStreamViolation(ViolationVacuousRun, "nonvacuity-stall-parked",
 			fmt.Sprintf("the queue toward the stalled consumer peaked at %d of %d byte(s): the writer "+
 				"was never observed blocked against a FULL buffer, so the teardown did not interrupt a "+
 				"parked writer and the no-leak clause is a statement about an idle connection",
 				e.StallBufferedPeak, simConnBufferSize)))
 	}
 	if len(e.StallSurfacePages) < 2 {
-		v = append(v, boltStreamViolation(ViolationOracleDeviation, "nonvacuity-stall-pages",
+		v = append(v, boltStreamViolation(ViolationVacuousRun, "nonvacuity-stall-pages",
 			fmt.Sprintf("the post-stall drain took %d page(s): fewer than two cannot show has_more "+
 				"changing, so \"the surface is intact\" is read off a pull-all",
 				len(e.StallSurfacePages))))
 	}
 	if len(e.RunQIDs) == 0 {
-		v = append(v, boltStreamViolation(ViolationOracleDeviation, "nonvacuity-stall-run-qid",
+		v = append(v, boltStreamViolation(ViolationVacuousRun, "nonvacuity-stall-run-qid",
 			"no RUN reply was inspected on the stall arm"))
 	}
 	return v

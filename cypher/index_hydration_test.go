@@ -461,7 +461,7 @@ func TestIndexHydration_CheckpointedReopen_SeeksExactRows(t *testing.T) {
 	hydSeedPeople(s1)
 	// Bulk filler with an age BELOW the range predicate. It exists only so the
 	// planner's range-seek gate admits the seek: that gate needs the label
-	// population at or above rangeSeekMinLabelPopulation (1024) AND the in-range
+	// population at or above rangeSeekMinLabelPopulation AND the in-range
 	// count within rangeSeekMaxSelectivity (10%) of it. On the four-person fixture
 	// alone the plan is a label scan, and a row assertion over a scan would be
 	// correct even with a wholly broken index — so without this the end-to-end

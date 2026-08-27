@@ -98,31 +98,80 @@ impractical for an example and orthogonal to what this one measures
 go run ./examples/26_social_scale_bench
 ```
 
-With **no flags** the example builds the full specification: **1,000,000
-users**, **30,000 articles**, **150–200 friends per user**, and **up to
-300 likes per user** — roughly 1.03M nodes and ~3.2 × 10⁸ edges.
+With **no flags** the example builds **50,000 users**, **30,000 articles**,
+**150–200 friends per user**, and **up to 300 likes per user** — about 80,000
+nodes and **16.3 million edges** — and completes in roughly **three minutes**
+using about **4.8 GiB** of peak RSS.
 
-> **Resource warning.** Each edge carries a mandatory date property. At this
-> model's degrees the graph needs on the order of **~62 bytes of live heap per
-> edge** (measured at 20k/2k, explicit types — see below), so the full run needs
-> roughly **~20 GiB of live heap** and a few minutes to build. The implicit-type
-> mode (`-rel-types=false`) does not change this materially — the date-property
-> columns are identical in both modes and the relationship-label column is already
-> negligible. Run the full specification only on a machine sized for it. On a
-> laptop, scale down first:
+### What each scale costs
+
+Measured on the reference machine (Apple M4, 10 cores, 32 GiB, `go1.26.5`),
+`-friends-min 150 -friends-max 200 -likes-max 300 -seed 1`, wall-clock and peak
+RSS from `/usr/bin/time -l`:
+
+| `-users` | `-articles` | edges | wall-clock | peak RSS |
+|---:|---:|---:|---:|---:|
+| 20,000 | 2,000 | 6.5 M | 71.7 s | 1.88 GiB |
+| 40,000 | 4,000 | 13.0 M | 149.6 s | 3.74 GiB |
+| **50,000** (default) | **30,000** | **16.3 M** | **183.6 s** | **4.81 GiB** |
+| 1,000,000 | 30,000 | ~325 M | **does not complete** | ~93 GiB (projected) |
+
+Peak RSS scales linearly with the user count, which is what rules the last row
+out: it is not a matter of waiting longer. The million-user scale was the default
+until rmp #2385 and it was never once run to completion — killed at twelve
+minutes having printed nothing past its config block, and at seven minutes at
+150,000 users. An example exists to yield measurements, and one that never
+finishes yields none.
+
+The large scale is still one flag away, on a machine sized for it:
+
+```sh
+go run ./examples/26_social_scale_bench -users 1000000
+```
+
+> **Where the time goes.** At the default, building the graph takes 14 s and the
+> read battery takes 154 s of the 184 — this example is dominated by its queries,
+> not by its ingest. The two typed relationship counts alone are ~19 s of that
+> (rmp #2625), and are still open.
 >
-> ```sh
-> go run ./examples/26_social_scale_bench -users 20000 -articles 2000
-> ```
->
-> See [Memory profile and optimizations](#memory-profile-and-optimizations)
+> The build's allocation was the other half of that note. It amplified **58x** at
+> 40 000 users and the ratio ROSE with scale (37x at 20 000), because an
+> unbracketed write clones the whole shard slot array per edge. Bracketing the
+> build in an exclusive-build window fixed it: allocation at 40 000 users fell
+> **28.02 GiB to 8.28 GiB**, the ratio is now **16.6x and FLAT** across the two
+> scales, and the build got ~21% faster. `bytes_per_edge` is unchanged at 40.0
+> (rmp #2624, and rmp #2628 for the engine defect the fix uncovered).
+
+> **Memory shape.** Each edge carries a mandatory date property; at this model's
+> degrees the graph needs on the order of **40 bytes of live heap per edge**
+> (`bytes_per_edge`, stable at 40.0–40.1 across scales). The implicit-type mode
+> (`-rel-types=false`) does not change this materially — the date-property columns
+> are identical in both modes and the relationship-label column is already
+> negligible. See [Memory profile and optimizations](#memory-profile-and-optimizations)
 > for the per-edge breakdown and how these figures were measured.
+
+### Progress output
+
+Results go to **stdout** and phase progress to **stderr**, so a pipe capturing
+results gets exactly the pinned facts while a reader watching the run can tell a
+slow phase from a hung one:
+
+```
+[    0.0s] build: creating nodes and edges
+[   14.2s] compact: right-sizing adjacency backing arrays
+[   16.1s] queries: running the read battery
+[  169.8s] statistics: exercising the estimate providers
+[  169.9s] csr-ordering: measuring the ordered neighbour runs
+[  178.9s] done
+```
+
+At larger scales the build loops also report their own progress within a phase.
 
 ### Flags
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `-users` | `1000000` | number of `USER` nodes |
+| `-users` | `50000` | number of `USER` nodes |
 | `-articles` | `30000` | number of `ARTICLE` nodes |
 | `-friends-min` | `150` | minimum `FRIEND` out-degree per user |
 | `-friends-max` | `200` | maximum `FRIEND` out-degree per user |
@@ -150,63 +199,63 @@ nodes.users=20000
 nodes.articles=2000
 edges.friend=3498025
 edges.like=3006369
-# build.elapsed=3.847s
-# build.node_rate=5719 nodes/s
-# build.edge_rate=1690865 edges/s
-# mem.heap_alloc=152.55 MiB
-# mem.heap_growth=152.20 MiB
-# mem.total_alloc=9.12 GiB
-# mem.sys=417.48 MiB
-# mem.num_gc=125
-# bytes_per_edge=24.5
+# build.elapsed=3.581s
+# build.node_rate=6143 nodes/s
+# build.edge_rate=1816310 edges/s
+# mem.heap_alloc=248.59 MiB
+# mem.heap_growth=248.24 MiB
+# mem.total_alloc=4.14 GiB
+# mem.sys=754.24 MiB
+# mem.num_gc=54
+# bytes_per_edge=40.0
 q.count_users=20000
-# q.count_users.latency=2.494ms
+# q.count_users.latency=1.692ms
 q.count_articles=2000
-# q.count_articles.latency=119µs
+# q.count_articles.latency=114µs
 q.count_friend=3498025
-# q.count_friend.latency=4.212704s
+# q.count_friend.latency=3.506954s
 q.count_like=3006369
-# q.count_like.latency=3.848539s
+# q.count_like.latency=2.913014s
 q.friend_since_filled=3498025
-# q.friend_since_filled.latency=5.476491s
+# q.friend_since_filled.latency=6.225728s
 q.like_when_filled=3006369
-# q.like_when_filled.latency=4.957594s
+# q.like_when_filled.latency=4.479478s
 q.fof_reach=15246
-# q.fof_reach.latency=175.579ms
+# q.fof_reach.latency=43.684ms
 q.top_articles.rows=10
-# q.top_articles.latency=7.150727s
+# q.top_articles.latency=2.59199s
 q.friend_degree.min=150
 q.friend_degree.max=200
 q.friend_degree.avg=174.9013
 q.friend_degree.median=175.0000
-# q.friend_degree.latency=8.303789s
+# q.friend_degree.latency=3.427969s
 q.users_with_like=19927
-# q.users_with_like.latency=172.137ms
+# q.users_with_like.latency=123.18ms
 q.users_without_like=73
-# q.users_without_like.latency=167.935ms
+# q.users_without_like.latency=120.088ms
 q.degree_band.high=6577
 q.degree_band.low=6745
 q.degree_band.mid=6678
-# q.degree_band.latency=8.472216s
+# q.degree_band.latency=3.590405s
 q.union.rows=2
 q.union.users=20000
 q.union.articles=2000
-# q.union.latency=11.326ms
+# q.union.latency=4.773ms
 q.unwind_requested=8
 q.unwind_matched=8
-# q.unwind_batch.latency=11.064ms
+# q.unwind_batch.latency=12.738ms
 q.sample_node_id=122
 q.sample_element_id=122
-# q.id_pair.latency=4.63ms
+# q.id_pair.latency=3.94ms
 q.temporal.window_days=2192
-# q.temporal.window_days.latency=121µs
+# q.temporal.window_days.latency=108µs
 q.temporal.dt_span_seconds=5400
-# q.temporal.dt_span_seconds.latency=53µs
+# q.temporal.dt_span_seconds.latency=65µs
 q.friend_age_days.min=0
 q.friend_age_days.max=2192
-# q.friend_age_days.latency=9.842523s
+# q.friend_age_days.latency=10.096945s
 q.friend_recent_30d=49502
-# q.friend_recent_30d.latency=6.723331s
+# q.friend_recent_30d.latency=7.87077s
 q.friend_by_year.2019=582806
 q.friend_by_year.2020=583777
 q.friend_by_year.2021=582547
@@ -214,10 +263,10 @@ q.friend_by_year.2022=580427
 q.friend_by_year.2023=583308
 q.friend_by_year.2024=583561
 q.friend_by_year.2025=1599
-# q.friend_by_year.latency=7.309185s
+# q.friend_by_year.latency=8.95735s
 # --- planner statistics & cardinality estimates (#2120) ---
 # stats.tracked_pairs=5
-# stats.refresh.latency=41.2ms
+# stats.refresh.latency=21.947ms
 # stats.explain.label_scan:
 #   ProduceResults
 #   └─ Projection
@@ -225,59 +274,131 @@ q.friend_by_year.2025=1599
 # stats.explain.equality_1_over_ndv:
 #   ProduceResults
 #   └─ Projection
-#      └─ Selection (est. rows~1, heuristic)
+#      └─ Selection (est. rows~8, heuristic)
 #         └─ NodeByLabelScan [u:USER] (est. rows=20000, exact)
 # stats.explain.range_histogram:
 #   ProduceResults
 #   └─ Projection
-#      └─ Selection (est. rows~13648, stats, err=0.0039)
+#      └─ Selection (est. rows~13985, stats, err=0.0039)
 #         └─ NodeByLabelScan [u:USER] (est. rows=20000, exact)
 # stats.label.est_rows=20000
 # stats.label.actual_rows=20000
-# stats.range.est_rows=13648
-# stats.range.actual_rows=13672
-# stats.range.abs_row_error=24
+# stats.range.est_rows=13985
+# stats.range.actual_rows=13969
+# stats.range.abs_row_error=16
+
+# --- CSR neighbour ordering (sprint 313) ---
+# csr.build_elapsed=215ms
+csr.order=22000
+csr.size=6504394
+csr.runs_ordered=true
+csr.bytes=99.46 MiB
+csr.bytes_per_arc=16.0
+csr.has_handles=true
+degree.threshold=16
+degree.sources=20000
+degree.min=151
+degree.max=499
+degree.mean=325.22
+degree.p50=325
+degree.p99=483
+degree.vertex_frac_above=100.00%
+degree.edge_frac_above=100.00%
+degree.cost_frac_above=100.00%
+degree.measured=FRIEND+LIKE combined (a CSR run carries both types)
+degree.expected_range=[150,500]
+degree.distribution=BOUNDED, LIGHT-TAILED (not power-law)
+# degree.shape: each user draws its FRIEND out-degree uniformly from
+#   [150,200] and its LIKE out-degree uniformly from [0,300]. The SUM of two
+#   uniforms is triangular, not uniform - but either way it is BOUNDED and
+#   symmetric, so there is NO hub tail: max/p50 = 1.54x here, whereas the
+#   power-law fixture in bench/csrorder reaches 65x (max 719 at p50 11).
+# degree.caveat: this example shows the ordered path ENGAGING and NOT
+#   REGRESSING. It CANNOT show a hub win - that is #2145's power-law
+#   fixture. Above the threshold of 16 the ordered probe covers 100.00% of
+#   scan cost here, but that 100% is NOT skew: it means every vertex is
+#   the same size and all of them sit above the crossover. On a power law
+#   the three fractions SPREAD (23.57% / 50.09% / 87.22%), and that
+#   spread is what skew looks like.
+hub.reverse_expand_rows=28768
+# hub.reverse_expand_warm=23.441ms
+# hub.reverse_expand_cold=2.056948s
+# hub.cache_speedup=87.75x (cold pays the CSR pair build and the
+#   ordering pass; warm hits the #2143 Engine-level pair cache)
+# csr.mem.heap_growth=0 B
+# csr.mem.total_alloc=898.38 MiB
+# csr.mem.num_gc=2
 # --- columnar execution exercise (#2121) ---
 # columnar.scale.users=1500
 # columnar.scale.articles=200
 # columnar.agg.groups=12
 # columnar.agg.members_total=1500
-# columnar.agg.col_mallocs=4406
-# columnar.agg.row_mallocs=17899
-# columnar.agg.col_bytes=149104
-# columnar.agg.row_bytes=1246480
-# columnar.agg.malloc_ratio=4.06
+# columnar.agg.col_mallocs=5886
+# columnar.agg.row_mallocs=13397
+# columnar.agg.col_bytes=177856
+# columnar.agg.row_bytes=694432
+# columnar.agg.malloc_ratio=2.28
 # columnar.filter.rows=9010
 # columnar.filter.col_batches=3
 # columnar.filter.row_batches=0
-# columnar.filter.col_mallocs=123
-# columnar.filter.row_mallocs=120882
-# columnar.filter.col_bytes=1516592
-# columnar.filter.row_bytes=2709008
-# columnar.filter.malloc_ratio=982.78
+# columnar.filter.col_mallocs=26526
+# columnar.filter.row_mallocs=138900
+# columnar.filter.col_bytes=1273152
+# columnar.filter.row_bytes=3275192
+# columnar.filter.malloc_ratio=5.24
 # columnar.hashjoin.pairs=457
-# columnar.hashjoin.col_mallocs=73448
-# columnar.hashjoin.nested_mallocs=8646912
-# columnar.hashjoin.col_bytes=5631192
-# columnar.hashjoin.nested_bytes=146680528
-# columnar.hashjoin.malloc_ratio=117.73
+# columnar.hashjoin.col_mallocs=102350
+# columnar.hashjoin.nested_mallocs=13151520
+# columnar.hashjoin.col_bytes=6192264
+# columnar.hashjoin.nested_bytes=218642328
+# columnar.hashjoin.malloc_ratio=128.50
 # --- intra-query parallelism exercise (#2122) ---
 # parallel.scale.nodes=60000
 # parallel.scale.threshold=1024
 # parallel.gomaxprocs=10
 # parallel.min.value=0
-# parallel.min.parallel_elapsed=8.383ms
-# parallel.min.serial_elapsed=28.767ms
-# parallel.min.speedup=3.43
+# parallel.min.parallel_elapsed=3.301ms
+# parallel.min.serial_elapsed=5.188ms
+# parallel.min.speedup=1.57
 # parallel.max.value=99997
-# parallel.max.parallel_elapsed=9.385ms
-# parallel.max.serial_elapsed=29.236ms
-# parallel.max.speedup=3.12
+# parallel.max.parallel_elapsed=4.119ms
+# parallel.max.serial_elapsed=5.202ms
+# parallel.max.speedup=1.26
 # parallel.count.nodes=60000
 # parallel.count.value=60000
-# parallel.count.o1_elapsed=6.458µs
-# parallel.count.scan_elapsed=12.4ms
-# parallel.count.speedup=1920.1
+# parallel.count.o1_elapsed=1.5µs
+# parallel.count.scan_elapsed=12.009ms
+# parallel.count.speedup=8006.2
+# --- fused cyclic expand exercise (#2157) ---
+# cyclic.friends=12
+# cyclic.n4000.users=4000
+cyclic.n4000.triangles=12000
+cyclic.n4000.plans_agree=true
+cyclic.n4000.fused_engaged=true
+cyclic.n4000.twoexpand_engaged=false
+cyclic.n4000.labelled_declines=true
+cyclic.n4000.labelled_agrees=true
+# cyclic.n4000.fused.latency=14.926ms
+# cyclic.n4000.twoexpand.latency=57.05ms
+# cyclic.n4000.labelled.latency=212.073ms
+# cyclic.n4000.fused.alloc_bytes=4794056
+# cyclic.n4000.twoexpand.alloc_bytes=36254416
+# cyclic.n4000.speedup=3.82x
+# cyclic.n4000.alloc_ratio=7.56x
+# cyclic.n12000.users=12000
+cyclic.n12000.triangles=36000
+cyclic.n12000.plans_agree=true
+cyclic.n12000.fused_engaged=true
+cyclic.n12000.twoexpand_engaged=false
+cyclic.n12000.labelled_declines=true
+cyclic.n12000.labelled_agrees=true
+# cyclic.n12000.fused.latency=50.896ms
+# cyclic.n12000.twoexpand.latency=175.438ms
+# cyclic.n12000.labelled.latency=657.996ms
+# cyclic.n12000.fused.alloc_bytes=14495432
+# cyclic.n12000.twoexpand.alloc_bytes=110276736
+# cyclic.n12000.speedup=3.45x
+# cyclic.n12000.alloc_ratio=7.61x
 ```
 
 The `edges.*` totals depend on the seed; `q.count_friend` and `q.count_like`

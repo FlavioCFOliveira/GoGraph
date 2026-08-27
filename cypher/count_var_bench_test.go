@@ -28,9 +28,7 @@ import (
 // rebuilt a full RelationshipValue (with its `w` property) just to null-check
 // it; after, the raw cell flows to the aggregator.
 func BenchmarkCountRelVar(b *testing.B) {
-	g := newBenchGraph()
-	eng := cypher.NewEngine(g)
-	seedRelGraph(b, eng, 400, 4) // ~3.2k relationships
+	eng := newRelBenchEngine(b, 400, 4) // ~3.2k relationships
 	const q = "MATCH (a)-[r]->(b) RETURN count(r)"
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -51,9 +49,7 @@ func BenchmarkCountRelVar(b *testing.B) {
 // BenchmarkCountNodeVar measures count(<node variable>) — the same fix on the
 // node side (raw NodeID cell instead of an upgraded NodeValue per row).
 func BenchmarkCountNodeVar(b *testing.B) {
-	g := newBenchGraph()
-	eng := cypher.NewEngine(g)
-	seedRelGraph(b, eng, 400, 4)
+	eng := newRelBenchEngine(b, 400, 4)
 	const q = "MATCH (a)-[r]->(b) RETURN count(a)"
 	b.ReportAllocs()
 	b.ResetTimer()

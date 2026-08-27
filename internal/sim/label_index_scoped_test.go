@@ -255,26 +255,46 @@ func TestLabelIndexScoped_EvidenceIsSubstantive(t *testing.T) {
 			control, raw, restamp, trunc, len(liRegionOrder()), liRestampTrials, liTruncateTrialsMin)
 	}
 
-	// The three pins, asserted as the measured numbers the file header quotes.
-	if ev.Boundary.AddGot != 0 || ev.Boundary.AddNaive != liBoundarySpan+1 {
-		t.Errorf("boundary: AddRange over [max-%d, max] yielded %d, naive %d; the pin records 0",
+	// The boundary CONTRACT (#2607) and the two remaining pins, asserted as the
+	// numbers the file header quotes.
+	if ev.Boundary.AddGot != liBoundarySpan+1 || ev.Boundary.AddNaive != liBoundarySpan+1 {
+		t.Errorf("boundary: AddRange over [max-%d, max] yielded %d, naive %d; the closed interval "+
+			"must be honoured at math.MaxUint64",
 			liBoundarySpan, ev.Boundary.AddGot, ev.Boundary.AddNaive)
 	}
 	if ev.Boundary.AddBelowGot != ev.Boundary.AddBelowNaive {
-		t.Errorf("the boundary control yielded %d, want %d — the loss must be attributable to the "+
-			"final id", ev.Boundary.AddBelowGot, ev.Boundary.AddBelowNaive)
+		t.Errorf("the boundary control yielded %d, want %d — behaviour at the boundary must be "+
+			"attributable to the final id", ev.Boundary.AddBelowGot, ev.Boundary.AddBelowNaive)
 	}
-	if int(ev.Phantom.AfterLabelCount) != liPhantomLabels ||
-		ev.Phantom.AfterBytes <= ev.Phantom.EmptyBytes || ev.Phantom.QueryVisible {
-		t.Errorf("phantom: %d labels declared in %d bytes (empty index %d), query-visible=%v",
+	if ev.Boundary.RemoveGot != ev.Boundary.RemoveNaive {
+		t.Errorf("boundary: RemoveRange over [max-3, max] left %d of %d ids on the bitmap tier, "+
+			"want %d", ev.Boundary.RemoveGot, ev.Boundary.RemoveBefore, ev.Boundary.RemoveNaive)
+	}
+	if ev.Boundary.RemoveInlineGot != ev.Boundary.RemoveGot ||
+		ev.Boundary.RemoveInlineBefore != ev.Boundary.RemoveBefore {
+		t.Errorf("boundary: the inline tier went %d -> %d and the bitmap tier %d -> %d; the same "+
+			"operation over the same membership cannot depend on the tier",
+			ev.Boundary.RemoveInlineBefore, ev.Boundary.RemoveInlineGot,
+			ev.Boundary.RemoveBefore, ev.Boundary.RemoveGot)
+	}
+	if ev.Phantom.AfterLabelCount != 0 || ev.Phantom.AfterBytes != ev.Phantom.EmptyBytes ||
+		ev.Phantom.QueryVisible || ev.Phantom.RoundTripLabelCount != 0 {
+		t.Errorf("empty-interval: %d labels declared in %d bytes (empty index %d), "+
+			"round-trip %d labels, query-visible=%v; an interval naming no ids must leave nothing",
 			ev.Phantom.AfterLabelCount, ev.Phantom.AfterBytes, ev.Phantom.EmptyBytes,
-			ev.Phantom.QueryVisible)
+			ev.Phantom.RoundTripLabelCount, ev.Phantom.QueryVisible)
+	}
+	if ev.Phantom.Labels != liPhantomLabels || ev.Phantom.CtrlLabelCount != 1 ||
+		ev.Phantom.CtrlCount != 5 {
+		t.Errorf("empty-interval arm drove %d labels with a control of %d ids in %d entries; "+
+			"want %d, 5 and 1, else the arm asserts nothing",
+			ev.Phantom.Labels, ev.Phantom.CtrlCount, ev.Phantom.CtrlLabelCount, liPhantomLabels)
 	}
 	d := &ev.DenseSmall
-	if d.Stable || !d.CtrlStable || d.Second != d.Third || d.Second <= d.First {
+	if !d.Stable || !d.CtrlStable || d.Second != d.Third || d.Second != d.First {
 		t.Errorf("dense-small: width %d went %d -> %d -> %d (stable=%v); control width %d went "+
-			"%d -> %d (stable=%v). The pin records an unstable first cycle that converges, against "+
-			"a stable control", d.Width, d.First, d.Second, d.Third, d.Stable, d.CtrlWidth,
+			"%d -> %d (stable=%v). Since #2609 both must be byte-stable across the cycle",
+			d.Width, d.First, d.Second, d.Third, d.Stable, d.CtrlWidth,
 			d.CtrlFirst, d.CtrlSecond, d.CtrlStable)
 	}
 	same, differ := 0, 0
@@ -342,10 +362,11 @@ func liPerturbTargets() map[liPerturb]string {
 		liPerturbWrongGuard:         "corrupt-guard",
 		liPerturbScopeSwap:          "scope-constructor",
 		liPerturbScopeRouting:       "scope-routing",
-		liPerturbBoundaryFixed:      "boundary-pin",
-		liPerturbPhantomGone:        "phantom-pin",
+		liPerturbBoundaryWraps:      "boundary-pin",
+		liPerturbPhantomKept:        "phantom-pin",
+		liPerturbPhantomCtrlBad:     "gate:phantom-armed",
 		liPerturbEntryFloor:         "entry-floor",
-		liPerturbDenseSmallStable:   "dense-small-pin",
+		liPerturbDenseSmallUnstable: "dense-small-pin",
 		liPerturbEmptySweep:         "gate:cells",
 		liPerturbUnionSingleShape:   "gate:union-shapes",
 		liPerturbSkipRegions:        "gate:corrupt-regions",
@@ -723,7 +744,7 @@ func liGateKnockouts() []struct {
 			}
 		}},
 		{"gate:boundary-control", func(e *LabelIndexScopedEvidence) { e.Boundary.AddBelowGot++ }},
-		{"gate:phantom-armed", func(e *LabelIndexScopedEvidence) { e.Phantom.AfterLabelCount = 0 }},
+		{"gate:phantom-armed", func(e *LabelIndexScopedEvidence) { e.Phantom.CtrlLabelCount = 0 }},
 		{"gate:dense-small-control", func(e *LabelIndexScopedEvidence) {
 			e.DenseSmall.CtrlStable = false
 		}},

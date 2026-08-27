@@ -46,6 +46,13 @@ type world struct {
 	err    error
 	params map[string]any
 
+	// inconclusiveRecorded is set once this scenario has already been counted as
+	// inconclusive. A scenario runs several queries (setup plus the test query),
+	// and counting each timed-out query separately made the credit in
+	// tckGateCheck exceed the scenario total — measured at 3897 "inconclusive"
+	// against 3897 scenarios, which is how the demonstration caught it (rmp #2568).
+	inconclusiveRecorded bool
+
 	// queryCancel cancels the context used by the last whenExecutingQuery call.
 	// It is used to abort result iteration if the engine goroutines hang.
 	queryCancel context.CancelFunc

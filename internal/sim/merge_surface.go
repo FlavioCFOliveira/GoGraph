@@ -1066,7 +1066,7 @@ func CheckMergeZeroDriverAbsent(tick int64, engine *EngineAdapter) []Violation {
 		fmt.Sprintf("MATCH (m:Person {name:'%s'}) RETURN count(m)", mergeZeroAbsentName),
 		"zero-driver premise",
 	); ok && n != 0 {
-		vs = append(vs, Violation{Kind: ViolationOracleDeviation, Tick: tick, Op: "merge zero-driver premise",
+		vs = append(vs, Violation{Kind: ViolationVacuousRun, Tick: tick, Op: "merge zero-driver premise",
 			Message: fmt.Sprintf("%d Person{name:%q} exist; the zero-row-driver family's MATCH must bind NOTHING, "+
 				"otherwise its all-zero expectation is wrong and the guard is vacuous", n, mergeZeroAbsentName)})
 	}
@@ -1343,12 +1343,12 @@ func CheckMergeHandleCollision(tick int64, f *mergeHandleFixture, g *lpg.Graph[s
 		add(ViolationGraphIntegrity, "merge handle-collision premise",
 			"the fixture %s(%q->%q) carries no stable handle any more", relPaired, mergeHandleSrcName, mergeHandleDstName)
 	case handle != f.handle:
-		add(ViolationOracleDeviation, "merge handle-collision premise",
+		add(ViolationVacuousRun, "merge handle-collision premise",
 			"the fixture relationship's handle changed from %d to %d: its identity is not stable across the run",
 			f.handle, handle)
 	default:
 		if got := personNameByID(g, graph.NodeID(handle)); got != f.decoyName {
-			add(ViolationOracleDeviation, "merge handle-collision premise",
+			add(ViolationVacuousRun, "merge handle-collision premise",
 				"node id %d is %q, want the decoy %q: the handle/id COLLISION no longer holds, so the family "+
 					"is exercising a shape on which rmp #2515 could not manifest and a clean run proves nothing",
 				handle, got, f.decoyName)

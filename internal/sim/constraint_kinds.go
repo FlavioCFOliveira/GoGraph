@@ -453,7 +453,7 @@ func (st *constraintKindState) checkNonVacuity(tick int64) []Violation {
 	for _, arm := range constraintKindArms {
 		if st.arms[arm] == 0 {
 			vs = append(vs, Violation{
-				Kind: ViolationOracleDeviation, Tick: tick, Op: "constraint-kind non-vacuity",
+				Kind: ViolationVacuousRun, Tick: tick, Op: "constraint-kind non-vacuity",
 				Message: fmt.Sprintf("constraint-kind arm %q never occurred: that route/outcome was vacuous this run", arm),
 			})
 		}

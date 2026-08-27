@@ -64,6 +64,15 @@ func resetFidelity() {
 // assertion has drained any lazy result into w.err, so err is the engine error
 // actually raised (or nil if the query unexpectedly succeeded).
 func recordFidelity(category, expected string, err error) {
+	// An INCONCLUSIVE run carries no evidence about which error type the engine
+	// would have raised: the query was cut off by its deadline before raising one.
+	// Recording it would count as a fidelity MISS and lower a ratcheted baseline
+	// on a slow host — the same false signal rmp #2568 removes from the execution
+	// gate, one gate over. Discovered by the end-to-end demonstration, which drove
+	// every scenario inconclusive and turned the fidelity gate red at 0/695.
+	if errors.Is(err, errInconclusive) {
+		return
+	}
 	classified, _ := classifyTCKErrorType(err)
 	fidelityMu.Lock()
 	fidelityRecords = append(fidelityRecords, fidelityRecord{

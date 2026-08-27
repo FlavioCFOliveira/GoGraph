@@ -218,7 +218,7 @@ func (c *InvariantChecker) checkOneParityProbe(tick int64, engine PlanEngine, p 
 	// 3. Vacuity guard: a MustSeek pair that agrees on two scans compares
 	// nothing — the literal arm regressing to a scan is itself the report.
 	if p.MustSeek && !hasSeekLeaf(litLeaves) {
-		c.add(ViolationOracleDeviation, tick, "access-path parity",
+		c.add(ViolationVacuousRun, tick, "access-path parity",
 			"the LITERAL arm does not seek, so this pair proves nothing about parity\n"+detail())
 	}
 }

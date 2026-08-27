@@ -202,6 +202,31 @@ func (o *MetricsOracle) Restore() {
 // failures). goroutineSlack is the tolerance on the goroutine delta — a healthy
 // run returns to its baseline, but a small positive slack absorbs the runtime's
 // own bookkeeping goroutines that a single -count run may leave parked.
+//
+// # How callers choose goroutineSlack (rmp #2592)
+//
+// It is a parameter and not a constant because the right value is a property of
+// the RUN, not of the quantity. Two things create room for the runtime to park a
+// helper, and they are independent:
+//
+//   - CONCURRENCY. A swarm of N workers needs slack that scales with N. The
+//     callers in phase5_integration_test.go pass 2, 4 and 8 for progressively
+//     wider swarms; metrics_oracle_test.go passes 4.
+//   - DURATION. A minutes-long run has more opportunity than a short one whatever
+//     its concurrency. phase4_long_running_soak_test.go is single-goroutine but
+//     drives 2,000,000 ticks, and passes 8 on that ground alone;
+//     bolt/server's connection-churn soak independently settled on the same value
+//     for the same reason.
+//
+// A run that is neither concurrent nor long takes ZERO, which is what the
+// single-scenario path at [MetricsOracle.RunWithMetricsOracle] does.
+//
+// Note what this delta is and is not. runtime.NumGoroutine counts goroutines the
+// RUNTIME owns as well as the harness's, so it cannot distinguish a leak from a
+// parked GC worker. Where a caller also runs goleak, THAT is the instrument that
+// certifies "leaks no goroutine" — it identifies a leak by its stack — and this
+// delta is a coarse cross-check that additionally catches a leak which has
+// already exited by teardown.
 func (o *MetricsOracle) Check(before, after MetricsSnapshot, expectedWrites, expectedWriteErrors uint64, goroutineSlack int) MetricsOracleResult {
 	res := MetricsOracleResult{
 		Before:              before,

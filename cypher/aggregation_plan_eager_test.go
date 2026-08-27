@@ -107,7 +107,14 @@ func TestAggregationPlan_ExecutionCorrectness(t *testing.T) {
 }
 
 // TestAggregationPlan_GlobalAggregate verifies that a global (non-grouping)
-// aggregate also emits EagerAggregation and returns the correct count.
+// count(*) is served by the CountRows pushdown and returns the correct count.
+//
+// It asserted EagerAggregation until #2625. A group-by-less, non-DISTINCT
+// count(*) has a CONSTANT aggregate argument, so the pre-projection it fed
+// materialised one single-column row per input row to carry a value CountAgg
+// could never reject; exec.CountRows counts the child's rows instead and no
+// aggregation operator is built. The grouping cases above still emit
+// EagerAggregation and still assert it.
 func TestAggregationPlan_GlobalAggregate(t *testing.T) {
 	t.Parallel()
 
@@ -119,8 +126,11 @@ func TestAggregationPlan_GlobalAggregate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Explain: %v", err)
 	}
-	if !strings.Contains(plan, "EagerAggregation") {
-		t.Errorf("global aggregate plan missing EagerAggregation:\n%s", plan)
+	if !strings.Contains(plan, "CountRows") {
+		t.Errorf("global count(*) plan missing CountRows:\n%s", plan)
+	}
+	if strings.Contains(plan, "EagerAggregation") {
+		t.Errorf("global count(*) still builds an aggregation the pushdown replaces:\n%s", plan)
 	}
 
 	res, err := eng.Run(ctx, q, nil)

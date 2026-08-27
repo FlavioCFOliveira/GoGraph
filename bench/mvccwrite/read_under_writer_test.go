@@ -48,7 +48,13 @@ const readUnderWriterNodes = 2000
 func seedFixedPopulation(tb testing.TB, eng *cypher.Engine) {
 	tb.Helper()
 	ctx := context.Background()
-	// An INDEX on :Acct(id) so the writer's MATCH is a SEEK, not a scan. Without it the
+	// An INDEX on :Acct(id) so the writer's MATCH is a SEEK, not a scan. The id is an
+	// INTEGER, so the seek is the RANGE path and not the hash one: a Cypher CREATE
+	// INDEX builds a STRING-keyed hash index and tryNewHashSeek declines a non-string
+	// seek against it. That matters because the range path is population-gated — it was
+	// suppressed below 1024 nodes until #2367 lowered the floor to 64 — so
+	// readUnderWriterNodes must stay above the floor or the writer silently becomes
+	// O(population) per commit again. Without it the
 	// writer's own query costs O(readUnderWriterNodes) per commit, which made a previous
 	// version of this benchmark confounded in a second way: the arms differed in total
 	// CPU demand as well as in write rate, and a CPU profile showed ~39% of all time in

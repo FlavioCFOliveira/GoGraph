@@ -1979,6 +1979,40 @@ provoked and matched with `errors.Is`** on every run, and the verdict fails when
 a cap declared reachable was not reached, so deleting a probe cannot quietly
 reduce the coverage.
 
+**The '#'-leading id was excluded from the hostile-name set on a claim that had
+stopped being true — rmp #2533.** The set carried a note saying a `#`-leading id
+"does not survive a CSV round-trip", because the CSV reader treats a leading
+comment character as a comment line, and the id was left out on that basis.
+Re-validating the claim REFUTED it: rmp #2042 had already made the CSV writer
+force-quote any cell whose first rune is the ACTIVE comment rune, so the id
+round-trips intact. The exclusion was preserving a defect record that the code
+had outgrown, which is worse than no record at all — it discourages exactly the
+assertion that would have caught a regression. `"#hash"` is now in
+`graphIOHostileNames`, where it drives the force-quoting path end to end.
+
+The class it belongs to — a node identifier whose FIRST character is significant
+to the format's own syntax — is now asserted across all four formats in
+`graph/io/prefix_significant_id_roundtrip_test.go`, and the answer per format is
+recorded rather than assumed. **CSV** is the only one exposed, and it is closed by
+force-quoting; the test also drives a NON-DEFAULT comment rune (`/` and `-`), so
+the writer is held to keying on the configured rune rather than a hard-coded `#`
+— coverage nothing had before, and it fails on different ids than the default arm
+does. **JSONL** has no comment convention at all and every id travels inside a
+JSON string that `encoding/json` escapes, so the class does not arise. **GraphML**
+puts ids in XML attribute values, where the hazard is markup rather than a line
+prefix; the probe ids are `<xml>`, which would break the document if emitted raw,
+and `&amp;`, which must come back as the five characters it is and not be decoded
+to `&`, a double-unescape being the silent-corruption shape of this class in XML.
+**DOT** is write-only, so there is no importer to lose anything; what is asserted
+instead is the property a third-party parser depends on — every hazardous id is
+emitted inside double quotes and no emitted line begins with `#`, `//` or `/*`.
+
+Non-vacuity was established by disabling the writer's force-quote branch: all
+four CSV arms fail, the two configured-comment-rune arms failing on `-danger` and
+`/*block*/` rather than on `#hash`, and the DST cross-format verdict fails with
+them (`<io-csv>`: the CSV round-trip did not reproduce the modelled edge
+multiset), which is what putting the id INTO the battery bought.
+
 **The two size caps and the two depth caps need DIFFERENT payloads, and a single
 one would reach only one of them.** The encoders check depth on the way DOWN and
 size after serialising on the way back UP, and the nested-list wire grows ~2x per
@@ -2643,13 +2677,26 @@ replayed nothing, so the accepted value has to come back too.
 The `store/txn` side is measured by `typedSchemaPureStoreArm`, on its own
 `SimDisk`, through `openSimTypedStore` rather than `OpenSimStore` because it needs
 the `txn.Store` itself — the Cypher adapter cannot reach that ordering at all.
-MEASURED: the refused commit returns `txn.ErrCommittedNotApplied` wrapping
-`schema.ErrTypeMismatch`, the LIVE graph is correctly left without the property,
-and after a host crash and reopen the recovered graph carries `age` **as a
-STRING**. It is pinned in both directions and its message says that a run in
-which the resurrection stops happening must update the pin, the file header and
-this document rather than delete the clause. See item 12 under
+MEASURED 2026-08-24: the refused commit returned `txn.ErrCommittedNotApplied`
+wrapping `schema.ErrTypeMismatch`, the LIVE graph was correctly left without the
+property, and after a host crash and reopen the recovered graph carried `age`
+**as a STRING**. See item 12 under
 [Defects surfaced by this coverage work](#defects-surfaced-by-this-coverage-work).
+
+**FIXED 2026-08-25 (rmp #2602), and the arm inverted with it.** `txn.Tx.SetNodeProperty`
+and its value-bearing siblings now validate BEFORE buffering, so a refused op
+never reaches the log and there is nothing for a validator-less replay to
+materialise. The arm asserts the contract instead of pinning its breach: the
+refusal is expected at BUFFER time (`pure-store:precondition`), a second
+rejection from `Commit` is itself a violation (`pure-store:refused-twice`,
+because the op should never have been buffered), and resurrection after the crash
+is now an `ACID_CONSISTENCY` violation (`pure-store:resurrection`) where it used
+to be the pinned behaviour.
+
+This is the pin doing its job. It was a PIN on a measurement rather than prose,
+and its message named exactly what to update when the ordering changed — the pin,
+the file header, and this document. All three were, which is the argument for
+pinning a measurement: prose would have gone quietly stale instead.
 
 **The reopened graph carries no validator — asserted, not documented away.**
 `SimStore.Graph()` returns a graph rebuilt by recovery, and the schema is not
@@ -2676,9 +2723,13 @@ no checkpoint can capture it either.
 graph reopened by recovery carries no validator until an embedder re-installs
 one, and the durable replay path deliberately does not consult one.* The
 consequence is asymmetric enforcement across a restart: writes made through a
-live validated graph are checked, writes replayed by recovery are not, and on the
-`store/txn` path a value the live validator refused can be materialised by the
-replay (item 12). Persisting the schema alongside the snapshot components, and
+live validated graph are checked, and writes replayed by recovery are not.
+
+Since rmp #2602 that asymmetry no longer lets a REFUSED value through, because
+both write paths now validate before the write-ahead log, so the log cannot
+contain one (item 12). What remains open is narrower and stated as such: a log
+written by an older build, before that fix, is outside the guarantee, and replay
+still enforces nothing of its own. Persisting the schema alongside the snapshot components, and
 validating on replay, would close it — and would be a change to the durable
 format and to the recovery contract, so it is recorded here for adjudication
 rather than decided by a test. What this task does is make the limitation
@@ -3061,16 +3112,17 @@ both server kinds to prove the distinction is real rather than decorative.
 
 `server.CertReloader` had unit tests for its happy path, a parse failure and
 missing files; what it had never been driven through is the sequence an operator
-actually produces. The scenario runs seven steps — initial load, clean rotation,
-torn key, garbled key, absent key, mismatched pair, completed rotation — and
-three things about it are worth recording.
+actually produces. The scenario runs ten steps — initial load, clean rotation,
+torn key, garbled key, absent key, mismatched pair, completed rotation,
+preserved-mtime rotation, expired leaf, not-yet-valid leaf — plus the
+background-poller arm, and five things about it are worth recording.
 
 **The oracle is a real TLS handshake, because the dangerous failure mode parses
 cleanly.** A cert rotated without its key leaves two files that both decode
 perfectly and no longer belong together. `crypto/tls` is the independent
 reference that can see it: the verifier completes a genuine TLS 1.3 handshake
-over a `net.Pipe` against whatever `GetCertificate` currently serves, with the
-client trusting exactly that certificate and verifying the SAN. A successful
+over a loopback TCP pair against whatever `GetCertificate` currently serves, with
+the client trusting exactly that certificate and verifying the SAN. A successful
 handshake proves the certificate parses, the name matches, and the private key
 corresponds to the certificate's public key. It deliberately does NOT trust a
 pre-agreed root, so it cannot by itself detect that the WRONG pair went live —
@@ -3094,6 +3146,46 @@ only operator-visible signal that an unattended rotation failed and a stale
 certificate is still in service. It is the same defect class as the
 `Options.Logger` bypass this sprint fixed, and it is now evidence: measured 2
 deliveries per broken-pair arm.
+
+**A pair can parse, pair, and still be unable to serve — rmp #2557.** Every arm
+above breaks the *material*: bytes missing, bytes corrupted, or the wrong key
+beside the certificate. The commonest real rotation incident breaks none of them.
+A renewal that produced an already-expired leaf, or a clock skew on the renewing
+host that produced a not-yet-valid one, yields two files that decode perfectly and
+belong to each other — and `tls.LoadX509KeyPair`, which inspects neither
+`NotBefore` nor `NotAfter`, accepted them. `Reload` then swapped the doomed leaf
+into service and the previous, working certificate was gone: a recoverable
+condition (stale but functioning) converted into a total outage of the Bolt
+listener, against a godoc that promised the previous certificate stays in service
+"until the new pair is fully validated". Two arms now install exactly that
+material and require the swap to be REFUSED.
+
+The refusal is adjudicated by **cause**, not by failure. Each step records
+`errors.Is(err, server.ErrCertOutsideValidity)` where the error is returned — not
+a substring of a message — and the oracle fails in both directions: a validity arm
+refused for any other reason, and a parse fault reported as a validity refusal.
+Without that, "the reload failed" would have been satisfied by a torn key, and the
+arms would have proved nothing about the window. A non-vacuity clause requires at
+least one validity refusal to have been observed anywhere in the run, and a
+distinctness clause requires both arms to have installed INTACT key material —
+otherwise they would silently duplicate the torn and absent arms. `CertReloader`
+also grew a module-internal `SetClock` seam, pinned here to the same instant
+`tls.Config.Time` uses: a leaf's window is now read by the ENGINE as well as by
+`crypto/tls`, so leaving the engine on the real clock would have made the fixed
+fixture bounds a time bomb on both sides rather than one.
+
+**The handshake oracle could not report the failure it exists to report.** Finding
+the #2557 arms meant running them against the unfixed engine, and that run did not
+fail — it HUNG, to the 40s test timeout, with both TLS peers parked in
+`crypto/tls.(*Conn).flush`. `net.Pipe` is synchronous and unbuffered, so a failing
+handshake deadlocks it: the server is still flushing its flight while the client,
+having already rejected the certificate, flushes its alert, and neither side is
+reading. Every earlier arm hid this, because in every earlier arm the reload was
+refused and the handshake therefore SUCCEEDED; the one condition the oracle exists
+to detect was the one condition that hung the run. The verifier now uses a
+loopback TCP pair, whose kernel buffer absorbs the flight, plus a deliberately
+generous 60s deadline as a deadlock breaker rather than a latency gate. The same
+broken-engine state is now reported in 0.03s as nine attributed violations.
 
 One latent defect in the scenario itself was found the same way and fixed. The
 fixtures carry fixed validity bounds so their bytes are seed-reproducible, but the
@@ -3132,12 +3224,44 @@ least one reload to have succeeded, at least one to have failed, and the
 certificate in service to have genuinely changed, since a reloader that ignored
 every rotation would pass every retention clause.
 
-One projection detail is load-bearing and easy to lose: the mtimes are stamped
-**explicitly**, one second apart. `CertReloader.Reload` short-circuits when
-neither file's mtime has advanced past the last successful load, so on a
-filesystem whose timestamp granularity is coarser than the time two consecutive
-projections take, an honest rotation would be silently skipped and the scenario
-would be measuring the clock instead of the reloader.
+**A rotation that does not advance the mtime must still take effect — rmp
+#2558.** `Reload` short-circuited on "neither file's mtime is After the last
+successful load", which is a cheap heuristic for "nothing changed" and an unsound
+one: mtime is not a content hash. Every rotation that replaces content without
+advancing the timestamp — a rename from another directory, `cp -p`, a restore
+from an archive, two rotations inside one filesystem timestamp tick — returned
+nil having loaded NOTHING, and because the call reported success `onError` never
+fired. A rotation performed to REVOKE a certificate could therefore be ignored in
+silence while the operator believed the material had been replaced, which is the
+worst shape this component can fail in. The skip is now keyed on a SHA-256 digest
+of each file's bytes, recorded only on a load that succeeded, so a skip is
+provably a no-op and a refused pair is always re-examined.
+
+The skip was measured rather than assumed, and the measurement contradicted the
+intuition that motivated it: 20.6 µs and 2.0 kB per call against 37.8 µs and
+9.4 kB for the full load (best of 5, darwin/arm64,
+`BenchmarkCertReloader_ReloadUnchanged` against
+`BenchmarkCertReloader_ParseCostAvoidedBySkip`). The two file reads dominate BOTH
+paths, so the skip is a 1.8x saving on a call that happens once per poll interval
+— it is kept because it does not recompute and re-publish a certificate that has
+not changed, not because it is fast.
+
+The DST arm carries two structural guards, because its fault is a timestamp and
+nothing else. The mtimes it leaves on disk are recorded in the evidence and may
+not exceed the previous step's, or the rotation advanced the clock after all. And
+it must FOLLOW a step whose reload SUCCEEDED: the fault is a timestamp
+indistinguishable from "nothing has changed since the last successful load", so
+placed after a refused step the same rotation would carry a newer timestamp than
+the reloader's bookkeeping and even the defective code would have loaded it — the
+arm would pass everywhere and prove nothing. Measured against the pre-fix code it
+reports exactly the bug's shape: `preserved-mtime-rotation reload-ok
+serving=rotation-C`, where `rotation-preserved` was expected.
+
+One projection detail remains load-bearing and easy to lose: the mtimes are
+stamped **explicitly**, one second apart, so the timestamp is a deterministic
+property of the run rather than a property of the filesystem's granularity. Until
+#2558 that mattered because an honest rotation could otherwise be skipped; it now
+matters because it is what makes the preserved-mtime arm expressible at all.
 
 ### The transaction registry, the idle reaper and the per-principal cap (rmp #2482)
 
@@ -3459,7 +3583,8 @@ by two readings of `wal.Writer.Stats`:
   is observed MOVING, without which "the doomed transaction appended no frame" would
   be a statement about a dead instrument.
 - **Over the cap.** The same cycles, then one more RUN, which must draw
-  `Neo.ClientError.General.LimitExceeded` naming `cap=3, open=3`. The `open=` figure
+  `Neo.TransientError.Transaction.MaximumTransactionLimitReached` naming `cap=3, open=3`.
+  The `open=` figure
   is parsed back out of the message and cross-checked against the harness's own
   cycle count, so two independent accountings of the same quantity must agree. The
   decisive RUN runs under an armed read deadline, so a stall becomes a harness error
@@ -3662,11 +3787,18 @@ than drawn because an arm and its control are comparable only as the same script
   reaper.
   The checker requires its code AND its message to be byte-identical to the subject's,
   which is how the shared-failure finding is ASSERTED rather than restated. Reading
-  `bolt/server` widens rmp #2560 from two paths to three — the idle reaper, the
-  total-lifetime reaper and `Server.TerminateTransaction` all funnel through
-  `Session.reapTimedOutTx` (`bolt/server/session.go:1831`), which arms a single
-  `pendingTermErr` carrying one code and one message (`:1839-1842`). A client cannot
-  tell the three apart.
+  `bolt/server` widened rmp #2560 from two paths to three — the idle reaper, the
+  total-lifetime reaper and `Server.TerminateTransaction` all funnelled through one
+  teardown that armed a single `pendingTermErr`, so a client could tell none of the
+  three apart.
+  **rmp #2560 split that PARTLY, and the surviving half is what these arms now pin.**
+  The operator path was given its own reason (`Session.terminateTxByOperator`, pinned
+  separately as `txTerminateFailureCode`/`txTerminateFailureMessage` and adjudicated by
+  the terminate arm); the two DEADLINE bounds still share one, deliberately, because a
+  client's correct response to either is identical whereas an operator's is not. The
+  idle-bound control therefore still asserts a byte-identical answer — but it now
+  asserts a two-way collision that is intended, rather than recording a three-way one
+  that was not.
 - `overflow-tx-timeout` is the hostile arm, and its mechanism is worth stating exactly
   because the obvious reading of it is wrong. It sends `tx_timeout = 1<<62`
   milliseconds, and that value never reaches a multiplication: `clientMillisToDuration`
@@ -3689,9 +3821,10 @@ is adjudicated by one shared checker, so the three cannot drift apart, and the c
 is skipped entirely for an arm that was not reaped — an arm with nothing to report
 must not be able to satisfy a clause about a report. It pins the exact code
 `Neo.ClientError.Transaction.TransactionTimedOut` and the exact message "the
-transaction has been terminated because it exceeded its timeout; the writer lock was
-released" against the named constants of rmp #2482
-(`internal/sim/bolt_tx_registry.go:517-518`); it requires the SECOND request-phase
+transaction has been terminated because it exceeded its timeout" against the named
+constants `txReapFailureCode`/`txReapFailureMessage` (`internal/sim/bolt_tx_registry.go`)
+— the message shed its trailing "; the writer lock was released" in rmp #2560, since
+rmp #2305/#2306 had retired the hold that clause named; it requires the SECOND request-phase
 message after the abort to draw `*proto.Ignored`, because `pendingTermErr` is
 delivered on the first such message and cleared there
 (`bolt/server/session.go:594-597`), after which the switch falls through to
@@ -3700,22 +3833,43 @@ advance to the abort reaching the client, so a stall reads as a failure rather t
 a pass; and it requires the injected clock to have registered at least one timer,
 because a reap is attributable to the reaper only if the reaper was armed.
 
-**The `mode` coercion FAILS OPEN, and that is measured on two independent
-observables.** `handleBegin` selects read-only for the exact string `"r"` and for
-nothing else (`bolt/server/session.go:1560-1566`): a non-string value, a misspelling,
-the uppercase `"R"`, an absent key — every one of them silently yields a WRITE
-transaction, and the client is told nothing. Five arms drive `"r"`, `"w"`, `"R"`,
-`"bogus"` and no key at all, in a seed-drawn order, and each is adjudicated on two
-observables: the server's own `server.TransactionInfo.Mode`, read off
-`Server.Transactions()` while the transaction is open, and whether a `CREATE` inside
-that transaction is accepted. One observable alone could not tell a mis-recorded mode
-from a mis-enforced one. The read-only arm's refusal is pinned to the exact code
-`Neo.ClientError.Request.Invalid`, while its message is required only to CONTAIN
-"read-only transaction": that text comes from `cypher`, not from `bolt/server`, so
-pinning it verbatim would couple the scenario to a message the engine owns. `"R"` is
-in the roster because it is the plausible misspelling, and the clause that matters is
-that its write is ACCEPTED. No earlier scenario had ever attempted a write inside a
-Bolt read-only transaction, so the refusal itself is new coverage too.
+**The `mode` coercion FAILED OPEN. This scenario measured it, and rmp #2564 fixed
+it.** `handleBegin` selected read-only for the exact string `"r"` and for nothing
+else: a non-string value, a misspelling, the uppercase `"R"` — every one of them
+silently yielded a WRITE transaction, so a client that asked for read-only received
+write authority and was told nothing. That is a fail-open coercion on a field this
+server treats as a capability restriction, which the project's
+fail-stop-never-fail-silent rule forbids.
+
+**The contract since rmp #2564:** the two canonical spellings and the ABSENT key
+behave as before, and any other value is REFUSED at the BEGIN with
+`Neo.ClientError.Request.Invalid`, in a message that NAMES the offending value. The
+decision was taken on evidence rather than preference — the Bolt specification is
+silent on invalid `mode` values and frames the field as a routing hint ("what kind of
+server the RUN message is targeting") rather than as authorisation, so the contract is
+GoGraph's to choose, and it chose the fail-stop direction its own rules require.
+Compatibility risk is low by construction: the official drivers send exactly `"r"` or
+`"w"`, so a refusal can only reach a client that was previously being granted write
+authority it did not ask for.
+
+Five arms drive `"r"`, `"w"`, `"R"`, `"bogus"` and no key at all, in a seed-drawn
+order. Each accepted arm is adjudicated on two observables — the server's own
+`server.TransactionInfo.Mode`, read off `Server.Transactions()` while the transaction
+is open, and whether a `CREATE` inside it is accepted — because one alone could not
+tell a mis-recorded mode from a mis-enforced one. For a REFUSED arm the second
+observable is that no transaction reached the registry at all. The read-only arm's
+refusal is pinned to the exact code `Neo.ClientError.Request.Invalid`, while its
+message is required only to CONTAIN "read-only transaction": that text comes from
+`cypher`, not from `bolt/server`, so pinning it verbatim would couple the scenario to
+a message the engine owns. No earlier scenario had ever attempted a write inside a
+Bolt read-only transaction, so that refusal is new coverage too.
+
+The clause that pinned the fail-open said, in its own failure message, that a refusal
+would mean the coercion had been hardened and that it and this document must be
+rewritten. Both were. The clause is INVERTED rather than deleted: accepting an
+unrecognised mode is now an `ACID_CONSISTENCY` violation, and a non-vacuity clause
+requires at least one arm to have been refused, so the new contract cannot go
+unexercised.
 
 **`db` is echoed unvalidated, agrees across both replies, and is never empty.**
 `selectDatabaseFrom` (`bolt/server/session.go:322-324`) records the extra verbatim,
@@ -3791,8 +3945,9 @@ so a positive count is guaranteed by construction); fewer than one real and two
 fabricated tokens, without which "the token changed nothing" compares nothing; fewer
 than two arms that completed a read, which would compare a value with itself; fewer
 than two issued bookmarks, because one event is not a sequence a strict-advance clause
-can falsify; an EMPTY reference bookmark, which would collapse the stale-autocommit
-equality into "both are empty"; a timeout family with no reaped arm or no surviving
+can falsify; an EMPTY reference bookmark, which would collapse the
+not-stale autocommit comparison into "both are empty"; a timeout family with no reaped
+arm or no surviving
 one; any timeout arm whose injected clock registered no timer, which is what separates
 "the reaper declined" from "there was no reaper"; a `client-tx-timeout` whose server
 bounds are not strictly beyond its advance; a mode family missing either the read-only
@@ -3805,22 +3960,30 @@ no keys, which would make "no reply echoed one" vacuously true.
 Measured at the catalogue seed 612741132: 3 nodes under `:BeginCausal` committed across
 2 transactions; all five causal arms accepted and each observing 3 of 3, with
 `ExtractBookmarks` keeping one token on three of them and zero on the other two; the
-autocommit bookmark EMPTY on a fresh session and equal to the prior COMMIT's on a
-session that had committed one, on a reply reporting `contains-updates`; the four
+autocommit bookmark `FB:k00000003` on a fresh session and `FB:k00000005` on a session
+that had already committed `FB:k00000004` — a freshly minted token in both cases, on a
+reply reporting `contains-updates`. **Re-measured after rmp #2563**, which fixed this:
+the same seed previously read EMPTY on the fresh session and equal to the prior
+COMMIT's token on the other; the four
 timeout arms reaped after advance ordinals 0, never, 0 and 1 respectively, each with
 exactly one timer armed on its injected clock, and all three reaped arms answering the
 byte-identical code and message with IGNORED on the message after it; the registry
-reporting mode `"w"` for `"w"`, `"R"`, `"bogus"` and the absent key with the write
-ACCEPTED in every one, and `"r"` for `"r"` with the write refused
-`Neo.ClientError.Request.Invalid` / "cypher: write or DDL statement not allowed in a
-read-only transaction"; `db` reported as `neo4j` for the arm that sent no key and as
+reporting mode `"w"` for `"w"` and for the absent key with the write ACCEPTED in both,
+`"r"` for `"r"` with the write refused `Neo.ClientError.Request.Invalid` / "cypher:
+write or DDL statement not allowed in a read-only transaction", and `"R"` and `"bogus"`
+REFUSED at the BEGIN with `Neo.ClientError.Request.Invalid`, opening no transaction at
+all. **Re-measured after rmp #2564**, which fixed this: the same seed previously read
+mode `"w"` with the write ACCEPTED for `"R"` and `"bogus"` too; `db` reported as `neo4j` for the arm that sent no key and as
 `not-this-server`, `neo4j` and `system` verbatim for the three that named one, with
 the COMMIT SUCCESS carrying exactly `[bookmark]` in all four; the
 routing table advertising `[WRITE READ ROUTE]` over three entries at the listener's own
 address with `ttl=300` and `db=""`, the populated and zero ROUTE answered identically;
 and the `tx_metadata` BEGIN SUCCESS carrying no metadata keys at all, its terminal PULL
-carrying `[bookmark db has_more]` and its COMMIT `[bookmark]`, none of them a key the
-client sent. A serial sweep of seeds 1 to 100 was clean on all 100.
+carrying `[db has_more]` and its COMMIT `[bookmark]`, none of them a key the client
+sent. **Re-measured after rmp #2563**: that terminal PULL is INSIDE an explicit
+transaction, where the specification puts the bookmark on the COMMIT SUCCESS and not on
+the stream's terminal SUCCESS, so the field is now absent there; the same seed
+previously read `[bookmark db has_more]`, carrying the stale token. A serial sweep of seeds 1 to 100 was clean on all 100.
 
 ### The protocol version matrix: 4.4, 5.0 and 5.x side by side (rmp #2486)
 
@@ -3986,8 +4149,8 @@ CWE-770 the pool exists to close. The **wire nesting cap** (`packstream maxValue
 crafted message can request millions of stack frames and kill the process, and it is
 reachable during the FIRST HELLO decode. And a third that this task found by measurement
 rather than by reading: the engine's **own parameter nesting cap** (`cypher
-maxParamBindDepth = 32`, declared at `cypher/api.go:4303` and enforced at `:4256`), a
-second, lower, independent cap on the same axis.
+maxParamBindDepth = 32`, in `cypher/api.go`), a second, lower, independent cap on the
+same axis, which nothing had documented as Bolt-visible.
 
 **The load-bearing oracle is a closed-form model of the pool, not the server's word.** The
 harness re-derives what a RUN's decode holds from the shared pool out of packstream's
@@ -4036,13 +4199,37 @@ against it:
 |---|---|---|
 | aggregate pool breach | `Neo.TransientError.General.OutOfMemoryError` | READY (usable with NO RESET) |
 | wire nesting cap (>= 128) | `Neo.ClientError.Request.Invalid` / `malformed Bolt message` | READY (usable with NO RESET) |
-| engine parameter cap (> 32) | `Neo.DatabaseError.General.UnknownError` | FAILED (next message IGNORED) |
+| engine parameter cap (> 32) | `Neo.ClientError.Statement.ArgumentError` / `cypher: ArgumentError.ParameterNestedTooDeep: parameter "d" is nested deeper than the supported limit of 32 levels` | FAILED (next message IGNORED) |
+
+The third row read `Neo.DatabaseError.General.UnknownError`, sanitised to "An internal
+error occurred", when this scenario first measured it — and **reporting that is what got it
+fixed**: rmp #2570 reclassified it as the client fault it always was, since the payload is
+entirely client-supplied. It is the **`Statement`** family rather than the `Request` family
+because the message decoded correctly and the statement was dispatched: what is invalid is
+the statement's ARGUMENT, not the form of the request, and `Request.Invalid` is what the
+row above answers for a frame that will not decode at all. The classification is reached
+through the module's own TCK-pinned convention — an engine error whose message carries
+`cypher: ArgumentError.` — so no `bolt/server` change was needed. The arms of this family
+were what pinned the old answer, so the correction failed them on purpose and they were
+updated with the ticket rather than deleted.
 
 The first two are answered ABOVE the session state machine — the serve loop rejects them
-between the read and `sess.HandleMessage` (`serve.go:1258` and `:1289`) — which is why the
-session survives them intact; the third travels through it into `cypher.BindParams`, so it
-fails the session. That state-after difference is a **third discriminator, independent of
-the codes**, and it is asserted separately. The classification segment is asserted on its
+between the read and `sess.HandleMessage` — which is why the session survives them intact;
+the third travels through it into `cypher.BindParams`, so it fails the session. That
+state-after difference is a **third discriminator, independent of the codes**, and it is
+asserted separately. The three answers do NOT disagree about the session, which is worth
+saying because it reads like an inconsistency: staying READY is reserved for
+back-pressure, where retrying the same request can succeed (`bolt/server/state.go`), and a
+depth refusal is deterministic — retrying the identical RUN fails identically forever.
+
+One consequence of the fix landed inside this scenario's own instruments. The parameter cap
+was the ONLY arm here whose failure went through the sanitiser, so
+`boltDecodeRedactSession` — which strips the per-session id that would otherwise make the
+rendering vary run to run — became a no-op on every arm. The determinism test's clause
+requiring that the redaction had really fired was therefore **unsatisfiable, and was
+retired rather than left to fail**; the redaction itself is kept as insurance for a future
+arm that does draw a sanitised message, and every message this family records is now a pure
+function of the seed by construction. The classification segment is asserted on its
 own too, read out of the OBSERVED code rather than compared to the literal this file
 declares: neo4j-go-driver's `IsRetriableTransient` tests `classification ==
 "TransientError"` (`bolt/server/errors.go:129-131`), so "typed RETRYABLE backpressure" is a
@@ -4357,8 +4544,8 @@ The coverage work exercised the engine against these scenarios and found:
    to fail without the fix.
 9. **An OPERATOR termination tells the client its transaction timed out and that
    a writer lock was released** (fail-misleading; no data loss).
-   `Server.TerminateTransaction` routes through `Session.reapTimedOutTx`, which
-   is shared with the idle/total reaper, so the client is answered
+   `Server.TerminateTransaction` routed through `Session.reapTimedOutTx`, which
+   was shared with the idle/total reaper, so the client was answered
    `Neo.ClientError.Transaction.TransactionTimedOut` with "the transaction has
    been terminated because it exceeded its timeout; the writer lock was
    released". BOTH halves are false for a termination on demand: it exceeded no
@@ -4366,11 +4553,37 @@ The coverage work exercised the engine against these scenarios and found:
    rmp #2305/#2306 retired it (`Engine.beginTxSession` acquires no writer
    serialisation, `cypher/exectx.go`). A driver cannot distinguish an operator
    ending a transaction from a transaction that ran too long, which is exactly
-   the distinction an operator needs the client's logs to preserve. Filed as
-   **rmp #2560**; both strings are PINNED against named constants in
-   `internal/sim/bolt_tx_registry.go`, and both the abandoned-registry and the
-   operator-terminate arms adjudicate against them, so the eventual correction
-   fails those arms deliberately instead of slipping through.
+   the distinction an operator needs the client's logs to preserve. Both strings
+   were PINNED against named constants so the eventual correction would fail those
+   arms deliberately instead of slipping through.
+   **Fixed (rmp #2560), and the pin did its job — it fired, and was updated rather
+   than deleted.** The teardown now takes the reason from its caller: the operator
+   path arms `Neo.ClientError.Transaction.Terminated` / "the transaction has been
+   terminated by an operator request", and the two deadline bounds keep the timeout
+   code with the stale writer-lock clause dropped. The DST constants split into a
+   deadline pair and a terminate pair, and the operator-terminate arm adjudicates
+   against the latter with a named case for the specific regression of borrowing the
+   deadline reason back.
+   The code is `ClientError`, not `TransientError`, on primary evidence:
+   `neo4j-go-driver` v5.28.4's `reclassify()` (`neo4j/db/errors.go:132-139`) rewrites
+   `Neo.TransientError.Transaction.Terminated` to exactly this code, and its stated
+   job is mapping "errors coming from pre-5.x servers into their 5.x
+   classifications" — so this IS the modern classification and the Transient
+   spelling is the legacy one. Because `reclassify()` runs BEFORE the classification
+   is parsed, emitting the Transient form would not make a driver retry either; it
+   would only claim a retriability the driver does not honour.
+   **The same teardown also carried a metric defect the filed report called
+   correct.** `incCounter(metricTxTimedOut)` was unconditional, so an idle reap and
+   an operator termination were each counted as a total-lifetime timeout too, making
+   that counter a superset of all three events. `metricTxIdleReaped`'s own godoc
+   promises the opposite — that an abandoned `BEGIN` "shows up here, whereas a
+   legitimately long transaction shows up there (rmp #2175)" — so the separation the
+   idle counter exists to draw was nominal. Measured on the unfixed build:
+   `tx.terminated=1` **and** `tx.timedout=1` for one operator termination;
+   `tx.idlereaped=1` **and** `tx.timedout=1` for one idle reap. The counter now
+   belongs to the total-bound branch of the serve loop alone, beside its log line.
+   `bolt/server/terminate_reason_test.go` is the regression guard and was verified to
+   fail on the unfixed build in all four shapes.
 10. **A quota-refused `BEGIN` leaves the session READY** (behavioural
     inconsistency; no data loss). `handleBegin`'s per-principal-cap branch
     returns before `Transition` and never calls `enterFailed`

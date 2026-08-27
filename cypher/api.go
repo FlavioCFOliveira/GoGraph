@@ -4284,6 +4284,20 @@ func (e *Engine) RunInTxAny(ctx context.Context, query string, params map[string
 // about internal server state.
 var ErrUnsupportedParamType = errors.New("cypher: unsupported parameter type")
 
+// ErrParamNestedTooDeep is the sentinel wrapped by [BindParams] when a parameter
+// nests lists or maps deeper than [maxParamBindDepth]. Like
+// [ErrUnsupportedParamType] it is a CLIENT fault — the request carried a value the
+// engine will not bind — and a front-end classifies it via [errors.Is]. The Bolt
+// server maps it to Neo.ClientError.Statement.ArgumentError: the payload decoded
+// correctly and the statement was dispatched, so what is wrong is the statement's
+// ARGUMENT, not the form of the request (rmp #2570).
+//
+// It is deliberately NOT the packstream wire nesting cap, which is a separate and
+// much higher bound enforced during decode, before a message reaches a session at
+// all. The two are different limits at different layers and answer differently by
+// design.
+var ErrParamNestedTooDeep = errors.New("nested deeper than the supported limit")
+
 // BindParams converts a map[string]any to map[string]expr.Value using the
 // following type mapping:
 //
@@ -4307,6 +4321,24 @@ func BindParams(params map[string]any) (map[string]expr.Value, error) {
 	for k, v := range params {
 		converted, err := bindAny(v)
 		if err != nil {
+			// A DEPTH refusal is reported without the accumulated path. Every other
+			// bind error names the position that offended — which element of which
+			// list carried the wrong type — and that position is what makes it
+			// actionable. For a depth refusal the path IS the depth, so carrying it
+			// restates the same limit once per level: measured 405 bytes for a
+			// 33-deep map chain, of which 396 were `map["k"]:` framing, all of it
+			// forwarded to the client because a ClientError code bypasses the
+			// sanitiser (rmp #2570). The key and the limit are the whole actionable
+			// content.
+			//
+			// The "cypher: ArgumentError." prefix is what the Bolt layer classifies
+			// on — the module's TCK-pinned convention for an engine error that
+			// carries its own category (bolt/server/errors.go) — so this message
+			// shape is load-bearing, not decoration.
+			if errors.Is(err, ErrParamNestedTooDeep) {
+				return nil, fmt.Errorf("cypher: ArgumentError.ParameterNestedTooDeep: parameter %q is %w of %d levels",
+					k, ErrParamNestedTooDeep, maxParamBindDepth)
+			}
 			return nil, fmt.Errorf("cypher: BindParams: key %q: %w", k, err)
 		}
 		out[k] = converted
@@ -4325,7 +4357,7 @@ func bindAny(v any) (expr.Value, error) { return bindAnyDepth(v, 0) }
 // class open through the other.
 func bindAnyDepth(v any, depth int) (expr.Value, error) {
 	if depth > maxParamBindDepth {
-		return nil, fmt.Errorf("cypher: parameter nested deeper than %d levels", maxParamBindDepth)
+		return nil, ErrParamNestedTooDeep
 	}
 	if v == nil {
 		return expr.Null, nil
@@ -4395,7 +4427,7 @@ const maxParamBindDepth = 32
 // GoGraph a real bytes value is a type-system change and is tracked separately.
 func bindReflect(v any, depth int) (expr.Value, error) {
 	if depth > maxParamBindDepth {
-		return nil, fmt.Errorf("cypher: parameter nested deeper than %d levels", maxParamBindDepth)
+		return nil, ErrParamNestedTooDeep
 	}
 	rv := reflect.ValueOf(v)
 	switch rv.Kind() {
@@ -4442,7 +4474,7 @@ func bindReflect(v any, depth int) (expr.Value, error) {
 // genuinely unknown containers pay for reflection.
 func bindReflectElem(rv reflect.Value, depth int) (expr.Value, error) {
 	if depth > maxParamBindDepth {
-		return nil, fmt.Errorf("cypher: parameter nested deeper than %d levels", maxParamBindDepth)
+		return nil, ErrParamNestedTooDeep
 	}
 	if !rv.IsValid() {
 		return expr.Null, nil
@@ -9357,6 +9389,19 @@ func buildOperatorRec(
 		if err != nil {
 			return nil, err
 		}
+		// General count(*) row count (#2625). Tried LAST, after every pushdown
+		// above has declined, because those answer in O(1) from a maintained
+		// counter while this still visits every row — it only stops BUILDING rows
+		// nobody reads. For a group-by-less, non-DISTINCT count(*) the
+		// pre-projection's sole item is the constant sentinel expr.BoolValue(true)
+		// (see aggArgItem), so the serial pipeline materialises one fresh
+		// single-column row per input row purely so CountAgg can null-check a
+		// value that is never null. Worth about 40% on a bare typed expansion and
+		// very little once a per-row endpoint-label Filter dominates — see
+		// [exec.CountRows] for both measurements.
+		if op, ok := tryBuildCountRows(p, child, schema, bopts); ok {
+			return op, nil
+		}
 		var aggG *lpg.ReadView[string, float64]
 		if lw, ok := walker.(*lpgNodeWalker); ok {
 			aggG = lw.g
@@ -9890,6 +9935,38 @@ func tryBuildParallelScanProject(
 		// on that label's own cardinality (#2187), so a small label inside a large graph
 		// stays serial.
 		if leafLabel != "" {
+			// The min-cardinality re-anchor (#2077) decides the row source FIRST, when
+			// it would fire (#2431).
+			//
+			// This is the argument [tryBuildColumnarFilterChain] already makes for
+			// itself, applied to the operator sitting directly behind it: the re-anchor
+			// replaces the scanned label with the smallest one in the conjunction, which
+			// reduces the number of rows SCANNED, whereas parallel execution only
+			// divides the cost of each scanned row by the worker count. A constant
+			// factor must never pre-empt a cardinality reduction.
+			//
+			// Without this the yield in the columnar chain was INERT: it declines
+			// exactly the `(n:A:B)` shapes the re-anchor exists for, and this
+			// recogniser — tried immediately after it — then claimed every one of them
+			// and anchored on Labels[0] anyway. MEASURED on 100 000 :Common of which
+			// 1 000 are also :Rare, `MATCH (n:Common:Rare) RETURN n.k`: 4.611 ms here
+			// against 0.186 ms for the serial re-anchored plan, and worse than the
+			// 4.280 ms legacy full-:Common scan the re-anchor was written to replace.
+			// The gate flipped at exactly |Common| > 50 000 with |Rare| held at 1 000,
+			// which is what proved it was judging the FIRST label rather than the
+			// anchor (rmp #2431).
+			//
+			// Adopting the anchor rather than merely declining keeps the shapes the
+			// parallel scan legitimately wins: when the smallest label is itself above
+			// the threshold this still parallelises, and over FEWER rows than before.
+			// The Selection is retained — unlike the intersection branch above, whose
+			// bitmap subsumes it — because the min-label walker guarantees only the
+			// chosen label and the residual ones must still be re-checked per row.
+			if bopts.minLabelScanEnabled && sel != nil {
+				if _, chosen, _, wouldReanchor := pickMinLabel(sel, labelSrc); wouldReanchor {
+					leafLabel = chosen
+				}
+			}
 			// Screen on the CHEAP count before materialising anything.
 			//
 			// A gate must cost less than the decision it informs — the same rule
@@ -10335,6 +10412,62 @@ func tryBuildParallelCountScan(
 	parallelCountScanBuildCount.Add(1)
 	return exec.NewParallelCountScan(walker, 0, gov), true
 }
+
+// tryBuildCountRows returns a [exec.CountRows] over child and true when p is a
+// group-by-less, non-DISTINCT count(*) — the one shape whose aggregate argument
+// is a constant, making the pre-projection pure overhead — and false otherwise
+// (the caller then builds the serial pipeline).
+//
+// The recognised shape is deliberately narrow:
+//
+//   - no grouping keys (a global aggregate);
+//   - exactly one aggregate, function count, non-DISTINCT;
+//   - an EMPTY argument, i.e. count(*) and not count(v).
+//
+// count(v) is excluded on purpose: it counts non-null BINDINGS, so its argument
+// must still be evaluated per row, whereas count(*) counts rows and cannot
+// depend on what they contain. Unlike the leaf pushdowns this places no
+// condition on the child, which is the point — it serves count(*) over an
+// Expand, a Filter, a join, or anything else.
+//
+// When it fires it mutates schema to the aggregation's single-column output
+// layout through [installAggOutputSchema] — the same installer the serial
+// EagerAggregation build uses, carrying the alias-shadow guard that a child
+// holding Selection closures requires. A declined shape leaves schema untouched.
+func tryBuildCountRows(
+	p *ir.EagerAggregation,
+	child exec.Operator,
+	schema map[string]int,
+	bopts *buildOpts,
+) (exec.Operator, bool) {
+	if len(p.GroupBy) != 0 || len(p.Aggregates) != 1 {
+		return nil, false
+	}
+	agg := p.Aggregates[0]
+	if agg.Function != "count" || agg.Distinct || agg.Argument != "" {
+		return nil, false
+	}
+	// Install the post-aggregation layout through the GUARDED installer, not
+	// through installCountAggSchema. The leaf pushdowns can use the unguarded one
+	// because nothing is built below them; CountRows sits over an ARBITRARY child,
+	// whose Selection operators hold closures over bopts.scalarCols. Tagging the
+	// output column scalar when its alias shadows a pre-aggregation variable — as
+	// `count(*) AS n` does over a pattern that binds n — makes those Selections
+	// read the bound node's column as a scalar and silently drop every row, which
+	// is the alias-shadow failure installAggOutputSchema documents and guards.
+	// MEASURED: `MATCH (n {name:'A'})-[:LIKES]->(m {name:'B'}) RETURN count(*) AS n`
+	// returned 0 instead of 1 with the unguarded installer, while the same query
+	// aliased AS c returned 1.
+	installAggOutputSchema(p, copySchema(schema), schema, bopts)
+	countRowsBuildCount.Add(1)
+	return exec.NewCountRows(child), true
+}
+
+// countRowsBuildCount counts how many times the planner emitted [exec.CountRows]
+// in place of the pre-projection + serial EagerAggregation pipeline (#2625). Like
+// [parallelCountScanBuildCount] it is a process-global, monotonic diagnostic seam
+// read only by the in-package tests to assert the path fired, or did not.
+var countRowsBuildCount atomic.Uint64
 
 // installCountAggSchema mutates schema to the single-column post-aggregation
 // layout that buildEagerAggregation installs for a group-by-less count (#1672,
@@ -18699,7 +18832,9 @@ func (a *walMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 	}
 	a.countPropertySet()
 	r.recordSetNodeProperty(n, key, prev, had)
-	_ = a.tx.SetNodeProperty(n, key, value) //nolint:errcheck // ErrTxFinished impossible here
+	// PreValidated: a.w().SetNodeProperty above already ran the schema validator
+	// on this value, and a stateful validator must not see it twice (rmp #2602).
+	_ = a.tx.SetNodePropertyPreValidated(n, key, value) //nolint:errcheck // ErrTxFinished impossible here
 	if a.buf != nil {
 		ch := index.Change{
 			Op:       index.OpSetNodeProperty,
@@ -18822,7 +18957,8 @@ func (a *walMutatorAdapter) SetEdgeProperty(src, dst, key string, value lpg.Prop
 	}
 	a.countPropertySet()
 	r.recordSetEdgeProperty(src, dst, key, prev, had)
-	_ = a.tx.SetEdgeProperty(src, dst, key, value) //nolint:errcheck // ErrTxFinished impossible here
+	// PreValidated: see the SetNodeProperty twin (rmp #2602).
+	_ = a.tx.SetEdgePropertyPreValidated(src, dst, key, value) //nolint:errcheck // ErrTxFinished impossible here
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
 			Op:       index.OpSetEdgeProperty,
@@ -18981,7 +19117,8 @@ func (a *walMutatorAdapter) SetEdgePropertyByHandle(src, dst string, handle uint
 		return err
 	}
 	r.recordSetEdgePropertyByHandle(src, dst, handle, key, prev, had)
-	_ = a.tx.SetEdgePropertyByHandle(src, dst, handle, key, value) //nolint:errcheck // ErrTxFinished impossible here
+	// PreValidated: see the SetNodeProperty twin (rmp #2602).
+	_ = a.tx.SetEdgePropertyByHandlePreValidated(src, dst, handle, key, value) //nolint:errcheck // ErrTxFinished impossible here
 	return nil
 }
 func (a *walMutatorAdapter) DelEdgePropertyByHandle(src, dst string, handle uint64, key string) {

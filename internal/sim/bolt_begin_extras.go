@@ -57,31 +57,47 @@ package sim
 //
 // [server.NextBookmark] (bolt/server/bookmark.go:20) returns "FB:k" followed by the
 // value of a PROCESS-GLOBAL atomic counter as 8 zero-padded hex digits. It is
-// assigned to the session in exactly ONE place — s.bookmark = NextBookmark() in
-// handleCommit, bolt/server/session.go:1694 — and delivered in three:
+// minted in TWO places, and until rmp #2563 in only one:
 //
-//   - the COMMIT SUCCESS, whose metadata is that bookmark and nothing else (:1696);
-//   - the terminal PULL SUCCESS, i.e. the one with has_more false (:1397);
-//   - the terminal DISCARD SUCCESS (:1500).
+//   - handleCommit, for an explicit transaction, delivered on the COMMIT SUCCESS
+//     whose metadata is that bookmark and nothing else;
+//   - the terminal PULL / DISCARD SUCCESS of an AUTOCOMMIT statement, added by rmp
+//     #2563.
 //
 // rmp #2484 established that the terminal reply is also the durability
 // acknowledgement, so the bookmark rides on the ack.
 //
-// Two consequences follow from "assigned only in handleCommit", and this scenario
-// pins both because they are what a driver sees:
+// # What this scenario measured, and what it now asserts
 //
-//   - An AUTOCOMMIT statement's terminal PULL SUCCESS carries a bookmark that was
-//     NOT minted for it. On a session that has never committed an explicit
-//     transaction the field is the EMPTY STRING — measured, on a write whose own
-//     stats in the same SUCCESS report nodes-created=1 and contains-updates=true.
-//   - On a session that HAS committed one, a later autocommit write's terminal PULL
-//     SUCCESS carries that EARLIER transaction's bookmark — measured equal to it,
-//     not merely similar. A driver chaining causality from an autocommit
-//     ResultSummary is therefore chaining a strictly earlier transaction's token.
+// While the assignment lived ONLY in handleCommit, both terminal-SUCCESS sites
+// published s.bookmark unconditionally, and this scenario pinned the two
+// consequences a driver actually sees:
 //
-// Neither is asserted anywhere in bolt/server: the only bookmark-key assertion in
-// that package is on a COMMIT SUCCESS and checks existence and non-emptiness only
-// (bolt/server/tx_test.go:82-88).
+//   - on a session that had never committed an explicit transaction, an autocommit
+//     write's terminal PULL SUCCESS carried the EMPTY STRING — measured on a write
+//     whose own stats in the same SUCCESS reported nodes-created=1 and
+//     contains-updates=true, so it could not be explained away as a statement that
+//     wrote nothing;
+//   - on a session that HAD committed one, a later autocommit write carried that
+//     EARLIER transaction's bookmark — measured equal to it, not merely similar. A
+//     driver chaining causality from an autocommit ResultSummary was chaining a
+//     strictly earlier transaction's token, and could not tell.
+//
+// rmp #2563 fixed it from the specification, which describes the field as "the
+// bookmark after committing this transaction (Autocommit Transaction only)": an
+// autocommit statement now mints its own, and inside an EXPLICIT transaction the
+// terminal SUCCESS omits the field entirely, because there the bookmark belongs on
+// the COMMIT SUCCESS. Publishing it in both places is what leaked the stale token.
+//
+// The two pins are INVERTED accordingly, not deleted: a fresh non-empty token is
+// now required, and repeating the earlier COMMIT's token is a violation. Each pin's
+// own message had said that a change meant an improvement and that the pin and its
+// documentation must be rewritten; that is what happened.
+//
+// Neither consequence was asserted anywhere in bolt/server at the time: the only
+// bookmark-key assertion in that package was on a COMMIT SUCCESS and checked
+// existence and non-emptiness only (bolt/server/tx_test.go:82-88). rmp #2563 added
+// the server-level tests as well.
 //
 // # The bookmark VALUE is not reachable from the seed
 //
@@ -111,14 +127,22 @@ package sim
 // "advance and the transaction died" is satisfiable by any timer at all; with it,
 // the single difference between the two arms is the extra.
 //
-// # A tx_timeout abort is NOT distinguishable on the wire, and that is asserted
+// # The TWO deadline bounds are not distinguishable on the wire, and that is asserted
 //
-// rmp #2482 pinned that an operator termination and a timeout deliver one shared
-// code and message (filed as rmp #2560). Reading bolt/server widens that: the idle
-// reaper, the total-lifetime reaper and Server.TerminateTransaction ALL funnel
-// through [Session.reapTimedOutTx] (bolt/server/session.go:1831), which arms a
-// single pendingTermErr with one code and one message (:1839-1842). The collision is
-// three-way, not two-way.
+// rmp #2482 pinned that an operator termination and a timeout delivered one shared
+// code and message, and filed the collision as rmp #2560. Reading bolt/server
+// widened it: all THREE server-initiated terminations — the idle bound, the total
+// bound, and Server.TerminateTransaction — funnelled through one teardown that
+// armed a single pendingTermErr, so the collision was three-way.
+//
+// rmp #2560 split it PARTLY, and the part it left alone is what these arms now
+// pin. The operator path was given its own reason
+// ([Session.terminateTxByOperator], adjudicated by the terminate arm against
+// [txTerminateFailureCode]); the two DEADLINE bounds still share one, because a
+// client's correct response to either is identical — only the operator's differs.
+// So the remaining collision is two-way and DELIBERATE, and these arms assert it
+// rather than merely tolerating it: were the idle and total reasons ever split, the
+// control below would fail and the change would have to be argued for.
 //
 // It is asserted rather than described: the idle-bound arm below is a CONSTRUCTED
 // control that reaches the same reap through the idle bound instead, and the checker
@@ -238,6 +262,10 @@ const beginBookmarkWrongTypeValue = int64(0x2485)
 // The mode values driven. Only "r" is special (handleBegin,
 // bolt/server/session.go:1561-1566); the rest are here to pin that the coercion to
 // "w" is silent.
+// beginUnknownModeRefusalCode is what a BEGIN carrying an unrecognised `mode`
+// is refused with since rmp #2564.
+const beginUnknownModeRefusalCode = "Neo.ClientError.Request.Invalid"
+
 const (
 	beginModeRead      = "r"
 	beginModeWrite     = "w"
@@ -454,6 +482,14 @@ type BoltModeArm struct {
 	// answered SUCCESS; WriteCode and WriteMessage carry the refusal when it was not.
 	WriteAccepted           bool
 	WriteCode, WriteMessage string
+	// BeginRefused records that the BEGIN ITSELF was refused, with its code and
+	// message. It is separate from WriteCode because the two are different events
+	// and were previously conflated: before rmp #2564 no arm could be refused at
+	// BEGIN, so the driver reused the write fields, and a clause reading them
+	// could not tell "the transaction never opened" from "the write inside it was
+	// refused".
+	BeginRefused            bool
+	BeginCode, BeginMessage string
 }
 
 // BoltDBArm is one probe of the `db` extra: the name sent on BEGIN and the name
@@ -984,7 +1020,14 @@ func (r *beginExtrasRunner) driveModeArm(ctx context.Context, name string) (Bolt
 		return arm, fmt.Errorf("sim: bolt-begin-extras: %s BEGIN: %w", arm.Name, err)
 	}
 	if !isSuccess(resp) {
-		arm.WriteCode, arm.WriteMessage = failureCode(resp), failureMessage(resp)
+		// Since rmp #2564 an unrecognised `mode` is refused HERE, at the BEGIN,
+		// rather than coerced to write. RESET returns the session from FAILED so
+		// the connection teardown is clean and the next arm starts from READY.
+		arm.BeginRefused = true
+		arm.BeginCode, arm.BeginMessage = failureCode(resp), failureMessage(resp)
+		if _, err := c.Reset(); err != nil {
+			return arm, fmt.Errorf("sim: bolt-begin-extras: %s RESET after refused BEGIN: %w", arm.Name, err)
+		}
 		return arm, nil
 	}
 	// handleBegin registers the transaction BEFORE the response loop writes the
@@ -1651,7 +1694,7 @@ func checkBoltBookmarkCausality(e *BoltBeginExtrasEvidence) []Violation {
 	// is an assumption rather than an observation.
 	fab, ok := beginBookmarkCounter(beginFabricatedFarFuture)
 	if !ok {
-		v = append(v, boltBeginViolation(ViolationOracleDeviation, "bookmark-fabricated-is-ahead",
+		v = append(v, boltBeginViolation(ViolationVacuousRun, "bookmark-fabricated-is-ahead",
 			fmt.Sprintf("the fabricated token %q does not parse as a %q + %d hex-digit bookmark, so it is not a "+
 				"syntactically valid token this server could have minted and the arm proves nothing about an "+
 				"UNKNOWN bookmark", beginFabricatedFarFuture, bookmarkPrefix, bookmarkHexDigits)))
@@ -1662,7 +1705,7 @@ func checkBoltBookmarkCausality(e *BoltBeginExtrasEvidence) []Violation {
 			continue
 		}
 		if n >= fab {
-			v = append(v, boltBeginViolation(ViolationOracleDeviation, "bookmark-fabricated-is-ahead",
+			v = append(v, boltBeginViolation(ViolationVacuousRun, "bookmark-fabricated-is-ahead",
 				fmt.Sprintf("this server issued bookmark counter %d, at or above the fabricated token's %d: the "+
 					"'far future' token is one the server COULD have minted, so the arm is no longer probing an "+
 					"unknown bookmark", n, fab)))
@@ -1706,33 +1749,49 @@ func checkBoltBookmarkDelivery(e *BoltBeginExtrasEvidence) []Violation {
 		prev, havePrev = n, true
 	}
 
-	// CLAUSE autocommit-bookmark-is-empty. On a session that never committed an
-	// explicit transaction, an autocommit WRITE's terminal PULL SUCCESS carries an
-	// EMPTY bookmark. Pinned as measured.
-	if e.AutocommitBookmarkFresh != "" {
-		v = append(v, boltBeginViolation(ViolationOracleDeviation, "autocommit-bookmark-is-empty",
-			fmt.Sprintf("an autocommit write on a session with no prior explicit COMMIT reported bookmark %q in its "+
-				"terminal PULL SUCCESS, not the empty string. s.bookmark is assigned ONLY in handleCommit "+
-				"(bolt/server/session.go:1694), so this can only mean the server now mints one per autocommit "+
-				"statement — which would be an IMPROVEMENT, and this pin and its documentation must be rewritten "+
-				"rather than the reading dismissed", e.AutocommitBookmarkFresh)))
+	// INVERTED BY rmp #2563. These two clauses PINNED the defect: the terminal PULL
+	// SUCCESS echoed s.bookmark, which handleCommit alone ever assigned, so an
+	// autocommit statement reported the EMPTY string on a fresh session and the
+	// EARLIER transaction's token once one had committed. Each pin's own message
+	// said that a change meant an improvement and that the pin and its
+	// documentation must be rewritten. They were.
+	//
+	// The contract now comes from the specification, which describes this field as
+	// "the bookmark after committing this transaction (Autocommit Transaction
+	// only)": an autocommit statement's terminal SUCCESS carries a FRESHLY MINTED
+	// token, and inside an explicit transaction the field is absent entirely
+	// because the bookmark belongs on the COMMIT SUCCESS.
+	//
+	// CLAUSE autocommit-bookmark-is-fresh. A non-empty token, and one the earlier
+	// COMMIT did not already return.
+	if e.AutocommitBookmarkFresh == "" {
+		v = append(v, boltBeginViolation(ViolationACIDConsistency, "autocommit-bookmark-is-fresh",
+			"an autocommit write on a session with no prior explicit COMMIT reported an EMPTY bookmark in its "+
+				"terminal PULL SUCCESS. The specification puts this field under \"Autocommit Transaction only\", "+
+				"so it is precisely this case that must carry a token naming the work just committed (rmp #2563)"))
 	}
-	// CLAUSE autocommit-bookmark-is-stale. On a session that HAS committed one, the
-	// autocommit terminal PULL SUCCESS carries that earlier transaction's bookmark.
-	if e.AutocommitBookmarkAfterCommit != e.AutocommitAfterCommitExpected {
-		v = append(v, boltBeginViolation(ViolationOracleDeviation, "autocommit-bookmark-is-stale",
-			fmt.Sprintf("an autocommit write following an explicit COMMIT reported bookmark %q; the COMMIT had "+
-				"returned %q. They must be EQUAL: the terminal PULL echoes s.bookmark and nothing mints a fresh one "+
-				"for an autocommit statement. A difference means the behaviour changed and the pin must be rewritten",
-				e.AutocommitBookmarkAfterCommit, e.AutocommitAfterCommitExpected)))
+	// CLAUSE autocommit-bookmark-not-stale. The token must NOT be the one the
+	// earlier COMMIT returned: a driver cannot tell a repeated token from a fresh
+	// one and would chain causality on work it does not describe.
+	if e.AutocommitBookmarkAfterCommit == e.AutocommitAfterCommitExpected {
+		v = append(v, boltBeginViolation(ViolationACIDConsistency, "autocommit-bookmark-not-stale",
+			fmt.Sprintf("an autocommit write following an explicit COMMIT reported bookmark %q, which is exactly "+
+				"what that COMMIT returned. A repeated token is worse than an empty one: a driver cannot tell it "+
+				"is stale and treats it as naming the autocommit write (rmp #2563)",
+				e.AutocommitBookmarkAfterCommit)))
+	}
+	if e.AutocommitBookmarkAfterCommit == "" {
+		v = append(v, boltBeginViolation(ViolationACIDConsistency, "autocommit-bookmark-not-stale",
+			"an autocommit write following an explicit COMMIT reported an EMPTY bookmark: not stale, but not a "+
+				"token for its own work either"))
 	}
 	// CLAUSE autocommit-did-write. The empty bookmark above must not be explainable by
 	// the statement having written nothing: the SAME reply must report it as an update.
 	if !e.AutocommitStatsSeen {
 		v = append(v, boltBeginViolation(ViolationOracleDeviation, "autocommit-did-write",
-			"the autocommit write's terminal SUCCESS did not report contains-updates, so the empty bookmark it "+
+			"the autocommit write's terminal SUCCESS did not report contains-updates, so the bookmark it "+
 				"carried cannot be attributed to the bookmark machinery: the statement may simply have written "+
-				"nothing, and the two pins above would be measuring the wrong thing"))
+				"nothing, and the two clauses above would be measuring the wrong thing"))
 	}
 	return v
 }
@@ -1778,7 +1837,7 @@ func checkBoltTxTimeout(e *BoltBeginExtrasEvidence) []Violation {
 	// identical advance: the transaction must live and its COMMIT must succeed.
 	if control != nil {
 		if control.reaped() {
-			v = append(v, boltBeginViolation(ViolationOracleDeviation, "txtimeout-control-survives",
+			v = append(v, boltBeginViolation(ViolationVacuousRun, "txtimeout-control-survives",
 				fmt.Sprintf("the control arm %q sent NO tx_timeout and its bounds are %s idle / %s total, yet an "+
 					"advance of %v reaped it. Some other deadline is firing, so the subject arm's reap cannot be "+
 					"attributed to its tx_timeout extra and the whole family proves nothing",
@@ -1848,7 +1907,9 @@ func beginCheckAbortShape(a *BoltTimeoutArm) []Violation {
 	}
 	var v []Violation
 	// CLAUSE txtimeout-abort-typed. The EXACT code and message, not merely "some
-	// failure": these are the constants rmp #2482 pinned (bolt_tx_registry.go:517-518).
+	// failure": these are [txReapFailureCode] and [txReapFailureMessage], the DEADLINE
+	// pair. An operator termination no longer answers with them (rmp #2560), so every
+	// arm reaching this check must have been reaped by a bound.
 	if a.GotCode != txReapFailureCode {
 		v = append(v, boltBeginViolation(ViolationOracleDeviation, "txtimeout-abort-typed",
 			fmt.Sprintf("arm %q: after the reap the client's next request-phase message was answered code %q, "+
@@ -1886,16 +1947,57 @@ func beginCheckAbortShape(a *BoltTimeoutArm) []Violation {
 
 // checkBoltBeginMode adjudicates the `mode` family.
 //
-// The finding it pins is that the coercion FAILS OPEN. handleBegin selects read-only
-// only for the exact string "r" (bolt/server/session.go:1561-1566); every other value
-// — a misspelling, the uppercase "R", a non-string, an absent key — silently yields a
-// WRITE transaction. That is asserted on TWO independent observables: the server's own
-// [server.TransactionInfo.Mode], and whether a write inside the transaction is allowed.
-// One observable alone could not tell a mis-recorded mode from a mis-enforced one.
+// UNTIL rmp #2564 IT PINNED A FAIL-OPEN COERCION: handleBegin selected read-only only
+// for the exact string "r", so every other value — a misspelling, the uppercase "R", a
+// non-string — silently yielded a WRITE transaction, and a client that asked for
+// read-only received write authority and was told nothing. The pin's own message said
+// that a refusal would mean the coercion had been hardened and that it, and
+// docs/dst-feature-coverage.md, must be rewritten. That is what happened.
+//
+// The contract now: the two canonical spellings and the ABSENT key behave as before,
+// and any other value is REFUSED at the BEGIN with Neo.ClientError.Request.Invalid.
+//
+// Each arm is still adjudicated on TWO independent observables — the server's own
+// [server.TransactionInfo.Mode] and whether a write inside the transaction is allowed
+// — because one alone could not tell a mis-recorded mode from a mis-enforced one. For
+// a refused arm the second observable is that NO transaction reached the registry.
 func checkBoltBeginMode(e *BoltBeginExtrasEvidence) []Violation {
 	var v []Violation
 	for i := range e.Modes {
 		a := &e.Modes[i]
+		// An arm whose value is neither canonical spelling must be refused at the
+		// BEGIN (rmp #2564), and nothing else about it is adjudicated: there is no
+		// transaction to have a mode, and no write to accept or refuse.
+		if a.SentKey && a.SentMode != beginModeRead && a.SentMode != beginModeWrite {
+			if !a.BeginRefused {
+				v = append(v, boltBeginViolation(ViolationACIDConsistency, "mode-unknown-refused",
+					fmt.Sprintf("arm %q sent mode %q and the BEGIN was ACCEPTED, opening a transaction the "+
+						"server recorded as Mode=%q. An access-mode token the server does not recognise must "+
+						"not be resolved in the MORE privileged direction (rmp #2564)",
+						a.Name, a.SentMode, a.RegistryMode)))
+				continue
+			}
+			if a.BeginCode != beginUnknownModeRefusalCode {
+				v = append(v, boltBeginViolation(ViolationOracleDeviation, "mode-unknown-refused",
+					fmt.Sprintf("arm %q was refused with code %q, want %q",
+						a.Name, a.BeginCode, beginUnknownModeRefusalCode)))
+			}
+			// The message must NAME the offending value, or a client cannot fix its
+			// own request without guessing.
+			if !strings.Contains(a.BeginMessage, a.SentMode) {
+				v = append(v, boltBeginViolation(ViolationOracleDeviation, "mode-unknown-refused",
+					fmt.Sprintf("arm %q: the refusal message %q does not contain the offending value %q",
+						a.Name, a.BeginMessage, a.SentMode)))
+			}
+			continue
+		}
+		if a.BeginRefused {
+			v = append(v, boltBeginViolation(ViolationOracleDeviation, "mode-canonical-accepted",
+				fmt.Sprintf("arm %q sent mode %q (present=%t) and the BEGIN was REFUSED with %q / %q. The two "+
+					"canonical spellings and the absent key must keep their behaviour",
+					a.Name, a.SentMode, a.SentKey, a.BeginCode, a.BeginMessage)))
+			continue
+		}
 		wantRead := a.SentKey && a.SentMode == beginModeRead
 		wantMode := beginModeWrite
 		if wantRead {
@@ -1930,15 +2032,13 @@ func checkBoltBeginMode(e *BoltBeginExtrasEvidence) []Violation {
 			}
 			continue
 		}
-		// CLAUSE mode-unknown-fails-open. Every non-"r" value must ACCEPT the write.
-		// This is the deliberate pin of the fail-open coercion: a driver that sends "R"
-		// gets write authority and is told nothing.
+		// CLAUSE mode-write-accepts-write. A write transaction — "w", or the absent
+		// key — must ACCEPT a write, or the mode is being enforced in the wrong
+		// direction.
 		if !a.WriteAccepted {
-			v = append(v, boltBeginViolation(ViolationOracleDeviation, "mode-unknown-fails-open",
+			v = append(v, boltBeginViolation(ViolationACIDConsistency, "mode-write-accepts-write",
 				fmt.Sprintf("arm %q sent mode %q (present=%t) and the write inside it was REFUSED with %q / %q. "+
-					"Every value other than the exact string \"r\" is currently coerced to a WRITE transaction, so a "+
-					"refusal means the coercion changed — which would be a HARDENING of a fail-open path, and this "+
-					"pin and docs/dst-feature-coverage.md must be rewritten to record it",
+					"A write transaction must accept a write",
 					a.Name, a.SentMode, a.SentKey, a.WriteCode, a.WriteMessage)))
 		}
 	}
@@ -2154,14 +2254,14 @@ func checkBoltBookmarkNonVacuity(e *BoltBeginExtrasEvidence) []Violation {
 	want := slices.Clone(beginBookmarkArmNames)
 	slices.Sort(want)
 	if !slices.Equal(got, want) {
-		v = append(v, boltBeginViolation(ViolationOracleDeviation, "nv-bookmark-roster",
+		v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-bookmark-roster",
 			fmt.Sprintf("the causal-read roster ran %v, want %v: a missing arm removes its clause silently", got, want)))
 	}
 	// CLAUSE nv-bookmark-write-nonempty. A causal read of ZERO nodes could not
 	// distinguish "the reader saw the write" from "the write never happened", so the
 	// whole family would be satisfiable by an engine that stored nothing.
 	if e.CommittedNodes <= 0 {
-		v = append(v, boltBeginViolation(ViolationOracleDeviation, "nv-bookmark-write-nonempty",
+		v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-bookmark-write-nonempty",
 			fmt.Sprintf("the writer committed %d node(s): with nothing committed, every causal read trivially "+
 				"observes the full committed set and the causality clause cannot fail", e.CommittedNodes)))
 	}
@@ -2184,7 +2284,7 @@ func checkBoltBookmarkNonVacuity(e *BoltBeginExtrasEvidence) []Violation {
 		}
 	}
 	if issued < 1 || fabricated < 2 {
-		v = append(v, boltBeginViolation(ViolationOracleDeviation, "nv-bookmark-contrast",
+		v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-bookmark-contrast",
 			fmt.Sprintf("the family presented %d real bookmark(s) and %d fabricated one(s); it needs at least 1 and 2. "+
 				"Without both, 'the token changed nothing' compares nothing and the causal read's meaning is "+
 				"unestablished", issued, fabricated)))
@@ -2192,13 +2292,13 @@ func checkBoltBookmarkNonVacuity(e *BoltBeginExtrasEvidence) []Violation {
 	// CLAUSE nv-bookmark-arms-completed. The comparison is only over arms that completed
 	// their read; if fewer than two did, it compares a value with itself.
 	if completed < 2 {
-		v = append(v, boltBeginViolation(ViolationOracleDeviation, "nv-bookmark-arms-completed",
+		v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-bookmark-arms-completed",
 			fmt.Sprintf("only %d arm(s) completed a causal read; the cross-arm comparison needs at least 2", completed)))
 	}
 	// CLAUSE nv-bookmark-sequence. A single bookmark cannot falsify a strict-advance
 	// clause: one event is not a sequence.
 	if len(e.IssuedBookmarks) < 2 {
-		v = append(v, boltBeginViolation(ViolationOracleDeviation, "nv-bookmark-sequence",
+		v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-bookmark-sequence",
 			fmt.Sprintf("the writer produced %d bookmark(s); the strict-advance clause needs at least 2 to compare",
 				len(e.IssuedBookmarks))))
 	}
@@ -2206,7 +2306,7 @@ func checkBoltBookmarkNonVacuity(e *BoltBeginExtrasEvidence) []Violation {
 	// against an OBSERVED bookmark. Were that reference empty, the clause would collapse
 	// into "both are empty" and pass on a session that never committed at all.
 	if e.AutocommitAfterCommitExpected == "" {
-		v = append(v, boltBeginViolation(ViolationOracleDeviation, "nv-bookmark-stale-reference",
+		v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-bookmark-stale-reference",
 			"the reference bookmark for the stale-autocommit clause is EMPTY, so that clause degenerates into "+
 				"comparing two empty strings and would pass whatever the server reported"))
 	}
@@ -2222,7 +2322,7 @@ func checkBoltTimeoutNonVacuity(e *BoltBeginExtrasEvidence) []Violation {
 		got = append(got, e.Timeouts[i].Name)
 	}
 	if !slices.Equal(got, beginTimeoutArmNames) {
-		v = append(v, boltBeginViolation(ViolationOracleDeviation, "nv-timeout-roster",
+		v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-timeout-roster",
 			fmt.Sprintf("the timeout roster ran %v, want %v in that order: an arm and its control are only comparable "+
 				"as the same script", got, beginTimeoutArmNames)))
 	}
@@ -2238,7 +2338,7 @@ func checkBoltTimeoutNonVacuity(e *BoltBeginExtrasEvidence) []Violation {
 		}
 	}
 	if reaped < 1 || survived < 1 {
-		v = append(v, boltBeginViolation(ViolationOracleDeviation, "nv-timeout-both-outcomes",
+		v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-timeout-both-outcomes",
 			fmt.Sprintf("the timeout family produced %d reaped and %d surviving arm(s); it needs at least one of "+
 				"each. A family in which every arm is reaped cannot distinguish a bound that works from a reaper "+
 				"that fires unconditionally", reaped, survived)))
@@ -2249,7 +2349,7 @@ func checkBoltTimeoutNonVacuity(e *BoltBeginExtrasEvidence) []Violation {
 	for i := range e.Timeouts {
 		a := &e.Timeouts[i]
 		if a.TimersArmed < 1 {
-			v = append(v, boltBeginViolation(ViolationOracleDeviation, "nv-timeout-reaper-armed",
+			v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-timeout-reaper-armed",
 				fmt.Sprintf("arm %q registered %d timer(s) on the injected clock. A surviving arm is only evidence "+
 					"that the bound was not reached if the reaper was ARMED; with no timer, 'not reaped' means the "+
 					"reaper was never installed and the control attributes nothing", a.Name, a.TimersArmed)))
@@ -2264,7 +2364,7 @@ func checkBoltTimeoutNonVacuity(e *BoltBeginExtrasEvidence) []Violation {
 			total += d
 		}
 		if total <= 0 {
-			v = append(v, boltBeginViolation(ViolationOracleDeviation, "nv-timeout-advance-nonzero",
+			v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-timeout-advance-nonzero",
 				fmt.Sprintf("arm %q advanced %v of virtual time in total: with no advance, no deadline is reachable "+
 					"and the arm's outcome is independent of every bound it installed", a.Name, a.Advanced)))
 		}
@@ -2278,7 +2378,7 @@ func checkBoltTimeoutNonVacuity(e *BoltBeginExtrasEvidence) []Violation {
 			reach += d
 		}
 		if a.IdleBound <= reach || a.DefaultTotalBound <= reach {
-			v = append(v, boltBeginViolation(ViolationOracleDeviation, "nv-timeout-bounds-separated",
+			v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-timeout-bounds-separated",
 				fmt.Sprintf("arm %q advances %s of virtual time with the idle bound at %s and the server default "+
 					"total bound at %s. Both must lie strictly BEYOND the advance, or the reap is attributable to a "+
 					"server bound rather than to the client's tx_timeout and the arm measures the wrong reaper "+
@@ -2301,15 +2401,21 @@ func checkBoltModeDBNonVacuity(e *BoltBeginExtrasEvidence) []Violation {
 	wantModes := slices.Clone(beginModeArmNames)
 	slices.Sort(wantModes)
 	if !slices.Equal(gotModes, wantModes) {
-		v = append(v, boltBeginViolation(ViolationOracleDeviation, "nv-mode-roster",
+		v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-mode-roster",
 			fmt.Sprintf("the mode roster ran %v, want %v", gotModes, wantModes)))
 	}
 	// CLAUSE nv-mode-both-sides. The family needs a transaction the server recorded as
-	// READ-ONLY and one it recorded as WRITE. Without the read-only side the fail-open
-	// clause is satisfiable by a server that never enforces anything; without the write
-	// side, by one that refuses everything.
-	readModes, writeModes := 0, 0
+	// READ-ONLY and one it recorded as WRITE, AND at least one BEGIN refused for an
+	// unrecognised mode. Without the read-only side the enforcement clauses are
+	// satisfiable by a server that never enforces anything; without the write side, by
+	// one that refuses everything; and without a refusal the rmp #2564 clause never
+	// fires at all.
+	readModes, writeModes, refusedBegins := 0, 0, 0
 	for i := range e.Modes {
+		if e.Modes[i].BeginRefused {
+			refusedBegins++
+			continue
+		}
 		switch e.Modes[i].RegistryMode {
 		case beginModeRead:
 			readModes++
@@ -2318,10 +2424,15 @@ func checkBoltModeDBNonVacuity(e *BoltBeginExtrasEvidence) []Violation {
 		}
 	}
 	if readModes < 1 || writeModes < 1 {
-		v = append(v, boltBeginViolation(ViolationOracleDeviation, "nv-mode-both-sides",
+		v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-mode-both-sides",
 			fmt.Sprintf("the mode family produced %d read-only and %d write transaction(s) by the server's own "+
-				"registry; it needs at least one of each, or the fail-open pin and the read-only refusal are each "+
-				"one-sided", readModes, writeModes)))
+				"registry; it needs at least one of each, or the enforcement clauses and the read-only refusal "+
+				"are each one-sided", readModes, writeModes)))
+	}
+	if refusedBegins < 1 {
+		v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-mode-unknown-driven",
+			"no mode arm was refused at the BEGIN, so the rmp #2564 clause — that an unrecognised access mode "+
+				"must not be resolved in the more privileged direction — was never exercised"))
 	}
 	// CLAUSE nv-mode-write-observed. The read-only refusal is only meaningful if the
 	// same statement SUCCEEDS somewhere: a write refused everywhere would satisfy it for
@@ -2333,7 +2444,7 @@ func checkBoltModeDBNonVacuity(e *BoltBeginExtrasEvidence) []Violation {
 		}
 	}
 	if acceptedWrites < 1 {
-		v = append(v, boltBeginViolation(ViolationOracleDeviation, "nv-mode-write-observed",
+		v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-mode-write-observed",
 			"no mode arm's write was ACCEPTED, so the read-only refusal cannot be attributed to the access mode: "+
 				"the same statement may simply be refused everywhere"))
 	}
@@ -2346,7 +2457,7 @@ func checkBoltModeDBNonVacuity(e *BoltBeginExtrasEvidence) []Violation {
 	wantDBs := slices.Clone(beginDBArmNames)
 	slices.Sort(wantDBs)
 	if !slices.Equal(gotDBs, wantDBs) {
-		v = append(v, boltBeginViolation(ViolationOracleDeviation, "nv-db-roster",
+		v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-db-roster",
 			fmt.Sprintf("the database roster ran %v, want %v", gotDBs, wantDBs)))
 	}
 	// CLAUSE nv-db-contrast. The echo clause needs a name that is NOT this server's, and
@@ -2363,7 +2474,7 @@ func checkBoltModeDBNonVacuity(e *BoltBeginExtrasEvidence) []Violation {
 		}
 	}
 	if foreign < 1 || absent < 1 {
-		v = append(v, boltBeginViolation(ViolationOracleDeviation, "nv-db-contrast",
+		v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-db-contrast",
 			fmt.Sprintf("the database family sent %d foreign name(s) and %d arm(s) with no name; it needs at least "+
 				"one of each. With only the server's own name, an echo and a fallback are indistinguishable",
 				foreign, absent)))
@@ -2379,7 +2490,7 @@ func checkBoltRouteMetadataNonVacuity(e *BoltBeginExtrasEvidence) []Violation {
 	// view of itself. Were that empty, "every role advertises the listener's address"
 	// would pass on a table full of empty strings.
 	if o.ListenerAddr == "" {
-		v = append(v, boltBeginViolation(ViolationOracleDeviation, "nv-route-reference",
+		v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-route-reference",
 			"the listener reported an EMPTY address, so the routing-table address clause compares every advertised "+
 				"address against \"\" and cannot fail"))
 	}
@@ -2387,35 +2498,35 @@ func checkBoltRouteMetadataNonVacuity(e *BoltBeginExtrasEvidence) []Violation {
 	// ROUTE actually NAMED a database: against an empty request, "the table's db is
 	// empty" is what an honest echo would also produce.
 	if o.SentDB == "" {
-		v = append(v, boltBeginViolation(ViolationOracleDeviation, "nv-route-asked-for-a-db",
+		v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-route-asked-for-a-db",
 			"the ROUTE message named no database, so 'the table's db came back empty' is equally consistent with "+
 				"the server ECHOING the request and with it dropping the field"))
 	}
 	// CLAUSE nv-route-table-decoded. A table that did not decode leaves every structured
 	// field at its zero value, and several clauses would then pass on nothing.
 	if o.RoleCount == 0 || len(o.AddressesByRole) == 0 {
-		v = append(v, boltBeginViolation(ViolationOracleDeviation, "nv-route-table-decoded",
+		v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-route-table-decoded",
 			fmt.Sprintf("the routing table decoded to %d entr(y/ies) and %d role(s): with nothing decoded the role, "+
 				"address and ttl clauses have no values to adjudicate", o.RoleCount, len(o.AddressesByRole))))
 	}
 	// CLAUSE nv-route-renders-nonempty. The identical-answer clause compares two
 	// renderings; two empty strings are equal and would pass on two broken replies.
 	if o.PopulatedRender == "" || o.ZeroMessageRender == "" {
-		v = append(v, boltBeginViolation(ViolationOracleDeviation, "nv-route-renders-nonempty",
+		v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-route-renders-nonempty",
 			fmt.Sprintf("a routing-table rendering is empty (populated=%q, zero=%q), so the identical-answer clause "+
 				"compares two empty strings", o.PopulatedRender, o.ZeroMessageRender)))
 	}
 	// CLAUSE nv-metadata-sent. "No reply echoes any key the client sent" is vacuously
 	// true when the client sent none.
 	if len(e.Metadata.SentKeys) == 0 {
-		v = append(v, boltBeginViolation(ViolationOracleDeviation, "nv-metadata-sent",
+		v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-metadata-sent",
 			"the tx_metadata arm sent NO keys, so 'no reply echoed one' is vacuously true"))
 	}
 	// CLAUSE nv-metadata-replies-read. The echo clause searches three key lists; if the
 	// replies were never decoded, all three are empty and the search finds nothing
 	// whatever the server did.
 	if len(e.Metadata.TerminalMetaKeys) == 0 || len(e.Metadata.CommitMetaKeys) == 0 {
-		v = append(v, boltBeginViolation(ViolationOracleDeviation, "nv-metadata-replies-read",
+		v = append(v, boltBeginViolation(ViolationVacuousRun, "nv-metadata-replies-read",
 			fmt.Sprintf("the tx_metadata arm read %d terminal and %d commit metadata key(s); both replies carry keys "+
 				"by contract (has_more/bookmark/db and bookmark), so an empty list means the reply was not decoded "+
 				"and the echo search ran over nothing",

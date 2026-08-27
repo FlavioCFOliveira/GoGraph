@@ -2099,6 +2099,44 @@ func (v *visitor) VisitInvocationName(ctx *gen.InvocationNameContext) interface{
 // Subquery forms
 // -------------------------------------------------------------------------
 
+// subqueryUnionUnsupported is the refusal a UNION inside an EXISTS or COUNT
+// subquery body earns, shared by both so the two cannot drift (rmp #2615).
+//
+// # Why this is a refusal and not an answer
+//
+// The grammar admits `regularQuery` in both positions, so a UNION parses; but
+// [ast.ExistsSubquery.Query] and [ast.CountSubquery.Query] are typed
+// *ast.SingleQuery, which cannot hold one. Both visitors used to keep
+// q.Parts[0] and discard the rest — "multi-union inside EXISTS is unusual" —
+// which made the query answer from ONE BRANCH with no error and no
+// notification. MEASURED on a node with a :W edge and no :Z edge,
+// `EXISTS { MATCH (x)-[:Z]->() RETURN 1 UNION MATCH (x)-[:W]->() RETURN 1 }`
+// returned false where the second branch matches: a silent wrong answer.
+//
+// BOTH REFERENCE ENGINES ANSWER THIS QUERY, read from their grammar source:
+// Neo4j's existsExpression and countExpression admit `regularQuery`, which is
+// `singleQuery (UNION (ALL | DISTINCT)? singleQuery)*` (Cypher5Parser.g4:33-35,
+// 671-677), and Memgraph's existsSubquery and countSubquery admit `cypherQuery`,
+// which carries `cypherUnion` (Cypher.g4:73-81, 317-323). So refusing DIVERGES
+// from both, and says so rather than pretending the shape is illegal.
+//
+// It is refused rather than supported because a silent wrong answer is a DEFECT
+// and reference parity is a FEATURE: supporting it means widening the two AST
+// node types and teaching the subquery driver to translate a multi-branch body,
+// including UNION-versus-UNION-ALL de-duplication inside a subquery. That is
+// filed separately. The openCypher 9 TCK does not cover subquery expressions at
+// all — zero occurrences of `EXISTS {` or `COUNT {` in any feature file — so
+// neither refusing nor supporting moves the conformance count.
+func subqueryUnionUnsupported(rule string, pos ast.Position) *SemaError {
+	return &SemaError{
+		Rule: rule,
+		Pos:  pos,
+		Message: "UNION is not supported inside an " + rule +
+			" subquery body: the query would be answered from its first branch alone. " +
+			"Rewrite the subquery without UNION, or combine the branches outside it",
+	}
+}
+
 // VisitSubqueryExist handles EXISTS { … }.
 func (v *visitor) VisitSubqueryExist(ctx *gen.SubqueryExistContext) interface{} {
 	if rq := ctx.RegularQuery(); rq != nil {
@@ -2114,7 +2152,12 @@ func (v *visitor) VisitSubqueryExist(ctx *gen.SubqueryExistContext) interface{} 
 			}
 			return &ast.ExistsSubquery{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Query: q}
 		case *ast.MultiQuery:
-			// Wrap first part for simplicity; multi-union inside EXISTS is unusual.
+			// A UNION body. Refused rather than answered from Parts[0], which is
+			// what this did until rmp #2615 — silently, and wrongly. See
+			// [subqueryUnionUnsupported].
+			if len(q.Parts) > 1 {
+				return subqueryUnionUnsupported("EXISTS", positionOf(ctx))
+			}
 			if len(q.Parts) > 0 {
 				if err := existsSubqueryHasUpdateClause(q.Parts[0]); err != nil {
 					return &SemaError{Rule: "subqueryExist", Pos: positionOf(ctx), Message: err.Error()}
@@ -2211,6 +2254,11 @@ func (v *visitor) VisitSubqueryCount(ctx *gen.SubqueryCountContext) interface{} 
 		case *ast.SingleQuery:
 			return &ast.CountSubquery{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Query: q}
 		case *ast.MultiQuery:
+			// Same refusal as the EXISTS sibling, through the same helper so the
+			// two cannot drift (rmp #2615).
+			if len(q.Parts) > 1 {
+				return subqueryUnionUnsupported("COUNT", positionOf(ctx))
+			}
 			if len(q.Parts) > 0 {
 				return &ast.CountSubquery{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Query: q.Parts[0]}
 			}

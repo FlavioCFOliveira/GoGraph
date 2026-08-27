@@ -989,18 +989,51 @@ func (a *analyser) whereClause(w *ast.Where) {
 // Pattern introduction helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-// patternIntroduce walks all path patterns and introduces any named variables
-// into the current scope.
+// patternIntroduce walks all path patterns of one clause and introduces any
+// named variables into the current scope.
+//
+// The relationship-uniqueness set is allocated HERE, once for the whole clause,
+// and threaded through every comma-separated path pattern. That scope is the
+// point: openCypher's relationship-uniqueness constraint is scoped to the
+// clause, not to one path pattern, so
+//
+//	MATCH (a)-[r]->(b), (b)-[r]->(a)
+//
+// must be rejected exactly as the single-pattern form
+// `MATCH (a)-[r]->()-[r]->(a)` already is. Before rmp #2528's sibling was
+// filed as #2252 the set lived inside [analyser.pathPatternIntroduce], so a
+// variable reused in a SIBLING comma pattern escaped the check and the query
+// was silently accepted — while the RUNTIME honoured the clause scope all
+// along (cypher/ir/match.go resets SiblingRelVars per clause and seeds it from
+// the preceding comma patterns). The analyser now mirrors the boundary the IR
+// already uses rather than inventing a second notion of scope.
+//
+// The boundary is the clause and nothing wider: reuse across clauses stays
+// legal (`MATCH (a1)-[r:T]->() WITH r, a1 MATCH (a1)-[r:T]->(b2)` returns a
+// row, pinned by TCK Match3 scenario [24]), which falls out of allocating the
+// set per patternIntroduce call.
 func (a *analyser) patternIntroduce(pat *ast.Pattern) {
 	if pat == nil {
 		return
 	}
+	relSeen := make(map[string]bool)
 	for _, pp := range pat.Paths {
-		a.pathPatternIntroduce(pp)
+		a.pathPatternIntroduceSeen(pp, relSeen)
 	}
 }
 
+// pathPatternIntroduce introduces one path pattern's variables with a
+// relationship-uniqueness scope of its own. It is the entry point for the
+// constructs that carry a SINGLE path pattern — MERGE and a pattern
+// comprehension — where per-pattern and per-clause scope coincide.
 func (a *analyser) pathPatternIntroduce(pp *ast.PathPattern) {
+	a.pathPatternIntroduceSeen(pp, make(map[string]bool))
+}
+
+// pathPatternIntroduceSeen is pathPatternIntroduce over a CALLER-OWNED
+// relationship-uniqueness set, so a clause can share one set across its
+// comma-separated patterns. relSeen must not be nil.
+func (a *analyser) pathPatternIntroduceSeen(pp *ast.PathPattern, relSeen map[string]bool) {
 	if pp == nil {
 		return
 	}
@@ -1018,12 +1051,11 @@ func (a *analyser) pathPatternIntroduce(pp *ast.PathPattern) {
 		a.checkTypeConflict(*pp.Variable, "path", pp.Pos)
 		a.error(a.scope.Define(*pp.Variable, pp.Pos, "path"))
 	}
-	// relSeen tracks named relationship variables already introduced
-	// inside this path. openCypher 9 §3.3.1.2 forbids re-using the same
-	// relationship name in a single path (the relationship-uniqueness
-	// constraint); we report it here so the error surfaces before
-	// type-conflict checks in relPatternIntroduce.
-	relSeen := make(map[string]bool)
+	// relSeen tracks named relationship variables already introduced in
+	// this uniqueness scope — this path pattern, or the whole clause when
+	// the caller owns the set. openCypher 9 §3.3.1.2 forbids re-using the
+	// same relationship name; we report it here so the error surfaces
+	// before type-conflict checks in relPatternIntroduce.
 	el := pp.Head
 	for el != nil {
 		if el.Node != nil {

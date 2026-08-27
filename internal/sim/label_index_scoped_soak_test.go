@@ -62,13 +62,24 @@ const (
 // serializes byte-identically to an Add-built one, and from width 4 upwards it
 // collapses to a flat 55 bytes whatever the length.
 //
-// It is the lower edge of the window in which the round trip is not idempotent —
-// the upper edge being smallSetMax, past which the down-convert does not run —
-// so [TestLabelIndexScopedSoak_DenseSmallWindow] asserts the window as
-// [liRunContainerMinWidth, liSmallSetMaxMirror] exactly. A roaring upgrade that
-// moved the encoding threshold would fail there rather than silently widening or
-// closing the window.
+// It WAS the lower edge of the window in which the round trip was not
+// idempotent, the upper edge being smallSetMax, past which the down-convert does
+// not run. rmp #2609 closed that window — Serialize now normalises the container
+// encoding at or below smallSetMax — so
+// [TestLabelIndexScopedSoak_DenseSmallWindow] asserts a fixpoint at every width
+// instead of a window.
+//
+// The constant is KEPT because the measurement it records is still true of
+// roaring and is what makes the normalisation's BOUND meaningful: below width 4
+// the two construction routes already agreed, so the bound only has work to do
+// in [4, smallSetMax]. A roaring upgrade that moved the encoding threshold would
+// change which widths the normalisation is load-bearing for, and this constant
+// is where that fact is written down.
 const liRunContainerMinWidth = 4
+
+// _ = liRunContainerMinWidth keeps the measured constant referenced now that the
+// window assertion it fed has been replaced by a fixpoint assertion.
+var _ = liRunContainerMinWidth
 
 // TestLabelIndexScopedSoak_SeedSweep runs the whole scenario across a band of
 // seeds and requires every one to be clean.
@@ -220,19 +231,34 @@ func TestLabelIndexScopedSoak_EveryByteIsCovered(t *testing.T) {
 	}
 }
 
-// TestLabelIndexScopedSoak_DenseSmallWindow characterises the round-trip
-// non-idempotence the short layer pins at one width.
+// TestLabelIndexScopedSoak_DenseSmallWindow sweeps every cardinality from 1 to
+// smallSetMax+8 and requires the serialized form to be a FIXPOINT FROM THE FIRST
+// CYCLE at every one of them, by both construction routes.
 //
-// It sweeps every cardinality from 1 to smallSetMax+8 and asserts the window
-// EXACTLY: the form is unstable on the first cycle if and only if the label was
-// built by AddRange, is long enough for roaring to encode it as a run container,
-// and is short enough for NodeSetFromBitmap to down-convert it. Both edges
-// matter, and pinning them is what makes a change at either one loud rather than
-// silent.
+// # What it used to assert, and why it was inverted
 //
-// The Add-built control at every width must be stable from the first cycle,
-// which is what attributes the instability to the run encoding rather than to
-// round trips or to cardinality.
+// It characterised the round-trip NON-idempotence the short layer pinned at one
+// width, asserting the window exactly: unstable on the first cycle if and only
+// if the label was built by AddRange, long enough for roaring to encode it as a
+// run container, and short enough for NodeSetFromBitmap to down-convert it.
+//
+// rmp #2609 FIXED that non-idempotence — Serialize now normalises the container
+// encoding for sets of at most smallSetMax ids, so the emitted bytes follow the
+// contents rather than the construction history — and this test began failing at
+// widths 4 through 8 with "the AddRange round trip was stable=true", which is the
+// repair reporting itself.
+//
+// IT WAS A SOAK-LAYER TEST, AND #2609's ACCEPTANCE GATE WAS THE SHORT LAYER
+// (`go test -race ./graph/index/... ./internal/sim/`), so it was invisible to
+// that task and only surfaced when rmp #2620 ran the soak layer. Its short-layer
+// sibling, the `dense-small-pin` clause, WAS inverted at the time; this is the
+// same inversion, arriving late.
+//
+// The Add-built control at every width is KEPT and still required to be stable
+// from the first cycle. Before the fix it attributed the instability to the run
+// encoding; now it guards the other direction — if the Add route ever became
+// unstable, the AddRange assertions above would still pass while the form as a
+// whole had stopped being reproducible.
 func TestLabelIndexScopedSoak_DenseSmallWindow(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	const base = uint64(32768)
@@ -276,16 +302,24 @@ func TestLabelIndexScopedSoak_DenseSmallWindow(t *testing.T) {
 		rows = append(rows, fmt.Sprintf("w=%-3d AddRange %d/%d/%d stable=%-5v | Add %d/%d/%d stable=%v",
 			w, r1, r2, r3, rStable, a1, a2, a3, aStable))
 
-		wantUnstable := w >= liRunContainerMinWidth && w <= liSmallSetMaxMirror
-		if rStable == wantUnstable {
-			t.Errorf("width %d: the AddRange round trip was stable=%v (%d -> %d bytes); the window "+
-				"in which it must be UNSTABLE is [%d, %d] — below it roaring keeps an array "+
-				"container, above it NodeSetFromBitmap does not down-convert",
-				w, rStable, r1, r2, liRunContainerMinWidth, liSmallSetMaxMirror)
+		if !rStable {
+			t.Errorf("width %d: the AddRange round trip changed the bytes (%d -> %d); since #2609 "+
+				"the serialized form is a fixpoint from the FIRST cycle at every width, because "+
+				"Serialize normalises the container encoding for sets of at most %d ids so the "+
+				"bytes follow the contents rather than the construction history",
+				w, r1, r2, liSmallSetMaxMirror)
 		}
 		if r2 != r3 {
-			t.Errorf("width %d: the AddRange form never converges (%d, %d, %d bytes); the re-tiering "+
-				"is supposed to happen at most once", w, r1, r2, r3)
+			t.Errorf("width %d: the AddRange form never converges (%d, %d, %d bytes); whatever the "+
+				"first cycle does, a form that keeps changing is worse still", w, r1, r2, r3)
+		}
+		// Within the normalisation bound the two construction routes must agree
+		// byte-for-byte: that is the property #2609 delivers, and asserting only
+		// fixpoint-ness would be satisfied by two stable-but-different forms.
+		if w <= int(liSmallSetMaxMirror) && r1 != a1 {
+			t.Errorf("width %d: AddRange serialized to %d bytes and Add to %d; at or below %d ids "+
+				"the image must be a function of the contents, not of how the label was built",
+				w, r1, a1, liSmallSetMaxMirror)
 		}
 		if !aStable || a2 != a3 {
 			t.Errorf("width %d: the Add-built CONTROL was not byte-stable (%d, %d, %d); without it "+

@@ -39,7 +39,7 @@ import (
 )
 
 // seedNumericSeekGraph builds the fixture. The label population must clear
-// rangeSeekMinLabelPopulation (1024) for the selectivity gate to admit any seek
+// rangeSeekMinLabelPopulation for the selectivity gate to admit any seek
 // at all; withIndex selects the seek or the scan arm of the differential.
 //
 // The data deliberately mixes types and straddles the float64 integer limit:

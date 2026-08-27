@@ -454,7 +454,7 @@ func checkTxnOversizeNonVacuity(e *TxnOversizeEvidence) []Violation {
 	var v []Violation
 	add := func(msg string) {
 		v = append(v, Violation{
-			Kind:    ViolationOracleDeviation,
+			Kind:    ViolationVacuousRun,
 			Op:      "<txn-oversize non-vacuity>",
 			Message: msg + " — " + e.String(),
 		})
@@ -834,7 +834,7 @@ func checkTxnOversizeReplayNonVacuity(e TxnOversizeReplayEvidence) []Violation {
 	var v []Violation
 	add := func(msg string) {
 		v = append(v, Violation{
-			Kind:    ViolationOracleDeviation,
+			Kind:    ViolationVacuousRun,
 			Op:      "<txn-oversize replay non-vacuity>",
 			Message: msg + " — " + e.String(),
 		})

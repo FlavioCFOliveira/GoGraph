@@ -227,7 +227,7 @@ func RunGroupCommitCoalescing(ctx context.Context, cfg GroupCommitConfig) (Group
 func checkGroupCommitNonVacuity(e GroupCommitEvidence) []Violation {
 	var v []Violation
 	add := func(msg string) {
-		v = append(v, Violation{Kind: ViolationOracleDeviation, Op: "<group-commit non-vacuity>", Message: msg + " — " + e.String()})
+		v = append(v, Violation{Kind: ViolationVacuousRun, Op: "<group-commit non-vacuity>", Message: msg + " — " + e.String()})
 	}
 	if e.Committers < groupCommitMinCommitters {
 		add(fmt.Sprintf("only %d concurrent committer(s), need >= %d: the workload never offered the writer an opportunity to coalesce",
@@ -542,11 +542,11 @@ func checkGroupCommitFailAll(r *GroupCommitFailAllResult) []Violation {
 	}
 
 	if !r.GateFired {
-		add(ViolationOracleDeviation,
+		add(ViolationVacuousRun,
 			"the sync gate never fired: the leader was not held inside its fsync, so no multi-member group was constructed and this run proves nothing about fail-all")
 	}
 	if r.Members < 2 {
-		add(ViolationOracleDeviation,
+		add(ViolationVacuousRun,
 			fmt.Sprintf("a group of %d member(s) cannot demonstrate fail-all", r.Members))
 	}
 	if r.Acked != 0 {

@@ -773,7 +773,7 @@ func collectListStrings(ctx context.Context, engine *EngineAdapter, query string
 func checkOrderingNonVacuity(tick int64, st *OrderingStats) []Violation {
 	var vs []Violation
 	fail := func(msg string) {
-		vs = append(vs, Violation{Kind: ViolationOracleDeviation, Tick: tick, Op: "ordering non-vacuity", Message: msg})
+		vs = append(vs, Violation{Kind: ViolationVacuousRun, Tick: tick, Op: "ordering non-vacuity", Message: msg})
 	}
 	if st == nil || st.checks == 0 {
 		fail("the ordering battery never ran on a usable model: every ordering probe was skipped")

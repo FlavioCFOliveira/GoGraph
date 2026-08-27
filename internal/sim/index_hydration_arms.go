@@ -266,7 +266,7 @@ func checkHydrationPopulation(
 ) []Violation {
 	fail := func(format string, args ...any) []Violation {
 		return []Violation{{
-			Kind: ViolationOracleDeviation, Tick: tick, Op: hydrationArmsOp,
+			Kind: ViolationVacuousRun, Tick: tick, Op: hydrationArmsOp,
 			Message: fmt.Sprintf("%s arm (%s): ", arm, witness) + fmt.Sprintf(format, args...),
 		}}
 	}
@@ -469,7 +469,7 @@ func (a *indexHydrationArms) finish(tick int64) []Violation {
 	}
 	var out []Violation
 	add := func(msg string) {
-		out = append(out, Violation{Kind: ViolationOracleDeviation, Tick: tick, Op: hydrationArmsOp, Message: msg})
+		out = append(out, Violation{Kind: ViolationVacuousRun, Tick: tick, Op: hydrationArmsOp, Message: msg})
 	}
 	if !a.hydrateRan {
 		add("vacuous run: the hydrate arm never ran, so no reopen was proven to have loaded an index" +

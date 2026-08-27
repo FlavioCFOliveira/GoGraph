@@ -103,44 +103,48 @@ package sim
 // a seed-shuffled order. The seed decides the order and the base band; it never
 // decides the coverage.
 //
-// # Three defects this file WITNESSES rather than fixes
+// # Three defects this file FIXED, all now covered by regression arms
 //
-// All three are latent — neither range method has a production caller, so no
-// production label is ever built the way any of them requires — and all three
-// are pinned to their MEASURED behaviour with a clause that says so, so that
-// fixing one fires loudly here instead of passing silently.
+// The boundary defect is FIXED (#2607): `to == math.MaxUint64` used to drop the
+// WHOLE range in both directions, because `to+1` wrapped to 0 and roaring treats
+// `start >= end` as a no-op, and the two tiers disagreed about it because
+// `RemoveRange`'s inline branches filter on the closed interval directly.
+// `graph/index/nodeset.go` now converts through `addRangeClosed` /
+// `removeRangeClosed`, which split the call at the top of the range.
+// [liDriveBoundary] is therefore a REGRESSION arm: it asserts the closed
+// interval is honoured at `math.MaxUint64` on BOTH tiers, with the same range
+// one id shorter as its control.
 //
-//  1. `to == math.MaxUint64` silently drops the WHOLE range on the BITMAP tier,
-//     in both directions. `NodeSet.AddRange` passes `to+1` to roaring, which
-//     wraps to 0, and roaring treats `start >= end` as a no-op. MEASURED:
-//     `AddRange(max-5, max)` yields cardinality 0, not 6 — not "loses the last
-//     element", loses all of them — and `RemoveRange(max-3, max)` over a
-//     five-element BITMAP-tier set removes nothing. Every `to` below `max` is
-//     exact: `AddRange(max-5, max-1)` yields 5. The tier qualifier is load-
-//     bearing for `RemoveRange` only, and the two tiers DISAGREE: the inline
-//     branches filter on the closed interval with no `+1`
-//     (`graph/index/nodeset.go:349-370`), so MEASURED the same call over a
-//     five-element INLINE-tier set leaves 1, which is correct. `AddRange`
-//     promotes before it looks at the interval, so it has no inline branch to
-//     disagree with. [liDriveBoundary] pins the bitmap-tier behaviour, with
-//     that exactness as its control.
-//  2. An inverted or empty `AddRange` on a label with no entry CREATES one,
-//     holding an empty bitmap, and it is permanent and serialized. MEASURED:
-//     1 000 inverted `AddRange` calls on distinct labels produce a 20 016-byte
-//     image against 16 bytes for an empty index — 20 bytes and one `labelCount`
-//     apiece — while `Count` reports 0 for every one of them. `RemoveRange`'s
-//     godoc promises the opposite for its own direction ("Empty bitmaps are
-//     deleted so the map does not grow unboundedly"). [liDriveWithPhantom] pins
-//     it.
-//  3. The serialized form is NOT idempotent for a run-encoded label small enough
-//     to be down-converted on the way back in. MEASURED: an AddRange-built label
-//     of 8 ids serializes to 55 bytes and, after one Serialize/Deserialize
-//     cycle, to 72 — because [index.NodeSetFromBitmap] moves a bitmap of at most
-//     smallSetMax ids to the inline tier, which re-materialises through
-//     `AddMany` as an ARRAY container where `AddRange` had built a RUN one. The
-//     control one id above the threshold stays at 55. No content is ever lost,
-//     but a checkpoint, reload and re-checkpoint cycle produces different bytes
-//     for the same logical state. [liDriveDenseSmall] pins it.
+// The empty-interval defect is FIXED too (#2608): an inverted or empty
+// `AddRange` on a label with no entry used to CREATE one holding an empty
+// bitmap, permanently and in the serialized image — MEASURED at the time, 1 000
+// such calls on distinct labels produced a 20 016-byte image against 16 bytes
+// for an empty index, 20 bytes and one `labelCount` apiece, while `Count`
+// reported 0 for every one. `NodeSet.AddRange` now returns before promoting when
+// the interval is inverted, and `label.Index.AddRange` deletes rather than
+// stores a set that is empty after the call — mirroring `RemoveRange`'s own
+// godoc promise ("Empty bitmaps are deleted so the map does not grow
+// unboundedly"). [liDriveWithPhantom] is a REGRESSION arm, with a range naming
+// five ids as its control.
+//
+// The idempotence defect is FIXED as well (#2609): the serialized form used to
+// change for a run-encoded label small enough to be down-converted on the way
+// back in. MEASURED at the time, an AddRange-built label of 8 ids serialized to
+// 55 bytes and, after one Serialize/Deserialize cycle, to 72 — because
+// [index.NodeSetFromBitmap] moves a bitmap of at most smallSetMax ids to the
+// inline tier, which re-materialises through `AddMany` as an ARRAY container
+// where `AddRange` had built a RUN one. No content was ever lost, but a
+// checkpoint, reload and re-checkpoint cycle produced different bytes for the
+// same logical state. `Serialize` now writes through
+// [index.NodeSet.CanonicalBitmap], which run-optimises the container so the
+// encoding follows the contents, BOUNDED at smallSetMax — the band the reader
+// down-converts, and so the only band where a cycle could change the bytes.
+// [liDriveDenseSmall] is the regression arm, with the same construction one id
+// above the threshold as its control.
+//
+// So all three arms now assert repaired contracts, and each carries a
+// perturbation that reproduces its old defect, so none of them can pass by
+// measuring nothing.
 //
 // # An over-strong assertion of this harness's own, corrected
 //
@@ -157,14 +161,19 @@ package sim
 // ([liDriveRangeTier]), because the consequence is easy to assume away and is
 // real: two indexes that answer every query identically can have different
 // images, so byte-comparing two snapshots is not a valid way to ask whether two
-// graphs carry the same labels.
+// graphs carry the same labels. #2609 moved the crossover from width 4 to
+// smallSetMax rather than removing it, and the measurement's widths moved with
+// it so the gate still brackets both answers.
 //
 // The same mistake nearly reached the round-trip clause. `image ==
-// round-tripped image` is FALSE for the band in defect 3, and the sweep can
-// reach that band — an AddRange followed by a RemoveRange that trims the label
-// to a handful of ids — so the clause would have passed on this seed and flaked
-// on another. What is asserted instead is that the form is a FIXPOINT after at
-// most one cycle, which is true across every width probed.
+// round-tripped image` WAS false for the down-convert band before #2609, and the
+// sweep can reach that band — an AddRange followed by a RemoveRange that trims
+// the label to a handful of ids — so the clause would have passed on this seed
+// and flaked on another. What is asserted instead is that the form is a FIXPOINT
+// after at most one cycle, which was true across every width probed then and is
+// true a fortiori now that the band is byte-stable from the first cycle. The
+// weaker formulation is KEPT deliberately: it is what the module actually
+// promises above smallSetMax, where the normalisation does not reach.
 //
 // # What the corruption arm can and cannot reach
 //
@@ -687,7 +696,8 @@ type liScopeEvidence struct {
 }
 
 // liBoundaryEvidence records the measured behaviour at the top of the NodeID
-// range. It is a PIN on a defect, not a contract: see the file header.
+// range. Since #2607 it is a CONTRACT: the closed interval must be honoured at
+// math.MaxUint64, identically on both tiers. See the file header.
 type liBoundaryEvidence struct {
 	// AddNaive / AddGot are what a naive reading of the closed interval says the
 	// cardinality should be, and what the index produced, for a range ending at
@@ -705,6 +715,13 @@ type liBoundaryEvidence struct {
 	RemoveBefore uint64
 	RemoveNaive  uint64
 	RemoveGot    uint64
+	// RemoveInlineBefore / RemoveInlineGot repeat the RemoveRange experiment over
+	// an INLINE-tier label holding the identical membership. The tier a set
+	// occupies is not observable through the public surface, so the two must
+	// agree; before #2607 they did not, and that divergence was the sharper half
+	// of the defect.
+	RemoveInlineBefore uint64
+	RemoveInlineGot    uint64
 }
 
 // liPhantomEvidence records the measured cost of an inverted AddRange on a label
@@ -718,13 +735,18 @@ type liPhantomEvidence struct {
 	AfterLabelCount uint32
 	// Labels is N.
 	Labels int
-	// QueryVisible records whether the phantom is observable through the query
-	// surface at all: Count, Scan and Has must ALL say the label is empty, which
-	// is what makes the serialized form the only place it shows.
+	// QueryVisible records whether an empty-interval label is observable through
+	// the query surface at all: Count, Scan and Has must ALL say the label is
+	// empty. This was true of the old phantom and must stay true.
 	QueryVisible bool
-	// SurvivesRoundTrip records whether the phantom entry is still declared after
-	// a Serialize/Deserialize cycle.
-	SurvivesRoundTrip bool
+	// RoundTripLabelCount is the labelCount the image declares after a
+	// Serialize/Deserialize/Serialize cycle. It must equal AfterLabelCount.
+	RoundTripLabelCount uint32
+	// CtrlLabelCount / CtrlCount are the CONTROL: a range naming at least one id
+	// must still be recorded, so that "no entry was created" cannot be satisfied
+	// by AddRange having stopped working altogether.
+	CtrlLabelCount uint32
+	CtrlCount      uint64
 }
 
 // liTierRow is one width of the Add-versus-AddRange byte comparison. It is
@@ -931,7 +953,9 @@ func (e *LabelIndexScopedEvidence) computeDigest() uint64 {
 		h = liMix(h, uint64(v))
 	}
 	h = liMix(h, liBoolBits(p.QueryVisible))
-	h = liMix(h, liBoolBits(p.SurvivesRoundTrip))
+	h = liMix(h, uint64(p.RoundTripLabelCount))
+	h = liMix(h, uint64(p.CtrlLabelCount))
+	h = liMix(h, p.CtrlCount)
 	return h
 }
 
@@ -963,9 +987,11 @@ func (e *LabelIndexScopedEvidence) String() string {
 	fmt.Fprintf(&b, "boundary add %d/%d (control %d/%d) remove %d->%d/%d; ",
 		e.Boundary.AddGot, e.Boundary.AddNaive, e.Boundary.AddBelowGot, e.Boundary.AddBelowNaive,
 		e.Boundary.RemoveBefore, e.Boundary.RemoveGot, e.Boundary.RemoveNaive)
-	fmt.Fprintf(&b, "phantom %d labels %dB->%dB count=%d query-visible=%v survives-rt=%v; ",
+	fmt.Fprintf(&b, "empty-interval %d labels %dB->%dB count=%d rt-count=%d query-visible=%v "+
+		"(control count=%d labels=%d); ",
 		e.Phantom.Labels, e.Phantom.EmptyBytes, e.Phantom.AfterBytes, e.Phantom.AfterLabelCount,
-		e.Phantom.QueryVisible, e.Phantom.SurvivesRoundTrip)
+		e.Phantom.RoundTripLabelCount, e.Phantom.QueryVisible,
+		e.Phantom.CtrlCount, e.Phantom.CtrlLabelCount)
 	fmt.Fprintf(&b, "perturb=%s; digest=%#016x", e.Perturb, e.Digest)
 	for i := range e.Cells {
 		c := &e.Cells[i]
@@ -1087,13 +1113,17 @@ const (
 	// liPerturbScopeRouting flips one Apply routing outcome, reproducing a
 	// subscriber that consumed a change kind outside its scope.
 	liPerturbScopeRouting
-	// liPerturbBoundaryFixed reports the math.MaxUint64 range as having been
-	// added in full. It is the tripwire direction: this is what the evidence will
-	// look like the day the overflow is fixed, and the clause must notice.
-	liPerturbBoundaryFixed
-	// liPerturbPhantomGone reports the inverted-AddRange experiment as leaving no
-	// entry behind, which is both the pin's failure and its arming gate's.
-	liPerturbPhantomGone
+	// liPerturbBoundaryWraps reports the math.MaxUint64 range as having been
+	// dropped whole, in both directions. It reproduces the pre-#2607 `to+1`
+	// overflow, so the regression arm has a demonstrated way to fail.
+	liPerturbBoundaryWraps
+	// liPerturbPhantomKept reports the empty-interval experiment as leaving one
+	// entry behind apiece. It reproduces the pre-#2608 measurement, so the
+	// regression arm has a demonstrated way to fail.
+	liPerturbPhantomKept
+	// liPerturbPhantomCtrlBad zeroes the non-empty CONTROL's labelCount, so the
+	// arm cannot be satisfied by an AddRange that records nothing at all.
+	liPerturbPhantomCtrlBad
 	// liPerturbEntryFloor reports a serialized labelCount below the number of
 	// labels the model says carry a member, reproducing a lost entry.
 	liPerturbEntryFloor
@@ -1114,10 +1144,10 @@ const (
 	// liPerturbRangeTierFlat reports every Add-versus-AddRange width as
 	// identical, so the measurement no longer brackets the crossover.
 	liPerturbRangeTierFlat
-	// liPerturbDenseSmallStable reports the dense-small round trip as
-	// byte-stable. It is the tripwire direction: this is what the evidence will
-	// look like the day the down-convert stops re-encoding the container.
-	liPerturbDenseSmallStable
+	// liPerturbDenseSmallUnstable reports the dense-small round trip as changing
+	// its bytes. It reproduces the pre-#2609 55-to-72 re-encoding, so the
+	// regression arm has a demonstrated way to fail.
+	liPerturbDenseSmallUnstable
 	// liPerturbDenseSmallCtrl reports the dense-small CONTROL as unstable, so the
 	// instability stops being attributable to the smallSetMax threshold.
 	liPerturbDenseSmallCtrl
@@ -1156,10 +1186,12 @@ func (p liPerturb) String() string {
 		return "scope-swap"
 	case liPerturbScopeRouting:
 		return "scope-routing"
-	case liPerturbBoundaryFixed:
-		return "boundary-fixed"
-	case liPerturbPhantomGone:
-		return "phantom-gone"
+	case liPerturbBoundaryWraps:
+		return "boundary-wraps"
+	case liPerturbPhantomKept:
+		return "phantom-kept"
+	case liPerturbPhantomCtrlBad:
+		return "phantom-control-bad"
 	case liPerturbEntryFloor:
 		return "entry-floor"
 	case liPerturbEmptySweep:
@@ -1174,8 +1206,8 @@ func (p liPerturb) String() string {
 		return "boundary-control-bad"
 	case liPerturbRangeTierFlat:
 		return "range-tier-flat"
-	case liPerturbDenseSmallStable:
-		return "dense-small-stable"
+	case liPerturbDenseSmallUnstable:
+		return "dense-small-unstable"
 	case liPerturbDenseSmallCtrl:
 		return "dense-small-ctrl"
 	default:
@@ -1814,27 +1846,36 @@ func liDriveTierIdentity(cfg *LabelIndexScopedConfig, ev *LabelIndexScopedEviden
 }
 
 // liRangeTierWidths brackets the width at which an AddRange-built label stops
-// serializing like an Add-built one. 1..3 are below the crossover and 4..8 above
-// it, so the measurement contains both answers and the gate can require that.
-func liRangeTierWidths() []uint64 { return []uint64{1, 2, 3, 4, 6, 8} }
+// serializing like an Add-built one. Since #2609 that crossover sits at
+// smallSetMax: 1..8 are normalised to a common encoding and 9..16 are not, so
+// the measurement contains both answers and the gate can require that.
+func liRangeTierWidths() []uint64 { return []uint64{1, 2, 3, 4, 6, 8, 9, 12, 16} }
 
 // liDriveRangeTier MEASURES, and does not assert, how an AddRange-built label's
 // image compares with an Add-built one holding the identical ids.
 //
-// They diverge from width 4 upwards: roaring encodes a four-or-longer contiguous
-// run as a RUN container, where `AddMany` of the same ids builds an ARRAY
-// container. MEASURED on the reference host: identical at widths 1, 2 and 3
-// (58, 60 and 62 bytes), and 64/66/68/70/72 bytes against a flat 55 from width 4
-// to width 8 — flat because a run container costs the same whatever the run's
+// The two used to diverge from width 4 upwards: roaring encodes a four-or-longer
+// contiguous run as a RUN container, where `AddMany` of the same ids builds an
+// ARRAY container. MEASURED at the time: identical at widths 1, 2 and 3 (58, 60
+// and 62 bytes), then 64/66/68/70/72 bytes against a flat 55 from width 4 to
+// width 8 — flat because a run container costs the same whatever the run's
 // length.
 //
-// This is NOT a defect and there is no clause on it. `Serialize`'s godoc
-// promises that the on-disk form is deterministic "for a given in-memory state",
-// which is exactly what holds; it never promised the bytes were a function of
-// the logical contents alone. The measurement is recorded because the
-// consequence is easy to assume away and is real: two indexes that answer every
-// query identically can have different images, so byte-comparing two snapshots
-// is not a valid way to ask whether two graphs carry the same labels.
+// #2609 moved the crossover to smallSetMax. `Serialize` now normalises the
+// container for sets of at most that many ids, so widths 1 to 8 agree and 9
+// upwards still do not. The normalisation is bounded because normalising an
+// arbitrary set means CLONING it first, which measured 6.55 to 90 microseconds
+// and 1 289 to 218 065 bytes per serialize on a sparse 100 000-id label to
+// produce a byte-identical image.
+//
+// This is still NOT a defect above the bound and there is still no clause on it.
+// `Serialize`'s godoc promises that the on-disk form is deterministic "for a
+// given in-memory state", which is exactly what holds; it never promised the
+// bytes were a function of the logical contents alone. The measurement is
+// recorded because the consequence is easy to assume away and is real: two
+// indexes that answer every query identically can have different images, so
+// byte-comparing two snapshots is not a valid way to ask whether two graphs
+// carry the same labels.
 func liDriveRangeTier(cfg *LabelIndexScopedConfig, ev *LabelIndexScopedEvidence) {
 	const base = uint64(8192)
 	for _, w := range liRangeTierWidths() {
@@ -1859,40 +1900,43 @@ func liDriveRangeTier(cfg *LabelIndexScopedConfig, ev *LabelIndexScopedEvidence)
 	}
 }
 
-// liDriveDenseSmall pins the round-trip NON-IDEMPOTENCE this scenario found.
+// liDriveDenseSmall is the REGRESSION arm for the round-trip non-idempotence
+// this scenario found (#2609).
 //
 // # What it measures
 //
 // A label built by `AddRange` sits on the bitmap tier holding a run container.
 // If its cardinality is at most smallSetMax, [index.NodeSetFromBitmap]
 // down-converts it to the inline tier when the image is read back, and the
-// inline tier re-materialises through `AddMany` as an array container. So the
-// image the reader produces on the way OUT is not the image it was handed on the
-// way IN. MEASURED: 55 bytes in, 72 bytes out at a cardinality of 8; the third
-// image equals the second, so the form converges after exactly one cycle.
+// inline tier re-materialises through `AddMany` as an array container. Run and
+// array encode the same ids in different bytes, so the image the reader produced
+// on the way OUT was not the image it was handed on the way IN. MEASURED at the
+// time: 55 bytes in, 72 bytes out at a cardinality of 8, converging after
+// exactly one cycle.
 //
-// The CONTROL is the same construction one id above the threshold. It stays on
-// the bitmap tier, keeps its run container, and MEASURED comes back at 55 bytes
-// unchanged. Without it the instability would be consistent with round trips
-// changing bytes in general, and would not be attributable to the down-convert.
-//
-// # It is a defect, it is latent, and it is reported rather than fixed
-//
-// Content is never lost — every membership query agrees before and after — but a
-// checkpoint, reload and re-checkpoint cycle produces different bytes for the
+// Content was never lost — every membership query agreed before and after — but
+// a checkpoint, reload and re-checkpoint cycle produced different bytes for the
 // same logical state, which is exactly what a fixture diff, a content-addressed
 // store, or an incremental backup's deduplication relies on not happening.
 //
-// It is unreachable in production today: `AddRange` has no production caller, so
-// no production label is ever a run container, and every Add-built label is
-// MEASURED stable from the first cycle at every width. The fix — teaching
-// `NodeSetFromBitmap` not to down-convert a run-encoded bitmap, or teaching the
-// inline tier to re-materialise the container it came from — is a design choice
-// for whoever owns the type.
+// `label.Index.Serialize` now writes through `index.NodeSet.CanonicalBitmap`,
+// which run-optimises the container so its encoding follows the set's contents
+// rather than its construction history. The normalisation is BOUNDED at
+// smallSetMax, which is exactly the band the reader down-converts and therefore
+// the only band where a cycle could change the bytes. It is bounded rather than
+// universal because normalising an arbitrary set means cloning it first, and
+// that measured 6.55 to 90 microseconds and 1 289 to 218 065 bytes per serialize
+// on a sparse 100 000-id label to produce a BYTE-IDENTICAL image.
 //
-// So this arm asserts the MEASURED behaviour, and the clause says so. It fires
-// the day the behaviour changes, which is when this note and the fixpoint
-// formulation above need revisiting together.
+// The CONTROL is the same construction one id ABOVE the threshold. It stays on
+// the bitmap tier and keeps its run container, so it never took the
+// down-convert; it was byte-stable before the fix and must stay so. Without it,
+// "the fixture is stable" would be consistent with round trips having stopped
+// changing bytes for some unrelated reason, and would not be attributable to the
+// down-convert band.
+//
+// So this arm asserts the REPAIRED contract, and its perturbation reproduces the
+// old instability so the arm keeps a demonstrated way to fail.
 func liDriveDenseSmall(cfg *LabelIndexScopedConfig, ev *LabelIndexScopedEvidence) error {
 	const base = uint64(16384)
 	run := func(w int) (first, second, third int, stable bool, err error) {
@@ -1943,8 +1987,8 @@ func liDriveDenseSmall(cfg *LabelIndexScopedConfig, ev *LabelIndexScopedEvidence
 			"fixpoint either (%d then %d bytes); the arm cannot attribute anything",
 			d.CtrlWidth, d.CtrlSecond, ctrlThird)
 	}
-	if cfg.Perturb == liPerturbDenseSmallStable {
-		d.Stable = true
+	if cfg.Perturb == liPerturbDenseSmallUnstable {
+		d.Stable = false
 	}
 	if cfg.Perturb == liPerturbDenseSmallCtrl {
 		d.CtrlStable = false
@@ -2519,41 +2563,37 @@ const liBoundarySpan = 5
 // liDriveBoundary measures what the range methods do when the CLOSED interval
 // ends at math.MaxUint64.
 //
-// # This clause pins a defect, and says so
+// # This clause was a defect pin and is now a REGRESSION arm (#2607)
 //
-// [index.NodeSet.AddRange] converts the inclusive upper endpoint to roaring's
-// exclusive one with `to+1` (`graph/index/nodeset.go:339`), and
-// [index.NodeSet.RemoveRange] does the same in its BITMAP branch (`:378`). At
-// `to == math.MaxUint64` that wraps to 0, and roaring treats `start >= end` as a
-// no-op — so the whole range is silently dropped, not merely its last id.
-// MEASURED: `AddRange(max-5, max)` yields cardinality 0 where a naive reading of
-// "[from, to] inclusive" says 6, and `RemoveRange(max-3, max)` over a
-// five-element BITMAP-tier set removes nothing at all.
+// [index.NodeSet.AddRange] used to convert the inclusive upper endpoint to
+// roaring's exclusive one with a plain `to+1`, and [index.NodeSet.RemoveRange]
+// did the same in its BITMAP branch. At `to == math.MaxUint64` that wraps to 0,
+// and roaring returns immediately on `start >= end` — so the whole range was
+// silently dropped, not merely its last id. MEASURED at the time:
+// `AddRange(max-5, max)` yielded cardinality 0 where the closed interval says 6,
+// and `RemoveRange(max-3, max)` over a five-element BITMAP-tier set removed
+// nothing at all.
 //
-// The tier matters, and only for `RemoveRange`. Its singleton and small branches
-// filter on the closed interval directly (`v < from || v > to`,
-// `graph/index/nodeset.go:349-370`) with no `+1` and therefore no wrap, so
-// MEASURED the identical call over a five-element INLINE-tier set leaves 1 — the
-// correct answer. So the same logical operation on the same membership answers
-// differently depending on which tier the set happens to occupy, which is
-// invisible from the public surface. `AddRange` has no such split: it promotes
-// to the bitmap tier BEFORE looking at the interval, so it is uniformly wrong at
-// the boundary. This arm drives the bitmap tier, which is the defective one.
+// The tier mattered, and only for `RemoveRange`. Its singleton and small
+// branches filter on the closed interval directly (`v < from || v > to`) with no
+// `+1` and therefore no wrap, so the identical call over an INLINE-tier set left
+// the correct answer. The same logical operation on the same membership answered
+// differently depending on which tier the set happened to occupy — state the
+// public surface does not expose. `AddRange` had no such split: it promotes to
+// the bitmap tier BEFORE looking at the interval, so it was uniformly wrong.
 //
-// The defect is LATENT: neither range method has any production caller (see the
-// file header), and no graph in this module mints a NodeID at the top of the
-// uint64 space. It is reported rather than fixed because the fix is a design
-// choice — split the call, saturate, or refuse — that changes behaviour at the
-// boundary and belongs to whoever owns the type.
+// `graph/index/nodeset.go` now routes both directions through `addRangeClosed` /
+// `removeRangeClosed`, which split the call at the top of the range rather than
+// relying on a bound that the uint64 element type cannot name. This arm asserts
+// the repaired contract: the closed interval is honoured at the boundary, and
+// BOTH tiers answer identically. It drives the RemoveRange experiment twice over
+// identical membership — once on a bitmap-tier label, once on an inline-tier one
+// — because tier agreement is the half that a single-tier arm cannot see.
 //
-// So this arm asserts the MEASURED behaviour, deliberately. It is a tripwire in
-// the honest direction: the day the overflow is repaired, this clause fires and
-// names itself, the naive model in [liModel] becomes correct at the boundary,
-// and both are updated together. What it must never do is quietly agree with
-// whatever the code happens to do — which is why the arm also carries a CONTROL
-// one id lower, where the conversion is exact. Without that control "the range
-// vanished" would be consistent with the whole top of the id space being
-// unusable, and the loss would not be attributable to the final id.
+// The arm keeps its CONTROL one id lower, where the conversion was always exact.
+// Without it, "the range was handled" would be consistent with the whole top of
+// the id space behaving in some other uniform way, and a future regression at
+// the final id would not be attributable to the final id.
 func liDriveBoundary(cfg *LabelIndexScopedConfig, ev *LabelIndexScopedEvidence) {
 	const maxU64 = uint64(math.MaxUint64)
 	const lbl uint32 = 0xB0
@@ -2564,8 +2604,8 @@ func liDriveBoundary(cfg *LabelIndexScopedConfig, ev *LabelIndexScopedEvidence) 
 	add.AddRange(lbl, graph.NodeID(maxU64-liBoundarySpan), graph.NodeID(maxU64))
 	b.AddNaive = liBoundarySpan + 1
 	b.AddGot = add.Count(lbl)
-	if cfg.Perturb == liPerturbBoundaryFixed {
-		b.AddGot = b.AddNaive
+	if cfg.Perturb == liPerturbBoundaryWraps {
+		b.AddGot = 0
 	}
 
 	// The control: the same interval one id shorter, which must be exact.
@@ -2577,18 +2617,30 @@ func liDriveBoundary(cfg *LabelIndexScopedConfig, ev *LabelIndexScopedEvidence) 
 		b.AddBelowGot--
 	}
 
-	// The same experiment for RemoveRange, over a set the control path built.
+	// The same experiment for RemoveRange, over a BITMAP-tier set the control
+	// path built. A closed removal of [max-3, max] from {max-5 .. max-1} leaves
+	// the two ids below it.
+	b.RemoveNaive = 2
 	rem := label.NewIndex()
 	rem.AddRange(lbl, graph.NodeID(maxU64-liBoundarySpan), graph.NodeID(maxU64-1))
 	b.RemoveBefore = rem.Count(lbl)
 	rem.RemoveRange(lbl, graph.NodeID(maxU64-3), graph.NodeID(maxU64))
-	// A naive removal of the closed interval [max-3, max] from {max-5 .. max-1}
-	// leaves the two ids below it.
-	b.RemoveNaive = 2
 	b.RemoveGot = rem.Count(lbl)
-	if cfg.Perturb == liPerturbBoundaryFixed {
-		b.RemoveGot = b.RemoveNaive
+	if cfg.Perturb == liPerturbBoundaryWraps {
+		b.RemoveGot = b.RemoveBefore
 	}
+
+	// And again over an INLINE-tier set holding the identical membership, built
+	// with Add so it never crosses the promotion threshold. This is the tier the
+	// defect answered correctly, so it is the arm's cross-check rather than its
+	// treatment: the two must agree whatever the answer is.
+	inl := label.NewIndex()
+	for id := maxU64 - liBoundarySpan; id <= maxU64-1; id++ {
+		inl.Add(lbl, graph.NodeID(id))
+	}
+	b.RemoveInlineBefore = inl.Count(lbl)
+	inl.RemoveRange(lbl, graph.NodeID(maxU64-3), graph.NodeID(maxU64))
+	b.RemoveInlineGot = inl.Count(lbl)
 }
 
 // -----------------------------------------------------------------------------
@@ -2607,30 +2659,35 @@ const liPhantomBase uint32 = 0x0100_0000
 // liDriveWithPhantom measures what an inverted (or empty) AddRange does to a
 // label that has no entry.
 //
-// # This clause pins a defect too
+// # This clause was a defect pin and is now a REGRESSION arm (#2608)
 //
-// [label.Index.AddRange] reads the label's [index.NodeSet] out of the map,
-// calls `AddRange` on it, and stores it back UNCONDITIONALLY
-// (`graph/index/label/index.go:151-153`). `NodeSet.AddRange` promotes to the
-// bitmap tier BEFORE looking at the interval (`graph/index/nodeset.go:326-339`),
-// so an interval that names no ids still leaves a bitmap behind, and the
-// store-back creates a map entry for a label with nothing in it.
+// [label.Index.AddRange] used to read the label's [index.NodeSet] out of the
+// map, call `AddRange` on it, and store it back UNCONDITIONALLY, while
+// `NodeSet.AddRange` promoted to the bitmap tier BEFORE looking at the interval.
+// An interval that named no ids therefore left a bitmap behind, and the
+// store-back created a map entry for a label with nothing in it.
 //
-// The entry is invisible through the query surface — `Count` is 0, `Scan` is
-// nil, `Has` is false — and permanent: nothing removes it except a `Remove` or
-// `RemoveRange` that happens to find the set already empty. It is also
-// SERIALIZED, so it costs on-disk bytes and inflates the image's `labelCount`.
-// MEASURED, and pinned here as numbers: 1 000 inverted `AddRange` calls on
-// distinct labels turn a 16-byte empty image into a 20 016-byte one declaring
-// 1 000 labels, none of which carries a single id.
+// The entry was invisible through the query surface — `Count` 0, `Scan` nil,
+// `Has` false — and permanent. It was also SERIALIZED, so it cost on-disk bytes
+// and inflated the image's `labelCount`. MEASURED at the time: 1 000 inverted
+// `AddRange` calls on distinct labels turned a 16-byte empty image into a
+// 20 016-byte one declaring 1 000 labels, none carrying a single id.
 //
-// [label.Index.RemoveRange]'s own godoc promises the opposite for its direction
-// — "Empty bitmaps are deleted so the map does not grow unboundedly after
-// bulk-remove operations" — and MEASURED it keeps that promise. AddRange has no
-// such clause and does not behave that way.
+// [label.Index.RemoveRange]'s godoc has always promised the opposite for its own
+// direction — "Empty bitmaps are deleted so the map does not grow unboundedly
+// after bulk-remove operations" — and MEASURED it kept that promise. `AddRange`
+// now mirrors it: `NodeSet.AddRange` returns before promoting when the interval
+// is inverted, and `label.Index.AddRange` deletes rather than stores an entry
+// whose set is empty after the call. The two halves fix different things and
+// neither alone suffices — without the first an existing inline label is still
+// promoted one-way for nothing; without the second the zero-value set is still
+// stored back and the entry is still minted.
 //
-// Like the boundary arm, this is latent (no production caller) and is reported
-// rather than fixed, and the pin fires the day it changes.
+// So this arm now asserts the repaired contract: an interval naming no ids
+// leaves the image byte-identical to an empty index. It keeps the query-surface
+// probe, because "invisible to every query path" was true before the fix and
+// must stay true after it, and it keeps the round-trip check, which now asserts
+// that nothing is re-declared on the way back in.
 func liDriveWithPhantom(cfg *LabelIndexScopedConfig, ev *LabelIndexScopedEvidence) error {
 	p := &ev.Phantom
 	p.Labels = liPhantomLabels
@@ -2649,17 +2706,19 @@ func liDriveWithPhantom(cfg *LabelIndexScopedConfig, ev *LabelIndexScopedEvidenc
 	}
 	img, err := liSerialize(idx)
 	if err != nil {
-		return fmt.Errorf("serialize the phantom index: %w", err)
+		return fmt.Errorf("serialize the empty-interval index: %w", err)
 	}
 	p.AfterBytes = len(img)
 	p.AfterLabelCount = liImageLabelCount(img)
-	if cfg.Perturb == liPerturbPhantomGone {
-		p.AfterBytes = p.EmptyBytes
-		p.AfterLabelCount = 0
+	if cfg.Perturb == liPerturbPhantomKept {
+		// Reproduce the pre-#2608 measurement: one 20-byte entry apiece.
+		p.AfterBytes = p.EmptyBytes + 20*liPhantomLabels
+		p.AfterLabelCount = uint32(liPhantomLabels)
 	}
 
-	// The phantom must be invisible to every query path, which is what makes the
-	// serialized form the only place it shows.
+	// The entry must be invisible to every query path. This was true of the
+	// phantom too, and it is what confined the old defect to the serialized
+	// form; it must not regress into a VISIBLE empty label.
 	p.QueryVisible = false
 	for k := 0; k < liPhantomLabels; k++ {
 		lbl := liPhantomBase + uint32(k)
@@ -2669,17 +2728,34 @@ func liDriveWithPhantom(cfg *LabelIndexScopedConfig, ev *LabelIndexScopedEvidenc
 		}
 	}
 
-	// And it survives the round trip: the entry is re-declared on the way back in.
+	// And nothing is re-declared on the way back in.
 	fresh := label.NewIndex()
 	if derr := fresh.Deserialize(bytes.NewReader(img)); derr != nil {
-		return fmt.Errorf("deserialize the phantom image: %w", derr)
+		return fmt.Errorf("deserialize the empty-interval image: %w", derr)
 	}
 	back, err := liSerialize(fresh)
 	if err != nil {
-		return fmt.Errorf("re-serialize the phantom image: %w", err)
+		return fmt.Errorf("re-serialize the empty-interval image: %w", err)
 	}
-	p.SurvivesRoundTrip = liImageLabelCount(back) == p.AfterLabelCount &&
-		cfg.Perturb != liPerturbPhantomGone
+	p.RoundTripLabelCount = liImageLabelCount(back)
+	if cfg.Perturb == liPerturbPhantomKept {
+		p.RoundTripLabelCount = uint32(liPhantomLabels)
+	}
+
+	// The CONTROL: a label built by a range that names at least one id must
+	// still be recorded. Without it, "no entry was created" would be consistent
+	// with AddRange having stopped working altogether.
+	ctrl := label.NewIndex()
+	ctrl.AddRange(liPhantomBase, 10, 14)
+	cimg, err := liSerialize(ctrl)
+	if err != nil {
+		return fmt.Errorf("serialize the non-empty control: %w", err)
+	}
+	p.CtrlLabelCount = liImageLabelCount(cimg)
+	p.CtrlCount = ctrl.Count(liPhantomBase)
+	if cfg.Perturb == liPerturbPhantomCtrlBad {
+		p.CtrlLabelCount = 0
+	}
 	return nil
 }
 
@@ -2968,58 +3044,77 @@ func liCheckScope(e *LabelIndexScopedEvidence) []Violation {
 	return v
 }
 
-// liCheckPins adjudicates the two defect pins.
+// liCheckPins adjudicates the boundary contract and the two remaining defect
+// pins.
 //
-// Both clauses assert MEASURED behaviour that is wrong, and both say so in their
-// message. They are tripwires in the honest direction: they fire the day the
-// behaviour changes, which is exactly when the naive model and the docs need
-// updating together. Neither is a claim that the current behaviour is correct.
+// The boundary clauses assert the CORRECT answer: since #2607 the closed
+// interval is honoured at math.MaxUint64 and both tiers agree. The phantom
+// clauses still assert MEASURED behaviour that is wrong, and say so in their
+// message — tripwires in the honest direction, firing the day the behaviour
+// changes, which is exactly when the naive model and the docs need updating
+// together. They are not a claim that the current behaviour is correct.
 func liCheckPins(e *LabelIndexScopedEvidence) []Violation {
 	var v []Violation
 	b := &e.Boundary
-	if b.AddGot != 0 {
-		v = append(v, liViolation(ViolationOracleDeviation, "boundary-pin",
-			"AddRange over the closed interval [max-%d, max] yielded cardinality %d, and this pin "+
-				"records the MEASURED behaviour of 0 (the `to+1` conversion at "+
-				"graph/index/nodeset.go:339 wraps to zero and roaring treats start>=end as a no-op). "+
-				"A naive reading says %d. If this fired because the overflow was FIXED, that is good "+
-				"news: update this pin, liModel's range methods are already correct, and drop the "+
-				"exclusion note in the file header",
+	if b.AddGot != b.AddNaive {
+		v = append(v, liViolation(ViolationGraphIntegrity, "boundary-pin",
+			"AddRange over the closed interval [max-%d, max] yielded cardinality %d, want %d. "+
+				"The closed interval must be honoured at math.MaxUint64: the half-open conversion "+
+				"cannot name one-past-max, so graph/index/nodeset.go splits the call through "+
+				"addRangeClosed (#2607). A plain `to+1` wraps to zero and roaring treats "+
+				"start>=end as a no-op, dropping the whole range",
 			liBoundarySpan, b.AddGot, b.AddNaive))
 	}
-	if b.RemoveGot != b.RemoveBefore {
+	if b.RemoveGot != b.RemoveNaive {
+		v = append(v, liViolation(ViolationGraphIntegrity, "boundary-pin",
+			"RemoveRange over the closed interval [max-3, max] left %d of %d ids on the BITMAP "+
+				"tier, want %d. Same conversion, same wrap, repaired the same way through "+
+				"removeRangeClosed (#2607)",
+			b.RemoveGot, b.RemoveBefore, b.RemoveNaive))
+	}
+	if b.RemoveInlineGot != b.RemoveGot {
+		v = append(v, liViolation(ViolationGraphIntegrity, "boundary-pin",
+			"the same RemoveRange over the same membership left %d ids on the INLINE tier and %d "+
+				"on the BITMAP tier. The tier a set occupies is not observable through the public "+
+				"surface, so the two cannot disagree; before #2607 they did, because the inline "+
+				"branches filter on the closed interval directly and never wrapped",
+			b.RemoveInlineGot, b.RemoveGot))
+	}
+	if b.RemoveInlineBefore != b.RemoveBefore {
 		v = append(v, liViolation(ViolationOracleDeviation, "boundary-pin",
-			"RemoveRange over the closed interval [max-3, max] left %d of %d ids, and this pin "+
-				"records the MEASURED behaviour of removing nothing at all (%d). A naive reading "+
-				"says %d survive. Same conversion, same wrap, at graph/index/nodeset.go:378",
-			b.RemoveGot, b.RemoveBefore, b.RemoveBefore, b.RemoveNaive))
+			"the inline and bitmap fixtures started from %d and %d ids, so the tier comparison "+
+				"above is not over identical membership and proves nothing",
+			b.RemoveInlineBefore, b.RemoveBefore))
 	}
 	p := &e.Phantom
-	if int(p.AfterLabelCount) != p.Labels {
-		v = append(v, liViolation(ViolationOracleDeviation, "phantom-pin",
-			"%d inverted AddRange calls on distinct labels left an image declaring %d labels, and "+
-				"this pin records the MEASURED behaviour of one phantom entry apiece (%d). "+
-				"label.Index.AddRange stores the NodeSet back unconditionally and NodeSet.AddRange "+
-				"promotes to the bitmap tier before it looks at the interval, so an interval naming "+
-				"no ids still leaves an entry. If this fired because the entry is no longer created, "+
-				"update the pin", p.Labels, p.AfterLabelCount, p.Labels))
+	if p.AfterLabelCount != 0 {
+		v = append(v, liViolation(ViolationGraphIntegrity, "phantom-pin",
+			"%d AddRange calls over an interval naming NO ids left an image declaring %d labels, "+
+				"want 0. An interval that names nothing must leave no entry: label.Index.AddRange "+
+				"deletes rather than stores a set that is empty after the call, mirroring "+
+				"RemoveRange's own godoc promise (#2608)", p.Labels, p.AfterLabelCount))
 	}
-	if p.AfterBytes <= p.EmptyBytes {
-		v = append(v, liViolation(ViolationOracleDeviation, "phantom-pin",
-			"the phantom image is %d bytes against %d for an empty index, so the entries cost "+
-				"nothing on disk; the pin records that they DO cost bytes (measured 20 apiece)",
+	if p.AfterBytes != p.EmptyBytes {
+		v = append(v, liViolation(ViolationGraphIntegrity, "phantom-pin",
+			"the empty-interval image is %d bytes against %d for an empty index; the entries must "+
+				"cost nothing on disk (they used to cost 20 apiece)",
 			p.AfterBytes, p.EmptyBytes))
 	}
 	if p.QueryVisible {
 		v = append(v, liViolation(ViolationGraphIntegrity, "phantom-pin",
-			"a phantom entry was observable through Count, Scan or Has; it must be invisible to "+
-				"every query path, which is what confines the defect to the serialized form"))
+			"an empty-interval label was observable through Count, Scan or Has; it must be "+
+				"invisible to every query path, which was true of the old phantom too and must "+
+				"not regress into a visible empty label"))
 	}
-	if !p.SurvivesRoundTrip {
+	if p.RoundTripLabelCount != p.AfterLabelCount {
 		v = append(v, liViolation(ViolationOracleDeviation, "phantom-pin",
-			"the phantom entries did not survive a Serialize/Deserialize cycle; the pin records "+
-				"that they do (the reader re-declares an entry for every labelID in the image, and "+
-				"NodeSetFromBitmap of an empty bitmap yields the empty tier)"))
+			"the image declared %d labels and %d after a Serialize/Deserialize cycle; the reader "+
+				"re-declares an entry for every labelID in the image, so the two must agree",
+			p.AfterLabelCount, p.RoundTripLabelCount))
+	}
+	if p.CtrlCount != 5 {
+		v = append(v, liViolation(ViolationOracleDeviation, "phantom-pin",
+			"the non-empty CONTROL recorded %d ids over a five-id range, want 5", p.CtrlCount))
 	}
 	return v
 }
@@ -3076,47 +3171,47 @@ func liGateSweep(e *LabelIndexScopedEvidence) []Violation {
 		}
 	}
 	if len(missing) > 0 {
-		v = append(v, liViolation(ViolationOracleDeviation, "gate:cells",
+		v = append(v, liViolation(ViolationVacuousRun, "gate:cells",
 			"%d of the %d (relationship, direction) cells were never driven, so the "+
 				"inclusive/exclusive conversion was not swept: %s",
 			len(missing), int(liRelCount)*int(liDirCount), strings.Join(missing, ", ")))
 	}
 	if e.FinalLabels < liFloorLabels {
-		v = append(v, liViolation(ViolationOracleDeviation, "gate:model-size",
+		v = append(v, liViolation(ViolationVacuousRun, "gate:model-size",
 			"the final index carries %d labels, below the floor of %d; a sweep that ends on one "+
 				"label never exercises the per-label map at all",
 			e.FinalLabels, liFloorLabels))
 	}
 	if e.PeakMembers < liFloorMembers {
-		v = append(v, liViolation(ViolationOracleDeviation, "gate:model-size",
+		v = append(v, liViolation(ViolationVacuousRun, "gate:model-size",
 			"the model peaked at %d (label, node) pairs, below the floor of %d; below the "+
 				"small-set threshold of 8 per label the bitmap tier is never reached and the range "+
 				"methods are compared only against the inline path",
 			e.PeakMembers, liFloorMembers))
 	}
 	if e.RangeOps < liFloorRangeOps {
-		v = append(v, liViolation(ViolationOracleDeviation, "gate:model-size",
+		v = append(v, liViolation(ViolationVacuousRun, "gate:model-size",
 			"the sweep drove %d range operations, below the floor of %d",
 			e.RangeOps, liFloorRangeOps))
 	}
 	if e.EmptiedLabels == 0 {
-		v = append(v, liViolation(ViolationOracleDeviation, "gate:emptied",
+		v = append(v, liViolation(ViolationVacuousRun, "gate:emptied",
 			"no RemoveRange ever drove a non-empty label to empty, so the entry-deletion path "+
 				"RemoveRange's godoc describes was never taken"))
 	}
 	if e.PromotedAfterAdd == 0 {
-		v = append(v, liViolation(ViolationOracleDeviation, "gate:promoted",
+		v = append(v, liViolation(ViolationVacuousRun, "gate:promoted",
 			"no epoch drove individual Adds BEFORE its range operations, so the add-then-range "+
 				"order — the one that folds an existing inline set into a fresh bitmap — was never "+
 				"driven"))
 	}
 	if e.TierChecks != len(liTierWidths()) {
-		v = append(v, liViolation(ViolationOracleDeviation, "gate:tier-checks",
+		v = append(v, liViolation(ViolationVacuousRun, "gate:tier-checks",
 			"the tier-identity arm compared %d width pairs, want %d",
 			e.TierChecks, len(liTierWidths())))
 	}
 	if e.RoundTrips == 0 {
-		v = append(v, liViolation(ViolationOracleDeviation, "gate:roundtrip",
+		v = append(v, liViolation(ViolationVacuousRun, "gate:roundtrip",
 			"no image was round-tripped, so the content, byte-stability and determinism clauses "+
 				"adjudicated nothing"))
 	}
@@ -3142,7 +3237,7 @@ func liGateUnion(e *LabelIndexScopedEvidence) []Violation {
 		missing = append(missing, "empty-subset")
 	}
 	if len(missing) > 0 {
-		v = append(v, liViolation(ViolationOracleDeviation, "gate:union-shapes",
+		v = append(v, liViolation(ViolationVacuousRun, "gate:union-shapes",
 			"the Union arm never reached %s across %d draws; those are the shapes that separate a "+
 				"real fold from a single-label Scan", strings.Join(missing, ", "), e.UnionDraws))
 	}
@@ -3181,30 +3276,30 @@ func liGateCorruption(e *LabelIndexScopedEvidence) []Violation {
 		}
 	}
 	if len(missing) > 0 {
-		v = append(v, liViolation(ViolationOracleDeviation, "gate:corrupt-regions",
+		v = append(v, liViolation(ViolationVacuousRun, "gate:corrupt-regions",
 			"the raw damage family never reached %s; every region of the layout must be flipped, "+
 				"because the claim being made is that the CRC covers all of them",
 			strings.Join(missing, ", ")))
 	}
 	if restampSeen < liRestampTrials {
-		v = append(v, liViolation(ViolationOracleDeviation, "gate:corrupt-regions",
+		v = append(v, liViolation(ViolationVacuousRun, "gate:corrupt-regions",
 			"the re-stamped family drove %d trials, want %d; the structural guards inside "+
 				"Deserialize are unreachable without a recomputed trailer, so a run that skips them "+
 				"has tested only the checksum", restampSeen, liRestampTrials))
 	}
 	if truncateSeen < liTruncateTrialsMin {
-		v = append(v, liViolation(ViolationOracleDeviation, "gate:corrupt-regions",
+		v = append(v, liViolation(ViolationVacuousRun, "gate:corrupt-regions",
 			"the truncate family drove %d trials, want at least %d — the short-payload branch and "+
 				"the truncated-body branch are different code",
 			truncateSeen, liTruncateTrialsMin))
 	}
 	if !control {
-		v = append(v, liViolation(ViolationOracleDeviation, "gate:clean-control",
+		v = append(v, liViolation(ViolationVacuousRun, "gate:clean-control",
 			"no undamaged control was driven, so nothing established that this reader accepts a "+
 				"good image at all"))
 	}
 	if unpopulated > 0 {
-		v = append(v, liViolation(ViolationOracleDeviation, "gate:corrupt-populated",
+		v = append(v, liViolation(ViolationVacuousRun, "gate:corrupt-populated",
 			"%d of %d damage trials deserialized into an EMPTY receiver, so \"the receiver was "+
 				"restored to its pre-call state\" was satisfied by an index that had no state to "+
 				"restore", unpopulated, len(e.Corrupt)))
@@ -3222,14 +3317,16 @@ const (
 )
 
 // liGateScopeAndPins certifies the scope table is complete and both directions
-// of the routing rule are represented, and that the boundary arm's control is
-// exact — without which the loss at math.MaxUint64 would not be attributable to
-// the final id.
+// of the routing rule are represented, that the boundary arm's control is exact
+// — without which behaviour at math.MaxUint64 would not be attributable to the
+// final id — and that the empty-interval arm's control actually recorded
+// something, without which its "no entry" assertion is satisfied by a harness
+// that measured nothing.
 func liGateScopeAndPins(e *LabelIndexScopedEvidence) []Violation {
 	var v []Violation
 	wantRows := 3 * len(liScopeOps())
 	if len(e.Scopes) != wantRows {
-		v = append(v, liViolation(ViolationOracleDeviation, "gate:scope-rows",
+		v = append(v, liViolation(ViolationVacuousRun, "gate:scope-rows",
 			"the scope arm drove %d (constructor, change kind) rows, want %d",
 			len(e.Scopes), wantRows))
 	}
@@ -3242,21 +3339,25 @@ func liGateScopeAndPins(e *LabelIndexScopedEvidence) []Violation {
 		}
 	}
 	if accepts == 0 || drops == 0 {
-		v = append(v, liViolation(ViolationOracleDeviation, "gate:scope-rows",
+		v = append(v, liViolation(ViolationVacuousRun, "gate:scope-rows",
 			"the routing table expects %d acceptances and %d drops; with either at zero the "+
 				"`scope-routing` clause would pass on an index that ignored every change, or on one "+
 				"that consumed every change", accepts, drops))
 	}
 	if e.Boundary.AddBelowGot != e.Boundary.AddBelowNaive {
-		v = append(v, liViolation(ViolationOracleDeviation, "gate:boundary-control",
+		v = append(v, liViolation(ViolationVacuousRun, "gate:boundary-control",
 			"the boundary CONTROL — the same interval ending one id below math.MaxUint64 — yielded "+
 				"%d ids, want %d. Until the control is exact, the loss the pin records is not "+
 				"attributable to the final id rather than to the whole top of the id space",
 			e.Boundary.AddBelowGot, e.Boundary.AddBelowNaive))
 	}
-	if e.Phantom.AfterLabelCount == 0 {
-		v = append(v, liViolation(ViolationOracleDeviation, "gate:phantom-armed",
-			"the phantom experiment produced no entries at all, so the pin adjudicated nothing"))
+	if e.Phantom.Labels == 0 || e.Phantom.CtrlLabelCount == 0 {
+		v = append(v, liViolation(ViolationVacuousRun, "gate:phantom-armed",
+			"the empty-interval experiment drove %d labels and its CONTROL — a range naming five "+
+				"ids — left %d entries in the image. With either at zero, "+
+				"\"no entry was created\" is satisfied by a harness that called nothing, or by an "+
+				"AddRange that records nothing at all",
+			e.Phantom.Labels, e.Phantom.CtrlLabelCount))
 	}
 	return v
 }
@@ -3329,28 +3430,26 @@ func runLabelIndexScopedScenario(ctx context.Context, seed uint64) (*SimReport, 
 
 // liCheckDenseSmallPin adjudicates the round-trip non-idempotence pin.
 //
-// Like the boundary and phantom pins, this clause asserts MEASURED behaviour
-// that is wrong, and says so in its message. It fires the day the behaviour
-// changes, which is exactly when the fixpoint formulation in [liDriveRoundTrip]
-// and the note in the file header need revisiting.
+// Since #2609 this clause asserts the REPAIRED contract rather than a measured
+// defect: the image of an unchanged logical state must not move across a cycle.
 func liCheckDenseSmallPin(e *LabelIndexScopedEvidence) []Violation {
 	var v []Violation
 	d := &e.DenseSmall
-	if d.Stable {
-		v = append(v, liViolation(ViolationOracleDeviation, "dense-small-pin",
-			"an AddRange-built label of %d ids round-tripped byte-stably (%d -> %d bytes), and this "+
-				"pin records the MEASURED instability (55 -> 72 on the reference host): "+
-				"index.NodeSetFromBitmap down-converts a bitmap of at most smallSetMax=%d ids to the "+
-				"inline tier, which re-materialises through AddMany as an ARRAY container where "+
-				"AddRange had built a RUN container. If this fired because the down-convert now "+
-				"preserves the encoding, that is good news: update this pin and the fixpoint note in "+
-				"liDriveRoundTrip", d.Width, d.First, d.Second, liSmallSetMaxMirror))
+	if !d.Stable {
+		v = append(v, liViolation(ViolationGraphIntegrity, "dense-small-pin",
+			"an AddRange-built label of %d ids changed its image across a Serialize/Deserialize "+
+				"cycle (%d -> %d bytes). index.NodeSetFromBitmap down-converts a bitmap of at most "+
+				"smallSetMax=%d ids to the inline tier, which re-materialises through AddMany as an "+
+				"ARRAY container where AddRange had built a RUN container; Serialize normalises the "+
+				"encoding within that band so the bytes follow the contents (#2609). An unchanged "+
+				"logical state that does not reproduce its own bytes defeats fixture diffing and "+
+				"content-addressed comparison", d.Width, d.First, d.Second, liSmallSetMaxMirror))
 	}
 	if d.Second != d.Third {
 		v = append(v, liViolation(ViolationGraphIntegrity, "dense-small-pin",
-			"the dense-small fixture never converges: %d, then %d, then %d bytes. The re-tiering is "+
-				"supposed to happen at most ONCE, and a form that keeps changing is a different and "+
-				"worse defect than the one this pin records", d.First, d.Second, d.Third))
+			"the dense-small fixture never converges: %d, then %d, then %d bytes. Whatever the "+
+				"first cycle does, a form that keeps changing is a worse defect still",
+			d.First, d.Second, d.Third))
 	}
 	return v
 }
@@ -3360,7 +3459,7 @@ func liCheckDenseSmallPin(e *LabelIndexScopedEvidence) []Violation {
 func liGateRoundTripShape(e *LabelIndexScopedEvidence) []Violation {
 	var v []Violation
 	if !e.DenseSmall.CtrlStable {
-		v = append(v, liViolation(ViolationOracleDeviation, "gate:dense-small-control",
+		v = append(v, liViolation(ViolationVacuousRun, "gate:dense-small-control",
 			"the dense-small CONTROL — the same AddRange construction at %d ids, one ABOVE "+
 				"smallSetMax — was not byte-stable across its round trip (%d -> %d). Until the "+
 				"control holds, the instability at %d ids is not attributable to the down-convert "+
@@ -3377,7 +3476,7 @@ func liGateRoundTripShape(e *LabelIndexScopedEvidence) []Violation {
 		}
 	}
 	if same == 0 || differ == 0 {
-		v = append(v, liViolation(ViolationOracleDeviation, "gate:range-tier-crossover",
+		v = append(v, liViolation(ViolationVacuousRun, "gate:range-tier-crossover",
 			"the Add-versus-AddRange measurement found %d identical and %d differing widths; it "+
 				"must BRACKET the crossover (below it roaring keeps an array container, at and above "+
 				"it a run container), or the row is an anecdote rather than a measurement",

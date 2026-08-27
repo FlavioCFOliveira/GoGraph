@@ -120,7 +120,8 @@ func TestBTreeStringEq_UsesTheIndex(t *testing.T) {
 	// Above the selectivity gate's floor. The rewrite deliberately does NOT force
 	// a seek: it hands the degenerate range to the same rangeCountWins gate the
 	// numeric path uses, which keeps the scan for a label too small for an index
-	// to pay for itself (the engine seeks from ~1024 nodes upward). A test seeded
+	// to pay for itself (the engine seeks from rangeSeekMinLabelPopulation upward,
+	// 64 since #2367). A test seeded
 	// below that floor would assert the gate away rather than the rewrite.
 	eng := newBtreeStringEngine(t, 2000)
 

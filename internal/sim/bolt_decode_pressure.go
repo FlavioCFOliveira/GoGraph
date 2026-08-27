@@ -35,7 +35,22 @@ package sim
 //	vector                         code                                          session afterwards
 //	aggregate pool breach          Neo.TransientError.General.OutOfMemoryError    READY   (usable with NO RESET)
 //	wire nesting cap (>=128)       Neo.ClientError.Request.Invalid                READY   (usable with NO RESET)
-//	engine param cap (>32)         Neo.DatabaseError.General.UnknownError         FAILED  (next message IGNORED)
+//	engine param cap (>32)         Neo.ClientError.Statement.ArgumentError        FAILED  (next message IGNORED)
+//
+// The third row was Neo.DatabaseError.General.UnknownError when this scenario
+// first measured it, and saying so in a report is what got it FIXED: rmp #2570
+// reclassified it as a client fault. This family's arms are what pinned the old
+// answer, so the correction failed them on purpose and they were updated with the
+// ticket rather than deleted.
+//
+// The two READY rows and the one FAILED row do NOT disagree, and the reason is
+// worth stating because it looks like an inconsistency. The first two refuse
+// during decode, in the serve loop, before the message reaches a session at all —
+// there is no request to fail, so the session is untouched. The third refuses
+// inside handleRun, after a message that decoded correctly was dispatched, which
+// the Bolt state machine puts in FAILED. Staying READY is reserved for
+// back-pressure, where retrying the same request can succeed (state.go); a depth
+// refusal is deterministic, so retrying it cannot.
 //
 // The classification segment is load-bearing and is asserted on its own:
 // neo4j-go-driver's IsRetriableTransient tests `classification == "TransientError"`
@@ -146,12 +161,18 @@ const (
 	// boltDecodeCodeInvalid is what any decode fault returns, the WIRE nesting cap
 	// among them (serve.go:1289).
 	boltDecodeCodeInvalid = "Neo.ClientError.Request.Invalid"
-	// boltDecodeCodeInternal is what the ENGINE'S parameter nesting cap returns,
-	// via the failure sanitiser. It is a DatabaseError, so a driver does not retry
-	// it — correct, since retrying an over-nested parameter fails identically —
-	// though the code says "server bug" about what is a client fault. See the
-	// scenario's report note.
-	boltDecodeCodeInternal = "Neo.DatabaseError.General.UnknownError"
+	// boltDecodeCodeParamDepth is what the ENGINE'S parameter nesting cap returns.
+	// It is a ClientError, so a driver does not retry it — correct, since retrying
+	// an over-nested parameter fails identically — and it names the fault as the
+	// client's, which is what rmp #2570 corrected: it was
+	// Neo.DatabaseError.General.UnknownError, sanitised to generic internal-error
+	// text, so the code said "server bug" about a wholly client-supplied payload.
+	//
+	// The Statement family rather than the Request family, because the message
+	// DECODED and the statement was dispatched: what is invalid is the statement's
+	// argument, not the form of the request. Request.Invalid belongs to the wire cap
+	// above, which refuses a frame that will not decode.
+	boltDecodeCodeParamDepth = "Neo.ClientError.Statement.ArgumentError"
 )
 
 // The exact message texts the two decode-layer refusals carry. A code alone is
@@ -160,9 +181,17 @@ const (
 const (
 	boltDecodeMsgBudget  = "server inbound decode memory limit reached; retry later"
 	boltDecodeMsgInvalid = "malformed Bolt message"
-	// boltDecodeMsgInternalPrefix is the STABLE prefix of the sanitised internal
-	// error; the remainder names a per-session id and is redacted before recording.
-	boltDecodeMsgInternalPrefix = "An internal error occurred."
+	// boltDecodeMsgParamDepth is the WHOLE message the parameter cap now carries.
+	// It used to be pinned as a PREFIX ("An internal error occurred.") because the
+	// sanitised text ended in a per-session id that had to be redacted before
+	// recording. Since rmp #2570 the message is a client-fault message that bypasses
+	// the sanitiser, is a pure function of the parameter key and the limit, and
+	// carries no session id — so it is pinned in full, which is strictly stronger.
+	//
+	// It names the key this family binds under, so a change to [boltDecodeParamKey]
+	// must change this literal too. The nesting-message clause is what would catch
+	// that, by name.
+	boltDecodeMsgParamDepth = `cypher: ArgumentError.ParameterNestedTooDeep: parameter "d" is nested deeper than the supported limit of 32 levels`
 )
 
 // boltDecodeRetriableClassification is the second dot-segment a Bolt status code
@@ -743,12 +772,20 @@ func boltDecodeParams(n int) map[string]any {
 // appends to its internal-error text with a fixed marker.
 //
 // The sanitised message reads "An internal error occurred. See server logs for
-// details (session: <16 hex>)." (bolt/server/session.go:1946). The id is minted
-// per connection and is NOT a function of the seed, so recording it verbatim
-// would make the rendering vary run to run — the exact trap rmp #2486's own
-// determinism test caught. The
-// STABLE prefix is what the oracle pins; the id is replaced rather than dropped
-// so the report still shows that a session id was present.
+// details (session: <16 hex>)." (bolt/server/session.go). The id is minted per
+// connection and is NOT a function of the seed, so recording it verbatim would make
+// the rendering vary run to run — the exact trap rmp #2486's own determinism test
+// caught. The id is replaced rather than dropped so the report still shows that a
+// session id was present.
+//
+// It is currently a NO-OP on every arm, and that is a consequence of rmp #2570: the
+// parameter cap was the only refusal in this family that reached the sanitiser, and
+// it now answers with a client-fault message that bypasses it. Every message this
+// family records is therefore a pure function of the seed by construction. This is
+// kept as insurance for a future arm that does draw a sanitised message, and the
+// determinism test says so where its "the redaction really fired" clause used to be
+// — that clause was retired rather than left to fail, because nothing can satisfy
+// it any more.
 func boltDecodeRedactSession(msg string) string {
 	i := strings.Index(msg, "(session: ")
 	if i < 0 {
@@ -954,7 +991,7 @@ func boltDecodeExpectedNesting(vehicle string, depth int) (kind, code string, se
 	if vehicle == "run" && depth > boltDecodeParamDepthCap {
 		// Decoded fine; cypher.BindParams then refuses the parameter and the
 		// sanitiser turns that into a DatabaseError, which enters the FAILED state.
-		return "FAILURE", boltDecodeCodeInternal, false
+		return "FAILURE", boltDecodeCodeParamDepth, false
 	}
 	return "SUCCESS", "", true
 }
@@ -2613,7 +2650,7 @@ func checkBoltDecodeNesting(e *BoltDecodeEvidence) []Violation {
 		// because it is the clause that would fire if the family were ever re-sized
 		// past the point where the anti-confound argument still holds.
 		if a.WireBytes >= boltDecodeNestingWireCeiling {
-			v = append(v, boltDecodeViolation(ViolationOracleDeviation, "nesting-not-by-size",
+			v = append(v, boltDecodeViolation(ViolationVacuousRun, "nesting-not-by-size",
 				fmt.Sprintf("%s is %d wire bytes, at or over the %d B anti-confound ceiling: a payload "+
 					"this large could have been refused for its SIZE, so it proves nothing about a DEPTH cap",
 					a.Name, a.WireBytes, boltDecodeNestingWireCeiling)))
@@ -2622,10 +2659,14 @@ func checkBoltDecodeNesting(e *BoltDecodeEvidence) []Violation {
 			v = append(v, boltDecodeViolation(ViolationOracleDeviation, "nesting-message",
 				fmt.Sprintf("%s carries message %q, want %q", a.Name, a.Message, boltDecodeMsgInvalid)))
 		}
-		if wantCode == boltDecodeCodeInternal && !strings.HasPrefix(a.Message, boltDecodeMsgInternalPrefix) {
+		// The WHOLE message, not a prefix. Before rmp #2570 the sanitised text ended
+		// in a per-session id, so only its prefix could be pinned; the client-fault
+		// message that replaced it is a pure function of the parameter key and the
+		// limit, so pinning it entire is strictly stronger and catches a message that
+		// named the wrong key or the wrong number.
+		if wantCode == boltDecodeCodeParamDepth && a.Message != boltDecodeMsgParamDepth {
 			v = append(v, boltDecodeViolation(ViolationOracleDeviation, "nesting-message",
-				fmt.Sprintf("%s carries message %q, want a message beginning %q",
-					a.Name, a.Message, boltDecodeMsgInternalPrefix)))
+				fmt.Sprintf("%s carries message %q, want %q", a.Name, a.Message, boltDecodeMsgParamDepth)))
 		}
 		// Only the OBSERVED code is tested. boltDecodeExpectedNesting can never
 		// return the budget code, so a disjunct on wantCode would be a dead guard
@@ -2844,20 +2885,20 @@ func checkBoltDecodePressureNonVacuity(e *BoltDecodeEvidence) []Violation {
 		}
 	}
 	if windowAccepted == 0 || windowRefused == 0 {
-		v = append(v, boltDecodeViolation(ViolationOracleDeviation, "nv-window-spans-boundary",
+		v = append(v, boltDecodeViolation(ViolationVacuousRun, "nv-window-spans-boundary",
 			fmt.Sprintf("the %d-probe window around the model's boundary (n=%d) produced %d accepted and "+
 				"%d refused: it did not BRACKET the transition, so the boundary was never located and "+
 				"pool-boundary-monotone had nothing to be monotone about",
 				len(e.Window), e.ModelBoundary, windowAccepted, windowRefused)))
 	}
 	if refused < boltDecodeMinRefusals {
-		v = append(v, boltDecodeViolation(ViolationOracleDeviation, "nv-pool-refusals-observed",
+		v = append(v, boltDecodeViolation(ViolationVacuousRun, "nv-pool-refusals-observed",
 			fmt.Sprintf("the pool refused %d message(s), want at least %d: a run in which the aggregate "+
 				"ceiling never fired satisfies every clause about how it fires",
 				refused, boltDecodeMinRefusals)))
 	}
 	if accepted == 0 {
-		v = append(v, boltDecodeViolation(ViolationOracleDeviation, "nv-pool-accepts-observed",
+		v = append(v, boltDecodeViolation(ViolationVacuousRun, "nv-pool-accepts-observed",
 			"the pool admitted nothing: a ceiling that refuses everything also satisfies "+
 				"'every refusal is typed', so an accepted message is what makes the refusals meaningful"))
 	}
@@ -2877,7 +2918,7 @@ func checkBoltDecodePressureNonVacuity(e *BoltDecodeEvidence) []Violation {
 	// conditionally rather than unconditionally.
 	for _, spec := range boltDecodeNestArms {
 		if !seen[spec.name] {
-			v = append(v, boltDecodeViolation(ViolationOracleDeviation, "nv-nesting-family-complete",
+			v = append(v, boltDecodeViolation(ViolationVacuousRun, "nv-nesting-family-complete",
 				fmt.Sprintf("nesting arm %q did not run", spec.name)))
 		}
 	}
@@ -2893,7 +2934,7 @@ func checkBoltDecodePressureNonVacuity(e *BoltDecodeEvidence) []Violation {
 			outcomes["served"]++
 		case a.Code == boltDecodeCodeInvalid:
 			outcomes["wire cap"]++
-		case a.Code == boltDecodeCodeInternal:
+		case a.Code == boltDecodeCodeParamDepth:
 			outcomes["engine cap"]++
 		}
 		if a.Vehicle == "hello" && a.Reply == "FAILURE" {
@@ -2902,7 +2943,7 @@ func checkBoltDecodePressureNonVacuity(e *BoltDecodeEvidence) []Violation {
 	}
 	for _, want := range []string{"served", "wire cap", "engine cap"} {
 		if outcomes[want] == 0 {
-			v = append(v, boltDecodeViolation(ViolationOracleDeviation, "nv-nesting-three-outcomes",
+			v = append(v, boltDecodeViolation(ViolationVacuousRun, "nv-nesting-three-outcomes",
 				fmt.Sprintf("the nesting family produced no %q outcome (served=%d wire-cap=%d "+
 					"engine-cap=%d): with fewer than three distinct answers the distinctness clause "+
 					"returns without adjudicating anything",
@@ -2910,7 +2951,7 @@ func checkBoltDecodePressureNonVacuity(e *BoltDecodeEvidence) []Violation {
 		}
 	}
 	if preauthRefusals == 0 {
-		v = append(v, boltDecodeViolation(ViolationOracleDeviation, "nv-preauth-refusal-observed",
+		v = append(v, boltDecodeViolation(ViolationVacuousRun, "nv-preauth-refusal-observed",
 			"no over-nested HELLO was refused: the wire depth cap's whole justification is that it is "+
 				"reachable during the FIRST HELLO decode, before anything can be authenticated, and a "+
 				"family that only abuses RUN never visits that path"))
@@ -2923,7 +2964,7 @@ func checkBoltDecodePressureNonVacuity(e *BoltDecodeEvidence) []Violation {
 	breach := boltDecodeFindArm(e.Arms, "pool-breach-write")
 	switch {
 	case ctl == nil || breach == nil:
-		v = append(v, boltDecodeViolation(ViolationOracleDeviation, "nv-control-differs",
+		v = append(v, boltDecodeViolation(ViolationVacuousRun, "nv-control-differs",
 			"the control arm or the breach arm did not run"))
 	// This branch is a guard on the HARNESS, not on the server: both ceilings are
 	// compile-time constants (boltDecodePressuredBudget, 4 MiB, against
@@ -2931,16 +2972,16 @@ func checkBoltDecodePressureNonVacuity(e *BoltDecodeEvidence) []Violation {
 	// to meet the other. The two branches around it are not: they read what the run
 	// and the server actually did.
 	case e.ControlBudget <= e.Budget:
-		v = append(v, boltDecodeViolation(ViolationOracleDeviation, "nv-control-differs",
+		v = append(v, boltDecodeViolation(ViolationVacuousRun, "nv-control-differs",
 			fmt.Sprintf("the control's ceiling (%d B) is not above the pressured one (%d B), so the two "+
 				"servers are not an A/B on the ceiling at all", e.ControlBudget, e.Budget)))
 	case ctl.Reply == breach.Reply:
-		v = append(v, boltDecodeViolation(ViolationOracleDeviation, "nv-control-differs",
+		v = append(v, boltDecodeViolation(ViolationVacuousRun, "nv-control-differs",
 			fmt.Sprintf("the control and the pressured server both answered %q for the same bytes: the "+
 				"A/B did not separate, so nothing about the ceiling was isolated", ctl.Reply)))
 	}
 	if n := e.LiveCensus[boltDecodeFitLabel]; n == 0 {
-		v = append(v, boltDecodeViolation(ViolationOracleDeviation, "nv-census-nonempty",
+		v = append(v, boltDecodeViolation(ViolationVacuousRun, "nv-census-nonempty",
 			fmt.Sprintf("the live census holds no :%s node, so 'the refused write left nothing behind' is "+
 				"trivially true of a graph in which nothing was written at all", boltDecodeFitLabel)))
 	}
@@ -2956,7 +2997,7 @@ func checkBoltDecodePressureNonVacuity(e *BoltDecodeEvidence) []Violation {
 // be admitted, so its refusal would read as a leak that is not there.
 func checkBoltDecodeLeakProbeTight(e *BoltDecodeEvidence, p BoltDecodeProbe, clause string) []Violation {
 	if p.Slack < 0 {
-		return []Violation{boltDecodeViolation(ViolationOracleDeviation, clause,
+		return []Violation{boltDecodeViolation(ViolationVacuousRun, clause,
 			fmt.Sprintf("the leak probe (n=%d) models a hold of %d B against a %d B ceiling: it does not "+
 				"fit even a pristine pool, so its refusal says nothing about a leak",
 				p.Elements, p.ModelHeld, e.Budget))}
@@ -3226,7 +3267,7 @@ func boltDecodeSwarmGapRefusals(honest []BoltDecodeHonest) int64 {
 func checkBoltDecodeSwarmNonVacuity(e *BoltDecodeEvidence) []Violation {
 	var v []Violation
 	if e.AbuserRejected == 0 {
-		v = append(v, boltDecodeViolation(ViolationOracleDeviation, "nv-swarm-rejections",
+		v = append(v, boltDecodeViolation(ViolationVacuousRun, "nv-swarm-rejections",
 			fmt.Sprintf("%d abusers produced NO refusal (start barrier satisfied: %v): the pool was never "+
 				"actually pressured, so every clause about how it refuses passed without being tested. "+
 				"Each message models a hold of %d%% of the %d B pool, so two in flight at once should not "+
@@ -3235,7 +3276,7 @@ func checkBoltDecodeSwarmNonVacuity(e *BoltDecodeEvidence) []Violation {
 				boltDecodeSwarmChargeNum*100/boltDecodeSwarmChargeDen, e.Budget)))
 	}
 	if e.AbuserAccepted == 0 {
-		v = append(v, boltDecodeViolation(ViolationOracleDeviation, "nv-swarm-accepts",
+		v = append(v, boltDecodeViolation(ViolationVacuousRun, "nv-swarm-accepts",
 			fmt.Sprintf("all %d abusive messages were refused: a pool stuck at zero refuses everything and "+
 				"satisfies 'every refusal is typed' exactly, so at least one message has to get through "+
 				"for the refusals to mean the pool was FULL rather than BROKEN", e.AbuserRejected)))
@@ -3252,7 +3293,7 @@ func checkBoltDecodeSwarmNonVacuity(e *BoltDecodeEvidence) []Violation {
 	// findings. This clause answers only the next question: given that the window
 	// held refusals, did any of them coincide with honest work in flight?
 	if e.RefusalsConcurrentWithHonest <= 0 && e.RefusalsSpanningHonestWindow > 0 {
-		v = append(v, boltDecodeViolation(ViolationOracleDeviation, "nv-swarm-overlap",
+		v = append(v, boltDecodeViolation(ViolationVacuousRun, "nv-swarm-overlap",
 			fmt.Sprintf("NOT ONE of the %d refusals drawn while the honest client was running was drawn "+
 				"on a round trip that OVERLAPPED a honest exchange's own flight: every one of them "+
 				"started and finished between two honest exchanges (%d were observed inside an exchange "+
@@ -3270,14 +3311,14 @@ func checkBoltDecodeSwarmNonVacuity(e *BoltDecodeEvidence) []Violation {
 	// time the honest client started, and the second alone admits one whose honest
 	// client ran first and met the pressure only at the end.
 	if !e.PressureStarted {
-		v = append(v, boltDecodeViolation(ViolationOracleDeviation, "nv-swarm-pressure-density",
+		v = append(v, boltDecodeViolation(ViolationVacuousRun, "nv-swarm-pressure-density",
 			fmt.Sprintf("the honest client's start barrier EXPIRED after %s without a single abusive "+
 				"message having been refused, so honest service did not begin inside the pressure "+
 				"window at all. Every clause about honest traffic staying live under backpressure is "+
 				"then a statement about an UNPRESSURED server", boltDecodeSwarmStartBarrier)))
 	}
 	if e.RefusalsSpanningHonestWindow <= 0 {
-		v = append(v, boltDecodeViolation(ViolationOracleDeviation, "nv-swarm-pressure-density",
+		v = append(v, boltDecodeViolation(ViolationVacuousRun, "nv-swarm-pressure-density",
 			fmt.Sprintf("NOT ONE abusive round trip that overlapped the honest window — from the first "+
 				"exchange starting to the last one finishing — was refused (the counter difference across "+
 				"the window read %d; per segment: %v; start barrier satisfied: %v; the fleet drew %d "+
@@ -3288,7 +3329,7 @@ func checkBoltDecodeSwarmNonVacuity(e *BoltDecodeEvidence) []Violation {
 				e.AbuserRejected, e.RefusalsConcurrentWithHonest)))
 	}
 	if wide < boltDecodeSwarmMinWide {
-		v = append(v, boltDecodeViolation(ViolationOracleDeviation, "nv-swarm-wide-exchanges",
+		v = append(v, boltDecodeViolation(ViolationVacuousRun, "nv-swarm-wide-exchanges",
 			fmt.Sprintf("the honest client ran %d wide exchanges, want at least %d: at %s each they are "+
 				"most of the in-flight time an abusive round trip has to overlap for the overlap clause "+
 				"to count it, so a run without them shrinks that time by an order of magnitude and "+
@@ -3296,7 +3337,7 @@ func checkBoltDecodeSwarmNonVacuity(e *BoltDecodeEvidence) []Violation {
 				wide, boltDecodeSwarmMinWide, boltDecodeSwarmWideHold)))
 	}
 	if len(e.Honest) != boltDecodeSwarmHonestOps {
-		v = append(v, boltDecodeViolation(ViolationOracleDeviation, "nv-swarm-honest-count",
+		v = append(v, boltDecodeViolation(ViolationVacuousRun, "nv-swarm-honest-count",
 			fmt.Sprintf("the honest client completed %d of %d exchanges: it stopped early, so the run "+
 				"sampled less of the pressure window than it was meant to",
 				len(e.Honest), boltDecodeSwarmHonestOps)))
@@ -3315,7 +3356,7 @@ func checkBoltDecodeSwarmNonVacuity(e *BoltDecodeEvidence) []Violation {
 		}
 	}
 	if swarmWindowAccepted == 0 || swarmWindowRefused == 0 || e.MeasuredBoundary < 0 {
-		v = append(v, boltDecodeViolation(ViolationOracleDeviation, "nv-swarm-window-spans-boundary",
+		v = append(v, boltDecodeViolation(ViolationVacuousRun, "nv-swarm-window-spans-boundary",
 			fmt.Sprintf("the pre-fleet scan accepted %d and refused %d of %d probes (measured boundary %d): "+
 				"it did not bracket the pool's admission transition, so there is no MEASURED size for the "+
 				"leak probe to be sized to and it falls back to the model's, which no server behaviour can "+

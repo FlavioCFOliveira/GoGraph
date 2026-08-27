@@ -86,8 +86,15 @@ func (t *translator) createPathPattern(pp *ast.PathPattern, child LogicalPlan, b
 // ensureNodeVar returns the variable name written in np, allocating a fresh
 // synthetic "__anon_N" for anonymous patterns and storing it back into
 // np.Variable so any later read (in particular [translator.createNode]) sees
-// the same name. The translator runs on a fresh AST per query so the
-// mutation is local to this query's lowering pass.
+// the same name.
+//
+// The mutation is safe because it is reachable only from an updating clause, and
+// updating clauses are translated exactly once, by [FromAST], while the AST is
+// still private to the plan-cache builder. It is NOT safe in general to write
+// into a translated AST: the reading-clause side of the same mutation raced once
+// the AST was published, because a subquery body is re-translated per execution
+// (rmp #2508). This comment used to assert "the translator runs on a fresh AST
+// per query", which was false as a statement about the cached AST.
 func (t *translator) ensureNodeVar(np *ast.NodePattern) string {
 	if np.Variable != nil {
 		return *np.Variable

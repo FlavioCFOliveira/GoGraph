@@ -104,6 +104,7 @@ package index
 // half-promoted set.
 
 import (
+	"math"
 	"unsafe"
 
 	"github.com/RoaringBitmap/roaring/v2/roaring64"
@@ -323,7 +324,14 @@ func (s *NodeSet) Remove(node uint64) (nowEmpty bool) {
 // labels; it is intentionally the ONLY entry point that can create a
 // bitmap without first crossing smallSetMax, and a set that takes an
 // AddRange is permanently a bitmap (#1585).
+//
+// An INVERTED interval (from > to) names no ids and is a no-op: it does not
+// promote, because promotion is one-way and a set that gained nothing must not
+// pay for a tier it never needed (#2608).
 func (s *NodeSet) AddRange(from, to uint64) {
+	if from > to {
+		return
+	}
 	if s.tag() != stateBitmap {
 		bm := roaring64.New()
 		// Fold any existing inline state into the new bitmap so the range
@@ -336,7 +344,7 @@ func (s *NodeSet) AddRange(from, to uint64) {
 		}
 		s.setBitmap(bm)
 	}
-	s.bitmapRef().AddRange(from, to+1)
+	addRangeClosed(s.bitmapRef(), from, to)
 }
 
 // RemoveRange removes every id in [from, to] (inclusive). On an inline
@@ -375,9 +383,47 @@ func (s *NodeSet) RemoveRange(from, to uint64) (nowEmpty bool) {
 		}
 	default: // stateBitmap
 		bm := s.bitmapRef()
-		bm.RemoveRange(from, to+1)
+		removeRangeClosed(bm, from, to)
 		return bm.IsEmpty()
 	}
+}
+
+// addRangeClosed adds every id in the CLOSED interval [from, to] to bm.
+//
+// roaring64's own AddRange is half-open and its bound is a uint64, so there is
+// no value that names "one past MaxUint64": the obvious `to+1` wraps to zero and
+// roaring returns immediately on start >= end, silently dropping the whole
+// range (#2607). The library's 32-bit sibling avoids this by widening the bound
+// to uint64 so it can name MaxUint32+1; at 64 bits no wider type exists, so the
+// top element is added separately. An inverted interval adds nothing.
+func addRangeClosed(bm *roaring64.Bitmap, from, to uint64) {
+	if from > to {
+		return
+	}
+	if to == math.MaxUint64 {
+		// [from, MaxUint64) followed by the top element itself. The half-open
+		// call is a no-op when from == to == MaxUint64, which is correct.
+		bm.AddRange(from, to)
+		bm.Add(to)
+		return
+	}
+	bm.AddRange(from, to+1)
+}
+
+// removeRangeClosed removes every id in the CLOSED interval [from, to] from bm.
+// It mirrors [addRangeClosed] and exists for the same reason: the half-open
+// RemoveRange cannot name a range ending at MaxUint64 (#2607). An inverted
+// interval removes nothing.
+func removeRangeClosed(bm *roaring64.Bitmap, from, to uint64) {
+	if from > to {
+		return
+	}
+	if to == math.MaxUint64 {
+		bm.RemoveRange(from, to)
+		bm.Remove(to)
+		return
+	}
+	bm.RemoveRange(from, to+1)
 }
 
 // Contains reports whether node is in the set. O(1) for the singleton
@@ -525,6 +571,66 @@ func (s *NodeSet) Bitmap() (bm *roaring64.Bitmap, shared bool) {
 	case stateSmall:
 		out.AddMany(s.smallSlice())
 	}
+	return out, false
+}
+
+// CanonicalBitmap returns the set as a *roaring64.Bitmap whose serialized form
+// is a function of the set's LOGICAL CONTENTS rather than of the container the
+// set happens to hold, for sets of at most smallSetMax ids.
+//
+// roaring picks a container encoding from construction history, not from
+// content: [NodeSet.AddRange] builds a RUN container, while the same ids added
+// one at a time build an ARRAY one, and the two encode identical membership in
+// different bytes. That made a Serialize/Deserialize/Serialize cycle change the
+// bytes for a label in the band the reader down-converts — measured 55 bytes in
+// and 64 to 72 out at widths 4 to 8 — so a snapshot of unchanged data was not
+// byte-reproducible (#2609).
+//
+// The normalisation is BOUNDED at smallSetMax deliberately, and it normalises
+// DOWN — towards the encoding the inline tiers already produce — rather than up.
+//
+// Normalising an arbitrary set the other way requires cloning it first, because
+// the bitmap tier hands back the live bitmap and roaring's run optimisation
+// rewrites containers in place; measured, that costs a sparse 100 000-id label
+// 6.55 to 90 microseconds and 1 289 to 218 065 bytes per serialize to produce a
+// BYTE-IDENTICAL image. Normalising down needs no clone at all: every set that
+// is NOT on the bitmap tier was already materialised from its sorted ids by
+// [NodeSet.Bitmap], so the only state that can be off-canonical is a bitmap-tier
+// set at or below the bound — which only [NodeSet.AddRange] can create. Every
+// other set takes a single cardinality check and nothing else.
+//
+// The bound is smallSetMax because that is exactly the band [NodeSetFromBitmap]
+// down-converts, and therefore the only band where a Serialize/Deserialize cycle
+// can change the encoding. Above the bound the form is already stable across a
+// cycle.
+//
+// MEASURED, interleaved A/B over five pairs: a 100 000-id dense label and a
+// 100 000-id sparse one are unchanged in time and IDENTICAL in allocations
+// (15/op, every sample equal), and so is an Add-built label of 8 ids
+// (26 allocs/op, every sample equal) — the common small label, which is on an
+// inline tier and therefore short-circuits. Only an AddRange-built label at or
+// below the bound pays anything, moving from 16 to 28 allocs/op: that is the
+// path being normalised, and 28 is what the Add-built label of the same ids
+// already cost. The normalisation makes the two paths do the same work rather
+// than making either do more.
+//
+// shared reports whether the returned bitmap aliases the set's live bitmap;
+// callers that need an independent copy must Clone when shared is true. It is
+// false whenever the set was normalised, since normalisation builds a new one.
+func (s *NodeSet) CanonicalBitmap() (bm *roaring64.Bitmap, shared bool) {
+	bm, shared = s.Bitmap()
+	if !shared || bm.GetCardinality() > smallSetMax {
+		// A set that is not on the bitmap tier was just materialised from its
+		// sorted ids, which IS the canonical form; above the bound nothing is
+		// normalised.
+		return bm, shared
+	}
+	// Only a set on the bitmap tier at or below the bound can hold an encoding
+	// that its ids alone would not have produced, and AddRange is the only way
+	// to reach that state. Re-materialise from the sorted ids, exactly as the
+	// inline tiers already do, so both arrive at the same container.
+	out := roaring64.New()
+	out.AddMany(bm.ToArray())
 	return out, false
 }
 

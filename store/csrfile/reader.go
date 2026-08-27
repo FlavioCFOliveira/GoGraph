@@ -69,7 +69,10 @@ type Reader struct {
 // Open mmaps path read-only, verifies the header and the tail CRC,
 // and returns a Reader pointing into the mapped region.
 func Open(path string) (*Reader, error) {
-	f, err := os.Open(path) //nolint:gosec // caller-supplied path
+	// csrNoFollow: a csrfile adopted from an untrusted source (a tampered backup,
+	// a shared directory) whose entry is a symlink pointing outside would
+	// otherwise be mmapped and read (CWE-59, rmp #2580).
+	f, err := os.OpenFile(path, os.O_RDONLY|csrNoFollow, 0) //nolint:gosec // caller-supplied path; csrNoFollow rejects a symlinked final component (CWE-59)
 	if err != nil {
 		return nil, err
 	}

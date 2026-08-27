@@ -1363,7 +1363,7 @@ func (e *CountStoreEvidence) ReproducibleSummary() string { return e.String() }
 func (e *CountStoreEvidence) Finish(tick int64) []Violation {
 	var vs []Violation
 	add := func(clause, format string, args ...any) {
-		vs = append(vs, csViolation(ViolationOracleDeviation, tick, "vacuity:"+clause, format, args...))
+		vs = append(vs, csViolation(ViolationVacuousRun, tick, "vacuity:"+clause, format, args...))
 	}
 	if e.LiveChecks == 0 {
 		add("live-checks", "no LIVE parity observation ran, so the incrementally-maintained store was "+
@@ -2210,7 +2210,7 @@ func countStoreLoop(
 	probes.ev.Checkpoints = sm.CheckpointCount()
 	if cfg.MinEdgesForBoundClaim > 0 && probes.ev.MaxEdges < cfg.MinEdgesForBoundClaim {
 		return sm.report(final, Op{Kind: OpMatch, Cypher: csOp("bound-vacuity")}, []Violation{
-			csViolation(ViolationOracleDeviation, final, "vacuity:bound-edges",
+			csViolation(ViolationVacuousRun, final, "vacuity:bound-edges",
 				"the run modelled at most %d edge(s), below the %d this arm requires. The boundedness "+
 					"claim is that Cells() is a function of SCHEMA cardinality and never of |E|, so it "+
 					"means nothing until |E| has actually grown well past the ceiling (cells=%d bound=%d)",

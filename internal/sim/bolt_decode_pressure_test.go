@@ -120,21 +120,21 @@ func TestBoltDecodePressure_Determinism(t *testing.T) {
 		t.Fatalf("two runs of seed %#x rendered differently:\n--- first ---\n%s\n--- second ---\n%s", seed, a, b)
 	}
 
-	// The exclusion is PROVED, not trusted: the redacted internal-error text must
-	// really have carried a per-session id, otherwise the redaction is dead code
-	// hiding nothing and the rendering's stability says nothing about it.
-	redacted := 0
-	for i := range first.Arms {
-		if strings.Contains(first.Arms[i].Message, "(session: <redacted>)") {
-			redacted++
-		}
-	}
-	if redacted == 0 {
-		t.Errorf("no arm's message carried a redacted session id. The engine's parameter-cap refusal is " +
-			"sanitised to \"An internal error occurred. See server logs for details (session: <16 hex>)\", " +
-			"so if none is present the redaction is guarding nothing and the rendering's stability is " +
-			"accidental rather than designed")
-	}
+	// This test USED to require that at least one arm's message carried a redacted
+	// session id, proving the redaction was really guarding something. That clause
+	// was REMOVED by rmp #2570 rather than left to fail, because it became
+	// unsatisfiable: the parameter cap was the only arm whose failure went through
+	// the sanitiser, and its refusal is now a client-fault message that bypasses it.
+	// No arm draws a session id any more, so a clause asserting one did is a clause
+	// that cannot pass.
+	//
+	// Determinism no longer depends on the redaction at all: every message this
+	// family records is now a pure function of the seed by construction — the two
+	// decode-layer refusals carry fixed strings, and the parameter cap's names only
+	// the parameter key and the limit. [boltDecodeRedactSession] is retained as
+	// insurance, so a future arm that does draw a sanitised message cannot make this
+	// comparison flap; it is currently a no-op on every arm, which is exactly why
+	// asserting that it fired would be dishonest.
 }
 
 // TestBoltDecodePressure_Scenario wires the catalogue: both scenarios must be
@@ -271,8 +271,8 @@ func healthyBoltDecodeEvidence() *BoltDecodeEvidence {
 		switch code {
 		case boltDecodeCodeInvalid:
 			arm.Message = boltDecodeMsgInvalid
-		case boltDecodeCodeInternal:
-			arm.Message = boltDecodeMsgInternalPrefix + " See server logs for details (session: <redacted>)"
+		case boltDecodeCodeParamDepth:
+			arm.Message = boltDecodeMsgParamDepth
 		}
 		e.Arms = append(e.Arms, arm)
 	}
@@ -553,7 +553,7 @@ func TestBoltDecodePressure_ContractCanFail(t *testing.T) {
 			name: "the engine's parameter cap collapsed onto the wire cap's code",
 			perturb: func(e *BoltDecodeEvidence) {
 				for i := range e.Arms {
-					if e.Arms[i].Code == boltDecodeCodeInternal {
+					if e.Arms[i].Code == boltDecodeCodeParamDepth {
 						e.Arms[i].Code, e.Arms[i].Message = boltDecodeCodeInvalid, boltDecodeMsgInvalid
 					}
 				}
@@ -654,7 +654,7 @@ func TestBoltDecodePressure_NonVacuityCanFail(t *testing.T) {
 			name: "the family stopped producing three distinct answers, so the distinctness clause returns silently",
 			perturb: func(e *BoltDecodeEvidence) {
 				for i := range e.Arms {
-					if e.Arms[i].Code == boltDecodeCodeInternal {
+					if e.Arms[i].Code == boltDecodeCodeParamDepth {
 						e.Arms[i].Reply, e.Arms[i].Code, e.Arms[i].Message = "SUCCESS", "", ""
 					}
 				}

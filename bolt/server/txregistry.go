@@ -239,9 +239,20 @@ func (s *Server) Transactions() []TransactionInfo {
 	return s.txReg.list()
 }
 
-// TerminateTransaction rolls back the open transaction with the given id,
-// releasing the writer serialisation and visibility barrier it holds. It returns
-// [ErrNoSuchTransaction] if no such transaction is open.
+// TerminateTransaction rolls back the open transaction with the given id. It
+// returns [ErrNoSuchTransaction] if no such transaction is open.
+//
+// It releases NO writer serialisation and no visibility barrier — rmp #2305/#2306
+// retired both, exactly as [Server.Transactions] above says at length. This line
+// claimed otherwise until rmp #2560, contradicting its own neighbour twenty lines
+// up. What the rollback reclaims is the transaction's unpublished commit record and
+// its reclamation-horizon slot.
+//
+// The terminated connection is told so on its next request-phase message:
+// [Session.terminateTxByOperator] arms Neo.ClientError.Transaction.Terminated,
+// which is deliberately distinct from the code an expired bound produces, so an
+// operator termination is not reported to the client as a timeout that never
+// happened.
 //
 // The rollback is performed by the connection that owns the transaction, on its
 // own goroutine, because a [Session] is single-threaded by contract. This call

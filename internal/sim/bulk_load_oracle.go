@@ -169,9 +169,11 @@ package sim
 // # Why the published path is a SUBDIRECTORY key
 //
 // [SimDisk] treats any path whose parent is "." or "/" as having a DURABLE
-// dirent from the instant of creation (see `isRootLevel`), because the
-// root-level WAL is governed by the data-durability model rather than the
-// dirent model. Publishing to a root-level key would therefore make the rename
+// dirent from the instant of creation (see `isRootLevel`), because a file at the
+// root has no parent directory whose fsync could make its name durable. (The WAL
+// used to rely on that exemption too; since rmp #2539 it lives under a real
+// directory and is governed by the dirent model like everything else.)
+// Publishing to a root-level key would therefore make the rename
 // un-rollbackable and the parent-directory fsync unobservable, and every "the
 // name survived the crash" assertion below would pass while proving nothing.
 // [bulkOraclePath] is a subdirectory key for exactly that reason, and
@@ -639,8 +641,6 @@ type bulkOracleImageFS struct{ img []byte }
 var errBulkOracleReadOnly = errors.New("sim: bulk-load-oracle image backend is read-only")
 
 func (b bulkOracleImageFS) Create(string) (csrfile.File, error) { return nil, errBulkOracleReadOnly }
-
-func (b bulkOracleImageFS) Truncate(string, int64) error { return errBulkOracleReadOnly }
 
 func (b bulkOracleImageFS) Rename(string, string) error { return errBulkOracleReadOnly }
 
@@ -1400,7 +1400,7 @@ func bulkOracleArmStreaming(
 	}
 	if cdrained <= 0 || cdrained >= len(edges) {
 		v = append(v, Violation{
-			Kind: ViolationOracleDeviation, Op: "<bulk-load-oracle:drain-cancel>",
+			Kind: ViolationVacuousRun, Op: "<bulk-load-oracle:drain-cancel>",
 			Message: fmt.Sprintf("a Drain cancelled mid-stream drained %d of %d edges — the cancellation was"+
 				" not observed part-way through, so the partial-ingest contract was never exercised",
 				cdrained, len(edges)),
@@ -1725,7 +1725,7 @@ func bulkOracleArmPublishFaults(
 		ev.faultOutcomes["sync-first"] = ver.outcome
 		if perr == nil {
 			v = append(v, Violation{
-				Kind: ViolationOracleDeviation, Op: "<bulk-load-oracle:fault>",
+				Kind: ViolationVacuousRun, Op: "<bulk-load-oracle:fault>",
 				Message: "[fault/sync-first] the armed fsync fault did not make the publish fail, so every" +
 					" assertion about a failed first publish below is vacuous",
 			})
@@ -1807,14 +1807,14 @@ func bulkOracleArmPublishFaults(
 		ev.faultOutcomes["rename"] = ver.outcome
 		if disk.RenameFaultCount() != 1 && !opts.disarmRenameFault {
 			v = append(v, Violation{
-				Kind: ViolationOracleDeviation, Op: "<bulk-load-oracle:fault>",
+				Kind: ViolationVacuousRun, Op: "<bulk-load-oracle:fault>",
 				Message: fmt.Sprintf("[fault/rename] the armed rename fault fired %d times, want exactly 1 —"+
 					" the destination never matched, so this case is vacuous", disk.RenameFaultCount()),
 			})
 		}
 		if perr == nil {
 			v = append(v, Violation{
-				Kind: ViolationOracleDeviation, Op: "<bulk-load-oracle:fault>",
+				Kind: ViolationVacuousRun, Op: "<bulk-load-oracle:fault>",
 				Message: "[fault/rename] the armed rename fault did not make the publish fail",
 			})
 		}
@@ -1851,7 +1851,7 @@ func bulkOracleArmPublishFaults(
 		ev.faultOutcomes["enospc"] = ver.outcome
 		if perr == nil {
 			v = append(v, Violation{
-				Kind: ViolationOracleDeviation, Op: "<bulk-load-oracle:fault>",
+				Kind: ViolationVacuousRun, Op: "<bulk-load-oracle:fault>",
 				Message: "[fault/enospc] the republish under an exact-capacity bound succeeded, so the" +
 					" atomicity assertion for this case is vacuous",
 			})
@@ -2278,14 +2278,14 @@ func bulkOracleArmCrashWindow(
 		if !opts.keepCrashDurability {
 			if perr == nil {
 				v = append(v, Violation{
-					Kind: ViolationOracleDeviation, Op: "<bulk-load-oracle:crash>",
+					Kind: ViolationVacuousRun, Op: "<bulk-load-oracle:crash>",
 					Message: "[crash/treatment] the armed parent-directory fsync fault did not make the" +
 						" publish fail, so the window this arm claims to enter was never entered",
 				})
 			}
 			if pending == 0 || rolledBack == 0 {
 				v = append(v, Violation{
-					Kind: ViolationOracleDeviation, Op: "<bulk-load-oracle:crash>",
+					Kind: ViolationVacuousRun, Op: "<bulk-load-oracle:crash>",
 					Message: fmt.Sprintf("[crash/treatment] the crash adjudicated pending=%d rolledBack=%d;"+
 						" the rename window was not entered, so the verdict below is vacuous",
 						pending, rolledBack),

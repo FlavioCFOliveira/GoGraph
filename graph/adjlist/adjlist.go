@@ -1786,6 +1786,15 @@ func (a *AdjList[N, W]) compactShard(s *adjShard[W]) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Drop any retained builder BEFORE trimming. Compact replaces slotsRef, so a
+	// builder left over from a closed window would keep the shard's untrimmed
+	// slot array alive alongside the trimmed one it is being replaced by, and
+	// Compact — whose entire purpose is to give memory back — would instead
+	// roughly DOUBLE the resident adjacency. See [AdjList.releaseBuilders] for
+	// the measurement and for why clearing loses nothing (rmp #2628).
+	s.building = nil
+	s.buildingOwner = 0
+
 	ss := s.slotsRef.Load()
 	if ss == nil {
 		return
@@ -2748,6 +2757,47 @@ func (a *AdjList[N, W]) builderOwner() uint64 {
 	return a.bulkOwner
 }
 
+// releaseBuilders drops every shard's private builder reference at the end of
+// the outermost write window, which is what the contract on [adjShard.building]
+// has always said the window end does ("the window end freezes it by clearing
+// this field") and what nothing actually did until rmp #2628.
+//
+// Clearing loses NOTHING. [AdjList.storeEntry] publishes the builder into
+// slotsRef on the shard's FIRST touch in the window, so every write the window
+// made is already reachable through the published pointer; the field is a
+// reuse cache for in-place mutation, not the owner of the data. Once the window
+// closes no write can present its owner again — bulkOwner is cleared here and
+// commit records are allocated per transaction and never reused — so the
+// builder is unreachable for reuse from this moment on, and keeping it merely
+// pins memory.
+//
+// Pinning it is not free, and the cost is not the builder itself: it is what
+// the builder BLOCKS. A retained builder keeps a shard's PRE-window slot array
+// alive after slotsRef has moved on, so anything that later replaces slotsRef
+// leaves both arrays live. [AdjList.Compact] does exactly that, which made a
+// bulk build followed by a compaction hold roughly TWICE the resident adjacency
+// of the same build with no window at all — measured at 3M edges: 159.9 MiB
+// unbracketed, 361.9 MiB bracketed, against 245 MiB for either with no compaction.
+// Compact's entire purpose was being inverted by the window that is supposed to
+// make the build cheaper.
+//
+// Until #2628 the field was released only LAZILY, by storeEntry, when a write
+// presenting a DIFFERENT owner happened to touch the same shard. A shard that
+// no later transaction touched kept its builder for the lifetime of the graph.
+//
+// The caller holds no shard lock; this takes each shard's mu in turn.
+func (a *AdjList[N, W]) releaseBuilders() {
+	for i := range a.shards {
+		s := &a.shards[i]
+		s.mu.Lock()
+		if s.building != nil {
+			s.building = nil
+			s.buildingOwner = 0
+		}
+		s.mu.Unlock()
+	}
+}
+
 // BeginCommit opens a commit window so that the writes of one transaction
 // clone each touched shard's slot array AT MOST ONCE (on first touch) and
 // mutate that private builder in place for the rest of the window, instead of
@@ -2915,6 +2965,7 @@ func (a *AdjList[N, W]) EndExclusiveBuild() {
 	}
 	a.bulkOwner = 0
 	a.exclusiveBuild.Store(false)
+	a.releaseBuilders()
 }
 
 // NestedServingWindows reports how many serving commit windows have been opened

@@ -110,10 +110,39 @@ var _ walFile = (*SimFileHandle)(nil)
 //	                image (power failure), [SimDisk.CrashProcess] keeps the
 //	                bytes and the names (SIGKILL). [SimDisk.Crash] is CrashHost.
 //
-//	MkdirAll        NOT MODELLED, negligible. Directories are opaque keys and
-//	                MkdirAll is a no-op, so a directory creation can never be
-//	                lost. A real mkdir without a parent fsync can be. Nothing in
-//	                the store depends on an empty directory existing.
+//	MkdirAll        MODELLED since rmp #2543. A created directory is registered
+//	                in the dirent model and is durable only once its parent is
+//	                fsynced, like any other name; an EMPTY directory is
+//	                representable and both Stat and Exists report it. It used to
+//	                be a no-op, so a directory creation could never be lost and a
+//	                partial-publish state was unreachable. MkdirAll over an
+//	                EXISTING directory still changes nothing, because it creates
+//	                nothing and needs no fsync.
+//
+//	Remove(dir)     MODELLED since rmp #2545. Remove follows os.Remove, which
+//	                tries unlink and then rmdir: an EMPTY directory is removed
+//	                and a NON-EMPTY one returns ENOTEMPTY. It used to succeed
+//	                silently on both, so a caller that meant to delete a
+//	                directory got success and no deletion. Remove on an ABSENT
+//	                path still succeeds, deliberately — the snapshot writer's
+//	                best-effort cleanup relies on it.
+//
+//	Truncation      MODELLED since rmp #2542. O_TRUNC, the handle Truncate and
+//	                TruncatePath all shorten the VISIBLE data at once and the
+//	                DURABLE image only at the next successful fsync, so a crash
+//	                in between restores the longer prior generation. All three go
+//	                through [simFile.truncatePendingTo], so they cannot drift.
+//	                They also drop the fault marks for sectors past the new end
+//	                of file uniformly (F13); TruncatePath used to keep them.
+//
+//	Sync failure    MODELLED since rmp #2540. A failed fsync freezes the file's
+//	                durable prefix for good: every later Sync RETURNS SUCCESS and
+//	                advances nothing, because a failed write-back marks the pages
+//	                clean and drops them (Rebello et al., USENIX ATC 2020;
+//	                PostgreSQL's fsyncgate response was to PANIC rather than
+//	                retry). It used to leave the data intact so a retry simply
+//	                worked, which would have made a "retry once before poisoning"
+//	                optimisation look safe under simulation.
 //
 //	DirSync         FIXED (rmp #2537), and NARROWER THAN REALITY in the safe
 //	                direction. It could not FAIL: the body ended in an
@@ -158,7 +187,8 @@ type SimDisk struct {
 	// a directory rename (the snapshot publish renames a whole staging
 	// directory onto the live name). The value is whether the directory's own
 	// name in its parent is durable; a directory absent from this map is
-	// implicitly durable (it was created in place via MkdirAll, never via a
+	// implicitly durable (it came into being under a file that was written
+	// there, never via MkdirAll or a
 	// publish rename). A [SimDisk.Crash] drops every directory whose dirent is
 	// not yet durable, taking its entire subtree with it.
 	dirs map[string]bool
@@ -205,8 +235,16 @@ type SimDisk struct {
 	// progress rather than on wall-clock time. It is mutated only under d.mu.
 	syncCount   int64
 	syncFaultAt int64
-	faultRate   float64
-	mu          sync.Mutex
+	// tornAppendArmed / tornAppendAt / tornAppendKeep implement a ONE-SHOT torn
+	// append: the tornAppendAt-th GROWING write on this disk is marked so that
+	// the next crash leaves only its first tornAppendKeep bytes intact, with the
+	// remainder garbled. appendCount counts growing writes since the arm was set.
+	tornAppendArmed bool
+	tornAppendAt    int64
+	tornAppendKeep  int64
+	appendCount     int64
+	faultRate       float64
+	mu              sync.Mutex
 	// syncFaultArmed / syncFaultAt implement a ONE-SHOT deterministic Sync
 	// fault: when armed, the syncFaultAt-th Sync call returns [ErrSimFault]
 	// exactly once (then disarms). Unlike the probabilistic faultRate path it
@@ -368,6 +406,13 @@ type SimDisk struct {
 	// back. [SimDisk.CrashProcess] deliberately does NOT bump it: SIGKILL does
 	// not abort an fsync already issued to the kernel, which owns the writeback.
 	hostCrashGen uint64
+	// crashGen counts crashes of EITHER kind, and is what invalidates an open
+	// [SimFileHandle]. It is deliberately separate from hostCrashGen, which
+	// models in-flight fsync invalidation and is bumped only by CrashHost: a
+	// file descriptor does not survive its process, so a handle must die on a
+	// CrashProcess too, while an fsync already handed to the kernel does not
+	// (rmp #2544).
+	crashGen uint64
 	// lastCrashKind / lastCrashDiscardedBytes are the shape observables of the
 	// most recent crash: which primitive ran, and how many
 	// written-but-never-synced bytes [SimDisk.CrashHost] discarded from the files
@@ -566,7 +611,25 @@ type simFile struct {
 	// [SimFileHandle.Sync] has placed on stable storage. It is meaningful only
 	// while durableData is nil; use [simFile.durableSize] rather than reading it
 	// directly. It advances ONLY when a Sync returns nil (rmp #2535).
-	durableLen    int64
+	durableLen int64
+	// tornTail* describe a PARTIAL trailing append that reached the platter
+	// without a completed fsync: the write-back was in flight when the power
+	// went. tornTailSet arms it; the record occupies [tornTailStart, tornTailEnd)
+	// and only its first tornTailKeep bytes landed intact. See
+	// [SimDisk.ArmTornAppendAt] for why this cannot emerge from the durable
+	// shadow alone.
+	// truncPending / truncPendingTo record a truncation that is VISIBLE but not
+	// yet DURABLE: the durable image still holds the longer prior content until
+	// the next successful Sync. See [simFile.truncatePendingTo].
+	truncPending   bool
+	truncPendingTo int64
+	// writebackLost records that an fsync on this file FAILED. Once set, the
+	// durable prefix can never advance again: see [SimFileHandle.Sync].
+	writebackLost bool
+	tornTailSet   bool
+	tornTailStart int64
+	tornTailKeep  int64
+	tornTailEnd   int64
 	direntDurable bool
 }
 
@@ -611,14 +674,42 @@ func (f *simFile) preserveDurableBelow(off int64) {
 	f.durableData = buf
 }
 
-// truncateDurableTo shortens the durable image to size.
+// truncatePendingTo records a truncation to size that is VISIBLE IMMEDIATELY
+// but NOT YET DURABLE.
 //
-// It models a truncation as INSTANTLY durable, which is the pre-existing
-// behaviour of [SimFileHandle.Truncate], [SimDisk.TruncatePath] and O_TRUNC and
-// is deliberately left unchanged here: making a truncation itself survivable —
-// so that a crash restores the longer prior image — is audit finding F8, filed
-// separately as rmp #2542. This is the single seam that change needs.
-func (f *simFile) truncateDurableTo(size int64) {
+// A truncation is a metadata-and-data change like any other: it does not reach
+// stable storage until an fsync, so a crash in between legitimately restores the
+// longer prior image — "the .tmp I truncated still holds a previous generation's
+// bytes, and my new shorter content sits in front of them". That state was
+// unreachable while all three truncation sites shortened the durable image on
+// the spot (audit finding F8, rmp #2542), and it is not hypothetical for this
+// codebase: both staging-file creators open with O_TRUNC
+// (store/snapshot/safe_create.go, store/csrfile/fs.go), as does the WAL suffix
+// temporary (store/wal/writer.go). A reader that trusted a length header over
+// the real file length would be exposed in production and could not be caught
+// here.
+//
+// The caller shortens f.data itself, so read-your-writes is preserved: the
+// truncation is visible to this process at once. Only the DURABLE image lags,
+// and [simFile.markSyncedTo] applies the pending truncation on the next
+// successful fsync.
+//
+// All three sites — O_TRUNC, [SimFileHandle.Truncate] and [SimDisk.TruncatePath]
+// — go through here, which is the point: three sites with one rule cannot drift.
+func (f *simFile) truncatePendingTo(size int64) {
+	// Pin the longer image BEFORE the caller shortens f.data, or the watermark
+	// representation would clamp to the new length and the prior bytes would be
+	// lost. preserveDurableBelow is a no-op when nothing durable lies beyond
+	// size, which is the common case and costs nothing.
+	f.preserveDurableBelow(size)
+	f.truncPending = true
+	f.truncPendingTo = size
+}
+
+// applyDurableTruncate shortens the durable image to size. It is called when a
+// successful fsync makes a pending truncation durable, and on the O_TRUNC path
+// for a file with no durable content to lose.
+func (f *simFile) applyDurableTruncate(size int64) {
 	if f.durableData != nil {
 		if int64(len(f.durableData)) > size {
 			f.durableData = f.durableData[:size]
@@ -643,6 +734,13 @@ func (f *simFile) truncateDurableTo(size int64) {
 // out of order, and an earlier, smaller round completing last must not un-harden
 // what a later one already made durable.
 func (f *simFile) markSyncedTo(n int64) {
+	// A successful fsync flushes metadata, so it is what makes a pending
+	// truncation durable. Applied FIRST, so the watermark logic below sees the
+	// shortened image (#2542).
+	if f.truncPending {
+		f.truncPending = false
+		f.applyDurableTruncate(f.truncPendingTo)
+	}
 	if n > int64(len(f.data)) {
 		n = int64(len(f.data))
 	}
@@ -676,13 +774,61 @@ func (f *simFile) markSyncedTo(n int64) {
 // pre-existing modelling choice — audit finding F13.)
 func (f *simFile) revertToDurable() int64 {
 	img := f.durableImage()
-	discarded := int64(len(f.data)) - int64(len(img))
 	buf := make([]byte, len(img))
 	copy(buf, img)
+
+	// A TORN APPEND survives the revert, because it describes bytes that reached
+	// the platter without a completed fsync — which is more than the durable
+	// image holds, not less. The record's first tornTailKeep bytes are the real
+	// payload; the remainder is GARBAGE rather than zeroes, because zero-fill is
+	// an unrealistically benign model of an interrupted write-back (ALICE,
+	// Pillai et al., OSDI '14) and a reader that only ever sees zeros can pass
+	// while mishandling the bytes a real platter would hold.
+	//
+	// It is applied only when it would EXTEND the durable image. A torn tail
+	// below the durable watermark would mean discarding bytes an fsync already
+	// hardened, which is not what an interrupted write-back does.
+	if f.tornTailSet {
+		if head := f.tornTailStart + f.tornTailKeep; head >= int64(len(buf)) &&
+			f.tornTailEnd <= int64(len(f.data)) {
+			out := make([]byte, f.tornTailEnd)
+			copy(out, f.data[:head])
+			fillGarbage(out[head:f.tornTailEnd], head)
+			buf = out
+		}
+		f.tornTailSet = false
+	}
+
+	discarded := int64(len(f.data)) - int64(len(buf))
 	f.data = buf
 	f.durableData = nil
 	f.durableLen = int64(len(buf))
+	// A truncation that never reached stable storage did not happen (#2542).
+	f.truncPending = false
+	f.truncPendingTo = 0
 	return discarded
+}
+
+// fillGarbage writes deterministic non-zero bytes into dst, as the residue of an
+// interrupted write-back. off is the file offset dst starts at, so the pattern is
+// a pure function of position and a run is reproducible without drawing from the
+// disk's fault stream — the same rule [SimDisk.SetCapacity] follows.
+//
+// It never produces a zero byte: a zero is exactly the value a benign model would
+// leave, and the point of this residue is to be the value a benign model would
+// not.
+func fillGarbage(dst []byte, off int64) {
+	x := uint64(off)*0x9E3779B97F4A7C15 + 0xDEAD_BEEF_CAFE_F00D
+	for i := range dst {
+		x ^= x << 13
+		x ^= x >> 7
+		x ^= x << 17
+		b := byte(x >> 24)
+		if b == 0 {
+			b = 0xA5
+		}
+		dst[i] = b
+	}
 }
 
 // direntCrashSeedMix decorrelates the dirent crash-outcome sub-stream from the
@@ -890,6 +1036,19 @@ func NewSimDisk(seed *Seed, faultRate float64) *SimDisk {
 	}
 }
 
+// FaultedSectorCount returns how many sectors of the file at path currently
+// carry a fault mark. It exists so a test can observe the marks being dropped by
+// a truncation (F13, rmp #2542) without reaching into simFile.
+func (d *SimDisk) FaultedSectorCount(path string) int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	f, ok := d.files[path]
+	if !ok {
+		return 0
+	}
+	return len(f.faulted)
+}
+
 // FaultRate returns the per-sector / per-Sync fault probability the disk was
 // constructed with (see [NewSimDisk]). It is an observability accessor for
 // tests that assert the [DiskConfig.FaultRate] wiring in [New]; faultRate is
@@ -1017,6 +1176,57 @@ func (d *SimDisk) ArmSyncFaultAt(at int64) {
 	d.syncFaultAt = at
 }
 
+// ArmTornAppendAt schedules a ONE-SHOT TORN APPEND: the at-th growing write on
+// this disk (counting from the current append total) is marked so that the next
+// crash leaves only its first keepBytes intact, with the remainder of that
+// record filled with garbage. A non-positive at disarms.
+//
+// # Why this cannot emerge from the durable shadow
+//
+// A truncated trailing frame is the single most important crash state a
+// write-ahead log must survive, and before this the simulator could not produce
+// one by any route (audit finding F7, rmp #2541). The durable shadow added for
+// F1 does not deliver it: [SimDisk.CrashHost] reverts each file to
+// data[:durableLen], and durableLen moves only on a SUCCESSFUL Sync — so a crash
+// truncates a file at its last sync boundary, which for a WAL is a FRAME
+// boundary. That is a cleanly LOST trailing frame, never a partial one, and the
+// two exercise different branches of recovery: a reader that handles a clean
+// truncation can still mishandle a frame whose header declares one length and
+// whose body stops short.
+//
+// The short-count contract in [SimFileHandle.Write] makes a partial record
+// emergent under a full disk; this arm makes one reachable at any capacity and
+// at a chosen record, which is what a targeted recovery scenario needs.
+//
+// The kept bytes are the real payload and the remainder is GARBAGE rather than
+// zeroes, per the ALICE finding that zero-fill is an unrealistically benign
+// model of an interrupted write-back. It draws nothing from the seed, so it
+// never perturbs the reproducible fault stream.
+func (d *SimDisk) ArmTornAppendAt(at, keepBytes int64) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.appendCount = 0
+	if at <= 0 {
+		d.tornAppendArmed = false
+		return
+	}
+	if keepBytes < 0 {
+		keepBytes = 0
+	}
+	d.tornAppendArmed = true
+	d.tornAppendAt = at
+	d.tornAppendKeep = keepBytes
+}
+
+// AppendCount returns the number of growing writes performed across every handle
+// of this disk since the last [SimDisk.ArmTornAppendAt] reset (or since
+// construction). A scenario reads it to choose which append to tear.
+func (d *SimDisk) AppendCount() int64 {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.appendCount
+}
+
 // SyncCount returns the number of [SimFileHandle.Sync] calls performed across
 // every handle of this disk since the last [SimDisk.ArmSyncFaultAt] reset (or
 // since construction). A concurrent scenario reads it to gate a teardown on
@@ -1086,13 +1296,13 @@ func (d *SimDisk) OpenFile(path string, flag int) (*SimFileHandle, error) {
 		d.files[path] = f
 	}
 	if flag&os.O_TRUNC != 0 {
+		// Visible at once, durable only at the next successful fsync — the same
+		// rule the other two truncation sites take (#2542).
+		f.truncatePendingTo(0)
 		f.data = f.data[:0]
 		f.faulted = make(map[int]bool)
-		// The truncation is modelled as instantly durable, exactly as it was
-		// before the durable shadow existed; see [simFile.truncateDurableTo].
-		f.truncateDurableTo(0)
 	}
-	h := &SimFileHandle{disk: d, file: f, path: path}
+	h := &SimFileHandle{disk: d, file: f, path: path, crashGen: d.crashGen}
 	if flag&os.O_APPEND != 0 {
 		h.pos = int64(len(f.data))
 	}
@@ -1855,10 +2065,100 @@ func (d *SimDisk) removeSubtreeLocked(path string) {
 	}
 }
 
-// MkdirAll is a no-op for the in-memory filesystem: there is no directory tree,
-// paths are opaque keys. It exists to satisfy the filesystem surface the WAL
-// and snapshot writers expect. perm is ignored.
-func (d *SimDisk) MkdirAll(_ string, _ fs.FileMode) error { return nil }
+// MkdirAll creates dir and every missing parent, registering each newly created
+// component in the dirent model. perm is ignored.
+//
+// # What it used to be, and what that cost
+//
+// It returned nil and registered nothing. Two consequences followed (audit
+// finding F9, rmp #2543). A newly created directory was IMPLICITLY DURABLE,
+// needing no parent fsync, unlike every other name in the model — so a crash
+// could never take one away. And an EMPTY directory was UNREPRESENTABLE, because
+// [SimDisk.Stat] inferred a directory purely from a key prefix and
+// [SimDisk.Exists] never saw directories at all — so the state "the snapshot
+// directory exists but is empty or incomplete" could not be reached.
+//
+// Neither was a live defect: today's recovery probe keys on the manifest FILE
+// rather than on the directory (store/recovery), so it is robust to the gap. The
+// exposure was prospective — any future check of the form "does the snapshot
+// directory exist" would have been silently inert under simulation, and
+// partial-publish states stayed out of reach.
+//
+// # Why only NEWLY created components are registered
+//
+// A component that already exists — tracked in d.dirs, or implied by a file
+// beneath it — is left exactly as it was. MkdirAll on an existing directory
+// creates nothing and needs no fsync, and registering it afresh as not-yet-
+// durable would let a crash delete a subtree that was already durable. That is
+// not a stricter model; it is a wrong one.
+func (d *SimDisk) MkdirAll(dir string, _ fs.FileMode) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if dir == "" || dir == "." || dir == "/" {
+		return nil
+	}
+	for _, c := range dirComponents(dir) {
+		if d.dirExistsLocked(c) {
+			continue
+		}
+		// A created directory's own name lives in its parent, so it is durable
+		// only once that parent is fsynced — exactly like a file. Root-level
+		// names keep the exemption settled by #2539: nothing can fsync the root.
+		d.dirs[c] = isRootLevel(c)
+	}
+	return nil
+}
+
+// dirComponents returns dir and every ancestor of it, outermost first, so
+// MkdirAll can register each one it creates.
+func dirComponents(dir string) []string {
+	dir = pathpkg.Clean(dir)
+	var out []string
+	for p := dir; p != "." && p != "/" && p != ""; p = pathpkg.Dir(p) {
+		out = append(out, p)
+		if pathpkg.Dir(p) == p {
+			break
+		}
+	}
+	// Reverse: outermost first, so a parent is registered before its child.
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out
+}
+
+// dirHasChildrenLocked reports whether the directory at path holds anything —
+// a file, or a tracked subdirectory. The caller holds d.mu.
+func (d *SimDisk) dirHasChildrenLocked(path string) bool {
+	prefix := path + "/"
+	for p := range d.files {
+		if strings.HasPrefix(p, prefix) {
+			return true
+		}
+	}
+	for dp := range d.dirs {
+		if strings.HasPrefix(dp, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// dirExistsLocked reports whether path names a directory that already exists,
+// either tracked explicitly or implied by a file beneath it. The caller holds
+// d.mu.
+func (d *SimDisk) dirExistsLocked(path string) bool {
+	if _, tracked := d.dirs[path]; tracked {
+		return true
+	}
+	prefix := path + "/"
+	for p := range d.files {
+		if strings.HasPrefix(p, prefix) {
+			return true
+		}
+	}
+	return false
+}
 
 // Remove deletes the file at path. Removing an absent path is a no-op, matching
 // the tolerant cleanup the snapshot writer relies on.
@@ -1876,8 +2176,24 @@ func (d *SimDisk) Remove(path string) error {
 	defer d.mu.Unlock()
 	f, ok := d.files[path]
 	if !ok {
-		// Nothing was unlinked, so there is no metadata mutation to record and
-		// no cleanup to count as having found anything.
+		// Not a file. It may still be a DIRECTORY, and os.Remove handles that by
+		// falling back to rmdir: an EMPTY directory is removed and a non-empty one
+		// returns ENOTEMPTY (os/file_unix.go, Remove — unlink then rmdir).
+		//
+		// This used to return nil for both, so a caller that meant to delete a
+		// directory received success and no deletion, and the model would never
+		// have revealed the mistake (audit finding F11, rmp #2545). Directories
+		// only became distinguishable from absent paths with #2543.
+		if d.dirExistsLocked(path) {
+			if d.dirHasChildrenLocked(path) {
+				return &fs.PathError{Op: "remove", Path: path, Err: syscall.ENOTEMPTY}
+			}
+			return d.removeAllLocked(path)
+		}
+		// ABSENT: tolerated, deliberately. The snapshot writer's best-effort
+		// cleanup relies on it, and that half of the behaviour is preserved
+		// unchanged. Nothing was unlinked, so there is no metadata mutation to
+		// record and no cleanup to count as having found anything.
 		return nil
 	}
 	d.noteRemoveHitLocked(path)
@@ -1994,6 +2310,13 @@ func (d *SimDisk) hasSubtreeLocked(dir string) bool {
 func (d *SimDisk) RemoveAll(path string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	return d.removeAllLocked(path)
+}
+
+// removeAllLocked is [SimDisk.RemoveAll]'s body. It is factored out so
+// [SimDisk.Remove] can reuse it for the rmdir half of its contract without
+// re-taking the lock. The caller holds d.mu.
+func (d *SimDisk) removeAllLocked(path string) error {
 	files, dirs := d.captureSubtreeLocked(path)
 	if len(files) == 0 && len(dirs) == 0 {
 		return nil
@@ -2023,19 +2346,21 @@ func (d *SimDisk) RemoveAll(path string) error {
 // Stat reports a minimal [fs.FileInfo] for a file at path. It returns an error
 // wrapping fs.ErrNotExist when no file is present, which is exactly the probe
 // the snapshot and recovery paths rely on (testing for manifest.json / wal
-// presence). Directories have no standalone entry in the opaque-key model;
-// Stat reports a directory when any child key is prefixed path+"/".
+// presence). Stat reports a directory when any child key is prefixed path+"/",
+// and — since rmp #2543 — also when the directory was created explicitly through
+// MkdirAll, which is what makes an EMPTY directory representable.
 func (d *SimDisk) Stat(path string) (fs.FileInfo, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if f, ok := d.files[path]; ok {
 		return simFileInfo{name: baseName(path), size: int64(len(f.data))}, nil
 	}
-	prefix := path + "/"
-	for p := range d.files {
-		if strings.HasPrefix(p, prefix) {
-			return simFileInfo{name: baseName(path), dir: true}, nil
-		}
+	// A directory is reported when it holds a file (the prefix inference every
+	// implicitly-created directory relies on) OR when it was created explicitly
+	// through MkdirAll — which is what makes an EMPTY directory representable
+	// (#2543).
+	if d.dirExistsLocked(path) {
+		return simFileInfo{name: baseName(path), dir: true}, nil
 	}
 	return nil, &fs.PathError{Op: "stat", Path: path, Err: fs.ErrNotExist}
 }
@@ -2069,8 +2394,17 @@ func (d *SimDisk) TruncatePath(path string, size int64) error {
 		return errors.New("sim: negative truncate size")
 	}
 	if size <= int64(len(f.data)) {
+		f.truncatePendingTo(size)
 		f.data = f.data[:size]
-		f.truncateDurableTo(size)
+		// F13, settled: drop the fault marks for sectors that no longer exist,
+		// exactly as [SimFileHandle.Truncate] does. The audit recorded the two
+		// paths disagreeing — TruncatePath kept the marks, the handle dropped
+		// them — with no reason for the difference. A fault mark names a SECTOR
+		// of this file; a sector past the new end of file does not exist, so
+		// keeping its mark would corrupt bytes that a later grow happens to
+		// place there, attributing damage to a sector the fault never touched.
+		// The handle's behaviour is the correct one and is now the only one.
+		dropFaultMarksAbove(f, size)
 		return nil
 	}
 	if d.wouldExceedLocked(int64(len(f.data)), size) {
@@ -2295,6 +2629,8 @@ func (d *SimDisk) CrashProcess() {
 	defer d.mu.Unlock()
 	d.lastCrashKind = CrashKindProcess
 	d.lastCrashDiscardedBytes = 0
+	// Every file descriptor the dead process held is gone with it (rmp #2544).
+	d.crashGen++
 	// The undo log is untouched, but the shape observables still report what this
 	// crash SAW, so a gate can prove it landed inside a publish window.
 	d.crashPendingRenames = d.countPendingLocked(direntUndoRename)
@@ -2391,6 +2727,8 @@ func (d *SimDisk) CrashHost() {
 	// Invalidate every fsync currently in flight before anything else: the power
 	// went out with the write-back incomplete.
 	d.hostCrashGen++
+	// And every open file descriptor with it (rmp #2544).
+	d.crashGen++
 	d.rollbackDirentUndosLocked()
 	// Drop directories whose own dirent never became durable, taking their
 	// whole subtree with them (a lost directory rename loses every child).
@@ -2570,10 +2908,25 @@ func (d *SimDisk) undoRenameLocked(rec *renameUndo) {
 func baseName(p string) string { return pathpkg.Base(p) }
 
 // isRootLevel reports whether p sits at the filesystem root (its parent is "."
-// or "/" or itself). Root-level names — notably the WAL at [simWALPath] — are
-// treated as durably linked on creation, so the long-standing WAL data-
-// durability model (per-Sync fault) is unaffected by the dirent model the
-// snapshot/csrfile publish protocol exercises in subdirectories.
+// or "/" or itself). Root-level names are treated as durably linked on creation.
+//
+// # Why the exemption exists, and why it is no longer a blind spot
+//
+// A file at the root has no parent directory that anything could fsync, so
+// without the exemption its name could never become durable and every crash
+// would revoke it. MEASURED: with isRootLevel forced to false, 16 tests fail for
+// exactly that reason. The exemption is therefore a necessity of the model, not
+// a simplification of it — retiring it outright was tried and rejected.
+//
+// What WAS a blind spot is that the WAL-only layout used to sit at the bare key
+// "wal" and take this exemption, which made wal.OpenFS's unconditional
+// ParentDirSync inert in that mode: the call happened, changed nothing, and
+// deleting it could not have failed a run. The WAL now lives under [simWALDir]
+// and is governed by the dirent model like any other name, so the fsync is
+// load-bearing in every mode. [TestWALDirentFsyncIsLoadBearing] proves it by
+// withholding the fsync and requiring the crash to punish the omission, and
+// [TestWALOnlyLayoutIsNotRootExempt] pins the layout so a move back to the root
+// cannot restore the blindness silently (rmp #2539, audit finding F5).
 func isRootLevel(p string) bool {
 	dir := pathpkg.Dir(p)
 	return dir == "." || dir == "/" || dir == p
@@ -2603,8 +2956,13 @@ func (fi simFileInfo) Sys() any           { return nil }
 func (d *SimDisk) Exists(path string) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	_, ok := d.files[path]
-	return ok
+	if _, ok := d.files[path]; ok {
+		return true
+	}
+	// Directories exist too, including empty ones (#2543). Before this, Exists
+	// never saw a directory at all, so "the snapshot directory exists but is
+	// incomplete" was not a state a scenario could observe.
+	return d.dirExistsLocked(path)
 }
 
 // Snapshot returns an independent deep copy of every file's contents keyed by
@@ -2633,21 +2991,64 @@ func (d *SimDisk) Snapshot() map[string][]byte {
 //
 //nolint:revive // "Sim" prefix is intentional (see SimDisk).
 type SimFileHandle struct {
-	disk   *SimDisk
-	file   *simFile
-	path   string
-	pos    int64
-	closed bool
+	disk *SimDisk
+	file *simFile
+	path string
+	pos  int64
+	// crashGen is the disk's crash counter as it stood when this handle was
+	// opened. A crash of either kind bumps the disk's, so a stale stamp means
+	// this handle outlived the process that opened it (rmp #2544).
+	crashGen uint64
+	closed   bool
+}
+
+// ErrCrashedDisk is returned by every [SimFileHandle] method whose handle was
+// opened before a crash. It WRAPS [fs.ErrClosed], so code that already treats a
+// closed handle as terminal keeps working unchanged, while errors.Is against
+// this sentinel still tells a scenario author which of the two happened.
+//
+// It exists because the alternative was silent (rmp #2544). [SimDisk.CrashHost]
+// drops entries from the name maps, but a handle holds its *simFile DIRECTLY, so
+// a scenario that crashed while holding its own handle went on writing into an
+// ORPHANED file. The bytes went nowhere, no error was returned, and the symptom
+// presented as data missing from the engine — a false accusation pointing at the
+// subject under test. Fail-stop beats silent discard: the author learns the
+// handle is dead instead of debugging phantom data loss.
+var ErrCrashedDisk = fmt.Errorf("sim: file handle was opened before a crash and did not survive it: %w", fs.ErrClosed)
+
+// dead is [SimFileHandle.deadLocked] for a caller that does not already hold the
+// disk lock.
+func (h *SimFileHandle) dead() error {
+	h.disk.mu.Lock()
+	defer h.disk.mu.Unlock()
+	return h.deadLocked()
+}
+
+// deadLocked reports whether this handle is unusable, and why. It must be called
+// with d.mu held, because crashGen is disk state.
+//
+// The order matters: an explicitly closed handle reports fs.ErrClosed, because
+// that is what the caller did; a handle killed by a crash reports the crash,
+// because that is something the caller did NOT do and would otherwise have to
+// infer from missing bytes.
+func (h *SimFileHandle) deadLocked() error {
+	if h.closed {
+		return fs.ErrClosed
+	}
+	if h.crashGen != h.disk.crashGen {
+		return ErrCrashedDisk
+	}
+	return nil
 }
 
 // Read copies up to len(p) bytes from the current position into p, advancing
 // the position. It returns io.EOF when the position is at or past end of file.
 func (h *SimFileHandle) Read(p []byte) (int, error) {
-	if h.closed {
-		return 0, fs.ErrClosed
-	}
 	h.disk.mu.Lock()
 	defer h.disk.mu.Unlock()
+	if err := h.deadLocked(); err != nil {
+		return 0, err
+	}
 	if h.pos >= int64(len(h.file.data)) {
 		return 0, io.EOF
 	}
@@ -2660,11 +3061,11 @@ func (h *SimFileHandle) Read(p []byte) (int, error) {
 // current file size. The snapshot index writer calls it to record the
 // component's on-disk size in the manifest.
 func (h *SimFileHandle) Stat() (fs.FileInfo, error) {
-	if h.closed {
-		return nil, fs.ErrClosed
-	}
 	h.disk.mu.Lock()
 	defer h.disk.mu.Unlock()
+	if err := h.deadLocked(); err != nil {
+		return nil, err
+	}
 	return simFileInfo{name: baseName(h.path), size: int64(len(h.file.data))}, nil
 }
 
@@ -2673,20 +3074,49 @@ func (h *SimFileHandle) Stat() (fs.FileInfo, error) {
 // fault injector has marked faulted is corrupted deterministically (a single
 // byte in that sector is flipped), modelling a torn or mis-directed write.
 func (h *SimFileHandle) Write(p []byte) (int, error) {
-	if h.closed {
-		return 0, fs.ErrClosed
-	}
 	h.disk.mu.Lock()
 	defer h.disk.mu.Unlock()
+	// THE clause rmp #2544 exists for: without it these bytes landed in a simFile
+	// no name reaches any more, and were discarded in silence.
+	if err := h.deadLocked(); err != nil {
+		return 0, err
+	}
 
 	end := h.pos + int64(len(p))
 	oldLen := int64(len(h.file.data))
+	partial := false
 	if end > oldLen {
-		// Disk full: in eager mode a growing write that would breach the budget
-		// returns ENOSPC and grows nothing (no partial write), matching real
-		// allocate-on-write and the internal/testfs ReturnENOSPC contract.
+		// Disk full. A partially-satisfiable write TRANSFERS THE BYTES THAT FIT
+		// and reports ENOSPC alongside the short count — it does not refuse
+		// wholesale.
+		//
+		// This matters because returning (0, ENOSPC) meant a partial record could
+		// never exist, which made a torn trailing WAL frame — the single most
+		// important crash state a write-ahead log must survive — unreachable by
+		// any route (rmp #2541, audit finding F7).
+		//
+		// The SHORT COUNT WITH A NON-NIL ERROR is the exact shape os.File.Write
+		// produces, and the shape is not optional: SimFileHandle is used as an
+		// io.Writer, and io.Writer's contract is that "Write must return a
+		// non-nil error if it returns n < len(p)". The task prescribed returning
+		// the count with a NIL error, on the POSIX write(2) reading; that was
+		// tried and REFUTED by a real caller in this tree — the CSV export path
+		// in the io-roundtrip-fault scenario detected the short write and
+		// reported "short write, want a typed ENOSPC error". POSIX describes the
+		// syscall; os.File is the layer that maps it to Go, and it attaches
+		// io.ErrShortWrite or the wrapped errno to every short count
+		// (os/file.go, File.Write).
+		//
+		// The partial record is emergent either way, because the bytes that fit
+		// are in the file before the error is returned.
 		if h.disk.wouldExceedLocked(oldLen, end) {
-			return 0, enospc("write", h.path)
+			fits := h.disk.bytesThatFitLocked(oldLen, h.pos)
+			if fits <= 0 {
+				return 0, enospc("write", h.path)
+			}
+			partial = true
+			p = p[:fits]
+			end = h.pos + fits
 		}
 		grown := make([]byte, end)
 		copy(grown, h.file.data)
@@ -2712,8 +3142,53 @@ func (h *SimFileHandle) Write(p []byte) (int, error) {
 			h.corruptSector(sec)
 		}
 	}
+	// Count growing writes and, when this is the armed one, mark the tail as
+	// torn so the next crash leaves it partial. The mark is taken AFTER the
+	// bytes are in place, so the kept prefix is the real payload.
+	if end > oldLen {
+		h.disk.appendCount++
+		if h.disk.tornAppendArmed && h.disk.appendCount == h.disk.tornAppendAt {
+			h.disk.tornAppendArmed = false
+			keep := h.disk.tornAppendKeep
+			if keep < 0 {
+				keep = 0
+			}
+			if n := end - h.pos; keep > n {
+				keep = n
+			}
+			h.file.tornTailSet = true
+			h.file.tornTailStart = h.pos
+			h.file.tornTailKeep = keep
+			h.file.tornTailEnd = end
+		}
+	}
+
 	h.pos = end
+	if partial {
+		return len(p), enospc("write", h.path)
+	}
 	return len(p), nil
+}
+
+// bytesThatFitLocked returns how many bytes a write starting at pos can still
+// transfer before the disk budget is reached, given the file's current length.
+// It is never negative. The caller holds disk.mu.
+//
+// A write may start BEYOND the current end of file (a seek past the end), in
+// which case the hole it creates counts against the budget too, exactly as the
+// allocation would on a real filesystem.
+func (d *SimDisk) bytesThatFitLocked(oldLen, pos int64) int64 {
+	if d.capacityBytes <= 0 || d.enospcOnSync {
+		return 1<<62 - 1
+	}
+	// The write consumes budget only for the bytes it adds beyond oldLen.
+	headroom := d.capacityBytes - (d.totalBytesLocked() - oldLen)
+	// headroom is the largest length this file may reach; the write may fill up
+	// to that, starting from pos.
+	if fits := headroom - pos; fits > 0 {
+		return fits
+	}
+	return 0
 }
 
 // corruptSector flips the first byte of the given sector deterministically.
@@ -2736,11 +3211,11 @@ func (h *SimFileHandle) corruptSector(sec int) {
 // returns the resulting absolute offset. A negative resulting offset is an
 // error.
 func (h *SimFileHandle) Seek(offset int64, whence int) (int64, error) {
-	if h.closed {
-		return 0, fs.ErrClosed
-	}
 	h.disk.mu.Lock()
 	defer h.disk.mu.Unlock()
+	if err := h.deadLocked(); err != nil {
+		return 0, err
+	}
 	var abs int64
 	switch whence {
 	case io.SeekStart:
@@ -2762,17 +3237,17 @@ func (h *SimFileHandle) Seek(offset int64, whence int) (int64, error) {
 // Truncate resizes the file to size bytes, zero-filling when growing and
 // dropping fault marks for sectors that no longer exist.
 func (h *SimFileHandle) Truncate(size int64) error {
-	if h.closed {
-		return fs.ErrClosed
-	}
 	if size < 0 {
 		return errors.New("sim: negative truncate size")
 	}
 	h.disk.mu.Lock()
 	defer h.disk.mu.Unlock()
+	if err := h.deadLocked(); err != nil {
+		return err
+	}
 	if size <= int64(len(h.file.data)) {
+		h.file.truncatePendingTo(size)
 		h.file.data = h.file.data[:size]
-		h.file.truncateDurableTo(size)
 	} else {
 		if h.disk.wouldExceedLocked(int64(len(h.file.data)), size) {
 			return enospc("truncate", h.path)
@@ -2781,22 +3256,70 @@ func (h *SimFileHandle) Truncate(size int64) error {
 		copy(grown, h.file.data)
 		h.file.data = grown
 	}
-	lastSector := int((size - 1) / sectorSize)
-	for sec := range h.file.faulted {
-		if int64(size) == 0 || sec > lastSector {
-			delete(h.file.faulted, sec)
-		}
-	}
+	dropFaultMarksAbove(h.file, size)
 	return nil
 }
 
-// Sync models flushing OS buffers to stable storage. With probability
-// faultRate (drawn from the disk's seed) it fails with [ErrSimFault], modelling
-// a durability fault. Each call consumes exactly one draw from the seed so the
-// fault sequence is reproducible.
+// dropFaultMarksAbove deletes the fault marks for sectors that no longer exist
+// after a truncation to size. It is shared by [SimFileHandle.Truncate] and
+// [SimDisk.TruncatePath] so the two cannot disagree about it again (F13, #2542).
+func dropFaultMarksAbove(f *simFile, size int64) {
+	lastSector := int((size - 1) / sectorSize)
+	for sec := range f.faulted {
+		if size == 0 || sec > lastSector {
+			delete(f.faulted, sec)
+		}
+	}
+}
+
+// Sync fsyncs the file, granting durability to everything written before the
+// call returns.
+//
+// # A FAILED fsync is permanent, and a retry is a lie (rmp #2540)
+//
+// When Sync fails, this file's durable prefix is frozen for good: every later
+// Sync on it RETURNS SUCCESS AND ADVANCES NOTHING. That is not a simplification;
+// it is the behaviour the sources describe.
+//
+// On Linux, a write-back error marks the affected pages CLEAN and reports the
+// error to exactly one fsync caller, after which it is gone — so the dirty data
+// is discarded and a retried fsync returns success over bytes that no longer
+// exist anywhere. The canonical write-up is Rebello et al., "Can Applications
+// Recover from fsync Failures?" (USENIX ATC 2020), which measured this across
+// ext4, XFS and Btrfs and found the page state after a failure differs per
+// filesystem but is never "still dirty and retryable" on ext4 data=ordered.
+// PostgreSQL reached the same conclusion the expensive way and now PANICs rather
+// than retrying (its fsync failure handling, commit 9ccdd7f6 and the
+// "fsyncgate" thread of 2018).
+//
+// The audit that filed this was explicit that NO man page warns against retrying
+// fsync, so the behaviour is sourced to the measurements and to PostgreSQL's
+// response, never to a man page.
+//
+// # Why the model freezes the whole prefix
+//
+// The durable image is a contiguous PREFIX. The bytes the failed write-back was
+// carrying are gone, so nothing after them can be made durable either — there is
+// no way to express "durable, then a hole, then durable" in a watermark, and a
+// real reader stopping at the hole would see exactly the same thing.
+//
+// Bound: a caller that SEEKS BACK and rewrites the lost region could legitimately
+// make it durable again, and that is not modelled. No caller in this module does
+// — the WAL only appends — and modelling it would require tracking which bytes
+// were rewritten after the failure.
+//
+// # There is no live defect this protects against; it protects against a future one
+//
+// No current caller retries: the WAL poisons fail-stop, and RocksDB's equivalent
+// is structural, with seen_error short-circuiting every later call on the writer.
+// What the model could not express before was the consequence of INTRODUCING a
+// retry. An optimisation of the form "retry the fsync once before poisoning"
+// would have looked perfectly safe under DST and been a data-loss bug in
+// production. [TestSyncRetryAfterFailureLosesData] writes exactly that
+// optimisation and observes the loss.
 func (h *SimFileHandle) Sync() error {
-	if h.closed {
-		return fs.ErrClosed
+	if err := h.dead(); err != nil {
+		return err
 	}
 	gate, req, err := h.disk.syncOutcome(h.path, h.file)
 	// Block on an armed gate with the disk lock RELEASED, so the rest of the disk
@@ -2813,6 +3336,15 @@ func (h *SimFileHandle) Sync() error {
 	if err != nil {
 		// A failed fsync advances nothing: the bytes it was carrying are still
 		// only in the page cache, so a crash still loses them.
+		//
+		// It also POISONS the file's durable prefix permanently. On Linux a
+		// failed write-back marks the affected pages CLEAN and reports the error
+		// once, so the dirty data is discarded and a retried fsync returns
+		// SUCCESS over data that is already gone. Modelling the retry as a plain
+		// success would make "retry the fsync once before poisoning" look safe
+		// under simulation while being a data-loss bug in production (rmp #2540,
+		// audit finding F6).
+		h.disk.markWritebackLost(h.file)
 		return err
 	}
 	// The durability lands when the fsync RETURNS, not when it was issued. That
@@ -2871,7 +3403,23 @@ func (d *SimDisk) completeSync(f *simFile, req syncRequest) {
 	if d.hostCrashGen != req.gen {
 		return
 	}
+	if f.writebackLost {
+		// A retry after a failed fsync RETURNS SUCCESS AND GRANTS NOTHING. The
+		// pages the failed write-back was carrying were marked clean and dropped,
+		// so the bytes between the old watermark and here are gone; a durable
+		// prefix is contiguous, so nothing beyond them can become durable either,
+		// however many times the caller retries.
+		return
+	}
 	f.markSyncedTo(req.covers)
+}
+
+// markWritebackLost records that an fsync on f failed, freezing its durable
+// prefix for good. The caller must not hold d.mu.
+func (d *SimDisk) markWritebackLost(f *simFile) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	f.writebackLost = true
 }
 
 // syncResultLocked returns the outcome the arms select for the Sync just
@@ -2901,6 +3449,10 @@ func (d *SimDisk) syncResultLocked(path string) error {
 
 // Close releases the handle. It is idempotent: a second Close is a no-op.
 func (h *SimFileHandle) Close() error {
+	// Deliberately NOT gated on [SimFileHandle.deadLocked]: closing a handle the
+	// crash already killed is a no-op, not an error. Every caller closes with
+	// `defer`, so returning ErrCrashedDisk here would turn the fail-stop of rmp
+	// #2544 into a second, spurious failure on a path that is only cleaning up.
 	h.closed = true
 	return nil
 }

@@ -239,10 +239,38 @@ func (l *Loader) Drain(ctx context.Context, ch <-chan Edge) (int, error) {
 // When Options.Parallel is set and the buffered load is a large
 // directed graph, Finalise builds the adjacency in parallel; the
 // resulting CSR and csrfile are byte-for-byte identical to the
-// sequential build. The csrfile is always published atomically and
-// durably by [csrfile.WriteToFile] (tmp + fsync + rename + parent
-// fsync): the parallel build completes fully in memory before the
-// single publication, so a crash mid-build leaves no partial csrfile.
+// sequential build. The csrfile is published by [csrfile.WriteToFile]
+// (tmp + fsync + rename + parent fsync): the parallel build completes
+// fully in memory before the single publication, so a crash mid-build
+// leaves no partial csrfile.
+//
+// # What a non-nil error means for the published file (rmp #2581)
+//
+// This godoc previously said publication was "always atomic and durable",
+// which is untrue of ONE step and the difference matters to a caller:
+//
+//   - errors.Is(err, [csrfile.ErrPublishedNotDurable]) — the rename SUCCEEDED,
+//     so the new generation IS published and the previous one is gone; only the
+//     parent-directory fsync failed, so the rename may not survive a crash.
+//     Retry the fsync or fail the process. Do NOT treat it as "not published"
+//     and do NOT assume the previous file survived.
+//   - any other error — nothing was published and the previous generation is
+//     intact.
+//
+// The returned *csr.CSR is valid in both cases; only the on-disk artefact
+// differs.
+//
+// # The platform scope of the durability claim (rmp #2582)
+//
+// On a nil error the published file's CONTENTS are durable everywhere, and on
+// linux/darwin/freebsd/netbsd/openbsd the rename's DIRECTORY ENTRY is durable
+// too. Outside that build set csrfile performs no barrier after the rename, so
+// the entry's durability is a property of the filesystem rather than something
+// GoGraph establishes — see [csrfile.WriteToFile], which carries the full
+// statement and explains why no claim is made about those platforms either way.
+//
+// This caveat used to be absent here entirely, which mattered more than its
+// absence in csrfile: a bulk-loader caller reads THIS godoc.
 func (l *Loader) Finalise() (int, *csr.CSR[int64], error) {
 	defer metrics.Time("store.bulk.Finalise").Stop()
 

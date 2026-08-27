@@ -93,10 +93,53 @@ _cover_profile_tmp="${COVER_PROFILE}${_cover_tmp_suffix}"
 _cover_testlog_tmp="${COVER_TEST_LOG}${_cover_tmp_suffix}"
 _cover_lib_tmp="${COVER_LIB_PROFILE}${_cover_tmp_suffix}"
 cleanup_cover_tmp() {
+  # Kill the instrumented test run first, if one is still in flight. Without
+  # this its output would keep being written to a path we are about to delete,
+  # and on a signal the run would outlive the gate that started it.
+  if [ -n "${_cover_test_pid:-}" ]; then
+    kill -TERM "${_cover_test_pid}" 2>/dev/null || true
+  fi
   rm -f "${_cover_profile_tmp}" "${_cover_testlog_tmp}" "${_cover_lib_tmp}" \
      "${COVER_PROFILE}.pub.$$" "${COVER_LIB_PROFILE}.pub.$$"
 }
+
+# SIGNAL SAFETY (rmp #2549). Measured consequence of not having it:
+# cover.out.tmp.60317 sat in the repository root holding 248,840,121 bytes for
+# seven days, because the run that created it was cancelled and nothing reclaimed
+# it. .gitignore hides such files from `git status`, so nothing surfaces them.
+#
+# WHAT ACTUALLY STRANDED THAT FILE, measured rather than assumed. rmp #2549 was
+# filed on the premise that "an EXIT trap does not run when the shell receives
+# SIGTERM". On the bash this project runs on (3.2.57, which is both /bin/bash and
+# the PATH bash on macOS) that premise is FALSE: a shell blocked in `wait` and
+# killed by SIGTERM or SIGHUP does run its EXIT trap. What the shell will NOT do
+# is run any trap while a FOREGROUND child is still going — and the instrumented
+# run used to be exactly that, so a cancelled gate sat unhandled until the
+# harness followed up with SIGKILL, which no trap can survive. The fix that
+# reclaims the file is therefore the backgrounding below, not this block.
+#
+# These traps are kept as the PORTABLE guarantee rather than the mechanism:
+# running the EXIT trap on a fatal signal is bash implementation behaviour, not
+# a POSIX guarantee, and only bash 3.2 was available to verify it here. They also
+# make the intent legible instead of resting on a side effect. The handler
+# re-raises after cleaning up, having first removed its own traps, so the exit
+# status still reports the signal (128+signo). rm -f is idempotent, so the EXIT
+# trap firing afterwards is harmless.
+#
+# Neither this block nor the backgrounding helps against SIGKILL, or against a
+# SIGINT that was ignored when the shell started — bash refuses to install a trap
+# for a signal ignored on entry. `make clean` covers what is already stranded.
+_cover_signal_exit() {
+  cleanup_cover_tmp
+  trap - "$1" EXIT
+  kill -s "$1" $$
+}
 trap cleanup_cover_tmp EXIT
+for _sig in INT TERM HUP; do
+  # shellcheck disable=SC2064  # expand _sig now: each trap must name its own signal
+  trap "_cover_signal_exit ${_sig}" "${_sig}"
+done
+unset _sig
 # -coverpkg=./... attributes coverage of EVERY package to whichever test
 # exercises it, not just that package's own _test.go files. The query engine
 # (cypher/...) is validated overwhelmingly by the openCypher TCK suite and the
@@ -105,7 +148,24 @@ trap cleanup_cover_tmp EXIT
 # Crediting cross-package coverage is the accurate measure of how well the
 # library is tested. The trade-off is a slower instrumented run, hence the
 # generous timeout.
-if ! "${GO}" test -coverpkg=./... -coverprofile="${_cover_profile_tmp}" -covermode=atomic -timeout=20m ./... >"${_cover_testlog_tmp}" 2>&1; then
+#
+# The run is BACKGROUNDED and waited on rather than run in the foreground. This
+# is not a style choice and it is the half of rmp #2549 that the trap alone does
+# not fix: bash defers a trap handler until the current FOREGROUND command
+# finishes, so with `go test` in the foreground a SIGTERM to the gate would sit
+# unhandled for the rest of the run - up to the 20m timeout - and the cleanup
+# this trap exists to perform would not happen in time to matter. Verified by
+# experiment before the fix was written: with the child in the foreground the
+# handler did not run, the shell stayed ALIVE, and the temporary file survived;
+# with it backgrounded and waited on, INT, TERM and HUP each cleaned up and the
+# shell terminated with the signal (TERM and HUP measured at 143 and 129).
+# `wait` is interruptible, which is what makes the difference.
+"${GO}" test -coverpkg=./... -coverprofile="${_cover_profile_tmp}" -covermode=atomic -timeout=20m ./... >"${_cover_testlog_tmp}" 2>&1 &
+_cover_test_pid=$!
+_cover_test_rc=0
+wait "${_cover_test_pid}" || _cover_test_rc=$?
+_cover_test_pid=""
+if [ "${_cover_test_rc}" -ne 0 ]; then
   # PRESERVE THE EVIDENCE BEFORE PRINTING ANYTHING (rmp #2347). The log used to
   # be published to ${COVER_TEST_LOG}, which the NEXT run - green or not -
   # overwrites. A rare failure was therefore destroyed by the very re-run

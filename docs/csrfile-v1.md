@@ -24,7 +24,7 @@ versioned and stable.
 | 7      | 1 B  | alignment       | uint8 — section alignment in bytes (64) |
 | 8      | 8 B  | nVertices       | uint64                                   |
 | 16     | 8 B  | nEdges          | uint64                                   |
-| 24     | 1 B  | weightKind      | 0 = absent, 1 = u32, 2 = u64, 3 = f32, 4 = f64 |
+| 24     | 1 B  | weightKind      | 0 = absent, 1 = u32, 2 = u64, 3 = f32, 4 = f64, 5 = u8, 6 = u16 |
 | 25     | 7 B  | reserved        | must be zero                             |
 | 32     | 8 B  | verticesOffset  | uint64, multiple of alignment            |
 | 40     | 8 B  | edgesOffset     | uint64, multiple of alignment            |
@@ -42,7 +42,25 @@ zero.
 | edges    | 8 × nEdges bytes           |
 | weights  | weightSize × nEdges bytes  |
 
-`weightSize` is 0 for `weightKind=0`, 4 for u32/f32, 8 for u64/f64.
+`weightSize` is 0 for `weightKind=0`, 1 for u8, 2 for u16, 4 for u32/f32,
+8 for u64/f64.
+
+Kinds 5 and 6 were **added** by rmp #2529, to reconcile this format's accepted
+weight set with `store/snapshot`'s — the two durable representations of the same
+graph previously disagreed about which weight types they would persist. The
+addition is backward compatible in both directions that matter: values 0-4 keep
+their meaning, so every file written by an earlier build reads unchanged, and an
+earlier reader meeting a 5 or a 6 refuses it with `ErrUnknownWeightKind` rather
+than misreading it. The format `version` is therefore still 1.
+
+The 1- and 2-byte kinds carry the signed and unsigned type of that width, and
+`u8` additionally carries `bool`; the on-disk bytes are the value's native
+little-endian representation in every case.
+
+`int`, `uint` and `uintptr` are persisted under `u64`. They are
+**platform-dependent widths**, accepted deliberately because `store/snapshot`
+accepts them and the two sets are reconciled — a file carrying them, written on a
+64-bit build, would be misread by a 32-bit one.
 
 ### Within-source order is DERIVED, never trusted from disk
 

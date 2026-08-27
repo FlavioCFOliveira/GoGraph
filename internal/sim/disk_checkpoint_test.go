@@ -80,7 +80,7 @@ func TestFullStack_CheckpointTruncateBoundary(t *testing.T) {
 	// Phase 3: the snapshot is durable, so the WAL prefix it folded can be
 	// reclaimed. The snapshot covers the entire graph, so the whole WAL is the
 	// folded prefix; truncate the image to empty (the suffix is empty).
-	if err := disk.TruncatePath("wal", 0); err != nil {
+	if err := disk.TruncatePath(simWALPath, 0); err != nil {
 		t.Fatalf("model prefix-truncate: %v", err)
 	}
 	disk.Crash() // crash after a fully completed checkpoint.
@@ -122,7 +122,7 @@ func TestFullStack_CheckpointOrderingViolationLosesData(t *testing.T) {
 	}
 	// Truncate the WAL prefix BEFORE the snapshot is durable — the ordering
 	// violation.
-	if err := disk.TruncatePath("wal", 0); err != nil {
+	if err := disk.TruncatePath(simWALPath, 0); err != nil {
 		t.Fatalf("premature truncate: %v", err)
 	}
 	disk.Crash() // snapshot dirents were never fsync'd -> dropped; WAL is empty.

@@ -335,7 +335,7 @@ type Options struct {
 
 	// MaxOpenTxPerPrincipal caps how many explicit transactions one authenticated
 	// principal may hold open at once across all of its connections. Exceeding it
-	// fails the BEGIN with Neo.ClientError.General.LimitExceeded rather than
+	// fails the BEGIN with Neo.TransientError.Transaction.MaximumTransactionLimitReached rather than
 	// queueing. Zero defaults to [DefaultMaxOpenTxPerPrincipal]; a NEGATIVE value
 	// disables enforcement, which is deliberate and visible at the call site.
 	MaxOpenTxPerPrincipal int
@@ -392,7 +392,9 @@ type Options struct {
 	// accumulated in tx.results since BEGIN; auto-commit cursors are
 	// not counted (the Bolt v5 state machine already prevents two
 	// concurrent auto-commit streams). The cap surfaces as a typed
-	// Bolt FAILURE with code "Neo.ClientError.General.LimitExceeded".
+	// Bolt FAILURE with code
+	// "Neo.TransientError.Transaction.MaximumTransactionLimitReached" — TRANSIENT, so a
+	// driver retries, and the session stays in READY so it can (rmp #2561).
 	MaxInFlightPerConnection int
 
 	// ConnTimeout is the per-connection idle read deadline applied throughout
@@ -1206,7 +1208,7 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 				s.log.Warn("bolt: explicit transaction terminated by operator request",
 					slog.String("remote", remote))
 				incCounter(metricTxTerminated)
-				sess.reapTimedOutTx()
+				sess.terminateTxByOperator()
 				syncTxTimer()
 			}
 			continue
@@ -1222,14 +1224,27 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 				// audit demonstrated (rmp #2175).
 				idle := !sess.txIdleDeadline.IsZero() &&
 					(sess.txDeadline.IsZero() || sess.txIdleDeadline.Before(sess.txDeadline))
+				//
+				// The metric is emitted HERE, not inside the teardown, for the
+				// same reason the log line is: only this branch knows which bound
+				// fired. metricTxTimedOut used to be incremented by the teardown
+				// itself, which made it a superset of the idle reaps AND the
+				// operator terminations and so erased the very distinction the
+				// idle counter was added to draw (rmp #2560).
+				//
+				// Neither log line says "rolled back to release the writer lock"
+				// any more: rmp #2305/#2306 retired that hold, and txregistry.go
+				// records at length what an abandoned transaction actually costs
+				// now — version memory, not other clients' progress.
 				if idle {
-					s.log.Warn("bolt: explicit transaction idle too long; rolled back to release the writer lock",
+					s.log.Warn("bolt: explicit transaction idle too long; rolled back",
 						slog.String("remote", remote),
 						slog.Duration("max_idle", s.opts.MaxTxIdleTime))
 					incCounter(metricTxIdleReaped)
 				} else {
-					s.log.Warn("bolt: explicit transaction timed out; rolled back to release the writer lock",
+					s.log.Warn("bolt: explicit transaction timed out; rolled back",
 						slog.String("remote", remote))
+					incCounter(metricTxTimedOut)
 				}
 				sess.reapTimedOutTx()
 			}

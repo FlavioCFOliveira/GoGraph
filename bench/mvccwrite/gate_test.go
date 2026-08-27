@@ -344,6 +344,11 @@ func newGateEngine(t *testing.T) (*cypher.Engine, context.Context) {
 // TestWriteScalingGate gates the sprint's headline number: concurrent writers
 // must deliver at least [writeScalingFloor] times the throughput of one writer.
 func TestWriteScalingGate(t *testing.T) {
+	// This gate's own failure message already tells the reader "or the machine is
+	// loaded. Re-run on an idle machine before touching the floor". `make ci` ran
+	// it on a loaded machine every time; `make test-timing` is that idle machine,
+	// arranged automatically instead of by instruction (rmp #2517).
+	testlayers.RequireQuietMachine(t, "the 8-vs-1 commit throughput ratio against the write-scaling floor")
 	eng, ctx := newGateEngine(t)
 	got := measureScaling(t, gateWriters, gateOps, "engine/mem", func(writer, i int) error {
 		return commit(ctx, eng, writer, i)
@@ -381,6 +386,7 @@ func newWALGateEngine(t *testing.T) (*cypher.Engine, context.Context) {
 // anywhere across the commit path — the fsync in particular — returns this arm to
 // the flat 1.00x it measured before, which is far below the floor.
 func TestWALWriteScalingGate(t *testing.T) {
+	testlayers.RequireQuietMachine(t, "the 8-vs-1 WAL commit throughput ratio against the WAL write-scaling floor")
 	eng, ctx := newWALGateEngine(t)
 	got := measureScaling(t, gateWriters, walGateOps, "engine/wal", func(writer, i int) error {
 		return commit(ctx, eng, writer, i)
@@ -401,6 +407,7 @@ func TestWALWriteScalingGate(t *testing.T) {
 // silently re-serialised write path once rmp #2304 lands, because unlike
 // [TestWriteScalingGate] its verdict does not depend on how busy the host is.
 func TestWriteConcurrencyGate(t *testing.T) {
+	testlayers.RequireQuietMachine(t, "the free-versus-globally-mutexed throughput ratio against the write-concurrency floor")
 	eng, ctx := newGateEngine(t)
 	got := measureSerialisationRatio(t, gateWriters, gateOps, "engine/mem", func(writer, i int) error {
 		return commit(ctx, eng, writer, i)
@@ -552,6 +559,14 @@ func TestWriteScalingInstrument_SeesConcurrency(t *testing.T) {
 	// here; this control asserts in the -race arm of the same `make ci`.
 	testlayers.RequireUninstrumented(t, "the serialisation ratio of genuinely parallel "+
 		"CPU-bound work forced through one mutex, which must exceed the sprint's scaling target")
+	// The SAME precondition, defeated by a different cause. Coverage
+	// instrumentation compresses the arms; a parallel whole-suite run takes away
+	// the cores the parallel arm needs. Measured: 2.984x against the 3.00x target
+	// under `make ci`, after this test's own probe reported 12.91x available
+	// parallelism — the probe runs before the measurement and cannot see load that
+	// arrives during it. Passes 3/3 solo (rmp #2499, #2517).
+	testlayers.RequireQuietMachine(t, "the 8-vs-1 throughput ratio of genuinely parallel "+
+		"CPU-bound work, which must exceed the sprint's scaling target")
 	const ops = gateOps / 4
 	// Probe the machine BEFORE asserting anything, and skip rather than return a
 	// false verdict when it cannot supply the parallelism either instrument needs.
@@ -613,6 +628,8 @@ func TestWriteScalingInstrument_SeesSerialisation(t *testing.T) {
 	// to separate the arms at all. Included by the audit rmp #2319 asked for rather
 	// than because it was observed failing — an instrument of this class that is
 	// guarded only once it goes red is guarded by luck.
+	testlayers.RequireQuietMachine(t, "the scaling ratio of work already behind a mutex, "+
+		"which must stay BELOW the sprint's scaling target (rmp #2499, #2517)")
 	testlayers.RequireUninstrumented(t, "the scaling ratio of work that is already "+
 		"fully serialised, which must measure below the sprint's scaling target")
 	requireCores(t)

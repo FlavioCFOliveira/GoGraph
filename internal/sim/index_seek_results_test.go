@@ -203,7 +203,7 @@ func TestIndexSeekResults_FinishFiresOnVacuousRun(t *testing.T) {
 	if len(v) != 1 {
 		t.Fatalf("Finish did not fire on a vacuous run, got %d violations: %v", len(v), v)
 	}
-	if v[0].Kind != ViolationOracleDeviation || !strings.Contains(v[0].Message, "vacuous run") {
+	if v[0].Kind != ViolationVacuousRun || !strings.Contains(v[0].Message, "vacuous run") {
 		t.Fatalf("unexpected vacuity violation: %+v", v[0])
 	}
 }

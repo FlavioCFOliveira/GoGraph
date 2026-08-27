@@ -44,6 +44,7 @@ import (
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ir"
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
@@ -124,10 +125,15 @@ func recogniseLabelledHopPattern(pat *ast.Pattern, where *ast.Where, row expr.Ro
 		return nil, false
 	}
 
-	// RELATIONSHIP: single hop, unnamed, untyped or exactly one type, no
-	// properties, outgoing.
+	// RELATIONSHIP: single hop, not named BY THE USER, untyped or exactly one
+	// type, no properties, outgoing.
+	//
+	// [ir.UserNamed] rather than `!= nil`, for the reason given at the same guard
+	// in ir/degree_shape.go: a synthetic name observes nothing, and spelling this
+	// syntactically made the recogniser stop firing once subquery relationships
+	// were named up front (rmp #2508).
 	rel := second.Relationship
-	if rel.Range != nil || rel.Variable != nil || rel.Properties != nil {
+	if rel.Range != nil || ir.UserNamed(rel.Variable) || rel.Properties != nil {
 		return nil, false
 	}
 	if rel.Direction != ast.RelDirectionOutgoing || len(rel.Types) > 1 {

@@ -62,7 +62,19 @@ package mvccwrite
 //     why the whole cascade of false readings below happened. contentionKey now returns
 //     a STRING. Measured after: 3212 ns/op at 256 nodes against 2949 at 4096, i.e.
 //     node-count INDEPENDENT, and allocs/op flat at 52-53 across writers 1..32 where it
-//     had been 174 -> 16052. rmp #2367 is retired by that evidence.
+//     had been 174 -> 16052.
+//
+//     THAT FIXED THE FIXTURE, NOT THE FINDING, and the claim once made here that
+//     "rmp #2367 is retired by that evidence" was WRONG. A string key routes the
+//     lookup to the hash path, which has no population gate; an INTEGER key — what a
+//     user naturally writes — cannot reach the hash path at all and falls to the RANGE
+//     path, which did have one. #2367 reproduced the whole inversion at HEAD on an
+//     integer key and root-caused it to rangeSeekMinLabelPopulation, a hard floor that
+//     suppressed the range seek below 1024 nodes: MEASURED 68.7 us at 1023 nodes
+//     against 5.5 us at 1024, a 12.6x cliff at a constant, reproduced in both sweep
+//     directions. The floor is now 64, set from measurement. Changing this fixture's
+//     key kind was still the right call — it removed a confound — but it removed the
+//     SYMPTOM from one benchmark rather than the defect from the engine.
 //
 //     THE HISTORICAL READING, kept because four hypotheses were needed to get here and
 //     three of them were wrong: seedPool creates

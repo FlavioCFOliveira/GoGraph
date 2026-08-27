@@ -102,6 +102,7 @@ package cypher_test
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"syscall"
 	"testing"
 	"time"
@@ -211,6 +212,9 @@ func processCPU(tb testing.TB) time.Duration {
 type cycleSample struct {
 	wall time.Duration
 	cpu  time.Duration
+	// alloc is the bytes allocated by the wipe. It is the GATED statistic since
+	// rmp #2589; wall and cpu are kept and logged as diagnostics.
+	alloc uint64
 }
 
 func wallOf(s []cycleSample) []time.Duration {
@@ -229,9 +233,23 @@ func cpuOf(s []cycleSample) []time.Duration {
 	return out
 }
 
-// ratio is the gated statistic: the last cycle's cost over the first's.
+// ratio is the last cycle's cost over the first's, for the duration diagnostics.
 func ratio(d []time.Duration) float64 {
 	return float64(d[len(d)-1]) / float64(d[0])
+}
+
+func allocOf(s []cycleSample) []uint64 {
+	out := make([]uint64, len(s))
+	for i, c := range s {
+		out[i] = c.alloc
+	}
+	return out
+}
+
+// allocRatio is THE gated statistic (rmp #2589): the bytes the last wipe
+// allocated over the bytes the first did.
+func allocRatio(v []uint64) float64 {
+	return float64(v[len(v)-1]) / float64(v[0])
 }
 
 // deleteCycles drives `cycles` seed-and-wipe rounds against ONE engine and
@@ -267,9 +285,18 @@ func deleteCycles(t *testing.T, perCycle, batch, cycles int, detach, degrade boo
 		if seen := countTmp(ctx, t, eng); seen != int64(want) {
 			t.Fatalf("cycle %d: seeded %d :Tmp nodes, want %d", cycle, seen, want)
 		}
+		var memBefore, memAfter runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&memBefore)
 		cpu0 := processCPU(t)
 		wall := wipeTmp(ctx, t, eng, batch, detach)
-		took = append(took, cycleSample{wall: wall, cpu: processCPU(t) - cpu0})
+		cpu := processCPU(t) - cpu0
+		runtime.ReadMemStats(&memAfter)
+		took = append(took, cycleSample{
+			wall:  wall,
+			cpu:   cpu,
+			alloc: memAfter.TotalAlloc - memBefore.TotalAlloc,
+		})
 	}
 	return took
 }
@@ -295,14 +322,15 @@ const maxCycleRatio = 2.5
 // Deliberately NOT parallel — see the file header.
 func TestDeleteDoesNotDegradeAcrossCycles(t *testing.T) {
 	got := deleteCycles(t, 20_000, 5_000, 6, false, false)
-	cpu, wall := cpuOf(got), wallOf(got)
-	r := ratio(cpu)
+	alloc, cpu, wall := allocOf(got), cpuOf(got), wallOf(got)
+	r := allocRatio(alloc)
 	if r > maxCycleRatio {
-		t.Fatalf("DELETE wipe CPU grew %.2fx from the first cycle to the last (limit %.1fx); per-cycle CPU %v, wall %v",
-			r, maxCycleRatio, cpu, wall)
+		t.Fatalf("DELETE wipe ALLOCATION grew %.2fx from the first cycle to the last (limit %.1fx); "+
+			"per-cycle bytes %v. Allocation volume cannot be moved by machine load, so this is the "+
+			"engine (rmp #2589). Diagnostics: CPU %v, wall %v", r, maxCycleRatio, alloc, cpu, wall)
 	}
-	t.Logf("DELETE per-cycle CPU %v (last/first %.2fx); wall %v (last/first %.2fx)",
-		cpu, r, wall, ratio(wall))
+	t.Logf("DELETE per-cycle alloc %v (last/first %.2fx); CPU %v (%.2fx); wall %v (%.2fx)",
+		alloc, r, cpu, ratio(cpu), wall, ratio(wall))
 }
 
 // TestDetachDeleteDoesNotDegradeAcrossCycles is the same gate for nodes that
@@ -313,14 +341,15 @@ func TestDeleteDoesNotDegradeAcrossCycles(t *testing.T) {
 // Deliberately NOT parallel — see the file header.
 func TestDetachDeleteDoesNotDegradeAcrossCycles(t *testing.T) {
 	got := deleteCycles(t, 5_000, 1_000, 6, true, false)
-	cpu, wall := cpuOf(got), wallOf(got)
-	r := ratio(cpu)
+	alloc, cpu, wall := allocOf(got), cpuOf(got), wallOf(got)
+	r := allocRatio(alloc)
 	if r > maxCycleRatio {
-		t.Fatalf("DETACH DELETE wipe CPU grew %.2fx from the first cycle to the last (limit %.1fx); per-cycle CPU %v, wall %v",
-			r, maxCycleRatio, cpu, wall)
+		t.Fatalf("DETACH DELETE wipe ALLOCATION grew %.2fx from the first cycle to the last "+
+			"(limit %.1fx); per-cycle bytes %v. Diagnostics: CPU %v, wall %v",
+			r, maxCycleRatio, alloc, cpu, wall)
 	}
-	t.Logf("DETACH DELETE per-cycle CPU %v (last/first %.2fx); wall %v (last/first %.2fx)",
-		cpu, r, wall, ratio(wall))
+	t.Logf("DETACH DELETE per-cycle alloc %v (last/first %.2fx); CPU %v (%.2fx); wall %v (%.2fx)",
+		alloc, r, cpu, ratio(cpu), wall, ratio(wall))
 }
 
 // TestDeleteCycleGateDetectsDegradation is the power control for the two gates
@@ -343,16 +372,23 @@ func TestDetachDeleteDoesNotDegradeAcrossCycles(t *testing.T) {
 //
 // Deliberately NOT parallel — see the file header.
 func TestDeleteCycleGateDetectsDegradation(t *testing.T) {
+	// Guarded for the MIRROR reason to the two gates above, and it must be
+	// guarded with them or the pair becomes incoherent: this control requires the
+	// ratio to EXCEED the threshold, so where load inflates the gates' ratios it
+	// can equally compress this one below the floor it needs (rmp #2589). A
+	// control that fires or not according to machine load proves nothing about
+	// the gates' power either way.
 	got := deleteCycles(t, 2_000, 1_000, 6, true, true)
-	cpu, wall := cpuOf(got), wallOf(got)
-	r := ratio(cpu)
+	alloc, cpu, wall := allocOf(got), cpuOf(got), wallOf(got)
+	r := allocRatio(alloc)
 	if r <= maxCycleRatio {
-		t.Fatalf("a workload doing 6x more work in its last cycle than its first moved the CPU ratio only %.2fx, "+
-			"which the %.1fx gate PASSES: the delete-scaling gates have lost their power; per-cycle CPU %v, wall %v",
-			r, maxCycleRatio, cpu, wall)
+		t.Fatalf("a workload doing 6x more work in its last cycle than its first moved the ALLOCATION "+
+			"ratio only %.2fx, which the %.1fx gate PASSES: the delete-scaling gates have lost their "+
+			"power; per-cycle bytes %v. Diagnostics: CPU %v, wall %v",
+			r, maxCycleRatio, alloc, cpu, wall)
 	}
-	t.Logf("degrading control: per-cycle CPU %v (last/first %.2fx, gate %.1fx); wall %v",
-		cpu, r, maxCycleRatio, wall)
+	t.Logf("degrading control: per-cycle alloc %v (last/first %.2fx, gate %.1fx); CPU %v (%.2fx); wall %v",
+		alloc, r, maxCycleRatio, cpu, ratio(cpu), wall)
 }
 
 // singleStatementDeleteBudget bounds the one-statement delete below. The

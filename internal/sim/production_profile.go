@@ -74,6 +74,20 @@ type productionProfileConfig struct {
 	counters    int
 }
 
+// reproCall renders the exact Go call that reproduces a run at this size.
+//
+// The configuration is test-local — [shortProductionProfile] and
+// [soakProductionProfile] are the two values, and neither is expressible on the
+// cmd/sim command line — so a report from this scenario carries the call rather
+// than a command that would run a different scale and report success (rmp
+// #2621).
+func (c productionProfileConfig) reproCall(seed uint64) string {
+	return fmt.Sprintf(
+		"runProductionProfile(ctx, %#x, productionProfileConfig{connections: %d, opsPerConn: %d, "+
+			"cycles: %d, counters: %d})  [Go call: the size is test-local and has no cmd/sim flag]",
+		seed, c.connections, c.opsPerConn, c.cycles, c.counters)
+}
+
 // shortProductionProfile is the short-layer size: enough concurrency and
 // enough cycles to exercise every role, conflict, and two real crash+recovery
 // boundaries.
@@ -420,6 +434,11 @@ func runProductionProfileEvidence(ctx context.Context, seed uint64, size product
 			Seed:       seed,
 			Violations: violations,
 			FailedOp:   Op{Kind: OpMatch, Cypher: "<production profile adjudication>"},
+			// The size is a TEST-LOCAL value with no command-line form, so the
+			// synthesised `go run ./cmd/sim -scenario=… <seed>` would run this
+			// scenario at the CATALOGUE's size and not at the one that failed.
+			// Emit the Go call that actually reproduces it (rmp #2621).
+			Repro: size.reproCall(seed),
 		}, ev, nil
 	}
 	return nil, ev, nil

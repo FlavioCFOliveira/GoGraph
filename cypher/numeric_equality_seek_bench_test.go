@@ -52,7 +52,7 @@ import (
 )
 
 // equalityBenchPopulations spans 16x so a linear curve is unmistakable against a
-// flat one. Every value clears rangeSeekMinLabelPopulation (1024), below which
+// flat one. Every value clears rangeSeekMinLabelPopulation, below which
 // the planner always scans.
 var equalityBenchPopulations = []int{4000, 16000, 64000}
 

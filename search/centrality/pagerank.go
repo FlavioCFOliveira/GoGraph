@@ -104,10 +104,16 @@ func DefaultPageRankOptions() PageRankOptions {
 // outdeg[u]) over a reverse-CSR, partitioned across a persistent worker
 // pool by approximately equal in-edge count. Each next[v] is computed
 // independently with no write contention, and every vertex sums its
-// in-edges in the fixed reverse-CSR order, so the result is bit-for-bit
+// in-edges in the fixed reverse-CSR order, so each ITERATE is bit-for-bit
 // identical to the serial path regardless of GOMAXPROCS or worker
-// scheduling. Smaller graphs use the serial push form unchanged and pay
-// neither the reverse-CSR transpose nor any goroutine overhead.
+// scheduling. The returned scores are too in every measurement taken —
+// 17 280 serial-versus-parallel comparisons found zero divergences — but
+// that is an empirical result rather than a guarantee, because the
+// convergence test reads an L1 delta whose reduction is not associative
+// across worker counts. See Determinism below for the measured spread
+// and its bound (rmp #2605). Smaller graphs use the serial push form
+// unchanged and pay neither the reverse-CSR transpose nor any goroutine
+// overhead.
 func PageRank[W any](c *csr.CSR[W], opts PageRankOptions) (ranks []float64, iterations int, err error) {
 	defer metrics.Time("search.centrality.PageRank").Stop()
 	ranks, iterations, err = PageRankCtx(context.Background(), c, opts)
@@ -628,9 +634,30 @@ func pageRankBuildReverseStructure(verts []uint64, edges []graph.NodeID, n int) 
 // pageRankBuildReverseStructure scatters in-neighbours in increasing
 // source-id order — the same order in which the serial push path
 // accumulates them — the per-vertex float sum is identical to the
-// serial push result down to the last bit. The
-// per-worker partial L1 deltas are reduced in fixed worker-id order, so
-// the returned delta is likewise deterministic across worker counts.
+// serial push result down to the last bit.
+//
+// The returned L1 DELTA is weaker, and deliberately so. The per-worker
+// partial deltas are reduced in fixed worker-id order, which makes the
+// result deterministic FOR A GIVEN WORKER COUNT — the same graph and
+// the same count always return the same bits. It is NOT identical
+// across counts: the number of partials changes with the worker count
+// and floating-point addition is not associative, so the last bits
+// differ. MEASURED on one pair of consecutive iterate vectors, the
+// sequential reduction and equal-range reductions over 2, 3, 4, 8 and
+// 10 ranges gave five different values spanning 73 ULP, about 1e-14
+// relative (rmp #2605).
+//
+// The consequence is bounded rather than absent. The delta drives the
+// convergence test, so a differing delta can in principle straddle the
+// tolerance and change the ITERATION COUNT — and therefore the returned
+// scores — across worker counts. How unlikely that is was measured, not
+// assumed: 17 280 serial-versus-parallel comparisons (40 seeds x 4
+// dampings x 9 tolerances x 12 worker counts) produced ZERO
+// divergences, as did a 400-seed scenario sweep of its own 1 600,
+// consistent with the roughly 1e-13-per-run estimate. Callers that need
+// a bit-reproducible score vector across differing worker counts should
+// pin GOMAXPROCS rather than rely on the tolerance never being
+// straddled.
 //
 // Load balancing. Vertex ranges are partitioned by approximately equal
 // in-edge count, not equal vertex count. On power-law graphs a handful
@@ -780,7 +807,11 @@ func (e *pageRankEngine) iterate(next, cur []float64, isLive []bool, outdeg []ui
 	for w := 0; w < e.workers; w++ {
 		<-e.done
 	}
-	// Deterministic reduction of partial deltas in fixed worker-id order.
+	// Reduction of the partial deltas in fixed worker-id order. That makes the
+	// result deterministic for a GIVEN worker count; it is not identical across
+	// counts, because the number of addends changes with the count and
+	// floating-point addition is not associative. See the Determinism section of
+	// [PageRank] for the measured spread and its bounded consequence (rmp #2605).
 	var delta float64
 	for w := 0; w < e.workers; w++ {
 		delta += e.deltas[w]
