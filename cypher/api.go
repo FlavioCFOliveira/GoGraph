@@ -529,7 +529,27 @@ type buildOpts struct {
 	// false by every other build path (write path, public BuildPlanWithMutator),
 	// which therefore always build the serial EagerAggregation pipeline.
 	parallelScanEnabled bool
-	fwdCSRReady         bool
+	// labelCountPushdownDisabled turns OFF the constant-time labelled count
+	// pushdown ([tryBuildLabelCountScan]) for THIS build, forcing the serial
+	// NodeByLabelScan + EagerAggregation pipeline.
+	//
+	// It is a DIFFERENTIAL-TEST SEAM, not a tuning knob, and it is deliberately
+	// unexported with no EngineOptions counterpart. The pushdown answers from the
+	// same snapshot-aware source the serial scan reads (see the "No size gate"
+	// section of [tryBuildLabelCountScan]), so there is no workload for which a
+	// user should want it off — the unlabelled counterpart
+	// [tryBuildAllNodesCountScan] has no knob either, for the same reason.
+	//
+	// What it does buy is a control arm. label_count_scan_diff_test.go proves the
+	// pushdown returns what the serial pipeline returns, and that needs two
+	// engines differing in exactly one variable. Before rmp #2654 the control was
+	// EngineOptions{DisableParallelScan: true}, which worked only because the
+	// pushdown was (wrongly) wired to that flag; un-gating it collapsed both arms
+	// onto the fast path and would have left the differential comparing the
+	// pushdown with itself. The polarity is negative so every build path that
+	// never sets it keeps the pushdown.
+	labelCountPushdownDisabled bool
+	fwdCSRReady                bool
 	// scalarUseMemo is the plan-cache entry's cross-execution memo for
 	// [analyseNodeScalarUse] (rmp #2383). The read-path build points it at the
 	// entry serving this query; every other build path leaves it nil, and
@@ -1284,6 +1304,13 @@ type Engine struct {
 	// by default; set false by EngineOptions.DisableParallelScan. When false the
 	// planner always builds the serial EagerAggregation pipeline.
 	parallelScanEnabled bool
+
+	// labelCountPushdownDisabled carries [buildOpts.labelCountPushdownDisabled]
+	// onto every plan this Engine builds. It is the DIFFERENTIAL-TEST SEAM
+	// documented there and has no EngineOptions counterpart by design: it is set
+	// only by the in-package helper the label-count differential test uses to
+	// obtain a serial control arm. False on every Engine a caller can construct.
+	labelCountPushdownDisabled bool
 
 	// parallelBackfillEnabled gates the morsel-parallel phase-2 of a CREATE INDEX
 	// backfill. True by default; set false by EngineOptions.DisableParallelBackfill.
@@ -2564,6 +2591,10 @@ func (e *Engine) buildReadPhysical(
 	bopts.parallelScanEnabled = e.parallelScanEnabled
 	bopts.parallelScanThreshold = e.parallelScanThreshold
 	bopts.parallelGov = e.parallelGov
+	// The labelled-count differential test's serial control arm (rmp #2654). False
+	// on every Engine a caller can construct; see
+	// [buildOpts.labelCountPushdownDisabled].
+	bopts.labelCountPushdownDisabled = e.labelCountPushdownDisabled
 	// Thread the same result-memory budget the Result drain enforces so the
 	// morsel-parallel scan leaf bounds peak memory instead of materialising
 	// the whole result set (#1830).
@@ -10403,6 +10434,12 @@ func (b *buildOpts) forSubquery() *buildOpts {
 		// scope — see "Why the adjacency caches ARE carried" above.
 		csrPairCache:        b.csrPairCache,
 		edgeTypeFilterCache: b.edgeTypeFilterCache,
+		// The labelled-count differential-test seam (rmp #2654). Carried because a
+		// control arm that stops being a control inside a subquery is not a control:
+		// the field's whole purpose is to hold for the WHOLE build, and it is
+		// scope-independent in exactly the way this allowlist admits — it names an
+		// optimisation, not a row, a pointer or a plan node.
+		labelCountPushdownDisabled: b.labelCountPushdownDisabled,
 	}
 }
 
@@ -10701,6 +10738,12 @@ func tryBuildParallelAggregateScan(
 // scan because WalkNodeIDs skips tombstones, so a bare AllNodesScan emits exactly
 // LiveOrder() rows.
 //
+// Since rmp #2654 [tryBuildLabelCountScan] is un-gated for the same reason, so the
+// two counterparts are symmetric again: neither constant-time pushdown consults a
+// size or a parallelism gate, and the threshold lives only on
+// [tryBuildParallelCountScan] and [tryBuildParallelAggregateScan], which build
+// genuinely parallel operators.
+//
 // When it fires it installs the same single-column post-aggregation schema as
 // [tryBuildParallelCountScan] via [installCountAggSchema]. Every declined shape
 // leaves schema untouched.
@@ -10764,9 +10807,64 @@ var labelCountScanBuildCount atomic.Uint64
 //     this fast path declines. A Selection between the scan and the aggregate
 //     would change which rows are counted, so excluding it is required for
 //     correctness;
-//   - the parallel count path is enabled and the live node count exceeds the
-//     threshold (delegated to useParallelScan, shared with the full-scan path so
-//     one knob governs every count pushdown).
+//   - the node source is the live whole-graph LPG walker. A morsel walker means
+//     the build is a per-worker rebuild inside a morsel-parallel leaf, whose share
+//     of the rows is NOT the label's count; a foreign walker — the write path's
+//     mutator adapter, a test stub — is not known to describe the graph labelSrc
+//     reads, and a write transaction's own uncommitted changes are not in the
+//     committed label index at all. Both decline to the serial pipeline, which is
+//     what they did before this recogniser existed.
+//
+// # No size gate, and no parallelism gate
+//
+// This recogniser applies NEITHER a cardinality threshold NOR the
+// DisableParallelScan feature flag, and that is deliberate. It used to end with
+// `!useParallelScan(walker, bopts)`, which gated a maintained, constant-time read
+// behind a MORSEL-PARALLELISM threshold, so a bare `MATCH (n:L) RETURN count(n)`
+// on 50 000 or fewer live nodes ran the full serial pipeline. Three separate
+// things were wrong with that coupling (rmp #2654):
+//
+//  1. It contributed nothing to correctness. Exactness is enforced one layer down
+//     and unconditionally. [lpgLabelResolver.ResolveLabelCount] delegates to
+//     [lpg.Graph.LabelCountExact], which is exact-or-nothing: it declines the
+//     moment any label or existence history is live. [exec.LabelCountScan] then
+//     falls back to the cardinality of [lpgLabelResolver.ResolveLabelBitmap] —
+//     LabelBitmapAsOf under this query's pinned snapshot, the SAME snapshot-aware
+//     source [exec.NodeByLabelScan] reads. Neither answer depends on how many
+//     nodes the graph holds or on whether morsel parallelism is enabled, so
+//     neither could be made more correct by a gate on either.
+//  2. There is nothing here to parallelise. [exec.LabelCountScan] spawns no
+//     worker, opens no channel and reads no row, so a threshold asking "is there
+//     enough work to divide between morsels?" answers a question this operator
+//     does not pose. DisableParallelScan is documented as the escape hatch for the
+//     morsel-parallel path; wiring it here made that flag silently turn a labelled
+//     count from O(1) into O(n) — the same defect with a different trigger.
+//  3. It read the wrong cardinality. [useParallelScan] thresholds the WHOLE
+//     GRAPH's live order, not the label's count. MEASURED: 100 :Rare nodes in a
+//     60 000-node graph got the constant-time read while 50 000 :Item nodes in a
+//     50 000-node graph got the full scan — the 500x SMALLER count was the one
+//     answered in O(1). This error class already has a name in this file:
+//     [useParallelScanForRows] exists because gating a labelled scan on graph
+//     order "would spawn workers for a ten-node label in a million-node graph"
+//     (#2187).
+//
+// Dropping the gate is Θ(n) → Θ(1) in time, in bytes AND in allocations. Measured
+// with bench/audit352/labelcount_gate_ab_test.go: the serial arm fits
+// ns = 586.6 + 26.5631·n (R² = 0.999963) and allocs = n − 185.2 (R² = 1.000000),
+// while the pushdown is flat at 1 420 ns / 2 168 B / 29 allocs across a 100x range
+// in n. At n = 50 000 that is 929x the time, 220x the bytes and 1 718x the
+// allocations.
+//
+// [tryBuildAllNodesCountScan], the unlabelled counterpart, is un-gated for the
+// same reason and says so in its own godoc. The asymmetry between the two — an
+// un-gated serial pushdown for the bare shape, a threshold-gated one for the
+// labelled shape — WAS the defect. The threshold still belongs on
+// [tryBuildParallelCountScan] and [tryBuildParallelAggregateScan], which build
+// genuinely parallel operators.
+//
+// The only remaining way to decline by configuration is
+// [buildOpts.labelCountPushdownDisabled], the differential test's control-arm
+// seam.
 //
 // Because [exec.NodeByLabelScan] emits exactly one row per NodeID in the label
 // bitmap with no liveness re-filter, and the count of those rows equals the
@@ -10798,7 +10896,16 @@ func tryBuildLabelCountScan(
 	if agg.Argument != "" && agg.Argument != scan.NodeVar {
 		return nil, false
 	}
-	if !useParallelScan(walker, bopts) {
+	// Only the live whole-graph walker may be answered from the label index. This
+	// is the one half of the deleted useParallelScan call that was load-bearing,
+	// and it is kept as an explicit guard rather than as a side effect of a
+	// threshold — exactly as the unlabelled [tryBuildAllNodesCountScan] does.
+	if lw, ok := walker.(*lpgNodeWalker); !ok || lw.morsel != nil {
+		return nil, false
+	}
+	// The differential test's serial control arm; see
+	// [buildOpts.labelCountPushdownDisabled].
+	if bopts != nil && bopts.labelCountPushdownDisabled {
 		return nil, false
 	}
 

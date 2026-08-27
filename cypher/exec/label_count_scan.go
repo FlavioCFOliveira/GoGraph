@@ -74,9 +74,14 @@ type labelCounter interface {
 //
 // LabelCountScan is NOT safe for concurrent use.
 type LabelCountScan struct {
-	src     labelResolver
-	ctx     context.Context //nolint:containedctx // stored for the per-Next ctx check
-	buf     [1]expr.Value   // fixed backing buffer — zero-alloc per Next
+	src labelResolver
+	ctx context.Context //nolint:containedctx // stored for the per-Next ctx check
+	// buf is inline in the struct and is never re-allocated. It is not
+	// allocation-free end to end: storing the count into it in Next is an
+	// interface conversion, which boxes 8 bytes once per query for a count
+	// >= 256 — see scan_label.go's "Per-row allocation" section for the same
+	// mechanism paid per ROW there. Once per query is the point of this operator.
+	buf     [1]expr.Value
 	label   string
 	count   int64
 	emitted bool
