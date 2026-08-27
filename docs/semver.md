@@ -146,18 +146,24 @@ baseline when **all** of the following conditions are met:
    under `go test -race ./...`, `golangci-lint` 0 issues, coverage 87.1 % aggregate
    with every package above its 75 % floor.
 
-   **For `v0.12.0` the only figures available at the time of writing are from the
-   sprint-350 close gate, not from a release-commit run, and they are attributed
-   rather than presented as the release's gate outcome:** at commit `1b7d7c7f` —
-   whose tree hash is byte-identical to the release commit `63739a7e`, the `--no-ff`
-   merge having introduced no change — that run recorded `MAKE_CI_EXIT=0`, **127
-   packages** ok with zero failures, `golangci-lint` **0 issues**, and coverage
-   **88.3 %** aggregate against an 85.0 % floor with every package at or above its
-   75.0 % floor. That run executed under the **previous** pinned
-   toolchain — `go.mod` at `1b7d7c7f` reads `toolchain go1.26.5`, and `v0.12.0` pins
-   `go1.27.0` — so even though the tree is identical, the release-commit
-   `make release-preflight` run is the authority and supersedes these figures. **Until that run is
-   recorded, this gate is MET at `v0.11.0` and unconfirmed at `v0.12.0`.**
+   **MET at `v0.12.0`, on a release-branch `make release-preflight` run rather than on
+   inherited figures.** `VERSION=v0.12.0 make release-preflight` exits **0** — read from
+   inside its own log, not from a wrapper — with **127 packages** ok and zero failures
+   under `go test -race ./...`, `golangci-lint` **0 issues**, coverage **88.3 %**
+   aggregate against the 85.0 % floor with every package at or above its 75.0 % floor,
+   and the release-accuracy checks passing. The run executed under the **currently
+   pinned** toolchain, `go1.27.0`, and with every direct dependency at the version this
+   release ships — including `godog` v0.16.0, the TCK runner itself, whose upgrade leaves
+   `TestTCKExecution` at **3897/3897** scenarios and 16006/16006 steps.
+
+   These figures coincide with the ones the sprint-350 close gate recorded at commit
+   `1b7d7c7f`, but they are **no longer inherited from it**: that run predated both the
+   toolchain bump and the dependency refresh, so it could not have spoken for this tree.
+   The `govulncheck` half of this gate carries a stated limitation rather than a clean
+   claim — see the CVE-scan step in
+   [CONTRIBUTING.md](../CONTRIBUTING.md#dependency-policy): module-level scanning reports
+   no vulnerabilities, and symbol-level reachability scanning is unavailable under the
+   pinned toolchain.
 
 3. **All T-series tasks closed — MET.** Every task prefixed `T-` in
    `docs/tck/DIVERGENCES.md` must be marked resolved. T-series tasks
