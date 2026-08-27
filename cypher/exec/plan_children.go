@@ -75,6 +75,8 @@ func (op *MergeRelationship) PlanChildren() []Operator { return []Operator{op.ch
 func (op *ProcedureCallOp) PlanChildren() []Operator { return []Operator{op.child} }
 
 // PlanChildren reports the input it projects.
+func (op *CountRows) PlanChildren() []Operator { return []Operator{op.child} }
+
 func (op *Project) PlanChildren() []Operator { return []Operator{op.child} }
 
 // PlanChildren reports the input whose rows name the nodes it relabels.

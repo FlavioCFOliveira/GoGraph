@@ -9389,6 +9389,19 @@ func buildOperatorRec(
 		if err != nil {
 			return nil, err
 		}
+		// General count(*) row count (#2625). Tried LAST, after every pushdown
+		// above has declined, because those answer in O(1) from a maintained
+		// counter while this still visits every row — it only stops BUILDING rows
+		// nobody reads. For a group-by-less, non-DISTINCT count(*) the
+		// pre-projection's sole item is the constant sentinel expr.BoolValue(true)
+		// (see aggArgItem), so the serial pipeline materialises one fresh
+		// single-column row per input row purely so CountAgg can null-check a
+		// value that is never null. Worth about 40% on a bare typed expansion and
+		// very little once a per-row endpoint-label Filter dominates — see
+		// [exec.CountRows] for both measurements.
+		if op, ok := tryBuildCountRows(p, child, schema, bopts); ok {
+			return op, nil
+		}
 		var aggG *lpg.ReadView[string, float64]
 		if lw, ok := walker.(*lpgNodeWalker); ok {
 			aggG = lw.g
@@ -10399,6 +10412,62 @@ func tryBuildParallelCountScan(
 	parallelCountScanBuildCount.Add(1)
 	return exec.NewParallelCountScan(walker, 0, gov), true
 }
+
+// tryBuildCountRows returns a [exec.CountRows] over child and true when p is a
+// group-by-less, non-DISTINCT count(*) — the one shape whose aggregate argument
+// is a constant, making the pre-projection pure overhead — and false otherwise
+// (the caller then builds the serial pipeline).
+//
+// The recognised shape is deliberately narrow:
+//
+//   - no grouping keys (a global aggregate);
+//   - exactly one aggregate, function count, non-DISTINCT;
+//   - an EMPTY argument, i.e. count(*) and not count(v).
+//
+// count(v) is excluded on purpose: it counts non-null BINDINGS, so its argument
+// must still be evaluated per row, whereas count(*) counts rows and cannot
+// depend on what they contain. Unlike the leaf pushdowns this places no
+// condition on the child, which is the point — it serves count(*) over an
+// Expand, a Filter, a join, or anything else.
+//
+// When it fires it mutates schema to the aggregation's single-column output
+// layout through [installAggOutputSchema] — the same installer the serial
+// EagerAggregation build uses, carrying the alias-shadow guard that a child
+// holding Selection closures requires. A declined shape leaves schema untouched.
+func tryBuildCountRows(
+	p *ir.EagerAggregation,
+	child exec.Operator,
+	schema map[string]int,
+	bopts *buildOpts,
+) (exec.Operator, bool) {
+	if len(p.GroupBy) != 0 || len(p.Aggregates) != 1 {
+		return nil, false
+	}
+	agg := p.Aggregates[0]
+	if agg.Function != "count" || agg.Distinct || agg.Argument != "" {
+		return nil, false
+	}
+	// Install the post-aggregation layout through the GUARDED installer, not
+	// through installCountAggSchema. The leaf pushdowns can use the unguarded one
+	// because nothing is built below them; CountRows sits over an ARBITRARY child,
+	// whose Selection operators hold closures over bopts.scalarCols. Tagging the
+	// output column scalar when its alias shadows a pre-aggregation variable — as
+	// `count(*) AS n` does over a pattern that binds n — makes those Selections
+	// read the bound node's column as a scalar and silently drop every row, which
+	// is the alias-shadow failure installAggOutputSchema documents and guards.
+	// MEASURED: `MATCH (n {name:'A'})-[:LIKES]->(m {name:'B'}) RETURN count(*) AS n`
+	// returned 0 instead of 1 with the unguarded installer, while the same query
+	// aliased AS c returned 1.
+	installAggOutputSchema(p, copySchema(schema), schema, bopts)
+	countRowsBuildCount.Add(1)
+	return exec.NewCountRows(child), true
+}
+
+// countRowsBuildCount counts how many times the planner emitted [exec.CountRows]
+// in place of the pre-projection + serial EagerAggregation pipeline (#2625). Like
+// [parallelCountScanBuildCount] it is a process-global, monotonic diagnostic seam
+// read only by the in-package tests to assert the path fired, or did not.
+var countRowsBuildCount atomic.Uint64
 
 // installCountAggSchema mutates schema to the single-column post-aggregation
 // layout that buildEagerAggregation installs for a group-by-less count (#1672,
