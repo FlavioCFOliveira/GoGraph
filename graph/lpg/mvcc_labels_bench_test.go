@@ -38,11 +38,34 @@ func benchLabelGraph(b *testing.B, n int, deltas bool) (*Graph[string, float64],
 	return benchLabelGraphAt(b, n, deltas, false)
 }
 
+// # Why this disarms rather than calling EnableLabelDeltas (rmp #2623)
+//
+// [Graph.EnableLabelDeltas] is a NO-OP on a graph from [New]. It was the #2275
+// spike's opt-in switch, and the substrate moved underneath it: [Graph.armMVCC]
+// now sets labelDeltas = true and runs by default, so the flag it sets is
+// already set. Its godoc still says "Nothing in the module calls it".
+//
+// The consequences were both invisible and total. The `deltas=off` arm was NOT
+// A CONTROL — MEASURED, a graph built by benchLabelGraph(size, false) reports
+// labelDeltas=true and 38 live deltas — so both arms measured the same thing.
+// And the `deltas=on` arms seeded 100 000 labelled nodes WITH deltas recording,
+// then asserted the count was zero; what they actually observed was whatever the
+// reclaimer had not yet swept, which is why the number was 13 at -benchtime=1x,
+// 153 at 10x, and 4965 on another run. It never accumulated across the loop:
+// the fixture is rebuilt for every b.N, and the count is a race, not a total.
+//
+// The real seam is [Graph.disarmMVCCForTest], which is what this uses.
+// Disarming before the seed and re-arming after gives the "armed, no live delta"
+// state DETERMINISTICALLY: measured 0, not 3 or 13 or 4965.
 func benchLabelGraphAt(b *testing.B, n int, deltas, armAfterSeed bool) (*Graph[string, float64], []string) {
 	b.Helper()
 	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	// Seed with the substrate DISARMED in every arm, so the seeding writes never
+	// record a delta and the post-seed state is a function of the arm rather than
+	// of how fast the reclaimer ran.
+	g.disarmMVCCForTest()
 	if deltas && !armAfterSeed {
-		g.EnableLabelDeltas()
+		g.armMVCC()
 	}
 	keys := make([]string, n)
 	for i := 0; i < n; i++ {
@@ -55,7 +78,7 @@ func benchLabelGraphAt(b *testing.B, n int, deltas, armAfterSeed bool) (*Graph[s
 		}
 	}
 	if deltas && armAfterSeed {
-		g.EnableLabelDeltas()
+		g.armMVCC()
 	}
 	return g, keys
 }
@@ -219,6 +242,13 @@ func BenchmarkPropRead(b *testing.B) {
 	const size = 100000
 	build := func(arm bool) (*Graph[string, float64], graph.NodeID) {
 		g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+		// Seed DISARMED, then arm — the same correction as the label fixture and
+		// for the same reason: EnablePropDeltas is a no-op on a graph from New,
+		// because armMVCC already set propDeltas and runs by default. Seeding
+		// with it on recorded a delta per node, so this arm's "no live delta"
+		// precondition observed whatever the reclaimer had not yet swept (rmp
+		// #2623). See benchLabelGraphAt for the measurements.
+		g.disarmMVCCForTest()
 		for i := 0; i < size; i++ {
 			k := fmt.Sprintf("n%d", i)
 			if err := g.AddNode(k); err != nil {
@@ -229,7 +259,7 @@ func BenchmarkPropRead(b *testing.B) {
 			}
 		}
 		if arm {
-			g.EnablePropDeltas()
+			g.armMVCC()
 		}
 		id, ok := g.adj.Mapper().Lookup("n0")
 		if !ok {

@@ -140,8 +140,20 @@ func (g *Graph[N, W]) labelDeltasEnabled() bool { return g.labelDeltas }
 // manufactured phantom regressions from a byte-identical control.
 //
 // It must be called before any label is written and never concurrently with
-// another operation on g. Nothing in the module calls it; it is a measurement
-// seam, and the spike it arms is not a supported feature.
+// another operation on g.
+//
+// # It is a NO-OP on a graph from [New] (rmp #2623)
+//
+// The substrate moved underneath this seam. [Graph.armMVCC] sets labelDeltas and
+// runs by default, so on any graph this package hands out the flag is ALREADY
+// set and this call changes nothing. It survives because the two tests that call
+// it still read correctly, not because it arms anything.
+//
+// A benchmark that used it to build an "armed but no live delta" fixture got a
+// timing-dependent count instead — 13, 153, 4965 across bench times — because
+// the seeding writes it believed were delta-free were not. The seam that
+// actually toggles the substrate is [Graph.disarmMVCCForTest]; use that, disarm
+// before seeding, and re-arm after.
 //
 // Not safe for concurrent use.
 func (g *Graph[N, W]) EnableLabelDeltas() { g.labelDeltas = true }

@@ -361,8 +361,13 @@ type Graph[N comparable, W any] struct {
 
 	// labelDeltas arms the P0 MVCC spike (rmp #2275); labelDeltaActive mirrors
 	// the number of live label deltas as a lock-free gate, exactly as
-	// tombstoneActive does for the tombstone set. Both are inert unless
-	// [Graph.EnableLabelDeltas] has been called. See mvcc_labels.go.
+	// tombstoneActive does for the tombstone set.
+	//
+	// It is set by [Graph.armMVCC], which runs by DEFAULT, so both are live on
+	// every graph from [New]. [Graph.EnableLabelDeltas] is a leftover of the
+	// spike's opt-in era and is now a no-op; [Graph.disarmMVCCForTest] is the
+	// seam that actually turns the substrate off (rmp #2623). See
+	// mvcc_labels.go.
 	labelDeltas      bool
 	labelDeltaActive atomic.Int64
 	// mvccClock mints commit timestamps and transaction ids from the two
