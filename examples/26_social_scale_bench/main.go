@@ -710,6 +710,34 @@ func build(ctx context.Context, g *lpg.Graph[string, float64], cfg config, prog 
 	rng := rand.New(rand.NewSource(cfg.seed))
 	start := time.Now()
 
+	// BRACKET THE WHOLE BUILD (rmp #2624).
+	//
+	// An UNBRACKETED write is its own one-op window, so it takes
+	// AdjList.storeEntry's first-touch path and CLONES the touched shard's entire
+	// slot array — `make([]unsafe.Pointer, len(base.slots))` plus a copy — for
+	// EVERY edge. The clone is O(shard size), the shard grows with the graph, and
+	// it happens once per edge, so the build's allocation is O(edges x shard
+	// size): quadratic in the population.
+	//
+	// MEASURED by a two-scale pprof -alloc_space diff, doubling 20 000 users to
+	// 40 000: every query-phase site scaled 1.97-2.06x, while main.build went
+	// 3.11x, AddEdgeLabeledWithProperties 3.16x, upsertEdgeSlotLocked 3.18x and
+	// storeEntry 3.92x. That localises the superlinearity to the clone and to
+	// nothing else.
+	//
+	// BeginExclusiveBuild opens ONE window for the whole build, which is what its
+	// godoc offers: each touched shard's array is cloned at most once, on first
+	// touch, and every later write mutates that private builder in place. The
+	// cost becomes O(distinct shards touched) instead of O(ops). Its contract is
+	// a single writer and no serving window, which is exactly this phase: build
+	// runs alone on a graph nobody is querying yet.
+	// One window covers the whole build. Batching it into 65536-write windows was
+	// MEASURED and earned nothing (8.34 GiB allocated against 8.28 GiB for a
+	// single window, elapsed within noise), so the simpler form is the one an
+	// example should show.
+	g.AdjList().BeginExclusiveBuild()
+	defer g.AdjList().EndExclusiveBuild()
+
 	userIDs := make([]string, cfg.users)
 	articleIDs := make([]string, cfg.articles)
 	seen := make(map[string]struct{}, cfg.users+cfg.articles)
