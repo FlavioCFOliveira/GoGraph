@@ -48,8 +48,10 @@ an audit of `git diff v0.11.0..HEAD` across the whole tree found **no exported
 identifier removed, no exported signature changed, and no exported struct field
 dropped**. **51 exported identifiers were added** across 15 packages, which is what
 makes this a pre-1.0 **MINOR** release under [docs/semver.md](docs/semver.md).
-`go.sum` is **byte-identical** to `v0.11.0`, so no dependency moved; the only `go.mod`
-change is the pinned `toolchain` directive, `go1.26.5` → `go1.27.0` (see *Changed*).
+Every direct dependency, and every tool and CI pin, was raised to its latest release in
+this window, so `go.sum` moved; the other `go.mod` change is the pinned `toolchain`
+directive, `go1.26.5` → `go1.27.0`, with the `go` directive left at `go 1.26` so the
+minimum Go a consumer needs is unchanged (see *Changed*).
 
 The openCypher TCK gate is unchanged at **3897/3897** — 100 % execution-level
 compliance is preserved, not extended. No `.feature` file changed in this window, so
@@ -430,6 +432,53 @@ there.
   consequence for comparison is stated there rather than glossed:** `v0.11.0` was
   measured on `go1.26.5`, so a cross-release benchmark delta mixes a compiler change
   with GoGraph's own, and none is attributed to the module on that basis.
+
+- **Every direct dependency moves to its latest release** — `RoaringBitmap/roaring/v2`
+  **v2.18.2 → v2.26.0** (eight minors; backs the bitmap-intersection access path,
+  `graph/index` and `store/snapshot`), `cucumber/godog` **v0.15.1 → v0.16.0** (the
+  openCypher TCK runner itself), `klauspost/compress` **v1.18.6 → v1.19.2**, and
+  `golang.org/x/sys` **v0.46.0 → v0.47.0**. The other five direct requirements —
+  `antlr4-go/antlr/v4`, `edsrzf/mmap-go`, `neo4j/neo4j-go-driver/v5`, `go.uber.org/goleak`
+  and `pgregory.net/rapid` — were already at their latest. Indirectly, the godog bump
+  carries `cucumber/gherkin` **v26 → v42.0.1** and `cucumber/messages` **v21 → v34.2.1**
+  and **replaces `gofrs/uuid` with `google/uuid` v1.6.0**; `bits-and-blooms/bitset`,
+  `hashicorp/go-memdb`, `hashicorp/golang-lru` (**v0.5.4 → v1.0.2**) and `spf13/pflag`
+  follow. `go mod verify` reports all modules verified and the module-level CVE scan
+  reports **no vulnerabilities**.
+
+  Each bump was landed individually per the dependency policy, and the two that could
+  have broken a Compliance Mandate were verified rather than assumed. **Upgrading the TCK
+  runner leaves the gate at 3897/3897** — 3897 scenarios, 3897 passed, 0 failed, 0
+  undefined, 0 inconclusive, 16006/16006 steps. And the `roaring64` rationale the
+  #2607/#2608 range fixes rest on — that `AddRange`/`RemoveRange` are half-open with no
+  closed variant — **still holds at v2.26.0**, at the same source lines, so the
+  workaround is still necessary rather than now redundant. `klauspost/compress` turned
+  out to be reachable from exactly one file, `internal/shapegen/graphalytics.go`, and
+  **not from the WAL or snapshot path**, so it carries no on-disk-format risk.
+
+- **`golang.org/x/exp` is deliberately NOT bumped, and `ANTLR` is deliberately held at
+  4.13.1.** Two exceptions to "latest everywhere", each for a reason. `go mod why` reports
+  that the main module does not need `x/exp` and no source file imports it; the newest
+  revision declares `go 1.26.0`, which would have forced this module's own **`go`
+  directive** from `go 1.26` to `go 1.26.0` — the one directive
+  [docs/release.md](docs/release.md) says not to touch, for an unused indirect. ANTLR's
+  latest jar is **4.13.2** but the Go runtime `antlr4-go/antlr/v4` has **no 4.13.2**, so
+  bumping the generator alone would emit a parser expecting a runtime that does not exist
+  for Go.
+
+- **Tooling and CI pins move to their latest releases.** `GOLANGCI_LINT_VERSION`
+  **v2.12.2 → v2.13.1**; `cyclonedx-gomod` **v1.10.0 → v1.12.0** in all three places that
+  named it (the release workflow, `.goreleaser.yaml`'s comment and `docs/release.md`'s
+  local-fallback command), which matters because the SBOM generator's version is a
+  supply-chain attestation input; and the three SHA-pinned GitHub Actions —
+  `actions/checkout` **v6.0.3 → v7.0.1**, `actions/setup-go` **v6.4.0 → v7.0.0**,
+  `goreleaser/goreleaser-action` **v7.2.2 → v7.2.3** — each re-pinned to the commit its
+  trailing comment claims, **verified by resolving every SHA against its tag**. Both
+  Action majors are packaging migrations (ESM, dependency bumps) that change no input this
+  workflow passes; checkout v7's one behavioural change blocks fork-PR checkout for
+  `pull_request_target`/`workflow_run`, and this workflow triggers on a `v*` tag push.
+  `goreleaser` itself is already at the latest release, 2.18.0, and `benchstat` and
+  `goimports` install `@latest`.
 
 - **The delete-degradation gates measure process CPU time, then allocation volume**
   (#2571, #2589). The wall-clock form made `make ci` red on a flat engine at 3.25× with
@@ -1280,6 +1329,23 @@ Full detail for this release is in
 - **The `csrfile` crash-durability claim is scoped to where the barrier exists** (#2582). An
   unmeasured reassurance is worse than silence, because a reader takes it for a guarantee. See
   *Changed*.
+
+- **The mandated CVE scan had stopped running, and was reporting success.** A
+  `govulncheck` binary built against an older Go minor than the one on `PATH` prints
+  *"Loading packages failed, possibly due to a mismatch between the Go version used to
+  build govulncheck and the Go version on PATH"* and then **exits 0**. So after the
+  toolchain moved, `govulncheck ./...` — step 4 of the dependency policy in
+  [CONTRIBUTING.md](CONTRIBUTING.md#dependency-policy) — performed **no analysis at all**
+  while returning success: a gate that cannot fail, of exactly the kind this project
+  treats as a defect rather than an inconvenience. Rebuilt against `go1.27.0` it fails
+  honestly instead (exit 1), because `govulncheck@v1.3.0`'s own source-processing
+  packages are built for go1.26 and cannot parse go1.27 source. The scan is therefore run
+  as **`govulncheck -scan=module`**, which reads `go.mod` without loading source and
+  reports **`No vulnerabilities found.`** across every pinned version. The policy now
+  documents both traps and requires the run to print a finding or that literal string —
+  **empty output is a failed scan, never a clean one**. Symbol-level reachability
+  scanning is unavailable until an upstream release built for the pinned Go minor
+  exists, and that limitation is stated rather than left implied.
 
 ### Compliance
 

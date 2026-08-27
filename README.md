@@ -11,11 +11,13 @@ release**, published at a pre-1.0 baseline: under Semantic Versioning a
 change without a major bump while the module matures toward `1.0.0`.
 `v0.12.0` is a pre-1.0 **MINOR** release of **192 commits** across **six
 sprints (345–350) and 176 closed tasks**, and — unlike `v0.11.0` — it
-**breaks nothing**: no exported identifier was removed, no exported
-signature changed, and no dependency moved — `go.sum` is byte-identical
-and the only `go.mod` change is the pinned toolchain, `go1.26.5` →
-`go1.27.0` — so existing code compiles and upgrades unchanged. It adds
-no engine capability. It is a **testing-and-correctness release**.
+**breaks nothing**: no exported identifier was removed and no exported
+signature changed, so existing code compiles and upgrades unchanged. The
+release also refreshes the whole supply chain — **every direct dependency
+and every tool and CI pin raised to its latest release**, and the pinned
+toolchain moved `go1.26.5` → `go1.27.0` while the `go` directive stays at
+`go 1.26`, so the minimum Go a consumer needs is unchanged. It adds no
+engine capability. It is a **testing-and-correctness release**.
 
 Two things define it. **A deterministic-simulation-testing campaign drove
 every published surface** — MVCC under true concurrency, the full Cypher
