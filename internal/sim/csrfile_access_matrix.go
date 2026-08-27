@@ -991,7 +991,7 @@ func checkCSRFileMatrixNonVacuity(res *csrfileMatrixResult) []Violation {
 	var v []Violation
 	add := func(op, format string, args ...any) {
 		v = append(v, Violation{
-			Kind: ViolationOracleDeviation, Op: op, Message: fmt.Sprintf(format, args...),
+			Kind: ViolationVacuousRun, Op: op, Message: fmt.Sprintf(format, args...),
 		})
 	}
 

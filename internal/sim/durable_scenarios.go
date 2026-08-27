@@ -319,11 +319,11 @@ func (r durableCommitResult) violations(faultReq bool) []Violation {
 	if faultReq {
 		switch {
 		case len(r.acked) == 0:
-			v = append(v, Violation{Kind: ViolationOracleDeviation, Op: "<non-vacuity>", Message: "no commit was acknowledged — the workload did not exercise the durable write path"})
+			v = append(v, Violation{Kind: ViolationVacuousRun, Op: "<non-vacuity>", Message: "no commit was acknowledged — the workload did not exercise the durable write path"})
 		case len(r.failed) == 0:
-			v = append(v, Violation{Kind: ViolationOracleDeviation, Op: "<non-vacuity>", Message: "no commit explicitly failed — the injected mid-flight fault did not bite"})
+			v = append(v, Violation{Kind: ViolationVacuousRun, Op: "<non-vacuity>", Message: "no commit explicitly failed — the injected mid-flight fault did not bite"})
 		case len(r.acked) >= len(r.issued):
-			v = append(v, Violation{Kind: ViolationOracleDeviation, Op: "<non-vacuity>", Message: fmt.Sprintf("every issued commit was acked (acked=%d issued=%d) — the fault did not lose the poisoned commit", len(r.acked), len(r.issued))})
+			v = append(v, Violation{Kind: ViolationVacuousRun, Op: "<non-vacuity>", Message: fmt.Sprintf("every issued commit was acked (acked=%d issued=%d) — the fault did not lose the poisoned commit", len(r.acked), len(r.issued))})
 		}
 	}
 	return v
@@ -413,7 +413,7 @@ func (r checkpointTeardownResult) violations(requireAcked bool) []Violation {
 		})
 	}
 	if requireAcked && len(r.acked) == 0 {
-		v = append(v, Violation{Kind: ViolationOracleDeviation, Op: "<non-vacuity>", Message: "no commit was acknowledged before the teardown — the race did not exercise durable commits"})
+		v = append(v, Violation{Kind: ViolationVacuousRun, Op: "<non-vacuity>", Message: "no commit was acknowledged before the teardown — the race did not exercise durable commits"})
 	}
 	return v
 }

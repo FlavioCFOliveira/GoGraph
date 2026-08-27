@@ -249,7 +249,7 @@ const walWatermarkMinCommits = 4
 func checkWALWatermarkNonVacuity(e WALWatermarkEvidence) []Violation {
 	var v []Violation
 	add := func(msg string) {
-		v = append(v, Violation{Kind: ViolationOracleDeviation, Op: "<wal-watermark non-vacuity>", Message: msg + " — " + e.String()})
+		v = append(v, Violation{Kind: ViolationVacuousRun, Op: "<wal-watermark non-vacuity>", Message: msg + " — " + e.String()})
 	}
 	if e.Commits < walWatermarkMinCommits {
 		add(fmt.Sprintf("only %d commit(s) observed, need >= %d: a monotonicity claim needs a sequence, not a point",
@@ -957,7 +957,7 @@ func walContiguityCensus(disk *SimDisk, path string, cfg WALContiguityConfig) (W
 func checkWALContiguityNonVacuity(e *WALContiguityEvidence, wantTx int) []Violation {
 	var v []Violation
 	add := func(msg string) {
-		v = append(v, Violation{Kind: ViolationOracleDeviation, Op: "<wal-contiguity non-vacuity>", Message: msg + " — " + e.String()})
+		v = append(v, Violation{Kind: ViolationVacuousRun, Op: "<wal-contiguity non-vacuity>", Message: msg + " — " + e.String()})
 	}
 	if e.Committers < walContiguityMinCommitters {
 		add(fmt.Sprintf("only %d concurrent committer(s), need >= %d: nothing could have interleaved",

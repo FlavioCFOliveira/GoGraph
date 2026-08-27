@@ -459,11 +459,29 @@ func (m *Mapper[N]) MaxNodeID() NodeID {
 }
 
 // mapperShardFor routes a comparable value to a shard index using a
-// deterministic FNV-1a hash. The hash is stable across processes, so a
-// snapshot written by one process and reopened by another agrees on the
-// same NodeID for the same natural key — the prerequisite for
-// cross-process snapshot+recovery without label drift in
-// [snapshot.ApplyLabelsToGraph] / [snapshot.ApplyPropertiesToGraph].
+// deterministic FNV-1a hash. The hash is stable across processes for any
+// key whose VALUE is address-independent, so a snapshot written by one
+// process and reopened by another agrees on the same NodeID for the same
+// natural key — the prerequisite for cross-process snapshot+recovery
+// without label drift in [snapshot.ApplyLabelsToGraph] /
+// [snapshot.ApplyPropertiesToGraph].
+//
+// # The address-independence precondition
+//
+// That qualifier is not a hedge, and it is not a gap. A comparable Go
+// type containing a pointer, an unsafe.Pointer or a channel compares by
+// ADDRESS, so for such a key the two properties fail together: the
+// default branch below formats it through "%v", which renders the
+// address, AND Go equality on it is address equality, so a key decoded
+// into a fresh allocation is not the key that was written even when it
+// carries identical data. "The same natural key" cannot be expressed in
+// a second process at all, which is why no hash could make it stable.
+//
+// The consequence is refused rather than absorbed: [Mapper.LoadFrom]
+// already rejects the resulting shard disagreement, and since rmp #2528
+// it attributes it to the key type via [ErrMapperKeyNotPortable] instead
+// of reporting a corrupted snapshot. A pointer-bearing key is therefore
+// usable in memory and refused at restore, loudly, naming the cause.
 //
 // The previous implementation hashed via [hash/maphash.Comparable] with
 // a process-local seed; the seed cannot be serialised (see the
@@ -514,8 +532,13 @@ func mapperShardFor[N comparable](k N) uint64 {
 		return h & mapperShardMask
 	default:
 		// Fallback for less common comparable types (custom structs,
-		// arrays, etc.). fmt.Sprintf into a fresh hash is acceptable
-		// here because the hot-path types are covered above.
+		// arrays, float64, etc.). fmt.Sprintf into a fresh hash is
+		// acceptable here because the hot-path types are covered above,
+		// and it is address-independent for every key that can be
+		// reproduced in another process at all — see the
+		// address-independence precondition above for why a key it
+		// renders as an address is refused at restore rather than
+		// hashed differently.
 		h := fnv.New64a()
 		_, _ = fmt.Fprintf(h, "%v", v)
 		return h.Sum64() & mapperShardMask

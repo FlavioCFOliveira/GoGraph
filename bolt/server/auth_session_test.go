@@ -179,8 +179,12 @@ func TestAuth_SchemeUnknown_FailureCode(t *testing.T) {
 		if f.Code != "Neo.ClientError.Security.AuthProviderFailed" {
 			t.Errorf("failure code: got %q, want Neo.ClientError.Security.AuthProviderFailed", f.Code)
 		}
-		if sess.state != StateFailed {
-			t.Fatalf("state: got %v, want FAILED", sess.state)
+		// DEFUNCT since rmp #2556: this LOGON arrives from READY, so it takes the
+		// re-authentication branch, and a failed LOGON now terminates the
+		// connection whichever branch it took. The subject of this test is the
+		// failure CODE for an unknown scheme, which is unchanged.
+		if sess.state != StateDefunct {
+			t.Fatalf("state: got %v, want DEFUNCT (rmp #2556)", sess.state)
 		}
 	})
 }

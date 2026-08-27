@@ -103,6 +103,22 @@ var ErrInvalidTransition = errors.New("bolt: invalid state transition")
 // Returns (StateFailed, ErrInvalidTransition) for illegal state/message
 // combinations.
 //
+// # The one documented exception: a refused RESOURCE CAP (rmp #2561)
+//
+// "On failure the next state is StateFailed" describes a failure to CARRY OUT the
+// request. A request refused because a bounded resource is momentarily full is
+// not that: [Session.handleBegin]'s open-transaction-quota branch returns its
+// FAILURE without calling Transition at all, and the session stays in READY.
+//
+// That is deliberate. A cap is back-pressure — the slot frees when another of the
+// principal's transactions closes — so the right response is to retry the same
+// BEGIN, and requiring a RESET first would charge the client a round trip for the
+// server being busy. The refusal carries a TRANSIENT code for the same reason.
+//
+// The adjacent newTx failure in the same function DOES go to StateFailed, because
+// that is a genuine failure to open a transaction. The two differ on purpose;
+// until rmp #2561 they differed by accident and nothing said so.
+//
 //nolint:gocyclo // Bolt v5 state machine has O(states×messages) branches; splitting it would obscure the protocol spec.
 func Transition(current State, msg any, success bool) (State, error) {
 	// GOODBYE and RESET are universal transitions from any non-DEFUNCT state.

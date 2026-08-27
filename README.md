@@ -5,56 +5,80 @@ designed to scale from in-memory graphs to graphs that exceed RAM.
 
 ## Status
 
-**Current release: `v0.11.0`.** This is the project's **fourteenth
+**Current release: `v0.12.0`.** This is the project's **fifteenth
 release**, published at a pre-1.0 baseline: under Semantic Versioning a
 `0.y.z` version signals that the public API is **not yet stable** and may
 change without a major bump while the module matures toward `1.0.0`.
-`v0.11.0` is a pre-1.0 **MINOR** release and the **largest the project has
-cut** — 505 commits, of which **31 are breaking**. Where `v0.10.0` was purely
-additive, this release is not: **read
-[release-notes/v0.11.0.md](release-notes/v0.11.0.md) before upgrading.**
+`v0.12.0` is a pre-1.0 **MINOR** release of **192 commits** across **six
+sprints (345–350) and 176 closed tasks**, and — unlike `v0.11.0` — it
+**breaks nothing**: no exported identifier was removed and no exported
+signature changed, so existing code compiles and upgrades unchanged. The
+release also refreshes the whole supply chain — **every direct dependency
+and every tool and CI pin raised to its latest release**, and the pinned
+toolchain moved `go1.26.5` → `go1.27.0` while the `go` directive stays at
+`go 1.26`, so the minimum Go a consumer needs is unchanged. It adds no
+engine capability. It is a **testing-and-correctness release**.
 
-Two things define it. **Concurrency control became MVCC and nothing else** —
-the `store/txn` single-writer semaphore, the engine writer mutex and
-`Graph.View`, the read barrier, are all gone, replaced by a transaction clock
-with shared commit records, version chains on every store, a contiguous commit
-frontier, optimistic write–write conflict detection with a retriable error, a
-bounded background vacuum, and an MVCC clock derived from the WAL at recovery.
-The consequence a user feels is that **durable write throughput is now
-monotonic in writer count and scales 415× from 1 to 1024 writers**, where
-`v0.10.0` delivered the same throughput at 32 writers as at one. And the
-**planner gained six new access paths**, several asymptotic rather than
-constant-factor: a prefix range seek for `STARTS WITH` (385×), multi-label
-conjunction by Roaring bitmap intersection (2909×), btree seek for string and
-numeric equality (849×), destination-ordered CSR neighbour runs probed in
-`O(log d)`, an index nested-loop join (55–258×), and an opt-in fused cyclic
-expand. Separately, a **parameterised index seek that had been a full scan**
-is now 50–65× faster on the shape every Bolt client actually sends.
+Two things define it. **A deterministic-simulation-testing campaign drove
+every published surface** — MVCC under true concurrency, the full Cypher
+language surface, the storage/durability/MVCC substrate, the Bolt wire, and
+the graph API, search and bulk-load surfaces. That is test infrastructure
+rather than module functionality, and the split is worth stating plainly:
+`internal/sim` accounts for **75.7 %** of the release's changed lines while
+the module's own production code accounts for **5.1 %**. **And the bug
+backlog was emptied** — every known bug resolved, each premise re-validated
+at HEAD first, with seven premises that no longer held recorded as refuted
+rather than reported as fixes.
 
-**One regression is worse, and is stated rather than omitted:** a plan-choice
-defect regressed a selective multi-label query **≈21.6×** in the default
-configuration (rmp #2431, open — see the release notes for the workaround).
-Graph iteration pays **+7–16 %** and WAL recovery is **1.51× slower**: the
-bounded, coherent price of MVCC.
+What a user consumes is the **50 defects found and fixed in the shipped
+module**, five of them silent — wrong or lost data with no error anywhere.
+Every edge weight of a non-primitive type was **permanently lost at the
+first checkpoint** (95 of 95 weights present at the WAL boundary, 0 of 191
+after one checkpoint), and bulk import was worse because it bypasses the
+WAL. `MATCH (:Person)-[:KNOWS]->(:Vip) RETURN count(*)` returned **0**
+where the named-source spelling returned 1, on the shipped default.
+Reverse and undirected traversal over a reciprocal edge pair returned **the
+other edge's** properties and endpoints. **Every** Cypher list crossing the
+Bolt wire reached clients as a string. And a write transaction's own
+uncommitted view leaked through the CSR cache, so **committed edges lost
+their types for every reader**. Alongside them: seven ACID fixes spanning
+Consistency, Isolation, Atomicity and Durability, a CWE-59 arbitrary-file
+overwrite in `store/csrfile`, four Bolt security fixes, a data race that
+could produce a wrong answer, six `search` entry points that ignored a
+cancelled context, and a panic reachable from the public API in three calls.
+
+**The most consequential result is a control, not a scenario.** Until this
+release the crash model retained unsynced data across a simulated host
+crash, so the battery **could not fail an engine that stopped calling
+`fsync` at all**. With a durable-length watermark in place, deleting the
+WAL commit fsync now fails loudly — 192 violations, exactly half of 384
+acknowledged commits lost, 33 tests red — where before it failed nothing.
+
+The `v0.11.0` **open plan-choice regression is closed**: the selective
+multi-label query that was ≈21.6× slower in the default configuration is
+**−96.08 %** and no shape regresses. One cost is large and is stated rather
+than omitted: a correctness guard on anonymous pattern heads costs the
+declined shape **62× to 1705×** (rmp #2604 is filed to recover it).
 
 The two compliance invariants remain in force: the module is **100 %
 openCypher TCK-compliant at the execution level** (**3 897/3 897 scenarios**,
-preserved rather than extended) and **100 % ACID-compliant** — four ACID
-defects were fixed this cycle, two of them CRITICAL. Every change is gated by
+16 006/16 006 steps, preserved rather than extended — no `.feature` file
+changed this cycle) and **100 % ACID-compliant**. Every change is gated by
 the project's local validation pipeline, run via `make ci` /
-`make release-preflight` before it lands; at the release commit that gate
-reports **123 packages ok with zero failures** under `go test -race ./...`,
-**0 lint issues**, and **87.1 %** aggregate coverage. The module is
-**certified for production use under extreme load and concurrency within a
-stated envelope** — the whole-tree soak layer and latency percentiles at the
-published concurrency levels are **not** part of that certification. The
-module uses the conventional Go path
+`make release-preflight` before it lands; at the release tree that gate
+reports **127 packages ok with zero failures** under `go test -race ./...`,
+**0 lint issues**, and **88.3 %** aggregate coverage with every package
+above its 75 % floor. **This release carries no production certification of
+its own** — the most recent one was taken at the `v0.11.0` commit, 192
+commits behind this tag, and the whole-tree soak layer has now gone unrun
+for five consecutive cycles. The module uses the conventional Go path
 `github.com/FlavioCFOliveira/GoGraph` and is fetchable with
-`go get github.com/FlavioCFOliveira/GoGraph@v0.11.0`. See
+`go get github.com/FlavioCFOliveira/GoGraph@v0.12.0`. See
 [CHANGELOG.md](CHANGELOG.md),
-[release-notes/v0.11.0.md](release-notes/v0.11.0.md) and
-[docs/benchmarks/v0.11.0.md](docs/benchmarks/v0.11.0.md) for the full release
-narrative, the measured performance delta, and the certification envelope.
+[release-notes/v0.12.0.md](release-notes/v0.12.0.md) and
+[docs/benchmarks/v0.12.0.md](docs/benchmarks/v0.12.0.md) for the full release
+narrative, the measured performance delta, and what the release does **not**
+establish.
 
 ### Core graph (`graph/`)
 
@@ -316,13 +340,20 @@ coverage. Every change must pass it before being committed.
 
 ## Performance
 
-**The authoritative, per-release record is
-[docs/benchmarks/v0.11.0.md](docs/benchmarks/v0.11.0.md)** — run environment,
-method, the figures below, what they do *not* establish, and reproduce commands.
-This section is a summary of it, not a second source. Every number here was
-measured first-hand at the `v0.11.0` commit (`ba436a5b`) on Apple M4 (10-core),
-32 GB, `darwin/arm64`, go1.26.5, on a host gated below a 1-minute load average of
-2.5.
+**The authoritative, per-release record for this release is
+[docs/benchmarks/v0.12.0.md](docs/benchmarks/v0.12.0.md)** — run environment,
+method, what the figures do *not* establish, and reproduce commands.
+This section is a summary, not a second source.
+
+`v0.12.0` adds no engine capability, so the throughput and primitive figures
+below are unchanged and are quoted with their original provenance: **each was
+measured first-hand at the `v0.11.0` commit (`ba436a5b`)** on Apple M4
+(10-core), 32 GB, `darwin/arm64`, go1.26.5, on a host gated below a 1-minute
+load average of 2.5, and is recorded in
+[docs/benchmarks/v0.11.0.md](docs/benchmarks/v0.11.0.md). What `v0.12.0`
+changed is set out in
+[its own record](docs/benchmarks/v0.12.0.md) and in
+[release-notes/v0.12.0.md](release-notes/v0.12.0.md#performance--the-honest-account).
 
 **Durable write throughput, at the concurrency levels the module publishes**
 (`store/txn`, one durable single-edge transaction per op, median of 6):
@@ -363,9 +394,14 @@ mandate holds.
 Graph iteration and bulk write pay **+7–16 %** across seven independent
 benchmarks, WAL recovery is **1.51× slower** (the price of deriving the MVCC clock
 from the WAL), on-disk bytes per node rise **2.9 %**, the uncontended intern path
-is **+14 %**, and one **open defect** (rmp #2431) makes a selective multi-label
-query **≈21.6× slower in the default configuration** — see
-[the release notes](release-notes/v0.11.0.md#known-issues) for the workaround.
+is **+14 %**. The `v0.11.0` **open defect** that made a selective multi-label
+query ≈21.6× slower in the default configuration (rmp #2431) is **closed in
+`v0.12.0`** at **−96.08 % sec/op with no shape regressing**
+([docs/benchmarks/min-label-anchor-vs-parallel-scan-2026-08-26.md](docs/benchmarks/min-label-anchor-vs-parallel-scan-2026-08-26.md)).
+The cost `v0.12.0` adds in its place is a correctness guard on anonymous
+pattern heads, which costs the declined shape **62× to 1705×** — stated in full
+in [the release notes](release-notes/v0.12.0.md#what-got-slower--measured-not-minimised),
+with rmp #2604 filed to recover the optimisation.
 
 > **Reproduce:** the exact commands are in
 > [docs/benchmarks/v0.11.0.md](docs/benchmarks/v0.11.0.md#7-reproduce); the

@@ -78,7 +78,7 @@ fall back to a default when left at the zero value:
 | `ConnTimeout` | 0 (disabled) | Per-connection idle read deadline, reset before each message read. |
 | `DatabaseName` | `DefaultDatabaseName` (`neo4j`) | The name reported in result metadata for a client that selects no database. A client that names one has its own name echoed back. See the `db` note under [Protocol conformance notes](#protocol-conformance-notes). |
 | `MaxTxIdleTime` | `DefaultMaxTxIdleTime` (5 s) | How long an **open** explicit transaction may go without the client sending a message, after which it is rolled back. Distinct from `DefaultTxTimeout`, which caps total lifetime however busy the transaction is. Cannot be disabled. |
-| `MaxOpenTxPerPrincipal` | `DefaultMaxOpenTxPerPrincipal` (16) | How many explicit transactions one authenticated principal may hold **open** at once, across all its connections. Exceeding it fails the `BEGIN` with `Neo.ClientError.General.LimitExceeded`. A negative value disables it. |
+| `MaxOpenTxPerPrincipal` | `DefaultMaxOpenTxPerPrincipal` (16) | How many explicit transactions one authenticated principal may hold **open** at once, across all its connections. Exceeding it fails the `BEGIN` with `Neo.TransientError.Transaction.MaximumTransactionLimitReached` — Neo4j's own TRANSIENT code, so a driver retries — and the session stays in **READY**, so the retry needs no `RESET` (rmp #2561). A negative value disables it. |
 
 ### Abandoned transactions
 
@@ -169,8 +169,25 @@ if err := srv.TerminateTransaction(id); err != nil {
 `Transactions` returns a point-in-time snapshot of every open explicit
 transaction, oldest first, so the one most likely to be blocking others comes
 first. `TerminateTransaction` rolls one back atomically — every statement of it,
-exactly as a client `ROLLBACK` would — releasing the writer serialisation and the
-visibility barrier.
+exactly as a client `ROLLBACK` would. It does **not** release a writer lock: the
+engine's writer serialisation and visibility barrier were retired, so what an
+abandoned transaction actually pins is version memory (no version it can still
+reach is reclaimable while it lives), not other clients' progress.
+
+**What the client is told.** On its next request-phase message the terminated
+connection receives `Neo.ClientError.Transaction.Terminated` — "the transaction has
+been terminated by an operator request". That is deliberately *not* the code an
+expired bound produces (`Neo.ClientError.Transaction.TransactionTimedOut`), so an
+operator who terminates a transaction and then reads the client's logs sees what
+actually happened. A statement caught in flight is failed through the same code,
+because the termination cancels the transaction's context; one termination
+therefore reports one reason regardless of timing.
+
+The code is a `ClientError` rather than a `TransientError` on purpose. Neo4j's
+own Go driver rewrites `Neo.TransientError.Transaction.Terminated` to exactly this
+code as part of mapping pre-5.x classifications forward, and it does so *before*
+reading the classification — so the `TransientError` spelling is both the legacy
+one and one no driver would actually retry.
 
 Termination is delivered rather than performed inline: a `Session` is
 single-threaded by contract, so the rollback runs on the owning connection's own
@@ -420,6 +437,12 @@ leak:
 | `bolt.server.tx.abandoned` | Explicit transactions still open at an abnormal disconnect (the client dropped the connection, hit the idle timeout, or the handler recovered a panic) without sending `COMMIT`, `ROLLBACK`, or `RESET`. A strict subset of `tx.closed`. |
 | `bolt.server.tx.timedout` | Explicit transactions reaped for exceeding their **total** wall-clock deadline (`DefaultTxTimeout` or a client `tx_timeout`) while the connection stayed alive. A strict subset of `tx.closed`. |
 | `bolt.server.tx.idlereaped` | Explicit transactions reaped for **silence** — no inbound message for `MaxTxIdleTime`. Separated from `tx.timedout` so an abandoned `BEGIN` is distinguishable from a legitimately long transaction. A strict subset of `tx.closed`. |
+
+The three server-initiated endings — `tx.timedout`, `tx.idlereaped`, and
+`tx.terminated` — are mutually **disjoint**: exactly one of them counts any given
+transaction. Until rmp #2560 `tx.timedout` was incremented by the shared teardown and
+was therefore a superset of the other two, which silently undid the separation the
+other two exist to provide.
 | `bolt.server.tx.quotarejected` | `BEGIN`s refused because the authenticated principal already held `MaxOpenTxPerPrincipal` open transactions. A rising count means one principal is monopolising transactions. |
 | `bolt.server.tx.terminated` | Explicit transactions rolled back because an operator called `Server.TerminateTransaction`. Kept separate from the automatic reaps: only this one means a human had to intervene. A strict subset of `tx.closed`. |
 | `bolt.server.conn.panics` | Recovered panics in a connection handler goroutine (defence-in-depth boundary). |

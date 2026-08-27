@@ -76,11 +76,17 @@ const (
 	metricTxAbandoned = "bolt.server.tx.abandoned"
 
 	// metricTxTimedOut counts explicit transactions reaped by the serve loop
-	// because they exceeded their wall-clock deadline while the connection was
-	// kept alive (idle, or by no-op pings). The reap rolls the transaction back
-	// — releasing the engine's global writer lock — and moves the session to
-	// FAILED (task #1346). It is a strict subset of metricTxClosed: a timed-out
-	// transaction is also counted closed by the rollback path.
+	// because they exceeded their TOTAL wall-clock lifetime while the connection
+	// was kept alive (by no-op pings, or simply held open). The reap rolls the
+	// transaction back and moves the session to FAILED (task #1346). It is a
+	// strict subset of metricTxClosed: a timed-out transaction is also counted
+	// closed by the rollback path.
+	//
+	// It is emitted by the total-bound branch of the serve loop ALONE. Until
+	// rmp #2560 the shared teardown emitted it, so an idle reap and an operator
+	// termination were each counted here too and this counter was a superset of
+	// all three — which silently undid the separation metricTxIdleReaped below
+	// exists to provide.
 	metricTxTimedOut = "bolt.server.tx.timedout"
 
 	// metricTxIdleReaped counts explicit transactions reaped for going SILENT —
@@ -90,6 +96,10 @@ const (
 	// scenario visible in metrics: one client sending BEGIN and going quiet shows
 	// up here, whereas a legitimately long transaction shows up there
 	// (rmp #2175). It is a strict subset of metricTxClosed.
+	//
+	// That separation was NOMINAL until rmp #2560: an idle reap incremented both
+	// this counter and metricTxTimedOut, so "shows up here rather than there" was
+	// not true of the metrics as emitted. The two are now disjoint.
 	metricTxIdleReaped = "bolt.server.tx.idlereaped"
 
 	// metricTxQuotaRejected counts BEGINs refused because the authenticated

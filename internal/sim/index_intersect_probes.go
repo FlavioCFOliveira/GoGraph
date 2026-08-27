@@ -485,7 +485,7 @@ func (k *IndexIntersectProbes) checkSoloControl(c *InvariantChecker, tick int64,
 		return
 	}
 	if strings.Contains(plan, intersectComposedMarker) {
-		c.add(ViolationOracleDeviation, tick, intersectOp,
+		c.add(ViolationVacuousRun, tick, intersectOp,
 			fmt.Sprintf("shape %q: a SINGLE-property predicate composed an intersection, so the composed marker does not discriminate composition and every composed assertion above is vacuous\nquery: %s\nplan:\n%s",
 				shape, query, plan))
 		return
@@ -538,7 +538,7 @@ func (k *IndexIntersectProbes) Counts() (composed, withRows, soloSeeks int) {
 func (k *IndexIntersectProbes) Finish(tick int64) []Violation {
 	var out []Violation
 	add := func(msg string) {
-		out = append(out, Violation{Kind: ViolationOracleDeviation, Tick: tick, Op: intersectOp, Message: msg})
+		out = append(out, Violation{Kind: ViolationVacuousRun, Tick: tick, Op: intersectOp, Message: msg})
 	}
 	if k.composedSeen == 0 {
 		add("vacuous run: the planner never composed two indexes, so the intersect path" +

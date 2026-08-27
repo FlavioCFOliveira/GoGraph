@@ -15,8 +15,22 @@ import (
 // Unsupported constructs (FOREACH, multi-graph constructs beyond UNION) return a
 // [*TranslateError] so callers can distinguish them from internal failures.
 //
-// Concurrency: FromAST is stateless; it is safe to call concurrently.
+// Concurrency: FromAST MUTATES q. It names q's anonymous pattern entities in
+// place — both here, up front, for every subquery body (see
+// [NameSubqueryAnonymousEntities]) and during the translation walk itself, at the
+// [translator.freshAnonVar] sites in match.go and writes.go. It is therefore safe
+// to call concurrently only on DISTINCT ASTs, and must never run concurrently
+// with any other access to q. The plan-cache builder satisfies this by parsing a
+// private AST per cache miss and publishing it only after FromAST returns; the
+// godoc here previously claimed statelessness, which was never true (rmp #2508).
 func FromAST(q ast.Query) (LogicalPlan, error) {
+	// Name every anonymous entity inside every subquery body BEFORE the
+	// translation walk, so that the per-execution re-translation of those bodies
+	// (ir.TranslateSubquery, driven once per Run by the subquery evaluator) finds
+	// them all non-nil and writes nothing into the by-then-shared AST. This is
+	// the fix for the rmp #2508 data race; see NameSubqueryAnonymousEntities for
+	// why it belongs here and not at the point of use.
+	NameSubqueryAnonymousEntities(q)
 	t := &translator{}
 	return t.query(q)
 }
@@ -36,7 +50,13 @@ func FromAST(q ast.Query) (LogicalPlan, error) {
 // [Argument] under in its argByTag map; the leading IR Argument carries this
 // tag so the leaf operator resolves to the same exec.Argument instance.
 //
-// Concurrency: stateless; safe to call concurrently.
+// Concurrency: safe to call concurrently on the SAME q, but only because q's
+// anonymous pattern entities were already named by
+// [NameSubqueryAnonymousEntities] while the AST was still private, so every
+// nil-guarded write below is unreachable. That precondition is what makes the
+// call safe — it is not stateless, and it was not safe before rmp #2508. The
+// regression test TestSubqueryConcurrentFirstExecution_2508 is what holds the
+// precondition in place.
 func TranslateSubquery(q *ast.SingleQuery, outerVars []string, argTag uint32) (LogicalPlan, error) {
 	t := &translator{}
 	// The subquery is a NEW translator, so its anonymous-variable counter would

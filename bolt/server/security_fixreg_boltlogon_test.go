@@ -178,12 +178,23 @@ func TestSec_Bolt51_FreshLogonAfterLogoffRestoresAccess(t *testing.T) {
 	}
 }
 
-// ── HYPOTHESIS 2/3: a FAILED RE-authentication (LOGOFF then bad LOGON) must NOT
-// terminate the connection as DEFUNCT (it is recoverable, since the connection
-// already proved itself once), yet must leave the session unauthenticated so a
-// subsequent RUN is still rejected. This pins that firstAuth is computed from the
-// state (StateAuthentication) and NOT erroneously from "is this the first LOGON".
-func TestSec_Bolt51_FailedReauthAfterLogoffIsRecoverableButGated(t *testing.T) {
+// ── HYPOTHESIS 2/3, REVISED BY rmp #2556: a FAILED RE-authentication (LOGOFF
+// then bad LOGON) leaves the session unauthenticated so a subsequent RUN is
+// rejected, AND terminates the connection.
+//
+// It used to assert the opposite of that second half — DEFUNCT was forbidden here
+// on the reasoning that the connection had already proved itself once. rmp #2556
+// retired that reasoning: the Bolt LOGON section says a failed authentication
+// closes the connection and carves out no exception for re-authentication, and
+// making the rule uniform removes a branch in which a refused identity switch
+// could leave the connection running as the previous principal.
+//
+// What the test still pins, and why it is here: that the RUN is rejected, and
+// that firstAuth is computed from the STATE (StateAuthentication) rather than
+// from "is this the first LOGON" — the two branches now converge on DEFUNCT, so
+// only the reclaim path differs, and getting firstAuth wrong would take the
+// branch that assumes no transaction can be open.
+func TestSec_Bolt51_FailedReauthAfterLogoffIsTerminalAndGated(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	sess := auth51(t)
@@ -205,12 +216,21 @@ func TestSec_Bolt51_FailedReauthAfterLogoffIsRecoverableButGated(t *testing.T) {
 	if sess.authenticated {
 		t.Fatalf("BYPASS: a failed re-LOGON authenticated the session")
 	}
-	// A failed RE-auth goes to FAILED (recoverable), NOT DEFUNCT.
-	if sess.state != StateFailed {
-		t.Fatalf("failed re-LOGON: state = %v, want FAILED (recoverable)", sess.state)
+	// CHANGED BY rmp #2556: a failed re-authentication now terminates the
+	// connection, as the Bolt LOGON section states for a failed authentication
+	// with no carve-out for re-authentication. It used to reach FAILED and stay
+	// recoverable, and this assertion pinned that.
+	//
+	// This arm reaches the branch with `authenticated` already FALSE, because the
+	// LOGOFF above cleared it, so it never carried the privilege-retention defect
+	// #2556 fixed. It changes with it because the contract is now uniform: a
+	// failed LOGON costs the connection whichever branch it took, which is one
+	// rule instead of two.
+	if sess.state != StateDefunct {
+		t.Fatalf("failed re-LOGON: state = %v, want DEFUNCT (rmp #2556)", sess.state)
 	}
 
-	// And a RUN in this FAILED state must still be rejected (no execution).
+	// And a RUN must still be rejected — the gate this test exists for, unchanged.
 	got2, err := sess.HandleMessage(ctx, &proto.Run{Query: "CREATE (:X)", Extra: map[string]interface{}{}})
 	if err != nil {
 		t.Fatalf("RUN: %v", err)

@@ -743,7 +743,7 @@ func TestBoltTxRegistry_OracleCanFail(t *testing.T) {
 		{
 			name:    "the reaper's failure text changed under the arm",
 			mutate:  func(e *BoltTxRegistryEvidence) { e.ReapMessages[1] = "the transaction was idle for too long" },
-			wantSub: "rmp #2560",
+			wantSub: "txReapFailureMessage",
 		},
 		{
 			name: "no connection was probed after the reap",

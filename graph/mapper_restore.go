@@ -3,6 +3,7 @@ package graph
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 )
 
@@ -19,6 +20,21 @@ var ErrMapperNotEmpty = errors.New("graph: Mapper.LoadFrom on non-empty mapper")
 // with the natural key's hash-derived shard, a non-contiguous
 // intra-shard slot sequence, or a duplicate (NodeID, key) record.
 var ErrMapperEntryCorrupted = errors.New("graph: Mapper.LoadFrom entries corrupted")
+
+// ErrMapperKeyNotPortable is returned by [Mapper.LoadFrom], wrapped in
+// [ErrMapperEntryCorrupted], when the shard disagreement it detected is
+// explained not by a damaged snapshot but by the KEY TYPE: the key carries a
+// pointer, an unsafe.Pointer or a channel, so its value is an ADDRESS and cannot
+// be reproduced in another process.
+//
+// Such a key is unusable as a persisted natural key, and not only because of the
+// hash. In Go, a comparable type containing a pointer compares by ADDRESS, so a
+// key decoded by [encoding.BinaryUnmarshaler] into a fresh allocation is not
+// equal to the key that was written even when it carries the same data — its
+// identity, not merely its shard, is unreproducible. The sentinel exists so that
+// diagnosis lands on the key type instead of on the snapshot writer or the disk,
+// which is where "entries corrupted" alone had pointed it (rmp #2528).
+var ErrMapperKeyNotPortable = errors.New("graph: mapper key type is address-dependent and cannot be persisted")
 
 // MapperEntry describes one (NodeID -> natural key) pair as serialised
 // by the snapshot writer. The NodeID is packed so the unpacked shard
@@ -82,6 +98,16 @@ func (m *Mapper[N]) LoadFrom(entries []MapperEntry[N]) error {
 		shardIdx, intraIdx := unpackNodeID(e.ID)
 		expected := mapperShardFor(e.Key)
 		if shardIdx != expected {
+			// A shard disagreement has two possible causes and they call for
+			// opposite responses, so name the one that actually applies. A
+			// damaged snapshot is an integrity problem; an address-dependent key
+			// type is a design problem in the caller's schema that no amount of
+			// re-reading the file will fix. Checking is free here because this is
+			// already the failure path.
+			if why := addressDependentKeyPath(e.Key); why != "" {
+				return fmt.Errorf("%w: %w: key %s formats and compares by address, so NodeID %d (shard %d) cannot be reproduced (this process hashes it to shard %d)",
+					ErrMapperEntryCorrupted, ErrMapperKeyNotPortable, why, uint64(e.ID), shardIdx, expected)
+			}
 			return fmt.Errorf("%w: NodeID %d shard %d != mapperShardFor(key) %d",
 				ErrMapperEntryCorrupted, uint64(e.ID), shardIdx, expected)
 		}
@@ -124,4 +150,60 @@ func (m *Mapper[N]) LoadFrom(entries []MapperEntry[N]) error {
 	}
 
 	return nil
+}
+
+// addressDependentKeyPath reports the path within k, in Go field notation, at
+// which an ADDRESS is stored — a pointer, an unsafe.Pointer, or a channel — or
+// "" when k's value is entirely address-independent.
+//
+// It inspects the VALUE rather than only the static type, because a comparable
+// struct may hold an interface field whose dynamic type is what decides: the
+// static type says "maybe", the value says which. It is called only from the
+// failure path in [Mapper.LoadFrom], so it costs nothing in normal operation.
+//
+// Slices, maps and functions cannot appear: a type containing one is not
+// comparable, so it cannot instantiate [Mapper].
+func addressDependentKeyPath[N comparable](k N) string {
+	return addressDependentPath(reflect.ValueOf(k), "key")
+}
+
+// addressDependentPath is the recursive worker behind
+// [addressDependentKeyPath]. path accumulates the human-readable location.
+func addressDependentPath(v reflect.Value, path string) string {
+	if !v.IsValid() {
+		return ""
+	}
+	switch v.Kind() {
+	case reflect.Pointer:
+		return path + " (" + v.Type().String() + ")"
+	case reflect.UnsafePointer:
+		return path + " (unsafe.Pointer)"
+	case reflect.Chan:
+		return path + " (" + v.Type().String() + ")"
+	case reflect.Interface:
+		if v.IsNil() {
+			return ""
+		}
+		return addressDependentPath(v.Elem(), path)
+	case reflect.Struct:
+		for i := 0; i < v.NumField(); i++ {
+			// Field(i) on an unexported field is readable for inspection; only
+			// Interface() would panic, and this walk never calls it.
+			if why := addressDependentPath(v.Field(i), path+"."+v.Type().Field(i).Name); why != "" {
+				return why
+			}
+		}
+		return ""
+	case reflect.Array:
+		for i := 0; i < v.Len(); i++ {
+			if why := addressDependentPath(v.Index(i), fmt.Sprintf("%s[%d]", path, i)); why != "" {
+				return why
+			}
+		}
+		return ""
+	default:
+		// Strings, numerics, bools and complex values are byte-for-byte
+		// reproducible in any process.
+		return ""
+	}
 }

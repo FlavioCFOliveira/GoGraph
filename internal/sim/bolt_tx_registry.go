@@ -501,21 +501,47 @@ const (
 	// txAbandonReadyState is the session state a listing must show for a
 	// transaction that has completed its RUN and is waiting for the client.
 	txAbandonReadyState = "TX_READY"
-	// txReapFailureCode and txReapFailureMessage are what a reaped connection is
+	// txReapFailureCode and txReapFailureMessage are what a REAPED connection is
 	// told on its next request-phase message: Session.reapTimedOutTx arms them as
-	// pendingTermErr (bolt/server/session.go:1832-1835) and ONLY the reaper and an
-	// operator termination do, which is what makes them attribution rather than
-	// decoration — a transaction absent from the registry could equally have been
-	// rolled back, or have lost its connection.
+	// pendingTermErr, and only the two deadline bounds reach that, which is what
+	// makes them attribution rather than decoration — a transaction absent from the
+	// registry could equally have been rolled back, or have lost its connection.
 	//
-	// The MESSAGE is pinned even though BOTH of its halves are currently false, and
-	// deliberately so (rmp #2560): an idle reap did not "exceed its timeout" in the
-	// sense a reader will assume, and no "writer lock" has been held for a
-	// transaction's lifetime since rmp #2305 retired it. Pinning the exact text
-	// means the eventual correction fails this arm on purpose instead of slipping
-	// through, and the arm is then updated with the ticket.
+	// THE PIN FIRED, AND WAS UPDATED (rmp #2560). It previously read
+	// "…exceeded its timeout; the writer lock was released" and was pinned with
+	// both halves false on purpose, so that the eventual correction would fail
+	// these arms instead of slipping through. It did: rmp #2560 dropped the stale
+	// writer-lock clause (rmp #2305/#2306 retired the hold it named) and gave the
+	// operator path its own reason. Attribution therefore needs TWO pairs now,
+	// because the shared reason is what #2560 removed — see
+	// [txTerminateFailureCode] below.
+	//
+	// What remains pinned here is the DEADLINE reason only. Note that it still does
+	// not distinguish the idle bound from the total one on the wire; only the log
+	// line and the metric do (bolt/server/serve.go). That is deliberate and is not
+	// a defect: a client's correct response to either is the same, whereas an
+	// operator's is not.
 	txReapFailureCode    = "Neo.ClientError.Transaction.TransactionTimedOut"
-	txReapFailureMessage = "the transaction has been terminated because it exceeded its timeout; the writer lock was released"
+	txReapFailureMessage = "the transaction has been terminated because it exceeded its timeout"
+
+	// txTerminateFailureCode and txTerminateFailureMessage are what an
+	// OPERATOR-TERMINATED connection is told, armed by
+	// Session.terminateTxByOperator. They exist as a separate pair because rmp
+	// #2560 stopped the operator path borrowing the deadline path's reason, and
+	// pinning them separately is what keeps the two apart: an arm that adjudicated
+	// an operator termination against txReapFailureMessage would go green again the
+	// moment the two were collapsed back onto one string.
+	//
+	// The CODE is ClientError, not TransientError, on primary evidence rather than
+	// on the obvious-looking reading. neo4j-go-driver v5.28.4's reclassify()
+	// (neo4j/db/errors.go:132-139) rewrites Neo.TransientError.Transaction.Terminated
+	// to exactly this code, and its stated job is mapping "errors coming from
+	// pre-5.x servers into their 5.x classifications" — so this IS the modern
+	// classification, and the Transient spelling is the legacy one. Because
+	// reclassify() runs BEFORE the classification is parsed, the Transient form
+	// would also not be retried by a driver; it would merely claim it would be.
+	txTerminateFailureCode    = "Neo.ClientError.Transaction.Terminated"
+	txTerminateFailureMessage = "the transaction has been terminated by an operator request"
 )
 
 // The four honest-write windows, named for where they sit relative to the reap.
@@ -1641,14 +1667,14 @@ func checkBoltTxReapAttribution(e *BoltTxRegistryEvidence) []Violation {
 			})
 			continue
 		}
-		// Pinned verbatim, both halves false, on purpose — see [txReapFailureMessage]
-		// and rmp #2560.
+		// Pinned verbatim — see [txReapFailureMessage]. The pin previously carried
+		// two false halves on purpose and rmp #2560 spent it: the stale writer-lock
+		// clause is gone, and what is pinned now is a true statement about a reap.
 		if e.ReapMessages[i] != txReapFailureMessage {
 			v = append(v, Violation{
 				Kind: ViolationOracleDeviation, Op: txOp(e.Arm, "reap-attribution"),
-				Message: fmt.Sprintf("connection %d was told %q, want the text pinned in txReapFailureMessage (rmp "+
-					"#2560): if that text has been corrected, update this arm with the ticket",
-					e.Plan[i].Conn, e.ReapMessages[i]),
+				Message: fmt.Sprintf("connection %d was told %q, want the text pinned in txReapFailureMessage (%q)",
+					e.Plan[i].Conn, e.ReapMessages[i], txReapFailureMessage),
 			})
 		}
 	}
@@ -1740,7 +1766,7 @@ func checkBoltTxWindow(arm string, w *BoltTxWriteWindow) []Violation {
 func checkBoltTxRegistryNonVacuity(e *BoltTxRegistryEvidence) []Violation {
 	var v []Violation
 	shortfall := func(clause, msg string) {
-		v = append(v, Violation{Kind: ViolationOracleDeviation, Op: txOp(e.Arm, clause), Message: msg})
+		v = append(v, Violation{Kind: ViolationVacuousRun, Op: txOp(e.Arm, clause), Message: msg})
 	}
 	if len(e.Plan) != txAbandonCount {
 		shortfall("nonvacuity-plan", fmt.Sprintf("the run opened %d transaction(s), want %d: "+

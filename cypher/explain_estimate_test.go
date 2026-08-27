@@ -184,7 +184,8 @@ func TestExplainEstimate_ExpandDegreeExact(t *testing.T) {
 
 // TestExplainEstimate_RangeSeekLeafExact asserts the rewritten
 // NodeByIndexRangeScan leaf carries the EXACT in-range index count. The fixture
-// clears the range-seek gate (≥ 1024 nodes, ≤ 10% selectivity) so the peephole
+// clears the range-seek gate (≥ rangeSeekMinLabelPopulation nodes, ≤ 10%
+// selectivity) so the peephole
 // fires and the leaf is rendered.
 func TestExplainEstimate_RangeSeekLeafExact(t *testing.T) {
 	const n = 1100
@@ -208,7 +209,8 @@ func TestExplainEstimate_RangeSeekLeafExact(t *testing.T) {
 	}
 
 	// code <= "code0049" matches exactly code0000..code0049 = 50 rows, an inclusive
-	// index range the seek serves. 50/1100 ≈ 4.5% ≤ 10%, population ≥ 1024 → fires.
+	// index range the seek serves. 50/1100 ≈ 4.5% ≤ 10%, population clears the
+	// floor → fires.
 	plan, err := e.ExplainLogical(`MATCH (n:Item) WHERE n.code <= 'code0049' RETURN n`, nil)
 	if err != nil {
 		t.Fatalf("Explain: %v", err)

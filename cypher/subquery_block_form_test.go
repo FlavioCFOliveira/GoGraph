@@ -232,7 +232,13 @@ func TestSubqueryForms_AcceptanceMatrix(t *testing.T) {
 		{"exists-match-nowhere", `MATCH (a:Person) WHERE EXISTS { MATCH (a)-[:KNOWS]->(b) } RETURN count(a) AS n`, true, "fixed by #2216"},
 		{"exists-match-where", `MATCH (a:Person) WHERE EXISTS { MATCH (a)-[:KNOWS]->(b) WHERE b.age > 1 } RETURN count(a) AS n`, true, "fixed by #2216"},
 		{"exists-match-return", `MATCH (a:Person) WHERE EXISTS { MATCH (a)-[:KNOWS]->(b) RETURN b } RETURN count(a) AS n`, true, ""},
-		{"exists-union", `MATCH (a:Person) WHERE EXISTS { MATCH (a)-[:KNOWS]->(b) RETURN b UNION MATCH (a)<-[:KNOWS]-(b) RETURN b } RETURN count(a) AS n`, true, ""},
+		// REJECTED since rmp #2615, and the change of verdict is the point. It
+		// was accepted and answered from its FIRST BRANCH ALONE, silently: the
+		// subquery AST cannot hold a multi-branch query, so the visitor kept
+		// Parts[0] and discarded the rest. Both reference engines ANSWER this
+		// query — supporting it is #2627 — but answering one branch of it is a
+		// wrong answer, and refusing is what stops that today.
+		{"exists-union", `MATCH (a:Person) WHERE EXISTS { MATCH (a)-[:KNOWS]->(b) RETURN b UNION MATCH (a)<-[:KNOWS]-(b) RETURN b } RETURN count(a) AS n`, false, "UNION in a subquery body is refused by #2615; support is #2627"},
 		{"exists-with", `MATCH (a:Person) WHERE EXISTS { MATCH (a)-[:KNOWS]->(b) WITH b WHERE b.age > 1 RETURN b } RETURN count(a) AS n`, true, ""},
 		{"exists-unwind-match", `MATCH (a:Person) WHERE EXISTS { UNWIND [1] AS x MATCH (a)-[:KNOWS]->(b) } RETURN count(a) AS n`, true, "fixed by #2216"},
 
@@ -241,6 +247,10 @@ func TestSubqueryForms_AcceptanceMatrix(t *testing.T) {
 		{"count-match-nowhere", `MATCH (a:Person) WHERE COUNT { MATCH (a)-[:KNOWS]->(b) } > 0 RETURN count(a) AS n`, true, "fixed by #2216"},
 		{"count-match-return", `MATCH (a:Person) WHERE COUNT { MATCH (a)-[:KNOWS]->(b) RETURN b } > 0 RETURN count(a) AS n`, true, ""},
 		{"count-in-return", `MATCH (a:Person) RETURN a.name AS name, COUNT { (a)-[:KNOWS]->() } AS deg`, true, ""},
+		// The COUNT twin of exists-union. It had no matrix entry at all, which is
+		// why the identical silent drop in VisitSubqueryCount went unrecorded
+		// while the EXISTS one at least carried a comment (#2615).
+		{"count-union", `MATCH (a:Person) WHERE COUNT { MATCH (a)-[:KNOWS]->(b) RETURN b UNION MATCH (a)<-[:KNOWS]-(b) RETURN b } > 0 RETURN count(a) AS n`, false, "UNION in a subquery body is refused by #2615; support is #2627"},
 
 		// ---- pattern predicates (the pre-subquery spelling) ----
 		// The target node must stay anonymous: a pattern predicate may not

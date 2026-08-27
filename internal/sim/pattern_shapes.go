@@ -385,7 +385,7 @@ func patternShapesVacuity(tick int64, oracle *GraphOracle) []Violation {
 		return nil
 	}
 	return []Violation{{
-		Kind: ViolationOracleDeviation,
+		Kind: ViolationVacuousRun,
 		Tick: tick,
 		Op:   "pattern-shapes non-vacuity",
 		Message: fmt.Sprintf("vacuous run: the final model never contained: %v — the corresponding "+

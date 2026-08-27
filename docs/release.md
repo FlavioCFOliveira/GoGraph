@@ -78,9 +78,14 @@ be merged or tagged.
   its review and must be re-approved.
 - **Require linear history.** Merge commits on `main` are rejected;
   use rebase or squash.
-- **Require signed commits** for repository contributors with
-  write access. Sign with the key registered at GitHub Settings →
-  SSH and GPG keys.
+- **Commit signing is likewise NOT yet in force.** `git log
+  --pretty=%G?` reports `N` — no signature — for every commit in the
+  `v0.12.0` window, for the same reason as the tags below: no signing
+  key is configured on the release workstation. The intended control
+  is to require signed commits from contributors with write access,
+  signing with the key registered at GitHub Settings → SSH and GPG
+  keys; it is stated here as intent, explicitly not as a control
+  currently enforced.
 - **Restrict push for tags `v*`.** Only members of the `releasers`
   team may push a release tag. The `Release` workflow at
   `.github/workflows/release.yml` runs the release-accuracy gate and
@@ -94,13 +99,20 @@ be merged or tagged.
 - **Restrict push.** Only the `releasers` team may push a tag
   matching `v[0-9]*`. Even a maintainer's regular push is
   rejected.
-- **Require signed tags.** All release tags are
-  `git tag -s` signed.
+- **Tag signing is an intended control that is NOT yet in force.**
+  Release tags are currently annotated but **unsigned** (`git tag -a`):
+  `v0.10.0`, `v0.11.0` and `v0.12.0` all are, and no signing key is
+  configured on the release workstation. This is recorded as the
+  present reality rather than as the policy, because a security
+  document that asserts a control it does not have is worse than one
+  that admits the gap. Adopting `git tag -s` requires a signing key,
+  a documented key-custody process, and the matching GitHub tag rule;
+  until those exist, do not claim signed tags anywhere.
 
 ## Go toolchain upgrade workflow
 
 GoGraph pins both a language version (`go 1.26`) and an explicit
-toolchain version (`toolchain go1.26.3`) in `go.mod`. The release
+toolchain version (`toolchain go1.27.0`) in `go.mod`. The release
 workflow (`.github/workflows/release.yml`) consumes the toolchain via
 `go-version-file: go.mod`, and the local gates (`make ci`,
 `make release-preflight`) use the same `go.mod` directive, so a single
@@ -272,7 +284,7 @@ instead of being emitted once per archive.
 Local fallback to generate the SBOM against the current checkout:
 
 ```bash
-go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.10.0
+go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.12.0
 cyclonedx-gomod mod -licenses -json -output gograph.cdx.json
 ```
 

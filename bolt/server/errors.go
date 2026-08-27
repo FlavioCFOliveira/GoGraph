@@ -307,3 +307,22 @@ func isResourceLimitErr(err error) bool {
 		errors.Is(err, cypher.ErrResultBytesExceeded) ||
 		errors.Is(err, funcs.ErrCollectItemsExceeded)
 }
+
+// txQuotaRefusalCode is the Bolt failure code for a BEGIN refused because the
+// principal is at its open-transaction cap ([Options.MaxOpenTxPerPrincipal]).
+//
+// It is Neo4j's own code for precisely this condition — "unable to start new
+// transaction since the maximum number of concurrently executing transactions is
+// reached" — and it is TRANSIENT, which is what tells a driver the request may be
+// retried.
+//
+// It replaced Neo.ClientError.General.LimitExceeded (rmp #2561), which was wrong
+// twice over: that code does not appear in Neo4j's status codes at all, and its
+// ClientError class instructs a driver NOT to retry, while a cap frees itself as
+// soon as another of the principal's transactions closes, making a retry exactly
+// the right response.
+//
+// The per-connection in-flight CURSOR cap still uses LimitExceeded. That is a
+// different limit, reached inside a single transaction, and it was not part of
+// this change.
+const txQuotaRefusalCode = "Neo.TransientError.Transaction.MaximumTransactionLimitReached"

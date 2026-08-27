@@ -142,6 +142,7 @@ func (i *Index) Remove(label uint32, node graph.NodeID) {
 // AddRange records that all nodes in [fromNode, toNode] (inclusive) carry
 // label. It uses [roaring64.Bitmap.AddRange] which represents dense ranges in
 // O(1) space, making bulk ingestion of contiguous NodeID bands efficient.
+// An interval naming no ids leaves no entry behind, mirroring RemoveRange.
 func (i *Index) AddRange(label uint32, fromNode, toNode graph.NodeID) {
 	i.mu.Lock()
 	// AddRange promotes the label's NodeSet to (or keeps it on) the roaring
@@ -150,7 +151,18 @@ func (i *Index) AddRange(label uint32, fromNode, toNode graph.NodeID) {
 	// one-way, so a dense label stays optimal.
 	set := i.bits[label]
 	set.AddRange(uint64(fromNode), uint64(toNode))
-	i.bits[label] = set
+	if set.IsEmpty() {
+		// An inverted or empty interval names no ids, so there is nothing to
+		// record. Storing the set back would mint a permanent entry that
+		// Serialize then writes out — 20 bytes and one labelCount apiece — while
+		// Count, Scan and Has all report the label as carrying nothing (#2608).
+		// This mirrors RemoveRange's delete-on-empty in the opposite direction.
+		// The branch is only reachable when the label had no entry: AddRange
+		// cannot empty a set that already held ids.
+		delete(i.bits, label)
+	} else {
+		i.bits[label] = set
+	}
 	i.mu.Unlock()
 }
 
@@ -404,16 +416,23 @@ func (i *Index) Serialize(w io.Writer) error {
 	for _, k := range keys {
 		set := i.bits[k]
 		// Materialise a roaring bitmap from the set's logical contents and
-		// write its native binary form. roaring64.WriteTo is a
-		// content-deterministic pure function of the final set (it never
-		// implicitly RunOptimizes), so a bitmap built here via AddMany of
-		// the sorted ids is BYTE-IDENTICAL to one that held the same ids all
-		// along — the inline small-set tier produces exactly the bytes the
-		// pre-refactor per-label *roaring64.Bitmap produced, keeping the
-		// on-disk format unchanged with zero migration (storage-engine-
-		// auditor, #1585). A dense (AddRange) label is already a bitmap, so
-		// Bitmap returns it directly with no materialisation cost.
-		bm, _ := set.Bitmap()
+		// write its native binary form. roaring64.WriteTo is deterministic for
+		// a given in-memory state, so a bitmap built here via AddMany of the
+		// sorted ids is BYTE-IDENTICAL to one that held the same ids all along
+		// IN THE SAME CONTAINER ENCODING — the inline small-set tier produces
+		// exactly the bytes the pre-refactor per-label *roaring64.Bitmap
+		// produced, keeping the on-disk format unchanged with zero migration
+		// (storage-engine-auditor, #1585). A dense (AddRange) label is already
+		// a bitmap, so no materialisation cost is paid.
+		//
+		// The encoding itself is NOT determined by the contents: AddRange
+		// builds a run container where the same ids added one at a time build
+		// an array one. CanonicalBitmap normalises that for sets of at most
+		// smallSetMax ids — the band the reader down-converts, and so the only
+		// band where a Serialize/Deserialize cycle could change the bytes
+		// (#2609). It is bounded because normalising a large set means cloning
+		// it, for no change in the image; see its godoc for the measurement.
+		bm, _ := set.CanonicalBitmap()
 		if err := binary.Write(tee, binary.LittleEndian, k); err != nil {
 			return err
 		}

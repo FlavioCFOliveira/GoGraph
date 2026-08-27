@@ -194,12 +194,27 @@ type config struct {
 	relTypes bool
 }
 
-// defaultConfig returns the full specification this example was written
-// to exercise: one million users, thirty thousand articles, 150-200
-// friends per user, and up to 300 likes per user.
+// defaultConfig returns the scale this example RUNS at: fifty thousand users,
+// thirty thousand articles, 150-200 friends per user, and up to 300 likes per
+// user.
+//
+// # Why not the million it used to advertise
+//
+// The default was 1 000 000 users, and at that scale the example did not
+// complete — MEASURED, killed at twelve minutes having printed nothing past its
+// config block, and at 150 000 users killed at seven. The reason is memory
+// rather than patience: resident heap scales linearly with the population
+// (measured 1.88 GiB at 20 000 users and 3.74 GiB at 40 000), so a million users
+// projects to roughly 93 GiB of peak RSS against a 32 GiB reference machine. No
+// time budget makes that finish.
+//
+// An example exists to yield measurements, and one that never finishes yields
+// none. The million-user scale is not gone — it is one `-users` flag away — but
+// it is no longer what a maintainer gets by typing `go run`. See the cost table
+// in README.md for what each scale actually costs (rmp #2385).
 func defaultConfig() config {
 	return config{
-		users:      1_000_000,
+		users:      50_000,
 		articles:   30_000,
 		friendsMin: 150,
 		friendsMax: 200,
@@ -249,7 +264,10 @@ func main() {
 	// below: log.Fatal exits through os.Exit, which does not run deferred calls.
 	ctx := context.Background()
 	if err := prof.Run(os.Stdout, func() error {
-		if err := run(ctx, os.Stdout, cfg); err != nil {
+		// Results to stdout, progress to stderr: a pipe capturing the result
+		// stream gets exactly the pinned facts, and a reader watching the run sees
+		// which phase it is in.
+		if err := runWithProgress(ctx, os.Stdout, os.Stderr, cfg); err != nil {
 			return err
 		}
 		// The columnar exercise runs on its own bounded working set (never the full
@@ -282,9 +300,17 @@ func main() {
 // vary per run and per machine. All output goes to w so a test can
 // capture and assert on the deterministic lines.
 func run(ctx context.Context, w io.Writer, cfg config) error {
+	return runWithProgress(ctx, w, nil, cfg)
+}
+
+// runWithProgress is run with a side channel for phase progress. run passes nil,
+// which makes every progress call a no-op, so the pinned result stream is
+// byte-identical whether or not anybody is watching.
+func runWithProgress(ctx context.Context, w, progressW io.Writer, cfg config) error {
 	if err := cfg.validate(); err != nil {
 		return fmt.Errorf("config: %w", err)
 	}
+	prog := newProgressReporter(progressW)
 
 	fmt.Fprintf(w, "config.users=%d\n", cfg.users)
 	fmt.Fprintf(w, "config.articles=%d\n", cfg.articles)
@@ -301,7 +327,8 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 	// column (W=float64) saves 8 B/edge of dead memory; the build is otherwise
 	// identical (addEdge still passes weight 1, which is accepted and ignored).
 	g := lpg.New[string, float64](adjlist.Config{Directed: true, Weightless: true})
-	stats, err := build(ctx, g, cfg, w)
+	prog.phase("build: creating nodes and edges")
+	stats, err := build(ctx, g, cfg, prog)
 	if err != nil {
 		return fmt.Errorf("build: %w", err)
 	}
@@ -314,6 +341,7 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	prog.phase("compact: right-sizing adjacency backing arrays")
 	g.AdjList().Compact(ctx)
 
 	fmt.Fprintf(w, "nodes.users=%d\n", stats.users)
@@ -334,15 +362,19 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 		safeDiv(float64(built.HeapAlloc-base.HeapAlloc), float64(stats.friendEdges+stats.likeEdges)))
 
 	eng := cypher.NewEngine(g)
+	prog.phase("queries: running the read battery")
 	if err := runQueries(ctx, eng, cfg, &stats, w); err != nil {
 		return fmt.Errorf("queries: %w", err)
 	}
+	prog.phase("statistics: exercising the estimate providers")
 	if err := statisticsExercise(ctx, eng, cfg, w); err != nil {
 		return fmt.Errorf("statistics: %w", err)
 	}
+	prog.phase("csr-ordering: measuring the ordered neighbour runs")
 	if err := csrOrderingExercise(ctx, g, eng, cfg, &stats, w); err != nil {
 		return fmt.Errorf("csr ordering: %w", err)
 	}
+	prog.phase("done")
 	return nil
 }
 
@@ -672,11 +704,39 @@ type buildStats struct {
 // are 24-char hex strings drawn from the seeded RNG; names and titles
 // are realistic strings assembled from fixed word lists. The build
 // honours ctx cancellation between phases and on a periodic check.
-func build(ctx context.Context, g *lpg.Graph[string, float64], cfg config, _ io.Writer) (buildStats, error) {
+func build(ctx context.Context, g *lpg.Graph[string, float64], cfg config, prog *progressReporter) (buildStats, error) {
 	//nolint:gosec // G404: a seeded math/rand is intentional here — the benchmark
 	// must reproduce a fixed dataset for a given -seed; crypto/rand would defeat that.
 	rng := rand.New(rand.NewSource(cfg.seed))
 	start := time.Now()
+
+	// BRACKET THE WHOLE BUILD (rmp #2624).
+	//
+	// An UNBRACKETED write is its own one-op window, so it takes
+	// AdjList.storeEntry's first-touch path and CLONES the touched shard's entire
+	// slot array — `make([]unsafe.Pointer, len(base.slots))` plus a copy — for
+	// EVERY edge. The clone is O(shard size), the shard grows with the graph, and
+	// it happens once per edge, so the build's allocation is O(edges x shard
+	// size): quadratic in the population.
+	//
+	// MEASURED by a two-scale pprof -alloc_space diff, doubling 20 000 users to
+	// 40 000: every query-phase site scaled 1.97-2.06x, while main.build went
+	// 3.11x, AddEdgeLabeledWithProperties 3.16x, upsertEdgeSlotLocked 3.18x and
+	// storeEntry 3.92x. That localises the superlinearity to the clone and to
+	// nothing else.
+	//
+	// BeginExclusiveBuild opens ONE window for the whole build, which is what its
+	// godoc offers: each touched shard's array is cloned at most once, on first
+	// touch, and every later write mutates that private builder in place. The
+	// cost becomes O(distinct shards touched) instead of O(ops). Its contract is
+	// a single writer and no serving window, which is exactly this phase: build
+	// runs alone on a graph nobody is querying yet.
+	// One window covers the whole build. Batching it into 65536-write windows was
+	// MEASURED and earned nothing (8.34 GiB allocated against 8.28 GiB for a
+	// single window, elapsed within noise), so the simpler form is the one an
+	// example should show.
+	g.AdjList().BeginExclusiveBuild()
+	defer g.AdjList().EndExclusiveBuild()
 
 	userIDs := make([]string, cfg.users)
 	articleIDs := make([]string, cfg.articles)
@@ -691,6 +751,9 @@ func build(ctx context.Context, g *lpg.Graph[string, float64], cfg config, _ io.
 		if i%checkEvery == 0 {
 			if err := ctx.Err(); err != nil {
 				return buildStats{}, err
+			}
+			if i%progressEvery == 0 && i > 0 {
+				prog.tick("users", i, cfg.users)
 			}
 		}
 		id := uniqueHexID(rng, seen)
@@ -721,6 +784,9 @@ func build(ctx context.Context, g *lpg.Graph[string, float64], cfg config, _ io.
 			if err := ctx.Err(); err != nil {
 				return buildStats{}, err
 			}
+			if i%progressEvery == 0 && i > 0 {
+				prog.tick("friend edges", i, cfg.users)
+			}
 		}
 		degree := cfg.friendsMin + rng.Intn(cfg.friendsMax-cfg.friendsMin+1)
 		clear(targets)
@@ -747,6 +813,9 @@ func build(ctx context.Context, g *lpg.Graph[string, float64], cfg config, _ io.
 			if i%checkEvery == 0 {
 				if err := ctx.Err(); err != nil {
 					return buildStats{}, err
+				}
+				if i%progressEvery == 0 && i > 0 {
+					prog.tick("like edges", i, cfg.users)
 				}
 			}
 			degree := rng.Intn(cfg.likesMax + 1)
@@ -778,6 +847,67 @@ func build(ctx context.Context, g *lpg.Graph[string, float64], cfg config, _ io.
 // (see analyticalQueries) looks up in one query. Kept small and constant so
 // the deterministic default pins an exact matched-count fact.
 const unwindBatch = 8
+
+// progressReporter emits PHASE PROGRESS to a side channel so a long run can be
+// told apart from a hung one.
+//
+// # Why a side channel and not the result stream
+//
+// This example's deterministic facts are pinned by [TestRun], which drives run
+// into a buffer and parses it. Progress lines are wall-clock-dependent by nature,
+// so writing them into that stream would either break the pinned facts or force
+// the parser to filter output it should not have to know about. They go to
+// os.Stderr instead: a reader watching the run sees them interleaved, a pipe
+// capturing results does not, and the test passes nil and sees nothing.
+//
+// # Why it exists at all
+//
+// At its documented default this example printed its six config lines and then
+// nothing for as long as it ran — MEASURED, twelve minutes at 1 000 000 users and
+// seven at 150 000, both killed without a single further line. An operator could
+// not distinguish a slow run from a deadlock, which is the difference between
+// waiting and debugging (rmp #2385).
+type progressReporter struct {
+	w     io.Writer
+	start time.Time
+}
+
+// newProgressReporter returns a reporter writing to w, or a nil reporter (every
+// method a no-op) when w is nil.
+func newProgressReporter(w io.Writer) *progressReporter {
+	if w == nil {
+		return nil
+	}
+	return &progressReporter{w: w, start: time.Now()}
+}
+
+// phase announces that a named phase has begun, stamped with the elapsed time
+// since the reporter was created, so consecutive lines give the cost of the phase
+// between them without any arithmetic on the reader's part.
+func (p *progressReporter) phase(name string) {
+	if p == nil {
+		return
+	}
+	fmt.Fprintf(p.w, "[%7.1fs] %s\n", time.Since(p.start).Seconds(), name)
+}
+
+// tick reports progress WITHIN a phase, as a count against its total. It is
+// called from the build loops, which are the ones long enough at scale for the
+// silence to matter.
+func (p *progressReporter) tick(name string, done, total int) {
+	if p == nil || total <= 0 {
+		return
+	}
+	fmt.Fprintf(p.w, "[%7.1fs]   %s %d/%d (%.0f%%)\n",
+		time.Since(p.start).Seconds(), name, done, total,
+		100*float64(done)/float64(total))
+}
+
+// progressEvery is how many items a build loop covers between ticks. It is a
+// COUNT rather than an interval so the output is deterministic in shape for a
+// given scale, and it is a multiple of checkEvery so a tick never adds a branch
+// the cancellation poll did not already take.
+const progressEvery = 16 * checkEvery
 
 // checkEvery bounds how often the build polls ctx for cancellation:
 // often enough that a cancelled multi-minute build stops promptly,
@@ -1506,7 +1636,7 @@ func columnarExercise(ctx context.Context, cfg config, w io.Writer) error {
 	}
 
 	cg := lpg.New[string, float64](adjlist.Config{Directed: true, Weightless: true})
-	if _, err := build(ctx, cg, ccfg, io.Discard); err != nil {
+	if _, err := build(ctx, cg, ccfg, nil); err != nil {
 		return fmt.Errorf("working-set build: %w", err)
 	}
 	if err := ctx.Err(); err != nil {

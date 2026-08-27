@@ -16,7 +16,7 @@ COVER_PROFILE   := coverage.out
 # slim or fat tzdata build. See cypher/tck/testdata/README.md.
 export ZONEINFO := $(CURDIR)/cypher/tck/testdata/zoneinfo-slim.zip
 
-GOLANGCI_LINT_VERSION ?= v2.12.2
+GOLANGCI_LINT_VERSION ?= v2.13.1
 
 .PHONY: help
 help: ## Show this help
@@ -96,16 +96,103 @@ race: ## Run unit tests with the race detector (SHORT_TIMEOUT overridable)
 # See docs/test-layers.md for the same measurements.
 SHORT_TIMEOUT ?= 30m
 
-.PHONY: test-short
-test-short: ## [layer: short]   local default — race detector, no build tags (SHORT_TIMEOUT overridable)
-	$(GO) test $(RACE_FLAGS) -count=1 -timeout=$(SHORT_TIMEOUT) $(PACKAGES)
+# Per-package short-layer COST budget, enforced on the routine gate by
+# scripts/pkg_time_budget.sh, which `test-short` pipes its output through
+# (rmp #2577, #2599). Before this it was enforced by nothing: HARD_BUDGET
+# defaulted to 0 (disabled), and the only target that ran the script at all was
+# absent from `ci`. A ceiling nothing reads is decoration.
+#
+# SOFT_BUDGET warns; HARD_BUDGET fails the gate. The global ceiling stays at the
+# documented 240 s: it is NOT relaxed to accommodate the two packages above it.
+# Those two get a NAMED, measured override instead, so the accommodation is
+# visible per package and cannot silently cover a third.
+SOFT_BUDGET ?= 60
+HARD_BUDGET ?= 240
 
-# test-short-timings runs the IDENTICAL short layer, so it carries the identical
-# timeout: without it, the target that exists to report per-package timings
-# would be the one that could not survive long enough to report them.
+# Overrides are "path-suffix=seconds", derived by one stated rule rather than a
+# number fitted per package: the WORST in-suite figure ever recorded for that
+# package in docs/test-layers.md, times 1.25, rounded up to the whole minute.
+#
+#   internal/sim  602.9s x 1.25 = 753.6 -> 780
+#   cypher        321.7s x 1.25 = 402.1 -> 420
+#
+# Worst-observed, not last-measured: internal/sim has been recorded in-suite at
+# 545.8s, 557.4s, 564.0s and 602.9s on this hardware — a 10.5% spread — so a
+# ceiling fitted to the run that happened to be measured would false-red on a
+# busier day. 780s leaves 29% headroom over the worst of them while still
+# tripping on a genuine 25% cost regression, and stays far clear of
+# SHORT_TIMEOUT (30m).
+#
+# The cypher figure was re-derived when its second observation arrived, exactly as
+# the single-observation caveat required: two in-suite runs the same day, both
+# with load recorded, gave 276.4s and 321.7s — a 16% swing, against internal/sim
+# 0.3% across the same pair. Mid-sized packages vary far more run to run than the
+# big one does, because their co-tenancy changes with scheduling order.
+PKG_HARD_BUDGET_OVERRIDES ?= /internal/sim=780 /cypher=420
+export SOFT_BUDGET HARD_BUDGET PKG_HARD_BUDGET_OVERRIDES
+
+# GOGRAPH_PARALLEL_SUITE declares to the test binaries that packages are being
+# tested IN PARALLEL, so any wall-clock, throughput, or CPU-time assertion is
+# measuring the machine's load rather than the code (rmp #2517).
+# testlayers.RequireQuietMachine reads it and skips those assertions LOUDLY, each
+# printing the quantity it would have measured. Nothing stops being gated: the
+# same assertions run and ASSERT in `make test-timing`, which `ci` invokes.
+# The variable is exported by presence, not value, so an empty expansion cannot
+# silently re-enable a gate under load.
+.PHONY: test-short
+# The pipe carries the per-package cost budget. The script echoes the go test
+# output through VERBATIM, so what the developer sees is unchanged, and it reads
+# the plain "ok<TAB>pkg<TAB>0.330s" summary lines rather than -json, because
+# -json implies -v and would bury the run in per-test noise for the identical
+# numbers. pipefail (.SHELLFLAGS, line 2) keeps a test failure failing: the
+# budget check cannot mask it.
+test-short: ## [layer: short]   local default — race detector, no build tags, per-package cost budget (SHORT_TIMEOUT/SOFT_BUDGET/HARD_BUDGET overridable)
+	GOGRAPH_PARALLEL_SUITE=1 $(GO) test $(RACE_FLAGS) -count=1 -timeout=$(SHORT_TIMEOUT) $(PACKAGES) | bash scripts/pkg_time_budget.sh
+
+# TIMING_PKGS are the packages holding short-layer assertions whose subject is a
+# duration, a throughput, or a ratio of them. The full inventory, with the
+# measurement that motivated each, is docs/short-layer-wallclock-audit.md.
+#
+# The list is explicit rather than `./...` on purpose: a serial run of the whole
+# repository would cost far more than the ~101 s these packages need, and the
+# point of the phase is to give the timing gates a quiet machine, not to re-run
+# the suite.
+# It lists ONLY the packages whose gates are actually guarded today. The audit
+# found 39 instances across 12 packages; the three filed as #2499, #2506 and #2517
+# are guarded here, and each remaining instance extends this list and TIMING_RUN
+# as its own task lands (#2568, #2569, #2572, #2573, #2574, #2588 are filed).
+# Listing a package before its gates are guarded only buys `[no tests to run]` and
+# the build time to discover it.
+TIMING_PKGS = \
+	./bench/cyclicjoin \
+	./bench/mvccwrite \
+	./bolt/server
+
+# TIMING_RUN selects only the guarded gates. Running the whole package serially
+# would reintroduce exactly the co-tenancy the phase exists to remove — the
+# gate's neighbours are as capable of loading the machine as another package is.
+TIMING_RUN ?= TestE2E_ConcurrentAutocommitReadsRunInParallel|TestCyclicJoin_FittedExponents|TestWriteScalingGate|TestWALWriteScalingGate|TestWriteConcurrencyGate|TestWriteScalingInstrument_SeesConcurrency|TestWriteScalingInstrument_SeesSerialisation
+
+TIMING_TIMEOUT ?= 20m
+
+# test-timing deliberately does NOT set GOGRAPH_PARALLEL_SUITE, and runs with
+# -p 1 so the packages do not compete with each other. This is the phase in which
+# every guarded wall-clock assertion actually asserts.
+.PHONY: test-timing
+test-timing: ## [layer: short] Serially re-run the wall-clock/throughput gates on a quiet machine, where their measurement is valid (rmp #2517)
+	$(GO) test $(RACE_FLAGS) -count=1 -p 1 -timeout=$(TIMING_TIMEOUT) -run '$(TIMING_RUN)' $(TIMING_PKGS)
+
+# test-short-timings DELEGATES to test-short rather than restating its command.
+# It used to carry its own copy, and the two drifted: the copy omitted
+# GOGRAPH_PARALLEL_SUITE, so it was the one target that ran the whole parallel
+# suite with the quiet-machine gates ASSERTING — precisely the contention rmp
+# #2517 removed everywhere else. Delegation makes that class of drift impossible;
+# the budget now lives on test-short itself, so there is nothing left to restate.
+# The knobs still work: SOFT_BUDGET/HARD_BUDGET/PKG_HARD_BUDGET_OVERRIDES are
+# exported above, so `SOFT_BUDGET=30 make test-short-timings` behaves as before.
 .PHONY: test-short-timings
-test-short-timings: ## [layer: short] Run the short layer (race, -json) and report packages over the 60s/pkg budget (SOFT_BUDGET/HARD_BUDGET/SHORT_TIMEOUT overridable)
-	bash -o pipefail -c '$(GO) test $(RACE_FLAGS) -count=1 -timeout=$(SHORT_TIMEOUT) -json $(PACKAGES) | bash scripts/pkg_time_budget.sh'
+test-short-timings: ## [layer: short] Alias for test-short, kept as the named entry point for ad-hoc budget exploration (SOFT_BUDGET/HARD_BUDGET/SHORT_TIMEOUT overridable)
+	$(MAKE) test-short
 
 # SOAK_TIMEOUT / NIGHTLY_TIMEOUT — the deferred layers need an EXPLICIT
 # per-package timeout (rmp #2259).
@@ -205,7 +292,7 @@ cover: ## Run tests with coverage
 
 .PHONY: cover-gate
 cover-gate: ## Enforce aggregate (>=85%) and per-package (>=75%) coverage gates
-	GO=$(GO) MIN_TOTAL=85.0 MIN_PER_PKG=75.0 bash scripts/cover_gate.sh
+	GOGRAPH_PARALLEL_SUITE=1 GO=$(GO) MIN_TOTAL=85.0 MIN_PER_PKG=75.0 bash scripts/cover_gate.sh
 
 .PHONY: bench
 bench: ## Run benchmarks ($(BENCH_PATTERN), count=$(BENCH_COUNT))
@@ -220,13 +307,13 @@ lint: ## Run golangci-lint (auto-install if missing)
 	golangci-lint run $(PACKAGES)
 
 .PHONY: ci
-ci: tidy fmt vet build test-short lint cover-gate ## Full CI pipeline: tidy + fmt + vet + build + test-short + lint + cover-gate
+ci: tidy fmt vet build test-short test-timing lint cover-gate ## Full CI pipeline: tidy + fmt + vet + build + test-short + test-timing + lint + cover-gate
 
 .PHONY: ci-soak
-ci-soak: tidy fmt vet build test-soak lint cover-gate ## CI pipeline with soak layer: like ci but runs test-soak
+ci-soak: tidy fmt vet build test-soak test-timing lint cover-gate ## CI pipeline with soak layer: like ci but runs test-soak
 
 .PHONY: ci-nightly
-ci-nightly: tidy fmt vet build test-nightly lint cover-gate ## CI pipeline with nightly layer: like ci but runs test-nightly
+ci-nightly: tidy fmt vet build test-nightly test-timing lint cover-gate ## CI pipeline with nightly layer: like ci but runs test-nightly
 
 .PHONY: smoke
 smoke: ## Quick PR pre-flight: tidy + fmt + vet + build + short unit tests (no race, no lint, no cover-gate)
@@ -347,7 +434,19 @@ generate-cypher-parser: ## Regenerate cypher/parser/gen/ from ANTLR grammar (req
 	$(GO) vet ./$(CYPHER_GEN_DIR)/...
 
 .PHONY: clean
-clean: ## Remove build artefacts
+# The second rm reclaims per-invocation coverage temporaries left by a run that
+# was cancelled (rmp #2549). scripts/cover_gate.sh now reclaims its own, but a run
+# killed with SIGKILL cannot, and files stranded before that fix exist in working
+# trees today: one measured 248,840,121 bytes and was seven days old, and clearing
+# it took this tree from 2.4 GB to 791 MB. .gitignore hides them from
+# `git status`, so `make clean` is the only thing that surfaces them.
+#
+# The patterns name the TEMPORARIES only. cover.out.failed.*.log is deliberately
+# NOT matched: it is preserved failure evidence (rmp #2347), and a re-run chasing
+# a rare failure must not destroy the record of it.
+clean: ## Remove build artefacts, including coverage temporaries stranded by a cancelled gate
 	rm -f $(COVER_PROFILE) coverage.html cover.out cover.lib.out
+	rm -f cover.out.tmp.* cover.out.testlog.tmp.* cover.lib.out.tmp.* \
+	      cover.out.pub.* cover.lib.out.pub.*
 	rm -rf bin build dist
 	$(GO) clean -testcache

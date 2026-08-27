@@ -2775,7 +2775,7 @@ func checkBoltVersionCoverageNonVacuity(e *BoltVersionMatrixEvidence) []Violatio
 		}
 	}
 	if len(missing) > 0 {
-		v = append(v, boltVersionViolation(ViolationOracleDeviation, "nv-every-target-negotiated",
+		v = append(v, boltVersionViolation(ViolationVacuousRun, "nv-every-target-negotiated",
 			fmt.Sprintf("the run did not confirm negotiation of %v; a version-matrix arm that did not reach "+
 				"its version has tested the version it DID reach, twice", missing)))
 	}
@@ -2800,7 +2800,7 @@ func checkBoltVersionCoverageNonVacuity(e *BoltVersionMatrixEvidence) []Violatio
 		}
 	}
 	if !sawMajor4 || !sawInlineOnMajor5 || !sawDeferred {
-		v = append(v, boltVersionViolation(ViolationOracleDeviation, "nv-crossed-design-constructed",
+		v = append(v, boltVersionViolation(ViolationVacuousRun, "nv-crossed-design-constructed",
 			fmt.Sprintf("the run reached major-4 layout=%v, inline auth on the major-5 layout=%v, deferred "+
 				"auth=%v; all three are needed for a difference to be attributable to ONE axis rather than to "+
 				"the pair", sawMajor4, sawInlineOnMajor5, sawDeferred)))
@@ -2833,7 +2833,7 @@ func checkBoltVersionDeltaNonVacuity(e *BoltVersionMatrixEvidence) []Violation {
 		}
 	}
 	if captured < 2 {
-		v = append(v, boltVersionViolation(ViolationOracleDeviation, "nv-entity-records-captured",
+		v = append(v, boltVersionViolation(ViolationVacuousRun, "nv-entity-records-captured",
 			fmt.Sprintf("only %d arm(s) captured an entity record; the encoding-difference guard needs at "+
 				"least two to compare", captured)))
 	}
@@ -2841,20 +2841,20 @@ func checkBoltVersionDeltaNonVacuity(e *BoltVersionMatrixEvidence) []Violation {
 	// layout branch was taken; a run that saw only one arity per tag cannot have
 	// distinguished the two majors, whatever the arms believed they negotiated.
 	if !boltVersionSawTwoArities(arities, boltTagNode) || !boltVersionSawTwoArities(arities, boltTagRelationship) {
-		v = append(v, boltVersionViolation(ViolationOracleDeviation, "nv-layout-branch-observed",
+		v = append(v, boltVersionViolation(ViolationVacuousRun, "nv-layout-branch-observed",
 			fmt.Sprintf("the run never saw the same entity tag at two different arities (census union: [%s]); "+
 				"the pre-5 and 5+ layouts were therefore not both exercised",
 				boltWireRenderCensus(boltVersionSortedWidths(arities)))))
 	}
 	// The same for the temporal branch: both spellings of a zoned datetime.
 	if !tags[0x49] || !tags[0x46] || !tags[0x69] || !tags[0x66] {
-		v = append(v, boltVersionViolation(ViolationOracleDeviation, "nv-temporal-branch-observed",
+		v = append(v, boltVersionViolation(ViolationVacuousRun, "nv-temporal-branch-observed",
 			fmt.Sprintf("the run did not see both conventions of a zoned datetime (offset 0x49=%v/0x46=%v, "+
 				"named 0x69=%v/0x66=%v); the UTC-versus-legacy branch was not both-ways exercised",
 				tags[0x49], tags[0x46], tags[0x69], tags[0x66])))
 	}
 	if !e.NamedZoneResolved {
-		v = append(v, boltVersionViolation(ViolationOracleDeviation, "nv-named-zone-reference-available",
+		v = append(v, boltVersionViolation(ViolationVacuousRun, "nv-named-zone-reference-available",
 			fmt.Sprintf("the zone database could not resolve %q, so the harness has no independent reference "+
 				"for the named-zone datetime and its clause was skipped rather than passed",
 				boltVersionZoneName)))
@@ -2875,7 +2875,7 @@ func checkBoltVersionDeltaNonVacuity(e *BoltVersionMatrixEvidence) []Violation {
 		}
 	}
 	if accepted == 0 || refused == 0 || ranged == 0 {
-		v = append(v, boltVersionViolation(ViolationOracleDeviation, "nv-negotiation-table-exercised",
+		v = append(v, boltVersionViolation(ViolationVacuousRun, "nv-negotiation-table-exercised",
 			fmt.Sprintf("the negotiation table produced %d acceptance(s), %d refusal(s) and %d range offer(s); "+
 				"a table that never saw a refusal cannot tell 'the server accepted the right version' from "+
 				"'the server accepts everything'", accepted, refused, ranged)))
@@ -2927,19 +2927,19 @@ func checkBoltVersionProbeNonVacuity(e *BoltVersionMatrixEvidence) []Violation {
 			committed++
 		}
 		if len(a.Params) != len(boltVersionParamCases) || a.ParamErr != "" {
-			v = append(v, boltVersionViolation(ViolationOracleDeviation, "nv-parameter-matrix-round-tripped",
+			v = append(v, boltVersionViolation(ViolationVacuousRun, "nv-parameter-matrix-round-tripped",
 				fmt.Sprintf("arm %q round-tripped %d of %d parameter kinds (%s); the invariance clause compares "+
 					"only what was captured", a.Name, len(a.Params), len(boltVersionParamCases), a.ParamErr)))
 		}
 	}
 	if spellingsDiffered == 0 {
-		v = append(v, boltVersionViolation(ViolationOracleDeviation, "nv-seeded-spelling-differed",
+		v = append(v, boltVersionViolation(ViolationVacuousRun, "nv-seeded-spelling-differed",
 			fmt.Sprintf("seed %#x drew the CANONICAL spelling for every arm, so `arm-spelling-invariant` "+
 				"compared each handshake with itself and the range and slot-placement paths were never "+
 				"entered", e.Seed)))
 	}
 	if committed != len(boltVersionTargets) {
-		v = append(v, boltVersionViolation(ViolationOracleDeviation, "nv-every-version-committed",
+		v = append(v, boltVersionViolation(ViolationVacuousRun, "nv-every-version-committed",
 			fmt.Sprintf("%d of %d arms committed an explicit transaction; the durable census can only attribute "+
 				"a marker to a version that wrote one", committed, len(boltVersionTargets))))
 	}

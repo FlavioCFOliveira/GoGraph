@@ -159,15 +159,21 @@ package sim
 //     reaches that shape; it is coverage evidence about the FIXTURE, and no
 //     clause asserts anything about the library from it.
 //
-// # A finding this file records rather than fixes
+// # A finding this file recorded, and the godoc it corrected
 //
-// [centrality.PageRank]'s godoc claims the parallel pull path is "bit-for-bit
-// identical to the serial path regardless of GOMAXPROCS or worker scheduling",
-// and that "the per-worker partial L1 deltas are reduced in fixed worker-id
-// order, so the returned delta is likewise deterministic across worker counts".
-// The second sentence is true for a GIVEN worker count and not across worker
-// counts: reducing per-range partial sums is not the same float operation as one
-// sequential sum. MEASURED, over one pair of consecutive iterate vectors from a
+// [centrality.PageRank]'s godoc used to claim the parallel pull path is
+// "bit-for-bit identical to the serial path regardless of GOMAXPROCS or worker
+// scheduling", and that "the per-worker partial L1 deltas are reduced in fixed
+// worker-id order, so the returned delta is likewise deterministic across worker
+// counts". The second sentence is true for a GIVEN worker count and not across
+// worker counts: reducing per-range partial sums is not the same float operation
+// as one sequential sum.
+//
+// The godoc was CORRECTED rather than the reduction changed (rmp #2605, decided
+// with the user): it now states the per-given-count guarantee, the across-count
+// caveat, and the bound measured below. The reduction is unchanged, so
+// everything this file measures still holds and the `cross-regime` clause keeps
+// exactly the role described at the end of this note. MEASURED, over one pair of consecutive iterate vectors from a
 // 2 400-node probe graph of the same family, a sequential L1 reduction gave
 // 0x3fb51ef43754e4b2 while equal-range partitioned reductions gave five
 // DIFFERENT values for 2, 3, 4, 8 and 10 ranges (0x...e469, e476, e474, e472,
@@ -191,7 +197,8 @@ package sim
 // reverse-CSR's increasing-source order, a partition that stopped being
 // contiguous, a reduction reordered — because any of those diverges
 // systematically rather than by coincidence. If it fires, the finding is the
-// godoc claim or the change beneath it, not the clause.
+// change beneath it, not the clause — and no longer the godoc claim, which
+// #2605 brought into line with what is measured here.
 
 import (
 	"context"

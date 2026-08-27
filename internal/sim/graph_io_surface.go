@@ -60,6 +60,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph"
@@ -89,16 +90,21 @@ import (
 //	"-danger"    — a leading '-' is a live spreadsheet formula, so it is the
 //	               cell csv.Options.SanitizeFormulae rewrites
 //	""           — the empty identifier the engine accepts (rmp #2043)
+//	"#hash"      — begins with the CSV reader's comment character, and is the
+//	               one id the CSV writer emits as a FORCE-QUOTED record
 //	"plain0"...  — ordinary ids, so the bare (unquoted) DOT path also runs
 //
-// A '#'-leading id is deliberately ABSENT: the CSV reader treats a leading
-// comment character as a comment line, so such an id does not survive a CSV
-// round-trip. That is a graph/io property, outside this task's scope (which
-// changes nothing outside internal/sim and docs), and is recorded rather than
-// papered over.
+// The '#'-leading id used to be deliberately ABSENT, on the recorded ground that
+// "the CSV reader treats a leading comment character as a comment line, so such
+// an id does not survive a CSV round-trip". Re-validating that claim under rmp
+// #2533 REFUTED it: rmp #2042 had already made the CSV writer force-quote any
+// cell whose first rune is the active comment rune, so the id round-trips
+// intact, and the exclusion was preserving a claim that had stopped being true.
+// It is now in the set, where it asserts the force-quoting path end to end
+// instead of documenting a defect that no longer exists.
 var graphIOHostileNames = []string{
 	"graph", "node with space", "héllo", `a"b`, `a\b`, "x->y", "p,q", "-danger", "",
-	"plain0", "plain1", "plain2", "plain3",
+	"#hash", "plain0", "plain1", "plain2", "plain3",
 }
 
 // graphIOIsolatedName is the vertex that carries no incident edge. It exists to
@@ -921,12 +927,34 @@ var graphIOAllocMu sync.Mutex
 func measureProcessAlloc(fn func()) uint64 {
 	graphIOAllocMu.Lock()
 	defer graphIOAllocMu.Unlock()
+	graphIOAllocWindowOpen.Store(true)
+	defer graphIOAllocWindowOpen.Store(false)
 	var m0, m1 runtime.MemStats
 	runtime.ReadMemStats(&m0)
 	fn()
 	runtime.ReadMemStats(&m1)
 	return m1.TotalAlloc - m0.TotalAlloc
 }
+
+// graphIOAllocWindowOpen is true while [measureProcessAlloc] is between its two
+// ReadMemStats calls.
+//
+// It exists so the falsifiability proof can assert INTERVAL CONTAINMENT — that
+// each injected allocation happened while the window was open — instead of
+// differencing two separately-taken readings of a process-global counter
+// (rmp #2555).
+//
+// The difference matters because the counter is per-PROCESS and monotonic, so the
+// only thing that can perturb the difference is this process's own allocation
+// varying between the control and the inflated run: map growth, size-class
+// rounding, GC timing. Under CPU contention that variance grew enough to flip the
+// comparison, measured at 1 failure in 20 runs against six concurrent
+// allocation-load processes even with a tolerance of 1% of the injected amount.
+// A boolean read at the moment of injection has no such variance.
+//
+// Written only under graphIOAllocMu, so windows cannot nest or overlap; read
+// without it by the injection hook, which is why it is atomic.
+var graphIOAllocWindowOpen atomic.Bool
 
 // -----------------------------------------------------------------------------
 // The mutated-export sweep
@@ -1337,7 +1365,7 @@ func CheckGraphIOSurface(r *GraphIOSurfaceResult) []Violation {
 func CheckGraphIOSurfaceShape(r *GraphIOSurfaceResult) []Violation {
 	var v []Violation
 	add := func(op, msg string) {
-		v = append(v, Violation{Kind: ViolationOracleDeviation, Op: op, Message: msg})
+		v = append(v, Violation{Kind: ViolationVacuousRun, Op: op, Message: msg})
 	}
 
 	// The DOT arm adjudicates quoting, weight labels and bare node statements;

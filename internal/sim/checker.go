@@ -17,6 +17,21 @@ const maxSamplesPerKind = 8
 // invariants (e.g. an edge whose endpoints are absent); ORACLE_DEVIATION covers
 // any disagreement between the shadow model and the engine that is not more
 // specifically classified.
+//
+// The kinds fall into TWO families, and an operator triaging a red run reads the
+// kind to decide which of the two it is looking at:
+//
+//   - ENGINE-VERSUS-ORACLE: ACID_ATOMICITY, ACID_CONSISTENCY, ACID_ISOLATION,
+//     ACID_DURABILITY, GRAPH_INTEGRITY, ORACLE_DEVIATION, SEARCH_DIVERGENCE.
+//     The engine did something the model says it must not. Suspect the engine.
+//   - RUN-NOT-EXERCISED: VACUOUS_RUN. The engine did nothing wrong because it was
+//     never driven to the point where it could. Suspect the harness, the seed,
+//     the machine, or a co-resident scenario.
+//
+// Keeping them apart is not cosmetic. On 2026-08-25 thirty-seven bolt-decode-swarm
+// failures were reported as ORACLE_DEVIATION when the cause was a co-resident
+// cpu-starvation scenario clamping GOMAXPROCS (rmp #2613): the clause text was
+// honest, but the KIND pointed the investigation at the engine (rmp #2614).
 type ViolationKind string
 
 // Violation kinds.
@@ -32,6 +47,20 @@ const (
 	// indicates a bug in the traversal/path-finding/analytics code, distinct from
 	// an engine-vs-oracle structural divergence (which is GRAPH_INTEGRITY).
 	ViolationSearchDivergence ViolationKind = "SEARCH_DIVERGENCE"
+	// ViolationVacuousRun reports that a run did not exercise its subject, so the
+	// clauses about that subject held without ever being tested. It is NOT an
+	// engine-versus-oracle disagreement and must never be used for one.
+	//
+	// It is load-bearing rather than advisory: rmp #2588 records that a run whose
+	// honest client never met live pressure must not pass as evidence, so these
+	// clauses still FAIL the run. What changes is what the failure is CALLED —
+	// which is what an operator uses to decide whether the engine or the harness
+	// is the suspect.
+	//
+	// The distinct route rmp #2554 took elsewhere — returning []string so the TYPE
+	// forbids promoting a coverage shortfall to a verdict — is not available here,
+	// precisely because these clauses must keep failing.
+	ViolationVacuousRun ViolationKind = "VACUOUS_RUN"
 )
 
 // Violation is a single detected invariant breach, tagged with its kind, a

@@ -33,7 +33,7 @@ import (
 )
 
 // pfxDiffPop is the number of ordinary "name%04d" nodes. Comfortably above
-// rangeSeekMinLabelPopulation (1024) so the population floor never explains a
+// rangeSeekMinLabelPopulation so the population floor never explains a
 // declined case, and small enough to keep the suite inside the short layer.
 const pfxDiffPop = 2000
 

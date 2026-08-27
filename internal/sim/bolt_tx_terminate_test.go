@@ -175,8 +175,8 @@ func cleanTxTerminateEvidence() BoltTxTerminateEvidence {
 		TimersArmed: int64(len(txTerminateRoles) + 1), Untils: int64(len(txTerminateRoles) + 1),
 		Tickers: 0, Nows: 137,
 		RegistryPeak:  len(txTerminateRoles),
-		VictimCode:    txReapFailureCode,
-		VictimMessage: txReapFailureMessage,
+		VictimCode:    txTerminateFailureCode,
+		VictimMessage: txTerminateFailureMessage,
 		// A termination is a rollback: it appends nothing.
 		TermFrames: 0, TermBytes: 0,
 		SuccessorSuffix: "-4", WantSuccessorSuffix: "-4",
@@ -300,7 +300,20 @@ func TestBoltTxTerminate_OracleCanFail(t *testing.T) {
 			mutate: func(e *BoltTxTerminateEvidence) {
 				e.VictimMessage = "the transaction was terminated by an operator"
 			},
-			wantSub: "rmp #2560",
+			wantSub: "txTerminateFailureMessage",
+		},
+		{
+			// THE regression rmp #2560 fixed, replayed exactly: the operator path
+			// answering with the DEADLINE reason. The generic mismatch above would
+			// catch it, but only as "some other string"; this case asserts the arm
+			// names what actually went wrong, because a reader who sees a bare
+			// mismatch has no way to know the two reasons have been collapsed back
+			// into one.
+			name: "the operator path borrowed the deadline reason again",
+			mutate: func(e *BoltTxTerminateEvidence) {
+				e.VictimCode, e.VictimMessage = txReapFailureCode, txReapFailureMessage
+			},
+			wantSub: "borrowing it again",
 		},
 		// ── the residue ──────────────────────────────────────────────────────
 		{

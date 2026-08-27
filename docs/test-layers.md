@@ -6,7 +6,7 @@ strict supersets of the shallower ones.
 
 | Layer | Budget | Selector | Default? |
 |---|---|---|---|
-| `short` | < 60 s per package | none (default) | yes — the default local run |
+| `short` | < 60 s per package soft, 240 s hard (**enforced on `make ci`** — see below) | none (default) | yes — the default local run |
 | `soak` | minutes | `-tags=soak` or `SOAK_FULL=1` | no |
 | `nightly` | hours | `-tags=nightly` or `GOGRAPH_NIGHTLY=1` | no |
 
@@ -38,44 +38,176 @@ real driver connection per check. It is excluded from the default run so
 each remaining check fails are recorded in the file's own header, which
 is the authoritative list.
 
-### Enforcing the short-layer budget
+### The short-layer budget, and what enforces it (rmp #2566, #2577, #2599)
 
-The `< 60 s per package` budget is enforced, not merely documented. The
-`make test-short-timings` target runs the short layer once under `-race`
-with `-json` and pipes it through `scripts/pkg_time_budget.sh`, which parses
-per-package wall-clock and:
+The per-package cost budget is **enforced on the routine gate**: `test-short`
+pipes its output through `scripts/pkg_time_budget.sh`, so every `make ci` reads
+it. `SOFT_BUDGET` (60 s) warns; `HARD_BUDGET` (240 s) fails the run.
 
-- emits a `::warning::` for any package over `SOFT_BUDGET` (60 s) so creep
-  is visible in the job summary before it becomes a breach, and
-- fails the job for any package over `HARD_BUDGET` (240 s, i.e. 4× the
-  budget) — a genuine runaway, not a package merely near the line on a slow
-  runner.
+The script echoes the `go test` output through **verbatim** and reads the plain
+`ok<TAB>pkg<TAB>0.330s` summary lines, so **what you see on `make test-short` is
+unchanged**. It deliberately does not use `-json` on that path: `-json` implies
+`-v` and would bury the routine run in per-test noise to obtain the identical
+per-package numbers.
 
-The measurement is taken under `-race`, which inflates wall-clock several-fold
-over a plain run; the 240 s hard ceiling (4× the 60 s budget) is sized to
-absorb that overhead and still catch a runaway.
+| Target | What it is |
+|---|---|
+| `make test-short` | the short layer **and** the budget check — one run, both outcomes |
+| `make test-short-timings` | an alias for `test-short`, kept as the named entry point for ad-hoc exploration (`SOFT_BUDGET=30 make test-short-timings`) |
+| `make test-timing` | a different gate entirely: the serial wall-clock phase (rmp #2517), not this |
 
-Run it locally with `make test-short-timings` (override `SOFT_BUDGET` /
-`HARD_BUDGET` to tighten the check). When a package approaches the budget,
-split it or move its slow cases to the `soak` layer rather than relaxing
-the threshold.
+`test-short-timings` is now an alias because its own copy of the command had
+**drifted**: it omitted `GOGRAPH_PARALLEL_SUITE`, making it the one target that
+ran the whole parallel suite with the quiet-machine gates *asserting* — exactly
+the contention rmp #2517 removed everywhere else. Delegation makes that class of
+drift impossible.
 
-#### Documented per-package hard-ceiling overrides
+#### Measured cost, 2026-08-25
 
-A single package may carry a higher hard ceiling than the global 240 s when
-it is legitimately heavy under `-race` and reducing it further would cost
-required short-layer coverage. This is a documented, justified accommodation —
-never a blanket relaxation — mirroring `cover_gate.sh`'s
-`COVER_PKG_FLOOR_EXEMPT`. Overrides are supplied to `pkg_time_budget.sh` via
-the `PKG_HARD_BUDGET_OVERRIDES` environment variable, a whitespace- or
-comma-separated list of `path-substring=seconds` entries; a package whose
-import path contains a key uses that key's ceiling instead of `HARD_BUDGET`.
+Whole suite, `GOGRAPH_PARALLEL_SUITE=1 go test -race -count=1 -timeout=30m ./...`,
+darwin/arm64, 10 cores, **load average 2.33 before / 5.11 after**, 11 m 39 s wall,
+exit 0: **124 packages, 2586.6 s summed**, eleven over the 60 s soft budget, two
+over the 240 s hard ceiling.
 
-The only current override, set in the `build + test + race` job:
+**The budget is only meaningful with the pass named, and the difference is a
+factor of 2.62.** `make ci` runs the suite twice: `test-short` under `-race`, and
+`scripts/cover_gate.sh` under `-coverpkg=./... -covermode=atomic` with **no**
+`-race`. The same tree, measured the same day:
 
-| Package | Ceiling | Justification |
+| Pass | Total | Packages over 60 s |
 |---|---|---|
-| `internal/sim` | 420 s | The deterministic-simulation (DST) integration harness. Its ACID/DST scenario battery is serial-dominated, so under `-race` it legitimately runs longer than a unit-test package. Its heaviest cases already run soak-only (the 9000-node index-diversity scenario and the seed-varied search scenarios); the remaining battery must still run under `-race` on **every** PR to preserve the ACID/DST guarantee, which the uniform 240 s ceiling would force out of the short layer. 420 s accommodates that cost with margin while staying well below the pre-reduction runtime (so a genuine regression still trips the gate) and clear of `go test`'s 10-minute timeout. |
+| `-race` (`test-short`) | 2586.6 s | **11** |
+| coverage, no `-race` (`cover-gate`) | 988.7 s | **1** |
+
+So every figure in this section is **under `-race`**, which is the stricter of the
+two and the one the budget gates.
+
+#### The known exceptions
+
+Every package over the soft budget is listed, with its measured cost and the
+reason. The reason is the same for all eleven and it is measured, not asserted:
+**the race detector**, whose per-package amplification is what puts them over.
+Under coverage instrumentation only `internal/sim` exceeds 60 s at all.
+
+| Package | `-race` | no `-race` | Amplification |
+|---|---|---|---|
+| `internal/sim` | 565.8 s | 103.9 s | 5.4× |
+| `cypher` | 321.7 s | 54.4 s | 5.9× |
+| `cypher/exec` | 177.8 s | 3.0 s | **58.4×** |
+| `examples/26_social_scale_bench` | 167.8 s | 20.5 s | 8.2× |
+| `bench/csrorder` | 110.4 s | 30.2 s | 3.7× |
+| `bench/cyclicjoin` | 96.9 s | 10.6 s | 9.1× |
+| `bench/cypher_scale` | 89.2 s | 16.7 s | 5.4× |
+| `examples/24_social_network_cli` | 86.5 s | 40.2 s | 2.2× |
+| `search` | 71.4 s | 35.2 s | 2.0× |
+| `cypher/tck` | 68.5 s | 7.9 s | 8.7× |
+| `store/recovery` | 66.3 s | 58.6 s | 1.1× |
+
+Only the first two exceed the 240 s hard ceiling, and each carries a named
+override below. The other nine **warn and pass**: they are over the soft budget,
+which is what a soft budget is for.
+
+`cypher/exec` deserves its own note: **3.0 s becomes 177.8 s**, a 58× penalty far
+outside the 2.62× the suite pays on average. That is a property worth
+understanding rather than absorbing — it points at heavily shared mutable state
+under concurrent access — and it is recorded here so it is not mistaken for the
+package simply being large.
+
+#### The premise that did not reproduce
+
+rmp #2585 was filed against a 2026-08-20 run reporting **16 packages over budget
+and a 4699 s total**. Re-measured at HEAD, the suite totals **2586.6 s** — 55 % of
+that — with **11** packages over. Individual packages diverge far more than the
+whole: `cypher/exec` was cited at 295.0 s against 177.8 s here, and
+`bench/cyclicjoin` at 306.3 s against 96.9 s.
+
+Those figures carry **no recorded load average**, and a suite total 1.82× a
+load-qualified measurement of the same tree is evidence about the machine rather
+than about the code. They are therefore cited but **excluded** from the
+worst-observed rule below. A measurement without its conditions cannot set a
+threshold.
+
+#### The override rule
+
+`PKG_HARD_BUDGET_OVERRIDES` entries are **one stated rule, not a number fitted
+per package**: the **worst** in-suite figure ever recorded for that package in
+this document × 1.25, rounded up to the whole minute.
+
+| Package | Worst in-suite | × 1.25 | Ceiling |
+|---|---|---|---|
+| `internal/sim` | 602.9 s | 753.6 s | **780 s** |
+| `cypher` | 321.7 s | 402.1 s | **420 s** |
+
+**Worst-observed, not last-measured.** `internal/sim` has been recorded in-suite
+on this hardware at 545.8 s, 557.4 s, 564.0 s, 565.8 s and 602.9 s — a **10.5 %
+spread** — and twice more at 600.7 s and 601.7 s, both of which were
+`panic: test timed out` against the old 600 s default and so are *lower bounds*
+on the real cost. A ceiling fitted to whichever run happened to be measured
+would false-red on a busier day; 780 s leaves **29 %** headroom over the worst of
+them while still tripping on a genuine 25 % cost regression, and stays far clear
+of `SHORT_TIMEOUT` (30 m).
+
+The `cypher` figure was **re-derived when its second observation arrived**, which
+is what the single-observation caveat was for. Two in-suite runs on 2026-08-25,
+both with load recorded, gave **276.4 s and 321.7 s** — a **16 %** swing, against
+`internal/sim`'s **0.3 %** (564.0 s and 565.8 s) across the same pair. Mid-sized
+packages vary far more run to run than the big one does, because their co-tenancy
+changes with scheduling order. That is also why the global 240 s ceiling, not a
+per-package one, is the right instrument for everything below these two.
+
+Keys match as a **suffix** of the import path, not as a substring. This matters:
+substring matching would have let `/cypher` also cover `cypher/tck`, `cypher/ir`
+and `bench/cypher_scale`, handing an unrelated package a ceiling nobody measured
+for it. `internal/scriptgate` asserts every key still names an existing package
+directory, because a stale suffix left behind after a rename is not inert — it
+starts covering whatever package later ends with it.
+
+#### Where `internal/sim` spends its time
+
+Recorded so the next person does not re-derive it. Whole package,
+`go test -race -count=1 -v`, quiet host, 2026-08-25: **974 top-level tests** (22
+skipped), **570.1 s** summed against a ~530 s wall.
+
+| Test | Cost | Share |
+|---|---|---|
+| `TestSchemaMutation_NonVacuityGatesAreNotVerdicts` | 97.20 s | 17.1 % |
+| `TestCypherSurface_Scenario_Passes` | 34.09 s | 6.0 % |
+| `TestMVCCSessionsCrash_Deterministic` | 25.58 s | 4.5 % |
+| `TestMVCCSessions_IsolationGreen20Seeds` | 25.56 s | 4.5 % |
+| `TestMergeRel_MultiSeed` | 19.82 s | 3.5 % |
+| *top 20 combined* | *331.4 s* | *58.1 %* |
+
+**The package was re-baselined rather than split, and that was a coverage
+decision, not an arithmetic one.** Removing even the single largest test leaves
+~433 s — still above the old 420 s figure — so no surgical cut reaches the
+ceiling; the remaining 954 tests hold the other 41.9 %. Moving the battery to
+`soak` was rejected because this document requires it to run under `-race` on
+**every** push to preserve the ACID/DST guarantee, and trading that for a cost
+target inverts the correct-before-fast order.
+
+The drift is real and is why the gate now runs: rmp #2577 measured **818 tests /
+460.9 s** at commit `147e28e4` on 2026-08-20. Five days later the same package is
+**974 tests / 570.1 s** — +19 % tests, +24 % cost, unremarked, because nothing on
+the routine path was reading the number.
+
+#### What rmp #2566 found, kept as the record
+
+Until rmp #2566 this section claimed the budget was "enforced, not merely
+documented". All three of its supporting claims were untrue at HEAD, and each was
+verified individually: `make ci` did not invoke the gate; `HARD_BUDGET` defaulted
+to `0`, which the script documents as *disabled*; and `PKG_HARD_BUDGET_OVERRIDES`
+was set nowhere, so the `internal/sim` override attributed to "the `build + test +
+race` job" existed no more than that job did — the only workflow is `release.yml`.
+
+That paragraph is kept because it names the failure mode this section now exists
+to prevent: **a ceiling nothing reads is decoration, and it reports success in
+exactly the same way as a passing one.** `internal/scriptgate` holds the
+regression tests, which fail on the tree described above.
+
+When a package approaches the budget, split it or move its slow cases to the
+`soak` layer rather than relaxing the threshold — unless, as with `internal/sim`,
+moving it would cost coverage the layer exists to provide. Then re-baseline
+deliberately, with the measurement recorded here.
 
 ## How a test selects its layer
 
@@ -136,6 +268,7 @@ near-instant; the cost is the `t.Skip` call itself.
 | `-tags=nightly` | activates the nightly layer at compile time (and implies soak) |
 | `SOAK_FULL=1` | activates the soak layer at runtime via the helpers |
 | `GOGRAPH_NIGHTLY=1` | activates the nightly layer at runtime via the helpers (and implies soak) |
+| `GOGRAPH_PARALLEL_SUITE=1` | declares that packages are being tested **in parallel**, so `testlayers.RequireQuietMachine` skips wall-clock/throughput/CPU-time assertions. Set by `test-short` and `cover-gate`; deliberately NOT set by `test-timing`. Detected by PRESENCE, not value — an empty expansion still counts as set, so a Makefile slip cannot silently re-enable a timing gate under load (rmp #2517) |
 
 `SOAK_FULL` is preserved verbatim from the pre-existing toolchain so
 existing scripts and developer aliases continue to work.
@@ -189,9 +322,16 @@ discipline is enforced by tooling, not folklore.
 
 | Target | Layer | Equivalent command |
 |---|---|---|
-| `make test-short` | short | `go test -race -count=1 -timeout=$(SHORT_TIMEOUT) ./...` |
+| `make test-short` | short | `GOGRAPH_PARALLEL_SUITE=1 go test -race -count=1 -timeout=$(SHORT_TIMEOUT) ./... \| bash scripts/pkg_time_budget.sh` |
+| `make test-timing` | short (serial phase) | `go test -race -count=1 -p 1 -timeout=$(TIMING_TIMEOUT) -run '$(TIMING_RUN)' $(TIMING_PKGS)` |
 | `make test-soak` | soak | `go test -race -count=1 -timeout=$(SOAK_TIMEOUT) -tags=soak ./...` |
 | `make test-nightly` | nightly | `go test -race -count=1 -timeout=$(NIGHTLY_TIMEOUT) -tags=nightly ./...` |
+
+`test-timing` is not a fourth layer. It is the **same** short layer re-run
+serially for the subset of tests whose assertion is a duration, a rate, or a
+ratio of them — the phase in which that measurement is valid. `make ci`,
+`make ci-soak` and `make ci-nightly` all invoke it, so those assertions gate
+every push. See [`RequireQuietMachine` and the `test-timing` phase](#requirequietmachine-and-the-test-timing-phase).
 
 ### Why every layer passes an explicit `-timeout`
 
@@ -213,9 +353,11 @@ inside `make ci` — carries its own hard-coded `-timeout=20m` for the same
 reason.
 
 **A `-timeout` is not a cost budget.** The per-package *cost* budget is a
-separate concern with a separate instrument: `make test-short-timings`
-(60 s soft, 240 s hard, plus the documented `internal/sim` override above).
-Raising a timeout must never be read as raising that budget.
+separate concern with its own instrument, `scripts/pkg_time_budget.sh`, which
+`test-short` pipes through on every run (60 s soft, 240 s hard, plus the two
+measured overrides above). Raising a timeout must never be read as raising that
+budget: a 30 m timeout catches a package that HUNG, the budget catches one that
+merely grew.
 
 #### The short layer: `SHORT_TIMEOUT` (rmp #2584)
 
@@ -375,12 +517,105 @@ would have to sit above 9.10 s, while the regression it guards costs about
 ceiling is the right short-layer shape only for a quantity the machine's load
 cannot inflate.
 
+### Resolution (rmp #2589): allocation volume is the instrument these gates needed
+
+The delete-scaling gates no longer measure time at all, and therefore no longer
+need `RequireQuietMachine`. They assert on **allocation volume**, which returned
+all three to asserting in `test-short` on every push — strictly more coverage than
+the serial phase gave them, and `cypher` left `TIMING_PKGS` entirely.
+
+Allocation was previously rejected for these gates on a precise ground, recorded in
+#2589: it is load-invariant here (mallocs differed 0.5% across a 35.9× wall
+inflation) but *"nothing establishes that the pre-fix O(k·n) Mapper.Walk allocated
+in proportion to the nodes it scanned. An oracle whose power against the actual
+defect is unknown is cover, not a gate."* Invariance was established; **power was
+not**.
+
+The missing experiment was then run, using the method #2572 had supplied — model
+the defect and measure whether the instrument sees it:
+
+| workload | per-cycle allocated bytes, last/first |
+|---|---|
+| flat (healthy, fixed work per cycle) | **0.87×** |
+| degrading (6× more work in the last cycle) | **8.66×** |
+
+A 10× separation, with the existing 2.5× threshold sitting between them — 2.9× of
+headroom below and 3.5× of margin above. Against the CPU ratio, which read 2.90× on
+the *flat* workload (a false red) and 1.52× on the *degrading* one (a false pass).
+The threshold did not change; only the instrument did.
+
+**The general lesson.** When a load-invariant instrument is rejected for unknown
+power, that is a missing measurement, not a dead end. Build a control that models
+the defect and measure the separation.
+
+### Correction (rmp #2517, 2026-08-25): process CPU time is NOT load-invariant
+
+The rule below used to read "in the short layer, assert on an instrument load
+cannot move — process CPU time is the load-invariant analogue of wall time",
+and quoted a worst-case CPU noise of 1.50× from the table above. **That rule was
+wrong, and following it is what produced rmp #2517 and #2589.**
+
+Measured on the same flat engine under `make ci`:
+
+| Test | Under `make ci` | In isolation |
+|---|---|---|
+| `TestDetachDeleteDoesNotDegradeAcrossCycles` | **2.90×** CPU ratio against a 2.5× limit; per-cycle 852 ms → 2.48 s | **0.94×**; per-cycle 19.3, 17.8, 18.5, 18.9, 18.2, 18.1 ms |
+
+The cycles ran 45–130× slower under the gate, and 2.90× is well past the 1.50×
+the table records as CPU's worst case — that figure was measured against
+synthetic `yes` workers, not against sibling Go test binaries under `-race`,
+which contend for cache, TLB, and the scheduler in ways that charge real CPU to
+the measured goroutine. Its sibling power control fails the mirror way: contention
+*compresses* the ratio it must exceed, so the control stops firing (#2589).
+
+Contention inflates CPU time. There is no cheap load-invariant proxy for a
+duration; the honest options are a genuinely invariant *different* quantity
+(allocation counts, operation counts, a fitted complexity exponent) or a quiet
+machine.
+
 The rules this yields:
 
-- **Assert on wall clock only where the machine is quiet** — the soak layer.
-- **In the short layer, assert on an instrument load cannot move.** Process CPU
-  time (`syscall.Getrusage(RUSAGE_SELF)`) is the load-invariant analogue of wall
-  time, and for a CPU-bound regression it is also the more faithful one.
+- **Assert on a duration, a rate, or a ratio of them only where the machine is
+  quiet.** Two places qualify: the soak layer, and the `test-timing` phase
+  described below.
+- **In the short layer, prefer a quantity that is invariant by construction** —
+  allocation counts, operation counts, fitted exponents — and only where its
+  power against the actual defect is established. `bench/cyclicjoin` is the
+  worked example: its per-point win is asserted in allocations (2.7×–27× margin,
+  run-to-run spread below 0.01%) while its wall-clock arm is only a coarse guard.
+- **Where no invariant quantity exists, guard the timing assertion with
+  `testlayers.RequireQuietMachine`** rather than widening its tolerance. For
+  roughly a third of the audited assertions — the plain "elapsed vs a constant"
+  hang detectors — the duration *is* the claim, and there is nothing to substitute.
+
+### `RequireQuietMachine` and the `test-timing` phase
+
+`testlayers.RequireQuietMachine(tb, detail)` skips a timing assertion when
+`GOGRAPH_PARALLEL_SUITE` is set. `test-short` and `cover-gate` set it, because
+both run packages concurrently; `test-timing` deliberately does not.
+
+**The default is to ASSERT.** The variable's presence is what causes a skip, so a
+single-package run — `go test ./cypher/`, or a `-run` filter while investigating —
+still checks the gate. No gate silently disappears from a developer's own runs.
+
+**Nothing moves out of the pre-push gate.** `make ci` invokes `test-timing` as its
+own phase, which re-runs exactly the guarded gates serially (`-p 1`) and without
+the variable, so every one of them still gates every push — in the phase where the
+measurement means something. Measured cost: **59 s** for the gates guarded so far,
+against 193 s for the `cypher` package alone under `-race` in the same `make ci`.
+
+`TIMING_PKGS` and `TIMING_RUN` in the `Makefile` list only the gates actually
+guarded today. The complete inventory of affected assertions — 39 across 12
+packages, with the measurement that motivated each — is
+[`short-layer-wallclock-audit.md`](short-layer-wallclock-audit.md).
+
+The skip is **loud by contract**: every caller passes the quantity it was about to
+assert on, and the message names `test-timing` as the place the assertion still
+runs, so a skipped gate can never be mistaken for a passing one. This is the same
+contract `RequireUninstrumented` carries for coverage instrumentation, and the two
+compose — `bench/mvccwrite`'s instrument controls call both, because the same
+precondition is defeated by two different causes.
+
 - **A test that measures process CPU must not call `t.Parallel()`.** `getrusage`
   is process-scoped, so a concurrent sibling is charged to the measurement. Go
   runs non-parallel top-level tests to completion before resuming any test that
@@ -402,8 +637,8 @@ The delete-scaling gates are split accordingly:
 
 | Test | Layer | Asserts |
 |---|---|---|
-| `TestDeleteDoesNotDegradeAcrossCycles`, `TestDetachDeleteDoesNotDegradeAcrossCycles` | short | last/first **CPU** ratio ≤ 2.5× (rmp #2400 / #2418) |
-| `TestDeleteCycleGateDetectsDegradation` | short | that the 2.5× gate still **fires** on a workload engineered to degrade (6.48×–6.77× idle, 5.82× under 300 competing CPU-bound processes, 8.80× under a rising load) |
+| `TestDeleteDoesNotDegradeAcrossCycles`, `TestDetachDeleteDoesNotDegradeAcrossCycles` | short | last/first **ALLOCATION** ratio ≤ 2.5× (rmp #2400 / #2418, instrument changed by #2589). Measures 0.97× and 0.88×; **no guard needed** — see below |
+| `TestDeleteCycleGateDetectsDegradation` | short | that the 2.5× gate still **fires** on a workload engineered to degrade: allocation ratio **8.84×** against the 2.5× limit |
 | `TestDeleteWallTimeDoesNotDegradeAcrossCycles`, `TestDetachDeleteWallTimeDoesNotDegradeAcrossCycles` | soak | last/first **wall** ratio ≤ 2.5×, on a quiet machine |
 | `TestSingleStatementDeleteOfNinetyThousandNodes` | soak | an absolute 10 s budget for a 90 000-node single-statement delete |
 
@@ -482,6 +717,14 @@ of GoGraph's public surface.
 | `RequireNightly(tb testing.TB)` | function | skips `tb` unless the nightly layer is active |
 | `IsSoak` | constant `bool` | compile-time flag, true under `-tags=soak` |
 | `IsNightly` | constant `bool` | compile-time flag, true under `-tags=nightly` |
+| `RequireUninstrumented(tb, detail)` | function | skips `tb` when built with coverage instrumentation, which compresses the arms a concurrency-**effect control** compares. For controls only (rmp #2319) |
+| `Instrumented() bool` | function | reports whether coverage instrumentation is active, for a caller that adjusts rather than skips |
+| `RequireQuietMachine(tb, detail)` | function | skips `tb` when `GOGRAPH_PARALLEL_SUITE` is set, i.e. when packages are being tested in parallel and a **timing** assertion would measure machine load. Defaults to ASSERTING; the assertion still runs in `make test-timing` (rmp #2517) |
+| `InParallelSuite() bool` | function | reports whether this is a parallel whole-suite run, for a test with BOTH load-independent and timing arms that must guard only the timing one — `bench/cyclicjoin` is the worked example |
+
+`detail` is mandatory on both `Require*` guards above and must name the quantity
+the caller was about to assert on. That is what makes a skip self-explaining, so a
+skipped gate can never be mistaken for a passing one.
 
 The two constants are useful when a test must branch its body on
 layer membership rather than skip wholesale, for example to enlarge a

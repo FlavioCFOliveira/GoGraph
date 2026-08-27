@@ -1171,7 +1171,7 @@ func equalInts(a, b []int) bool { return slices.Equal(a, b) }
 func checkCheckpointCadenceNonVacuity(e *CheckpointCadenceEvidence) []Violation {
 	var v []Violation
 	add := func(msg string) {
-		v = append(v, Violation{Kind: ViolationOracleDeviation, Op: "<checkpoint-cadence non-vacuity>", Message: msg + " — " + e.String()})
+		v = append(v, Violation{Kind: ViolationVacuousRun, Op: "<checkpoint-cadence non-vacuity>", Message: msg + " — " + e.String()})
 	}
 	if e.TickersRegistered != 1 {
 		add(fmt.Sprintf("the loop registered %d ticker(s) on the injected clock; want exactly 1: without one the cadence is not on the seam this arm drives", e.TickersRegistered))

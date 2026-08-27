@@ -123,10 +123,31 @@ dependencies:
    its checksum in `go.sum`, catching tampered proxies, mid-flight
    corruption, and any forged `go.sum` entries.
 
-4. **Periodic CVE scan.** Run `govulncheck ./...` locally before
-   pushing a dependency change and before tagging a release. A new CVE
-   against a pinned version surfaces as a failure, prompting an explicit
-   bump.
+4. **Periodic CVE scan.** Run the scan locally before pushing a
+   dependency change and before tagging a release. A new CVE against a
+   pinned version surfaces as a failure, prompting an explicit bump.
+
+   ```bash
+   go install golang.org/x/vuln/cmd/govulncheck@latest   # rebuild against the current toolchain
+   govulncheck -scan=module                              # module-level: no source loading, no patterns
+   govulncheck ./...                                     # symbol-level: needs a govulncheck built for this Go minor
+   ```
+
+   **Two traps, both hit while preparing `v0.12.0`.** A `govulncheck`
+   binary built against an older Go minor than the one on `PATH`
+   **exits 0 while performing no analysis at all** — it prints
+   "Loading packages failed, possibly due to a mismatch between the Go
+   version used to build govulncheck and the Go version on PATH" and
+   returns success, so the scan silently does not happen. Always
+   reinstall it after a toolchain bump, and require the run to print
+   either a finding or the literal `No vulnerabilities found.`; treat
+   empty output as a failed scan, never as a clean one. Second,
+   `govulncheck@v1.3.0`'s source-processing packages are built for
+   go1.26 and **cannot parse go1.27 source**, so symbol-level
+   (reachability) scanning is unavailable under the currently pinned
+   toolchain. Use `-scan=module`, which reads `go.mod` only and accepts
+   **no package patterns**, until an upstream release built for the
+   pinned Go minor is available.
 
 5. **Upgrade workflow.** To upgrade a dependency:
 

@@ -20,7 +20,8 @@ package sim
 //
 // # Why the refusal MESSAGE is recomputed and not merely code-matched
 //
-// The refusal reaches the client as Neo.ClientError.General.LimitExceeded with
+// The refusal reaches the client as
+// Neo.TransientError.Transaction.MaximumTransactionLimitReached with
 // the quota error's own text, VERBATIM: bolt/server/session.go:1602-1605 returns
 // qerr.Error() and does NOT route it through Session.sanitiseErr, unlike every
 // neighbouring failure in that handler. The text names the principal and the
@@ -131,7 +132,7 @@ const (
 const (
 	// txQuotaRefusalCode is what a BEGIN over the cap is answered with
 	// (bolt/server/session.go:1603).
-	txQuotaRefusalCode = "Neo.ClientError.General.LimitExceeded"
+	txQuotaRefusalCode = "Neo.TransientError.Transaction.MaximumTransactionLimitReached"
 	// txQuotaLogoffRefusalCode is what a COMMIT from a de-authorised session is
 	// answered with: handleCommit's !s.authenticated gate routes to failTransition
 	// (bolt/server/session.go:1656-1657), which returns
@@ -1088,7 +1089,7 @@ func checkBoltTxQuotaRefusal(e *BoltTxQuotaEvidence) []Violation {
 	over := e.beginFor(txQuotaPhaseOverCap)
 	if over == nil {
 		v = append(v, Violation{
-			Kind: ViolationOracleDeviation, Op: txOp(e.Arm, "refusal"),
+			Kind: ViolationVacuousRun, Op: txOp(e.Arm, "refusal"),
 			Message: fmt.Sprintf("the run never drove the %q phase, so the cap was never asked to refuse",
 				txQuotaPhaseOverCap),
 		})
@@ -1201,7 +1202,7 @@ func checkBoltTxQuotaReclamation(e *BoltTxQuotaEvidence) []Violation {
 		v = append(v, Violation{
 			Kind: ViolationOracleDeviation, Op: txOp(e.Arm, "reap-attribution"),
 			Message: fmt.Sprintf("the reaped connection was told %q, want the text pinned in txReapFailureMessage "+
-				"(rmp #2560); if that text has been corrected, update this arm with the ticket", e.ReapMessage),
+				"(%q)", e.ReapMessage, txReapFailureMessage),
 		})
 	}
 	if e.TerminateOutcome != txTermOutcomeOK {
@@ -1317,7 +1318,7 @@ func checkBoltTxQuotaResidue(e *BoltTxQuotaEvidence) []Violation {
 func checkBoltTxQuotaNonVacuity(e *BoltTxQuotaEvidence) []Violation {
 	var v []Violation
 	shortfall := func(clause, msg string) {
-		v = append(v, Violation{Kind: ViolationOracleDeviation, Op: txOp(e.Arm, clause), Message: msg})
+		v = append(v, Violation{Kind: ViolationVacuousRun, Op: txOp(e.Arm, clause), Message: msg})
 	}
 	// THE geometry clause. At a cap of one, "BEGIN never works" and "the cap
 	// fired" produce the same wire trace.

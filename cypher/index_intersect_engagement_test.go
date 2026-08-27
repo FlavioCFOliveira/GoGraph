@@ -39,12 +39,15 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
-// iiSmallPop is BELOW rangeSeekMinLabelPopulation (1024), so every conjunct over
+// iiSmallPop is BELOW rangeSeekMinLabelPopulation, so every conjunct over
 // the :Small label is refused by the population floor no matter how selective its
 // range is. Such a label is the purest statement of the #2266 defect: not one
 // cardinality probe can influence the outcome, so every probe it pays is waste by
 // construction.
-const iiSmallPop = 512
+// It was 512, which sat under the floor when the floor was 1024. #2367 lowered
+// the floor to 64 on measured evidence, which put 512 ABOVE it — at which point
+// this fixture would have kept passing while proving nothing about the floor.
+const iiSmallPop = 32
 
 // iiSmallLabelFixture builds a :Small graph whose population is below the seek
 // floor, with btree indexes on BOTH a and b — so a shape over it is declined by

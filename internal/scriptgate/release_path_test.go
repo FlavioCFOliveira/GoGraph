@@ -100,12 +100,40 @@ func TestReleasePathsConverge(t *testing.T) {
 	}
 
 	// 3. `make ci` must still run every mandated gate — it is the last line of
-	//    defence now that no per-push CI exists. Assert its composition:
-	//    vet + build + the race/TCK test pass + lint + the coverage gate.
-	if !strings.Contains(makefile, "ci: tidy fmt vet build test-short lint cover-gate") {
-		t.Errorf("the `ci` target no longer runs the full `tidy fmt vet build test-short " +
-			"lint cover-gate` pipeline; a mandated correctness or coverage gate would be " +
-			"skipped on the release path (#1444)")
+	//    defence now that no per-push CI exists.
+	//
+	//    This checks that every mandated prerequisite is PRESENT, rather than
+	//    matching the prerequisite list as one exact string. The exact-string form
+	//    failed on an ADDITION as readily as on a removal, which is the opposite of
+	//    what this gate is for: it exists to catch a mandated gate being dropped
+	//    (#1444), and adding a phase strengthens the pipeline rather than weakening
+	//    it. It duly went red when `test-timing` was inserted (rmp #2517) on a tree
+	//    where every mandated gate was still present and running.
+	//
+	//    The subset check keeps all of the original power — remove any one of these
+	//    prerequisites and this fails, naming it — while allowing the pipeline to
+	//    grow.
+	mandated := []string{
+		"tidy",        // module hygiene
+		"fmt",         // formatting
+		"vet",         // static analysis
+		"build",       // compiles
+		"test-short",  // the race pass, in which the openCypher TCK baseline runs
+		"test-timing", // the serial phase in which the wall-clock gates assert (rmp #2517)
+		"lint",        // golangci-lint
+		"cover-gate",  // coverage floors
+	}
+	ciLine := makefileTargetPrereqs(makefile, "ci")
+	if ciLine == "" {
+		t.Errorf("could not find a `ci:` target in the Makefile at all; the release path " +
+			"has no canonical gate (#1444)")
+	}
+	for _, gate := range mandated {
+		if !prereqPresent(ciLine, gate) {
+			t.Errorf("the `ci` target no longer runs %q; a mandated correctness or coverage "+
+				"gate would be skipped on the release path (#1444). Current prerequisites: %q",
+				gate, ciLine)
+		}
 	}
 
 	// 4. `test-short` (the gate `make ci` runs) must exercise the race detector
@@ -156,4 +184,41 @@ func TestReleasePathsConverge(t *testing.T) {
 			"excluded from the default `test-short ./...` pass and the release gate would " +
 			"skip the TCK baseline (#1444)")
 	}
+}
+
+// makefileTargetPrereqs returns the prerequisite list of the named Make target —
+// the text between `name:` and either the end of the line or the `##` help
+// comment — or "" when the target is absent.
+//
+// It matches at the start of a line so a target NAME cannot be confused with a
+// mention of it in another target's prerequisites, which is how `ci` would
+// otherwise match `ci-soak`'s line.
+func makefileTargetPrereqs(makefile, name string) string {
+	for _, line := range strings.Split(makefile, "\n") {
+		rest, ok := strings.CutPrefix(line, name+":")
+		if !ok {
+			continue
+		}
+		// A target line, not a variable assignment like `ci := …`.
+		if strings.HasPrefix(rest, "=") {
+			continue
+		}
+		if i := strings.Index(rest, "##"); i >= 0 {
+			rest = rest[:i]
+		}
+		return strings.TrimSpace(rest)
+	}
+	return ""
+}
+
+// prereqPresent reports whether gate appears as a WHOLE prerequisite in the
+// space-separated list, so `test-short` is not satisfied by `test-shortcut` and
+// `ci` is not satisfied by `ci-soak`.
+func prereqPresent(prereqs, gate string) bool {
+	for _, f := range strings.Fields(prereqs) {
+		if f == gate {
+			return true
+		}
+	}
+	return false
 }

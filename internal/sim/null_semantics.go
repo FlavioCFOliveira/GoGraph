@@ -329,7 +329,7 @@ func checkOptionalMatchNullRows(ctx context.Context, tick int64, oracle *GraphOr
 func checkNullSemanticsNonVacuity(tick int64, oracle *GraphOracle) []Violation {
 	var vs []Violation
 	fail := func(msg string) {
-		vs = append(vs, Violation{Kind: ViolationOracleDeviation, Tick: tick, Op: "null-semantics non-vacuity", Message: msg})
+		vs = append(vs, Violation{Kind: ViolationVacuousRun, Tick: tick, Op: "null-semantics non-vacuity", Message: msg})
 	}
 	withAge, ageless := oracle.personAgePartition()
 	if len(ageless) == 0 {

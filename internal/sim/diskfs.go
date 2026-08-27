@@ -63,8 +63,6 @@ func (s simCSRFS) Create(path string) (csrfile.File, error) {
 	return s.disk.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC)
 }
 
-func (s simCSRFS) Truncate(path string, size int64) error { return s.disk.TruncatePath(path, size) }
-
 func (s simCSRFS) Rename(oldPath, newPath string) error { return s.disk.Rename(oldPath, newPath) }
 
 func (s simCSRFS) Remove(path string) error { return s.disk.Remove(path) }

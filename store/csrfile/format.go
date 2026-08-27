@@ -33,17 +33,37 @@ const Alignment = 64
 type WeightKind uint8
 
 // Supported weight kinds.
+//
+// The wire values are stable and additive: 0-4 are the original set and 5-6
+// were added by rmp #2529 to reconcile csrfile with the snapshot writer, which
+// already persisted the narrower widths. A file written by an older build
+// therefore reads unchanged, and a file carrying a new kind is refused by an
+// older reader with [ErrUnknownWeightKind] rather than misread.
 const (
 	WeightAbsent  WeightKind = 0
 	WeightUint32  WeightKind = 1
 	WeightUint64  WeightKind = 2
 	WeightFloat32 WeightKind = 3
 	WeightFloat64 WeightKind = 4
+	// WeightUint8 is the 1-byte kind, carrying int8, uint8 and bool.
+	WeightUint8 WeightKind = 5
+	// WeightUint16 is the 2-byte kind, carrying int16 and uint16.
+	WeightUint16 WeightKind = 6
 )
+
+// weightKindMax is the highest defined [WeightKind]. Every bound check reads it
+// rather than naming a member, so adding a kind cannot leave a validation site
+// behind — which is how the set came to be stated in two places that disagreed
+// (rmp #2529).
+const weightKindMax = WeightUint16
 
 // Size returns the byte size of one weight value for k.
 func (k WeightKind) Size() int {
 	switch k {
+	case WeightUint8:
+		return 1
+	case WeightUint16:
+		return 2
 	case WeightUint32, WeightFloat32:
 		return 4
 	case WeightUint64, WeightFloat64:
@@ -154,7 +174,7 @@ func alignUpOverflow(n, alignment uint64) (aligned uint64, overflowed bool) {
 // — must treat a zero totalBytes as "this header is not representable
 // on disk" and reject it rather than proceeding with bogus offsets.
 func Layout(nVertices, nEdges uint64, weight WeightKind) (header Header, totalBytes uint64) {
-	if weight > WeightFloat64 {
+	if weight > weightKindMax {
 		return Header{}, 0
 	}
 	header = Header{
@@ -258,7 +278,7 @@ func DecodeHeader(buf []byte) (Header, error) {
 		return Header{}, ErrUnsupportedByteOrder
 	}
 	kind := WeightKind(buf[24])
-	if kind > WeightFloat64 {
+	if kind > weightKindMax {
 		return Header{}, ErrUnknownWeightKind
 	}
 	return Header{

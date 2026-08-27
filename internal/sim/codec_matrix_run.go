@@ -195,7 +195,7 @@ func checkCodecCrashStormShape(ev []codecArmEvidence) []Violation {
 		}
 		if e.windowsEntered != want {
 			v = append(v, Violation{
-				Kind: ViolationOracleDeviation, Op: "<window-not-entered>",
+				Kind: ViolationVacuousRun, Op: "<window-not-entered>",
 				Message: fmt.Sprintf(
 					"arm %s entered %d of %d publish windows: an armed fault that never fired leaves"+
 						" the cycle adjudicating a crash it did not land", e.arm, e.windowsEntered, want),
@@ -203,7 +203,7 @@ func checkCodecCrashStormShape(ev []codecArmEvidence) []Violation {
 		}
 		if e.promotes == 0 {
 			v = append(v, Violation{
-				Kind: ViolationOracleDeviation, Op: "<promote-unexercised>",
+				Kind: ViolationVacuousRun, Op: "<promote-unexercised>",
 				Message: fmt.Sprintf(
 					"arm %s never drove recovery's snapshot-promote repair, so the interrupted-publish"+
 						" path was not reached on this codec pair", e.arm),

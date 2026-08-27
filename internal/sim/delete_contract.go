@@ -216,7 +216,7 @@ func deleteContractVacuity(tick int64, st *deleteContractStats) []Violation {
 		return nil
 	}
 	return []Violation{{
-		Kind: ViolationOracleDeviation, Tick: tick, Op: "non-detach DELETE non-vacuity",
+		Kind: ViolationVacuousRun, Tick: tick, Op: "non-detach DELETE non-vacuity",
 		Message: fmt.Sprintf(
 			"vacuous run: the non-detach DELETE probe never exercised: %v — the contract was never "+
 				"adjudicated (accepted=%d refused=%d)", missing, st.accepted, st.refused),

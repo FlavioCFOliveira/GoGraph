@@ -202,9 +202,28 @@ If the answer to any of these is "no" or "I do not know", the cheap alternative 
 
 **Tests and validation.**
 
-- While iterating, run the specific test or package under change; reserve the full suite for the task's final validation.
-- Do not run the full suite repeatedly to check a change that affects only one isolated component.
-- This relaxes no gate. `make ci` — `go test -race ./...`, the TCK regression gate, `goleak`, and the lint pass — still runs in full before a task is closed and before every push, exactly as the [Compliance Mandates](#compliance-mandates) and the [Reliability and Concurrency Mandates](#reliability-and-concurrency-mandates) require. Always read the command's exit status rather than inferring success from its output.
+- **`make ci` runs ONCE, at SPRINT CLOSE — never per task.** The full gate takes
+  roughly fifteen minutes and re-runs the entire module, so running it after every
+  task spends hours re-proving what has not changed. It runs at the close of the
+  sprint, and before any push.
+- **Per task, run the targeted validation instead:** the package under change, its
+  direct dependents, and any gate the change can plausibly move — plus the
+  compliance gates the change touches (the openCypher TCK when `cypher/` changed,
+  the crash/recovery battery when `store/` changed). Name in the task's closing
+  record exactly what was run **and what was left unverified until sprint close**;
+  never imply the full gate passed when it was not run.
+- While iterating within a task, narrow further still: run the single test under
+  change, not its whole package.
+- **This relaxes no gate, it relocates one.** `make ci` — `go test -race ./...`,
+  the TCK regression gate, `goleak`, and the lint pass — still runs in full, and
+  every [Compliance Mandate](#compliance-mandates) and
+  [Reliability and Concurrency Mandate](#reliability-and-concurrency-mandates)
+  still has to be green before the sprint closes and before anything is pushed. What
+  changes is the frequency, not the standard.
+- **Read the exit status from inside the log, never from the wrapper.** A
+  `make ci | tail` pipeline reports the exit code of `tail`: a real
+  `make: *** [test-short] Error 1` has been masked as success this way. Redirect the
+  whole run to a file, append the exit code to it, and read that.
 
 **Model, effort, and parallelism.**
 
@@ -426,7 +445,7 @@ Before writing a single line of code for any non-trivial component, conduct a **
 - **Package naming** — single-word, lowercase, no underscores; package names must not stutter with their exported identifiers (`graph.Graph` is acceptable; `graph.GraphGraph` is not).
 - **Tests** — table-driven tests with `t.Run`; property-based tests with `testing/quick` or `pgregory.net/rapid` for algorithms where invariants can be expressed generically.
 - **Test layers** — every test belongs to one of three layers:
-  - `short` — the default; runs on `go test ./...` with no tags. Run this layer on every change (via `make ci`); each package must stay under 60 s.
+  - `short` — the default; runs on `go test ./...` with no tags. Run the packages a change touches on every change; the whole layer runs via `make ci` at sprint close and before every push (see [Tests and validation](#concrete-applications)). The per-package cost budget, the ceilings that are enforced, and the measured exceptions are specified in [`docs/test-layers.md`](docs/test-layers.md) and are deliberately **not** restated here: this file carried its own copy of the number and the two drifted apart.
   - `soak` — minutes-long workloads. Activated by the `soak` build tag or by setting `SOAK_FULL=1`. The pre-existing `stress` and `soakfull` build tags are considered part of the soak family.
   - `nightly` — hours-long workloads. Activated by the `nightly` build tag or by setting `GOGRAPH_NIGHTLY=1`; implies soak.
 

@@ -20,6 +20,37 @@ import (
 // count so that legitimate ±5-scenario run-to-run variance does not flap the
 // gate, but any real regression in execution support fails CI.
 //
+// # What a TIMEOUT means for this baseline (rmp #2568)
+//
+// A scenario whose query exceeds queryTimeout is NOT counted against this
+// baseline, provided the engine HONOURED cancellation. Such a run is
+// INCONCLUSIVE: the host was too slow to verify the scenario, which is evidence
+// about the machine and none at all about conformance. Before this, a loaded host
+// lowered the pass count and reported a loss of openCypher conformance — the most
+// serious false signal this project can emit, since CLAUDE.md makes 100% TCK
+// compliance non-negotiable and an engineer meeting that red would reasonably
+// conclude the engine had regressed.
+//
+// Three things keep the credit honest, and each is pinned by a test:
+//
+//   - It is bounded to scenarios the harness itself recorded as timing out, and
+//     every one is rendered in the gate output, so a partly-inconclusive run can
+//     never be mistaken for a clean one. It also cannot excuse a real shortfall —
+//     see TestTCKGateCheck_InconclusiveIsNotAConformanceRegression, which asserts
+//     both directions.
+//   - It is counted ONCE PER SCENARIO, not per query. A scenario runs several
+//     queries, and counting each timed-out query separately made the credit exceed
+//     the scenario total (measured: 3897 "inconclusive" against 3897 scenarios).
+//   - An inconclusive run cannot satisfy an error-EXPECTING scenario, nor be
+//     recorded as an error-type fidelity miss. Both would be a false pass or a
+//     false ratchet drop on a slow host; the guards are in assertError,
+//     assertSyntaxError and recordFidelity.
+//
+// A query that IGNORES its cancelled context is a different verdict entirely: it
+// is classified as WEDGED, is never credited, and still fails this gate. See
+// queryWedgeGrace in compare_test.go for why cancellation-honoured is the
+// discriminator rather than elapsed time.
+//
 // History:
 //
 //   - 1000: initial gate.
@@ -2116,7 +2147,7 @@ func TestTCKExecution(t *testing.T) {
 			scenarioSummaryRE.String())
 	}
 	undefined := parseUndefinedCount(raw)
-	tckGateCheck(t, total, passed, undefined)
+	tckGateCheck(t, total, passed, undefined, inconclusiveCount(), inconclusiveReasons())
 }
 
 // tckGateError is the minimal interface needed by tckGateCheck for testability.
@@ -2128,19 +2159,50 @@ type tckGateError interface {
 
 // tckGateCheck encodes the TCK execution gate assertions. Called by
 // TestOpenCypherTCK and unit-tested independently.
-func tckGateCheck(t tckGateError, total, passed, undefined int) {
+func tckGateCheck(t tckGateError, total, passed, undefined, inconclusive int, reasons []string) {
 	t.Helper()
 	failed := total - passed - undefined
-	t.Logf("TCK execution: %d scenarios, %d passed, %d failed, %d undefined (baseline=%d)",
-		total, passed, failed, undefined, tckExecutionBaseline)
-	if passed < tckExecutionBaseline {
-		t.Errorf("TCK execution regression: %d scenarios passed, baseline=%d", passed, tckExecutionBaseline)
+	t.Logf("TCK execution: %d scenarios, %d passed, %d failed, %d undefined, %d inconclusive (baseline=%d)",
+		total, passed, failed, undefined, inconclusive, tckExecutionBaseline)
+
+	// An INCONCLUSIVE scenario is one whose query exceeded queryTimeout while the
+	// engine HONOURED cancellation — a slow host, carrying no evidence either way
+	// about conformance (rmp #2568). Such a scenario does not pass, because it was
+	// not verified, so godog counts it among the failures; crediting it back here is
+	// what stops a loaded machine being reported as a loss of openCypher
+	// conformance, which is the most serious false signal this project can emit.
+	//
+	// This does NOT excuse a hung engine. A query that ignores its cancelled
+	// context is classified as WEDGED by whenExecutingQuery, lands in w.err as an
+	// ordinary error, and still fails here — see queryWedgeGrace for why the
+	// discriminator is cancellation-honoured rather than elapsed time.
+	//
+	// The credit is bounded by construction: it can only ever cover scenarios the
+	// harness itself recorded as timing out, and every one of them is rendered
+	// below, so a run that leaned on this can never be mistaken for a clean one.
+	if inconclusive > 0 {
+		t.Logf("TCK execution: %d scenario(s) were INCONCLUSIVE — the host was too slow to verify them, "+
+			"and they are NOT scored as conformance failures. This run is therefore NOT evidence of "+
+			"100%% conformance; re-run on an idle machine to obtain that. Reasons:", inconclusive)
+		for i, r := range reasons {
+			t.Logf("  inconclusive[%d]: %s", i, r)
+		}
+	}
+	if passed+inconclusive < tckExecutionBaseline {
+		t.Errorf("TCK execution regression: %d scenarios passed (+%d inconclusive), baseline=%d",
+			passed, inconclusive, tckExecutionBaseline)
 	}
 	if undefined > 0 {
 		t.Errorf("TCK execution: %d scenario(s) have undefined step definitions — register step handlers for all new TCK steps", undefined)
 	}
-	if passed != total {
-		t.Errorf("TCK execution: %d/%d scenarios passed — all scenarios must pass (no failed or pending steps allowed)", passed, total)
+	// The "every scenario must pass" check from #1380 has to account for the
+	// inconclusive ones too, for the same reason the baseline check does: a
+	// scenario the host was too slow to verify is not a failed or pending step.
+	// Without this the credit above would be undone one line later, which is what
+	// TestTCKGateCheck_InconclusiveIsNotAConformanceRegression caught.
+	if passed+inconclusive != total {
+		t.Errorf("TCK execution: %d/%d scenarios passed (+%d inconclusive) — every scenario must pass "+
+			"or be inconclusive (no failed or pending steps allowed)", passed, total, inconclusive)
 	}
 }
 
@@ -2158,10 +2220,60 @@ func tckGateCheck(t tckGateError, total, passed, undefined int) {
 func TestTCKGateCheck_DetectsFailedScenarios(t *testing.T) {
 	t.Parallel()
 	probe := &errProbe{}
-	tckGateCheck(probe, 3898, 3897, 0)
+	tckGateCheck(probe, 3898, 3897, 0, 0, nil)
 	if !probe.errored {
 		t.Error("tckGateCheck did not fire Errorf for total=3898 passed=3897 undefined=0 — passed!=total check is missing")
 	}
+}
+
+// TestTCKGateCheck_InconclusiveIsNotAConformanceRegression pins the rmp #2568
+// contract on the gate itself, in both directions.
+//
+// A scenario the host was too slow to verify is INCONCLUSIVE: it does not pass,
+// so godog counts it among the failures, and crediting it back here is what stops
+// a loaded machine being reported as a loss of openCypher conformance. But the
+// credit must be BOUNDED — it may only cover scenarios the harness recorded as
+// timing out, never a real shortfall.
+func TestTCKGateCheck_InconclusiveIsNotAConformanceRegression(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a timeout does not read as a regression", func(t *testing.T) {
+		t.Parallel()
+		// One scenario short of the baseline, and exactly one inconclusive: the
+		// shortfall is fully explained by the slow host.
+		probe := &errProbe{}
+		tckGateCheck(probe, tckExecutionBaseline, tckExecutionBaseline-1, 0, 1,
+			[]string{"query exceeded 10s but the engine honoured cancellation"})
+		if probe.errored {
+			t.Error("tckGateCheck reported a conformance regression for a scenario that merely timed out " +
+				"on a slow host; that is the false signal rmp #2568 exists to remove")
+		}
+	})
+
+	t.Run("inconclusive does NOT excuse a real shortfall", func(t *testing.T) {
+		t.Parallel()
+		// Two short of the baseline but only one inconclusive: one scenario really
+		// did fail, and the gate must still fire. Without this the credit would be
+		// an unbounded escape hatch.
+		probe := &errProbe{}
+		tckGateCheck(probe, tckExecutionBaseline, tckExecutionBaseline-2, 0, 1,
+			[]string{"query exceeded 10s but the engine honoured cancellation"})
+		if !probe.errored {
+			t.Errorf("tckGateCheck did NOT fire for passed=%d inconclusive=1 baseline=%d: one scenario "+
+				"failed for a reason the timeouts do not explain, and the credit has become an "+
+				"unbounded escape hatch", tckExecutionBaseline-2, tckExecutionBaseline)
+		}
+	})
+
+	t.Run("no inconclusive means the old behaviour is unchanged", func(t *testing.T) {
+		t.Parallel()
+		probe := &errProbe{}
+		tckGateCheck(probe, tckExecutionBaseline, tckExecutionBaseline-1, 0, 0, nil)
+		if !probe.errored {
+			t.Error("tckGateCheck did not fire for a one-scenario shortfall with nothing inconclusive; " +
+				"the baseline gate has stopped gating")
+		}
+	})
 }
 
 // errProbe is a tckGateError that records whether Errorf was ever called.

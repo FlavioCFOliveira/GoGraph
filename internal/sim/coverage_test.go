@@ -25,9 +25,25 @@ func TestCoverageTracker_RecordAndSummary(t *testing.T) {
 		},
 	})
 
+	// A VACUOUS run on crash-storm: the gate fired, but because the run never
+	// exercised its subject rather than because the engine misbehaved. It must
+	// land in its OWN violation bucket, not be folded in with the engine kinds
+	// (rmp #2614) — the swarm summary is where an operator first sees which of
+	// the two families a red run belongs to.
+	// Recorded on read-heavy, NOT crash-storm: crash-storm must stay unexplored so
+	// the Unexplored assertion below keeps its power.
+	ct.Record(SwarmRun{
+		Index:    2,
+		Scenario: ScenarioReadHeavy,
+		Report: &SimReport{
+			FailedOp:   Op{Kind: OpCreate},
+			Violations: []Violation{{Kind: ViolationVacuousRun}},
+		},
+	})
+
 	sc := ct.ScenarioCoverage()
-	if sc[ScenarioReadHeavy] != 1 || sc[ScenarioWriteHeavy] != 1 {
-		t.Errorf("scenario coverage = %v, want read-heavy=1 write-heavy=1", sc)
+	if sc[ScenarioReadHeavy] != 2 || sc[ScenarioWriteHeavy] != 1 {
+		t.Errorf("scenario coverage = %v, want read-heavy=2 write-heavy=1", sc)
 	}
 	if sc[ScenarioCrashStorm] != 0 {
 		t.Errorf("crash-storm should be unexplored, got %d", sc[ScenarioCrashStorm])
@@ -39,9 +55,9 @@ func TestCoverageTracker_RecordAndSummary(t *testing.T) {
 	}
 	// Verify the outcome + op-kind + violation dimensions got their hits.
 	want := map[string]map[string]int{
-		string(dimOutcome):   {outcomePass: 1, outcomeViolation: 1},
-		string(dimOpKind):    {string(OpCreate): 1},
-		string(dimViolation): {string(ViolationOracleDeviation): 1},
+		string(dimOutcome):   {outcomePass: 1, outcomeViolation: 2},
+		string(dimOpKind):    {string(OpCreate): 2},
+		string(dimViolation): {string(ViolationOracleDeviation): 1, string(ViolationVacuousRun): 1},
 	}
 	got := map[string]map[string]int{}
 	for _, b := range sum.Buckets {

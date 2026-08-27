@@ -2252,7 +2252,7 @@ func checkBoltDrainResidue(e *BoltDrainEvidence) []Violation {
 func checkBoltShutdownDrainNonVacuity(e *BoltDrainEvidence) []Violation {
 	var v []Violation
 	shortfall := func(clause, msg string) {
-		v = append(v, Violation{Kind: ViolationOracleDeviation, Op: boltDrainOp(e.Arm, clause), Message: msg})
+		v = append(v, Violation{Kind: ViolationVacuousRun, Op: boltDrainOp(e.Arm, clause), Message: msg})
 	}
 	if !e.CloserWired {
 		shortfall("nonvacuity-closer", "the server was given no Options.Closer, so it owned no store and every "+

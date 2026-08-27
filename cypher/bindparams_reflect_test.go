@@ -127,8 +127,24 @@ func TestBindParams_BoundedNesting(t *testing.T) {
 	if err == nil {
 		t.Fatal("a 200-deep parameter bound without error; the recursion is unbounded")
 	}
-	if !strings.Contains(err.Error(), "nested deeper than") {
-		t.Fatalf("got %v, want the depth-limit error", err)
+	// The SENTINEL, not a substring. rmp #2570 gave the refusal
+	// [cypher.ErrParamNestedTooDeep] precisely so a front-end can classify it with
+	// errors.Is instead of matching text, and a substring check would keep passing
+	// if the sentinel were dropped and the wording kept.
+	if !errors.Is(err, cypher.ErrParamNestedTooDeep) {
+		t.Fatalf("got %v, want it to wrap cypher.ErrParamNestedTooDeep", err)
+	}
+	// The message must name the KEY and the LIMIT and nothing else: it is forwarded
+	// to a Bolt client verbatim, because its ArgumentError classification bypasses
+	// the failure sanitiser. It must NOT carry the accumulated bind path, which for
+	// this 200-deep chain would be 200 `list[0]:` segments.
+	if strings.Contains(err.Error(), "list[") {
+		t.Fatalf("the depth error forwards the internal bind path: %v", err)
+	}
+	for _, want := range []string{"cypher: ArgumentError.ParameterNestedTooDeep:", `parameter "p"`, "32 levels"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("got %v, want it to contain %q", err, want)
+		}
 	}
 }
 

@@ -103,10 +103,16 @@ func DegreeCountableShape(pat *ast.Pattern, where *ast.Where) (DegreeShape, bool
 		return zero, false
 	}
 
-	// RELATIONSHIP: single hop, unnamed, untyped or exactly one type, no
-	// properties, outgoing.
+	// RELATIONSHIP: single hop, not named BY THE USER, untyped or exactly one
+	// type, no properties, outgoing.
+	//
+	// The name test is [UserNamed], not `!= nil`: a user-bound relationship makes
+	// the edge observable, which a bare degree cannot supply, but a SYNTHETIC name
+	// observes nothing. Spelled `!= nil` this guard silently stopped firing once
+	// NameSubqueryAnonymousEntities began naming subquery relationships up front,
+	// and the shapes fell back to driving an inner plan per outer row (rmp #2508).
 	rel := second.Relationship
-	if rel.Range != nil || rel.Variable != nil || rel.Properties != nil {
+	if rel.Range != nil || UserNamed(rel.Variable) || rel.Properties != nil {
 		return zero, false
 	}
 	if rel.Direction != ast.RelDirectionOutgoing {
@@ -123,7 +129,11 @@ func DegreeCountableShape(pat *ast.Pattern, where *ast.Where) (DegreeShape, bool
 	}
 
 	sh := DegreeShape{AnchorVar: *anchor.Variable}
-	if far.Variable != nil {
+	// Only a USER name goes into FarVar, so the field keeps the meaning its
+	// godoc states — "" when the pattern does not name the far endpoint. A
+	// synthetic name is never bound in the outer row, so recording it would
+	// change no decision, but it would make the documented invariant false.
+	if UserNamed(far.Variable) {
 		sh.FarVar = *far.Variable
 	}
 	if len(rel.Types) == 1 {

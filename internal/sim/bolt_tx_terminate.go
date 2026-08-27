@@ -273,9 +273,11 @@ type BoltTxTerminateEvidence struct {
 	// VictimCode and VictimMessage are what the terminated connection was told on
 	// the one message sent to it after the termination. They are what attributes
 	// its departure to the operator call rather than to a rollback or a dropped
-	// connection — and they are adjudicated against [txReapFailureCode] and
-	// [txReapFailureMessage], BOTH of whose halves are false for an operator
-	// termination (rmp #2560).
+	// connection — and they are adjudicated against [txTerminateFailureCode] and
+	// [txTerminateFailureMessage], which since rmp #2560 name the OPERATOR event
+	// specifically. They used to be adjudicated against the reap pair, both of
+	// whose halves were false here: no timeout had elapsed, and the writer lock the
+	// message named was retired by rmp #2305/#2306.
 	VictimCode    string
 	VictimMessage string
 
@@ -609,7 +611,10 @@ func (r *boltTxTerminateRunner) call(name, role string, want txTerminateOutcome)
 // probeVictim sends ONE statement down the terminated connection and records
 // what the server answered. An absent registry entry is an ambiguous post-state
 // on its own — a rollback, a dropped connection or a harness mistake all produce
-// it — and only Session.reapTimedOutTx arms the typed FAILURE recorded here.
+// it — and only Session.terminateTxByOperator arms the typed FAILURE recorded
+// here. Before rmp #2560 that was Session.reapTimedOutTx, shared with the two
+// deadline bounds, so this probe could attribute a departure to a
+// server-initiated end but not to the OPERATOR specifically.
 func (r *boltTxTerminateRunner) probeVictim() error {
 	c := r.conns[0]
 	if derr := armTxReadDeadline(c); derr != nil {
@@ -891,24 +896,26 @@ func checkBoltTxTerminateCalls(e *BoltTxTerminateEvidence) []Violation {
 			})
 		}
 	}
-	if e.VictimCode != txReapFailureCode {
+	if e.VictimCode != txTerminateFailureCode {
+		// The reap code is called out BY NAME here rather than being folded into a
+		// generic mismatch, because it is the one wrong answer this arm exists to
+		// catch: it is what the operator path returned before rmp #2560, and a
+		// regression would restore exactly it and nothing else.
+		hint := ""
+		if e.VictimCode == txReapFailureCode {
+			hint = " — that is the DEADLINE reason, so the operator path is borrowing it again (rmp #2560)"
+		}
 		v = append(v, Violation{
 			Kind: ViolationOracleDeviation, Op: txOp(e.Arm, "terminate-attribution"),
 			Message: fmt.Sprintf("the terminated connection was answered %q on its next message, want %q: only "+
-				"Session.reapTimedOutTx arms that failure, so an absent entry alone does not prove a termination",
-				e.VictimCode, txReapFailureCode),
+				"Session.terminateTxByOperator arms that failure, so an absent entry alone does not prove a "+
+				"termination%s", e.VictimCode, txTerminateFailureCode, hint),
 		})
-	} else if e.VictimMessage != txReapFailureMessage {
-		// Pinned VERBATIM although BOTH halves are false for an operator
-		// termination — it exceeded no timeout, and no writer lock has been held for
-		// a transaction's lifetime since rmp #2305 (rmp #2560). Pinning it means the
-		// eventual correction fails this arm on purpose instead of slipping through;
-		// when that happens, update the arm with the ticket.
+	} else if e.VictimMessage != txTerminateFailureMessage {
 		v = append(v, Violation{
 			Kind: ViolationOracleDeviation, Op: txOp(e.Arm, "terminate-attribution"),
-			Message: fmt.Sprintf("the terminated connection was told %q, want the text pinned in txReapFailureMessage "+
-				"(rmp #2560: an OPERATOR termination is told it exceeded a timeout and released a writer lock, and "+
-				"neither is true); if that text has been corrected, update this arm with the ticket", e.VictimMessage),
+			Message: fmt.Sprintf("the terminated connection was told %q, want the text pinned in "+
+				"txTerminateFailureMessage (%q)", e.VictimMessage, txTerminateFailureMessage),
 		})
 	}
 	return v
@@ -1004,7 +1011,7 @@ func checkBoltTxTerminateResidue(e *BoltTxTerminateEvidence) []Violation {
 func checkBoltTxTerminateNonVacuity(e *BoltTxTerminateEvidence) []Violation {
 	var v []Violation
 	shortfall := func(clause, msg string) {
-		v = append(v, Violation{Kind: ViolationOracleDeviation, Op: txOp(e.Arm, clause), Message: msg})
+		v = append(v, Violation{Kind: ViolationVacuousRun, Op: txOp(e.Arm, clause), Message: msg})
 	}
 	// THE attribution clause. clock.Fake delivers to a waiter only from Advance
 	// (internal/clock/fake.go), so zero advances is a PROOF that neither reaper
@@ -1110,7 +1117,7 @@ func (e *BoltTxTerminateEvidence) String() string {
 	fmt.Fprintf(&b, "\n  successor: id=%s want=%s listed=%t bystander-listed=%t",
 		e.SuccessorSuffix, e.WantSuccessorSuffix, e.SuccessorListed, e.BystanderListed)
 	fmt.Fprintf(&b, "\n  attribution: code=%s message-as-pinned=%t",
-		e.VictimCode, e.VictimMessage == txReapFailureMessage)
+		e.VictimCode, e.VictimMessage == txTerminateFailureMessage)
 	fmt.Fprintf(&b, "\n  terminate bracket: frames+%d bytes+%d", e.TermFrames, e.TermBytes)
 	b.WriteString("\n  honest windows:")
 	for i := range e.Windows {

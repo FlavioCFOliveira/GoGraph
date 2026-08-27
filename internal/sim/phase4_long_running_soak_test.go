@@ -52,10 +52,37 @@ func TestScenario_LongRunningSoak(t *testing.T) {
 		t.Fatalf("long-running soak reported violations (seed %d):\n%s", sc.DefaultSeed, report)
 	}
 
-	// Goroutine stability: the deterministic engine-API loop spawns none, so the
-	// count must not have grown.
-	if grown := runtime.NumGoroutine() - baselineGoroutines; grown > 0 {
-		t.Fatalf("goroutine count grew by %d over the soak run (baseline %d)", grown, baselineGoroutines)
+	// Goroutine stability, as a COARSE cross-check on top of goleak.
+	//
+	// goleak.VerifyNone above is the instrument that actually certifies "leaks no
+	// goroutine": it identifies a leak by its STACK and ignores runtime-owned
+	// goroutines. This delta is a second, cruder look at the same property, kept
+	// because it catches a leak that has already exited by teardown, which goleak
+	// by construction cannot.
+	//
+	// It carries a named slack rather than demanding exact zero (rmp #2592).
+	// runtime.NumGoroutine() counts goroutines the RUNTIME owns as well as the
+	// harness's — GC workers, the finalizer, timer and netpoll helpers — so exact
+	// zero asserts something this sample cannot see the inputs to. The acceptance
+	// criteria for #2592 offered exact zero only "if the sample provably counts
+	// only harness-owned goroutines", and it provably does not.
+	//
+	// EIGHT, and why the value is not copied blindly from the swarm sites. In
+	// internal/sim goroutineSlack is a PARAMETER, not a constant, and its callers
+	// choose 0 for a single deterministic scenario (metrics_oracle.go:274) and 2,
+	// 4 or 8 for a swarm, scaling with worker count: more concurrent workers, more
+	// runtime helpers parked. This run is single-goroutine, so concurrency scaling
+	// does not apply — but it is the LONGEST run in the family at 2,000,000 ticks
+	// and minutes of wall time, which is the other thing that gives the runtime
+	// opportunity to park a helper. bolt/server's connection-churn soak, the only
+	// other minutes-long site, independently settled on 8 for the same reason.
+	// The slack applies to THIS run length; a shorter run should not inherit it.
+	const goroutineSlack = 8
+	if grown := runtime.NumGoroutine() - baselineGoroutines; grown > goroutineSlack {
+		t.Fatalf("goroutine count grew by %d over the soak run, beyond the slack of %d "+
+			"(baseline %d). goleak in teardown is the precise instrument; a delta this far "+
+			"past the runtime's own bookkeeping is a leak it may also report",
+			grown, goroutineSlack, baselineGoroutines)
 	}
 }
 

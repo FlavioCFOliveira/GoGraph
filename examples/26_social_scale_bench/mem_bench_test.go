@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"io"
 	"os"
 	"strconv"
 	"testing"
@@ -44,7 +43,7 @@ func BenchmarkBuild(b *testing.B) {
 		// is dead memory and dropped. The heap profile thus reflects the real
 		// resident shape the example runs against.
 		g := lpg.New[string, float64](adjlist.Config{Directed: true, Weightless: true})
-		if _, err := build(context.Background(), g, cfg, io.Discard); err != nil {
+		if _, err := build(context.Background(), g, cfg, nil); err != nil {
 			b.Fatal(err)
 		}
 		keepAlive = g

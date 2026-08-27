@@ -501,11 +501,11 @@ func checkSurfaceNonVacuity(tick int64, oracle *GraphOracle) []Violation {
 	var vs []Violation
 	stats, complete := oracle.personCityStats()
 	if !complete {
-		vs = append(vs, Violation{Kind: ViolationOracleDeviation, Tick: tick, Op: "surface non-vacuity",
+		vs = append(vs, Violation{Kind: ViolationVacuousRun, Tick: tick, Op: "surface non-vacuity",
 			Message: "a modelled Person lacks a city: the grouped-by-city probes were skipped for part of the run"})
 	}
 	if len(stats) < 2 {
-		vs = append(vs, Violation{Kind: ViolationOracleDeviation, Tick: tick, Op: "surface non-vacuity",
+		vs = append(vs, Violation{Kind: ViolationVacuousRun, Tick: tick, Op: "surface non-vacuity",
 			Message: fmt.Sprintf("terminal graph has %d distinct cities; grouped aggregation needs >= 2 groups to be non-trivial", len(stats))})
 	}
 	distinctAges := make(map[int64]bool)
@@ -513,11 +513,11 @@ func checkSurfaceNonVacuity(tick int64, oracle *GraphOracle) []Violation {
 		distinctAges[a] = true
 	}
 	if len(distinctAges) < 2 {
-		vs = append(vs, Violation{Kind: ViolationOracleDeviation, Tick: tick, Op: "surface non-vacuity",
+		vs = append(vs, Violation{Kind: ViolationVacuousRun, Tick: tick, Op: "surface non-vacuity",
 			Message: fmt.Sprintf("terminal graph has %d distinct ages; the exact-aggregate probes need spread to be non-trivial", len(distinctAges))})
 	}
 	if len(oracle.knowsTargetNamesDistinct()) == 0 {
-		vs = append(vs, Violation{Kind: ViolationOracleDeviation, Tick: tick, Op: "surface non-vacuity",
+		vs = append(vs, Violation{Kind: ViolationVacuousRun, Tick: tick, Op: "surface non-vacuity",
 			Message: "terminal graph has no KNOWS target: the DISTINCT-row probes never saw a row"})
 	}
 	return vs

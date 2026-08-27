@@ -119,9 +119,19 @@ type Session struct {
 	// identity is populated after a successful HELLO/LOGON.
 	identity Identity
 
-	// bookmark holds the last committed transaction bookmark (server-generated
-	// placeholder for this sprint).
+	// bookmark holds the last bookmark this session minted — on an explicit
+	// COMMIT, or on the terminal SUCCESS of an autocommit statement.
 	bookmark string
+
+	// autocommitStmt records that the statement currently streaming was run in
+	// AUTOCOMMIT mode rather than inside an explicit transaction.
+	//
+	// It exists because the Bolt specification puts the `bookmark` field of a
+	// terminal PULL/DISCARD SUCCESS under "Autocommit Transaction only": inside an
+	// explicit transaction the bookmark belongs on the COMMIT SUCCESS and must not
+	// appear on the stream's terminal SUCCESS at all. Publishing it there
+	// unconditionally is how a stale token reached the wire (rmp #2563).
+	autocommitStmt bool
 
 	// localAddr is the listener address of the server that accepted this
 	// connection; used to populate the routing table in ROUTE responses.
@@ -947,8 +957,10 @@ func (s *Session) handleLogon(m *proto.Logon) ([]any, error) {
 	// (Bolt >= 5.1 deferred-auth flow). A FIRST authentication that fails must
 	// terminate the connection per the Bolt 5.1 spec: respond FAILURE then close,
 	// exactly like a failed <= 5.0 HELLO — the client never reached an
-	// authenticated state, so there is nothing to recover. A RE-authentication
-	// failure (from READY/TX_READY) stays recoverable via RESET, unchanged. (task #1470)
+	// authenticated state, so there is nothing to recover. Since rmp #2556 a
+	// RE-authentication failure terminates the connection as well, for the reason
+	// recorded at that branch; firstAuth now only selects WHICH reclaim path runs
+	// on the way to DEFUNCT, not whether the connection survives. (tasks #1470, #2556)
 	firstAuth := s.state == StateAuthentication
 
 	scheme, _ := extractString(m.Auth, "scheme")
@@ -967,10 +979,34 @@ func (s *Session) handleLogon(m *proto.Logon) ([]any, error) {
 			s.log.Error("bolt: authentication failed", slog.String("session", s.id), slog.String("err", err.Error()))
 			return []any{&proto.Failure{Code: authErrorCode(err), Message: s.sanitiseErr(err)}}, nil
 		}
-		// LOGON re-authentication is legal in TX_READY, so a failed auth here can
-		// leave an explicit transaction open; enterFailed reclaims it (#1312).
+		// A FAILED RE-AUTHENTICATION TERMINATES THE CONNECTION TOO (rmp #2556).
+		//
+		// It used to leave the session recoverable, and that left the connection
+		// operating as the PREVIOUS principal: this branch is the only exit that
+		// set neither s.identity nor s.authenticated — the assignments sit after
+		// the error return — so a refused identity switch changed nothing, and
+		// RESET took the authenticated path back to READY with full write
+		// capability. Measured end to end over a real socket: LOGON(alice, ok),
+		// LOGON(bob, WRONG) -> FAILURE, RESET, CREATE -> SUCCESS as alice.
+		//
+		// The Bolt specification's LOGON section says a failed authentication
+		// closes the connection and carves out no exception for re-authentication,
+		// which is the same sentence the firstAuth branch above already cites. It
+		// also removes the surviving-identity question rather than managing it, and
+		// it makes a failed guess COST the connection — the threat shape here is a
+		// non-conforming client that skips LOGOFF, because the official driver
+		// always sends it, so skipping it was how a failed guess cost nothing.
+		//
+		// enterFailed first, then DEFUNCT: LOGON is legal in TX_READY, so this path
+		// can have an explicit transaction open, and enterFailed is the audited
+		// reclaim (drains the cursor, rolls the transaction back, releases what it
+		// holds) rather than a duplicate of it here (#1312).
 		s.enterFailed()
-		s.log.Error("bolt: authentication failed", slog.String("session", s.id), slog.String("err", err.Error()))
+		s.identity = Identity{}
+		s.authenticated = false
+		s.state = StateDefunct
+		s.log.Error("bolt: re-authentication failed, terminating connection",
+			slog.String("session", s.id), slog.String("err", err.Error()))
 		return []any{&proto.Failure{Code: authErrorCode(err), Message: s.sanitiseErr(err)}}, nil
 	}
 	s.identity = id
@@ -1172,8 +1208,10 @@ func (s *Session) handleRun(ctx context.Context, m *proto.Run) ([]any, error) {
 	if s.txActive && s.tx != nil {
 		// Run inside the explicit transaction so that index-buffer writes are
 		// scoped to the transaction lifecycle (commit/rollback in tx.go).
+		s.autocommitStmt = false
 		result, runErr = s.tx.Run(m.Query, params)
 	} else {
+		s.autocommitStmt = true
 		// Autocommit mode (or defensive fallback when txActive is unexpectedly
 		// false in StateTxReady): route through RunAny so that reads take the
 		// lock-free Engine.Run path and, since rmp #2306, not even writes acquire a single-writer
@@ -1394,7 +1432,25 @@ func (s *Session) handlePull(ctx context.Context, m *proto.Pull) ([]any, error) 
 		"has_more": hasMore,
 	}
 	if !hasMore {
-		meta["bookmark"] = s.bookmark
+		// The bookmark is minted HERE for an autocommit statement, and OMITTED
+		// inside an explicit transaction (rmp #2563).
+		//
+		// The Bolt specification puts this field under "Autocommit Transaction
+		// only": for an explicit transaction the bookmark belongs on the COMMIT
+		// SUCCESS. Publishing s.bookmark unconditionally produced two wrong
+		// answers — the EMPTY string on a fresh session's autocommit write, since
+		// nothing but handleCommit ever assigned it, and the PREVIOUS
+		// transaction's token verbatim once an explicit commit had happened, which
+		// is worse because a driver cannot tell it is stale and chains causality
+		// on it.
+		//
+		// The autocommit statement has already committed by the time this SUCCESS
+		// is written — csess.RunAny commits internally — so a token minted here
+		// names work that is durable, not work in flight.
+		if s.autocommitStmt {
+			s.bookmark = NextBookmark()
+			meta["bookmark"] = s.bookmark
+		}
 		// This is the SUCCESS the driver turns into the ResultSummary, so `db`
 		// must be here or ResultSummary.Database() hands back a nil
 		// DatabaseInfo and summary.Database().Name() panics (rmp #2172).
@@ -1497,7 +1553,11 @@ func (s *Session) handleDiscard(m *proto.Discard) ([]any, error) {
 
 	meta := map[string]packstream.Value{"has_more": hasMore}
 	if !hasMore {
-		meta["bookmark"] = s.bookmark
+		// Same contract as the PULL terminal SUCCESS; see the note there (rmp #2563).
+		if s.autocommitStmt {
+			s.bookmark = NextBookmark()
+			meta["bookmark"] = s.bookmark
+		}
 		// A DISCARD terminates the stream just as a PULL does, and the driver
 		// builds its ResultSummary from whichever SUCCESS ends it (rmp #2172).
 		meta["db"] = s.databaseName()
@@ -1557,11 +1617,40 @@ func (s *Session) handleBegin(ctx context.Context, m *proto.Begin) ([]any, error
 		effective = s.maxStmtTimeout
 	}
 
-	// Determine transaction mode (default: "w").
+	// Determine transaction mode (default: "w" when the key is absent).
+	//
+	// AN UNRECOGNISED VALUE IS REFUSED, NOT COERCED (rmp #2564). This read used
+	// to be `if modeStr == "r" { mode = "r" }`, so every other value — "R",
+	// "read", or a non-string — fell through to the WRITE default: a client that
+	// asked for read-only silently received write authority and its writes
+	// succeeded. That is a fail-open coercion on a field this server treats as a
+	// capability restriction, and the project's fail-stop-never-fail-silent rule
+	// forbids it.
+	//
+	// The Bolt specification is SILENT on invalid mode values, and frames `mode`
+	// as a routing hint — "what kind of server the RUN message is targeting" —
+	// rather than as authorisation. GoGraph gives it the stronger meaning: mode
+	// "r" makes the transaction read-only and refuses writes. A token this server
+	// does not understand therefore must not be resolved in the MORE privileged
+	// direction, and refusing is what tells the client at the BEGIN rather than
+	// through a puzzling write refusal later.
+	//
+	// Compatibility risk is low by construction: the official drivers send
+	// exactly "r" or "w", so a refusal can only reach a client that is today
+	// receiving write authority it did not ask for.
 	mode := "w"
 	if v, ok := m.Extra["mode"]; ok {
-		if modeStr, ok := v.(string); ok && modeStr == "r" {
-			mode = "r"
+		modeStr, isStr := v.(string)
+		switch {
+		case isStr && modeStr == boltAccessModeRead:
+			mode = boltAccessModeRead
+		case isStr && modeStr == boltAccessModeWrite:
+			mode = boltAccessModeWrite
+		default:
+			return []any{&proto.Failure{
+				Code:    "Neo.ClientError.Request.Invalid",
+				Message: unsupportedAccessModeMessage(v),
+			}}, nil
 		}
 	}
 
@@ -1606,8 +1695,34 @@ func (s *Session) handleBegin(ctx context.Context, m *proto.Begin) ([]any, error
 		incCounter(metricTxQuotaRejected)
 		s.log.Warn("bolt: BEGIN refused; principal is at its open-transaction cap",
 			slog.String("session", s.id), slog.String("err", qerr.Error()))
+		// THE SESSION DELIBERATELY STAYS IN READY, and the code is deliberately
+		// TRANSIENT (rmp #2561).
+		//
+		// A cap is back-pressure, not a protocol error: the slot frees when some
+		// other transaction of this principal closes, so retrying the same BEGIN is
+		// exactly the right response and a RESET round trip to earn the right to
+		// retry would be pure cost. That is why this path returns before the
+		// [Transition] call below and does NOT go through [Session.enterFailed],
+		// unlike the newTx failure a few lines above — that one is a genuine
+		// failure to open a transaction and FAILED is right for it.
+		//
+		// The two adjacent paths therefore differ ON PURPOSE. Until rmp #2561 they
+		// differed by accident: this branch simply returned early, nothing said so,
+		// and no test asserted the resulting state at any level.
+		//
+		// The code is Neo4j's own, and the previous one was not:
+		// Neo.ClientError.General.LimitExceeded does not exist in Neo4j's status
+		// codes at all, and its ClientError class tells a driver the request is
+		// wrong and must not be retried — the opposite of what a cap wants.
+		// Neo.TransientError.Transaction.MaximumTransactionLimitReached is real and
+		// means exactly this ("unable to start new transaction since the maximum
+		// number of concurrently executing transactions is reached"), and its
+		// Transient class is what makes a driver retry.
+		//
+		// The in-flight CURSOR cap keeps LimitExceeded: it is a different limit,
+		// reached inside one transaction, and it is not this ticket's subject.
 		return []any{&proto.Failure{
-			Code:    "Neo.ClientError.General.LimitExceeded",
+			Code:    txQuotaRefusalCode,
 			Message: qerr.Error(),
 		}}, nil
 	}
@@ -1820,26 +1935,84 @@ func (s *Session) drainResult() {
 //
 // In particular the context-cancellation early return in [Session.HandleMessage]
 // — which never reaches a handler — still reclaims the transaction.
-// reapTimedOutTx rolls back an explicit transaction that has exceeded its
-// wall-clock deadline while the connection was kept alive (idle, or by no-op
-// pings), releasing the engine's global writer lock, and moves the session to
-// FAILED so the client's next message receives a FAILURE and must RESET. It is
-// invoked by the serve loop on a read-deadline timeout, on the session's own
-// goroutine, so it never races the single-threaded session. enterFailed drains
-// any cursor and rolls back the transaction (clearing txActive); txDeadline is
-// cleared here so the serve loop stops tightening the read deadline. (task #1346)
-func (s *Session) reapTimedOutTx() {
-	incCounter(metricTxTimedOut)
+// The two reasons a server-initiated termination gives the client. They are
+// SEPARATE because the two events are separate, and telling them apart from the
+// failure alone is the whole point (rmp #2560): an expired bound and a
+// deliberate human intervention need different responses from whoever reads the
+// client's logs.
+//
+// CLASSIFICATION. Both are ClientError rather than TransientError, and for
+// Terminated that is a deliberate, evidence-backed choice rather than the
+// obvious-looking one. github.com/neo4j/neo4j-go-driver/v5 v5.28.4 — the version
+// in go.mod — carries a reclassify() (neo4j/db/errors.go:132-139) whose stated
+// job is to classify "errors coming from pre-5.x servers into their 5.x
+// classifications", and one of its two entries is exactly:
+//
+//	Neo.TransientError.Transaction.Terminated -> Neo.ClientError.Transaction.Terminated
+//
+// So Neo.ClientError.Transaction.Terminated IS the modern classification for
+// this condition, the Transient spelling is the legacy one the driver rewrites
+// forward, and because reclassify() runs BEFORE IsRetriableTransient() reads the
+// classification, emitting the Transient form would NOT make a driver retry —
+// it would only put a code on the wire that claims a retriability the driver
+// does not honour.
+//
+// It is also the code [FailureCode] already returns for context.Canceled, which
+// makes one operator termination report ONE reason rather than two: Server
+// .TerminateTransaction cancels the transaction's context, so a statement caught
+// in flight is failed through that path while the next request-phase message
+// gets the armed reason below. Two different codes for one event would be
+// distinguishable only by timing.
+const (
+	txTimedOutCode    = "Neo.ClientError.Transaction.TransactionTimedOut"
+	txTimedOutMessage = "the transaction has been terminated because it exceeded its timeout"
+
+	txTerminatedCode    = "Neo.ClientError.Transaction.Terminated"
+	txTerminatedMessage = "the transaction has been terminated by an operator request"
+)
+
+// endTxWithReason is the shared server-initiated-termination teardown: it moves
+// the session to FAILED — which drains any cursor and rolls the transaction back,
+// clearing txActive — clears txDeadline so the serve loop stops tightening the
+// read deadline, and arms reason as the typed FAILURE the client's next
+// request-phase message receives instead of a silent IGNORED (#1784). The armed
+// failure is cleared when delivered (dispatch) or on RESET.
+//
+// The REASON is the caller's, not this function's. Three distinct events end a
+// transaction from the server side — the total bound, the idle bound, and an
+// operator's [Server.TerminateTransaction] — and the serve loop is where they are
+// already told apart, because that is where each one's log line and metric live.
+// Before rmp #2560 this teardown chose the reason itself, so all three told the
+// client the same thing: that it had timed out. Two thirds of the time that was
+// simply false.
+//
+// Called on the session's own goroutine, so it never races the single-threaded
+// session. (task #1346)
+func (s *Session) endTxWithReason(reason *proto.Failure) {
 	s.enterFailed()
 	s.txDeadline = time.Time{}
-	// Server-initiated termination: arm a typed FAILURE for the client's next
-	// request-phase message so it learns the transaction timed out, rather than
-	// silently receiving IGNORED (#1784). Cleared when delivered (dispatch) or
-	// on RESET.
-	s.pendingTermErr = &proto.Failure{
-		Code:    "Neo.ClientError.Transaction.TransactionTimedOut",
-		Message: "the transaction has been terminated because it exceeded its timeout; the writer lock was released",
-	}
+	s.pendingTermErr = reason
+}
+
+// reapTimedOutTx ends an explicit transaction that has exceeded one of its
+// wall-clock bounds while the connection was kept alive (idle, or by no-op
+// pings). The client's next request-phase message is told it timed out.
+//
+// It does NOT increment metricTxTimedOut. That counter is the serve loop's,
+// because only the serve loop knows WHICH bound fired: metricTxTimedOut is
+// documented as counting transactions that exceeded their total lifetime
+// "however busy they were", as distinct from metricTxIdleReaped. Incrementing it
+// here made it a superset of all three termination events, which defeated the
+// separation the idle counter exists to provide (rmp #2175, corrected by #2560).
+func (s *Session) reapTimedOutTx() {
+	s.endTxWithReason(&proto.Failure{Code: txTimedOutCode, Message: txTimedOutMessage})
+}
+
+// terminateTxByOperator ends an explicit transaction because an operator called
+// [Server.TerminateTransaction]. The client's next request-phase message is told
+// exactly that, rather than being told about a timeout that never elapsed.
+func (s *Session) terminateTxByOperator() {
+	s.endTxWithReason(&proto.Failure{Code: txTerminatedCode, Message: txTerminatedMessage})
 }
 
 func (s *Session) enterFailed() {
@@ -2240,4 +2413,29 @@ func dateTimeToPackstream(x expr.DateTimeValue, boltMajor uint8) packstream.Valu
 		return packstream.Struct{Tag: 0x66, Fields: []packstream.Value{localEpochSec, nano, locName}}
 	}
 	return packstream.Struct{Tag: 0x46, Fields: []packstream.Value{localEpochSec, nano, int64(offsetSec)}}
+}
+
+// The two access-mode tokens the Bolt BEGIN `mode` extra accepts. They are named
+// rather than spelled inline so the accepted spelling lives in one place; rmp
+// #2564 was reachable partly because the comparison and the default were written
+// as separate literals.
+const (
+	boltAccessModeRead  = "r"
+	boltAccessModeWrite = "w"
+)
+
+// unsupportedAccessModeMessage renders the refusal for a BEGIN whose `mode` extra
+// the server does not recognise.
+//
+// It NAMES the offending value, so a client can fix its own request without
+// guessing, and includes the Go type for a non-string because a driver sending
+// an integer 0 would otherwise read the message as being about the string "0".
+// The value is the client's own input, so echoing it discloses nothing internal.
+func unsupportedAccessModeMessage(v any) string {
+	if s, ok := v.(string); ok {
+		return fmt.Sprintf("unsupported access mode %q: the BEGIN `mode` extra accepts only %q or %q",
+			s, boltAccessModeRead, boltAccessModeWrite)
+	}
+	return fmt.Sprintf("unsupported access mode of type %T: the BEGIN `mode` extra accepts only "+
+		"the strings %q or %q", v, boltAccessModeRead, boltAccessModeWrite)
 }

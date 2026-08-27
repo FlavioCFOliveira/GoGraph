@@ -745,7 +745,7 @@ func identicalError(a, b error) bool {
 func checkDBTeardownNonVacuity(e *DBTeardownEvidence) []Violation {
 	var v []Violation
 	add := func(msg string) {
-		v = append(v, Violation{Kind: ViolationOracleDeviation, Op: "<db-teardown non-vacuity>", Message: msg + " — " + e.String()})
+		v = append(v, Violation{Kind: ViolationVacuousRun, Op: "<db-teardown non-vacuity>", Message: msg + " — " + e.String()})
 	}
 	if e.AckedCommits == 0 {
 		add("no commit was acknowledged before the teardown: acked-implies-recoverable is satisfied by the empty set")
