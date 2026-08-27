@@ -26,6 +26,9 @@ package exec
 // PlanChildren reports the operator whose rows it searches paths from.
 func (op *AllShortestPaths) PlanChildren() []Operator { return []Operator{op.input} }
 
+// PlanChildren reports the input whose rows it counts.
+func (op *CountRows) PlanChildren() []Operator { return []Operator{op.child} }
+
 // PlanChildren reports the input whose rows it creates a node for.
 func (op *CreateNode) PlanChildren() []Operator { return []Operator{op.child} }
 
@@ -75,8 +78,6 @@ func (op *MergeRelationship) PlanChildren() []Operator { return []Operator{op.ch
 func (op *ProcedureCallOp) PlanChildren() []Operator { return []Operator{op.child} }
 
 // PlanChildren reports the input it projects.
-func (op *CountRows) PlanChildren() []Operator { return []Operator{op.child} }
-
 func (op *Project) PlanChildren() []Operator { return []Operator{op.child} }
 
 // PlanChildren reports the input whose rows name the nodes it relabels.

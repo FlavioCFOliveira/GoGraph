@@ -56,7 +56,7 @@ func scalarOf(t *testing.T, e *Engine, q string) string {
 	}
 	var out []string
 	for res.Next() {
-		out = append(out, fmt.Sprint(res.ValueAt(0)))
+		out = append(out, res.ValueAt(0).String())
 	}
 	if err := res.Err(); err != nil {
 		t.Fatalf("Err %q: %v", q, err)
