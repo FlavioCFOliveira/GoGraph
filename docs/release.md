@@ -284,7 +284,7 @@ instead of being emitted once per archive.
 Local fallback to generate the SBOM against the current checkout:
 
 ```bash
-go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.10.0
+go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.12.0
 cyclonedx-gomod mod -licenses -json -output gograph.cdx.json
 ```
 

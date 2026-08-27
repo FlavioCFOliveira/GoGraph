@@ -4861,7 +4861,7 @@ The coverage work exercised the engine against these scenarios and found:
     saturating silently drops the top id and refusing changes the public surface.
     The dependency's own source settles that a split is required rather than
     avoidable — roaring64's `AddRange`/`RemoveRange` are half-open over `uint64`
-    with no closed variant (`roaring/v2@v2.18.2/roaring64/roaring64.go:1054,1079`),
+    with no closed variant (`roaring/v2@v2.26.0/roaring64/roaring64.go:1054,1079`),
     while the 32-bit sibling escapes the same problem only by widening its bound to
     `uint64` so it can name `MaxUint32+1` (`roaring.go:1958`); at 64 bits no wider
     type exists, so the top element is handled separately. Both directions now

@@ -66,7 +66,7 @@ checksum:
 # module graph does not vary by OS/arch.
 #
 # cyclonedx-gomod must be installed before goreleaser is invoked,
-# pinned to an exact released version (currently v1.10.0) so the SBOM
+# pinned to an exact released version (currently v1.12.0) so the SBOM
 # generator cannot be silently swapped by a poisoned upstream release;
 # see docs/release.md and .github/workflows/release.yml. This pin — like
 # the GitHub Actions SHA pins in the workflows — is maintained MANUALLY
