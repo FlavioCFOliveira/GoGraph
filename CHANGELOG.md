@@ -6,6 +6,1322 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-08-27
+
+**192 commits** — 87 fixes, 51 features, 25 documentation, 18 test, 4 performance,
+1 style, 1 chore, 1 build change, and 4 merges. **Six sprints delivered work in this
+window — 345–350 — and 176 tasks closed.**
+
+Three things define the release, and none of them is a new capability in the engine.
+
+**A deterministic-simulation-testing campaign drove every published surface.**
+Sprints 345–349 (110 tasks) took the DST harness in `internal/sim` from a
+graph-and-storage exerciser to one that drives MVCC under true concurrency, the full
+Cypher language surface, the storage/durability/MVCC substrate, the Bolt wire, and the
+graph API, search and bulk-load surfaces. **50 of the release's 51 `feat` commits are
+`feat(sim)`**, and `internal/sim` accounts for **127 267 of the 168 208 changed lines
+(75.7 %)**. This is test infrastructure, not module functionality — the module's own
+production code accounts for **8 564 lines across 93 files (5.1 %)**. What the campaign
+delivers to a user is the defects it found: **26 module defects across those five
+sprints, and 50 across the release once sprint 350's 24 are added.** Five of the
+severity-9 ones were *silent* — wrong or lost data with no error anywhere.
+
+**And the crash model was repaired before it was trusted.** The most consequential
+result of the campaign is not a scenario but a control: until #2535, `SimDisk`
+retained unsynced file data across a simulated host crash, so **the battery could not
+fail an engine that stopped calling `fsync` at all.** With a durable-length watermark
+in place, deleting the WAL commit fsync now fails loudly —
+`checkpoint-crash-storm` reports **192 violations at seed 610621185, losing exactly
+half of 384 acknowledged commits, and 33 top-level tests fail**, where before the
+change it failed nothing. Every durability claim this release makes about the
+simulator rests on that.
+
+**The bug backlog was emptied.** Sprint 350 (66 tasks) resolved every known bug,
+re-validating each premise at HEAD before working it. Of the 66: **26 landed a fix in
+product code** (24 in the module, 2 in `examples/26_social_scale_bench`), **7 premises
+did not hold at HEAD** and are recorded below as refuted or obsolete rather than
+reported as fixes, and **33 changed only tests, the simulator, the gates, benchmarks or
+documentation**. No `BUG`-type task remains in the backlog.
+
+**Nothing breaks.** No commit carries a `!` marker or a `BREAKING CHANGE` footer, and
+an audit of `git diff v0.11.0..HEAD` across the whole tree found **no exported
+identifier removed, no exported signature changed, and no exported struct field
+dropped**. **51 exported identifiers were added** across 15 packages, which is what
+makes this a pre-1.0 **MINOR** release under [docs/semver.md](docs/semver.md).
+`go.sum` is **byte-identical** to `v0.11.0`, so no dependency moved; the only `go.mod`
+change is the pinned `toolchain` directive, `go1.26.5` → `go1.27.0` (see *Changed*).
+
+The openCypher TCK gate is unchanged at **3897/3897** — 100 % execution-level
+compliance is preserved, not extended. No `.feature` file changed in this window, so
+the scenario population is the same one `v0.11.0` was measured against.
+
+**Read [`release-notes/v0.12.0.md`](release-notes/v0.12.0.md) before upgrading.** There
+are **no migration steps**, but a dozen observable behaviours changed and are listed
+there.
+
+### Added
+
+#### Deterministic simulation testing — the campaign that found the defects
+
+- **MVCC under true concurrency** (sprint 345). A deterministic multi-session mode
+  (`RunMVCCSessions`) over the durable store, per-transaction MVCC workspaces over the
+  graph oracle, MVCC isolation checkers for snapshot stability, read-your-own-writes
+  and atomic visibility (rmp #2436), a lost-update and write-conflict adjudication
+  scenario (#2437), crash and recovery with open MVCC transactions (#2438),
+  concurrent-mode transactional roles with typed conflict accounting (#2439),
+  during-run isolation oracles (#2440), and a production-profile scenario with crash
+  cycles and transaction-granular durability (#2441).
+- **The full Cypher language surface** (sprint 346). Access-path parity and
+  plan-stability oracles via `Explain` (#2447); a per-tick `QueryCounters` oracle over
+  the drained result (#2448); relationship `SET`/`REMOVE`/`DELETE` over parallel-edge
+  instances (#2449); result-verified range, prefix and `IN` seeks in both spellings
+  (#2450); pattern shapes unlocking the join/intersect planner family (#2451); grouped
+  aggregation, `DISTINCT`, `UNION` and exact aggregate oracles (#2452); a
+  null-semantics scenario that makes the three-valued-logic probes non-tautological
+  (#2453); `FOREACH` write-path equivalence by oracle expansion (#2454); schema
+  introspection and full constraint-kind adjudication (#2455); the statistics-planning
+  regime through `db.stats.refresh` (#2456); temporal values stored, recovered and read
+  back as temporals (#2457); entity-valued and pure-function probes (#2458);
+  list-property predicates and entity map projection (#2459); ordering, pagination and
+  multi-part query structure (#2460); the `MERGE` surface with its semantics pinned as
+  measured (#2461); the `DELETE` contract, notifications, `YIELD` filter and the wire
+  parameter matrix (#2462); and the variable-length path surface, oracle-computed
+  (#2463).
+- **Storage, durability and the MVCC substrate** (sprint 347). DDL across the
+  checkpoint and snapshot boundary (#2464); a crash inside the checkpoint publish
+  window (#2465); bulk-import publish parity with its uncovered faults documented
+  (#2466); a snapshot component-corruption fail-stop battery (#2467); typed values and
+  edge properties through the snapshot codec (#2468); MVCC clock and sequence recovery
+  across a snapshot boundary (#2469); MVCC substrate telemetry read and adjudicated
+  (#2470); group-commit coalescing and its fail-all path (#2471); WAL writer surface
+  oracles with a constructed contiguity control (#2472); a key and weight codec matrix
+  across crash and upgrade (#2473); transaction-size cap sentinels with the refusal
+  proven inert (#2474); `store.DB` teardown under a cancelled context and concurrent
+  closers (#2475); the checkpointer cadence on a fake clock (#2476); cross-release
+  compatibility beyond the WAL (#2477); a `csrfile` access-pattern and weight-kind
+  matrix with the alignment gate probed (#2478); required counters per fault scenario
+  (#2479); and the `graph/io` codec surface with cap provocation and reproducibility
+  oracles (#2480).
+- **The Bolt wire surface** (sprint 348). The authentication surface with the WAL as
+  witness (#2481); the transaction registry on a fake clock (#2482);
+  `Server.Shutdown`'s drain and `Closer` ordering (#2483); streaming semantics —
+  paging, `DISCARD` and the `qid` contract (#2484); `BEGIN` extras — bookmarks,
+  `tx_timeout`, metadata, mode, `db` and `ROUTE` (#2485); the protocol version matrix
+  with 4.4, 5.0 and 5.x side by side (#2486); and the aggregate inbound-decode budget
+  with its two distinct nesting caps (#2487).
+- **The graph API, search and bulk-load surfaces** (sprint 349). The bulk loader's full
+  contract against an independent model (#2488); every public context-accepting
+  `search` entry point under cancellation (#2489); index contents across the snapshot
+  boundary (#2490); the lock-free CSR publisher's refcount lifecycle (#2491);
+  `graph/query` as a differential read path against Cypher and an independent oracle
+  (#2492); the typed schema as a runtime enforcement hook (#2493); the count store held
+  to a model across recovery (#2494); the stateful `PageRanker`'s two published claims
+  (#2495); the label index's scoped and range surface against a naive model (#2496);
+  and min-cost flow's negative-cost regime with the hoisted-reverse Dijkstra (#2497).
+- **The `SimDisk` crash model was overhauled for fidelity** (#2514, #2535, #2536,
+  #2537, #2538, #2547), after an audit recorded in
+  [`docs/audits/simdisk-crash-model-fidelity-2026-08-18.md`](docs/audits/simdisk-crash-model-fidelity-2026-08-18.md)
+  with **15 findings, 12 of them filed as tasks**. A rename undo log with
+  durable-prefix semantics; a **`durableLen` watermark, so unsynced file data is now
+  discarded on a host crash**; `CrashHost` and `CrashProcess` split apart; unlink
+  modelled as a non-durable directory mutation; a `DirSync` fault arm; and ghost
+  directory entries pruned. The watermark's own cost was measured against the
+  alternative: **+0.00 % bytes and allocations per operation**, against +97.64 % time
+  and +99.94 % bytes for a full clone. The whole catalogue passes under `SOAK_FULL=1`
+  with **36 of 36 scenarios and zero skips**.
+- **Scenario-scoped required counters** (#2479): every fault scenario declares the
+  counters its faults must move, so a fault that silently stopped firing fails the run
+  instead of passing it.
+- **A `VACUOUS_RUN` violation family** (#2614), so a run that never exercised its
+  subject is reported as having proved nothing rather than as an `ORACLE_DEVIATION`.
+  About 178 of 818 emitter lines migrated; `checkCheckpointStormNonVacuity` had to be
+  **split**, because migrating it wholesale would have relabelled a real snapshot loss
+  as "the run proved nothing".
+- **Cross-release coverage now reaches the snapshot directory** (#2477, #2531). The
+  harness previously imported only the WAL, recovery and transaction packages, so a
+  prior release's snapshot directory had never been opened by current code. The tag
+  list grows from two to four — `v0.1.0` as the oldest artefact in existence, `v0.2.0`
+  and `v0.3.0` as the bracket around the WAL-replay gap, and `v0.11.0` because it is
+  the release users actually upgrade *from*. All four publish a manifest-v3 snapshot
+  that current code opens snapshot-only, with 52 labels and 65 properties arriving from
+  the image, at a cost of 46 s across three arms. The forced WAL-only arm is a
+  **required** arm, not a control: publishing a checkpoint truncates the WAL
+  (`walOps` 682 → 0), so the specified fix alone would have moved the prior-release
+  WAL-replay path out of coverage entirely.
+
+#### Public API — every addition is additive
+
+- **`store/recovery` now builds the transactional store it recovered** (#2522):
+  `Result.NewStore`, `Result.NewStoreCapped`, binding the recovered graph and the
+  derived sequence to a caller-supplied WAL writer. `recovery.Options` is unchanged, so
+  every existing caller compiles untouched.
+- **`store/recovery` surfaces the snapshot index payloads** (#2490):
+  `Result.IndexPayloadFor`, `Result.WALSuffixTouchesNodeIndex`, `IndexPayload`, and the
+  sentinels `ErrIndexPayloadNotFound`, `ErrIndexPayloadStale`,
+  `ErrIndexPayloadUnreadable`. On the `cypher` side, `IndexPayloadSource`,
+  `RecoveredIndexPopulation`, `Engine.RecoveredIndexPopulation` and
+  `NewEngineWithStoreAndRecovery`.
+- **Weight codecs reach every durable path** (#2526, #2529):
+  `store/checkpoint.WithWeightCodec`, `store/bulkimport.PublishWithWeightCodec`,
+  `store/snapshot.CaptureGraphWithWeightCodec`, `ApplyCSRToGraphWithWeightCodec`,
+  `WriteCSRWithWeightCodec`, `WriteSnapshotFullWithWeightCodecCtx`,
+  `CSRReadback.CodecWeights`, and the sentinels `snapshot.ErrWeightNotPersistable` and
+  `snapshot.ErrWeightCodecRequired`.
+- **New typed errors** where an untyped or misattributed one used to escape:
+  `cypher.ErrParamNestedTooDeep` (#2570), `graph.ErrMapperKeyNotPortable` (#2528),
+  `store/csrfile.ErrPublishedNotDurable` (#2581),
+  `bolt/server.ErrCertOutsideValidity` (#2557). `cypher.ErrSerializationConflict` is
+  re-exported from `graph/mvcc` so a caller need not import the substrate to test for a
+  retriable conflict.
+- **`graph/lpg.Graph.ValidateProperty`** (#2602) and the three pre-validated buffering
+  entry points `store/txn.Tx.SetNodePropertyPreValidated`,
+  `SetEdgePropertyPreValidated` and `SetEdgePropertyByHandlePreValidated`, for the one
+  caller that has already validated the same value against the same graph.
+- **`cypher/exec.CountRows`** with `NewCountRows` and the `Operator` methods (#2625);
+  `cypher/exec.Merge.WithLeadingClause`, `Merge.WithOuterRelCols`,
+  `MergePattern.WithLeadingClause`, `MergePattern.WithOuterRelCols` and
+  `MergePattern.WithSchema` (#2510, #2511, #2512).
+- **`cypher/ir.NameSubqueryAnonymousEntities`**, `ir.UserNamed`, `ir.IsSyntheticVar`
+  and `cypher/ast.SyntheticSubqueryVarPrefix` (#2508).
+- **`cypher.Engine.CountSnapshot`** (#2494), so the count store can be held to a model
+  across recovery; **`graph/index.NodeSet.CanonicalBitmap`** (#2609);
+  **`bolt/server.CertReloader.SetClock`** (#2557) and `Server.SetClock`.
+
+#### On-disk formats — additive, with no version step
+
+- **The snapshot manifest carries a CRC32C framing trailer** (#2520): sixteen bytes of
+  magic, algorithm and CRC32C over every preceding byte, exposed as
+  `snapshot.IntegrityCRC32CTrailer`. `ManifestVersion` stays **3**: old snapshots still
+  open, and an old decoder stops at the closing brace and never reads the trailer, which
+  is precisely why this shipped without a version step.
+- **The manifest gains `indexes_commit_ts`** (#2490), the bounding instant that lets
+  recovery prove an index payload is not stale. Written only on the quiesced
+  checkpointer path, so every snapshot that already exists is never hydrated.
+- **`csrfile` gains wire values 5 and 6** for the 1- and 2-byte weight kinds (#2529).
+  Backward compatible in both directions that matter: 0–4 keep their meaning so every
+  earlier file reads unchanged, and an earlier reader meeting a 5 or 6 refuses it with
+  `ErrUnknownWeightKind` rather than misreading it. `CurrentVersion` stays **1**.
+
+#### Gates and tooling
+
+- **The per-package short-layer cost budget is now enforced** on `make ci` (#2599,
+  #2577). `HARD_BUDGET` defaulted to 0 — which the script documents as disabled — and
+  the only target that ran the script was absent from `ci`, so `internal/sim` drifted
+  from 818 tests / 460.9 s to 974 tests / 570.1 s in five days, unremarked.
+  `test-short` now pipes through `scripts/pkg_time_budget.sh`, so one run yields both
+  outcomes. The global 240 s ceiling is **not** relaxed; two named overrides are derived
+  by one stated rule — worst in-suite figure ever recorded × 1.25, rounded up to the
+  minute: `internal/sim` 602.9 s → 780, `cypher` 276.4 s → 360.
+- **`SHORT_TIMEOUT ?= 30m`** (#2584). The `-race` pass was the only whole-suite run in
+  `make ci` without an explicit `-timeout`, so it relied on Go's 600 s default and died
+  twice on machine load rather than on code, with `internal/sim` at 600.705 s and
+  601.675 s. The value is a backstop against a genuinely hung package, at 3.05× the
+  slowest package that completed.
+- **`testlayers.RequireQuietMachine`** and a serial `make test-timing` phase (#2517),
+  since retired for the three gates that no longer need it (see *Changed*).
+- **A standing power control beside each timing gate** — a workload that models the
+  defect and must make the gate fire, because the pre-fix build cannot be rebuilt and a
+  gate that has quietly lost its power reads exactly like one that is passing
+  (#2571, #2572, #2574, #2589).
+
+### Changed
+
+#### Behaviour a caller can observe
+
+- **`UNION` inside an `EXISTS { }` or `COUNT { }` subquery body is now refused**
+  (#2615). It previously parsed cleanly and the second branch was **silently dropped**:
+  measured on a node with a `:W` edge and no `:Z` edge,
+  `EXISTS { MATCH (x)-[:Z]->() RETURN 1 UNION MATCH (x)-[:W]->() RETURN 1 }` returned
+  `false` where the second branch matches. Refusing rather than supporting was decided
+  with the user, and the divergence is stated rather than hidden: **both reference
+  engines answer this query**, read from their grammar source — Neo4j's
+  `existsExpression`/`countExpression` admit `regularQuery`
+  (`Cypher5Parser.g4:33-35, 671-677`) and Memgraph's `existsSubquery`/`countSubquery`
+  admit `cypherQuery` carrying `cypherUnion` (`Cypher.g4:73-81, 317-323`). The
+  openCypher 9 TCK does not cover subquery expressions at all — zero occurrences of
+  `EXISTS {` or `COUNT {` across every feature file — so neither choice can move the
+  conformance count. Support is filed as #2627.
+- **Relationship-variable uniqueness is scoped to the clause, not to one path pattern**
+  (#2252). `MATCH (a)-[r]->(b), (b)-[r]->(a)` was accepted and returned one row with
+  count 0; it is now refused with `SyntaxError.RelationshipUniquenessViolation`, as the
+  equivalent single-pattern spelling always was. `OPTIONAL MATCH`, `CREATE` and an
+  `EXISTS` subquery pattern inherit the clause scope. Reuse *across* clauses stays
+  legal. The error text moves from "cannot be used twice in the same path pattern" to
+  "in the same clause".
+- **An unrecognised Bolt `BEGIN` access mode is refused** (#2564) with
+  `Neo.ClientError.Request.Invalid`, in a message naming the offending value and, for a
+  non-string, its Go type. `"R"`, `"read"` and a non-string previously fell through to
+  the write default, so a client that asked for read-only silently received write
+  authority. The two canonical spellings and the absent key behave exactly as before.
+- **A failed Bolt `LOGON` terminates the connection, whichever branch it took**
+  (#2556). See *Security*.
+- **Bolt status codes changed on three paths.** A per-principal quota refusal now
+  answers `Neo.TransientError.Transaction.MaximumTransactionLimitReached` and leaves the
+  session `READY` (#2561) — the previous `Neo.ClientError.General.LimitExceeded` does
+  not appear in Neo4j's status codes at all, and its `ClientError` class instructs a
+  driver **not** to retry, which is the opposite of what a self-freeing cap wants. An
+  operator-initiated termination now answers
+  `Neo.ClientError.Transaction.Terminated` (#2560) instead of
+  `TransactionTimedOut`. An over-nested parameter now answers
+  `Neo.ClientError.Statement.ArgumentError` (#2570) instead of
+  `Neo.DatabaseError.General.UnknownError`.
+- **`metricTxTimedOut` counts the total-lifetime bound alone** (#2560). It was
+  incremented unconditionally by the shared teardown, so an idle reap and an operator
+  termination were each also counted as a timeout, making the counter a superset of all
+  three events and defeating `metricTxIdleReaped`'s own godoc. Measured on the unfixed
+  build: `tx.terminated=1` **and** `tx.timedout=1` for one termination. The three are
+  now disjoint.
+- **A Cypher list crossing the Bolt wire is a PackStream List** (#2513). Every list
+  previously reached clients as a **String**: `collect()`, `labels()`, `keys()`,
+  `nodes(p)`, `relationships(p)`, list literals and list-valued properties were all
+  affected, and `nodes(p)` additionally lost every node structure. Parameter binding was
+  never at fault. A client that parsed the stringified form must stop.
+- **An autocommit statement's terminal `SUCCESS` carries a fresh bookmark, and a
+  statement inside an explicit transaction carries none** (#2563). It previously carried
+  whatever `s.bookmark` held: empty on a session that had never committed explicitly,
+  and the **prior** explicit `COMMIT`'s token verbatim on one that had — so a driver
+  chaining a causally-consistent read was pinned to a strictly older transaction than
+  the one it had just run. The Bolt specification puts the bookmark on the `COMMIT`
+  `SUCCESS` and qualifies the stream's terminal one as "(Autocommit Transaction only)".
+- **A schema validator refuses at buffer time, not after the fsync** (#2602). A
+  `store/txn` write of a value the installed validator rejects now fails in
+  `Tx.SetNodeProperty` / `SetEdgeProperty` / `SetEdgePropertyByHandle` rather than
+  reaching `Commit` and returning `ErrCommittedNotApplied`. An installed validator is
+  therefore a durability gate on both write paths, which
+  `graph/lpg/validator.go` now records. A log written by an older build is outside that
+  guarantee.
+- **A snapshot write fails rather than publishing a weightless image** (#2526). A graph
+  whose weights the codec cannot encode now returns
+  `snapshot.ErrWeightNotPersistable` before the header is written, so the checkpoint
+  returns before the WAL-prefix truncation and the one surviving copy is never
+  destroyed. Reads are symmetric: a missing codec refuses rather than applying zeros
+  over weights that are on disk.
+- **`csrfile` accepts the weight kinds it advertises** (#2529). `int`, `uint` and
+  `uintptr` move from an untyped `binary.Write: some values are not fixed-sized` leaking
+  from a dependency to persisting; `int8`, `uint8`, `bool`, `int16` and `uint16` move
+  from `unknown weight kind` to persisting; an unsupported type is refused with a typed
+  error that names it (`csrfile: unknown weight kind: string`). **Platform-dependent
+  widths are accepted deliberately**, on the user's decision: `int`, `uint` and
+  `uintptr` persist at 8 bytes to match `store/snapshot`, so such a file written on a
+  64-bit build would be misread by a 32-bit one. A caller needing a file that crosses
+  word sizes should use an explicitly-sized weight type.
+- **Six `search` entry points now honour a cancelled context** where they previously ran
+  to completion (#2593). A caller that relied on the old behaviour will start seeing
+  context errors. See *Fixed*.
+- **`graph/query` orders and compares integers and floats in one numeric order**
+  (#2600, #2601). `WithRange` with `Float64Value` bounds now matches an
+  `Int64Value` property, and `WithProperty("age", Float64Value(5))` now matches a node
+  whose `age` is `Int64Value(5)`. A query that previously returned nothing returns
+  matches. The comparison is **exact, not a promotion**:
+  `4611686018427387905` and `4611686018427387900` stay distinct, because both round to
+  the same `float64` at 2⁶². The identity between an equality and a degenerate range is
+  scoped to the **orderable** kinds — openCypher's equatability is wider than its
+  comparability, so `BOOLEAN`, `BYTES` and `TIME` are equal to themselves while no range
+  over them holds. **One contract widens:** a bound `float64`-keyed btree covering a
+  `(label, property)` pair must now key every numeric value of that property, integers
+  included. The engine's companion satisfies it by construction; a hand-built
+  float-only index would under-return.
+- **`Mapper.LoadFrom` names an unportable key type** (#2528). A restore that fails
+  because a key contains a pointer, `unsafe.Pointer` or channel now reports
+  `ErrMapperKeyNotPortable` wrapped inside `ErrMapperEntryCorrupted`, naming the
+  offending field path (`key.P`, `key.Inner.P`, `key.A[0]`). It inspects the **value**,
+  not only the static type, because an interface field's dynamic type is what decides.
+  A portable key with a genuinely wrong recorded shard is still reported as corruption.
+- **A `csrfile` publish failure after the rename is distinguishable** (#2581).
+  Behaviour is unchanged; what changes is that the caller can tell the two apart.
+  `ErrPublishedNotDurable` wraps the parent-directory fsync error at the one site that
+  fails after the rename, and both godocs name the two sound responses (retry the
+  fsync, or fail the process) and the unsound one (treat it as "not published").
+- **Recovery may hydrate an index from the snapshot payload instead of rebuilding it**
+  (#2490). Hydration requires a self-sufficient snapshot, a CRC-valid payload, and no
+  newer WAL-suffix write to that index's label and property; otherwise the index is
+  backfilled exactly as before. A corrupt payload falls back to a rebuild per index
+  rather than fail-stopping, because an index is derived state over an
+  already-integrity-checked graph.
+
+#### Query plans — result-identical, cost changed
+
+- **The parallel scan adopts the min-cardinality label anchor instead of pre-empting
+  it** (#2431), closing the regression `v0.11.0` shipped as open. See *Performance*.
+- **The range-seek population floor moves 1024 → 64** (#2367), set from measurement.
+  A floor is **kept** rather than removed, because below it no count can change the
+  verdict and `rangeSeekBudget` therefore refuses to take one — the same "a gate must
+  cost less than the decision it informs" rule #2380 and #2392 imposed on the
+  parallel-scan gate.
+- **The single-edge anchor-swap peephole declines any site whose endpoint name is
+  empty** (#2603). This is the correctness fix for the anonymous-head wrong answer, and
+  its cost is large and is stated in *Performance* rather than minimised. #2604 is filed
+  to recover the optimisation properly.
+- **A group-by-less, non-`DISTINCT` `count(*)` counts the child's rows** through the new
+  `exec.CountRows` (#2625) instead of materialising one single-column row per input row
+  to carry a constant. It is tried **after** every existing count pushdown, because
+  those answer in `O(1)` from a maintained counter while this still visits every row —
+  it only stops *building* rows nobody reads. `count(v)` is excluded deliberately: it
+  counts non-null bindings, so its argument must still be evaluated per row.
+
+#### Documentation corrected against the code
+
+- **`docs/release.md` no longer claims two security controls the project does not have.**
+  Its branch- and tag-protection policy asserted, as fact, that release tags are
+  `git tag -s` signed and that signed commits are required. **Neither is in force:** no
+  signing key is configured on the release workstation, `v0.10.0` and `v0.11.0` are
+  unsigned annotated tags, and `git log --pretty=%G?` reports `N` for every commit in this
+  window. Both are now stated as **intended controls that are not yet enforced**, with what
+  adopting them would require, because a security document asserting a control it lacks is
+  worse than one that admits the gap. The stale `toolchain go1.26.3` claim on the same page
+  is corrected to `go1.27.0`.
+
+- **PageRank's L1 delta is not deterministic across worker counts** (#2605). The godoc
+  claimed it was, on the reasoning that per-worker partials are reduced in fixed
+  worker-id order — which makes the reduction deterministic *for a given count*, while
+  the *number* of partials changes with the count and floating-point addition is not
+  associative. Reproduced at HEAD on a fresh 100 000-element fixture: reducing identical
+  values over 1, 2, 3, 4, 8 and 10 partitions gave **six distinct results, up to 58 ULP
+  apart**. A third over-claim was found while correcting the first — the Parallelism
+  summary asserted the result is bit-for-bit identical regardless of `GOMAXPROCS`, which
+  inherits the same caveat because the delta drives the convergence test and therefore
+  the iteration count. Measurement does not contradict it — **17 280 serial-versus-
+  parallel comparisons across 40 seeds, 4 dampings, 9 tolerances and 12 worker counts
+  produced zero divergences**, as did a 400-seed sweep — but an absolute statement
+  resting on a probabilistic argument is now stated as empirical. The reduction is
+  untouched; callers needing bit-reproducible scores across differing worker counts are
+  told to pin `GOMAXPROCS`.
+- **The `csrfile` crash-durability claim is scoped to where the barrier exists**
+  (#2582). `WriteToFile` asserted unconditionally that a nil return means the published
+  file survives process crash, host crash and `kill -9`; outside the unix build set
+  `parentDirFsync` is an unconditional no-op. The contents are fsynced before the rename
+  on every platform, and the rename's directory **entry** is made durable on
+  linux/darwin/freebsd/netbsd/openbsd. **No claim is made about the other platforms**,
+  which is the point rather than an omission — the mirror `parent_fsync_other.go`
+  asserted *positively* that on Windows the dirent becomes durable once the filesystem
+  commits its log, citing LMDB, SQLite and RocksDB; that is the same unmeasured
+  inference with its sign flipped and it is removed.
+- **`Graph.EnableLabelDeltas` and `EnablePropDeltas` are no-ops on a graph from `New`**
+  (#2623). Their godoc said the mechanism is "inert unless `EnableLabelDeltas` has been
+  called"; `Graph.armMVCC` sets the flags and runs by default.
+- **`docs/test-layers.md`** lost three false claims (#2566) — the pipeline did not
+  invoke the budget gate, `HARD_BUDGET` defaults to 0, and the override variable is set
+  nowhere — and now states the measured short-layer budget in one owning place (#2585),
+  with a regression test that fails if the owner stops carrying the figures. The rule
+  that produced a whole family of gate defects — "assert on process CPU time, it is
+  load-invariant" — is corrected: CPU time was measured at **2.90× under `make ci`
+  against 0.94× solo**, because contention charges real CPU through scheduler, cache and
+  TLB pressure.
+- **`docs/dst.md` and `docs/dst-feature-coverage.md` were re-measured, not asserted**
+  (#2498). Simulator-driven whole-module coverage moved **54.5 % → 71.4 %** raw, but
+  `-coverpkg=./...` includes `internal/sim` itself and the harness grew from 8 619 to
+  30 726 statements while sitting at ~84 % covered, so the number that answers the
+  sprint's question is the one over the **product surface on a near-stable denominator**
+  (60 246 → 61 405 statements): **50.7 % → 65.1 %, +14.4 pp**. Both
+  acceptance-criteria packages came off zero — `graph/lpg/schema` 0.0 % → 61.0 % and
+  `graph/index/stats` 0.0 % → 56.2 %. The baseline run reproduced the inherited 54.5 %
+  exactly, which is what makes the delta trustworthy.
+
+#### Gates — the instrument changed, the threshold did not
+
+- **The pinned toolchain moves `go1.26.5` → `go1.27.0`** in `go.mod`. Only the
+  `toolchain` directive changed; the `go` directive stays at **`go 1.26`**, so no new
+  language feature is adopted and the pre-1.0 semver-MAJOR consideration the `go`
+  directive triggers does not arise. `go.sum` is untouched and `go mod tidy` leaves the
+  tree clean, so no direct or indirect dependency required a newer minor. The whole
+  correctness gate for this release — `go test -race ./...`, the TCK baseline, lint and
+  the coverage gate — was run under `go1.27.0`, which is also what
+  [`docs/benchmarks/v0.12.0.md`](docs/benchmarks/v0.12.0.md) was measured on. **The
+  consequence for comparison is stated there rather than glossed:** `v0.11.0` was
+  measured on `go1.26.5`, so a cross-release benchmark delta mixes a compiler change
+  with GoGraph's own, and none is attributed to the module on that basis.
+
+- **The delete-degradation gates measure process CPU time, then allocation volume**
+  (#2571, #2589). The wall-clock form made `make ci` red on a flat engine at 3.25× with
+  the last cycle *dipping* (2.376 s → 2.074 s), a load shape no algorithmic regression
+  can produce: a ratio cancels *constant* load, not load that changes during the run,
+  which is exactly what `make ci` does as sibling packages start and finish. The final
+  instrument is allocation volume, whose power against the actual defect was
+  *established* rather than assumed — flat workload 0.87×, degrading workload 8.66×, a
+  10× separation with the unchanged 2.5× threshold between them. `RequireQuietMachine`
+  is consequently **removed** from all three gates, which return to asserting in
+  `test-short` on every push.
+- **The hub-scaling gate measures allocation volume** (#2572), which is also the
+  faithful instrument: the defect it catches is exact-fit reallocation, whose signature
+  is copy volume. The prescribed process-CPU remedy was refuted by measurement. The
+  threshold is unchanged at 40; measured ratio 11.17/11.15/11.15 over three reps, a
+  0.2 % spread, and 12 of 12 runs pass under 300 named spinners against 6 of 12 failures
+  for the old instrument.
+- **The MVCC gate asserts an ordering, not a duration** (#2574). Widening the margin was
+  *impossible*, not merely inadequate: `holderTenure` is 500 ms and a 60× ceiling of
+  601 ms exceeds it, so a caller that blocked for the holder's whole tenure — the #2174
+  defect, a 232× overrun reported as `err=nil` — would have **passed**. The property was
+  never "returned inside 105 ms"; it is "abandoned the wait rather than blocking for the
+  tenure", which is an ordering fact with no margin to tune.
+- **The openCypher TCK gate no longer reports a slow host as a conformance loss**
+  (#2568). A scenario exceeding the 10 s `queryTimeout` stored
+  `context.DeadlineExceeded` and lowered the count `tckExecutionBaseline` gates on — the
+  most serious false signal this project can emit. The discriminator is **not elapsed
+  time**, because no duration separates a slow host from a hung engine; it is whether
+  the engine **honoured cancellation**. A prompt `DeadlineExceeded` is `INCONCLUSIVE`
+  and is not scored as a conformance failure; a `RunAny` that does not return within
+  `queryWedgeGrace` is `WEDGED` and is never credited. `queryTimeout` is unchanged at
+  10 s. The credit is bounded to scenarios the harness recorded as timing out, every one
+  is rendered, and it cannot excuse a real shortfall.
+- **`internal/tmphygiene` requires exact registration for coverage and keeps containment
+  for attribution** (#2586). None of the 33 call sites was passing only by nesting, so
+  the defect was latent.
+- **`scripts/cover_gate.sh` reclaims its temporaries when cancelled** (#2549). The filed
+  premise was refuted by measurement — bash *does* run the `EXIT` trap on
+  `SIGTERM`/`SIGHUP` when blocked in `wait`; the real cause was `go test` running in the
+  **foreground**, where the trap is deferred until the command finishes and the harness
+  `SIGKILL` arrives first. Reclaiming the stranded 248 840 121-byte file took the tree
+  from 2.4 GB to 791 MB.
+
+### Removed
+
+- **No exported identifier.** The public API is a strict superset of `v0.11.0`'s.
+- Two tests proven to have no failure path at all (#2617):
+  `cypher.TestUsingIndexHint_NotImplemented`, a bare `t.Skip` whose divergence is
+  already recorded in [`docs/tck/DIVERGENCES.md`](docs/tck/DIVERGENCES.md), and
+  `internal/goldens.TestUpdateRequested_EnvVar_Unset`, which discarded its result and
+  leaked an `os.Unsetenv` into its siblings. **Gate time saved: zero measurable** — the
+  premise that the full gate is slow through accumulated vacuous tests is not supported,
+  and mechanical vacuity detection is declared untrustworthy: a naive scan flagged 652
+  candidates and per-candidate verification left 2, so final-shortlist precision was
+  2 of 16. The worst false positive would have deleted infrastructure —
+  `TestBreakpointSelfKillChildMarker` has an **empty body** and is the `-test.run`
+  target two crash-injection tests re-exec the binary with.
+- The `store/csrfile` FS seam's two now-orphaned methods, verified to have no callers
+  first, with `Truncate` moving from the `fs` interface to `File` (#2580).
+- The chain-level `primordial` flag on the life store, replaced by
+  `aliveBefore(born, died)` (#2445).
+- `RequireQuietMachine` from the three delete- and hub-scaling gates (#2589, #2572).
+
+### Fixed
+
+#### Correctness — silent wrong answers, and one panic
+
+- **A bit-packed BOOL edge-property column panicked on the fused append path**
+  (#2493). `edgePropColumn.grownWithValue` and `grownAbsentShared` converted a dense
+  column to sparse unconditionally, but a `PropBool` column is packed bits and **has no
+  sparse form**. Reachable from the public API with three nodes and two calls — no
+  concurrency, no store, no schema:
+  `SetEdgeProperty("a","b","flag",BoolValue(true))` followed by
+  `AddEdgeLabeledWithProperty("a","c",1,"REL","n",Int64Value(7))` panicked with
+  `index out of range [n] with length 0` inside `toSparse`. It was invisible because the
+  guard already existed in two **sibling** functions, so the invariant looked enforced.
+  Each half of the fix is proven load-bearing by controlled revert. Found because a new
+  DST scenario died on its first run.
+- **The single-edge anchor swap dropped every row of an anonymous-head pattern**
+  (#2603). `MATCH (:Person)-[:KNOWS]->(:Vip) RETURN count(*)` returned **0** where the
+  named-source spelling returned 1, on the shipped default configuration, with no error
+  and no notification. openCypher requires the rows: `Match2.feature` scenario [2] pins
+  `MATCH (:A)-[r]->(:B) RETURN r` to one row.
+  The mechanism is why the same pattern is correct *without* the swap. The written plan
+  enforces the head's label **structurally**, in the access path — `NodeByLabelScan`
+  needs no variable name to scan a label. The mirror **relocates** that label onto a
+  `Selection{LabelPredicate(fromVar, …)}` above the re-rooted expand, and a predicate can
+  only reach a node **through its name**. `ir.matchNodeScan` leaves the pattern head's
+  `NodeVar` empty while every non-head anonymous node is given a synthetic `__anon_N`,
+  so the relocated receiver resolved to no column, `evalLabelPredicate` returned NULL,
+  and `Filter` dropped every row. Mis-resolution is ruled out rather than assumed: the
+  fixture's destination is `(:Person:Vip)`, so had `Variable{""}` fallen back to column
+  0 the `(:Person)` predicate would have been TRUE and the row kept.
+  Teaching the mirror to *name* that endpoint was rejected on two grounds, not on
+  effort: `mirrorAnchorSite` is a pure IR function holding only the site, so it cannot
+  mint a provably collision-free name, and the peephole's published correctness argument
+  is that the mirror is **byte-identical** to the plan the translator emits for the
+  openCypher-equivalent pattern — a synthetic-name mirror is a plan the translator can
+  never emit, so proof-by-construction would stop covering the anonymous case.
+  **Why nothing caught it:** the TCK scenario cannot reach the peephole for two
+  independent reasons, each sufficient — its relationship is untyped while
+  `matchAnchorSite` requires exactly one type, and its graph is balanced so the 2× cost
+  margin is unreachable (both confirmed by `anchorSwapBuildCount` reading 0). And the
+  optimisation's own 24 test patterns all used **named** variables and never
+  `count(*)`, so their differential oracle only ever compared the spelling that was
+  already right. That gap is closed with anonymous-endpoint arms, which matters more
+  than the fix.
+- **`MERGE` contradicted `MATCH` inside one transaction and created a duplicate**
+  (#2365). `MERGE` decided whether an existing node matched its pattern by reading that
+  node's labels and properties **raw** — bare shard reads returning the newest stored
+  value, including other in-flight transactions' uncommitted writes. Reachable because
+  conflicts are per **substore**, so a transaction writing the label never collides with
+  one reading it to make a match decision. The predicted direction (a peer's uncommitted
+  *add* making `MERGE` match) does **not** reproduce, because the enumeration feeding the
+  filter is already view-resolved; the **mirror** does — a peer's uncommitted label
+  *removal* hid a node that carries the label in every committed state:
+  `MATCH (n:Target {k:'y'}) RETURN count(n)` answered 1 while
+  `MERGE (n:Target {k:'y'})` duplicated. Probing after the label half was fixed found the
+  **property half has the identical exposure at the same three call sites**, and it is
+  fixed here too. Where the peer's write and `MERGE`'s `ON MATCH` action touch the same
+  substore, `MERGE` now correctly takes `ON MATCH` and the action meets a real
+  serialization conflict — refused, not duplicated, which is what the ACID contract asks
+  for.
+- **A `MERGE` action on an outer relationship wrote to an unrelated node** (#2515).
+  Two identity namespaces share one representation: a relationship rides in a row as a
+  bare integer holding its stable handle, and the node resolver converts any integer to
+  a node id unconditionally. The node-only merge operator asked *is this a node* first,
+  so whenever a node existed whose id equalled the relationship handle, the action wrote
+  its property to that node — and reported one property set, so the counters oracle was
+  structurally blind. **A misdirected write, not a lost one.** It was never flaky: under
+  `-count` it failed three times in five hundred, always the same iterations,
+  byte-identical across separate processes, and a parallelism sweep from 1 to 32 gave
+  exactly the same three at every level, which is what ruled concurrency out. The
+  varying input is a process-global synthetic-key counter that decides node ids. The
+  regression tests **construct** the collision — raising the handle counter until it
+  reuses a decoy node id — and verify that precondition instead of hoping for it.
+- **`MERGE` fired when its driving clause produced no rows** (#2512), writing data into
+  the graph. Eighteen cells: a `MATCH` that matches nothing, `WITH` followed by a false
+  filter, `UNWIND` of an empty list, a `WHERE` excluding everything, zero-row drivers
+  carrying `ON CREATE` or `ON MATCH`, and `FOREACH` over an empty list in both merge
+  forms. The diagnosis needed one correction: the empty-row fallback was never required
+  for a leading clause, because the plan builder already substitutes a single-row leaf
+  when the IR child is nil — so the fallback was reachable **only** in the defective
+  case, which is why the leading-clause path is byte-identical now that plan shape,
+  rather than row arrival, decides. No TCK scenario drives a `MERGE` from a zero-row
+  clause, which is why a green conformance suite never saw it.
+- **A `MERGE` action targeting a variable bound by a preceding clause was silently
+  dropped** (#2511): the statement committed, the counters came up short by exactly one
+  property, and the value read back null. **Thirty of thirty-six matrix cells.** A third
+  operator was involved that the first diagnosis missed — the node-only `Merge` already
+  resolved an outer *node* target through the full row schema but lost an outer
+  *relationship* target, because that resolver understands only node values. Two adjacent
+  problems are fixed in passing: a zero-row driver left the target column unset and the
+  node resolver dereferenced a nil interface, crashing the statement; and the counters arm
+  added for #2510 was unreachable because its family was never listed in the expectation
+  switch.
+- **A whole-entity relationship action was discarded on the `MergePattern` path**
+  (#2510). `MERGE (a{..})-[r:T]->(b{..}) ON CREATE SET r += {...}` created the
+  relationship and dropped its properties without error — **20 of 24 cells**; only
+  pre-bound endpoints with an all-literal map ever worked. Two narrowings compound: the
+  endpoint-boundness gate routes any unbound pattern to `MergePattern` whatever the
+  right-hand side, and a second independent check rejects any parameter even when the
+  endpoints *are* bound. Routing these shapes to `MergeRelationship` was **refuted**
+  rather than assumed: its contract requires both endpoints bound, so 16 of the 20 broken
+  cells can never reach it.
+- **Reverse and undirected traversal returned another edge's data** (#2504). Over a
+  reciprocal pair — both `A->B` and `B->A` present — `MATCH (b)<-[r]-(a)` reported the
+  right `id(r)` but the **reciprocal** edge's type, properties, `startNode` and
+  `endNode`; undirected returned two rows with distinct ids carrying the same properties.
+  The suspected reverse-expansion mapping was **not** the cause: `revtofwd` is
+  handle-exact. `exec.Expand` emits its triple in **traversal** order with no direction
+  flag, so the hydrator re-derived storage direction by probing existence —
+  `HasEdge(src,dst)` versus `HasEdge(dst,src)` — which is undecidable exactly when both
+  directions exist. `relStoredInverted` decides by handle instead. A second site, the
+  `WITH`-barrier whole-entity projection, carried an older no-labels-and-no-properties
+  probe that a reciprocal pair passes trivially, and was found only after reinstating the
+  simulator arm. Forward reads and non-reciprocal edges were always correct, which is why
+  3897 green TCK scenarios and every existing fixture missed it. `Merge5.feature` pins the
+  contract in-tree: an undirected match reports the **stored** orientation, independent of
+  traversal. Measured 2.13 % faster, allocations identical.
+- **The `UNWIND` pattern-comprehension route had drifted five defects from the `MATCH`
+  baseline** (#2505). `RETURN` and `WITH` hoist a pattern comprehension into a
+  `RollUpApply` so it executes on the real `Expand`; nothing hoists for `UNWIND`, where
+  the comprehension survives to a separate fallback evaluator. On a reverse leg the walk
+  advanced to the anchor instead of the neighbour, and the endpoints came back transposed
+  against the stored-orientation contract; independent of direction, the relationship
+  value carried no identity so `id(r)` was 0, its properties were read per **pair**
+  rather than per handle — parallel siblings reporting the last writer's values — and the
+  type filter was per pair too, so `[r:KNOWS]` over a `KNOWS`/`LIKES` pair emitted two
+  rows where `MATCH` emits one. The simulator fixture then found two more: an incoming
+  comprehension over a self-looping node returned nothing, and the same skip made the
+  existential `WHERE (s)<-[:R]-()` disagree with both `MATCH` and `EXISTS` on the same
+  graph.
+- **A projection-position `EXISTS { }` / `COUNT { }` with an inner filter was constantly
+  false or zero** (#2507), while the same subquery unfiltered, and the `WHERE`-position
+  form, were correct. **The reported cause was wrong.** Instrumenting the inner `Filter`
+  closure showed the node hydrating correctly: `StripLiterals` hoists **STRING** literals
+  in `MATCH` and `WHERE` onto auto-parameters, and `compileSubAST` passed a nil parameter
+  map to `buildOperator`, so the auto-parameter evaluated to NULL and the comparison
+  dropped every row. Numeric literals are never hoisted — which is exactly why an age
+  filter always worked and a name filter never did. The nil build options were real but
+  explained different symptoms: an inner `r.prop` or `type(r)` had no edge metadata, a
+  nested subquery had no sub-evaluator, and a pattern predicate had no pattern evaluator.
+  `forSubquery` builds the child context from an explicit allowlist and **fails closed**,
+  deliberately withholding the parallel fields because the sub- and pattern-evaluators are
+  not concurrency-safe. No TCK feature file uses a braced `EXISTS` or `COUNT` subquery,
+  and none uses a `WHERE`-position pattern predicate with an inline string property.
+- **The parallel-edge family: four routes reported or wrote the wrong instance's
+  state** (#2500, #2501, #2502, #2503). Relationship `REMOVE` reported
+  `PropertiesRemoved=1` only for the *first* removal of a `(src,dst)` pair, because both
+  mutator adapters gated the counter on the aggregate pair probe while the mutation ran
+  per handle (#2500); five more routes did the same for `SET x = null`, a literal map, a
+  `FromParam` map and two merge-action paths (#2501); the replace teardown enumerated only
+  the aggregate pair store's keys, so a key living only in the targeted instance's
+  by-handle bag **survived** a replace whose contract is "the resulting map equals exactly
+  the given map", and `resolveEntityBinding` dropped `relHandle` for a
+  `RelationshipValue` that crossed a `WITH` boundary (#2502); and every source-side
+  whole-entity copy read the aggregate per-pair map when its source was a bound instance,
+  so keys carried only by the twin leaked into the copy target — all five routes plus the
+  `applyExprValue` `RelationshipValue` arm, red-reproduced 18 of 18 on both write paths
+  (#2503). Graph state was correct in #2500 and #2501 — the effect report lied; in #2502
+  and #2503 reads returned wrong data.
+- **A write transaction's own-writes view leaked to every reader through the CSR and
+  edge-type-filter caches** (#2446). Both caches key on `(epoch, startTS)` with no
+  transaction identity, while the pair is built as-of `(startTS, snap.TxID())` — so a
+  write transaction querying after its own edge create cached a CSR containing its own
+  pending arc, and every reader at the same instant was served that private view: CSR
+  positions shifted, the position-keyed type filter mislanded, and **committed edges lost
+  their types for every reader**. Found by the DST multi-session mode as seed 16's
+  typed-count flip at the exact tick of an unrelated pending create. Pure readers carry
+  `Snapshot.TxID() == 0` and identical visibility at identical `(epoch, startTS)`, so
+  `viewCarriesOwnWrites` gates both caches: an own-writes view builds fresh and is neither
+  stored nor served, and pure-reader caching — the hot path — is untouched.
+- **`graph/query`'s index seek and its scan fallback disagreed on mixed-kind numeric
+  bounds** (#2600). With an `Int64Value` property under `Float64Value` bounds the seek
+  returned the match and the scan returned nothing, while the Cypher path and an
+  independent model oracle both returned it. The direction was settled from the project's
+  own conformance authority: `Comparison2.feature`'s "Comparing across types yields null,
+  except numbers" sweeps all 90 ordered cross-type pairs and keeps exactly the four
+  INTEGER/FLOAT rows; `Comparison1` has `1 = 1.0` as true; CIP2016-06-14, adopted and
+  normative, has INTEGER × FLOAT as the only off-diagonal entry in its comparability
+  matrix. So **the scan was the defect**. Fixing the comparison alone would not have made
+  the arms agree, and that is the part worth reading: `seekIndexablePreds` marked a served
+  predicate so the scan **skipped** it with no residual filter, and the companion index is
+  `float64`-keyed — so above 2⁵³ the seek would have started over-returning at the moment
+  the scan stopped under-returning. The seek now reports whether it was exact, and an
+  inexact one narrows the working set without discharging the predicate.
+  `btreeRanger[int64]` is removed, and **not because it was dead**: once the range
+  comparison unifies the two numeric kinds, an `int64`-keyed btree is a **subset** of the
+  answer, and a subset cannot be repaired by a residual filter.
+- **`WithProperty` equality and a degenerate `WithRange` disagreed on the same data**
+  (#2601). After #2600 unified the range order, `WithRange(5, 5)` matched an
+  `Int64Value(5)` under a float bound while `WithProperty("age", Float64Value(5))` did
+  not. `equalValue` now routes a numeric pair through the same exact comparator. The
+  relation is **equality, not equivalence** — NaN is equal to nothing, including itself —
+  so the constraint canonical-key path is deliberately not reused.
+  `hashLookuper[int64]` and `hashLookuper[float64]` are removed for the #2600 reason; no
+  engine-created hash index is numeric, so nothing the engine builds lost a seek.
+- **`count(*)`'s first implementation shipped a wrong answer, and it is recorded**
+  (#2625). It installed the post-aggregation schema through the **unguarded** installer
+  the leaf pushdowns use — safe there only because nothing is built below a leaf. Over an
+  arbitrary child whose `Selection` operators hold closures over `bopts.scalarCols`,
+  tagging the output column scalar when its alias **shadows** a pattern variable made
+  those `Selection`s read the bound node's column as a scalar and drop every row:
+  `MATCH (n {name:'A'})-[:LIKES]->(m {name:'B'}) RETURN count(*) AS n` returned 0 while the
+  same query aliased `AS c` returned 1. Three existing `TestEdgeTypeFilterCache_*` tests
+  caught it; `installAggOutputSchema`, which carries the alias-shadow guard, is what it
+  uses now.
+
+#### ACID — Consistency, Isolation and Atomicity
+
+- **A value the installed schema validator refused became durable and was materialised
+  by recovery** (#2602). `Tx.Commit` appended and fsynced every buffered op and only then
+  applied them through `lpg`, where the validator hook lives, so the rejection arrived
+  **after** the frame was on disk: `Commit` returned `ErrCommittedNotApplied`, the live
+  graph stayed clean, and the reopen — which installs no validator — replayed the refused
+  value straight in. Measured: an `age` declared `PropInt64` came back from a host crash
+  as a **STRING**. That breaks the Consistency half of the ACID contract, which names
+  label/property typing among the invariants a committed transaction must leave satisfied.
+  The cost flagged when recommending the fix **did** bite, and finding out how is the more
+  interesting half: the Cypher adapter calls `a.w().SetNodeProperty` (which validates) and
+  then `a.tx.SetNodeProperty`, so every engine write validated **twice** — and a
+  `SchemaValidator` is permitted to be stateful, so a counting validator that rejects the
+  second write of a key saw the wrong write refused. Worse, the adapter **discarded** that
+  call's error (`_ =`, annotated "ErrTxFinished impossible here" — a premise this change
+  falsified), so the new guard fired on the engine path and was swallowed. Both are closed
+  by the explicit pre-validated entry points. Measured after: `refusedAtBuffer=true`,
+  `notApplied=false`, `resurrected=false`, `storedAfterRecovery=absent`, and `walOps` down
+  from 4 to 3 — the refused frame is gone from the log.
+- **Uncommitted create+delete pairs leaked phantom nodes** (#2443), both found by the DST
+  multi-session mode. `NodeExistsAsOf` answered TRUE for a node whose birth and death
+  records were both invisible, so a create+delete inside one open transaction showed
+  concurrent readers a bare node with no labels or properties. And `reclaimAbortedLife`
+  treated an aborted birth+death pair as independent directions — it tombstoned the node
+  for the birth and then revived it for the death, so a conflict-doomed transaction's
+  rolled-back creates persisted as phantoms.
+- **The node is now the unit of write–write conflict under MVCC** (#2444). A
+  `DETACH DELETE` of a node carrying another in-flight transaction's pending property
+  write sailed through where a second property write is refused, and its eager
+  present-state mutations then destroyed state a rollback could not restore: with both
+  transactions rolled back, the committed node was **gone from the label scan
+  permanently**. Every side now claims in its own store first and cross-checks the others
+  after, so whichever claim lands second sees the other and detection is race-free without
+  a per-node lock. Edge appends check and stamp **both** endpoints, directed graphs
+  included, as Memgraph prepares both vertices. A birth on a virgin slot is exempt from the
+  doomed-transaction refusal: the mapper has already interned the slot when the hook runs,
+  and refusing the record left a permanently visible orphan node.
+- **Rollback is sound under MVCC — four defects** (#2445), each with a minimal
+  deterministic reproduction that fails on the unfixed engine. The life store's
+  chain-level primordial flag misread a died+born pair written over committed history, so
+  a doomed rollback re-tombstoned the node its undo had revived, and a **voluntary**
+  rollback — which publishes its inverses — made the node invisible to readers pinned
+  before it. The undo replay's own-arc adjacency withdrawals were refused by the head test
+  when a foreign commuting append had moved the head, silently leaking the rolled-back
+  edge as a **torn arc**. Adjacency entries are immutable snapshots built from the current
+  slot, so a concurrent append embedded another transaction's pending arc — a permanent
+  leak when the owner aborted, an uncommitted-edge read when it was merely slow. And
+  `addEdgeInfo`/`addEdgeHInfo` ran the #2444 endpoint cross-check **after** the physical
+  insert and returned the refusal with the arc still in the slot; no undo is recorded for a
+  failed statement, so the next committed append on the node embedded and published the
+  phantom arc.
+
+#### Durability and on-disk integrity
+
+- **A struct or named-integer edge weight was silently dropped at the first checkpoint,
+  permanently** (#2526). `store/snapshot` sized weights statically and returned zero for
+  anything outside a fixed set of Go primitives, so it wrote `hasWeights=0` —
+  **byte-identical to a deliberately weightless graph** — and the checkpoint then truncated
+  the WAL prefix still holding the values. Nothing errored, and the recovered graph was
+  indistinguishable from one that never had any weights. Measured **95 of 95** weights at
+  the WAL boundary and **zero of 191** after one checkpoint. Bulk import carried the
+  identical defect and worse: it bypasses the WAL, so no surviving copy existed anywhere.
+  A sentinel in the existing width byte now selects a variable-width section — offsets plus
+  payload — encoded through the weight codec; offsets rather than length prefixes because
+  the apply path **skips** slots whose endpoints cannot be resolved, so a self-delimiting
+  concatenation would desynchronise. The safety property matters more than the encoding:
+  the decision is made **before** the header is written and the refusal propagates, so the
+  one surviving copy is never destroyed. Measured after: a duration weight 0 of 3 → 3 of 3,
+  and the simulator's binary-marshaler arm 0 of 17 → 17 of 17 through snapshot-only
+  recovery — a figure that is now a gate, because a codec that survives WAL replay and
+  loses everything through the snapshot shows a healthy total and a zero there.
+- **`manifest.json` was not checksummed** (#2520). It recorded a CRC for every component
+  it listed and none for its own bytes. Being JSON, a flip inside a **key name** left valid
+  JSON whose renamed key the decoder dropped, so the field silently became zero: **360 of
+  1399 bytes, 25.7 %, were accepted in silence**, and one character of the commit-timestamp
+  key dropped the recovered MVCC clock floor from 20 to 0, skipping clock restoration. The
+  census falls to **0 of 1450**, and the clock floor holds across all 1447 flips. The shape
+  was chosen from prior art read at source: only the RocksDB MANIFEST achieves full byte
+  integrity **and** ignore-unknown-fields, and only by separating them — forward-compatible
+  tag skipping inside the payload, the checksum in the framing outside it. Two details are
+  load-bearing: a non-empty tail **must** verify, or a flip in the magic would demote a
+  protected file to legacy-accepted and merely relocate the defect; and an integrity marker
+  in the document means a manifest whose trailer was lost is refused rather than taken for
+  legacy, so defeating the protection needs two independent damages.
+- **The recovered transaction sequence was derived on every open and discarded by every
+  caller** (#2522). Its godoc said the value exists to seed the store so a sequence is
+  never minted twice. Measured: a store reopened on a non-empty WAL **re-minted sequences
+  1, 2 and 3** while transactions carrying those values were still in that same WAL. The
+  census over the tree was total — no shipped embedder wired it. A contract that every
+  caller violates is **mis-placed**, not universally mis-implemented, and this codebase had
+  already reached that conclusion one field over, where recovery restores the MVCC clock
+  itself and its comment names this very field as the negative example. The floor never
+  leaves the package now and the omission is inexpressible. Returning a fully-open store
+  was rejected: deciding whether to append onto an unclean recovery must stay with the
+  caller. **Three shipped examples were wrong and are fixed**, one of them a long-lived
+  HTTP API serving writes off a reopened store.
+- **`csrfile` persists every weight kind it advertises, reconciled with the snapshot**
+  (#2529). See *Changed*.
+- **The snapshot index payload was written on every checkpoint and never read back**
+  (#2490). `applySnapshotIndexes` required the index to be already registered on the
+  graph's `index.Manager`, but recovery builds its own graph and nothing registers on it,
+  so the manager was always nil and `Result.SnapshotIndexes` was **provably always 0**.
+  Every test that reached `Deserialize` poked the package-private helper on a hand-built
+  manager; the two that went through the real entry points asserted 0. Registering the index
+  earlier would **not** fix it: there is no index fan-out below `cypher` — the only
+  production `Manager.ApplyBatch` call site is in `cypher/exec/index_writeback.go` and
+  `store/txn` does not import `graph/index` at all — so WAL replay cannot maintain a
+  registered index, and an early registration would leave it seekable but frozen at the
+  snapshot instant, which is a silent wrong answer rather than a slow one. Also fixed:
+  `store.snapshot.indexes.loaded` was incremented by the **write** path and counted payloads
+  written rather than loaded, so it is renamed `.written`.
+
+#### Bolt protocol and wire
+
+- **`Options.Logger` never reached the Bolt session** (#2481). `newSession` hard-coded
+  `slog.Default()`, so **all eleven session-level log sites bypassed the configured
+  logger** — authentication outcomes, query, `BEGIN` and `COMMIT` failures, and the
+  transaction-quota refusal. An embedder that configured a logger still had the majority
+  of the server's events written to the process default. Found by the DST authentication
+  scenario, and verified red without the fix.
+- **A refused re-authentication left the connection running as the previous principal**
+  (#2556). See *Security*.
+- **An expired certificate could evict a working one, and a content-preserving rotation
+  was silently ignored** (#2557, #2558). See *Security*.
+- **An unrecognised `BEGIN` access mode granted write authority** (#2564). See *Security*.
+- **An operator termination reported a timeout that had not elapsed and a writer lock that
+  no longer exists** (#2560). Three distinct server-initiated endings — the total bound, the
+  idle bound and `Server.TerminateTransaction` — funnelled through one teardown that chose
+  the reason itself. Both halves of the message were false: no timeout elapsed, and the
+  writer serialisation that clause named was retired by #2305/#2306, which `txregistry.go`
+  documents in as many words. The filed prescription was **refuted by primary evidence**:
+  `neo4j-go-driver` v5.28.4's `reclassify()` (`neo4j/db/errors.go:132-139`) rewrites
+  `Neo.TransientError.Transaction.Terminated` to the ClientError form and its stated job is
+  mapping pre-5.x errors into 5.x classifications — so ClientError **is** the modern
+  spelling, and because `reclassify()` runs before `IsRetriableTransient` reads the
+  classification, the Transient form would not be retried either.
+- **A quota-refused `BEGIN` left the session in a state nothing had chosen** (#2561). Two
+  adjacent failure paths in `handleBegin` disagreed, and nothing asserted the difference at
+  any level, so it was accidental. It is chosen now — a cap is **back-pressure**, not a
+  protocol error; the slot frees when another of the principal's transactions closes, so
+  retrying the same `BEGIN` is the right response and requiring a `RESET` first would charge
+  the client a round trip for the server being busy. The neighbour keeps `FAILED`, because a
+  `newTx` failure is a genuine failure to open a transaction. The in-flight **cursor** cap
+  keeps `LimitExceeded`: it is a different limit, reached inside one transaction.
+- **An autocommit statement's bookmark was empty or stale** (#2563). See *Changed*.
+- **Every Cypher list crossed the wire as a String** (#2513). See *Changed*. The arm
+  recurses element-wise like the map case, so nested containers and entity elements encode
+  structurally. A PackStream List is itself version-independent — neither this codec nor the
+  reference driver's unpacker takes a version — but its **elements** branch, so a list of
+  nodes carries three fields on 4.4 and four on 5.0 and a datetime changes tag; both majors
+  are proven over a real socket. The fix is generalised past its own symptom: a sweep over
+  all sixteen concrete value types on both majors fails if anything but a string encodes to
+  a Go string.
+- **An over-nested parameter was reported as an internal server bug** (#2570). The
+  `maxParamBindDepth` check returned a bare `fmt.Errorf` carrying no sentinel and no
+  category, so `FailureCode` fell through to `Neo.DatabaseError.General.UnknownError`, whose
+  text the failure sanitiser replaced with "An internal error occurred. See server logs for
+  details" — telling an operator GoGraph had a defect over a payload that is wholly
+  client-supplied and wholly malformed. Measured at HEAD, the boundary is exactly 32 accepted
+  / 33 refused, identical for list chains and map chains. The task proposed
+  `Neo.ClientError.Request.Invalid`; that confuses two layers — the message **decoded**
+  correctly and the statement was dispatched, so what is invalid is the statement's
+  *argument*. `Request.Invalid` is what the serve loop answers for a frame that will not
+  decode at all, and reusing it here would make one code mean two things. Session state is
+  left `FAILED`, verified rather than assumed: `Transition`'s one documented exception for
+  staying `READY` is back-pressure, "where retrying the same request can succeed", and a
+  depth refusal is deterministic.
+
+#### graph/index — range boundaries and the serialized image
+
+- **`AddRange` and `RemoveRange` silently dropped the whole range at `MaxUint64`**
+  (#2607). Both are documented over the **closed** interval `[from, to]` but converted to
+  roaring's half-open API with a plain `to+1`; at `to == math.MaxUint64` that wraps to zero
+  and roaring returns immediately on `start >= end`, so the loss was total, not off-by-one.
+  Reproduced exactly as filed: `AddRange(max-5, max)` yields cardinality **0** where the
+  closed interval says 6, and `RemoveRange(max-3, max)` over a five-member bitmap-tier set
+  removes nothing; both `max-1` controls are exact, so the failure is attributable to the
+  final id. **The sharper half is the tier divergence**: `RemoveRange`'s singleton and small
+  branches filter on the closed interval directly with no `+1` and therefore no wrap, so the
+  identical call over an inline-tier set holding the same five members correctly leaves 1 —
+  the same logical operation on the same membership answered differently depending on state
+  the public surface does not expose. The repair was a design choice among splitting at the
+  boundary, saturating and refusing; **split**, because it is the only one that keeps the
+  documented contract. The dependency's own source settles that a split is required rather
+  than avoidable: roaring64's `AddRange`/`RemoveRange` are half-open over `uint64` with no
+  closed variant, while the 32-bit sibling escapes the same problem only by widening its
+  bound to `uint64` so it can name `MaxUint32+1`.
+- **An inverted or empty `AddRange` minted a permanent, serialized entry for a label
+  carrying nothing** (#2608). `label.Index.AddRange` stored the `NodeSet` back
+  unconditionally while `NodeSet.AddRange` promoted to the bitmap tier **before** looking at
+  the interval. Reproduced: 1000 inverted `AddRange` calls on distinct labels take the
+  serialized image from 16 bytes to **20 016**, declaring 1000 labels, while `Count` reports
+  0 for every one — the entry is permanent and costs 20 bytes apiece on disk while being
+  invisible through `Count`, `Scan` and `Has`. `RemoveRange` has always promised the opposite
+  for its own direction and kept the promise; `AddRange` now mirrors it. **Both** prescribed
+  repairs are applied, because they fix different halves and neither alone suffices, verified
+  rather than assumed. Recorded, not fixed, and out of scope: `Deserialize` still
+  re-materialises an empty-bitmap entry from a legacy image written by the defective writer.
+- **A `Serialize`/`Deserialize` cycle changed the bytes of a small run-encoded label**
+  (#2609). roaring picks a container encoding from construction *history*, not from content:
+  `AddRange` builds a RUN container, `NodeSetFromBitmap` moves a bitmap of at most
+  `smallSetMax` ids back to the inline tier on the way in, and the inline tier
+  re-materialises through `AddMany` as an ARRAY container. No content is lost, but a snapshot
+  of unchanged data was not byte-reproducible, which defeats fixture diffing and any
+  content-addressed comparison of images. Reproduced across widths 1 to 16: 55 B in and
+  64/66/68/70/72 B out at widths 4 to 8. **The acceptance criteria were amended, with the
+  user's decision recorded**: as filed they asked for byte-reproducibility at *every* width,
+  and measured that costs more than the report knew — `Serialize` holds only an `RLock` and
+  `NodeSet.Bitmap` hands back the live bitmap, so normalising an arbitrary set needs a full
+  `Clone` first, measured at **6.55 → 90 µs/op and 1 289 → 218 065 B/op** on a sparse
+  100k-id label to produce a byte-identical image. Normalisation is bounded at `smallSetMax`
+  — exactly the band the reader down-converts — and normalises **down** rather than up,
+  reaching the same canonical form as `RunOptimize` with strictly less work.
+
+#### Memory, resources and the mapper
+
+- **Closing a write window never released its shard builders, so `Compact` doubled
+  resident memory** (#2628). The contract on `adjShard.building` says "the window end
+  freezes it by clearing this field"; nothing did. Neither `EndExclusiveBuild` nor
+  `EndCommit` touched it, so the field was released only lazily by `storeEntry`, when a write
+  presenting a **different** owner happened to touch the same shard — a shard no later
+  transaction touched pinned its builder for the lifetime of the graph. The cost is not the
+  builder, it is what the builder **blocks**: it keeps the shard's pre-window slot array
+  alive after `slotsRef` has moved on, so anything replacing `slotsRef` leaves both arrays
+  live. Measured at 3 M edges, build then `Compact`, live heap after `runtime.GC()`:
+
+  | Arm | Live heap | Allocated |
+  |---|---:|---:|
+  | no window | 159.9 MiB | 3.25 GiB |
+  | exclusive-build window, before | **361.9 MiB** | 1.79 GiB |
+  | exclusive-build window, after | **159.9 MiB** | 1.79 GiB |
+
+  Bracketing a bulk build — the documented way to make it cheaper — roughly **doubled**
+  resident adjacency once the graph was compacted, inverting `Compact`'s own purpose. It is
+  now free. `EndCommit` is deliberately unchanged: that is the per-transaction serving path,
+  and an `O(shards)` walk per commit would be a real regression. A second, sharper hypothesis
+  was **refuted** and is not claimed — a write made after `Compact` inside the same open
+  window is not lost, and a test asserting the edge survives passes on the unfixed code.
+- **An unreproducible `NodeID` was attributed to the snapshot rather than to the key type**
+  (#2528). `mapperShardFor` hashes an uncovered comparable key through
+  `fmt.Fprintf(h, "%v", v)`, which renders a pointer as an **address**, so a key carrying one
+  hashes to a different shard on every run — while the function's godoc promised the hash was
+  stable across processes, and FNV was chosen precisely to guarantee that. Reproduced
+  deterministically **in process**, which is stronger than the subprocess reopen the task
+  prescribed: two allocations of the same logical key already hash to different shards, so no
+  second address space is needed and, unlike a subprocess run, this cannot agree by
+  coincidence. Two findings changed what the fix should be. **The loss is not silent** —
+  `Mapper.LoadFrom` already enforces that an entry's packed shard equals
+  `mapperShardFor(key)` and returns `ErrMapperEntryCorrupted`, and
+  `store/snapshot/apply.go` propagates it and aborts before any label or property is applied.
+  And **no better hash could fix such a key**: for every comparable Go type, "formats as an
+  address" and "compares by address" coincide, so a key decoded into a fresh allocation is
+  not the key that was written even with identical data — its *identity*, not merely its
+  shard, is unreproducible, and an address-independent hash would have made the hash agree
+  while the map still created a second entry, which looks fixed and is not. The real defect
+  is therefore **misattribution**. The audit for other `%v`-based hashing or ordering is
+  recorded: `mapperShardFor` is the only `%v` hash in the tree.
+
+#### Concurrency — cancellation and a data race
+
+- **Six exported `search` entry points could run to completion without ever observing a
+  cancelled context** (#2593), violating the concurrency mandate's context-aware-blocking
+  rule. Worst case first: **`flow.PushRelabelMaxFlowCtx` returned the true, complete maximum
+  flow with a nil error under an already-cancelled context**, measured at `MaxNodeID` up to
+  1536 — a request-scoped deadline fires, the caller's context is dead, the library does the
+  full work and reports success, and nothing downstream can tell. One root cause behind five
+  of the six: **increment-then-mask**, so the counter is 1 on the first iteration and the mask
+  first trips at 4096 units of work. Measured with a pre-cancelled context at 8 nodes, every
+  one of `BellmanFordCtx`, `BellmanFordInto`, `KCoreCtx`, `KShortestPathsLooplessCtx`,
+  `KShortestPathsLooplessCtxWithOpts`, `EppsteinKShortestCtx` and `PushRelabelMaxFlowCtx`
+  returned nil with a complete result. `TopologicalSortCtx` was a different mechanism: on a
+  fully cyclic graph every vertex has indegree ≥ 1, so the polled Kahn loop never runs and
+  `ErrCycle` was returned in preference to the context error, at every input size.
+  `discharge` got its own poll, decided by measurement: one discharge reaches 60 004 inner
+  steps at 20k vertices and 600 004 at 200k — **146× the whole stride** — so counting
+  discharges left the interval between polls unbounded in the input size. The sixth site was
+  missed by the first sweep and found by the battery it was meant to unblock:
+  `bellmanFordVirtualSource` is a shared prologue, so neither Johnson entry point's own file
+  contained the defect. **The count is closed by scan rather than by trust** — a detector for
+  the shape, run over all 47 stride-gated polls in the module, leaves exactly two
+  increment-then-mask sites, both benign because their callers poll unconditionally first.
+  **No live-context result changed, and that is measured, not argued: 3 622 signatures
+  byte-identical before and after.**
+- **Concurrent first executions of a subquery-bearing query raced on the shared cached
+  AST** (#2508). Only the *outer* plan is cached; an `EXISTS { }` / `COUNT { }` subquery's
+  inner plan was re-translated on **every** execution, over the shared cached AST, and the
+  translation walk names anonymous entities by **writing into** that AST. Not benignly: each
+  translator mints its own names, so one plan could reference a variable the other never
+  bound — a wrong answer, not a duplicated identical write.
+  `ir.NameSubqueryAnonymousEntities` now names those entities once, at the top of `FromAST`,
+  while the AST is still private to the plan-cache builder. This is the discipline both LPG
+  reference engines follow, read from source: Neo4j's `NameAllPatternElements` runs in
+  `AstRewriting`, inside `parsingPost` and so before its AST cache; Memgraph fills its
+  anonymous identifiers at the end of `visitSingleQuery`, at parse time. **Two regressions the
+  fix caused, both found by evidence and both fixed here:** the degree-rewrite (#2232) and
+  labelled-hop-count (#2235) recognisers refuse a *named* relationship, so they silently
+  stopped firing and fell back to driving an inner plan per outer row — measured at **115×**
+  the cost of the equivalent non-subquery form, with their guards now semantic
+  (`ir.UserNamed`) rather than syntactic; and the synthetic names leaked into the public
+  result-column name of an un-aliased projection, since that name is derived by re-rendering
+  the AST. **The TCK cannot cover the column-name regression** — it has no un-aliased
+  `RETURN EXISTS{}`/`COUNT{}` scenario at all, so 3897/3897 is structurally blind to it.
+
+#### The simulator and the gates themselves
+
+Twelve genuine defects were fixed in the DST harness. They change simulator **fidelity**,
+not module behaviour, and are listed here because a harness that misreports is how a real
+defect hides:
+
+- A file handle held across a simulated crash accepted and discarded bytes; it now returns
+  `ErrCrashedDisk` wrapping `fs.ErrClosed` (#2544). The prescribed nil-error short write was
+  **refuted** against the `io.Writer` contract (#2541).
+- A torn trailing WAL frame was made reachable from a simulated crash (#2541); the WAL-only
+  layout moved under a real `waldir/wal` directory and the `isRootLevel` exemption was proven
+  a **necessity** of the model — forcing it false fails 16 tests (#2539); `MkdirAll` registers
+  the components it creates (#2543); a failed fsync is permanent and a retry grants nothing,
+  sourced to Rebello et al., USENIX ATC 2020 and the PostgreSQL fsyncgate response (#2540); a
+  truncation is durable only once fsynced (#2542); and `Remove` no longer silently no-ops on a
+  directory — the report named the wrong error, since this surface models `os.Remove`, so an
+  empty directory *is* removed and only a non-empty one returns `ENOTEMPTY` (#2545).
+- The soak layer was red for **three independent reasons**, not the one filed (#2620). The
+  filed cause was an over-eager oracle gated on `crossedBound || sweeps() > 0`, so **one
+  sweep** fired a clause whose message asserts churn reached the vacuum's wake threshold —
+  while the failing run's high-water was 12 records against a bound of 4096. A sweep that
+  frees nothing is the vacuum's *documented exit condition*, and `Backlog` is by definition
+  versions the observed pass could not have swept, so the evidence pointed the other way. The
+  other two were pin inversions: #2602 and #2609 each correctly inverted their short-layer pin
+  and left the **soak-layer sibling** asserting the old behaviour. The structural cause is that
+  **no task's acceptance gate runs the soak layer** — `-tags=soak` appears in no acceptance
+  criterion in the sprint.
+- The `Reproduce with` line omitted `-scenario` entirely, so it was wrong for **all 55**
+  catalogue scenarios and ran the default workload instead (#2621).
+- The allocation oracle differenced two process-global readings; it now requires exact
+  interval containment (#2555), after measuring the old form's difference-less-injection
+  ranging from −135 256 to +101 320 bytes across 25 runs — a spread of 236 576 straddling
+  zero, with one run within 32 516 bytes of the tolerance.
+- The goroutine-growth slack is documented at the source (#2592); its fourth acceptance
+  clause **could not be met**, because the package's soak layer was already red, which is what
+  filed #2620 and #2621.
+- Six further harness gates stopped measuring machine load: the swarm's overlap and
+  pressure-density claims became structural rather than wall-clock thresholds (#2596, #2611,
+  #2587), a `GOMAXPROCS`-clamping scenario now runs alone so it stops deciding its neighbours'
+  regime (#2613), the cancellation-precedence table is passed in rather than raced through a
+  package global (#2597), and a scenario is no longer billed for its neighbours' allocations
+  (#2553).
+- Five bounded security gates stopped reporting a slow machine as a failed subject (#2567).
+  Run alone under `-race` the two string-budget tests pass in 0.47 s and 0.48 s; under the full
+  race suite the ~21× slowdown pushed a half-second evaluation past the 10 s deadline its
+  helper imposed, and the helper scored `context.DeadlineExceeded` as proof the guard had
+  failed. The deadline is **removed rather than widened**, because it was measured to carry no
+  detection power. A repository-wide sweep cross-checked three ways over 277 occurrences left
+  roughly 148 sites alone, where the wait is genuinely unbounded and the clock is the only
+  possible oracle. The worst of the five had already flaked once and been "fixed" by widening
+  its ceiling to 120 s; measured at 17.76 s idle and **537.36 s saturated**, that was a live
+  time bomb, not a fixed test.
+- The `bench/cypher` `Rel*` benchmarks failed in their own seed, because `seedRelGraph`
+  writes two edges between the same endpoints and needs `Multigraph:true` (#2068). The more
+  useful half: **`go test` compiles benchmarks but does not run them**, so a benchmark broken
+  in its fixture gates nothing *and* reports nothing while still appearing in the suite. The
+  same class was then found in `graph/lpg`'s MVCC read benchmarks (#2623), where the
+  `deltas=off` arm was **not a control** — it ran with deltas on — so the comparison the
+  benchmark exists to make had never been valid, invisible in the output because a control
+  that is not a control still prints a number.
+
+### Performance
+
+Full detail for this release is in
+[`docs/benchmarks/v0.12.0.md`](docs/benchmarks/v0.12.0.md).
+
+#### What got faster
+
+- **The `v0.11.0` open plan-choice regression is closed** (#2431). `MATCH (n:Common:Rare)`
+  over 100 000 `:Common` of which 1 000 also carry `:Rare` took 4.611 ms in the default
+  configuration against 0.186 ms for the plan the same engine already knew how to build — and
+  worse than the 4.280 ms legacy full-`:Common` scan the re-anchor was written to replace.
+  The root cause was that the columnar chain's **yield was inert**:
+  `tryBuildColumnarFilterChain` already declines when `pickMinLabel` would fire and states the
+  rule, while `tryBuildParallelScanProject` was tried immediately after and was not making the
+  same argument — parallelism is also a constant factor — so it claimed every shape the yield
+  gave up, anchored on `Labels[0]`. The fix **adopts** the anchor rather than merely declining,
+  which makes the case where the smallest label is itself above the threshold *faster* rather
+  than merely unregressed. Measured interleaved A/B over 5 pairs with `benchstat`:
+
+  | Arm | sec/op | B/op | allocs/op |
+  |---|---:|---:|---:|
+  | `P2431_Fixture` | **−96.08 %** (p=0.008) | −99.28 % | −98.54 % (106 293 → 1 551) |
+  | `P2431_MinLabelAboveThreshold` | −19.92 % (p=0.008) | | |
+  | `P2431_MinLabelAboveThresholdSkewed` | −44.16 % (p=0.008) | | |
+  | `P2431_SingleLabel` | ~ (p=0.151/1.000/1.000) | ~ | ~ |
+
+  **No shape regresses.** `BenchmarkMinLabelScanSelective_MinLabel` is now 204.7 µs against
+  `_FirstLabel`'s 3 421 µs — 16.6× faster, the relationship its name asserts and which did not
+  hold before — and faster than `v0.10.0`'s 230.3 µs, so the regression is undone rather than
+  merely levelled. 106 293 allocs/op is exactly the figure the report quoted, so the
+  attribution is confirmed on the reported number.
+  ([`min-label-anchor-vs-parallel-scan-2026-08-26.md`](docs/benchmarks/min-label-anchor-vs-parallel-scan-2026-08-26.md))
+- **The range-seek population floor is set from measurement** (#2367): an indexed integer
+  equality cost **68.7 µs over a label of 1023 nodes and 5.5 µs over one of 1024** — a 12.6×
+  cliff at a constant, with the **smaller** graph the slower one. The sweep is a step at the
+  constant in both directions, and allocations say the same and cannot be moved by machine
+  load: 889 per lookup at 1023 nodes against 127 at 4096, flat at ~123 after. The shared floor
+  also governs the key-set path, measured rather than assumed: at 1023 nodes the seek set costs
+  168 allocations against 13 239 for the scan (**78.8×**). An earlier version of this ticket
+  asserted a mis-calibrated cost-based crossover; that claim was **withdrawn** when no such
+  threshold was found, and four further explanations for the surrounding anomaly were each
+  refuted by measurement. **Not fixed, and out of scope:** an integer-keyed property still
+  cannot use the hash path, because a Cypher `CREATE INDEX` only ever builds a string-keyed
+  hash index.
+  ([`range-seek-population-floor-2026-08-26.md`](docs/benchmarks/range-seek-population-floor-2026-08-26.md))
+- **`count(*)` no longer builds a row per row to carry a constant** (#2625). On a bare typed
+  expansion the pre-projection was 4.06 ms of an 11.30 ms query and removing it cut the query
+  **4.52 ms → 2.71 ms (~40 %)**. The gain depends entirely on the child: once an endpoint label
+  is added, the per-row `Filter` checking the far endpoint costs ~18.2 ms of 26.1 ms and this
+  operator's own cost is ~2.6 ms. At scale (`examples/26_social_scale_bench`, 40 000 users,
+  interleaved A/B, five runs per arm) the median gain is modest and **the variance result is
+  large**: `count_friend` 8.040 s → 7.504 s (+6.7 %) with spread 52 % → 4 %, and `count_like`
+  6.331 s → 6.156 s (+2.8 %) with spread 59 % → 9 % — removing seven million per-row
+  allocations takes the GC out of the tail. One early pairing showed 35 %; five rounds identify
+  it as an outlier in the *before* arm and **it is not claimed**. The count-store fast path the
+  task prescribed is **refuted and not built**: `count.Store.CountE` takes no snapshot and a
+  read transaction pins its view, so answering from the store would violate snapshot isolation.
+  ([`count-star-row-count-2026-08-27.md`](docs/benchmarks/count-star-row-count-2026-08-27.md))
+- **Snapshot index hydration** (#2490), measured with `benchstat` over 50 000 nodes and 4
+  indexes, n=10: **sec/op −69.65 %**, B/op −15.88 %, at **allocs/op +24.91 %**. The allocation
+  cost is real and is tracked as #2594, and the win applies **only** where the WAL suffix is
+  empty or index-irrelevant.
+- **`graph/query`'s integer-bounded numeric range is index-served** (#2600). Against the path
+  the query actually took before the fix — a full scan, since an integer-bounded range was
+  never index-served — **31.8× faster selective, 44.19 ms → 1.39 ms**, and 1.4 % slower at
+  100 % selectivity. B/op and allocs/op are identical: the residual reads properties and
+  allocates nothing. Measured on darwin/arm64, 10 cores, 200k nodes, ages uniform in [21,65],
+  `-benchmem -count=6` with `benchstat`.
+- **`Compact` reclaims what it should** (#2628): 361.9 MiB → 159.9 MiB live heap after a
+  bracketed 3 M-edge build, matching the unbracketed arm, while still allocating 1.79 GiB
+  against 3.25 GiB. See *Fixed*.
+- **The certificate-reload skip is 1.8×, not two orders of magnitude** (#2558). Measured
+  rather than assumed, and the measurement **refuted the assumption**: 20.6 µs and 2.0 kB per
+  call against 37.8 µs and 9.4 kB for the full load (best of 5, darwin/arm64). The two file
+  reads dominate **both** paths. The skip is kept because it does not recompute and re-publish
+  a certificate that has not changed, and the godoc now states the real numbers.
+
+#### What got slower — measured, not minimised
+
+- **The anchor-swap guard costs the declined shape a great deal, and it is not called
+  negligible** (#2603). `benchstat`, `-count=6`, same fixture and rows: at hub degree 1601 the
+  declined shape costs **65×** (5.644 µs → 368.8 µs) out-ward and 62× in-ward; at degree
+  40 000, **1705×** (5.681 µs → 9.687 ms) and 1660×. Allocations go 193 → 79 566 and bytes
+  8.88 KiB → 627 KiB. The swapped plan is flat in the hub's degree and the written order is
+  linear, so **the loss grows without bound** on an ordinary spelling. Correctness outranks
+  speed, so the guard ships; **#2604 is filed to recover the optimisation properly.**
+- **`flow.PushRelabel`'s discharge polling costs +3.3 % to +4.6 %** on one adversarial
+  fan-out shape (#2593), p<0.05 over three interleaved rounds, with B/op and allocs/op
+  identical because the counter is threaded by value. Accepted under correct → secure → fast,
+  and recorded as the only measurable throughput cost in that change.
+- **The MVCC endpoint cross-checks cost Cypher `DETACH` +4–6 % and relationship creation
+  +3.9 %** (#2444); direct-API bulk delete is unchanged. That is the attributable price of
+  making the node the unit of write–write conflict.
+- **An `AddRange`-built label at or below the normalisation bound moves 16 → 28 allocs/op**
+  (#2609) — which is what an `Add`-built label of the same ids already cost, so the change
+  makes the two paths do the same work rather than making either do more. Allocations are
+  **identical**, every sample equal, for a 100k dense label, a 100k sparse one and an
+  `Add`-built label of 8 ids. A first, **sequential** A/B reported a −8.57 % speedup on the
+  dense label; interleaving **refuted** it (p=0.841), so it was an artefact and is not
+  claimed.
+
+#### Examples — not part of the module
+
+`examples/` is an exercise harness, and the module neither imports nor depends on it.
+
+- **`examples/26_social_scale_bench` could not run at its own advertised default** (#2385).
+  It printed its six config lines and then nothing: at the documented default of 1 000 000
+  users it was killed at twelve minutes, at 150 000 at seven. **The reason is memory, not
+  patience**, which is what decides the fix: 20 000 users is 71.7 s and 1.88 GiB peak RSS,
+  40 000 users is 149.6 s and 3.74 GiB, so peak RSS scales 1.99× for a 2× population and a
+  million users projects to roughly **93 GiB against a 32 GiB machine**. The default is now
+  50 000 users, agreed with the user because it is documented behaviour and a pinned fact, and
+  **measured at that default rather than projected**: 183.6 s and 4.81 GiB peak RSS over
+  16 265 613 edges. Progress telemetry goes to stderr and results to stdout, so a pipe
+  capturing results gets exactly the pinned facts — and it immediately produced a finding the
+  example could not previously show: at the default the build takes 14.2 s and the **read
+  battery takes 153.7 s of the 183.6**. This example is dominated by its queries, not its
+  ingest.
+- **The social-graph build allocated 58× its resident size, and the ratio rose with scale**
+  (#2624). The site was named by a **two-scale `-alloc_space` diff** rather than a single
+  profile: query-phase sites scale 1.97–2.06× between 20k and 40k users (linear), while
+  `main.build` is 3.11×, `AddEdgeLabeledWithProperties` 3.16×, `upsertEdgeSlotLocked` 3.18×
+  and `adjlist.storeEntry` **3.92×**. At 40 000 users total allocation went **28.02 GiB →
+  8.28 GiB**, amplification **58× → 16.6×**, and build elapsed 10.229 s → 8.044 s; across the
+  two scales the ratio goes from 37× → 58× **rising** to 16.5× → 16.6× **flat**. Batching the
+  window every 65 536 writes was measured and earned nothing (8.34 GiB against 8.28 GiB), so
+  the simpler single bracket is what an example should show. This is the task that uncovered
+  the engine defect fixed as #2628 — without that fix this change traded 3.4× allocation for
+  2× residency. The README's sample-output block was several sprints stale (9.12 GiB against a
+  real 4.14 GiB) and is regenerated from an actual run.
+
+### Security
+
+- **CWE-59, link following, in `store/csrfile`** (#2580, severity 7). Files were opened with
+  no `O_NOFOLLOW` on either the write or the read path, while both sibling publish paths were
+  hardened against exactly this class under #1843 — `store/wal` has `walNoFollow`,
+  `store/snapshot` has `openSnapshotComponent`. The write side is the sharper half because the
+  temp name is **fully predictable**: the writer forms it as `OutputPath + ".tmp"`, so a local
+  principal who can write the store directory pre-plants a symlink there aimed at any file this
+  process may write. **Reproduced, with all three parts of the claim measured rather than
+  argued** — with the guard disabled the publish **succeeded** through the symlinked temp, the
+  victim file went from 60 bytes to 2 244 bytes of CSR data (an arbitrary-file overwrite), and
+  the published path itself **became a symlink**, because `rename(2)` moved the planted link
+  onto the output name, so every later write through it lands on the victim. The read path
+  followed a symlink too. The **TOCTOU is closed separately, and it had to be**: the writer
+  resized the temp with a path-based `os.Truncate` moments after creating it, which re-resolves
+  a predictable name and is a second window even with `O_NOFOLLOW` on the create; `Truncate`
+  moves onto the already-open descriptor, so there is no second name resolution to race. The
+  negatives are paired with a positive control — an ordinary publish and open still work, and
+  so does a publish through a symlinked **parent** directory, which pins the guard's scope to
+  the final component.
+- **A refused Bolt re-authentication left the connection running as the previous principal**
+  (#2556). The non-`firstAuth` failure branch was the only exit from `handleLogon` that set
+  neither `s.identity` nor `s.authenticated` — the assignments sit after the error return — so a
+  refused identity switch changed nothing, and `handleReset` then took the authenticated path
+  back to `READY` with full write capability. **Measured end to end over a real socket:**
+  `LOGON(alice, ok)`, `LOGON(bob, WRONG)` → FAILURE, `RUN` → IGNORED, `RESET` → SUCCESS,
+  `CREATE (:Ghost)` → SUCCESS, nodes-created **1**. The identity is security-relevant even
+  without roles: it keys the per-principal transaction quota and the `SHOW TRANSACTIONS`
+  attribution, so a refused switch left both pointing at the wrong principal. The contract comes
+  from the **specification**: the Bolt `LOGON` section states that a failed authentication makes
+  the server respond FAILURE and close the connection, and carves out no exception for
+  re-authentication. It makes a failed guess cost the connection, which is the point — the
+  official `neo4j-go-driver` always emits `LOGOFF` before `LOGON`, so the branch where
+  `authenticated` is true on entry was reachable only by a non-conforming client, exactly an
+  attacker's shape, because skipping the `LOGOFF` was how a failed credential guess cost
+  nothing. **Why nothing caught it:** every existing test and DST arm sends `LOGOFF` first,
+  which pre-clears the flag. The new arm omits it and attempts the write **after** a `RESET`,
+  because `RESET` is where the recovery happened — an arm that only checked the reply to the
+  `LOGON` would have passed against the defect.
+- **A certificate rotation performed to revoke a certificate could be ignored in silence**
+  (#2558). `CertReloader.Reload` short-circuited on "neither file mtime is after the last
+  successful load" — a cheap heuristic for "nothing changed" and an unsound one, because mtime
+  is not a content hash. Every rotation that replaces content without advancing the timestamp —
+  a rename from another directory, `cp -p`, a restore from an archive, or two rotations inside
+  one filesystem timestamp tick — returned nil **having loaded nothing**, and because the call
+  reported success `onError` never fired, so an operator polling through `Watch` had no signal at
+  all. `Reload` now reads both files on every call and compares a **SHA-256 digest** of each
+  against the digests the live certificate was built from, re-parsing only when they differ and
+  recording the digests only on a load that **succeeded** — so a skip is provably a no-op and a
+  refused pair is always re-examined. `os.Stat` is gone, which changes the absent-file error
+  from `stat key: …` to `read key: open …: no such file or directory`.
+- **An expired certificate was swapped over a working one** (#2557). `Reload` validated only
+  the **pairing**, via `tls.LoadX509KeyPair`, which inspects neither `NotBefore` nor `NotAfter`.
+  A rotation to an expired leaf — the commonest real rotation incident, a renewal that produced
+  expired material or a clock skew on the renewing host — returned nil, swapped the doomed leaf
+  into service, and **destroyed the previous working certificate**: every subsequent handshake
+  failed. The godoc promised the opposite. Three decisions are documented on `Reload` itself: a
+  not-yet-valid leaf is refused too, and because a refusal does not stamp the bookkeeping the
+  `Watch` poller picks the pair up on its own once `NotBefore` passes; **only the leaf** is
+  checked, never the chain, because an expired issuer kept in a bundle is a real working pattern
+  (Let's Encrypt DST Root CA X3) and the one surveyed implementation validating the whole chain
+  documents two incidents its strictness caused; and the check gates the **swap**, not
+  construction, since at construction there is no working certificate to protect and refusing
+  there would make a host whose clock has not yet synchronised unable to start at all.
+- **A fail-open Bolt access mode granted write authority to a client that asked for
+  read-only** (#2564). `handleBegin` read the mode as `if modeStr == "r"`, so `"R"`, `"read"` or
+  a non-string all fell through to the write default and the client's writes succeeded. That is
+  a fail-open coercion on a field this server treats as a **capability restriction**, and the
+  project's fail-stop-never-fail-silent rule forbids resolving an unknown token in the more
+  privileged direction. **The contract was decided from evidence, and the evidence cuts against
+  simply copying the protocol:** the Bolt specification is silent on invalid mode values and
+  frames `mode` as a routing hint rather than as authorisation, so in Neo4j's cluster model a
+  read-only transaction fails on a follower because the follower is read-only, not because the
+  server validated the token. GoGraph gives the field the stronger meaning, so the contract is
+  its own to choose. Compatibility risk is low by construction: the official drivers send
+  exactly `"r"` or `"w"`, so a refusal can only reach a client that was previously being granted
+  write authority it did not ask for.
+- **An internal bind path would have been forwarded to the client** (#2570). A `ClientError`
+  code **bypasses** the failure sanitiser, and the wrapped depth error accumulated one path
+  segment per level: 405 bytes for a 33-deep map chain, **396 of them `map["k"]:` framing**.
+  `BindParams` discards the path for this one sentinel — the path *is* the depth, so it merely
+  restates the limit 33 times — and reports the key and the limit alone, at 108 bytes.
+- **The `csrfile` crash-durability claim is scoped to where the barrier exists** (#2582). An
+  unmeasured reassurance is worse than silence, because a reader takes it for a guarantee. See
+  *Changed*.
+
+### Compliance
+
+- **100 % openCypher TCK-compliant at the execution level, preserved.**
+  `const tckExecutionBaseline = 3897` in `cypher/tck/runner_test.go` is unchanged, no
+  `.feature` file changed in this window, and the sprint-close gate reports **3897 scenarios,
+  3897 passed, 0 failed, 0 undefined, 0 inconclusive**, with the error-type fidelity ratchet at
+  122/695. Three changes in this release were checked against the TCK before shipping and each
+  is recorded as unable to move the count: subquery expressions are not covered at all (#2615),
+  the comma-pattern relationship-uniqueness form does not appear (#2252), and `graph/query` is
+  absent from `go list -deps -test ./cypher/tck/...` (#2600, #2601).
+- **100 % ACID-compliant, and strengthened.** Four Consistency, Isolation and Atomicity
+  defects were fixed this cycle — a validator-refused value made durable and resurrected by
+  recovery (#2602), phantom nodes from uncommitted create+delete pairs (#2443), a
+  `DETACH DELETE` that destroyed state a rollback could not restore (#2444), and four rollback
+  defects including a torn arc leaked by the undo replay (#2445).
+- **Extreme / massive concurrent ready — no new certification.** The most recent production
+  certification is [`docs/certification-2026-08-13.md`](docs/certification-2026-08-13.md), taken
+  at the `v0.11.0` release commit. **This release is 192 commits past it and carries no
+  certification of its own.** The envelope that certification states — latency percentiles at
+  the published concurrency levels unmeasured, the whole-tree soak layer unrun, no container ever
+  run, a single host and architecture — is unchanged, and `soak-artefacts/` is still from
+  2026-05-30 at commit `b5453b9`. See
+  [`release-notes/v0.12.0.md`](release-notes/v0.12.0.md#what-this-release-does-not-establish).
+- **Ultra efficient by design — held, with costs stated.** `Compact` reclaims 2.26× the
+  adjacency it used to (#2628); an indexed integer equality below 1024 nodes stops allocating
+  889 per lookup (#2367); a `count(*)` over seven million rows stops allocating a row per row
+  (#2625). Against that: the anchor-swap guard's declined shape, `PushRelabel`'s poll, and the
+  MVCC cross-checks, all quantified above.
+
+### Notes
+
+- **Pre-1.0 stability.** This is a `0.y.z` release. The public Go API may change without a
+  major-version bump until `1.0.0`; pin the exact version you depend on.
+- **`1.0.0` gates: 3 of 4 met, unchanged.** Execution-level TCK is at 100 % against a ≥ 95 %
+  requirement, every `T-` divergence is resolved, and the local gate is green. Gate 4 — a soak
+  report in `soak-artefacts/` reflecting a run against the release commit — remains open for a
+  fifth consecutive cycle. The `internal/sim` soak layer *was* brought green in this window and
+  verified twice consecutively (#2620); the **whole-tree** soak was not run.
+
+[0.12.0]: https://github.com/FlavioCFOliveira/GoGraph/releases/tag/v0.12.0
+
 ## [0.11.0] — 2026-08-13
 
 The largest release the project has cut: **505 commits**, of which 63 are features,
