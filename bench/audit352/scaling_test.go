@@ -110,7 +110,8 @@ func TestScaling_SubqueryComplexity(t *testing.T) {
 	t.Logf("")
 	t.Logf("%-20s %10s %10s   %s", "shape", "exponent", "r2", "verdict")
 	for _, s := range shapes {
-		var lx, ly []float64
+		lx := make([]float64, 0, len(sizes))
+		ly := make([]float64, 0, len(sizes))
 		for _, n := range sizes {
 			lx = append(lx, math.Log(float64(n)))
 			ly = append(ly, math.Log(timings[key{s.name, n}]))

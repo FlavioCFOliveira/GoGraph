@@ -6,8 +6,11 @@ package exec
 // that each incoming row is compared against the current worst and replaces it
 // if it is better. After consuming the child it drains the heap in sorted order.
 //
-// Complexity: O(M log N) time, O(N) space — significantly cheaper than
-// Sort+Limit when M >> N (M = total input rows, N = limit).
+// Complexity: O(M log N) comparisons, O(N) space — significantly cheaper than
+// Sort+Limit when M >> N (M = total input rows, N = limit). Since #2652 each
+// heap entry carries its materialised sort keys, so key EVALUATIONS are Θ(M)
+// rather than Θ(M log N) and no comparison allocates; see
+// [Top.consumeAndFinish].
 //
 // # NULL ordering
 //
@@ -24,6 +27,7 @@ import (
 	"sort"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/internal/sortseam"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -70,7 +74,14 @@ func NewTop(child Operator, keys []SortKey, n int) (*Top, error) {
 // first Next call.
 func (op *Top) Init(ctx context.Context) error {
 	op.ctx = ctx
-	op.h = &topHeap{keys: op.keys}
+	// The control is read ONCE per execution, never per row and never per
+	// comparison. decorated is false for n == 0 as well: that shape admits no
+	// row at all, so materialising a key for each of the M rows it drains would
+	// be pure waste (see [Top.consumeAndFinish]).
+	op.h = &topHeap{
+		keys:      op.keys,
+		decorated: !sortseam.KeyDecorationDisabled() && op.n > 0,
+	}
 	op.result = nil
 	op.built = false
 	op.emitIdx = 0
@@ -111,9 +122,43 @@ func (op *Top) Close() error {
 // consumeAndFinish — blocking phase
 // ─────────────────────────────────────────────────────────────────────────────
 
+// consumeAndFinish drains the child and finalises the bounded heap.
+//
+// # Decoration (#2652)
+//
+// Top reached [rowLessForKeys] from THREE sites, each of which re-evaluated both
+// operands: the per-row admission test against the heap root, the heap's own
+// Less (so every sift of every replacement re-evaluated the keys of every node
+// it touched), and the final result sort. For an evaluator-backed key — any
+// ORDER BY expression that is not a projected column — one such call builds a
+// fresh expr.RowContext map and a fresh sorted schema walk, so the cost was
+// Θ(M log N) row-context builds for M input rows and a limit of N.
+//
+// Every heap entry now CARRIES its keys, materialised exactly once when the row
+// is admitted, and every comparison reads only those precomputed values. Key
+// evaluations drop to one per input row.
+//
+// # Why the emitted order is unchanged
+//
+// The decorated values are exactly what [sortKeyValue] returns for the same row,
+// so [keysLess] returns the same verdict for every pair [rowLessForKeys] would.
+// Heap operations are deterministic functions of the comparator's VERDICTS
+// alone, so the sequence of sifts, the drain order, and therefore the tie order
+// are all identical. The final stable sort is kept, driven by the decorated
+// keys, rather than dropped on the argument that the drain already leaves the
+// slice ordered.
 func (op *Top) consumeAndFinish() error {
 	h := op.h
 	heap.Init(h)
+	k := len(op.keys)
+
+	// scratch holds the candidate row's decorated keys. One buffer for the whole
+	// run: it is read and either copied into the heap or discarded before the
+	// next row is fetched, so no entry can alias it.
+	var scratch []expr.Value
+	if h.decorated {
+		scratch = make([]expr.Value, k)
+	}
 
 	var row Row
 	iter := 0
@@ -136,26 +181,55 @@ func (op *Top) consumeAndFinish() error {
 		cp := make(Row, len(row))
 		copy(cp, row)
 
-		if h.Len() < op.n {
-			heap.Push(h, cp)
-		} else if h.Len() > 0 && rowLessForKeys(cp, h.rows[0], op.keys) {
-			// cp is better than the current worst — replace.
-			h.rows[0] = cp
+		if !h.decorated {
+			// Legacy arm — see [sortseam]. Also the n == 0 arm, which admits
+			// nothing and must therefore evaluate nothing.
+			if h.Len() < op.n {
+				heap.Push(h, topEntry{row: cp})
+			} else if h.Len() > 0 && rowLessForKeys(cp, h.entries[0].row, op.keys) {
+				h.entries[0].row = cp
+				heap.Fix(h, 0)
+			}
+			continue
+		}
+
+		for j := range op.keys {
+			scratch[j] = sortKeyValue(op.keys[j], cp)
+		}
+		switch {
+		case h.Len() < op.n:
+			// Filling the heap: this is the only site that allocates a key
+			// block, and it runs at most min(M, n) times.
+			kv := make([]expr.Value, k)
+			copy(kv, scratch)
+			heap.Push(h, topEntry{row: cp, kv: kv})
+		case h.Len() > 0 && keysLess(op.keys, scratch, h.entries[0].kv):
+			// cp is better than the current worst — replace, reusing the
+			// displaced entry's key block so a replacement allocates nothing.
+			e := &h.entries[0]
+			e.row = cp
+			copy(e.kv, scratch)
 			heap.Fix(h, 0)
 		}
 	}
 
-	// Drain heap into result in sorted order (smallest to largest).
-	op.result = make([]Row, h.Len())
-	for i := len(op.result) - 1; i >= 0; i-- {
-		op.result[i] = heap.Pop(h).(Row) //nolint:forcetypeassert // heap invariant
+	// Drain heap into ascending order (smallest to largest) by filling from the
+	// back, then re-sort stably. Entries are drained rather than bare rows so
+	// the final sort can read the decorated keys instead of re-evaluating them.
+	ents := make([]topEntry, h.Len())
+	for i := len(ents) - 1; i >= 0; i-- {
+		ents[i] = heap.Pop(h).(topEntry) //nolint:forcetypeassert // heap invariant
 	}
-	// After draining in reverse pop order the slice is already sorted because
-	// we filled from the back. Verify by sorting once more (stable, low cost
-	// because the slice is nearly-sorted from the heap drain).
-	sort.SliceStable(op.result, func(i, j int) bool {
-		return rowLessForKeys(op.result[i], op.result[j], op.keys)
+	sort.SliceStable(ents, func(i, j int) bool {
+		if h.decorated {
+			return keysLess(op.keys, ents[i].kv, ents[j].kv)
+		}
+		return rowLessForKeys(ents[i].row, ents[j].row, op.keys)
 	})
+	op.result = make([]Row, len(ents))
+	for i := range ents {
+		op.result[i] = ents[i].row
+	}
 	return nil
 }
 
@@ -163,34 +237,50 @@ func (op *Top) consumeAndFinish() error {
 // topHeap — max-heap keyed by the sort order (worst row at root)
 // ─────────────────────────────────────────────────────────────────────────────
 
-// topHeap is a max-heap: the root is the "worst" row by the given sort order.
+// topEntry is one heap slot: a retained row together with the sort keys
+// materialised for it (#2652). kv has len(topHeap.keys) values on the decorated
+// path and is nil on the legacy path, where the comparator re-evaluates instead.
+type topEntry struct {
+	row Row
+	kv  []expr.Value
+}
+
+// topHeap is a max-heap: the root is the "worst" entry by the given sort order.
 // When the heap is full, a newly arriving row that is "better" than the root
 // replaces it.
 type topHeap struct {
-	rows []Row
-	keys []SortKey
+	entries []topEntry
+	keys    []SortKey
+	// decorated selects which comparator Less uses. Set once by [Top.Init] from
+	// [sortseam.KeyDecorationDisabled] and never written afterwards, so a
+	// half-decorated heap is not representable.
+	decorated bool
 }
 
-func (h *topHeap) Len() int { return len(h.rows) }
+func (h *topHeap) Len() int { return len(h.entries) }
 
-// Less returns true when i should be above j in the max-heap, i.e. when row i
-// is "worse" (sorts later) than row j.
+// Less returns true when i should be above j in the max-heap, i.e. when entry i
+// is "worse" (sorts later) than entry j.
 func (h *topHeap) Less(i, j int) bool {
-	return rowLessForKeys(h.rows[j], h.rows[i], h.keys) // reversed: worst at root
+	if h.decorated {
+		// reversed: worst at root.
+		return keysLess(h.keys, h.entries[j].kv, h.entries[i].kv)
+	}
+	return rowLessForKeys(h.entries[j].row, h.entries[i].row, h.keys)
 }
 
-func (h *topHeap) Swap(i, j int) { h.rows[i], h.rows[j] = h.rows[j], h.rows[i] }
+func (h *topHeap) Swap(i, j int) { h.entries[i], h.entries[j] = h.entries[j], h.entries[i] }
 
 func (h *topHeap) Push(x any) {
-	h.rows = append(h.rows, x.(Row)) //nolint:forcetypeassert // heap contract
+	h.entries = append(h.entries, x.(topEntry)) //nolint:forcetypeassert // heap contract
 }
 
 func (h *topHeap) Pop() any {
-	old := h.rows
+	old := h.entries
 	n := len(old)
 	x := old[n-1]
-	old[n-1] = nil // zero for GC
-	h.rows = old[:n-1]
+	old[n-1] = topEntry{} // zero for GC
+	h.entries = old[:n-1]
 	return x
 }
 
@@ -198,8 +288,16 @@ func (h *topHeap) Pop() any {
 // rowLessForKeys — shared comparator for Sort and Top
 // ─────────────────────────────────────────────────────────────────────────────
 
-// rowLessForKeys returns true iff row a should appear before row b according to
-// the given key sequence. It applies the same NULL ordering as [Sort.rowLess].
+// rowLessForKeys is the LEGACY comparator: it evaluates both operands of every
+// comparison through [sortKeyValue]. Since #2652 it is reached only when
+// [sortseam.KeyDecorationDisabled] selects the control arm, and on the n == 0
+// shape that admits nothing; the production path compares decorated keys through
+// [keysLess]. It is kept because it is the definition the decorated path must
+// agree with, and because the differential test needs a real arm to compare
+// against rather than a golden file.
+//
+// It returns true iff row a should appear before row b according to the given key
+// sequence, and applies the same NULL ordering as [Sort.rowLess].
 func rowLessForKeys(a, b Row, keys []SortKey) bool {
 	for _, key := range keys {
 		av := sortKeyValue(key, a)

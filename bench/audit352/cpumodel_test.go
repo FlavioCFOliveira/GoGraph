@@ -241,7 +241,8 @@ func TestCPUModel_FixedAndMarginal(t *testing.T) {
 		dur  = 1200 * time.Millisecond
 	)
 
-	var unwind, agg []fitPoint
+	unwind := make([]fitPoint, 0, len(cpuModelKs))
+	agg := make([]fitPoint, 0, len(cpuModelKs))
 	t.Logf("%-14s %8s %10s %12s %12s %12s", "arm", "k", "ops", "gross us/op", "net us/op", "ns/op")
 	for _, k := range cpuModelKs {
 		q := fmt.Sprintf(`UNWIND range(1,%d) AS i RETURN i`, k)

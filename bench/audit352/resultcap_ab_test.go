@@ -47,6 +47,24 @@ type capArm struct {
 	opts cypher.EngineOptions
 }
 
+// capSandwichArms is the three-arm control sandwich the per-shape and
+// per-GOMAXPROCS sweeps run: a default arm on either side of the arm under test,
+// so drift over the sweep shows up as the two controls disagreeing.
+//
+// It is a function rather than a package-level slice so each caller gets its own
+// copy and cannot mutate another sweep's arms, and so the callers can index it
+// instead of ranging it by value (gocritic rangeValCopy: capArm is 192 bytes).
+func capSandwichArms() []capArm {
+	return []capArm{
+		{"ctrl_a__default", cypher.EngineOptions{}},
+		{"both_off", cypher.EngineOptions{
+			MaxResultRows:  cypher.MaxResultRowsUnlimited,
+			MaxResultBytes: cypher.MaxResultBytesUnlimited,
+		}},
+		{"ctrl_b__default", cypher.EngineOptions{}},
+	}
+}
+
 func capArms() []capArm {
 	return []capArm{
 		{"ctrl_a__default", cypher.EngineOptions{}},
@@ -69,11 +87,13 @@ const capABQuery = `MATCH (p:Person) RETURN p.salary`
 //
 //	go test -run='^$' -bench='^BenchmarkResultCapAB$' -benchmem -count=10 ./bench/audit352/
 func BenchmarkResultCapAB(b *testing.B) {
-	for _, arm := range capArms() {
-		arm := arm
-		opts := arm.opts
-		engine := cypher.NewEngineWithOptions(benchGraph, opts)
-		b.Run(arm.name, func(b *testing.B) { runQuery(b, engine, capABQuery) })
+	// Indexed rather than ranged by value: capArm carries an EngineOptions and
+	// copying one per iteration is 192 bytes the loop has no use for (gocritic
+	// rangeValCopy).
+	arms := capArms()
+	for i := range arms {
+		engine := cypher.NewEngineWithOptions(benchGraph, arms[i].opts)
+		b.Run(arms[i].name, func(b *testing.B) { runQuery(b, engine, capABQuery) })
 	}
 }
 
@@ -89,17 +109,10 @@ func BenchmarkResultCapAB_Procs(b *testing.B) {
 	for _, procs := range []int{1, 2, 4, 8, 10} {
 		procs := procs
 		b.Run(fmt.Sprintf("procs=%02d", procs), func(b *testing.B) {
-			for _, arm := range []capArm{
-				{"ctrl_a__default", cypher.EngineOptions{}},
-				{"both_off", cypher.EngineOptions{
-					MaxResultRows:  cypher.MaxResultRowsUnlimited,
-					MaxResultBytes: cypher.MaxResultBytesUnlimited,
-				}},
-				{"ctrl_b__default", cypher.EngineOptions{}},
-			} {
-				arm := arm
-				engine := cypher.NewEngineWithOptions(benchGraph, arm.opts)
-				b.Run(arm.name, func(b *testing.B) {
+			sandwich := capSandwichArms()
+			for i := range sandwich {
+				engine := cypher.NewEngineWithOptions(benchGraph, sandwich[i].opts)
+				b.Run(sandwich[i].name, func(b *testing.B) {
 					runtime.GOMAXPROCS(procs)
 					defer runtime.GOMAXPROCS(orig)
 					runQuery(b, engine, capABQuery)
@@ -148,17 +161,10 @@ func BenchmarkResultCapAB_Shapes(b *testing.B) {
 	for _, s := range shapes {
 		s := s
 		b.Run(s.name, func(b *testing.B) {
-			for _, arm := range []capArm{
-				{"ctrl_a__default", cypher.EngineOptions{}},
-				{"both_off", cypher.EngineOptions{
-					MaxResultRows:  cypher.MaxResultRowsUnlimited,
-					MaxResultBytes: cypher.MaxResultBytesUnlimited,
-				}},
-				{"ctrl_b__default", cypher.EngineOptions{}},
-			} {
-				arm := arm
-				engine := cypher.NewEngineWithOptions(benchGraph, arm.opts)
-				b.Run(arm.name, func(b *testing.B) { runQuery(b, engine, s.q) })
+			sandwich := capSandwichArms()
+			for i := range sandwich {
+				engine := cypher.NewEngineWithOptions(benchGraph, sandwich[i].opts)
+				b.Run(sandwich[i].name, func(b *testing.B) { runQuery(b, engine, s.q) })
 			}
 		})
 	}

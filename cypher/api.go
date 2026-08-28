@@ -11617,6 +11617,21 @@ func validPercentileParam(v expr.Value) (float64, error) {
 	return 0.5, nil
 }
 
+// sortKeyEvalCount counts how many times a compiled ORDER BY key evaluator
+// (the Case-2 closure in [irSortKeys]) has been invoked since process start.
+// Like [labelCountScanBuildCount] it is a process-global, monotonic diagnostic
+// seam read only by the in-package tests; callers snapshot it before and after a
+// query rather than resetting it.
+//
+// It exists because the defect it guards is a COMPLEXITY defect, and no timing
+// measurement can separate O(n) from O(n log n) at the sizes a unit test can
+// afford. Before #2652 [exec.Sort] and [exec.Top] called this closure from
+// inside their comparators, so the count grew as n log n; the
+// decorate-sort-undecorate rewrite calls it exactly once per row per key, so the
+// count grows as n. Doubling n twice must multiply the count by exactly 4, not
+// by 4·(log n′/log n).
+var sortKeyEvalCount atomic.Uint64
+
 // irSortKeys converts a slice of ir.SortItem to exec.SortKey values.
 //
 // Resolution strategy (per item):
@@ -11655,10 +11670,16 @@ func irSortKeys(
 		if si.Expr != nil {
 			// Snapshot the schema and capture all dependencies so the closure
 			// evaluates correctly against the row layout produced by the child.
-			schemaCopy := make(map[string]int, len(schema))
-			for k, v := range schema {
-				schemaCopy[k] = v
-			}
+			schemaCopy := copySchema(schema)
+			// HOIST THE SCHEMA WALK (#2652, the sort-shape share of #2645). The
+			// walk is a pure function of the snapshotted schema, and the schema is
+			// frozen for the whole execution, so deriving it here rather than
+			// inside the closure removes one slice allocation AND one
+			// slices.SortFunc per invocation. It is the same reasoning that gave
+			// [evalRowPooledWalk] its existence, and this closure is now expressed
+			// through it so the two paths cannot drift.
+			walk := newSchemaWalk(schemaCopy)
+			width := len(schemaCopy)
 			capturedExpr := si.Expr
 			capturedG := g
 			capturedParams := params
@@ -11668,8 +11689,19 @@ func irSortKeys(
 			keys = append(keys, exec.SortKey{
 				Ascending: ascending,
 				Eval: func(row exec.Row) (expr.Value, error) {
-					rowCtx := buildRowCtx(row, schemaCopy, capturedG, capturedBopts)
-					return evalRow(capturedBopts, capturedExpr, rowCtx, capturedParams, capturedReg)
+					// scalarUse is deliberately nil. The value this returns is
+					// RETAINED by [exec.Sort] / [exec.Top] for the whole span of
+					// the sort (decorate-sort-undecorate, #2652), so it must not
+					// borrow a pooled RowContext map or a pooled lazy node, and it
+					// must be a fully materialised value rather than a partial
+					// one. Passing nil selects the fresh-map, fresh-lazy-node arm
+					// of evalRowPooledWalk, which is byte-for-byte the historical
+					// buildRowCtx behaviour.
+					sortKeyEvalCount.Add(1)
+					return evalRowPooledWalk(
+						capturedBopts, capturedExpr, row, walk, width,
+						capturedG, capturedParams, capturedReg, nil,
+					)
 				},
 			})
 			continue

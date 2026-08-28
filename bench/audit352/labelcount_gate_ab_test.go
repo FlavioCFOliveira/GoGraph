@@ -443,7 +443,7 @@ func BenchmarkLabelCountScanBoxing(b *testing.B) {
 // assumption is therefore replaced by the measured id distribution, read out of
 // the engine with id(n). Nothing but boxing predicts those counts.
 func TestLabelCountBoxingAttribution(t *testing.T) {
-	var fixed []int
+	fixed := make([]int, 0, 5)
 	for _, n := range []int{200, 256, 300, 1_000, 2_000} {
 		e := pushdownEngine(t, n)
 		assertPlan(t, e, scanQuery, planScan, n)
