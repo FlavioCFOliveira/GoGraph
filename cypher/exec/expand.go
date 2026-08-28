@@ -1014,8 +1014,16 @@ func (c columnarExpand) nodeIDColumnProducer() {}
 // (the passthrough), then three int64 columns for srcID, edgeID, dstID. The
 // passthrough kinds are read from a fresh child template so a scalar column stays
 // unboxed; a non-scalar (boxed) child column stays boxed, byte-identically.
+//
+// The template is built at capacity 1 — not at capacity — because only its SCHEMA
+// is read ([Chunk.NumCols] and [Chunk.ColKind], both fixed at construction) before
+// it is discarded; capacity 1 gives it the minimal backing, matching
+// [NewColumnarHashJoin]'s templates. It must not be 0: [NewChunk] and
+// [NewDynamicChunk] map a capacity < 1 to [DefaultChunkCapacity], which would
+// silently restore the full allocation. The returned chunk — the one that actually
+// carries rows — keeps the caller's capacity.
 func (op *Expand) columnarOutputChunk(capacity int) *Chunk {
-	template := op.chunkChild.NewOutputChunk(capacity)
+	template := op.chunkChild.NewOutputChunk(1)
 	p := template.NumCols()
 	kinds := make([]expr.Kind, p+3)
 	for j := 0; j < p; j++ {

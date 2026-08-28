@@ -6,6 +6,26 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Removed
+
+- **The dead `cypher/exec.ChunkPool`** (its `NewChunkPool` constructor and its
+  `Get` / `Put` methods). It had **no production call site anywhere in the
+  repository**: its only references were its own definition and the two tests that
+  exercised it — `TestChunkPoolRoundTrip` and `TestChunkPoolCopiesKinds`, removed
+  with it — so the `cypher.pool.chunk.get` / `cypher.pool.chunk.put` counters it
+  incremented **could never fire outside those two tests**. Its godoc ("Operators
+  that process a high volume of batches should obtain chunks from a shared pool")
+  described an intent no operator honoured: every columnar stage owns its chunk from
+  its child's `NewOutputChunk` and reuses it across batches via `Chunk.Reset`. It has
+  been exported and unwired since `v0.9.0`, where it landed as part of the additive
+  `Chunk` surface. This is the same shape as `v0.9.0`'s removal of `ParallelScan` —
+  one dead, never-wired exported identifier in `cypher/exec`, a package that
+  [docs/semver.md](docs/semver.md) does list in the public-API surface; pre-1.0 the
+  minor digit absorbs such a change, as it did then. No other exported identifier
+  changes, and **no production behaviour changes**. Nothing measurable is reclaimed —
+  dead code costs nothing at runtime; it is removed because the sprint-352 bottleneck
+  audit found it, not because anything gets faster. (#2656)
+
 ## [0.12.0] — 2026-08-27
 
 **192 commits** — 87 fixes, 51 features, 25 documentation, 18 test, 4 performance,
