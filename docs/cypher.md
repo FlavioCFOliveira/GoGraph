@@ -21,7 +21,11 @@ import (
 // CREATE always adds a relationship (including a parallel edge between an
 // existing node pair). Constructing the engine over a non-multigraph graph makes
 // such a CREATE fail with cypher.ErrParallelEdgeInSimpleGraph.
-g   := lpg.New[string, float64](adjlist.Config{Multigraph: true})
+// Directed: true is required too — openCypher relationships are directed,
+// whereas the zero value mirrors every edge back to its source.
+// Weightless: true drops the per-node edge-weight column, which carries no
+// information for the engine (see "Graph configuration" below).
+g   := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true, Weightless: true})
 eng := cypher.NewEngine(g)
 
 res, err := eng.RunInTx(context.Background(),
@@ -51,6 +55,37 @@ writer. The returned `Result` is not safe for concurrent use.
 To classify a query as read or write without running it (for example, to route
 writers to `RunInTx`), call `cypher.QueryHasWritingClause(query)`; this is the
 same textual heuristic `RunAny`/`RunInTxAny` use to dispatch.
+
+### Graph configuration
+
+All three `adjlist.Config` fields in the quick start are deliberate, and the
+first two are required for openCypher semantics rather than merely advisable:
+
+- `Multigraph: true` — openCypher's data model is a multigraph, so two `CREATE`
+  statements between the same ordered pair must yield two relationships. On a
+  simple graph the second one instead fails with
+  `cypher.ErrParallelEdgeInSimpleGraph`. This is the field most easily missed:
+  `adjlist.Config{}` is *not* a multigraph.
+- `Directed: true` — openCypher relationships are directed. On an undirected
+  graph `AddEdge` also inserts the reverse edge, so the stored adjacency no
+  longer matches the direction the query wrote.
+- `Weightless: true` — Cypher has no edge-weight concept: the engine records the
+  zero weight for every relationship, and the one path that reads a weight back
+  (transaction undo, restoring an edge a rolled-back write had removed) therefore
+  only ever reads that same zero. The per-node `[]float64` weight column carries
+  no information, and dropping it removes one heap object per node that has
+  outgoing relationships — measured at 32 B/node for a degree-4 graph and
+  64 B/node for degrees 5–8, the geometric capacity buckets the column is
+  allocated in.
+
+The engine's own openCypher TCK harness builds its graph with `Directed: true,
+Multigraph: true` for exactly these reasons.
+
+`Weightless` is the only one of the three that is an optimisation rather than a
+requirement, and it carries one exclusion: do not set it on a graph you also
+intend to query with a weight-consuming `search/` algorithm (Dijkstra, A\*,
+Bellman-Ford, and the rest), which would then see every edge as weight 0. See
+`adjlist.Config.Weightless` for that contract in full.
 
 ---
 

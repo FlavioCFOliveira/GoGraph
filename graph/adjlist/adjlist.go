@@ -104,9 +104,14 @@ type Config struct {
 	//
 	// Weightless is the right choice for a property graph queried only by
 	// relationships and properties — for example the Cypher engine, which is
-	// hardwired to W=float64 yet never reads edge weights. It is left
-	// caller-opt-in (the engine is not auto-defaulted to it) because the weight
-	// column is load-bearing for weighted algorithms.
+	// hardwired to W=float64 yet has no edge-weight concept: it writes the zero
+	// weight for every relationship and never reads a weight to compute a
+	// result. Its one read is the DELETE undo preimage, which snapshots the
+	// pair's weight so the inverse can restore it; on a weightless graph that
+	// read yields the same zero the engine itself wrote, so the column carries
+	// no information for it either way. Weightless is left caller-opt-in (the
+	// engine is not auto-defaulted to it) because the weight column is
+	// load-bearing for weighted algorithms.
 	//
 	// Contract for weighted algorithms: a weightless graph models the weight≡0
 	// special case. Structure-only algorithms (BFS, DFS, connectivity,

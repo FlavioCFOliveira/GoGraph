@@ -13,10 +13,14 @@ import (
     "github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
-// Multigraph: true is required — openCypher's data model is a multigraph, so a
-// CREATE always adds a relationship (including a parallel edge between an
-// existing node pair).
-g := lpg.New[string, float64](adjlist.Config{Multigraph: true})
+// Directed and Multigraph are both required for openCypher semantics:
+// relationships are directed, and the data model is a multigraph, so a CREATE
+// always adds a relationship (including a parallel edge between an existing
+// node pair). Weightless is the right choice here because Cypher has no
+// edge-weight concept, so the per-node weight column carries no information;
+// see docs/cypher.md "Graph configuration" for the full rationale and the one
+// case that excludes it.
+g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true, Weightless: true})
 eng := cypher.NewEngine(g)
 
 // NewServer returns an error and is secure-by-default: it refuses a nil Auth
@@ -332,9 +336,11 @@ import (
 )
 
 func main() {
-    // Multigraph: true — openCypher's data model is a multigraph (a CREATE
-    // always adds a relationship, including a parallel edge between a pair).
-    g   := lpg.New[string, float64](adjlist.Config{Multigraph: true})
+    // Directed + Multigraph — openCypher relationships are directed and the
+    // data model is a multigraph (a CREATE always adds a relationship,
+    // including a parallel edge between a pair). Weightless drops the per-node
+    // edge-weight column, which carries no information for the Cypher engine.
+    g   := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true, Weightless: true})
     eng := cypher.NewEngine(g)
     srv, err := server.NewServer(eng, server.Options{
         MaxConnections: 1024,

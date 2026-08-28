@@ -3,7 +3,24 @@
 //
 // # Usage
 //
-//	g := lpg.New[string, float64](adjlist.Config{})
+// Directed and Multigraph are required for openCypher semantics: relationships
+// are directed, and the data model is a multigraph, so a CREATE always adds a
+// relationship — including a parallel edge between an existing node pair, which
+// on a simple graph fails with [ErrParallelEdgeInSimpleGraph] instead. The zero
+// adjlist.Config is neither directed nor a multigraph, so it is the wrong
+// graph for this engine. Weightless is the right choice because Cypher has no
+// edge-weight concept: the engine records the zero weight for every
+// relationship, and the one path that reads a weight back (transaction undo)
+// only ever reads that same zero, so the per-node weight column carries no
+// information. Leave Weightless unset on a graph that is also queried with a
+// weight-consuming search algorithm (Dijkstra, A*, Bellman-Ford); see
+// adjlist.Config.Weightless for that contract.
+//
+//	g := lpg.New[string, float64](adjlist.Config{
+//		Directed:   true,
+//		Multigraph: true,
+//		Weightless: true,
+//	})
 //	// ... populate graph ...
 //
 //	engine := cypher.NewEngine(g)

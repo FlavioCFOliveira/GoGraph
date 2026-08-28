@@ -173,9 +173,14 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 	fmt.Fprintf(w, "config.seed=%d\n", cfg.seed)
 
 	// Engine over an in-memory labelled property graph, seeded from cfg.
-	// Multigraph: true is required for openCypher semantics — CREATE always adds
-	// a relationship, including a parallel edge between an existing node pair.
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	// Directed + Multigraph are required for openCypher semantics — relationships
+	// are directed, and CREATE always adds a relationship, including a parallel
+	// edge between an existing node pair. Weightless drops the per-node edge-weight
+	// column: Cypher has no edge-weight concept, so the []float64 holds no
+	// information (every relationship is recorded with the zero weight).
+	// This example never runs a weighted search/ algorithm over g; one that did
+	// (Dijkstra, Bellman-Ford, A*) must leave Weightless unset.
+	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true, Weightless: true})
 	eng := cypher.NewEngine(g)
 	stats, err := seed(ctx, g, cfg)
 	if err != nil {
