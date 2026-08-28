@@ -54,15 +54,43 @@ import (
 //
 // # Concurrency
 //
-// A Profiler is NOT safe for concurrent use and must not be shared between
-// queries. One query's pipeline is driven by one goroutine, so the wrappers need
-// no synchronisation. An operator that fans work out internally (the parallel
-// tier) is measured as one node: the wrapper times the calls the driving
-// goroutine makes, which is the honest attribution — it cannot see inside.
+// A Profiler carries no mutable state: Wrap allocates a wrapper, returns it and
+// retains nothing, so Wrap itself is safe to call from any goroutine. The
+// WRAPPERS are the part that is not: each accumulates its row count and elapsed
+// time with plain non-atomic adds, so every wrapper must be driven by exactly one
+// goroutine — which is what a single-goroutine Volcano pipeline gives it.
+//
+// # The parallel tier is measured as ONE node, by construction
+//
+// A morsel-parallel leaf ([ParallelScanProject], [ParallelAggregateScan],
+// [ParallelCountScan]) builds and drives a private sub-plan per morsel on a
+// worker goroutine. Those sub-plans are neither instrumented nor rendered, and
+// both halves are ENFORCED rather than assumed:
+//
+//   - the builder clears the profiler from the per-worker build options
+//     (cypher's buildOpts.forWorker), so no worker allocates a wrapper or times a
+//     row; and
+//   - a morsel-parallel leaf implements no [PlanChildren], so [PlanTree] stops at
+//     it and a measurement taken below it would be unreachable anyway.
+//
+// The leaf therefore reports the rows it emitted and the time its own Next and
+// FillChunk calls took on the driving goroutine: the whole parallel phase
+// attributed to one node. That is a deliberate contract, not a limitation of the
+// wrapper. Showing the inside would mean rendering one sub-tree per morsel, or
+// merging N morsel sub-trees into one synthetic tree; both change what PROFILE
+// reports, so neither is done here.
+//
+// Sharing one Profiler between two concurrently executing queries is meaningless
+// rather than unsafe — the measurements would belong to two unrelated trees — so
+// Engine.Profile allocates one per call.
 type Profiler struct {
-	// wrapped retains every wrapper in build order, tying their lifetime to the
-	// Profiler and keeping them reachable without a tree walk.
-	wrapped []profiledNode
+	// The type deliberately carries NO state. It is the marker that instrumentation
+	// is on, and nothing more: Wrap returns the wrapper it builds, and the wrapper's
+	// lifetime is already tied to the operator tree that [PlanTree] walks, so
+	// retaining a second reference here would keep every wrapper (and, from a
+	// morsel-parallel build, every per-morsel sub-plan) alive for no reader's
+	// benefit. A field that only ever gets appended to is not a design, it is a leak
+	// with a race attached (rmp #2664).
 }
 
 // NewProfiler returns a Profiler ready to instrument one query build.
@@ -81,17 +109,14 @@ func (p *Profiler) Wrap(op Operator) Operator {
 	}
 
 	base := profiledOp{inner: op}
-	var w Operator
 	switch cp := op.(type) {
 	case NodeIDColumnProducer:
-		w = &profiledNodeIDOp{profiledChunkOp{profiledOp: base, chunk: cp}}
+		return &profiledNodeIDOp{profiledChunkOp{profiledOp: base, chunk: cp}}
 	case ChunkProducer:
-		w = &profiledChunkOp{profiledOp: base, chunk: cp}
+		return &profiledChunkOp{profiledOp: base, chunk: cp}
 	default:
-		w = &profiledOp{inner: op}
+		return &profiledOp{inner: op}
 	}
-	p.wrapped = append(p.wrapped, w.(profiledNode))
-	return w
 }
 
 // profiledNode is the behaviour [PlanTree] needs from any wrapper variant: the
@@ -222,8 +247,16 @@ type profiledNodeIDOp struct {
 
 func (p *profiledNodeIDOp) nodeIDColumnProducer() {}
 
+// Every variant Wrap can return must satisfy [profiledNode], or [PlanTree] would
+// walk past a wrapper without unwrapping it and the node would render unmeasured.
+// Wrap used to enforce that with a `w.(profiledNode)` type assertion on the value
+// it appended to a retained slice; the slice was write-only and the append was a
+// data race (rmp #2664), so both are gone and the invariant is stated here — at
+// compile time, where it belongs, rather than as a panic on the build path.
 var (
 	_ profiledNode         = (*profiledOp)(nil)
+	_ profiledNode         = (*profiledChunkOp)(nil)
+	_ profiledNode         = (*profiledNodeIDOp)(nil)
 	_ ChunkProducer        = (*profiledChunkOp)(nil)
 	_ NodeIDColumnProducer = (*profiledNodeIDOp)(nil)
 	_ rowCountHinter       = (*profiledOp)(nil)

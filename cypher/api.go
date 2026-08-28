@@ -10305,6 +10305,14 @@ func isNonDeterministicCall(fn *ast.FunctionInvocation) bool {
 //     entry the build needs is (re)written from the subtree's own IR, never read
 //     from a pre-existing entry.
 //
+//   - SHARED INSTRUMENTATION. profiler is an *exec.Profiler, so a value copy hands
+//     every worker the SAME instance and the worker build MUTATES it. Clearing it
+//     is what makes exec.Profiler's documented "the parallel tier is measured as
+//     one node" contract true rather than merely intended, and it costs the
+//     rendered PROFILE nothing: a morsel-parallel leaf implements no
+//     exec.PlanChildren, so exec.PlanTree stops at it and nothing built below it
+//     was ever reachable from the output (rmp #2664).
+//
 // subEval and patEval are shared by the value copy — i.e. BY POINTER — and this
 // is safe ONLY because the caller has screened them out of reach. Both are
 // documented as not safe for concurrent use (cypher/subquery_eval.go,
@@ -10337,6 +10345,16 @@ func (b *buildOpts) forWorker() *buildOpts {
 	cp.pathVarChain = nil
 	cp.vleRelMeta = nil
 	cp.expandTripletSeq = nil
+	// SHARED INSTRUMENTATION. The profiler is a POINTER, so a value copy hands
+	// every worker the same *exec.Profiler and each one mutates it while building
+	// its sub-plan — the data race at cypher/exec/profile.go:93 (rmp #2664).
+	// Clearing it is not merely the cheapest way to close that race, it is the
+	// contract: a morsel-parallel leaf implements no PlanChildren, so exec.PlanTree
+	// stops at it and NOTHING built below it is ever rendered. Instrumenting a
+	// worker sub-plan therefore bought a wrapper allocation per morsel per operator
+	// and two time.Now calls per row that no reader could ever see. The parallel
+	// tier is measured as one node, which is what exec.Profiler documents.
+	cp.profiler = nil
 	return &cp
 }
 

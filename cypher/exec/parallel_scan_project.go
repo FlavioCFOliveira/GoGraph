@@ -24,12 +24,27 @@ package exec
 // Init collects every live NodeID once, on the calling goroutine (identical to
 // AllNodesScan.Init / ParallelCountScan.Init — the ONLY phase that touches graph
 // state), splits the owned slice into disjoint morsels of [DefaultMorselSize]
-// IDs, and builds one INDEPENDENT sub-plan per worker via the supplied
-// [SubplanFactory]. The factory is invoked on the calling goroutine, before any
-// worker launches, so every build-time write (schema population, build-time
-// buildOpts fields) stays single-threaded. Each worker then drives its own
-// sub-plan over the morsels it dequeues from a pre-filled bounded work channel,
-// deep-copying every result row into a private []Row buffer.
+// IDs, and launches the workers. Each worker then drives its own sub-plan over
+// the morsels it dequeues from a pre-filled bounded work channel, deep-copying
+// every result row into a private []Row buffer.
+//
+// The sub-plans come from the supplied [SubplanFactory], and WHERE each call runs
+// matters. Before it constructs this operator at all, the caller (cypher's
+// tryBuildParallelScanProject) builds ONE PROBE sub-plan on its own goroutine —
+// with the same builder the factory wraps, over an empty morsel — and closes it.
+// That probe is what populates the caller's output schema and surfaces a build
+// error while everything is still single-threaded. Every subsequent build is a
+// factory call made by a WORKER, once per morsel, on the goroutine that will
+// drive the returned operator (see runMorsel). The factory is therefore called
+// concurrently by design, and every build-time write it performs must land in
+// PER-WORKER state — which is exactly what cypher's buildOpts.forWorker exists to
+// provide.
+//
+// This paragraph used to claim the opposite: that the factory ran only on the
+// calling goroutine, before any worker launched, so build-time writes stayed
+// single-threaded. That was false, and the false claim is what let a shared
+// *exec.Profiler reach the workers — forWorker copied the pointer, and every
+// worker appended to the same unsynchronised slice inside it (rmp #2664).
 //
 // The first call to Next joins every worker synchronously via wg.Wait on the
 // caller's goroutine, then concatenates the per-worker buffers and streams them.
@@ -106,6 +121,10 @@ var errBudgetReached = errors.New("exec: parallel scan result budget reached")
 //
 // The returned operator is driven Init → Next* → Close by exactly one worker
 // goroutine. It must honour the standard [Operator] lifecycle.
+//
+// The factory is called ONCE PER MORSEL, on the worker goroutine that will drive
+// the operator it returns, so an implementation must be safe to call concurrently
+// and must not write to any state shared with another call.
 type SubplanFactory func(morsel []graph.NodeID) (Operator, error)
 
 // ParallelScanProject is a Volcano leaf operator that partitions a full-node
@@ -197,12 +216,16 @@ func NewParallelScanProject(g nodeWalker, factory SubplanFactory, morselSize int
 	return &ParallelScanProject{g: g, morselSize: morselSize, factory: factory, gov: gov}
 }
 
-// Init collects all node IDs, partitions them into morsels, builds one
-// independent sub-plan per worker on the calling goroutine, and launches the
-// workers. Each worker drives its sub-plan over the morsels it dequeues and
-// accumulates deep-copied result rows into its private buffer. The join and
-// combine are deferred to the first Next call so every worker is joined on the
-// Next goroutine, inside the engine's visibility barrier.
+// Init collects all node IDs on the calling goroutine, partitions them into
+// morsels, and launches the workers. Each worker then BUILDS its own sub-plan per
+// morsel — on its own goroutine, by calling the [SubplanFactory] — drives it over
+// the morsels it dequeues, and accumulates deep-copied result rows into its
+// private buffer. Init builds no sub-plan itself; the single-threaded probe build
+// that populates the caller's schema happens earlier still, in the caller (see
+// the file header). The join and combine are deferred to the first Next call so
+// every worker is joined on the Next goroutine, by wg.Wait — which, since rmp
+// #2344 removed the engine's visibility-barrier reader, is what bounds the
+// workers' lifetime.
 func (op *ParallelScanProject) Init(ctx context.Context) error {
 	op.ctx = ctx
 	op.joined = false
