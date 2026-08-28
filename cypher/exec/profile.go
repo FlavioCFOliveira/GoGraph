@@ -107,16 +107,74 @@ func (p *Profiler) Wrap(op Operator) Operator {
 	if _, already := op.(profiledNode); already {
 		return op
 	}
-
-	base := profiledOp{inner: op}
-	switch cp := op.(type) {
-	case NodeIDColumnProducer:
-		return &profiledNodeIDOp{profiledChunkOp{profiledOp: base, chunk: cp}}
-	case ChunkProducer:
-		return &profiledChunkOp{profiledOp: base, chunk: cp}
-	default:
-		return &profiledOp{inner: op}
+	if cp, columnar := op.(ChunkProducer); columnar {
+		return p.wrapChunkProducer(cp)
 	}
+	return &profiledOp{inner: op}
+}
+
+// WrapChunk is [Profiler.Wrap] for a caller that holds a [ChunkProducer] and needs
+// one back.
+//
+// It exists so that a plan-shape recogniser which SUBSTITUTES a columnar operator
+// can re-instrument it without a type assertion. Wrap returns an [Operator], and a
+// caller feeding [NewColumnarFilter] would have to assert its result back to
+// ChunkProducer — an assertion that cannot fail, but that the compiler forces the
+// caller to handle anyway, so the code grows an unreachable branch whose behaviour
+// nobody can test. Returning the interface the caller needs removes the branch
+// instead of documenting it.
+//
+// Like Wrap it returns cp unchanged when the profiler is nil, when cp is nil, or
+// when cp is already wrapped.
+func (p *Profiler) WrapChunk(cp ChunkProducer) ChunkProducer {
+	if p == nil || cp == nil {
+		return cp
+	}
+	if _, already := cp.(profiledNode); already {
+		return cp
+	}
+	return p.wrapChunkProducer(cp)
+}
+
+// wrapChunkProducer builds the wrapper variant matching what cp exposes. The two
+// return types are the only variants that satisfy [ChunkProducer], which the
+// compile-time assertions at the foot of this file enforce, so the result is a
+// ChunkProducer by construction rather than by assertion.
+func (p *Profiler) wrapChunkProducer(cp ChunkProducer) ChunkProducer {
+	base := profiledChunkOp{profiledOp: profiledOp{inner: cp}, chunk: cp}
+	if _, nodeIDs := cp.(NodeIDColumnProducer); nodeIDs {
+		return &profiledNodeIDOp{base}
+	}
+	return &base
+}
+
+// UnwrapProfiled returns the operator op measures when op is a profiling wrapper,
+// and op itself otherwise. It sees through exactly one wrapper, which is all there
+// ever is: [Profiler.Wrap] returns op unchanged when op is already wrapped.
+//
+// # Why the builder needs this
+//
+// [Profiler.Wrap] preserves every INTERFACE an operator exposes, which is what
+// keeps a capability type-assertion — `child.(ChunkProducer)` — answering the same
+// under PROFILE as without it. It cannot preserve a CONCRETE type: no wrapper is
+// an *Expand. A plan-shape recogniser that asserts on a concrete operator type
+// therefore stops recognising its own shape the moment a Profiler is installed,
+// and PROFILE renders a plan the user never runs (rmp #2665).
+//
+// A recogniser in that position asks for the operator itself here, builds what it
+// meant to build, and puts the result back through the profiler
+// ([Profiler.Wrap] or [Profiler.WrapChunk]) so the node it substituted is still
+// measured. The wrapper it discards was allocated by the build and never driven,
+// so no measurement is lost with it.
+//
+// Reaching for this to escape a CAPABILITY assertion would be a defect: those the
+// wrapper already satisfies, and unwrapping one would silently drop the node from
+// the profile. Use it only where a concrete type is genuinely required.
+func UnwrapProfiled(op Operator) Operator {
+	if p, ok := op.(profiledNode); ok {
+		return p.planUnwrap()
+	}
+	return op
 }
 
 // profiledNode is the behaviour [PlanTree] needs from any wrapper variant: the

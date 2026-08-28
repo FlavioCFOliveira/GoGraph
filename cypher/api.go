@@ -482,6 +482,11 @@ type buildOpts struct {
 	// exists and production never sets it — which is exactly why the linter cannot
 	// see it being written, since the only writer is the differential test.
 	disableIndexNestedLoopForTest bool //nolint:unused // written only by the in-package differential test; see index_nested_loop_plan_test.go
+	// forceColumnarChainDecline makes [tryBuildColumnarFilterChain] and
+	// [tryBuildColumnarExpandFilterChain] take their post-build decline path, so the
+	// [buildStateSnapshot] restore on it is exercised. Set only from the Engine test
+	// seam of the same name; every other build path leaves it false.
+	forceColumnarChainDecline bool
 	// indexNestedLoopEnabled gates the index nested-loop join (#2233), the
 	// Θ(B·log N) plan for the same disconnected-equi-join shape the hash join
 	// serves at Θ(N+B). Both paths set it from the same source as
@@ -1273,6 +1278,19 @@ type Engine struct {
 	// suite cannot otherwise observe both answers for one query. No public setter
 	// exists and production never sets it.
 	disableIndexNestedLoopForTest bool
+
+	// forceColumnarChainDeclineForTest makes both columnar read-chain recognisers
+	// take their POST-BUILD decline path — the one that runs after buildOperator has
+	// already written the schema — so the state restore that path performs can be
+	// exercised end to end. It is a TEST SEAM, not an option, and there is no other
+	// way to reach the branch: with the rmp #2665 assertion fixed, the whole
+	// cypher test corpus (TCK included) reaches it zero times, measured with a
+	// counter on the branch itself.
+	//
+	// What it buys is a differential. With it set the query must return exactly what
+	// the columnar chain returns, because declining is supposed to fall back to the
+	// byte-identical serial build. Before #2665 it returned nothing at all.
+	forceColumnarChainDeclineForTest bool //nolint:unused // written only by the in-package differential test; see profile_plan_parity_test.go
 
 	// rangeSeekEnabled gates the range-predicate btree index seek (#1505). True
 	// by default; set false by EngineOptions.DisableRangeIndexSeek. When false
@@ -2559,6 +2577,7 @@ func (e *Engine) buildReadPhysical(
 	// awards to the seek — the two plans are exclusive, so there is no other way to
 	// see both for one query.
 	bopts.indexNestedLoopEnabled = e.hashJoinEnabled && !e.disableIndexNestedLoopForTest
+	bopts.forceColumnarChainDecline = e.forceColumnarChainDeclineForTest
 	bopts.rangeSeekEnabled = e.rangeSeekEnabled
 	bopts.prefixSeekEnabled = e.prefixSeekEnabled
 	// Min-label scan gating (#2077): enable the smallest-cardinality
@@ -7603,7 +7622,113 @@ func setSnap[V any](m map[string]V) map[string]struct{} {
 	return out
 }
 
-// copySchema returns a shallow copy of the schema map.
+// buildStateSnapshot is the builder state a plan-shape recogniser has to be able
+// to put back when it BUILDS a subtree and then declines it.
+//
+// A recogniser that declines BEFORE building costs nothing to unwind, which is why
+// both columnar recognisers run every check they can against a hypothetical schema
+// first. One that declines AFTER — because the operator it got back is not the one
+// it needed — leaves behind the schema columns and the per-query metadata the build
+// already recorded, and buildOperatorRec then re-builds the SAME subtree from
+// scratch on top of them. The second build appends its columns PAST the first's, so
+// every variable's recorded column points beyond the end of the row the operators
+// actually emit. [exec.Expand] answers an out-of-range source column by skipping the
+// row silently, so the query runs, returns no error, and yields ZERO rows.
+//
+// That is not hypothetical: it is the second half of rmp #2665. Installing a
+// Profiler made [tryBuildColumnarExpandFilterChain] decline after its build, and
+// `MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN b.salary` — 960000 rows under Run —
+// reported rows=0 at every level above the leaf, as a SUCCESS. Measured on the
+// 300-node fixture: schema went from {a:0, a__dup:1, __anon_0:2, b:3} to
+// {a:4, a__dup:5, __anon_0:6, b:7} over a row four columns wide.
+//
+// Fixing the assertion (see [exec.UnwrapProfiled]) removes the only decline that was
+// reachable; this restores the property both recognisers already DOCUMENT — that a
+// non-match never half-mutates the real schema — for the defensive fall-throughs
+// that remain, so a future one cannot reopen the same silent-wrong-answer hole.
+//
+// The maps are copied whole rather than diffed, so a key the build OVERWROTE is put
+// back with its previous value and not merely deleted. Nothing is allocated when
+// there is nothing to remember: both recognisers require an EMPTY schema to run at
+// all, and the metadata maps are usually empty at that point too, so
+// [copyMetaMap] returns nil and the snapshot costs one struct on the stack.
+type buildStateSnapshot struct {
+	schema       map[string]int
+	edgeVarMeta  map[string]edgeVarInfo
+	pathVarMeta  map[string]pathVarInfo
+	pathVarChain map[string]pathChainInfo
+	vleRelMeta   map[string]vleRelInfo
+	tripletLen   int
+}
+
+// snapshotBuildState captures schema and the bopts state a read subtree build
+// records, so [buildStateSnapshot.restore] can undo it. bopts may be nil.
+//
+// The covered set is what a Projection → Selection* → Expand → scan build writes:
+// the schema, the relationship- and path-variable metadata
+// buildIRProjection later reads back, and the append-only expand triplet
+// sequence. The remaining per-build maps (the scalar-column sets, the pending
+// path predicates) are written only by aggregation, shortest-path and named-path
+// lowerings, none of which can appear inside a subtree these recognisers admit.
+func snapshotBuildState(schema map[string]int, bopts *buildOpts) buildStateSnapshot {
+	snap := buildStateSnapshot{schema: copyMetaMap(schema)}
+	if bopts == nil {
+		return snap
+	}
+	snap.edgeVarMeta = copyMetaMap(bopts.edgeVarMeta)
+	snap.pathVarMeta = copyMetaMap(bopts.pathVarMeta)
+	snap.pathVarChain = copyMetaMap(bopts.pathVarChain)
+	snap.vleRelMeta = copyMetaMap(bopts.vleRelMeta)
+	snap.tripletLen = len(bopts.expandTripletSeq)
+	return snap
+}
+
+// restore puts schema and the bopts state back as they were when the snapshot was
+// taken. schema is restored IN PLACE because the caller holds the same map.
+//
+// A metadata map that did not exist before the build is left as an empty map
+// rather than set back to nil: the builder creates these lazily and only ever
+// reads them through an ordinary lookup, so an empty map and a nil one are
+// indistinguishable to every reader, and assigning nil back would differ from the
+// pre-build state only in a way no code can observe.
+func (s buildStateSnapshot) restore(schema map[string]int, bopts *buildOpts) {
+	restoreMetaMap(schema, s.schema)
+	if bopts == nil {
+		return
+	}
+	restoreMetaMap(bopts.edgeVarMeta, s.edgeVarMeta)
+	restoreMetaMap(bopts.pathVarMeta, s.pathVarMeta)
+	restoreMetaMap(bopts.pathVarChain, s.pathVarChain)
+	restoreMetaMap(bopts.vleRelMeta, s.vleRelMeta)
+	if s.tripletLen <= len(bopts.expandTripletSeq) {
+		bopts.expandTripletSeq = bopts.expandTripletSeq[:s.tripletLen]
+	}
+}
+
+// copyMetaMap returns a shallow copy of m, or nil when m is nil or empty.
+func copyMetaMap[V any](m map[string]V) map[string]V {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]V, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+// restoreMetaMap resets live to hold exactly the entries of snap. live may be nil
+// (the build never created it), in which case there is nothing to undo.
+func restoreMetaMap[V any](live, snap map[string]V) {
+	if live == nil {
+		return
+	}
+	clear(live)
+	for k, v := range snap {
+		live[k] = v
+	}
+}
+
 // schemaBinding is one variable's place in a row: its name and its column.
 type schemaBinding struct {
 	name string
@@ -7637,6 +7762,7 @@ func newSchemaWalk(schema map[string]int) schemaWalk {
 	return w
 }
 
+// copySchema returns a shallow copy of the schema map.
 func copySchema(schema map[string]int) map[string]int {
 	cp := make(map[string]int, len(schema))
 	for k, v := range schema {
@@ -8541,7 +8667,12 @@ func buildPlanEngine(
 		if rerr != nil {
 			return nil, nil, rerr
 		}
-		return exec.NewUnionAll(leftOp, rightOp), leftCols, nil
+		// profileIntermediate, because this operator is the plan ROOT and is built
+		// ABOVE buildOperator's recursion — the single wrap point never sees it, so
+		// without this a profiled UNION ALL rendered its root as "(not measured)"
+		// (rmp #2665, found by the derived-corpus parity gate). The branches are
+		// recursive buildPlanEngine calls, so each branch root is wrapped already.
+		return profileIntermediate(bopts, exec.NewUnionAll(leftOp, rightOp)), leftCols, nil
 	}
 	if u, ok := plan.(*ir.Union); ok {
 		leftOp, leftCols, lerr := buildPlanEngine(u.Left, walker, labelSrc, reg, params, idxMgr, procReg, bopts)
@@ -8552,7 +8683,11 @@ func buildPlanEngine(
 		if rerr != nil {
 			return nil, nil, rerr
 		}
-		return exec.NewUnion(leftOp, rightOp, 0), leftCols, nil
+		// Wrapped for the same reason as UNION ALL above — and built through
+		// NewUnionInstrumented, because UNION lowers to THREE operators and the two
+		// below the root are inside exec, out of profileIntermediate's reach.
+		u := exec.NewUnionInstrumented(leftOp, rightOp, 0, profileHook(bopts))
+		return profileIntermediate(bopts, u), leftCols, nil
 	}
 
 	pr, ok := plan.(*ir.ProduceResults)
@@ -8716,6 +8851,28 @@ func profileIntermediate(bopts *buildOpts, op exec.Operator) exec.Operator {
 		return op
 	}
 	return bopts.profiler.Wrap(op)
+}
+
+// profileHook returns profileIntermediate as a function value for an exec-side
+// composite constructor to apply to the operators it builds internally, or nil
+// when no profiler is installed — so an ordinary build allocates no closure and
+// the constructor takes its uninstrumented path.
+func profileHook(bopts *buildOpts) func(exec.Operator) exec.Operator {
+	if bopts == nil || bopts.profiler == nil {
+		return nil
+	}
+	return bopts.profiler.Wrap
+}
+
+// profileIntermediateChunk is [profileIntermediate] for an intermediate the caller
+// must keep as an [exec.ChunkProducer] — a columnar operator a plan-shape
+// recogniser substituted for the one buildOperator returned. Without a profiler it
+// returns cp unchanged, so the ordinary build path is untouched.
+func profileIntermediateChunk(bopts *buildOpts, cp exec.ChunkProducer) exec.ChunkProducer {
+	if bopts == nil || bopts.profiler == nil || cp == nil {
+		return cp
+	}
+	return bopts.profiler.WrapChunk(cp)
 }
 
 // buildOperatorRec is the recursive read-plan lowering: one case per read IR node
@@ -8892,7 +9049,12 @@ func buildOperatorRec(
 			rangeG = lw.g
 		}
 		if rangeChild, ok := buildRangeSeekIfEnabled(bopts, p, schema, idxMgr, rangeG, params); ok {
-			child = rangeChild
+			// profileIntermediate, because the seek is built HERE rather than by the
+			// recursion, so buildOperator's single wrap point never sees it and a
+			// profiled plan rendered the access path as "(not measured)" — the one
+			// node whose cost a reader of PROFILE most wants (rmp #2665, found by the
+			// derived-corpus completeness gate).
+			child = profileIntermediate(bopts, rangeChild)
 		} else {
 			child, err = buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
 			if err != nil {
@@ -15622,12 +15784,20 @@ func tryBuildColumnarFilterChain(
 	// Committed: build the chain. buildOperator sets schema[scanVar]=0; the filter
 	// preserves the schema; buildIRProjection installs the projection output layout
 	// and — seeing a NodeIDColumnProducer child — selects the chunk-input path.
+	undo := snapshotBuildState(schema, bopts)
 	scanOp, err := buildOperator(sel.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, nil, bopts)
 	if err != nil {
 		return nil, false, err
 	}
+	// A CAPABILITY assertion, so it survives the PROFILE wrapper by construction
+	// ([exec.Profiler.Wrap] re-implements NodeIDColumnProducer). It still has to put
+	// the builder state back on the way out: buildOperatorRec re-builds this same
+	// subtree, and a build stacked on the columns this one recorded returns zero rows
+	// without an error — see [buildStateSnapshot].
 	scanCP, isCP := scanOp.(exec.NodeIDColumnProducer)
-	if !isCP {
+	if !isCP || bopts.forceColumnarChainDecline {
+		undo.restore(schema, bopts)
+		closeProbe(scanOp)
 		return nil, false, nil
 	}
 	predFn := newRowPredicate(sel.PredicateExpr, schema, g, params, reg, bopts)
@@ -15761,17 +15931,31 @@ func tryBuildColumnarExpandFilterChain(
 	// Expand column-major. The Expand build over a single-node scan always yields a
 	// *exec.Expand whose child is the scan (a NodeIDColumnProducer), so
 	// NewColumnarExpand succeeds; a defensive fall-through keeps correctness if either
-	// invariant does not hold.
+	// invariant does not hold — and it RESTORES the builder state the build already
+	// mutated, because the caller re-builds this same subtree from scratch (see
+	// [buildStateSnapshot]).
+	undo := snapshotBuildState(schema, bopts)
 	expandOp, err := buildOperator(base, walker, labelSrc, reg, params, schema, idxMgr, procReg, nil, bopts)
 	if err != nil {
 		return nil, false, err
 	}
-	expandExec, isExpandExec := expandOp.(*exec.Expand)
-	if !isExpandExec {
+	// UNWRAP before the concrete-type assertion. Under PROFILE buildOperator returns
+	// the Expand behind a profiling wrapper, and no wrapper is an *exec.Expand: the
+	// assertion failed, this recogniser declined, and PROFILE rendered a row-mode
+	// plan — a DIFFERENT plan from the one EXPLAIN shows and the one Run executes
+	// (rmp #2665). [exec.Profiler.Wrap] preserves every interface an operator
+	// exposes but cannot preserve its concrete type, so a recogniser that needs the
+	// type asks for the operator itself and re-instruments what it substitutes.
+	expandExec, isExpandExec := exec.UnwrapProfiled(expandOp).(*exec.Expand)
+	if !isExpandExec || bopts.forceColumnarChainDecline {
+		undo.restore(schema, bopts)
+		closeProbe(expandOp)
 		return nil, false, nil
 	}
 	colExp, wrapped := exec.NewColumnarExpand(expandExec)
 	if !wrapped {
+		undo.restore(schema, bopts)
+		closeProbe(expandOp)
 		return nil, false, nil
 	}
 	rowPreds := make([]func(exec.Row) (expr.Value, error), len(predsInner))
@@ -15780,7 +15964,13 @@ func tryBuildColumnarExpandFilterChain(
 		rowPreds[i] = newRowPredicate(pe, schema, g, params, reg, bopts)
 		cpreds[i], _ = buildColumnarExpandPredicate(pe, schema, g, params, reg, bopts)
 	}
-	filter := exec.NewColumnarFilter(colExp, chainRowPredicates(rowPreds), makeColumnarConjunctionPredicate(cpreds))
+	// Re-instrument the columnar presentation. The wrapper [exec.UnwrapProfiled]
+	// discarded above was measuring the row-mode Expand this chain does not run, so
+	// without this the traversal node would render "(not measured)" under PROFILE.
+	// profileIntermediateChunk hands back a ChunkProducer, so the substitution needs
+	// no type assertion and grows no branch that cannot be exercised.
+	filter := exec.NewColumnarFilter(profileIntermediateChunk(bopts, colExp),
+		chainRowPredicates(rowPreds), makeColumnarConjunctionPredicate(cpreds))
 	projOp, err := buildIRProjection(proj.Items, profileIntermediate(bopts, filter), schema, g, params, reg, bopts)
 	if err != nil {
 		return nil, false, err
@@ -20353,15 +20543,27 @@ var _ exec.GraphMutator = (*walMutatorAdapter)(nil)
 //   - The flag is off. Positive polarity: the operator is opt-in.
 //   - Either hop carries a PathVar. Path reconstruction consumes the per-hop
 //     (src, edge, dst) triplets, which a fused operator does not register.
-//   - The child is not EXACTLY an *exec.Expand. It is wrapped under PROFILE
-//     (buildOperator wraps when a profiler is attached) and by the columnar chain,
-//     and declining there is what stops this recogniser from stealing shapes the
-//     ChunkProducer chain would otherwise claim — a collision that has twice
+//   - The child is not EXACTLY an *exec.Expand — a columnarExpand is not, and
+//     declining there is what stops this recogniser from stealing shapes the
+//     ChunkProducer chain would otherwise claim, a collision that has twice
 //     regressed this project.
 //   - Either direction is not OUT. An undirected neighbourhood is out ∪ in, which
 //     is not one contiguous ordered run, so the intersection primitive does not
 //     apply to it.
 //   - The middle hop is itself a closing hop, or does not feed this one.
+//
+// # Why the child assertion unwraps first
+//
+// The *exec.Expand assertion runs through [exec.UnwrapProfiled], so a PROFILE build
+// sees the same child an ordinary build sees. It used to run against the raw value,
+// and buildOperator hands a PROFILE build's operators back behind a wrapper:
+// installing a Profiler made this veto fire on EVERY shape, so PROFILE rendered
+// three Expands where EXPLAIN rendered the ExpandIntersect that actually runs
+// (rmp #2665). Unwrapping cannot widen what the recogniser claims — it sees through
+// the profiling wrapper and nothing else, so a columnarExpand still declines. The
+// discarded wrapper measured an operator this build then throws away, and the fused
+// operator is instrumented by buildOperator's own wrap point on the way out, so the
+// substituted node is still measured.
 //
 // RelCols is the MIDDLE hop's sibling set, not the closing hop's. The closing hop's
 // set is the middle's plus the middle's own relationship, and that one pairing is
@@ -20391,7 +20593,7 @@ func tryFuseCyclicIntersect(
 	if mid.ToVar == "" || mid.ToVar != p.FromVar {
 		return nil
 	}
-	midExp, ok := child.(*exec.Expand)
+	midExp, ok := exec.UnwrapProfiled(child).(*exec.Expand)
 	if !ok {
 		return nil
 	}
