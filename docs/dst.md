@@ -1548,6 +1548,29 @@ Every gate is proved falsifiable by a synthetic result that drives it red.
 
 ## Command-line usage
 
+### The seed is mandatory
+
+**`cmd/sim` refuses to run a simulation without an explicit seed**, exiting `2`
+with an error. It owns no way to pick one: the package imports no randomness
+source at all, and a guard test (`TestSim_NoNonDeterministicRandomSource`) fails
+the build if one is ever added back. The matching guard inside the harness,
+`TestSim_SeedIsTheOnlyRandomnessSource`, holds the other end: only
+`internal/sim/seed.go` may import a randomness package, and only to build the
+explicitly-seeded PCG behind `Seed`, so a seeded run cannot consult anything the
+seed does not control either.
+
+The reason is that a simulation is a **pure function of its seed**, so the seed
+is the run's identity. A harness that invented a seed would make two identical
+commands two different experiments — not comparable with each other, and not
+replayable, so a violation could never be reproduced from the report. Making the
+caller name the seed is what keeps every DST result interpretable.
+
+The only two seed-free invocations are the modes that run no simulation:
+`--list-scenarios` and `--coverage-report` without `--swarm`.
+
+Under `--swarm` the positional seed is the **master** seed from which every
+derived run seed is drawn, so naming it reproduces the entire swarm.
+
 ```bash
 # Build the simulator.
 go build ./cmd/sim
@@ -1555,20 +1578,22 @@ go build ./cmd/sim
 # Run a single deterministic simulation (seed is a leading positional argument).
 go run ./cmd/sim 42 --ticks=100000
 
-# List the scenario catalogue.
+# List the scenario catalogue. One of the two invocations that need no seed;
+# it prints each scenario's default seed, which is a fine value to start from.
 go run ./cmd/sim --list-scenarios
 
 # Run a named scenario (note the '=' form — a bare token is parsed as the seed).
-go run ./cmd/sim --scenario=search
+go run ./cmd/sim --scenario=search 6202568
 go run ./cmd/sim --scenario=search-crash 12345
 
-# Run a swarm of seeds, time- or count-boxed.
-go run ./cmd/sim --scenario=search --swarm --runs=200
-go run ./cmd/sim --swarm --duration=30s --coverage-report
+# Run a swarm of seeds, time- or count-boxed. The positional seed is the
+# swarm's MASTER seed, so the whole swarm reproduces from it.
+go run ./cmd/sim 20260828 --scenario=search --swarm --runs=200
+go run ./cmd/sim 20260828 --swarm --duration=30s --runs=0 --coverage-report
 
 # Drive the real Bolt wire / concurrent / liveness harnesses.
-go run ./cmd/sim --mode=wire
-go run ./cmd/sim --mode=concurrent --conns=16 --ops-per-conn=25
+go run ./cmd/sim 42 --mode=wire
+go run ./cmd/sim 42 --mode=concurrent --conns=16 --ops-per-conn=25
 
 # Inject deterministic crash + recovery cycles.
 go run ./cmd/sim 7 --crashes
@@ -1576,6 +1601,9 @@ go run ./cmd/sim 7 --crashes
 # Add full-stack checkpointing: periodically publish a real snapshot and
 # truncate the WAL prefix, so a crash recovers via the full snapshot+WAL path.
 go run ./cmd/sim 7 --crashes --checkpoint --checkpoint-every=20
+
+# Omitting the seed is refused, in every mode that runs a simulation.
+go run ./cmd/sim --ticks=100000        # exit 2: "sim: a seed is REQUIRED"
 ```
 
 Flags of note: `--workload` (`default|write-heavy|read-heavy|bad-actor`),

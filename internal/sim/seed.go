@@ -11,7 +11,12 @@
 // To preserve that property, every probabilistic decision anywhere in the
 // package must draw from a single [Seed]; no other source of randomness (no
 // global math/rand, no time.Now, no map-iteration ordering decisions) may
-// influence control flow.
+// influence control flow. The import half of that rule is enforced, not merely
+// documented: TestSim_SeedIsTheOnlyRandomnessSource fails if any file other
+// than this one imports a randomness package, and fails on crypto/rand or the
+// auto-seeded math/rand (v1) even here. The seed itself is mandatory at the
+// command line for the same reason — cmd/sim refuses to run without one rather
+// than invent a value that would make the run unreproducible.
 //
 // # Concurrency contract
 //
