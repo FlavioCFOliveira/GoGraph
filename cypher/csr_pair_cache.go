@@ -131,9 +131,19 @@ type csrPairKey struct {
 
 // csrPairCache is safe for concurrent use by any number of goroutines.
 type csrPairCache struct {
-	mu    sync.Mutex
-	fwd   *csr.CSR[float64]
-	rev   *csr.CSR[float64]
+	mu  sync.Mutex
+	fwd *csr.CSR[float64]
+	rev *csr.CSR[float64]
+	// col is the slot-aligned relationship-type column for THIS pair (rmp #2251),
+	// filled lazily on the first typed query against the pair and dropped with it.
+	//
+	// It lives here, beside the pair, rather than in a cache of its own because it
+	// is a function of exactly the same state: the arc positions it indexes are the
+	// pair's, so the pair's key is its key and the pair's invalidation is its
+	// invalidation. The per-type-set LRU it replaced had to carry the pair key as a
+	// second component to say the same thing (rmp #2293), and had to be consulted
+	// through a second mutex on every outer row. Both are gone.
+	col   *exec.RelTypeColumn
 	key   csrPairKey
 	valid bool
 }
@@ -144,17 +154,47 @@ func newCSRPairCache() *csrPairCache { return &csrPairCache{} }
 // get returns the cached pair when it describes exactly the state key names, or
 // (nil, nil, false) when the caller must build one.
 func (c *csrPairCache) get(key csrPairKey) (fwd, rev *csr.CSR[float64], ok bool) {
+	f, r, _, ok := c.getWithColumn(key)
+	return f, r, ok
+}
+
+// getWithColumn is [csrPairCache.get] also returning the pair's relationship-type
+// column, which may be nil because no typed query has needed one yet. Fetching
+// both in ONE lookup is the point of storing them together: a typed expand asks
+// for its adjacency and its type information in a single mutex acquisition, where
+// the retired per-type-set LRU cost it a second one on every outer row.
+func (c *csrPairCache) getWithColumn(
+	key csrPairKey,
+) (fwd, rev *csr.CSR[float64], col *exec.RelTypeColumn, ok bool) {
 	if c == nil {
-		return nil, nil, false
+		return nil, nil, nil, false
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !c.valid || c.key != key {
 		metrics.IncCounter("cypher.csr_pair_cache.misses", 1)
-		return nil, nil, false
+		return nil, nil, nil, false
 	}
 	metrics.IncCounter("cypher.csr_pair_cache.hits", 1)
-	return c.fwd, c.rev, true
+	return c.fwd, c.rev, c.col, true
+}
+
+// putColumn records col as the relationship-type column of the pair currently
+// cached under key, and is a no-op when the entry has since been replaced by a
+// different state. Dropping the column in that case is correct and not merely
+// convenient: it indexes the arc positions of the pair it was built from, so
+// filing it against another pair would mistype relationships rather than merely
+// miss them (the rmp #2293 failure mode).
+func (c *csrPairCache) putColumn(key csrPairKey, col *exec.RelTypeColumn) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.valid || c.key != key {
+		return
+	}
+	c.col = col
 }
 
 // put records a pair describing the state key names.
@@ -182,7 +222,9 @@ func (c *csrPairCache) put(key csrPairKey, fwd, rev *csr.CSR[float64]) {
 		// enough that the cache is not paying for itself.
 		metrics.IncCounter("cypher.csr_pair_cache.replacements", 1)
 	}
-	c.fwd, c.rev, c.key, c.valid = fwd, rev, key, true
+	// The column describes the OUTGOING pair's arc positions, so it must not
+	// survive the pair it was built for.
+	c.fwd, c.rev, c.col, c.key, c.valid = fwd, rev, nil, key, true
 }
 
 // newerThan reports whether k describes a strictly later state than other.
@@ -291,47 +333,117 @@ func csrPairCachedForAt(
 // to read a delta.
 var csrPairAbsentCacheBuildCount atomic.Uint64
 
+// csrPairAndColumnCachedFor returns the CSR pair AND the slot-aligned
+// relationship-type column describing it, in ONE cache lookup (rmp #2251).
+//
+// # Why they are fetched together
+//
+// The column indexes the pair's ABSOLUTE ARC POSITIONS, so it is meaningful
+// against that exact pair and no other. Fetching them separately is what made the
+// retired per-type-set filter cache need the pair's key as a second key component
+// (rmp #2293) and cost a second mutex acquisition on every outer row. Stored
+// beside the pair, the column is invalidated by the pair's own replacement and
+// costs nothing extra to reach.
+//
+// The column is built LAZILY: an untyped workload never pays for one. It is built
+// OUTSIDE the cache mutex, deliberately — it is an O(V+E) sweep, and serialising
+// concurrent queries behind it is exactly the hot-path contention this project's
+// concurrency mandates forbid. Two racers may therefore both build one; both
+// results are equally valid for the state they were built against, and whichever
+// lands last is kept.
+func csrPairAndColumnCachedFor(
+	bopts *buildOpts, g *lpg.ReadView[string, float64],
+) (fwd, rev *csr.CSR[float64], col *exec.RelTypeColumn) {
+	var cache *csrPairCache
+	if bopts != nil {
+		cache = bopts.csrPairCache
+	}
+	// A write transaction's view sees its own uncommitted writes, so neither the
+	// pair NOR the column it describes may be shared across transactions — the same
+	// rmp #2446 rule the pair alone already obeyed, and for the same reason: the
+	// column is position-keyed, so a reader served a private pair's column would
+	// have committed edges mistyped rather than merely missing.
+	if cache == nil || g == nil || viewCarriesOwnWrites(g) {
+		if cache == nil {
+			csrPairAbsentCacheBuildCount.Add(1)
+		}
+		f, r, _ := csrPairFromGraphAt(g)
+		return f, r, buildRelTypeColumn(g, f, r)
+	}
+	key := csrPairKeyFor(g)
+	f, r, c, ok := cache.getWithColumn(key)
+	if !ok {
+		var built csrPairKey
+		f, r, built = csrPairFromGraphAt(g)
+		cache.put(built, f, r)
+		key, c = built, nil
+	}
+	if c == nil {
+		c = buildRelTypeColumn(g, f, r)
+		cache.putColumn(key, c)
+	} else {
+		metrics.IncCounter("cypher.reltype_column.reuses", 1)
+	}
+	return f, r, c
+}
+
 // expandAdjacencySource returns an [exec.AdjacencySource] that resolves the CSR
-// pair AND the relationship-type filter keyed to it at EXECUTION time rather than
-// when the plan is built (rmp #2317).
+// pair AND the relationship-type admission view keyed to it at EXECUTION time
+// rather than when the plan is built (rmp #2317).
 //
-// # Why the filter travels with the pair
+// # Why the type information travels with the pair
 //
-// edgeTypeFilter maps ABSOLUTE EDGE POSITIONS in the forward CSR's edges array to
-// type names. A filter built against one CSR is meaningless against another: the
+// The type column is indexed by ABSOLUTE ARC POSITION in the pair it was built
+// from. A column built against one CSR is meaningless against another: the
 // positions name different edges. Resolving the two separately — the pair at
-// execution time and the filter at plan-build time — would apply a filter built
-// for the pre-write topology to the post-write one, which silently MISTYPES
+// execution time and the types at plan-build time — would apply type information
+// built for the pre-write topology to the post-write one, which silently MISTYPES
 // relationships rather than merely missing them.
 //
-// Both come from caches keyed on the same [csrPairKey], so when the topology has
-// not moved this is two mutex-guarded hits and no rebuild; when it has moved, both
-// rebuild together and stay consistent by construction.
+// # Why the accepted-type set is resolved per Init, not once
+//
+// The column says what each arc IS; the MASK says what this pattern accepts, and
+// it is derived from the graph's label registry, which a preceding clause of the
+// same statement may have extended. Resolving it here, beside the adjacency,
+// keeps the two describing the same instant. It costs one registry lookup per
+// named type and — because [exec.RelTypeAdmit] is a value — no allocation at all
+// for any schema whose LabelIDs stay below 64.
 func expandAdjacencySource(
 	bopts *buildOpts, g *lpg.ReadView[string, float64], relTypes []string,
 ) exec.AdjacencySource {
-	return func() (exec.CSRAdjacency, exec.CSRAdjacency, map[uint64]string) {
-		fwd, rev, at := csrPairCachedForAt(bopts, g)
-		if len(relTypes) == 0 {
-			return fwd, rev, nil
+	if len(relTypes) == 0 {
+		return func() (exec.CSRAdjacency, exec.CSRAdjacency, exec.RelTypeAdmit) {
+			fwd, rev := csrPairCachedFor(bopts, g)
+			return fwd, rev, exec.RelTypeAdmit{}
 		}
-		return fwd, rev, edgeTypeFilterFor(g, fwd, relTypes, bopts, at)
+	}
+	return func() (exec.CSRAdjacency, exec.CSRAdjacency, exec.RelTypeAdmit) {
+		fwd, rev, col := csrPairAndColumnCachedFor(bopts, g)
+		return fwd, rev, col.Admit(relTypeCodesFor(g, relTypes))
 	}
 }
 
 // intersectAdjacencySource is [expandAdjacencySource] for the fused cyclic expand,
-// which filters two legs and so needs both filters keyed to the one adjacency.
+// which filters two legs and so needs both admission views keyed to the one
+// adjacency. Both legs share ONE column — it is type-set independent — so the
+// second leg costs only its own mask.
 func intersectAdjacencySource(
 	bopts *buildOpts, g *lpg.ReadView[string, float64], midRelTypes, endRelTypes []string,
 ) exec.IntersectAdjacencySource {
-	return func() (exec.CSRAdjacency, exec.CSRAdjacency, map[uint64]string, map[uint64]string) {
-		fwd, rev, at := csrPairCachedForAt(bopts, g)
-		var mid, end map[uint64]string
+	if len(midRelTypes) == 0 && len(endRelTypes) == 0 {
+		return func() (exec.CSRAdjacency, exec.CSRAdjacency, exec.RelTypeAdmit, exec.RelTypeAdmit) {
+			fwd, rev := csrPairCachedFor(bopts, g)
+			return fwd, rev, exec.RelTypeAdmit{}, exec.RelTypeAdmit{}
+		}
+	}
+	return func() (exec.CSRAdjacency, exec.CSRAdjacency, exec.RelTypeAdmit, exec.RelTypeAdmit) {
+		fwd, rev, col := csrPairAndColumnCachedFor(bopts, g)
+		var mid, end exec.RelTypeAdmit
 		if len(midRelTypes) > 0 {
-			mid = edgeTypeFilterFor(g, fwd, midRelTypes, bopts, at)
+			mid = col.Admit(relTypeCodesFor(g, midRelTypes))
 		}
 		if len(endRelTypes) > 0 {
-			end = edgeTypeFilterFor(g, fwd, endRelTypes, bopts, at)
+			end = col.Admit(relTypeCodesFor(g, endRelTypes))
 		}
 		return fwd, rev, mid, end
 	}

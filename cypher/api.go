@@ -342,16 +342,6 @@ type buildOpts struct {
 	// reverse-edge traversals). Lazily populated on first use to avoid
 	// building CSR snapshots for queries that never reconstruct paths.
 	edgeIDResolver func(edgeID uint64) (storageSrc, storageDst uint64, ok bool)
-	// edgeTypeFilterCache, when non-nil, is the Engine's shared
-	// [edgeTypeFilterCache] (rmp #1871), consulted by [edgeTypeFilterFor] so
-	// a relationship-type-filtered Expand/OptionalExpand/VarLengthExpand
-	// build, or a predicated shortest-path build ([buildShortestPathWithPred]),
-	// reuses a prior query's O(V+E) filter map instead of rebuilding it, as
-	// long as [lpg.Graph.TopoGeneration] has not advanced since. nil on the
-	// public BuildPlanWithMutator path (no Engine behind the build), in
-	// which case edgeTypeFilterFor falls back to an uncached
-	// [buildEdgeTypeFilter] call — correct, just unamortised.
-	edgeTypeFilterCache *edgeTypeFilterCache
 	// csrPairCache, when non-nil, is the Engine's shared [csrPairCache], consulted
 	// by [csrPairCachedFor] so a query needing a CSR pair reuses a prior query's
 	// O(V+E) build while lpg.Graph.TopoGeneration has not advanced (rmp #2143).
@@ -690,12 +680,21 @@ type EngineOptions struct {
 	// clamped to the default by the constructor.
 	PlanCacheCapacity int
 
-	// EdgeTypeFilterCacheCapacity bounds the number of distinct
-	// relationship-type combinations whose filter map (rmp #1871) the
-	// Engine keeps cached. Zero selects
-	// [DefaultEdgeTypeFilterCacheCapacity]; positive values override it.
-	// A negative value is clamped to the default, mirroring
-	// PlanCacheCapacity.
+	// EdgeTypeFilterCacheCapacity used to bound the number of distinct
+	// relationship-type combinations whose filter map the Engine kept cached.
+	//
+	// Deprecated: it has no effect. The per-relationship-type-set filter cache it
+	// bounded was retired by rmp #2251, which replaced the position-keyed filter
+	// map with a slot-aligned relationship-type column stored beside the CSR pair
+	// it describes. That column records what each arc IS rather than whether some
+	// pattern accepts it, so it is built once per graph state and shared by every
+	// type set — there is no per-type-set population left to bound, and therefore
+	// no replacement option.
+	//
+	// The field is retained so code written against an earlier release keeps
+	// compiling. It is read on NO path: whatever value is set — zero, negative, or
+	// any positive capacity — the Engine allocates nothing for it and behaves
+	// identically. Pinned by TestEdgeTypeFilterCacheCapacityOptionIsInert.
 	EdgeTypeFilterCacheCapacity int
 
 	// DisableCSRPairCache turns off the Engine's cross-query forward/reverse CSR
@@ -1101,14 +1100,6 @@ type Engine struct {
 	indexDefReg *indexDefRegistry
 	procReg     *procs.Registry
 	cache       *planCache
-	// edgeTypeFilterCache amortises buildEdgeTypeFilter's O(V+E) rebuild
-	// across queries sharing a relationship-type combination, invalidated
-	// by lpg.Graph.TopoGeneration rather than time or a manual clear
-	// (rmp #1871). Unlike cache (the plan cache), no DDL operator clears
-	// this — schema changes (index/constraint) never affect edge-type
-	// filter results, only edge topology does, which TopoGeneration
-	// already tracks precisely.
-	edgeTypeFilterCache *edgeTypeFilterCache
 	// csrPairCache amortises csrPairFromGraph's O(V+E) forward+reverse build
 	// across queries against an unchanged graph, invalidated by
 	// lpg.Graph.TopoGeneration exactly as edgeTypeFilterCache is (rmp #2143).
@@ -1629,7 +1620,6 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 		indexDefReg:            newIndexDefRegistry(),
 		procReg:                procs.NewRegistry(),
 		cache:                  newPlanCache(opts.PlanCacheCapacity),
-		edgeTypeFilterCache:    newEdgeTypeFilterCache(opts.EdgeTypeFilterCacheCapacity),
 		csrPairCache:           newCSRPairCacheIfEnabled(opts.DisableCSRPairCache),
 		maxResultRows:          resolveMaxResultRows(opts.MaxResultRows),
 		maxResultBytes:         resolveMaxResultBytes(opts.MaxResultBytes),
@@ -2560,11 +2550,10 @@ func (e *Engine) buildReadPhysical(
 	if entry != nil {
 		bopts.scalarUseMemo = &entry.scalarUse
 	}
-	// Edge-type-filter cache sharing (#1871): the SAME cache instance
-	// serves every concurrent Run call, so a relationship-type-filtered
-	// pattern amortises its O(V+E) build across the whole Engine's query
-	// stream, not just within one call.
-	bopts.edgeTypeFilterCache = e.edgeTypeFilterCache
+	// Adjacency cache sharing (#2143, #2251): the SAME cache instance serves every
+	// concurrent Run call, so a traversing pattern amortises its O(V+E) CSR pair
+	// build — and the slot-aligned relationship-type column stored beside it —
+	// across the whole Engine's query stream, not just within one call.
 	bopts.csrPairCache = e.csrPairCache
 	// Hash-join optimisation gating (#1506): the Engine flag alone. There is no
 	// order-safety companion — the substitution emits the nested loop's row
@@ -6691,13 +6680,13 @@ func BuildPlanWithMutator(
 	// The public entry point applies the finite default per-group element budget
 	// (maxCollectItems == 0 → DefaultMaxCollectItems in buildEagerAggregation) so
 	// a collect on this path is never unbounded either. It has no Engine-owned
-	// edge-type-filter cache to share, so a relationship-type-filtered pattern
-	// on this path always rebuilds — correct, just unamortised.
+	// adjacency cache to share, so a relationship-type-filtered pattern on this
+	// path always rebuilds its type column — correct, just unamortised.
 	//
 	// It also passes the zero [planGates], so the public entry point keeps the
 	// unoptimised access paths it has always had. Only the Engine, which owns
 	// the EngineOptions that gate each substitution, enables them.
-	return buildPlanWithMutatorFull(plan, walker, labelSrc, reg, params, mutator, nil, nil, 0, nil, nil, planGates{})
+	return buildPlanWithMutatorFull(plan, walker, labelSrc, reg, params, mutator, nil, nil, 0, nil, planGates{})
 }
 
 // planGates carries the ORDER-NEUTRAL planner substitutions the write-path build
@@ -6747,12 +6736,6 @@ type planGates struct {
 // maxCollectItems carries the Engine's per-group element budget for buffering
 // aggregators into the write-path build, using the EngineOptions.MaxCollectItems
 // encoding (0 → default, <0 → no cap, >0 → active).
-//
-// edgeTypeFilterCache, when non-nil, is the Engine's shared
-// [edgeTypeFilterCache] (rmp #1871), threaded into bopts so a
-// relationship-type-filtered pattern inside a write query's MATCH clause
-// (e.g. `MATCH (a)-[:T]->(b) CREATE …`) amortises its filter build the same
-// way the pure-read path does.
 func buildPlanWithMutatorFull(
 	plan ir.LogicalPlan,
 	walker nodeWalkerIface,
@@ -6763,7 +6746,6 @@ func buildPlanWithMutatorFull(
 	constraintReg *exec.ConstraintRegistry,
 	idxMgr *index.Manager,
 	maxCollectItems int,
-	edgeTypeFilterCache *edgeTypeFilterCache,
 	procReg *procs.Registry,
 	gates planGates,
 ) (op exec.Operator, cols []string, err error) {
@@ -6777,7 +6759,7 @@ func buildPlanWithMutatorFull(
 	// of `CREATE (n) RETURN n.x` — ProduceResults → Projection → CreateNode
 	// — falls through to [buildOperator]'s default branch and errors with
 	// "unsupported IR node *ir.CreateNode".
-	bopts := &buildOpts{maxCollectItems: maxCollectItems, edgeTypeFilterCache: edgeTypeFilterCache, procReg: procReg}
+	bopts := &buildOpts{maxCollectItems: maxCollectItems, procReg: procReg}
 	// Order-neutral planner substitutions (#2225). Before this, the write path
 	// left every gate at its zero value, so a statement carrying any write clause
 	// was planned without the seek, without the min-label re-anchor and without
@@ -10580,23 +10562,30 @@ func (b *buildOpts) forWorker() *buildOpts {
 // variable NAME, so an inner shortestPath() binding a path variable the outer plan
 // also named would consume the OUTER clause's pending predicate.
 //
-// # Why the adjacency caches ARE carried
+// # Why the adjacency cache IS carried
 //
-// csrPairCache and edgeTypeFilterCache were added to the allowlist by rmp #2646,
-// and the reason they are safe is precisely the reason the fields below are not:
-// THEY ARE NOT KEYED TO A SCOPE. Every field this function omits is keyed either
-// to the OUTER ROW LAYOUT (a column index, or a path-variable name) or to *ir node
-// pointers belonging to the OUTER plan, so carrying it would have the inner build
-// read the wrong slot or gate on the wrong node. These two are keyed to
-// [csrPairKey] — {epoch, startTS, versioned} — which describes GRAPH STATE. A
-// scope has no bearing on it: the pair the inner Expand needs at a given epoch and
-// start timestamp IS the pair the outer one needs. Both types are documented safe
-// for concurrent use, so sharing them across the boundary adds no new contract.
+// csrPairCache — and, since rmp #2251, the relationship-type column stored inside
+// it — was added to the allowlist by rmp #2646, and the reason it is safe is
+// precisely the reason the fields below are not: IT IS NOT KEYED TO A SCOPE. Every
+// field this function omits is keyed either to the OUTER ROW LAYOUT (a column
+// index, or a path-variable name) or to *ir node pointers belonging to the OUTER
+// plan, so carrying it would have the inner build read the wrong slot or gate on
+// the wrong node. This one is keyed to [csrPairKey] — {epoch, startTS, versioned}
+// — which describes GRAPH STATE. A scope has no bearing on it: the pair the inner
+// Expand needs at a given epoch and start timestamp IS the pair the outer one
+// needs. The type is documented safe for concurrent use, so sharing it across the
+// boundary adds no new contract.
+//
+// It used to be TWO caches: the pair, and a separate per-relationship-type-set LRU
+// holding the position-keyed filter map. rmp #2251 replaced that map with a
+// type-set-independent column stored beside the pair, so there is one cache to
+// carry where there were two, and one mutex on the per-outer-row path where there
+// were two.
 //
 // What this fixes is a per-outer-row Θ(V+E) rebuild. [exec.Expand.Init] runs once
 // per outer row under Apply and resolves its adjacency through the closure
-// [expandAdjacencySource] returns, so with both fields nil every outer row rebuilt
-// the forward CSR, its reverse transpose, and the whole position-keyed type filter.
+// [expandAdjacencySource] returns, so with the field nil every outer row rebuilt
+// the forward CSR, its reverse transpose, and the whole per-slot type resolution.
 // MEASURED on a fixture with out-degree pinned at 1:
 // `MATCH (a:P) RETURN a.sid, COUNT { MATCH (a)-[:R]->(:P) }` performed exactly one
 // pair build and one filter build PER ROW — 250 of each at n=250, 500 at n=500 —
@@ -10610,19 +10599,19 @@ func (b *buildOpts) forWorker() *buildOpts {
 //     EXECUTION time — this changes what the closure finds in the cache, never
 //     when the closure runs — and because the cache key IS the freshness token: a
 //     write bumps [lpg.Graph.TopoGeneration], the epoch component changes, and the
-//     pair and its position-keyed filter miss and rebuild TOGETHER, which is what
-//     keeps #2293 sound.
+//     pair and its position-keyed type column miss and rebuild TOGETHER, which is
+//     what keeps #2293 sound.
 //   - A WRITE TRANSACTION still shares nothing (#2446). Both entry points refuse
-//     independently of this allowlist: [csrPairCachedAt] and [edgeTypeFilterFor]
-//     each test [viewCarriesOwnWrites] before consulting their cache. A statement
-//     that writes therefore keeps the per-row rebuild, which is also why the
-//     freshness case above is protected by EXCLUSION and not merely by the key.
-//   - PLAN SHAPE is untouched. Neither field is read by any recogniser or gate,
-//     and every consumer of either runs after the plan exists. edgeTypeFilterCache
-//     is reached only from the adjacency closures [expandAdjacencySource] and
-//     [intersectAdjacencySource] return; csrPairCache is reached from those and
-//     from [ensureEdgeIDResolver], which derives the path-reconstruction resolver
-//     from the same pair at eval time.
+//     independently of this allowlist: [csrPairCachedAt] and
+//     [csrPairAndColumnCachedFor] each test [viewCarriesOwnWrites] before
+//     consulting the cache. A statement that writes therefore keeps the per-row
+//     rebuild, which is also why the freshness case above is protected by
+//     EXCLUSION and not merely by the key.
+//   - PLAN SHAPE is untouched. The field is read by no recogniser and no gate, and
+//     every consumer of it runs after the plan exists: the adjacency closures
+//     [expandAdjacencySource] and [intersectAdjacencySource] return, and
+//     [ensureEdgeIDResolver], which derives the path-reconstruction resolver from
+//     the same pair at eval time.
 //
 // # What it carries, and what it deliberately does not
 //
@@ -10657,10 +10646,9 @@ func (b *buildOpts) forSubquery() *buildOpts {
 		subEval:  b.subEval,
 		patEval:  b.patEval,
 		queryCtx: b.queryCtx,
-		// The two adjacency caches (rmp #2646). Keyed to graph state, not to this
-		// scope — see "Why the adjacency caches ARE carried" above.
-		csrPairCache:        b.csrPairCache,
-		edgeTypeFilterCache: b.edgeTypeFilterCache,
+		// The adjacency cache (rmp #2646). Keyed to graph state, not to this
+		// scope — see "Why the adjacency cache IS carried" above.
+		csrPairCache: b.csrPairCache,
 		// The labelled-count differential-test seam (rmp #2654). Carried because a
 		// control arm that stops being a control inside a subquery is not a control:
 		// the field's whole purpose is to hold for the WHOLE build, and it is
@@ -17944,7 +17932,7 @@ func (e *Engine) execUnderBarrier(
 		} else {
 			walker, labelSrc = &lpgNodeWalker{g: wv}, &lpgLabelResolver{g: wv}
 		}
-		op, cols, berr := buildPlanWithMutatorFull(plan, walker, labelSrc, queryReg, params, mutator, e.constraintReg, e.g.IndexManager(), e.maxCollectItems, e.edgeTypeFilterCache,
+		op, cols, berr := buildPlanWithMutatorFull(plan, walker, labelSrc, queryReg, params, mutator, e.constraintReg, e.g.IndexManager(), e.maxCollectItems,
 			// #2229: the write path resolves `CALL db.*` from the same registry the
 			// read path uses. Shared, not snapshotted — procs.Registry is
 			// RWMutex-guarded internally.
@@ -20235,41 +20223,59 @@ func nodeIDOrNodeValue(v expr.Value) (uint64, bool) {
 	return 0, false
 }
 
-// edgeTypeFilterBuildCount counts how many times the edge-type filter map was
-// actually CONSTRUCTED — the O(V+E) pass in [buildEdgeTypeFilter] — as opposed to
-// served from [edgeTypeFilterCache]. It is the companion structural instrument to
-// [csrPairUncachedBuildCount]: the filter is keyed to a specific CSR pair's arc
-// positions, so the two are rebuilt together and an unamortised path shows in both.
+// slotTypeResolveCount counts how many times the whole-graph per-slot relationship
+// type RESOLUTION — the O(V+E) pass in [forEachResolvedSlotType] — was actually
+// executed, as opposed to served from the type column cached beside its CSR pair.
+// It is the companion structural instrument to [csrPairUncachedBuildCount]: the
+// resolution is keyed to a specific CSR pair's arc positions, so the two are
+// rebuilt together and an unamortised path shows in both.
+//
+// It replaced edgeTypeFilterBuildCount (rmp #2251) and counts strictly LESS often
+// for the same drive: the column it feeds is type-set INDEPENDENT, so a workload
+// mixing `[:A]` and `[:B]` over one graph state now resolves once where the
+// per-type-set filter map resolved twice. A zero delta still means the same thing
+// it always did — nothing rebuilt.
+//
 // Process-global and monotonic; bracket a drive to read a delta.
-var edgeTypeFilterBuildCount atomic.Uint64
+var slotTypeResolveCount atomic.Uint64
 
-// buildEdgeTypeFilter constructs an edge-type filter map against fwdCSR, a
-// forward CSR already built by the caller (normally [csrPairFromGraph]'s
-// fwd result — every call site already needs one for its own traversal, so
-// building a second, independent one here was pure waste, rmp #1871). The
-// map key is the edge's absolute position in fwdCSR's EdgesSlice; the value
-// is a label attached to that edge in the LPG. The caller MUST pass the same
-// fwdCSR it will traverse: this function's positions are only meaningful
-// relative to that exact CSR instance, not to some other CSR built from an
-// equivalent-looking but distinct graph snapshot.
+// forEachResolvedSlotType resolves the relationship types of EVERY arc of fwdCSR
+// and reports each typed arc to visit, as (absolute forward CSR position, the
+// types that arc carries). An arc carrying no type is not visited at all.
 //
-// When relTypes is non-empty an edge passes the filter if ANY of the labels
-// attached to that edge matches one of the listed types; the stored value
-// is the matching label (used by reverseEdgePassesFilter and downstream
-// per-edge bookkeeping). An empty relTypes slice means "accept all edge
-// types" — the returned map lists every labelled edge with its first label.
+// # It is the pre-#2251 buildEdgeTypeFilter, verbatim, minus one step
 //
-// The any-label semantics let `MATCH (a)-[:T]->(b)` match an edge that
-// carries multiple labels (e.g. PLAYS_FOR + SUPPORTS on the same (src,dst)
-// pair) when one of them equals T. Closes Match7 [29] and unblocks the
-// general "multiple labels per edge" scenario.
+// This function IS the three-tier resolution that built the position-keyed
+// edge-type filter map: stable-handle record first, then the pair's COLUMN-TYPED
+// slot for the position's ordinal, then — only for a position that could not be
+// matched to a column-typed slot at all — the positional inference. Not one line
+// of that resolution was rewritten when the type column replaced the map; the ONLY
+// thing removed is the accept-set filtering that used to run on the result, which
+// is what made the old map depend on the query's type set and the new column not.
 //
-// O(V+E) time; allocates one map entry per labelled edge. Callers needing
-// this filter for a live query should go through [edgeTypeFilterFor]
-// rather than calling this directly, so a repeat query against an unchanged
-// graph reuses a cached result instead of re-paying this cost.
-func buildEdgeTypeFilter(g *lpg.ReadView[string, float64], fwdCSR *csr.CSR[float64], relTypes []string) map[uint64]string {
-	edgeTypeFilterBuildCount.Add(1)
+// That distinction is load-bearing rather than stylistic. The adjacency label
+// column is NOT authoritative on its own — [lpg.Graph.slotCarriesTypeAsOf]
+// resolves handle record → column → pair overflow, [lpg.Graph.columnTypedSlots]
+// deliberately skips a handle-recorded slot so the two legitimately disagree, a
+// handle's label bag is a SET so one arc may carry several types, and the pair
+// overflow holds second-and-later types. A column filled from the raw adjacency
+// labels would have reintroduced rmp #2258, #2293 and TCK Match2 [6] / Match7 [29]
+// in one move. Reuse this resolution; do not write another.
+//
+// The types slice handed to visit ALIASES a buffer reused across slots, so a
+// visitor that keeps it must copy.
+//
+// The caller MUST pass the same fwdCSR it will index the result against: the
+// positions are only meaningful relative to that exact CSR instance, not to some
+// other CSR built from an equivalent-looking but distinct graph snapshot.
+//
+// O(V+E) time. Callers needing this for a live query should go through
+// [relTypeColumnFor] rather than calling it directly, so a repeat query against an
+// unchanged graph reuses the cached column instead of re-paying the cost.
+func forEachResolvedSlotType(
+	g *lpg.ReadView[string, float64], fwdCSR *csr.CSR[float64], visit func(pos uint64, types []string),
+) {
+	slotTypeResolveCount.Add(1)
 	adj := g.AdjList()
 	verts := fwdCSR.VerticesSlice()
 	edges := fwdCSR.EdgesSlice()
@@ -20279,15 +20285,6 @@ func buildEdgeTypeFilter(g *lpg.ReadView[string, float64], fwdCSR *csr.CSR[float
 	// case every slot takes the positional fallback below.
 	handles := fwdCSR.HandlesSlice()
 	mapper := adj.Mapper()
-
-	// Pre-build a set of accepted types for O(1) lookup.
-	acceptAll := len(relTypes) == 0
-	accept := make(map[string]struct{}, len(relTypes))
-	for _, t := range relTypes {
-		accept[t] = struct{}{}
-	}
-
-	filter := make(map[uint64]string)
 
 	// slotTypes collects the relationship types of ONE adjacency slot for the
 	// per-slot resolution below, and appendSlotType is the visitor that fills it.
@@ -20448,80 +20445,19 @@ func buildEdgeTypeFilter(g *lpg.ReadView[string, float64], fwdCSR *csr.CSR[float
 			}
 			if len(labels) == 0 {
 				// The slot carries no relationship type at all, so it matches no
-				// type filter and is absent from the map.
+				// type filter and is not visited.
 				continue
 			}
-			if acceptAll {
-				filter[pos] = labels[0]
-				continue
-			}
-			// any-label match: include the edge when at least one label
-			// is in the accept set; record the matching label so
-			// reverseEdgePassesFilter can route the lookup.
-			for _, lbl := range labels {
-				if _, ok := accept[lbl]; ok {
-					filter[pos] = lbl
-					break
-				}
-			}
+			// The ONLY step removed from the original [buildEdgeTypeFilter] is the
+			// accept-set filtering that used to happen here. Everything above is the
+			// resolution, verbatim, and the caller now decides what to do with the
+			// answer — which is what makes the result type-set INDEPENDENT.
+			//
+			// types aliases a buffer reused across slots (see slotTypes above), so a
+			// visitor that keeps it must copy.
+			visit(pos, labels)
 		}
 	}
-	return filter
-}
-
-// edgeTypeFilterFor returns the edge-type filter map for relTypes against
-// fwdCSR, the caller's already-built forward CSR (rmp #1871). It transparently
-// reuses a prior query's result from bopts.edgeTypeFilterCache when that result
-// describes the same graph state, avoiding [buildEdgeTypeFilter]'s O(V+E)
-// rebuild for a read-mostly workload's repeat queries. Falls back to an
-// uncached, correct buildEdgeTypeFilter call when bopts or its cache is nil (the
-// public BuildPlanWithMutator path has no Engine-owned cache to consult).
-//
-// at MUST be the key fwdCSR itself was stamped with, which is why it is a
-// parameter rather than re-sampled here. The filter is indexed by fwdCSR's ARC
-// POSITIONS, so it is only meaningful against that exact pair; re-sampling would
-// let it be filed under a state the pair does not describe, and a reader holding
-// a differently-sized pair would then be served positions that name other arcs
-// (rmp #2293).
-func edgeTypeFilterFor(
-	g *lpg.ReadView[string, float64], fwdCSR *csr.CSR[float64], relTypes []string,
-	bopts *buildOpts, at csrPairKey,
-) map[uint64]string {
-	// A write transaction's view sees its own uncommitted writes, so a filter
-	// built through it describes a private CSR no other reader may be served —
-	// and the shared cache's key carries no transaction identity (rmp #2446,
-	// see [viewCarriesOwnWrites]).
-	if bopts == nil || bopts.edgeTypeFilterCache == nil || viewCarriesOwnWrites(g) {
-		return buildEdgeTypeFilter(g, fwdCSR, relTypes)
-	}
-	return bopts.edgeTypeFilterCache.getOrBuild(canonicalRelTypesKey(relTypes), at, func() map[uint64]string {
-		return buildEdgeTypeFilter(g, fwdCSR, relTypes)
-	})
-}
-
-// canonicalRelTypesKey returns a cache key that is identical for any two
-// relTypes slices naming the same set of types regardless of input order or
-// duplicates — buildEdgeTypeFilter's any-label-match semantics fold relTypes
-// into a set (see its accept map) before ever consulting order, so the cache
-// key must collapse the same way or logically-identical filter requests
-// would miss on each other. Does not mutate relTypes. Joins with NUL rather
-// than a printable separator (comma, pipe) because a backtick-quoted
-// relationship type name may legally contain one. An empty relTypes (the
-// nil/accept-all case, key "") cannot collide with any real, non-empty type
-// set for that same reason — a real key always contains at least one NUL-
-// free type-name byte. A relTypes containing only the pathological
-// empty-string type name (“ MATCH ()-[:“]->() “, a distinct, pre-existing,
-// TCK-uncovered edge case unrelated to this cache) would also canonicalise
-// to "", but every real call site gates on len(relTypes) > 0 before ever
-// reaching edgeTypeFilterFor, so that case never actually reaches here.
-func canonicalRelTypesKey(relTypes []string) string {
-	if len(relTypes) == 0 {
-		return ""
-	}
-	sorted := slices.Clone(relTypes)
-	slices.Sort(sorted)
-	sorted = slices.Compact(sorted)
-	return strings.Join(sorted, "\x00")
 }
 
 // fillSlotLabs rewrites out so that, for every destination srcID has an edge to,

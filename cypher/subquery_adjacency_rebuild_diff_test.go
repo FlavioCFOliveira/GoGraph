@@ -11,7 +11,7 @@ package cypher
 // exponent, it moves with the host's load, and — worst of all — a "fraction of a
 // fixed workload inside a fixed window" is a RATE dressed up as a structural fact.
 //
-// [csrPairUncachedBuildCount] and [edgeTypeFilterBuildCount] admit no such
+// [csrPairUncachedBuildCount] and [slotTypeResolveCount] admit no such
 // confusion. They count O(V+E) constructions. Bracket one query drive between two
 // reads of them and the delta is an ABSOLUTE COUNT of full adjacency rebuilds that
 // drive performed. Run the same query shape over a graph of 250 nodes and one of
@@ -90,7 +90,7 @@ type rebuildDelta struct {
 }
 
 func (d rebuildDelta) String() string {
-	return fmt.Sprintf("rows=%d csr_pair_builds=%d (absent_cache=%d) edge_type_filter_builds=%d "+
+	return fmt.Sprintf("rows=%d csr_pair_builds=%d (absent_cache=%d) slot_type_resolutions=%d "+
 		"degree_rewrites=%d labelled_hop_rewrites=%d",
 		d.rows, d.pairs, d.absent, d.filter, d.degree, d.hop)
 }
@@ -104,7 +104,7 @@ func (d rebuildDelta) String() string {
 func driveCounted(tb testing.TB, e *Engine, q string) rebuildDelta {
 	tb.Helper()
 	pairBefore := csrPairUncachedBuildCount.Load()
-	filterBefore := edgeTypeFilterBuildCount.Load()
+	filterBefore := slotTypeResolveCount.Load()
 	absentBefore := csrPairAbsentCacheBuildCount.Load()
 	degreeBefore := degreeRewriteCount.Load()
 	hopBefore := labelledHopRewriteCount.Load()
@@ -127,7 +127,7 @@ func driveCounted(tb testing.TB, e *Engine, q string) rebuildDelta {
 	return rebuildDelta{
 		rows:   rows,
 		pairs:  csrPairUncachedBuildCount.Load() - pairBefore,
-		filter: edgeTypeFilterBuildCount.Load() - filterBefore,
+		filter: slotTypeResolveCount.Load() - filterBefore,
 		absent: csrPairAbsentCacheBuildCount.Load() - absentBefore,
 		degree: degreeRewriteCount.Load() - degreeBefore,
 		hop:    labelledHopRewriteCount.Load() - hopBefore,
@@ -139,7 +139,7 @@ func driveCounted(tb testing.TB, e *Engine, q string) rebuildDelta {
 // taken from them afterwards carries meaning.
 //
 // Positive control — a COLD Engine has an empty [csrPairCache] and an empty
-// [edgeTypeFilterCache], so its first `-[:R]->` traversal MUST construct one of
+// the per-type-set filter LRU it replaced, so its first `-[:R]->` traversal MUST construct one of
 // each. A counter that stayed at zero here would be inert, and every subsequent
 // zero would be an artefact rather than a finding.
 //
@@ -162,8 +162,8 @@ func TestAdjacencyRebuildCounters_Controls(t *testing.T) {
 			"csrPairUncachedBuildCount is inert and no zero reading from it is evidence", cold)
 	}
 	if cold.filter == 0 {
-		t.Errorf("positive control FAILED: cold one-hop built no edge-type filter (%s); "+
-			"edgeTypeFilterBuildCount is inert and no zero reading from it is evidence", cold)
+		t.Errorf("positive control FAILED: cold one-hop resolved no slot types (%s); "+
+			"slotTypeResolveCount is inert and no zero reading from it is evidence", cold)
 	}
 	t.Logf("positive control (cold Engine, one-hop): %s", cold)
 
@@ -189,8 +189,8 @@ func TestAdjacencyRebuildCounters_Controls(t *testing.T) {
 // rebuilds 3n times at both sizes.
 func TestSubqueryAdjacencyRebuild_ScalesWithGraph(t *testing.T) {
 	// The ceiling an amortised shape must respect. A drive may legitimately need a
-	// couple of cold builds (its own first pair, its own first filter, a second
-	// filter for a differently-typed leg); it may never need one PER ROW.
+	// couple of cold builds (its own first pair, its own first type resolution); it
+	// may never need one PER ROW.
 	const amortisedCeiling = 8
 
 	shapes := []struct{ name, query string }{
@@ -229,7 +229,7 @@ func TestSubqueryAdjacencyRebuild_ScalesWithGraph(t *testing.T) {
 	t.Logf("%-20s %-40s | %s", "shape", "n=250", "n=500")
 	for _, s := range shapes {
 		a, b := obs[key{s.name, 250}], obs[key{s.name, 500}]
-		t.Logf("%-20s  csr=%-4d abs=%-4d flt=%-4d deg=%-4d hop=%-4d | csr=%-4d abs=%-4d flt=%-4d deg=%-4d hop=%-4d",
+		t.Logf("%-20s  csr=%-4d abs=%-4d typ=%-4d deg=%-4d hop=%-4d | csr=%-4d abs=%-4d typ=%-4d deg=%-4d hop=%-4d",
 			s.name, a.pairs, a.absent, a.filter, a.degree, a.hop,
 			b.pairs, b.absent, b.filter, b.degree, b.hop)
 	}
@@ -269,16 +269,22 @@ func TestSubqueryAdjacencyRebuild_ScalesWithGraph(t *testing.T) {
 	}
 }
 
-// csrPairCacheRouteProbe records the CACHE-LOOKUP events of both adjacency
-// caches, so a rebuild counted by [csrPairUncachedBuildCount] can be attributed to
-// the route that produced it rather than merely observed.
+// csrPairCacheRouteProbe records the CACHE-LOOKUP events of the adjacency cache
+// and the BUILD/REUSE events of the relationship-type column stored inside it, so
+// a rebuild counted by [csrPairUncachedBuildCount] can be attributed to the route
+// that produced it rather than merely observed.
+//
+// Since rmp #2251 the column lives beside the pair, so a pair hit and a column
+// reuse are one lookup. They are still counted separately, because a pair can hit
+// while the column is absent — an untyped query warmed the pair — and only the
+// column's own counter can say whether the O(V+E) resolution actually ran.
 //
 // NOT parallel-safe: it installs a global metrics backend.
 type csrPairCacheRouteProbe struct {
-	pairHits     atomic.Uint64
-	pairMisses   atomic.Uint64
-	filterHits   atomic.Uint64
-	filterMisses atomic.Uint64
+	pairHits   atomic.Uint64
+	pairMisses atomic.Uint64
+	colReuses  atomic.Uint64
+	colBuilds  atomic.Uint64
 }
 
 func (p *csrPairCacheRouteProbe) IncCounter(name string, delta uint64) {
@@ -287,10 +293,10 @@ func (p *csrPairCacheRouteProbe) IncCounter(name string, delta uint64) {
 		p.pairHits.Add(delta)
 	case "cypher.csr_pair_cache.misses":
 		p.pairMisses.Add(delta)
-	case "cypher.edge_type_filter_cache.hits":
-		p.filterHits.Add(delta)
-	case "cypher.edge_type_filter_cache.misses":
-		p.filterMisses.Add(delta)
+	case "cypher.reltype_column.reuses":
+		p.colReuses.Add(delta)
+	case "cypher.reltype_column.builds":
+		p.colBuilds.Add(delta)
 	}
 }
 
@@ -298,8 +304,8 @@ func (p *csrPairCacheRouteProbe) ObserveLatency(string, time.Duration) {}
 func (p *csrPairCacheRouteProbe) SetGauge(string, float64)             {}
 
 func (p *csrPairCacheRouteProbe) String() string {
-	return fmt.Sprintf("pair{hit=%d miss=%d} filter{hit=%d miss=%d}",
-		p.pairHits.Load(), p.pairMisses.Load(), p.filterHits.Load(), p.filterMisses.Load())
+	return fmt.Sprintf("pair{hit=%d miss=%d} reltype_column{reuse=%d build=%d}",
+		p.pairHits.Load(), p.pairMisses.Load(), p.colReuses.Load(), p.colBuilds.Load())
 }
 
 // setMetricsBackendForTest installs b as the process-wide metrics sink (nil
@@ -337,10 +343,10 @@ func probedDrive(t *testing.T, e *Engine, q string) (rebuildDelta, *csrPairCache
 // absent-cache route, with zero hits and zero misses, because
 // [buildOpts.forSubquery] carried neither cache into the inner build.
 //
-// The fix put both caches on that allowlist, so the assertion is now the inverse
+// The fix put the cache on that allowlist, so the assertion is now the inverse
 // and is a strictly stronger guard: the subject arm must CONSULT the cache and be
 // SERVED from it — one hit per outer row, no miss, no build. A regression dropping
-// either field from the allowlist shows builds returning and hits collapsing to
+// the field from the allowlist shows builds returning and hits collapsing to
 // zero; a regression breaking invalidation instead shows misses rather than hits.
 // The two failure modes stay distinguishable, which is the point of reading lookup
 // events rather than time.
@@ -377,7 +383,7 @@ func TestSubqueryAdjacencyRebuild_Attribution(t *testing.T) {
 	// No rebuild at all: the inner Expand's adjacency is served from the Engine's
 	// caches on every one of the n outer rows.
 	if subDelta.pairs != 0 || subDelta.filter != 0 {
-		t.Errorf("subject arm still rebuilds: %s — want zero pair and filter builds", subDelta)
+		t.Errorf("subject arm still rebuilds: %s — want zero pair builds and zero slot-type resolutions", subDelta)
 	}
 	// And it was SERVED, not merely spared: one lookup per outer row, every one a
 	// hit. Asserting the HITS, rather than only the absence of builds, is what makes
@@ -387,8 +393,8 @@ func TestSubqueryAdjacencyRebuild_Attribution(t *testing.T) {
 		t.Errorf("CSR-pair cache not serving the inner Expand per row: %s, want hit=%d miss=0",
 			subProbe, n)
 	}
-	if subProbe.filterHits.Load() != uint64(n) || subProbe.filterMisses.Load() != 0 {
-		t.Errorf("edge-type-filter cache not serving the inner Expand per row: %s, want hit=%d miss=0",
+	if subProbe.colReuses.Load() != uint64(n) || subProbe.colBuilds.Load() != 0 {
+		t.Errorf("relationship-type column not serving the inner Expand per row: %s, want reuse=%d build=0",
 			subProbe, n)
 	}
 	// The absent-cache route must be gone entirely: that counter firing again is the
@@ -486,10 +492,12 @@ func TestSubqueryAdjacencyRebuild_WritePathStaysUncached(t *testing.T) {
 		t.Errorf("STALE ADJACENCY SERVED TO A WRITE STATEMENT: got %v, want [%s]; "+
 			"the subquery did not observe the :Z edges its own statement created", got, want)
 	}
-	if probe.pairHits.Load() != 0 || probe.pairMisses.Load() != 0 ||
-		probe.filterHits.Load() != 0 || probe.filterMisses.Load() != 0 {
+	if probe.pairHits.Load() != 0 || probe.pairMisses.Load() != 0 || probe.colReuses.Load() != 0 {
 		t.Errorf("a write statement CONSULTED a shared adjacency cache (%s); "+
-			"viewCarriesOwnWrites must exclude it at both entry points (rmp #2446)", probe)
+			"viewCarriesOwnWrites must exclude it at every entry point (rmp #2446). "+
+			"A column REUSE counts as a consultation exactly as a pair hit does: the "+
+			"column is stored inside the cached pair, so being served one means having "+
+			"been served the pair.", probe)
 	}
 	if builds == 0 {
 		t.Errorf("write statement performed no adjacency build at all (%d); the oracle "+
@@ -500,21 +508,22 @@ func TestSubqueryAdjacencyRebuild_WritePathStaysUncached(t *testing.T) {
 
 // BenchmarkAdjacencyCacheLookup measures what rmp #2646 COSTS, as opposed to what
 // it saves. The fix does not make the per-outer-row work vanish: it replaces a
-// Θ(V+E) rebuild with two cache lookups, and each lookup takes a mutex —
-// [csrPairCache.mu] and the edge-type filter's LRU lock — both of them
+// Θ(V+E) rebuild with a cache lookup, and that lookup takes a mutex —
+// [csrPairCache.mu]. It was TWO lookups and two mutexes until rmp #2251 stored the
+// relationship-type column inside the cached pair; what remains is
 // Engine-global and therefore shared by every concurrent query.
 //
 // The measured unit is exactly what [exec.Expand.Init] performs once per outer
 // row: one call of the closure [expandAdjacencySource] returns, which is one
-// [csrPairCachedForAt] plus one [edgeTypeFilterFor]. Nothing else is in the timing
-// window, so the number is the per-row toll of the fix and not a query's worth of
-// other work attributed to it.
+// [csrPairAndColumnCachedFor] — the pair and its relationship-type column in a
+// single lookup. Nothing else is in the timing window, so the number is the per-row
+// toll of the fix and not a query's worth of other work attributed to it.
 //
-// The serial arm gives the uncontended toll. The parallel arm is the one that
-// could actually justify the contingent refinement (an unsynchronised single-entry
-// memo on the child buildOpts), because two global mutexes on a per-row path is a
-// contention shape, not merely an instruction-count one — so it is measured rather
-// than argued about.
+// The serial arm gives the uncontended toll. The parallel arm is the one that could
+// actually justify a contingent refinement (an unsynchronised single-entry memo on
+// the child buildOpts), because a global mutex on a per-row path is a contention
+// shape, not merely an instruction-count one — so it is measured rather than argued
+// about.
 //
 // The benchmark asserts it is measuring HITS. A lookup that missed would be timing
 // the rebuild this fix exists to remove, and would report a number several orders
@@ -533,10 +542,7 @@ func BenchmarkAdjacencyCacheLookup(b *testing.B) {
 	// would have timed a 2000-node rebuild and reported it as the cost of a mutex.
 	// Owning the caches removes the interference entirely and measures exactly the
 	// configuration [exec.Expand.Init] sees.
-	bopts := &buildOpts{
-		csrPairCache:        newCSRPairCache(),
-		edgeTypeFilterCache: newEdgeTypeFilterCache(DefaultEdgeTypeFilterCacheCapacity),
-	}
+	bopts := &buildOpts{csrPairCache: newCSRPairCache()}
 	view := g.ReadAt(nil)
 	src := expandAdjacencySource(bopts, view, []string{"R"})
 
@@ -546,8 +552,8 @@ func BenchmarkAdjacencyCacheLookup(b *testing.B) {
 	// magnitude too large.
 	src()
 	before := csrPairUncachedBuildCount.Load()
-	if fwd, _, filter := src(); fwd == nil || filter == nil {
-		b.Fatalf("adjacency source returned nil (fwd=%v filter=%v)", fwd == nil, filter == nil)
+	if fwd, _, admit := src(); fwd == nil || !admit.Active() {
+		b.Fatalf("adjacency source returned nil (fwd=%v admit=%v)", fwd == nil, !admit.Active())
 	}
 	if got := csrPairUncachedBuildCount.Load() - before; got != 0 {
 		b.Fatalf("steady state is not a cache hit: %d rebuilds on the probe call", got)
@@ -558,8 +564,8 @@ func BenchmarkAdjacencyCacheLookup(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			fwd, _, filter := src()
-			if fwd == nil || filter == nil {
+			fwd, _, admit := src()
+			if fwd == nil || !admit.Active() {
 				b.Fatal("nil adjacency")
 			}
 		}
@@ -569,16 +575,17 @@ func BenchmarkAdjacencyCacheLookup(b *testing.B) {
 		}
 	})
 
-	// Contention: every goroutine takes the same two Engine-global locks, which is
-	// the shape a massively concurrent workload would present.
+	// Contention: every goroutine takes the same Engine-global lock, which is the
+	// shape a massively concurrent workload would present. It was TWO locks before
+	// rmp #2251 stored the relationship-type column beside the pair.
 	b.Run("parallel", func(b *testing.B) {
 		guard := csrPairUncachedBuildCount.Load()
 		b.ReportAllocs()
 		b.ResetTimer()
 		b.RunParallel(func(pb *testing.PB) {
 			for pb.Next() {
-				fwd, _, filter := src()
-				if fwd == nil || filter == nil {
+				fwd, _, admit := src()
+				if fwd == nil || !admit.Active() {
 					b.Fatal("nil adjacency")
 				}
 			}

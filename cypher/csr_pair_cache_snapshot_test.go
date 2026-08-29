@@ -39,12 +39,6 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
-// atEpoch is the key of a PRESENT read at the given topology epoch — what every
-// pair-derived cache was keyed on before the reader's instant joined the key.
-// It keeps the pre-MVCC cache tests, which are about eviction and LRU order
-// rather than about visibility, reading as they did.
-func atEpoch(epoch uint64) csrPairKey { return csrPairKey{epoch: epoch} }
-
 // snapCacheEngine builds the same hub-and-spokes fixture the sibling
 // csr_pair_cache_test.go uses — one node 'a' with five outgoing :R arcs — and
 // returns the engine and its graph.
