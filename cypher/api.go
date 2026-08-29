@@ -9650,20 +9650,56 @@ func buildOperatorRec(
 			topG = lw.g
 		}
 		keys := irSortKeys(p.SortItems, schema, topG, params, reg, bopts)
-		if len(keys) == 0 || p.Limit < 0 {
-			// Degenerate: no resolvable sort keys, or a negative no-limit
-			// sentinel — return child unchanged. (LIMIT 0 is NOT degenerate;
-			// it must yield an empty result — see #1801.)
+		// Resolve the OFFSET before the LIMIT. The unfused shape builds Skip
+		// BELOW Limit, so buildOperator reaches Skip's expression first and a
+		// query whose SKIP and LIMIT are both ill-typed reports the SKIP error.
+		// Resolving in the same order here keeps the fused plan reporting the
+		// same one (#2509).
+		offset := p.Offset
+		if p.OffsetExpr != nil {
+			v, rerr := resolveCountExpr(p.OffsetExpr, params, reg, "SKIP")
+			if rerr != nil {
+				return nil, rerr
+			}
+			offset = v
+		}
+		limit := p.Limit
+		if p.LimitExpr != nil {
+			v, rerr := resolveCountExpr(p.LimitExpr, params, reg, "LIMIT")
+			if rerr != nil {
+				return nil, rerr
+			}
+			limit = v
+		}
+		if limit < 0 {
+			// Negative no-limit sentinel — return child unchanged. (LIMIT 0 is
+			// NOT degenerate; it must yield an empty result — see #1801.)
 			return child, nil
 		}
-		// exec.NewTop requires n ≥ 0 (int); ir.Top.Limit is int64. n == 0 is the
-		// ORDER BY … LIMIT 0 case and produces an empty result.
-		n := int(p.Limit)
-		if int64(n) != p.Limit {
-			// Limit overflows int — clamp to a large safe value.
-			n = int(^uint(0) >> 1) // math.MaxInt
+		n := topBoundRows(offset, limit)
+		if len(keys) == 0 {
+			// No resolvable sort key: there is nothing to order, but the BOUND
+			// still applies. Returning the child unchanged here would drop the
+			// caller's LIMIT. With no ordering, Limit(s+k) below the Skip(s)
+			// above this node yields rows [s, s+k) — the same rows Skip(s) then
+			// Limit(k) yields — so the bound survives with the same semantics.
+			// A write subtree needs the Eager barrier for the same reason
+			// [ir.Limit] does: every write below must run before the truncation.
+			if ir.ContainsWrite(p.Child) {
+				degMB, degEst := resultByteBudget(bopts)
+				return exec.NewLimit(exec.NewEager(child, 0).WithByteBudget(degMB, degEst), int64(n))
+			}
+			return exec.NewLimit(child, int64(n))
 		}
-		return exec.NewTop(child, keys, n)
+		topOp, terr := exec.NewTop(child, keys, n, 0)
+		if terr != nil {
+			return nil, terr
+		}
+		// Both memory dimensions are wired, exactly as for Sort. n is s+k and
+		// both may be parameters, so an unbounded Top would turn a hostile $skip
+		// into an out-of-memory kill instead of a typed error (#2509).
+		topMB, topEst := resultByteBudget(bopts)
+		return topOp.WithByteBudget(topMB, topEst), nil
 
 	case *ir.Eager:
 		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
@@ -10335,39 +10371,10 @@ func projectionItemsAreScalar(items []ir.ProjectionItem) bool {
 	return true
 }
 
-// nonDeterministicFuncs is the deny-set of scalar functions whose result is NOT
-// (pure ∧ row-local): two evaluations of the same call can yield different
-// values. A projection item containing any of them must NOT be fused into the
-// morsel-parallel scan (#1682), because evaluating it independently per worker
-// would change the projected VALUE multiset versus the serial single-threaded
-// path — a genuine semantic divergence the openCypher TCK does not cover.
-//
-// Two groups (cypher-expert sign-off):
-//
-//   - rand / randomUUID: non-deterministic per call;
-//   - the zero-argument "clock" temporal constructors: even though GoGraph freezes
-//     one per-query "now" in the shared registry (newNowAwareRegistry) so the
-//     workers would in fact observe the same instant, they are rejected as cheap,
-//     unambiguous insurance — these queries are rare and the safety margin is worth
-//     more than fusing them. Argument-bearing temporal forms (date('2020-01-01'),
-//     datetime(n.ts)) are pure and are NOT in this set.
-//
-// Names are matched case-insensitively against the call's bare function name; the
-// no-namespace assumption matches the built-in registry's flat namespace.
-var nonDeterministicFuncs = map[string]struct{}{
-	"rand":          {},
-	"randomuuid":    {},
-	"timestamp":     {},
-	"date":          {},
-	"datetime":      {},
-	"localdatetime": {},
-	"time":          {},
-	"localtime":     {},
-}
-
 // exprHasNonScalar reports whether e contains any construct that disqualifies a
 // projection item from the morsel-parallel fused scan: an aggregate function
-// call, a non-deterministic / clock-dependent function ([nonDeterministicFuncs]),
+// call, a non-deterministic / clock-dependent function
+// ([ir.IsNonDeterministicCall]),
 // an EXISTS/COUNT subquery, a pattern comprehension, a list comprehension, or a
 // reduce (the latter two evaluate per element but are excluded conservatively so
 // the fused set stays the simple per-row pure-scalar shapes signed off).
@@ -10386,7 +10393,7 @@ func exprHasNonScalar(e ast.Expression) bool { //nolint:gocyclo // per-AST-node 
 		if ir.IsAggregateFunc(n.Name) || n.CountStar {
 			return true
 		}
-		if isNonDeterministicCall(n) {
+		if ir.IsNonDeterministicCall(n) {
 			return true
 		}
 		for _, a := range n.Args {
@@ -10427,30 +10434,6 @@ func exprHasNonScalar(e ast.Expression) bool { //nolint:gocyclo // per-AST-node 
 		}
 	}
 	return false
-}
-
-// isNonDeterministicCall reports whether fn is a call this engine must not
-// evaluate independently per worker (#1682): rand / randomUUID (always
-// non-deterministic), or a ZERO-ARGUMENT temporal clock constructor (date(),
-// datetime(), localdatetime(), time(), localtime(), timestamp()). The temporal
-// names are only non-deterministic in their no-argument clock form; an
-// argument-bearing call (date('2020-01-01'), datetime(n.ts)) is pure and is not
-// rejected. rand / randomUUID are rejected regardless of arguments.
-func isNonDeterministicCall(fn *ast.FunctionInvocation) bool {
-	if len(fn.Namespace) != 0 {
-		return false // namespaced calls (apoc.*, …) are not the built-in clock/rand forms
-	}
-	name := strings.ToLower(fn.Name)
-	if _, ok := nonDeterministicFuncs[name]; !ok {
-		return false
-	}
-	switch name {
-	case "rand", "randomuuid":
-		return true // non-deterministic for any argument shape
-	default:
-		// Temporal constructor: only the zero-argument clock form is rejected.
-		return len(fn.Args) == 0
-	}
 }
 
 // forWorker returns a value copy of bopts that is fully independent of every
@@ -12448,6 +12431,34 @@ func resolveCountExpr(e ast.Expression, params map[string]expr.Value, reg expr.F
 		return 0, fmt.Errorf("cypher: SyntaxError.InvalidArgumentType: %s requires an integer, got float", kind)
 	}
 	return 0, fmt.Errorf("cypher: SyntaxError.InvalidArgumentType: %s requires an integer, got %T", kind, v)
+}
+
+// topBoundRows is the number of rows [exec.Top] must retain to serve
+// ORDER BY … SKIP offset LIMIT limit: offset+limit, SATURATED at math.MaxInt
+// rather than wrapped, and never thrown on.
+//
+// Saturating is exact here, not merely safe. The sum only fails to fit when
+// offset+limit exceeds math.MaxInt, while the row count the operator is ever
+// allowed to buffer is bounded by [exec.DefaultMaxSortRows] (10 million) — nine
+// orders of magnitude smaller. So whenever saturation happens the LIMIT cannot
+// bind for any input the operator may hold, and a bound that never truncates
+// returns exactly what the LIMIT would have returned.
+//
+// Neo4j spells this Math.addExact and throws on overflow. This engine must not:
+// its pinned pagination contract says a SKIP past the end of the input returns
+// zero rows rather than erroring (internal/sim/surface_order.go). The planner
+// separately refuses to fuse when BOTH bounds are literals and their sum
+// overflows (ir.fusibleTopBound), which is the case it can decide before the
+// parameters are known.
+func topBoundRows(offset, limit int64) int {
+	if offset > math.MaxInt64-limit {
+		return math.MaxInt
+	}
+	sum := offset + limit
+	if sum > math.MaxInt {
+		return math.MaxInt
+	}
+	return int(sum)
 }
 
 // resolveSeekValue resolves p.Value to an expr.Value. If value starts with "$",

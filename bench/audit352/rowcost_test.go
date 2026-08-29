@@ -2,6 +2,7 @@ package audit352_test
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
@@ -121,18 +122,38 @@ func TestProjectionShapeRowCounts(t *testing.T) {
 	}
 }
 
-// paginationShapes probe whether ORDER BY + LIMIT fuses into a Top operator
-// and whether adding SKIP defeats that fusion, forcing a full sort of the
-// whole scan. Both arms return the same number of rows to the caller.
+// paginationShapes probe the cost of the ordinary pagination idiom. Every arm
+// orders the same 120 000-row scan; they differ only in the page they ask for.
+//
+// wantOps is the ordering/pagination operator sequence the arm MUST compile to.
+// Before rmp #2509 the SKIP arms planned Limit→Skip→Sort — a full sort of the
+// whole scan for a ten-row page — and this table's predecessor recorded that
+// with t.Logf and asserted nothing, so it could not have failed however the
+// planner behaved. The expectation is now declared, because a benchmark table
+// read against a plan that has silently changed is worse than no table.
 var paginationShapes = []struct {
-	name  string
-	query string
+	name    string
+	query   string
+	wantOps []string
 }{
-	{"limit10", `MATCH (p:Person) RETURN p.firstName ORDER BY p.salary LIMIT 10`},
-	{"skip0_limit10", `MATCH (p:Person) RETURN p.firstName ORDER BY p.salary SKIP 0 LIMIT 10`},
-	{"skip100_limit10", `MATCH (p:Person) RETURN p.firstName ORDER BY p.salary SKIP 100 LIMIT 10`},
-	{"skip10000_limit10", `MATCH (p:Person) RETURN p.firstName ORDER BY p.salary SKIP 10000 LIMIT 10`},
-	{"limit110_noskip", `MATCH (p:Person) RETURN p.firstName ORDER BY p.salary LIMIT 110`},
+	{"limit10", `MATCH (p:Person) RETURN p.firstName ORDER BY p.salary LIMIT 10`,
+		[]string{"Top"}},
+	{"skip0_limit10", `MATCH (p:Person) RETURN p.firstName ORDER BY p.salary SKIP 0 LIMIT 10`,
+		[]string{"Skip", "Top"}},
+	{"skip100_limit10", `MATCH (p:Person) RETURN p.firstName ORDER BY p.salary SKIP 100 LIMIT 10`,
+		[]string{"Skip", "Top"}},
+	{"skip10000_limit10", `MATCH (p:Person) RETURN p.firstName ORDER BY p.salary SKIP 10000 LIMIT 10`,
+		[]string{"Skip", "Top"}},
+	{"limit110_noskip", `MATCH (p:Person) RETURN p.firstName ORDER BY p.salary LIMIT 110`,
+		[]string{"Top"}},
+	// Deep pagination: the fused bound (100 010) is most of the 120 000-row
+	// input, the regime in which the bounded operator has the least to gain and
+	// the most transient buffer to pay for. It is here so the trade-off is
+	// measured rather than assumed.
+	{"skip100000_limit10", `MATCH (p:Person) RETURN p.firstName ORDER BY p.salary SKIP 100000 LIMIT 10`,
+		[]string{"Skip", "Top"}},
+	{"unlimited_sort", `MATCH (p:Person) RETURN p.firstName ORDER BY p.salary`,
+		[]string{"Sort"}},
 }
 
 func BenchmarkPagination(b *testing.B) {
@@ -143,9 +164,25 @@ func BenchmarkPagination(b *testing.B) {
 	}
 }
 
-// TestPaginationPlans records the physical plan of each pagination shape.
-// This is the structural half of the Top-fusion question; the benchmark is
-// the quantitative half.
+// orderingPlanOps extracts, in plan order, the ordering and pagination operator
+// names a rendered physical plan contains.
+func orderingPlanOps(plan string) []string {
+	var out []string
+	for _, line := range strings.Split(plan, "\n") {
+		trimmed := strings.TrimLeft(line, " \u2502\u251c\u2514\u2500\t")
+		name, _, _ := strings.Cut(trimmed, " ")
+		switch name {
+		case "Sort", "Top", "Limit", "Skip":
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// TestPaginationPlans is this harness's own precondition guard, in the same
+// spirit as TestSweepPreconditions: it fails if an arm stops compiling to the
+// plan its benchmark number is attributed to. It runs on every `go test` of this
+// package, with no -bench needed.
 func TestPaginationPlans(t *testing.T) {
 	engine := cypher.NewEngine(benchGraph)
 	for _, s := range paginationShapes {
@@ -153,7 +190,12 @@ func TestPaginationPlans(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Explain(%q): %v", s.query, err)
 		}
-		t.Logf("%s ships %d rows\n%s", s.name, countRows(t, engine, s.query), p)
+		got := orderingPlanOps(p)
+		if strings.Join(got, ",") != strings.Join(s.wantOps, ",") {
+			t.Errorf("%s: ordering operators %v, want %v\n%s", s.name, got, s.wantOps, p)
+			continue
+		}
+		t.Logf("%-18s ops=%v ships %d rows", s.name, got, countRows(t, engine, s.query))
 	}
 }
 

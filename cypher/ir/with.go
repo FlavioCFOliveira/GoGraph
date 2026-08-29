@@ -1,6 +1,10 @@
 package ir
 
-import "github.com/FlavioCFOliveira/GoGraph/cypher/ast"
+import (
+	"math"
+
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
+)
 
 // with.go — WITH pipeline-boundary translation.
 //
@@ -460,10 +464,38 @@ func collectOrderByVars(e ast.Expression, preSet, itemNames map[string]struct{},
 // applyProjectionTail wraps plan with the DISTINCT / ORDER BY / SKIP /
 // LIMIT operators declared on proj. The canonical openCypher evaluation
 // order is DISTINCT → ORDER BY → SKIP → LIMIT, so the plan tree is built
-// from the inside out in exactly that order. ORDER BY fuses with LIMIT
-// into Top only when SKIP is absent — when SKIP and LIMIT both appear,
-// the Sort produces the full ordered stream and Skip/Limit operate on
-// it independently.
+// from the inside out in exactly that order.
+//
+// # The fusion (#2509)
+//
+// ORDER BY … SKIP s LIMIT k plans as Skip(s) over Top(s+k): the bounded operator
+// retains only the rows the page can possibly need, and the Skip above it
+// discards the leading s. That is Neo4j's shape
+// (LogicalPlanProducer.planSkipAndLimit), chosen over folding the offset INTO the
+// operator because it keeps EXPLAIN showing both clauses as operators.
+//
+// It fuses for LITERAL and PARAMETERISED bounds alike. The literal-only
+// restriction that preceded this was backwards: StripLiterals clears the
+// hoistable flag at SKIP/LIMIT, so LIMIT 10/20/30 occupy three plan-cache entries
+// while LIMIT $m occupies one — the spelling the engine's own documentation
+// recommends was exactly the spelling that lost the fusion.
+//
+// Two conditions refuse the fusion, both of them soundness rather than cost:
+//
+//   - a NON-DETERMINISTIC bound expression. The fused shape evaluates s twice —
+//     once inside the Top bound and once in the Skip above it — so a SKIP
+//     toInteger(rand()*10) would skip a different number of rows than it
+//     reserved. [ExprIsDeterministic] is the gate.
+//   - s+k OVERFLOWING int64 for literal bounds. Saturating would silently drop
+//     the LIMIT, and Neo4j's Math.addExact would THROW where this engine's
+//     pinned contract (internal/sim/surface_order.go, "SKIP past the end") says a
+//     SKIP beyond the input returns zero rows and no error. Refusing to fuse
+//     leaves Sort → Skip → Limit, which returns those zero rows.
+//
+// There is deliberately NO plan-time crossover guard on n against the input
+// cardinality: neither reference engine attempts one, and this function has no
+// statistics to attempt it with. [exec.Top] decides it at run time by
+// accumulating to 2n before it builds a heap, as PostgreSQL does.
 func applyProjectionTail(plan LogicalPlan, proj *ast.Projection) LogicalPlan {
 	if proj == nil {
 		return plan
@@ -476,39 +508,78 @@ func applyProjectionTail(plan LogicalPlan, proj *ast.Projection) LogicalPlan {
 		for i, s := range proj.OrderBy {
 			sortItems[i] = SortItem{Expression: s.Expr.String(), Expr: s.Expr, Descending: s.Descending}
 		}
-		// Fuse Sort+Limit into Top only when no SKIP is present; with a
-		// SKIP, Top would discard rows that the Skip should reveal.
-		if proj.Limit != nil && proj.Skip == nil {
-			if lim, err := intExpr(proj.Limit); err == nil {
-				plan = NewTop(sortItems, lim, plan)
-			} else {
-				// LIMIT is a parameter or another expression: defer
-				// resolution to the physical builder via LimitExpr
-				// so a float-typed parameter surfaces as the
-				// documented InvalidArgumentType at runtime.
-				plan = NewSort(sortItems, plan)
-				plan = NewLimitExpr(proj.Limit, plan)
+		if bound, ok := fusibleTopBound(proj); ok {
+			plan = NewTopWithBound(sortItems, bound, plan)
+			// The Skip is still emitted, above the Top, so the page starts
+			// where the caller asked. The Limit is NOT: the Top bound already
+			// carries it.
+			if proj.Skip != nil {
+				plan = newSkipFrom(proj.Skip, plan)
 			}
-		} else {
-			plan = NewSort(sortItems, plan)
+			return plan
 		}
+		plan = NewSort(sortItems, plan)
 	}
 	if proj.Skip != nil {
-		if sk, err := intExpr(proj.Skip); err == nil {
-			plan = NewSkip(sk, plan)
-		} else {
-			plan = NewSkipExpr(proj.Skip, plan)
-		}
+		plan = newSkipFrom(proj.Skip, plan)
 	}
-	// LIMIT alone (no ORDER BY) or LIMIT alongside SKIP needs an explicit
-	// Limit wrapper. When ORDER BY+LIMIT fused into Top above, proj.Skip
-	// is nil so we don't reach this branch.
-	if proj.Limit != nil && (len(proj.OrderBy) == 0 || proj.Skip != nil) {
-		if lim, err := intExpr(proj.Limit); err == nil {
-			plan = NewLimit(lim, plan)
-		} else {
-			plan = NewLimitExpr(proj.Limit, plan)
-		}
+	// LIMIT alone (no ORDER BY), or a LIMIT whose fusion was refused above.
+	if proj.Limit != nil {
+		plan = newLimitFrom(proj.Limit, plan)
 	}
 	return plan
+}
+
+// newSkipFrom builds a Skip from a SKIP expression, using the literal form when
+// the expression is a literal integer and deferring resolution otherwise.
+func newSkipFrom(e ast.Expression, child LogicalPlan) LogicalPlan {
+	if v, err := intExpr(e); err == nil {
+		return NewSkip(v, child)
+	}
+	// A parameter or another expression: defer resolution to the physical
+	// builder so a float-typed parameter surfaces as the documented
+	// InvalidArgumentType at runtime rather than at plan time.
+	return NewSkipExpr(e, child)
+}
+
+// newLimitFrom is [newSkipFrom] for a LIMIT expression.
+func newLimitFrom(e ast.Expression, child LogicalPlan) LogicalPlan {
+	if v, err := intExpr(e); err == nil {
+		return NewLimit(v, child)
+	}
+	return NewLimitExpr(e, child)
+}
+
+// fusibleTopBound reports the fused Top bound for proj's SKIP/LIMIT pair, and
+// whether the fusion may be applied at all. It is called only when proj carries
+// an ORDER BY.
+func fusibleTopBound(proj *ast.Projection) (TopBound, bool) {
+	if proj.Limit == nil {
+		return TopBound{}, false // ORDER BY with no LIMIT is an unbounded Sort
+	}
+	if !ExprIsDeterministic(proj.Limit) || !ExprIsDeterministic(proj.Skip) {
+		return TopBound{}, false
+	}
+
+	var b TopBound
+	limLit, limIsLit := int64(0), false
+	if v, err := intExpr(proj.Limit); err == nil {
+		b.Limit, limLit, limIsLit = v, v, true
+	} else {
+		b.LimitExpr = proj.Limit
+	}
+	if proj.Skip == nil {
+		return b, true
+	}
+	if v, err := intExpr(proj.Skip); err == nil {
+		b.Offset = v
+		if limIsLit && v > math.MaxInt64-limLit {
+			// s+k does not fit. See the doc comment: fall back to
+			// Sort → Skip → Limit rather than saturate or throw.
+			return TopBound{}, false
+		}
+		return b, true
+	}
+	b.OffsetExpr = proj.Skip
+	return b, true
 }

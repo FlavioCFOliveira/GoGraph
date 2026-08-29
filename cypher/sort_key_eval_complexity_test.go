@@ -37,10 +37,17 @@ import (
 // sortComplexityQuery is the #2652 reproduction. `p.salary` is NOT projected, so
 // irSortKeys cannot resolve it by schema lookup (Case 1) and compiles an
 // expression evaluator instead (Case 2) — the shape whose evaluation count this
-// file measures. The `SKIP 0` is deliberate: per #2509 it blocks ORDER BY+LIMIT
-// fusion into Top and forces the full Sort. TestSortKeyEvalPlanIsSort is the
-// guard that fails if that ever stops being true.
-const sortComplexityQuery = `MATCH (p:Person) RETURN p.firstName ORDER BY p.salary SKIP 0 LIMIT 10`
+// file measures.
+//
+// It carries NO pagination clause. It used to be spelled `SKIP 0 LIMIT 10`,
+// chosen because any SKIP blocked ORDER BY+LIMIT fusion and so forced the full
+// Sort; #2509 removed that blocker, and `SKIP 0 LIMIT 10` now fuses into
+// Skip(0) over Top(10) — which is the whole point of that task. An unbounded
+// ORDER BY is the shape that is a Sort by definition rather than by a planner
+// limitation, so it is the durable spelling for this oracle.
+// TestSortKeyEvalPlanIsSort is the guard that fails if that ever stops being
+// true.
+const sortComplexityQuery = `MATCH (p:Person) RETURN p.firstName ORDER BY p.salary`
 
 // sortComplexityGraph builds n :Person nodes carrying the two properties the
 // reproduction needs.
@@ -130,10 +137,10 @@ func TestSortKeyEvalIsLinearInRows(t *testing.T) {
 	evalsSmall, rowsSmall := sortKeyEvalsFor(t, small)
 	evalsLarge, rowsLarge := sortKeyEvalsFor(t, large)
 
-	// Both arms must have shipped the LIMIT, or the sort never ran over the
+	// Both arms must have shipped every row, or the sort never ran over the
 	// full input and the counts describe nothing.
-	if rowsSmall != 10 || rowsLarge != 10 {
-		t.Fatalf("shipped rows: n=%d -> %d, n=%d -> %d; want 10 each",
+	if rowsSmall != small || rowsLarge != large {
+		t.Fatalf("shipped rows: n=%d -> %d, n=%d -> %d; want the full input each",
 			small, rowsSmall, large, rowsLarge)
 	}
 	if evalsSmall == 0 || evalsLarge == 0 {
@@ -172,10 +179,12 @@ func TestSortKeyEvalIsLinearInRows(t *testing.T) {
 	}
 }
 
-// topComplexityQuery is the same reproduction WITHOUT the SKIP, so ORDER BY +
-// LIMIT fuses into Top (#2509) and the twin call-site family in
-// cypher/exec/top.go is exercised end to end.
-const topComplexityQuery = `MATCH (p:Person) RETURN p.firstName ORDER BY p.salary LIMIT 10`
+// topComplexityQuery is the same reproduction WITH a pagination clause, so
+// ORDER BY + SKIP + LIMIT fuses into Skip over Top (#2509) and the twin
+// call-site family in cypher/exec/top.go is exercised end to end. The SKIP is
+// present deliberately: it is the clause that used to defeat the fusion, so this
+// query is also the end-to-end witness that it no longer does.
+const topComplexityQuery = `MATCH (p:Person) RETURN p.firstName ORDER BY p.salary SKIP 0 LIMIT 10`
 
 // TestTopKeyEvalIsLinearInRows is TestSortKeyEvalIsLinearInRows for the Top
 // operator. It is a separate test because Top's evaluation count depends on the
@@ -395,8 +404,8 @@ func TestSortKeyEvalLegacyArmIsSuperLinear(t *testing.T) {
 
 	evalsSmall, rowsSmall := sortKeyEvalsFor(t, small)
 	evalsLarge, rowsLarge := sortKeyEvalsFor(t, large)
-	if rowsSmall != 10 || rowsLarge != 10 {
-		t.Fatalf("shipped rows: n=%d -> %d, n=%d -> %d; want 10 each",
+	if rowsSmall != small || rowsLarge != large {
+		t.Fatalf("shipped rows: n=%d -> %d, n=%d -> %d; want the full input each",
 			small, rowsSmall, large, rowsLarge)
 	}
 

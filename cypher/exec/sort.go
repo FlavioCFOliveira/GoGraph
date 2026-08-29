@@ -370,11 +370,47 @@ func keysLess(keys []SortKey, a, b []expr.Value) bool {
 	return false // equal under every key
 }
 
-// permuteRows reorders rows in place so that rows[i] ends up holding the row that
+// keysCompare is the THREE-WAY form of [keysLess] over the same decorated key
+// blocks: it returns a negative number when a sorts before b, a positive number
+// when it sorts after, and 0 when the two are equal under every key.
+//
+// Both spellings exist because they serve different callers and one of them is
+// hot:
+//
+//   - [Sort] needs only a boolean and performs Θ(n log n) of them, so keysLess is
+//     kept as a direct loop rather than a wrapper around this function. A wrapper
+//     would add one non-inlinable call per comparison (keysLess contains a loop
+//     and is not inlined either), which at the audit fixture's 120 000 rows is
+//     roughly two million extra calls on the operator's hot path.
+//   - [Top] orders by (keys, arrival ordinal), so it must distinguish "before"
+//     from "equal" in ONE pass. Expressing that with keysLess costs a SECOND full
+//     comparison on every tie, and Top's whole reason for existing is inputs
+//     where ties are dense.
+//
+// TestKeysCompareAgreesWithKeysLess pins the two against each other so they
+// cannot drift.
+func keysCompare(keys []SortKey, a, b []expr.Value) int {
+	for j := range keys {
+		c := expr.Compare(a[j], b[j])
+		if !keys[j].Ascending {
+			c = -c
+		}
+		if c != 0 {
+			return c
+		}
+	}
+	return 0
+}
+
+// permuteRows reorders s in place so that s[i] ends up holding the element that
 // perm[i] named on entry. It CONSUMES perm, using each entry's self-reference as
 // the visited mark, and so needs no auxiliary storage at all.
 //
-// The alternative — filling a fresh []Row of the same length and assigning it to
+// It is generic over the element type because [Sort] permutes rows while [Top]
+// permutes heap entries, and a second copy of a cycle-following permutation is a
+// second place for an off-by-one to hide.
+//
+// The alternative — filling a fresh slice of the same length and assigning it to
 // op.rows — is shorter, but it costs one slice header per row.
 // BenchmarkPermuteRowsInPlace against BenchmarkPermuteRowsBuffered measures the
 // difference at the audit fixture's 120 000 rows: 0 B/op and 0 allocs/op against
@@ -383,21 +419,21 @@ func keysLess(keys []SortKey, a, b []expr.Value) bool {
 // and it is paid on EVERY execution, because assigning a fresh slice to op.rows
 // discards the backing array that [Sort.Init] reuses and documents. Cycle
 // following avoids both and needs no auxiliary storage at all.
-func permuteRows(rows []Row, perm []int) {
+func permuteRows[T any](s []T, perm []int) {
 	for i := range perm {
 		if perm[i] == i {
 			continue // already home, or already placed by an earlier cycle
 		}
-		held := rows[i]
+		held := s[i]
 		j := i
 		for {
 			src := perm[j]
 			perm[j] = j // mark placed
 			if src == i {
-				rows[j] = held // the cycle closes on the row we lifted out
+				s[j] = held // the cycle closes on the element we lifted out
 				break
 			}
-			rows[j] = rows[src]
+			s[j] = s[src]
 			j = src
 		}
 	}

@@ -59,9 +59,12 @@ func EmitsExactly(op Operator, cols []string) bool {
 //
 //   - Distinct, Filter, Limit and Skip hand the caller's Row straight to the
 //     child and return it untouched; they drop rows, never columns.
-//   - Eager and Sort copy each child row verbatim
+//   - Eager, Sort and Top copy each child row verbatim
 //     (cp := make(Row, len(row)); copy(cp, row)) before retaining it, and Sort
-//     reorders ROWS, never the columns within one.
+//     and Top reorder or DROP whole rows, never the columns within one. Top was
+//     absent from this set until #2509, which is why `RETURN n ORDER BY n.age
+//     LIMIT 3` rendered two Project operators where the same query without the
+//     LIMIT rendered one.
 //
 // Anything absent from this set is treated as shape-changing. Adding an operator
 // here requires reading its Next and confirming the same property; the cost of
@@ -69,7 +72,7 @@ func EmitsExactly(op Operator, cols []string) bool {
 // shape-changing operator is a wrong result schema.
 func rowShapePreserving(op Operator) bool {
 	switch op.(type) {
-	case *Distinct, *Eager, *Filter, *Limit, *Skip, *Sort:
+	case *Distinct, *Eager, *Filter, *Limit, *Skip, *Sort, *Top:
 		return true
 	default:
 		return false

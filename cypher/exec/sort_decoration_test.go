@@ -314,7 +314,7 @@ func TestTopDecorationMatchesLegacy(t *testing.T) {
 			t.Run(fmt.Sprintf("limit=%d/asc=%v", limit, ascending), func(t *testing.T) {
 				legacyRows, legacyKey, legacyEvals := decorationFixture(n, ascending)
 				restore := sortseam.SetKeyDecorationDisabled(true)
-				op, err := NewTop(&sliceSource{rows: copyRows(legacyRows)}, []SortKey{legacyKey}, limit)
+				op, err := NewTop(&sliceSource{rows: copyRows(legacyRows)}, []SortKey{legacyKey}, limit, 0)
 				if err != nil {
 					t.Fatalf("NewTop: %v", err)
 				}
@@ -323,7 +323,7 @@ func TestTopDecorationMatchesLegacy(t *testing.T) {
 
 				decRows, decKey, decEvals := decorationFixture(n, ascending)
 				restoreDec := sortseam.SetKeyDecorationDisabled(false)
-				op2, err := NewTop(&sliceSource{rows: copyRows(decRows)}, []SortKey{decKey}, limit)
+				op2, err := NewTop(&sliceSource{rows: copyRows(decRows)}, []SortKey{decKey}, limit, 0)
 				if err != nil {
 					t.Fatalf("NewTop: %v", err)
 				}
@@ -370,7 +370,7 @@ func TestTopDecorationSeamIsEffective(t *testing.T) {
 	_, legacyKey, legacyEvals := decorationFixture(n, true)
 	legacyRows, _, _ := decorationFixture(n, true)
 	restore := sortseam.SetKeyDecorationDisabled(true)
-	op, err := NewTop(&sliceSource{rows: copyRows(legacyRows)}, []SortKey{legacyKey}, limit)
+	op, err := NewTop(&sliceSource{rows: copyRows(legacyRows)}, []SortKey{legacyKey}, limit, 0)
 	if err != nil {
 		t.Fatalf("NewTop: %v", err)
 	}
