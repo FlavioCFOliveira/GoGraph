@@ -26,6 +26,8 @@ package exec
 
 import (
 	"fmt"
+
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 )
 
 // ColumnFiller extracts one projected column value for the current input row and
@@ -72,6 +74,72 @@ type ColumnarProject struct {
 	scratch      *Chunk // reused source-batch buffer for the chunk-input path
 	fillers      []ColumnFiller
 	chunkFillers []ChunkColumnFiller
+
+	// chunkMaxRowBytes / chunkValueOverhead / estimateBoxedValue bound the
+	// estimated size of a single row APPENDED BY FillChunk (0 = disabled). See
+	// WithChunkRowByteBudget.
+	estimateBoxedValue func(expr.Value) int64
+	chunkMaxRowBytes   int64
+	chunkValueOverhead int64
+}
+
+// WithChunkRowByteBudget bounds the estimated size of a single row appended by
+// [ColumnarProject.FillChunk] to maxRowBytes, charging valueOverhead for a NULL or
+// fixed-width scalar cell, valueOverhead plus the byte length for a string cell,
+// and estimateBoxed for a boxed cell — the accounting [Chunk.RowByteEstimate]
+// performs, which equals what a per-value estimator summed over the row's boxed
+// values would yield. A row over the ceiling stops the fill with
+// [ErrProjectionRowTooLarge], the SAME sentinel the row-at-a-time
+// [Project.WithRowByteBudget] guard raises.
+//
+// It exists because the columnar path bypasses [Project.Next], and with it that
+// guard. That is harmless for a ColumnarProject whose rows reach the drain — the
+// drain runs its own per-result byte budget over the chunk. It is NOT harmless for
+// a ColumnarProject consumed by a pipeline breaker that never forwards those rows:
+// the aggregation pre-projection is exactly that case, and its rows were the one
+// projection in the engine bounded by nothing (rmp #2655). The chunk makes the
+// exposure larger, not smaller — FillChunk materialises up to
+// [DefaultChunkCapacity] rows before its consumer looks at any of them.
+//
+// The bound is per ROW rather than per COLUMN (the row-at-a-time guard charges
+// incrementally, bounding the peak to the ceiling plus one column). That is
+// sufficient here because the columnar fillers READ values — one property, one
+// already-materialised cell — and never CONSTRUCT one, so the multi-column
+// range()-style blow-up #1852 defends against cannot arise; what this restores is
+// the CEILING, which was absent altogether. The overshoot is therefore bounded by
+// the row's own column count, a query-text constant.
+//
+// IT IS NOT FREE, and the cost is stated rather than assumed. [Chunk.RowByteEstimate]
+// walks the row's columns per row, and on 50 000 nodes at GOMAXPROCS=1 that measured
+// +3.6% on `RETURN count(n.age)` (77.63 -> 80.44 ns/node with the chunk-input path
+// held disabled) and +2.7% on `WHERE n.age > x RETURN count(n)` (72.23 -> 74.16).
+// Correctness outranks speed: the alternative is a projection bounded by nothing.
+//
+// A non-positive maxRowBytes or a nil estimateBoxed leaves the guard disabled
+// (behaviour-preserving). Returns op for chaining; call before Init.
+func (op *ColumnarProject) WithChunkRowByteBudget(maxRowBytes, valueOverhead int64, estimateBoxed func(expr.Value) int64) *ColumnarProject {
+	op.chunkMaxRowBytes = maxRowBytes
+	op.chunkValueOverhead = valueOverhead
+	op.estimateBoxedValue = estimateBoxed
+	return op
+}
+
+// chargeChunkRow enforces the per-row byte budget on the row FillChunk has just
+// finished appending to dst (the last one, at index dst.Len()-1). It returns
+// [ErrProjectionRowTooLarge] when that row is over the ceiling, and nil when the
+// budget is disabled or the row fits. It allocates nothing.
+func (op *ColumnarProject) chargeChunkRow(dst *Chunk) error {
+	if op.chunkMaxRowBytes <= 0 || op.estimateBoxedValue == nil {
+		return nil
+	}
+	row := dst.Len() - 1
+	if row < 0 {
+		return nil
+	}
+	if dst.RowByteEstimate(row, op.chunkValueOverhead, op.estimateBoxedValue) > op.chunkMaxRowBytes {
+		return ErrProjectionRowTooLarge
+	}
+	return nil
 }
 
 // NewColumnarProject creates a ColumnarProject. items are the row-at-a-time
@@ -174,6 +242,9 @@ func (op *ColumnarProject) FillChunk(dst *Chunk, maxRows int) (int, error) {
 				return n, fmt.Errorf("exec: ColumnarProject column %d: %w", col, err)
 			}
 		}
+		if bErr := op.chargeChunkRow(dst); bErr != nil {
+			return n, bErr
+		}
 		n++
 	}
 	return n, nil
@@ -204,6 +275,9 @@ func (op *ColumnarProject) fillChunkFromChunk(dst *Chunk, maxRows int) (int, err
 			if fErr := fill(op.scratch, row, dst, col); fErr != nil {
 				return row, fmt.Errorf("exec: ColumnarProject column %d: %w", col, fErr)
 			}
+		}
+		if bErr := op.chargeChunkRow(dst); bErr != nil {
+			return row, bErr
 		}
 	}
 	return n, err

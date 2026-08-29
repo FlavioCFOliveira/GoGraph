@@ -483,10 +483,11 @@ type buildOpts struct {
 	// exists and production never sets it — which is exactly why the linter cannot
 	// see it being written, since the only writer is the differential test.
 	disableIndexNestedLoopForTest bool //nolint:unused // written only by the in-package differential test; see index_nested_loop_plan_test.go
-	// forceColumnarChainDecline makes [tryBuildColumnarFilterChain] and
-	// [tryBuildColumnarExpandFilterChain] take their post-build decline path, so the
-	// [buildStateSnapshot] restore on it is exercised. Set only from the Engine test
-	// seam of the same name; every other build path leaves it false.
+	// forceColumnarChainDecline makes [tryBuildColumnarFilterChain],
+	// [tryBuildColumnarExpandFilterChain] and [tryBuildColumnarAggSource] take their
+	// post-build decline path, so the [buildStateSnapshot] restore on it is
+	// exercised. Set only from the Engine test seam of the same name; every other
+	// build path leaves it false.
 	forceColumnarChainDecline bool
 	// indexNestedLoopEnabled gates the index nested-loop join (#2233), the
 	// Θ(B·log N) plan for the same disconnected-equi-join shape the hash join
@@ -1280,7 +1281,8 @@ type Engine struct {
 	// exists and production never sets it.
 	disableIndexNestedLoopForTest bool
 
-	// forceColumnarChainDeclineForTest makes both columnar read-chain recognisers
+	// forceColumnarChainDeclineForTest makes all three columnar read-chain
+	// recognisers — the two shipping ones and [tryBuildColumnarAggSource] (#2655) —
 	// take their POST-BUILD decline path — the one that runs after buildOperator has
 	// already written the schema — so the state restore that path performs can be
 	// exercised end to end. It is a TEST SEAM, not an option, and there is no other
@@ -5636,6 +5638,34 @@ func applyProjectionRowBudget(p *exec.Project, bopts *buildOpts) *exec.Project {
 	return p.WithRowByteBudget(bopts.maxResultBytes, func(v expr.Value) int64 { return estimateValueSize(v) })
 }
 
+// applyColumnarAggRowBudget threads the SAME per-row byte ceiling
+// [applyProjectionRowBudget] gives the row-at-a-time aggregation pre-projection into
+// the COLUMNAR one, on both of its paths: the embedded [exec.Project] guards the
+// row-at-a-time fallback ([exec.ColumnarProject.Next], taken when the aggregation
+// declines chunk input), and the chunk budget guards
+// [exec.ColumnarProject.FillChunk].
+//
+// Without it the two pre-projections disagreed about the ceiling, and the disagreement
+// was observable (rmp #2655). MEASURED at HEAD with MaxResultBytes=100000 over a node
+// carrying a 20 000-element list property, whose estimate is 320 016 bytes:
+//
+//	MATCH (n:P) RETURN count(n.big)                    -- columnar -> succeeded
+//	MATCH (n:P) WHERE n.tag = 1 RETURN count(n.big)    -- row      -> ErrProjectionRowTooLarge
+//
+// The aggregation's own [exec.EagerAggregation.WithByteBudget] does not subsume this:
+// it charges the RETAINED GROUP KEYS once per NEW GROUP (#1841) and never charges an
+// aggregate ARGUMENT column at all, so the two arms above differ only in which
+// pre-projection ran. A nil/unbudgeted bopts leaves both guards disabled, exactly as
+// the row path does.
+func applyColumnarAggRowBudget(cp *exec.ColumnarProject, bopts *buildOpts) *exec.ColumnarProject {
+	if cp == nil || bopts == nil || bopts.maxResultBytes <= 0 {
+		return cp
+	}
+	_ = applyProjectionRowBudget(cp.Project, bopts)
+	return cp.WithChunkRowByteBudget(bopts.maxResultBytes, perValueOverhead,
+		func(v expr.Value) int64 { return estimateValueSize(v) })
+}
+
 // estimateValueSize returns a coarse, allocation-free byte estimate for a single
 // column value. It takes any because a materialised [exec.Record] is a
 // map[string]interface{} (its values are [expr.Value] instances boxed as the
@@ -9596,8 +9626,18 @@ func buildOperatorRec(
 		if op, ok := tryBuildAllNodesCountScan(p, walker, schema, bopts); ok {
 			return op, nil
 		}
-		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
-		if err != nil {
+		// Columnar read source (#2655 F1): a WHERE under an aggregate built a row
+		// exec.Filter, which is not a ChunkProducer, so tryBuildColumnarAggInput
+		// declined and the aggregate fell back to the fully boxed row pipeline. Build
+		// the ColumnarFilter chain instead where the shape and every access-path
+		// decline admit it. Declining costs nothing: the ordinary build follows.
+		var child exec.Operator
+		var err error
+		if colSrc, colOK, colErr := tryBuildColumnarAggSource(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, bopts); colErr != nil {
+			return nil, colErr
+		} else if colOK {
+			child = colSrc
+		} else if child, err = buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts); err != nil {
 			return nil, err
 		}
 		// General count(*) row count (#2625). Tried LAST, after every pushdown
@@ -11237,7 +11277,7 @@ func buildEagerAggregation(
 		return nil, colErr
 	}
 	if colOK {
-		preProj = columnarPre
+		preProj = applyColumnarAggRowBudget(columnarPre, bopts)
 	} else {
 		rowPre, err := exec.NewProject(child, items)
 		if err != nil {
@@ -15996,6 +16036,227 @@ func tryBuildColumnarExpandFilterChain(
 	return projOp, true, nil
 }
 
+// tryBuildColumnarAggSource builds the columnar READ SOURCE for an
+// [ir.EagerAggregation] whose child subtree is `Selection+ → single-node scan` or
+// `Selection+ → Expand → single-node scan`, returning an [exec.ColumnarFilter] — a
+// [exec.NodeIDColumnProducer] — in place of the row [exec.Filter] the ordinary
+// [buildOperator] would build (#2655 F1). It returns (op, true, nil) on a match,
+// (nil, false, nil) to fall through to the ordinary child build, or (nil, false, err)
+// on a build error.
+//
+// WHY IT HAS TO EXIST AT ALL. [tryBuildColumnarAggInput] requires the aggregation's
+// child to be a [exec.ChunkProducer]. The two recognisers that DO build an
+// [exec.ColumnarFilter] — [tryBuildColumnarFilterChain] and
+// [tryBuildColumnarExpandFilterChain] — dispatch only from `case *ir.Projection` and
+// additionally require every projection item to be a scalar node property, which an
+// AGGREGATING projection never is. So under an aggregate the child was always the row
+// [exec.Filter], the columnar pre-projection always declined, and the whole aggregate
+// fell back to the fully boxed row pipeline: the columnar chain was structurally
+// unreachable from under an aggregate.
+//
+// MEASURED, 50 000 :Person, GOMAXPROCS=1, interleaved A/B of two binaries built from
+// the same tree, medians of three rounds, against a 2.3% noise floor:
+// `MATCH (n:Person) WHERE n.age > x RETURN count(n)` went 199.04 -> 74.16 ns/node
+// (-62.7%). The same scan+filter SHIPPING 24 999 rows costs 110.20, so the
+// aggregating form is now CHEAPER than the shipping form (0.67x) where before it was
+// 1.83x DEARER — which is the ordering the shapes should have had all along. A
+// four-arm decomposition on the same run shows the two halves are jointly necessary
+// and separately worthless: this recogniser alone, with the pre-projection still
+// consuming its child row-at-a-time, measured 193.79 ns/node — inside the noise of
+// HEAD — because a ColumnarFilter pulled through Next IS the row Filter. The win
+// arrives only once [tryBuildColumnarAggInput] also takes its chunk input.
+//
+// EVERY DECLINE OF THE TWO WORKING RECOGNISERS IS CARRIED OVER, because each of them
+// yields to a plan that removes ROWS where columnar execution removes only a CONSTANT
+// FACTOR from each row, and a cardinality reduction outranks a constant factor
+// unconditionally: the index-seek probe (#2204), the min-cardinality label re-anchor
+// (#2077), the set-at-a-time label intersection (#2133), the unclaimed seek hint
+// (#2183) and the single-edge anchor swap (#2090). The seek-hint and anchor-swap
+// declines are applied on BOTH arms here, where [tryBuildColumnarFilterChain] applies
+// them on neither; declining more can only cost this path a shape, never a result.
+//
+// Like both of them it pre-checks against a hypothetical schema BEFORE building, so a
+// non-match never half-mutates the real schema, and it restores the builder state on
+// every post-build fall-through ([snapshotBuildState]). Once committed, the leaf is
+// built through the SAME [buildOperator] the serial path uses and the filter's boxed
+// row predicate is the SAME [newRowPredicate] closure the [exec.Filter] would have
+// carried, so a row the unboxed fast path cannot decide is decided byte-identically.
+//
+// It is safe to fire even when [tryBuildColumnarAggInput] later declines the chunk
+// pre-projection: [exec.ColumnarFilter] embeds its [exec.Filter] BY VALUE, so driven
+// row-at-a-time it IS that Filter, at the same one allocation.
+func tryBuildColumnarAggSource(
+	plan ir.LogicalPlan,
+	walker nodeWalkerIface,
+	labelSrc labelResolverIface,
+	reg expr.FunctionRegistry,
+	params map[string]expr.Value,
+	schema map[string]int,
+	idxMgr *index.Manager,
+	procReg *procs.Registry,
+	bopts *buildOpts,
+) (exec.Operator, bool, error) {
+	if bopts == nil || len(schema) != 0 {
+		// A non-empty schema means the scan would not bind at column 0, breaking the
+		// chunk-column ⇔ row-column alignment the chain relies on; fall back.
+		return nil, false, nil
+	}
+	lw, ok := walker.(*lpgNodeWalker)
+	if !ok || lw.g == nil || lw.morsel != nil {
+		return nil, false, nil
+	}
+	g := lw.g
+	if _, isSel := plan.(*ir.Selection); !isSel {
+		return nil, false, nil
+	}
+	// Peel the Selection stack and treat it as one fused conjunction, exactly as
+	// [tryBuildColumnarExpandFilterChain] does: the IR translator emits a separate
+	// Selection per pattern predicate. innermost is the one whose child is the leaf —
+	// the ONLY one buildOperator's Selection-level rewrites can fire on, since every
+	// one of them requires the child to be a scan or an *ir.Apply — so it is the one
+	// the access-path declines below are evaluated against.
+	var predsInner []ast.Expression
+	var innermost *ir.Selection
+	base := plan
+	for {
+		cur, isSelection := base.(*ir.Selection)
+		if !isSelection {
+			break
+		}
+		// A predicate-less Selection is a pass-through the chain cannot represent, and
+		// a seek-hinted one is meant to be DROPPED by buildOperator rather than
+		// evaluated (#2183); decline both rather than change what they mean.
+		if cur.PredicateExpr == nil || bopts.seekHint[cur] {
+			return nil, false, nil
+		}
+		// The anchor swap re-roots the traversal on the cheaper endpoint, which reduces
+		// CARDINALITY (#2090). Columnar execution only removes a constant factor, so it
+		// must never pre-empt the swap.
+		if len(bopts.anchorSwap) > 0 {
+			if site, isSite := matchAnchorSite(cur); isSite && bopts.anchorSwap[site.exp] {
+				return nil, false, nil
+			}
+		}
+		predsInner = append(predsInner, cur.PredicateExpr)
+		innermost = cur
+		base = cur.Child
+	}
+	// Reverse into evaluation order (innermost Selection runs first).
+	for i, j := 0, len(predsInner)-1; i < j; i, j = i+1, j-1 {
+		predsInner[i], predsInner[j] = predsInner[j], predsInner[i]
+	}
+
+	// Arm selection: the leaf is either the scan itself or an Expand over one.
+	var expandArm *ir.Expand
+	scanVar, isScan := columnarScanVar(base)
+	if !isScan {
+		exp, isExp := base.(*ir.Expand)
+		if !isExp {
+			return nil, false, nil
+		}
+		if scanVar, isScan = columnarScanVar(exp.Child); !isScan {
+			return nil, false, nil
+		}
+		expandArm = exp
+	}
+
+	// Pre-check against a hypothetical schema so a non-match never mutates the real
+	// one. The scan binds at column 0; the Expand additionally emits its far endpoint
+	// at column 3 (scanVar || __dup, rel, to), and omitting the relationship slot makes
+	// a relationship-property predicate reject naturally.
+	tmpSchema := map[string]int{scanVar: 0}
+	matchPred := buildColumnarPredicate
+	if expandArm != nil {
+		if expandArm.ToVar != "" {
+			tmpSchema[expandArm.ToVar] = 3
+		}
+		matchPred = buildColumnarExpandPredicate
+	} else {
+		// SCAN ARM ONLY — the access-path declines. An index seek is sublinear in the
+		// label population where the columnar chain is linear in it (#2204); the
+		// min-label re-anchor (#2077) and the label intersection (#2133) each reduce the
+		// rows SCANNED. All three are evaluated read-only against the innermost
+		// Selection, the one buildOperator would rewrite.
+		if indexSeekWouldFire(innermost, walker, params, schema, idxMgr, bopts) {
+			return nil, false, nil
+		}
+		if bopts.minLabelScanEnabled {
+			if _, _, _, wouldReanchor := pickMinLabel(innermost, labelSrc); wouldReanchor {
+				return nil, false, nil
+			}
+		}
+		if bopts.bitmapIntersectEnabled {
+			if counter, canCount := labelSrc.(labelCardinalitySource); canCount {
+				if _, _, wouldIntersect := pickLabelIntersection(innermost, labelSrc, counter); wouldIntersect {
+					return nil, false, nil
+				}
+			}
+		}
+	}
+	for _, pe := range predsInner {
+		if _, matched := matchPred(pe, tmpSchema, g, params, reg, bopts); !matched {
+			return nil, false, nil
+		}
+	}
+
+	// Committed: build the leaf through the normal builder, populating schema and the
+	// edge/path metadata identically to the serial path.
+	undo := snapshotBuildState(schema, bopts)
+	leafOp, err := buildOperator(base, walker, labelSrc, reg, params, schema, idxMgr, procReg, nil, bopts)
+	if err != nil {
+		return nil, false, err
+	}
+	var source exec.ChunkProducer
+	if expandArm != nil {
+		// UNWRAP before the concrete-type assertion: under PROFILE buildOperator returns
+		// the Expand behind a wrapper, and no wrapper is an *exec.Expand (rmp #2665).
+		expandExec, isExpandExec := exec.UnwrapProfiled(leafOp).(*exec.Expand)
+		if !isExpandExec || bopts.forceColumnarChainDecline {
+			undo.restore(schema, bopts)
+			closeProbe(leafOp)
+			return nil, false, nil
+		}
+		colExp, wrapped := exec.NewColumnarExpand(expandExec)
+		if !wrapped {
+			undo.restore(schema, bopts)
+			closeProbe(leafOp)
+			return nil, false, nil
+		}
+		// Re-instrument the columnar presentation: the wrapper discarded above was
+		// measuring the row-mode Expand this chain does not run.
+		source = profileIntermediateChunk(bopts, colExp)
+	} else {
+		// A CAPABILITY assertion, so it survives the PROFILE wrapper by construction
+		// ([exec.Profiler.Wrap] re-implements NodeIDColumnProducer).
+		scanCP, isCP := leafOp.(exec.NodeIDColumnProducer)
+		if !isCP || bopts.forceColumnarChainDecline {
+			undo.restore(schema, bopts)
+			closeProbe(leafOp)
+			return nil, false, nil
+		}
+		source = scanCP
+	}
+
+	rowPreds := make([]func(exec.Row) (expr.Value, error), len(predsInner))
+	cpreds := make([]exec.ChunkPredicate, len(predsInner))
+	for i, pe := range predsInner {
+		rowPreds[i] = newRowPredicate(pe, schema, g, params, reg, bopts)
+		cpreds[i], _ = matchPred(pe, schema, g, params, reg, bopts)
+	}
+	var cpred exec.ChunkPredicate
+	if len(cpreds) == 1 {
+		cpred = cpreds[0]
+	} else {
+		cpred = makeColumnarConjunctionPredicate(cpreds)
+	}
+	filter := exec.NewColumnarFilter(source, chainRowPredicates(rowPreds), cpred)
+	// The filter is an INTERMEDIATE: buildOperator's single wrap point returns the
+	// aggregation above it, never this, so it instruments itself or renders as
+	// "(not measured)" under PROFILE. Wrap preserves NodeIDColumnProducer, which
+	// [tryBuildColumnarAggInput] asserts against.
+	return profileIntermediate(bopts, filter), true, nil
+}
+
 // projItems are the already-built row-at-a-time items; each item's Eval is reused
 // as the columnar filler's byte-identical fallback. inputSchema is the pre-loop
 // input-column layout the fillers resolve receiver variables against.
@@ -16164,6 +16425,14 @@ func tryBuildColumnarAggInput(
 	_, isNodeIDProducer := child.(exec.NodeIDColumnProducer)
 
 	fillers := make([]exec.ColumnFiller, len(items))
+	// chunkFillers is the parallel CHUNK-INPUT extractor set (#2655 F2): with one for
+	// EVERY item the pre-projection pulls its child column-major and never boxes the
+	// child's row at all, exactly as the shipping projection has done since #1704 P3.
+	// chunkOK goes false the moment one item has no unboxed extractor, and the whole
+	// pre-projection then keeps the byte-identical row-input path — an all-or-nothing
+	// gate, because [exec.ColumnarProject.WithChunkInput] takes one filler per item.
+	chunkFillers := make([]exec.ChunkColumnFiller, len(items))
+	chunkOK := isNodeIDProducer
 
 	// Grouping-key items occupy positions 0..len(GroupBy)-1.
 	for i := range p.GroupBy {
@@ -16174,10 +16443,17 @@ func tryBuildColumnarAggInput(
 		if isNodeIDProducer {
 			if nodeCol, propName, ok := aggNodePropertyItem(keyExpr, schemaSnap, bopts); ok {
 				fillers[i] = buildScalarPropertyFiller(nodeCol, propName, g, items[i].Eval)
+				chunkFillers[i] = buildScalarPropertyChunkFiller(nodeCol, propName, g, items[i].Eval)
 				continue
 			}
 			if aggKeyBareVar(keyExpr, schemaSnap) {
 				fillers[i] = evalPutColumnFiller(items[i].Eval)
+				// A bare variable grouping key BOXES: the key value is retained and
+				// emitted as an output column, so it must be exactly what the row eval
+				// produces (a NodeValue for a node variable), never the raw id. There is
+				// no unboxed extractor for that, so the whole pre-projection stays on the
+				// row-input path.
+				chunkOK = false
 				continue
 			}
 			return nil, false, nil // non-eligible grouping-key shape → row path
@@ -16200,25 +16476,126 @@ func tryBuildColumnarAggInput(
 			return nil, false, nil // property arg needs a NodeID child → row path
 		}
 		pos := len(p.GroupBy) + j
+		if p.Aggregates[j].Argument == "" {
+			// count(*): the row eval is the constant non-null sentinel
+			// expr.BoolValue(true) (see aggArgItem), which [exec.Chunk.PutValue] routes
+			// to PutBool. The chunk filler writes that same bool directly, reading
+			// nothing at all — and countStarKernel ignores the column's VALUES
+			// entirely, consulting only the row count.
+			fillers[pos] = evalPutColumnFiller(items[pos].Eval)
+			chunkFillers[pos] = constTrueChunkFiller()
+			continue
+		}
 		// A `node.prop` argument over a NodeID-emitting child reads the property
 		// straight off the raw NodeID and lands it UNBOXED in the chunk's typed
 		// column — the same filler, and the same byte-identical row-eval fallback,
 		// the grouping key above already uses (#2185). Every other admitted argument
 		// shape (count(*)'s sentinel, a bare variable) keeps the boxed row evaluator.
-		if isNodeIDProducer && p.Aggregates[j].Argument != "" {
+		if isNodeIDProducer {
 			if nodeCol, propName, ok := aggNodePropertyItem(p.Aggregates[j].ArgumentExpr, schemaSnap, bopts); ok {
 				fillers[pos] = buildScalarPropertyFiller(nodeCol, propName, g, items[pos].Eval)
+				chunkFillers[pos] = buildScalarPropertyChunkFiller(nodeCol, propName, g, items[pos].Eval)
+				continue
+			}
+			if nodeCol, ok := aggCountBareNodeVar(&p.Aggregates[j], schemaSnap, bopts); ok {
+				fillers[pos] = evalPutColumnFiller(items[pos].Eval)
+				chunkFillers[pos] = buildNodeIDPresenceChunkFiller(nodeCol, items[pos].Eval)
 				continue
 			}
 		}
 		fillers[pos] = evalPutColumnFiller(items[pos].Eval)
+		chunkOK = false
 	}
 
 	cp, err := exec.NewColumnarProject(child, items, fillers)
 	if err != nil {
 		return nil, false, err
 	}
+	// Chunk-input fast path (#2655 F2). Every receiver's CHUNK column equals its
+	// ROW-SCHEMA column, because an [exec.NodeIDColumnProducer]'s chunk layout mirrors
+	// the schema — the same identity [tryBuildColumnarProjection] relies on for the
+	// shipping path — so a receiver at schema column c is read at chunk column c.
+	//
+	// MEASURED in isolation on the shape that already reached here before #2655 — a
+	// BARE scan, `MATCH (n:Person) RETURN count(n.age)`, 50 000 nodes, GOMAXPROCS=1:
+	// 77.63 ns/node at HEAD, 80.44 with the pre-projection's new byte guard and this
+	// path disabled, 77.68 with both. So on that shape this buys 3.5%, which is what
+	// the guard costs, and the net is nil. Its value is the OTHER shape: under
+	// [tryBuildColumnarAggSource] the same wiring is what turns a 199 ns/node
+	// aggregate into a 74 ns/node one, because there the child it consumes is a
+	// ColumnarFilter whose row-at-a-time path is the boxed Filter.
+	if chunkOK {
+		if werr := cp.WithChunkInput(chunkFillers); werr != nil {
+			// Preconditions are already checked above; on the (unreachable) error keep
+			// the byte-identical row-input path rather than failing the query.
+			return cp, true, nil
+		}
+	}
 	return cp, true, nil
+}
+
+// aggCountBareNodeVar reports whether an aggregate is `count(<bare node variable>)`,
+// non-DISTINCT, over a child that emits that variable as a raw NodeID column,
+// returning the variable's column.
+//
+// The gate on Function == "count" && !Distinct is a CORRECTNESS gate, not a
+// selectivity one. [countKernel] consults only the validity bitmap, so a raw NodeID
+// column answers count exactly. Every other kernel reads the VALUES: a raw NodeID
+// column reaching [minMaxKernel] would order NODE IDS and return the wrong node, and
+// reaching [sumKernel] would add them up. DISTINCT is excluded for the same reason
+// the row path excludes it in [aggArgItem] — it dedups on the argument's VALUE.
+func aggCountBareNodeVar(aggExpr *ir.AggregateExpr, schemaSnap map[string]int, bopts *buildOpts) (int, bool) {
+	if aggExpr.Function != "count" || aggExpr.Distinct {
+		return 0, false
+	}
+	v, isVar := aggExpr.ArgumentExpr.(*ast.Variable)
+	if !isVar {
+		return 0, false
+	}
+	col, inSchema := schemaSnap[v.Name]
+	if !inSchema || isNonNodeVar(v.Name, bopts) {
+		return 0, false
+	}
+	return col, true
+}
+
+// constTrueChunkFiller returns the columnar-input [exec.ChunkColumnFiller] for the
+// count(*) sentinel column: it appends the constant expr.BoolValue(true) that
+// [aggArgItem]'s row eval produces, without reading the source row at all.
+func constTrueChunkFiller() exec.ChunkColumnFiller {
+	return func(_ *exec.Chunk, _ int, dst *exec.Chunk, dstCol int) error {
+		dst.PutBool(dstCol, true)
+		return nil
+	}
+}
+
+// buildNodeIDPresenceChunkFiller returns the columnar-input [exec.ChunkColumnFiller]
+// for a `count(<bare node variable>)` argument whose receiver occupies CHUNK column
+// nodeChunkCol: it copies the raw int64 NodeID across, preserving the source cell's
+// NULL-ness, which is the only property [countKernel] reads. Its caller MUST have
+// established the count gate — see [aggCountBareNodeVar].
+//
+// For a source cell that is not an int64 column it boxes the source row and defers to
+// the item's row-at-a-time eval, matching [buildScalarPropertyChunkFiller]'s fallback.
+func buildNodeIDPresenceChunkFiller(nodeChunkCol int, fallback func(exec.Row) (expr.Value, error)) exec.ChunkColumnFiller {
+	var boxScratch exec.Row // reused across calls for the rare fallback path
+	return func(src *exec.Chunk, srcRow int, dst *exec.Chunk, dstCol int) error {
+		if src.IsInt64Column(nodeChunkCol) {
+			if id64, valid := src.Int64(nodeChunkCol, srcRow); valid {
+				dst.PutInt64(dstCol, id64)
+			} else {
+				dst.PutNull(dstCol)
+			}
+			return nil
+		}
+		boxScratch = src.BoxRow(srcRow, boxScratch)
+		v, err := fallback(boxScratch)
+		if err != nil {
+			return err
+		}
+		dst.PutValue(dstCol, v)
+		return nil
+	}
 }
 
 // aggKeyScalarBareVar reports whether a grouping-key expression is a bare variable

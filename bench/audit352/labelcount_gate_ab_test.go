@@ -99,7 +99,22 @@ const pushdownQuery = `MATCH (n:` + pushdownLabel + `) RETURN count(n) AS c`
 // still walks every labelled node and is the vehicle for the boxing measurement.
 // The predicate is true for every node, so the scan emits n rows and the
 // aggregate consumes n rows.
-const scanQuery = `MATCH (p:` + pushdownLabel + `) WHERE p.v >= 0 RETURN count(p) AS c`
+//
+// THE PREDICATE IS `IS NOT NULL`, NOT `p.v >= 0`, AND THE DIFFERENCE IS THE WHOLE
+// POINT. Since rmp #2655 an aggregate whose WHERE is a comparison the columnar
+// predicate builder recognises plans scan -> ColumnarFilter -> ColumnarProject and
+// reads the node id as a raw int64, so the per-row interface box this file exists to
+// attribute NO LONGER HAPPENS on `p.v >= 0`. IS NOT NULL is not a shape that builder
+// recognises, so it keeps the row plan — the one that still writes
+// expr.IntegerValue(id) once per scanned node — and the mechanism stays observable.
+// It is equally true for every node, so the row counts are unchanged, and it reads
+// the same property, so no second per-row mechanism is introduced.
+// [TestLabelCountScanPredicateModes] pins both halves of that statement.
+const scanQuery = `MATCH (p:` + pushdownLabel + `) WHERE p.v IS NOT NULL RETURN count(p) AS c`
+
+// columnarScanQuery is the shape scanQuery USED to be, kept so the reason scanQuery
+// changed is asserted rather than remembered. See [TestLabelCountScanPredicateModes].
+const columnarScanQuery = `MATCH (p:` + pushdownLabel + `) WHERE p.v >= 0 RETURN count(p) AS c`
 
 // The two physical plans this file asserts. Pinning the exact text means an
 // unexpected third plan fails loudly instead of being measured under the wrong
@@ -124,6 +139,39 @@ func scanPlanFor(label string) string {
 // planScan is scanPlanFor(pushdownLabel), kept in step with the same constants
 // in cypher/label_count_pushdown_gate_test.go.
 var planScan = scanPlanFor(pushdownLabel)
+
+// columnarScanPlanFor renders the COLUMNAR plan a recognised comparison predicate
+// compiles to since rmp #2655 — the chain that reads the node id as a raw int64 and
+// therefore does not box it per row.
+func columnarScanPlanFor(label string) string {
+	return "Project\n" +
+		"└─ GlobalAggregateAdapter\n" +
+		"   └─ EagerAggregation\n" +
+		"      └─ ColumnarProject\n" +
+		"         └─ ColumnarFilter\n" +
+		"            └─ NodeByLabelScan [" + label + "]"
+}
+
+// TestLabelCountScanPredicateModes pins the fact that made this file change its
+// predicate, so the change is evidence rather than a note.
+//
+// The two queries differ ONLY in how the WHERE is written, and both are true for
+// every node — yet since rmp #2655 they compile to different physical plans, because
+// a comparison the columnar predicate builder recognises now reaches
+// scan -> ColumnarFilter -> ColumnarProject from under an aggregate while IS NOT NULL
+// does not. The boxing attribution below needs the ROW plan; without this test, a
+// later change that made IS NOT NULL columnar too would silently turn that
+// differential into a measurement of nothing.
+func TestLabelCountScanPredicateModes(t *testing.T) {
+	const n = 1_000
+	e := pushdownEngine(t, n)
+	assertPlan(t, e, scanQuery, scanPlanFor(pushdownLabel), n)
+	assertPlan(t, e, columnarScanQuery, columnarScanPlanFor(pushdownLabel), n)
+	if got := runPushdownOnce(t, e, columnarScanQuery); got != int64(n) {
+		t.Fatalf("%s returned %d, want %d — the two predicates must select the same rows",
+			columnarScanQuery, got, n)
+	}
+}
 
 // ratchetSizes spans a 100x range. 50_000 is kept deliberately: it was the
 // largest graph the deleted gate refused (the gate was strict >), so it is where
@@ -610,9 +658,11 @@ func boxingHiLabel(rows int) string { return fmt.Sprintf("HiBox%d", rows) }
 // tryBuildLabelCountScan declines — so the scan really does emit one row per
 // labelled node instead of being answered from the label index in O(1).
 // p.v is i%100, below 256, so reading it is itself allocation-free and cannot
-// contribute a second per-row mechanism.
+// contribute a second per-row mechanism. The predicate is IS NOT NULL rather than
+// `p.v >= 0` for the reason given on [scanQuery]: since rmp #2655 a recognised
+// comparison plans column-major and the box being attributed here is gone.
 func boxingQuery(label string) string {
-	return `MATCH (p:` + label + `) WHERE p.v >= 0 RETURN count(p) AS c`
+	return `MATCH (p:` + label + `) WHERE p.v IS NOT NULL RETURN count(p) AS c`
 }
 
 // boxingEngine caches the differential fixture: one graph, one engine, both arms.
