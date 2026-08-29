@@ -126,6 +126,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/internal/crashpoint"
 	"github.com/FlavioCFOliveira/GoGraph/internal/memlimit"
 	cmetrics "github.com/FlavioCFOliveira/GoGraph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/internal/planseam"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
 	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
@@ -10047,10 +10048,16 @@ func buildOperatorRec(
 
 // parallelScanProjectBuildCount counts how many times the planner has emitted
 // the morsel-parallel fused scan→filter→project in place of the serial pipeline
-// (#1682). It is a diagnostic seam read only by the in-package differential test
-// to assert the structural trigger actually fired (or, under a guard, did not).
-// Process-global and monotonic; tests snapshot it before/after a query.
-var parallelScanProjectBuildCount atomic.Uint64
+// (#1682). It is a diagnostic seam that asserts the structural trigger actually
+// fired (or, under a guard, did not). Process-global and monotonic; readers
+// snapshot it before/after a query.
+//
+// The counter itself lives in internal/planseam so that the measurement
+// harnesses under bench/ — which cannot reach an unexported identifier here, and
+// for which exporting one would enlarge the module's public API — can read the
+// SAME counter the in-package differential tests read. This name is retained as
+// the in-package handle on it.
+var parallelScanProjectBuildCount = &planseam.ParallelScanProjectBuilds
 
 // tryBuildParallelScanProject returns a [exec.ParallelScanProject] and true when
 // child is the single shape a morsel-parallel fused scan can serve while staying

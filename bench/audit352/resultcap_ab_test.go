@@ -6,19 +6,26 @@ import (
 	"testing"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/internal/planseam"
 )
 
 // ---------------------------------------------------------------------------
 // SAME-PROCESS A/B for the ParallelScanProject result-budget counters.
 //
-// exec.(*ParallelScanProject).overResultBudget (cypher/exec/parallel_scan_project.go:178)
-// increments TWO process-shared atomics for EVERY produced row, from EVERY
-// parallel worker:
+// BEFORE #2649, exec.(*ParallelScanProject).overResultBudget incremented TWO
+// process-shared atomics for EVERY produced row, from EVERY parallel worker:
 //
 //	over := op.maxRows > 0 && op.sharedRows.Add(1) > op.maxRows
 //	if op.maxBytes > 0 && op.estimateRow != nil {
 //	    if op.sharedBytes.Add(op.estimateRow(row)) > op.maxBytes { over = true }
 //	}
+//
+// That function no longer exists. It was replaced by a worker-confined tally
+// (chargeBudget) flushed to the shared totals in cap-relative batches
+// (flushBudget), so the atomics are touched once per ~1024 rows per worker
+// instead of twice per row. This harness is retained to measure what that
+// recovered, and to keep measuring it: the `batched` arm is the production
+// path, and `both_off` remains the ceiling it is judged against.
 //
 // Both caps are ON by default: resolveMaxResultRows/Bytes map the zero value
 // to a finite DefaultMaxResultRows/DefaultMaxResultBytes (api.go:1463, :1503).
@@ -57,6 +64,10 @@ type capArm struct {
 func capSandwichArms() []capArm {
 	return []capArm{
 		{"ctrl_a__default", cypher.EngineOptions{}},
+		{"batched", cypher.EngineOptions{
+			MaxResultRows:  cypher.DefaultMaxResultRows,
+			MaxResultBytes: cypher.DefaultMaxResultBytes,
+		}},
 		{"both_off", cypher.EngineOptions{
 			MaxResultRows:  cypher.MaxResultRowsUnlimited,
 			MaxResultBytes: cypher.MaxResultBytesUnlimited,
@@ -65,9 +76,24 @@ func capSandwichArms() []capArm {
 	}
 }
 
+// capArms is the headline arm set. `batched` is the arm under test: the
+// production configuration after #2649, in which both caps are enforced through
+// per-worker tallies flushed in batches.
+//
+// It is deliberately spelled with EXPLICIT finite caps rather than relying on
+// the zero value's mapping, so the arm keeps measuring what it claims to measure
+// if a future change alters what the zero value resolves to. That makes it
+// runtime-identical to the two default control arms today — which is stated here
+// rather than hidden: `batched` names the path under test, and the ctrl arms
+// bracket it, so the three together give both the measurement and its noise
+// floor at no extra configuration.
 func capArms() []capArm {
 	return []capArm{
 		{"ctrl_a__default", cypher.EngineOptions{}},
+		{"batched", cypher.EngineOptions{
+			MaxResultRows:  cypher.DefaultMaxResultRows,
+			MaxResultBytes: cypher.DefaultMaxResultBytes,
+		}},
 		{"rows_off", cypher.EngineOptions{MaxResultRows: cypher.MaxResultRowsUnlimited}},
 		{"bytes_off", cypher.EngineOptions{MaxResultBytes: cypher.MaxResultBytesUnlimited}},
 		{"both_off", cypher.EngineOptions{
@@ -125,6 +151,16 @@ func BenchmarkResultCapAB_Procs(b *testing.B) {
 // TestResultCapAB_Preconditions proves the A/B is single-variable: every arm
 // must compile to the SAME physical plan and ship the SAME rows. Only the
 // budget configuration may differ.
+//
+// It also proves the A/B is measuring the operator the finding is ATTRIBUTED to.
+// capABQuery is a pure-property projection, and a pure-property projection over
+// a simple predicate can route to the columnar filter/project chain (#2065)
+// instead of exec.ParallelScanProject — in which case every number this file
+// produces would be about a different operator than the one #2649 changed. The
+// Explain assertion above is not sufficient on its own: this package's own
+// fixture documents a shape that planned one way on a fresh engine and another
+// on a warmed one, so what Explain renders is not proof of what Run builds. The
+// planner's build counter is, because Run is what bumps it.
 func TestResultCapAB_Preconditions(t *testing.T) {
 	var firstPlan string
 	for i, arm := range capArms() {
@@ -139,9 +175,19 @@ func TestResultCapAB_Preconditions(t *testing.T) {
 		} else if p != firstPlan {
 			t.Fatalf("%s plans differently:\n%s\nwant:\n%s", arm.name, p, firstPlan)
 		}
+
+		before := planseam.ParallelScanProjectBuilds.Load()
 		if n := countRows(t, engine, capABQuery); n != nodeCount {
 			t.Fatalf("%s shipped %d rows, want %d", arm.name, n, nodeCount)
 		}
+		built := planseam.ParallelScanProjectBuilds.Load() - before
+		if built == 0 {
+			t.Fatalf("%s: running %q built ZERO exec.ParallelScanProject leaves, so this "+
+				"A/B does not measure the operator #2649 changed (the pure-property "+
+				"projection routed elsewhere, most likely the columnar chain)",
+				arm.name, capABQuery)
+		}
+		t.Logf("%s: ParallelScanProject builds during one run: %d", arm.name, built)
 	}
 }
 
