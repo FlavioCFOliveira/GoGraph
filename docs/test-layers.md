@@ -96,7 +96,7 @@ standalone addition explained under the table.
 | `internal/sim` | 565.8 s | 103.9 s | 5.4× |
 | `cypher` | 321.7 s | 54.4 s | 5.9× |
 | `cypher/exec` | 177.8 s | 3.0 s | **58.4×** |
-| `bench/audit352` † | 174.4 s | 50.0 s | 3.5× |
+| `bench/audit352` † | 180.6 s | 50.1 s | 3.6× |
 | `examples/26_social_scale_bench` | 167.8 s | 20.5 s | 8.2× |
 | `bench/csrorder` | 110.4 s | 30.2 s | 3.7× |
 | `bench/cyclicjoin` | 96.9 s | 10.6 s | 9.1× |
@@ -111,8 +111,12 @@ override below. The other ten **warn and pass**: they are over the soft budget,
 which is what a soft budget is for.
 
 † `bench/audit352` did not exist on 2026-08-25 and its two figures were measured
-**standalone**, not in-suite, on 2026-08-29 at commit `d7116485` — same host, load
-average 2.27 before / 2.95 after (`-race`) and 2.73 / 2.47 (no `-race`). A
+**standalone**, not in-suite, on 2026-08-29 on the rmp #2645 tree (the commit this
+footnote ships in) — same host, load average 1.94 before / 3.29 after (`-race`) and
+2.93 / 3.20 (no `-race`). They replace the 174.4 s / 50.0 s measured earlier the
+same day at commit `d7116485`: rmp #2645 added `schemawalk_hoist_test.go` and
+`schemawalk_ab_test.go` to the package, which cost **+6.2 s under `-race`** and left
+the no-`-race` column unmoved. A
 standalone figure is a **lower bound** on the in-suite one, because it carries none
 of the co-tenancy the parallel suite adds, so it is marked rather than silently
 mixed with the rest of the column.
@@ -120,7 +124,7 @@ mixed with the rest of the column.
 The package is the purpose-built exercise harness for the rmp #352 bottleneck
 audit. Its **profiling sweeps are soak-gated** (`//go:build soak || nightly`) in
 `sortprofile_soak_test.go` (rmp #2652), `gctax_soak_test.go` and
-`relprops_soak_test.go` (rmp #2667); the 174.4 s above is what remains in the short
+`relprops_soak_test.go` (rmp #2667); the 180.6 s above is what remains in the short
 layer once they are gated. Ungated it measured **399.77 s**, over the hard ceiling,
 and the four tests moved under #2667 accounted for 225.0 s of that:
 `TestGCTax_ResidentGraph` 138.37 s, `TestRelationshipPropsPlans` 82.75 s,

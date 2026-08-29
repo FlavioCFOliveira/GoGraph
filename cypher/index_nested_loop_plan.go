@@ -191,7 +191,7 @@ func tryBuildIndexNestedLoopJoin(
 		return nil, false, err
 	}
 	outerWidth := schemaWidth(schema)
-	probeKeySchema := copySchema(schema)
+	probeKeySchema := newRowSchema(copySchema(schema))
 
 	innerSchema := map[string]int{}
 	var preEdgeKeys, prePathChainKeys, prePathMetaKeys, preVLEKeys map[string]struct{}
@@ -216,7 +216,7 @@ func tryBuildIndexNestedLoopJoin(
 	}
 	shiftApplyMetaColumns(bopts, outerWidth, preEdgeKeys, prePathChainKeys, prePathMetaKeys, preVLEKeys, preTripletLen)
 
-	buildKeySchema := copySchema(innerSchema)
+	buildKeySchema := newRowSchema(copySchema(innerSchema))
 	innerKeyExpr := key.innerKey
 	outerKeyExpr := key.outerKey
 

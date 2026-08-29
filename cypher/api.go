@@ -6979,7 +6979,7 @@ func buildOperatorWrite(
 		// expr.Eval errors or unsupported value kinds so the operator skips
 		// the write without aborting the pipeline.
 		if p.ValueExpr != nil && p.PropertyKey != "" {
-			schemaSnap := schemaCopy
+			schemaSnap := newRowSchema(schemaCopy)
 			capturedExpr := p.ValueExpr
 			capturedParams := params
 			capturedReg := reg
@@ -7164,7 +7164,7 @@ func buildOperatorWrite(
 		}
 		if p.TargetExpr != nil {
 			if _, isVar := p.TargetExpr.(*ast.Variable); !isVar {
-				schemaSnap := schemaCopy
+				schemaSnap := newRowSchema(schemaCopy)
 				capturedExpr := p.TargetExpr
 				capturedParams := params
 				capturedReg := reg
@@ -7229,7 +7229,7 @@ func buildOperatorWrite(
 			}
 		}
 		if needTargetEval {
-			schemaSnap := schemaCopy
+			schemaSnap := newRowSchema(schemaCopy)
 			capturedExpr := p.TargetExpr
 			capturedParams := params
 			capturedReg := reg
@@ -7773,6 +7773,67 @@ func newSchemaWalk(schema map[string]int) schemaWalk {
 	}
 	slices.SortFunc(w, func(a, b schemaBinding) int { return a.col - b.col })
 	return w
+}
+
+// rowSchema is a row layout frozen at plan-build time: the schema snapshot, the
+// column-ordered walk derived from it, and the width a [expr.RowContext] built
+// against it must be sized to. It is the plan-time carrier that keeps
+// [newSchemaWalk] off the per-row path.
+//
+// Every ingredient a per-row RowContext build needs is a pure function of a
+// schema that is fixed for the whole execution, yet the row-context builders
+// used to re-derive them from a bare map on EVERY ROW — one slice allocation and
+// one slices.SortFunc per row. Measured on this tree with exact
+// (MemProfileRate=1) bracketed allocation profiles (bench/audit352,
+// schemawalk_hoist_test.go), the walk was 64.57% of all objects allocated by
+// `RETURN DISTINCT p.bucket`, 17.75% by `RETURN p.bucket + 1, count(*)` and
+// 15.70% by an UNWIND over a scan.
+//
+// Both reference engines make the per-row form unrepresentable rather than
+// merely discouraged: Memgraph assigns Symbol::position_ once in
+// SymbolTable::CreateSymbol and reads elems_[symbol.position()]; Neo4j allocates
+// slots once in SlotAllocation.allocateSlots and addresses two flat arrays.
+// Neither derives a binding order at runtime, and neither sorts per row. Taking
+// the bare map out of the builders' signatures is what applies the same
+// discipline here: the per-row path can no longer be reached with a map, so the
+// derivation cannot silently return to it.
+//
+// # Concurrency
+//
+// A rowSchema is WRITTEN ONCE, by [newRowSchema], before the closure that
+// captures it exists, and is READ-ONLY from then on. That is what makes it safe
+// to share across the parallel scan/project workers, which call a single
+// captured closure from several goroutines at once: they only read cols, walk
+// and width, and no code path mutates any of the three after construction.
+// Neither the struct nor the map it carries may be mutated once it has been
+// handed to a closure.
+type rowSchema struct {
+	// cols is the snapshot walk and width were derived from. Holding it here is
+	// what makes the three mutually consistent BY CONSTRUCTION: a caller cannot
+	// pair a walk taken from one map with a width taken from another, because
+	// only [newRowSchema] can build the triple. It is also the map a caller
+	// consults for a direct column lookup against the same snapshot.
+	cols map[string]int
+	// walk is cols flattened into column order — the traversal [populateRowCtx]
+	// runs per row.
+	walk schemaWalk
+	// width sizes the RowContext map and selects pooled-vs-fresh in
+	// [acquireRowCtx]. It is len(cols), deliberately NOT [schemaWidth]: the two
+	// differ whenever buildIRProjection has registered secondary
+	// expression-string keys, and swapping one for the other would change which
+	// rows take the pooled path. That is a behaviour change, not a tidy-up.
+	width int
+}
+
+// newRowSchema freezes schema into a [rowSchema]. It is the ONLY caller of
+// [newSchemaWalk], and it must be called at plan-build time — never from inside
+// a per-row closure, which is the whole point of the type.
+//
+// schema is retained, not copied: callers that need a snapshot independent of a
+// later mutation pass a [copySchema] result, exactly as they did when they
+// captured the bare map.
+func newRowSchema(schema map[string]int) rowSchema {
+	return rowSchema{cols: schema, walk: newSchemaWalk(schema), width: len(schema)}
 }
 
 // copySchema returns a shallow copy of the schema map.
@@ -11638,6 +11699,11 @@ func newAggregationEval(
 	reg expr.FunctionRegistry,
 	bopts *buildOpts,
 ) func(exec.Row) (expr.Value, error) {
+	// Freeze the row layout ONCE, here at plan-build time (#2645). Both arms
+	// below read it — the AST arm walks it per row, the legacy arm resolves
+	// varName against the same snapshot — so the two can never end up consulting
+	// different maps.
+	rs := newRowSchema(schemaSnap)
 	// AST path — always preferred when present.
 	if astExpr != nil {
 		// DEMAND-GATE THE ROW CONTEXT (#1630, extended here to the aggregation
@@ -11672,12 +11738,12 @@ func newAggregationEval(
 			scalarUse = nil
 		}
 		return func(row exec.Row) (expr.Value, error) {
-			rowCtx := buildRowCtxWithUse(row, schemaSnap, g, bopts, scalarUse)
+			rowCtx := buildRowCtxWithUse(row, rs, g, bopts, scalarUse)
 			return evalRow(bopts, astExpr, rowCtx, params, reg)
 		}
 	}
 	// Legacy schema-lookup path.
-	if col, ok := schemaSnap[varName]; ok {
+	if col, ok := rs.cols[varName]; ok {
 		capturedCol := col
 		return func(row exec.Row) (expr.Value, error) {
 			if capturedCol < len(row) {
@@ -11870,14 +11936,13 @@ func irSortKeys(
 			// evaluates correctly against the row layout produced by the child.
 			schemaCopy := copySchema(schema)
 			// HOIST THE SCHEMA WALK (#2652, the sort-shape share of #2645). The
-			// walk is a pure function of the snapshotted schema, and the schema is
-			// frozen for the whole execution, so deriving it here rather than
-			// inside the closure removes one slice allocation AND one
-			// slices.SortFunc per invocation. It is the same reasoning that gave
-			// [evalRowPooledWalk] its existence, and this closure is now expressed
-			// through it so the two paths cannot drift.
-			walk := newSchemaWalk(schemaCopy)
-			width := len(schemaCopy)
+			// row layout is a pure function of the snapshotted schema, and the
+			// schema is frozen for the whole execution, so deriving it here rather
+			// than inside the closure removes one slice allocation AND one
+			// slices.SortFunc per invocation. #2645 generalised the same hoist to
+			// every remaining per-row site, so this closure now carries the shared
+			// [rowSchema] and the two paths cannot drift.
+			rs := newRowSchema(schemaCopy)
 			capturedExpr := si.Expr
 			capturedG := g
 			capturedParams := params
@@ -11893,11 +11958,11 @@ func irSortKeys(
 					// borrow a pooled RowContext map or a pooled lazy node, and it
 					// must be a fully materialised value rather than a partial
 					// one. Passing nil selects the fresh-map, fresh-lazy-node arm
-					// of evalRowPooledWalk, which is byte-for-byte the historical
+					// of evalRowPooled, which is byte-for-byte the historical
 					// buildRowCtx behaviour.
 					sortKeyEvalCount.Add(1)
-					return evalRowPooledWalk(
-						capturedBopts, capturedExpr, row, walk, width,
+					return evalRowPooled(
+						capturedBopts, capturedExpr, row, rs,
 						capturedG, capturedParams, capturedReg, nil,
 					)
 				},
@@ -12893,7 +12958,7 @@ func buildUnwindOperator(
 		g = lw.g
 	}
 
-	schemaSnap := copySchema(schema)
+	schemaSnap := newRowSchema(copySchema(schema))
 	listExpr := p.ListExpr
 	capturedParams := params
 	capturedReg := reg
@@ -13633,8 +13698,8 @@ func buildPathValueFromVLEMeta(row exec.Row, pmeta pathVarInfo, g *lpg.ReadView[
 // `r[0].type` operate on the documented openCypher list-of-relationships
 // shape rather than on the raw alternating path encoding emitted by
 // VarLengthExpand.
-func buildRowCtx(row exec.Row, schema map[string]int, g *lpg.ReadView[string, float64], bopts *buildOpts) expr.RowContext {
-	return buildRowCtxWithUse(row, schema, g, bopts, nil)
+func buildRowCtx(row exec.Row, rs rowSchema, g *lpg.ReadView[string, float64], bopts *buildOpts) expr.RowContext {
+	return buildRowCtxWithUse(row, rs, g, bopts, nil)
 }
 
 // buildRowCtxWithUse is the lazy-aware core of [buildRowCtx]. When scalarUse is
@@ -13655,11 +13720,11 @@ func buildRowCtx(row exec.Row, schema map[string]int, g *lpg.ReadView[string, fl
 // scalarUse therefore MUST NOT be supplied by any caller whose RowContext value
 // can flow into a result row (e.g. the projection general path), because a
 // partially-materialised node would serialise a truncated property map.
-func buildRowCtxWithUse(row exec.Row, schema map[string]int, g *lpg.ReadView[string, float64], bopts *buildOpts, scalarUse map[string]*nodeScalarUse) expr.RowContext {
-	ctx := make(expr.RowContext, len(schema))
+func buildRowCtxWithUse(row exec.Row, rs rowSchema, g *lpg.ReadView[string, float64], bopts *buildOpts, scalarUse map[string]*nodeScalarUse) expr.RowContext {
+	ctx := make(expr.RowContext, rs.width)
 	// arena nil: this path allocates a fresh map (escaping/eager callers) and so
 	// must allocate fresh lazy nodes too — no reuse, no pooled lifecycle.
-	populateRowCtx(ctx, row, newSchemaWalk(schema), g, bopts, scalarUse, nil)
+	populateRowCtx(ctx, row, rs.walk, g, bopts, scalarUse, nil)
 	return ctx
 }
 
@@ -13783,22 +13848,15 @@ func releaseRowCtx(p *pooledRowCtx) {
 // scalarUse is nil it falls back to a freshly allocated RowContext (the
 // historical behaviour), preserving exact semantics. It is the shared body of
 // the non-escaping Filter-predicate and scalar-projection evaluation closures.
-func evalRowPooled(bopts *buildOpts, e ast.Expression, row exec.Row, schema map[string]int, g *lpg.ReadView[string, float64], params map[string]expr.Value, reg expr.FunctionRegistry, scalarUse map[string]*nodeScalarUse) (expr.Value, error) {
-	return evalRowPooledWalk(bopts, e, row, newSchemaWalk(schema), len(schema), g, params, reg, scalarUse)
-}
-
-// evalRowPooledWalk is [evalRowPooled] for a caller that already derived the
-// schema walk once for the whole execution, which is where it belongs: the walk
-// is a pure function of the schema and rebuilding it per row was measurable.
-func evalRowPooledWalk(bopts *buildOpts, e ast.Expression, row exec.Row, walk schemaWalk, width int, g *lpg.ReadView[string, float64], params map[string]expr.Value, reg expr.FunctionRegistry, scalarUse map[string]*nodeScalarUse) (expr.Value, error) {
+func evalRowPooled(bopts *buildOpts, e ast.Expression, row exec.Row, rs rowSchema, g *lpg.ReadView[string, float64], params map[string]expr.Value, reg expr.FunctionRegistry, scalarUse map[string]*nodeScalarUse) (expr.Value, error) {
 	if scalarUse == nil {
-		ctx := make(expr.RowContext, width)
-		populateRowCtx(ctx, row, walk, g, bopts, nil, nil)
+		ctx := make(expr.RowContext, rs.width)
+		populateRowCtx(ctx, row, rs.walk, g, bopts, nil, nil)
 		return evalRow(bopts, e, ctx, params, reg)
 	}
-	p := acquireRowCtx(width)
+	p := acquireRowCtx(rs.width)
 	defer releaseRowCtx(p)
-	populateRowCtx(p.ctx, row, walk, g, bopts, scalarUse, p)
+	populateRowCtx(p.ctx, row, rs.walk, g, bopts, scalarUse, p)
 	return evalRow(bopts, e, p.ctx, params, reg)
 }
 
@@ -15451,7 +15509,7 @@ func buildIRProjection(
 			}
 			if evalFn == nil {
 				// General path: evaluate full AST expression with loaded RowContext.
-				schemaSnap := copySchema(schema)
+				schemaSnap := newRowSchema(copySchema(schema))
 				capturedExpr := item.Expr
 				capturedG := g
 				capturedParams := params
@@ -16802,17 +16860,15 @@ func buildScalarPropertyChunkFiller(nodeChunkCol int, propName string, g *lpg.Re
 // analyseNodeScalarUse runs once at build time; a bailout (complex expression kind)
 // disables the lazy path and restores full eager materialisation.
 func newRowPredicate(predExpr ast.Expression, schema map[string]int, g *lpg.ReadView[string, float64], params map[string]expr.Value, reg expr.FunctionRegistry, bopts *buildOpts) exec.FilterFn {
-	schemaSnap := copySchema(schema)
 	// Derived ONCE per execution: the predicate closure runs per row, and the
-	// walk is a pure function of the schema.
-	walk := newSchemaWalk(schemaSnap)
-	width := len(schemaSnap)
+	// row layout is a pure function of the schema.
+	rs := newRowSchema(copySchema(schema))
 	scalarUse, bail := analyseNodeScalarUseFor(bopts, predExpr)
 	if bail {
 		scalarUse = nil
 	}
 	return func(row exec.Row) (expr.Value, error) {
-		return evalRowPooledWalk(bopts, predExpr, row, walk, width, g, params, reg, scalarUse)
+		return evalRowPooled(bopts, predExpr, row, rs, g, params, reg, scalarUse)
 	}
 }
 
@@ -20774,7 +20830,7 @@ func buildShortestPathWithPred(
 	// where the path variable hydrates to a PathValue through pathVarMeta.
 	var pathPred func(exec.Row) (bool, error)
 	if predExpr != nil {
-		predSchema := copySchema(schema)
+		predSchema := newRowSchema(copySchema(schema))
 		capturedG := g
 		pathPred = func(out exec.Row) (bool, error) {
 			v, perr := evalRowPooled(bopts, predExpr, out, predSchema, capturedG, params, reg, nil)
