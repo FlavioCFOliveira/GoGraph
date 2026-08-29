@@ -85,15 +85,18 @@ two and the one the budget gates.
 #### The known exceptions
 
 Every package over the soft budget is listed, with its measured cost and the
-reason. The reason is the same for all eleven and it is measured, not asserted:
+reason. The reason is the same for all of them and it is measured, not asserted:
 **the race detector**, whose per-package amplification is what puts them over.
-Under coverage instrumentation only `internal/sim` exceeds 60 s at all.
+Under coverage instrumentation only `internal/sim` exceeds 60 s at all. The
+eleven unmarked rows are the 2026-08-25 in-suite run; the marked row is a later,
+standalone addition explained under the table.
 
 | Package | `-race` | no `-race` | Amplification |
 |---|---|---|---|
 | `internal/sim` | 565.8 s | 103.9 s | 5.4× |
 | `cypher` | 321.7 s | 54.4 s | 5.9× |
 | `cypher/exec` | 177.8 s | 3.0 s | **58.4×** |
+| `bench/audit352` † | 174.4 s | 50.0 s | 3.5× |
 | `examples/26_social_scale_bench` | 167.8 s | 20.5 s | 8.2× |
 | `bench/csrorder` | 110.4 s | 30.2 s | 3.7× |
 | `bench/cyclicjoin` | 96.9 s | 10.6 s | 9.1× |
@@ -104,8 +107,32 @@ Under coverage instrumentation only `internal/sim` exceeds 60 s at all.
 | `store/recovery` | 66.3 s | 58.6 s | 1.1× |
 
 Only the first two exceed the 240 s hard ceiling, and each carries a named
-override below. The other nine **warn and pass**: they are over the soft budget,
+override below. The other ten **warn and pass**: they are over the soft budget,
 which is what a soft budget is for.
+
+† `bench/audit352` did not exist on 2026-08-25 and its two figures were measured
+**standalone**, not in-suite, on 2026-08-29 at commit `d7116485` — same host, load
+average 2.27 before / 2.95 after (`-race`) and 2.73 / 2.47 (no `-race`). A
+standalone figure is a **lower bound** on the in-suite one, because it carries none
+of the co-tenancy the parallel suite adds, so it is marked rather than silently
+mixed with the rest of the column.
+
+The package is the purpose-built exercise harness for the rmp #352 bottleneck
+audit. Its **profiling sweeps are soak-gated** (`//go:build soak || nightly`) in
+`sortprofile_soak_test.go` (rmp #2652), `gctax_soak_test.go` and
+`relprops_soak_test.go` (rmp #2667); the 174.4 s above is what remains in the short
+layer once they are gated. Ungated it measured **399.77 s**, over the hard ceiling,
+and the four tests moved under #2667 accounted for 225.0 s of that:
+`TestGCTax_ResidentGraph` 138.37 s, `TestRelationshipPropsPlans` 82.75 s,
+`TestRelPropertyMaterialisationCount` 3.69 s and `TestSubqueryShapeRowCounts`
+0.21 s. The last three share one fixture and had to move together: `buildRelGraph`
+caches into a package-level variable, so ~82.5 s of that total is the fixture and
+whichever consumer ran first paid it. None of the four asserts anything about the
+quantity it measures. `TestScaling_SubqueryComplexity` (33.40 s) was
+**deliberately left in the short layer**: it asserts that every subquery shape
+ships exactly one row per outer row at every graph size, which is a check that can
+catch a cardinality regression, and this document's own rule is that coverage is
+not traded for a cost target.
 
 `cypher/exec` deserves its own note: **3.0 s becomes 177.8 s**, a 58× penalty far
 outside the 2.62× the suite pays on average. That is a property worth

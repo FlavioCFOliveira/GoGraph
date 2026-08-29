@@ -43,10 +43,17 @@ func buildRelGraphN(n int) *lpg.Graph[string, float64] {
 // outer rows (correct for a fixed out-degree of 1), ~2.0 means every outer row
 // is doing work proportional to the whole graph.
 //
+// It is deliberately kept in the SHORT layer (rmp #2667). Unlike the profile
+// sweeps moved to gctax_soak_test.go and relprops_soak_test.go, it carries a
+// value assertion — every shape must ship exactly n rows at every size — so
+// gating it would remove a check that can catch a cardinality regression in
+// OPTIONAL MATCH, EXISTS {}, COUNT {} and the pattern predicate. It builds its
+// own fixtures and costs 33.40 s under -race.
+//
 //	go test -run '^TestScaling_SubqueryComplexity$' -v -timeout 40m ./bench/audit352/
 func TestScaling_SubqueryComplexity(t *testing.T) {
 	if testing.Short() {
-		t.Skip("scaling sweep is not a short-layer test")
+		t.Skip("scaling sweep is skipped under -short; it is a short-LAYER test but not a -short one")
 	}
 	shapes := []struct{ name, query string }{
 		{"optional_match", `MATCH (a:P) OPTIONAL MATCH (a)-[:R]->(b:P) RETURN a.sid, b.sid`},
@@ -153,64 +160,4 @@ func olsFitXY(xs, ys []float64) (a, b, r2 float64) {
 		return a, b, math.NaN()
 	}
 	return a, b, 1 - ssRes/ssTot
-}
-
-// TestRelPropertyMaterialisationCount probes whether each additional
-// relationship property READ triggers another full materialisation of the
-// relationship's property map. If it does, cost grows linearly in the number
-// of DISTINCT properties projected, and projecting all five costs about five
-// times projecting one — while `RETURN r`, which materialises once, stays flat.
-func TestRelPropertyMaterialisationCount(t *testing.T) {
-	if testing.Short() {
-		t.Skip("not a short-layer test")
-	}
-	g := buildRelGraph()
-	engine := cypher.NewEngine(g)
-	ctx := context.Background()
-	shapes := []struct{ name, query string }{
-		{"whole_r", `MATCH ()-[r:R]->() RETURN r`},
-		{"1_prop", `MATCH ()-[r:R]->() RETURN r.w`},
-		{"2_props", `MATCH ()-[r:R]->() RETURN r.w, r.k3`},
-		{"3_props", `MATCH ()-[r:R]->() RETURN r.w, r.k3, r.k4`},
-		{"4_props", `MATCH ()-[r:R]->() RETURN r.w, r.k3, r.k4, r.k1`},
-		{"5_props", `MATCH ()-[r:R]->() RETURN r.w, r.k3, r.k4, r.k1, r.k2`},
-		{"same_prop_x5", `MATCH ()-[r:R]->() RETURN r.w, r.w, r.w, r.w, r.w`},
-	}
-	t.Logf("%-14s %12s %12s", "shape", "median ms", "vs 1_prop")
-	base := 0.0
-	for _, s := range shapes {
-		var samples []float64
-		for rep := 0; rep < 4; rep++ {
-			start := time.Now()
-			res, err := engine.Run(ctx, s.query, nil)
-			if err != nil {
-				t.Fatalf("%s: %v", s.name, err)
-			}
-			rows := 0
-			for res.Next() {
-				rows++
-			}
-			if e := res.Err(); e != nil {
-				t.Fatalf("%s: %v", s.name, e)
-			}
-			if err := res.Close(); err != nil {
-				t.Fatalf("%s close: %v", s.name, err)
-			}
-			if rows != relNodes {
-				t.Fatalf("%s shipped %d rows, want %d", s.name, rows, relNodes)
-			}
-			if rep > 0 {
-				samples = append(samples, time.Since(start).Seconds())
-			}
-		}
-		m := medianOf(samples) * 1e3
-		if s.name == "1_prop" {
-			base = m
-		}
-		ratio := ""
-		if base > 0 {
-			ratio = fmt.Sprintf("%.2fx", m/base)
-		}
-		t.Logf("%-14s %12.3f %12s", s.name, m, ratio)
-	}
 }

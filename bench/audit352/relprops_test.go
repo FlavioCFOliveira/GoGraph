@@ -1,5 +1,10 @@
 package audit352_test
 
+// relprops_test.go — the relGraph fixture, its shape tables and the benchmarks
+// that drive them. The TESTS that drive this fixture are soak-layer and live in
+// relprops_soak_test.go: building the fixture costs ~82.5 s under -race, which
+// was 21 % of this package on its own (rmp #2667).
+
 import (
 	"context"
 	"fmt"
@@ -70,21 +75,8 @@ func BenchmarkRelationshipProps(b *testing.B) {
 	}
 }
 
-func TestRelationshipPropsPlans(t *testing.T) {
-	g := buildRelGraph()
-	engine := cypher.NewEngine(g)
-	for _, s := range relShapes {
-		p, err := engine.Explain(s.query, nil)
-		if err != nil {
-			t.Fatalf("Explain(%q): %v", s.query, err)
-		}
-		t.Logf("--- %s ships %d rows\n%s\n%s", s.name, countRows(t, engine, s.query), s.query, p)
-	}
-}
-
 // subqueryShapes compare a CALL subquery against the OPTIONAL MATCH that
-// computes the same thing, plus their non-subquery baselines. Both arms must
-// ship the same rows; TestSubqueryShapeRowCounts asserts it.
+// computes the same thing, plus their non-subquery baselines.
 var subqueryShapes = []struct{ name, query string }{
 	{"plain_match", `MATCH (a:P) RETURN a.sid`},
 	{"optional_match", `MATCH (a:P) OPTIONAL MATCH (a)-[:R]->(b:P) RETURN a.sid, b.sid`},
@@ -99,17 +91,5 @@ func BenchmarkSubqueryShape(b *testing.B) {
 	for _, s := range subqueryShapes {
 		s := s
 		b.Run(s.name, func(b *testing.B) { runQuery(b, engine, s.query) })
-	}
-}
-
-func TestSubqueryShapeRowCounts(t *testing.T) {
-	g := buildRelGraph()
-	engine := cypher.NewEngine(g)
-	for _, s := range subqueryShapes {
-		p, err := engine.Explain(s.query, nil)
-		if err != nil {
-			t.Fatalf("Explain(%q): %v", s.query, err)
-		}
-		t.Logf("--- %s ships %d rows\n%s\n%s", s.name, countRows(t, engine, s.query), s.query, p)
 	}
 }
