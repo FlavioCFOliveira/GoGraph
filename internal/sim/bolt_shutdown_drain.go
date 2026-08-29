@@ -649,7 +649,11 @@ type BoltDrainEvidence struct {
 	GateArmed bool
 	GateFired bool
 	// ParkedLiveConns is how many server-side connections were live while the
-	// commit was parked. ListenerClosedWhileParked records that the listener was
+	// commit was parked. It is SAMPLED at the instant the fsync gate fires, so it is
+	// a coverage witness and not a function of the seed: like ConnsPeak it is read
+	// by the non-vacuity gate but deliberately absent from
+	// [BoltDrainEvidence.String], for the reason set out there.
+	// ListenerClosedWhileParked records that the listener was
 	// already closed in that window, which is what proves Shutdown had passed
 	// ln.Close() and was inside its drain wait rather than not yet started.
 	// DialRefusedAfterTeardown is the same observable from a client's point of view,
@@ -767,17 +771,32 @@ func (e *BoltDrainEvidence) String() string {
 	fmt.Fprintf(&b, "bolt-shutdown-drain evidence (arm=%s seed=%#x):", e.Arm, e.Seed)
 	fmt.Fprintf(&b, "\n  wiring: closer=%t decorated=%t idle-conns=%d gate=armed:%t/fired:%t",
 		e.CloserWired, e.ConnDecorated, e.IdleConnsOpened, e.GateArmed, e.GateFired)
-	// ConnsPeak is deliberately NOT rendered. It is a coverage witness the
-	// non-vacuity gate reads (at most one connection says little about draining),
-	// but it is not a function of the seed: whether an earlier connection's handler
-	// has finished by the time a later one is accepted is scheduling, so the peak
-	// was measured flipping between 3 and 4 across two runs of ONE seed — which is
-	// what made the determinism clause red in a full-suite run after eight
-	// consecutive clean ones. Rendering a scheduling observable inside a value whose
-	// stability is asserted turns the assertion into a coin flip; the sibling case
-	// was the expiry branch, and this is the same mistake one field over.
-	fmt.Fprintf(&b, "\n  conns: accepted=%d closed=%d live-at-end=%d parked-live=%d listener-closed-while-parked=%t dial-refused-after=%t",
-		e.ConnsAccepted, e.ConnsClosed, e.ConnsLiveAtEnd, e.ParkedLiveConns,
+	// TWO connection observables are deliberately NOT rendered: ConnsPeak and
+	// ParkedLiveConns. Both are coverage witnesses the non-vacuity gate reads, and
+	// NEITHER is a function of the seed — each is a live count SAMPLED at an
+	// instant, so what it returns depends on where that instant falls relative to a
+	// connection teardown, which is scheduling.
+	//
+	// ConnsPeak: whether an earlier connection's handler has finished by the time a
+	// later one is accepted is scheduling, so the peak was measured flipping between
+	// 3 and 4 across two runs of ONE seed — which is what made the determinism
+	// clause red in a full-suite run after eight consecutive clean ones.
+	//
+	// ParkedLiveConns: r.conns.live.Load() read at the instant the fsync gate fires
+	// (see parkOneCommit). Under contention the sampling instant lands either side of
+	// a teardown, so 240 runs of ONE seed gave 4 two hundred and thirty-nine times
+	// and 5 once — a 1-in-240 red that 103 isolated runs on a quiet tree, including
+	// one at load average 22, never reproduced. It was found the same way ConnsPeak
+	// was: a full `make ci` run, not a targeted one.
+	//
+	// Rendering a scheduling observable inside a value whose stability is asserted
+	// turns the assertion into a coin flip. Both fields are still COLLECTED and
+	// still ASSERTED — ConnsPeak in checkBoltShutdownDrainNonVacuity, ParkedLiveConns
+	// in checkBoltDrainParkShape ("< 2") — they simply stop being part of the byte
+	// comparison. Excluding a field from the rendering costs no coverage; including
+	// a sampled one costs determinism.
+	fmt.Fprintf(&b, "\n  conns: accepted=%d closed=%d live-at-end=%d listener-closed-while-parked=%t dial-refused-after=%t",
+		e.ConnsAccepted, e.ConnsClosed, e.ConnsLiveAtEnd,
 		e.ListenerClosedWhileParked, e.DialRefusedAfterTeardown)
 	fmt.Fprintf(&b, "\n  teardown: bodies=%d while-parked=%d", len(e.CloseBodies), e.CloseBodiesWhileParked)
 	for i := range e.CloseBodies {
