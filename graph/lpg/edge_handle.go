@@ -430,6 +430,41 @@ func (g *Graph[N, W]) EdgePropertiesByHandleAsOf(src, dst N, handle uint64, snap
 	return g.EdgePropertiesByHandleIDAsOf(srcID, dstID, handle, snap)
 }
 
+// EdgePropertyByHandle returns the value recorded under key for the edge
+// identified by handle on the (src, dst) pair. The boolean reports whether that
+// instance carries the key; it is false when handle is 0, either endpoint is
+// unknown, the key was never interned, or the instance has no record for it.
+//
+// It is the SINGLE-KEY dual of [Graph.EdgePropertiesByHandle] — same shard, same
+// instance bag, same value — for a caller that needs one property and would
+// otherwise allocate the whole map to read one cell. See
+// [Graph.EdgePropertyByHandleIDAsOf] for the equivalence argument and the
+// cross-store consistency caveat that applies to every by-handle read.
+//
+// EdgePropertyByHandle is safe for concurrent use.
+func (g *Graph[N, W]) EdgePropertyByHandle(src, dst N, handle uint64, key string) (PropertyValue, bool) {
+	return g.EdgePropertyByHandleAsOf(src, dst, handle, key, nil)
+}
+
+// EdgePropertyByHandleAsOf is [Graph.EdgePropertyByHandle] as the instance stood
+// at snap. A nil snapshot reads the current value; see snapshot_read.go.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) EdgePropertyByHandleAsOf(src, dst N, handle uint64, key string, snap *Snapshot) (PropertyValue, bool) {
+	if handle == 0 {
+		return PropertyValue{}, false
+	}
+	srcID, ok := g.adj.Mapper().Lookup(src)
+	if !ok {
+		return PropertyValue{}, false
+	}
+	dstID, ok := g.adj.Mapper().Lookup(dst)
+	if !ok {
+		return PropertyValue{}, false
+	}
+	return g.EdgePropertyByHandleIDAsOf(srcID, dstID, handle, key, snap)
+}
+
 // FirstEdgeHandle returns the stable handle stamped on the FIRST adjacency
 // slot from src to dst — the slot a subsequent [Graph.RemoveEdge] would
 // remove, because [adjlist.AdjList.RemoveEdge] removes the lowest-indexed

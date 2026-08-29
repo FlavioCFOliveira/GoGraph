@@ -314,6 +314,48 @@ func (g *Graph[N, W]) EdgePropertiesByHandleIDAsOf(srcID, dstID graph.NodeID, ha
 	return out
 }
 
+// EdgePropertyByHandleIDAsOf returns the value recorded under key for the edge
+// identified by handle on the directed (srcID, dstID) NodeID pair, as the
+// instance stood at snap. A nil snapshot reads the current value. The boolean
+// reports whether the instance carries that key at all; it is false when handle
+// is 0, the key name was never interned, the handle was never written, or the
+// instance's bag has no record for the key.
+//
+// It is the SINGLE-KEY dual of [Graph.EdgePropertiesByHandleIDAsOf] and returns
+// exactly the PropertyValue that map would hold under key: the two read the same
+// shard, resolve the same instance bag through the same snapshot reconstruction,
+// and differ only in that this one asks the bag for one record instead of
+// enumerating them all. The map builder drops a record whose PropertyKeyID does
+// not resolve to a name; this one starts from the name and fails when it is not
+// interned, which is the same set of keys viewed from the other side of the
+// registry. It exists so a caller that needs ONE property of a bound parallel
+// instance does not allocate the whole map to read one cell (rmp #2388).
+//
+// EdgePropertyByHandleIDAsOf is safe for concurrent use.
+func (g *Graph[N, W]) EdgePropertyByHandleIDAsOf(srcID, dstID graph.NodeID, handle uint64, key string, snap *Snapshot) (PropertyValue, bool) {
+	if handle == 0 {
+		return PropertyValue{}, false
+	}
+	pid, known := g.pkeys.Lookup(key)
+	if !known {
+		return PropertyValue{}, false
+	}
+	k := edgeKey{src: srcID, dst: dstID}
+	sh := g.edgeHandlePropShardFor(k)
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	// Inline for the reason given on [Graph.EdgeLabelsByHandleIDAsOf].
+	im := sh.m[k]
+	bag, ok := im.get(handle)
+	if snap != nil && !sh.v.empty() {
+		bag, ok = sh.v.asOfSnap(edgeHandleKey{pair: k, handle: handle}, bag, ok, snap, snap.startTS, snap.txID)
+	}
+	if !ok {
+		return PropertyValue{}, false
+	}
+	return bag.get(pid)
+}
+
 // SetEdgeLabelByHandleID attaches `name` to the edge identified by `handle`
 // on the directed (srcID, dstID) NodeID pair, resolving by NodeID rather
 // than natural key. It is the NodeID-keyed dual of

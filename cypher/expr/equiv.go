@@ -87,10 +87,10 @@ func Equivalent(a, b Value) bool {
 
 // hashFloatBits returns the equivalence-consistent hash for the canonical
 // (non-NaN) float64 representation f. It is the shared bucketing hash for the
-// FloatValue, IntegerValue, NodeValue, RelationshipValue, and *LazyNodeValue
-// branches of [EquivalentHash]: each of those routes its numeric or identity
-// payload through this one float64 domain so that every pair the comparator
-// treats as EQUAL lands in the same bucket.
+// FloatValue, IntegerValue, NodeValue, RelationshipValue, *LazyNodeValue and
+// *LazyRelationshipValue branches of [EquivalentHash]: each of those routes its
+// numeric or identity payload through this one float64 domain so that every pair
+// the comparator treats as EQUAL lands in the same bucket.
 //
 // # Why the shared float64 domain stays consistent with the exact comparator
 //
@@ -149,9 +149,9 @@ func hashFloatBits(f float64) uint64 {
 // This differs from v.Hash() in three cases:
 //   - All NaN bit-patterns map to one canonical hash (NaN ≡ NaN).
 //   - -0.0 maps to the same hash as 0.0 (−0.0 == 0.0 in IEEE 754).
-//   - IntegerValue, [NodeValue], [*LazyNodeValue], and [RelationshipValue]
-//     all hash through the same float64 domain as FloatValue (see
-//     [hashFloatBits]), so any pair of these that [Value.Equal] treats as
+//   - IntegerValue, [NodeValue], [*LazyNodeValue], [RelationshipValue] and
+//     [*LazyRelationshipValue] all hash through the same float64 domain as
+//     FloatValue (see [hashFloatBits]), so any pair of these that Equal treats as
 //     equal — an Integer and a numerically-equal Float, or a node/
 //     relationship and an IntegerValue carrying its raw ID (the in-pipeline
 //     encoding NodeScan/Expand emit, per [NodeValue.Equal] /
@@ -187,6 +187,9 @@ func EquivalentHash(v Value) uint64 {
 	}
 	if rv, ok := v.(RelationshipValue); ok {
 		return hashFloatBits(float64(rv.ID))
+	}
+	if lrv, ok := v.(*LazyRelationshipValue); ok {
+		return hashFloatBits(float64(lrv.ID()))
 	}
 	if lv, ok := v.(ListValue); ok {
 		const (

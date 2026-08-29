@@ -688,6 +688,168 @@ type RelationshipValue struct {
 	Deleted bool
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// LazyRelationshipValue
+// ─────────────────────────────────────────────────────────────────────────────
+
+// RelSource identifies, to a [RelationshipResolver], the ONE stored
+// relationship a [LazyRelationshipValue] reads its properties from. Its fields
+// are storage coordinates that package expr treats as opaque: it copies them
+// into the value and hands them back to the resolver unchanged, and never
+// interprets them.
+//
+// StartKey and EndKey are the STORAGE endpoints of the relationship — the
+// direction under which the engine's property stores are keyed, which for an
+// undirected reverse hop is the inverse of the traversal order. Handle is the
+// stable per-edge handle of the bound parallel instance, and ByHandle records
+// which of the engine's two property stores its routing ladder selected for
+// this instance: the per-instance by-handle store when true, the per-pair
+// coalesced store when false. The two are mutually exclusive by construction —
+// see the routing ladder in package cypher — so a resolver must never fall back
+// from one to the other, or a parallel sibling's value could leak into the
+// answer.
+//
+// A RelSource is immutable once constructed and safe for concurrent reads.
+type RelSource struct {
+	StartKey string
+	EndKey   string
+	Handle   uint64
+	ByHandle bool
+}
+
+// RelationshipResolver fetches individual relationship properties from the
+// backing graph on demand, so a [LazyRelationshipValue] can answer a scalar
+// `r.prop` access without materialising the relationship's whole property map.
+// The implementation (in package cypher) reads the one property through the
+// same pinned read view, the same store, and the same storage-to-runtime value
+// conversion the eager materialiser would use, and must alias no
+// graph-internal mutable state in the returned [Value].
+//
+// A RelationshipResolver is consulted only for a relationship the query's
+// static analysis has proven is dereferenced solely through scalar accessors
+// (see the lazy fast-path gate in package cypher); whole-relationship uses
+// (properties/keys/type/startNode/endNode functions, identity equality, bare
+// projection) take the eager path and never construct a LazyRelationshipValue.
+//
+// Concurrency: an implementation must be safe for concurrent use, since a
+// single resolver instance is shared across every row of a query and the engine
+// is safe for concurrent reads. The package-cypher implementation satisfies
+// this by holding only an immutable pinned read view and performing each fetch
+// under that view's own per-store contract.
+type RelationshipResolver interface {
+	// RelProperty returns the value of key on the relationship src identifies,
+	// and false when that relationship carries no such property (a missing key
+	// reads as null per openCypher three-valued logic — the caller maps !ok to
+	// Null).
+	RelProperty(src RelSource, key string) (Value, bool)
+}
+
+// LazyRelationshipValue is an on-demand-resolving relationship value, the
+// relationship counterpart of [LazyNodeValue] and used on exactly the same
+// engine fast path: a WHERE predicate, a scalar projection, or an aggregation
+// pre-projection whose RowContext is built, evaluated once, and discarded
+// inside the query's pinned visibility barrier. Instead of copying the
+// relationship's properties into a [MapValue] and boxing a full
+// [RelationshipValue] per row, it carries the identity fields the engine has
+// already computed cheaply (ID, endpoints, type) plus a [RelSource] and a
+// [RelationshipResolver], and reads each touched property (`r.prop`,
+// `r["lit"]`) directly from storage when the evaluator asks for it.
+//
+// Soundness: a LazyRelationshipValue is produced only for a variable the static
+// analysis proved is used solely through scalar property accesses and type
+// predicates, so it is observed only by [evalProperty], [evalLabelPredicate]
+// and the literal-string subscript path — never by whole-relationship consumers
+// (properties()/keys()/type()/id()/startNode()/endNode()/identity equality/bare
+// projection), which force eager materialisation upstream. A relationship
+// deleted earlier in the same statement is never represented as a bare edge id
+// in a row (the DELETE operator stamps it as a Deleted [RelationshipValue]
+// carrying a frozen property snapshot, which the engine forwards before the
+// lazy path is reached), so a LazyRelationshipValue is never constructed for a
+// deleted entity and the DeletedEntityAccess contract is preserved by
+// construction.
+//
+// It is a pointer type so that storing it in a [RowContext] costs a single
+// small allocation (the struct itself) rather than the RelationshipValue box
+// plus a per-row property map.
+//
+// Concurrency and mutability: an instance is IMMUTABLE after construction and
+// safe for concurrent reads (the resolver performs its own synchronisation).
+// Unlike [LazyNodeValue] it is never rebound and never drawn from a reusable
+// arena, so it carries no single-goroutine ownership contract: the engine
+// allocates a fresh one per row. That difference is measured rather than
+// stylistic — see the note on the engine's buildRelationshipValueFromRow.
+type LazyRelationshipValue struct {
+	res     RelationshipResolver
+	relType string
+	src     RelSource
+	id      uint64
+	startID uint64
+	endID   uint64
+}
+
+// NewLazyRelationshipValue constructs a [LazyRelationshipValue] for the
+// relationship id with endpoints (startID, endID) and type relType, whose
+// properties are resolved from src through res.
+func NewLazyRelationshipValue(id, startID, endID uint64, relType string, src RelSource, res RelationshipResolver) *LazyRelationshipValue {
+	return &LazyRelationshipValue{res: res, relType: relType, src: src, id: id, startID: startID, endID: endID}
+}
+
+// ID returns the relationship's storage-layer identifier.
+func (v *LazyRelationshipValue) ID() uint64 { return v.id }
+
+// StartID returns the relationship's storage start endpoint.
+func (v *LazyRelationshipValue) StartID() uint64 { return v.startID }
+
+// EndID returns the relationship's storage end endpoint.
+func (v *LazyRelationshipValue) EndID() uint64 { return v.endID }
+
+// RelType returns the relationship's type, resolved eagerly by the engine
+// exactly as [RelationshipValue.Type] is.
+func (v *LazyRelationshipValue) RelType() string { return v.relType }
+
+// Property resolves key on demand, returning Null for an absent key (openCypher
+// missing-property-is-null). It is the lazy counterpart of indexing a
+// [RelationshipValue.Properties] map.
+func (v *LazyRelationshipValue) Property(key string) Value {
+	if v.res == nil {
+		return Null
+	}
+	if pv, ok := v.res.RelProperty(v.src, key); ok {
+		return pv
+	}
+	return Null
+}
+
+// Kind implements [Value]; a lazy relationship is a relationship.
+func (v *LazyRelationshipValue) Kind() Kind { return KindRelationship }
+
+// Hash implements [Value]; identity is determined by ID, matching
+// [RelationshipValue.Hash] so the two forms hash consistently.
+func (v *LazyRelationshipValue) Hash() uint64 { return v.id ^ (v.id >> 32) }
+
+// String returns the same diagnostic form as the eager [RelationshipValue].
+func (v *LazyRelationshipValue) String() string {
+	return fmt.Sprintf("-[rel#%d:%s]->", v.id, v.relType)
+}
+
+// Equal compares on relationship identity, symmetric with
+// [RelationshipValue.Equal] and [IntegerValue.Equal], so a lazy relationship
+// compares equal to the same relationship in eager or raw-edge-id form.
+func (v *LazyRelationshipValue) Equal(other Value) Value {
+	if IsNull(other) {
+		return Null
+	}
+	switch o := other.(type) {
+	case *LazyRelationshipValue:
+		return BoolValue(v.id == o.id)
+	case RelationshipValue:
+		return BoolValue(v.id == o.ID)
+	case IntegerValue:
+		return BoolValue(int64(v.id) == int64(o))
+	}
+	return BoolValue(false)
+}
+
 // Kind implements [Value].
 func (v RelationshipValue) Kind() Kind { return KindRelationship }
 
@@ -715,6 +877,8 @@ func (v RelationshipValue) Equal(other Value) Value {
 		return BoolValue(v.ID == o.ID)
 	case IntegerValue:
 		return BoolValue(int64(v.ID) == int64(o))
+	case *LazyRelationshipValue:
+		return BoolValue(v.ID == o.id)
 	}
 	return BoolValue(false)
 }

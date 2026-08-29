@@ -266,6 +266,12 @@ type buildOpts struct {
 	// shared across every row and every node column, so the lazy path costs no
 	// per-row resolver allocation. nil until first use; see [bopts.lazyResolver].
 	nodeResolver expr.NodeResolver
+	// relResolver backs [expr.LazyRelationshipValue] for the lazy
+	// relationship-materialisation fast path (rmp #2388). Like nodeResolver it
+	// depends only on the pinned read view, so it is created once per build and
+	// shared across every row and every relationship column. nil until first use;
+	// see [lazyRelResolverFor].
+	relResolver expr.RelationshipResolver
 	// subEval handles [ast.ExistsSubquery] and [ast.CountSubquery] expressions
 	// encountered inside Filter/Project closures. May be nil; in that case
 	// subquery expressions surface as [expr.EvalError] at runtime.
@@ -10527,9 +10533,14 @@ func exprHasNonScalar(e ast.Expression) bool { //nolint:gocyclo // per-AST-node 
 //   - LAZILY-WRITTEN-AT-EVAL fields. nodeResolver is assigned by lazyResolver on
 //     first use WITHOUT synchronisation and is reachable from both the Filter
 //     predicate and the Projection via expr.LazyNodeValue — the genuine eval-time
-//     race on the node-only scan path. fwdCSR / fwdCSRReady / edgeIDResolver are
-//     relationship-reconstruction caches the fused shape never touches; reset
-//     defensively.
+//     race on the node-only scan path. relResolver is its relationship twin
+//     (assigned by lazyRelResolverFor, reachable via expr.LazyRelationshipValue)
+//     and carries the identical hazard, so it is reset for the identical reason:
+//     edgeVarMeta below is nil'd so a worker rebuilds its own, which means a
+//     future widening of the fused shape to a relationship pattern would reach
+//     lazyRelResolverFor on the worker goroutine. fwdCSR / fwdCSRReady /
+//     edgeIDResolver are relationship-reconstruction caches the fused shape never
+//     touches; reset defensively.
 //
 //   - BUILD-WRITTEN maps. The per-worker subtree rebuild runs buildOperator /
 //     buildIRProjection on the worker goroutine, and those WRITE bopts maps
@@ -10567,6 +10578,7 @@ func (b *buildOpts) forWorker() *buildOpts {
 	cp := *b
 	// Lazily-written-at-eval fields.
 	cp.nodeResolver = nil
+	cp.relResolver = nil
 	cp.fwdCSR = nil
 	cp.fwdCSRReady = false
 	cp.edgeIDResolver = nil
@@ -13417,6 +13429,135 @@ func lazyResolver(bopts *buildOpts, g *lpg.ReadView[string, float64]) expr.NodeR
 	return bopts.nodeResolver
 }
 
+// lazyRelResolver adapts a pinned [lpg.ReadView] to
+// [expr.RelationshipResolver], translating one storage-layer property value to
+// the runtime expr form on demand. One instance is created per query build (see
+// [buildOpts.relResolver]) and shared across every row and every lazily
+// materialised relationship column, so the lazy fast path pays no per-row
+// resolver allocation.
+//
+// It routes by the SAME ladder [buildEdgeProps] applies, decided once per row by
+// [relLazyRoute] and carried in the [expr.RelSource]: a bound parallel instance
+// with a by-handle entry reads THAT instance's own store, everything else reads
+// the per-pair coalesced store. The two are exclusive — there is no fallback
+// between them — so a parallel sibling's value can never leak into the answer.
+//
+// Each lookup observes the same instant the eager materialiser would, because
+// both go through the same pinned read view; the returned value aliases no
+// graph-internal mutable state (lpgPropToExpr copies every kind it converts).
+type lazyRelResolver struct {
+	g *lpg.ReadView[string, float64]
+}
+
+// RelProperty implements [expr.RelationshipResolver]. A missing key returns
+// (nil, false); the caller maps that to Null.
+//
+// Value equivalence with the eager build, per route:
+//
+//   - by-handle — [lpg.ReadView.EdgePropertyByHandle] returns exactly the cell
+//     [lpg.ReadView.EdgePropertiesByHandle] would hold under key (same shard,
+//     same instance bag, same snapshot reconstruction), and lpgPropToExpr is the
+//     same conversion [edgePropsByHandleToExprMap] applies to it.
+//   - per-pair — [lpg.ReadView.GetEdgeProperty] scans the same entry view with
+//     the same bound and the same latest-dst-matching-slot-wins rule that
+//     [lpg.Graph.ForEachEdgePropertyByIDAsOf] streams under, so it selects the
+//     coalesced winner [edgePropsToExprMap] would have recorded last; again the
+//     same lpgPropToExpr converts it.
+//
+// A key whose stored kind maps to Cypher null therefore yields expr.Null here
+// exactly as it would sit under that key in the eager map, so `r.k` reads null
+// either way.
+func (r lazyRelResolver) RelProperty(src expr.RelSource, key string) (expr.Value, bool) {
+	var (
+		pv lpg.PropertyValue
+		ok bool
+	)
+	if src.ByHandle {
+		pv, ok = r.g.EdgePropertyByHandle(src.StartKey, src.EndKey, src.Handle, key)
+	} else {
+		pv, ok = r.g.GetEdgeProperty(src.StartKey, src.EndKey, key)
+	}
+	if !ok {
+		return nil, false
+	}
+	return lpgPropToExpr(pv), true
+}
+
+// lazyRelResolverFor returns the per-build [expr.RelationshipResolver] for g,
+// creating and caching it on bopts on first use. When bopts is nil (call sites
+// that build a RowContext without a buildOpts) a fresh per-call resolver is
+// returned; this is the cold path and never the per-row hot path, which always
+// carries bopts. Mirrors [lazyResolver].
+func lazyRelResolverFor(bopts *buildOpts, g *lpg.ReadView[string, float64]) expr.RelationshipResolver {
+	if bopts == nil {
+		return lazyRelResolver{g: g}
+	}
+	if bopts.relResolver == nil {
+		bopts.relResolver = lazyRelResolver{g: g}
+	}
+	return bopts.relResolver
+}
+
+// relLazyRoute decides whether the bound relationship may be materialised as an
+// [expr.LazyRelationshipValue] instead of a [expr.RelationshipValue] carrying a
+// freshly built property map, and returns the storage coordinates its resolver
+// needs (rmp #2388). It is the relationship counterpart of the gate
+// [upgradeNodeIDToValuePartial] applies to a node.
+//
+// # Which uses are admissible
+//
+// Only a variable whose every dereference is a scalar property read — the
+// value-key branch of [buildEdgeProps] — with NO whole-entity use and NO
+// field-extractor use:
+//
+//   - relUse nil, or needsWholeNode: the entity may escape whole, so it must be
+//     materialised whole. This is the same fail-safe [analyseNodeScalarUse]
+//     documents; the lazy value is admissible ONLY on the non-escaping
+//     expressions the scalarUse gate already restricts.
+//   - hasScalarFnNeed: id/type/startNode/endNode/labels/keys type-switch on a
+//     CONCRETE RelationshipValue, exactly as they do for a node (which is why
+//     [buildPartialNodeValueForFn] exists and returns a concrete value there).
+//   - no value key: the presence-only, keys(r) and field-extractor branches of
+//     [buildEdgeProps] already allocate nothing per row, so there is nothing to
+//     win and no reason to widen the surface.
+//
+// A co-occurring `r:TYPE` predicate (needsLabels) is admissible: the type is
+// resolved eagerly by the caller and carried on the lazy value, so
+// [expr.LazyRelationshipValue] answers a label predicate from the identical
+// string the eager value would.
+//
+// # Which storage routes are admissible
+//
+// The route must be decidable WITHOUT building the by-handle map, or the read
+// the lazy value exists to avoid has already happened. That is exactly the
+// partition [buildEdgeProps]'s ladder already makes, restated:
+//
+//   - handle bound AND a by-handle entry present — useByHandle is true
+//     regardless of the map's contents, so the route is known for free and the
+//     resolver reads the per-instance store.
+//   - no handle, or the graph never recorded a by-handle edge property — the
+//     by-handle map is provably empty (the latch's false is exact, rmp #2387),
+//     so useByHandle is false for free and the resolver reads the per-pair store.
+//   - handle bound, no by-handle entry, latch set — the ladder genuinely needs
+//     len(byHandle) > 0 to decide. Bail: the caller then takes today's eager
+//     path unchanged, including that probe.
+//
+// The latch is read under exactly the conditions [buildEdgeProps] reads it, so
+// this decision costs the same probes the eager path would have paid.
+func relLazyRoute(g *lpg.ReadView[string, float64], stKey, enKey string, fwdHandle uint64, hasByHandleEntry bool, relUse *nodeScalarUse) (expr.RelSource, bool) {
+	if relUse == nil || relUse.needsWholeNode || relUse.hasScalarFnNeed() || len(relUse.keys) == 0 {
+		return expr.RelSource{}, false
+	}
+	switch {
+	case fwdHandle != 0 && hasByHandleEntry:
+		return expr.RelSource{StartKey: stKey, EndKey: enKey, Handle: fwdHandle, ByHandle: true}, true
+	case fwdHandle == 0 || !g.AnyEdgeHandlePropertyEverWritten():
+		return expr.RelSource{StartKey: stKey, EndKey: enKey}, true
+	default:
+		return expr.RelSource{}, false
+	}
+}
+
 // upgradeNodeIDToValuePartial is the lazy counterpart of [upgradeNodeIDToValue].
 // Instead of eagerly copying the node's touched properties into a fresh
 // [expr.MapValue] and boxing a full [expr.NodeValue] per row, it produces an
@@ -14147,13 +14288,36 @@ func slotHoldsHandle(g *lpg.ReadView[string, float64], srcID, dstID graph.NodeID
 // row. With relUse nil — or carrying any value key — the property map is built
 // in full from EdgeProperties exactly as before, so non-gated callers are
 // byte-identical (C5).
-func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.ReadView[string, float64], bopts *buildOpts, relUse *nodeScalarUse) (expr.RelationshipValue, bool) {
+//
+// LAZY RETURN (rmp #2388). When relUse marks the edge's reads as VALUE-KEY-ONLY
+// scalar accesses — and only then, and only on a storage route [relLazyRoute]
+// can decide without materialising the by-handle map — the return is an
+// [*expr.LazyRelationshipValue] instead: the identity fields the eager build
+// already computed (id, storage endpoints, type), plus a resolver that reads
+// each touched property from the SAME store on demand. That removes the per-row
+// property map entirely. The gate is [relLazyRoute]'s, which is the scalarUse
+// gate: a lazy value is admissible only where a partially materialised value is,
+// so it can never reach a result row. Every other shape returns the eager
+// [expr.RelationshipValue] exactly as before, which is why the return type is
+// expr.Value rather than expr.RelationshipValue.
+//
+// The lazy value is allocated fresh per row rather than drawn from the pooled
+// RowContext's struct arena, the way the lazy NODE value is. That is a MEASURED
+// choice, not an oversight: an arena variant was built and interleaved against
+// this one, and it made the pooled path no faster (the predicate query moved
+// -5.44% without it against -5.51% with it, a difference inside the measured
+// noise floor) while growing [pooledRowCtx] past one cache line, which cost a
+// reproducible ~1.7% on an unrelated aggregation that binds no relationship at
+// all. Allocating one small immutable struct also keeps the value free of the
+// single-goroutine ownership contract a reused struct would carry. See the
+// #2388 measurement record.
+func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.ReadView[string, float64], bopts *buildOpts, relUse *nodeScalarUse) (expr.Value, bool) {
 	if meta.edgeCol >= len(row) {
-		return expr.RelationshipValue{}, false
+		return nil, false
 	}
 	edgeIDVal, ok := row[meta.edgeCol].(expr.IntegerValue)
 	if !ok {
-		return expr.RelationshipValue{}, false
+		return nil, false
 	}
 	var srcID, dstID uint64
 	if meta.srcCol < len(row) {
@@ -14260,6 +14424,14 @@ func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.ReadVi
 			}
 			if len(ets) > 0 {
 				edgeType = pickEdgeType(ets, meta.acceptedTypes)
+			}
+			// Lazy relationship (rmp #2388): every field below is already
+			// resolved, so when the use is value-key-only the property map is
+			// the ONLY thing left to build — and the lazy value builds it never.
+			// Falls through to the eager map on every shape the gate rejects.
+			if relSrc, lazyOK := relLazyRoute(g, stKey, enKey, fwdHandle, hasByHandleEntry, relUse); lazyOK {
+				return expr.NewLazyRelationshipValue(uint64(edgeIDVal), storageStart, storageEnd,
+					edgeType, relSrc, lazyRelResolverFor(bopts, g)), true
 			}
 			edgeProps = buildEdgeProps(g, stKey, enKey, fwdHandle, hasByHandleEntry, relUse)
 		}

@@ -624,6 +624,16 @@ func evalLabelPredicate(n *ast.LabelPredicate, row RowContext, st *evalCallState
 			}
 		}
 		return BoolValue(true), nil
+	case *LazyRelationshipValue:
+		// Lazy relationship: the type is resolved eagerly by the engine
+		// (it is one cheap label read, not a property map), so this is the
+		// identical conjunctive walk over the identical string.
+		for _, want := range n.Labels {
+			if r.RelType() != want {
+				return BoolValue(false), nil
+			}
+		}
+		return BoolValue(true), nil
 	}
 	return Null, nil
 }
@@ -670,6 +680,17 @@ func evalProperty(n *ast.Property, row RowContext, st *evalCallState, params map
 			}
 		}
 		return Null, nil
+	case *LazyRelationshipValue:
+		// Lazy relationship fast path: resolve only the touched property from
+		// storage. A LazyRelationshipValue is constructed solely for
+		// relationships the static analysis proved are accessed only through
+		// scalar accessors, and never for an entity deleted in the same
+		// statement (the DELETE operator stamps those as a Deleted
+		// RelationshipValue, which the engine forwards before the lazy path is
+		// reached and which the branch above handles), so the
+		// DeletedEntityAccess contract is preserved without a flag here. A
+		// missing key reads as Null (Property does this).
+		return r.Property(n.Key), nil
 	case MapValue:
 		if v, ok := r[n.Key]; ok {
 			return v, nil
@@ -749,6 +770,17 @@ func evalSubscript(n *ast.SubscriptExpr, row RowContext, st *evalCallState, para
 			return nil, &EvalError{Msg: fmt.Sprintf("MapElementAccessByNonString: map key must be String, got %s", idx.Kind())}
 		}
 		return subscriptMap(c.Properties, idx), nil
+	case *LazyRelationshipValue:
+		// Lazy relationship subscript: only a String key is valid (same
+		// TypeError surface as the eager RelationshipValue branch). The static
+		// analysis only produces a LazyRelationshipValue when subscripts use
+		// literal-string keys, but resolving any runtime String key on demand is
+		// equally sound.
+		sk, ok := idx.(StringValue)
+		if !ok {
+			return nil, &EvalError{Msg: fmt.Sprintf("MapElementAccessByNonString: map key must be String, got %s", idx.Kind())}
+		}
+		return c.Property(string(sk)), nil
 	default:
 		// Subscripting a non-list / non-map / non-graph-element value is
 		// an InvalidArgumentType TypeError per openCypher (e.g. `1[0]`,
