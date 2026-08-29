@@ -352,13 +352,17 @@ func (e *subqueryEvaluator) prepareDrive(ctx context.Context, cs *compiledSubque
 }
 
 // outerVarsFromRow returns the variable names present in row, in
-// deterministic order, excluding the smuggled subquery-context sentinel.
+// deterministic order.
+//
+// It used to filter out a reserved sentinel key, because [expr.EvalWith]
+// smuggled its per-evaluation state through the RowContext and every row this
+// function saw carried it. That state is now an explicit parameter inside the
+// evaluator (#2653), so a RowContext holds nothing but real variable bindings
+// and the filter — along with the duplicated copy of the sentinel constant that
+// this file had to keep in step with cypher/expr — is gone.
 func outerVarsFromRow(row expr.RowContext) []string {
 	out := make([]string, 0, len(row))
 	for k := range row {
-		if k == subqueryContextRowKey {
-			continue
-		}
 		out = append(out, k)
 	}
 	// Sort for deterministic seed-row layout. The compiled schema map mirrors
@@ -366,13 +370,6 @@ func outerVarsFromRow(row expr.RowContext) []string {
 	sortStrings(out)
 	return out
 }
-
-// subqueryContextRowKey mirrors expr.subqueryContextKey for filtering during
-// outer-variable enumeration. The constant is duplicated here because the
-// expr-side key is unexported; both definitions use the same NUL-bracketed
-// string and any drift would surface as the subquery seeing a synthetic
-// variable named "subquery-context".
-const subqueryContextRowKey = "\x00subquery-context\x00"
 
 // downgradeForRow converts a NodeValue or RelValue back to the IntegerValue
 // representation expected by inner scans and expands. Other values pass

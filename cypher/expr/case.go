@@ -21,11 +21,11 @@ import "github.com/FlavioCFOliveira/GoGraph/cypher/ast"
 // evalCase evaluates a [ast.CaseExpression] in the context of row and params.
 // It delegates to the simple-form or generic-form path depending on whether
 // n.Subject is non-nil.
-func evalCase(n *ast.CaseExpression, row RowContext, params map[string]Value, reg FunctionRegistry) (Value, error) {
+func evalCase(n *ast.CaseExpression, row RowContext, st *evalCallState, params map[string]Value, reg FunctionRegistry) (Value, error) {
 	if n.Subject != nil {
-		return evalCaseSimple(n, row, params, reg)
+		return evalCaseSimple(n, row, st, params, reg)
 	}
-	return evalCaseGeneric(n, row, params, reg)
+	return evalCaseGeneric(n, row, st, params, reg)
 }
 
 // evalCaseSimple handles CASE subject WHEN v THEN r … [ELSE e] END.
@@ -33,25 +33,25 @@ func evalCase(n *ast.CaseExpression, row RowContext, params map[string]Value, re
 // The subject is evaluated once. Each WHEN arm's condition is compared to the
 // subject using 3VL equality: only IsTruthy(subject.Equal(cond)) triggers the
 // match. A NULL subject never matches any arm.
-func evalCaseSimple(n *ast.CaseExpression, row RowContext, params map[string]Value, reg FunctionRegistry) (Value, error) {
-	subject, err := evalExpr(n.Subject, row, params, reg)
+func evalCaseSimple(n *ast.CaseExpression, row RowContext, st *evalCallState, params map[string]Value, reg FunctionRegistry) (Value, error) {
+	subject, err := evalExpr(n.Subject, row, st, params, reg)
 	if err != nil {
 		return nil, err
 	}
 
 	for _, alt := range n.Alternatives {
-		cond, err := evalExpr(alt.Condition, row, params, reg)
+		cond, err := evalExpr(alt.Condition, row, st, params, reg)
 		if err != nil {
 			return nil, err
 		}
 		// 3VL equality: NULL subject or NULL cond produces NULL, which is not truthy.
 		if IsTruthy(subject.Equal(cond)) {
-			return evalExpr(alt.Consequent, row, params, reg)
+			return evalExpr(alt.Consequent, row, st, params, reg)
 		}
 	}
 
 	if n.ElseExpr != nil {
-		return evalExpr(n.ElseExpr, row, params, reg)
+		return evalExpr(n.ElseExpr, row, st, params, reg)
 	}
 	return Null, nil
 }
@@ -60,19 +60,19 @@ func evalCaseSimple(n *ast.CaseExpression, row RowContext, params map[string]Val
 //
 // Each WHEN predicate is independently evaluated as a boolean. A NULL predicate
 // is not truthy and therefore does not match.
-func evalCaseGeneric(n *ast.CaseExpression, row RowContext, params map[string]Value, reg FunctionRegistry) (Value, error) {
+func evalCaseGeneric(n *ast.CaseExpression, row RowContext, st *evalCallState, params map[string]Value, reg FunctionRegistry) (Value, error) {
 	for _, alt := range n.Alternatives {
-		cond, err := evalExpr(alt.Condition, row, params, reg)
+		cond, err := evalExpr(alt.Condition, row, st, params, reg)
 		if err != nil {
 			return nil, err
 		}
 		if IsTruthy(cond) {
-			return evalExpr(alt.Consequent, row, params, reg)
+			return evalExpr(alt.Consequent, row, st, params, reg)
 		}
 	}
 
 	if n.ElseExpr != nil {
-		return evalExpr(n.ElseExpr, row, params, reg)
+		return evalExpr(n.ElseExpr, row, st, params, reg)
 	}
 	return Null, nil
 }

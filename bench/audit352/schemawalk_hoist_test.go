@@ -213,7 +213,8 @@ func walkDerivations(tb testing.TB, eng *cypher.Engine, query string, wantRows i
 				continue
 			}
 			fmt.Fprintf(&sb, " <- %s", shortFn(f))
-			if shown++; shown >= 8 {
+			shown++
+			if shown >= 8 {
 				break
 			}
 		}

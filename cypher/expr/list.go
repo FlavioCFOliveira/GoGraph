@@ -30,8 +30,8 @@ import "github.com/FlavioCFOliveira/GoGraph/cypher/ast"
 //   - Negative lower bounds are resolved relative to the end of the
 //     list. Out-of-range bounds are clamped to [0, len(list)].
 //   - The result is the half-open slice [from, to).
-func evalSlice(n *ast.SliceExpr, row RowContext, params map[string]Value, reg FunctionRegistry) (Value, error) {
-	src, err := evalExpr(n.Expr, row, params, reg)
+func evalSlice(n *ast.SliceExpr, row RowContext, st *evalCallState, params map[string]Value, reg FunctionRegistry) (Value, error) {
+	src, err := evalExpr(n.Expr, row, st, params, reg)
 	if err != nil {
 		return nil, err
 	}
@@ -47,7 +47,7 @@ func evalSlice(n *ast.SliceExpr, row RowContext, params map[string]Value, reg Fu
 
 	from := 0
 	if n.From != nil {
-		fv, err := evalExpr(n.From, row, params, reg)
+		fv, err := evalExpr(n.From, row, st, params, reg)
 		if err != nil {
 			return nil, err
 		}
@@ -63,7 +63,7 @@ func evalSlice(n *ast.SliceExpr, row RowContext, params map[string]Value, reg Fu
 
 	to := ln
 	if n.To != nil {
-		tv, err := evalExpr(n.To, row, params, reg)
+		tv, err := evalExpr(n.To, row, st, params, reg)
 		if err != nil {
 			return nil, err
 		}
@@ -107,8 +107,8 @@ func resolveIndex(idx, length int) int {
 //
 // If predicate is nil, all elements pass. If projection is nil, the element
 // itself is the output. A NULL source is treated as an empty list.
-func evalListComprehension(n *ast.ListComprehension, row RowContext, params map[string]Value, reg FunctionRegistry) (Value, error) {
-	src, err := evalExpr(n.Source, row, params, reg)
+func evalListComprehension(n *ast.ListComprehension, row RowContext, st *evalCallState, params map[string]Value, reg FunctionRegistry) (Value, error) {
+	src, err := evalExpr(n.Source, row, st, params, reg)
 	if err != nil {
 		return nil, err
 	}
@@ -120,10 +120,10 @@ func evalListComprehension(n *ast.ListComprehension, row RowContext, params map[
 		return ListValue{}, nil
 	}
 
-	// ctx is the (possibly cancellable) context smuggled through row by
-	// EvalWith; on the bare Eval path it is context.Background() and the
-	// per-stride cancellation check (#1477) never fires.
-	ctx, _ := extractSubqueryContext(row)
+	// ctx is the (possibly cancellable) context the evaluation state carries;
+	// on the bare Eval path it is context.Background() and the per-stride
+	// cancellation check (#1477) never fires.
+	ctx := st.evalContext()
 
 	result := make(ListValue, 0, len(list))
 	for i, elem := range list {
@@ -141,7 +141,7 @@ func evalListComprehension(n *ast.ListComprehension, row RowContext, params map[
 
 		// Apply WHERE predicate if present.
 		if n.Predicate != nil {
-			pv, err := evalExpr(n.Predicate, innerRow, params, reg)
+			pv, err := evalExpr(n.Predicate, innerRow, st, params, reg)
 			if err != nil {
 				return nil, err
 			}
@@ -153,13 +153,13 @@ func evalListComprehension(n *ast.ListComprehension, row RowContext, params map[
 		// Charge the element this iteration appends against the per-evaluation
 		// list-element budget so nested comprehensions (whose product is
 		// N^depth) cannot materialise without bound (#1475).
-		if err := chargeListGrowth(row, 1); err != nil {
+		if err := chargeListGrowth(st, 1); err != nil {
 			return nil, err
 		}
 
 		// Apply projection if present, otherwise use the element as-is.
 		if n.Projection != nil {
-			out, err := evalExpr(n.Projection, innerRow, params, reg)
+			out, err := evalExpr(n.Projection, innerRow, st, params, reg)
 			if err != nil {
 				return nil, err
 			}
