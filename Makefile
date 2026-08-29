@@ -103,9 +103,9 @@ SHORT_TIMEOUT ?= 30m
 # absent from `ci`. A ceiling nothing reads is decoration.
 #
 # SOFT_BUDGET warns; HARD_BUDGET fails the gate. The global ceiling stays at the
-# documented 240 s: it is NOT relaxed to accommodate the two packages above it.
-# Those two get a NAMED, measured override instead, so the accommodation is
-# visible per package and cannot silently cover a third.
+# documented 240 s: it is NOT relaxed to accommodate the three packages above it.
+# Those three get a NAMED, measured override instead, so the accommodation is
+# visible per package and cannot silently cover a fourth.
 SOFT_BUDGET ?= 60
 HARD_BUDGET ?= 240
 
@@ -113,8 +113,9 @@ HARD_BUDGET ?= 240
 # number fitted per package: the WORST in-suite figure ever recorded for that
 # package in docs/test-layers.md, times 1.25, rounded up to the whole minute.
 #
-#   internal/sim  602.9s x 1.25 = 753.6 -> 780
-#   cypher        321.7s x 1.25 = 402.1 -> 420
+#   internal/sim    602.9s x 1.25 = 753.6 -> 780
+#   cypher          321.7s x 1.25 = 402.1 -> 420
+#   bench/audit352  328.7s x 1.25 = 410.9 -> 420
 #
 # Worst-observed, not last-measured: internal/sim has been recorded in-suite at
 # 545.8s, 557.4s, 564.0s and 602.9s on this hardware — a 10.5% spread — so a
@@ -128,7 +129,16 @@ HARD_BUDGET ?= 240
 # with load recorded, gave 276.4s and 321.7s — a 16% swing, against internal/sim
 # 0.3% across the same pair. Mid-sized packages vary far more run to run than the
 # big one does, because their co-tenancy changes with scheduling order.
-PKG_HARD_BUDGET_OVERRIDES ?= /internal/sim=780 /cypher=420
+#
+# bench/audit352 is NOT a regression: it is a ceiling that had never been
+# exercised. The package carried no entry here, so its cost was only ever inferred
+# from a STANDALONE figure (180.6s), which docs/test-layers.md marks as a lower
+# bound precisely because it carries none of the co-tenancy the parallel suite
+# adds. The first three in-suite measurements ever taken — 2026-08-29, all three
+# with load recorded in docs/test-layers.md — gave 321.5s, 328.7s and 318.1s, a
+# 3.3% spread and 1.76x the standalone lower bound. The rule then reads the worst
+# of them, 328.7s, exactly as it reads the worst for the two packages above.
+PKG_HARD_BUDGET_OVERRIDES ?= /internal/sim=780 /cypher=420 /bench/audit352=420
 export SOFT_BUDGET HARD_BUDGET PKG_HARD_BUDGET_OVERRIDES
 
 # GOGRAPH_PARALLEL_SUITE declares to the test binaries that packages are being

@@ -106,9 +106,12 @@ standalone addition explained under the table.
 | `cypher/tck` | 68.5 s | 7.9 s | 8.7× |
 | `store/recovery` | 66.3 s | 58.6 s | 1.1× |
 
-Only the first two exceed the 240 s hard ceiling, and each carries a named
-override below. The other ten **warn and pass**: they are over the soft budget,
-which is what a soft budget is for.
+Three packages exceed the 240 s hard ceiling — `internal/sim`, `cypher` and
+`bench/audit352` — and each carries a named override below. `bench/audit352` is
+the one whose breach is invisible in this table, because the figure shown for it
+is standalone: its in-suite cost is recorded in the footnote. The other nine
+**warn and pass**: they are over the soft budget, which is what a soft budget is
+for.
 
 † `bench/audit352` did not exist on 2026-08-25 and its two figures were measured
 **standalone**, not in-suite, on 2026-08-29 on the rmp #2645 tree (the commit this
@@ -120,6 +123,39 @@ the no-`-race` column unmoved. A
 standalone figure is a **lower bound** on the in-suite one, because it carries none
 of the co-tenancy the parallel suite adds, so it is marked rather than silently
 mixed with the rest of the column.
+
+**The in-suite cost, measured at last (rmp #2670).** That lower bound was for a
+while the only figure the package had, and the ceiling was inferred from it. It
+was an inference, not a measurement: runs 1–3 below are the first in-suite
+observations `bench/audit352` has ever had, all on 2026-08-29, all `make ci` on
+the same tree, and they put the package at **1.76×** the standalone figure —
+comfortably over the 240 s global ceiling it had never been tested against. Run 4
+is the post-fix verification and is marked separately.
+
+| Run | In-suite `-race` | Load average before | Load average after |
+|---|---|---|---|
+| 1 (12:06 → 12:16) | 321.5 s | 3.51 12.74 11.71 | 5.58 11.15 13.78 |
+| 2 (12:46 → 12:56) | **328.7 s** | 1.34 2.00 5.05 | 4.92 10.24 11.21 |
+| 3 (13:28 → 13:39) | 318.1 s | 2.40 2.32 4.38 | 4.45 9.08 9.69 |
+| 4 (14:29 → 14:40) ‡ | 328.3 s | 2.19 8.54 9.79 | 4.13 9.96 12.55 |
+
+Each run is bracketed by `uptime` before and after, so the load the figure was
+taken under is auditable rather than asserted. The spread is **3.3 %** — narrow
+for a mid-sized package, and narrower than `cypher`'s 16 % — and the worst,
+328.7 s, is what the override rule below reads. Note that the run with the
+**quietest** start (run 2, 1.34) produced the **worst** figure, which is why the
+rule takes the worst observation rather than the one measured on the quietest
+host: co-tenancy inside the suite, not ambient load, dominates here.
+
+‡ Run 4 is the **verification** run, taken after the override landed: the package
+came in at 328.3 s and the gate passed it. Its one-minute load at start was 2.19
+but its five-minute load was 8.54 — the host was still shedding the load of an
+earlier, interrupted run — so it is recorded as a **contended** observation. It
+does not move the ceiling: 328.3 s < 328.7 s, so the worst observed is unchanged
+and the derivation below stands as it was. It is kept because a fourth
+independent figure landing within **0.4 s** of the worst of the first three is
+worth having on the record: it is what makes the 3.3 % spread look like a
+property of the package rather than an accident of three runs.
 
 The package is the purpose-built exercise harness for the rmp #352 bottleneck
 audit. Its **profiling sweeps are soak-gated** (`//go:build soak || nightly`) in
@@ -168,6 +204,7 @@ this document × 1.25, rounded up to the whole minute.
 |---|---|---|---|
 | `internal/sim` | 602.9 s | 753.6 s | **780 s** |
 | `cypher` | 321.7 s | 402.1 s | **420 s** |
+| `bench/audit352` | 328.7 s | 410.9 s | **420 s** |
 
 **Worst-observed, not last-measured.** `internal/sim` has been recorded in-suite
 on this hardware at 545.8 s, 557.4 s, 564.0 s, 565.8 s and 602.9 s — a **10.5 %
@@ -184,7 +221,26 @@ both with load recorded, gave **276.4 s and 321.7 s** — a **16 %** swing, agai
 `internal/sim`'s **0.3 %** (564.0 s and 565.8 s) across the same pair. Mid-sized
 packages vary far more run to run than the big one does, because their co-tenancy
 changes with scheduling order. That is also why the global 240 s ceiling, not a
-per-package one, is the right instrument for everything below these two.
+per-package one, is the right instrument for everything below these three.
+
+`bench/audit352` was added under rmp #2670 and is the one entry here that
+corrects **no regression**. The package had no entry, so it was gated by the
+global 240 s ceiling — a ceiling nothing had ever measured it against, because its
+only figures were standalone. When `make ci` was finally run to completion on this
+tree the gate fired three times out of three, at 321.5 s, 328.7 s and 318.1 s;
+the three observations and their load averages are tabulated in the footnote
+above. The rule reads the worst, 328.7 s × 1.25 = 410.9 → **420 s**, which leaves
+**27.8 %** headroom over it. The entry is named rather than absorbed into a raised
+global ceiling for the reason the `Makefile` comment gives: an accommodation has
+to stay visible per package, or it silently starts covering the next package to
+drift over.
+
+Two things about this entry are worth keeping in view. First, **420 s is not
+`cypher`'s 420 s** — the two ceilings coincide by arithmetic, not by kinship, and
+neither constrains the other. Second, the package is a *purpose-built audit
+harness*, so a cost regression in it is a regression in an instrument rather than
+in the module; the right response to it drifting again is to gate more sweeps to
+the soak layer, as #2652 and #2667 already did, not to raise this number.
 
 Keys match as a **suffix** of the import path, not as a substring. This matters:
 substring matching would have let `/cypher` also cover `cypher/tck`, `cypher/ir`
