@@ -77,6 +77,7 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 
@@ -104,15 +105,25 @@ const scanQuery = `MATCH (p:` + pushdownLabel + `) WHERE p.v >= 0 RETURN count(p
 // unexpected third plan fails loudly instead of being measured under the wrong
 // label. Kept in step with the same constants in
 // cypher/label_count_pushdown_gate_test.go.
-const (
-	planPushdown = "Project\n└─ LabelCountScan"
-	planScan     = "Project\n" +
+const planPushdown = "Project\n└─ LabelCountScan"
+
+// scanPlanFor renders the scanning plan for one label. The boxing differential
+// below measures two labels of the SAME shape, so the expected plan has to be
+// parameterised rather than pinned as a single constant; pinning the text at all
+// is what makes an unexpected third plan fail loudly instead of being measured
+// under the wrong name.
+func scanPlanFor(label string) string {
+	return "Project\n" +
 		"└─ GlobalAggregateAdapter\n" +
 		"   └─ EagerAggregation\n" +
 		"      └─ Project\n" +
 		"         └─ Filter\n" +
-		"            └─ NodeByLabelScan [" + pushdownLabel + "]"
-)
+		"            └─ NodeByLabelScan [" + label + "]"
+}
+
+// planScan is scanPlanFor(pushdownLabel), kept in step with the same constants
+// in cypher/label_count_pushdown_gate_test.go.
+var planScan = scanPlanFor(pushdownLabel)
 
 // ratchetSizes spans a 100x range. 50_000 is kept deliberately: it was the
 // largest graph the deleted gate refused (the gate was strict >), so it is where
@@ -399,7 +410,7 @@ func BenchmarkLabelCountScanBoxing(b *testing.B) {
 }
 
 // TestLabelCountBoxingAttribution establishes the MECHANISM behind
-// exec.NodeByLabelScan's per-row allocation.
+// exec.NodeByLabelScan's per-row allocation, by DIFFERENCE.
 //
 // The finding is unchanged by rmp #2654, which removed a planner gate and did not
 // touch the scan: cypher/exec/scan_label.go still writes
@@ -414,112 +425,331 @@ func BenchmarkLabelCountScanBoxing(b *testing.B) {
 // essentially all of its objects to that one line. The scan's own godoc now
 // documents this, having previously claimed a "zero-alloc contract".
 //
-// # Why the query changed
+// # Why this test is a DIFFERENCE and no longer an absolute model (rmp #2666)
 //
-// This test used to drive the bare labelled count. Since #2654 that shape plans
-// LabelCountScan and never scans, so it can no longer carry the measurement. It
-// now drives scanQuery, whose WHERE puts a Filter between the scan and the
-// aggregate — the documented reason tryBuildLabelCountScan declines — so the scan
-// still emits one row per labelled node. The plan is asserted, because a boxing
-// measurement on an unasserted plan is void.
-//
-// The shape was chosen by measurement, not by preference. `MATCH (p:Item) RETURN
-// p.v` plans ColumnarProject over the scan and drives NodeByLabelScan.FillChunk,
-// which appends UNBOXED int64 into a typed Chunk column: its allocs/op is a flat
-// 53 from n=200 to n=2 000, so it exhibits none of the boxing and a test built on
-// it would pass forever without measuring anything. scanQuery's allocs/op tracks
-// #{id >= 256} exactly.
-//
-// # The prediction
-//
-// If the per-row allocation is convT64 boxing of the node id, then
+// It used to sweep one graph per size and assert
 //
 //	allocs/op == #{ scanned node ids >= 256 } + F,   F constant in n
 //
-// An earlier version of this test assumed ids were dense from 0 in insertion
-// order and predicted max(0, n-256). That assumption is FALSE in this engine —
-// measured, the first 256 inserted nodes span the id range [0, 764] — and the
-// prediction failed below n = 1 000 while holding exactly above it. The
-// assumption is therefore replaced by the measured id distribution, read out of
-// the engine with id(n). Nothing but boxing predicts those counts.
+// with F required to hold a spread of 2 across the sweep. That model is TRUE, and
+// the instrument built on it was still WRONG, because F is not a property of the
+// engine: it is a property of the BUILD. Measured on the reference host
+// (Apple M4, 10 cores, darwin/arm64, go1.27.0):
+//
+//	go test           ./bench/audit352/ -run TestLabelCountBoxingAttribution
+//	  F = [72 73 73 73 73]      spread 1     PASS
+//	go test -race     ./bench/audit352/ -run TestLabelCountBoxingAttribution
+//	  F = [323 391 447 1325 2574] spread 2251 FAIL
+//
+// The race build adds ~1.25 allocations per SCANNED ROW — the residue is exactly
+// linear in n, slope 1.2505 at the 1 000 -> 2 000 step — so subtracting only the
+// boxed ids leaves a per-row term inside "the fixed term", and the spread grows
+// with the sweep. `make ci` runs the short layer under -race, so the gate could
+// not go green there however quiet the machine was. (The defect was FILED as
+// process-global pollution from neighbouring tests in the package; that was
+// refuted: the failure reproduces with this test running alone, and the whole
+// package passes without -race.)
+//
+// The correction is the one rmp #2652 applied to the allocation instrument:
+// measure the SUBJECT, not the process. Two arms are measured in the same window,
+// on the same graph, through the same engine, with the SAME NUMBER OF ROWS, and
+// differing in exactly one thing — the numeric value of the node ids the scan
+// boxes:
+//
+//	:LoN  the N nodes with the LOWEST ids  -> every id < 256, no box allocates
+//	:HiN  the N lowest ids >= 256          -> every id >= 256, every box allocates
+//
+// Every per-row cost that is not the id box — the Filter's property read, the
+// aggregate's accumulation, and whatever the build adds — is identical on both
+// arms and cancels in the difference. What is left is the boxing, and the
+// prediction is exact and dimensionless:
+//
+//	allocs(:HiN) - allocs(:LoN) == #{id >= 256 in HiN} - #{id >= 256 in LoN} == N
+//
+// Nothing but one convT64 box per scanned id predicts that: no other cost in this
+// plan depends on whether a node id happens to be above or below 256.
+//
+// # Measured
+//
+//	without -race: the difference is EXACT at every arm and every round —
+//	               64/64/64, 128/128/128, 256/256/256 (9 observations).
+//	with    -race: 63 64 63 / 129 126 128 / 258 258 254, i.e. |dev| <= 2 and
+//	               |dev|/rows <= 1.6%, which is the race build's own allocation
+//	               jitter, not the model. Re-measured under 20 competing busy
+//	               processes (loadavg 20.5): medians 65 / 128 / 255, ratios
+//	               1.0156 / 1.0000 / 0.9961.
+//
+// # Falsification (measured, rmp #2666)
+//
+// Two mutations of cypher/exec/scan_label.go were run against this test:
+//
+//	an extra unconditional allocation for ids BELOW 256, so the per-row cost
+//	  stops depending on the id value:  median delta 0 / 0 / 0, ratio 0.0000, FAIL.
+//	a SECOND box per scanned id:       median delta 128 / 256 / 512, ratio
+//	  2.0000, FAIL.
+//
+// Both are exactly the two hypotheses boxingRatioSlack is sized to separate, and
+// both went red at every arm.
+//
+// The ids are not dense from 0 in insertion order — they are hash-derived, so the
+// 256 lowest ids of a 4 000-node graph are exactly 0..255 while the 200 lowest
+// span [0, 761] — and they are therefore READ OUT of the engine with id(n) rather
+// than assumed, exactly as before.
 func TestLabelCountBoxingAttribution(t *testing.T) {
-	fixed := make([]int, 0, 5)
-	for _, n := range []int{200, 256, 300, 1_000, 2_000} {
-		e := pushdownEngine(t, n)
-		assertPlan(t, e, scanQuery, planScan, n)
+	fx := boxingArms(t)
 
-		drainQuery(t, e, scanQuery)
-		allocs := testing.AllocsPerRun(100, func() { drainQuery(t, e, scanQuery) })
+	for _, rows := range boxingArmRows {
+		loLbl, hiLbl := boxingLoLabel(rows), boxingHiLabel(rows)
+		loQ, hiQ := boxingQuery(loLbl), boxingQuery(hiLbl)
 
-		// Read the actual id distribution out of the engine rather than assuming it.
-		res, err := e.Run(context.Background(),
-			fmt.Sprintf(`MATCH (p:%s) RETURN id(p) AS i`, pushdownLabel), nil)
-		if err != nil {
-			t.Fatal(err)
+		// A measurement on an unasserted plan is void, and a differential on two
+		// DIFFERENT plans is worse than void: it would attribute the plan
+		// difference to boxing.
+		assertPlan(t, fx, loQ, scanPlanFor(loLbl), rows)
+		assertPlan(t, fx, hiQ, scanPlanFor(hiLbl), rows)
+		if got := runPushdownOnce(t, fx, loQ); got != int64(rows) {
+			t.Fatalf("%s counted %d rows, want %d", loQ, got, rows)
 		}
-		rows, below, minID, maxID := 0, 0, int64(1<<62), int64(-1)
-		for res.Next() {
-			iv, ok := res.ValueAt(0).(expr.IntegerValue)
-			if !ok {
-				t.Fatalf("id(p) is %T, want expr.IntegerValue", res.ValueAt(0))
-			}
-			id := int64(iv)
-			rows++
-			if id < 256 {
-				below++
-			}
-			if id < minID {
-				minID = id
-			}
-			if id > maxID {
-				maxID = id
-			}
-		}
-		if err := res.Err(); err != nil {
-			t.Fatal(err)
-		}
-		if err := res.Close(); err != nil {
-			t.Fatal(err)
-		}
-		if rows != n {
-			t.Fatalf("n=%d: id(p) returned %d rows", n, rows)
+		if got := runPushdownOnce(t, fx, hiQ); got != int64(rows) {
+			t.Fatalf("%s counted %d rows, want %d", hiQ, got, rows)
 		}
 
-		ge := n - below
-		f := int(allocs) - ge
-		fixed = append(fixed, f)
-		t.Logf("n=%5d  allocs/op=%6.0f  id range [%d,%d]  #{id>=256}=%5d  F=allocs-#{id>=256}=%4d",
-			n, allocs, minID, maxID, ge, f)
-	}
-
-	// The mechanism's signature is that F — what is left after subtracting one
-	// allocation per boxed id — does not depend on n.
-	//
-	// Tolerance: a spread of 2. Measured, F is 72 at n=200 and 73 at every larger
-	// size, i.e. a spread of exactly 1, from one chunk-growth step that differs
-	// between 200 and 2 000 rows. The tolerance is deliberately NOT set to that
-	// measured 1: a bound fitted to the run it was measured on has no headroom and
-	// goes red on the next unrelated allocation. Nor is n=200 dropped to make the
-	// spread zero — it is the size where most ids fall inside the free window, so
-	// removing it would weaken the very contrast the model is read from.
-	//
-	// A spread of 2 still discriminates by ~850x: if the per-row allocation were
-	// NOT the id box, subtracting #{id>=256} would leave the whole per-row term in
-	// F, whose spread across n=200..2 000 would then be of order 1 700.
-	const fixedTermSpreadMax = 2
-	lo, hi := fixed[0], fixed[0]
-	for _, f := range fixed {
-		if f < lo {
-			lo = f
+		// The contrast is READ BACK, never assumed: the arms are only a
+		// differential if their id distributions really do straddle 256.
+		loLow, loGE, loMin, loMax := boxingIDSpread(t, fx, loLbl)
+		hiLow, hiGE, hiMin, hiMax := boxingIDSpread(t, fx, hiLbl)
+		t.Logf("rows=%3d  %-8s ids [%d,%d] #{<256}=%3d #{>=256}=%3d   %-8s ids [%d,%d] #{<256}=%3d #{>=256}=%3d",
+			rows, loLbl, loMin, loMax, loLow, loGE, hiLbl, hiMin, hiMax, hiLow, hiGE)
+		if loGE != 0 || hiGE != rows {
+			t.Fatalf("rows=%d: the arms do not contrast — %s has %d ids >= 256 (want 0) and "+
+				"%s has %d (want %d). Without the contrast this measures nothing.",
+				rows, loLbl, loGE, hiLbl, hiGE, rows)
 		}
-		if f > hi {
-			hi = f
+		wantDelta := float64(hiGE - loGE)
+
+		// Warm both arms outside every window, then INTERLEAVE: A B A B A B. A
+		// block of A followed by a block of B would let drift between the blocks
+		// enter the difference.
+		drainQuery(t, fx, loQ)
+		drainQuery(t, fx, hiQ)
+		deltas := make([]float64, 0, boxingRounds)
+		for r := 0; r < boxingRounds; r++ {
+			lo := testing.AllocsPerRun(boxingRuns, func() { drainQuery(t, fx, loQ) })
+			hi := testing.AllocsPerRun(boxingRuns, func() { drainQuery(t, fx, hiQ) })
+			deltas = append(deltas, hi-lo)
+			t.Logf("  rows=%3d round=%d  allocs/op lo=%6.0f hi=%6.0f  delta=%6.0f (want %.0f)",
+				rows, r, lo, hi, hi-lo, wantDelta)
+		}
+
+		// The MEDIAN, not the mean: testing.AllocsPerRun divides a PROCESS-GLOBAL
+		// malloc counter by the run count, so one window that happened to contain
+		// a burst of background allocation shifts a single round and must not be
+		// allowed to shift the verdict.
+		got := medianOf(deltas)
+		ratio := got / wantDelta
+		t.Logf("  rows=%3d median delta=%.0f  want %.0f  ratio=%.4f", rows, got, wantDelta, ratio)
+		if ratio < 1-boxingRatioSlack || ratio > 1+boxingRatioSlack {
+			t.Errorf("rows=%d: %s allocated %.0f more per op than %s, want %.0f "+
+				"(ratio %.4f, tolerance 1 +/- %.2f) across rounds %v. The two arms scan the "+
+				"SAME number of rows through the SAME plan and differ only in whether the "+
+				"scanned node ids are below 256, so the difference IS the convT64 boxing of "+
+				"the node id in exec.NodeByLabelScan.Next. A ratio near 0 means the per-row "+
+				"allocation is not the id box; a ratio near 2 means the scan now boxes twice.",
+				rows, hiLbl, got, loLbl, wantDelta, ratio, boxingRatioSlack, deltas)
 		}
 	}
-	if hi-lo > fixedTermSpreadMax {
-		t.Errorf("F = allocs/op - #{id>=256} ranges over %v (spread %d > %d): the per-row "+
-			"allocation is NOT one convT64 box per scanned node id",
-			fixed, hi-lo, fixedTermSpreadMax)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The boxing differential's fixture
+// ─────────────────────────────────────────────────────────────────────────────
+
+const (
+	// boxingBaseLabel carries every node of the differential graph, so the id
+	// map can be read with one query.
+	boxingBaseLabel = "Boxed"
+
+	// boxingTotal is large enough that ids 0..255 are ALL occupied, which is what
+	// lets the :Lo arm be built entirely out of ids the runtime serves from
+	// staticuint64s. Measured on this engine: 600 nodes fill 246 of those 256
+	// slots, 4 000 fill all 256.
+	boxingTotal = 4_000
+
+	// boxingRuns is testing.AllocsPerRun's iteration count. It is high because
+	// that function divides a PROCESS-GLOBAL malloc counter by it, so background
+	// allocation has to reach boxingRuns objects inside a single window to move
+	// the reading by one. Measured under -race: at 100 the difference wandered by
+	// up to 5 allocations, at 500 and at 1 000 by at most 2. 500 is kept because
+	// 1 000 doubled the test's cost for no measurable gain in stability.
+	boxingRuns = 500
+
+	// boxingRounds interleaved A/B pairs, reduced to their median.
+	boxingRounds = 3
+
+	// boxingRatioSlack is a band on a DIMENSIONLESS ratio whose predicted value
+	// is 1. It is not a tolerance on an absolute figure, and it does not grow
+	// with the regression it must catch: the two hypotheses it separates sit at
+	// ratio 0 (the per-row allocation is not the id box) and ratio 2 (the scan
+	// boxes twice), so any band strictly inside (0, 2) discriminates. 5% is 20x
+	// clear of the nearer of them, and 3x the largest deviation measured under
+	// -race (1.6% at rows=64).
+	boxingRatioSlack = 0.05
+)
+
+// boxingArmRows are the row counts the differential is measured at. Every arm
+// must fit inside the 256-wide free window, because the :Lo arm's whole point is
+// that none of its ids allocates; 256 is therefore the largest arm possible and
+// is kept as the sharpest one.
+var boxingArmRows = []int{64, 128, 256}
+
+func boxingLoLabel(rows int) string { return fmt.Sprintf("LoBox%d", rows) }
+func boxingHiLabel(rows int) string { return fmt.Sprintf("HiBox%d", rows) }
+
+// boxingQuery is the scanning shape, per arm label. The WHERE puts a Filter
+// between the scan and the aggregate — the documented reason
+// tryBuildLabelCountScan declines — so the scan really does emit one row per
+// labelled node instead of being answered from the label index in O(1).
+// p.v is i%100, below 256, so reading it is itself allocation-free and cannot
+// contribute a second per-row mechanism.
+func boxingQuery(label string) string {
+	return `MATCH (p:` + label + `) WHERE p.v >= 0 RETURN count(p) AS c`
+}
+
+// boxingEngine caches the differential fixture: one graph, one engine, both arms.
+var boxingEngine *cypher.Engine
+
+// boxingArms builds the graph the differential is read from and labels the two
+// arms of every row count.
+//
+// Node ids in this engine are hash-derived from the key, not dense in insertion
+// order, so the arms cannot be built by choosing which nodes to create. They are
+// built by MEASURING the ids first — id(p) against a base label — sorting them,
+// and then labelling the two ends of that order.
+func boxingArms(tb testing.TB) *cypher.Engine {
+	tb.Helper()
+	if boxingEngine != nil {
+		return boxingEngine
 	}
-	t.Logf("F across sizes = %v (spread %d, tolerance %d)", fixed, hi-lo, fixedTermSpreadMax)
+	key := func(i int) string { return fmt.Sprintf("b%d", i) }
+
+	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	for i := 0; i < boxingTotal; i++ {
+		k := key(i)
+		if err := g.AddNode(k); err != nil {
+			tb.Fatalf("boxingArms AddNode(%s): %v", k, err)
+		}
+		if err := g.SetNodeLabel(k, boxingBaseLabel); err != nil {
+			tb.Fatalf("boxingArms SetNodeLabel(%s): %v", k, err)
+		}
+		// v < 256: the predicate's read is allocation-free (see boxingQuery).
+		if err := g.SetNodeProperty(k, "v", lpg.Int64Value(int64(i%100))); err != nil {
+			tb.Fatalf("boxingArms SetNodeProperty(%s, v): %v", k, err)
+		}
+		// idx carries the key back out of the engine alongside id(p), so the id
+		// order can be mapped to nodes without assuming anything about ids.
+		if err := g.SetNodeProperty(k, "idx", lpg.Int64Value(int64(i))); err != nil {
+			tb.Fatalf("boxingArms SetNodeProperty(%s, idx): %v", k, err)
+		}
+	}
+
+	type nodeID struct {
+		id  int64
+		idx int64
+	}
+	probe := cypher.NewEngineWithOptions(g, cypher.EngineOptions{})
+	res, err := probe.Run(context.Background(),
+		`MATCH (p:`+boxingBaseLabel+`) RETURN id(p) AS i, p.idx AS x`, nil)
+	if err != nil {
+		tb.Fatalf("boxingArms id probe: %v", err)
+	}
+	ids := make([]nodeID, 0, boxingTotal)
+	for res.Next() {
+		iv, ok := res.ValueAt(0).(expr.IntegerValue)
+		if !ok {
+			tb.Fatalf("id(p) is %T, want expr.IntegerValue", res.ValueAt(0))
+		}
+		xv, ok := res.ValueAt(1).(expr.IntegerValue)
+		if !ok {
+			tb.Fatalf("p.idx is %T, want expr.IntegerValue", res.ValueAt(1))
+		}
+		ids = append(ids, nodeID{int64(iv), int64(xv)})
+	}
+	if err := res.Err(); err != nil {
+		tb.Fatalf("boxingArms id probe: %v", err)
+	}
+	if err := res.Close(); err != nil {
+		tb.Fatalf("boxingArms id probe close: %v", err)
+	}
+	if len(ids) != boxingTotal {
+		tb.Fatalf("boxingArms id probe returned %d rows, want %d", len(ids), boxingTotal)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i].id < ids[j].id })
+
+	var below, atOrAbove []nodeID
+	for _, n := range ids {
+		if n.id < boxingFreeWindow {
+			below = append(below, n)
+		} else {
+			atOrAbove = append(atOrAbove, n)
+		}
+	}
+	maxRows := boxingArmRows[len(boxingArmRows)-1]
+	if len(below) < maxRows || len(atOrAbove) < maxRows {
+		tb.Fatalf("boxingArms: %d ids below %d and %d at or above it, need %d of each; "+
+			"raise boxingTotal", len(below), boxingFreeWindow, len(atOrAbove), maxRows)
+	}
+	for _, rows := range boxingArmRows {
+		for j := 0; j < rows; j++ {
+			if err := g.SetNodeLabel(key(int(below[j].idx)), boxingLoLabel(rows)); err != nil {
+				tb.Fatalf("boxingArms label lo: %v", err)
+			}
+			if err := g.SetNodeLabel(key(int(atOrAbove[j].idx)), boxingHiLabel(rows)); err != nil {
+				tb.Fatalf("boxingArms label hi: %v", err)
+			}
+		}
+	}
+
+	boxingEngine = cypher.NewEngineWithOptions(g, cypher.EngineOptions{})
+	return boxingEngine
+}
+
+// boxingFreeWindow is len(runtime.staticuint64s): the runtime serves interface
+// conversions of integers in [0, 256) from that static table, so converting them
+// to expr.Value allocates nothing. It is the constant the whole differential
+// turns on.
+const boxingFreeWindow = 256
+
+// boxingIDSpread reads one arm's id distribution back out of the engine.
+func boxingIDSpread(tb testing.TB, e *cypher.Engine, label string) (below, atOrAbove int, minID, maxID int64) {
+	tb.Helper()
+	res, err := e.Run(context.Background(), `MATCH (p:`+label+`) RETURN id(p) AS i`, nil)
+	if err != nil {
+		tb.Fatalf("boxingIDSpread(%s): %v", label, err)
+	}
+	minID, maxID = int64(1<<62), int64(-1)
+	for res.Next() {
+		iv, ok := res.ValueAt(0).(expr.IntegerValue)
+		if !ok {
+			tb.Fatalf("id(p) is %T, want expr.IntegerValue", res.ValueAt(0))
+		}
+		id := int64(iv)
+		if id < boxingFreeWindow {
+			below++
+		} else {
+			atOrAbove++
+		}
+		if id < minID {
+			minID = id
+		}
+		if id > maxID {
+			maxID = id
+		}
+	}
+	if err := res.Err(); err != nil {
+		tb.Fatalf("boxingIDSpread(%s): %v", label, err)
+	}
+	if err := res.Close(); err != nil {
+		tb.Fatalf("boxingIDSpread(%s) close: %v", label, err)
+	}
+	return below, atOrAbove, minID, maxID
 }

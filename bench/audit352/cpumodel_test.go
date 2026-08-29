@@ -6,6 +6,8 @@ import (
 	"math"
 	"runtime"
 	"sort"
+	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -42,39 +44,282 @@ func cpuMicros() int64 {
 	return u + s
 }
 
-// TestCPUInstrumentSanity validates the CPU counter against a known amount
-// of busy work before any result derived from it is believed. One busy
-// goroutine for D should read ~D CPU-seconds; N busy goroutines ~N*D. A
-// counter that clamped at one core, or that did not move at all, would be
-// caught here rather than silently halving every number in the report.
+// TestCPUInstrumentSanity validates the CPU counter before any result derived
+// from it is believed. Two properties are asserted, and both are RATIOS measured
+// in the same conditions rather than absolute figures:
+//
+//   - it meters WORK, not wall time and not nothing: doubling the work on one
+//     goroutine doubles the reading.
+//   - it AGGREGATES ACROSS THREADS: the same work spread over N goroutines reads
+//     N times what it reads on one. A counter clamped at a single core reads ~1x
+//     whenever the machine really did run the goroutines in parallel (measured:
+//     1.007); a counter scoped to the calling thread trips one of the two bounds
+//     depending on scheduler placement (see busyCPU).
+//
+// # Why it is not "N busy goroutines for D seconds must read N*D" (rmp #2666)
+//
+// That is what it used to assert, and it is a claim about the MACHINE, not about
+// the counter: it holds only while this process owns N whole cores. `make ci`
+// runs the short layer as `go test -race ./...`, which runs packages in
+// parallel, so it does not. Measured on the reference host (Apple M4, 10 cores,
+// darwin/arm64, go1.27.0) with 20 competing busy processes:
+//
+//	threads=1 busy=0.40s measured CPU=0.199s (ratio 0.50)
+//	CPU counter under-reads: 0.199s measured for 0.400s of busy work on 1 threads
+//
+// Nothing was wrong with the counter. The process got half a core, and a gate
+// written as an absolute could not tell that apart from a broken instrument —
+// which is exactly the failure mode this file exists to prevent.
+//
+// A fixed amount of WORK costs the same CPU however long it has to wait for a
+// core, so every quantity here is a ratio of two work-defined windows. Contention
+// changes the WALL time of each window and cancels out of the ratio. The unit of
+// work is calibrated at run time, so the test does not carry a hard-coded
+// iteration count fitted to one machine.
+//
+// # Falsification (measured, rmp #2666)
+//
+// Two mutations of cpuMicros were run against this test on the reference host:
+//
+//	one-core clamp (return wall-clock micros): work linearity still 2.021 (it
+//	  is linear on one thread), thread aggregation n=2 -> 1.007, FAIL.
+//	dead counter (return 0): FAIL in calibration, "could not reach 30ms of CPU
+//	  in 1073741824 iterations".
+//
+// # Honest limits
+//
+//   - A counter scoped to the CALLING THREAD would read ~0 for the spawned arms
+//     and so trip the same lower bound the one-core clamp tripped at 1.007. That
+//     is REASONED, not measured: Darwin's syscall package exposes no
+//     RUSAGE_THREAD to mutate cpuMicros into.
+//   - A counter that under-reports by a CONSTANT FACTOR is invisible here,
+//     because a constant factor cancels out of every ratio. It was equally
+//     invisible to the absolute form this replaced, which could not tell a
+//     halved counter from a half-loaded machine — it only appeared to catch it.
+//   - If the host is so saturated that the N goroutines never actually run at
+//     the same time, a wall-clock-like counter would also read ~N and the second
+//     property loses its power against that particular alternative (it keeps full
+//     power against a thread-scoped counter). The observed parallelism is
+//     therefore measured and logged, so a reader can see whether that arm was
+//     discriminating.
 func TestCPUInstrumentSanity(t *testing.T) {
-	const d = 400 * time.Millisecond
-	for _, threads := range []int{1, 2, 4} {
-		start := cpuMicros()
-		wall := time.Now()
-		done := make(chan struct{})
-		for i := 0; i < threads; i++ {
-			go func() {
-				x := 0.0
-				for time.Since(wall) < d {
-					for j := 0; j < 100000; j++ {
-						x += float64(j)
-					}
-				}
-				_ = x
-				done <- struct{}{}
-			}()
+	unit := calibrateCPUUnit(t, cpuUnitTargetCPU)
+
+	type round struct {
+		single, double float64         // CPU seconds, 1 goroutine, U and 2U units
+		multi          map[int]float64 // CPU seconds, N goroutines x U units
+		wall           map[int]float64 // wall seconds of the same windows
+	}
+	rounds := make([]round, 0, cpuSanityRounds)
+	for r := 0; r < cpuSanityRounds; r++ {
+		// Interleaved within the round: an arm is never measured as a block, so
+		// drift between blocks cannot enter a ratio.
+		c1, w1 := busyCPU(1, 1, unit)
+		c2, _ := busyCPU(1, 2, unit)
+		rd := round{single: c1, double: c2, multi: map[int]float64{}, wall: map[int]float64{}}
+		rd.wall[1] = w1
+		for _, n := range cpuSanityThreads {
+			c, w := busyCPU(n, 1, unit)
+			rd.multi[n] = c
+			rd.wall[n] = w
 		}
-		for i := 0; i < threads; i++ {
-			<-done
+		rounds = append(rounds, rd)
+		t.Logf("round %d  1x1U=%.4fs  1x2U=%.4fs  %s (unit=%d iters, wall 1x1U=%.4fs)",
+			r, rd.single, rd.double, fmtMulti(rd.multi, rd.wall), unit, w1)
+	}
+
+	single := medianOf(pick(rounds, func(r round) float64 { return r.single }))
+	double := medianOf(pick(rounds, func(r round) float64 { return r.double }))
+	if single <= 0 {
+		t.Fatalf("the CPU counter did not move at all across %d units of busy work "+
+			"(median %.6fs): every figure derived from it is void", cpuSanityRounds, single)
+	}
+
+	// Property 1 — it meters work. Predicted ratio 2; a dead counter gives 0 and
+	// a counter that lost half the work gives 1.
+	lin := double / single
+	t.Logf("work linearity: 2U/1U = %.3f (want 2, tolerance %.2f..%.2f)", lin, cpuLinMin, cpuLinMax)
+	if lin < cpuLinMin || lin > cpuLinMax {
+		t.Fatalf("the CPU counter is not proportional to work: twice the work read %.4fs "+
+			"against %.4fs (ratio %.3f, want %.2f..%.2f). A counter that does not meter work "+
+			"cannot attribute CPU to a query.", double, single, lin, cpuLinMin, cpuLinMax)
+	}
+
+	// Property 2 — it aggregates across threads. Predicted ratio N.
+	for _, n := range cpuSanityThreads {
+		multi := medianOf(pick(rounds, func(r round) float64 { return r.multi[n] }))
+		wallN := medianOf(pick(rounds, func(r round) float64 { return r.wall[n] }))
+		ratio := multi / single
+		// How much parallelism the host actually granted, so the reader can see
+		// whether the one-core-clamp alternative was discriminated at all.
+		clamp := multi / wallN
+		t.Logf("thread aggregation n=%d: %.4fs / %.4fs = %.3f (want %d, tolerance %.2f..%.2f); "+
+			"CPU/wall in that window = %.2f (>1 means the host really did run them in parallel)",
+			n, multi, single, ratio, n, cpuAggMin*float64(n), cpuAggMax*float64(n), clamp)
+		if clamp <= 1.05 {
+			t.Logf("  note: the host granted little or no parallelism in that window, so this " +
+				"arm has reduced power against a counter clamped at one core; it retains full " +
+				"power against a counter scoped to the calling thread.")
 		}
-		got := float64(cpuMicros()-start) / 1e6
-		want := d.Seconds() * float64(threads)
-		t.Logf("threads=%d busy=%.2fs measured CPU=%.3fs (ratio %.2f)", threads, d.Seconds(), got, got/want)
-		if got < want*0.7 {
-			t.Fatalf("CPU counter under-reads: %.3fs measured for %.3fs of busy work on %d threads", got, want, threads)
+		if ratio < cpuAggMin*float64(n) || ratio > cpuAggMax*float64(n) {
+			t.Fatalf("the CPU counter does not aggregate across threads: %d goroutines each "+
+				"doing the SAME work as the single-goroutine arm read %.4fs against %.4fs "+
+				"(ratio %.3f, want %d +%.0f%%/-%.0f%%). A ratio near 1 means it clamps at one "+
+				"core; a ratio near 0 means it counts only the calling thread. Either way every "+
+				"CPU figure in this package would be understated.",
+				n, multi, single, ratio, n, (cpuAggMax-1)*100, (1-cpuAggMin)*100)
 		}
 	}
+}
+
+// --- CPU instrument calibration and busy work --------------------------------
+
+const (
+	// cpuUnitTargetCPU is how much CPU one unit of busy work must consume before
+	// it is used as the ratios' denominator. Large enough that getrusage's
+	// microsecond granularity and the goroutine-launch overhead are noise;
+	// small enough that the whole test costs a fraction of a CPU-second.
+	cpuUnitTargetCPU = 30 * time.Millisecond
+
+	// cpuSanityRounds interleaved rounds, reduced to medians, so one window that
+	// happened to be descheduled does not decide the verdict.
+	cpuSanityRounds = 3
+
+	// cpuLinMin/cpuLinMax bound the work-linearity ratio, whose predicted value
+	// is exactly 2. The alternatives it separates are 0 (a dead counter) and 1
+	// (a counter losing half the work), so the band is far from both.
+	cpuLinMin = 1.6
+	cpuLinMax = 2.6
+
+	// cpuAggMin/cpuAggMax are multipliers on N for the thread-aggregation ratio,
+	// whose predicted value is exactly N.
+	//
+	// The LOWER bound is the gate: under-reading is the failure this test exists
+	// to catch, and the alternatives sit at 0 and at 1, i.e. at or below N/2 for
+	// every N used here.
+	//
+	// The UPPER bound is only a runaway guard and is deliberately loose, because
+	// the same work legitimately costs MORE CPU-time when it runs on more
+	// threads: on this host the efficiency cores execute it more slowly than the
+	// performance cores, and contention adds system time to every window. An
+	// upper bound tight enough to be interesting would fail on a busy machine
+	// while detecting nothing the lower bound does not already detect.
+	cpuAggMin = 0.7
+	cpuAggMax = 2.5
+)
+
+// cpuSanityThreads are the goroutine counts the aggregation property is asserted
+// at. Kept at or below half the host's cores on the reference machine so the
+// window has some chance of real parallelism even under a parallel package run.
+var cpuSanityThreads = []int{2, 4}
+
+// cpuBusySink keeps every accumulator observable outside the loop that produced
+// it, so the compiler cannot delete the work being measured. It is written only
+// from the test goroutine, after every worker has been joined.
+var cpuBusySink float64
+
+// cpuBusy performs iters units of deterministic floating-point work.
+//
+// Floating-point addition is not associative, so the compiler may not
+// strength-reduce the loop to a closed form, and the returned accumulator keeps
+// it from being eliminated. The work touches no memory beyond one register, so
+// its CPU cost depends on the core it runs on and on nothing else in the process.
+func cpuBusy(iters int) float64 {
+	x := 0.0
+	for j := 0; j < iters; j++ {
+		x += float64(j)
+	}
+	return x
+}
+
+// calibrateCPUUnit returns an iteration count for cpuBusy whose measured CPU cost
+// is at least want.
+//
+// It is a measurement, not a constant, because the same iteration count costs
+// different CPU on different cores and different machines — and because a
+// hard-coded count fitted to one host is precisely the kind of absolute this
+// test was rewritten to stop making. Contention does not disturb it: waiting for
+// a core costs wall time, not CPU time.
+func calibrateCPUUnit(tb testing.TB, want time.Duration) int {
+	tb.Helper()
+	const maxIters = 1 << 30
+	iters := 1 << 20
+	for {
+		c0 := cpuMicros()
+		cpuBusySink += cpuBusy(iters)
+		got := time.Duration(cpuMicros()-c0) * time.Microsecond
+		if got >= want {
+			return iters
+		}
+		if iters >= maxIters {
+			tb.Fatalf("calibration could not reach %v of CPU in %d iterations of cpuBusy "+
+				"(got %v): the CPU counter is not moving with work", want, iters, got)
+		}
+		iters *= 2
+	}
+}
+
+// busyCPU runs threads goroutines, each performing units*iters of cpuBusy work,
+// and returns the process CPU and the wall time consumed by that window.
+//
+// threads == 1 still spawns a goroutine so that the multi-threaded arms differ
+// from it in ONE variable only — the number of goroutines — and so that the
+// ratio's denominator is measured on the same kind of thread as its numerator.
+//
+// A counter scoped to the CALLING thread is caught either way, but by different
+// assertions depending on where the scheduler put the single worker: if it runs
+// on the parked caller's M the denominator is full and the N-goroutine arms read
+// ~1/N of it, tripping the aggregation bound; if it runs elsewhere the
+// denominator itself reads ~0 and the "did not move at all" floor trips first.
+func busyCPU(threads, units, iters int) (cpuSec, wallSec float64) {
+	out := make([]float64, threads)
+	var wg sync.WaitGroup
+	c0 := cpuMicros()
+	t0 := time.Now()
+	for i := 0; i < threads; i++ {
+		wg.Add(1)
+		go func(slot int) {
+			defer wg.Done()
+			s := 0.0
+			for u := 0; u < units; u++ {
+				s += cpuBusy(iters)
+			}
+			out[slot] = s
+		}(i)
+	}
+	wg.Wait()
+	wallSec = time.Since(t0).Seconds()
+	cpuSec = float64(cpuMicros()-c0) / 1e6
+	for _, v := range out {
+		cpuBusySink += v
+	}
+	return cpuSec, wallSec
+}
+
+// pick projects one field out of every round, for medianOf.
+func pick[T any](rs []T, f func(T) float64) []float64 {
+	out := make([]float64, 0, len(rs))
+	for _, r := range rs {
+		out = append(out, f(r))
+	}
+	return out
+}
+
+// fmtMulti renders the multi-goroutine arms of one round.
+func fmtMulti(cpu, wall map[int]float64) string {
+	ns := make([]int, 0, len(cpu))
+	for n := range cpu {
+		ns = append(ns, n)
+	}
+	sort.Ints(ns)
+	var sb strings.Builder
+	for i, n := range ns {
+		if i > 0 {
+			sb.WriteString("  ")
+		}
+		fmt.Fprintf(&sb, "%dx1U=%.4fs(wall %.4fs)", n, cpu[n], wall[n])
+	}
+	return sb.String()
 }
 
 // --- linear fit -----------------------------------------------------------
