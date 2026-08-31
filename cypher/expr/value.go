@@ -198,6 +198,17 @@ func (v IntegerValue) Equal(other Value) Value {
 		// Symmetric with RelationshipValue.Equal — accept a raw edge ID
 		// as equal to the projected RelationshipValue.
 		return BoolValue(int64(v) == int64(o.ID))
+	case *LazyNodeValue:
+		// Symmetric with LazyNodeValue.Equal. Closing this leg keeps the
+		// invariant LOCAL: EquivalentHash buckets a lazy entity with the
+		// same hashFloatBits(id) as the raw ID, so an asymmetric Equal
+		// would make Equivalent depend on which side the caller passed
+		// first. The escaping-value gate makes that unreachable today; it
+		// should not also be what makes it correct.
+		return BoolValue(int64(v) == int64(o.ID()))
+	case *LazyRelationshipValue:
+		// Symmetric with LazyRelationshipValue.Equal — see above.
+		return BoolValue(int64(v) == int64(o.ID()))
 	}
 	return BoolValue(false)
 }

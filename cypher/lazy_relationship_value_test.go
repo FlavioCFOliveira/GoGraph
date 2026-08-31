@@ -37,6 +37,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
@@ -525,7 +526,10 @@ func TestLazyRelationshipPropertyIsByteIdenticalToTheEagerMap(t *testing.T) {
 			}
 			res := lazyRelResolver{g: c.view}
 
-			seenTemporal := 0
+			// Distinct KINDS, not a count. A count of 6 is also satisfied by
+			// five kinds plus a duplicate, which would let one tagged encoding
+			// silently drop out of the comparison while the gate still read 6.
+			seenTemporalKinds := map[reflect.Type]struct{}{}
 			for key, want := range eager {
 				got := expr.Null
 				if v, found := res.RelProperty(relSrc, key); found {
@@ -538,12 +542,13 @@ func TestLazyRelationshipPropertyIsByteIdenticalToTheEagerMap(t *testing.T) {
 				switch want.(type) {
 				case expr.DateValue, expr.LocalDateTimeValue, expr.DateTimeValue,
 					expr.LocalTimeValue, expr.TimeValue, expr.DurationValue:
-					seenTemporal++
+					seenTemporalKinds[reflect.TypeOf(want)] = struct{}{}
 				}
 			}
-			if seenTemporal != len(lazyRelTempProps) {
-				t.Errorf("the fixture decoded %d temporal properties, expected all %d tagged kinds; "+
-					"the temporal half of the comparison is incomplete", seenTemporal, len(lazyRelTempProps))
+			if len(seenTemporalKinds) != len(lazyRelTempProps) {
+				t.Errorf("the fixture decoded %d DISTINCT temporal kinds (%v), expected all %d tagged "+
+					"encodings; the temporal half of the comparison is incomplete",
+					len(seenTemporalKinds), seenTemporalKinds, len(lazyRelTempProps))
 			}
 
 			// An absent key must read null through the lazy path exactly as it
@@ -773,19 +778,9 @@ func TestLazyRelationshipDeletedRelationshipTakesTheEagerPath(t *testing.T) {
 // containsAll reports whether s contains every substring.
 func containsAll(s string, subs ...string) bool {
 	for _, sub := range subs {
-		found := false
-		for i := 0; i+len(sub) <= len(s); i++ {
-			if s[i:i+len(sub)] == sub {
-				found = true
-				break
-			}
-		}
-		if !found {
+		if !strings.Contains(s, sub) {
 			return false
 		}
 	}
 	return true
 }
-
-// unusedGraphNodeID keeps the graph import honest if the file is later trimmed.
-var _ = graph.NodeID(0)

@@ -13858,9 +13858,22 @@ func buildRowCtx(row exec.Row, rs rowSchema, g *lpg.ReadView[string, float64], b
 //
 // A variable flagged needsWholeNode (or any variable when the analysis bailed)
 // falls back to the full eager upgrade, so semantics are preserved exactly.
-// scalarUse therefore MUST NOT be supplied by any caller whose RowContext value
-// can flow into a result row (e.g. the projection general path), because a
-// partially-materialised node would serialise a truncated property map.
+//
+// The invariant is PER VARIABLE, not per caller. An earlier form of this comment
+// said scalarUse "MUST NOT be supplied by any caller whose RowContext value can
+// flow into a result row", which is coarser than what the code relies on and is
+// already contradicted by newAggregationEval: it supplies a use on a path whose
+// value DOES flow into the projected row. What actually has to hold is that a
+// variable whose value can flow WHOLE into a result row is not gated — and that
+// is exactly what needsWholeNode records. Omitting a variable, and gating one
+// used only through scalar shapes, are sound on any caller.
+//
+// Enforcement lives at two points, and both must keep the needsWholeNode term:
+// [upgradeNodeIDToValuePartial] for nodes, and [relLazyRoute] for relationships,
+// whose needsWholeNode check is the ONLY thing standing between collect(r) and a
+// partially-materialised relationship in a result row. Such a value would not
+// merely serialise a truncated property map: it also carries a reference to the
+// pinned ReadView past the query's visibility barrier.
 func buildRowCtxWithUse(row exec.Row, rs rowSchema, g *lpg.ReadView[string, float64], bopts *buildOpts, scalarUse map[string]*nodeScalarUse) expr.RowContext {
 	ctx := make(expr.RowContext, rs.width)
 	// arena nil: this path allocates a fresh map (escaping/eager callers) and so
