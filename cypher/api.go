@@ -14325,6 +14325,10 @@ func slotHoldsHandle(g *lpg.ReadView[string, float64], srcID, dstID graph.NodeID
 // single-goroutine ownership contract a reused struct would carry. See the
 // #2388 measurement record.
 func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.ReadView[string, float64], bopts *buildOpts, relUse *nodeScalarUse) (expr.Value, bool) {
+	// The oracle for "the relationship is resolved once per row" (#2658): one count
+	// per mapper-resolution + [relStoredInverted] + by-handle-routing pass. Gated,
+	// so it costs a predicted branch when off — see [projFusionCountersOn].
+	countRelRowBind()
 	if meta.edgeCol >= len(row) {
 		return nil, false
 	}
@@ -15102,6 +15106,18 @@ func buildIRProjection(
 	// integer property (Return4 [3]).
 	inputSchema := copySchema(schema)
 	_ = inputSchema // referenced below in fast-path branches
+	// generalSnap is ONE schema snapshot shared by every general-path item in this
+	// body, built on the first item that needs it. Every such item resolves against
+	// the SAME input layout — the loop below does not touch the schema map, its
+	// per-item update being deferred to the post-projection reset — so the per-item
+	// copies this replaces were N copies of one map. Lazy, so a projection made
+	// entirely of fast-path items still snapshots nothing.
+	var generalSnap rowSchema
+	var generalSnapReady bool
+	// fusable collects the general-path items — the only ones that build a row
+	// context — so the fusion decision can be taken after the pass, when every
+	// item's materialisation analysis is known. See projection_fusion.go (#2658).
+	var fusable []fusableProjItem
 	for i, item := range items {
 		name := item.Name
 		exprStr := item.Expression
@@ -15694,7 +15710,11 @@ func buildIRProjection(
 			}
 			if evalFn == nil {
 				// General path: evaluate full AST expression with loaded RowContext.
-				schemaSnap := newRowSchema(copySchema(schema))
+				if !generalSnapReady {
+					generalSnap = newRowSchema(copySchema(schema))
+					generalSnapReady = true
+				}
+				schemaSnap := generalSnap
 				capturedExpr := item.Expr
 				capturedG := g
 				capturedParams := params
@@ -15723,7 +15743,12 @@ func buildIRProjection(
 				if projectsWholeNode {
 					scalarUse = nil
 				}
+				// scalarUse is now the GATED analysis — exactly what this item's
+				// closure hands populateRowCtx — which is what the fusion union
+				// must be built from (#2658).
+				fusable = append(fusable, fusableProjItem{idx: i, expr: capturedExpr, use: scalarUse})
 				evalFn = func(row exec.Row) (expr.Value, error) {
+					countProjRowCtxBuild()
 					return evalRowPooled(capturedBopts, capturedExpr, row, schemaSnap, capturedG, capturedParams, capturedReg, scalarUse)
 				}
 			}
@@ -15844,6 +15869,22 @@ func buildIRProjection(
 	for k, v := range keep {
 		schema[k] = v
 	}
+	// Projection fusion (rmp #2658): give every general-path item ONE shared
+	// per-row [expr.RowContext] instead of one each, so a body that reads two
+	// properties off the same bound entity resolves that entity once per ROW rather
+	// than once per COLUMN. The replacement closures are installed BEFORE the
+	// columnar builders below, because those capture [exec.ProjectionItem.Eval] by
+	// value as their per-row fallback and would otherwise capture the unfused one.
+	// Declines — leaving the body exactly as the loop built it — below two
+	// general-path items, and whenever the shared materialisation level would
+	// demote any single item; see projection_fusion.go.
+	var projBinder exec.RowBinder
+	if binder, fns := newProjRowBinder(fusable, generalSnap, g, params, reg, bopts); binder != nil {
+		for k := range fusable {
+			projItems[fusable[k].idx].Eval = fns[k]
+		}
+		projBinder = binder
+	}
 	// Late-materialisation columnar projection (#1704 P2, #1823): when EVERY item
 	// is a plain scalar-property access on a bound node, build a [exec.ColumnarProject]
 	// that fills a typed Chunk and boxes only at the sink. Each filler carries the
@@ -15859,7 +15900,7 @@ func buildIRProjection(
 	if columnarProj, ok, cErr := tryBuildColumnarProjection(items, projItems, child, inputSchema, g, bopts); cErr != nil {
 		return nil, cErr
 	} else if ok {
-		return columnarProj, nil
+		return attachProjRowBinder(columnarProj, projBinder), nil
 	}
 	// Late-materialisation columnar SCALAR-COLUMN passthrough (#2045): when EVERY
 	// item is a plain variable naming a scalar column the columnar child already
@@ -15873,13 +15914,36 @@ func buildIRProjection(
 	if passthrough, ok, pErr := tryBuildColumnarScalarPassthrough(items, projItems, child, inputSchema, bopts); pErr != nil {
 		return nil, pErr
 	} else if ok {
-		return passthrough, nil
+		return attachProjRowBinder(passthrough, projBinder), nil
 	}
 	p, err := exec.NewProject(child, projItems)
 	if err != nil {
 		return nil, err
 	}
-	return applyProjectionRowBudget(p, bopts), nil
+	return attachProjRowBinder(applyProjectionRowBudget(p, bopts), projBinder), nil
+}
+
+// attachProjRowBinder installs b on the projection operator op, so op brackets
+// every per-row item loop it drives with one shared binding context (#2658).
+//
+// It type-switches rather than taking a concrete type because buildIRProjection
+// returns three shapes — a plain [exec.Project], a [exec.ColumnarProject], and a
+// columnar scalar passthrough (also a ColumnarProject) — and all three drive the
+// same [exec.ProjectionItem] closures row-at-a-time. A nil b is the "not fused"
+// case and leaves op untouched. Anything else is returned unchanged: the profiler
+// wrapper is applied later, by buildOperator's single wrap point, so no wrapped
+// operator reaches this function.
+func attachProjRowBinder(op exec.Operator, b exec.RowBinder) exec.Operator {
+	if b == nil {
+		return op
+	}
+	switch p := op.(type) {
+	case *exec.ColumnarProject:
+		p.WithRowBinder(b)
+	case *exec.Project:
+		p.WithRowBinder(b)
+	}
+	return op
 }
 
 // tryBuildColumnarProjection builds a [exec.ColumnarProject] for a projection all

@@ -237,11 +237,20 @@ func (op *ColumnarProject) FillChunk(dst *Chunk, maxRows int) (int, error) {
 		if !ok {
 			break
 		}
+		// The ROW-input arm pulls the child row-at-a-time, so it owes the shared
+		// per-row binding context exactly as [Project.Next] does: a filler that
+		// cannot take its unboxed fast path falls back to the item's own eval
+		// closure, which reads whatever the binder made current. A no-op when no
+		// binder is installed. fillChunkFromChunk is deliberately NOT given this
+		// treatment — it is genuinely column-major and evaluates no row context.
+		op.bindRow(op.inputRow)
 		for col, fill := range op.fillers {
 			if err := fill(op.inputRow, dst, col); err != nil {
+				op.releaseRow()
 				return n, fmt.Errorf("exec: ColumnarProject column %d: %w", col, err)
 			}
 		}
+		op.releaseRow()
 		if bErr := op.chargeChunkRow(dst); bErr != nil {
 			return n, bErr
 		}
