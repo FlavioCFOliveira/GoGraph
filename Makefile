@@ -1,4 +1,21 @@
-SHELL := /usr/bin/env bash
+# The recipe shell, and WHY the flags are on SHELL itself and not only on
+# .SHELLFLAGS (rmp #2672). `.SHELLFLAGS` was introduced in GNU Make 3.82, and
+# macOS still ships GNU Make 3.81, where it is silently IGNORED — not warned
+# about, ignored. Under 3.81 that left EVERY recipe line in this file without
+# -e, -u and -o pipefail, and the consequence was measured, not theorised:
+# `test-short` runs `go test ... | pkg_time_budget.sh`, so without pipefail the
+# line reported only the budget script's status, and a run with a genuinely
+# FAILING package (bench/audit352) came back as `MAKE_CI_EXIT=0` with make going
+# on to run test-timing, lint and cover-gate. The gate could not fail on a test
+# failure at all; every red it had ever produced was a cost red.
+#
+# Carrying the flags on SHELL works on BOTH 3.81 and 3.82+, so there is ONE
+# regime instead of two, and it fixes all recipe lines at once rather than
+# leaving each future pipeline to remember `set -o pipefail` for itself.
+# .SHELLFLAGS is kept so a 3.82+ make is still configured the way it documents;
+# the duplicated flags are idempotent in bash. `shell-guard` below PROVES the
+# regime is active rather than trusting it.
+SHELL := /usr/bin/env bash -o pipefail -e -u
 .SHELLFLAGS := -eu -o pipefail -c
 .DEFAULT_GOAL := help
 
@@ -22,6 +39,31 @@ GOLANGCI_LINT_VERSION ?= v2.13.1
 help: ## Show this help
 	@awk 'BEGIN { FS = ":.*##"; printf "Available targets:\n" } /^[a-zA-Z_-]+:.*##/ { printf "  \033[1m%-16s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
+# shell-guard turns the assumption above into an assertion. It is a prerequisite
+# of `ci` and of `test-short`, so the gate cannot run in a regime where a test
+# failure would be invisible. It probes the ACTUAL recipe shell -- `$$-` carries
+# the current option letters and `[[ -o pipefail ]]` reads the option directly --
+# rather than comparing version strings, because the thing that matters is
+# whether the flags are in force, not which make is installed.
+.PHONY: shell-guard
+shell-guard: ## Assert the recipe shell really has -e, -u and -o pipefail (rmp #2672)
+	@missing=""; \
+	 case "$$-" in *e*) ;; *) missing="$$missing -e";; esac; \
+	 case "$$-" in *u*) ;; *) missing="$$missing -u";; esac; \
+	 if [[ -o pipefail ]]; then :; else missing="$$missing -o=pipefail"; fi; \
+	 if [ -n "$$missing" ]; then \
+	   echo "shell-guard: FATAL - the recipe shell is missing:$$missing"; \
+	   echo "  running make: $(MAKE_VERSION)"; \
+	   echo "  .SHELLFLAGS requires GNU Make 3.82+; this Makefile therefore also"; \
+	   echo "  carries the flags on SHELL itself so that 3.81 is covered too."; \
+	   echo "  If you are seeing this, SHELL was changed or overridden. Restore it:"; \
+	   echo "  without -o pipefail, a FAILING 'go test' inside test-short's pipeline"; \
+	   echo "  reports exit 0 and the whole gate silently stops detecting failures"; \
+	   echo "  (rmp #2672)."; \
+	   exit 1; \
+	 fi; \
+	 echo "shell-guard: OK (-e -u -o pipefail active; make $(MAKE_VERSION))"
+
 .PHONY: tidy
 tidy: ## Run go mod tidy
 	$(GO) mod tidy
@@ -29,7 +71,14 @@ tidy: ## Run go mod tidy
 .PHONY: fmt
 fmt: ## Format all Go sources
 	$(GO) fmt $(PACKAGES)
-	@command -v goimports >/dev/null 2>&1 && goimports -w . || echo "goimports not installed; skipping (install: go install golang.org/x/tools/cmd/goimports@latest)"
+# `&& goimports -w . || echo ...` used to report "not installed" when goimports
+# was installed and FAILED, and exit 0 either way. The if/else distinguishes the
+# two: a missing tool is skipped, a failing tool fails the target.
+	@if command -v goimports >/dev/null 2>&1; then \
+	   goimports -w .; \
+	 else \
+	   echo "goimports not installed; skipping (install: go install golang.org/x/tools/cmd/goimports@latest)"; \
+	 fi
 
 .PHONY: vet
 vet: ## Run go vet
@@ -154,9 +203,13 @@ export SOFT_BUDGET HARD_BUDGET PKG_HARD_BUDGET_OVERRIDES
 # output through VERBATIM, so what the developer sees is unchanged, and it reads
 # the plain "ok<TAB>pkg<TAB>0.330s" summary lines rather than -json, because
 # -json implies -v and would bury the run in per-test noise for the identical
-# numbers. pipefail (.SHELLFLAGS, line 2) keeps a test failure failing: the
-# budget check cannot mask it.
-test-short: ## [layer: short]   local default — race detector, no build tags, per-package cost budget (SHORT_TIMEOUT/SOFT_BUDGET/HARD_BUDGET overridable)
+# numbers. pipefail keeps a test failure failing, so the budget check cannot mask
+# it -- but ONLY because the flags are carried on SHELL itself (see the header).
+# This comment previously credited `.SHELLFLAGS`, which needs GNU Make 3.82+; on
+# the 3.81 macOS ships it was inert, this pipeline reported the budget script's
+# status alone, and a real `FAIL` read as exit 0 (rmp #2672). `shell-guard` is a
+# prerequisite of this target so that regime cannot return unnoticed.
+test-short: shell-guard ## [layer: short]   local default — race detector, no build tags, per-package cost budget (SHORT_TIMEOUT/SOFT_BUDGET/HARD_BUDGET overridable)
 	GOGRAPH_PARALLEL_SUITE=1 $(GO) test $(RACE_FLAGS) -count=1 -timeout=$(SHORT_TIMEOUT) $(PACKAGES) | bash scripts/pkg_time_budget.sh
 
 # TIMING_PKGS are the packages holding short-layer assertions whose subject is a
@@ -317,13 +370,13 @@ lint: ## Run golangci-lint (auto-install if missing)
 	golangci-lint run $(PACKAGES)
 
 .PHONY: ci
-ci: tidy fmt vet build test-short test-timing lint cover-gate ## Full CI pipeline: tidy + fmt + vet + build + test-short + test-timing + lint + cover-gate
+ci: shell-guard tidy fmt vet build test-short test-timing lint cover-gate ## Full CI pipeline: tidy + fmt + vet + build + test-short + test-timing + lint + cover-gate
 
 .PHONY: ci-soak
-ci-soak: tidy fmt vet build test-soak test-timing lint cover-gate ## CI pipeline with soak layer: like ci but runs test-soak
+ci-soak: shell-guard tidy fmt vet build test-soak test-timing lint cover-gate ## CI pipeline with soak layer: like ci but runs test-soak
 
 .PHONY: ci-nightly
-ci-nightly: tidy fmt vet build test-nightly test-timing lint cover-gate ## CI pipeline with nightly layer: like ci but runs test-nightly
+ci-nightly: shell-guard tidy fmt vet build test-nightly test-timing lint cover-gate ## CI pipeline with nightly layer: like ci but runs test-nightly
 
 .PHONY: smoke
 smoke: ## Quick PR pre-flight: tidy + fmt + vet + build + short unit tests (no race, no lint, no cover-gate)
@@ -365,7 +418,7 @@ release-check: ## Dry-run goreleaser against the local checkout (snapshot mode, 
 
 .PHONY: release-accuracy
 release-accuracy: ## Release-accuracy checks only (Phase A): CHANGELOG/release-notes/README/SECURITY/benchmark-doc consistency for VERSION. This is the only gate the release.yml CI job runs; correctness (vet/build/-race/lint/TCK), coverage and the crash battery are enforced LOCALLY by `make release-preflight` before the tag is pushed.
-	@test -n "$$VERSION" || { echo "set VERSION=vX.Y.Z"; exit 1; }
+	@test -n "$${VERSION:-}" || { echo "set VERSION=vX.Y.Z"; exit 1; }
 	@echo "release-accuracy: VERSION=$$VERSION"
 	@v_no_prefix=$$(echo "$$VERSION" | sed 's/^v//'); \
 	  grep -q "## \[$$v_no_prefix\]" CHANGELOG.md \
@@ -400,6 +453,7 @@ release-preflight: ## Canonical LOCAL release gate (`make release` calls this) �
 .PHONY: release
 release: release-preflight ## Run goreleaser to publish a release for the current tag — requires VERSION and a clean tree
 	@test -z "$$(git status --porcelain)" || { echo "working tree dirty"; exit 1; }
+	@test -n "$${VERSION:-}" || { echo "set VERSION=vX.Y.Z"; exit 1; }
 	@git rev-parse "$$VERSION" >/dev/null 2>&1 || { echo "tag $$VERSION does not exist; create it first"; exit 1; }
 	@command -v goreleaser >/dev/null 2>&1 || { echo "goreleaser not installed"; exit 1; }
 	GOVERSION=$$($(GO) version | awk '{print $$3}') goreleaser release --clean
