@@ -72,7 +72,24 @@ should not be quoted as a scaling result for the engine.
 Ranked by severity: anti-scaling first, then absolute delay. "Share" is the
 site's percentage of all mutex delay in that workload.
 
-### 1 — The global write barrier · CRITICAL
+> **CORRECTION, same day.** Site 1 was mis-attributed when first written; the
+> correction is recorded here rather than by silently rewriting the section. It was
+> named on the strength of a **cumulative** ranking, but `lpg.go:1342` is
+> `return 0, fn(WriteTx{w: w})` — the statement-body call — so a `-cum` share there
+> says only "the delay is somewhere inside the write", which is close to tautological.
+> `pprof -peek` shows the gate costs **microseconds** (`beginWrite` 6.83 µs,
+> `finishWriteSharedInstant` 14.33 µs), and `graph/mvcc.Gate` is already a striped
+> weak/strong gate with 64 cache-line-padded slots.
+>
+> **The real terminal site is `graph/lpg/lpg.go:2893` — the `sh.mu.Lock()` in
+> `setNodeLabelInfo` — holding 14.48 s, 75.5% of all mutex delay in the write
+> workload.** Chain: `CreateNode.Next` → `SetNodeLabel` (92.39%) →
+> `setNodeLabelInfo` → `sync.RWMutex.Unlock` (94.53%). The node-label map is
+> already sharded, so the lever is the **width of the critical section** — it spans
+> the label-bag mutation, the MVCC write-write conflict test, delta stamping and
+> `index/label.Index.Add` — not the shard count.
+
+### 1 — The node-label write path · CRITICAL
 
 | | |
 |---|---|
@@ -130,6 +147,19 @@ Tracked as **rmp #2682**.
 
 Mandate 3 states that a hot path serialising every caller on a single global
 lock is "a defect against this mandate, not merely a missed optimisation".
+
+**Follow-up measurement corrects the cause.** Running the same workload with the
+write fraction set to **zero** still collapses to **0.348× at 8** and then goes
+flat (0.354 @64, 0.357 @1024). So the 1.000 → 0.35 cliff is the **reader's own
+`RLock`/`RUnlock`** — two atomic read-modify-writes on one cache line, saturating
+at ~9.3M pairs/s, a hardware coherence ceiling rather than queueing. Only the
+further decay 0.368 → 0.162 is writer exclusion. Shortening the writer's critical
+section alone therefore cannot fix this: **the read path must take no lock at
+all.** A control arm with lock-free traversal but a global write mutex reached
+7.9× on pure reads and only **1.6×** on the 90/10 mix — 10% of operations on a
+global lock cost 4.6× of achieved throughput. Both halves must be fixed together.
+Measured ceiling with zero read synchronisation on this host: **7.61×**, not 10×
+(4 performance + 6 efficiency cores).
 
 Tracked as **rmp #2683**.
 
