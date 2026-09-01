@@ -87,7 +87,7 @@ func (g *Graph[N, W]) reclaimLabelVersions(watermark uint64) int {
 			// The head itself unreachable means the node keeps no history at
 			// all, so the map entry goes with it and the shard shrinks.
 			if head.stampTS() <= watermark {
-				freed += labelChainLen(head)
+				freed += releaseLabelChain(head, &g.labelChurn)
 				delete(sh.d, id)
 				continue
 			}
@@ -97,7 +97,7 @@ func (g *Graph[N, W]) reclaimLabelVersions(watermark uint64) int {
 			retained := 1
 			for d := head; d.next != nil; d = d.next {
 				if d.next.stampTS() <= watermark {
-					freed += labelChainLen(d.next)
+					freed += releaseLabelChain(d.next, &g.labelChurn)
 					d.next = nil
 					break
 				}
@@ -189,9 +189,22 @@ func (d *nodePropDelta) stampTS() uint64 {
 	return d.ts
 }
 
-func labelChainLen(d *nodeLabelDelta) int {
+// releaseLabelChain counts the deltas from d to the end of the chain and drops
+// the per-label churn hold each of them owns (rmp #2686).
+//
+// The count and the release are ONE walk because they must name the same set:
+// every delta this reclamation makes unreachable is a suspect that has stopped
+// being one, and its hold — taken by [nodeLabelShard.pushLabelDelta] — has to go
+// with it or the label is pinned to the slow path for the life of the process.
+//
+// The caller holds the shard's write lock, so the chain cannot move underneath
+// the walk. Releasing under that lock is deliberate: the deltas are already
+// unreachable from any reader by the watermark argument this file opens with, so
+// the hold can only be over-counting from here, which is the safe direction.
+func releaseLabelChain(d *nodeLabelDelta, churn *labelChurn) int {
 	n := 0
 	for ; d != nil; d = d.next {
+		churn.release(d.lid)
 		n++
 	}
 	return n

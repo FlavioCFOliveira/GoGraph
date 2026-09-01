@@ -33,6 +33,7 @@ package lpg
 //     the caller falls back to counting the filtered scan otherwise.
 
 import (
+	"slices"
 	"sync"
 
 	"github.com/RoaringBitmap/roaring/v2/roaring64"
@@ -142,6 +143,11 @@ func (g *Graph[N, W]) deferLabelIndexRemoval(lid uint32, id graph.NodeID, tx *wr
 	g.idxDeferred.mu.Unlock()
 	if !existed {
 		g.idxPendingActive.Add(1)
+		// The per-label hold this entry owns. Raised while the bag write that
+		// caused it is still under the shard lock, so it is in place before any
+		// reader can observe the bag and the bitmap disagreeing. Released by
+		// whichever of cancel / apply / withdraw takes the key back out.
+		g.labelChurn.raise(LabelID(lid))
 	}
 	return true
 }
@@ -169,6 +175,7 @@ func (g *Graph[N, W]) cancelDeferredIndexRemoval(lid uint32, id graph.NodeID) {
 	g.idxDeferred.mu.Unlock()
 	if existed {
 		g.idxPendingActive.Add(-1)
+		g.labelChurn.release(LabelID(lid))
 	}
 }
 
@@ -234,6 +241,14 @@ func (g *Graph[N, W]) applyDeferredIndexRemovals(watermark uint64) int {
 
 	if n := len(ready); n > 0 {
 		g.idxPendingActive.Add(-int64(n))
+		// AFTER the bitmap removals above, never before: while the gate is still
+		// raised a reader can only take the slow path and find nothing to do,
+		// which is the over-counting direction. Lowering first would open a
+		// window in which the clone still carries the entry and the reader is
+		// told the label is quiet.
+		for _, k := range ready {
+			g.labelChurn.release(LabelID(k.lid))
+		}
 		return n
 	}
 	return 0
@@ -262,25 +277,94 @@ func (g *Graph[N, W]) IndexRemovalBacklog() int64 { return g.idxPendingActive.Lo
 //
 // Safe for concurrent use.
 func (g *Graph[N, W]) LabelBitmapAsOf(lid LabelID, s *Snapshot) *roaring64.Bitmap {
-	return g.labelBitmapAsOfFiltered(s,
+	return g.labelBitmapAsOfFiltered(s, oneLabel(lid),
 		func() *roaring64.Bitmap { return g.nodeIdx.Intersect(uint32(lid)) },
 		func(bag labelBag) bool { return bag.has(lid) })
 }
 
 // labelBitmapAsOfFiltered is the shared body of [Graph.LabelBitmapAsOf] and
-// [Graph.LabelsBitmapAsOf]: clone, decide, correct.
+// [Graph.LabelsBitmapAsOf]: gate, clone, decide, correct.
 //
 // It samples the suspect set BEFORE clone() as well as after, and corrects against
-// both. See [Graph.suspectNodes] for why one post-clone sample is not enough and
-// why widening the sample instead of dropping its gates is the only sound direction.
-func (g *Graph[N, W]) labelBitmapAsOfFiltered(s *Snapshot, clone func() *roaring64.Bitmap, want func(labelBag) bool) *roaring64.Bitmap {
-	pre := g.suspectNodes()
+// the DEDUPLICATED union of both. See [Graph.suspectNodes] for why one post-clone
+// sample is not enough and why widening the sample instead of dropping its gates is
+// the only sound direction.
+//
+// # The per-label gate comes first (rmp #2686)
+//
+// ls names the labels this read concerns, and [Graph.churnLive] answers whether any
+// of them has a live suspect at all. When none has, the whole apparatus is skipped:
+// no shard walk, no clone-spanning sample, no correction. That is the whole of a
+// read-only workload and — far more importantly — the whole of a mixed one whose
+// writers touch a label the readers do not scan, which measured 93 to 1049 suspects
+// visited per read for 0.0000 bits changed.
+//
+// # It does not weaken the ADD-WINDOW gate, and that had to be checked
+//
+// [Graph.labelBitmapNeedsFilter] answers yes for EVERY reader while idxAddActive
+// is non-zero, because in that window the bag says a label is present and the
+// bitmap does not yet — the one direction that loses a row rather than
+// over-reporting it. This gate sits in FRONT of that one, so it would be able to
+// override it. It cannot: the window is opened only by a write that pushed a
+// delta ([Graph.setNodeLabelInfo] hoists only when `versioned`), the delta raises
+// this gate for that same lid under the shard lock before idxAddActive goes up,
+// and no sweep can reclaim it while the writer's own transaction holds the
+// horizon back. So the gate is live for the whole of any window this one could
+// hide. Pinned by TestLabelIndexAddWindow_BitmapReaderNeverLosesARow.
+//
+// The gate is consulted TWICE, at exactly the two instants the suspect set is
+// sampled, and for the same reason. A gate reading zero before the clone cannot be
+// hiding a suspect that drains across it: a hold is released only after the change
+// it covers has stopped being observable, so zero at the pre-sample means there was
+// nothing to sample. A hold that ARRIVES across the clone raises the gate before it
+// makes its change observable, so the post-clone check sees it and the post-clone
+// sample catches the node.
+//
+// # The union is deduplicated, and that is not cosmetic
+//
+// A node lands in the suspect set once per source it appears in — the label-delta
+// map AND the life born/died maps are the ordinary pair — and the set is sampled
+// twice, so rmp #2686 measured the same id arriving 3.6 to 4.0 times. Each arrival
+// costs a bitmap probe and, until the gate short-circuits it, two shard read locks.
+// The correction is idempotent so the duplicates were harmless; they were never
+// free.
+func (g *Graph[N, W]) labelBitmapAsOfFiltered(s *Snapshot, ls labelSet, clone func() *roaring64.Bitmap, want func(labelBag) bool) *roaring64.Bitmap {
+	preLive := g.churnLive(ls)
+	var pre []graph.NodeID
+	if preLive {
+		pre = g.appendSuspects(nil)
+	}
 	bm := clone()
+	postLive := g.churnLive(ls)
+	if !preLive && !postLive {
+		// No label this read concerns has a live suspect on either side of the
+		// clone, so no member of this bitmap can differ from what s should see.
+		return bm
+	}
 	if !g.labelBitmapNeedsFilter(s) && len(pre) == 0 {
 		return bm
 	}
-	g.correctBitmapOver(bm, s, want, append(pre, g.suspectNodes()...))
+	sus := pre
+	if postLive {
+		sus = g.appendSuspects(sus)
+	}
+	g.correctBitmapOver(bm, s, want, dedupSuspects(sus))
 	return bm
+}
+
+// dedupSuspects sorts and compacts the suspect union in place.
+//
+// Sorting rather than hashing: the set is small (tens to low thousands), the ids
+// are integers, and a map would allocate on a path whose entire purpose is to
+// allocate as little as possible. The ascending order is a small extra win — the
+// two probes that follow are keyed on the id, so the shard each one lands in walks
+// in a repeating cycle rather than at random.
+func dedupSuspects(ids []graph.NodeID) []graph.NodeID {
+	if len(ids) < 2 {
+		return ids
+	}
+	slices.Sort(ids)
+	return slices.Compact(ids)
 }
 
 // correctBitmapOver adjusts bm in place so it describes s rather than the present,
@@ -308,19 +392,34 @@ func (g *Graph[N, W]) labelBitmapAsOfFiltered(s *Snapshot, clone func() *roaring
 func (g *Graph[N, W]) correctBitmapOver(bm *roaring64.Bitmap, s *Snapshot, want func(labelBag) bool, suspects []graph.NodeID) {
 	// Every shard lock is RELEASED before the first check runs; see
 	// [Graph.suspectNodes].
+	//
+	// The MEMBERSHIP TEST IS FIRST, and it decides which of the two probes is
+	// worth taking first after it. bm.Contains is a lock-free read of a bitmap
+	// this goroutine owns; NodeExistsAsOf takes the LIFE shard lock and
+	// labelBagTest takes the LABEL shard lock, in that order and never nested —
+	// the two are different locks, and the bag is consumed inside its own.
+	// `should` is the same predicate on both arms; only the order in which its
+	// two halves are evaluated differs, and && makes the cheaper refutation the
+	// one that runs first.
 	for _, id := range suspects {
-		present := bm.Contains(uint64(id))
-		// NodeExistsAsOf takes the LIFE shard lock and labelBagTest takes the
-		// LABEL shard lock, in that order and never nested — the two are
-		// different locks, and the bag is consumed inside its own.
-		should := g.NodeExistsAsOf(id, s) && g.labelBagTest(id, s, want)
-		switch {
-		case present && !should:
-			bm.Remove(uint64(id))
-		case !present && should:
-			// Reachable only if an index entry was dropped despite the
-			// deferral. Adding it back is the safe direction: a missing member
-			// is a silently lost row.
+		if bm.Contains(uint64(id)) {
+			// A member LEAVES when the node is dead as of s, or when it has lost
+			// the label. Existence first: a suspect that is in this bitmap is
+			// normally there because it carries the label, so the discriminating
+			// half is the life record, and a dead node needs no bag resolution
+			// at all.
+			if !g.NodeExistsAsOf(id, s) || !g.labelBagTest(id, s, want) {
+				bm.Remove(uint64(id))
+			}
+			continue
+		}
+		// A non-member is ADDED back only when the versioned bag actually wants
+		// the label — the hoisted add window of rmp #2681, or an index entry
+		// dropped despite the deferral. Label first: a suspect that is churning
+		// some OTHER label fails this test, and then the life shard is never
+		// touched for it at all. Adding it back is the safe direction when it
+		// does pass: a missing member is a silently lost row.
+		if g.labelBagTest(id, s, want) && g.NodeExistsAsOf(id, s) {
 			bm.Add(uint64(id))
 		}
 	}
@@ -368,8 +467,12 @@ func (g *Graph[N, W]) correctBitmapOver(bm *roaring64.Bitmap, s *Snapshot, want 
 // and corrects against the union: the pre-clone sample cannot have been drained by a
 // sweep that had not yet happened, and the post-clone sample catches churn that
 // arrived later. Both are gated, so a withdrawn delta is excluded from both.
-func (g *Graph[N, W]) suspectNodes() []graph.NodeID {
-	var out []graph.NodeID
+func (g *Graph[N, W]) suspectNodes() []graph.NodeID { return g.appendSuspects(nil) }
+
+// appendSuspects is [Graph.suspectNodes] appending into a slice the caller owns,
+// so the pre-clone and post-clone samples share ONE allocation and the union does
+// not have to be spliced together afterwards.
+func (g *Graph[N, W]) appendSuspects(out []graph.NodeID) []graph.NodeID {
 	if g.labelDeltaActive.Load() != 0 {
 		for i := range g.nodeLabelShards {
 			sh := &g.nodeLabelShards[i]
@@ -411,7 +514,7 @@ func (g *Graph[N, W]) LabelsBitmapAsOf(lids []LabelID, s *Snapshot) *roaring64.B
 	for i, l := range lids {
 		raw[i] = uint32(l)
 	}
-	return g.labelBitmapAsOfFiltered(s,
+	return g.labelBitmapAsOfFiltered(s, manyLabels(lids),
 		func() *roaring64.Bitmap { return g.nodeIdx.Intersect(raw...) },
 		func(bag labelBag) bool {
 			for _, l := range lids {

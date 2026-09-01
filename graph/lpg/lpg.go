@@ -820,6 +820,13 @@ type Graph[N comparable, W any] struct {
 	// the lock-free gate and the observable backlog. See mvcc_index.go.
 	idxDeferred      deferredIdx
 	idxPendingActive atomic.Int64
+	// labelChurn narrows the three counters above from "is ANY node suspect" to
+	// "is any node suspect FOR THIS LABEL", so a reader scanning a quiet label
+	// skips the suspect gathering and the correction entirely. It is the index
+	// that makes that question answerable without walking the side maps; see
+	// mvcc_label_churn.go for the storage, and for the invariant that it may
+	// over-count but must never under-count.
+	labelChurn labelChurn
 	// idxAddActive counts the versioned label writes currently between claiming
 	// a label in the bag and having it in the label-index bitmap. It does two
 	// jobs at once, and [Graph.setNodeLabelInfo] explains both.
@@ -2958,7 +2965,7 @@ func (g *Graph[N, W]) setNodeLabelInfo(n N, name string, tx *writeCtx) error {
 	versioned := false
 	if g.labelDeltasEnabled() && !bag.has(lid) {
 		ci, ts := g.deltaStamp(tx.record())
-		sh.pushLabelDelta(id, undoRemoveLabel, lid, ci, ts, &g.labelDeltaActive)
+		sh.pushLabelDelta(id, undoRemoveLabel, lid, ci, ts, &g.labelDeltaActive, &g.labelChurn)
 		versioned = true
 	}
 	bag.add(lid)
@@ -3110,6 +3117,29 @@ func (g *Graph[N, W]) removeNodeInfo(n N, tx *writeCtx) {
 	if !ok {
 		return
 	}
+	// A SCOPED CHURN HOLD ACROSS THE WHOLE RETIREMENT (rmp #2686).
+	//
+	// This retirement moves the node out of every one of its label bitmaps, and
+	// it does so in three steps that do not happen together: the tombstone flip,
+	// the death record, and the deferred index removals. Each of the last two
+	// takes a hold of its own, but the AUTOCOMMIT path writes the death record in
+	// a deferred call that runs after both of the others, so between the flip and
+	// the strip there would be an instant at which the node is dead, still in
+	// every bitmap, and the gate says its labels are quiet.
+	//
+	// Registered FIRST so it is released LAST — defers run in reverse — which is
+	// after the death record and after the deferred removals have taken theirs.
+	// A refusal below returns through it having mutated nothing.
+	var bagLids []LabelID
+	if g.mvccArmed {
+		// ONE bag read for the whole retirement: the scoped hold below, the death
+		// record's own hold, and the bitmap strip all need the same set.
+		bagLids = g.nodeLabelBagLids(id)
+		if len(bagLids) > 0 {
+			g.raiseChurnFor(bagLids)
+			defer g.labelChurn.releaseAll(bagLids)
+		}
+	}
 	claimed := false
 	if g.mvccArmed && tx != nil {
 		// CLAIM the death in the existence store BEFORE any mutation (rmp
@@ -3121,7 +3151,7 @@ func (g *Graph[N, W]) removeNodeInfo(n N, tx *writeCtx) {
 		// tombstone bitmap flipped and the label bitmaps were stripped, so a
 		// delete that lost its conflict check had already mutated present
 		// state that a rollback could not fully restore.
-		if !g.noteNodeDied(id, tx) {
+		if !g.noteNodeDied(id, tx, bagLids) {
 			return
 		}
 		claimed = true
@@ -3157,7 +3187,7 @@ func (g *Graph[N, W]) removeNodeInfo(n N, tx *writeCtx) {
 		// records it here, at the flip, exactly as before.
 		if died {
 			if !claimed {
-				g.noteNodeDied(id, tx)
+				g.noteNodeDied(id, tx, bagLids)
 			}
 			g.reclaimAfterDirectWrite(tx)
 		}
@@ -3194,21 +3224,22 @@ func (g *Graph[N, W]) removeNodeInfo(n N, tx *writeCtx) {
 	// via RemoveNodeLabel (the Cypher executor delete path), and
 	// correct when RemoveNode is called directly via the Go API without
 	// prior label removal.
-	g.stripLabelBitmaps(id, tx)
+	g.stripLabelBitmaps(id, bagLids, tx)
 }
 
-// stripLabelBitmaps removes id from every label bitmap that records it.
+// stripLabelBitmaps removes id from every label bitmap in lids.
 // Called by RemoveNode to keep nodeIdx exact so consumers outside the
 // Cypher executor do not need to consult IsTombstoned (task #1409).
-func (g *Graph[N, W]) stripLabelBitmaps(id graph.NodeID, tx *writeCtx) {
-	sh := g.nodeLabelShardFor(id)
-	sh.mu.RLock()
-	bag := sh.m[id]
-	lids := make([]LabelID, 0, bag.len())
-	bag.forEach(func(lid LabelID) {
-		lids = append(lids, lid)
-	})
-	sh.mu.RUnlock()
+//
+// lids is the node's label bag as its caller read it. It is passed in rather than
+// re-read because [Graph.removeNodeInfo] already needs the same set for the churn
+// hold it takes across the whole retirement, and the bag cannot change under it:
+// nothing on this path writes it.
+func (g *Graph[N, W]) stripLabelBitmaps(id graph.NodeID, lids []LabelID, tx *writeCtx) {
+	if !g.mvccArmed {
+		// The disarmed path never read the bag, so read it here.
+		lids = g.nodeLabelBagLids(id)
+	}
 	for _, lid := range lids {
 		// DEFERRED while versioning is armed: a reader older than the removal
 		// must still find this node in the label bitmap, or it silently loses a
@@ -3966,6 +3997,23 @@ func (g *Graph[N, W]) RestoreTombstones(ids []graph.NodeID) {
 	if len(ids) == 0 {
 		return
 	}
+	// PIN THE CHURN GATE FOR ANY LABEL THIS LEAVES DISAGREEING (rmp #2686).
+	//
+	// This is the fourth path that retires a node, and the only exported one. It
+	// records no death instant and strips no label bitmap, so an id it tombstones
+	// while the label index still carries it is a permanent disagreement that
+	// nothing will ever revisit — exactly the shape [Graph.tombstoneAborted] has,
+	// and pinned the same way, before the flip that creates it.
+	//
+	// Recovery, the intended caller, pins nothing: it runs before the graph is
+	// published, and the ids it restores have no index entry yet. The probe is
+	// there because the method is exported and the precondition is a documented
+	// contract rather than an enforced one.
+	for _, id := range ids {
+		if !g.IsTombstoned(id) {
+			g.pinChurnForDivergentBag(id, false)
+		}
+	}
 	g.tombstoneMu.Lock()
 	cur := g.tombstones.Load()
 	var next *roaring64.Bitmap
@@ -4263,7 +4311,7 @@ func (g *Graph[N, W]) removeNodeLabelInfo(n N, name string, tx *writeCtx) {
 		// DELTA is guarded; the conflict test above is not (rmp #2354).
 		if g.labelDeltasEnabled() && bag.has(lid) {
 			ci, ts := g.deltaStamp(tx.record())
-			sh.pushLabelDelta(id, undoAddLabel, lid, ci, ts, &g.labelDeltaActive)
+			sh.pushLabelDelta(id, undoAddLabel, lid, ci, ts, &g.labelDeltaActive, &g.labelChurn)
 		}
 		if bag.del(lid) {
 			// Bag became empty: drop the entry so a node with no labels costs
