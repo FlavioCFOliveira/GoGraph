@@ -31,24 +31,23 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/index"
 )
 
-// sortedInvariantHolds reports whether the B+ tree's leaf chain is
-// strictly ascending under the [cmp.Compare] total order — the
-// precondition every lower-bound search in this package depends on. It
-// walks the leaves low→high (the same order Serialize and Range use) and
-// checks each key against the previous one across leaf boundaries.
+// sortedInvariantHolds reports whether the B+ tree's in-order key
+// sequence is strictly ascending under the [cmp.Compare] total order —
+// the precondition every lower-bound search in this package depends on.
+// It walks the published snapshot low→high with the descent cursor (the
+// same order Serialize and Range use, and the replacement for the leaf
+// chain the pre-COW tree maintained) and checks each key against the
+// previous one across leaf boundaries.
 func sortedInvariantHolds[V cmp.Ordered](i *Index[V]) bool {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
 	var prev V
 	hasPrev := false
-	for l := i.tree.first; l != nil; l = l.next {
-		for k := range l.keys {
-			if hasPrev && cmp.Compare(prev, l.keys[k]) >= 0 {
-				return false
-			}
-			prev = l.keys[k]
-			hasPrev = true
+	var c cursor[V]
+	for c.seekFirst(i.tree.Load()); c.valid(); c.next() {
+		if hasPrev && cmp.Compare(prev, c.key()) >= 0 {
+			return false
 		}
+		prev = c.key()
+		hasPrev = true
 	}
 	return true
 }

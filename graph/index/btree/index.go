@@ -3,9 +3,8 @@
 // the NodeIDs that carry each value.
 //
 // The implementation is a cache-friendly in-memory B+ tree (task
-// #1514): all (value, NodeID-set) data lives in the leaves, internal
-// nodes hold separator keys + child pointers, and leaves are singly
-// linked low→high for forward range scans. Insert and Delete of a
+// #1514): all (value, NodeID-set) data lives in the leaves and internal
+// nodes hold separator keys + child pointers. Insert and Delete of a
 // distinct key are O(log n); point reads (Lookup, Cardinality) are
 // O(log n); a range scan is O(log n + k) over the k keys it spans; and
 // [Index.BulkLoad] builds the tree bottom-up in O(n) from sorted input.
@@ -14,12 +13,78 @@
 // indexed workloads while every read path keeps its prior complexity.
 // The tree internals live in bplus.go.
 //
-// All operations are safe for concurrent use; a single [sync.RWMutex]
-// guards the tree for the whole duration of each operation. Because the
-// mutex fully excludes a writer's split/unlink from any in-flight
-// reader, a reader can never observe a half-applied split or a dangling
-// leaf. The mutex provides index-internal isolation only; transaction
+// # Concurrency
+//
+// Every operation is safe for concurrent use by any number of
+// goroutines, and NO read path takes a lock on the tree (task #2683).
+//
+// The tree is an IMMUTABLE snapshot published through an
+// [atomic.Pointer]. A read performs one atomic load and then traverses
+// the snapshot with no synchronisation at all; nothing it can reach
+// will ever change shape underneath it. A structural write — creating
+// or destroying a key — copies the root-to-leaf path, leaves every
+// off-path node shared, and publishes the new spine with one atomic
+// store, serialised against other structural writes by a mutex that no
+// reader ever acquires. Adding or removing a NodeID under an EXISTING
+// key touches no tree node at all: it takes only that key's own lock,
+// so two writers on different keys never interact and a writer never
+// blocks a reader of another key.
+//
+// This is the Lehman & Yao premise restored. PostgreSQL's own B-tree
+// README (REL_17_2, src/backend/access/nbtree/README lines 63-68)
+// records why it could not use it: "Lehman and Yao don't require read
+// locks, but assume that in-memory copies of tree pages are unshared.
+// Postgres shares in-memory buffers among backends. As a result, we do
+// page-level read locking on btree pages in order to guarantee that no
+// record is modified while we are examining it. This reduces
+// concurrency but guarantees correct behavior." A copy-on-write
+// snapshot makes the pages a reader examines genuinely unshared with
+// any writer, so the read lock that assumption forced is not needed
+// here.
+//
+// What a scan guarantees:
+//
+//   - The KEY SET a scan observes is snapshot-atomic. It is exactly the
+//     set of keys the index held at the instant of the scan's atomic
+//     load: a concurrent structural write can neither add a key to a
+//     scan already in flight nor take one away from it, and a scan can
+//     never observe a half-applied split or a detached node.
+//   - Each key's NodeID set is read at the instant the scan REACHES
+//     that key, not all at one instant. A multi-key scan
+//     ([Index.Range], [Index.RangeFrom], [Index.RangeCount],
+//     [Index.RangeCountFrom], [Index.Serialize]) is therefore not a
+//     point-in-time image of the node sets, and may mix a node added
+//     under an early key before the scan started with one added under a
+//     late key after it started.
+//   - SINGLE-key operations ([Index.Lookup], [Index.LookupAppend],
+//     [Index.Cardinality], [Index.RangeFirst]) ARE atomic with respect
+//     to that key's node set: they hold the key's lock while reading it.
+//
+// The per-key relaxation is sound for both consumers in this module,
+// and both were verified rather than assumed:
+//
+//   - cypher/exec/scan_index_btree.go documents the range result as an
+//     inclusive SUPERSET and stacks a MANDATORY residual predicate
+//     Filter that re-checks the property against the live node, so a
+//     stale or early NodeID is rejected there, exactly as an
+//     out-of-interval one already is.
+//   - [Index.Serialize]'s only production caller is the checkpointer,
+//     which drains writers to zero before capture and refuses a capture
+//     instant taken while a write transaction is open
+//     (store/snapshot/capture.go, ErrCaptureNotQuiesced). Serializing a
+//     concurrently mutating index is outside that contract.
+//
+// The index provides index-internal isolation only; transaction
 // isolation across multiple calls is the engine's responsibility.
+//
+// [Index.BulkLoad], [Index.BulkLoadSorted] and [Index.Deserialize]
+// REPLACE the whole index rather than editing it. They publish a tree
+// of brand-new entries, so a concurrent Insert or Delete that had
+// already resolved a key against the outgoing tree writes to an entry
+// the new tree does not contain and is lost. They are load-time
+// operations — backfill before registration, snapshot recovery — and
+// every caller in this module runs them before the index is shared;
+// callers must not race them against index maintenance.
 //
 // # Key ordering
 //
@@ -49,6 +114,7 @@ import (
 	"math"
 	"sort"
 	"sync"
+	"sync/atomic"
 
 	"github.com/RoaringBitmap/roaring/v2/roaring64"
 
@@ -70,9 +136,19 @@ var ErrMismatchedLengths = errors.New("btree: values and nodes slices must have 
 var ErrNotSorted = errors.New("btree: values must be in ascending order for BulkLoadSorted")
 
 // Index is an order-preserving property index keyed by V, backed by an
-// in-memory B+ tree (see bplus.go).
+// in-memory B+ tree (see bplus.go). It is safe for concurrent use by any
+// number of goroutines; see the Concurrency section of the package
+// documentation for exactly what a concurrent scan observes.
 type Index[V cmp.Ordered] struct {
-	tree *bplus[V]
+	// tree is the published, IMMUTABLE snapshot. Every read path resolves it
+	// with a single atomic load and then traverses it lock-free.
+	tree atomic.Pointer[bplus[V]]
+
+	// mu serialises STRUCTURAL writers only — the path copies that create or
+	// destroy a key, and the wholesale replacements. No read path ever takes
+	// it, and neither does a write that only adds or removes a NodeID under an
+	// existing key. Lock order is mu → entry.mu, never the reverse.
+	mu sync.Mutex
 
 	// binding, when non-nil, ties the index to one (label, property) pair of
 	// a live node graph so [Index.Apply] can translate [index.Change] events
@@ -80,12 +156,14 @@ type Index[V cmp.Ordered] struct {
 	// the index is shared and never mutated afterwards, so Apply reads it
 	// without synchronisation. See bound.go.
 	binding *Binding[V]
-
-	mu sync.RWMutex
 }
 
 // New returns an empty index.
-func New[V cmp.Ordered]() *Index[V] { return &Index[V]{tree: newBplus[V]()} }
+func New[V cmp.Ordered]() *Index[V] {
+	i := &Index[V]{}
+	i.tree.Store(newBplus[V]())
+	return i
+}
 
 // BulkLoad replaces the contents of the index with the given
 // (value, node) pairs in O(n log n) time. The pairs slice is left
@@ -127,8 +205,11 @@ func (i *Index[V]) BulkLoad(values []V, nodes []graph.NodeID) error {
 	}
 	tree := newBplus[V]()
 	tree.bulkPack(keys, sets)
+	// Publish under mu so the replacement cannot interleave with a structural
+	// writer's read-modify-publish. See the package doc for why a wholesale
+	// replacement is not linearisable against a concurrent Insert or Delete.
 	i.mu.Lock()
-	i.tree = tree
+	i.tree.Store(tree)
 	i.mu.Unlock()
 	return nil
 }
@@ -169,8 +250,11 @@ func (i *Index[V]) BulkLoadSorted(values []V, nodes []graph.NodeID) error {
 	}
 	tree := newBplus[V]()
 	tree.bulkPack(keys, sets)
+	// Publish under mu so the replacement cannot interleave with a structural
+	// writer's read-modify-publish. See the package doc for why a wholesale
+	// replacement is not linearisable against a concurrent Insert or Delete.
 	i.mu.Lock()
-	i.tree = tree
+	i.tree.Store(tree)
 	i.mu.Unlock()
 	return nil
 }
@@ -206,21 +290,119 @@ func equalKeys[V cmp.Ordered](a, b V) bool {
 // NaN is a valid key: it sorts before every other value and all NaN
 // bit patterns share one entry. Inserting a new distinct key is
 // O(log n).
+//
+// Adding a node to a key the index ALREADY holds takes no lock but that
+// key's own: it does not touch the tree and does not exclude a writer
+// on any other key. Creating a new key falls through to the structural
+// path, which is serialised across the whole index.
 func (i *Index[V]) Insert(value V, node graph.NodeID) {
+	if e := i.tree.Load().get(value); e != nil {
+		e.mu.Lock()
+		if !e.dead {
+			e.set.Add(uint64(node))
+			e.mu.Unlock()
+			return
+		}
+		// The entry we resolved has been detached: the snapshot we read it
+		// from is stale. Adding to it would be invisible to every future
+		// reader, so re-resolve against the published tree instead.
+		e.mu.Unlock()
+	}
+	i.insertStructural(value, uint64(node))
+}
+
+// insertStructural creates value as a new key, or joins a key another writer
+// created first. It is the slow half of [Index.Insert].
+func (i *Index[V]) insertStructural(value V, node uint64) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	i.tree.insert(value, uint64(node))
+	// Re-read under mu: the tree may have moved on since the fast path looked,
+	// and a racing structural insert may already have created the key.
+	t := i.tree.Load()
+	if e := t.get(value); e != nil {
+		// The entry cannot be dead: only the detach in [Index.Delete] sets
+		// that flag, it does so while holding mu, and it publishes a tree
+		// without the key before releasing mu.
+		e.mu.Lock()
+		e.set.Add(node)
+		e.mu.Unlock()
+		return
+	}
+	i.tree.Store(t.cloneInsert(value, node))
 }
 
 // Delete removes node from the set associated with value. No-op when
-// absent. The (value, bitmap) entry is removed when its bitmap
-// becomes empty, and a leaf that becomes entirely empty is unlinked
-// (see the delete policy in bplus.go). Like [Index.Insert], value is
-// matched under the total order, so Delete addresses a NaN-keyed entry.
+// absent. The (value, node-set) entry is removed when its set becomes
+// empty, and a leaf that becomes entirely empty is dropped from the
+// tree (see the delete policy in bplus.go). Like [Index.Insert], value
+// is matched under the total order, so Delete addresses a NaN-keyed
+// entry.
+//
+// Removing a node that does not empty the key's set takes no lock but
+// that key's own; emptying the set falls through to the structural
+// detach, which is serialised across the whole index.
 func (i *Index[V]) Delete(value V, node graph.NodeID) {
+	e := i.tree.Load().get(value)
+	if e == nil {
+		return
+	}
+	e.mu.Lock()
+	if e.dead {
+		// The key was detached after we loaded the snapshot, so as of that
+		// load the index did not hold this node under this value and the
+		// delete is a no-op. It is a legitimate serialisation: observing
+		// dead == true proves the detach had not yet published when we
+		// loaded, hence any re-creation of the key published later still,
+		// hence it did not complete before this call began.
+		e.mu.Unlock()
+		return
+	}
+	nowEmpty := e.set.Remove(uint64(node)) && e.set.IsEmpty()
+	e.mu.Unlock()
+	if !nowEmpty {
+		return
+	}
+	i.detach(value)
+}
+
+// detach removes an emptied key from the tree. It is the slow half of
+// [Index.Delete].
+//
+// The crux of the protocol, and the reason both re-checks below exist: the
+// fast-path Insert's !e.dead test and the !e.set.IsEmpty() test here happen
+// under the SAME entry.mu, and that is the only thing that orders them.
+//
+//   - Without the emptiness re-check, an Insert that resurrected the key
+//     between [Index.Delete]'s Remove and this detach would be silently lost:
+//     the detach would drop a key that had just become non-empty again.
+//   - Without the dead flag the fast-path Insert consults, an Insert that
+//     resolved the entry before the detach and added to it afterwards would be
+//     equally lost: it would write into an entry no published tree contains.
+//
+// Together they leave exactly two outcomes for that race, both correct. The
+// inserter wins the entry lock first, the set is non-empty here and the detach
+// ABORTS; or the detach wins, the inserter sees dead and re-resolves against
+// the tree this call publishes.
+func (i *Index[V]) detach(value V) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	i.tree.remove(value, uint64(node))
+	t := i.tree.Load()
+	e := t.get(value)
+	if e == nil {
+		// Another writer detached the same emptied key first.
+		return
+	}
+	e.mu.Lock()
+	// e.dead cannot be true here: a dead entry is unreachable from the tree
+	// published before its detach released mu, and we hold mu. It is re-tested
+	// so the invariant is enforced rather than assumed.
+	if e.dead || !e.set.IsEmpty() {
+		e.mu.Unlock()
+		return
+	}
+	e.dead = true
+	e.mu.Unlock()
+	i.tree.Store(t.cloneRemove(value))
 }
 
 // RangeFirst returns the first NodeID in the smallest indexed value
@@ -230,19 +412,38 @@ func (i *Index[V]) Delete(value V, node graph.NodeID) {
 // full union of matches is available via [Index.Range]. Bounds
 // compare under the total order, so lo = NaN admits a NaN key while
 // any non-NaN lo excludes it.
+//
+// The value and NodeID returned are read together under that key's own
+// lock, so they are a consistent pair even under concurrent writes.
 func (i *Index[V]) RangeFirst(lo, hi V) (V, graph.NodeID, bool) {
 	var zeroV V
 	if cmp.Less(hi, lo) {
 		return zeroV, 0, false
 	}
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-	l, off := i.tree.lowerBound(lo)
-	if l == nil || cmp.Less(hi, l.keys[off]) {
-		return zeroV, 0, false
+	var c cursor[V]
+	for c.seek(i.tree.Load(), lo); c.valid(); c.next() {
+		k := c.key()
+		if cmp.Less(hi, k) {
+			return zeroV, 0, false
+		}
+		e := c.entry()
+		e.mu.Lock()
+		empty := e.set.IsEmpty()
+		var first uint64
+		if !empty {
+			first = e.set.Minimum()
+		}
+		e.mu.Unlock()
+		if !empty {
+			return k, graph.NodeID(first), true
+		}
+		// A concurrent Delete emptied this key's set but has not yet published
+		// the tree without it. The key carries no NodeID, so it is not the
+		// first row of anything: skip it exactly as an absent key would be.
+		// Only a concurrent writer can produce this state — a Delete that
+		// empties a set always detaches the key before it returns.
 	}
-	first := l.sets[off].Minimum()
-	return l.keys[off], graph.NodeID(first), true
+	return zeroV, 0, false
 }
 
 // Range returns a Roaring bitmap that is the union of the per-value
@@ -255,17 +456,15 @@ func (i *Index[V]) Range(lo, hi V) *roaring64.Bitmap {
 	if cmp.Less(hi, lo) {
 		return out
 	}
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-	l, off := i.tree.lowerBound(lo)
-	for l != nil {
-		for k := off; k < len(l.keys); k++ {
-			if cmp.Less(hi, l.keys[k]) {
-				return out
-			}
-			l.sets[k].OrInto(out)
+	var c cursor[V]
+	for c.seek(i.tree.Load(), lo); c.valid(); c.next() {
+		if cmp.Less(hi, c.key()) {
+			break
 		}
-		l, off = l.next, 0
+		e := c.entry()
+		e.mu.Lock()
+		e.set.OrInto(out)
+		e.mu.Unlock()
 	}
 	return out
 }
@@ -284,14 +483,12 @@ func (i *Index[V]) Range(lo, hi V) *roaring64.Bitmap {
 // The returned bitmap is freshly allocated; the caller owns it.
 func (i *Index[V]) RangeFrom(lo V) *roaring64.Bitmap {
 	out := roaring64.New()
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-	l, off := i.tree.lowerBound(lo)
-	for l != nil {
-		for k := off; k < len(l.keys); k++ {
-			l.sets[k].OrInto(out)
-		}
-		l, off = l.next, 0
+	var c cursor[V]
+	for c.seek(i.tree.Load(), lo); c.valid(); c.next() {
+		e := c.entry()
+		e.mu.Lock()
+		e.set.OrInto(out)
+		e.mu.Unlock()
 	}
 	return out
 }
@@ -302,18 +499,16 @@ func (i *Index[V]) RangeFrom(lo V) *roaring64.Bitmap {
 // unbounded-above selectivity gate so the count and the executed [Index.RangeFrom]
 // scan agree on the same key space (#F-CY1).
 func (i *Index[V]) RangeCountFrom(lo V, budget uint64) (count uint64, exact bool) {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-	l, off := i.tree.lowerBound(lo)
 	var total uint64
-	for l != nil {
-		for k := off; k < len(l.keys); k++ {
-			total += l.sets[k].Cardinality()
-			if total > budget {
-				return budget + 1, false
-			}
+	var c cursor[V]
+	for c.seek(i.tree.Load(), lo); c.valid(); c.next() {
+		e := c.entry()
+		e.mu.Lock()
+		total += e.set.Cardinality()
+		e.mu.Unlock()
+		if total > budget {
+			return budget + 1, false
 		}
-		l, off = l.next, 0
 	}
 	return total, true
 }
@@ -322,13 +517,13 @@ func (i *Index[V]) RangeCountFrom(lo V, budget uint64) (count uint64, exact bool
 // empty bitmap when value is unknown. Matching uses the total order,
 // so Lookup(NaN) returns the NaN entry when one exists.
 func (i *Index[V]) Lookup(value V) *roaring64.Bitmap {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-	set := i.tree.get(value)
-	if set == nil {
+	e := i.tree.Load().get(value)
+	if e == nil {
 		return roaring64.New()
 	}
-	bm, shared := set.Bitmap()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	bm, shared := e.set.Bitmap()
 	if shared {
 		// The set is in the bitmap state and the returned bitmap aliases
 		// the live one; clone so the caller owns an independent copy that
@@ -353,33 +548,32 @@ func (i *Index[V]) Lookup(value V) *roaring64.Bitmap {
 // appends nothing. The appended ids are an independent snapshot the caller may
 // iterate after the call returns, with the same ownership as Lookup's clone.
 func (i *Index[V]) LookupAppend(value V, dst []uint64) []uint64 {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-	set := i.tree.get(value)
-	if set == nil {
+	e := i.tree.Load().get(value)
+	if e == nil {
 		return dst
 	}
-	return set.AppendTo(dst)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.set.AppendTo(dst)
 }
 
 // Cardinality returns the number of NodeIDs associated with value,
 // matched under the total order (see [Index.Lookup]).
 func (i *Index[V]) Cardinality(value V) uint64 {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-	set := i.tree.get(value)
-	if set == nil {
+	e := i.tree.Load().get(value)
+	if e == nil {
 		return 0
 	}
-	return set.Cardinality()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.set.Cardinality()
 }
 
 // DistinctValues returns the number of distinct values currently
-// indexed. It is O(1): the tree maintains a running key count.
+// indexed. It is O(1) and takes no lock at all: the count is a field of
+// the published snapshot, which the tree maintains as it is built.
 func (i *Index[V]) DistinctValues() int {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-	return i.tree.count
+	return i.tree.Load().count
 }
 
 // Kind returns "btree" — satisfies [index.Subscriber].
@@ -414,21 +608,19 @@ func (i *Index[V]) RangeCount(lo, hi V, budget uint64) (count uint64, exact bool
 	if cmp.Less(hi, lo) {
 		return 0, true
 	}
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-	l, off := i.tree.lowerBound(lo)
 	var total uint64
-	for l != nil {
-		for k := off; k < len(l.keys); k++ {
-			if cmp.Less(hi, l.keys[k]) {
-				return total, true
-			}
-			total += l.sets[k].Cardinality()
-			if total > budget {
-				return budget + 1, false
-			}
+	var c cursor[V]
+	for c.seek(i.tree.Load(), lo); c.valid(); c.next() {
+		if cmp.Less(hi, c.key()) {
+			return total, true
 		}
-		l, off = l.next, 0
+		e := c.entry()
+		e.mu.Lock()
+		total += e.set.Cardinality()
+		e.mu.Unlock()
+		if total > budget {
+			return budget + 1, false
+		}
 	}
 	return total, true
 }
@@ -595,38 +787,40 @@ func (i *Index[V]) Serialize(w io.Writer) error {
 		return err
 	}
 
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-
-	if err := binary.Write(tee, binary.LittleEndian, uint64(i.tree.count)); err != nil {
+	// One snapshot for the header count AND the body, so the declared entry
+	// count always matches the number of entries written.
+	t := i.tree.Load()
+	if err := binary.Write(tee, binary.LittleEndian, uint64(t.count)); err != nil {
 		return err
 	}
-	// Walk the leaf chain low→high so entries are emitted in ascending key
-	// order — the byte-identical layout the v1 sorted-array writer produced
-	// (the wire format is a logical key→nodes mapping; the tree shape is not
-	// serialised). storage-engine-auditor #1514: formatVersion stays 1.
-	for l := i.tree.first; l != nil; l = l.next {
-		for k := range l.keys {
-			key, err := encodeOrdered(l.keys[k])
-			if err != nil {
-				return err
-			}
-			if uint64(len(key)) > uint64(^uint32(0)) {
-				return fmt.Errorf("btree: key too long to serialize: %d", len(key))
-			}
-			if err := binary.Write(tee, binary.LittleEndian, uint32(len(key))); err != nil {
-				return err
-			}
-			if _, err := tee.Write(key); err != nil {
-				return err
-			}
-			ids := l.sets[k].ToArray()
-			if err := binary.Write(tee, binary.LittleEndian, uint64(len(ids))); err != nil {
-				return err
-			}
-			if err := binary.Write(tee, binary.LittleEndian, ids); err != nil {
-				return err
-			}
+	// Walk the snapshot in ascending key order — the byte-identical layout the
+	// v1 sorted-array writer produced (the wire format is a logical key→nodes
+	// mapping; the tree shape is not serialised). storage-engine-auditor
+	// #1514: formatVersion stays 1.
+	var c cursor[V]
+	for c.seekFirst(t); c.valid(); c.next() {
+		key, err := encodeOrdered(c.key())
+		if err != nil {
+			return err
+		}
+		if uint64(len(key)) > uint64(^uint32(0)) {
+			return fmt.Errorf("btree: key too long to serialize: %d", len(key))
+		}
+		if err := binary.Write(tee, binary.LittleEndian, uint32(len(key))); err != nil {
+			return err
+		}
+		if _, err := tee.Write(key); err != nil {
+			return err
+		}
+		e := c.entry()
+		e.mu.Lock()
+		ids := e.set.ToArray()
+		e.mu.Unlock()
+		if err := binary.Write(tee, binary.LittleEndian, uint64(len(ids))); err != nil {
+			return err
+		}
+		if err := binary.Write(tee, binary.LittleEndian, ids); err != nil {
+			return err
 		}
 	}
 
@@ -765,8 +959,11 @@ func (i *Index[V]) Deserialize(r io.Reader) error {
 	// non-ascending payload never reaches this point (auditor condition C4a).
 	tree := newBplus[V]()
 	tree.bulkPack(keys, sets)
+	// Publish under mu so the replacement cannot interleave with a structural
+	// writer's read-modify-publish. See the package doc for why a wholesale
+	// replacement is not linearisable against a concurrent Insert or Delete.
 	i.mu.Lock()
-	i.tree = tree
+	i.tree.Store(tree)
 	i.mu.Unlock()
 	return nil
 }
