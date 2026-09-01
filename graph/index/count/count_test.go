@@ -3,6 +3,7 @@ package count
 import (
 	"sync"
 	"testing"
+	"unsafe"
 )
 
 func TestApply_EDCounts(t *testing.T) {
@@ -56,19 +57,50 @@ func TestApply_DeleteOnZeroFreesKey(t *testing.T) {
 		t.Fatalf("E(10) = %d, want 0 after cancel", got)
 	}
 	// The key must have been deleted (bounded growth), not left as a zero cell.
+	//
+	// The map is now the copy-on-write one the shard publishes, and it is read
+	// under the EXCLUSIVE lock rather than the shared one: an increment holds the
+	// shared lock (see [addCell]), so a shared hold here would no longer freeze
+	// the shard. The assertion itself is unchanged — the key must be absent.
 	sh := s.eShardOf(10)
-	sh.mu.RLock()
-	_, present := sh.e[10]
-	sh.mu.RUnlock()
+	sh.mu.Lock()
+	_, present := sh.e.load()[10]
+	sh.mu.Unlock()
 	if present {
 		t.Fatalf("E(10) key still present after returning to zero")
 	}
 	tsh := s.tShardOf(triKey{1, 10, 2})
-	tsh.mu.RLock()
-	_, tpresent := tsh.t[triKey{1, 10, 2}]
-	tsh.mu.RUnlock()
+	tsh.mu.Lock()
+	_, tpresent := tsh.t.load()[triKey{1, 10, 2}]
+	tsh.mu.Unlock()
 	if tpresent {
 		t.Fatalf("T(1,10,2) key still present after returning to zero")
+	}
+}
+
+// TestShard_LayoutOneCacheLine pins the 128-byte stride that keeps two shards'
+// hot fields off one another's cache line.
+//
+// MEASURED, because the obvious claim is false: `Store` has an alignment of 8,
+// not 128, so `&shards[0]` is NOT line-aligned — over 200 heap-allocated Stores
+// it landed at offset 8 within the line 200/200 times. No shard ever occupies
+// exactly one cache line. What actually prevents false sharing is that the
+// STRIDE equals the line size while the hot region (four table pointers plus the
+// mutex, 56 bytes) is far smaller than it: consecutive shards' hot fields are
+// always 128 bytes apart and therefore never share a line, whatever the base
+// offset. The guarantee is `hotBytes + (base mod cacheLine) <= cacheLine`.
+//
+// Pinning the size is what preserves that stride. The `shardPad` expression
+// cannot: it is arithmetic over literals with no reference to the struct, so
+// adding a field leaves it unchanged and the build stays green — VERIFIED by
+// appending one uint64 in a scratch copy, which took Sizeof to 136 with
+// `go build` still exiting 0. This test is the only guard.
+func TestShard_LayoutOneCacheLine(t *testing.T) {
+	t.Parallel()
+	if got := unsafe.Sizeof(shard{}); got != cacheLine {
+		t.Fatalf("unsafe.Sizeof(shard{}) = %d, want %d: the shard stride no longer equals the "+
+			"cache line, so two shards' hot fields can land in one line and writers to DIFFERENT "+
+			"shards false-share", got, cacheLine)
 	}
 }
 
@@ -112,8 +144,13 @@ func TestRecomputeReset_ClearsCells(t *testing.T) {
 	}
 }
 
-// TestConcurrentReadsDuringSerialWrites exercises the documented contract:
-// a single serialised writer with many concurrent readers must be race-free.
+// TestConcurrentReadsDuringSerialWrites drives many concurrent readers against
+// ONE writer. Single-writer is this test's own CONSTRUCTION, not the store's
+// contract: since rmp #2320 the engine's barrier is held SHARED and two writers
+// mutate the store concurrently, which the package "Concurrency contract" section
+// states and which hot_test.go and commutative_test.go exercise. What this test
+// pins is the narrower thing — the lock-free read path stays race-free while a
+// writer churns cells through create and unlink.
 func TestConcurrentReadsDuringSerialWrites(t *testing.T) {
 	s := New(0)
 	var wg sync.WaitGroup
@@ -136,7 +173,9 @@ func TestConcurrentReadsDuringSerialWrites(t *testing.T) {
 			}
 		}()
 	}
-	// Single writer (the serialisation the engine barrier provides).
+	// One writer. NOT the serialisation the engine barrier provides — it provides
+	// none, and has not since rmp #2320 — but a deliberate isolation of the reader
+	// path from writer-versus-writer interleaving, which hot_test.go covers.
 	for i := 0; i < 5000; i++ {
 		s.Apply(EDelta(10, 1))
 		s.Apply(TDelta(1, 10, 2, 1))
