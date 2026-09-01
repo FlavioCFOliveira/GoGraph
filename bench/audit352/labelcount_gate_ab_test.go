@@ -85,6 +85,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/internal/testlayers"
 )
 
 const pushdownLabel = "Item"
@@ -102,9 +103,12 @@ const pushdownQuery = `MATCH (n:` + pushdownLabel + `) RETURN count(n) AS c`
 //
 // THE PREDICATE IS `IS NOT NULL`, NOT `p.v >= 0`, AND THE DIFFERENCE IS THE WHOLE
 // POINT. Since rmp #2655 an aggregate whose WHERE is a comparison the columnar
-// predicate builder recognises plans scan -> ColumnarFilter -> ColumnarProject and
-// reads the node id as a raw int64, so the per-row interface box this file exists to
-// attribute NO LONGER HAPPENS on `p.v >= 0`. IS NOT NULL is not a shape that builder
+// predicate builder recognises reaches the ColumnarFilter chain and reads the node id
+// as a raw int64, so the per-row interface box this file exists to attribute NO
+// LONGER HAPPENS on `p.v >= 0`. (Since rmp #2657 that chain no longer carries a
+// ColumnarProject pre-projection — see [columnarScanPlanFor] — and it is still
+// box-free: measured 90 allocs/op at n = 1 000 and 66 at n = 2 000, flat, against
+// this shape's +1.0000 per scanned row.) IS NOT NULL is not a shape that builder
 // recognises, so it keeps the row plan — the one that still writes
 // expr.IntegerValue(id) once per scanned node — and the mechanism stays observable.
 // It is equally true for every node, so the row counts are unchanged, and it reads
@@ -127,13 +131,30 @@ const planPushdown = "Project\n└─ LabelCountScan"
 // parameterised rather than pinned as a single constant; pinning the text at all
 // is what makes an unexpected third plan fail loudly instead of being measured
 // under the wrong name.
+//
+// # Rebased for rmp #2657 — the control is CHEAPER, not WEAKER
+//
+// The aggregate above the Filter is exec.CountRows, where before rmp #2657 it was
+// GlobalAggregateAdapter -> EagerAggregation -> Project. `p` is bound by a
+// NON-OPTIONAL NodeByLabelScan, so it cannot be null and count(p) is exactly
+// count(*); rewriteCountVarToCountStar normalises the spelling before any recogniser
+// runs, tryBuildCountRows then claims the shape, and the pre-projection goes with it.
+//
+// THIS PLAN'S JOB IS TO BE THE O(n) ARM, and it still is. CountRows pulls one row per
+// labelled node through the Filter exactly as the old pipeline did — it merely stops
+// building a throwaway single-column row per node on the way. So it remains the
+// linear comparison that [TestLabelCountPushdownIsConstantTime]'s O(1)
+// LabelCountScan is measured against, and the per-row mechanism
+// [TestLabelCountBoxingAttribution] attributes is untouched: the slope is +1.0000
+// allocations per scanned row at HEAD (allocs/op 799 at n = 1 000, 1 799 at
+// n = 2 000). A control that had stopped visiting every node WOULD be a lost gate,
+// and both the constant-time ratchet and the boxing differential would catch it; a
+// control that visits every node for fewer allocations is just a cheaper control.
 func scanPlanFor(label string) string {
 	return "Project\n" +
-		"└─ GlobalAggregateAdapter\n" +
-		"   └─ EagerAggregation\n" +
-		"      └─ Project\n" +
-		"         └─ Filter\n" +
-		"            └─ NodeByLabelScan [" + label + "]"
+		"└─ CountRows\n" +
+		"   └─ Filter\n" +
+		"      └─ NodeByLabelScan [" + label + "]"
 }
 
 // planScan is scanPlanFor(pushdownLabel), kept in step with the same constants
@@ -143,13 +164,25 @@ var planScan = scanPlanFor(pushdownLabel)
 // columnarScanPlanFor renders the COLUMNAR plan a recognised comparison predicate
 // compiles to since rmp #2655 — the chain that reads the node id as a raw int64 and
 // therefore does not box it per row.
+//
+// # Rebased for rmp #2657, and it was a LATENT failure
+//
+// This arm carries the same count(p) and is normalised to count(*) by the same
+// rewrite, so exec.CountRows replaces GlobalAggregateAdapter -> EagerAggregation here
+// too and the ColumnarProject pre-projection disappears with them. Nothing reported
+// it: assertPlan uses t.Fatalf, so [TestLabelCountScanPredicateModes] aborted on the
+// row arm one line earlier and never reached this one. Rebasing [scanPlanFor] alone
+// would have left the test red on its second assertion.
+//
+// Dropping ColumnarProject cost this shape nothing, which was MEASURED rather than
+// read off the plan text: allocs/op is 90 at n = 1 000 and 66 at n = 2 000 — flat,
+// slope -0.02 per row — against the row arm's +1.0000 per row. ColumnarFilter is
+// where the raw int64 read happens, and it is still here.
 func columnarScanPlanFor(label string) string {
 	return "Project\n" +
-		"└─ GlobalAggregateAdapter\n" +
-		"   └─ EagerAggregation\n" +
-		"      └─ ColumnarProject\n" +
-		"         └─ ColumnarFilter\n" +
-		"            └─ NodeByLabelScan [" + label + "]"
+		"└─ CountRows\n" +
+		"   └─ ColumnarFilter\n" +
+		"      └─ NodeByLabelScan [" + label + "]"
 }
 
 // TestLabelCountScanPredicateModes pins the fact that made this file change its
@@ -157,11 +190,20 @@ func columnarScanPlanFor(label string) string {
 //
 // The two queries differ ONLY in how the WHERE is written, and both are true for
 // every node — yet since rmp #2655 they compile to different physical plans, because
-// a comparison the columnar predicate builder recognises now reaches
-// scan -> ColumnarFilter -> ColumnarProject from under an aggregate while IS NOT NULL
-// does not. The boxing attribution below needs the ROW plan; without this test, a
-// later change that made IS NOT NULL columnar too would silently turn that
-// differential into a measurement of nothing.
+// a comparison the columnar predicate builder recognises reaches the ColumnarFilter
+// chain from under an aggregate while IS NOT NULL does not. The boxing attribution
+// below needs the ROW plan; without this test, a later change that made IS NOT NULL
+// columnar too would silently turn that differential into a measurement of nothing.
+//
+// STILL DIFFERENTIAL AFTER rmp #2657, which was checked and not assumed. Both arms
+// now carry the same exec.CountRows aggregate — count(p) normalises to count(*) on
+// either predicate — so the whole difference between the two plans has narrowed to
+// one node, Filter against ColumnarFilter. That is precisely the load-bearing node:
+// measured on this fixture, the row arm allocates +1.0000 per scanned row while the
+// columnar arm is flat in n (90 allocs/op at n = 1 000, 66 at n = 2 000). Had the
+// rewrite collapsed both arms onto ONE plan, this test would have become a
+// measurement of nothing and the two constants below would have been a string to
+// delete, not a string to update.
 func TestLabelCountScanPredicateModes(t *testing.T) {
 	const n = 1_000
 	e := pushdownEngine(t, n)
@@ -305,11 +347,15 @@ func drainQuery(tb testing.TB, e *cypher.Engine, query string) {
 //
 //   - allocsSlack / bytesSlack are the deterministic gates and the sharp ones.
 //     Pre-fix, allocs/op was exactly n-185.2 with R2 = 1.000000; post-fix it is a
-//     flat 29 with zero variance across ten benchstat samples in two rounds. The
+//     flat 31 with zero variance across the whole size range — 29 until rmp #2657,
+//     whose rewrite pays two allocations per query BUILD to copy the logical
+//     aggregation rather than mutate the plan the cache shares, a fixed cost that is
+//     flat in n and therefore leaves this gate's shape untouched. The
 //     slack exists only to absorb a single stray allocation from another
 //     goroutine, since testing.AllocsPerRun reads process-global counters. A
 //     reintroduced size gate puts +49 786 allocations and +475 776 bytes on the
 //     n = 50 000 point, i.e. 49 786x and 7 434x these bounds.
+//
 //   - timeRatioMax bounds max(ns/op)/min(ns/op) over the whole size range. This
 //     is the loose gate, because wall-clock is the noisy metric: the measured
 //     ratio is ~1.01, the harness noise floor is ~2%, and any reintroduced size
@@ -317,6 +363,12 @@ func drainQuery(tb testing.TB, e *cypher.Engine, query string) {
 //     half and drives the ratio to at least 87x (the two endpoints under the
 //     historical 26.56 ns/node slope). 1.5 sits two orders of magnitude above the
 //     noise and roughly 58x below the smallest regression it must catch.
+//
+//     Its measurement precondition is a QUIET MACHINE, and under `make ci` that
+//     precondition is absent — see [TestLabelCountPushdownIsConstantTime] for the
+//     two failures that established it. The tolerance is deliberately UNCHANGED
+//     (widening it past the observed load would forfeit the 87x regression it
+//     exists to catch); what changed is WHERE it is evaluated.
 const (
 	allocsSlack  = 1
 	bytesSlack   = 64
@@ -334,6 +386,43 @@ const (
 // allocs/op is the instrument that actually matters. It is exactly deterministic,
 // so a size gate reappearing anywhere in the range shows up as a slope no noise
 // floor can hide, and it does so without depending on the machine being quiet.
+//
+// # The wall-clock arm is guarded, the allocation arms are not (rmp #2673)
+//
+// The ns/op ratio at the end of this test is a comparison of two wall-clock
+// windows measured while `go test` is running the whole repository in parallel
+// (`-p` defaults to GOMAXPROCS), so its subject is the machine's load rather than
+// the pushdown. That is not a conjecture here; it failed twice on 2026-09-01, on a
+// tree whose functional tests were green, and the two failures point in OPPOSITE
+// directions, which no property of the code can produce:
+//
+//	test-short, -race:      n=1000: 25354 ns   n=100000: 15532 ns   ratio=1.632
+//	cover-gate, no -race:   n=1000:  2214 ns   n=100000:  3607 ns   ratio=1.629
+//
+// The first run had the SMALL graph timing 1.63x SLOWER than the 100x larger one.
+// An inverted ratio is only possible if the compared quantity is scheduling noise:
+// there is no size gate, real or imagined, that makes 1 000 nodes cost more than
+// 100 000.
+//
+// In BOTH runs the allocation arms were flat and identical at all five sizes
+// (29.0 allocs / 2176 B in run A, 31.0 / 2408 in run B; the +2 is the
+// per-query-build cost rmp #2657 disclosed, fixed in n). So the constant-time
+// property this test defends HELD in both failing runs; only its wall-clock half
+// was broken. Re-measured under -race after the guard landed: 31.0 allocs/op and
+// 2 416 B/op at every one of the five sizes, zero variance.
+//
+// [testlayers.RequireQuietMachine] therefore guards ONLY the ratio, and only after
+// it has been measured and logged, so the skip prints the number it would have
+// asserted on. Nothing is disabled: `bench/audit352` is in TIMING_PKGS and this
+// test is in TIMING_RUN, so the ratio ASSERTS in `make test-timing`, which `make
+// ci` runs serially (-p 1) without GOGRAPH_PARALLEL_SUITE, and it asserts on any
+// single-package or -run invocation too. The allocation and byte arms above the
+// guard are load-independent and keep asserting in the short layer — they are the
+// half that actually catches a reintroduced size gate (+49 786 allocations at
+// n = 50 000, against a slack of 1), and because a recorded failure outranks a
+// later skip, a broken alloc arm still fails the package under the guard.
+//
+// Recorded in docs/short-layer-wallclock-audit.md alongside the other instances.
 func TestLabelCountPushdownIsConstantTime(t *testing.T) {
 	type point struct {
 		n      int
@@ -404,6 +493,19 @@ func TestLabelCountPushdownIsConstantTime(t *testing.T) {
 	}
 	t.Logf("ns/op  n=%d: %.0f   n=%d: %.0f   ratio=%.3f (tolerance %.1f)",
 		ratchetSizes[0], loNs, ratchetSizes[len(ratchetSizes)-1], hiNs, ratio, timeRatioMax)
+
+	// ONLY THIS ARM is guarded, and only from HERE — the ratio above is measured
+	// and logged unconditionally, so the skip states the quantity it declined to
+	// assert on instead of an absence. Everything before this line (allocs/op and
+	// B/op at all five sizes) is load-independent and keeps asserting in the short
+	// layer. See this test's godoc for the two opposed failures that motivated it.
+	testlayers.RequireQuietMachine(t, fmt.Sprintf(
+		"max/min ns/op for %s over n=%d..%d — %.0f ns at n=%d against %.0f ns at n=%d, "+
+			"ratio %.3f, tolerance %.1f. The allocation and byte arms of this test ran and "+
+			"ASSERTED; only the wall-clock ratio is deferred",
+		pushdownQuery, ratchetSizes[0], ratchetSizes[len(ratchetSizes)-1],
+		loNs, ratchetSizes[0], hiNs, ratchetSizes[len(ratchetSizes)-1], ratio, timeRatioMax))
+
 	if ratio > timeRatioMax {
 		t.Errorf("ns/op is NOT flat in graph size: %.0f ns at n=%d vs %.0f ns at n=%d "+
 			"(ratio %.2f > %.1f). Constant-time means the 100x larger graph is not "+

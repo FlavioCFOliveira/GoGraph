@@ -224,9 +224,17 @@ test-short: shell-guard ## [layer: short]   local default — race detector, no 
 # found 39 instances across 12 packages; the three filed as #2499, #2506 and #2517
 # are guarded here, and each remaining instance extends this list and TIMING_RUN
 # as its own task lands (#2568, #2569, #2572, #2573, #2574, #2588 are filed).
+# An instance found AFTER that population audit extends the list the same way:
+# bench/audit352's TestLabelCountPushdownIsConstantTime (#2673) is here because its
+# ns/op ratio failed twice in one day in OPPOSITE directions -- 1.632 with the small
+# graph slower under `test-short -race`, 1.629 the right way round under
+# `cover-gate` -- while its allocation arms read flat and identical at all five
+# sizes in both runs. Only the wall-clock half is guarded; the allocation half still
+# asserts in the short layer.
 # Listing a package before its gates are guarded only buys `[no tests to run]` and
 # the build time to discover it.
 TIMING_PKGS = \
+	./bench/audit352 \
 	./bench/cyclicjoin \
 	./bench/mvccwrite \
 	./bolt/server
@@ -234,7 +242,7 @@ TIMING_PKGS = \
 # TIMING_RUN selects only the guarded gates. Running the whole package serially
 # would reintroduce exactly the co-tenancy the phase exists to remove — the
 # gate's neighbours are as capable of loading the machine as another package is.
-TIMING_RUN ?= TestE2E_ConcurrentAutocommitReadsRunInParallel|TestCyclicJoin_FittedExponents|TestWriteScalingGate|TestWALWriteScalingGate|TestWriteConcurrencyGate|TestWriteScalingInstrument_SeesConcurrency|TestWriteScalingInstrument_SeesSerialisation
+TIMING_RUN ?= TestE2E_ConcurrentAutocommitReadsRunInParallel|TestCyclicJoin_FittedExponents|TestLabelCountPushdownIsConstantTime|TestWriteScalingGate|TestWALWriteScalingGate|TestWriteConcurrencyGate|TestWriteScalingInstrument_SeesConcurrency|TestWriteScalingInstrument_SeesSerialisation
 
 TIMING_TIMEOUT ?= 20m
 
