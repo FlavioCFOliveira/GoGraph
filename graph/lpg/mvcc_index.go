@@ -439,7 +439,24 @@ func (g *Graph[N, W]) labelBitmapNeedsFilter(s *Snapshot) bool {
 		return true
 	}
 	if s == nil {
-		return false
+		// The mirror-image window on the ADD side, and it is gated HERE — on the
+		// present-time branch alone — rather than above the nil check.
+		//
+		// [Graph.setNodeLabelInfo] may apply a versioned label's bitmap entry
+		// after releasing the bag's shard lock, so between the two the bag says
+		// PRESENT and the raw bitmap does not. Serving that raw bitmap is a LOST
+		// ROW, which no later predicate can recover; filtering instead sends the
+		// reader through [Graph.correctBitmapOver], which finds the node among
+		// the suspects and adds it back.
+		//
+		// A SNAPSHOT reader needs no such gate, so it is not made to pay the
+		// load: the same write that opened the window pushed a label delta and
+		// cannot have had it reclaimed while its transaction is open, so
+		// labelDeltaActive below is already non-zero for the whole window. The
+		// present-time branch is the one that consults no version counter at
+		// all, which is exactly why rmp #2308 and rmp #2326 found it exposed on
+		// the removal side. See [Graph.setNodeLabelInfo].
+		return g.idxAddActive.Load() != 0
 	}
 	return g.labelDeltaActive.Load() != 0 || g.nodeLifeActive.Load() != 0
 }

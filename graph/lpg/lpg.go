@@ -820,6 +820,20 @@ type Graph[N comparable, W any] struct {
 	// the lock-free gate and the observable backlog. See mvcc_index.go.
 	idxDeferred      deferredIdx
 	idxPendingActive atomic.Int64
+	// idxAddActive counts the versioned label writes currently between claiming
+	// a label in the bag and having it in the label-index bitmap. It does two
+	// jobs at once, and [Graph.setNodeLabelInfo] explains both.
+	//
+	// It is the lock-free GATE that keeps the window from ever being observed:
+	// while it is non-zero [Graph.labelBitmapNeedsFilter] answers yes for EVERY
+	// reader, snapshot or present-time, exactly as idxPendingActive does for the
+	// mirror-image removal window.
+	//
+	// It is also the CONTENTION SIGNAL that decides whether a given write
+	// applies its bitmap entry inside the shard lock or after releasing it: a
+	// post-increment above one means another writer is in the same window, which
+	// is the condition under which releasing first pays.
+	idxAddActive atomic.Int64
 }
 
 // ApplyAtomically runs fn while holding the graph's transaction-visibility
@@ -2941,9 +2955,11 @@ func (g *Graph[N, W]) setNodeLabelInfo(n N, name string, tx *writeCtx) error {
 	// re-asserts labels on every match, so this guard is what keeps a delta per
 	// WRITE rather than a delta per statement. Only the DELTA is guarded; the
 	// conflict test above is not (rmp #2354).
+	versioned := false
 	if g.labelDeltasEnabled() && !bag.has(lid) {
 		ci, ts := g.deltaStamp(tx.record())
 		sh.pushLabelDelta(id, undoRemoveLabel, lid, ci, ts, &g.labelDeltaActive)
+		versioned = true
 	}
 	bag.add(lid)
 	sh.m[id] = bag
@@ -2975,8 +2991,98 @@ func (g *Graph[N, W]) setNodeLabelInfo(n N, name string, tx *writeCtx) error {
 	// transition together or a reader can observe one without the other; before
 	// rmp #2308 the visibility barrier hid both windows.
 	g.cancelDeferredIndexRemoval(uint32(lid), id)
-	g.nodeIdx.Add(uint32(lid), id)
+	// THE BITMAP ADD LEAVES THE SHARD LOCK WHEN, AND ONLY WHEN, ANOTHER WRITER
+	// IS ALREADY IN THE SAME WINDOW (rmp #2681). The paragraph above still
+	// holds: what it forbids is a window a reader can OBSERVE, not the two
+	// stores moving at different instants. When the add is hoisted the window is
+	// closed by idxAddActive instead of by the lock.
+	//
+	// # Why it has to leave
+	//
+	// [label.Index.Add] takes the index's own process-global mutex. Taking it
+	// while holding a shard lock is a lock convoy: the holder can PARK there,
+	// and at 64 goroutines on ten cores the park-and-reschedule is tens of
+	// microseconds in which this shard is closed to everyone. Measured with the
+	// committed contention instrument (bench/contention, 2026-09-01, Apple M4,
+	// 10 cores, cypher-write-mem@64): the shard lock accounted for 14.62 s of
+	// 19.22 s of mutex delay while the index's own lock accounted for 0.70 s, so
+	// the shard lock was not itself hot — it was held across somebody else's
+	// queue. Only 1.95 us per write of that hold was CPU.
+	//
+	// # Why it leaves only under contention, and how that is detected
+	//
+	// Hoisting unconditionally is a LOSS below oversubscription, because the
+	// shard lock doubles as admission control on the index lock: at 8 goroutines
+	// on 10 cores, where no convoy forms, releasing first let more writers arrive
+	// at the index mutex at once and cost 4.07% of throughput. Measured, and the
+	// counter was measured separately and is not the cause: an arm that raised
+	// and lowered idxAddActive but kept the add inside the lock ran at 726 531
+	// ops/s against a 719 498 ops/s baseline.
+	//
+	// So the decision is taken per write, from the one signal that answers the
+	// question directly: is another versioned label write in this same window
+	// right now? idxAddActive is raised for the whole of this region in BOTH
+	// branches, so it is a live count of writers in it, and a post-increment
+	// above one means this write has company and would queue. Below
+	// oversubscription that is rare and the add stays inside the lock; at 64 and
+	// above it is the common case and the convoy is broken. No threshold is
+	// tuned and no core count is consulted: the contention measures itself.
+	//
+	// # Why the hoisted window cannot be observed
+	//
+	// Two facts close it, and both are established here rather than assumed:
+	//
+	//  1. idxAddActive is raised UNDER this lock, so it is already non-zero for
+	//     any reader that can see the bag write, and it stays non-zero until the
+	//     bitmap agrees. [Graph.labelBitmapNeedsFilter] answers yes while it is,
+	//     for a present-time reader as much as for a snapshot one — which is the
+	//     half rmp #2308 and rmp #2326 found missing on the removal side.
+	//  2. The node is in the SUSPECT set for the whole window, because this write
+	//     pushed a delta into sh.d a few lines above and nothing can reclaim it
+	//     while tx is open: a writer registers with the horizon ([Graph.beginWrite]),
+	//     so the reclamation watermark cannot pass its own start. So
+	//     [Graph.correctBitmapOver] visits the node and takes its
+	//     `!present && should` branch, ADDING the member the raw bitmap has not
+	//     got yet.
+	//
+	// Together they turn the one direction rmp #2308 called unrecoverable — the
+	// bag says PRESENT and the bitmap does not — into a correction the reader
+	// makes for itself.
+	//
+	// # Why only a VERSIONED write may hoist
+	//
+	// `versioned` is exactly "this call pushed a delta", and it is what supplies
+	// fact 2. The other cases keep the old ordering:
+	//
+	//   - the label was ALREADY in the bag: no delta, but also nothing to
+	//     publish — the bitmap already carries the entry, so Add is a no-op and
+	//     there is no window to close.
+	//   - deltas disarmed, or a direct Go-API write with no transaction
+	//     (tx == nil): no delta, or one a sweep may reclaim at once because no
+	//     open transaction holds the horizon back.
+	//
+	// A concurrent REMOVAL cannot slip into the window either. A transactional
+	// one is refused by its own conflict test, because the head this write just
+	// pushed is uncommitted and therefore invisible to it. A direct Go-API one
+	// defers its bitmap removal with a stamp NEWER than this transaction's start,
+	// and the sweep collects only what the watermark has passed — which this
+	// transaction is holding back. Either way the sweep cannot remove an entry
+	// this add is about to re-assert.
+	gated := versioned && tx != nil && g.mvccArmed
+	hoist := false
+	if gated {
+		hoist = g.idxAddActive.Add(1) > 1
+	}
+	if !hoist {
+		g.nodeIdx.Add(uint32(lid), id)
+	}
 	sh.mu.Unlock()
+	if hoist {
+		g.nodeIdx.Add(uint32(lid), id)
+	}
+	if gated {
+		g.idxAddActive.Add(-1)
+	}
 	// The write is CLAIMED in this store; now cross-check the existence store —
 	// a pending DETACH DELETE of this node by another transaction refuses the
 	// write, symmetrically with the delete's own label-head cross-check
