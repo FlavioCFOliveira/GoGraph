@@ -29,6 +29,36 @@ import (
 // argv: <workload> <level> <window> <outDir>
 const childMode = "contention-observe"
 
+// envOpsScale multiplies a workload's declared Ops in the CHILD.
+//
+// It exists for the differential that separates a one-shot cold-start cost
+// from steady-state contention: a lock site whose ABSOLUTE blocked time is
+// unchanged when the same workload does ten times the work paid that cost
+// once, at start-up, and is not contention the module suffers in service. A
+// site whose blocked time rises with the work is.
+//
+// The child reads it from its inherited environment; subproc.RunCtx passes
+// os.Environ() through, so the parent need only set it once.
+const envOpsScale = "GOGRAPH_CONTENTION_OPS_SCALE"
+
+// scaledOps applies envOpsScale to a declared operation count. A malformed or
+// non-positive value is ignored rather than silently halving the workload.
+func scaledOps(ops int) (int, error) {
+	raw := os.Getenv(envOpsScale)
+	if raw == "" {
+		return ops, nil
+	}
+	f, err := strconv.ParseFloat(raw, 64)
+	if err != nil || f <= 0 {
+		return 0, fmt.Errorf("bad %s=%q", envOpsScale, raw)
+	}
+	scaled := int(float64(ops) * f)
+	if scaled < 1 {
+		scaled = 1
+	}
+	return scaled, nil
+}
+
 func init() {
 	subproc.Register(childMode, func(args []string) int {
 		if len(args) != 4 {
@@ -53,6 +83,13 @@ func init() {
 				windowArg, contention.WindowEffect, contention.WindowProbe)
 			return 2
 		}
+
+		ops, err := scaledOps(w.Ops)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			return 2
+		}
+		w.Ops = ops
 
 		m, err := contention.Observe(w, level, win, outDir)
 		if err != nil {

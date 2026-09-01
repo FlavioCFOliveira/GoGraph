@@ -68,19 +68,32 @@ func readWorkload(name, surface string, n, ops int, query string) Workload {
 // surface it is meant to reach, so a sweep can state its coverage honestly
 // rather than implying it touched everything.
 //
-// Op counts are deliberately modest: the observatory runs each workload twice
-// per level across five levels, and the profiled window is slow by design.
+// Op counts are sized so that every measured window lasts of the order of a
+// second at the SLOWEST rung of the ladder. The first counts committed with
+// this package were far smaller, and the sweep for rmp #2679 measured what that
+// cost: at level 8 cypher-read-label-small closed in 18 ms, cypher-write-mem in
+// 30 ms and lpg-neighbours-read in 13 ms. In an 18 ms window the one-shot plan
+// compile is 30.51% of all blocked nanoseconds, so the profile ranked a
+// start-up cost above every steady-state lock; and because a fixed cold cost
+// falls on every rung alike, it dragged scaling_vs_1 towards 1.0 and made the
+// module look as though it scaled better than it does.
 //
 // All is safe for concurrent use: every call builds a fresh slice of fresh
 // [Workload] values, so no caller can mutate the registry another caller sees.
 func All() []Workload {
+	return append(coreWorkloads(), surfaceWorkloads()...)
+}
+
+// coreWorkloads is the registry as it stood at rmp #2678: Cypher read and
+// write paths, a mixed read/write population, and the raw graph API.
+func coreWorkloads() []Workload {
 	return []Workload{
 		// --- Cypher read paths -------------------------------------------
 		// Small graph: below the parallel-scan threshold, so every query walks
 		// the serial path and hammers the label/property registries. This is
 		// the shape most likely to expose registry-level shared state.
 		readWorkload("cypher-read-label-small", "cypher, cypher/exec, graph/lpg",
-			2000, 20000, "MATCH (n:N) RETURN count(n)"),
+			2000, 800000, "MATCH (n:N) RETURN count(n)"),
 
 		// Large graph: above the 50k parallel-scan threshold, so the parallel
 		// governor and its worker pool are in play — a scheduler-shaped
@@ -101,7 +114,7 @@ func All() []Workload {
 		{
 			Name:    "cypher-write-mem",
 			Surface: "cypher write barrier, graph/lpg, graph/mvcc",
-			Ops:     20000,
+			Ops:     400000,
 			Setup: func(_ string) (Op, func() error, error) {
 				g, err := seedGraph(0)
 				if err != nil {
@@ -163,7 +176,7 @@ func All() []Workload {
 		{
 			Name:    "cypher-mixed-rw",
 			Surface: "graph/mvcc visibility, graph/lpg, cypher",
-			Ops:     20000,
+			Ops:     200000,
 			Setup: func(_ string) (Op, func() error, error) {
 				g, err := seedGraph(2000)
 				if err != nil {
@@ -190,7 +203,7 @@ func All() []Workload {
 		{
 			Name:    "lpg-neighbours-read",
 			Surface: "graph/lpg, graph/adjlist",
-			Ops:     200000,
+			Ops:     10000000,
 			Setup: func(_ string) (Op, func() error, error) {
 				const n = 20000
 				g, err := seedGraph(n)
