@@ -230,7 +230,17 @@ func (s *degreeShape) relTypeID(g *lpg.ReadView[string, float64]) (lpg.LabelID, 
 // nil when the pattern is not degree-answerable. The recogniser runs at most
 // once per occurrence: the verdict is a property of the AST and of which outer
 // variables are bound at that point, both fixed for the life of the query.
+//
+// A nil result is also what [EngineOptions.DisableAdjacencyCountRewrites]
+// produces, deliberately: "no shape" is already the caller's signal to drive the
+// inner plan, so the gate needs no second code path and cannot answer differently
+// from a genuine rejection. The gate is checked BEFORE the memo so the two never
+// interact — a verdict cached on one engine is not consulted by another, since an
+// evaluator belongs to a single query run.
 func (e *subqueryEvaluator) degreeShapeFor(key ast.Expression, pat *ast.Pattern, where *ast.Where, row expr.RowContext) *degreeShape {
+	if e.adjacencyCountsDisabled {
+		return nil
+	}
 	if sh, seen := e.degree[key]; seen {
 		return sh
 	}
@@ -312,6 +322,11 @@ func (e *subqueryEvaluator) EvalCountBounded(ctx context.Context, sub *ast.Count
 // builds the list and takes its length exactly as before.
 func (pe *patternEvaluator) CountPatternComp(_ context.Context, pc *ast.PatternComprehension, row expr.RowContext) (expr.Value, bool, error) {
 	if pc == nil || pc.Predicate != nil || pc.Variable != nil {
+		return nil, false, nil
+	}
+	// EngineOptions.DisableAdjacencyCountRewrites: decline exactly as an
+	// unrecognised shape does, so the caller builds the list and takes its length.
+	if pe.adjacencyCountsDisabled {
 		return nil, false, nil
 	}
 	// recogniseDegreePattern works on an *ast.Pattern; a comprehension carries a

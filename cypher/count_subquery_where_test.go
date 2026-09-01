@@ -19,13 +19,37 @@ import (
 // which routes through the ordinary MATCH pipeline and honoured the predicate all
 // along, plus a hand-computed absolute value — because two forms agreeing proves
 // nothing when the bug is in the form you trusted.
+//
+// # Why the oracle runs on its own engine (rmp #2647)
+//
+// The full form was trusted because no recogniser accepted that SPELLING, which
+// makes the oracle a hostage to a limitation rather than to a decision. rmp #2648
+// removes that limitation — it makes the block form rewritable — and the first
+// case below (`COUNT { (a)-[:K]->(b) }`, no predicate on either side) is
+// degree-answerable in both spellings. Both arms would then have taken the degree
+// rewrite, and this file would have compared the rewrite with itself while
+// staying green.
+//
+// The oracle arm is therefore an engine built with
+// [EngineOptions.DisableAdjacencyCountRewrites], which forbids both
+// adjacency-answered rewrites outright, and [oracleRun] asserts on the runtime
+// counters that neither fired. It runs BOTH spellings: the block form, and the
+// pattern form itself. Two independent unrewritten readings of the same question
+// is what #2242's defect actually needed — the bug was that the PATTERN form
+// dropped its predicate, so a reading of the pattern form that cannot take the
+// rewrite is the closest possible control.
+//
+// [adjacencyCountEngines] and [oracleRun] live in degree_rewrite_test.go; the
+// counters they read are process-global, so no test in this file may call
+// t.Parallel.
 
 // TestCountSubquery_HonoursInlineWhere is acceptance criterion 1.
 //
 // Fixture facts, established independently below: n3's :K out-edges land on n4
 // and n6; only n6 carries :Q.
 func TestCountSubquery_HonoursInlineWhere(t *testing.T) {
-	eng := NewEngine(degreeFixture(t, 60))
+	g := degreeFixture(t, 60)
+	eng, off := adjacencyCountEngines(g)
 
 	// Pin the fixture with an enumerating form, so a case failing below is the
 	// classifier's fault and not a wrong assumption about the graph.
@@ -103,14 +127,26 @@ func TestCountSubquery_HonoursInlineWhere(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := degreeRun(t, eng, "MATCH (a:P {id: 3}) RETURN "+tc.pattern)
-			oracle := degreeRun(t, eng, "MATCH (a:P {id: 3}) RETURN "+tc.fullForm)
+			// Oracle 1: the block form, on the arm that cannot take either
+			// adjacency-answered rewrite.
+			oracle := oracleRun(t, off, "MATCH (a:P {id: 3}) RETURN "+tc.fullForm)
+			// Oracle 2: the pattern form itself, read by the inner plan. This is the
+			// control #2242 needed — the defect was that the PATTERN form discarded
+			// its predicate, so the strongest oracle is the same pattern text on a
+			// path that cannot answer it from a degree.
+			unrewritten := oracleRun(t, off, "MATCH (a:P {id: 3}) RETURN "+tc.pattern)
 			if oracle[0] != tc.want {
 				t.Fatalf("the full-subquery oracle itself returned %v, want %s — the case's "+
 					"hand-computed value is wrong, not the pattern form", oracle, tc.want)
 			}
+			if unrewritten[0] != tc.want {
+				t.Fatalf("the UNREWRITTEN reading of %s returned %v, want %s — the inner plan "+
+					"is dropping the predicate, so the pattern form below is being compared "+
+					"against a broken oracle", tc.pattern, unrewritten, tc.want)
+			}
 			if got[0] != tc.want {
-				t.Errorf("%s = %v, want %s (full form agrees at %v)",
-					tc.pattern, got, tc.want, oracle)
+				t.Errorf("%s = %v, want %s (full form agrees at %v, unrewritten pattern at %v)",
+					tc.pattern, got, tc.want, oracle, unrewritten)
 			}
 		})
 	}
@@ -121,6 +157,12 @@ func TestCountSubquery_HonoursInlineWhere(t *testing.T) {
 // nor the labelled-hop count can evaluate, so both must decline and let the
 // inner plan answer. Before #2242 gave the AST a Where field they could not even
 // SEE the clause, so they answered the pattern without its predicate.
+//
+// It runs on a DEFAULT engine, and must keep doing so.
+// [EngineOptions.DisableAdjacencyCountRewrites] would satisfy every assertion
+// below for every query ever written, because the claim under test is that the
+// RECOGNISERS decline — not that some engine forbade them. Moving this to the
+// oracle arm would delete the test rather than harden it.
 func TestCountSubquery_InlineWhereIsRefusedByBothRecognisers(t *testing.T) {
 	eng := NewEngine(degreeFixture(t, 60))
 

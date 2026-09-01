@@ -16,6 +16,27 @@ package cypher
 //  3. SHORT-CIRCUITING IS REAL. A comparison against a small literal must stop
 //     before walking a high-degree node, demonstrated by measurement rather
 //     than asserted.
+//
+// # Where the unrewritten arm comes from (rmp #2647)
+//
+// Obligation 1 says "the SAME query with the rewrite disabled", and until #2647
+// that was not what happened: there was no way to disable the rewrite, so the
+// unrewritten arm was a hand-written `COUNT { MATCH … RETURN x }` block form,
+// relied upon because no recogniser accepted that SPELLING. An oracle resting on
+// a limitation expires the moment somebody removes the limitation, and rmp #2648
+// removes exactly this one — it makes the block form rewritable. Both arms would
+// then have taken the same path, every differential here would have compared the
+// rewrite with itself, and the suite would have stayed green while proving
+// nothing. That is the failure mode [degreeDifferential] already warns about in
+// its own message: two forms agreeing means nothing when they share a path.
+//
+// The arm is therefore built from [EngineOptions.DisableAdjacencyCountRewrites]:
+// the oracle engine may not take either adjacency-answered rewrite, whatever the
+// recognisers grow to accept, and [oracleRun] ASSERTS on the runtime counters
+// that it did not. The block form is kept as a second, independently-translated
+// oracle rather than as the only one.
+//
+// The counters are process-global, so no test in this file may call t.Parallel.
 
 import (
 	"context"
@@ -99,27 +120,91 @@ func degreeRun(t *testing.T, eng *Engine, q string) []string {
 	return out
 }
 
-// degreeDifferential runs q on two identical fixtures and reports the rows plus
-// how many times the rewrite fired. The second engine is not "the rewrite
-// disabled" — there is no engine option for that — so identity is established
-// against a SEMANTICALLY EQUIVALENT unrewritable form supplied by the caller,
-// which is the stronger comparison anyway: it checks the answer, not just that
-// two code paths agree with each other.
+// adjacencyCountEngines returns the two arms of every differential in this file
+// and in count_subquery_where_test.go. Both wrap the SAME graph, so the arms
+// differ in exactly one variable — whether the evaluator may answer a count or an
+// existence question from the anchor's adjacency:
+//
+//   - on is an engine with DEFAULT options, where the degree rewrite (#2232) and
+//     the labelled single-hop count (#2235) are both live. It is the arm under
+//     test.
+//   - off is the ORACLE arm. [EngineOptions.DisableAdjacencyCountRewrites]
+//     forbids both rewrites at every dispatch site, so each shape drives its
+//     compiled inner plan — the path it took before either rewrite existed.
+//
+// The plan SHAPE is identical on both: the knob gates the evaluator, not the
+// translator, so a projected pattern comprehension is left unhoisted on both arms
+// and the difference really is only the access path.
+func adjacencyCountEngines(g *lpg.Graph[string, float64]) (on, off *Engine) {
+	return NewEngine(g), NewEngineWithOptions(g, EngineOptions{DisableAdjacencyCountRewrites: true})
+}
+
+// oracleRun executes q on the rewrite-free arm and asserts that NEITHER
+// adjacency-answered rewrite fired while it did.
+//
+// The assertion is what keeps the oracle honest. A gate that silently stopped
+// gating would leave both arms on the fast path and quietly delete the
+// comparison; here it fails the test instead. It reads both counters, not only
+// the degree one, because a shape the degree recogniser refuses may still be
+// served by the labelled single-hop count — the two are separate recognisers with
+// separate counters, and an oracle blind to one of them is only half an oracle.
+func oracleRun(t *testing.T, off *Engine, q string) []string {
+	t.Helper()
+	beforeDeg := degreeRewriteCount.Load()
+	beforeHop := labelledHopRewriteCount.Load()
+	got := degreeRun(t, off, q)
+	if fired := degreeRewriteCount.Load() - beforeDeg; fired != 0 {
+		t.Fatalf("the ORACLE arm took the degree rewrite %d time(s), so it is not an "+
+			"unrewritten reading and every comparison against it is vacuous.\n"+
+			"  query: %s\n"+
+			"  EngineOptions.DisableAdjacencyCountRewrites did not reach the dispatch site.", fired, q)
+	}
+	if fired := labelledHopRewriteCount.Load() - beforeHop; fired != 0 {
+		t.Fatalf("the ORACLE arm took the labelled single-hop count %d time(s), so it is not "+
+			"an unrewritten reading and every comparison against it is vacuous.\n"+
+			"  query: %s\n"+
+			"  EngineOptions.DisableAdjacencyCountRewrites did not reach the dispatch site.", fired, q)
+	}
+	return got
+}
+
+// degreeDifferential establishes obligation 1 for one case, against THREE
+// oracles that share no code with each other:
+//
+//  1. the SAME query text on the rewrite-free arm, which is the comparison
+//     obligation 1 actually asks for — identical query, identical fixture, only
+//     the access path differs;
+//  2. a semantically equivalent block form, also on the rewrite-free arm, whose
+//     inner plan is translated from a different AST;
+//  3. want, the hand-computed absolute answer, which shares no code at all.
+//
+// Oracle 1 is new in rmp #2647 and is the one that cannot be vacated by a later
+// widening of either recogniser: it is unrewritten because the engine forbids the
+// rewrite, not because nobody has taught the recogniser that spelling yet.
 func degreeDifferential(t *testing.T, n int, rewritable, equivalent, want string) {
 	t.Helper()
-	eng := NewEngine(degreeFixture(t, n))
+	g := degreeFixture(t, n)
+	on, off := adjacencyCountEngines(g)
 
 	before := degreeRewriteCount.Load()
-	got := degreeRun(t, eng, rewritable)
+	got := degreeRun(t, on, rewritable)
 	fired := degreeRewriteCount.Load() - before
 	if fired == 0 {
 		t.Fatalf("the degree rewrite did NOT fire for %q, so this case proves nothing about it", rewritable)
 	}
 
-	before = degreeRewriteCount.Load()
-	oracle := degreeRun(t, eng, equivalent)
-	if degreeRewriteCount.Load() != before {
-		t.Fatalf("the control form %q ALSO took the rewrite; it is not an independent oracle", equivalent)
+	unrewritten := oracleRun(t, off, rewritable)
+	oracle := oracleRun(t, off, equivalent)
+
+	if len(got) != len(unrewritten) {
+		t.Fatalf("row count differs from the SAME query unrewritten: rewritten %d, unrewritten %d\n  query: %s",
+			len(got), len(unrewritten), rewritable)
+	}
+	for i := range got {
+		if got[i] != unrewritten[i] {
+			t.Fatalf("row %d differs from the SAME query unrewritten:\n  rewritten   %q\n  unrewritten %q\n  query: %s",
+				i, got[i], unrewritten[i], rewritable)
+		}
 	}
 
 	if len(got) != len(oracle) {
@@ -251,6 +336,13 @@ func TestDegreeRewrite_Identity(t *testing.T) {
 // take the rewrite, and each one is also checked for the right ANSWER, so a
 // future widening fails loudly on both counts rather than silently returning a
 // plausible-looking number.
+//
+// It runs on a DEFAULT engine, and must keep doing so. This is the one test in
+// the file for which [EngineOptions.DisableAdjacencyCountRewrites] would be
+// actively wrong: the assertion is that the RECOGNISER refuses each shape, and an
+// engine that forbids the rewrite outright satisfies that assertion for every
+// query ever written. Switching this to the oracle arm would not strengthen it —
+// it would delete it.
 func TestDegreeRewrite_IneligibleShapes(t *testing.T) {
 	cases := []struct {
 		name string
@@ -308,8 +400,16 @@ func TestDegreeRewrite_IneligibleShapes(t *testing.T) {
 // obligation 2: refusing the rewrite must not change the answer either. Each
 // ineligible shape is compared against a form that computes the same thing a
 // different way.
+//
+// "Ineligible" here means ineligible for the DEGREE rewrite specifically. Case 0
+// is the labelled-hop shape (#2235), so it is served by the OTHER adjacency
+// rewrite rather than by an inner plan — which is why the oracle has to be
+// rewrite-free rather than merely differently spelled, and why [oracleRun] checks
+// both counters. Cases 1 and 2 (incoming, undirected) are refused by both
+// recognisers, so on the default arm they already drive the inner plan.
 func TestDegreeRewrite_IneligibleShapesStillCorrect(t *testing.T) {
-	eng := NewEngine(degreeFixture(t, 60))
+	g := degreeFixture(t, 60)
+	on, off := adjacencyCountEngines(g)
 	cases := []struct{ a, b string }{
 		{
 			`MATCH (a:P) WHERE COUNT { (a)-[:K]->(:Q) } > 0 RETURN count(a)`,
@@ -325,12 +425,131 @@ func TestDegreeRewrite_IneligibleShapesStillCorrect(t *testing.T) {
 		},
 	}
 	for i, tc := range cases {
-		got := degreeRun(t, eng, tc.a)
-		want := degreeRun(t, eng, tc.b)
+		got := degreeRun(t, on, tc.a)
+		// The SAME query on the rewrite-free arm: whatever a recogniser is taught to
+		// accept later, this reading enumerates.
+		unrewritten := oracleRun(t, off, tc.a)
+		if len(got) != len(unrewritten) || (len(got) > 0 && got[0] != unrewritten[0]) {
+			t.Errorf("case %d: the shape disagrees with its own unrewritten reading:\n  %s\n  default arm -> %v\n  oracle arm  -> %v",
+				i, tc.a, got, unrewritten)
+		}
+		// The differently-spelled oracle, also rewrite-free so a widening cannot
+		// quietly move it onto the path it is meant to check.
+		want := oracleRun(t, off, tc.b)
 		if len(got) != len(want) || (len(got) > 0 && got[0] != want[0]) {
 			t.Errorf("case %d: ineligible shape disagrees with its oracle:\n  %s -> %v\n  %s -> %v",
 				i, tc.a, got, tc.b, want)
 		}
+	}
+}
+
+// TestDisableAdjacencyCountRewrites_GatesEveryDispatchSite is the regression gate
+// for the oracle arm itself (rmp #2647). Every differential in this file and in
+// count_subquery_where_test.go now rests on
+// [EngineOptions.DisableAdjacencyCountRewrites] actually reaching the code that
+// decides to answer from the adjacency, so that has to be proved rather than
+// assumed — a gate that silently stopped gating would leave both arms on the fast
+// path and vacate every comparison built on it while keeping them green.
+//
+// One case per dispatch site the knob claims to cover, and each case has two
+// halves that must BOTH hold:
+//
+//   - NON-VACUITY, on the default arm: the shape really is rewritable, so the
+//     zero the oracle arm reports is caused by the knob and not by the shape
+//     being ineligible anyway. Without this half the whole test would pass on a
+//     build where the knob did nothing at all.
+//   - THE GATE, on the oracle arm: neither counter moves.
+//
+// The cross-assertions (a degree case must not fire the hop counter, and vice
+// versa) pin WHICH site each query exercises. That matters here more than usual:
+// the claim is that all four sites are gated, and a query that quietly migrated
+// to a different recogniser would leave one site untested while the case still
+// passed.
+func TestDisableAdjacencyCountRewrites_GatesEveryDispatchSite(t *testing.T) {
+	g := degreeFixture(t, 60)
+	on, off := adjacencyCountEngines(g)
+
+	cases := []struct {
+		name       string
+		site       string
+		q          string
+		wantDegree bool
+		wantHop    bool
+	}{
+		{
+			name: "EXISTS/COUNT subquery answered by the degree",
+			site: "subqueryEvaluator.degreeShapeFor",
+			q:    `MATCH (a:P) WHERE COUNT { (a)-[:K]->() } > 0 RETURN count(a)`,
+			// Verified rewritable by TestDegreeRewrite_Identity/"count > 0, typed".
+			wantDegree: true,
+		},
+		{
+			name: "COUNT subquery answered by one labelled walk",
+			site: "subqueryEvaluator.countLabelledHop",
+			q:    `MATCH (a:P {id: 3}) RETURN COUNT { (a)-[:K]->(:Q) }`,
+			// Verified rewritable by TestLabelledHopCount_Identity.
+			wantHop: true,
+		},
+		{
+			name: "size(pattern comprehension) answered by the degree",
+			site: "patternEvaluator.CountPatternComp",
+			q:    `MATCH (a:P) WHERE size([ (a)-[:K]->(b) | b ]) > 1 RETURN count(a)`,
+			// Verified rewritable by TestDegreeRewrite_Identity's last case.
+			wantDegree: true,
+		},
+		{
+			name: "bare pattern predicate answered by one labelled walk",
+			site: "patternEvaluator.labelledHopShapeFor",
+			q:    `MATCH (a:P) WHERE (a)-[:K]->(:Q) RETURN count(a)`,
+			// Verified rewritable by TestLabelledHopCount_PatternPredicateIdentity.
+			wantHop: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			beforeDeg := degreeRewriteCount.Load()
+			beforeHop := labelledHopRewriteCount.Load()
+			got := degreeRun(t, on, tc.q)
+			deg := degreeRewriteCount.Load() - beforeDeg
+			hop := labelledHopRewriteCount.Load() - beforeHop
+
+			if tc.wantDegree && deg == 0 {
+				t.Fatalf("the DEFAULT arm did not take the degree rewrite for %s, so the zero "+
+					"the oracle arm reports proves nothing about the knob — this case has gone "+
+					"vacuous and the shape needs replacing.\n  query: %s\n  site:  %s",
+					tc.name, tc.q, tc.site)
+			}
+			if tc.wantHop && hop == 0 {
+				t.Fatalf("the DEFAULT arm did not take the labelled single-hop count for %s, so "+
+					"the zero the oracle arm reports proves nothing about the knob — this case "+
+					"has gone vacuous and the shape needs replacing.\n  query: %s\n  site:  %s",
+					tc.name, tc.q, tc.site)
+			}
+			if !tc.wantDegree && deg != 0 {
+				t.Errorf("the degree rewrite fired %d time(s) for a shape this case attributes to "+
+					"%s; the query no longer exercises the site it names.\n  query: %s", deg, tc.site, tc.q)
+			}
+			if !tc.wantHop && hop != 0 {
+				t.Errorf("the labelled single-hop count fired %d time(s) for a shape this case "+
+					"attributes to %s; the query no longer exercises the site it names.\n  query: %s",
+					hop, tc.site, tc.q)
+			}
+
+			// The gate, plus the assertion that turning it on costs work and not
+			// correctness: the unrewritten reading must return the same rows.
+			unrewritten := oracleRun(t, off, tc.q)
+			if len(got) != len(unrewritten) {
+				t.Fatalf("row count differs with the rewrites disabled: default %d, oracle %d\n  query: %s",
+					len(got), len(unrewritten), tc.q)
+			}
+			for i := range got {
+				if got[i] != unrewritten[i] {
+					t.Fatalf("row %d differs with the rewrites disabled:\n  default %q\n  oracle  %q\n  query: %s",
+						i, got[i], unrewritten[i], tc.q)
+				}
+			}
+		})
 	}
 }
 

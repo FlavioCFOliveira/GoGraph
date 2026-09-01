@@ -966,6 +966,47 @@ type EngineOptions struct {
 	// internal concurrency.
 	DisableParallelBackfill bool
 
+	// DisableAdjacencyCountRewrites turns OFF both runtime rewrites that answer a
+	// count-or-existence question from the anchor's adjacency instead of by driving
+	// a compiled inner plan once per outer row: the degree rewrite (#2232, Neo4j's
+	// getDegreeRewriter — see degree_rewrite.go) and the labelled single-hop count
+	// (#2235, see labelled_hop_count.go). One field covers both because they are
+	// two implementations of one idea, they are selected by the same shape family,
+	// and a caller who wants the unrewritten reading of a query wants neither.
+	//
+	// It gates the four dispatch sites and nothing else, so the answers are
+	// unchanged in both settings — every gated shape falls through to the inner
+	// plan (or, for `size([ … ])`, to building the list and taking its length),
+	// which is the same path the shape took before either rewrite existed:
+	//
+	//   - [subqueryEvaluator.degreeShapeFor] — EXISTS/COUNT via the degree
+	//   - [subqueryEvaluator.countLabelledHop] — EXISTS/COUNT via one labelled walk
+	//   - [patternEvaluator.CountPatternComp] — `size([ (a)-[:K]->(x) | … ])`
+	//   - [patternEvaluator.labelledHopShapeFor] — `WHERE (a)-[:K]->(:P)`
+	//
+	// When false (the default) both rewrites are live. Setting it true exists for
+	// two reasons, in this order:
+	//
+	//  1. AS AN UNREWRITABLE-BY-CONSTRUCTION ORACLE (rmp #2647). The differential
+	//     suites for both rewrites need an arm that provably does NOT take them.
+	//     Until this field existed the arm was a hand-written `COUNT { MATCH … }`
+	//     block form, chosen because no recogniser accepted that spelling — an
+	//     oracle resting on a LIMITATION rather than on a decision. rmp #2648 makes
+	//     the block form rewritable, at which point both arms would have taken the
+	//     same path and every such differential would have gone silently vacuous
+	//     while staying green. An explicit gate cannot be removed by a later
+	//     widening: the arm is unrewritten because it was told to be.
+	//  2. As an operational escape hatch, matching [DisableAnchorSwap] and
+	//     [DisableParallelScan]. Both rewrites strictly reduce work for the shapes
+	//     they admit, so there is no workload for which off is faster; the hatch is
+	//     for isolating a suspected defect, not for tuning.
+	//
+	// The planner is NOT gated. [ir.DegreeCountableShape] still decides whether a
+	// projected pattern comprehension is left unhoisted, so the plan SHAPE is
+	// identical in both settings and the two arms of a differential differ in
+	// exactly one variable — whether the evaluator may answer from the adjacency.
+	DisableAdjacencyCountRewrites bool
+
 	// MaxLabelRecountEdges bounds the per-relabel OUT-side fan-out the
 	// relationship count-store (#2082) recounts exactly when a node gains or
 	// loses a label (SET / REMOVE n:X). A relabel of a node with more than this
@@ -1353,6 +1394,14 @@ type Engine struct {
 	// index contents.
 	parallelBackfillEnabled bool
 
+	// adjacencyCountRewritesEnabled gates BOTH adjacency-answered count rewrites —
+	// the degree rewrite (#2232) and the labelled single-hop count (#2235). True by
+	// default; set false by EngineOptions.DisableAdjacencyCountRewrites. When false
+	// every eligible shape drives its inner plan instead, which is the same answer
+	// by the pre-rewrite path. See [EngineOptions.DisableAdjacencyCountRewrites] for
+	// the four dispatch sites it gates and why one field covers two rewrites.
+	adjacencyCountRewritesEnabled bool
+
 	// countStore is the derived, non-durable relationship count-store (task
 	// #2082, docs/count-store-design.md). It maintains exact E(relType) /
 	// D(label,relType,dir) / T(labelA,relType,labelB) statistics from the write
@@ -1642,9 +1691,11 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 
 		parallelScanEnabled:     !opts.DisableParallelScan,
 		parallelBackfillEnabled: !opts.DisableParallelBackfill,
-		parallelScanThreshold:   resolveParallelScanThreshold(opts.ParallelScanThreshold),
-		parallelGov:             &exec.ParallelGovernor{},
-		countStore:              count.New(resolveMaxLabelRecountEdges(opts.MaxLabelRecountEdges)),
+
+		adjacencyCountRewritesEnabled: !opts.DisableAdjacencyCountRewrites,
+		parallelScanThreshold:         resolveParallelScanThreshold(opts.ParallelScanThreshold),
+		parallelGov:                   &exec.ParallelGovernor{},
+		countStore:                    count.New(resolveMaxLabelRecountEdges(opts.MaxLabelRecountEdges)),
 		// Held for the duration of this constructor only; cleared just before
 		// the Engine is returned (see the publish step at the end).
 		recoveredIndexPayloads: opts.RecoveredIndexPayloads,
@@ -2534,6 +2585,15 @@ func (e *Engine) buildReadPhysical(
 	// comprehension over a supernode anchor cannot build an unbounded
 	// result list — the same bound collect() enforces (#1294, #1298).
 	patEval := newPatternEvaluator(rv, e.maxCollectItems)
+	// Adjacency-answered count gating (#2232 / #2235, knob added by rmp #2647). The
+	// polarity flips here on purpose: the Engine field is positive to match its
+	// siblings, the evaluator field is NEGATIVE so that the zero value keeps both
+	// rewrites live. That matters because [newPatternEvaluator] has test call sites
+	// that construct an evaluator without an Engine, and an evaluator built outside
+	// this function must behave as it always has rather than silently lose the
+	// optimisation. Set before either evaluator is handed to a build.
+	subEval.adjacencyCountsDisabled = !e.adjacencyCountRewritesEnabled
+	patEval.adjacencyCountsDisabled = !e.adjacencyCountRewritesEnabled
 	bopts := &buildOpts{subEval: subEval, patEval: patEval, queryCtx: ctx, maxCollectItems: e.maxCollectItems}
 	// Hand the subquery evaluator this query's parameters and build options so an
 	// inner plan is compiled in a scope that can resolve them (rmp #2507). It has

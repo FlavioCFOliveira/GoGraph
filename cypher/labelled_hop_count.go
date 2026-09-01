@@ -260,8 +260,13 @@ func (s *labelledHopShape) resolveFarLabels(g *lpg.ReadView[string, float64]) bo
 
 // labelledHopShapeFor memoises the recogniser's verdict per subquery occurrence,
 // so it runs once rather than once per outer row. A cached nil is a pattern
-// already examined and rejected.
+// already examined and rejected, and so is the nil
+// [EngineOptions.DisableAdjacencyCountRewrites] returns — the caller's response
+// to either is to drive the inner plan.
 func (e *subqueryEvaluator) labelledHopShapeFor(key ast.Expression, pat *ast.Pattern, where *ast.Where, row expr.RowContext) *labelledHopShape {
+	if e.adjacencyCountsDisabled {
+		return nil
+	}
 	if sh, seen := e.labelledHop[key]; seen {
 		return sh
 	}
@@ -314,7 +319,13 @@ func (pe *patternEvaluator) matchLabelledHop(pp *ast.PathPattern, row expr.RowCo
 // The pattern evaluator sees the same *ast.PathPattern pointer on every outer
 // row, so without this the recogniser — and the shape allocation — would repeat
 // per row on the very path this optimisation exists to make cheap.
+//
+// It returns nil when [EngineOptions.DisableAdjacencyCountRewrites] is set, which
+// sends [patternEvaluator.matchLabelledHop]'s caller to the general enumeration.
 func (pe *patternEvaluator) labelledHopShapeFor(pp *ast.PathPattern, row expr.RowContext) *labelledHopShape {
+	if pe.adjacencyCountsDisabled {
+		return nil
+	}
 	if sh, seen := pe.labelledHop[pp]; seen {
 		return sh
 	}

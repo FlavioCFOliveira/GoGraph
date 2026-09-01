@@ -82,6 +82,17 @@ type subqueryEvaluator struct {
 	// sharing a cache would conflate the two verdicts.
 	labelledHop map[ast.Expression]*labelledHopShape
 
+	// adjacencyCountsDisabled forbids BOTH adjacency-answered rewrites above, so
+	// every EXISTS/COUNT subquery drives its compiled inner plan. It is set from
+	// [EngineOptions.DisableAdjacencyCountRewrites]; see that field for what the
+	// knob is for and why one flag covers two rewrites.
+	//
+	// The polarity is NEGATIVE so the zero value keeps both rewrites live: an
+	// evaluator constructed without an Engine behaves as it did before the knob
+	// existed. A nested subquery inherits the setting for free, because
+	// [buildOpts.forSubquery] carries THIS evaluator into the child scope.
+	adjacencyCountsDisabled bool
+
 	// params is the enclosing query's fully-resolved parameter map, threaded
 	// into every inner build (rmp #2507).
 	//
