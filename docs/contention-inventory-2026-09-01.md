@@ -277,3 +277,64 @@ GOGRAPH_CONTENTION_SWEEP_DIR=<abs dir> \
 ```
 
 `-v` is required: `go test` discards everything a passing package writes.
+
+---
+
+# Campaign results — clean re-measurement at `29860f7a`
+
+Single sweep, isolated git worktree, no other work on the host. loadavg 2.88
+before, 7.67 after (the sweep's own load). `SWEEP_EXIT=0`, zero failures, 71.2 s.
+
+**Validity control.** `index-hash-rw` is untouched by this sprint and reads
+**1.01 / 1.04 / 0.86 / 0.98 / 1.00** across the ladder — four of five levels
+within 4%. An earlier attempt at this sweep read the same control at **0.40×**,
+which is how it was caught as contaminated (another agent was compiling
+concurrently) and discarded rather than published.
+
+## Absolute throughput, pre-campaign → now
+
+| workload | level | before (ops/s) | after (ops/s) | factor |
+|---|---:|---:|---:|---:|
+| `cypher-mixed-rw` | 1024 | 8,886 | 386,126 | **43.45×** |
+| `cypher-mixed-rw` | 256 | 20,664 | 430,020 | **20.81×** |
+| `cypher-mixed-rw` | 64 | 64,036 | 528,640 | **8.26×** |
+| `index-btree-rw` | 1024 | 3,711,196 | 123,409,681 | **33.25×** |
+| `index-btree-rw` | 256 | 4,836,808 | 126,082,095 | **26.07×** |
+| `index-btree-rw` | 8 | 10,803,838 | 130,843,253 | **12.11×** |
+| `index-count-spread` | 1024 | 54,454,380 | 296,297,978 | **5.44×** |
+| `index-count-hot` | 1024 | 24,077,229 | 79,878,766 | **3.32×** |
+| `cypher-write-mem` | 1024 | 418,595 | 490,518 | 1.17× |
+| `mvcc-session-write` | 1024 | 423,863 | 468,346 | 1.10× |
+
+## The anti-scaling is gone
+
+`scaling_vs_1`, before → after:
+
+| workload | 8 | 64 | 256 | 1024 |
+|---|---|---|---|---|
+| `index-btree-rw` | 0.445 → **5.610** | 0.359 → **5.668** | 0.199 → **5.406** | 0.153 → **5.291** |
+| `index-count-spread` | 0.917 → **2.423** | 0.665 → **2.587** | 0.609 → **2.685** | 0.538 → **2.508** |
+| `cypher-mixed-rw` | 1.602 → 1.203 | 0.691 → **1.142** | 0.223 → 0.929 | 0.096 → **0.834** |
+
+`cypher-mixed-rw`'s ratios understate the result and must be read with the
+absolutes beside them: its level-1 throughput itself rose **4.99×** (92,690 →
+462,953), because a single reader now skips the suspect walk entirely. Every
+rung improved; the ratio fell only because the denominator improved most.
+
+`index-count-hot` holds a flat 0.325 across the whole ladder where it previously
+decayed 0.391 → 0.147. A ratio above 1.000 is unreachable there by
+construction — every writer increments one counter on one cache line, so the
+bound is cache coherence, not locking.
+
+## What was NOT fixed
+
+* **`index-count-hot` cannot scale**, only stop collapsing (see above).
+* **`cypher-mixed-rw` at 1024 is 0.834**, not above 1.000. The ceiling arm — the
+  whole suspect machinery deleted — measured 0.760 at that rung, so the residual
+  is oversubscription on 10 cores, not contention.
+* **`graph/index/label`** still holds a global `RWMutex`. Its ceiling probe buys
+  only ~4%, at or below the instrument's own repeatability, so it was measured
+  and declined rather than shipped (rmp #2685).
+* **A pre-existing ACID hole** was found and independently reproduced: a deleted
+  node is briefly visible to present-time readers (rmp #2687). It predates this
+  campaign and is unaffected by it.
