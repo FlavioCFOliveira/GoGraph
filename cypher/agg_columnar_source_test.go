@@ -22,8 +22,12 @@ var aggSourceQueries = []struct {
 	q    string
 	want []string
 }{
+	// count(<bare pattern-bound var>) is normalised to count(*) before any recogniser
+	// runs (rmp #2657), so this shape now reaches exec.CountRows and needs no
+	// pre-projection at all — the columnar chain still has to reach under the
+	// aggregate, which is what this table is for.
 	{"count_var", `MATCH (n:P) WHERE n.age > 10 RETURN count(n) AS c`,
-		[]string{"ColumnarProject", "ColumnarFilter"}},
+		[]string{"CountRows", "ColumnarFilter"}},
 	{"count_star", `MATCH (n:P) WHERE n.age > 10 RETURN count(*) AS c`,
 		[]string{"CountRows", "ColumnarFilter"}},
 	{"count_prop", `MATCH (n:P) WHERE n.age > 10 RETURN count(n.age) AS c`,
@@ -38,8 +42,9 @@ var aggSourceQueries = []struct {
 		[]string{"ColumnarProject", "ColumnarFilter"}},
 	{"expand_count_star", `MATCH (a:P)-[:K]->(b:P) WHERE b.age > 10 RETURN count(*) AS c`,
 		[]string{"CountRows", "ColumnarFilter", "columnarExpand"}},
+	// Likewise normalised by #2657: b is bound by a non-optional ir.Expand.
 	{"expand_count_var", `MATCH (a:P)-[:K]->(b:P) WHERE b.age > 10 RETURN count(b) AS c`,
-		[]string{"ColumnarProject", "ColumnarFilter", "columnarExpand"}},
+		[]string{"CountRows", "ColumnarFilter", "columnarExpand"}},
 	{"expand_grouped", `MATCH (a:P)-[:K]->(b:P) WHERE b.age > 10 RETURN b.name AS nm, count(*) AS c`,
 		[]string{"ColumnarProject", "ColumnarFilter", "columnarExpand"}},
 }
@@ -231,11 +236,29 @@ func TestAggColumnarSource_YieldsToAccessPaths(t *testing.T) {
 // `RETURN count(n.big)` SUCCEEDED on the columnar path while the identical query
 // with a WHERE — which forced the row path — returned ErrProjectionRowTooLarge.
 //
-// Every pair below must now reach the SAME verdict, whichever pre-projection runs.
+// Every triple below must now reach the SAME verdict, whichever pre-projection runs.
+//
+// EXTENDED for rmp #2668 with the THIRD pre-projection: the one
+// tryBuildParallelAggregateScan's sub-plan factory rebuilds per morsel, which was
+// also wrapped in nothing. #2655 could not have widened to it, because that path
+// requires a BARE scan and so is excluded by the very WHERE the row arm needs. The
+// third arm is therefore an UNLABELLED bare scan on an engine whose parallel
+// threshold the fixture exceeds; the parallel path declining would make it a fourth
+// serial arm, so [TestParallelAggPreProjection_ThreeSitesIdenticalVerdict] asserts
+// engagement from the query's own physical plan and additionally pins the three error
+// strings byte-identical.
+//
+// MEASURED with the per-worker guard unwired: 2 of the 3 new parallel arms go red. The
+// third, `RETURN n.big AS b, count(*)`, still refuses without it, because the retained
+// GROUPING KEY is charged by exec.ParallelAggregateScan.WithByteBudget; only the
+// aggregate ARGUMENT arms depend on the new guard.
 func TestColumnarAggPreProjection_RowByteBudgetParity(t *testing.T) {
 	t.Parallel()
 	const (
-		nodes   = 32
+		// > psTestThreshold (50) so the third arm's unlabelled scan engages the
+		// morsel-parallel aggregate path. The labelled arms are unaffected: their
+		// engine keeps the default 50 000 threshold.
+		nodes   = 60
 		listLen = 20000 // 16 + 20000*16 = 320016 estimated bytes
 		ceiling = 100000
 	)
@@ -267,21 +290,36 @@ func TestColumnarAggPreProjection_RowByteBudgetParity(t *testing.T) {
 		MaxResultBytes:       ceiling,
 		GlobalMaxResultBytes: GlobalMaxResultBytesUnlimited,
 	})
-	// Each pair is the SAME aggregate; the `tag` predicate exists only to move the
-	// query between the two pre-projections. Neither arm may complete.
-	pairs := [][2]string{
+	// The third arm's engine: the same ceiling, plus a threshold the fixture exceeds
+	// so the unlabelled bare scan reaches tryBuildParallelAggregateScan (#2668).
+	parEng := NewEngineWithOptions(g, EngineOptions{
+		MaxResultBytes:        ceiling,
+		GlobalMaxResultBytes:  GlobalMaxResultBytesUnlimited,
+		ParallelScanThreshold: psTestThreshold,
+	})
+	// Each triple is the SAME aggregate; the `tag` predicate exists only to move the
+	// query from the columnar pre-projection to the row one, and dropping the label
+	// only to move it to the per-worker one. No arm may complete.
+	triples := [][3]string{
 		{`MATCH (n:P) RETURN count(n.big) AS c`,
-			`MATCH (n:P) WHERE n.tag < 9 RETURN count(n.big) AS c`},
+			`MATCH (n:P) WHERE n.tag < 9 RETURN count(n.big) AS c`,
+			`MATCH (n) RETURN count(n.big) AS c`},
 		{`MATCH (n:P) RETURN n.small AS s, count(n.big) AS c`,
-			`MATCH (n:P) WHERE n.tag < 9 RETURN n.small AS s, count(n.big) AS c`},
+			`MATCH (n:P) WHERE n.tag < 9 RETURN n.small AS s, count(n.big) AS c`,
+			`MATCH (n) RETURN n.small AS s, count(n.big) AS c`},
 		{`MATCH (n:P) RETURN n.big AS b, count(*) AS c`,
-			`MATCH (n:P) WHERE n.tag < 9 RETURN n.big AS b, count(*) AS c`},
+			`MATCH (n:P) WHERE n.tag < 9 RETURN n.big AS b, count(*) AS c`,
+			`MATCH (n) RETURN n.big AS b, count(*) AS c`},
 	}
-	for _, pair := range pairs {
-		for _, q := range pair {
+	for _, triple := range triples {
+		for i, q := range triple {
 			q := q
+			e := eng
+			if i == 2 {
+				e = parEng
+			}
 			t.Run(q, func(t *testing.T) {
-				res, err := eng.Run(context.Background(), q, nil)
+				res, err := e.Run(context.Background(), q, nil)
 				if err != nil {
 					return // a build-time refusal is a refusal
 				}
@@ -292,7 +330,7 @@ func TestColumnarAggPreProjection_RowByteBudgetParity(t *testing.T) {
 				if drainErr == nil {
 					t.Fatalf("%q completed under a %d-byte result budget while carrying a "+
 						"320016-byte value: the pre-projection is bounded by nothing.\n%s",
-						q, ceiling, explainOK(t, eng, q))
+						q, ceiling, explainOK(t, e, q))
 				}
 			})
 		}

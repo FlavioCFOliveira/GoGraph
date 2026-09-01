@@ -17,7 +17,12 @@ package exec
 // bindings, so no null semantics are lost.
 //
 // This is deliberately NOT extended to count(<var>), which counts non-null
-// bindings and therefore must keep evaluating its argument per row.
+// bindings and therefore must keep evaluating its argument per row. What DOES
+// reach this operator, since rmp #2657, is a count(<var>) the PLANNER has already
+// normalised to count(*) — which it does only where the variable is bound by a
+// pattern that cannot produce a null binding. The normalisation happens above this
+// operator and leaves its own contract untouched: an empty argument still means
+// "count rows", and a non-empty one is still refused.
 //
 // # Why it is worth an operator
 //

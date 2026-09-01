@@ -5721,6 +5721,55 @@ func applyColumnarAggRowBudget(cp *exec.ColumnarProject, bopts *buildOpts) *exec
 		func(v expr.Value) int64 { return estimateValueSize(v) })
 }
 
+// applyWorkerAggRowBudget threads the SAME per-row byte ceiling
+// [applyProjectionRowBudget] gives the serial row-at-a-time aggregation
+// pre-projection — and [applyColumnarAggRowBudget] gives the columnar one — into the
+// PER-WORKER pre-projection that [tryBuildParallelAggregateScan]'s sub-plan factory
+// rebuilds for every morsel. It goes through [applyProjectionRowBudget] rather than
+// configuring [exec.Project.WithRowByteBudget] itself, so all three sites raise
+// [exec.ErrProjectionRowTooLarge] from the one guard inside [exec.Project.Next]: a
+// caller cannot tell from the error which pre-projection ran.
+//
+// This was the THIRD instance of the gap #2655 closed for the other two (rmp #2668).
+// It survived #2655 because this path requires a BARE scan, so any WHERE excludes it
+// and #2655 never routed here. [exec.ParallelAggregateScan.WithByteBudget] does not
+// subsume it, for the reason [applyColumnarAggRowBudget] records: that budget charges
+// the RETAINED GROUP KEYS once per NEW GROUP (#1841) and never charges an aggregate
+// ARGUMENT column at all.
+//
+// # The cap is PER WORKER, and its value is NOT divided
+//
+// Every worker builds its own [exec.Project] for the morsel it is running and every
+// one of them gets maxResultBytes in full. The bound on rows under construction, at
+// any instant, is therefore
+//
+//	W * (maxResultBytes + the single column that crossed the ceiling)
+//
+// where W is the worker count [exec.ParallelGovernor.Enter] granted — at most
+// GOMAXPROCS, and never more than the morsel count. The "+ one column" is the
+// row-at-a-time guard's own overshoot: it charges incrementally and refuses the row
+// after the crossing column is built, which is exactly the bound
+// [exec.Project.WithRowByteBudget] documents for either serial arm. Numerically, at
+// the 100 000-byte ceiling of the #2655 measurement and GOMAXPROCS=10, this path may
+// hold 1 000 000 bytes plus ten columns in flight where the serial arms hold 100 000
+// plus one.
+//
+// A SHARED cap — maxResultBytes/W per worker, or one atomic counter across all of
+// them — was rejected. The ceiling is a per-ROW construction bound, so making it
+// depend on W would make the VERDICT depend on how many workers the governor happened
+// to grant and on how morsels were distributed: the same query under the same cap
+// would refuse on a 10-core host and complete on a 2-core one, and a shared counter
+// would additionally put contention on the per-row path. A per-worker cap keeps the
+// refusal a property of the row, so all three pre-projections refuse exactly the same
+// rows. The price is that the in-flight peak scales with W, which is the trade the
+// parallel path already makes for every other per-worker buffer (each worker's
+// morsel, output row, and partial group state).
+//
+// A nil/unbudgeted bopts leaves the guard disabled, exactly as both serial arms do.
+func applyWorkerAggRowBudget(p *exec.Project, bopts *buildOpts) *exec.Project {
+	return applyProjectionRowBudget(p, bopts)
+}
+
 // estimateValueSize returns a coarse, allocation-free byte estimate for a single
 // column value. It takes any because a materialised [exec.Record] is a
 // map[string]interface{} (its values are [expr.Value] instances boxed as the
@@ -9686,6 +9735,16 @@ func buildOperatorRec(
 		return exec.NewArgument(), nil
 
 	case *ir.EagerAggregation:
+		// count(<bare non-null pattern-bound variable>) → count(*) (#2657). Applied
+		// FIRST, so every recogniser below and the serial build all see the same
+		// normalised aggregate: count(v) counts non-null bindings and count(*) counts
+		// rows, which are the same integer exactly when v cannot be null, and the
+		// engine's cheap count paths are keyed on the count(*) spelling. The three leaf
+		// pushdowns already admitted count(<scan-var>) themselves; what this reaches is
+		// tryBuildCountRows and the columnar countStarKernel, for the Selection- and
+		// Expand-child shapes no leaf pushdown can serve. Returns p unchanged unless
+		// the null-safety walk passes; never mutates the cached logical plan.
+		p = rewriteCountVarToCountStar(p)
 		// Parallel-reduce fast path (#1672): a group-by-less count(*) /
 		// count(<scan-var>) over a bare full-node scan is served by a
 		// ParallelCountScan that sums per-worker partial counters, avoiding both
@@ -10863,6 +10922,12 @@ func tryBuildParallelCountScan(
 // condition on the child, which is the point — it serves count(*) over an
 // Expand, a Filter, a join, or anything else.
 //
+// Since #2657 a count(v) whose v is bound by a pattern that cannot yield a null
+// binding arrives here ALREADY SPELLED count(*), rewritten by
+// [rewriteCountVarToCountStar] before any recogniser runs. That is what put the
+// Selection-child and Expand-child count(v) shapes on this operator; the condition
+// here is unchanged, and a count(v) the rewrite refused still declines.
+//
 // When it fires it mutates schema to the aggregation's single-column output
 // layout through [installAggOutputSchema] — the same installer the serial
 // EagerAggregation build uses, carrying the alias-shadow guard that a child
@@ -10962,6 +11027,10 @@ var allNodesCountScanBuildCount atomic.Uint64
 // walker and a per-worker buildOpts copy so two workers never race. Every declined
 // shape leaves schema untouched and returns (nil, false, nil).
 //
+// Each per-worker pre-projection carries the same per-row byte ceiling both serial
+// arms carry, applied PER WORKER and undivided, for a bound of
+// W*(maxResultBytes + one column) in flight; see [applyWorkerAggRowBudget] (#2668).
+//
 //nolint:gocyclo // structural shape match — one guard per rejected IR shape
 func tryBuildParallelAggregateScan(
 	p *ir.EagerAggregation,
@@ -11043,12 +11112,20 @@ func tryBuildParallelAggregateScan(
 	// and a per-worker buildOpts copy whose lazily-written fields are zeroed, so no
 	// two workers race on bopts.nodeResolver or a build-written map. The rebuilt
 	// items come from the SAME buildAggPreProjItems the serial path uses, so each
-	// worker's per-node key/argument values are byte-identical to serial.
+	// worker's per-node key/argument values are byte-identical to serial, and each
+	// carries the SAME per-row byte ceiling both serial arms carry — see
+	// [applyWorkerAggRowBudget] for the per-worker-versus-shared decision and the
+	// resulting numeric bound (rmp #2668).
 	factory := func(ids []graph.NodeID) (exec.Operator, error) {
 		wWalker := &lpgNodeWalker{g: g, morsel: ids}
 		scan := exec.NewAllNodesScan(wWalker)
-		wItems, _ := buildAggPreProjItems(p, schemaSnap, g, params, reg, bopts.forWorker())
-		return exec.NewProject(scan, wItems)
+		wBopts := bopts.forWorker()
+		wItems, _ := buildAggPreProjItems(p, schemaSnap, g, params, reg, wBopts)
+		wProj, perr := exec.NewProject(scan, wItems)
+		if perr != nil {
+			return nil, perr
+		}
+		return applyWorkerAggRowBudget(wProj, wBopts), nil
 	}
 
 	// Validate the pre-projection builds cleanly before launching workers (surfaces

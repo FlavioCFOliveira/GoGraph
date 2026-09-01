@@ -44,11 +44,18 @@ import (
 // bench/audit352/labelcount_gate_ab_test.go.
 const (
 	lcPlanPushdown = "Project\n└─ LabelCountScan"
-	lcPlanSerial   = "Project\n" +
-		"└─ GlobalAggregateAdapter\n" +
-		"   └─ EagerAggregation\n" +
-		"      └─ ColumnarProject\n" +
-		"         └─ NodeByLabelScan [Item]"
+	// The serial CONTROL plan for `MATCH (p:Item) RETURN count(p) AS c`. Since rmp
+	// #2657 the control is exec.CountRows rather than
+	// GlobalAggregateAdapter/EagerAggregation/ColumnarProject: count(<bare
+	// pattern-bound var>) is normalised to count(*) before any recogniser runs, and
+	// CountRows then claims the shape. The control is no weaker for it — CountRows
+	// still visits every labelled node, so it is still the O(n) arm the O(1)
+	// LabelCountScan is being compared against; it merely stops building one
+	// throwaway row per node while doing so. Both count(*) and count(p) now compile
+	// to this same control plan, where before #2657 only count(*) did.
+	lcPlanSerial = "Project\n" +
+		"└─ CountRows\n" +
+		"   └─ NodeByLabelScan [Item]"
 )
 
 // buildLeanLabelGraph creates total nodes carrying `label`, with no properties
