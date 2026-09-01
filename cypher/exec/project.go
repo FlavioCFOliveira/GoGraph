@@ -38,6 +38,41 @@ import (
 // compounding many big columns into one row (#1852).
 var ErrProjectionRowTooLarge = errors.New("exec: projection row memory cap exceeded")
 
+// RowBinder builds ONE shared per-row evaluation context for a whole projection
+// body, so every [ProjectionItem.Eval] in that body resolves each bound entity
+// once per ROW instead of once per COLUMN.
+//
+// The engine (the cypher package) owns the binding context — it holds the graph
+// read view, the schema snapshot and the per-variable materialisation analysis —
+// so a driver cannot build one itself. It therefore asks for the row's context to
+// be made current before the first item is evaluated and dropped after the last,
+// and the item closures read whatever the binder made current. A driver that
+// installs no binder leaves every item on its own per-item context, which is the
+// behaviour that preceded this seam.
+//
+// # Lifetime
+//
+// The context BindRow makes current is valid ONLY until the matching ReleaseRow.
+// A driver MUST call ReleaseRow exactly once for every BindRow, on the error
+// paths as well as the success path, because the implementation may be recycling
+// a pooled map and a pooled value arena. A driver MUST NOT call BindRow again
+// before releasing the previous row.
+//
+// # Concurrency
+//
+// A RowBinder carries the current row's state, so it is owned by exactly one
+// driver on exactly one goroutine — the same contract [Project] itself declares.
+// The morsel-parallel tier satisfies it by rebuilding the whole projection
+// subtree, binder included, per worker.
+type RowBinder interface {
+	// BindRow makes the shared context for row current. Called exactly once,
+	// before the first item of that row is evaluated.
+	BindRow(row Row)
+	// ReleaseRow drops the context BindRow made current. Called exactly once per
+	// BindRow, including when an item's evaluation failed.
+	ReleaseRow()
+}
+
 // ProjectionItem describes a single column in a projection.  Eval is evaluated
 // against the input row; Alias names the resulting output column.
 type ProjectionItem struct {
@@ -57,6 +92,10 @@ type Project struct {
 	child         Operator
 	ctx           context.Context //nolint:containedctx // stored for per-Next ctx check
 	estimateValue func(expr.Value) int64
+	// rowBinder, when non-nil, builds one shared evaluation context per input row
+	// for the whole item list. nil leaves every item on its own per-item context.
+	// See [RowBinder] and [Project.WithRowBinder].
+	rowBinder RowBinder
 
 	items    []ProjectionItem
 	outBuf   Row // reusable output backing slice; len = len(items)
@@ -83,6 +122,37 @@ func (op *Project) WithRowByteBudget(maxRowBytes int64, estimateValue func(expr.
 	op.maxRowBytes = maxRowBytes
 	op.estimateValue = estimateValue
 	return op
+}
+
+// WithRowBinder installs b as this projection's shared per-row context builder,
+// so the item list resolves each bound entity once per row instead of once per
+// column. It brackets the per-row item loop of BOTH row-at-a-time drivers —
+// [Project.Next] and, for a [ColumnarProject], the row-input arm of
+// [ColumnarProject.FillChunk] — so an item closure sees a bound context on either.
+// A nil b (the default) leaves every item on its own per-item context, which is
+// byte-identical to the behaviour before this seam existed.
+//
+// Returns op for chaining; call before Init.
+func (op *Project) WithRowBinder(b RowBinder) *Project {
+	op.rowBinder = b
+	return op
+}
+
+// bindRow makes the shared per-row context current when a binder is installed,
+// and does nothing otherwise.
+func (op *Project) bindRow(row Row) {
+	if op.rowBinder != nil {
+		op.rowBinder.BindRow(row)
+	}
+}
+
+// releaseRow drops the shared per-row context. It MUST run on every exit from a
+// per-row item loop that called bindRow, the error exits included, or a pooled
+// binding map and its value arena are never returned for reuse.
+func (op *Project) releaseRow() {
+	if op.rowBinder != nil {
+		op.rowBinder.ReleaseRow()
+	}
 }
 
 // NewProject creates a Project operator.  items defines the output schema;
@@ -134,10 +204,16 @@ func (op *Project) Next(out *Row) (bool, error) {
 		return false, nil
 	}
 
+	// One shared binding context for the whole item list (see [RowBinder]); a
+	// no-op when no binder is installed. Released on every exit below, so a
+	// pooled map and its value arena are always returned.
+	op.bindRow(op.inputRow)
+
 	var rowBytes int64
 	for i, item := range op.items {
 		v, err := item.Eval(op.inputRow)
 		if err != nil {
+			op.releaseRow()
 			return false, fmt.Errorf("exec: Project item %q eval: %w", item.Alias, err)
 		}
 		op.outBuf[i] = v
@@ -149,10 +225,12 @@ func (op *Project) Next(out *Row) (bool, error) {
 		if op.maxRowBytes > 0 && op.estimateValue != nil {
 			rowBytes += op.estimateValue(v)
 			if rowBytes > op.maxRowBytes {
+				op.releaseRow()
 				return false, ErrProjectionRowTooLarge
 			}
 		}
 	}
+	op.releaseRow()
 
 	*out = op.outBuf
 	return true, nil

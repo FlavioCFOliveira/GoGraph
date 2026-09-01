@@ -599,44 +599,6 @@ func TestChunkResetClearsState(t *testing.T) {
 	}
 }
 
-func TestChunkPoolRoundTrip(t *testing.T) {
-	pool := NewChunkPool(4, expr.KindInteger, expr.KindString)
-
-	c := pool.Get()
-	if c.NumCols() != 2 || c.Cap() != 4 {
-		t.Fatalf("pooled chunk: NumCols=%d Cap=%d, want 2,4", c.NumCols(), c.Cap())
-	}
-	c.AppendInt64(0, 1)
-	c.AppendNull(0)
-	c.AppendString(1, "x")
-	c.AppendString(1, "y")
-	pool.Put(c) // resets
-
-	c2 := pool.Get()
-	if c2.Len() != 0 {
-		t.Errorf("chunk from pool has Len()=%d, want 0 (reset)", c2.Len())
-	}
-	if !c2.cols[0].allValid {
-		t.Errorf("chunk from pool: col 0 allValid=false, want true (reset)")
-	}
-	// Reusable and correct.
-	c2.AppendInt64(0, 42)
-	if v, valid := c2.Int64(0, 0); !valid || v != 42 {
-		t.Errorf("reused pool chunk: got (%d,%v), want (42,true)", v, valid)
-	}
-}
-
-// The kinds slice passed to NewChunkPool must be copied, not aliased.
-func TestChunkPoolCopiesKinds(t *testing.T) {
-	kinds := []expr.Kind{expr.KindInteger, expr.KindString}
-	pool := NewChunkPool(4, kinds...)
-	kinds[0] = expr.KindFloat // mutate caller's slice after construction
-	c := pool.Get()
-	if c.ColKind(0) != expr.KindInteger {
-		t.Errorf("pool aliased caller kinds: ColKind(0)=%s, want Integer", c.ColKind(0))
-	}
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Programmer-error panics (misuse is a bug, surfaced immediately)
 // ─────────────────────────────────────────────────────────────────────────────

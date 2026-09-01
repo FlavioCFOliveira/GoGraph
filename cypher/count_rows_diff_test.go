@@ -83,14 +83,32 @@ func TestCountRows_EngagesOverNonScanChild(t *testing.T) {
 	}
 }
 
-// TestCountRows_DeclinesWhenArgumentIsNotConstant proves the gate is narrow.
-// count(v) counts non-null BINDINGS and DISTINCT dedups them, so both must keep
-// evaluating their argument per row; a grouping key needs the pre-projection too.
+// TestCountRows_DeclinesWhenArgumentIsNotConstant proves the gate is narrow: an
+// argument that must be evaluated per row keeps the pre-projection, and a grouping
+// key needs it too.
+//
+// `MATCH (a)-[:FRIEND]->() RETURN count(a)` USED TO BE the first row here, and it is
+// now served by this operator: rmp #2657 normalises count(<bare pattern-bound var>)
+// to count(*) before any recogniser runs, because a is bound by a non-optional
+// ir.Expand and so cannot be null. That is a change of what reaches the gate, not a
+// widening of the gate — CountRows still refuses every non-empty argument. The rows
+// below are the ones the normalisation does NOT touch, so the gate's own narrowness
+// is still under test:
+//
+//   - a PROPERTY argument: never a rewrite candidate, and genuinely per-row.
+//   - DISTINCT: excluded by the rewrite, and dedups on the argument's value.
+//   - an OPTIONAL binding: the rewrite's null-safety walk refuses it, and count(r)
+//     must skip the null rows count(*) would include.
+//   - a grouping key: needs the pre-projection regardless of the argument.
+//
+// The engaged direction for count(a) is asserted in
+// TestCountRows_EngagesForNormalisedCountVar below.
 func TestCountRows_DeclinesWhenArgumentIsNotConstant(t *testing.T) {
 	e := NewEngine(buildCountRowsGraph(t))
 	for _, q := range []string{
-		`MATCH (a)-[:FRIEND]->() RETURN count(a)`,
+		`MATCH (a)-[:FRIEND]->() RETURN count(a.name)`,
 		`MATCH (a)-[:FRIEND]->() RETURN count(DISTINCT a)`,
+		`MATCH (a) OPTIONAL MATCH (a)-[r:FRIEND]->() RETURN count(r)`,
 		`MATCH (a)-[:FRIEND]->(b) RETURN a, count(*)`,
 	} {
 		before := countRowsBuildCount.Load()
@@ -104,6 +122,31 @@ func TestCountRows_DeclinesWhenArgumentIsNotConstant(t *testing.T) {
 		if countRowsBuildCount.Load() != before {
 			t.Errorf("CountRows engaged for %q, which needs its argument evaluated per row", q)
 		}
+	}
+}
+
+// TestCountRows_EngagesForNormalisedCountVar is the counterpart of the row rmp #2657
+// moved out of the decline table: count(<bare pattern-bound var>) over an Expand now
+// reaches this operator, and must still return the same integer count(*) does,
+// because a non-optional Expand binds a non-null node in every row.
+func TestCountRows_EngagesForNormalisedCountVar(t *testing.T) {
+	e := NewEngine(buildCountRowsGraph(t))
+	const (
+		varQ  = `MATCH (a)-[:FRIEND]->() RETURN count(a)`
+		starQ = `MATCH (a)-[:FRIEND]->() RETURN count(*)`
+	)
+	before := countRowsBuildCount.Load()
+	got := scalarOf(t, e, varQ)
+	if countRowsBuildCount.Load() == before {
+		t.Errorf("CountRows did not engage for %q; #2657 should have normalised it to "+
+			"count(*)", varQ)
+	}
+	if want := scalarOf(t, e, starQ); got != want {
+		t.Errorf("%q = %s but %q = %s; the normalisation changed the answer",
+			varQ, got, starQ, want)
+	}
+	if want := "22"; got != want {
+		t.Errorf("count(a) = %s, want %s", got, want)
 	}
 }
 

@@ -1630,11 +1630,20 @@ func (g *Graph[N, W]) edgeLabelShardFor(k edgeKey) *edgeLabelShard {
 	return &g.edgeLabelShards[uint64(k.src)&(propMapShards-1)]
 }
 
-// encodeSlotLabel maps a [LabelID] to its on-slot encoding. The adjacency
+// EncodeSlotLabel maps a [LabelID] to its on-slot encoding. The adjacency
 // label column reserves 0 for "no label", so the stored value is lid+1. The
 // id space is uint32; the +1 bias forbids only the single id math.MaxUint32,
 // which would require 2^32 distinct relationship-type names to ever reach.
-func encodeSlotLabel(lid LabelID) uint32 { return uint32(lid) + 1 }
+//
+// It is exported because the query layer's slot-aligned relationship-type column
+// (rmp #2251) speaks this same encoding rather than inventing a private
+// dictionary: the two describe the same arcs, so a divergence between their code
+// spaces would be a silent mistyping waiting to happen.
+func EncodeSlotLabel(lid LabelID) uint32 { return uint32(lid) + 1 }
+
+// encodeSlotLabel is [EncodeSlotLabel] under the name this package's own call
+// sites have always used.
+func encodeSlotLabel(lid LabelID) uint32 { return EncodeSlotLabel(lid) }
 
 // decodeSlotLabel is the inverse of [encodeSlotLabel]. The second return is
 // false for the 0 ("no label") sentinel.

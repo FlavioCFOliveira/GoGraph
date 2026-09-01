@@ -631,7 +631,7 @@ func TestTop_SmallN(t *testing.T) {
 		{expr.IntegerValue(1)}, {expr.IntegerValue(9)}, {expr.IntegerValue(3)},
 	}
 	op, err := exec.NewTop(newSliceOperator(rows...),
-		[]exec.SortKey{{ColIdx: 0, Ascending: true}}, 3)
+		[]exec.SortKey{{ColIdx: 0, Ascending: true}}, 3, 0)
 	if err != nil {
 		t.Fatalf("NewTop: %v", err)
 	}
@@ -656,7 +656,7 @@ func TestTop_NLargerThanInput(t *testing.T) {
 		{expr.IntegerValue(3)}, {expr.IntegerValue(1)}, {expr.IntegerValue(2)},
 	}
 	op, err := exec.NewTop(newSliceOperator(rows...),
-		[]exec.SortKey{{ColIdx: 0, Ascending: true}}, 100)
+		[]exec.SortKey{{ColIdx: 0, Ascending: true}}, 100, 0)
 	if err != nil {
 		t.Fatalf("NewTop: %v", err)
 	}
@@ -671,7 +671,7 @@ func TestTop_NLargerThanInput(t *testing.T) {
 
 func TestTop_EmptyInput(t *testing.T) {
 	op, err := exec.NewTop(newSliceOperator(),
-		[]exec.SortKey{{ColIdx: 0, Ascending: true}}, 5)
+		[]exec.SortKey{{ColIdx: 0, Ascending: true}}, 5, 0)
 	if err != nil {
 		t.Fatalf("NewTop: %v", err)
 	}
@@ -688,7 +688,7 @@ func TestTop_DESC(t *testing.T) {
 	// TOP 2 DESC from [1,2,3,4,5] → [5,4].
 	rows := makeIntRows(5)
 	op, err := exec.NewTop(newSliceOperator(rows...),
-		[]exec.SortKey{{ColIdx: 0, Ascending: false}}, 2)
+		[]exec.SortKey{{ColIdx: 0, Ascending: false}}, 2, 0)
 	if err != nil {
 		t.Fatalf("NewTop: %v", err)
 	}
@@ -713,7 +713,7 @@ func TestTop_MatchesSortLimit(t *testing.T) {
 	}
 	keys := []exec.SortKey{{ColIdx: 0, Ascending: true}}
 
-	opTop, _ := exec.NewTop(newSliceOperator(rows...), keys, N)
+	opTop, _ := exec.NewTop(newSliceOperator(rows...), keys, N, 0)
 	resultTop, err := exec.Drain(context.Background(), opTop)
 	if err != nil {
 		t.Fatalf("Top Drain: %v", err)
@@ -740,18 +740,18 @@ func TestTop_InvalidN(t *testing.T) {
 	// n == 0 is now VALID — it yields an empty result while draining the child
 	// (ORDER BY … LIMIT 0, #1801). Only a negative n is rejected.
 	if _, err := exec.NewTop(newSliceOperator(),
-		[]exec.SortKey{{ColIdx: 0, Ascending: true}}, 0); err != nil {
+		[]exec.SortKey{{ColIdx: 0, Ascending: true}}, 0, 0); err != nil {
 		t.Fatalf("n=0 must be accepted (ORDER BY LIMIT 0), got %v", err)
 	}
 	if _, err := exec.NewTop(newSliceOperator(),
-		[]exec.SortKey{{ColIdx: 0, Ascending: true}}, -1); err == nil {
+		[]exec.SortKey{{ColIdx: 0, Ascending: true}}, -1, 0); err == nil {
 		t.Fatal("expected error for n=-1, got nil")
 	}
 }
 
 func TestTop_NZeroEmptyResult_1801(t *testing.T) {
 	op, err := exec.NewTop(newSliceOperator(),
-		[]exec.SortKey{{ColIdx: 0, Ascending: true}}, 0)
+		[]exec.SortKey{{ColIdx: 0, Ascending: true}}, 0, 0)
 	if err != nil {
 		t.Fatalf("NewTop n=0: %v", err)
 	}
@@ -1128,7 +1128,7 @@ func BenchmarkTop_10kN100(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		op, _ := exec.NewTop(newSliceOperator(rows...), keys, 100)
+		op, _ := exec.NewTop(newSliceOperator(rows...), keys, 100, 0)
 		_, err := exec.Drain(context.Background(), op)
 		if err != nil {
 			b.Fatal(err)

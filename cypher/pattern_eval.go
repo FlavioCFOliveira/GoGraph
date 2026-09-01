@@ -77,6 +77,18 @@ type patternEvaluator struct {
 	// both [expr.EvalWith] call sites in [patternEvaluator.EvalPatternComp], so
 	// such a subquery answered false / 0 instead of being evaluated.
 	subEval expr.SubqueryEvaluator
+
+	// adjacencyCountsDisabled forbids both adjacency-answered rewrites this
+	// evaluator can take — the degree count behind `size([ … ])`
+	// ([patternEvaluator.CountPatternComp]) and the labelled single hop behind
+	// `WHERE (a)-[:K]->(:P)` ([patternEvaluator.matchLabelledHop]) — so each shape
+	// enumerates instead. It is set from
+	// [EngineOptions.DisableAdjacencyCountRewrites].
+	//
+	// The polarity is NEGATIVE for the reason [bind] is a setter: the several test
+	// call sites of [newPatternEvaluator] pass no Engine, and the zero value must
+	// leave them exactly as they were.
+	adjacencyCountsDisabled bool
 }
 
 // bind attaches the enclosing query's parameter map and subquery evaluator. It is

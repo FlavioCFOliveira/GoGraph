@@ -2,11 +2,15 @@
 //
 // Usage:
 //
-//	go run ./cmd/sim [seed] [flags]
+//	go run ./cmd/sim <seed> [flags]
 //
-// With no seed argument a random seed is chosen (from a non-deterministic
-// source used solely to pick the seed value) and printed so the run can be
-// reproduced. Flags:
+// The seed is MANDATORY and the harness never invents one. A simulation is a
+// pure function of its seed, so a run whose seed had been drawn at random would
+// be neither comparable with another run nor replayable, and any violation it
+// found could not be reproduced. Invoking sim without a seed is therefore
+// refused with exit code 2. The only seed-free invocations are the two modes
+// that run no simulation at all: --list-scenarios and --coverage-report without
+// --swarm. Flags:
 //
 //	--ticks       number of ticks (operations) to simulate (default 100000)
 //	--check-every invariant-check cadence in ticks (default 1 = every tick);
@@ -39,8 +43,8 @@
 // Scenario and replay modes (Phase 4):
 //
 //	--list-scenarios            prints the catalogue (name, mode, default seed)
-//	--scenario=<name> [seed]    runs a named scenario; exit 1 on a violation
-//	--replay=<seed> [--scenario=<name>]
+//	<seed> --scenario=<name>    runs a named scenario; exit 1 on a violation
+//	<seed> --replay [--scenario=<name>]
 //	                            re-runs a DETERMINISTIC workload for the seed,
 //	                            printing every op; on a violation it shrinks the
 //	                            recorded trace to a minimal reproducer (ddmin) and
@@ -65,7 +69,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	mrand "math/rand/v2"
 	"os"
 	"strconv"
 	"time"
@@ -109,7 +112,7 @@ func run(args []string, stdoutRaw, stderrRaw io.Writer) int {
 
 	// Go's flag package stops parsing at the first non-flag token, so the
 	// documented usage `sim <seed> --ticks=N` would otherwise leave --ticks
-	// unparsed. Split the optional leading positional seed out first, then parse
+	// unparsed. Split the leading positional seed out first, then parse
 	// the remaining tokens as flags, so flags work whether they precede or
 	// follow the seed.
 	seedArgs, flagArgs := splitSeedArg(args)
@@ -139,7 +142,7 @@ func run(args []string, stdoutRaw, stderrRaw io.Writer) int {
 	}
 
 	// -swarm runs many derived seeds across a bounded worker pool, time/count
-	// boxed, and reports failures + coverage. It uses the (positional or random)
+	// boxed, and reports failures + coverage. It uses the mandatory positional
 	// seed as the swarm's MASTER seed, so the whole swarm reproduces from it.
 	if *swarm {
 		return runSwarmMode(seed, swarmOptions{
@@ -640,10 +643,11 @@ func (e *errWriter) printf(format string, args ...any) {
 	_, e.err = fmt.Fprintf(e.w, format, args...)
 }
 
-// splitSeedArg separates an optional leading positional seed token (the first
-// argument that does not start with '-') from the flag tokens. It returns
-// (seedArgs, flagArgs): seedArgs holds the single seed token when present (else
-// empty), and flagArgs holds every remaining token in its original order. Only
+// splitSeedArg separates the leading positional seed token (the first argument
+// that does not start with '-') from the flag tokens. It returns (seedArgs,
+// flagArgs): seedArgs holds the single seed token when present (else empty, on
+// which resolveSeed refuses the run), and flagArgs holds every remaining token
+// in its original order. Only
 // a leading positional is treated as the seed; a non-flag token appearing after
 // flags is left in flagArgs so flag.Parse reports it as unexpected.
 func splitSeedArg(args []string) (seedArgs, flagArgs []string) {
@@ -660,16 +664,25 @@ func splitSeedArg(args []string) (seedArgs, flagArgs []string) {
 }
 
 // resolveSeed returns the seed to use: the first positional argument parsed as
-// an unsigned integer, or a freshly-chosen random seed when none is given. The
-// random source is math/rand/v2's auto-seeded top-level generator, used only to
-// pick the value (never inside the deterministic simulation). The chosen seed
-// is always reported by the caller so the run can be reproduced.
+// an unsigned integer. The seed is MANDATORY — when none is given, resolveSeed
+// reports the refusal on stderr and returns ok=false, and the caller exits 2.
+//
+// The harness deliberately owns no way to pick a seed for the caller. A
+// simulation is a pure function of its seed, so the seed IS the run's identity:
+// an invented one makes two invocations of the same command two different
+// experiments, which cannot be compared with each other and cannot be replayed
+// to reproduce a violation. Refusing is what keeps every reported DST result
+// interpretable. Modes that run no simulation (-list-scenarios, and
+// -coverage-report without -swarm) return before reaching this function and so
+// need no seed.
 func resolveSeed(positional []string, stderr *errWriter) (uint64, bool) {
 	if len(positional) == 0 {
-		//nolint:gosec // G404: this is a test-harness seed selector; a
-		// non-cryptographic source is intentional and the chosen value is
-		// printed so the run is reproducible.
-		return mrand.Uint64(), true
+		stderr.printf("sim: a seed is REQUIRED and none was given.\n")
+		stderr.printf("sim: the harness never picks a seed for you: a run's seed is its identity, and an\n")
+		stderr.printf("sim: invented one would make this run neither reproducible nor comparable with any other.\n")
+		stderr.printf("usage: sim <seed> [flags]        e.g. sim 42 --ticks=100000\n")
+		stderr.printf("       -list-scenarios and -coverage-report are the only seed-free invocations.\n")
+		return 0, false
 	}
 	v, err := strconv.ParseUint(positional[0], 10, 64)
 	if err != nil {

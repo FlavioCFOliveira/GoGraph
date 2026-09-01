@@ -192,8 +192,9 @@ type VarLengthExpand struct {
 
 	ctx context.Context //nolint:containedctx // stored for per-Next ctx check
 
-	// edgeTypeFilter maps absolute forward edge positions to type labels.
-	edgeTypeFilter map[uint64]string
+	// admit is the slot-aligned relationship-type admission view keyed to this
+	// Init's adjacency, indexed by absolute FORWARD position (rmp #2251).
+	admit RelTypeAdmit
 
 	edgeType string
 
@@ -333,7 +334,7 @@ func NewVarLengthExpand(input Operator, src AdjacencySource, cfg *VarLengthConfi
 func (op *VarLengthExpand) Init(ctx context.Context) error {
 	op.ctx = ctx
 	// Resolved NOW, not at plan-build time (rmp #2317); see [AdjacencySource].
-	op.fwd, op.rev, op.edgeTypeFilter = op.src()
+	op.fwd, op.rev, op.admit = op.src()
 	op.fwdVerts = op.fwd.VerticesSlice()
 	op.fwdEdges = op.fwd.EdgesSlice()
 	op.fwdHandles = op.fwd.HandlesSlice()
@@ -696,17 +697,16 @@ func (op *VarLengthExpand) enqueueEdges(uid uint64, isFwd bool, parent *pathStat
 		}
 
 		// Edge-type filter (forward only; reverse edges skip type filter).
-		// MEMBERSHIP, not equality: op.edgeTypeFilter is a presence-SET built
-		// by [buildEdgeTypeFilter] holding exactly the positions whose edge
-		// carries one of the pattern's declared types, so a relationship-type
+		// SET MEMBERSHIP, not equality: op.admit tests the slot's resolved type
+		// against the SET of the pattern's declared types, so a relationship-type
 		// disjunction -[:A|B*]- accepts an edge of EITHER type. Comparing the
 		// looked-up label against the single op.edgeType (= RelTypes[0]) here
 		// silently dropped every edge of a non-first declared type, even on a
-		// simple graph (rmp #1688/D3); the presence test mirrors
-		// [Expand.passesTypeFilter]. op.edgeType stays as the "a filter was
-		// requested" gate, set in lockstep with op.edgeTypeFilter.
+		// simple graph (rmp #1688/D3); the set test mirrors
+		// [Expand.passesFilter]. op.edgeType stays as the "a filter was
+		// requested" gate, set in lockstep with op.admit.
 		if isFwd && op.edgeType != "" {
-			if _, ok := op.edgeTypeFilter[absPos]; !ok {
+			if !op.admit.Fwd(absPos) {
 				continue
 			}
 		}
@@ -722,7 +722,7 @@ func (op *VarLengthExpand) enqueueEdges(uid uint64, isFwd bool, parent *pathStat
 		// absPos guard keeps the unresolved-remap fallback (a rare
 		// out-of-range vertex) permissive, matching the prior DirBoth path.
 		if !isFwd && op.edgeType != "" && op.dir != DirOut && fwdAbsPos != absPos {
-			if _, ok := op.edgeTypeFilter[fwdAbsPos]; !ok {
+			if !op.admit.Fwd(fwdAbsPos) {
 				continue
 			}
 		}

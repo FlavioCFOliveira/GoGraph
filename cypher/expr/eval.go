@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"math"
 	"strings"
-	"sync"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
 )
@@ -257,27 +256,14 @@ func (b *evalBudget) chargeBytes(n int64) error {
 	return nil
 }
 
-// extractBudget returns the per-evaluation [evalBudget] smuggled through row by
-// [EvalWith], or nil when none is present (the bare [Eval] path).
-func extractBudget(row RowContext) *evalBudget {
-	if row == nil {
-		return nil
-	}
-	scv, ok := row[subqueryContextKey].(*subqueryContextValue)
-	if !ok {
-		return nil
-	}
-	return &scv.budget
-}
-
 // chargeListGrowth charges n newly-materialised list elements against the
-// per-evaluation budget carried by row. When row carries no budget (the bare
-// [Eval] path), it instead enforces an intrinsic per-call ceiling of
-// [DefaultMaxListElements] on n alone, which still rejects a single oversized
-// list. It returns a typed [EvalError] on breach.
-func chargeListGrowth(row RowContext, n int64) error {
-	if b := extractBudget(row); b != nil {
-		return b.charge(n)
+// per-evaluation budget st carries. On the bare [Eval] path (st == nil) there
+// is no cumulative budget, so it instead enforces an intrinsic per-call ceiling
+// of [DefaultMaxListElements] on n alone, which still rejects a single
+// oversized list. It returns a typed [EvalError] on breach.
+func chargeListGrowth(st *evalCallState, n int64) error {
+	if st != nil {
+		return st.budget.charge(n)
 	}
 	if n > DefaultMaxListElements {
 		return errListTooLarge(DefaultMaxListElements)
@@ -286,13 +272,13 @@ func chargeListGrowth(row RowContext, n int64) error {
 }
 
 // chargeStringGrowth charges n newly-materialised string bytes against the
-// per-evaluation byte budget carried by row. When row carries no budget (the
-// bare [Eval] path), it instead enforces an intrinsic per-call ceiling of
-// [DefaultMaxStringEvalBytes] on n alone, which still rejects a single oversized
-// concatenation. It returns a typed [EvalError] on breach (#1482).
-func chargeStringGrowth(row RowContext, n int64) error {
-	if b := extractBudget(row); b != nil {
-		return b.chargeBytes(n)
+// per-evaluation byte budget st carries. On the bare [Eval] path (st == nil) it
+// instead enforces an intrinsic per-call ceiling of [DefaultMaxStringEvalBytes]
+// on n alone, which still rejects a single oversized concatenation. It returns
+// a typed [EvalError] on breach (#1482).
+func chargeStringGrowth(st *evalCallState, n int64) error {
+	if st != nil {
+		return st.budget.chargeBytes(n)
 	}
 	if n > DefaultMaxStringEvalBytes {
 		return errStringTooLarge(DefaultMaxStringEvalBytes)
@@ -305,13 +291,12 @@ func chargeStringGrowth(row RowContext, n int64) error {
 // every-4096-tuples convention (see cypher/exec/operator.go and eager.go).
 const ctxIterCheckStride = 4096
 
-// checkIterCtx polls the context smuggled through row for cancellation when
-// iter is a multiple of [ctxIterCheckStride]. It returns the context error
+// checkIterCtx polls the evaluation's context for cancellation when iter is a
+// multiple of [ctxIterCheckStride]. It returns the context error
 // (context.Canceled / context.DeadlineExceeded) promptly so a long in-expression
 // loop — reduce(), a comprehension, or a quantifier over a large list — can be
-// aborted by a caller's deadline or cancellation. On the bare [Eval] path no
-// context is smuggled; the extracted context is context.Background() and the
-// check never fires.
+// aborted by a caller's deadline or cancellation. On the bare [Eval] path the
+// context is context.Background() and the check never fires.
 func checkIterCtx(ctx context.Context, iter int) error {
 	if iter%ctxIterCheckStride != 0 {
 		return nil
@@ -330,7 +315,7 @@ func checkIterCtx(ctx context.Context, iter int) error {
 // [ast.CountSubquery]); these return an [EvalError]. Use [EvalWith] with a
 // non-nil [SubqueryEvaluator] to enable subquery evaluation.
 func Eval(expr ast.Expression, row RowContext, params map[string]Value, reg FunctionRegistry) (Value, error) {
-	return evalExpr(expr, row, params, reg)
+	return evalExpr(expr, row, nil, params, reg)
 }
 
 // EvalWith evaluates expr just like [Eval], but threads a [context.Context]
@@ -348,185 +333,94 @@ func EvalWith(ctx context.Context, expr ast.Expression, row RowContext, params m
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	// The subquery/pattern context is carried alongside the per-row evaluator
-	// state via a small holder so it threads through every recursive call
-	// automatically. We attach it to the RowContext under a sentinel reserved
-	// key that cannot collide with any valid Cypher identifier (NUL bytes are
-	// not legal in identifiers per the openCypher 9 grammar §A.1).
+	// The per-evaluation state is an ordinary local threaded down the recursive
+	// evaluator as an explicit parameter (#2653). It used to ride inside the
+	// RowContext under a reserved NUL-bracketed sentinel key, which cost three
+	// string-keyed map operations on every single evaluation — a save, an
+	// install and an erase — plus a pooled holder to acquire and release. A
+	// CPU profile of `MATCH (p:Person) RETURN p.bucket` over 120 000 nodes
+	// attributed 7.83% of all samples to exactly that bookkeeping, and an exact
+	// counter compiled into the three sentinel readers showed the smuggled
+	// value was read ZERO times on that shape: the key was written and erased
+	// for nothing. At a one-variable row schema it was also half the map's
+	// keys, so it distorted the cost of real variable binding alongside it.
 	//
-	// The sentinel is inserted into the caller's map in place rather than into
-	// a full clone: cloning copied every binding on every projected row, the
-	// dominant per-row allocation on the WITH/RETURN general path (#1501). The
-	// caller owns a freshly built, single-goroutine RowContext that is
-	// discarded after this call, so an in-place toggle is sound. To remain
-	// re-entrant — a nested EvalWith reached through a pattern comprehension
-	// can receive a map that already carries the sentinel (it was copied down
-	// by enumeratePatternMatches' cloneRow) — the prior binding is saved and
-	// restored on return rather than blindly deleted.
+	// Re-entrancy is now structural rather than arranged. A nested EvalWith —
+	// reached through a pattern comprehension, which re-enters via
+	// [PatternEvaluator] — builds its own state in its own frame, so the outer
+	// call's context, evaluators and budget are untouched by construction and
+	// need no save/restore. That reproduces the previous nesting behaviour
+	// exactly: the old code likewise gave each nested call a fresh holder with
+	// a fresh budget, and restored the outer holder on return.
 	//
-	// A nil RowContext (a legal input: an expression with no variable
-	// bindings) has no slot to toggle, so it needs a one-entry map to carry
-	// the sentinel holder — there is nothing to copy, so this is not the clone
-	// the optimisation removes. Binding-free expressions (RETURN 1, constant
-	// projections, parameter-only predicates) hit this on every evaluated row,
-	// so the map is drawn from a pool and returned on exit instead of freshly
-	// allocated each call (#1721). The map's lifetime is exactly this single,
-	// single-goroutine call: the sentinel is the only key ever written to it
-	// (every binding-introducing form — list/pattern comprehension — clones
-	// into a fresh inner map, never our row), and it is deleted again below, so
-	// the map is observably empty when released.
-	pooledRow := false
-	if row == nil {
-		row = bindingFreeRowPool.Get().(RowContext)
-		pooledRow = true
+	// A nil RowContext (a legal input: an expression with no variable bindings)
+	// now stays nil, because there is no longer anything to carry. That removes
+	// the pooled one-entry map binding-free expressions used to need on every
+	// evaluated row.
+	st := evalCallState{
+		ctx: ctx,
+		sub: subEval,
+		pat: patEval,
+		budget: evalBudget{
+			remaining:      DefaultMaxListElements,
+			limit:          DefaultMaxListElements,
+			bytesRemaining: DefaultMaxStringEvalBytes,
+			bytesLimit:     DefaultMaxStringEvalBytes,
+		},
 	}
-	// The holder + its embedded budget were the dominant per-row allocation on
-	// the common (no-subquery) evaluation path (#1589): every EvalWith call
-	// heap-allocated a fresh subqueryContextValue and evalBudget even when no
-	// subquery / pattern / list-budget work occurred. They are now drawn from a
-	// sync.Pool and returned on exit. The lifetime is exactly this single,
-	// single-goroutine EvalWith call: the holder lives only in row[sentinel],
-	// is restored to its prior binding before return, and is never retained by
-	// any evaluator (subquery/pattern evaluators read correlation bindings and
-	// return fresh scalar/list values; they never keep the holder), so it is
-	// sound to recycle. A nested EvalWith (reached through a pattern
-	// comprehension) acquires its OWN holder and restores ours on return — each
-	// call releases only the holder it acquired, so the LIFO save/restore and
-	// the pool stay in lockstep.
-	scv := acquireSubqueryContext()
-	scv.ctx = ctx
-	scv.sub = subEval
-	scv.pat = patEval
-	scv.budget = evalBudget{
-		remaining:      DefaultMaxListElements,
-		limit:          DefaultMaxListElements,
-		bytesRemaining: DefaultMaxStringEvalBytes,
-		bytesLimit:     DefaultMaxStringEvalBytes,
-	}
-	prev, had := row[subqueryContextKey]
-	row[subqueryContextKey] = scv
-	v, err := evalExpr(expr, row, params, reg)
-	if had {
-		row[subqueryContextKey] = prev
-	} else {
-		delete(row, subqueryContextKey)
-	}
-	releaseSubqueryContext(scv)
-	// Recycle the pooled binding-free map only once it is observably empty (the
-	// sentinel deleted above, no binding written in place). The guard keeps a
-	// future in-place writer from poisoning the pool: a non-empty map is simply
-	// dropped for the GC rather than reused.
-	if pooledRow && len(row) == 0 {
-		bindingFreeRowPool.Put(row)
-	}
-	return v, err
+	return evalExpr(expr, row, &st, params, reg)
 }
 
-// bindingFreeRowPool recycles the single-entry RowContext that [EvalWith] needs
-// when called with a nil row (a binding-free expression). The map exists only
-// to carry the pooled subquery-context holder under subqueryContextKey and is
-// emptied again before EvalWith returns, so it is reused across calls instead
-// of freshly allocated each time. RowContext is a map — pointer-shaped — so
-// boxing it into the pool's any allocates nothing.
-var bindingFreeRowPool = sync.Pool{New: func() any { return make(RowContext, 1) }}
-
-// subqueryContextPool recycles the per-evaluation holder allocated by
-// [EvalWith]. The holder's lifetime is exactly one EvalWith call (it is
-// installed into the call's RowContext, restored before return, and never
-// retained beyond the call), so recycling it removes the per-row holder +
-// budget allocation without any aliasing hazard. See [EvalWith].
-var subqueryContextPool = sync.Pool{New: func() any { return new(subqueryContextValue) }}
-
-// acquireSubqueryContext returns a holder from the pool. The caller fully
-// overwrites every field before use, so a recycled holder needs no clearing.
-func acquireSubqueryContext() *subqueryContextValue {
-	scv, _ := subqueryContextPool.Get().(*subqueryContextValue)
-	if scv == nil {
-		scv = new(subqueryContextValue)
-	}
-	return scv
-}
-
-// releaseSubqueryContext returns a holder to the pool. The evaluator references
-// (ctx/sub/pat) are nilled so a pooled holder cannot pin a context, evaluator,
-// or — transitively — a graph snapshot between evaluations.
-func releaseSubqueryContext(scv *subqueryContextValue) {
-	scv.ctx = nil
-	scv.sub = nil
-	scv.pat = nil
-	subqueryContextPool.Put(scv)
-}
-
-// subqueryContextKey is the sentinel RowContext key used by [EvalWith] to
-// smuggle the [context.Context] and [SubqueryEvaluator] down through the
-// recursive evaluator without touching every helper's signature. The key
-// contains NUL bytes that are not legal in Cypher identifiers per the
-// openCypher 9 grammar §A.1, so no user variable can ever collide with it.
-const subqueryContextKey = "\x00subquery-context\x00"
-
-// subqueryContextValue is the holder stored under [subqueryContextKey]. It
-// implements [Value] so it can live inside a [RowContext] map alongside real
-// runtime values. The smuggled fields are accessed via
-// [extractSubqueryContext] and [extractPatternEvaluator]; user code never
-// sees this value.
-type subqueryContextValue struct {
-	ctx    context.Context //nolint:containedctx // smuggled through RowContext, see EvalWith
+// evalCallState is the per-evaluation state [EvalWith] threads through the
+// recursive evaluator: the cancellation context, the optional subquery and
+// pattern evaluators, and the cumulative list/string growth budget that bounds
+// what one evaluation may materialise (#1475, #1482).
+//
+// It is passed by pointer purely so the budget is shared across the whole
+// evaluation — every helper reads it, and [evalBudget.charge] mutates it — not
+// because it is heap state: the value lives in [EvalWith]'s frame, no callee
+// retains it, and it never crosses an evaluator interface boundary (the
+// evaluators receive st.ctx, never st), so escape analysis keeps it on the
+// stack.
+//
+// A nil *evalCallState is the bare [Eval] path: no context, no evaluators, and
+// no cumulative budget. Every accessor below is nil-safe so both paths share
+// one call graph, exactly as the absent sentinel used to make them.
+type evalCallState struct {
+	ctx    context.Context //nolint:containedctx // per-evaluation cancellation scope, not stored beyond the call; see EvalWith
 	sub    SubqueryEvaluator
 	pat    PatternEvaluator
-	budget evalBudget // per-evaluation cumulative list-element budget (#1475), embedded by value so the holder is a single (pooled) allocation
+	budget evalBudget
 }
 
-// Kind implements [Value]. Returns [KindNull] because subqueryContextValue
-// must never appear in arithmetic or comparison contexts; if it does, the
-// 3-valued logic will propagate Null and surface the bug as a Null result.
-func (*subqueryContextValue) Kind() Kind { return KindNull }
-
-// Equal implements [Value]. Always returns Null — subqueryContextValue must
-// never be compared for equality.
-func (*subqueryContextValue) Equal(_ Value) Value { return Null }
-
-// Hash implements [Value]. Returns a fixed sentinel so accidental map
-// insertion is deterministic.
-func (*subqueryContextValue) Hash() uint64 { return 0 }
-
-// String implements [Value]. Returns a fixed sentinel string for debugging.
-func (*subqueryContextValue) String() string { return "<subquery-context>" }
-
-// extractSubqueryContext returns the smuggled context and SubqueryEvaluator
-// from row, or (context.Background(), nil) when none is present.
-func extractSubqueryContext(row RowContext) (context.Context, SubqueryEvaluator) {
-	if row == nil {
-		return context.Background(), nil
+// evalContext returns the evaluation's cancellation context, or
+// context.Background() on the bare [Eval] path.
+func (st *evalCallState) evalContext() context.Context {
+	if st == nil {
+		return context.Background()
 	}
-	v, ok := row[subqueryContextKey]
-	if !ok {
-		return context.Background(), nil
-	}
-	scv, ok := v.(*subqueryContextValue)
-	if !ok {
-		return context.Background(), nil
-	}
-	return scv.ctx, scv.sub
+	return st.ctx
 }
 
-// extractPatternEvaluator returns the smuggled context and PatternEvaluator
-// from row, or (context.Background(), nil) when none is present.
-func extractPatternEvaluator(row RowContext) (context.Context, PatternEvaluator) {
-	if row == nil {
+// subquery returns the evaluation's context and [SubqueryEvaluator], or
+// (context.Background(), nil) on the bare [Eval] path.
+func (st *evalCallState) subquery() (context.Context, SubqueryEvaluator) {
+	if st == nil {
 		return context.Background(), nil
 	}
-	v, ok := row[subqueryContextKey]
-	if !ok {
-		return context.Background(), nil
-	}
-	scv, ok := v.(*subqueryContextValue)
-	if !ok {
-		return context.Background(), nil
-	}
-	return scv.ctx, scv.pat
+	return st.ctx, st.sub
 }
 
-func evalExpr(e ast.Expression, row RowContext, params map[string]Value, reg FunctionRegistry) (Value, error) { //nolint:gocyclo // Main dispatch switch; all branches are simple delegations and cannot be split without obscuring the type mapping.
+// pattern returns the evaluation's context and [PatternEvaluator], or
+// (context.Background(), nil) on the bare [Eval] path.
+func (st *evalCallState) pattern() (context.Context, PatternEvaluator) {
+	if st == nil {
+		return context.Background(), nil
+	}
+	return st.ctx, st.pat
+}
+
+func evalExpr(e ast.Expression, row RowContext, st *evalCallState, params map[string]Value, reg FunctionRegistry) (Value, error) { //nolint:gocyclo // Main dispatch switch; all branches are simple delegations and cannot be split without obscuring the type mapping.
 	switch n := e.(type) {
 	// ── Literals ──────────────────────────────────────────────────────────────
 	case *ast.NullLiteral:
@@ -542,9 +436,9 @@ func evalExpr(e ast.Expression, row RowContext, params map[string]Value, reg Fun
 
 	// ── Composite literals ─────────────────────────────────────────────────────
 	case *ast.ListLiteral:
-		return evalListLiteral(n, row, params, reg)
+		return evalListLiteral(n, row, st, params, reg)
 	case *ast.MapLiteral:
-		return evalMapLiteral(n, row, params, reg)
+		return evalMapLiteral(n, row, st, params, reg)
 
 	// ── Variable and parameter ─────────────────────────────────────────────────
 	case *ast.Variable:
@@ -563,47 +457,47 @@ func evalExpr(e ast.Expression, row RowContext, params map[string]Value, reg Fun
 
 	// ── Property access ────────────────────────────────────────────────────────
 	case *ast.Property:
-		return evalProperty(n, row, params, reg)
+		return evalProperty(n, row, st, params, reg)
 
 	// ── Label predicate ────────────────────────────────────────────────────────
 	case *ast.LabelPredicate:
-		return evalLabelPredicate(n, row, params, reg)
+		return evalLabelPredicate(n, row, st, params, reg)
 
 	// ── Subscript access ───────────────────────────────────────────────────────
 	case *ast.SubscriptExpr:
-		return evalSubscript(n, row, params, reg)
+		return evalSubscript(n, row, st, params, reg)
 
 	// ── Slice access ───────────────────────────────────────────────────────────
 	case *ast.SliceExpr:
-		return evalSlice(n, row, params, reg)
+		return evalSlice(n, row, st, params, reg)
 
 	// ── List comprehension ─────────────────────────────────────────────────────
 	case *ast.ListComprehension:
-		return evalListComprehension(n, row, params, reg)
+		return evalListComprehension(n, row, st, params, reg)
 
 	// ── Map projection ─────────────────────────────────────────────────────────
 	case *ast.MapProjection:
-		return evalMapProjection(n, row, params, reg)
+		return evalMapProjection(n, row, st, params, reg)
 
 	// ── Binary operator ────────────────────────────────────────────────────────
 	case *ast.BinaryOp:
-		return evalBinaryOp(n, row, params, reg)
+		return evalBinaryOp(n, row, st, params, reg)
 
 	// ── Unary operator ─────────────────────────────────────────────────────────
 	case *ast.UnaryOp:
-		return evalUnaryOp(n, row, params, reg)
+		return evalUnaryOp(n, row, st, params, reg)
 
 	// ── CASE expression ────────────────────────────────────────────────────────
 	case *ast.CaseExpression:
-		return evalCase(n, row, params, reg)
+		return evalCase(n, row, st, params, reg)
 
 	// ── Function call ──────────────────────────────────────────────────────────
 	case *ast.FunctionInvocation:
-		return evalFunction(n, row, params, reg)
+		return evalFunction(n, row, st, params, reg)
 
 	// ── EXISTS { … } subquery ──────────────────────────────────────────────────
 	case *ast.ExistsSubquery:
-		ctx, subEval := extractSubqueryContext(row)
+		ctx, subEval := st.subquery()
 		if subEval == nil {
 			return nil, &EvalError{Msg: "EXISTS { … } subquery is not supported in this evaluation context (no SubqueryEvaluator wired)"}
 		}
@@ -611,7 +505,7 @@ func evalExpr(e ast.Expression, row RowContext, params map[string]Value, reg Fun
 
 	// ── COUNT { … } subquery ───────────────────────────────────────────────────
 	case *ast.CountSubquery:
-		ctx, subEval := extractSubqueryContext(row)
+		ctx, subEval := st.subquery()
 		if subEval == nil {
 			return nil, &EvalError{Msg: "COUNT { … } subquery is not supported in this evaluation context (no SubqueryEvaluator wired)"}
 		}
@@ -621,7 +515,7 @@ func evalExpr(e ast.Expression, row RowContext, params map[string]Value, reg Fun
 	// WHERE (a)-[:T]->(b) is an existential check: true iff at least one path
 	// matching the pattern exists in the graph given the bindings in row.
 	case *ast.PathPattern:
-		ctx, patEval := extractPatternEvaluator(row)
+		ctx, patEval := st.pattern()
 		if patEval == nil {
 			return nil, &EvalError{Msg: "pattern predicate is not supported in this evaluation context (no PatternEvaluator wired)"}
 		}
@@ -633,14 +527,14 @@ func evalExpr(e ast.Expression, row RowContext, params map[string]Value, reg Fun
 	// the iteration scope would lose the iteration variable binding.
 	// Closes Pattern2 [7].
 	case *ast.PatternComprehension:
-		ctx, patEval := extractPatternEvaluator(row)
+		ctx, patEval := st.pattern()
 		if patEval == nil {
 			return nil, &EvalError{Msg: "pattern comprehension is not supported in this evaluation context (no PatternEvaluator wired)"}
 		}
 		return patEval.EvalPatternComp(ctx, n, row, params, reg)
 
 	case *ast.ReduceExpr:
-		return evalReduceExpr(n, row, params, reg)
+		return evalReduceExpr(n, row, st, params, reg)
 
 	default:
 		return nil, &EvalError{Msg: fmt.Sprintf("unsupported expression type %T", e)}
@@ -651,10 +545,10 @@ func evalExpr(e ast.Expression, row RowContext, params map[string]Value, reg Fun
 // Composite literals
 // ─────────────────────────────────────────────────────────────────────────────
 
-func evalListLiteral(n *ast.ListLiteral, row RowContext, params map[string]Value, reg FunctionRegistry) (Value, error) {
+func evalListLiteral(n *ast.ListLiteral, row RowContext, st *evalCallState, params map[string]Value, reg FunctionRegistry) (Value, error) {
 	result := make(ListValue, len(n.Elements))
 	for i, elem := range n.Elements {
-		v, err := evalExpr(elem, row, params, reg)
+		v, err := evalExpr(elem, row, st, params, reg)
 		if err != nil {
 			return nil, err
 		}
@@ -663,10 +557,10 @@ func evalListLiteral(n *ast.ListLiteral, row RowContext, params map[string]Value
 	return result, nil
 }
 
-func evalMapLiteral(n *ast.MapLiteral, row RowContext, params map[string]Value, reg FunctionRegistry) (Value, error) {
+func evalMapLiteral(n *ast.MapLiteral, row RowContext, st *evalCallState, params map[string]Value, reg FunctionRegistry) (Value, error) {
 	result := make(MapValue, len(n.Keys))
 	for i, k := range n.Keys {
-		v, err := evalExpr(n.Values[i], row, params, reg)
+		v, err := evalExpr(n.Values[i], row, st, params, reg)
 		if err != nil {
 			return nil, err
 		}
@@ -685,8 +579,8 @@ func evalMapLiteral(n *ast.MapLiteral, row RowContext, params map[string]Value, 
 // type and only one label may be specified after the colon, per
 // openCypher 9). NULL receiver propagates to NULL; any other kind
 // yields NULL (a runtime type mismatch).
-func evalLabelPredicate(n *ast.LabelPredicate, row RowContext, params map[string]Value, reg FunctionRegistry) (Value, error) {
-	recv, err := evalExpr(n.Receiver, row, params, reg)
+func evalLabelPredicate(n *ast.LabelPredicate, row RowContext, st *evalCallState, params map[string]Value, reg FunctionRegistry) (Value, error) {
+	recv, err := evalExpr(n.Receiver, row, st, params, reg)
 	if err != nil {
 		return nil, err
 	}
@@ -730,6 +624,16 @@ func evalLabelPredicate(n *ast.LabelPredicate, row RowContext, params map[string
 			}
 		}
 		return BoolValue(true), nil
+	case *LazyRelationshipValue:
+		// Lazy relationship: the type is resolved eagerly by the engine
+		// (it is one cheap label read, not a property map), so this is the
+		// identical conjunctive walk over the identical string.
+		for _, want := range n.Labels {
+			if r.RelType() != want {
+				return BoolValue(false), nil
+			}
+		}
+		return BoolValue(true), nil
 	}
 	return Null, nil
 }
@@ -738,8 +642,8 @@ func evalLabelPredicate(n *ast.LabelPredicate, row RowContext, params map[string
 // Property access
 // ─────────────────────────────────────────────────────────────────────────────
 
-func evalProperty(n *ast.Property, row RowContext, params map[string]Value, reg FunctionRegistry) (Value, error) {
-	recv, err := evalExpr(n.Receiver, row, params, reg)
+func evalProperty(n *ast.Property, row RowContext, st *evalCallState, params map[string]Value, reg FunctionRegistry) (Value, error) {
+	recv, err := evalExpr(n.Receiver, row, st, params, reg)
 	if err != nil {
 		return nil, err
 	}
@@ -776,6 +680,17 @@ func evalProperty(n *ast.Property, row RowContext, params map[string]Value, reg 
 			}
 		}
 		return Null, nil
+	case *LazyRelationshipValue:
+		// Lazy relationship fast path: resolve only the touched property from
+		// storage. A LazyRelationshipValue is constructed solely for
+		// relationships the static analysis proved are accessed only through
+		// scalar accessors, and never for an entity deleted in the same
+		// statement (the DELETE operator stamps those as a Deleted
+		// RelationshipValue, which the engine forwards before the lazy path is
+		// reached and which the branch above handles), so the
+		// DeletedEntityAccess contract is preserved without a flag here. A
+		// missing key reads as Null (Property does this).
+		return r.Property(n.Key), nil
 	case MapValue:
 		if v, ok := r[n.Key]; ok {
 			return v, nil
@@ -806,15 +721,15 @@ func evalProperty(n *ast.Property, row RowContext, params map[string]Value, reg 
 // Subscript access
 // ─────────────────────────────────────────────────────────────────────────────
 
-func evalSubscript(n *ast.SubscriptExpr, row RowContext, params map[string]Value, reg FunctionRegistry) (Value, error) {
-	container, err := evalExpr(n.Expr, row, params, reg)
+func evalSubscript(n *ast.SubscriptExpr, row RowContext, st *evalCallState, params map[string]Value, reg FunctionRegistry) (Value, error) {
+	container, err := evalExpr(n.Expr, row, st, params, reg)
 	if err != nil {
 		return nil, err
 	}
 	if IsNull(container) {
 		return Null, nil
 	}
-	idx, err := evalExpr(n.Index, row, params, reg)
+	idx, err := evalExpr(n.Index, row, st, params, reg)
 	if err != nil {
 		return nil, err
 	}
@@ -855,6 +770,17 @@ func evalSubscript(n *ast.SubscriptExpr, row RowContext, params map[string]Value
 			return nil, &EvalError{Msg: fmt.Sprintf("MapElementAccessByNonString: map key must be String, got %s", idx.Kind())}
 		}
 		return subscriptMap(c.Properties, idx), nil
+	case *LazyRelationshipValue:
+		// Lazy relationship subscript: only a String key is valid (same
+		// TypeError surface as the eager RelationshipValue branch). The static
+		// analysis only produces a LazyRelationshipValue when subscripts use
+		// literal-string keys, but resolving any runtime String key on demand is
+		// equally sound.
+		sk, ok := idx.(StringValue)
+		if !ok {
+			return nil, &EvalError{Msg: fmt.Sprintf("MapElementAccessByNonString: map key must be String, got %s", idx.Kind())}
+		}
+		return c.Property(string(sk)), nil
 	default:
 		// Subscripting a non-list / non-map / non-graph-element value is
 		// an InvalidArgumentType TypeError per openCypher (e.g. `1[0]`,
@@ -899,13 +825,13 @@ func subscriptMap(m MapValue, idx Value) Value {
 // Binary operator
 // ─────────────────────────────────────────────────────────────────────────────
 
-func evalBinaryOp(n *ast.BinaryOp, row RowContext, params map[string]Value, reg FunctionRegistry) (Value, error) { //nolint:gocyclo // One case per binary operator; splitting would obscure the operator mapping without reducing real complexity.
+func evalBinaryOp(n *ast.BinaryOp, row RowContext, st *evalCallState, params map[string]Value, reg FunctionRegistry) (Value, error) { //nolint:gocyclo // One case per binary operator; splitting would obscure the operator mapping without reducing real complexity.
 	// AND and OR short-circuit under 3VL before evaluating right.
 	switch n.Operator {
 	case "AND":
-		return eval3VLAND(n, row, params, reg)
+		return eval3VLAND(n, row, st, params, reg)
 	case "OR":
-		return eval3VLOR(n, row, params, reg)
+		return eval3VLOR(n, row, st, params, reg)
 	}
 
 	// A COUNT { … } compared against an integer literal never needs the exact
@@ -913,16 +839,16 @@ func evalBinaryOp(n *ast.BinaryOp, row RowContext, params map[string]Value, reg 
 	// SubqueryEvaluator can stop early, give it the ceiling (#2232). See
 	// [BoundedCountEvaluator] for why literal+1 is sufficient for all six
 	// operators.
-	left, right, done, err := evalBoundedCountComparison(n, row, params, reg)
+	left, right, done, err := evalBoundedCountComparison(n, row, st, params, reg)
 	if err != nil {
 		return nil, err
 	}
 	if !done {
-		left, err = evalExpr(n.Left, row, params, reg)
+		left, err = evalExpr(n.Left, row, st, params, reg)
 		if err != nil {
 			return nil, err
 		}
-		right, err = evalExpr(n.Right, row, params, reg)
+		right, err = evalExpr(n.Right, row, st, params, reg)
 		if err != nil {
 			return nil, err
 		}
@@ -945,17 +871,17 @@ func evalBinaryOp(n *ast.BinaryOp, row RowContext, params map[string]Value, reg 
 
 	// ── Arithmetic ────────────────────────────────────────────────────────────
 	case "+":
-		return evalArith(row, "+", left, right)
+		return evalArith(st, "+", left, right)
 	case "-":
-		return evalArith(row, "-", left, right)
+		return evalArith(st, "-", left, right)
 	case "*":
-		return evalArith(row, "*", left, right)
+		return evalArith(st, "*", left, right)
 	case "/":
-		return evalArith(row, "/", left, right)
+		return evalArith(st, "/", left, right)
 	case "%":
-		return evalArith(row, "%", left, right)
+		return evalArith(st, "%", left, right)
 	case "^":
-		return evalArith(row, "^", left, right)
+		return evalArith(st, "^", left, right)
 
 	// ── String operators ──────────────────────────────────────────────────────
 	case "CONTAINS":
@@ -1003,8 +929,8 @@ func logicalOperandError(op string, v Value) error {
 }
 
 // eval3VLAND evaluates AND with Kleene 3VL short-circuit.
-func eval3VLAND(n *ast.BinaryOp, row RowContext, params map[string]Value, reg FunctionRegistry) (Value, error) {
-	left, err := evalExpr(n.Left, row, params, reg)
+func eval3VLAND(n *ast.BinaryOp, row RowContext, st *evalCallState, params map[string]Value, reg FunctionRegistry) (Value, error) {
+	left, err := evalExpr(n.Left, row, st, params, reg)
 	if err != nil {
 		return nil, err
 	}
@@ -1017,7 +943,7 @@ func eval3VLAND(n *ast.BinaryOp, row RowContext, params map[string]Value, reg Fu
 	if err := logicalOperandError(n.Operator, left); err != nil {
 		return nil, err
 	}
-	right, err := evalExpr(n.Right, row, params, reg)
+	right, err := evalExpr(n.Right, row, st, params, reg)
 	if err != nil {
 		return nil, err
 	}
@@ -1037,8 +963,8 @@ func eval3VLAND(n *ast.BinaryOp, row RowContext, params map[string]Value, reg Fu
 }
 
 // eval3VLOR evaluates OR with Kleene 3VL short-circuit.
-func eval3VLOR(n *ast.BinaryOp, row RowContext, params map[string]Value, reg FunctionRegistry) (Value, error) {
-	left, err := evalExpr(n.Left, row, params, reg)
+func eval3VLOR(n *ast.BinaryOp, row RowContext, st *evalCallState, params map[string]Value, reg FunctionRegistry) (Value, error) {
+	left, err := evalExpr(n.Left, row, st, params, reg)
 	if err != nil {
 		return nil, err
 	}
@@ -1051,7 +977,7 @@ func eval3VLOR(n *ast.BinaryOp, row RowContext, params map[string]Value, reg Fun
 	if err := logicalOperandError(n.Operator, left); err != nil {
 		return nil, err
 	}
-	right, err := evalExpr(n.Right, row, params, reg)
+	right, err := evalExpr(n.Right, row, st, params, reg)
 	if err != nil {
 		return nil, err
 	}
@@ -1241,12 +1167,15 @@ func promoteNumeric(a, b Value) (Value, Value) { //nolint:gocritic // Named retu
 	return a, b
 }
 
-// evalArith evaluates arithmetic binary operators. row carries the
-// per-evaluation list-element budget (#1475), consulted before any list
-// concatenation allocates so a doubling accumulator (reduce(acc=[0], … | acc +
-// acc)) is rejected with a typed [EvalError] rather than allocating an
-// exponentially large slice.
-func evalArith(row RowContext, op string, left, right Value) (Value, error) {
+// evalArith evaluates arithmetic binary operators. st carries the
+// per-evaluation list-element and string-byte budgets (#1475, #1482), consulted
+// before any list concatenation or string growth allocates so a doubling
+// accumulator (reduce(acc=[0], … | acc + acc)) is rejected with a typed
+// [EvalError] rather than allocating an exponentially large slice. It is the
+// only thing this function needs from the evaluation, which is why it takes no
+// row: before #2653 the budget travelled inside the RowContext, so the row had
+// to be passed here purely to reach it.
+func evalArith(st *evalCallState, op string, left, right Value) (Value, error) {
 	if IsNull(left) || IsNull(right) {
 		return Null, nil
 	}
@@ -1259,7 +1188,7 @@ func evalArith(row RowContext, op string, left, right Value) (Value, error) {
 				// doubling accumulator (reduce(s='x', … | s + s)) is rejected
 				// with a typed [EvalError] rather than growing one string to
 				// gigabytes from O(1) query text (#1482).
-				if err := chargeStringGrowth(row, int64(len(ls))+int64(len(rs))); err != nil {
+				if err := chargeStringGrowth(st, int64(len(ls))+int64(len(rs))); err != nil {
 					return nil, err
 				}
 				return StringValue(string(ls) + string(rs)), nil
@@ -1274,7 +1203,7 @@ func evalArith(row RowContext, op string, left, right Value) (Value, error) {
 		if ll, lok := left.(ListValue); lok {
 			if rl, rok := right.(ListValue); rok {
 				// list + list
-				if err := chargeListGrowth(row, int64(len(ll))+int64(len(rl))); err != nil {
+				if err := chargeListGrowth(st, int64(len(ll))+int64(len(rl))); err != nil {
 					return nil, err
 				}
 				result := make(ListValue, len(ll)+len(rl))
@@ -1283,7 +1212,7 @@ func evalArith(row RowContext, op string, left, right Value) (Value, error) {
 				return result, nil
 			}
 			// list + element: wrap right in a single-element list and append.
-			if err := chargeListGrowth(row, int64(len(ll))+1); err != nil {
+			if err := chargeListGrowth(st, int64(len(ll))+1); err != nil {
 				return nil, err
 			}
 			result := make(ListValue, len(ll)+1)
@@ -1293,7 +1222,7 @@ func evalArith(row RowContext, op string, left, right Value) (Value, error) {
 		}
 		if rl, rok := right.(ListValue); rok {
 			// element + list: prepend left to right.
-			if err := chargeListGrowth(row, int64(len(rl))+1); err != nil {
+			if err := chargeListGrowth(st, int64(len(rl))+1); err != nil {
 				return nil, err
 			}
 			result := make(ListValue, 1+len(rl))
@@ -1606,24 +1535,24 @@ func evalIn(left, right Value) (Value, error) {
 // Unary operator
 // ─────────────────────────────────────────────────────────────────────────────
 
-func evalUnaryOp(n *ast.UnaryOp, row RowContext, params map[string]Value, reg FunctionRegistry) (Value, error) { //nolint:gocyclo // One case per unary operator; splitting would add indirection without reducing real complexity.
+func evalUnaryOp(n *ast.UnaryOp, row RowContext, st *evalCallState, params map[string]Value, reg FunctionRegistry) (Value, error) { //nolint:gocyclo // One case per unary operator; splitting would add indirection without reducing real complexity.
 	switch n.Operator {
 	case "IS NULL":
-		operand, err := evalExpr(n.Operand, row, params, reg)
+		operand, err := evalExpr(n.Operand, row, st, params, reg)
 		if err != nil {
 			return nil, err
 		}
 		return BoolValue(IsNull(operand)), nil
 
 	case "IS NOT NULL":
-		operand, err := evalExpr(n.Operand, row, params, reg)
+		operand, err := evalExpr(n.Operand, row, st, params, reg)
 		if err != nil {
 			return nil, err
 		}
 		return BoolValue(!IsNull(operand)), nil
 
 	case "NOT":
-		operand, err := evalExpr(n.Operand, row, params, reg)
+		operand, err := evalExpr(n.Operand, row, st, params, reg)
 		if err != nil {
 			return nil, err
 		}
@@ -1638,7 +1567,7 @@ func evalUnaryOp(n *ast.UnaryOp, row RowContext, params map[string]Value, reg Fu
 		return BoolValue(!bool(operand.(BoolValue))), nil
 
 	case "-":
-		operand, err := evalExpr(n.Operand, row, params, reg)
+		operand, err := evalExpr(n.Operand, row, st, params, reg)
 		if err != nil {
 			return nil, err
 		}
@@ -1657,7 +1586,7 @@ func evalUnaryOp(n *ast.UnaryOp, row RowContext, params map[string]Value, reg Fu
 		return Null, nil
 
 	case "+":
-		operand, err := evalExpr(n.Operand, row, params, reg)
+		operand, err := evalExpr(n.Operand, row, st, params, reg)
 		if err != nil {
 			return nil, err
 		}
@@ -1680,7 +1609,7 @@ func evalUnaryOp(n *ast.UnaryOp, row RowContext, params map[string]Value, reg Fu
 //
 // The returned operands keep the ORIGINAL left/right positions, so the operator
 // switch that follows is unchanged and no comparison is reversed.
-func evalBoundedCountComparison(n *ast.BinaryOp, row RowContext, params map[string]Value, _ FunctionRegistry) (left, right Value, done bool, err error) {
+func evalBoundedCountComparison(n *ast.BinaryOp, row RowContext, st *evalCallState, params map[string]Value, _ FunctionRegistry) (left, right Value, done bool, err error) {
 	switch n.Operator {
 	case "=", "<>", "<", "<=", ">", ">=":
 	default:
@@ -1706,7 +1635,7 @@ func evalBoundedCountComparison(n *ast.BinaryOp, row RowContext, params map[stri
 	if !ok {
 		return nil, nil, false, nil
 	}
-	ctx, subEval := extractSubqueryContext(row)
+	ctx, subEval := st.subquery()
 	if subEval == nil {
 		return nil, nil, false, nil
 	}
@@ -1747,7 +1676,7 @@ func integerLiteralValue(e ast.Expression) (int64, bool) {
 	return 0, false
 }
 
-func evalFunction(n *ast.FunctionInvocation, row RowContext, params map[string]Value, reg FunctionRegistry) (Value, error) {
+func evalFunction(n *ast.FunctionInvocation, row RowContext, st *evalCallState, params map[string]Value, reg FunctionRegistry) (Value, error) {
 	if reg == nil {
 		return nil, &EvalError{Msg: fmt.Sprintf("no function registry; cannot call %s()", n.Name)}
 	}
@@ -1775,7 +1704,7 @@ func evalFunction(n *ast.FunctionInvocation, row RowContext, params map[string]V
 	// ordinary path — build the list, take its length — whenever it cannot.
 	if name == "size" && len(n.Args) == 1 {
 		if pc, ok := n.Args[0].(*ast.PatternComprehension); ok {
-			if ctx, patEval := extractPatternEvaluator(row); patEval != nil {
+			if ctx, patEval := st.pattern(); patEval != nil {
 				if pce, capable := patEval.(PatternCountEvaluator); capable {
 					v, answered, err := pce.CountPatternComp(ctx, pc, row)
 					if err != nil {
@@ -1793,7 +1722,7 @@ func evalFunction(n *ast.FunctionInvocation, row RowContext, params map[string]V
 	case "all", "any", "none", "single":
 		if len(n.Args) == 1 {
 			if lc, ok := n.Args[0].(*ast.ListComprehension); ok {
-				return evalQuantifier(name, lc, row, params, reg)
+				return evalQuantifier(name, lc, row, st, params, reg)
 			}
 		}
 		// Fall through to normal dispatch if args don't match the expected shape.
@@ -1804,7 +1733,7 @@ func evalFunction(n *ast.FunctionInvocation, row RowContext, params map[string]V
 	case "reduce":
 		if len(n.Args) == 2 {
 			if lc, ok := n.Args[1].(*ast.ListComprehension); ok {
-				return evalReduce(n.Args[0], lc, row, params, reg)
+				return evalReduce(n.Args[0], lc, row, st, params, reg)
 			}
 		}
 	}
@@ -1816,7 +1745,7 @@ func evalFunction(n *ast.FunctionInvocation, row RowContext, params map[string]V
 
 	args := make([]Value, len(n.Args))
 	for i, arg := range n.Args {
-		v, err := evalExpr(arg, row, params, reg)
+		v, err := evalExpr(arg, row, st, params, reg)
 		if err != nil {
 			return nil, err
 		}
@@ -1839,7 +1768,7 @@ func evalFunction(n *ast.FunctionInvocation, row RowContext, params map[string]V
 	// of magnitude above any TCK-covered list, so it never rejects a legitimate
 	// query.
 	if lv, ok := result.(ListValue); ok {
-		if cerr := chargeListGrowth(row, int64(len(lv))); cerr != nil {
+		if cerr := chargeListGrowth(st, int64(len(lv))); cerr != nil {
 			return nil, cerr
 		}
 	}
@@ -1850,8 +1779,8 @@ func evalFunction(n *ast.FunctionInvocation, row RowContext, params map[string]V
 // It evaluates the source list and counts how many elements satisfy the predicate.
 //
 //nolint:gocyclo // Dispatch over 4 quantifier types × 3-4 count/null branches; extraction would obscure the logic.
-func evalQuantifier(name string, lc *ast.ListComprehension, row RowContext, params map[string]Value, reg FunctionRegistry) (Value, error) {
-	src, err := evalExpr(lc.Source, row, params, reg)
+func evalQuantifier(name string, lc *ast.ListComprehension, row RowContext, st *evalCallState, params map[string]Value, reg FunctionRegistry) (Value, error) {
+	src, err := evalExpr(lc.Source, row, st, params, reg)
 	if err != nil {
 		return nil, err
 	}
@@ -1863,7 +1792,7 @@ func evalQuantifier(name string, lc *ast.ListComprehension, row RowContext, para
 		return Null, nil
 	}
 
-	counts, err := countQuantifierMatches(lc, list, row, params, reg)
+	counts, err := countQuantifierMatches(lc, list, row, st, params, reg)
 	if err != nil {
 		return nil, err
 	}
@@ -1884,10 +1813,10 @@ type quantifierCounts struct {
 // countQuantifierMatches iterates the list and evaluates the predicate for each
 // element, partitioning the outcomes into the (true, false, null) counters
 // of [quantifierCounts].
-func countQuantifierMatches(lc *ast.ListComprehension, list ListValue, row RowContext, params map[string]Value, reg FunctionRegistry) (quantifierCounts, error) {
-	// ctx is smuggled through row by EvalWith; on the bare Eval path it is
+func countQuantifierMatches(lc *ast.ListComprehension, list ListValue, row RowContext, st *evalCallState, params map[string]Value, reg FunctionRegistry) (quantifierCounts, error) {
+	// ctx comes from the evaluation state; on the bare Eval path it is
 	// context.Background() and the per-stride cancellation check never fires.
-	ctx, _ := extractSubqueryContext(row)
+	ctx := st.evalContext()
 	c := quantifierCounts{total: len(list)}
 	for i, elem := range list {
 		// Honour cancellation/deadline on a fixed stride so a quantifier
@@ -1904,7 +1833,7 @@ func countQuantifierMatches(lc *ast.ListComprehension, list ListValue, row RowCo
 		var predVal Value
 		var err error
 		if lc.Predicate != nil {
-			predVal, err = evalExpr(lc.Predicate, innerRow, params, reg)
+			predVal, err = evalExpr(lc.Predicate, innerRow, st, params, reg)
 			if err != nil {
 				return quantifierCounts{}, err
 			}
@@ -1976,12 +1905,12 @@ func quantifierResult(name string, c quantifierCounts) Value {
 
 // evalReduceExpr handles the *ast.ReduceExpr AST node produced by the parser
 // for reduce(acc = init, x IN list | expr). This is the primary eval path.
-func evalReduceExpr(n *ast.ReduceExpr, row RowContext, params map[string]Value, reg FunctionRegistry) (Value, error) {
-	acc, err := evalExpr(n.Init, row, params, reg)
+func evalReduceExpr(n *ast.ReduceExpr, row RowContext, st *evalCallState, params map[string]Value, reg FunctionRegistry) (Value, error) {
+	acc, err := evalExpr(n.Init, row, st, params, reg)
 	if err != nil {
 		return nil, err
 	}
-	src, err := evalExpr(n.Source, row, params, reg)
+	src, err := evalExpr(n.Source, row, st, params, reg)
 	if err != nil {
 		return nil, err
 	}
@@ -1992,13 +1921,13 @@ func evalReduceExpr(n *ast.ReduceExpr, row RowContext, params map[string]Value, 
 	if !ok {
 		return acc, nil
 	}
-	// ctx is smuggled through row by EvalWith; on the bare Eval path it is
+	// ctx comes from the evaluation state; on the bare Eval path it is
 	// context.Background() and the per-stride cancellation check never fires.
 	// The per-evaluation list-element budget that bounds a list-growing
 	// accumulator (reduce(acc=[0], … | acc + acc)) is charged inside evalArith
 	// before each concat allocates (#1475); this loop adds the cancellation
 	// check (#1477).
-	ctx, _ := extractSubqueryContext(row)
+	ctx := st.evalContext()
 	for i, elem := range list {
 		if err := checkIterCtx(ctx, i); err != nil {
 			return nil, err
@@ -2009,7 +1938,7 @@ func evalReduceExpr(n *ast.ReduceExpr, row RowContext, params map[string]Value, 
 		}
 		innerRow[n.AccVar] = acc
 		innerRow[n.ElemVar] = elem
-		acc, err = evalExpr(n.Projection, innerRow, params, reg)
+		acc, err = evalExpr(n.Projection, innerRow, st, params, reg)
 		if err != nil {
 			return nil, err
 		}
@@ -2033,12 +1962,12 @@ func evalReduceExpr(n *ast.ReduceExpr, row RowContext, params map[string]Value, 
 // evalReduce handles reduce(acc = init, x IN list | expr).
 // The parser produces: FunctionInvocation{Name: "reduce", Args: [initExpr, ListComprehension{...}]}
 // where ListComprehension has a Projection (the accumulator expression) and a Source (the list).
-func evalReduce(initExpr ast.Expression, lc *ast.ListComprehension, row RowContext, params map[string]Value, reg FunctionRegistry) (Value, error) {
-	acc, err := evalExpr(initExpr, row, params, reg)
+func evalReduce(initExpr ast.Expression, lc *ast.ListComprehension, row RowContext, st *evalCallState, params map[string]Value, reg FunctionRegistry) (Value, error) {
+	acc, err := evalExpr(initExpr, row, st, params, reg)
 	if err != nil {
 		return nil, err
 	}
-	src, err := evalExpr(lc.Source, row, params, reg)
+	src, err := evalExpr(lc.Source, row, st, params, reg)
 	if err != nil {
 		return nil, err
 	}
@@ -2071,11 +2000,11 @@ func evalReduce(initExpr ast.Expression, lc *ast.ListComprehension, row RowConte
 		accVarName = v.Name
 	}
 
-	// ctx is smuggled through row by EvalWith; on the bare Eval path it is
+	// ctx comes from the evaluation state; on the bare Eval path it is
 	// context.Background() and the per-stride cancellation check never fires.
 	// The per-evaluation list-element budget is charged inside evalArith before
 	// each concat allocates (#1475); this loop adds the cancellation check (#1477).
-	ctx, _ := extractSubqueryContext(row)
+	ctx := st.evalContext()
 	for i, elem := range list {
 		if err := checkIterCtx(ctx, i); err != nil {
 			return nil, err
@@ -2087,7 +2016,7 @@ func evalReduce(initExpr ast.Expression, lc *ast.ListComprehension, row RowConte
 		innerRow[accVarName] = acc
 		innerRow[lc.Variable] = elem
 
-		acc, err = evalExpr(lc.Projection, innerRow, params, reg)
+		acc, err = evalExpr(lc.Projection, innerRow, st, params, reg)
 		if err != nil {
 			return nil, err
 		}

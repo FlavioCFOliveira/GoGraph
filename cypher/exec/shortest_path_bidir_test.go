@@ -473,8 +473,8 @@ func TestBiBFS_DifferentialAgainstForwardOnly(t *testing.T) {
 						if fc.admits == nil || rk.canonical {
 							if !twoSide {
 								t.Fatalf("canBidirectional = false, want true — the admission gate "+
-									"narrowed without this test moving with it (revAdmit=%v "+
-									"revVerts=%d/%d revEdges=%d/%d)", op.revAdmit != nil,
+									"narrowed without this test moving with it (revExact=%v "+
+									"revVerts=%d/%d revEdges=%d/%d)", op.admit.RevExact(),
 									len(op.revVerts), len(op.fwdVerts), len(op.revEdges), len(op.fwdEdges))
 							}
 						}

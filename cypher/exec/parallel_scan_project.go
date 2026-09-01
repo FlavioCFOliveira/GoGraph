@@ -24,12 +24,27 @@ package exec
 // Init collects every live NodeID once, on the calling goroutine (identical to
 // AllNodesScan.Init / ParallelCountScan.Init — the ONLY phase that touches graph
 // state), splits the owned slice into disjoint morsels of [DefaultMorselSize]
-// IDs, and builds one INDEPENDENT sub-plan per worker via the supplied
-// [SubplanFactory]. The factory is invoked on the calling goroutine, before any
-// worker launches, so every build-time write (schema population, build-time
-// buildOpts fields) stays single-threaded. Each worker then drives its own
-// sub-plan over the morsels it dequeues from a pre-filled bounded work channel,
-// deep-copying every result row into a private []Row buffer.
+// IDs, and launches the workers. Each worker then drives its own sub-plan over
+// the morsels it dequeues from a pre-filled bounded work channel, deep-copying
+// every result row into a private []Row buffer.
+//
+// The sub-plans come from the supplied [SubplanFactory], and WHERE each call runs
+// matters. Before it constructs this operator at all, the caller (cypher's
+// tryBuildParallelScanProject) builds ONE PROBE sub-plan on its own goroutine —
+// with the same builder the factory wraps, over an empty morsel — and closes it.
+// That probe is what populates the caller's output schema and surfaces a build
+// error while everything is still single-threaded. Every subsequent build is a
+// factory call made by a WORKER, once per morsel, on the goroutine that will
+// drive the returned operator (see runMorsel). The factory is therefore called
+// concurrently by design, and every build-time write it performs must land in
+// PER-WORKER state — which is exactly what cypher's buildOpts.forWorker exists to
+// provide.
+//
+// This paragraph used to claim the opposite: that the factory ran only on the
+// calling goroutine, before any worker launched, so build-time writes stayed
+// single-threaded. That was false, and the false claim is what let a shared
+// *exec.Profiler reach the workers — forWorker copied the pointer, and every
+// worker appended to the same unsynchronised slice inside it (rmp #2664).
 //
 // The first call to Next joins every worker synchronously via wg.Wait on the
 // caller's goroutine, then concatenates the per-worker buffers and streams them.
@@ -87,9 +102,10 @@ import (
 // the fleet-wide result budget (row count or byte estimate) is exceeded. It is
 // never propagated to the caller: runWorker treats it as a clean stop, keeps
 // the rows accumulated so far, and returns them with a nil error. The operator
-// therefore emits a bounded prefix of the result set (~the budget plus a small
-// per-worker overshoot), and the engine's Result-drain layer — which sums the
-// same estimate — produces the canonical ErrResultRowsExceeded /
+// therefore emits a bounded prefix of the result set (the budget plus a bounded
+// per-worker overshoot, stated numerically in
+// [ParallelScanProject.WithResultBudget]), and the engine's Result-drain layer —
+// which sums the same estimate — produces the canonical ErrResultRowsExceeded /
 // ErrResultBytesExceeded from that bounded set, exactly as it does on the serial
 // path. This keeps the cap error's definition in one place (package cypher)
 // without exec importing it.
@@ -106,6 +122,10 @@ var errBudgetReached = errors.New("exec: parallel scan result budget reached")
 //
 // The returned operator is driven Init → Next* → Close by exactly one worker
 // goroutine. It must honour the standard [Operator] lifecycle.
+//
+// The factory is called ONCE PER MORSEL, on the worker goroutine that will drive
+// the operator it returns, so an implementation must be safe to call concurrently
+// and must not write to any state shared with another call.
 type SubplanFactory func(morsel []graph.NodeID) (Operator, error)
 
 // ParallelScanProject is a Volcano leaf operator that partitions a full-node
@@ -139,13 +159,23 @@ type ParallelScanProject struct {
 	// caps — which do protect the serial (lazy Volcano) path — could not bound
 	// peak memory on the parallel path: an untrusted client could force a
 	// multi-gigabyte resident allocation regardless of the 1 GiB default byte
-	// budget. sharedRows/sharedBytes are the fleet-wide running totals the
-	// workers check via overResultBudget so accumulation stops at ~the budget
-	// (plus one in-flight batch per worker) instead of the whole set. estimateRow
-	// is the engine's own coarse row-size estimate, injected so the worker's byte
+	// budget. sharedRows/sharedBytes are the fleet-wide running totals against
+	// which the workers reconcile, so accumulation stops at ~the budget (plus a
+	// bounded per-worker overshoot) instead of the whole set. estimateRow is the
+	// engine's own coarse row-size estimate, injected so the worker's byte
 	// accounting matches the drain's exactly.
+	//
+	// The reconciliation is BATCHED (#2649): each worker charges rows into a
+	// private [budgetTally] and touches sharedRows/sharedBytes only once per
+	// flushRows rows (or flushBytes bytes), not once per row. flushRows and
+	// flushBytes are computed in Init, after the worker count is known, and are
+	// read-only for the workers' whole lifetime. See [ParallelScanProject.flushBudget]
+	// for why the batch is charged AFTER the rows are produced and never reserved
+	// in advance.
 	maxRows     int64
 	maxBytes    int64
+	flushRows   int64 // per-worker row batch; 0 disables the row dimension
+	flushBytes  int64 // per-worker byte batch; 0 disables the byte dimension
 	sharedRows  atomic.Int64
 	sharedBytes atomic.Int64
 
@@ -161,6 +191,44 @@ type ParallelScanProject struct {
 // disable byte-budget enforcement. It returns op for chaining and must be called
 // before Init. When neither bound is set the operator behaves exactly as before
 // (full materialisation), so the result multiset is unchanged under budget.
+//
+// # Overshoot bound
+//
+// The budget is enforced by W workers that each accumulate PRIVATELY and
+// reconcile with the fleet-wide total in batches (#2649), so the shared total
+// lags the true produced count and the operator emits slightly MORE than the
+// cap. That is deliberate and is what keeps the cap error correct: see
+// [ParallelScanProject.flushBudget]. The excess is bounded, and the bound is
+// part of this method's contract.
+//
+// Write W for the worker count [ParallelGovernor.Enter] returned, Fr for
+// op.flushRows, Fb for op.flushBytes, and S_max for the largest single-row
+// value estimateRow can return. Then the operator materialises at most:
+//
+//	rows  <= maxRows  + W*Fr
+//	bytes <= maxBytes + W*Fb + W*S_max
+//
+// because a worker holds at most Fr rows (Fb + S_max bytes) unpublished, and
+// every worker stops at its first flush that observes the shared total over the
+// cap — so at most one further batch per worker can land after the crossing.
+//
+// Init sizes the batches CAP-RELATIVELY, never as an absolute chunk:
+//
+//	Fr = clamp(maxRows  / (16*W), 1, morselSize)
+//	Fb = clamp(maxBytes / (16*W), 1, execMemChargeChunk)
+//
+// Hence W*Fr <= max(W, maxRows/16) and W*Fb <= max(W, maxBytes/16): whenever the
+// divisor does not clamp to 1 — that is, whenever the cap is at least 16*W — the
+// batching adds AT MOST 6.25% of the configured cap, for every W and every cap.
+// Below that (a cap smaller than 16*W, e.g. maxRows=100 with W=10) the clamp
+// pins Fr to 1 and the bound degenerates to maxRows + W, which is byte-for-byte
+// the per-row overshoot this operator had before the batching existed. The
+// batching therefore never loosens a small budget a caller deliberately set: it
+// adds 6.25% of a large cap, or nothing at all to a small one.
+//
+// The morselSize and execMemChargeChunk ceilings only ever TIGHTEN these bounds
+// (they bind exactly when maxRows/(16*W) already exceeds them), so the 6.25%
+// figure holds with them in place.
 func (op *ParallelScanProject) WithResultBudget(maxRows, maxBytes int64, estimateRow func(Row) int64) *ParallelScanProject {
 	op.maxRows = maxRows
 	op.maxBytes = maxBytes
@@ -168,23 +236,175 @@ func (op *ParallelScanProject) WithResultBudget(maxRows, maxBytes int64, estimat
 	return op
 }
 
-// overResultBudget records one emitted row against the fleet-wide running
-// totals and reports whether the engine's result budget is now exceeded. It is
-// called by every worker (concurrently) after appending a row, so the counters
-// are atomic. When it returns true the worker stops accumulating and the
-// operator emits only the bounded prefix gathered so far. It never drops a row
-// while under budget, so the result multiset is unchanged when the budget is not
-// exceeded.
-func (op *ParallelScanProject) overResultBudget(row Row) bool {
-	// Increment both fleet-wide counters (short-circuiting the Add when that
-	// dimension is unbounded) and report whether either now exceeds its cap.
-	over := op.maxRows > 0 && op.sharedRows.Add(1) > op.maxRows
-	if op.maxBytes > 0 && op.estimateRow != nil {
-		if op.sharedBytes.Add(op.estimateRow(row)) > op.maxBytes {
+// budgetFlushDivisor sets how finely a worker's private batch divides the
+// configured cap: each of the W workers holds at most cap/(budgetFlushDivisor*W)
+// before publishing, so the fleet's unpublished total is at most
+// cap/budgetFlushDivisor — one sixteenth, i.e. 6.25%, of whichever cap is set.
+const budgetFlushDivisor = 16
+
+// execMemChargeChunk is the ceiling on a worker's private BYTE batch. It equals
+// cypher's globalMemChargeChunk — the granularity at which Result.materialize
+// flushes its estimate to the engine-wide counter — deliberately, so the module
+// reconciles result bytes at ONE granularity wherever it batches them. package
+// exec cannot import package cypher (cypher imports exec), so the value is
+// restated here rather than shared; the two must be changed together.
+const execMemChargeChunk int64 = 1 << 20 // 1 MiB
+
+// budgetTally is one worker's PRIVATE accumulation of the rows and bytes it has
+// produced since it last reconciled with the operator's fleet-wide totals. It
+// lives in [ParallelScanProject.runWorker]'s frame — never as a field on the
+// operator — so charging a row touches nothing outside this goroutine's own
+// stack. That is the whole point of the type: before #2649 every produced row
+// bumped two process-shared atomics, which measured at 18.9% of flat CPU and
+// stopped the operator scaling past four workers entirely.
+//
+// The configuration fields are copies, read out of the operator ONCE per worker
+// before its first morsel. That read is deliberately hoisted: op.maxRows,
+// op.maxBytes, op.sharedRows and op.sharedBytes occupy the same 32 contiguous
+// bytes of the operator, so reading a config field per row would pull in the
+// very cache line the two atomics dirty. Reading them once per worker removes
+// that line from the row loop altogether.
+type budgetTally struct {
+	// estimateRow is the engine's coarse per-row byte estimate, or nil when the
+	// byte dimension is off. It is the drain layer's own estimator, so the two
+	// accountings agree exactly.
+	estimateRow func(Row) int64
+
+	rows  int64 // rows produced since the last flush
+	bytes int64 // estimated bytes produced since the last flush
+
+	flushRows  int64 // flush once rows reaches this (0 = row dimension off)
+	flushBytes int64 // flush once bytes reaches this (0 = byte dimension off)
+}
+
+// newBudgetTally returns one worker's private tally, reading every budget
+// parameter out of op exactly once. Call it on the worker goroutine, before its
+// first morsel; op's budget fields are written before any worker starts (in
+// WithResultBudget and Init) and never afterwards, so the read is race-free.
+func (op *ParallelScanProject) newBudgetTally() budgetTally {
+	t := budgetTally{flushRows: op.flushRows, flushBytes: op.flushBytes}
+	if t.flushBytes > 0 {
+		t.estimateRow = op.estimateRow
+	}
+	return t
+}
+
+// chargeBudget records one produced row in the worker's PRIVATE tally and
+// reports whether that tally has reached its flush threshold. It performs no
+// shared access whatsoever — no atomic, no field read on op — so it costs a
+// register increment and a predictable branch per row.
+//
+// It always charges BOTH active dimensions before returning, even when the row
+// dimension alone has hit its threshold. Returning early on the row threshold
+// would leave that row's bytes uncharged forever and make the byte total a
+// permanent under-count.
+func (t *budgetTally) chargeBudget(row Row) bool {
+	over := false
+	if t.flushRows > 0 {
+		t.rows++
+		over = t.rows >= t.flushRows
+	}
+	if t.estimateRow != nil {
+		t.bytes += t.estimateRow(row)
+		if t.bytes >= t.flushBytes {
 			over = true
 		}
 	}
 	return over
+}
+
+// flushBudget publishes the worker's private tally to the fleet-wide running
+// totals — ONE atomic Add per active dimension, per BATCH, rather than two per
+// row — and reports whether the fleet is now over the engine's result budget.
+// When it returns true the worker stops accumulating and the operator emits only
+// the bounded prefix gathered so far. It never drops a row while under budget,
+// so the result multiset is unchanged when the budget is not exceeded.
+//
+// # Why the batch is POST-charged, and must never become a reservation
+//
+// The obvious way to batch a shared counter is to PRE-CHARGE: reserve a batch up
+// front, spend it locally, reserve again. That is what both reference engines do
+// — Neo4j's ExecutionContextMemoryTracker decrements a thread-confined long and
+// touches the shared pool only on refill, and Memgraph's SharedQuota takes one
+// CAS per limit/(4*workers) rows. Reserving makes the shared total an
+// OVER-estimate, so those engines fail EARLY: they may reject a query that would
+// in fact have fitted. For them that is the safe direction, because their
+// counter is the thing that produces the error.
+//
+// It is the WRONG direction here, and adopting it would be a correctness
+// regression, not a simplification. This operator's [errBudgetReached] is
+// INTERNAL and advisory: it never reaches the caller. The canonical
+// ErrResultRowsExceeded / ErrResultBytesExceeded comes from the engine's own
+// drain layer, which counts the rows this operator actually emitted, exactly. So
+// the two counters must agree on this ordering:
+//
+//   - POST-charge (what this does): the shared total UNDER-estimates, workers
+//     stop slightly LATE, the operator emits a prefix strictly LARGER than the
+//     cap, and the drain's exact count therefore trips the cap error. Correct.
+//   - PRE-charge: the shared total OVER-estimates, workers stop EARLY, the
+//     operator emits FEWER rows than the cap — so the drain's exact count never
+//     reaches it, no error is produced, and the caller receives a SILENTLY
+//     TRUNCATED result reported as success. Data loss, indistinguishable from a
+//     complete answer.
+//
+// This is why chargeBudget counts rows that have already been produced and
+// flushBudget publishes them afterwards. Do not "simplify" it into a
+// reservation; the emitted prefix must overshoot the cap for the cap to be
+// enforceable at all. [ParallelScanProject.WithResultBudget] states the bound on
+// that overshoot.
+func (op *ParallelScanProject) flushBudget(t *budgetTally) bool {
+	over := false
+	if t.rows > 0 {
+		if op.sharedRows.Add(t.rows) > op.maxRows {
+			over = true
+		}
+		t.rows = 0
+	}
+	if t.bytes > 0 {
+		if op.sharedBytes.Add(t.bytes) > op.maxBytes {
+			over = true
+		}
+		t.bytes = 0
+	}
+	return over
+}
+
+// setBudgetThresholds sizes the per-worker batches from the configured caps and
+// the worker count, once, in Init. The sizing is CAP-RELATIVE, never an absolute
+// chunk: an absolute chunk would silently loosen the guarantee for a caller who
+// deliberately set a small budget, whereas clamp(cap/(16*W), 1, ceiling) yields a
+// batch of 1 — byte-for-byte the pre-#2649 per-row behaviour — as soon as the cap
+// falls below 16*W. See [ParallelScanProject.WithResultBudget] for the resulting
+// overshoot bound.
+func (op *ParallelScanProject) setBudgetThresholds(nWorkers int) {
+	w := int64(nWorkers)
+	if w < 1 {
+		w = 1
+	}
+	op.flushRows = budgetChunk(op.maxRows, w, int64(op.morselSize))
+	op.flushBytes = 0
+	if op.estimateRow != nil {
+		op.flushBytes = budgetChunk(op.maxBytes, w, execMemChargeChunk)
+	}
+}
+
+// budgetChunk returns clamp(capacity/(budgetFlushDivisor*workers), 1, ceiling),
+// or 0 when the dimension is unbounded (capacity <= 0, the engine convention).
+func budgetChunk(capacity, workers, ceiling int64) int64 {
+	if capacity <= 0 {
+		return 0
+	}
+	if ceiling < 1 {
+		ceiling = 1
+	}
+	chunk := capacity / (budgetFlushDivisor * workers)
+	if chunk < 1 {
+		chunk = 1
+	}
+	if chunk > ceiling {
+		chunk = ceiling
+	}
+	return chunk
 }
 
 // NewParallelScanProject creates a ParallelScanProject over g whose per-worker
@@ -197,12 +417,16 @@ func NewParallelScanProject(g nodeWalker, factory SubplanFactory, morselSize int
 	return &ParallelScanProject{g: g, morselSize: morselSize, factory: factory, gov: gov}
 }
 
-// Init collects all node IDs, partitions them into morsels, builds one
-// independent sub-plan per worker on the calling goroutine, and launches the
-// workers. Each worker drives its sub-plan over the morsels it dequeues and
-// accumulates deep-copied result rows into its private buffer. The join and
-// combine are deferred to the first Next call so every worker is joined on the
-// Next goroutine, inside the engine's visibility barrier.
+// Init collects all node IDs on the calling goroutine, partitions them into
+// morsels, and launches the workers. Each worker then BUILDS its own sub-plan per
+// morsel — on its own goroutine, by calling the [SubplanFactory] — drives it over
+// the morsels it dequeues, and accumulates deep-copied result rows into its
+// private buffer. Init builds no sub-plan itself; the single-threaded probe build
+// that populates the caller's schema happens earlier still, in the caller (see
+// the file header). The join and combine are deferred to the first Next call so
+// every worker is joined on the Next goroutine, by wg.Wait — which, since rmp
+// #2344 removed the engine's visibility-barrier reader, is what bounds the
+// workers' lifetime.
 func (op *ParallelScanProject) Init(ctx context.Context) error {
 	op.ctx = ctx
 	op.joined = false
@@ -257,6 +481,11 @@ func (op *ParallelScanProject) Init(ctx context.Context) error {
 	nWorkers := op.gov.Enter(len(morsels))
 	op.entered = true
 
+	// Size the per-worker budget batches now that W is known, and before the
+	// first worker starts — the `go` statement below is the happens-before edge
+	// that publishes them, so no worker can observe a stale threshold (#2649).
+	op.setBudgetThresholds(nWorkers)
+
 	// Bounded work channel pre-filled with every morsel (cap == morsel count),
 	// so no send blocks and the channel is closed before any worker starts.
 	workCh := make(chan []graph.NodeID, len(morsels))
@@ -298,11 +527,15 @@ func (op *ParallelScanProject) Init(ctx context.Context) error {
 // caller joins via wg.Wait.
 func (op *ParallelScanProject) runWorker(ctx context.Context, workCh <-chan []graph.NodeID) ([]Row, error) {
 	var out []Row
+	// One private budget tally per worker, in THIS goroutine's frame. Every
+	// budget parameter the row loop needs is read out of op here, once, and the
+	// row loop then touches nothing shared until a batch fills (#2649).
+	tally := op.newBudgetTally()
 	for morsel := range workCh {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		rows, err := op.runMorsel(ctx, morsel)
+		rows, err := op.runMorsel(ctx, morsel, &tally)
 		if err != nil {
 			if errors.Is(err, errBudgetReached) {
 				// Fleet-wide result budget exceeded: keep the rows this morsel
@@ -317,13 +550,19 @@ func (op *ParallelScanProject) runWorker(ctx context.Context, workCh <-chan []gr
 		}
 		out = append(out, rows...)
 	}
+	// The work channel drained without the budget tripping, so this worker's last
+	// batch is still unpublished. Flush it — one Add per active dimension for the
+	// whole worker — so every produced row is charged exactly once and a worker
+	// that finishes early still tightens the total the others reconcile against.
+	// The verdict is irrelevant here: there is no more work to stop.
+	op.flushBudget(&tally)
 	return out, nil
 }
 
 // runMorsel builds and drains one fused sub-plan over morsel, returning the
 // deep-copied result rows. The sub-plan is Closed before return (including on the
 // error path) so a worker never leaks an operator's resources.
-func (op *ParallelScanProject) runMorsel(ctx context.Context, morsel []graph.NodeID) ([]Row, error) {
+func (op *ParallelScanProject) runMorsel(ctx context.Context, morsel []graph.NodeID, tally *budgetTally) ([]Row, error) {
 	sub, err := op.factory(morsel)
 	if err != nil {
 		return nil, fmt.Errorf("exec: ParallelScanProject subplan build: %w", err)
@@ -359,7 +598,7 @@ func (op *ParallelScanProject) runMorsel(ctx context.Context, morsel []graph.Nod
 		w := len(row)
 		if w == 0 {
 			rows = append(rows, Row{})
-			if op.overResultBudget(nil) {
+			if tally.chargeBudget(nil) && op.flushBudget(tally) {
 				return rows, errBudgetReached
 			}
 			continue
@@ -374,7 +613,9 @@ func (op *ParallelScanProject) runMorsel(ctx context.Context, morsel []graph.Nod
 		start := len(slab)
 		slab = append(slab, row...)
 		rows = append(rows, slab[start:start+w:start+w])
-		if op.overResultBudget(row) {
+		// Charge the row into this worker's private tally; only when the batch
+		// fills does the shared total get touched at all.
+		if tally.chargeBudget(row) && op.flushBudget(tally) {
 			return rows, errBudgetReached
 		}
 	}

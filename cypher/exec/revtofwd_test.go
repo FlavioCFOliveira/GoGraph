@@ -22,7 +22,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 )
 
-// revToFwdByReplay inverts [fwdToRevByTranspose] into the reverse→forward form
+// revToFwdByReplay inverts [projectFwdToRevByTranspose] into the reverse→forward form
 // [buildRevToFwd] returns, so the two can be compared entry for entry. It lives
 // in the test rather than in the package because production reads the replay only
 // through [revTypeAdmitSet]; the position mapping stays with the scan, whose
@@ -33,16 +33,13 @@ import (
 // disjoint buckets, and the edge counts are equal — so every reverse slot is
 // written exactly once.
 func revToFwdByReplay(fwd, rev *biCSR) ([]uint64, bool) {
-	fwdToRev := make([]uint64, len(fwd.edges))
-	if !fwdToRevByTranspose(
+	out := make([]uint64, len(rev.edges))
+	if !projectFwdToRevByTranspose(
 		fwd.vertices, fwd.edges, fwd.handles,
-		rev.vertices, rev.edges, rev.handles, fwdToRev,
+		rev.vertices, rev.edges, rev.handles,
+		func(fwdPos, revPos uint64) { out[revPos] = fwdPos },
 	) {
 		return nil, false
-	}
-	out := make([]uint64, len(rev.edges))
-	for k, revPos := range fwdToRev {
-		out[revPos] = uint64(k)
 	}
 	return out, true
 }
@@ -143,36 +140,55 @@ func TestBuildRevToFwd_DeclinesWhatIsNotATranspose(t *testing.T) {
 	}
 }
 
-// TestRevTypeAdmitSet_MarksExactlyTheAdmittedSlots is the absolute check on the
-// bitset the typed two-sided search rests on. It is built from forward positions
-// and read at reverse positions, so the property to verify is that a reverse slot
-// is marked if and only if the SAME physical edge — identified by handle — is
-// admitted in the forward filter.
-func TestRevTypeAdmitSet_MarksExactlyTheAdmittedSlots(t *testing.T) {
+// TestRelTypeColumn_MarksExactlyTheAdmittedSlots is the absolute check on the
+// REVERSE half of the slot-aligned type column, which the typed two-sided search
+// rests on. It is the test TestRevTypeAdmitSet_MarksExactlyTheAdmittedSlots
+// became when rmp #2251 replaced the per-query reverse-position bitset with a
+// per-CSR-pair column; the property it verifies is unchanged, because the risk is
+// unchanged.
+//
+// The column is filled at FORWARD positions and read at REVERSE positions, so the
+// property is that a reverse slot is admitted if and only if the SAME physical
+// edge — identified by its handle — is admitted on the forward side. The oracle is
+// the filter CASE (a predicate over handles), not the structure the column was
+// derived from, so a column that mis-projects agrees with nothing.
+func TestRelTypeColumn_MarksExactlyTheAdmittedSlots(t *testing.T) {
 	for _, gc := range biGraphCases(t) {
 		for _, fc := range biFilterCases {
 			if fc.admits == nil {
-				continue // no filter, no bitset
+				continue // no filter, no column to check
 			}
 			t.Run(gc.name+"/"+fc.name, func(t *testing.T) {
 				fwd, rev := gc.g.csrPair()
-				filter := filterFor(fwd, fc)
 
-				admit, ok := revTypeAdmitSet(
-					fwd.vertices, fwd.edges, fwd.handles,
-					rev.vertices, rev.edges, rev.handles, filter,
-				)
-				if !ok {
-					t.Fatal("the bitset was refused for a canonical transpose, so no typed " +
-						"two-sided search can run on this shape")
+				// One synthetic code for "admitted", 0 for everything else — the same
+				// shape [StaticAdjacency] derives from an explicit position set.
+				const admittedCode uint32 = 1
+				fwdCodes := make([]uint32, len(fwd.edges))
+				for pos := range fwd.edges {
+					if fc.admits(int(fwd.handles[pos])) {
+						fwdCodes[pos] = admittedCode
+					}
+				}
+				col := NewRelTypeColumnFor(fwd, rev, fwdCodes, nil)
+				admit := col.Admit([]uint32{admittedCode})
+				if !admit.RevExact() {
+					t.Fatal("the reverse column was refused for a canonical transpose, so no " +
+						"typed two-sided search can run on this shape")
 				}
 				for revPos := range rev.edges {
 					// The oracle: this slot's edge, by handle, and whether the FIXTURE
-					// admits it — read from the filter case, not from the filter map the
-					// bitset was built from.
+					// admits it — read from the filter case, not from the codes the
+					// column was built from.
 					wantAdmitted := fc.admits(int(rev.handles[revPos]))
-					if got := bitsetContains(admit, uint64(revPos)); got != wantAdmitted {
-						t.Errorf("reverse slot %d (edge %d): bitset says admitted=%v, filter case says %v",
+					got, known := admit.Rev(uint64(revPos))
+					if !known {
+						t.Errorf("reverse slot %d (edge %d): the column declined a slot it "+
+							"reported as exact", revPos, rev.handles[revPos])
+						continue
+					}
+					if got != wantAdmitted {
+						t.Errorf("reverse slot %d (edge %d): column says admitted=%v, filter case says %v",
 							revPos, rev.handles[revPos], got, wantAdmitted)
 					}
 				}

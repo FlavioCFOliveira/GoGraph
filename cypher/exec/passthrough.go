@@ -10,7 +10,8 @@ package exec
 // a profiled build wraps every operator, and only this package can see through
 // the wrapper — [profiledNode.planUnwrap] is unexported, and a walk that could
 // not unwrap would answer differently under PROFILE than under EXPLAIN, which is
-// exactly the divergence [Profiler] documents as forbidden.
+// exactly the divergence [Profiler] documents as forbidden. [UnwrapProfiled] is
+// how that is done here and by the plan builder alike.
 
 // EmitsExactly reports whether op is statically known to emit exactly cols, in
 // that order — both the column NAMES and the row ARITY.
@@ -30,7 +31,7 @@ package exec
 // through by omission.
 func EmitsExactly(op Operator, cols []string) bool {
 	for {
-		op = unwrapProfiled(op)
+		op = UnwrapProfiled(op)
 		if declarer, ok := op.(columnDeclarer); ok {
 			return declarer.columnsAre(cols)
 		}
@@ -58,9 +59,12 @@ func EmitsExactly(op Operator, cols []string) bool {
 //
 //   - Distinct, Filter, Limit and Skip hand the caller's Row straight to the
 //     child and return it untouched; they drop rows, never columns.
-//   - Eager and Sort copy each child row verbatim
+//   - Eager, Sort and Top copy each child row verbatim
 //     (cp := make(Row, len(row)); copy(cp, row)) before retaining it, and Sort
-//     reorders ROWS, never the columns within one.
+//     and Top reorder or DROP whole rows, never the columns within one. Top was
+//     absent from this set until #2509, which is why `RETURN n ORDER BY n.age
+//     LIMIT 3` rendered two Project operators where the same query without the
+//     LIMIT rendered one.
 //
 // Anything absent from this set is treated as shape-changing. Adding an operator
 // here requires reading its Next and confirming the same property; the cost of
@@ -68,7 +72,7 @@ func EmitsExactly(op Operator, cols []string) bool {
 // shape-changing operator is a wrong result schema.
 func rowShapePreserving(op Operator) bool {
 	switch op.(type) {
-	case *Distinct, *Eager, *Filter, *Limit, *Skip, *Sort:
+	case *Distinct, *Eager, *Filter, *Limit, *Skip, *Sort, *Top:
 		return true
 	default:
 		return false
@@ -102,14 +106,4 @@ func (op *Project) columnsAre(cols []string) bool {
 		}
 	}
 	return true
-}
-
-// unwrapProfiled returns the operator a profiling wrapper measures, or op itself
-// when op is not a wrapper. It keeps [EmitsExactly] blind to whether the build
-// was profiled, which is what holds EXPLAIN and PROFILE to the same plan shape.
-func unwrapProfiled(op Operator) Operator {
-	if p, ok := op.(profiledNode); ok {
-		return p.planUnwrap()
-	}
-	return op
 }

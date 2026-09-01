@@ -791,20 +791,71 @@ func (s *Sort) Vars() []string { return s.Child.Vars() }
 
 // Top is a fused ORDER BY … LIMIT operator that sorts and truncates in a single
 // pass, avoiding the need to materialise the full sorted result.
+//
+// # The fused bound
+//
+// Top retains Offset+Limit rows, not Limit rows. ORDER BY … SKIP s LIMIT k plans
+// as Skip(s) over Top(s+k) — Neo4j's shape
+// (LogicalPlanProducer.planSkipAndLimit), which keeps EXPLAIN showing both
+// operators while the bounded operator does the work. A plan with no SKIP simply
+// has Offset == 0 and OffsetExpr == nil.
+//
+// Offset is resolved BEFORE Limit at physical-build time, matching the order in
+// which the unfused Skip-below-Limit shape resolves them, so a query whose SKIP
+// and LIMIT are both ill-typed reports the same one of the two either way.
 type Top struct {
 	// Child is the subplan whose rows are sorted and truncated.
 	Child LogicalPlan
 	// SortItems is the ordered list of sort keys.
 	SortItems []SortItem
-	// Limit is the maximum number of rows to produce.
+	// LimitExpr is the parsed AST for the LIMIT expression when it is not a
+	// literal integer (typically a parameter reference like $limit). Nil when
+	// Limit is the authoritative value. It follows the same deferred-resolution
+	// contract as [Limit.CountExpr], and carrying it here is what lets a
+	// PARAMETERISED limit reach the fused operator: StripLiterals clears the
+	// hoistable flag at SKIP/LIMIT, so LIMIT 10/20/30 are three plan-cache
+	// entries while LIMIT $m is one — the cache-friendly spelling must not be
+	// the one that loses the fusion.
+	LimitExpr ast.Expression
+	// OffsetExpr is the parsed AST for the SKIP expression when it is not a
+	// literal integer. Nil when Offset is the authoritative value.
+	OffsetExpr ast.Expression
+	// Limit is the maximum number of rows to produce AFTER the offset. Ignored
+	// when LimitExpr is non-nil.
 	Limit int64
+	// Offset is the number of leading ordered rows the Skip above this operator
+	// will discard, included in the bound so those rows are retained. Ignored
+	// when OffsetExpr is non-nil.
+	Offset int64
 }
 
-// NewTop creates a Top operator.
+// TopBound carries the fused pagination bound for [NewTopWithBound]. Exactly one
+// of Limit/LimitExpr and one of Offset/OffsetExpr is authoritative, the
+// expression form taking precedence when non-nil.
+type TopBound struct {
+	LimitExpr  ast.Expression
+	OffsetExpr ast.Expression
+	Limit      int64
+	Offset     int64
+}
+
+// NewTop creates a Top operator with a literal limit and no offset.
 func NewTop(items []SortItem, limit int64, child LogicalPlan) *Top {
+	return NewTopWithBound(items, TopBound{Limit: limit}, child)
+}
+
+// NewTopWithBound creates a Top operator with the given fused pagination bound.
+func NewTopWithBound(items []SortItem, b TopBound, child LogicalPlan) *Top {
 	cp := make([]SortItem, len(items))
 	copy(cp, items)
-	return &Top{SortItems: cp, Limit: limit, Child: child}
+	return &Top{
+		SortItems:  cp,
+		LimitExpr:  b.LimitExpr,
+		OffsetExpr: b.OffsetExpr,
+		Limit:      b.Limit,
+		Offset:     b.Offset,
+		Child:      child,
+	}
 }
 
 // Children implements LogicalPlan.

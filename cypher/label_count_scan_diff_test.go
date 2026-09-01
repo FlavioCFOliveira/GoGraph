@@ -18,6 +18,21 @@ package cypher
 //
 // The boundary tests are the guard the CORRECTNESS constraint demands: they fail
 // if a future change wrongly pushes down a null-bearing or filtered shape.
+//
+// # The control arm (rmp #2654)
+//
+// Every differential below needs a SERIAL control, and until #2654 that control
+// was EngineOptions{DisableParallelScan: true} (the `off` engine from
+// [engines]) — which worked only because tryBuildLabelCountScan was wrongly
+// gated on that flag. Un-gating it made both arms take the fast path, so the
+// differential would have compared the pushdown with itself and could no longer
+// fail. The control is therefore rebuilt on the unexported build seam
+// buildOpts.labelCountPushdownDisabled via [withoutLabelCountPushdown], so the
+// two arms still differ in EXACTLY ONE variable — whether the labelled-count
+// pushdown may fire — and nothing else, the parallel-scan threshold included.
+// Each differential now also asserts the control arm did NOT engage the
+// pushdown, so a seam that silently stopped working fails the test instead of
+// quietly deleting the comparison.
 
 import (
 	"fmt"
@@ -26,6 +41,32 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
+
+// withoutLabelCountPushdown forbids e from using the labelled-count pushdown, so
+// `MATCH (p:L) RETURN count(*)` builds the serial NodeByLabelScan +
+// EagerAggregation pipeline on it whatever the graph's size. It returns e for
+// composition: withoutLabelCountPushdown(NewEngineWithOptions(g, opts)).
+//
+// It reaches the unexported build seam directly because there is deliberately no
+// public knob for it (see buildOpts.labelCountPushdownDisabled). The field is set
+// on the calling goroutine immediately after construction, before e is handed to
+// any query, so the assignment happens-before every build that reads it; e is
+// then never mutated again.
+func withoutLabelCountPushdown(e *Engine) *Engine {
+	e.labelCountPushdownDisabled = true
+	return e
+}
+
+// labelCountEngines returns the two arms of every labelled-count differential:
+// `on` is an engine with DEFAULT options — the parallel-scan threshold is left at
+// DefaultParallelScanThreshold precisely so the test graphs sit far below it and
+// a size gate reappearing anywhere would show up as a non-engagement — and `off`
+// is the serial control from [withoutLabelCountPushdown]. The two differ in
+// exactly one variable.
+func labelCountEngines(g *lpg.Graph[string, float64]) (on, off *Engine) {
+	return NewEngineWithOptions(g, EngineOptions{}),
+		withoutLabelCountPushdown(NewEngineWithOptions(g, EngineOptions{}))
+}
 
 // buildLabelCountGraph creates n :Item nodes (i in [0,n)), each carrying an
 // integer "v"=i and "g"=i%3 property. Even-indexed nodes additionally carry a
@@ -68,7 +109,7 @@ func buildLabelCountGraph(t *testing.T, n int) *lpg.Graph[string, float64] {
 func TestLabelCount_Differential(t *testing.T) {
 	// 200 :Item nodes > psTestThreshold (50), so the label count pushdown engages.
 	g := buildLabelCountGraph(t, 200)
-	on, off := engines(g)
+	on, off := labelCountEngines(g)
 
 	cases := []struct {
 		name, query, want string
@@ -87,7 +128,13 @@ func TestLabelCount_Differential(t *testing.T) {
 			if parallelCountScanBuildCount.Load() != beforeWorker {
 				t.Errorf("parallel worker count reduce unexpectedly engaged for %q", tc.query)
 			}
+			beforeCtl := labelCountScanBuildCount.Load()
 			gotOff := drainSortedPS(t, off, tc.query)
+			if labelCountScanBuildCount.Load() != beforeCtl {
+				t.Fatalf("the SERIAL CONTROL arm engaged the pushdown for %q: the two "+
+					"arms no longer differ, so this differential compares the pushdown "+
+					"with itself and can never fail", tc.query)
+			}
 			assertEqualRows(t, tc.query, gotOn, gotOff)
 			if !engaged {
 				t.Fatalf("expected label count pushdown to engage for %q, but it did not", tc.query)
@@ -107,7 +154,7 @@ func TestLabelCount_Differential(t *testing.T) {
 // fails if a future change over-eagerly substitutes the row count.
 func TestLabelCount_DeclinesForUnsafeShapes(t *testing.T) {
 	g := buildLabelCountGraph(t, 200)
-	on, off := engines(g)
+	on, off := labelCountEngines(g)
 
 	cases := []struct {
 		name, query, want string
@@ -160,7 +207,7 @@ func TestLabelCount_DeclinesForUnsafeShapes(t *testing.T) {
 // the pushdown. The result is a set of grouped rows, not a single total.
 func TestLabelCount_GroupedDeclines(t *testing.T) {
 	g := buildLabelCountGraph(t, 30) // 30 :Item: g=0→10, g=1→10, g=2→10
-	on, off := engines(g)
+	on, off := labelCountEngines(g)
 
 	const q = `MATCH (p:Item) RETURN p.g AS g, count(*) AS c`
 	beforeLabel := labelCountScanBuildCount.Load()
@@ -207,8 +254,7 @@ func TestLabelCount_OptionalMatchNullDeclines(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	on := NewEngineWithOptions(g, EngineOptions{ParallelScanThreshold: psTestThreshold})
-	off := NewEngineWithOptions(g, EngineOptions{DisableParallelScan: true})
+	on, off := labelCountEngines(g)
 
 	const q = `MATCH (a:Item) OPTIONAL MATCH (a)-[:KNOWS]->(b:Other) RETURN count(b) AS c`
 	beforeLabel := labelCountScanBuildCount.Load()
@@ -223,33 +269,21 @@ func TestLabelCount_OptionalMatchNullDeclines(t *testing.T) {
 	}
 }
 
-// TestLabelCount_SmallGraphStaysSerial proves the threshold gate keeps a small
-// labelled graph on the serial path, so small-query latency is unaffected.
-func TestLabelCount_SmallGraphStaysSerial(t *testing.T) {
-	g := buildLabelCountGraph(t, psTestThreshold) // exactly at threshold → strict > fails
-	on := NewEngineWithOptions(g, EngineOptions{ParallelScanThreshold: psTestThreshold})
-
-	for _, q := range []string{
-		`MATCH (p:Item) RETURN count(*) AS c`,
-		`MATCH (p:Item) RETURN count(p) AS c`,
-	} {
-		before := labelCountScanBuildCount.Load()
-		got := drainSortedPS(t, on, q)
-		if labelCountScanBuildCount.Load() != before {
-			t.Errorf("label count pushdown engaged at-threshold for %q (should stay serial)", q)
-		}
-		if len(got) != 1 || got[0] != fmt.Sprintf("c=%d", psTestThreshold) {
-			t.Fatalf("%s = %v, want [c=%d]", q, got, psTestThreshold)
-		}
-	}
-}
+// The former TestLabelCount_SmallGraphStaysSerial lived here. It asserted the
+// OPPOSITE of the fixed behaviour — that a labelled count on a graph at or below
+// the parallel-scan threshold stays on the serial O(n) pipeline — and rmp #2654
+// established that gate was a defect: nothing about a constant-time index read
+// becomes more correct below a morsel-parallelism threshold. Its replacement is
+// TestLabelCount_EngagesBelowAndAtThreshold in
+// label_count_pushdown_gate_test.go, which asserts engagement at 1 000, 10 000
+// and exactly 50 000 nodes.
 
 // TestLabelCount_UnknownLabel proves that counting an unknown label yields 0 on
 // both paths. The pushdown may or may not engage (an unknown label resolves to a
 // zero count directly); either way the answer is 0.
 func TestLabelCount_UnknownLabel(t *testing.T) {
 	g := buildLabelCountGraph(t, 200)
-	on, off := engines(g)
+	on, off := labelCountEngines(g)
 
 	const q = `MATCH (p:Ghost) RETURN count(*) AS c`
 	gotOn := drainSortedPS(t, on, q)
@@ -270,8 +304,7 @@ func TestLabelCount_AfterDelete(t *testing.T) {
 	for i := range 40 {
 		g.RemoveNode(fmt.Sprintf("n%d", i))
 	}
-	on := NewEngineWithOptions(g, EngineOptions{ParallelScanThreshold: psTestThreshold})
-	off := NewEngineWithOptions(g, EngineOptions{DisableParallelScan: true})
+	on, off := labelCountEngines(g)
 
 	const q = `MATCH (p:Item) RETURN count(p) AS c`
 	before := labelCountScanBuildCount.Load()
@@ -279,7 +312,11 @@ func TestLabelCount_AfterDelete(t *testing.T) {
 	if labelCountScanBuildCount.Load() == before {
 		t.Fatalf("expected label count pushdown to engage for %q", q)
 	}
+	beforeCtl := labelCountScanBuildCount.Load()
 	gotOff := drainSortedPS(t, off, q)
+	if labelCountScanBuildCount.Load() != beforeCtl {
+		t.Fatalf("the SERIAL CONTROL arm engaged the pushdown for %q", q)
+	}
 	assertEqualRows(t, q, gotOn, gotOff)
 	if len(gotOn) != 1 || gotOn[0] != "c=160" {
 		t.Fatalf("count after delete = %v, want [c=160]", gotOn)

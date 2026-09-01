@@ -2,10 +2,8 @@ package exec
 
 import (
 	"fmt"
-	"sync"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
-	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 // Chunk is a column-major (struct-of-arrays) execution batch, the foundation
@@ -68,7 +66,8 @@ import (
 // # Concurrency
 //
 // A Chunk is NOT safe for concurrent use. Each pipeline stage owns its own
-// instance, typically obtained from a [ChunkPool].
+// instance, obtained from that stage's NewOutputChunk (see [ChunkProducer]) and
+// reused across batches via [Chunk.Reset].
 type Chunk struct {
 	cols     []column
 	capacity int
@@ -1115,44 +1114,4 @@ func BitSet(bitmap []uint64, i int) bool {
 		return false
 	}
 	return bitmap[w]&(uint64(1)<<(uint(i)&63)) != 0
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// ChunkPool
-// ─────────────────────────────────────────────────────────────────────────────
-
-// ChunkPool is a [sync.Pool]-backed pool of [Chunk] instances with a fixed
-// schema (column kinds) and capacity. Operators that process a high volume of
-// batches should obtain chunks from a shared pool to reduce GC pressure.
-//
-// ChunkPool is safe for concurrent use; the [Chunk] instances it vends are not.
-type ChunkPool struct {
-	p sync.Pool
-}
-
-// NewChunkPool creates a ChunkPool that vends Chunks with the given capacity and
-// column kinds. The kinds slice is copied, so the caller may reuse it.
-func NewChunkPool(capacity int, kinds ...expr.Kind) *ChunkPool {
-	kindsCopy := append([]expr.Kind(nil), kinds...)
-	cp := &ChunkPool{}
-	cp.p = sync.Pool{
-		New: func() any {
-			return NewChunk(capacity, kindsCopy...)
-		},
-	}
-	return cp
-}
-
-// Get retrieves a Chunk from the pool, or allocates a new one. A pooled Chunk was
-// [Chunk.Reset] before being returned, so it is empty.
-func (cp *ChunkPool) Get() *Chunk {
-	metrics.IncCounter("cypher.pool.chunk.get", 1)
-	return cp.p.Get().(*Chunk) //nolint:forcetypeassert // pool invariant: New always returns *Chunk
-}
-
-// Put resets c and returns it to the pool.
-func (cp *ChunkPool) Put(c *Chunk) {
-	metrics.IncCounter("cypher.pool.chunk.put", 1)
-	c.Reset()
-	cp.p.Put(c)
 }

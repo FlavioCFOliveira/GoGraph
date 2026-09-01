@@ -54,15 +54,43 @@ import (
 //
 // # Concurrency
 //
-// A Profiler is NOT safe for concurrent use and must not be shared between
-// queries. One query's pipeline is driven by one goroutine, so the wrappers need
-// no synchronisation. An operator that fans work out internally (the parallel
-// tier) is measured as one node: the wrapper times the calls the driving
-// goroutine makes, which is the honest attribution — it cannot see inside.
+// A Profiler carries no mutable state: Wrap allocates a wrapper, returns it and
+// retains nothing, so Wrap itself is safe to call from any goroutine. The
+// WRAPPERS are the part that is not: each accumulates its row count and elapsed
+// time with plain non-atomic adds, so every wrapper must be driven by exactly one
+// goroutine — which is what a single-goroutine Volcano pipeline gives it.
+//
+// # The parallel tier is measured as ONE node, by construction
+//
+// A morsel-parallel leaf ([ParallelScanProject], [ParallelAggregateScan],
+// [ParallelCountScan]) builds and drives a private sub-plan per morsel on a
+// worker goroutine. Those sub-plans are neither instrumented nor rendered, and
+// both halves are ENFORCED rather than assumed:
+//
+//   - the builder clears the profiler from the per-worker build options
+//     (cypher's buildOpts.forWorker), so no worker allocates a wrapper or times a
+//     row; and
+//   - a morsel-parallel leaf implements no [PlanChildren], so [PlanTree] stops at
+//     it and a measurement taken below it would be unreachable anyway.
+//
+// The leaf therefore reports the rows it emitted and the time its own Next and
+// FillChunk calls took on the driving goroutine: the whole parallel phase
+// attributed to one node. That is a deliberate contract, not a limitation of the
+// wrapper. Showing the inside would mean rendering one sub-tree per morsel, or
+// merging N morsel sub-trees into one synthetic tree; both change what PROFILE
+// reports, so neither is done here.
+//
+// Sharing one Profiler between two concurrently executing queries is meaningless
+// rather than unsafe — the measurements would belong to two unrelated trees — so
+// Engine.Profile allocates one per call.
 type Profiler struct {
-	// wrapped retains every wrapper in build order, tying their lifetime to the
-	// Profiler and keeping them reachable without a tree walk.
-	wrapped []profiledNode
+	// The type deliberately carries NO state. It is the marker that instrumentation
+	// is on, and nothing more: Wrap returns the wrapper it builds, and the wrapper's
+	// lifetime is already tied to the operator tree that [PlanTree] walks, so
+	// retaining a second reference here would keep every wrapper (and, from a
+	// morsel-parallel build, every per-morsel sub-plan) alive for no reader's
+	// benefit. A field that only ever gets appended to is not a design, it is a leak
+	// with a race attached (rmp #2664).
 }
 
 // NewProfiler returns a Profiler ready to instrument one query build.
@@ -79,19 +107,74 @@ func (p *Profiler) Wrap(op Operator) Operator {
 	if _, already := op.(profiledNode); already {
 		return op
 	}
-
-	base := profiledOp{inner: op}
-	var w Operator
-	switch cp := op.(type) {
-	case NodeIDColumnProducer:
-		w = &profiledNodeIDOp{profiledChunkOp{profiledOp: base, chunk: cp}}
-	case ChunkProducer:
-		w = &profiledChunkOp{profiledOp: base, chunk: cp}
-	default:
-		w = &profiledOp{inner: op}
+	if cp, columnar := op.(ChunkProducer); columnar {
+		return p.wrapChunkProducer(cp)
 	}
-	p.wrapped = append(p.wrapped, w.(profiledNode))
-	return w
+	return &profiledOp{inner: op}
+}
+
+// WrapChunk is [Profiler.Wrap] for a caller that holds a [ChunkProducer] and needs
+// one back.
+//
+// It exists so that a plan-shape recogniser which SUBSTITUTES a columnar operator
+// can re-instrument it without a type assertion. Wrap returns an [Operator], and a
+// caller feeding [NewColumnarFilter] would have to assert its result back to
+// ChunkProducer — an assertion that cannot fail, but that the compiler forces the
+// caller to handle anyway, so the code grows an unreachable branch whose behaviour
+// nobody can test. Returning the interface the caller needs removes the branch
+// instead of documenting it.
+//
+// Like Wrap it returns cp unchanged when the profiler is nil, when cp is nil, or
+// when cp is already wrapped.
+func (p *Profiler) WrapChunk(cp ChunkProducer) ChunkProducer {
+	if p == nil || cp == nil {
+		return cp
+	}
+	if _, already := cp.(profiledNode); already {
+		return cp
+	}
+	return p.wrapChunkProducer(cp)
+}
+
+// wrapChunkProducer builds the wrapper variant matching what cp exposes. The two
+// return types are the only variants that satisfy [ChunkProducer], which the
+// compile-time assertions at the foot of this file enforce, so the result is a
+// ChunkProducer by construction rather than by assertion.
+func (p *Profiler) wrapChunkProducer(cp ChunkProducer) ChunkProducer {
+	base := profiledChunkOp{profiledOp: profiledOp{inner: cp}, chunk: cp}
+	if _, nodeIDs := cp.(NodeIDColumnProducer); nodeIDs {
+		return &profiledNodeIDOp{base}
+	}
+	return &base
+}
+
+// UnwrapProfiled returns the operator op measures when op is a profiling wrapper,
+// and op itself otherwise. It sees through exactly one wrapper, which is all there
+// ever is: [Profiler.Wrap] returns op unchanged when op is already wrapped.
+//
+// # Why the builder needs this
+//
+// [Profiler.Wrap] preserves every INTERFACE an operator exposes, which is what
+// keeps a capability type-assertion — `child.(ChunkProducer)` — answering the same
+// under PROFILE as without it. It cannot preserve a CONCRETE type: no wrapper is
+// an *Expand. A plan-shape recogniser that asserts on a concrete operator type
+// therefore stops recognising its own shape the moment a Profiler is installed,
+// and PROFILE renders a plan the user never runs (rmp #2665).
+//
+// A recogniser in that position asks for the operator itself here, builds what it
+// meant to build, and puts the result back through the profiler
+// ([Profiler.Wrap] or [Profiler.WrapChunk]) so the node it substituted is still
+// measured. The wrapper it discards was allocated by the build and never driven,
+// so no measurement is lost with it.
+//
+// Reaching for this to escape a CAPABILITY assertion would be a defect: those the
+// wrapper already satisfies, and unwrapping one would silently drop the node from
+// the profile. Use it only where a concrete type is genuinely required.
+func UnwrapProfiled(op Operator) Operator {
+	if p, ok := op.(profiledNode); ok {
+		return p.planUnwrap()
+	}
+	return op
 }
 
 // profiledNode is the behaviour [PlanTree] needs from any wrapper variant: the
@@ -222,8 +305,16 @@ type profiledNodeIDOp struct {
 
 func (p *profiledNodeIDOp) nodeIDColumnProducer() {}
 
+// Every variant Wrap can return must satisfy [profiledNode], or [PlanTree] would
+// walk past a wrapper without unwrapping it and the node would render unmeasured.
+// Wrap used to enforce that with a `w.(profiledNode)` type assertion on the value
+// it appended to a retained slice; the slice was write-only and the append was a
+// data race (rmp #2664), so both are gone and the invariant is stated here — at
+// compile time, where it belongs, rather than as a panic on the build path.
 var (
 	_ profiledNode         = (*profiledOp)(nil)
+	_ profiledNode         = (*profiledChunkOp)(nil)
+	_ profiledNode         = (*profiledNodeIDOp)(nil)
 	_ ChunkProducer        = (*profiledChunkOp)(nil)
 	_ NodeIDColumnProducer = (*profiledNodeIDOp)(nil)
 	_ rowCountHinter       = (*profiledOp)(nil)

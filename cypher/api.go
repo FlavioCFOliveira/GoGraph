@@ -3,7 +3,24 @@
 //
 // # Usage
 //
-//	g := lpg.New[string, float64](adjlist.Config{})
+// Directed and Multigraph are required for openCypher semantics: relationships
+// are directed, and the data model is a multigraph, so a CREATE always adds a
+// relationship — including a parallel edge between an existing node pair, which
+// on a simple graph fails with [ErrParallelEdgeInSimpleGraph] instead. The zero
+// adjlist.Config is neither directed nor a multigraph, so it is the wrong
+// graph for this engine. Weightless is the right choice because Cypher has no
+// edge-weight concept: the engine records the zero weight for every
+// relationship, and the one path that reads a weight back (transaction undo)
+// only ever reads that same zero, so the per-node weight column carries no
+// information. Leave Weightless unset on a graph that is also queried with a
+// weight-consuming search algorithm (Dijkstra, A*, Bellman-Ford); see
+// adjlist.Config.Weightless for that contract.
+//
+//	g := lpg.New[string, float64](adjlist.Config{
+//		Directed:   true,
+//		Multigraph: true,
+//		Weightless: true,
+//	})
 //	// ... populate graph ...
 //
 //	engine := cypher.NewEngine(g)
@@ -109,6 +126,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/internal/crashpoint"
 	"github.com/FlavioCFOliveira/GoGraph/internal/memlimit"
 	cmetrics "github.com/FlavioCFOliveira/GoGraph/internal/metrics"
+	"github.com/FlavioCFOliveira/GoGraph/internal/planseam"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
 	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
@@ -248,6 +266,12 @@ type buildOpts struct {
 	// shared across every row and every node column, so the lazy path costs no
 	// per-row resolver allocation. nil until first use; see [bopts.lazyResolver].
 	nodeResolver expr.NodeResolver
+	// relResolver backs [expr.LazyRelationshipValue] for the lazy
+	// relationship-materialisation fast path (rmp #2388). Like nodeResolver it
+	// depends only on the pinned read view, so it is created once per build and
+	// shared across every row and every relationship column. nil until first use;
+	// see [lazyRelResolverFor].
+	relResolver expr.RelationshipResolver
 	// subEval handles [ast.ExistsSubquery] and [ast.CountSubquery] expressions
 	// encountered inside Filter/Project closures. May be nil; in that case
 	// subquery expressions surface as [expr.EvalError] at runtime.
@@ -324,16 +348,6 @@ type buildOpts struct {
 	// reverse-edge traversals). Lazily populated on first use to avoid
 	// building CSR snapshots for queries that never reconstruct paths.
 	edgeIDResolver func(edgeID uint64) (storageSrc, storageDst uint64, ok bool)
-	// edgeTypeFilterCache, when non-nil, is the Engine's shared
-	// [edgeTypeFilterCache] (rmp #1871), consulted by [edgeTypeFilterFor] so
-	// a relationship-type-filtered Expand/OptionalExpand/VarLengthExpand
-	// build, or a predicated shortest-path build ([buildShortestPathWithPred]),
-	// reuses a prior query's O(V+E) filter map instead of rebuilding it, as
-	// long as [lpg.Graph.TopoGeneration] has not advanced since. nil on the
-	// public BuildPlanWithMutator path (no Engine behind the build), in
-	// which case edgeTypeFilterFor falls back to an uncached
-	// [buildEdgeTypeFilter] call — correct, just unamortised.
-	edgeTypeFilterCache *edgeTypeFilterCache
 	// csrPairCache, when non-nil, is the Engine's shared [csrPairCache], consulted
 	// by [csrPairCachedFor] so a query needing a CSR pair reuses a prior query's
 	// O(V+E) build while lpg.Graph.TopoGeneration has not advanced (rmp #2143).
@@ -465,6 +479,12 @@ type buildOpts struct {
 	// exists and production never sets it — which is exactly why the linter cannot
 	// see it being written, since the only writer is the differential test.
 	disableIndexNestedLoopForTest bool //nolint:unused // written only by the in-package differential test; see index_nested_loop_plan_test.go
+	// forceColumnarChainDecline makes [tryBuildColumnarFilterChain],
+	// [tryBuildColumnarExpandFilterChain] and [tryBuildColumnarAggSource] take their
+	// post-build decline path, so the [buildStateSnapshot] restore on it is
+	// exercised. Set only from the Engine test seam of the same name; every other
+	// build path leaves it false.
+	forceColumnarChainDecline bool
 	// indexNestedLoopEnabled gates the index nested-loop join (#2233), the
 	// Θ(B·log N) plan for the same disconnected-equi-join shape the hash join
 	// serves at Θ(N+B). Both paths set it from the same source as
@@ -529,7 +549,27 @@ type buildOpts struct {
 	// false by every other build path (write path, public BuildPlanWithMutator),
 	// which therefore always build the serial EagerAggregation pipeline.
 	parallelScanEnabled bool
-	fwdCSRReady         bool
+	// labelCountPushdownDisabled turns OFF the constant-time labelled count
+	// pushdown ([tryBuildLabelCountScan]) for THIS build, forcing the serial
+	// NodeByLabelScan + EagerAggregation pipeline.
+	//
+	// It is a DIFFERENTIAL-TEST SEAM, not a tuning knob, and it is deliberately
+	// unexported with no EngineOptions counterpart. The pushdown answers from the
+	// same snapshot-aware source the serial scan reads (see the "No size gate"
+	// section of [tryBuildLabelCountScan]), so there is no workload for which a
+	// user should want it off — the unlabelled counterpart
+	// [tryBuildAllNodesCountScan] has no knob either, for the same reason.
+	//
+	// What it does buy is a control arm. label_count_scan_diff_test.go proves the
+	// pushdown returns what the serial pipeline returns, and that needs two
+	// engines differing in exactly one variable. Before rmp #2654 the control was
+	// EngineOptions{DisableParallelScan: true}, which worked only because the
+	// pushdown was (wrongly) wired to that flag; un-gating it collapsed both arms
+	// onto the fast path and would have left the differential comparing the
+	// pushdown with itself. The polarity is negative so every build path that
+	// never sets it keeps the pushdown.
+	labelCountPushdownDisabled bool
+	fwdCSRReady                bool
 	// scalarUseMemo is the plan-cache entry's cross-execution memo for
 	// [analyseNodeScalarUse] (rmp #2383). The read-path build points it at the
 	// entry serving this query; every other build path leaves it nil, and
@@ -646,12 +686,21 @@ type EngineOptions struct {
 	// clamped to the default by the constructor.
 	PlanCacheCapacity int
 
-	// EdgeTypeFilterCacheCapacity bounds the number of distinct
-	// relationship-type combinations whose filter map (rmp #1871) the
-	// Engine keeps cached. Zero selects
-	// [DefaultEdgeTypeFilterCacheCapacity]; positive values override it.
-	// A negative value is clamped to the default, mirroring
-	// PlanCacheCapacity.
+	// EdgeTypeFilterCacheCapacity used to bound the number of distinct
+	// relationship-type combinations whose filter map the Engine kept cached.
+	//
+	// Deprecated: it has no effect. The per-relationship-type-set filter cache it
+	// bounded was retired by rmp #2251, which replaced the position-keyed filter
+	// map with a slot-aligned relationship-type column stored beside the CSR pair
+	// it describes. That column records what each arc IS rather than whether some
+	// pattern accepts it, so it is built once per graph state and shared by every
+	// type set — there is no per-type-set population left to bound, and therefore
+	// no replacement option.
+	//
+	// The field is retained so code written against an earlier release keeps
+	// compiling. It is read on NO path: whatever value is set — zero, negative, or
+	// any positive capacity — the Engine allocates nothing for it and behaves
+	// identically. Pinned by TestEdgeTypeFilterCacheCapacityOptionIsInert.
 	EdgeTypeFilterCacheCapacity int
 
 	// DisableCSRPairCache turns off the Engine's cross-query forward/reverse CSR
@@ -917,6 +966,47 @@ type EngineOptions struct {
 	// internal concurrency.
 	DisableParallelBackfill bool
 
+	// DisableAdjacencyCountRewrites turns OFF both runtime rewrites that answer a
+	// count-or-existence question from the anchor's adjacency instead of by driving
+	// a compiled inner plan once per outer row: the degree rewrite (#2232, Neo4j's
+	// getDegreeRewriter — see degree_rewrite.go) and the labelled single-hop count
+	// (#2235, see labelled_hop_count.go). One field covers both because they are
+	// two implementations of one idea, they are selected by the same shape family,
+	// and a caller who wants the unrewritten reading of a query wants neither.
+	//
+	// It gates the four dispatch sites and nothing else, so the answers are
+	// unchanged in both settings — every gated shape falls through to the inner
+	// plan (or, for `size([ … ])`, to building the list and taking its length),
+	// which is the same path the shape took before either rewrite existed:
+	//
+	//   - [subqueryEvaluator.degreeShapeFor] — EXISTS/COUNT via the degree
+	//   - [subqueryEvaluator.countLabelledHop] — EXISTS/COUNT via one labelled walk
+	//   - [patternEvaluator.CountPatternComp] — `size([ (a)-[:K]->(x) | … ])`
+	//   - [patternEvaluator.labelledHopShapeFor] — `WHERE (a)-[:K]->(:P)`
+	//
+	// When false (the default) both rewrites are live. Setting it true exists for
+	// two reasons, in this order:
+	//
+	//  1. AS AN UNREWRITABLE-BY-CONSTRUCTION ORACLE (rmp #2647). The differential
+	//     suites for both rewrites need an arm that provably does NOT take them.
+	//     Until this field existed the arm was a hand-written `COUNT { MATCH … }`
+	//     block form, chosen because no recogniser accepted that spelling — an
+	//     oracle resting on a LIMITATION rather than on a decision. rmp #2648 makes
+	//     the block form rewritable, at which point both arms would have taken the
+	//     same path and every such differential would have gone silently vacuous
+	//     while staying green. An explicit gate cannot be removed by a later
+	//     widening: the arm is unrewritten because it was told to be.
+	//  2. As an operational escape hatch, matching [DisableAnchorSwap] and
+	//     [DisableParallelScan]. Both rewrites strictly reduce work for the shapes
+	//     they admit, so there is no workload for which off is faster; the hatch is
+	//     for isolating a suspected defect, not for tuning.
+	//
+	// The planner is NOT gated. [ir.DegreeCountableShape] still decides whether a
+	// projected pattern comprehension is left unhoisted, so the plan SHAPE is
+	// identical in both settings and the two arms of a differential differ in
+	// exactly one variable — whether the evaluator may answer from the adjacency.
+	DisableAdjacencyCountRewrites bool
+
 	// MaxLabelRecountEdges bounds the per-relabel OUT-side fan-out the
 	// relationship count-store (#2082) recounts exactly when a node gains or
 	// loses a label (SET / REMOVE n:X). A relabel of a node with more than this
@@ -1057,14 +1147,6 @@ type Engine struct {
 	indexDefReg *indexDefRegistry
 	procReg     *procs.Registry
 	cache       *planCache
-	// edgeTypeFilterCache amortises buildEdgeTypeFilter's O(V+E) rebuild
-	// across queries sharing a relationship-type combination, invalidated
-	// by lpg.Graph.TopoGeneration rather than time or a manual clear
-	// (rmp #1871). Unlike cache (the plan cache), no DDL operator clears
-	// this — schema changes (index/constraint) never affect edge-type
-	// filter results, only edge topology does, which TopoGeneration
-	// already tracks precisely.
-	edgeTypeFilterCache *edgeTypeFilterCache
 	// csrPairCache amortises csrPairFromGraph's O(V+E) forward+reverse build
 	// across queries against an unchanged graph, invalidated by
 	// lpg.Graph.TopoGeneration exactly as edgeTypeFilterCache is (rmp #2143).
@@ -1237,6 +1319,20 @@ type Engine struct {
 	// exists and production never sets it.
 	disableIndexNestedLoopForTest bool
 
+	// forceColumnarChainDeclineForTest makes all three columnar read-chain
+	// recognisers — the two shipping ones and [tryBuildColumnarAggSource] (#2655) —
+	// take their POST-BUILD decline path — the one that runs after buildOperator has
+	// already written the schema — so the state restore that path performs can be
+	// exercised end to end. It is a TEST SEAM, not an option, and there is no other
+	// way to reach the branch: with the rmp #2665 assertion fixed, the whole
+	// cypher test corpus (TCK included) reaches it zero times, measured with a
+	// counter on the branch itself.
+	//
+	// What it buys is a differential. With it set the query must return exactly what
+	// the columnar chain returns, because declining is supposed to fall back to the
+	// byte-identical serial build. Before #2665 it returned nothing at all.
+	forceColumnarChainDeclineForTest bool //nolint:unused // written only by the in-package differential test; see profile_plan_parity_test.go
+
 	// rangeSeekEnabled gates the range-predicate btree index seek (#1505). True
 	// by default; set false by EngineOptions.DisableRangeIndexSeek. When false
 	// the planner always builds the legacy NodeByLabelScan+Filter plan.
@@ -1285,11 +1381,26 @@ type Engine struct {
 	// planner always builds the serial EagerAggregation pipeline.
 	parallelScanEnabled bool
 
+	// labelCountPushdownDisabled carries [buildOpts.labelCountPushdownDisabled]
+	// onto every plan this Engine builds. It is the DIFFERENTIAL-TEST SEAM
+	// documented there and has no EngineOptions counterpart by design: it is set
+	// only by the in-package helper the label-count differential test uses to
+	// obtain a serial control arm. False on every Engine a caller can construct.
+	labelCountPushdownDisabled bool
+
 	// parallelBackfillEnabled gates the morsel-parallel phase-2 of a CREATE INDEX
 	// backfill. True by default; set false by EngineOptions.DisableParallelBackfill.
 	// When false the backfill always runs serially. Both paths produce identical
 	// index contents.
 	parallelBackfillEnabled bool
+
+	// adjacencyCountRewritesEnabled gates BOTH adjacency-answered count rewrites —
+	// the degree rewrite (#2232) and the labelled single-hop count (#2235). True by
+	// default; set false by EngineOptions.DisableAdjacencyCountRewrites. When false
+	// every eligible shape drives its inner plan instead, which is the same answer
+	// by the pre-rewrite path. See [EngineOptions.DisableAdjacencyCountRewrites] for
+	// the four dispatch sites it gates and why one field covers two rewrites.
+	adjacencyCountRewritesEnabled bool
 
 	// countStore is the derived, non-durable relationship count-store (task
 	// #2082, docs/count-store-design.md). It maintains exact E(relType) /
@@ -1564,7 +1675,6 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 		indexDefReg:            newIndexDefRegistry(),
 		procReg:                procs.NewRegistry(),
 		cache:                  newPlanCache(opts.PlanCacheCapacity),
-		edgeTypeFilterCache:    newEdgeTypeFilterCache(opts.EdgeTypeFilterCacheCapacity),
 		csrPairCache:           newCSRPairCacheIfEnabled(opts.DisableCSRPairCache),
 		maxResultRows:          resolveMaxResultRows(opts.MaxResultRows),
 		maxResultBytes:         resolveMaxResultBytes(opts.MaxResultBytes),
@@ -1581,9 +1691,11 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 
 		parallelScanEnabled:     !opts.DisableParallelScan,
 		parallelBackfillEnabled: !opts.DisableParallelBackfill,
-		parallelScanThreshold:   resolveParallelScanThreshold(opts.ParallelScanThreshold),
-		parallelGov:             &exec.ParallelGovernor{},
-		countStore:              count.New(resolveMaxLabelRecountEdges(opts.MaxLabelRecountEdges)),
+
+		adjacencyCountRewritesEnabled: !opts.DisableAdjacencyCountRewrites,
+		parallelScanThreshold:         resolveParallelScanThreshold(opts.ParallelScanThreshold),
+		parallelGov:                   &exec.ParallelGovernor{},
+		countStore:                    count.New(resolveMaxLabelRecountEdges(opts.MaxLabelRecountEdges)),
 		// Held for the duration of this constructor only; cleared just before
 		// the Engine is returned (see the publish step at the end).
 		recoveredIndexPayloads: opts.RecoveredIndexPayloads,
@@ -2473,6 +2585,15 @@ func (e *Engine) buildReadPhysical(
 	// comprehension over a supernode anchor cannot build an unbounded
 	// result list — the same bound collect() enforces (#1294, #1298).
 	patEval := newPatternEvaluator(rv, e.maxCollectItems)
+	// Adjacency-answered count gating (#2232 / #2235, knob added by rmp #2647). The
+	// polarity flips here on purpose: the Engine field is positive to match its
+	// siblings, the evaluator field is NEGATIVE so that the zero value keeps both
+	// rewrites live. That matters because [newPatternEvaluator] has test call sites
+	// that construct an evaluator without an Engine, and an evaluator built outside
+	// this function must behave as it always has rather than silently lose the
+	// optimisation. Set before either evaluator is handed to a build.
+	subEval.adjacencyCountsDisabled = !e.adjacencyCountRewritesEnabled
+	patEval.adjacencyCountsDisabled = !e.adjacencyCountRewritesEnabled
 	bopts := &buildOpts{subEval: subEval, patEval: patEval, queryCtx: ctx, maxCollectItems: e.maxCollectItems}
 	// Hand the subquery evaluator this query's parameters and build options so an
 	// inner plan is compiled in a scope that can resolve them (rmp #2507). It has
@@ -2495,11 +2616,10 @@ func (e *Engine) buildReadPhysical(
 	if entry != nil {
 		bopts.scalarUseMemo = &entry.scalarUse
 	}
-	// Edge-type-filter cache sharing (#1871): the SAME cache instance
-	// serves every concurrent Run call, so a relationship-type-filtered
-	// pattern amortises its O(V+E) build across the whole Engine's query
-	// stream, not just within one call.
-	bopts.edgeTypeFilterCache = e.edgeTypeFilterCache
+	// Adjacency cache sharing (#2143, #2251): the SAME cache instance serves every
+	// concurrent Run call, so a traversing pattern amortises its O(V+E) CSR pair
+	// build — and the slot-aligned relationship-type column stored beside it —
+	// across the whole Engine's query stream, not just within one call.
 	bopts.csrPairCache = e.csrPairCache
 	// Hash-join optimisation gating (#1506): the Engine flag alone. There is no
 	// order-safety companion — the substitution emits the nested loop's row
@@ -2515,6 +2635,7 @@ func (e *Engine) buildReadPhysical(
 	// awards to the seek — the two plans are exclusive, so there is no other way to
 	// see both for one query.
 	bopts.indexNestedLoopEnabled = e.hashJoinEnabled && !e.disableIndexNestedLoopForTest
+	bopts.forceColumnarChainDecline = e.forceColumnarChainDeclineForTest
 	bopts.rangeSeekEnabled = e.rangeSeekEnabled
 	bopts.prefixSeekEnabled = e.prefixSeekEnabled
 	// Min-label scan gating (#2077): enable the smallest-cardinality
@@ -2564,6 +2685,10 @@ func (e *Engine) buildReadPhysical(
 	bopts.parallelScanEnabled = e.parallelScanEnabled
 	bopts.parallelScanThreshold = e.parallelScanThreshold
 	bopts.parallelGov = e.parallelGov
+	// The labelled-count differential test's serial control arm (rmp #2654). False
+	// on every Engine a caller can construct; see
+	// [buildOpts.labelCountPushdownDisabled].
+	bopts.labelCountPushdownDisabled = e.labelCountPushdownDisabled
 	// Thread the same result-memory budget the Result drain enforces so the
 	// morsel-parallel scan leaf bounds peak memory instead of materialising
 	// the whole result set (#1830).
@@ -5568,6 +5693,83 @@ func applyProjectionRowBudget(p *exec.Project, bopts *buildOpts) *exec.Project {
 	return p.WithRowByteBudget(bopts.maxResultBytes, func(v expr.Value) int64 { return estimateValueSize(v) })
 }
 
+// applyColumnarAggRowBudget threads the SAME per-row byte ceiling
+// [applyProjectionRowBudget] gives the row-at-a-time aggregation pre-projection into
+// the COLUMNAR one, on both of its paths: the embedded [exec.Project] guards the
+// row-at-a-time fallback ([exec.ColumnarProject.Next], taken when the aggregation
+// declines chunk input), and the chunk budget guards
+// [exec.ColumnarProject.FillChunk].
+//
+// Without it the two pre-projections disagreed about the ceiling, and the disagreement
+// was observable (rmp #2655). MEASURED at HEAD with MaxResultBytes=100000 over a node
+// carrying a 20 000-element list property, whose estimate is 320 016 bytes:
+//
+//	MATCH (n:P) RETURN count(n.big)                    -- columnar -> succeeded
+//	MATCH (n:P) WHERE n.tag = 1 RETURN count(n.big)    -- row      -> ErrProjectionRowTooLarge
+//
+// The aggregation's own [exec.EagerAggregation.WithByteBudget] does not subsume this:
+// it charges the RETAINED GROUP KEYS once per NEW GROUP (#1841) and never charges an
+// aggregate ARGUMENT column at all, so the two arms above differ only in which
+// pre-projection ran. A nil/unbudgeted bopts leaves both guards disabled, exactly as
+// the row path does.
+func applyColumnarAggRowBudget(cp *exec.ColumnarProject, bopts *buildOpts) *exec.ColumnarProject {
+	if cp == nil || bopts == nil || bopts.maxResultBytes <= 0 {
+		return cp
+	}
+	_ = applyProjectionRowBudget(cp.Project, bopts)
+	return cp.WithChunkRowByteBudget(bopts.maxResultBytes, perValueOverhead,
+		func(v expr.Value) int64 { return estimateValueSize(v) })
+}
+
+// applyWorkerAggRowBudget threads the SAME per-row byte ceiling
+// [applyProjectionRowBudget] gives the serial row-at-a-time aggregation
+// pre-projection — and [applyColumnarAggRowBudget] gives the columnar one — into the
+// PER-WORKER pre-projection that [tryBuildParallelAggregateScan]'s sub-plan factory
+// rebuilds for every morsel. It goes through [applyProjectionRowBudget] rather than
+// configuring [exec.Project.WithRowByteBudget] itself, so all three sites raise
+// [exec.ErrProjectionRowTooLarge] from the one guard inside [exec.Project.Next]: a
+// caller cannot tell from the error which pre-projection ran.
+//
+// This was the THIRD instance of the gap #2655 closed for the other two (rmp #2668).
+// It survived #2655 because this path requires a BARE scan, so any WHERE excludes it
+// and #2655 never routed here. [exec.ParallelAggregateScan.WithByteBudget] does not
+// subsume it, for the reason [applyColumnarAggRowBudget] records: that budget charges
+// the RETAINED GROUP KEYS once per NEW GROUP (#1841) and never charges an aggregate
+// ARGUMENT column at all.
+//
+// # The cap is PER WORKER, and its value is NOT divided
+//
+// Every worker builds its own [exec.Project] for the morsel it is running and every
+// one of them gets maxResultBytes in full. The bound on rows under construction, at
+// any instant, is therefore
+//
+//	W * (maxResultBytes + the single column that crossed the ceiling)
+//
+// where W is the worker count [exec.ParallelGovernor.Enter] granted — at most
+// GOMAXPROCS, and never more than the morsel count. The "+ one column" is the
+// row-at-a-time guard's own overshoot: it charges incrementally and refuses the row
+// after the crossing column is built, which is exactly the bound
+// [exec.Project.WithRowByteBudget] documents for either serial arm. Numerically, at
+// the 100 000-byte ceiling of the #2655 measurement and GOMAXPROCS=10, this path may
+// hold 1 000 000 bytes plus ten columns in flight where the serial arms hold 100 000
+// plus one.
+//
+// A SHARED cap — maxResultBytes/W per worker, or one atomic counter across all of
+// them — was rejected. The ceiling is a per-ROW construction bound, so making it
+// depend on W would make the VERDICT depend on how many workers the governor happened
+// to grant and on how morsels were distributed: the same query under the same cap
+// would refuse on a 10-core host and complete on a 2-core one, and a shared counter
+// would additionally put contention on the per-row path. A per-worker cap keeps the
+// refusal a property of the row, so all three pre-projections refuse exactly the same
+// rows. The price is that the in-flight peak scales with W, which is the trade the
+// parallel path already makes for every other per-worker buffer (each worker's
+// morsel, output row, and partial group state).
+//
+// A nil/unbudgeted bopts leaves the guard disabled, exactly as both serial arms do.
+func applyWorkerAggRowBudget(p *exec.Project, bopts *buildOpts) *exec.Project {
+	return applyProjectionRowBudget(p, bopts)
+}
+
 // estimateValueSize returns a coarse, allocation-free byte estimate for a single
 // column value. It takes any because a materialised [exec.Record] is a
 // map[string]interface{} (its values are [expr.Value] instances boxed as the
@@ -6593,13 +6795,13 @@ func BuildPlanWithMutator(
 	// The public entry point applies the finite default per-group element budget
 	// (maxCollectItems == 0 → DefaultMaxCollectItems in buildEagerAggregation) so
 	// a collect on this path is never unbounded either. It has no Engine-owned
-	// edge-type-filter cache to share, so a relationship-type-filtered pattern
-	// on this path always rebuilds — correct, just unamortised.
+	// adjacency cache to share, so a relationship-type-filtered pattern on this
+	// path always rebuilds its type column — correct, just unamortised.
 	//
 	// It also passes the zero [planGates], so the public entry point keeps the
 	// unoptimised access paths it has always had. Only the Engine, which owns
 	// the EngineOptions that gate each substitution, enables them.
-	return buildPlanWithMutatorFull(plan, walker, labelSrc, reg, params, mutator, nil, nil, 0, nil, nil, planGates{})
+	return buildPlanWithMutatorFull(plan, walker, labelSrc, reg, params, mutator, nil, nil, 0, nil, planGates{})
 }
 
 // planGates carries the ORDER-NEUTRAL planner substitutions the write-path build
@@ -6649,12 +6851,6 @@ type planGates struct {
 // maxCollectItems carries the Engine's per-group element budget for buffering
 // aggregators into the write-path build, using the EngineOptions.MaxCollectItems
 // encoding (0 → default, <0 → no cap, >0 → active).
-//
-// edgeTypeFilterCache, when non-nil, is the Engine's shared
-// [edgeTypeFilterCache] (rmp #1871), threaded into bopts so a
-// relationship-type-filtered pattern inside a write query's MATCH clause
-// (e.g. `MATCH (a)-[:T]->(b) CREATE …`) amortises its filter build the same
-// way the pure-read path does.
 func buildPlanWithMutatorFull(
 	plan ir.LogicalPlan,
 	walker nodeWalkerIface,
@@ -6665,7 +6861,6 @@ func buildPlanWithMutatorFull(
 	constraintReg *exec.ConstraintRegistry,
 	idxMgr *index.Manager,
 	maxCollectItems int,
-	edgeTypeFilterCache *edgeTypeFilterCache,
 	procReg *procs.Registry,
 	gates planGates,
 ) (op exec.Operator, cols []string, err error) {
@@ -6679,7 +6874,7 @@ func buildPlanWithMutatorFull(
 	// of `CREATE (n) RETURN n.x` — ProduceResults → Projection → CreateNode
 	// — falls through to [buildOperator]'s default branch and errors with
 	// "unsupported IR node *ir.CreateNode".
-	bopts := &buildOpts{maxCollectItems: maxCollectItems, edgeTypeFilterCache: edgeTypeFilterCache, procReg: procReg}
+	bopts := &buildOpts{maxCollectItems: maxCollectItems, procReg: procReg}
 	// Order-neutral planner substitutions (#2225). Before this, the write path
 	// left every gate at its zero value, so a statement carrying any write clause
 	// was planned without the seek, without the min-label re-anchor and without
@@ -6899,7 +7094,7 @@ func buildOperatorWrite(
 		// expr.Eval errors or unsupported value kinds so the operator skips
 		// the write without aborting the pipeline.
 		if p.ValueExpr != nil && p.PropertyKey != "" {
-			schemaSnap := schemaCopy
+			schemaSnap := newRowSchema(schemaCopy)
 			capturedExpr := p.ValueExpr
 			capturedParams := params
 			capturedReg := reg
@@ -7084,7 +7279,7 @@ func buildOperatorWrite(
 		}
 		if p.TargetExpr != nil {
 			if _, isVar := p.TargetExpr.(*ast.Variable); !isVar {
-				schemaSnap := schemaCopy
+				schemaSnap := newRowSchema(schemaCopy)
 				capturedExpr := p.TargetExpr
 				capturedParams := params
 				capturedReg := reg
@@ -7149,7 +7344,7 @@ func buildOperatorWrite(
 			}
 		}
 		if needTargetEval {
-			schemaSnap := schemaCopy
+			schemaSnap := newRowSchema(schemaCopy)
 			capturedExpr := p.TargetExpr
 			capturedParams := params
 			capturedReg := reg
@@ -7555,7 +7750,113 @@ func setSnap[V any](m map[string]V) map[string]struct{} {
 	return out
 }
 
-// copySchema returns a shallow copy of the schema map.
+// buildStateSnapshot is the builder state a plan-shape recogniser has to be able
+// to put back when it BUILDS a subtree and then declines it.
+//
+// A recogniser that declines BEFORE building costs nothing to unwind, which is why
+// both columnar recognisers run every check they can against a hypothetical schema
+// first. One that declines AFTER — because the operator it got back is not the one
+// it needed — leaves behind the schema columns and the per-query metadata the build
+// already recorded, and buildOperatorRec then re-builds the SAME subtree from
+// scratch on top of them. The second build appends its columns PAST the first's, so
+// every variable's recorded column points beyond the end of the row the operators
+// actually emit. [exec.Expand] answers an out-of-range source column by skipping the
+// row silently, so the query runs, returns no error, and yields ZERO rows.
+//
+// That is not hypothetical: it is the second half of rmp #2665. Installing a
+// Profiler made [tryBuildColumnarExpandFilterChain] decline after its build, and
+// `MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN b.salary` — 960000 rows under Run —
+// reported rows=0 at every level above the leaf, as a SUCCESS. Measured on the
+// 300-node fixture: schema went from {a:0, a__dup:1, __anon_0:2, b:3} to
+// {a:4, a__dup:5, __anon_0:6, b:7} over a row four columns wide.
+//
+// Fixing the assertion (see [exec.UnwrapProfiled]) removes the only decline that was
+// reachable; this restores the property both recognisers already DOCUMENT — that a
+// non-match never half-mutates the real schema — for the defensive fall-throughs
+// that remain, so a future one cannot reopen the same silent-wrong-answer hole.
+//
+// The maps are copied whole rather than diffed, so a key the build OVERWROTE is put
+// back with its previous value and not merely deleted. Nothing is allocated when
+// there is nothing to remember: both recognisers require an EMPTY schema to run at
+// all, and the metadata maps are usually empty at that point too, so
+// [copyMetaMap] returns nil and the snapshot costs one struct on the stack.
+type buildStateSnapshot struct {
+	schema       map[string]int
+	edgeVarMeta  map[string]edgeVarInfo
+	pathVarMeta  map[string]pathVarInfo
+	pathVarChain map[string]pathChainInfo
+	vleRelMeta   map[string]vleRelInfo
+	tripletLen   int
+}
+
+// snapshotBuildState captures schema and the bopts state a read subtree build
+// records, so [buildStateSnapshot.restore] can undo it. bopts may be nil.
+//
+// The covered set is what a Projection → Selection* → Expand → scan build writes:
+// the schema, the relationship- and path-variable metadata
+// buildIRProjection later reads back, and the append-only expand triplet
+// sequence. The remaining per-build maps (the scalar-column sets, the pending
+// path predicates) are written only by aggregation, shortest-path and named-path
+// lowerings, none of which can appear inside a subtree these recognisers admit.
+func snapshotBuildState(schema map[string]int, bopts *buildOpts) buildStateSnapshot {
+	snap := buildStateSnapshot{schema: copyMetaMap(schema)}
+	if bopts == nil {
+		return snap
+	}
+	snap.edgeVarMeta = copyMetaMap(bopts.edgeVarMeta)
+	snap.pathVarMeta = copyMetaMap(bopts.pathVarMeta)
+	snap.pathVarChain = copyMetaMap(bopts.pathVarChain)
+	snap.vleRelMeta = copyMetaMap(bopts.vleRelMeta)
+	snap.tripletLen = len(bopts.expandTripletSeq)
+	return snap
+}
+
+// restore puts schema and the bopts state back as they were when the snapshot was
+// taken. schema is restored IN PLACE because the caller holds the same map.
+//
+// A metadata map that did not exist before the build is left as an empty map
+// rather than set back to nil: the builder creates these lazily and only ever
+// reads them through an ordinary lookup, so an empty map and a nil one are
+// indistinguishable to every reader, and assigning nil back would differ from the
+// pre-build state only in a way no code can observe.
+func (s buildStateSnapshot) restore(schema map[string]int, bopts *buildOpts) {
+	restoreMetaMap(schema, s.schema)
+	if bopts == nil {
+		return
+	}
+	restoreMetaMap(bopts.edgeVarMeta, s.edgeVarMeta)
+	restoreMetaMap(bopts.pathVarMeta, s.pathVarMeta)
+	restoreMetaMap(bopts.pathVarChain, s.pathVarChain)
+	restoreMetaMap(bopts.vleRelMeta, s.vleRelMeta)
+	if s.tripletLen <= len(bopts.expandTripletSeq) {
+		bopts.expandTripletSeq = bopts.expandTripletSeq[:s.tripletLen]
+	}
+}
+
+// copyMetaMap returns a shallow copy of m, or nil when m is nil or empty.
+func copyMetaMap[V any](m map[string]V) map[string]V {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]V, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+// restoreMetaMap resets live to hold exactly the entries of snap. live may be nil
+// (the build never created it), in which case there is nothing to undo.
+func restoreMetaMap[V any](live, snap map[string]V) {
+	if live == nil {
+		return
+	}
+	clear(live)
+	for k, v := range snap {
+		live[k] = v
+	}
+}
+
 // schemaBinding is one variable's place in a row: its name and its column.
 type schemaBinding struct {
 	name string
@@ -7589,6 +7890,68 @@ func newSchemaWalk(schema map[string]int) schemaWalk {
 	return w
 }
 
+// rowSchema is a row layout frozen at plan-build time: the schema snapshot, the
+// column-ordered walk derived from it, and the width a [expr.RowContext] built
+// against it must be sized to. It is the plan-time carrier that keeps
+// [newSchemaWalk] off the per-row path.
+//
+// Every ingredient a per-row RowContext build needs is a pure function of a
+// schema that is fixed for the whole execution, yet the row-context builders
+// used to re-derive them from a bare map on EVERY ROW — one slice allocation and
+// one slices.SortFunc per row. Measured on this tree with exact
+// (MemProfileRate=1) bracketed allocation profiles (bench/audit352,
+// schemawalk_hoist_test.go), the walk was 64.57% of all objects allocated by
+// `RETURN DISTINCT p.bucket`, 17.75% by `RETURN p.bucket + 1, count(*)` and
+// 15.70% by an UNWIND over a scan.
+//
+// Both reference engines make the per-row form unrepresentable rather than
+// merely discouraged: Memgraph assigns Symbol::position_ once in
+// SymbolTable::CreateSymbol and reads elems_[symbol.position()]; Neo4j allocates
+// slots once in SlotAllocation.allocateSlots and addresses two flat arrays.
+// Neither derives a binding order at runtime, and neither sorts per row. Taking
+// the bare map out of the builders' signatures is what applies the same
+// discipline here: the per-row path can no longer be reached with a map, so the
+// derivation cannot silently return to it.
+//
+// # Concurrency
+//
+// A rowSchema is WRITTEN ONCE, by [newRowSchema], before the closure that
+// captures it exists, and is READ-ONLY from then on. That is what makes it safe
+// to share across the parallel scan/project workers, which call a single
+// captured closure from several goroutines at once: they only read cols, walk
+// and width, and no code path mutates any of the three after construction.
+// Neither the struct nor the map it carries may be mutated once it has been
+// handed to a closure.
+type rowSchema struct {
+	// cols is the snapshot walk and width were derived from. Holding it here is
+	// what makes the three mutually consistent BY CONSTRUCTION: a caller cannot
+	// pair a walk taken from one map with a width taken from another, because
+	// only [newRowSchema] can build the triple. It is also the map a caller
+	// consults for a direct column lookup against the same snapshot.
+	cols map[string]int
+	// walk is cols flattened into column order — the traversal [populateRowCtx]
+	// runs per row.
+	walk schemaWalk
+	// width sizes the RowContext map and selects pooled-vs-fresh in
+	// [acquireRowCtx]. It is len(cols), deliberately NOT [schemaWidth]: the two
+	// differ whenever buildIRProjection has registered secondary
+	// expression-string keys, and swapping one for the other would change which
+	// rows take the pooled path. That is a behaviour change, not a tidy-up.
+	width int
+}
+
+// newRowSchema freezes schema into a [rowSchema]. It is the ONLY caller of
+// [newSchemaWalk], and it must be called at plan-build time — never from inside
+// a per-row closure, which is the whole point of the type.
+//
+// schema is retained, not copied: callers that need a snapshot independent of a
+// later mutation pass a [copySchema] result, exactly as they did when they
+// captured the bare map.
+func newRowSchema(schema map[string]int) rowSchema {
+	return rowSchema{cols: schema, walk: newSchemaWalk(schema), width: len(schema)}
+}
+
+// copySchema returns a shallow copy of the schema map.
 func copySchema(schema map[string]int) map[string]int {
 	cp := make(map[string]int, len(schema))
 	for k, v := range schema {
@@ -8493,7 +8856,12 @@ func buildPlanEngine(
 		if rerr != nil {
 			return nil, nil, rerr
 		}
-		return exec.NewUnionAll(leftOp, rightOp), leftCols, nil
+		// profileIntermediate, because this operator is the plan ROOT and is built
+		// ABOVE buildOperator's recursion — the single wrap point never sees it, so
+		// without this a profiled UNION ALL rendered its root as "(not measured)"
+		// (rmp #2665, found by the derived-corpus parity gate). The branches are
+		// recursive buildPlanEngine calls, so each branch root is wrapped already.
+		return profileIntermediate(bopts, exec.NewUnionAll(leftOp, rightOp)), leftCols, nil
 	}
 	if u, ok := plan.(*ir.Union); ok {
 		leftOp, leftCols, lerr := buildPlanEngine(u.Left, walker, labelSrc, reg, params, idxMgr, procReg, bopts)
@@ -8504,7 +8872,11 @@ func buildPlanEngine(
 		if rerr != nil {
 			return nil, nil, rerr
 		}
-		return exec.NewUnion(leftOp, rightOp, 0), leftCols, nil
+		// Wrapped for the same reason as UNION ALL above — and built through
+		// NewUnionInstrumented, because UNION lowers to THREE operators and the two
+		// below the root are inside exec, out of profileIntermediate's reach.
+		u := exec.NewUnionInstrumented(leftOp, rightOp, 0, profileHook(bopts))
+		return profileIntermediate(bopts, u), leftCols, nil
 	}
 
 	pr, ok := plan.(*ir.ProduceResults)
@@ -8668,6 +9040,28 @@ func profileIntermediate(bopts *buildOpts, op exec.Operator) exec.Operator {
 		return op
 	}
 	return bopts.profiler.Wrap(op)
+}
+
+// profileHook returns profileIntermediate as a function value for an exec-side
+// composite constructor to apply to the operators it builds internally, or nil
+// when no profiler is installed — so an ordinary build allocates no closure and
+// the constructor takes its uninstrumented path.
+func profileHook(bopts *buildOpts) func(exec.Operator) exec.Operator {
+	if bopts == nil || bopts.profiler == nil {
+		return nil
+	}
+	return bopts.profiler.Wrap
+}
+
+// profileIntermediateChunk is [profileIntermediate] for an intermediate the caller
+// must keep as an [exec.ChunkProducer] — a columnar operator a plan-shape
+// recogniser substituted for the one buildOperator returned. Without a profiler it
+// returns cp unchanged, so the ordinary build path is untouched.
+func profileIntermediateChunk(bopts *buildOpts, cp exec.ChunkProducer) exec.ChunkProducer {
+	if bopts == nil || bopts.profiler == nil || cp == nil {
+		return cp
+	}
+	return bopts.profiler.WrapChunk(cp)
 }
 
 // buildOperatorRec is the recursive read-plan lowering: one case per read IR node
@@ -8844,7 +9238,12 @@ func buildOperatorRec(
 			rangeG = lw.g
 		}
 		if rangeChild, ok := buildRangeSeekIfEnabled(bopts, p, schema, idxMgr, rangeG, params); ok {
-			child = rangeChild
+			// profileIntermediate, because the seek is built HERE rather than by the
+			// recursion, so buildOperator's single wrap point never sees it and a
+			// profiled plan rendered the access path as "(not measured)" — the one
+			// node whose cost a reader of PROFILE most wants (rmp #2665, found by the
+			// derived-corpus completeness gate).
+			child = profileIntermediate(bopts, rangeChild)
 		} else {
 			child, err = buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
 			if err != nil {
@@ -9336,6 +9735,16 @@ func buildOperatorRec(
 		return exec.NewArgument(), nil
 
 	case *ir.EagerAggregation:
+		// count(<bare non-null pattern-bound variable>) → count(*) (#2657). Applied
+		// FIRST, so every recogniser below and the serial build all see the same
+		// normalised aggregate: count(v) counts non-null bindings and count(*) counts
+		// rows, which are the same integer exactly when v cannot be null, and the
+		// engine's cheap count paths are keyed on the count(*) spelling. The three leaf
+		// pushdowns already admitted count(<scan-var>) themselves; what this reaches is
+		// tryBuildCountRows and the columnar countStarKernel, for the Selection- and
+		// Expand-child shapes no leaf pushdown can serve. Returns p unchanged unless
+		// the null-safety walk passes; never mutates the cached logical plan.
+		p = rewriteCountVarToCountStar(p)
 		// Parallel-reduce fast path (#1672): a group-by-less count(*) /
 		// count(<scan-var>) over a bare full-node scan is served by a
 		// ParallelCountScan that sums per-worker partial counters, avoiding both
@@ -9385,8 +9794,18 @@ func buildOperatorRec(
 		if op, ok := tryBuildAllNodesCountScan(p, walker, schema, bopts); ok {
 			return op, nil
 		}
-		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
-		if err != nil {
+		// Columnar read source (#2655 F1): a WHERE under an aggregate built a row
+		// exec.Filter, which is not a ChunkProducer, so tryBuildColumnarAggInput
+		// declined and the aggregate fell back to the fully boxed row pipeline. Build
+		// the ColumnarFilter chain instead where the shape and every access-path
+		// decline admit it. Declining costs nothing: the ordinary build follows.
+		var child exec.Operator
+		var err error
+		if colSrc, colOK, colErr := tryBuildColumnarAggSource(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, bopts); colErr != nil {
+			return nil, colErr
+		} else if colOK {
+			child = colSrc
+		} else if child, err = buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts); err != nil {
 			return nil, err
 		}
 		// General count(*) row count (#2625). Tried LAST, after every pushdown
@@ -9439,20 +9858,56 @@ func buildOperatorRec(
 			topG = lw.g
 		}
 		keys := irSortKeys(p.SortItems, schema, topG, params, reg, bopts)
-		if len(keys) == 0 || p.Limit < 0 {
-			// Degenerate: no resolvable sort keys, or a negative no-limit
-			// sentinel — return child unchanged. (LIMIT 0 is NOT degenerate;
-			// it must yield an empty result — see #1801.)
+		// Resolve the OFFSET before the LIMIT. The unfused shape builds Skip
+		// BELOW Limit, so buildOperator reaches Skip's expression first and a
+		// query whose SKIP and LIMIT are both ill-typed reports the SKIP error.
+		// Resolving in the same order here keeps the fused plan reporting the
+		// same one (#2509).
+		offset := p.Offset
+		if p.OffsetExpr != nil {
+			v, rerr := resolveCountExpr(p.OffsetExpr, params, reg, "SKIP")
+			if rerr != nil {
+				return nil, rerr
+			}
+			offset = v
+		}
+		limit := p.Limit
+		if p.LimitExpr != nil {
+			v, rerr := resolveCountExpr(p.LimitExpr, params, reg, "LIMIT")
+			if rerr != nil {
+				return nil, rerr
+			}
+			limit = v
+		}
+		if limit < 0 {
+			// Negative no-limit sentinel — return child unchanged. (LIMIT 0 is
+			// NOT degenerate; it must yield an empty result — see #1801.)
 			return child, nil
 		}
-		// exec.NewTop requires n ≥ 0 (int); ir.Top.Limit is int64. n == 0 is the
-		// ORDER BY … LIMIT 0 case and produces an empty result.
-		n := int(p.Limit)
-		if int64(n) != p.Limit {
-			// Limit overflows int — clamp to a large safe value.
-			n = int(^uint(0) >> 1) // math.MaxInt
+		n := topBoundRows(offset, limit)
+		if len(keys) == 0 {
+			// No resolvable sort key: there is nothing to order, but the BOUND
+			// still applies. Returning the child unchanged here would drop the
+			// caller's LIMIT. With no ordering, Limit(s+k) below the Skip(s)
+			// above this node yields rows [s, s+k) — the same rows Skip(s) then
+			// Limit(k) yields — so the bound survives with the same semantics.
+			// A write subtree needs the Eager barrier for the same reason
+			// [ir.Limit] does: every write below must run before the truncation.
+			if ir.ContainsWrite(p.Child) {
+				degMB, degEst := resultByteBudget(bopts)
+				return exec.NewLimit(exec.NewEager(child, 0).WithByteBudget(degMB, degEst), int64(n))
+			}
+			return exec.NewLimit(child, int64(n))
 		}
-		return exec.NewTop(child, keys, n)
+		topOp, terr := exec.NewTop(child, keys, n, 0)
+		if terr != nil {
+			return nil, terr
+		}
+		// Both memory dimensions are wired, exactly as for Sort. n is s+k and
+		// both may be parameters, so an unbounded Top would turn a hostile $skip
+		// into an out-of-memory kill instead of a typed error (#2509).
+		topMB, topEst := resultByteBudget(bopts)
+		return topOp.WithByteBudget(topMB, topEst), nil
 
 	case *ir.Eager:
 		child, err := buildOperator(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
@@ -9837,10 +10292,16 @@ func buildOperatorRec(
 
 // parallelScanProjectBuildCount counts how many times the planner has emitted
 // the morsel-parallel fused scan→filter→project in place of the serial pipeline
-// (#1682). It is a diagnostic seam read only by the in-package differential test
-// to assert the structural trigger actually fired (or, under a guard, did not).
-// Process-global and monotonic; tests snapshot it before/after a query.
-var parallelScanProjectBuildCount atomic.Uint64
+// (#1682). It is a diagnostic seam that asserts the structural trigger actually
+// fired (or, under a guard, did not). Process-global and monotonic; readers
+// snapshot it before/after a query.
+//
+// The counter itself lives in internal/planseam so that the measurement
+// harnesses under bench/ — which cannot reach an unexported identifier here, and
+// for which exporting one would enlarge the module's public API — can read the
+// SAME counter the in-package differential tests read. This name is retained as
+// the in-package handle on it.
+var parallelScanProjectBuildCount = &planseam.ParallelScanProjectBuilds
 
 // tryBuildParallelScanProject returns a [exec.ParallelScanProject] and true when
 // child is the single shape a morsel-parallel fused scan can serve while staying
@@ -10118,39 +10579,10 @@ func projectionItemsAreScalar(items []ir.ProjectionItem) bool {
 	return true
 }
 
-// nonDeterministicFuncs is the deny-set of scalar functions whose result is NOT
-// (pure ∧ row-local): two evaluations of the same call can yield different
-// values. A projection item containing any of them must NOT be fused into the
-// morsel-parallel scan (#1682), because evaluating it independently per worker
-// would change the projected VALUE multiset versus the serial single-threaded
-// path — a genuine semantic divergence the openCypher TCK does not cover.
-//
-// Two groups (cypher-expert sign-off):
-//
-//   - rand / randomUUID: non-deterministic per call;
-//   - the zero-argument "clock" temporal constructors: even though GoGraph freezes
-//     one per-query "now" in the shared registry (newNowAwareRegistry) so the
-//     workers would in fact observe the same instant, they are rejected as cheap,
-//     unambiguous insurance — these queries are rare and the safety margin is worth
-//     more than fusing them. Argument-bearing temporal forms (date('2020-01-01'),
-//     datetime(n.ts)) are pure and are NOT in this set.
-//
-// Names are matched case-insensitively against the call's bare function name; the
-// no-namespace assumption matches the built-in registry's flat namespace.
-var nonDeterministicFuncs = map[string]struct{}{
-	"rand":          {},
-	"randomuuid":    {},
-	"timestamp":     {},
-	"date":          {},
-	"datetime":      {},
-	"localdatetime": {},
-	"time":          {},
-	"localtime":     {},
-}
-
 // exprHasNonScalar reports whether e contains any construct that disqualifies a
 // projection item from the morsel-parallel fused scan: an aggregate function
-// call, a non-deterministic / clock-dependent function ([nonDeterministicFuncs]),
+// call, a non-deterministic / clock-dependent function
+// ([ir.IsNonDeterministicCall]),
 // an EXISTS/COUNT subquery, a pattern comprehension, a list comprehension, or a
 // reduce (the latter two evaluate per element but are excluded conservatively so
 // the fused set stays the simple per-row pure-scalar shapes signed off).
@@ -10169,7 +10601,7 @@ func exprHasNonScalar(e ast.Expression) bool { //nolint:gocyclo // per-AST-node 
 		if ir.IsAggregateFunc(n.Name) || n.CountStar {
 			return true
 		}
-		if isNonDeterministicCall(n) {
+		if ir.IsNonDeterministicCall(n) {
 			return true
 		}
 		for _, a := range n.Args {
@@ -10212,30 +10644,6 @@ func exprHasNonScalar(e ast.Expression) bool { //nolint:gocyclo // per-AST-node 
 	return false
 }
 
-// isNonDeterministicCall reports whether fn is a call this engine must not
-// evaluate independently per worker (#1682): rand / randomUUID (always
-// non-deterministic), or a ZERO-ARGUMENT temporal clock constructor (date(),
-// datetime(), localdatetime(), time(), localtime(), timestamp()). The temporal
-// names are only non-deterministic in their no-argument clock form; an
-// argument-bearing call (date('2020-01-01'), datetime(n.ts)) is pure and is not
-// rejected. rand / randomUUID are rejected regardless of arguments.
-func isNonDeterministicCall(fn *ast.FunctionInvocation) bool {
-	if len(fn.Namespace) != 0 {
-		return false // namespaced calls (apoc.*, …) are not the built-in clock/rand forms
-	}
-	name := strings.ToLower(fn.Name)
-	if _, ok := nonDeterministicFuncs[name]; !ok {
-		return false
-	}
-	switch name {
-	case "rand", "randomuuid":
-		return true // non-deterministic for any argument shape
-	default:
-		// Temporal constructor: only the zero-argument clock form is rejected.
-		return len(fn.Args) == 0
-	}
-}
-
 // forWorker returns a value copy of bopts that is fully independent of every
 // other worker's copy for the morsel-parallel fused scan→filter→project subtree
 // (#1682), so two workers building (and then running) their own copy of the
@@ -10244,9 +10652,14 @@ func isNonDeterministicCall(fn *ast.FunctionInvocation) bool {
 //   - LAZILY-WRITTEN-AT-EVAL fields. nodeResolver is assigned by lazyResolver on
 //     first use WITHOUT synchronisation and is reachable from both the Filter
 //     predicate and the Projection via expr.LazyNodeValue — the genuine eval-time
-//     race on the node-only scan path. fwdCSR / fwdCSRReady / edgeIDResolver are
-//     relationship-reconstruction caches the fused shape never touches; reset
-//     defensively.
+//     race on the node-only scan path. relResolver is its relationship twin
+//     (assigned by lazyRelResolverFor, reachable via expr.LazyRelationshipValue)
+//     and carries the identical hazard, so it is reset for the identical reason:
+//     edgeVarMeta below is nil'd so a worker rebuilds its own, which means a
+//     future widening of the fused shape to a relationship pattern would reach
+//     lazyRelResolverFor on the worker goroutine. fwdCSR / fwdCSRReady /
+//     edgeIDResolver are relationship-reconstruction caches the fused shape never
+//     touches; reset defensively.
 //
 //   - BUILD-WRITTEN maps. The per-worker subtree rebuild runs buildOperator /
 //     buildIRProjection on the worker goroutine, and those WRITE bopts maps
@@ -10256,6 +10669,14 @@ func isNonDeterministicCall(fn *ast.FunctionInvocation) bool {
 //     sound for the fused shape because the subtree is self-contained: every map
 //     entry the build needs is (re)written from the subtree's own IR, never read
 //     from a pre-existing entry.
+//
+//   - SHARED INSTRUMENTATION. profiler is an *exec.Profiler, so a value copy hands
+//     every worker the SAME instance and the worker build MUTATES it. Clearing it
+//     is what makes exec.Profiler's documented "the parallel tier is measured as
+//     one node" contract true rather than merely intended, and it costs the
+//     rendered PROFILE nothing: a morsel-parallel leaf implements no
+//     exec.PlanChildren, so exec.PlanTree stops at it and nothing built below it
+//     was ever reachable from the output (rmp #2664).
 //
 // subEval and patEval are shared by the value copy — i.e. BY POINTER — and this
 // is safe ONLY because the caller has screened them out of reach. Both are
@@ -10276,6 +10697,7 @@ func (b *buildOpts) forWorker() *buildOpts {
 	cp := *b
 	// Lazily-written-at-eval fields.
 	cp.nodeResolver = nil
+	cp.relResolver = nil
 	cp.fwdCSR = nil
 	cp.fwdCSRReady = false
 	cp.edgeIDResolver = nil
@@ -10289,6 +10711,16 @@ func (b *buildOpts) forWorker() *buildOpts {
 	cp.pathVarChain = nil
 	cp.vleRelMeta = nil
 	cp.expandTripletSeq = nil
+	// SHARED INSTRUMENTATION. The profiler is a POINTER, so a value copy hands
+	// every worker the same *exec.Profiler and each one mutates it while building
+	// its sub-plan — the data race at cypher/exec/profile.go:93 (rmp #2664).
+	// Clearing it is not merely the cheapest way to close that race, it is the
+	// contract: a morsel-parallel leaf implements no PlanChildren, so exec.PlanTree
+	// stops at it and NOTHING built below it is ever rendered. Instrumenting a
+	// worker sub-plan therefore bought a wrapper allocation per morsel per operator
+	// and two time.Now calls per row that no reader could ever see. The parallel
+	// tier is measured as one node, which is what exec.Profiler documents.
+	cp.profiler = nil
 	return &cp
 }
 
@@ -10322,9 +10754,60 @@ func (b *buildOpts) forWorker() *buildOpts {
 // variable NAME, so an inner shortestPath() binding a path variable the outer plan
 // also named would consume the OUTER clause's pending predicate.
 //
+// # Why the adjacency cache IS carried
+//
+// csrPairCache — and, since rmp #2251, the relationship-type column stored inside
+// it — was added to the allowlist by rmp #2646, and the reason it is safe is
+// precisely the reason the fields below are not: IT IS NOT KEYED TO A SCOPE. Every
+// field this function omits is keyed either to the OUTER ROW LAYOUT (a column
+// index, or a path-variable name) or to *ir node pointers belonging to the OUTER
+// plan, so carrying it would have the inner build read the wrong slot or gate on
+// the wrong node. This one is keyed to [csrPairKey] — {epoch, startTS, versioned}
+// — which describes GRAPH STATE. A scope has no bearing on it: the pair the inner
+// Expand needs at a given epoch and start timestamp IS the pair the outer one
+// needs. The type is documented safe for concurrent use, so sharing it across the
+// boundary adds no new contract.
+//
+// It used to be TWO caches: the pair, and a separate per-relationship-type-set LRU
+// holding the position-keyed filter map. rmp #2251 replaced that map with a
+// type-set-independent column stored beside the pair, so there is one cache to
+// carry where there were two, and one mutex on the per-outer-row path where there
+// were two.
+//
+// What this fixes is a per-outer-row Θ(V+E) rebuild. [exec.Expand.Init] runs once
+// per outer row under Apply and resolves its adjacency through the closure
+// [expandAdjacencySource] returns, so with the field nil every outer row rebuilt
+// the forward CSR, its reverse transpose, and the whole per-slot type resolution.
+// MEASURED on a fixture with out-degree pinned at 1:
+// `MATCH (a:P) RETURN a.sid, COUNT { MATCH (a)-[:R]->(:P) }` performed exactly one
+// pair build and one filter build PER ROW — 250 of each at n=250, 500 at n=500 —
+// which fitted a complexity exponent of 1.924 against the 1.0 every sibling shape
+// fits. TestSubqueryAdjacencyRebuild_ScalesWithGraph is the structural gate.
+//
+// Three properties survive the change, and none of them rests on the caches being
+// absent:
+//
+//   - FRESHNESS (#2317) is unaffected because resolution still happens at
+//     EXECUTION time — this changes what the closure finds in the cache, never
+//     when the closure runs — and because the cache key IS the freshness token: a
+//     write bumps [lpg.Graph.TopoGeneration], the epoch component changes, and the
+//     pair and its position-keyed type column miss and rebuild TOGETHER, which is
+//     what keeps #2293 sound.
+//   - A WRITE TRANSACTION still shares nothing (#2446). Both entry points refuse
+//     independently of this allowlist: [csrPairCachedAt] and
+//     [csrPairAndColumnCachedFor] each test [viewCarriesOwnWrites] before
+//     consulting the cache. A statement that writes therefore keeps the per-row
+//     rebuild, which is also why the freshness case above is protected by
+//     EXCLUSION and not merely by the key.
+//   - PLAN SHAPE is untouched. The field is read by no recogniser and no gate, and
+//     every consumer of it runs after the plan exists: the adjacency closures
+//     [expandAdjacencySource] and [intersectAdjacencySource] return, and
+//     [ensureEdgeIDResolver], which derives the path-reconstruction resolver from
+//     the same pair at eval time.
+//
 // # What it carries, and what it deliberately does not
 //
-// Only the three scope-independent services above. Everything else is left at its
+// Only the five scope-independent services above. Everything else is left at its
 // zero value, which is exactly the state the inner build saw before this existed —
 // so this fix cannot change the shape of any inner plan, only what its predicates
 // can see. Four omissions are load-bearing rather than incidental:
@@ -10355,6 +10838,15 @@ func (b *buildOpts) forSubquery() *buildOpts {
 		subEval:  b.subEval,
 		patEval:  b.patEval,
 		queryCtx: b.queryCtx,
+		// The adjacency cache (rmp #2646). Keyed to graph state, not to this
+		// scope — see "Why the adjacency cache IS carried" above.
+		csrPairCache: b.csrPairCache,
+		// The labelled-count differential-test seam (rmp #2654). Carried because a
+		// control arm that stops being a control inside a subquery is not a control:
+		// the field's whole purpose is to hold for the WHOLE build, and it is
+		// scope-independent in exactly the way this allowlist admits — it names an
+		// optimisation, not a row, a pointer or a plan node.
+		labelCountPushdownDisabled: b.labelCountPushdownDisabled,
 	}
 }
 
@@ -10429,6 +10921,12 @@ func tryBuildParallelCountScan(
 // depend on what they contain. Unlike the leaf pushdowns this places no
 // condition on the child, which is the point — it serves count(*) over an
 // Expand, a Filter, a join, or anything else.
+//
+// Since #2657 a count(v) whose v is bound by a pattern that cannot yield a null
+// binding arrives here ALREADY SPELLED count(*), rewritten by
+// [rewriteCountVarToCountStar] before any recogniser runs. That is what put the
+// Selection-child and Expand-child count(v) shapes on this operator; the condition
+// here is unchanged, and a count(v) the rewrite refused still declines.
 //
 // When it fires it mutates schema to the aggregation's single-column output
 // layout through [installAggOutputSchema] — the same installer the serial
@@ -10529,6 +11027,10 @@ var allNodesCountScanBuildCount atomic.Uint64
 // walker and a per-worker buildOpts copy so two workers never race. Every declined
 // shape leaves schema untouched and returns (nil, false, nil).
 //
+// Each per-worker pre-projection carries the same per-row byte ceiling both serial
+// arms carry, applied PER WORKER and undivided, for a bound of
+// W*(maxResultBytes + one column) in flight; see [applyWorkerAggRowBudget] (#2668).
+//
 //nolint:gocyclo // structural shape match — one guard per rejected IR shape
 func tryBuildParallelAggregateScan(
 	p *ir.EagerAggregation,
@@ -10610,12 +11112,20 @@ func tryBuildParallelAggregateScan(
 	// and a per-worker buildOpts copy whose lazily-written fields are zeroed, so no
 	// two workers race on bopts.nodeResolver or a build-written map. The rebuilt
 	// items come from the SAME buildAggPreProjItems the serial path uses, so each
-	// worker's per-node key/argument values are byte-identical to serial.
+	// worker's per-node key/argument values are byte-identical to serial, and each
+	// carries the SAME per-row byte ceiling both serial arms carry — see
+	// [applyWorkerAggRowBudget] for the per-worker-versus-shared decision and the
+	// resulting numeric bound (rmp #2668).
 	factory := func(ids []graph.NodeID) (exec.Operator, error) {
 		wWalker := &lpgNodeWalker{g: g, morsel: ids}
 		scan := exec.NewAllNodesScan(wWalker)
-		wItems, _ := buildAggPreProjItems(p, schemaSnap, g, params, reg, bopts.forWorker())
-		return exec.NewProject(scan, wItems)
+		wBopts := bopts.forWorker()
+		wItems, _ := buildAggPreProjItems(p, schemaSnap, g, params, reg, wBopts)
+		wProj, perr := exec.NewProject(scan, wItems)
+		if perr != nil {
+			return nil, perr
+		}
+		return applyWorkerAggRowBudget(wProj, wBopts), nil
 	}
 
 	// Validate the pre-projection builds cleanly before launching workers (surfaces
@@ -10652,6 +11162,12 @@ func tryBuildParallelAggregateScan(
 // disabled), where the parallel reduce declines. It is bit-identical to the serial
 // scan because WalkNodeIDs skips tombstones, so a bare AllNodesScan emits exactly
 // LiveOrder() rows.
+//
+// Since rmp #2654 [tryBuildLabelCountScan] is un-gated for the same reason, so the
+// two counterparts are symmetric again: neither constant-time pushdown consults a
+// size or a parallelism gate, and the threshold lives only on
+// [tryBuildParallelCountScan] and [tryBuildParallelAggregateScan], which build
+// genuinely parallel operators.
 //
 // When it fires it installs the same single-column post-aggregation schema as
 // [tryBuildParallelCountScan] via [installCountAggSchema]. Every declined shape
@@ -10716,9 +11232,64 @@ var labelCountScanBuildCount atomic.Uint64
 //     this fast path declines. A Selection between the scan and the aggregate
 //     would change which rows are counted, so excluding it is required for
 //     correctness;
-//   - the parallel count path is enabled and the live node count exceeds the
-//     threshold (delegated to useParallelScan, shared with the full-scan path so
-//     one knob governs every count pushdown).
+//   - the node source is the live whole-graph LPG walker. A morsel walker means
+//     the build is a per-worker rebuild inside a morsel-parallel leaf, whose share
+//     of the rows is NOT the label's count; a foreign walker — the write path's
+//     mutator adapter, a test stub — is not known to describe the graph labelSrc
+//     reads, and a write transaction's own uncommitted changes are not in the
+//     committed label index at all. Both decline to the serial pipeline, which is
+//     what they did before this recogniser existed.
+//
+// # No size gate, and no parallelism gate
+//
+// This recogniser applies NEITHER a cardinality threshold NOR the
+// DisableParallelScan feature flag, and that is deliberate. It used to end with
+// `!useParallelScan(walker, bopts)`, which gated a maintained, constant-time read
+// behind a MORSEL-PARALLELISM threshold, so a bare `MATCH (n:L) RETURN count(n)`
+// on 50 000 or fewer live nodes ran the full serial pipeline. Three separate
+// things were wrong with that coupling (rmp #2654):
+//
+//  1. It contributed nothing to correctness. Exactness is enforced one layer down
+//     and unconditionally. [lpgLabelResolver.ResolveLabelCount] delegates to
+//     [lpg.Graph.LabelCountExact], which is exact-or-nothing: it declines the
+//     moment any label or existence history is live. [exec.LabelCountScan] then
+//     falls back to the cardinality of [lpgLabelResolver.ResolveLabelBitmap] —
+//     LabelBitmapAsOf under this query's pinned snapshot, the SAME snapshot-aware
+//     source [exec.NodeByLabelScan] reads. Neither answer depends on how many
+//     nodes the graph holds or on whether morsel parallelism is enabled, so
+//     neither could be made more correct by a gate on either.
+//  2. There is nothing here to parallelise. [exec.LabelCountScan] spawns no
+//     worker, opens no channel and reads no row, so a threshold asking "is there
+//     enough work to divide between morsels?" answers a question this operator
+//     does not pose. DisableParallelScan is documented as the escape hatch for the
+//     morsel-parallel path; wiring it here made that flag silently turn a labelled
+//     count from O(1) into O(n) — the same defect with a different trigger.
+//  3. It read the wrong cardinality. [useParallelScan] thresholds the WHOLE
+//     GRAPH's live order, not the label's count. MEASURED: 100 :Rare nodes in a
+//     60 000-node graph got the constant-time read while 50 000 :Item nodes in a
+//     50 000-node graph got the full scan — the 500x SMALLER count was the one
+//     answered in O(1). This error class already has a name in this file:
+//     [useParallelScanForRows] exists because gating a labelled scan on graph
+//     order "would spawn workers for a ten-node label in a million-node graph"
+//     (#2187).
+//
+// Dropping the gate is Θ(n) → Θ(1) in time, in bytes AND in allocations. Measured
+// with bench/audit352/labelcount_gate_ab_test.go: the serial arm fits
+// ns = 586.6 + 26.5631·n (R² = 0.999963) and allocs = n − 185.2 (R² = 1.000000),
+// while the pushdown is flat at 1 420 ns / 2 168 B / 29 allocs across a 100x range
+// in n. At n = 50 000 that is 929x the time, 220x the bytes and 1 718x the
+// allocations.
+//
+// [tryBuildAllNodesCountScan], the unlabelled counterpart, is un-gated for the
+// same reason and says so in its own godoc. The asymmetry between the two — an
+// un-gated serial pushdown for the bare shape, a threshold-gated one for the
+// labelled shape — WAS the defect. The threshold still belongs on
+// [tryBuildParallelCountScan] and [tryBuildParallelAggregateScan], which build
+// genuinely parallel operators.
+//
+// The only remaining way to decline by configuration is
+// [buildOpts.labelCountPushdownDisabled], the differential test's control-arm
+// seam.
 //
 // Because [exec.NodeByLabelScan] emits exactly one row per NodeID in the label
 // bitmap with no liveness re-filter, and the count of those rows equals the
@@ -10750,7 +11321,16 @@ func tryBuildLabelCountScan(
 	if agg.Argument != "" && agg.Argument != scan.NodeVar {
 		return nil, false
 	}
-	if !useParallelScan(walker, bopts) {
+	// Only the live whole-graph walker may be answered from the label index. This
+	// is the one half of the deleted useParallelScan call that was load-bearing,
+	// and it is kept as an explicit guard rather than as a side effect of a
+	// threshold — exactly as the unlabelled [tryBuildAllNodesCountScan] does.
+	if lw, ok := walker.(*lpgNodeWalker); !ok || lw.morsel != nil {
+		return nil, false
+	}
+	// The differential test's serial control arm; see
+	// [buildOpts.labelCountPushdownDisabled].
+	if bopts != nil && bopts.labelCountPushdownDisabled {
 		return nil, false
 	}
 
@@ -10895,7 +11475,7 @@ func buildEagerAggregation(
 		return nil, colErr
 	}
 	if colOK {
-		preProj = columnarPre
+		preProj = applyColumnarAggRowBudget(columnarPre, bopts)
 	} else {
 		rowPre, err := exec.NewProject(child, items)
 		if err != nil {
@@ -11268,6 +11848,11 @@ func newAggregationEval(
 	reg expr.FunctionRegistry,
 	bopts *buildOpts,
 ) func(exec.Row) (expr.Value, error) {
+	// Freeze the row layout ONCE, here at plan-build time (#2645). Both arms
+	// below read it — the AST arm walks it per row, the legacy arm resolves
+	// varName against the same snapshot — so the two can never end up consulting
+	// different maps.
+	rs := newRowSchema(schemaSnap)
 	// AST path — always preferred when present.
 	if astExpr != nil {
 		// DEMAND-GATE THE ROW CONTEXT (#1630, extended here to the aggregation
@@ -11302,12 +11887,12 @@ func newAggregationEval(
 			scalarUse = nil
 		}
 		return func(row exec.Row) (expr.Value, error) {
-			rowCtx := buildRowCtxWithUse(row, schemaSnap, g, bopts, scalarUse)
+			rowCtx := buildRowCtxWithUse(row, rs, g, bopts, scalarUse)
 			return evalRow(bopts, astExpr, rowCtx, params, reg)
 		}
 	}
 	// Legacy schema-lookup path.
-	if col, ok := schemaSnap[varName]; ok {
+	if col, ok := rs.cols[varName]; ok {
 		capturedCol := col
 		return func(row exec.Row) (expr.Value, error) {
 			if capturedCol < len(row) {
@@ -11445,6 +12030,21 @@ func validPercentileParam(v expr.Value) (float64, error) {
 	return 0.5, nil
 }
 
+// sortKeyEvalCount counts how many times a compiled ORDER BY key evaluator
+// (the Case-2 closure in [irSortKeys]) has been invoked since process start.
+// Like [labelCountScanBuildCount] it is a process-global, monotonic diagnostic
+// seam read only by the in-package tests; callers snapshot it before and after a
+// query rather than resetting it.
+//
+// It exists because the defect it guards is a COMPLEXITY defect, and no timing
+// measurement can separate O(n) from O(n log n) at the sizes a unit test can
+// afford. Before #2652 [exec.Sort] and [exec.Top] called this closure from
+// inside their comparators, so the count grew as n log n; the
+// decorate-sort-undecorate rewrite calls it exactly once per row per key, so the
+// count grows as n. Doubling n twice must multiply the count by exactly 4, not
+// by 4·(log n′/log n).
+var sortKeyEvalCount atomic.Uint64
+
 // irSortKeys converts a slice of ir.SortItem to exec.SortKey values.
 //
 // Resolution strategy (per item):
@@ -11483,10 +12083,15 @@ func irSortKeys(
 		if si.Expr != nil {
 			// Snapshot the schema and capture all dependencies so the closure
 			// evaluates correctly against the row layout produced by the child.
-			schemaCopy := make(map[string]int, len(schema))
-			for k, v := range schema {
-				schemaCopy[k] = v
-			}
+			schemaCopy := copySchema(schema)
+			// HOIST THE SCHEMA WALK (#2652, the sort-shape share of #2645). The
+			// row layout is a pure function of the snapshotted schema, and the
+			// schema is frozen for the whole execution, so deriving it here rather
+			// than inside the closure removes one slice allocation AND one
+			// slices.SortFunc per invocation. #2645 generalised the same hoist to
+			// every remaining per-row site, so this closure now carries the shared
+			// [rowSchema] and the two paths cannot drift.
+			rs := newRowSchema(schemaCopy)
 			capturedExpr := si.Expr
 			capturedG := g
 			capturedParams := params
@@ -11496,8 +12101,19 @@ func irSortKeys(
 			keys = append(keys, exec.SortKey{
 				Ascending: ascending,
 				Eval: func(row exec.Row) (expr.Value, error) {
-					rowCtx := buildRowCtx(row, schemaCopy, capturedG, capturedBopts)
-					return evalRow(capturedBopts, capturedExpr, rowCtx, capturedParams, capturedReg)
+					// scalarUse is deliberately nil. The value this returns is
+					// RETAINED by [exec.Sort] / [exec.Top] for the whole span of
+					// the sort (decorate-sort-undecorate, #2652), so it must not
+					// borrow a pooled RowContext map or a pooled lazy node, and it
+					// must be a fully materialised value rather than a partial
+					// one. Passing nil selects the fresh-map, fresh-lazy-node arm
+					// of evalRowPooled, which is byte-for-byte the historical
+					// buildRowCtx behaviour.
+					sortKeyEvalCount.Add(1)
+					return evalRowPooled(
+						capturedBopts, capturedExpr, row, rs,
+						capturedG, capturedParams, capturedReg, nil,
+					)
 				},
 			})
 			continue
@@ -12059,6 +12675,34 @@ func resolveCountExpr(e ast.Expression, params map[string]expr.Value, reg expr.F
 	return 0, fmt.Errorf("cypher: SyntaxError.InvalidArgumentType: %s requires an integer, got %T", kind, v)
 }
 
+// topBoundRows is the number of rows [exec.Top] must retain to serve
+// ORDER BY … SKIP offset LIMIT limit: offset+limit, SATURATED at math.MaxInt
+// rather than wrapped, and never thrown on.
+//
+// Saturating is exact here, not merely safe. The sum only fails to fit when
+// offset+limit exceeds math.MaxInt, while the row count the operator is ever
+// allowed to buffer is bounded by [exec.DefaultMaxSortRows] (10 million) — nine
+// orders of magnitude smaller. So whenever saturation happens the LIMIT cannot
+// bind for any input the operator may hold, and a bound that never truncates
+// returns exactly what the LIMIT would have returned.
+//
+// Neo4j spells this Math.addExact and throws on overflow. This engine must not:
+// its pinned pagination contract says a SKIP past the end of the input returns
+// zero rows rather than erroring (internal/sim/surface_order.go). The planner
+// separately refuses to fuse when BOTH bounds are literals and their sum
+// overflows (ir.fusibleTopBound), which is the case it can decide before the
+// parameters are known.
+func topBoundRows(offset, limit int64) int {
+	if offset > math.MaxInt64-limit {
+		return math.MaxInt
+	}
+	sum := offset + limit
+	if sum > math.MaxInt {
+		return math.MaxInt
+	}
+	return int(sum)
+}
+
 // resolveSeekValue resolves p.Value to an expr.Value. If value starts with "$",
 // it is a parameter reference looked up in params. Otherwise it is parsed as a
 // literal (string in single or double quotes, boolean, integer).
@@ -12463,7 +13107,7 @@ func buildUnwindOperator(
 		g = lw.g
 	}
 
-	schemaSnap := copySchema(schema)
+	schemaSnap := newRowSchema(copySchema(schema))
 	listExpr := p.ListExpr
 	capturedParams := params
 	capturedReg := reg
@@ -12922,6 +13566,135 @@ func lazyResolver(bopts *buildOpts, g *lpg.ReadView[string, float64]) expr.NodeR
 	return bopts.nodeResolver
 }
 
+// lazyRelResolver adapts a pinned [lpg.ReadView] to
+// [expr.RelationshipResolver], translating one storage-layer property value to
+// the runtime expr form on demand. One instance is created per query build (see
+// [buildOpts.relResolver]) and shared across every row and every lazily
+// materialised relationship column, so the lazy fast path pays no per-row
+// resolver allocation.
+//
+// It routes by the SAME ladder [buildEdgeProps] applies, decided once per row by
+// [relLazyRoute] and carried in the [expr.RelSource]: a bound parallel instance
+// with a by-handle entry reads THAT instance's own store, everything else reads
+// the per-pair coalesced store. The two are exclusive — there is no fallback
+// between them — so a parallel sibling's value can never leak into the answer.
+//
+// Each lookup observes the same instant the eager materialiser would, because
+// both go through the same pinned read view; the returned value aliases no
+// graph-internal mutable state (lpgPropToExpr copies every kind it converts).
+type lazyRelResolver struct {
+	g *lpg.ReadView[string, float64]
+}
+
+// RelProperty implements [expr.RelationshipResolver]. A missing key returns
+// (nil, false); the caller maps that to Null.
+//
+// Value equivalence with the eager build, per route:
+//
+//   - by-handle — [lpg.ReadView.EdgePropertyByHandle] returns exactly the cell
+//     [lpg.ReadView.EdgePropertiesByHandle] would hold under key (same shard,
+//     same instance bag, same snapshot reconstruction), and lpgPropToExpr is the
+//     same conversion [edgePropsByHandleToExprMap] applies to it.
+//   - per-pair — [lpg.ReadView.GetEdgeProperty] scans the same entry view with
+//     the same bound and the same latest-dst-matching-slot-wins rule that
+//     [lpg.Graph.ForEachEdgePropertyByIDAsOf] streams under, so it selects the
+//     coalesced winner [edgePropsToExprMap] would have recorded last; again the
+//     same lpgPropToExpr converts it.
+//
+// A key whose stored kind maps to Cypher null therefore yields expr.Null here
+// exactly as it would sit under that key in the eager map, so `r.k` reads null
+// either way.
+func (r lazyRelResolver) RelProperty(src expr.RelSource, key string) (expr.Value, bool) {
+	var (
+		pv lpg.PropertyValue
+		ok bool
+	)
+	if src.ByHandle {
+		pv, ok = r.g.EdgePropertyByHandle(src.StartKey, src.EndKey, src.Handle, key)
+	} else {
+		pv, ok = r.g.GetEdgeProperty(src.StartKey, src.EndKey, key)
+	}
+	if !ok {
+		return nil, false
+	}
+	return lpgPropToExpr(pv), true
+}
+
+// lazyRelResolverFor returns the per-build [expr.RelationshipResolver] for g,
+// creating and caching it on bopts on first use. When bopts is nil (call sites
+// that build a RowContext without a buildOpts) a fresh per-call resolver is
+// returned; this is the cold path and never the per-row hot path, which always
+// carries bopts. Mirrors [lazyResolver].
+func lazyRelResolverFor(bopts *buildOpts, g *lpg.ReadView[string, float64]) expr.RelationshipResolver {
+	if bopts == nil {
+		return lazyRelResolver{g: g}
+	}
+	if bopts.relResolver == nil {
+		bopts.relResolver = lazyRelResolver{g: g}
+	}
+	return bopts.relResolver
+}
+
+// relLazyRoute decides whether the bound relationship may be materialised as an
+// [expr.LazyRelationshipValue] instead of a [expr.RelationshipValue] carrying a
+// freshly built property map, and returns the storage coordinates its resolver
+// needs (rmp #2388). It is the relationship counterpart of the gate
+// [upgradeNodeIDToValuePartial] applies to a node.
+//
+// # Which uses are admissible
+//
+// Only a variable whose every dereference is a scalar property read — the
+// value-key branch of [buildEdgeProps] — with NO whole-entity use and NO
+// field-extractor use:
+//
+//   - relUse nil, or needsWholeNode: the entity may escape whole, so it must be
+//     materialised whole. This is the same fail-safe [analyseNodeScalarUse]
+//     documents; the lazy value is admissible ONLY on the non-escaping
+//     expressions the scalarUse gate already restricts.
+//   - hasScalarFnNeed: id/type/startNode/endNode/labels/keys type-switch on a
+//     CONCRETE RelationshipValue, exactly as they do for a node (which is why
+//     [buildPartialNodeValueForFn] exists and returns a concrete value there).
+//   - no value key: the presence-only, keys(r) and field-extractor branches of
+//     [buildEdgeProps] already allocate nothing per row, so there is nothing to
+//     win and no reason to widen the surface.
+//
+// A co-occurring `r:TYPE` predicate (needsLabels) is admissible: the type is
+// resolved eagerly by the caller and carried on the lazy value, so
+// [expr.LazyRelationshipValue] answers a label predicate from the identical
+// string the eager value would.
+//
+// # Which storage routes are admissible
+//
+// The route must be decidable WITHOUT building the by-handle map, or the read
+// the lazy value exists to avoid has already happened. That is exactly the
+// partition [buildEdgeProps]'s ladder already makes, restated:
+//
+//   - handle bound AND a by-handle entry present — useByHandle is true
+//     regardless of the map's contents, so the route is known for free and the
+//     resolver reads the per-instance store.
+//   - no handle, or the graph never recorded a by-handle edge property — the
+//     by-handle map is provably empty (the latch's false is exact, rmp #2387),
+//     so useByHandle is false for free and the resolver reads the per-pair store.
+//   - handle bound, no by-handle entry, latch set — the ladder genuinely needs
+//     len(byHandle) > 0 to decide. Bail: the caller then takes today's eager
+//     path unchanged, including that probe.
+//
+// The latch is read under exactly the conditions [buildEdgeProps] reads it, so
+// this decision costs the same probes the eager path would have paid.
+func relLazyRoute(g *lpg.ReadView[string, float64], stKey, enKey string, fwdHandle uint64, hasByHandleEntry bool, relUse *nodeScalarUse) (expr.RelSource, bool) {
+	if relUse == nil || relUse.needsWholeNode || relUse.hasScalarFnNeed() || len(relUse.keys) == 0 {
+		return expr.RelSource{}, false
+	}
+	switch {
+	case fwdHandle != 0 && hasByHandleEntry:
+		return expr.RelSource{StartKey: stKey, EndKey: enKey, Handle: fwdHandle, ByHandle: true}, true
+	case fwdHandle == 0 || !g.AnyEdgeHandlePropertyEverWritten():
+		return expr.RelSource{StartKey: stKey, EndKey: enKey}, true
+	default:
+		return expr.RelSource{}, false
+	}
+}
+
 // upgradeNodeIDToValuePartial is the lazy counterpart of [upgradeNodeIDToValue].
 // Instead of eagerly copying the node's touched properties into a fresh
 // [expr.MapValue] and boxing a full [expr.NodeValue] per row, it produces an
@@ -13203,8 +13976,8 @@ func buildPathValueFromVLEMeta(row exec.Row, pmeta pathVarInfo, g *lpg.ReadView[
 // `r[0].type` operate on the documented openCypher list-of-relationships
 // shape rather than on the raw alternating path encoding emitted by
 // VarLengthExpand.
-func buildRowCtx(row exec.Row, schema map[string]int, g *lpg.ReadView[string, float64], bopts *buildOpts) expr.RowContext {
-	return buildRowCtxWithUse(row, schema, g, bopts, nil)
+func buildRowCtx(row exec.Row, rs rowSchema, g *lpg.ReadView[string, float64], bopts *buildOpts) expr.RowContext {
+	return buildRowCtxWithUse(row, rs, g, bopts, nil)
 }
 
 // buildRowCtxWithUse is the lazy-aware core of [buildRowCtx]. When scalarUse is
@@ -13222,14 +13995,27 @@ func buildRowCtx(row exec.Row, schema map[string]int, g *lpg.ReadView[string, fl
 //
 // A variable flagged needsWholeNode (or any variable when the analysis bailed)
 // falls back to the full eager upgrade, so semantics are preserved exactly.
-// scalarUse therefore MUST NOT be supplied by any caller whose RowContext value
-// can flow into a result row (e.g. the projection general path), because a
-// partially-materialised node would serialise a truncated property map.
-func buildRowCtxWithUse(row exec.Row, schema map[string]int, g *lpg.ReadView[string, float64], bopts *buildOpts, scalarUse map[string]*nodeScalarUse) expr.RowContext {
-	ctx := make(expr.RowContext, len(schema))
+//
+// The invariant is PER VARIABLE, not per caller. An earlier form of this comment
+// said scalarUse "MUST NOT be supplied by any caller whose RowContext value can
+// flow into a result row", which is coarser than what the code relies on and is
+// already contradicted by newAggregationEval: it supplies a use on a path whose
+// value DOES flow into the projected row. What actually has to hold is that a
+// variable whose value can flow WHOLE into a result row is not gated — and that
+// is exactly what needsWholeNode records. Omitting a variable, and gating one
+// used only through scalar shapes, are sound on any caller.
+//
+// Enforcement lives at two points, and both must keep the needsWholeNode term:
+// [upgradeNodeIDToValuePartial] for nodes, and [relLazyRoute] for relationships,
+// whose needsWholeNode check is the ONLY thing standing between collect(r) and a
+// partially-materialised relationship in a result row. Such a value would not
+// merely serialise a truncated property map: it also carries a reference to the
+// pinned ReadView past the query's visibility barrier.
+func buildRowCtxWithUse(row exec.Row, rs rowSchema, g *lpg.ReadView[string, float64], bopts *buildOpts, scalarUse map[string]*nodeScalarUse) expr.RowContext {
+	ctx := make(expr.RowContext, rs.width)
 	// arena nil: this path allocates a fresh map (escaping/eager callers) and so
 	// must allocate fresh lazy nodes too — no reuse, no pooled lifecycle.
-	populateRowCtx(ctx, row, newSchemaWalk(schema), g, bopts, scalarUse, nil)
+	populateRowCtx(ctx, row, rs.walk, g, bopts, scalarUse, nil)
 	return ctx
 }
 
@@ -13353,22 +14139,15 @@ func releaseRowCtx(p *pooledRowCtx) {
 // scalarUse is nil it falls back to a freshly allocated RowContext (the
 // historical behaviour), preserving exact semantics. It is the shared body of
 // the non-escaping Filter-predicate and scalar-projection evaluation closures.
-func evalRowPooled(bopts *buildOpts, e ast.Expression, row exec.Row, schema map[string]int, g *lpg.ReadView[string, float64], params map[string]expr.Value, reg expr.FunctionRegistry, scalarUse map[string]*nodeScalarUse) (expr.Value, error) {
-	return evalRowPooledWalk(bopts, e, row, newSchemaWalk(schema), len(schema), g, params, reg, scalarUse)
-}
-
-// evalRowPooledWalk is [evalRowPooled] for a caller that already derived the
-// schema walk once for the whole execution, which is where it belongs: the walk
-// is a pure function of the schema and rebuilding it per row was measurable.
-func evalRowPooledWalk(bopts *buildOpts, e ast.Expression, row exec.Row, walk schemaWalk, width int, g *lpg.ReadView[string, float64], params map[string]expr.Value, reg expr.FunctionRegistry, scalarUse map[string]*nodeScalarUse) (expr.Value, error) {
+func evalRowPooled(bopts *buildOpts, e ast.Expression, row exec.Row, rs rowSchema, g *lpg.ReadView[string, float64], params map[string]expr.Value, reg expr.FunctionRegistry, scalarUse map[string]*nodeScalarUse) (expr.Value, error) {
 	if scalarUse == nil {
-		ctx := make(expr.RowContext, width)
-		populateRowCtx(ctx, row, walk, g, bopts, nil, nil)
+		ctx := make(expr.RowContext, rs.width)
+		populateRowCtx(ctx, row, rs.walk, g, bopts, nil, nil)
 		return evalRow(bopts, e, ctx, params, reg)
 	}
-	p := acquireRowCtx(width)
+	p := acquireRowCtx(rs.width)
 	defer releaseRowCtx(p)
-	populateRowCtx(p.ctx, row, walk, g, bopts, scalarUse, p)
+	populateRowCtx(p.ctx, row, rs.walk, g, bopts, scalarUse, p)
 	return evalRow(bopts, e, p.ctx, params, reg)
 }
 
@@ -13659,13 +14438,40 @@ func slotHoldsHandle(g *lpg.ReadView[string, float64], srcID, dstID graph.NodeID
 // row. With relUse nil — or carrying any value key — the property map is built
 // in full from EdgeProperties exactly as before, so non-gated callers are
 // byte-identical (C5).
-func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.ReadView[string, float64], bopts *buildOpts, relUse *nodeScalarUse) (expr.RelationshipValue, bool) {
+//
+// LAZY RETURN (rmp #2388). When relUse marks the edge's reads as VALUE-KEY-ONLY
+// scalar accesses — and only then, and only on a storage route [relLazyRoute]
+// can decide without materialising the by-handle map — the return is an
+// [*expr.LazyRelationshipValue] instead: the identity fields the eager build
+// already computed (id, storage endpoints, type), plus a resolver that reads
+// each touched property from the SAME store on demand. That removes the per-row
+// property map entirely. The gate is [relLazyRoute]'s, which is the scalarUse
+// gate: a lazy value is admissible only where a partially materialised value is,
+// so it can never reach a result row. Every other shape returns the eager
+// [expr.RelationshipValue] exactly as before, which is why the return type is
+// expr.Value rather than expr.RelationshipValue.
+//
+// The lazy value is allocated fresh per row rather than drawn from the pooled
+// RowContext's struct arena, the way the lazy NODE value is. That is a MEASURED
+// choice, not an oversight: an arena variant was built and interleaved against
+// this one, and it made the pooled path no faster (the predicate query moved
+// -5.44% without it against -5.51% with it, a difference inside the measured
+// noise floor) while growing [pooledRowCtx] past one cache line, which cost a
+// reproducible ~1.7% on an unrelated aggregation that binds no relationship at
+// all. Allocating one small immutable struct also keeps the value free of the
+// single-goroutine ownership contract a reused struct would carry. See the
+// #2388 measurement record.
+func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.ReadView[string, float64], bopts *buildOpts, relUse *nodeScalarUse) (expr.Value, bool) {
+	// The oracle for "the relationship is resolved once per row" (#2658): one count
+	// per mapper-resolution + [relStoredInverted] + by-handle-routing pass. Gated,
+	// so it costs a predicted branch when off — see [projFusionCountersOn].
+	countRelRowBind()
 	if meta.edgeCol >= len(row) {
-		return expr.RelationshipValue{}, false
+		return nil, false
 	}
 	edgeIDVal, ok := row[meta.edgeCol].(expr.IntegerValue)
 	if !ok {
-		return expr.RelationshipValue{}, false
+		return nil, false
 	}
 	var srcID, dstID uint64
 	if meta.srcCol < len(row) {
@@ -13772,6 +14578,14 @@ func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.ReadVi
 			}
 			if len(ets) > 0 {
 				edgeType = pickEdgeType(ets, meta.acceptedTypes)
+			}
+			// Lazy relationship (rmp #2388): every field below is already
+			// resolved, so when the use is value-key-only the property map is
+			// the ONLY thing left to build — and the lazy value builds it never.
+			// Falls through to the eager map on every shape the gate rejects.
+			if relSrc, lazyOK := relLazyRoute(g, stKey, enKey, fwdHandle, hasByHandleEntry, relUse); lazyOK {
+				return expr.NewLazyRelationshipValue(uint64(edgeIDVal), storageStart, storageEnd,
+					edgeType, relSrc, lazyRelResolverFor(bopts, g)), true
 			}
 			edgeProps = buildEdgeProps(g, stKey, enKey, fwdHandle, hasByHandleEntry, relUse)
 		}
@@ -14429,6 +15243,18 @@ func buildIRProjection(
 	// integer property (Return4 [3]).
 	inputSchema := copySchema(schema)
 	_ = inputSchema // referenced below in fast-path branches
+	// generalSnap is ONE schema snapshot shared by every general-path item in this
+	// body, built on the first item that needs it. Every such item resolves against
+	// the SAME input layout — the loop below does not touch the schema map, its
+	// per-item update being deferred to the post-projection reset — so the per-item
+	// copies this replaces were N copies of one map. Lazy, so a projection made
+	// entirely of fast-path items still snapshots nothing.
+	var generalSnap rowSchema
+	var generalSnapReady bool
+	// fusable collects the general-path items — the only ones that build a row
+	// context — so the fusion decision can be taken after the pass, when every
+	// item's materialisation analysis is known. See projection_fusion.go (#2658).
+	var fusable []fusableProjItem
 	for i, item := range items {
 		name := item.Name
 		exprStr := item.Expression
@@ -15021,7 +15847,11 @@ func buildIRProjection(
 			}
 			if evalFn == nil {
 				// General path: evaluate full AST expression with loaded RowContext.
-				schemaSnap := copySchema(schema)
+				if !generalSnapReady {
+					generalSnap = newRowSchema(copySchema(schema))
+					generalSnapReady = true
+				}
+				schemaSnap := generalSnap
 				capturedExpr := item.Expr
 				capturedG := g
 				capturedParams := params
@@ -15050,7 +15880,12 @@ func buildIRProjection(
 				if projectsWholeNode {
 					scalarUse = nil
 				}
+				// scalarUse is now the GATED analysis — exactly what this item's
+				// closure hands populateRowCtx — which is what the fusion union
+				// must be built from (#2658).
+				fusable = append(fusable, fusableProjItem{idx: i, expr: capturedExpr, use: scalarUse})
 				evalFn = func(row exec.Row) (expr.Value, error) {
+					countProjRowCtxBuild()
 					return evalRowPooled(capturedBopts, capturedExpr, row, schemaSnap, capturedG, capturedParams, capturedReg, scalarUse)
 				}
 			}
@@ -15171,6 +16006,22 @@ func buildIRProjection(
 	for k, v := range keep {
 		schema[k] = v
 	}
+	// Projection fusion (rmp #2658): give every general-path item ONE shared
+	// per-row [expr.RowContext] instead of one each, so a body that reads two
+	// properties off the same bound entity resolves that entity once per ROW rather
+	// than once per COLUMN. The replacement closures are installed BEFORE the
+	// columnar builders below, because those capture [exec.ProjectionItem.Eval] by
+	// value as their per-row fallback and would otherwise capture the unfused one.
+	// Declines — leaving the body exactly as the loop built it — below two
+	// general-path items, and whenever the shared materialisation level would
+	// demote any single item; see projection_fusion.go.
+	var projBinder exec.RowBinder
+	if binder, fns := newProjRowBinder(fusable, generalSnap, g, params, reg, bopts); binder != nil {
+		for k := range fusable {
+			projItems[fusable[k].idx].Eval = fns[k]
+		}
+		projBinder = binder
+	}
 	// Late-materialisation columnar projection (#1704 P2, #1823): when EVERY item
 	// is a plain scalar-property access on a bound node, build a [exec.ColumnarProject]
 	// that fills a typed Chunk and boxes only at the sink. Each filler carries the
@@ -15186,7 +16037,7 @@ func buildIRProjection(
 	if columnarProj, ok, cErr := tryBuildColumnarProjection(items, projItems, child, inputSchema, g, bopts); cErr != nil {
 		return nil, cErr
 	} else if ok {
-		return columnarProj, nil
+		return attachProjRowBinder(columnarProj, projBinder), nil
 	}
 	// Late-materialisation columnar SCALAR-COLUMN passthrough (#2045): when EVERY
 	// item is a plain variable naming a scalar column the columnar child already
@@ -15200,13 +16051,36 @@ func buildIRProjection(
 	if passthrough, ok, pErr := tryBuildColumnarScalarPassthrough(items, projItems, child, inputSchema, bopts); pErr != nil {
 		return nil, pErr
 	} else if ok {
-		return passthrough, nil
+		return attachProjRowBinder(passthrough, projBinder), nil
 	}
 	p, err := exec.NewProject(child, projItems)
 	if err != nil {
 		return nil, err
 	}
-	return applyProjectionRowBudget(p, bopts), nil
+	return attachProjRowBinder(applyProjectionRowBudget(p, bopts), projBinder), nil
+}
+
+// attachProjRowBinder installs b on the projection operator op, so op brackets
+// every per-row item loop it drives with one shared binding context (#2658).
+//
+// It type-switches rather than taking a concrete type because buildIRProjection
+// returns three shapes — a plain [exec.Project], a [exec.ColumnarProject], and a
+// columnar scalar passthrough (also a ColumnarProject) — and all three drive the
+// same [exec.ProjectionItem] closures row-at-a-time. A nil b is the "not fused"
+// case and leaves op untouched. Anything else is returned unchanged: the profiler
+// wrapper is applied later, by buildOperator's single wrap point, so no wrapped
+// operator reaches this function.
+func attachProjRowBinder(op exec.Operator, b exec.RowBinder) exec.Operator {
+	if b == nil {
+		return op
+	}
+	switch p := op.(type) {
+	case *exec.ColumnarProject:
+		p.WithRowBinder(b)
+	case *exec.Project:
+		p.WithRowBinder(b)
+	}
+	return op
 }
 
 // tryBuildColumnarProjection builds a [exec.ColumnarProject] for a projection all
@@ -15400,12 +16274,20 @@ func tryBuildColumnarFilterChain(
 	// Committed: build the chain. buildOperator sets schema[scanVar]=0; the filter
 	// preserves the schema; buildIRProjection installs the projection output layout
 	// and — seeing a NodeIDColumnProducer child — selects the chunk-input path.
+	undo := snapshotBuildState(schema, bopts)
 	scanOp, err := buildOperator(sel.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, nil, bopts)
 	if err != nil {
 		return nil, false, err
 	}
+	// A CAPABILITY assertion, so it survives the PROFILE wrapper by construction
+	// ([exec.Profiler.Wrap] re-implements NodeIDColumnProducer). It still has to put
+	// the builder state back on the way out: buildOperatorRec re-builds this same
+	// subtree, and a build stacked on the columns this one recorded returns zero rows
+	// without an error — see [buildStateSnapshot].
 	scanCP, isCP := scanOp.(exec.NodeIDColumnProducer)
-	if !isCP {
+	if !isCP || bopts.forceColumnarChainDecline {
+		undo.restore(schema, bopts)
+		closeProbe(scanOp)
 		return nil, false, nil
 	}
 	predFn := newRowPredicate(sel.PredicateExpr, schema, g, params, reg, bopts)
@@ -15539,17 +16421,31 @@ func tryBuildColumnarExpandFilterChain(
 	// Expand column-major. The Expand build over a single-node scan always yields a
 	// *exec.Expand whose child is the scan (a NodeIDColumnProducer), so
 	// NewColumnarExpand succeeds; a defensive fall-through keeps correctness if either
-	// invariant does not hold.
+	// invariant does not hold — and it RESTORES the builder state the build already
+	// mutated, because the caller re-builds this same subtree from scratch (see
+	// [buildStateSnapshot]).
+	undo := snapshotBuildState(schema, bopts)
 	expandOp, err := buildOperator(base, walker, labelSrc, reg, params, schema, idxMgr, procReg, nil, bopts)
 	if err != nil {
 		return nil, false, err
 	}
-	expandExec, isExpandExec := expandOp.(*exec.Expand)
-	if !isExpandExec {
+	// UNWRAP before the concrete-type assertion. Under PROFILE buildOperator returns
+	// the Expand behind a profiling wrapper, and no wrapper is an *exec.Expand: the
+	// assertion failed, this recogniser declined, and PROFILE rendered a row-mode
+	// plan — a DIFFERENT plan from the one EXPLAIN shows and the one Run executes
+	// (rmp #2665). [exec.Profiler.Wrap] preserves every interface an operator
+	// exposes but cannot preserve its concrete type, so a recogniser that needs the
+	// type asks for the operator itself and re-instruments what it substitutes.
+	expandExec, isExpandExec := exec.UnwrapProfiled(expandOp).(*exec.Expand)
+	if !isExpandExec || bopts.forceColumnarChainDecline {
+		undo.restore(schema, bopts)
+		closeProbe(expandOp)
 		return nil, false, nil
 	}
 	colExp, wrapped := exec.NewColumnarExpand(expandExec)
 	if !wrapped {
+		undo.restore(schema, bopts)
+		closeProbe(expandOp)
 		return nil, false, nil
 	}
 	rowPreds := make([]func(exec.Row) (expr.Value, error), len(predsInner))
@@ -15558,12 +16454,239 @@ func tryBuildColumnarExpandFilterChain(
 		rowPreds[i] = newRowPredicate(pe, schema, g, params, reg, bopts)
 		cpreds[i], _ = buildColumnarExpandPredicate(pe, schema, g, params, reg, bopts)
 	}
-	filter := exec.NewColumnarFilter(colExp, chainRowPredicates(rowPreds), makeColumnarConjunctionPredicate(cpreds))
+	// Re-instrument the columnar presentation. The wrapper [exec.UnwrapProfiled]
+	// discarded above was measuring the row-mode Expand this chain does not run, so
+	// without this the traversal node would render "(not measured)" under PROFILE.
+	// profileIntermediateChunk hands back a ChunkProducer, so the substitution needs
+	// no type assertion and grows no branch that cannot be exercised.
+	filter := exec.NewColumnarFilter(profileIntermediateChunk(bopts, colExp),
+		chainRowPredicates(rowPreds), makeColumnarConjunctionPredicate(cpreds))
 	projOp, err := buildIRProjection(proj.Items, profileIntermediate(bopts, filter), schema, g, params, reg, bopts)
 	if err != nil {
 		return nil, false, err
 	}
 	return projOp, true, nil
+}
+
+// tryBuildColumnarAggSource builds the columnar READ SOURCE for an
+// [ir.EagerAggregation] whose child subtree is `Selection+ → single-node scan` or
+// `Selection+ → Expand → single-node scan`, returning an [exec.ColumnarFilter] — a
+// [exec.NodeIDColumnProducer] — in place of the row [exec.Filter] the ordinary
+// [buildOperator] would build (#2655 F1). It returns (op, true, nil) on a match,
+// (nil, false, nil) to fall through to the ordinary child build, or (nil, false, err)
+// on a build error.
+//
+// WHY IT HAS TO EXIST AT ALL. [tryBuildColumnarAggInput] requires the aggregation's
+// child to be a [exec.ChunkProducer]. The two recognisers that DO build an
+// [exec.ColumnarFilter] — [tryBuildColumnarFilterChain] and
+// [tryBuildColumnarExpandFilterChain] — dispatch only from `case *ir.Projection` and
+// additionally require every projection item to be a scalar node property, which an
+// AGGREGATING projection never is. So under an aggregate the child was always the row
+// [exec.Filter], the columnar pre-projection always declined, and the whole aggregate
+// fell back to the fully boxed row pipeline: the columnar chain was structurally
+// unreachable from under an aggregate.
+//
+// MEASURED, 50 000 :Person, GOMAXPROCS=1, interleaved A/B of two binaries built from
+// the same tree, medians of three rounds, against a 2.3% noise floor:
+// `MATCH (n:Person) WHERE n.age > x RETURN count(n)` went 199.04 -> 74.16 ns/node
+// (-62.7%). The same scan+filter SHIPPING 24 999 rows costs 110.20, so the
+// aggregating form is now CHEAPER than the shipping form (0.67x) where before it was
+// 1.83x DEARER — which is the ordering the shapes should have had all along. A
+// four-arm decomposition on the same run shows the two halves are jointly necessary
+// and separately worthless: this recogniser alone, with the pre-projection still
+// consuming its child row-at-a-time, measured 193.79 ns/node — inside the noise of
+// HEAD — because a ColumnarFilter pulled through Next IS the row Filter. The win
+// arrives only once [tryBuildColumnarAggInput] also takes its chunk input.
+//
+// EVERY DECLINE OF THE TWO WORKING RECOGNISERS IS CARRIED OVER, because each of them
+// yields to a plan that removes ROWS where columnar execution removes only a CONSTANT
+// FACTOR from each row, and a cardinality reduction outranks a constant factor
+// unconditionally: the index-seek probe (#2204), the min-cardinality label re-anchor
+// (#2077), the set-at-a-time label intersection (#2133), the unclaimed seek hint
+// (#2183) and the single-edge anchor swap (#2090). The seek-hint and anchor-swap
+// declines are applied on BOTH arms here, where [tryBuildColumnarFilterChain] applies
+// them on neither; declining more can only cost this path a shape, never a result.
+//
+// Like both of them it pre-checks against a hypothetical schema BEFORE building, so a
+// non-match never half-mutates the real schema, and it restores the builder state on
+// every post-build fall-through ([snapshotBuildState]). Once committed, the leaf is
+// built through the SAME [buildOperator] the serial path uses and the filter's boxed
+// row predicate is the SAME [newRowPredicate] closure the [exec.Filter] would have
+// carried, so a row the unboxed fast path cannot decide is decided byte-identically.
+//
+// It is safe to fire even when [tryBuildColumnarAggInput] later declines the chunk
+// pre-projection: [exec.ColumnarFilter] embeds its [exec.Filter] BY VALUE, so driven
+// row-at-a-time it IS that Filter, at the same one allocation.
+func tryBuildColumnarAggSource(
+	plan ir.LogicalPlan,
+	walker nodeWalkerIface,
+	labelSrc labelResolverIface,
+	reg expr.FunctionRegistry,
+	params map[string]expr.Value,
+	schema map[string]int,
+	idxMgr *index.Manager,
+	procReg *procs.Registry,
+	bopts *buildOpts,
+) (exec.Operator, bool, error) {
+	if bopts == nil || len(schema) != 0 {
+		// A non-empty schema means the scan would not bind at column 0, breaking the
+		// chunk-column ⇔ row-column alignment the chain relies on; fall back.
+		return nil, false, nil
+	}
+	lw, ok := walker.(*lpgNodeWalker)
+	if !ok || lw.g == nil || lw.morsel != nil {
+		return nil, false, nil
+	}
+	g := lw.g
+	if _, isSel := plan.(*ir.Selection); !isSel {
+		return nil, false, nil
+	}
+	// Peel the Selection stack and treat it as one fused conjunction, exactly as
+	// [tryBuildColumnarExpandFilterChain] does: the IR translator emits a separate
+	// Selection per pattern predicate. innermost is the one whose child is the leaf —
+	// the ONLY one buildOperator's Selection-level rewrites can fire on, since every
+	// one of them requires the child to be a scan or an *ir.Apply — so it is the one
+	// the access-path declines below are evaluated against.
+	var predsInner []ast.Expression
+	var innermost *ir.Selection
+	base := plan
+	for {
+		cur, isSelection := base.(*ir.Selection)
+		if !isSelection {
+			break
+		}
+		// A predicate-less Selection is a pass-through the chain cannot represent, and
+		// a seek-hinted one is meant to be DROPPED by buildOperator rather than
+		// evaluated (#2183); decline both rather than change what they mean.
+		if cur.PredicateExpr == nil || bopts.seekHint[cur] {
+			return nil, false, nil
+		}
+		// The anchor swap re-roots the traversal on the cheaper endpoint, which reduces
+		// CARDINALITY (#2090). Columnar execution only removes a constant factor, so it
+		// must never pre-empt the swap.
+		if len(bopts.anchorSwap) > 0 {
+			if site, isSite := matchAnchorSite(cur); isSite && bopts.anchorSwap[site.exp] {
+				return nil, false, nil
+			}
+		}
+		predsInner = append(predsInner, cur.PredicateExpr)
+		innermost = cur
+		base = cur.Child
+	}
+	// Reverse into evaluation order (innermost Selection runs first).
+	for i, j := 0, len(predsInner)-1; i < j; i, j = i+1, j-1 {
+		predsInner[i], predsInner[j] = predsInner[j], predsInner[i]
+	}
+
+	// Arm selection: the leaf is either the scan itself or an Expand over one.
+	var expandArm *ir.Expand
+	scanVar, isScan := columnarScanVar(base)
+	if !isScan {
+		exp, isExp := base.(*ir.Expand)
+		if !isExp {
+			return nil, false, nil
+		}
+		if scanVar, isScan = columnarScanVar(exp.Child); !isScan {
+			return nil, false, nil
+		}
+		expandArm = exp
+	}
+
+	// Pre-check against a hypothetical schema so a non-match never mutates the real
+	// one. The scan binds at column 0; the Expand additionally emits its far endpoint
+	// at column 3 (scanVar || __dup, rel, to), and omitting the relationship slot makes
+	// a relationship-property predicate reject naturally.
+	tmpSchema := map[string]int{scanVar: 0}
+	matchPred := buildColumnarPredicate
+	if expandArm != nil {
+		if expandArm.ToVar != "" {
+			tmpSchema[expandArm.ToVar] = 3
+		}
+		matchPred = buildColumnarExpandPredicate
+	} else {
+		// SCAN ARM ONLY — the access-path declines. An index seek is sublinear in the
+		// label population where the columnar chain is linear in it (#2204); the
+		// min-label re-anchor (#2077) and the label intersection (#2133) each reduce the
+		// rows SCANNED. All three are evaluated read-only against the innermost
+		// Selection, the one buildOperator would rewrite.
+		if indexSeekWouldFire(innermost, walker, params, schema, idxMgr, bopts) {
+			return nil, false, nil
+		}
+		if bopts.minLabelScanEnabled {
+			if _, _, _, wouldReanchor := pickMinLabel(innermost, labelSrc); wouldReanchor {
+				return nil, false, nil
+			}
+		}
+		if bopts.bitmapIntersectEnabled {
+			if counter, canCount := labelSrc.(labelCardinalitySource); canCount {
+				if _, _, wouldIntersect := pickLabelIntersection(innermost, labelSrc, counter); wouldIntersect {
+					return nil, false, nil
+				}
+			}
+		}
+	}
+	for _, pe := range predsInner {
+		if _, matched := matchPred(pe, tmpSchema, g, params, reg, bopts); !matched {
+			return nil, false, nil
+		}
+	}
+
+	// Committed: build the leaf through the normal builder, populating schema and the
+	// edge/path metadata identically to the serial path.
+	undo := snapshotBuildState(schema, bopts)
+	leafOp, err := buildOperator(base, walker, labelSrc, reg, params, schema, idxMgr, procReg, nil, bopts)
+	if err != nil {
+		return nil, false, err
+	}
+	var source exec.ChunkProducer
+	if expandArm != nil {
+		// UNWRAP before the concrete-type assertion: under PROFILE buildOperator returns
+		// the Expand behind a wrapper, and no wrapper is an *exec.Expand (rmp #2665).
+		expandExec, isExpandExec := exec.UnwrapProfiled(leafOp).(*exec.Expand)
+		if !isExpandExec || bopts.forceColumnarChainDecline {
+			undo.restore(schema, bopts)
+			closeProbe(leafOp)
+			return nil, false, nil
+		}
+		colExp, wrapped := exec.NewColumnarExpand(expandExec)
+		if !wrapped {
+			undo.restore(schema, bopts)
+			closeProbe(leafOp)
+			return nil, false, nil
+		}
+		// Re-instrument the columnar presentation: the wrapper discarded above was
+		// measuring the row-mode Expand this chain does not run.
+		source = profileIntermediateChunk(bopts, colExp)
+	} else {
+		// A CAPABILITY assertion, so it survives the PROFILE wrapper by construction
+		// ([exec.Profiler.Wrap] re-implements NodeIDColumnProducer).
+		scanCP, isCP := leafOp.(exec.NodeIDColumnProducer)
+		if !isCP || bopts.forceColumnarChainDecline {
+			undo.restore(schema, bopts)
+			closeProbe(leafOp)
+			return nil, false, nil
+		}
+		source = scanCP
+	}
+
+	rowPreds := make([]func(exec.Row) (expr.Value, error), len(predsInner))
+	cpreds := make([]exec.ChunkPredicate, len(predsInner))
+	for i, pe := range predsInner {
+		rowPreds[i] = newRowPredicate(pe, schema, g, params, reg, bopts)
+		cpreds[i], _ = matchPred(pe, schema, g, params, reg, bopts)
+	}
+	var cpred exec.ChunkPredicate
+	if len(cpreds) == 1 {
+		cpred = cpreds[0]
+	} else {
+		cpred = makeColumnarConjunctionPredicate(cpreds)
+	}
+	filter := exec.NewColumnarFilter(source, chainRowPredicates(rowPreds), cpred)
+	// The filter is an INTERMEDIATE: buildOperator's single wrap point returns the
+	// aggregation above it, never this, so it instruments itself or renders as
+	// "(not measured)" under PROFILE. Wrap preserves NodeIDColumnProducer, which
+	// [tryBuildColumnarAggInput] asserts against.
+	return profileIntermediate(bopts, filter), true, nil
 }
 
 // projItems are the already-built row-at-a-time items; each item's Eval is reused
@@ -15734,6 +16857,14 @@ func tryBuildColumnarAggInput(
 	_, isNodeIDProducer := child.(exec.NodeIDColumnProducer)
 
 	fillers := make([]exec.ColumnFiller, len(items))
+	// chunkFillers is the parallel CHUNK-INPUT extractor set (#2655 F2): with one for
+	// EVERY item the pre-projection pulls its child column-major and never boxes the
+	// child's row at all, exactly as the shipping projection has done since #1704 P3.
+	// chunkOK goes false the moment one item has no unboxed extractor, and the whole
+	// pre-projection then keeps the byte-identical row-input path — an all-or-nothing
+	// gate, because [exec.ColumnarProject.WithChunkInput] takes one filler per item.
+	chunkFillers := make([]exec.ChunkColumnFiller, len(items))
+	chunkOK := isNodeIDProducer
 
 	// Grouping-key items occupy positions 0..len(GroupBy)-1.
 	for i := range p.GroupBy {
@@ -15744,10 +16875,17 @@ func tryBuildColumnarAggInput(
 		if isNodeIDProducer {
 			if nodeCol, propName, ok := aggNodePropertyItem(keyExpr, schemaSnap, bopts); ok {
 				fillers[i] = buildScalarPropertyFiller(nodeCol, propName, g, items[i].Eval)
+				chunkFillers[i] = buildScalarPropertyChunkFiller(nodeCol, propName, g, items[i].Eval)
 				continue
 			}
 			if aggKeyBareVar(keyExpr, schemaSnap) {
 				fillers[i] = evalPutColumnFiller(items[i].Eval)
+				// A bare variable grouping key BOXES: the key value is retained and
+				// emitted as an output column, so it must be exactly what the row eval
+				// produces (a NodeValue for a node variable), never the raw id. There is
+				// no unboxed extractor for that, so the whole pre-projection stays on the
+				// row-input path.
+				chunkOK = false
 				continue
 			}
 			return nil, false, nil // non-eligible grouping-key shape → row path
@@ -15770,25 +16908,126 @@ func tryBuildColumnarAggInput(
 			return nil, false, nil // property arg needs a NodeID child → row path
 		}
 		pos := len(p.GroupBy) + j
+		if p.Aggregates[j].Argument == "" {
+			// count(*): the row eval is the constant non-null sentinel
+			// expr.BoolValue(true) (see aggArgItem), which [exec.Chunk.PutValue] routes
+			// to PutBool. The chunk filler writes that same bool directly, reading
+			// nothing at all — and countStarKernel ignores the column's VALUES
+			// entirely, consulting only the row count.
+			fillers[pos] = evalPutColumnFiller(items[pos].Eval)
+			chunkFillers[pos] = constTrueChunkFiller()
+			continue
+		}
 		// A `node.prop` argument over a NodeID-emitting child reads the property
 		// straight off the raw NodeID and lands it UNBOXED in the chunk's typed
 		// column — the same filler, and the same byte-identical row-eval fallback,
 		// the grouping key above already uses (#2185). Every other admitted argument
 		// shape (count(*)'s sentinel, a bare variable) keeps the boxed row evaluator.
-		if isNodeIDProducer && p.Aggregates[j].Argument != "" {
+		if isNodeIDProducer {
 			if nodeCol, propName, ok := aggNodePropertyItem(p.Aggregates[j].ArgumentExpr, schemaSnap, bopts); ok {
 				fillers[pos] = buildScalarPropertyFiller(nodeCol, propName, g, items[pos].Eval)
+				chunkFillers[pos] = buildScalarPropertyChunkFiller(nodeCol, propName, g, items[pos].Eval)
+				continue
+			}
+			if nodeCol, ok := aggCountBareNodeVar(&p.Aggregates[j], schemaSnap, bopts); ok {
+				fillers[pos] = evalPutColumnFiller(items[pos].Eval)
+				chunkFillers[pos] = buildNodeIDPresenceChunkFiller(nodeCol, items[pos].Eval)
 				continue
 			}
 		}
 		fillers[pos] = evalPutColumnFiller(items[pos].Eval)
+		chunkOK = false
 	}
 
 	cp, err := exec.NewColumnarProject(child, items, fillers)
 	if err != nil {
 		return nil, false, err
 	}
+	// Chunk-input fast path (#2655 F2). Every receiver's CHUNK column equals its
+	// ROW-SCHEMA column, because an [exec.NodeIDColumnProducer]'s chunk layout mirrors
+	// the schema — the same identity [tryBuildColumnarProjection] relies on for the
+	// shipping path — so a receiver at schema column c is read at chunk column c.
+	//
+	// MEASURED in isolation on the shape that already reached here before #2655 — a
+	// BARE scan, `MATCH (n:Person) RETURN count(n.age)`, 50 000 nodes, GOMAXPROCS=1:
+	// 77.63 ns/node at HEAD, 80.44 with the pre-projection's new byte guard and this
+	// path disabled, 77.68 with both. So on that shape this buys 3.5%, which is what
+	// the guard costs, and the net is nil. Its value is the OTHER shape: under
+	// [tryBuildColumnarAggSource] the same wiring is what turns a 199 ns/node
+	// aggregate into a 74 ns/node one, because there the child it consumes is a
+	// ColumnarFilter whose row-at-a-time path is the boxed Filter.
+	if chunkOK {
+		if werr := cp.WithChunkInput(chunkFillers); werr != nil {
+			// Preconditions are already checked above; on the (unreachable) error keep
+			// the byte-identical row-input path rather than failing the query.
+			return cp, true, nil
+		}
+	}
 	return cp, true, nil
+}
+
+// aggCountBareNodeVar reports whether an aggregate is `count(<bare node variable>)`,
+// non-DISTINCT, over a child that emits that variable as a raw NodeID column,
+// returning the variable's column.
+//
+// The gate on Function == "count" && !Distinct is a CORRECTNESS gate, not a
+// selectivity one. [countKernel] consults only the validity bitmap, so a raw NodeID
+// column answers count exactly. Every other kernel reads the VALUES: a raw NodeID
+// column reaching [minMaxKernel] would order NODE IDS and return the wrong node, and
+// reaching [sumKernel] would add them up. DISTINCT is excluded for the same reason
+// the row path excludes it in [aggArgItem] — it dedups on the argument's VALUE.
+func aggCountBareNodeVar(aggExpr *ir.AggregateExpr, schemaSnap map[string]int, bopts *buildOpts) (int, bool) {
+	if aggExpr.Function != "count" || aggExpr.Distinct {
+		return 0, false
+	}
+	v, isVar := aggExpr.ArgumentExpr.(*ast.Variable)
+	if !isVar {
+		return 0, false
+	}
+	col, inSchema := schemaSnap[v.Name]
+	if !inSchema || isNonNodeVar(v.Name, bopts) {
+		return 0, false
+	}
+	return col, true
+}
+
+// constTrueChunkFiller returns the columnar-input [exec.ChunkColumnFiller] for the
+// count(*) sentinel column: it appends the constant expr.BoolValue(true) that
+// [aggArgItem]'s row eval produces, without reading the source row at all.
+func constTrueChunkFiller() exec.ChunkColumnFiller {
+	return func(_ *exec.Chunk, _ int, dst *exec.Chunk, dstCol int) error {
+		dst.PutBool(dstCol, true)
+		return nil
+	}
+}
+
+// buildNodeIDPresenceChunkFiller returns the columnar-input [exec.ChunkColumnFiller]
+// for a `count(<bare node variable>)` argument whose receiver occupies CHUNK column
+// nodeChunkCol: it copies the raw int64 NodeID across, preserving the source cell's
+// NULL-ness, which is the only property [countKernel] reads. Its caller MUST have
+// established the count gate — see [aggCountBareNodeVar].
+//
+// For a source cell that is not an int64 column it boxes the source row and defers to
+// the item's row-at-a-time eval, matching [buildScalarPropertyChunkFiller]'s fallback.
+func buildNodeIDPresenceChunkFiller(nodeChunkCol int, fallback func(exec.Row) (expr.Value, error)) exec.ChunkColumnFiller {
+	var boxScratch exec.Row // reused across calls for the rare fallback path
+	return func(src *exec.Chunk, srcRow int, dst *exec.Chunk, dstCol int) error {
+		if src.IsInt64Column(nodeChunkCol) {
+			if id64, valid := src.Int64(nodeChunkCol, srcRow); valid {
+				dst.PutInt64(dstCol, id64)
+			} else {
+				dst.PutNull(dstCol)
+			}
+			return nil
+		}
+		boxScratch = src.BoxRow(srcRow, boxScratch)
+		v, err := fallback(boxScratch)
+		if err != nil {
+			return err
+		}
+		dst.PutValue(dstCol, v)
+		return nil
+	}
 }
 
 // aggKeyScalarBareVar reports whether a grouping-key expression is a bare variable
@@ -16007,17 +17246,15 @@ func buildScalarPropertyChunkFiller(nodeChunkCol int, propName string, g *lpg.Re
 // analyseNodeScalarUse runs once at build time; a bailout (complex expression kind)
 // disables the lazy path and restores full eager materialisation.
 func newRowPredicate(predExpr ast.Expression, schema map[string]int, g *lpg.ReadView[string, float64], params map[string]expr.Value, reg expr.FunctionRegistry, bopts *buildOpts) exec.FilterFn {
-	schemaSnap := copySchema(schema)
 	// Derived ONCE per execution: the predicate closure runs per row, and the
-	// walk is a pure function of the schema.
-	walk := newSchemaWalk(schemaSnap)
-	width := len(schemaSnap)
+	// row layout is a pure function of the schema.
+	rs := newRowSchema(copySchema(schema))
 	scalarUse, bail := analyseNodeScalarUseFor(bopts, predExpr)
 	if bail {
 		scalarUse = nil
 	}
 	return func(row exec.Row) (expr.Value, error) {
-		return evalRowPooledWalk(bopts, predExpr, row, walk, width, g, params, reg, scalarUse)
+		return evalRowPooled(bopts, predExpr, row, rs, g, params, reg, scalarUse)
 	}
 }
 
@@ -17137,7 +18374,7 @@ func (e *Engine) execUnderBarrier(
 		} else {
 			walker, labelSrc = &lpgNodeWalker{g: wv}, &lpgLabelResolver{g: wv}
 		}
-		op, cols, berr := buildPlanWithMutatorFull(plan, walker, labelSrc, queryReg, params, mutator, e.constraintReg, e.g.IndexManager(), e.maxCollectItems, e.edgeTypeFilterCache,
+		op, cols, berr := buildPlanWithMutatorFull(plan, walker, labelSrc, queryReg, params, mutator, e.constraintReg, e.g.IndexManager(), e.maxCollectItems,
 			// #2229: the write path resolves `CALL db.*` from the same registry the
 			// read path uses. Shared, not snapshotted — procs.Registry is
 			// RWMutex-guarded internally.
@@ -19265,9 +20502,26 @@ func csrPairFromGraph(g *lpg.ReadView[string, float64]) (fwd, rev *csr.CSR[float
 	return f, r
 }
 
+// csrPairUncachedBuildCount counts how many times a forward+reverse CSR pair was
+// actually CONSTRUCTED — the O(V+E) pass — as opposed to served from
+// [csrPairCache]. Every route into an uncached build funnels through
+// [csrPairFromGraphAt]: a cache miss, a nil cache (no Engine behind the build, a
+// [buildOpts] whose csrPairCache field was never threaded), and a write-transaction
+// view that must not share ([viewCarriesOwnWrites]).
+//
+// It is the STRUCTURAL instrument for "is this rebuild amortised?", and it answers
+// that question without reference to a clock: bracket a query drive between two
+// reads and the delta is an absolute count of O(V+E) passes. A count that tracks
+// the number of rows a plan processes is a per-row rebuild whatever the wall time
+// says; a count that stays put as the graph grows is amortised whatever the wall
+// time says. Like [parallelCountScanBuildCount] it is process-global and
+// monotonic, so tests snapshot it before/after rather than resetting it.
+var csrPairUncachedBuildCount atomic.Uint64
+
 // csrPairFromGraphAt is [csrPairFromGraph] also returning the cache key the
 // pair may be filed under; see [csrPairKey] for why the key has two components.
 func csrPairFromGraphAt(g *lpg.ReadView[string, float64]) (fwd, rev *csr.CSR[float64], key csrPairKey) {
+	csrPairUncachedBuildCount.Add(1)
 	adj := g.AdjList()
 	// Build live: omit arcs incident to a node that was not live AT THIS
 	// READER'S INSTANT, so search never traverses a logically-deleted node
@@ -19411,32 +20665,59 @@ func nodeIDOrNodeValue(v expr.Value) (uint64, bool) {
 	return 0, false
 }
 
-// buildEdgeTypeFilter constructs an edge-type filter map against fwdCSR, a
-// forward CSR already built by the caller (normally [csrPairFromGraph]'s
-// fwd result — every call site already needs one for its own traversal, so
-// building a second, independent one here was pure waste, rmp #1871). The
-// map key is the edge's absolute position in fwdCSR's EdgesSlice; the value
-// is a label attached to that edge in the LPG. The caller MUST pass the same
-// fwdCSR it will traverse: this function's positions are only meaningful
-// relative to that exact CSR instance, not to some other CSR built from an
-// equivalent-looking but distinct graph snapshot.
+// slotTypeResolveCount counts how many times the whole-graph per-slot relationship
+// type RESOLUTION — the O(V+E) pass in [forEachResolvedSlotType] — was actually
+// executed, as opposed to served from the type column cached beside its CSR pair.
+// It is the companion structural instrument to [csrPairUncachedBuildCount]: the
+// resolution is keyed to a specific CSR pair's arc positions, so the two are
+// rebuilt together and an unamortised path shows in both.
 //
-// When relTypes is non-empty an edge passes the filter if ANY of the labels
-// attached to that edge matches one of the listed types; the stored value
-// is the matching label (used by reverseEdgePassesFilter and downstream
-// per-edge bookkeeping). An empty relTypes slice means "accept all edge
-// types" — the returned map lists every labelled edge with its first label.
+// It replaced edgeTypeFilterBuildCount (rmp #2251) and counts strictly LESS often
+// for the same drive: the column it feeds is type-set INDEPENDENT, so a workload
+// mixing `[:A]` and `[:B]` over one graph state now resolves once where the
+// per-type-set filter map resolved twice. A zero delta still means the same thing
+// it always did — nothing rebuilt.
 //
-// The any-label semantics let `MATCH (a)-[:T]->(b)` match an edge that
-// carries multiple labels (e.g. PLAYS_FOR + SUPPORTS on the same (src,dst)
-// pair) when one of them equals T. Closes Match7 [29] and unblocks the
-// general "multiple labels per edge" scenario.
+// Process-global and monotonic; bracket a drive to read a delta.
+var slotTypeResolveCount atomic.Uint64
+
+// forEachResolvedSlotType resolves the relationship types of EVERY arc of fwdCSR
+// and reports each typed arc to visit, as (absolute forward CSR position, the
+// types that arc carries). An arc carrying no type is not visited at all.
 //
-// O(V+E) time; allocates one map entry per labelled edge. Callers needing
-// this filter for a live query should go through [edgeTypeFilterFor]
-// rather than calling this directly, so a repeat query against an unchanged
-// graph reuses a cached result instead of re-paying this cost.
-func buildEdgeTypeFilter(g *lpg.ReadView[string, float64], fwdCSR *csr.CSR[float64], relTypes []string) map[uint64]string {
+// # It is the pre-#2251 buildEdgeTypeFilter, verbatim, minus one step
+//
+// This function IS the three-tier resolution that built the position-keyed
+// edge-type filter map: stable-handle record first, then the pair's COLUMN-TYPED
+// slot for the position's ordinal, then — only for a position that could not be
+// matched to a column-typed slot at all — the positional inference. Not one line
+// of that resolution was rewritten when the type column replaced the map; the ONLY
+// thing removed is the accept-set filtering that used to run on the result, which
+// is what made the old map depend on the query's type set and the new column not.
+//
+// That distinction is load-bearing rather than stylistic. The adjacency label
+// column is NOT authoritative on its own — [lpg.Graph.slotCarriesTypeAsOf]
+// resolves handle record → column → pair overflow, [lpg.Graph.columnTypedSlots]
+// deliberately skips a handle-recorded slot so the two legitimately disagree, a
+// handle's label bag is a SET so one arc may carry several types, and the pair
+// overflow holds second-and-later types. A column filled from the raw adjacency
+// labels would have reintroduced rmp #2258, #2293 and TCK Match2 [6] / Match7 [29]
+// in one move. Reuse this resolution; do not write another.
+//
+// The types slice handed to visit ALIASES a buffer reused across slots, so a
+// visitor that keeps it must copy.
+//
+// The caller MUST pass the same fwdCSR it will index the result against: the
+// positions are only meaningful relative to that exact CSR instance, not to some
+// other CSR built from an equivalent-looking but distinct graph snapshot.
+//
+// O(V+E) time. Callers needing this for a live query should go through
+// [relTypeColumnFor] rather than calling it directly, so a repeat query against an
+// unchanged graph reuses the cached column instead of re-paying the cost.
+func forEachResolvedSlotType(
+	g *lpg.ReadView[string, float64], fwdCSR *csr.CSR[float64], visit func(pos uint64, types []string),
+) {
+	slotTypeResolveCount.Add(1)
 	adj := g.AdjList()
 	verts := fwdCSR.VerticesSlice()
 	edges := fwdCSR.EdgesSlice()
@@ -19446,15 +20727,6 @@ func buildEdgeTypeFilter(g *lpg.ReadView[string, float64], fwdCSR *csr.CSR[float
 	// case every slot takes the positional fallback below.
 	handles := fwdCSR.HandlesSlice()
 	mapper := adj.Mapper()
-
-	// Pre-build a set of accepted types for O(1) lookup.
-	acceptAll := len(relTypes) == 0
-	accept := make(map[string]struct{}, len(relTypes))
-	for _, t := range relTypes {
-		accept[t] = struct{}{}
-	}
-
-	filter := make(map[uint64]string)
 
 	// slotTypes collects the relationship types of ONE adjacency slot for the
 	// per-slot resolution below, and appendSlotType is the visitor that fills it.
@@ -19615,80 +20887,19 @@ func buildEdgeTypeFilter(g *lpg.ReadView[string, float64], fwdCSR *csr.CSR[float
 			}
 			if len(labels) == 0 {
 				// The slot carries no relationship type at all, so it matches no
-				// type filter and is absent from the map.
+				// type filter and is not visited.
 				continue
 			}
-			if acceptAll {
-				filter[pos] = labels[0]
-				continue
-			}
-			// any-label match: include the edge when at least one label
-			// is in the accept set; record the matching label so
-			// reverseEdgePassesFilter can route the lookup.
-			for _, lbl := range labels {
-				if _, ok := accept[lbl]; ok {
-					filter[pos] = lbl
-					break
-				}
-			}
+			// The ONLY step removed from the original [buildEdgeTypeFilter] is the
+			// accept-set filtering that used to happen here. Everything above is the
+			// resolution, verbatim, and the caller now decides what to do with the
+			// answer — which is what makes the result type-set INDEPENDENT.
+			//
+			// types aliases a buffer reused across slots (see slotTypes above), so a
+			// visitor that keeps it must copy.
+			visit(pos, labels)
 		}
 	}
-	return filter
-}
-
-// edgeTypeFilterFor returns the edge-type filter map for relTypes against
-// fwdCSR, the caller's already-built forward CSR (rmp #1871). It transparently
-// reuses a prior query's result from bopts.edgeTypeFilterCache when that result
-// describes the same graph state, avoiding [buildEdgeTypeFilter]'s O(V+E)
-// rebuild for a read-mostly workload's repeat queries. Falls back to an
-// uncached, correct buildEdgeTypeFilter call when bopts or its cache is nil (the
-// public BuildPlanWithMutator path has no Engine-owned cache to consult).
-//
-// at MUST be the key fwdCSR itself was stamped with, which is why it is a
-// parameter rather than re-sampled here. The filter is indexed by fwdCSR's ARC
-// POSITIONS, so it is only meaningful against that exact pair; re-sampling would
-// let it be filed under a state the pair does not describe, and a reader holding
-// a differently-sized pair would then be served positions that name other arcs
-// (rmp #2293).
-func edgeTypeFilterFor(
-	g *lpg.ReadView[string, float64], fwdCSR *csr.CSR[float64], relTypes []string,
-	bopts *buildOpts, at csrPairKey,
-) map[uint64]string {
-	// A write transaction's view sees its own uncommitted writes, so a filter
-	// built through it describes a private CSR no other reader may be served —
-	// and the shared cache's key carries no transaction identity (rmp #2446,
-	// see [viewCarriesOwnWrites]).
-	if bopts == nil || bopts.edgeTypeFilterCache == nil || viewCarriesOwnWrites(g) {
-		return buildEdgeTypeFilter(g, fwdCSR, relTypes)
-	}
-	return bopts.edgeTypeFilterCache.getOrBuild(canonicalRelTypesKey(relTypes), at, func() map[uint64]string {
-		return buildEdgeTypeFilter(g, fwdCSR, relTypes)
-	})
-}
-
-// canonicalRelTypesKey returns a cache key that is identical for any two
-// relTypes slices naming the same set of types regardless of input order or
-// duplicates — buildEdgeTypeFilter's any-label-match semantics fold relTypes
-// into a set (see its accept map) before ever consulting order, so the cache
-// key must collapse the same way or logically-identical filter requests
-// would miss on each other. Does not mutate relTypes. Joins with NUL rather
-// than a printable separator (comma, pipe) because a backtick-quoted
-// relationship type name may legally contain one. An empty relTypes (the
-// nil/accept-all case, key "") cannot collide with any real, non-empty type
-// set for that same reason — a real key always contains at least one NUL-
-// free type-name byte. A relTypes containing only the pathological
-// empty-string type name (“ MATCH ()-[:“]->() “, a distinct, pre-existing,
-// TCK-uncovered edge case unrelated to this cache) would also canonicalise
-// to "", but every real call site gates on len(relTypes) > 0 before ever
-// reaching edgeTypeFilterFor, so that case never actually reaches here.
-func canonicalRelTypesKey(relTypes []string) string {
-	if len(relTypes) == 0 {
-		return ""
-	}
-	sorted := slices.Clone(relTypes)
-	slices.Sort(sorted)
-	sorted = slices.Compact(sorted)
-	return strings.Join(sorted, "\x00")
 }
 
 // fillSlotLabs rewrites out so that, for every destination srcID has an edge to,
@@ -20005,7 +21216,7 @@ func buildShortestPathWithPred(
 	// where the path variable hydrates to a PathValue through pathVarMeta.
 	var pathPred func(exec.Row) (bool, error)
 	if predExpr != nil {
-		predSchema := copySchema(schema)
+		predSchema := newRowSchema(copySchema(schema))
 		capturedG := g
 		pathPred = func(out exec.Row) (bool, error) {
 			v, perr := evalRowPooled(bopts, predExpr, out, predSchema, capturedG, params, reg, nil)
@@ -20105,15 +21316,27 @@ var _ exec.GraphMutator = (*walMutatorAdapter)(nil)
 //   - The flag is off. Positive polarity: the operator is opt-in.
 //   - Either hop carries a PathVar. Path reconstruction consumes the per-hop
 //     (src, edge, dst) triplets, which a fused operator does not register.
-//   - The child is not EXACTLY an *exec.Expand. It is wrapped under PROFILE
-//     (buildOperator wraps when a profiler is attached) and by the columnar chain,
-//     and declining there is what stops this recogniser from stealing shapes the
-//     ChunkProducer chain would otherwise claim — a collision that has twice
+//   - The child is not EXACTLY an *exec.Expand — a columnarExpand is not, and
+//     declining there is what stops this recogniser from stealing shapes the
+//     ChunkProducer chain would otherwise claim, a collision that has twice
 //     regressed this project.
 //   - Either direction is not OUT. An undirected neighbourhood is out ∪ in, which
 //     is not one contiguous ordered run, so the intersection primitive does not
 //     apply to it.
 //   - The middle hop is itself a closing hop, or does not feed this one.
+//
+// # Why the child assertion unwraps first
+//
+// The *exec.Expand assertion runs through [exec.UnwrapProfiled], so a PROFILE build
+// sees the same child an ordinary build sees. It used to run against the raw value,
+// and buildOperator hands a PROFILE build's operators back behind a wrapper:
+// installing a Profiler made this veto fire on EVERY shape, so PROFILE rendered
+// three Expands where EXPLAIN rendered the ExpandIntersect that actually runs
+// (rmp #2665). Unwrapping cannot widen what the recogniser claims — it sees through
+// the profiling wrapper and nothing else, so a columnarExpand still declines. The
+// discarded wrapper measured an operator this build then throws away, and the fused
+// operator is instrumented by buildOperator's own wrap point on the way out, so the
+// substituted node is still measured.
 //
 // RelCols is the MIDDLE hop's sibling set, not the closing hop's. The closing hop's
 // set is the middle's plus the middle's own relationship, and that one pairing is
@@ -20143,7 +21366,7 @@ func tryFuseCyclicIntersect(
 	if mid.ToVar == "" || mid.ToVar != p.FromVar {
 		return nil
 	}
-	midExp, ok := child.(*exec.Expand)
+	midExp, ok := exec.UnwrapProfiled(child).(*exec.Expand)
 	if !ok {
 		return nil
 	}

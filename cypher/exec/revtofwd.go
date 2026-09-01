@@ -52,8 +52,13 @@ package exec
 // counting-sort transpose that scatters forward slots into destination buckets in
 // (u ascending, then u's own slot order); REPLAYING that scatter reproduces the
 // pairing directly, and either validates completely or declines completely.
-// [revTypeAdmitSet] turns it into a reverse-position bitset — an admission answer
-// that is exact for every slot, or absent, never permissive.
+// [NewRelTypeColumnFor] projects the forward type column along it to obtain a
+// reverse type column — an admission answer that is exact for every slot, or
+// absent, never permissive (rmp #2251). It used to build a reverse-position bitset
+// per query instead ([revTypeAdmitSet], retired with the position-keyed filter map
+// it was derived from), which cost O(V+E) once per query AND once per
+// relationship-type set; the column is a function of the CSR pair alone and is
+// built once for all of them.
 //
 // The replay is an alternative, not an optimisation, and the measurement says so.
 // It is O(V+E) against the scan's O(E·d), yet BenchmarkRevToFwd puts it only
@@ -148,14 +153,15 @@ func matchFwdByHandle(fwdEdges []graph.NodeID, fwdHandles []uint64, fStart, fEnd
 	return unresolvedFwdPos
 }
 
-// fwdToRevByTranspose fills out[fwdPos] with the reverse-CSR position of the
-// same physical edge, by replaying the counting-sort scatter
-// [csr.CSR.BuildReverse] performs: walking the forward CSR in (u ascending, slot
-// order), the k-th arc into destination v lands at reverse position
-// revVerts[v]+k. It reports whether the reverse CSR really is that transpose.
+// projectFwdToRevByTranspose pairs each forward-CSR position with the reverse-CSR
+// position of the same physical edge and hands the pair to apply, by replaying the
+// counting-sort scatter [csr.CSR.BuildReverse] performs: walking the forward CSR
+// in (u ascending, slot order), the k-th arc into destination v lands at reverse
+// position revVerts[v]+k. It reports whether the reverse CSR really is that
+// transpose.
 //
-// out must be len(fwdEdges). Cost is O(V+E) time and one []uint64 of len(revVerts)
-// — no adjacency scanning, which is the whole point (see the file comment).
+// Cost is O(V+E) time and one []uint64 of len(revVerts) — no adjacency scanning,
+// which is the whole point (see the file comment).
 //
 // # What is validated, and why the validation is sufficient
 //
@@ -176,13 +182,26 @@ func matchFwdByHandle(fwdEdges []graph.NodeID, fwdHandles []uint64, fStart, fEnd
 // parallel arcs of one (u,v) pair are indistinguishable in both CSRs, so any
 // pairing among them is equally correct — and the replay's is the k-th-to-k-th
 // pairing, which is precisely what [matchFwdByOrdinal] defines.
-func fwdToRevByTranspose(
+// # It PROJECTS rather than materialising a mapping
+//
+// Every caller wants to carry something ALONG the pairing, not to keep the pairing
+// itself, so each validated pair is handed to apply. Materialising it instead
+// costs one uint64 per forward arc — 7.68 MB on the 960k-arc cypher_scale fixture,
+// which showed up as a +22.55% B/op regression on the cold-engine benchmark while
+// the structure being built accounted for only 7.32 MB of it.
+//
+// # apply may be called before a later validation fails
+//
+// The replay validates each pair as it produces it, so a run that ultimately
+// returns false will already have applied every pair up to the failure. A caller
+// must therefore either overwrite every destination on its fallback path (which
+// [NewRelTypeColumnFor] does) or project into a scratch of its own.
+func projectFwdToRevByTranspose(
 	fwdVerts []uint64, fwdEdges []graph.NodeID, fwdHandles []uint64,
 	revVerts []uint64, revEdges []graph.NodeID, revHandles []uint64,
-	out []uint64,
+	apply func(fwdPos, revPos uint64),
 ) bool {
-	if len(out) != len(fwdEdges) ||
-		len(revEdges) != len(fwdEdges) ||
+	if len(revEdges) != len(fwdEdges) ||
 		len(revVerts) != len(fwdVerts) ||
 		len(fwdVerts) == 0 {
 		return false
@@ -208,50 +227,10 @@ func fwdToRevByTranspose(
 			if useHandles && revHandles[revPos] != fwdHandles[k] {
 				return false
 			}
-			out[k] = revPos
+			apply(k, revPos)
 		}
 	}
 	return true
-}
-
-// revTypeAdmitSet returns a bitset over REVERSE-CSR positions marking every slot
-// whose edge the forward-position-keyed type filter admits, or (nil, false) when
-// the transpose replay does not apply.
-//
-// This is the exact, O(1)-per-slot reverse type check the typed two-sided
-// shortestPath needed (rmp #2236). The filter a query builds is keyed by forward
-// position ([buildEdgeTypeFilter]), so a search that scans reverse slots must map
-// each one before it can test it — and every mapping strategy in this file has an
-// unresolvable case a type check can only answer permissively, which is how a
-// typed search came to route over an excluded edge. The replay has no such case:
-// it validates every slot or declines outright. The result is a bitset of
-// len(revEdges)/64 words, so the per-slot test is a single word read and shift —
-// no map lookup, no position resolution, and nothing to be permissive about.
-//
-// Bits are set by iterating the FILTER, not the CSR, so the cost beyond the
-// replay is O(number of admitted edges) rather than a second full pass.
-func revTypeAdmitSet(
-	fwdVerts []uint64, fwdEdges []graph.NodeID, fwdHandles []uint64,
-	revVerts []uint64, revEdges []graph.NodeID, revHandles []uint64,
-	filter map[uint64]string,
-) ([]uint64, bool) {
-	fwdToRev := make([]uint64, len(fwdEdges))
-	if !fwdToRevByTranspose(fwdVerts, fwdEdges, fwdHandles, revVerts, revEdges, revHandles, fwdToRev) {
-		return nil, false
-	}
-	admit := make([]uint64, (len(revEdges)+63)/64)
-	for fwdPos := range filter {
-		if fwdPos >= uint64(len(fwdToRev)) {
-			// A filter position outside this CSR cannot be tested against it. The
-			// filter and the CSR must be the same snapshot (buildEdgeTypeFilter's
-			// documented contract), so this is a caller error rather than a
-			// tolerable gap: refuse the bitset instead of silently under-admitting.
-			return nil, false
-		}
-		revPos := fwdToRev[fwdPos]
-		admit[revPos/64] |= 1 << (revPos % 64)
-	}
-	return admit, true
 }
 
 // matchFwdByOrdinal returns the ordinal-th (1-based) forward position in

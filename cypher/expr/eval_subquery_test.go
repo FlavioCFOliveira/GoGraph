@@ -1,8 +1,8 @@
 package expr
 
-// eval_subquery_test.go — white-box tests for EvalWith, the subqueryContextValue
-// holder, extractSubqueryContext, and evalReduce. Together these close every
-// remaining 0%-coverage function in eval.go for cypher/expr.
+// eval_subquery_test.go — white-box tests for EvalWith, the evalCallState it
+// threads through the recursive evaluator, and evalReduce. Together these close
+// every remaining 0%-coverage function in eval.go for cypher/expr.
 
 import (
 	"context"
@@ -107,54 +107,57 @@ func TestEvalWith_NilSubEvalErrors(t *testing.T) {
 	}
 }
 
-// TestSubqueryContextValue_ValueIface covers Kind, Equal, Hash, String on the
-// internal holder so that all four 0%-covered methods light up.
-func TestSubqueryContextValue_ValueIface(t *testing.T) {
+// TestEvalCallState_NilSafe covers every accessor of [evalCallState] on both
+// receivers it is ever called with: the nil pointer that marks the bare [Eval]
+// path, and a populated state as [EvalWith] builds it. The nil branches are the
+// ones that matter — before #2653 the same fallback was expressed as "the row
+// carries no sentinel", and every helper in the evaluator still depends on it
+// to keep [Eval] and [EvalWith] on one call graph.
+func TestEvalCallState_NilSafe(t *testing.T) {
 	t.Parallel()
-	scv := &subqueryContextValue{ctx: context.Background(), sub: nil}
-	if scv.Kind() != KindNull {
-		t.Errorf("Kind=%v; want KindNull", scv.Kind())
+
+	// Nil state — the bare Eval path.
+	var nilState *evalCallState
+	if got := nilState.evalContext(); got != context.Background() {
+		t.Errorf("nil evalContext() = %v; want context.Background()", got)
 	}
-	if scv.Equal(IntegerValue(0)) != Null {
-		t.Errorf("Equal not Null")
+	if ctx, sub := nilState.subquery(); ctx != context.Background() || sub != nil {
+		t.Errorf("nil subquery() = (%v, %v); want (background, nil)", ctx, sub)
 	}
-	if scv.Hash() != 0 {
-		t.Errorf("Hash=%d; want 0", scv.Hash())
+	if ctx, pat := nilState.pattern(); ctx != context.Background() || pat != nil {
+		t.Errorf("nil pattern() = (%v, %v); want (background, nil)", ctx, pat)
 	}
-	if scv.String() != "<subquery-context>" {
-		t.Errorf("String=%q", scv.String())
+
+	// Populated state — the EvalWith path.
+	se := &fakeSubEval{}
+	pe := &fakePatEval{}
+	myCtx := context.WithValue(context.Background(), evalStateTestKey("k"), "v")
+	st := &evalCallState{ctx: myCtx, sub: se, pat: pe}
+	if got := st.evalContext(); got != myCtx {
+		t.Errorf("evalContext() = %v; want the state's own context", got)
+	}
+	if ctx, sub := st.subquery(); ctx != myCtx || sub != se {
+		t.Errorf("subquery() = (%v, %v); want (myCtx, se)", ctx, sub)
+	}
+	if ctx, pat := st.pattern(); ctx != myCtx || pat != pe {
+		t.Errorf("pattern() = (%v, %v); want (myCtx, pe)", ctx, pat)
 	}
 }
 
-// TestExtractSubqueryContext_AllPaths covers each branch of
-// extractSubqueryContext.
-func TestExtractSubqueryContext_AllPaths(t *testing.T) {
-	t.Parallel()
-	// nil row → background context, no evaluator.
-	ctx, sub := extractSubqueryContext(nil)
-	if ctx == nil || sub != nil {
-		t.Errorf("nil row: ctx=%v sub=%v", ctx, sub)
-	}
-	// Row without the sentinel key.
-	row := RowContext{"x": IntegerValue(1)}
-	ctx, sub = extractSubqueryContext(row)
-	if ctx == nil || sub != nil {
-		t.Errorf("no sentinel: ctx=%v sub=%v", ctx, sub)
-	}
-	// Row with the sentinel key holding the wrong value type.
-	row[subqueryContextKey] = IntegerValue(99) // wrong type
-	ctx, sub = extractSubqueryContext(row)
-	if ctx == nil || sub != nil {
-		t.Errorf("wrong type: ctx=%v sub=%v", ctx, sub)
-	}
-	// Row with proper holder.
-	se := &fakeSubEval{}
-	myCtx := context.Background()
-	row[subqueryContextKey] = &subqueryContextValue{ctx: myCtx, sub: se}
-	ctx, sub = extractSubqueryContext(row)
-	if ctx != myCtx || sub != se {
-		t.Errorf("happy path: ctx=%v sub=%v", ctx, sub)
-	}
+// evalStateTestKey is a private context-key type, so the value this test plants
+// cannot collide with any other package's key.
+type evalStateTestKey string
+
+// fakePatEval is an inert PatternEvaluator stand-in: the accessor tests only
+// need identity, never behaviour.
+type fakePatEval struct{}
+
+func (*fakePatEval) EvalPattern(_ context.Context, _ *ast.PathPattern, _ RowContext, _ map[string]Value) (Value, error) {
+	return BoolValue(false), nil
+}
+
+func (*fakePatEval) EvalPatternComp(_ context.Context, _ *ast.PatternComprehension, _ RowContext, _ map[string]Value, _ FunctionRegistry) (Value, error) {
+	return ListValue{}, nil
 }
 
 // TestEvalReduce_AccumulateSum exercises the reduce(acc=init, x IN list | expr)
@@ -189,7 +192,7 @@ func TestEvalReduce_AccumulateSum(t *testing.T) {
 	}
 	// Outer row binds "total" to 0 (the initial accumulator value).
 	row := RowContext{"total": IntegerValue(0)}
-	got, err := evalReduce(init, lc, row, nil, nopReg{})
+	got, err := evalReduce(init, lc, row, nil, nil, nopReg{})
 	if err != nil {
 		t.Fatalf("evalReduce: %v", err)
 	}
@@ -210,7 +213,7 @@ func TestEvalReduce_EmptyList(t *testing.T) {
 		Source:     &ast.ListLiteral{Pos: pos, Elements: nil},
 		Projection: &ast.Variable{Pos: pos, Name: "_acc"},
 	}
-	got, err := evalReduce(init, lc, RowContext{}, nil, nopReg{})
+	got, err := evalReduce(init, lc, RowContext{}, nil, nil, nopReg{})
 	if err != nil {
 		t.Fatalf("evalReduce empty: %v", err)
 	}
@@ -230,7 +233,7 @@ func TestEvalReduce_NullSource(t *testing.T) {
 		Variable: "x",
 		Source:   &ast.NullLiteral{Pos: pos},
 	}
-	got, err := evalReduce(init, lc, RowContext{}, nil, nopReg{})
+	got, err := evalReduce(init, lc, RowContext{}, nil, nil, nopReg{})
 	if err != nil {
 		t.Fatalf("evalReduce null source: %v", err)
 	}
@@ -250,7 +253,7 @@ func TestEvalReduce_NonListSource(t *testing.T) {
 		Variable: "x",
 		Source:   &ast.StringLiteral{Pos: pos, Value: "not a list"},
 	}
-	got, err := evalReduce(init, lc, RowContext{}, nil, nopReg{})
+	got, err := evalReduce(init, lc, RowContext{}, nil, nil, nopReg{})
 	if err != nil {
 		t.Fatalf("evalReduce non-list: %v", err)
 	}
@@ -272,7 +275,7 @@ func TestEvalReduce_NilProjection(t *testing.T) {
 		}},
 		Projection: nil,
 	}
-	got, err := evalReduce(init, lc, RowContext{}, nil, nopReg{})
+	got, err := evalReduce(init, lc, RowContext{}, nil, nil, nopReg{})
 	if err != nil {
 		t.Fatalf("evalReduce nil projection: %v", err)
 	}

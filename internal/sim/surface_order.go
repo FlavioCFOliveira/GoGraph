@@ -430,42 +430,83 @@ func orderingPlanOps(plan string) []string {
 	return out
 }
 
-// checkTopFusion asserts the two arms of the Top-vs-Sort equivalence really do
-// resolve through different operators: the unlimited ordering through Sort, the
-// LIMITed one through the fused Top. Without this the equivalence could hold
+// checkTopFusion asserts that the ordering arms really do resolve through
+// different operators: the unlimited ordering through Sort, every BOUNDED one
+// through the fused Top. Without this the Top-vs-Sort equivalence could hold
 // vacuously — two arms answered by the identical plan prove nothing about the
-// fused path, exactly as an access-path parity pair agreeing on two scans
-// proves nothing about seeking (rmp #2447).
+// fused path, exactly as an access-path parity pair agreeing on two scans proves
+// nothing about seeking (rmp #2447).
 //
-// Both arms are issued with NIL parameters and a LITERAL limit on purpose. At
-// HEAD the fusion fires only for a literal LIMIT with no SKIP: `ORDER BY …
-// LIMIT $m` plans as Limit→Sort and `ORDER BY … SKIP 3 LIMIT 5` as
-// Limit→Skip→Sort. That asymmetry is a planner property, not a documented
-// contract, so it is deliberately NOT asserted here — the pagination probes pin
-// the parameterised arms by RESULT, which is the contract that must hold.
+// # What changed in rmp #2509, and what did not
+//
+// This check was written when the fusion fired ONLY for a literal LIMIT with no
+// SKIP, and it deliberately asserted nothing about the other spellings: `ORDER
+// BY … LIMIT $m` planned as Limit→Sort and `ORDER BY … SKIP 3 LIMIT 5` as
+// Limit→Skip→Sort, an asymmetry that was a planner limitation rather than a
+// contract, and freezing a limitation into a gate is how a limitation survives.
+//
+// #2509 removed the limitation, and — worth stating plainly, because the task
+// predicted otherwise — the two assertions this function already made did NOT
+// fail: an unlimited ordering is still a Sort and a literal LIMIT is still a
+// Top. What became stale was the PROSE above, and what became assertable is the
+// rest of the matrix. So the bounded spellings are now pinned positively:
+//
+//   - a PARAMETERISED limit must reach the same fused operator its identical
+//     literal reaches — the literal/parameter parity theme of rmp #2447, here on
+//     the pagination clauses; and
+//   - SKIP s LIMIT k must plan as Skip over Top, Neo4j's shape, rather than
+//     forcing the full sort the ordinary pagination idiom used to force.
+//
+// The unlimited arm keeps its negative assertion (never a Top), because an
+// ORDER BY with no bound has nothing to bound and a Top there would mean the
+// planner invented one.
 func checkTopFusion(tick int64, engine *EngineAdapter) []Violation {
 	const op = "Top/Sort plan divergence"
 	var vs []Violation
 	fail := func(msg string) {
 		vs = append(vs, Violation{Kind: ViolationOracleDeviation, Tick: tick, Op: op, Message: msg})
 	}
-	sortPlan, err := engine.Explain(orderQueryAgeDescNameAsc, nil)
-	if err != nil {
-		return []Violation{{Kind: ViolationGraphIntegrity, Tick: tick, Op: op,
-			Message: fmt.Sprintf("explain (unlimited) error: %v", err)}}
+	ops := func(query string, params map[string]any) ([]string, string, bool) {
+		plan, err := engine.Explain(query, params)
+		if err != nil {
+			vs = append(vs, Violation{Kind: ViolationGraphIntegrity, Tick: tick, Op: op,
+				Message: fmt.Sprintf("explain (%s) error: %v", query, err)})
+			return nil, "", false
+		}
+		return orderingPlanOps(plan), plan, true
 	}
-	topPlan, err := engine.Explain(orderQueryAgeDescNameAscTop, nil)
-	if err != nil {
-		return []Violation{{Kind: ViolationGraphIntegrity, Tick: tick, Op: op,
-			Message: fmt.Sprintf("explain (limited) error: %v", err)}}
+
+	sortOps, sortPlan, ok := ops(orderQueryAgeDescNameAsc, nil)
+	if !ok {
+		return vs
 	}
-	sortOps, topOps := orderingPlanOps(sortPlan), orderingPlanOps(topPlan)
 	if !slices.Contains(sortOps, "Sort") || slices.Contains(sortOps, "Top") {
 		fail(fmt.Sprintf("the unlimited ordering must plan as Sort (and never Top); ops=%v plan=\n%s", sortOps, sortPlan))
 	}
-	if !slices.Contains(topOps, "Top") || slices.Contains(topOps, "Sort") {
-		fail(fmt.Sprintf("ORDER BY … LIMIT %d must plan as the fused Top (and never Sort); ops=%v plan=\n%s",
-			orderTopK, topOps, topPlan))
+
+	// Every bounded spelling of the SAME ordering must reach the fused operator.
+	bounded := []struct {
+		what   string
+		query  string
+		params map[string]any
+	}{
+		{"literal LIMIT", orderQueryAgeDescNameAscTop, nil},
+		{"parameterised LIMIT", orderQueryAgeDescNameAsc + " LIMIT $m",
+			map[string]any{"m": int64(orderTopK)}},
+		{"literal SKIP + LIMIT", fmt.Sprintf("%s SKIP %d LIMIT %d",
+			orderQueryAgeDescNameAsc, orderPageSkip, orderTopK), nil},
+		{"parameterised SKIP + LIMIT", orderQueryAgeDescNameAsc + " SKIP $k LIMIT $m",
+			map[string]any{"k": int64(orderPageSkip), "m": int64(orderTopK)}},
+	}
+	for _, b := range bounded {
+		topOps, topPlan, ok := ops(b.query, b.params)
+		if !ok {
+			continue
+		}
+		if !slices.Contains(topOps, "Top") || slices.Contains(topOps, "Sort") {
+			fail(fmt.Sprintf("%s must plan as the fused Top (and never Sort); ops=%v plan=\n%s",
+				b.what, topOps, topPlan))
+		}
 	}
 	return vs
 }

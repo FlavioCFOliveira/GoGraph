@@ -223,6 +223,12 @@ func (v *ReadView[N, W]) EdgePropertiesByHandle(src, dst N, handle uint64) map[s
 	return v.g.EdgePropertiesByHandleAsOf(src, dst, handle, v.snap)
 }
 
+// EdgePropertyByHandle returns the by-handle instance's value under key at this
+// view's instant, without materialising the instance's whole property map.
+func (v *ReadView[N, W]) EdgePropertyByHandle(src, dst N, handle uint64, key string) (PropertyValue, bool) {
+	return v.g.EdgePropertyByHandleAsOf(src, dst, handle, key, v.snap)
+}
+
 // EdgePropertiesByHandleID is [ReadView.EdgePropertiesByHandle] keyed by
 // NodeIDs.
 func (v *ReadView[N, W]) EdgePropertiesByHandleID(srcID, dstID graph.NodeID, handle uint64) map[string]PropertyValue {

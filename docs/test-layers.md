@@ -85,15 +85,18 @@ two and the one the budget gates.
 #### The known exceptions
 
 Every package over the soft budget is listed, with its measured cost and the
-reason. The reason is the same for all eleven and it is measured, not asserted:
+reason. The reason is the same for all of them and it is measured, not asserted:
 **the race detector**, whose per-package amplification is what puts them over.
-Under coverage instrumentation only `internal/sim` exceeds 60 s at all.
+Under coverage instrumentation only `internal/sim` exceeds 60 s at all. The
+eleven unmarked rows are the 2026-08-25 in-suite run; the marked row is a later,
+standalone addition explained under the table.
 
 | Package | `-race` | no `-race` | Amplification |
 |---|---|---|---|
 | `internal/sim` | 565.8 s | 103.9 s | 5.4× |
 | `cypher` | 321.7 s | 54.4 s | 5.9× |
-| `cypher/exec` | 177.8 s | 3.0 s | **58.4×** |
+| `cypher/exec` ‡‡ | 177.8 s → **18.1 s** | 3.0 s → **1.3 s** | 58.4× → **13.6×** |
+| `bench/audit352` † | 180.6 s | 50.1 s | 3.6× |
 | `examples/26_social_scale_bench` | 167.8 s | 20.5 s | 8.2× |
 | `bench/csrorder` | 110.4 s | 30.2 s | 3.7× |
 | `bench/cyclicjoin` | 96.9 s | 10.6 s | 9.1× |
@@ -103,15 +106,240 @@ Under coverage instrumentation only `internal/sim` exceeds 60 s at all.
 | `cypher/tck` | 68.5 s | 7.9 s | 8.7× |
 | `store/recovery` | 66.3 s | 58.6 s | 1.1× |
 
-Only the first two exceed the 240 s hard ceiling, and each carries a named
-override below. The other nine **warn and pass**: they are over the soft budget,
-which is what a soft budget is for.
+Three packages exceed the 240 s hard ceiling — `internal/sim`, `cypher` and
+`bench/audit352` — and each carries a named override below. `cypher/exec` was a
+fourth breach and is **not** on that list: it was fixed rather than accommodated
+(rmp #2672), and the reasoning is recorded under the table. `bench/audit352` is
+the one whose breach is invisible in this table, because the figure shown for it
+is standalone: its in-suite cost is recorded in the footnote. The other nine
+**warn and pass**: they are over the soft budget, which is what a soft budget is
+for.
 
-`cypher/exec` deserves its own note: **3.0 s becomes 177.8 s**, a 58× penalty far
-outside the 2.62× the suite pays on average. That is a property worth
-understanding rather than absorbing — it points at heavily shared mutable state
-under concurrent access — and it is recorded here so it is not mistaken for the
-package simply being large.
+† `bench/audit352` did not exist on 2026-08-25 and its two figures were measured
+**standalone**, not in-suite, on 2026-08-29 on the rmp #2645 tree (the commit this
+footnote ships in) — same host, load average 1.94 before / 3.29 after (`-race`) and
+2.93 / 3.20 (no `-race`). They replace the 174.4 s / 50.0 s measured earlier the
+same day at commit `d7116485`: rmp #2645 added `schemawalk_hoist_test.go` and
+`schemawalk_ab_test.go` to the package, which cost **+6.2 s under `-race`** and left
+the no-`-race` column unmoved. A
+standalone figure is a **lower bound** on the in-suite one, because it carries none
+of the co-tenancy the parallel suite adds, so it is marked rather than silently
+mixed with the rest of the column.
+
+**The in-suite cost, measured at last (rmp #2670).** That lower bound was for a
+while the only figure the package had, and the ceiling was inferred from it. It
+was an inference, not a measurement: runs 1–3 below are the first in-suite
+observations `bench/audit352` has ever had, all on 2026-08-29, all `make ci` on
+the same tree, and they put the package at **1.76×** the standalone figure —
+comfortably over the 240 s global ceiling it had never been tested against. Run 4
+is the post-fix verification and is marked separately.
+
+| Run | In-suite `-race` | Load average before | Load average after |
+|---|---|---|---|
+| 1 (12:06 → 12:16) | 321.5 s | 3.51 12.74 11.71 | 5.58 11.15 13.78 |
+| 2 (12:46 → 12:56) | **328.7 s** | 1.34 2.00 5.05 | 4.92 10.24 11.21 |
+| 3 (13:28 → 13:39) | 318.1 s | 2.40 2.32 4.38 | 4.45 9.08 9.69 |
+| 4 (14:29 → 14:40) ‡ | 328.3 s | 2.19 8.54 9.79 | 4.13 9.96 12.55 |
+
+Each run is bracketed by `uptime` before and after, so the load the figure was
+taken under is auditable rather than asserted. The spread is **3.3 %** — narrow
+for a mid-sized package, and narrower than `cypher`'s 16 % — and the worst,
+328.7 s, is what the override rule below reads. Note that the run with the
+**quietest** start (run 2, 1.34) produced the **worst** figure, which is why the
+rule takes the worst observation rather than the one measured on the quietest
+host: co-tenancy inside the suite, not ambient load, dominates here.
+
+‡ Run 4 is the **verification** run, taken after the override landed: the package
+came in at 328.3 s and the gate passed it. Its one-minute load at start was 2.19
+but its five-minute load was 8.54 — the host was still shedding the load of an
+earlier, interrupted run — so it is recorded as a **contended** observation. It
+does not move the ceiling: 328.3 s < 328.7 s, so the worst observed is unchanged
+and the derivation below stands as it was. It is kept because a fourth
+independent figure landing within **0.4 s** of the worst of the first three is
+worth having on the record: it is what makes the 3.3 % spread look like a
+property of the package rather than an accident of three runs.
+
+The package is the purpose-built exercise harness for the rmp #352 bottleneck
+audit. Its **profiling sweeps are soak-gated** (`//go:build soak || nightly`) in
+`sortprofile_soak_test.go` (rmp #2652), `gctax_soak_test.go` and
+`relprops_soak_test.go` (rmp #2667); the 180.6 s above is what remains in the short
+layer once they are gated. Ungated it measured **399.77 s**, over the hard ceiling,
+and the four tests moved under #2667 accounted for 225.0 s of that:
+`TestGCTax_ResidentGraph` 138.37 s, `TestRelationshipPropsPlans` 82.75 s,
+`TestRelPropertyMaterialisationCount` 3.69 s and `TestSubqueryShapeRowCounts`
+0.21 s. The last three share one fixture and had to move together: `buildRelGraph`
+caches into a package-level variable, so ~82.5 s of that total is the fixture and
+whichever consumer ran first paid it. None of the four asserts anything about the
+quantity it measures. `TestScaling_SubqueryComplexity` (33.40 s) was
+**deliberately left in the short layer**: it asserts that every subquery shape
+ships exactly one row per outer row at every graph size, which is a check that can
+catch a cardinality regression, and this document's own rule is that coverage is
+not traded for a cost target.
+
+‡‡ **`cypher/exec`: the 58.4× was ONE test, and it is now fixed (rmp #2672).**
+The arrow figures above are before → after that task; the whole note below
+replaces an earlier one that read the 58× as a property of the package and
+guessed at "heavily shared mutable state under concurrent access". The guess was
+directionally right about the mechanism and wrong about the scale and the
+location, so it is corrected here rather than quietly amended.
+
+The concentration was total. Measured standalone at HEAD `a136fcd0`, quiet host,
+whole package, 580 top-level tests, 0 skips, all passing, per-test times from
+`-v`: **177.621 s** under `-race` (1583 s of CPU at 889 %) against **1.334 s**
+without it (2.16 s of CPU at 124 %). Of that 177.7 s summed `-race` cost,
+**`TestIndexBuffer_ConcurrentStress` alone was 173.57 s — 97.7 %** — against
+0.080 s for the same test without `-race`, an amplification of **2170×**. Every
+other test in the package amplified 1× to 21×, which is ordinary for
+ThreadSanitizer. So the true package amplification was 133× on wall and ~733× on
+CPU, not 58.4×: the 3.0 s denominator in the table above is a *coverage-
+instrumented* figure, which inflates it.
+
+**What caused it.** That test started 100 writers plus **1000 reader
+goroutines**, each spinning on `label.Index.Count`, which takes `i.mu.RLock()` on
+one shared `sync.RWMutex` (`graph/index/label/index.go:206`). The cost is
+ThreadSanitizer's per-sync-object happens-before bookkeeping: each acquire must
+be ordered against every other goroutine participating in that object, so the
+cost grows superlinearly in the number of distinct goroutines sharing it. Two
+control arms, run under `-race` on a quiet host against a replica built outside
+the repo, isolate it from the two obvious alternative explanations:
+
+| Arm | Shape | Cost |
+|---|---|---|
+| A | 1000 readers, **shared** index | 82.22 s |
+| B | 1000 readers, spinning but touching nothing | **0.00 s** |
+| F | 1000 readers, each on its **own** `label.Index` | **0.24 s** |
+| D / I / H / C / G | 10 / 25 / 50 / 100 / 200 readers, shared | 0.12 / 4.43 / 9.98 / 34.24 / 112.55 s |
+
+Arm B rules out CPU starvation from spinning; arm F rules out the sheer volume
+of instrumented work, since the identical reader work on private indexes is
+**343×** cheaper. The sweep is superlinear: 10 → 200 readers is 20× the
+goroutines for 938× the cost (~N^2.3). Those sweep arms are single observations
+each, so the exponent is a characterisation rather than a precise measurement.
+
+**It also explains the instability.** The same test, `-count=3` back to back on a
+quiet host, measured **49.35 s, 76.59 s and 174.32 s — a 253 % spread**. A
+package that is 97.7 % one test with a 253 % intrinsic spread cannot have a
+stable in-suite figure, which is why its seven recorded in-suite observations
+range from 154.8 s to 252.3 s. The swing was the test, not the host and not
+co-tenancy.
+
+**The fix relocates the cost; it removes no coverage.** The short-layer test
+keeps its 100 writers and drops to the measured **50 readers** (the 9.98 s point
+above, still oversubscribing all 10 cores 5×), and the 1024-goroutine level that
+CLAUDE.md's EXTREME/MASSIVE Concurrent Ready mandate publishes (1, 8, 64, 256,
+1024) moves to a soak-gated variant — see "The 1024-reader soak variant" below.
+Trimming alone was rejected because dropping a published measurement level would
+trade a mandate for a cost target; soak-gating the whole test was rejected
+because it would leave the short layer with no concurrent index stress at all.
+
+Detection power was not traded away, and this was verified against the shipped
+test rather than argued. With the synchronisation it defends deliberately
+removed — `i.mu.RLock()`/`RUnlock()` deleted from `label.Index.Count` — the
+50-reader test reported **10 `WARNING: DATA RACE`** findings and failed (exit 1);
+with the mutation reverted it passed clean. The race detector needs only two
+conflicting accesses, so 1000 readers bought no detection power that 50 does not
+have.
+
+**Result, same host, quiet, `uptime` bracketed:** standalone `-race` **177.621 s
+→ 18.092 s** (−89.8 %; CPU 1583 s → 132 s), with the dominant test at
+173.57 s → 13.99 s and all 580 tests still passing.
+
+#### The 1024-reader soak variant
+
+`cypher/exec/index_stress_soak_test.go` (`//go:build soak || nightly`,
+rmp #2672) runs `TestIndexBuffer_MassiveConcurrentStress` — the same driver and
+the same assertion as the short-layer test — at **1024 readers**, so the
+published EXTREME-concurrency level is still exercised. It joins the soak-gating
+precedent set by `bench/audit352`'s `sortprofile_soak_test.go` (#2652),
+`gctax_soak_test.go` and `relprops_soak_test.go` (#2667).
+
+Measured cost, this host, `-tags=soak -race`, load average 2,29 5,22 5,66 before
+/ 9,98 7,45 6,50 after: **157.28 s**, passing. It is *highly* variable for the
+reason the arms above establish — an earlier attempt begun at a 1-minute load of
+5,76 had not finished after **600 s** and was abandoned — so treat 157 s as a
+quiet-host figure and not a ceiling. `SOAK_TIMEOUT` is 4 h, so it has ample room.
+Both layers share one driver function, `runIndexBufferConcurrentStress`, declared
+in the untagged file, so the two variants cannot drift apart in shape; only the
+reader count differs. The two counts are **not** in the same file: the short-layer
+`shortLayerStressReaders` is in `index_stress_test.go`, and the 1024 level's
+`massiveConcurrencyStressReaders` is in `index_stress_soak_test.go`, because a
+constant used only from a `soak || nightly` file is `unused` in the default build
+and `golangci-lint` rejects it. The two files cross-reference each other so
+neither count can be changed in ignorance of the other.
+
+The driver reads the index **before** testing its stop channel, so every reader is
+guaranteed at least one `Count`, and it rejects a reader count of zero or less.
+Without that ordering a reader losing the race to `close(stop)` would perform no
+reads at all and the test would still pass — the concurrent read pressure would be
+absent while the gate stayed green.
+
+#### `cypher/exec` gets NO per-package override, deliberately
+
+`HARD_BUDGET` stays **240 s** and `PKG_HARD_BUDGET_OVERRIDES` gains **no fourth
+entry**. Recorded here so it is not re-derived: the override rule would have read
+the worst in-suite observation, 252.3 s, and produced 252.3 × 1.25 = 315.4 →
+**360 s**. It was rejected on three measured grounds.
+
+* It would have been a different *kind* of accommodation from the three existing
+  entries. `internal/sim`, `cypher` and `bench/audit352` are genuinely heavy
+  packages doing real work; `cypher/exec` costs **1.334 s** without `-race`. Its
+  budget problem was not size, it was one constant in one test.
+* It would not even have bought reliability. A 360 s ceiling sits above a single
+  test that varied 49.35–174.32 s on its own, with the upper tail unmeasured, so
+  the gate would still have gone red intermittently.
+* It would have blinded the gate. At 360 s the package's other 579 tests, which
+  together cost ~4 s under `-race`, could have grown by two orders of magnitude
+  unnoticed.
+
+After the fix the package needs no accommodation: it lands at 18.1 s standalone,
+comfortably inside the global 240 s ceiling. Its post-fix in-suite figure is
+recorded as run 8 in the observation table above.
+
+#### `cypher/exec` in-suite observations
+
+The four figures the breach was filed on, and the three quiet-host `make ci` runs
+taken under rmp #2672 to establish whether it was genuine at rest, in the same
+run-table form #2670 used for `bench/audit352`. All on this host; runs 5–7 are on
+HEAD `a136fcd0` with the tree clean and nothing else running; run 8 is the
+post-fix verification.
+
+| Run | In-suite `-race` | Load average before | Load average after |
+|---|---|---|---|
+| 1 | 223.5 s | not recorded | not recorded |
+| 2 | 240.6 s | not recorded | not recorded |
+| 3 | 224.0 s | not recorded | not recorded |
+| 4 | **252.3 s** | 5-minute load 8.54 (contended) | not recorded |
+| 5 (17:14 → 17:28) | 194.1 s | 1,75 1,72 1,80 | 4,28 8,57 9,68 |
+| 6 (17:36 → 17:50) | 211.1 s | 1,20 2,83 6,13 | 4,89 8,16 10,85 |
+| 7 (17:56 → 18:09) | 154.8 s | 2,48 3,70 7,63 | 4,73 7,37 9,97 |
+| 8 (post-fix, 19:31 → 19:44) | **12.4 s** | 2,17 3,52 4,87 | 7,13 7,49 7,90 |
+| 9 (post-fix, 19:51 → 20:04) † | **15.1 s** | 2,43 3,84 5,93 | 4,41 6,35 7,61 |
+
+† Run 9 is the verification run for the fix: `make ci` exit 0, read from inside
+the log, with no `FAIL` and no `--- FAIL:` line anywhere in it, and `test-timing`,
+`lint` and `cover-gate` all reached and green (`cover_gate: OK (aggregate 88.4 %)`).
+Run 8 is the run before it, which reached `test-short` green — hence its usable
+figure — but stopped at `lint`. Both post-fix figures are single observations, and
+they are reported as such: a drop from 154.8–252.3 s to 12.4–15.1 s is roughly an
+order of magnitude, far outside any noise floor measured here, so it needs no
+statistics to be believed.
+
+Runs 5–7 did **not** breach the 240 s ceiling: worst 211.1 s, 12.0 % under it,
+with a 36.4 % spread across the three. So the 2-of-4 breach was not reproducible
+at rest, and it was not co-tenancy relief either — `bench/audit352` was fully
+present alongside them at 309.6 / 314.7 / 294.6 s. What the runs did establish is
+that the figure is unstable, and the note above identifies why.
+
+**Reconciling the 177.8 s row.** This document recorded `cypher/exec` in-suite at
+177.8 s on 2026-08-25, which is *below* four of the seven observations, so the
+override rule as written would have read a figure beneath the observed cost. The
+asymmetry resolves in an unexpected way: 177.8 s (in-suite, 2026-08-25) and
+**177.621 s** (standalone at HEAD, measured under #2672) coincide almost exactly.
+The usual reasoning that a standalone figure is a lower bound on the in-suite one
+is therefore **weak for this package**, because its cost was one test that
+saturates ~9 of 10 cores by itself: such a test is barely slowed by co-tenancy,
+and its own 253 % run-to-run spread swamps whatever co-tenancy adds. The 177.8 s
+row was not wrong; it was one draw from a very wide distribution.
 
 #### The premise that did not reproduce
 
@@ -137,6 +365,15 @@ this document × 1.25, rounded up to the whole minute.
 |---|---|---|---|
 | `internal/sim` | 602.9 s | 753.6 s | **780 s** |
 | `cypher` | 321.7 s | 402.1 s | **420 s** |
+| `bench/audit352` | 328.7 s | 410.9 s | **420 s** |
+
+There is deliberately **no `cypher/exec` entry**, though it breached the ceiling
+in 2 of its first 4 in-suite runs. The rule would have produced 360 s; it was
+rejected and the package was fixed instead. The full reasoning is under
+"`cypher/exec` gets NO per-package override, deliberately" above — the short
+version is that the package costs 1.334 s without `-race`, so an override would
+have raised the ceiling for 579 cheap tests in order to accommodate one
+expensive one.
 
 **Worst-observed, not last-measured.** `internal/sim` has been recorded in-suite
 on this hardware at 545.8 s, 557.4 s, 564.0 s, 565.8 s and 602.9 s — a **10.5 %
@@ -153,7 +390,26 @@ both with load recorded, gave **276.4 s and 321.7 s** — a **16 %** swing, agai
 `internal/sim`'s **0.3 %** (564.0 s and 565.8 s) across the same pair. Mid-sized
 packages vary far more run to run than the big one does, because their co-tenancy
 changes with scheduling order. That is also why the global 240 s ceiling, not a
-per-package one, is the right instrument for everything below these two.
+per-package one, is the right instrument for everything below these three.
+
+`bench/audit352` was added under rmp #2670 and is the one entry here that
+corrects **no regression**. The package had no entry, so it was gated by the
+global 240 s ceiling — a ceiling nothing had ever measured it against, because its
+only figures were standalone. When `make ci` was finally run to completion on this
+tree the gate fired three times out of three, at 321.5 s, 328.7 s and 318.1 s;
+the three observations and their load averages are tabulated in the footnote
+above. The rule reads the worst, 328.7 s × 1.25 = 410.9 → **420 s**, which leaves
+**27.8 %** headroom over it. The entry is named rather than absorbed into a raised
+global ceiling for the reason the `Makefile` comment gives: an accommodation has
+to stay visible per package, or it silently starts covering the next package to
+drift over.
+
+Two things about this entry are worth keeping in view. First, **420 s is not
+`cypher`'s 420 s** — the two ceilings coincide by arithmetic, not by kinship, and
+neither constrains the other. Second, the package is a *purpose-built audit
+harness*, so a cost regression in it is a regression in an instrument rather than
+in the module; the right response to it drifting again is to gate more sweeps to
+the soak layer, as #2652 and #2667 already did, not to raise this number.
 
 Keys match as a **suffix** of the import path, not as a substring. This matters:
 substring matching would have let `/cypher` also cover `cypher/tck`, `cypher/ir`

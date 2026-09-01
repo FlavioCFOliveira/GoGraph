@@ -1,24 +1,25 @@
 package cypher_test
 
-// edge_type_filter_cache_test.go — regression coverage for rmp #1871
-// (2026-07-02 production-readiness audit round 2, finding
-// "buildEdgeTypeFilter rebuilds O(V+E) whole-graph map on every query
-// execution regardless of selectivity").
+// reltype_column_cache_test.go — regression coverage for the caching of
+// per-slot relationship-type information across queries.
 //
-// Background. Every relationship-type-filtered pattern (`-[:TYPE]->`)
-// rebuilt its edge-type filter map from a full O(V+E) graph scan on every
-// query execution, never amortised across queries. The fix caches the
-// filter map keyed by (canonicalised relationship-type set,
-// lpg.Graph.TopoGeneration): the cache is valid to reuse exactly as long as
-// no edge has been added, removed, or had either undone since the cached
-// entry was built.
+// # Provenance
 //
-// The critical risk in any such cache is invalidation correctness, not
-// hit-rate: the filter's map keys are physical CSR slot POSITIONS, which
-// shift for every edge at or after an insertion/deletion point in NodeID
-// order. TestEdgeTypeFilterCache_InvalidatesOnPositionShift below
-// constructs exactly that shift and proves the cache does not serve a
-// stale, now-mismatched position mapping across it.
+// These tests were written for rmp #1871 (2026-07-02 production-readiness audit
+// round 2, "buildEdgeTypeFilter rebuilds an O(V+E) whole-graph map on every query
+// execution regardless of selectivity") and were named TestEdgeTypeFilterCache_*
+// after the bounded LRU that fix introduced. rmp #2251 retired that LRU: the
+// per-slot type information is now a slot-aligned COLUMN cached beside the CSR
+// pair it describes, and — because the column records what each arc IS rather
+// than whether some pattern accepts it — it is type-set INDEPENDENT, so there is
+// nothing left for a per-type-set cache to amortise.
+//
+// What the tests assert is unchanged in substance, because the RISK is unchanged:
+// the structure is keyed by physical CSR slot POSITION, and positions shift for
+// every arc at or after an insertion or deletion point in NodeID order. A stale
+// entry served across such a shift does not merely miss a relationship, it
+// MISTYPES one. TestRelTypeColumn_InvalidatesOnPositionShift below constructs
+// exactly that shift and proves it is not served across it.
 
 import (
 	"context"
@@ -36,49 +37,52 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
-// edgeTypeFilterCacheProbe records edge-type-filter-cache hits, misses and
-// evictions via the global metrics backend, mirroring cacheProbe's role for
-// the plan cache (plan_cache_engine_hit_test.go). NOT parallel-safe:
-// installs a global metrics backend.
-type edgeTypeFilterCacheProbe struct {
-	hits      atomic.Uint64
-	misses    atomic.Uint64
-	evictions atomic.Uint64
+// relTypeColumnProbe records how often the slot-aligned relationship-type column
+// was BUILT (the O(V+E) resolution) and how often an already-built one was reused,
+// via the global metrics backend — mirroring cacheProbe's role for the plan cache
+// (plan_cache_engine_hit_test.go).
+//
+// Builds and reuses are the right pair to count here, and hits/misses on the CSR
+// pair are not: the pair can hit while the column is still absent (an untyped
+// query warmed the pair), so only a counter on the column itself can say whether
+// the O(V+E) resolution actually ran. NOT parallel-safe: installs a global
+// metrics backend.
+type relTypeColumnProbe struct {
+	builds atomic.Uint64
+	reuses atomic.Uint64
 }
 
-func (p *edgeTypeFilterCacheProbe) IncCounter(name string, delta uint64) {
+func (p *relTypeColumnProbe) IncCounter(name string, delta uint64) {
 	switch name {
-	case "cypher.edge_type_filter_cache.hits":
-		p.hits.Add(delta)
-	case "cypher.edge_type_filter_cache.misses":
-		p.misses.Add(delta)
-	case "cypher.edge_type_filter_cache.evictions":
-		p.evictions.Add(delta)
+	case "cypher.reltype_column.builds":
+		p.builds.Add(delta)
+	case "cypher.reltype_column.reuses":
+		p.reuses.Add(delta)
 	}
 }
 
-func (p *edgeTypeFilterCacheProbe) ObserveLatency(string, time.Duration) {}
+func (p *relTypeColumnProbe) ObserveLatency(string, time.Duration) {}
 
-func (p *edgeTypeFilterCacheProbe) SetGauge(string, float64) {}
+func (p *relTypeColumnProbe) SetGauge(string, float64) {}
 
-// withEdgeTypeFilterCacheProbe installs a fresh probe, runs fn, restores the
+// withRelTypeColumnProbe installs a fresh probe, runs fn, restores the
 // default no-op backend, then returns the probe for inspection.
-func withEdgeTypeFilterCacheProbe(t *testing.T, fn func()) *edgeTypeFilterCacheProbe {
+func withRelTypeColumnProbe(t *testing.T, fn func()) *relTypeColumnProbe {
 	t.Helper()
-	p := &edgeTypeFilterCacheProbe{}
+	p := &relTypeColumnProbe{}
 	cmetrics.SetBackend(p)
 	t.Cleanup(func() { cmetrics.SetBackend(nil) })
 	fn()
 	return p
 }
 
-func newEdgeTypeFilterEngine(t *testing.T) (*lpg.Graph[string, float64], *cypher.Engine) {
+func newRelTypeColumnEngine(t *testing.T) (*lpg.Graph[string, float64], *cypher.Engine) {
 	t.Helper()
 	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
 	return g, cypher.NewEngine(g)
 }
 
-// TestEdgeTypeFilterCache_InvalidatesOnPositionShift is the load-bearing
+// TestRelTypeColumn_InvalidatesOnPositionShift is the load-bearing
 // correctness proof for this cache. It constructs a graph where a later
 // edge addition shifts an EARLIER, already-cached edge's physical CSR
 // position, then verifies a repeat query still returns the correct rows —
@@ -104,9 +108,9 @@ func newEdgeTypeFilterEngine(t *testing.T) (*lpg.Graph[string, float64], *cypher
 // (X,C)) while the real, shifted A-LIKES-B edge at position 1 would be
 // silently missing (a false negative). Both failure modes are asserted
 // against directly below.
-func TestEdgeTypeFilterCache_InvalidatesOnPositionShift(t *testing.T) {
+func TestRelTypeColumn_InvalidatesOnPositionShift(t *testing.T) {
 	ctx := context.Background()
-	_, eng := newEdgeTypeFilterEngine(t)
+	_, eng := newRelTypeColumnEngine(t)
 
 	drainRunInTx(t, eng, `CREATE (:P {name: 'X'})`)
 	drainRunInTx(t, eng, `CREATE (:P {name: 'A'})`)
@@ -133,12 +137,12 @@ func TestEdgeTypeFilterCache_InvalidatesOnPositionShift(t *testing.T) {
 	assertCount(ctx, t, eng, `MATCH (n)-[:KNOWS]->(m) RETURN count(*) AS n`, 1)
 }
 
-// TestEdgeTypeFilterCache_InvalidatesOnRemoval mirrors the addition-based
+// TestRelTypeColumn_InvalidatesOnRemoval mirrors the addition-based
 // shift test above for a removal: deleting an earlier edge also shifts
 // every later edge's CSR position, and must equally invalidate the cache.
-func TestEdgeTypeFilterCache_InvalidatesOnRemoval(t *testing.T) {
+func TestRelTypeColumn_InvalidatesOnRemoval(t *testing.T) {
 	ctx := context.Background()
-	_, eng := newEdgeTypeFilterEngine(t)
+	_, eng := newRelTypeColumnEngine(t)
 
 	drainRunInTx(t, eng, `CREATE (:P {name: 'X'})`)
 	drainRunInTx(t, eng, `CREATE (:P {name: 'A'})`)
@@ -159,88 +163,96 @@ func TestEdgeTypeFilterCache_InvalidatesOnRemoval(t *testing.T) {
 	assertCount(ctx, t, eng, `MATCH (n)-[:KNOWS]->(m) RETURN count(*) AS n`, 0)
 }
 
-// TestEdgeTypeFilterCache_HitOnRepeatedQuery proves the caching is actually
-// occurring (not merely harmless): identical relationship-type filters
-// across repeated queries against an unchanged graph must hit, not rebuild.
+// TestRelTypeColumn_ReusedOnRepeatedQuery proves the caching is actually
+// occurring (not merely harmless): repeated queries against an unchanged graph
+// must reuse the resolved column, not re-resolve it.
 //
 // NOT parallel: installs a global metrics backend.
-func TestEdgeTypeFilterCache_HitOnRepeatedQuery(t *testing.T) {
+func TestRelTypeColumn_ReusedOnRepeatedQuery(t *testing.T) {
 	ctx := context.Background()
-	_, eng := newEdgeTypeFilterEngine(t)
+	_, eng := newRelTypeColumnEngine(t)
 	drainRunInTx(t, eng, `CREATE (:P {name: 'A'})-[:LIKES]->(:P {name: 'B'})`)
 
 	const q = `MATCH (n)-[:LIKES]->(m) RETURN count(*) AS n`
-	p := withEdgeTypeFilterCacheProbe(t, func() {
+	p := withRelTypeColumnProbe(t, func() {
 		assertCount(ctx, t, eng, q, 1)
 		assertCount(ctx, t, eng, q, 1)
 		assertCount(ctx, t, eng, q, 1)
 	})
 
-	if got := p.misses.Load(); got != 1 {
-		t.Errorf("misses = %d, want exactly 1 (first query only)", got)
+	if got := p.builds.Load(); got != 1 {
+		t.Errorf("builds = %d, want exactly 1 (first query only)", got)
 	}
-	if got := p.hits.Load(); got != 2 {
-		t.Errorf("hits = %d, want exactly 2 (second and third query)", got)
+	if got := p.reuses.Load(); got != 2 {
+		t.Errorf("reuses = %d, want exactly 2 (second and third query)", got)
 	}
 }
 
-// TestEdgeTypeFilterCache_MissAfterWrite proves a graph mutation between two
-// otherwise-identical queries forces a real rebuild rather than an
-// undetected stale hit.
+// TestRelTypeColumn_RebuiltAfterWrite proves a graph mutation between two
+// otherwise-identical queries forces a real re-resolution rather than an
+// undetected stale reuse.
 //
 // NOT parallel: installs a global metrics backend.
-func TestEdgeTypeFilterCache_MissAfterWrite(t *testing.T) {
+func TestRelTypeColumn_RebuiltAfterWrite(t *testing.T) {
 	ctx := context.Background()
-	_, eng := newEdgeTypeFilterEngine(t)
+	_, eng := newRelTypeColumnEngine(t)
 	drainRunInTx(t, eng, `CREATE (:P {name: 'A'})-[:LIKES]->(:P {name: 'B'})`)
 
 	const q = `MATCH (n)-[:LIKES]->(m) RETURN count(*) AS n`
-	p := withEdgeTypeFilterCacheProbe(t, func() {
+	p := withRelTypeColumnProbe(t, func() {
 		assertCount(ctx, t, eng, q, 1)
 		drainRunInTx(t, eng, `CREATE (:P {name: 'C'})-[:LIKES]->(:P {name: 'D'})`)
 		assertCount(ctx, t, eng, q, 2)
 	})
 
-	if got := p.misses.Load(); got != 2 {
-		t.Errorf("misses = %d, want exactly 2 (the write must force a second rebuild)", got)
+	if got := p.builds.Load(); got != 2 {
+		t.Errorf("builds = %d, want exactly 2 (the write must force a second resolution)", got)
 	}
-	if got := p.hits.Load(); got != 0 {
-		t.Errorf("hits = %d, want 0 (no query repeated without an intervening write)", got)
+	if got := p.reuses.Load(); got != 0 {
+		t.Errorf("reuses = %d, want 0 (no query repeated without an intervening write)", got)
 	}
 }
 
-// TestEdgeTypeFilterCache_CapacityOption verifies EngineOptions.
-// EdgeTypeFilterCacheCapacity is actually wired to the cache constructor
-// rather than silently ignored.
-func TestEdgeTypeFilterCache_CapacityOption(t *testing.T) {
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
-	eng := cypher.NewEngineWithOptions(g, cypher.EngineOptions{EdgeTypeFilterCacheCapacity: 1})
+// TestRelTypeColumn_SharedAcrossTypeSets is the test the retired
+// TestEdgeTypeFilterCache_CapacityOption became.
+//
+// That test existed because the old structure was keyed by RELATIONSHIP-TYPE SET:
+// a workload alternating `[:LIKES]` and `[:KNOWS]` needed one cached map each, so
+// the cache needed a capacity bound, and the bound needed an option, and the
+// option needed proving wired. The column is keyed by nothing but the CSR pair,
+// so all four of those disappear — and what has to be proved instead is the
+// property that made them disappear: TWO DIFFERENT type sets over ONE graph state
+// resolve the slot types exactly ONCE between them.
+//
+// This is the load-bearing test for the change, not a leftover. If the column ever
+// became type-set dependent again, every assertion above would still pass and only
+// this one would fail.
+func TestRelTypeColumn_SharedAcrossTypeSets(t *testing.T) {
 	ctx := context.Background()
+	_, eng := newRelTypeColumnEngine(t)
 
 	drainRunInTx(t, eng, `CREATE (:P {name: 'A'})-[:LIKES]->(:P {name: 'B'})`)
 	drainRunInTx(t, eng, `CREATE (:P {name: 'C'})-[:KNOWS]->(:P {name: 'D'})`)
 
-	p := withEdgeTypeFilterCacheProbe(t, func() {
-		// Populate LIKES (miss), then KNOWS (miss, evicting LIKES at
-		// capacity 1), then LIKES again — must miss again since it was
-		// evicted, proving the capacity bound is real and load-bearing.
+	p := withRelTypeColumnProbe(t, func() {
 		assertCount(ctx, t, eng, `MATCH (n)-[:LIKES]->(m) RETURN count(*) AS n`, 1)
 		assertCount(ctx, t, eng, `MATCH (n)-[:KNOWS]->(m) RETURN count(*) AS n`, 1)
 		assertCount(ctx, t, eng, `MATCH (n)-[:LIKES]->(m) RETURN count(*) AS n`, 1)
+		assertCount(ctx, t, eng, `MATCH (n)-[:LIKES|KNOWS]->(m) RETURN count(*) AS n`, 2)
 	})
 
-	if got := p.misses.Load(); got != 3 {
-		t.Errorf("misses = %d, want 3 (capacity 1 evicts LIKES before its second query)", got)
+	if got := p.builds.Load(); got != 1 {
+		t.Errorf("builds = %d, want exactly 1 — the column must be TYPE-SET INDEPENDENT, "+
+			"so four queries naming three different type sets over one unchanged graph "+
+			"state resolve the slot types once between them", got)
 	}
-	// Capacity 1 evicts on every insertion after the first: installing
-	// KNOWS evicts LIKES, then re-installing LIKES evicts KNOWS.
-	if got := p.evictions.Load(); got != 2 {
-		t.Errorf("evictions = %d, want 2", got)
+	if got := p.reuses.Load(); got != 3 {
+		t.Errorf("reuses = %d, want exactly 3", got)
 	}
 }
 
-// TestEdgeTypeFilterCache_InvalidatesOnDirectStoreWrite is the store-direct
-// counterpart to TestEdgeTypeFilterCache_InvalidatesOnPositionShift: a
+// TestRelTypeColumn_InvalidatesOnDirectStoreWrite is the store-direct
+// counterpart to TestRelTypeColumn_InvalidatesOnPositionShift: a
 // concurrency-architect review of this fix (rmp #1871) found that a caller
 // holding the *txn.Store directly (bypassing the Cypher engine's own write
 // adapters entirely — [store/txn.Tx.AddEdge]/[store/txn.Tx.Commit], the same
@@ -252,7 +264,7 @@ func TestEdgeTypeFilterCache_CapacityOption(t *testing.T) {
 // This test proves the fix: a direct store.Begin/Tx.AddEdge/Tx.Commit
 // sequence between two otherwise-identical Cypher queries must not leave the
 // second query serving a stale, now-mismatched position mapping.
-func TestEdgeTypeFilterCache_InvalidatesOnDirectStoreWrite(t *testing.T) {
+func TestRelTypeColumn_InvalidatesOnDirectStoreWrite(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	w, err := wal.Open(filepath.Join(dir, "wal"))

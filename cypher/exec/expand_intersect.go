@@ -130,10 +130,10 @@ type ExpandIntersect struct {
 	revVerts   []uint64
 	revEdges   []graph.NodeID
 
-	midType, endType     string
-	midFilter, endFilter map[uint64]string
-	relCols              []int
-	midCol, endCol       int
+	midType, endType   string
+	midAdmit, endAdmit RelTypeAdmit
+	relCols            []int
+	midCol, endCol     int
 
 	it csr.Intersector
 	// ranges is the reusable two-element backing array handed to Intersector.Init,
@@ -197,7 +197,7 @@ func (op *ExpandIntersect) Init(ctx context.Context) error {
 	cmetrics.IncCounter(MetricExpandIntersectEngaged, 1)
 	// Resolved NOW, not at plan-build time (rmp #2317); see
 	// [IntersectAdjacencySource].
-	op.fwd, op.rev, op.midFilter, op.endFilter = op.src()
+	op.fwd, op.rev, op.midAdmit, op.endAdmit = op.src()
 	op.fwdHandles = op.fwd.HandlesSlice()
 	op.fwdVerts = op.fwd.VerticesSlice()
 	op.fwdEdges = op.fwd.EdgesSlice()
@@ -401,7 +401,7 @@ func (op *ExpandIntersect) advanceR2() bool {
 		for op.r2Pos < op.r2End {
 			pos := op.r2Pos
 			op.r2Pos++
-			if !passesTypeFilter(op.midType, op.midFilter, pos) {
+			if !passesTypeFilter(op.midType, &op.midAdmit, pos) {
 				continue
 			}
 			if !op.passesRelMorphism(op.emittedEdgeID(pos)) {
@@ -429,7 +429,7 @@ func (op *ExpandIntersect) advanceR3() (uint64, bool) {
 		if pos == op.r2Cur {
 			continue
 		}
-		if !passesTypeFilter(op.endType, op.endFilter, pos) {
+		if !passesTypeFilter(op.endType, &op.endAdmit, pos) {
 			continue
 		}
 		if !op.passesRelMorphism(op.emittedEdgeID(pos)) {
@@ -475,18 +475,18 @@ func (op *ExpandIntersect) passesRelMorphism(edgeID int64) bool {
 	return true
 }
 
-// passesTypeFilter is the shared forward-position type test. Membership in the
-// filter map is sufficient because the map holds only positions whose type is in
-// the accepted set, which is what makes multi-type patterns ([r:A|B]) work.
-func passesTypeFilter(edgeType string, filter map[uint64]string, pos uint64) bool {
+// passesTypeFilter is the shared forward-position type test: one indexed load into
+// the slot-aligned type column and one bit test against the pattern's accepted-type
+// mask (rmp #2251). The mask is a SET of codes, which is what makes multi-type
+// patterns ([r:A|B]) work, and it costs the same whatever the alternative count.
+//
+// A nil view — a type WAS requested but none was resolved — rejects, exactly as an
+// absent key in the position-keyed map it replaced did.
+func passesTypeFilter(edgeType string, admit *RelTypeAdmit, pos uint64) bool {
 	if edgeType == "" {
 		return true
 	}
-	if filter == nil {
-		return false
-	}
-	_, ok := filter[pos]
-	return ok
+	return admit.Fwd(pos)
 }
 
 // buildRow appends the SIX columns the two fused Expands would have appended, in

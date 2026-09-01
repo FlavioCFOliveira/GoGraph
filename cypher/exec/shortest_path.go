@@ -137,7 +137,11 @@ type ShortestPath struct {
 
 	ctx context.Context //nolint:containedctx // stored for per-Next ctx check
 
-	edgeTypeFilter map[uint64]string
+	// admit is the slot-aligned relationship-type admission view keyed to this
+	// Init's adjacency (rmp #2251). It answers a FORWARD slot by indexed load, and
+	// a REVERSE slot directly — no position resolution — whenever the pair's
+	// transpose could be established; see [RelTypeAdmit].
+	admit RelTypeAdmit
 	// pathPred, when non-nil, is a whole-path predicate that references the path
 	// variable (#1786). The operator then runs an EXHAUSTIVE search returning the
 	// shortest path that SATISFIES the predicate, rather than the unconstrained
@@ -145,9 +149,9 @@ type ShortestPath struct {
 	// row followed by the candidate path-list column).
 	pathPred func(Row) (bool, error)
 
-	// edgeType is the "a type filter was requested" gate; edgeTypeFilter is the
-	// presence-set of forward edge positions whose edge carries an accepted
-	// type (membership, not equality). Both nil/"" means no type filter.
+	// edgeType is the "a type filter was requested" gate; admit is the slot-aligned
+	// type column masked by the accepted set (membership, not equality). Both
+	// nil/"" means no type filter.
 	edgeType string
 
 	// CSR snapshots.
@@ -158,14 +162,7 @@ type ShortestPath struct {
 	revEdges   []graph.NodeID
 	revHandles []uint64
 	revToFwd   []uint64
-	// revAdmit is a bitset over REVERSE-CSR positions marking the slots the
-	// type filter admits, built by [revTypeAdmitSet] when a filter is in force
-	// and the reverse CSR is the canonical transpose. It makes the reverse-side
-	// type test exact and O(1) — no position resolution, no permissive fallback
-	// — which is what admits a TYPED two-sided search (rmp #2236). nil when
-	// there is no filter, or when the transpose replay does not apply.
-	revAdmit []uint64
-	outBuf   []expr.Value
+	outBuf     []expr.Value
 
 	srcCol int
 	dstCol int
@@ -249,13 +246,14 @@ func (op *ShortestPath) WithWorkBudget(maxPerRow, maxTotal int) *ShortestPath {
 // in filter. edgeType is the non-empty "a filter was requested" gate (typically
 // the pattern's first declared relationship type). It returns op for chaining.
 //
-// Callers configure the operator before Init, as the planner does. Changing the
-// filter afterwards nonetheless invalidates the reverse-position admit bitset
-// derived from it, so this clears the once-only build flag rather than leaving a
-// bitset that describes a filter no longer in force.
+// Callers configure the operator before Init, as the planner does. The reverse
+// admission answer is no longer derived from the gate — since rmp #2251 it is a
+// property of the type COLUMN, which is type-set independent — so nothing derived
+// from the old gate can survive this call. The once-only build flag is still
+// cleared, because the reverse→forward POSITION table's build is gated on the
+// direction and this keeps the two decisions in one place.
 func (op *ShortestPath) WithTypeFilter(edgeType string) *ShortestPath {
 	op.edgeType = edgeType
-	op.revAdmit = nil
 	op.revPrepared = false
 	return op
 }
@@ -293,7 +291,7 @@ func (op *ShortestPath) Init(ctx context.Context) error {
 	// Resolved NOW, not at plan-build time (rmp #2317); see [AdjacencySource]. The
 	// FILTER comes from the source too: it is keyed to that adjacency's edge
 	// positions, so a plan-build filter over an execution-time pair would mistype.
-	op.fwd, op.rev, op.edgeTypeFilter = op.src()
+	op.fwd, op.rev, op.admit = op.src()
 	op.fwdVerts = op.fwd.VerticesSlice()
 	op.fwdEdges = op.fwd.EdgesSlice()
 	op.fwdHandles = op.fwd.HandlesSlice()
@@ -329,24 +327,17 @@ func (op *ShortestPath) Init(ctx context.Context) error {
 				op.revVerts, op.revEdges, op.revHandles,
 			)
 		}
-		// The reverse-side TYPE test is a different problem from position resolution,
-		// and gets its own structure. A filter is keyed by forward position, so any
-		// search that scans reverse slots must decide admission for a reverse slot;
-		// doing that by resolving the position first is either slow (O(deg) per slot)
-		// or, where the mapping is unknown, permissive — and permissive is how a typed
-		// shortestPath came to route over an excluded edge (#2236, obstacle 2).
+		// The reverse-side TYPE test needs NO structure of its own since rmp #2251.
+		// It used to: a position-keyed filter map forced any search scanning reverse
+		// slots to resolve each one's forward position first, which is either slow
+		// (O(deg) per slot) or, where the mapping is unknown, permissive — and
+		// permissive is how a typed shortestPath came to route over an excluded edge
+		// (#2236, obstacle 2). [revTypeAdmitSet] answered that by building a
+		// reverse-position bitset per query, O(V+E) each time and once per type set.
 		//
-		// revAdmit answers it directly and exactly, at O(V+E) to build and one word
-		// read per slot. It is what admits a TYPED two-sided search, so build it for
-		// every direction that can scan reverse slots: DirIn / DirBoth always do, and
-		// a DirOut two-sided search's backward half does.
-		if op.rev != nil && op.edgeType != "" {
-			op.revAdmit, _ = revTypeAdmitSet(
-				op.fwdVerts, op.fwdEdges, op.fwdHandles,
-				op.revVerts, op.revEdges, op.revHandles,
-				op.edgeTypeFilter,
-			)
-		}
+		// The type COLUMN carries the reverse answer already, built once per CSR pair
+		// and independent of which types a pattern accepts, so the per-query build is
+		// gone and the per-slot test is the same one word read.
 	}
 	return op.input.Init(ctx)
 }
@@ -1181,10 +1172,10 @@ func (op *ShortestPath) passesTypeFilter(pos uint64, isFwd bool) bool {
 	}
 	fwdPos := pos
 	if !isFwd {
-		// Prefer the reverse-position bitset: it is keyed by the very position
+		// Prefer the column's own reverse answer: it is keyed by the very position
 		// being tested, so it needs no resolution step and has no unknown case.
-		if op.revAdmit != nil {
-			return bitsetContains(op.revAdmit, pos)
+		if admitted, known := op.admit.Rev(pos); known {
+			return admitted
 		}
 		// The resolution must report whether it SUCCEEDED, not signal failure by
 		// returning the input. resolvedFwdPosOrSelf returns revPos both when the
@@ -1203,8 +1194,7 @@ func (op *ShortestPath) passesTypeFilter(pos uint64, isFwd bool) bool {
 		}
 		fwdPos = resolved
 	}
-	_, ok := op.edgeTypeFilter[fwdPos]
-	return ok
+	return op.admit.Fwd(fwdPos)
 }
 
 // resolveFwdPos returns the handle-disambiguated forward edge position and the
@@ -1270,7 +1260,9 @@ type AllShortestPaths struct {
 
 	ctx context.Context //nolint:containedctx // stored for per-Next ctx check
 
-	edgeTypeFilter map[uint64]string
+	// admit is the slot-aligned relationship-type admission view keyed to this
+	// Init's adjacency (rmp #2251); see [RelTypeAdmit].
+	admit RelTypeAdmit
 	// pathPred, when non-nil, is a whole-path predicate referencing the path
 	// variable (#1786). The operator then runs an EXHAUSTIVE search returning ALL
 	// shortest paths that SATISFY the predicate (the minimum satisfying length),
@@ -1386,7 +1378,7 @@ func (op *AllShortestPaths) Init(ctx context.Context) error {
 	// Resolved NOW, not at plan-build time (rmp #2317); see [AdjacencySource]. The
 	// FILTER comes from the source too: it is keyed to that adjacency's edge
 	// positions, so a plan-build filter over an execution-time pair would mistype.
-	op.fwd, op.rev, op.edgeTypeFilter = op.src()
+	op.fwd, op.rev, op.admit = op.src()
 	op.fwdVerts = op.fwd.VerticesSlice()
 	op.fwdEdges = op.fwd.EdgesSlice()
 	op.fwdHandles = op.fwd.HandlesSlice()
@@ -2354,8 +2346,7 @@ func (op *AllShortestPaths) passesTypeFilter(pos uint64, isFwd bool) bool {
 		}
 		fwdPos = resolved
 	}
-	_, ok := op.edgeTypeFilter[fwdPos]
-	return ok
+	return op.admit.Fwd(fwdPos)
 }
 
 // resolveFwdPos mirrors [ShortestPath.resolveFwdPos].
