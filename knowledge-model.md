@@ -3967,3 +3967,303 @@ its sibling `edgeTypeFilterCache` (Type, `cypher/edge_type_filter_cache.go`) and
 being half of this defect. Both created and wired with `CONTAINS`. A `MATCH … SET`
 that binds nothing still reports `ok`, so each stamp in this sync was verified by
 reading it back; that read is what surfaced the gap.
+
+### Sprint 352 sync + fidelity audit — the sprint close (2026-09-01)
+
+Synced and audited at commit `42491072` (2026-09-01, sprint 352, tree clean). This
+section covers the eight commits `351707e8`, `9824a544`, `ed31dc32`, `cf5646ab`
+(all 2026-08-31) and `4a2a3b90`, `8851ca61`, `a64660c5`, `42491072` (all
+**2026-09-01** — the brief said only the last three were, and `4a2a3b90` was
+confirmed by `git show -s --format=%cs` to be 2026-09-01 as well). It also
+reconciles the whole sprint, whose working branch carries **31 commits** against
+`develop`, of which **28** are the close commits of the sprint's 31 tasks.
+
+**The headline: per-commit updating had not been happening.** Before this sync the
+graph held **6 of the sprint's 31 `Task` nodes** — and four of those six were
+unusable: two were empty stubs with no title and no status (`2645`, `2653`), two
+still read `BACKLOG` (`2509`, `2659`), and **three further tasks (`2651`, `2654`,
+`2656`) existed only as nodes keyed on `name` holding the id as a STRING** — the
+exact retired identity form that rmp #2612 migrated away from four sprints
+earlier, reappearing inside this sprint. They were invisible to every `{id: …}`
+lookup, which is why a naive coverage count reported them missing rather than
+malformed. All 31 now carry the canonical shape (`id` INTEGER, `title`, `status`,
+`type`, `sprint`, `closedAt`, `commit`) and one `IMPLEMENTED_IN` edge each;
+graph-wide there are now **0** `Task` nodes with a null `id` and **0** legacy
+`task_id`/`number` keys.
+
+**Counts written, measured as a before/after label census, not tallied from
+intent.** Net **+198 nodes** (14,766 → **14,964**), after **19 deletions**. The edge total
+at the end of the sync is **19,321**; the pre-sync edge total was not captured
+before the first write, so no edge delta is claimed here — the node census was, and
+that is the figure quoted. By label: `Test` **+69**, `Benchmark` **+29**,
+`Commit` **+26**, `Task` **+23**, `Method` **+21**, `Function` **+11**, `Lesson`
+**+4**, `Component` **+4**, `Type` **+4**, `Decision` **+2**, `Defect` **+2**,
+`Package` **+1** (`bench/audit352`, `kind='bench'`, `testOnly=true` — the sprint's
+own instrument package had no node), `Finding` **+1**, `Spec` **+1**. The `Test`
+and `Benchmark` figures are net of the 47 nodes created for the whole of
+`bench/audit352`, which held **1** node — and that one was invented (see below) —
+against 47 real test functions.
+
+Edges: 28 `Sprint→Commit` `CONTAINS`, 31 `Task→Commit` `IMPLEMENTED_IN`, 57
+`Commit→Package` `TOUCHES`, 9 `Commit→Feature` `FIXES`/`IMPROVES`, 13 `Task→…`
+`ABOUT`, 10 `Test→Feature` `VERIFIES`, 27 `Type→Method` `HAS_METHOD`, 1
+`Feature→Feature` `PART_OF`, 1 `Sprint→Feature` `DELIVERS`, 1 `Feature→Spec`
+`SPECIFIED_IN`, 5 `TAUGHT`, 3 `FOUND`, 1 `FOLLOWED_BY`, and a `Package→…`
+`CONTAINS` for every node created. Every write was read back; a `MATCH … SET` that
+binds nothing still reports `ok`, so reading back is the only way to know a stamp
+landed.
+
+#### Fidelity: the numbers, both directions
+
+- **Code → graph.** Of the **117** top-level declarations the eight commits'
+  hunks actually touched (mapped hunk-to-enclosing-declaration per commit, then
+  intersected with the declaration set at HEAD), **20** had a node and **97** did
+  not — and **96 of the 97 had no node under any name anywhere in the graph**. All
+  117 now exist, are unique, and carry a sprint-352 `gitCommit`. Provenance
+  freshness before the sync: **5** of the 20 present nodes were sprint-stamped,
+  **15** were stale (nine still on `567253cb`/`dd20de6b`, 2026-06).
+- **The 13 new files** the eight commits add (the brief said 11; it omitted
+  `cypher/count_block_form_bench_test.go` and
+  `cypher/projection_fusion_bench_test.go`, both `_bench_test.go`) had **3** nodes
+  between them before the sync — the two `Test` nodes and the `projectionFusion`
+  `Component` stamped by hand during the sprint. All 13 now have nodes.
+- **Graph → code — 19 nodes deleted in all** (14 here, 2 invented names, 3
+  mislabelled). **14** nodes denoted declarations that
+  sprint 352 itself deleted and that no sync removed: `cypher/expr/eval.go`'s
+  `subqueryContextValue`, `extractSubqueryContext`, `extractPatternEvaluator` and
+  two of its tests (`d98c999a`); `buildEdgeTypeFilter`, `edgeTypeFilterFor` and the
+  `edgeTypeFilterCache` Type, all removed with `cypher/edge_type_filter_cache.go`
+  by `aea749a4` (rmp #2251, the slot-aligned relationship-type column); and
+  `topHeap`'s five `heap.Interface` methods plus `rowLessForKeys`, removed by
+  `83be4a40` when `Top` was given its own heap. **The previous sync's own
+  "fidelity repair" is what left three of these:** the 2026-08-27 section below
+  records creating `edgeTypeFilterCache` and `edgeTypeFilterFor`; both were real
+  then and were deleted two days later.
+- **Graph → code — 2 invented names.** `TestSchemaWalkHoisted` (`Test`,
+  `bench/audit352/schemawalk_hoist_test.go`, stamped `ed341595`) and
+  `TestEvalWithReentrancy` (`Test`, `cypher/expr/eval_reentrancy_test.go`, stamped
+  `d98c999a`) **exist nowhere in the repository — 0 hits at HEAD and 0 at
+  `develop`**, proved by a full-tree python scan and shown as a hit list, not by an
+  empty `grep`. Both were written by earlier syncs *inside this sprint*. Deleted,
+  and the four real gates that live in those two files created in their place
+  (`TestSchemaWalkIsNotPerRow`, `TestSchemaWalkIsNotPerRowUnderParallelScan`,
+  `TestEvalWith_NestedSubqueryDoesNotLeakContext`,
+  `TestEvalWith_NestedEvaluationGetsFreshBudget`).
+- **Graph → code — 5 mislabelled or mis-filed.** `ResolveLabelCount`,
+  `sortDecorated` and `columnarOutputChunk` were modelled as `Function` when each
+  is a `Method` (receivers `lpgLabelResolver`/`execLabelAdapter`, `Sort`, `Expand`);
+  `columnsAre` was a `Method` with **no `recv` and no `pkg`**, so it was
+  unreachable by identity; `csrPairFromGraphAt` claimed
+  `cypher/csr_pair_cache.go` when it is declared in `cypher/api.go`. Also
+  `csrPairCache` (Type) and `ColumnarProject` (Type) had **neither `pkg` nor
+  `file`**, `buildReadPhysical` (Method) had **no `file`**, and `lpgLabelWalker`
+  (Type, `cypher/api.go:6401`) had **no `pkg` and no provenance at all**. All
+  reconciled to the code; the code won in every case.
+- **`pkg` drift on incrementally synced nodes.** The bulk survey sets `pkg` to the
+  importPath; every node written by an in-sprint incremental sync omitted it. **21**
+  sprint-352-stamped symbol nodes had no `pkg`; all 21 now do, derived from the
+  file's directory, with the missing `Package → CONTAINS` edges added.
+- **Final state:** of the **544** nodes stamped with a sprint-352 commit, **445**
+  are symbol-tier and **0** disagree with the code (every `Type` name declared in
+  its claimed file, every `Method` matched on name *and* receiver, every
+  `Test`/`Benchmark` present). **0** duplicate `(label, name, pkg, recv)` groups.
+  **0** reversed `Commit→Task` `IMPLEMENTED_IN`. **0** nodes stamped with a date
+  after HEAD's.
+
+#### Properties this sprint added, and three it merely DOCUMENTED
+
+Checked by counting holders before claiming novelty — three properties I first
+recorded as new turned out to pre-date the sprint.
+
+| Label | Property | Status | Meaning |
+|---|---|---|---|
+| `Test` | `layer` | **pre-existing, undocumented until now** — 71 holders, the oldest at `406a0b48` (2026-07-28) | Which test layer the function belongs to: `short` \| `soak` \| `crashinject`. **Absence does NOT mean `short`**: only 71 of 4,722 `Test` nodes carry it at all, so the property answers "which layer" only where it is set, and says nothing where it is not. Sprint 352 set it on the six functions it moved across the layer boundary and on `TestIndexBuffer_MassiveConcurrentStress`. |
+| `Decision` | `priorArt` | **pre-existing, undocumented until now** — 2 holders; the older is the un-named 2026-08-05 node (PostgreSQL/InnoDB/Memgraph on XID assignment order) that the `Decision` row above already flags as unreachable by identity | The reference implementation read to settle the decision, **with its tag and commit**, so the citation is verifiable rather than remembered. |
+| `Type` | `note` | **pre-existing** — 6 holders since 2026-08-03 | The non-obvious behaviour, or a recorded reconciliation. Sprint 352 added two (`topHeap`, `lpgLabelWalker`). |
+| `Test` | `measured` | **new** (1 holder) | The figure that justifies the test's current shape — `TestIndexBuffer_ConcurrentStress`: 97.7% of the whole `cypher/exec` `-race` cost before rmp #2672. Distinct from `note`, which is prose. |
+| `Defect` | `gap` | **new** (1 holder) | What the defect is invisible to — the gate that does **not** catch it. Introduced for rmp #2675, which no TCK scenario can reach. |
+| `Task` | `backlog` | **new on `Task`** (1 holder); already documented on `Defect` | True while the task is filed but in no sprint. |
+| `Spec` | `note` | **new** (1 holder) | One sentence on what the document settles, for a spec whose title does not say. |
+| `Finding` | `conclusion` | **new** (1 holder); `Finding.task` is pre-existing with 105 holders | What the measurement settles, as opposed to what it measured. `Finding` itself is still absent from the label table above (129 nodes) — see the gap list below. |
+
+No new node label and **no new edge type or endpoint form** were introduced; every
+edge written uses a form the table above already documents.
+
+#### Divergences observed and deliberately NOT changed
+
+These are counted, not fixed, because fixing them is outside a sprint-352 sync and
+each needs its own decision:
+
+- **`IMPLEMENTED_IN` has 21 off-model edges.** The table documents exactly
+  `(Task)-[:IMPLEMENTED_IN]->(Commit)`. The live graph also carries
+  `Feature→Commit` (10), `Commit→Feature` (5), `DSTScenario→Commit` (4),
+  `Task→Package` (1) and `Scenario→File` (1). None is the reversed `Commit→Task`
+  form the table calls a defect, so none is silently hiding work; they are
+  undocumented endpoint forms.
+- **17 `Component` nodes carry `file` and have a NULL `path`**, so a `path`-based
+  query — the documented one — misses them entirely (54 nodes do carry `path`). The
+  sprint's own `projectionFusion` node was one of them and **was** corrected here.
+- **The live graph has 89 DISTINCT EDGE TYPES**, against roughly 30 documented in
+  the edge table above. The pre-existing data-quality note under that table puts the
+  live figure at 29 — measured at commit `42491072` it is **89**, so that note is
+  itself three times out of date. The census below lists all 89. Reconciling them is
+  a standing hygiene task, unchanged by this sync: every edge sprint 352 wrote uses a
+  documented form.
+- **503 nodes and 177 edges carry no `gitCommit` at all**, concentrated in
+  `Commit` (236) and `Task` (78). Criterion 6 of the fidelity audit is therefore
+  not met graph-wide, only within sprint 352's own footprint.
+- **Labels present in the graph but absent from the label table:** `Finding` (129),
+  `File` (35), `ExampleProgram` (34), `Audit` (21), `Fix` (13), `Doc` (9),
+  `AuditRound` (5), `Document` (4), `Perf` (4), `Note` (2), `SecurityAudit` (2),
+  `Metric` (2), `Initiative` (1), `Config` (1), `Scenario` (1), `Certification` (1),
+  `SecurityFinding` (1), `Bug` (1), `DesignSpike` (1). The `Package`→symbol tier is
+  populated; the `File` tier is **not** (35 nodes against **2,880** tracked `.go`
+  files, counted with `git ls-files '*.go'`) and a source file is reached through
+  its symbols' `file` property, not through a `File` node. This is the model in
+  force, not an aspiration.
+- **Test-file helper functions are not modelled**, confirmed empirically: the graph
+  holds **0** `Function` nodes with `inTestFile = true`. A `_test.go` file
+  contributes only its `Test`/`Benchmark`/`FuzzTarget`/`Example` nodes.
+
+#### What the sprint established, as knowledge
+
+* **`make ci` could not fail on a test failure before `351707e8`.** Recorded as
+  `Defect {ref:'make-shellflags-inert-gnu-make-3.81'}`, FIXED, `fixedWith` rmp
+  #2672. The `Makefile` set `.SHELLFLAGS = -e -u -o pipefail`, and **GNU Make 3.81
+  — the `/usr/bin/make` on macOS — ignores `.SHELLFLAGS` entirely**, so the flags
+  never applied and a failing command inside a recipe did not abort it. **Every
+  "make ci green" recorded before that commit was read from a gate that could not
+  go red.** The flags now live on the `SHELL` assignment and a `shell-guard` target
+  (`Component {name:'make.shell-guard'}`) asserts they are in force. Lesson:
+  `a-gate-must-prove-it-can-fail`.
+* **`TestIndexBuffer_ConcurrentStress` was 97.7% of `cypher/exec`'s entire `-race`
+  cost.** The cost is ThreadSanitizer's per-sync-object bookkeeping, measured at
+  roughly **N^2.3 in the number of goroutines contending one mutex** — not in the
+  work done. Readers cut 1000 → 50 in short; the 1024 level moved to
+  `//go:build soak || nightly`. Lesson:
+  `race-cost-is-superlinear-in-goroutines-sharing-one-sync-object`.
+* **The resident graph's GC tax is 0.17% of CPU under load and ZERO idle.** Under
+  GOGC pacing the live heap cancels, so shrinking objects-per-node buys **zero**
+  steady-state GC CPU. `Decision {name:'b10-is-a-memory-item-not-a-gc-item'}`:
+  argue B-10 on footprint alone, never on a GC-CPU saving that does not exist.
+* **Neo4j's `CountExpression` AST has exactly ONE form, and its PARSER desugars
+  the pattern form into the block form** — read at tag `2026.07.1`, commit
+  `f213380f`, in the source rather than the documentation. GoGraph carried the
+  inverse asymmetry, so the same query lost the degree and hop pushdowns purely by
+  how it was spelled. Spelling-independence in `getDegreeRewriter` is therefore a
+  property of the **representation**; GoGraph puts the normalisation at
+  `ir.PatternFormOf` (`Component`, the inverse of desugaring) rather than in the
+  parser, because the IR is where the rewrites read.
+* **`cypher/ir/translator.go`'s `TranslateSubquery` discards a subquery body's
+  trailing `RETURN`**, so `COUNT { MATCH … RETURN count(*) }` answers **2** where
+  openCypher requires **1**. **TCK-INVISIBLE: zero `COUNT { }` scenarios exist
+  across all 220 TCK feature files**, so the full suite stays green with the defect
+  in place — conformance here cannot be gated by the TCK. Filed as rmp **#2675**
+  (`Task`, BACKLOG, and `Defect {id:2675}`, OPEN, `backlog=true`, with the `gap`
+  property), reached from `Task 2648 -[:FOUND]-> Defect 2675` and
+  `Task 2648 -[:FOLLOWED_BY]-> Task 2675`. Lesson:
+  `a-green-tck-is-not-coverage-of-what-it-never-scenarios`.
+* **Three of the four count pushdowns ALREADY accepted `count(<var>)`.** Their real
+  requirement is a **bare-scan child**, not `count(*)`, so the `count(var)`
+  normalisation unlocked **one** site, not four. Lesson:
+  `the-pushdown-gate-was-the-child-shape-not-the-count-argument`, taught by both
+  #2657 and #2668.
+
+**Graph size after this sync: 14,964 nodes and 19,321 edges.**
+
+#### Counts by label and edge type (commit `42491072`, 2026-09-01)
+
+The 2026-06-11 tables above are kept for their date; these are the live counts.
+
+| Label | Count | | Edge type | Count |
+|---|---:|---|---|---:|
+| `Test` | 4746 | | `CONTAINS` | 13011 |
+| `Method` | 3597 | | `HAS_METHOD` | 3531 |
+| `Function` | 3118 | | `TOUCHES` | 573 |
+| `Type` | 1062 | | `VERIFIES` | 316 |
+| `Commit` | 716 | | `IMPLEMENTED_IN` | 269 |
+| `Task` | 470 | | `FIXES` | 218 |
+| `Benchmark` | 178 | | `IMPLEMENTS` | 203 |
+| `Finding` | 129 | | `BELONGS_TO` | 143 |
+| `Example` | 121 | | `ABOUT` | 123 |
+| `Package` | 120 | | `IMPROVES` | 84 |
+| `Feature` | 87 | | `EXERCISES` | 74 |
+| `Sprint` | 86 | | `FROM_AUDIT` | 56 |
+| `Spec` | 83 | | `SPECIFIED_IN` | 53 |
+| `Component` | 79 | | `TAUGHT` | 51 |
+| `DSTScenario` | 57 | | `PART_OF` | 50 |
+| `Defect` | 53 | | `CONCERNS` | 49 |
+| `Lesson` | 45 | | `FOUND` | 39 |
+| `File` | 35 | | `CLOSES` | 35 |
+| `ExampleProgram` | 34 | | `FOLLOWED_BY` | 35 |
+| `Decision` | 32 | | `DEPENDS_ON` | 34 |
+| `Memory` | 29 | | `FIXED_IN` | 31 |
+| `Audit` | 21 | | `PRODUCED` | 27 |
+| `Fix` | 13 | | `INCLUDES` | 25 |
+| `Doc` | 9 | | `DELIVERS` | 20 |
+| `Release` | 6 | | `REMEDIATED_BY` | 20 |
+| `FuzzTarget` | 5 | | `RECORDED_IN` | 14 |
+| `Agent` | 5 | | `LIVES_IN` | 12 |
+| `AuditRound` | 5 | | `MEASURES` | 12 |
+| `Document` | 4 | | `MADE_DECISION` | 11 |
+| `Perf` | 4 | | `BUILDS_ON` | 11 |
+| `Note` | 2 | | `RECORDS` | 10 |
+| `Skill` | 2 | | `ADDRESSES` | 10 |
+| `SecurityAudit` | 2 | | `DELIVERED_BY` | 9 |
+| `Metric` | 2 | | `TESTS` | 8 |
+| `Initiative` | 1 | | `AUDITED` | 8 |
+| `Config` | 1 | | `CREATES` | 7 |
+| `Scenario` | 1 | | `DOCUMENTED_BY` | 6 |
+| `Certification` | 1 | | `FOUND_IN` | 6 |
+| `SecurityFinding` | 1 | | `REPORTED_IN` | 6 |
+| `Bug` | 1 | | `RESOLVES` | 6 |
+| `DesignSpike` | 1 | | `SPECIFIES` | 6 |
+|  |  | | `SPECIALISES_IN` | 6 |
+|  |  | | `VERIFIED_BY` | 6 |
+|  |  | | `CONSULTED_BY` | 5 |
+|  |  | | `IMPLEMENTED_BY` | 5 |
+|  |  | | `CLOSED_BY` | 5 |
+|  |  | | `COVERS` | 5 |
+|  |  | | `FOUND_BY` | 4 |
+|  |  | | `TRACKED_BY` | 4 |
+|  |  | | `DISCOVERED` | 4 |
+|  |  | | `MODIFIES` | 4 |
+|  |  | | `PINNED_BY` | 3 |
+|  |  | | `REGRESSION_TEST` | 3 |
+|  |  | | `FOLLOWED_UP_BY` | 3 |
+|  |  | | `PARTIALLY_FIXES` | 3 |
+|  |  | | `REMEDIATES` | 3 |
+|  |  | | `PINS` | 3 |
+|  |  | | `CLOSED_DEFECT` | 3 |
+|  |  | | `FIXED_BY` | 2 |
+|  |  | | `ADDS` | 2 |
+|  |  | | `CHANGED` | 2 |
+|  |  | | `EVIDENCED_BY` | 2 |
+|  |  | | `DOCUMENTED_IN` | 2 |
+|  |  | | `RELEASES` | 2 |
+|  |  | | `INTRODUCED` | 2 |
+|  |  | | `INTRODUCES` | 2 |
+|  |  | | `AUDITS` | 2 |
+|  |  | | `HAS_KNOWN_DEFECT` | 1 |
+|  |  | | `FOLLOWS` | 1 |
+|  |  | | `PROVES` | 1 |
+|  |  | | `RETURNS` | 1 |
+|  |  | | `CALLS` | 1 |
+|  |  | | `SAME_ROOT_CAUSE_AS` | 1 |
+|  |  | | `BUILDS` | 1 |
+|  |  | | `MIRRORS` | 1 |
+|  |  | | `VALIDATES` | 1 |
+|  |  | | `HARDENED_IN` | 1 |
+|  |  | | `MEASURED_BY` | 1 |
+|  |  | | `FORMERLY_GATED` | 1 |
+|  |  | | `USES` | 1 |
+|  |  | | `ACCELERATES` | 1 |
+|  |  | | `RESOLVED_BY` | 1 |
+|  |  | | `DEFINED` | 1 |
+|  |  | | `DECIDED_FOR` | 1 |
+|  |  | | `REVISED_BY` | 1 |
+|  |  | | `RECORDED_BY` | 1 |
+|  |  | | `CAUSED_BY` | 1 |
+|  |  | | `REGRESSION_FOR` | 1 |
+|  |  | | `DEFINED_IN` | 1 |
+
