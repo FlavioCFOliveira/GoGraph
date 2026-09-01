@@ -14,23 +14,40 @@ import (
 // labelledHopDifferential is [degreeDifferential] for the labelled single-hop
 // count (rmp #2235), and it carries one extra obligation.
 //
-// Besides establishing identity against a semantically equivalent UNREWRITABLE
-// form and against a hand-computed absolute value, it asserts that
-// degreeRewriteCount did NOT move. That is acceptance criterion 3 discharged by
-// construction rather than by inspection: if this optimisation had been built by
-// widening #2232's recogniser, the degree counter would fire here and every case
-// below would fail.
+// Besides establishing identity against an UNREWRITABLE reading and against a
+// hand-computed absolute value, it asserts that degreeRewriteCount did NOT move.
+// That is acceptance criterion 3 discharged by construction rather than by
+// inspection: if this optimisation had been built by widening #2232's recogniser,
+// the degree counter would fire here and every case below would fail.
+//
+// # Where the unrewritten arm comes from (rmp #2648)
+//
+// It used to come from the SPELLING: both arms ran on one default engine, and the
+// control was a `COUNT { MATCH … WHERE … RETURN b }` block form trusted because
+// no recogniser accepted that spelling. rmp #2648 removes exactly that
+// limitation — it normalises a single-MATCH block form into the pattern the
+// recognisers see — so an oracle resting on it was one commit away from silently
+// becoming a second reading of the code under test, while staying green.
+//
+// The arm is now [adjacencyCountEngines]'s off engine, built with
+// [EngineOptions.DisableAdjacencyCountRewrites], and [oracleRun] ASSERTS on both
+// runtime counters that neither rewrite fired while it ran. That cannot be
+// vacated by any later widening: the arm is unrewritten because the engine
+// forbids it, not because nobody has taught a recogniser that spelling yet.
+//
+// Three oracles now, sharing no code with each other: the SAME query text
+// unrewritten, the differently-spelled equivalent unrewritten, and want.
 func labelledHopDifferential(t *testing.T, g *lpg.Graph[string, float64], rewritable, equivalent, want string) {
 	t.Helper()
 	// NOT parallel, and neither is any test in this file: labelledHopRewriteCount
 	// and degreeRewriteCount are process-wide, so a concurrent test firing either
 	// one corrupts every delta read here. Running them in parallel first made
 	// nine cases fail against counts another subtest had produced.
-	eng := NewEngine(g)
+	on, off := adjacencyCountEngines(g)
 
 	beforeHop := labelledHopRewriteCount.Load()
 	beforeDeg := degreeRewriteCount.Load()
-	got := degreeRun(t, eng, rewritable)
+	got := degreeRun(t, on, rewritable)
 	fired := labelledHopRewriteCount.Load() - beforeHop
 	degFired := degreeRewriteCount.Load() - beforeDeg
 
@@ -42,11 +59,24 @@ func labelledHopDifferential(t *testing.T, g *lpg.Graph[string, float64], rewrit
 			"stay ineligible for it (rmp #2235 AC 3)", degFired, rewritable)
 	}
 
-	beforeHop = labelledHopRewriteCount.Load()
-	oracle := degreeRun(t, eng, equivalent)
-	if labelledHopRewriteCount.Load() != beforeHop {
-		t.Fatalf("the control form %q ALSO took the rewrite; it is not an independent oracle", equivalent)
+	// ORACLE 1: the SAME query on the rewrite-free arm. Identical text, identical
+	// fixture, only the access path differs — which is what "identity" actually
+	// asks for.
+	unrewritten := oracleRun(t, off, rewritable)
+	if len(got) != len(unrewritten) {
+		t.Fatalf("row count differs from the SAME query unrewritten: rewritten %d, unrewritten %d\n  query: %s",
+			len(got), len(unrewritten), rewritable)
 	}
+	for i := range got {
+		if got[i] != unrewritten[i] {
+			t.Fatalf("row %d differs from the SAME query unrewritten:\n  rewritten   %q\n  unrewritten %q\n  query: %s",
+				i, got[i], unrewritten[i], rewritable)
+		}
+	}
+
+	// ORACLE 2: the differently-spelled equivalent, also on the rewrite-free arm
+	// so a widening cannot quietly move it onto the path it is meant to check.
+	oracle := oracleRun(t, off, equivalent)
 
 	if len(got) != len(oracle) {
 		t.Fatalf("row count differs: rewritten %d, control %d\n  rewritten: %s\n  control:   %s",
@@ -69,18 +99,20 @@ func labelledHopDifferential(t *testing.T, g *lpg.Graph[string, float64], rewrit
 }
 
 // TestLabelledHopCount_Identity is acceptance criterion 2. Each case pairs the
-// rewritable `(a)-[:K]->(:L)` form with an unrewritable one that must produce
-// the same answer.
+// rewritable `(a)-[:K]->(:L)` form with a differently-spelled equivalent, run on
+// the rewrite-free arm, that must produce the same answer.
 //
-// The control is deliberately the FULL subquery form,
-// `COUNT { MATCH … WHERE … RETURN b }`, and not the more obvious pattern form
-// `COUNT { (a)-[:K]->(b) WHERE b:Q }`. The latter is not a valid oracle: the
-// parser drops the inline WHERE of a COUNT pattern subquery
-// (VisitSubqueryCount builds ast.CountSubquery without pat.Where, where the
-// EXISTS sibling sets it), so that spelling silently answers the unfiltered
-// count. The absolute oracle in labelledHopDifferential is what caught it —
-// the two forms disagreed 1 against 2, and the hand-computed value said 1.
-// Filed separately; see the sprint 327 notes.
+// The equivalent is the FULL subquery form, `COUNT { MATCH … WHERE … RETURN b }`.
+// When these cases were written that spelling was chosen because the parser
+// DROPPED the inline WHERE of a COUNT pattern subquery, so
+// `COUNT { (a)-[:K]->(b) WHERE b:Q }` silently answered the unfiltered count and
+// could not serve as a control. The absolute oracle in labelledHopDifferential is
+// what caught it — the two forms disagreed 1 against 2, and the hand-computed
+// value said 1. That defect is rmp #2242 and is FIXED: VisitSubqueryCount now
+// sets Where, and cypher/count_subquery_where_test.go is its regression gate. The
+// full form is kept here because it exercises an independently translated inner
+// plan, which is a better second oracle than a near-identical spelling, not
+// because the pattern form is still untrustworthy.
 func TestLabelledHopCount_Identity(t *testing.T) {
 
 	cases := []struct {
@@ -240,12 +272,11 @@ func TestLabelledHopCount_ParallelEdges(t *testing.T) {
 func TestLabelledHopCount_IneligibleShapes(t *testing.T) {
 
 	cases := []struct{ name, query string }{
-		// NOTE: `COUNT { (a)-[:K]->(b:Q) WHERE b.id > 1 }` is deliberately absent.
-		// It SHOULD be ineligible, but the recogniser never sees the WHERE — the
-		// parser discards it before the AST reaches here (see the note on
-		// TestLabelledHopCount_Identity). Asserting either outcome would pin
-		// behaviour that belongs to the parser defect, not to this recogniser.
-		// The EXISTS spelling, whose WHERE the parser does preserve, is covered.
+		// The COUNT spelling of the first case used to be absent, because the
+		// parser discarded a COUNT pattern subquery's inline WHERE and the
+		// recogniser therefore never saw it (rmp #2242). It is asserted now that
+		// the clause survives to the AST.
+		{"inline WHERE on COUNT is a Selection", "MATCH (a:P {id: 3}) RETURN COUNT { (a)-[:K]->(b:Q) WHERE b.id > 1 }"},
 		{"inline WHERE on EXISTS is a Selection", "MATCH (a:P {id: 3}) RETURN EXISTS { (a)-[:K]->(b:Q) WHERE b.id > 1 }"},
 		{"far-node property is a Selection", "MATCH (a:P {id: 3}) RETURN COUNT { (a)-[:K]->(:Q {id: 4}) }"},
 		{"label on the anchor", "MATCH (a:P {id: 3}) RETURN COUNT { (a:P)-[:K]->(:Q) }"},

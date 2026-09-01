@@ -61,6 +61,17 @@ package cypher
 // silently steals from cardinality-reducing rewrites, and every instance was
 // caught only by the differential suites. [TestDegreeRewrite_IneligibleShapes]
 // pins each exclusion with a test that fails if the gate loosens.
+//
+// # rmp #2648 is NOT a widening of it
+//
+// The recogniser's clauses are untouched by #2648. What changed is what it is
+// HANDED: a block-form body (`COUNT { MATCH (a)-[:K]->() }`) used to arrive as a
+// nil pattern and be rejected by the first clause, because the AST carries that
+// spelling in [ast.CountSubquery].Query and every dispatch site read
+// [ast.CountSubquery].Pattern. [subqueryRecogniserBody] now normalises the two
+// spellings to one view before the recogniser runs, so the SAME clauses decide
+// the SAME way for both. See [ir.PatternFormOf] for the Neo4j evidence, the
+// boundary, and what was deliberately left out.
 
 import (
 	"context"
@@ -98,15 +109,23 @@ type degreeShape struct {
 	haveResolv bool
 }
 
-// recogniseDegreePattern reports whether the pattern form of an EXISTS/COUNT
-// subquery is degree-answerable for an outer row shaped like row, and returns
-// the shape when it is.
+// recogniseDegreePattern reports whether an EXISTS/COUNT subquery's pattern is
+// degree-answerable for an outer row shaped like row, and returns the shape when
+// it is.
 //
-// where is the subquery's inline WHERE; a non-nil WHERE is a Selection and
-// disqualifies the pattern. It is threaded for COUNT as well as EXISTS: until
-// rmp #2242 gave [ast.CountSubquery] a Where field, callers passed nil here
-// because there was nothing to pass, so a COUNT carrying an inline WHERE was
-// answered from the degree WITHOUT its predicate.
+// pat is the SPELLING-INDEPENDENT view of the subquery body since rmp #2648: it
+// is the pattern the user wrote for the pattern form, and the pattern of the
+// single MATCH for a block form that is exactly the same query
+// ([ir.PatternFormOf], reached through [subqueryRecogniserBody]). This function
+// itself is unchanged by that work — it never learned a second shape, it simply
+// stopped being handed nil for one of the two spellings.
+//
+// where is the body's WHERE; a non-nil WHERE is a Selection and disqualifies the
+// pattern. It is threaded for COUNT as well as EXISTS: until rmp #2242 gave
+// [ast.CountSubquery] a Where field, callers passed nil here because there was
+// nothing to pass, so a COUNT carrying an inline WHERE was answered from the
+// degree WITHOUT its predicate. A block form's `MATCH … WHERE …` arrives here the
+// same way and is refused for the same reason.
 //
 // Every rejection below mirrors a clause of Neo4j's QuerySolvableByGetDegree or
 // isEligible; see the file comment for the correspondence.
@@ -231,24 +250,33 @@ func (s *degreeShape) relTypeID(g *lpg.ReadView[string, float64]) (lpg.LabelID, 
 // once per occurrence: the verdict is a property of the AST and of which outer
 // variables are bound at that point, both fixed for the life of the query.
 //
+// sub is the subquery expression itself, in EITHER spelling. The (pattern,
+// where) pair the recogniser needs is derived from it by
+// [subqueryRecogniserBody], INSIDE the memo, so a block-form body is walked once
+// per occurrence and not once per outer row (rmp #2648). Before that the two
+// fields were read at the dispatch site, which is what made
+// `COUNT { MATCH (a)-[:K]->() }` structurally unreachable: sub.Pattern is nil for
+// the block form, and the recogniser's first clause rejects a nil pattern.
+//
 // A nil result is also what [EngineOptions.DisableAdjacencyCountRewrites]
 // produces, deliberately: "no shape" is already the caller's signal to drive the
 // inner plan, so the gate needs no second code path and cannot answer differently
 // from a genuine rejection. The gate is checked BEFORE the memo so the two never
 // interact — a verdict cached on one engine is not consulted by another, since an
 // evaluator belongs to a single query run.
-func (e *subqueryEvaluator) degreeShapeFor(key ast.Expression, pat *ast.Pattern, where *ast.Where, row expr.RowContext) *degreeShape {
+func (e *subqueryEvaluator) degreeShapeFor(sub ast.Expression, row expr.RowContext) *degreeShape {
 	if e.adjacencyCountsDisabled {
 		return nil
 	}
-	if sh, seen := e.degree[key]; seen {
+	if sh, seen := e.degree[sub]; seen {
 		return sh
 	}
+	pat, where := subqueryRecogniserBody(sub)
 	sh, ok := recogniseDegreePattern(pat, where, row)
 	if !ok {
 		sh = nil
 	}
-	e.degree[key] = sh
+	e.degree[sub] = sh
 	return sh
 }
 
@@ -279,9 +307,10 @@ func (e *subqueryEvaluator) degreeShapeFor(key ast.Expression, pat *ast.Pattern,
 // When the pattern is not degree-answerable this falls back to the full inner
 // drive and the exact count, where the cap is simply not applied.
 func (e *subqueryEvaluator) EvalCountBounded(ctx context.Context, sub *ast.CountSubquery, row expr.RowContext, params map[string]expr.Value, limit int64) (expr.Value, error) {
-	// sub.Where is threaded so both recognisers refuse a pattern carrying an
-	// inline WHERE, which neither can evaluate (rmp #2242).
-	if sh := e.degreeShapeFor(sub, sub.Pattern, sub.Where, row); sh != nil {
+	// The body's WHERE is threaded — derived inside the memo since rmp #2648 —
+	// so both recognisers refuse a pattern carrying an inline WHERE, which
+	// neither can evaluate (rmp #2242).
+	if sh := e.degreeShapeFor(sub, row); sh != nil {
 		if n, ok := sh.count(e.g, row, limit); ok {
 			degreeRewriteCount.Add(1)
 			return expr.IntegerValue(n), nil
@@ -290,7 +319,7 @@ func (e *subqueryEvaluator) EvalCountBounded(ctx context.Context, sub *ast.Count
 	// Labelled single hop (#2235): a separate path for the shape the degree
 	// recogniser must refuse. It honours the same cap — the walk stops as soon as
 	// limit matching neighbours have been seen.
-	if n, ok := e.countLabelledHop(sub, sub.Pattern, sub.Where, row, limit); ok {
+	if n, ok := e.countLabelledHop(sub, row, limit); ok {
 		return expr.IntegerValue(n), nil
 	}
 	return e.EvalCount(ctx, sub, row, params)

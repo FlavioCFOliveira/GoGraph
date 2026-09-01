@@ -193,12 +193,33 @@ func TestSubqueryAdjacencyRebuild_ScalesWithGraph(t *testing.T) {
 	// may never need one PER ROW.
 	const amortisedCeiling = 8
 
-	shapes := []struct{ name, query string }{
-		{"plain_match", `MATCH (a:P) RETURN a.sid`},
-		{"optional_match", `MATCH (a:P) OPTIONAL MATCH (a)-[:R]->(b:P) RETURN a.sid, b.sid`},
-		{"pattern_predicate", `MATCH (a:P) WHERE (a)-[:R]->(:P) RETURN a.sid`},
-		{"exists_subquery", `MATCH (a:P) WHERE EXISTS { MATCH (a)-[:R]->(:P) } RETURN a.sid`},
-		{"count_subquery", `MATCH (a:P) RETURN a.sid AS sid, COUNT { MATCH (a)-[:R]->(:P) } AS c`},
+	// unrewritten selects the arm a shape is observed on. rmp #2648 normalises a
+	// single-MATCH BLOCK-form subquery into the pattern the adjacency recognisers
+	// see, so `COUNT { MATCH (a)-[:R]->(:P) }` is now answered by one adjacency
+	// walk and builds no inner pipeline AT ALL. That is a different fact from
+	// #2646's "the inner pipeline's rebuild is amortised", and [rebuildDelta]'s
+	// own godoc warns that the two must not be confused — both produce a zero.
+	//
+	// So the shape is observed TWICE: once on a default engine, where the claim is
+	// that no inner plan exists, and once on an engine built with
+	// [EngineOptions.DisableAdjacencyCountRewrites], which is where #2646's claim
+	// still lives and is still measured. Dropping the second arm would have
+	// silently deleted #2646's structural verdict while leaving this test green.
+	shapes := []struct {
+		name        string
+		query       string
+		unrewritten bool
+	}{
+		{name: "plain_match", query: `MATCH (a:P) RETURN a.sid`},
+		{name: "optional_match", query: `MATCH (a:P) OPTIONAL MATCH (a)-[:R]->(b:P) RETURN a.sid, b.sid`},
+		{name: "pattern_predicate", query: `MATCH (a:P) WHERE (a)-[:R]->(:P) RETURN a.sid`},
+		{name: "exists_subquery", query: `MATCH (a:P) WHERE EXISTS { MATCH (a)-[:R]->(:P) } RETURN a.sid`},
+		{name: "count_subquery", query: `MATCH (a:P) RETURN a.sid AS sid, COUNT { MATCH (a)-[:R]->(:P) } AS c`},
+		{
+			name:        "count_subquery_unrewritten",
+			query:       `MATCH (a:P) RETURN a.sid AS sid, COUNT { MATCH (a)-[:R]->(:P) } AS c`,
+			unrewritten: true,
+		},
 	}
 	sizes := []int{250, 500}
 
@@ -211,14 +232,21 @@ func TestSubqueryAdjacencyRebuild_ScalesWithGraph(t *testing.T) {
 	for _, n := range sizes {
 		g := buildRebuildFixture(t, n)
 		e := NewEngine(g)
+		// The same graph, read by an engine that may not answer a count from the
+		// adjacency. Both arms therefore differ in exactly one variable.
+		eOff := NewEngineWithOptions(g, EngineOptions{DisableAdjacencyCountRewrites: true})
 		for _, s := range shapes {
+			arm := e
+			if s.unrewritten {
+				arm = eOff
+			}
 			// Warm-up drive: populates the Engine's shared caches and the plan
 			// cache, so the bracketed observation that follows measures ONLY what
 			// the shape rebuilds that no cache could have served.
-			if w := driveCounted(t, e, s.query); w.rows != n {
+			if w := driveCounted(t, arm, s.query); w.rows != n {
 				t.Fatalf("%s n=%d warm-up shipped %d rows, want %d", s.name, n, w.rows, n)
 			}
-			d := driveCounted(t, e, s.query)
+			d := driveCounted(t, arm, s.query)
 			if d.rows != n {
 				t.Fatalf("%s n=%d shipped %d rows, want %d", s.name, n, d.rows, n)
 			}
@@ -244,18 +272,32 @@ func TestSubqueryAdjacencyRebuild_ScalesWithGraph(t *testing.T) {
 		}
 	}
 
-	// The recognisers must not have moved. Amortising a rebuild changes what the
-	// adjacency closure FINDS, never which shapes the planner or the evaluator
-	// recognise, so the two adjacency-level rewrite counters must read exactly what
-	// they read before rmp #2646 — measured, not assumed: pattern_predicate is
-	// answered by the labelled-hop rewrite once per outer row, and no other shape
-	// fires either rewrite. A shape that started or stopped firing one would mean a
-	// recogniser changed behaviour, which is not licensed however much faster it got.
+	// WHICH recogniser serves WHICH shape is pinned exactly, per arm, and it is
+	// measured rather than assumed. An unexplained change here means a recogniser
+	// moved, which is never licensed as a side effect of a performance change
+	// however much faster it got — every entry below is a deliberate decision with
+	// a task behind it.
+	//
+	//   - pattern_predicate — one labelled-hop walk per outer row (rmp #2235).
+	//   - count_subquery — one labelled-hop walk per outer row SINCE rmp #2648,
+	//     which normalises the block form into the pattern the recogniser sees. It
+	//     read 0 before that, because ast.CountSubquery.Pattern is nil for this
+	//     spelling and the recogniser rejects a nil pattern on its first line.
+	//   - count_subquery_unrewritten — 0 by construction, on the arm that forbids
+	//     both rewrites. This is where #2646's amortisation claim is still
+	//     measured; the ceiling assertions above are what measure it.
+	//   - exists_subquery — 0, and NOT because the recogniser refuses it: a
+	//     WHERE-position EXISTS is planned as a SemiApply operator, so it never
+	//     reaches the expression evaluator where either rewrite lives.
+	//   - plain_match, optional_match — 0, no subquery.
+	//
+	// The degree rewrite fires for no shape here: every pattern in the table has a
+	// LABEL on its far node, and a label is a Selection a degree cannot filter on.
 	for _, s := range shapes {
 		for _, n := range sizes {
 			d := obs[key{s.name, n}]
 			wantHop := uint64(0)
-			if s.name == "pattern_predicate" {
+			if s.name == "pattern_predicate" || s.name == "count_subquery" {
 				wantHop = uint64(n)
 			}
 			if d.degree != 0 {
@@ -355,6 +397,25 @@ func probedDrive(t *testing.T, e *Engine, q string) (rebuildDelta, *csrPairCache
 // top-level one-hop takes the miss route by construction, so it must show exactly
 // one build AND one miss — proving the probe can still see a miss at all, before
 // its silence anywhere else is read as evidence of anything.
+//
+// # Why the subject arm forbids the adjacency rewrites (rmp #2648)
+//
+// The paragraph above says asserting the HITS is "what makes this fail on a
+// future change that stops the inner Expand from running at all instead of
+// passing on a vacuous zero". rmp #2648 is exactly that change, and it is
+// licensed: it normalises a single-MATCH block form into the pattern the
+// labelled-hop recogniser sees, so on a DEFAULT engine this query now performs no
+// inner Expand, no cache lookup and no rebuild — it walks the anchor's adjacency
+// once. This test duly went red, which is the gate working.
+//
+// What it attributes, though, is the route the INNER PIPELINE takes through
+// [csrPairCachedAt], and that is still worth pinning: it is the path every
+// subquery the recognisers refuse continues to take. The subject arm is therefore
+// built with [EngineOptions.DisableAdjacencyCountRewrites], which is the same
+// instrument rmp #2647 introduced for the differential oracles — the arm is on
+// the inner path because the engine was TOLD to be, not because no recogniser
+// happens to accept the spelling. The default-engine reading is asserted too, at
+// the end, so the two facts are both recorded here and cannot silently swap.
 func TestSubqueryAdjacencyRebuild_Attribution(t *testing.T) {
 	const n = 100
 	const countSub = `MATCH (a:P) RETURN a.sid AS sid, COUNT { MATCH (a)-[:R]->(:P) } AS c`
@@ -372,13 +433,21 @@ func TestSubqueryAdjacencyRebuild_Attribution(t *testing.T) {
 
 	// Subject arm: the correlated COUNT subquery on a WARM Engine, so the outer
 	// query's own adjacency needs are already cached and every build the drive
-	// performs is attributable to the inner pipeline.
-	e := NewEngine(buildRebuildFixture(t, n))
+	// performs is attributable to the inner pipeline. The adjacency rewrites are
+	// forbidden on this arm so that there IS an inner pipeline to attribute — see
+	// the note on rmp #2648 above.
+	g := buildRebuildFixture(t, n)
+	e := NewEngineWithOptions(g, EngineOptions{DisableAdjacencyCountRewrites: true})
 	if w := driveCounted(t, e, countSub); w.rows != n {
 		t.Fatalf("warm-up shipped %d rows, want %d", w.rows, n)
 	}
 	subDelta, subProbe := probedDrive(t, e, countSub)
-	t.Logf("subject (warm correlated COUNT subquery): %s  %s", subDelta, subProbe)
+	t.Logf("subject (warm correlated COUNT subquery, rewrites forbidden): %s  %s", subDelta, subProbe)
+	if subDelta.degree != 0 || subDelta.hop != 0 {
+		t.Fatalf("the subject arm took an adjacency rewrite (%s), so there was no inner "+
+			"pipeline to attribute and every reading below is vacuous — "+
+			"EngineOptions.DisableAdjacencyCountRewrites did not reach the dispatch site", subDelta)
+	}
 
 	// No rebuild at all: the inner Expand's adjacency is served from the Engine's
 	// caches on every one of the n outer rows.
@@ -402,6 +471,29 @@ func TestSubqueryAdjacencyRebuild_Attribution(t *testing.T) {
 	if subDelta.absent != 0 {
 		t.Errorf("subject arm took the absent-cache route %d times: buildOpts.forSubquery "+
 			"is no longer carrying csrPairCache", subDelta.absent)
+	}
+
+	// The rmp #2648 arm, recorded here so this file states BOTH facts about the
+	// same query and neither can be lost by a later edit to the other: on a
+	// DEFAULT engine the same text builds no inner pipeline at all, so it makes no
+	// cache lookup — it takes one adjacency walk per outer row instead.
+	//
+	// This is what the assertions above would read as "a vacuous zero", and the
+	// reason they are not allowed to see it. A regression that made the
+	// normalisation stop firing shows up here as hop=0 with the lookups returning.
+	dOn := NewEngine(g)
+	if w := driveCounted(t, dOn, countSub); w.rows != n {
+		t.Fatalf("default-arm warm-up shipped %d rows, want %d", w.rows, n)
+	}
+	onDelta, onProbe := probedDrive(t, dOn, countSub)
+	t.Logf("default arm (rewrites live): %s  %s", onDelta, onProbe)
+	if onDelta.hop != uint64(n) {
+		t.Errorf("the default arm answered the block form from the adjacency %d time(s), want %d "+
+			"— rmp #2648's normalisation is not firing for `COUNT { MATCH … }`: %s", onDelta.hop, n, onDelta)
+	}
+	if onProbe.pairHits.Load() != 0 || onProbe.pairMisses.Load() != 0 || onDelta.pairs != 0 {
+		t.Errorf("the default arm still consulted the CSR-pair cache (%s, %s); the adjacency "+
+			"walk does not build an inner Expand, so there is nothing for it to look up", onDelta, onProbe)
 	}
 }
 

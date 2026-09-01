@@ -85,6 +85,11 @@ type labelledHopShape struct {
 // recogniseLabelledHopPattern reports whether pat is a single labelled hop that
 // can be counted from the adjacency for an outer row shaped like row.
 //
+// pat is spelling-independent since rmp #2648: it is the pattern of a pattern-form
+// subquery, or the pattern of the single MATCH of a block form that is exactly the
+// same query ([ir.PatternFormOf]). The clauses below were not widened for that —
+// the block form simply started arriving with a pattern instead of nil.
+//
 // The eligibility rules are [recogniseDegreePattern]'s, with exactly one
 // difference: the far node MUST carry at least one label, where the degree
 // recogniser requires it carry none. Everything a degree cannot express — an
@@ -263,26 +268,33 @@ func (s *labelledHopShape) resolveFarLabels(g *lpg.ReadView[string, float64]) bo
 // already examined and rejected, and so is the nil
 // [EngineOptions.DisableAdjacencyCountRewrites] returns — the caller's response
 // to either is to drive the inner plan.
-func (e *subqueryEvaluator) labelledHopShapeFor(key ast.Expression, pat *ast.Pattern, where *ast.Where, row expr.RowContext) *labelledHopShape {
+//
+// sub is the subquery expression in EITHER spelling; the (pattern, where) pair is
+// derived from it by [subqueryRecogniserBody] INSIDE the memo, so a block-form
+// body costs one walk per occurrence rather than one per outer row (rmp #2648).
+// The recogniser below is unchanged: it stopped being handed a nil pattern for
+// the block form, it did not learn a second shape.
+func (e *subqueryEvaluator) labelledHopShapeFor(sub ast.Expression, row expr.RowContext) *labelledHopShape {
 	if e.adjacencyCountsDisabled {
 		return nil
 	}
-	if sh, seen := e.labelledHop[key]; seen {
+	if sh, seen := e.labelledHop[sub]; seen {
 		return sh
 	}
+	pat, where := subqueryRecogniserBody(sub)
 	sh, ok := recogniseLabelledHopPattern(pat, where, row)
 	if !ok {
 		sh = nil
 	}
-	e.labelledHop[key] = sh
+	e.labelledHop[sub] = sh
 	return sh
 }
 
 // countLabelledHop answers a COUNT/EXISTS over a labelled single hop from the
 // adjacency, reporting ok=false when the shape does not apply and the caller must
 // drive the inner plan.
-func (e *subqueryEvaluator) countLabelledHop(key ast.Expression, pat *ast.Pattern, where *ast.Where, row expr.RowContext, limit int64) (int64, bool) {
-	sh := e.labelledHopShapeFor(key, pat, where, row)
+func (e *subqueryEvaluator) countLabelledHop(sub ast.Expression, row expr.RowContext, limit int64) (int64, bool) {
+	sh := e.labelledHopShapeFor(sub, row)
 	if sh == nil {
 		return 0, false
 	}

@@ -166,7 +166,13 @@ func (e *subqueryEvaluator) EvalExists(ctx context.Context, sub *ast.ExistsSubqu
 	// Degree rewrite (#2232): EXISTS over a degree-answerable pattern is
 	// "degree > 0", which the adjacency answers without an inner plan. Capped at
 	// 1 — the existence question never needs to know the true degree.
-	if sh := e.degreeShapeFor(sub, sub.Pattern, sub.Where, row); sh != nil {
+	//
+	// Only the subquery node is passed: since rmp #2648 the recogniser's view of
+	// the body is derived inside the memo by [subqueryRecogniserBody], so BOTH
+	// spellings — pattern form and single-MATCH block form — reach the same
+	// recogniser. Reading sub.Pattern here is what made the block form
+	// structurally unreachable.
+	if sh := e.degreeShapeFor(sub, row); sh != nil {
 		if n, ok := sh.count(e.g, row, 1); ok {
 			degreeRewriteCount.Add(1)
 			return expr.BoolValue(n > 0), nil
@@ -176,7 +182,7 @@ func (e *subqueryEvaluator) EvalExists(ctx context.Context, sub *ast.ExistsSubqu
 	// ineligible for the degree rewrite above — in Neo4j too — but it is still
 	// one adjacency walk rather than an inner plan. Capped at 1 for the same
 	// reason.
-	if n, ok := e.countLabelledHop(sub, sub.Pattern, sub.Where, row, 1); ok {
+	if n, ok := e.countLabelledHop(sub, row, 1); ok {
 		return expr.BoolValue(n > 0), nil
 	}
 	cs, err := e.compileExists(sub, row)
@@ -197,17 +203,21 @@ func (e *subqueryEvaluator) EvalCount(ctx context.Context, sub *ast.CountSubquer
 	// Degree rewrite (#2232). Uncapped: this entry point owes the caller the
 	// true count. A comparison against a literal reaches the bounded form
 	// through EvalCountBounded instead, which is where short-circuiting lives.
-	// sub.Where is threaded, not nil: an inline WHERE is a Selection neither
-	// recogniser can evaluate, and both must refuse the pattern rather than
-	// answer it without the predicate (rmp #2242).
-	if sh := e.degreeShapeFor(sub, sub.Pattern, sub.Where, row); sh != nil {
+	//
+	// The body's WHERE is still threaded — it is now derived by
+	// [subqueryRecogniserBody] inside the memo rather than read from sub here —
+	// because an inline WHERE is a Selection neither recogniser can evaluate, and
+	// both must refuse the pattern rather than answer it without the predicate
+	// (rmp #2242). That holds identically for a block form's `MATCH … WHERE …`
+	// since rmp #2648.
+	if sh := e.degreeShapeFor(sub, row); sh != nil {
 		if n, ok := sh.count(e.g, row, -1); ok {
 			degreeRewriteCount.Add(1)
 			return expr.IntegerValue(n), nil
 		}
 	}
 	// Labelled single hop (#2235), likewise uncapped here.
-	if n, ok := e.countLabelledHop(sub, sub.Pattern, sub.Where, row, -1); ok {
+	if n, ok := e.countLabelledHop(sub, row, -1); ok {
 		return expr.IntegerValue(n), nil
 	}
 	cs, err := e.compileCount(sub, row)
@@ -431,6 +441,53 @@ func countToSingleQuery(sub *ast.CountSubquery) *ast.SingleQuery {
 			&ast.Match{Pattern: sub.Pattern, Where: sub.Where},
 		},
 	}
+}
+
+// subqueryRecogniserBody returns the (pattern, where) pair the two
+// adjacency-answered recognisers should see for one subquery occurrence,
+// whichever of the two spellings the user wrote (rmp #2648).
+//
+// It is the INVERSE of [existsToSingleQuery] / [countToSingleQuery] above, and
+// deliberately lives beside them: those two turn a pattern form into the
+// synthetic `MATCH <pattern> [WHERE …]` body the translator compiles, and this
+// turns exactly that body back into the pair the recognisers take. Keeping the
+// two adjacent is what makes the round trip checkable — see
+// TestPatternFormOf_IsInverseOfDesugaring — rather than a claim.
+//
+// It exists because [ast.CountSubquery] and [ast.ExistsSubquery] carry the same
+// question in two shapes, and every fast path takes an [ast.Pattern]. Neo4j has
+// no equivalent function because it has no equivalent problem: its parser emits
+// one shape (see [ir.PatternFormOf] for the source citations and for the
+// boundary this adopts).
+//
+// A nil pattern is the "not recognisable" answer, which is already what both
+// recognisers do with one, so no caller needs a second code path.
+//
+// It is called from inside the per-occurrence memos in [degreeShapeFor] and
+// [labelledHopShapeFor], NOT from the per-row dispatch sites, so the block-form
+// walk is paid once per subquery occurrence rather than once per outer row.
+func subqueryRecogniserBody(sub ast.Expression) (*ast.Pattern, *ast.Where) {
+	var (
+		pat   *ast.Pattern
+		where *ast.Where
+		body  *ast.SingleQuery
+	)
+	switch s := sub.(type) {
+	case *ast.ExistsSubquery:
+		pat, where, body = s.Pattern, s.Where, s.Query
+	case *ast.CountSubquery:
+		pat, where, body = s.Pattern, s.Where, s.Query
+	default:
+		return nil, nil
+	}
+	// The pattern form needs no normalisation: it IS the canonical shape.
+	if pat != nil {
+		return pat, where
+	}
+	if p, w, ok := ir.PatternFormOf(body); ok {
+		return p, w
+	}
+	return nil, nil
 }
 
 // sortStrings is a tiny in-place ascending sort used by outerVarsFromRow.
