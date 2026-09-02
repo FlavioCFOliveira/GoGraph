@@ -106,6 +106,7 @@ package btree
 import (
 	"cmp"
 	"sync"
+	"unsafe"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph/index"
 )
@@ -168,6 +169,151 @@ type entry struct {
 
 	// set is the node-set for the key. Read and written only under mu.
 	set index.NodeSet
+}
+
+// entrySlabLen is the number of [entry] values [entryArena] carves out of ONE
+// heap object.
+//
+// # Why four
+//
+// Measured on this module against one heap object per entry, 10M distinct keys
+// each carrying one node (the case most adverse to a per-key payload object),
+// arms interleaved within each campaign, minimum of nine forced collections per
+// run, every delta taken against the baseline arm of its OWN campaign. The
+// same-vs-same noise floor, measured by running the baseline arm twice inside
+// the same window, was 1.6% on wall clock and 1.7% on mark CPU (task #2684,
+// bench/entryheap):
+//
+//	slab   objects/key   GC wall   mark CPU   resident/key   worst-case pin
+//	   1       1.04767    (base)     (base)         (base)          0 B/key
+//	   2       0.54766   -29.85%    -39.78%         -0.000%         32 B/key
+//	   4       0.29767   -32.79%    -41.73%         +0.000%         96 B/key
+//	   8       0.17267   -32.90%    -42.98%         +0.000%        224 B/key
+//	  16       0.11017   -30.81%    -37.26%         +0.000%        480 B/key
+//
+// Rows 1-8 are one campaign of six repetitions; row 16 is a second campaign of
+// five, whose own baseline arm landed within 0.5% of the first one's. They are
+// not one run and are not quoted as one.
+//
+// The GC saving PLATEAUS at four: eight is 0.11 percentage points better on
+// wall clock and 1.25 on mark CPU, both inside the noise floor, while it
+// doubles the retention exposure documented on [entryArena]. Two gives up about
+// three points, outside the floor. Four is therefore the whole win at the
+// smallest exposure that buys it, and the last column — the bytes a lone
+// surviving key can pin, (entrySlabLen-1)*32 — is why the tie is broken
+// downward rather than upward.
+//
+// # Why never more than sixteen
+//
+// There is a hard cliff above, and it is not a matter of taste. An object that
+// CONTAINS POINTERS and is LARGER than 512 bytes carries an 8-byte malloc
+// header naming its type (internal/runtime/gc.MinSizeForMallocHeader =
+// PtrSize*PtrBits = 512, gc.MallocHeaderSize = 8; go1.27.1
+// internal/runtime/gc/malloc.go). The header is added to the requested size
+// BEFORE the size class is chosen, so it costs far more than its eight bytes: a
+// 17-entry slab asks for 544, becomes 552, and lands in the 576-byte class.
+// Measured on an isolated allocator probe holding the same object graph, one
+// entry past the cliff inverts the result outright:
+//
+//	slab   bytes   resident/key   GC wall   mark CPU
+//	  16     512         +0.00%   -13.21%    -15.33%
+//	  17     544         +3.82%    +7.17%    +29.45%
+//	  32    1024         +8.12%   +11.39%    +29.91%
+//
+// A 13% win becomes a 7% loss, mark CPU rises by 30%, and 3.8% of resident
+// memory is spent on padding. The guard below makes that structural rather than
+// hopeful.
+const entrySlabLen = 4
+
+// A slab must never cross the malloc-header cutover; see [entrySlabLen]. This
+// is a constant expression, so a slab that grew past 512 bytes — because
+// entrySlabLen rose, or because [entry] gained a field — fails to COMPILE here
+// rather than silently costing 30% of GC mark time and 4% of resident memory.
+const _ = uint(512 - entrySlabLen*unsafe.Sizeof(entry{}))
+
+// entryArena hands out [entry] values [entrySlabLen] at a time from a shared
+// heap object, instead of allocating each one on its own.
+//
+// # Why
+//
+// The per-key payload object is what makes a shared lock possible: a path copy
+// duplicates only the pointer, so a snapshot and its predecessor address ONE
+// entry, ONE node-set and ONE lock for the key. That is load-bearing and is not
+// in question here. What it costs is one heap OBJECT per distinct key, and GC
+// mark time is sensitive to object count in a way it is not sensitive to the
+// bytes those objects hold: slabbing leaves the pointer count and the resident
+// bytes untouched, RAISES scannable bytes by ~23% (the trailing scalar half of
+// every non-final entry now falls inside the scanned range), and still cuts
+// mark cost by ~15%. The saving is per-object bookkeeping, not scanning.
+//
+// The pointer identity every correctness argument in this file rests on is
+// UNCHANGED: &slab[i] is a stable, unique address for the life of the entry,
+// and the concurrency protocol never learns where it came from.
+//
+// # What it costs: retention
+//
+// A slab is reclaimed only when EVERY entry in it is unreachable, so a lone
+// surviving key pins its whole slab. The worst case is entrySlabLen-1 dead
+// entries retained per survivor — 96 bytes at entrySlabLen = 4 — and it is
+// reached when deletion leaves exactly one survivor per slab. That is why the
+// constant is small: the exposure is linear in it while the GC saving plateaus
+// by four (see [entrySlabLen]).
+//
+// The bound is a bound, not a leak. Every live key pins at most one slab, so
+// retained dead-entry bytes never exceed (entrySlabLen-1)*32 per LIVE key —
+// 4x amplification of a 32-byte-per-key component, and never a function of how
+// many keys the index once held beyond that. Deleting keys therefore never
+// RAISES the footprint; it only stops lowering it once a slab has one survivor
+// left. Measured at 2M keys pruned to every KEEP-th insertion, the pinned bytes
+// per survivor land on the model exactly (task #2684):
+//
+//	keep    survivors   pinned/survivor   amplification   pruned heap
+//	   2    1,000,000            32.00 B           2.00x       82.63 MB
+//	   4      500,000            95.99 B           4.00x       74.63 MB
+//	   8      250,000            96.00 B           4.00x       38.63 MB
+//	  16      125,000            96.01 B           4.00x       20.64 MB
+//	  64       31,250            95.86 B           4.00x        7.14 MB
+//
+// The overhead saturates at (entrySlabLen-1)*32 and the amplification at
+// entrySlabLen, exactly as the model says; and every pruned heap is far below
+// the 98.63 MB the same index occupied before any key was deleted, which is
+// what "never raises the footprint" means concretely.
+//
+// An index whose churn has actually reached that state has the same remedy the
+// delete policy already prescribes for leaf density: rebuild through
+// [Index.BulkLoad], whose packer uses a private arena and therefore compacts
+// the payloads as well as the leaves.
+//
+// Slots are NEVER reused. A detached entry can still be reachable from an older
+// snapshot a reader is traversing, and from a writer that resolved it before
+// the detach; handing its slot to a different key would resurrect it under that
+// key. The garbage collector is the grace period, exactly as it is for the
+// entry pointers themselves, and a free list would be a second, unsound
+// reclamation scheme racing it.
+//
+// # Concurrency
+//
+// entryArena is NOT safe for concurrent use. The only arena reached by a live
+// index is [Index.arena], and every call to alloc happens while its owner holds
+// [Index.mu]; [bplus.bulkPack] uses a private arena on a tree no other
+// goroutine can see yet.
+type entryArena struct {
+	// free is the unhanded tail of the current slab. Reslicing it forward keeps
+	// the slab reachable through the arena until it is exhausted, after which
+	// only the entries still referenced by a tree keep it alive.
+	free []entry
+}
+
+// alloc returns a pointer to a fresh, zero-valued entry. The zero value is a
+// live, empty entry (see [entry]), which is what makes handing out a slot of a
+// freshly made slab equivalent to allocating one.
+func (a *entryArena) alloc() *entry {
+	if len(a.free) == 0 {
+		a.free = make([]entry, entrySlabLen)
+	}
+	e := &a.free[0]
+	a.free = a.free[1:]
+	return e
 }
 
 // leaf is a B+ tree leaf: parallel slices of keys and pointers to their
@@ -415,14 +561,16 @@ type insertNode[V cmp.Ordered] struct {
 }
 
 // cloneInsert returns a NEW snapshot holding every key of t plus value, mapped
-// to a freshly allocated entry containing node. t is left untouched.
+// to a fresh entry, drawn from a, containing node. t is left untouched.
 //
-// PRECONDITION: value is absent from t. [Index.insertSlow] establishes it while
-// holding Index.mu, against this very snapshot, which is also what makes the
-// fresh entry safe to publish — no concurrent writer can be holding a live
-// entry for the same key.
-func (t *bplus[V]) cloneInsert(value V, node uint64) *bplus[V] {
-	e := &entry{}
+// PRECONDITION: value is absent from t. [Index.insertStructural] establishes it
+// while holding Index.mu, against this very snapshot, which is also what makes
+// the fresh entry safe to publish — no concurrent writer can be holding a live
+// entry for the same key. Holding Index.mu is equally what makes the arena
+// unshared for the duration of the call, which it must be: [entryArena] is not
+// safe for concurrent use.
+func (t *bplus[V]) cloneInsert(value V, node uint64, a *entryArena) *bplus[V] {
+	e := a.alloc()
 	e.set.Add(node)
 	root, promoted := cloneInsertInto(t.root, t.height, value, e)
 	height := t.height
@@ -609,23 +757,41 @@ func (t *bplus[V]) bulkPack(keys []V, sets []index.NodeSet) {
 	if leafCap < 1 {
 		leafCap = 1
 	}
+	// Payloads come from ONE rolling arena rather than one block per leaf. Per
+	// key would cost n allocations on the recovery path, and a block for the
+	// whole load would keep the entire array alive for as long as a single key
+	// of it survived; a per-LEAF block avoided both, but it sized the object at
+	// leafCap entries — 85 * 32 = 2720 bytes, five times past the malloc-header
+	// cutover documented on [entrySlabLen]. That block therefore asked for 2728
+	// bytes and landed in the 3072-byte class, wasting 352 bytes per 85 keys,
+	// and it was scanned in the expensive regime.
+	//
+	// Moving it to the arena's sub-cutover slabs RAISES the object count (one
+	// per four keys instead of one per 85) and still measures, at 10M keys,
+	// eight interleaved repetitions, noise floor 0.22% (task #2684):
+	//
+	//	                per-leaf block   arena slabs    delta
+	//	resident/key          53.3201 B     49.1786 B   -7.77%
+	//	mark CPU              181.07 ms     133.37 ms  -26.34%
+	//	GC wall                20.441 ms     19.698 ms   -3.63%
+	//
+	// More objects, less mark time: the saving is the cutover, not the count.
+	// The 4.14 bytes per key recovered is exactly the 352-byte size-class
+	// remainder amortised over 85 keys. A bulk-loaded index now has the same
+	// payload economics as an incrementally built one, and its retention
+	// granularity improves from a leaf to a slab.
+	var arena entryArena
 	leaves := make([]*leaf[V], 0, (len(keys)+leafCap-1)/leafCap)
 	for i := 0; i < len(keys); i += leafCap {
 		end := i + leafCap
 		if end > len(keys) {
 			end = len(keys)
 		}
-		// One entry block PER LEAF, not one per key and not one for the whole
-		// load. Per key would cost n allocations on the recovery path; one
-		// global block would keep the whole array alive for as long as a single
-		// key of it survives. Per leaf is one allocation per ~85 keys, gives the
-		// leaf's payloads cache-adjacency for a scan, and is released as soon as
-		// the leaf and its splits are all gone.
-		block := make([]entry, end-i)
 		ptrs := make([]*entry, end-i)
-		for j := range block {
-			block[j].set = sets[i+j]
-			ptrs[j] = &block[j]
+		for j := range ptrs {
+			e := arena.alloc()
+			e.set = sets[i+j]
+			ptrs[j] = e
 		}
 		// Adopt each leaf's key window directly via a three-index reslice
 		// (cap == len) instead of copying it into a fresh slice. bulkPack owns

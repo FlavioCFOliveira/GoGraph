@@ -150,6 +150,14 @@ type Index[V cmp.Ordered] struct {
 	// existing key. Lock order is mu → entry.mu, never the reverse.
 	mu sync.Mutex
 
+	// arena supplies the per-key payload objects, [entrySlabLen] at a time out
+	// of one heap object rather than one at a time. It is guarded by mu and by
+	// nothing else: [Index.insertStructural] is the only caller and it holds mu
+	// across the whole read-modify-publish. The zero value is a ready, empty
+	// arena, so [New] need not initialise it. See [entryArena] for what the
+	// sharing costs and what it must never do.
+	arena entryArena
+
 	// binding, when non-nil, ties the index to one (label, property) pair of
 	// a live node graph so [Index.Apply] can translate [index.Change] events
 	// into typed Insert / Delete calls. It is set once by [NewBound] before
@@ -328,7 +336,7 @@ func (i *Index[V]) insertStructural(value V, node uint64) {
 		e.mu.Unlock()
 		return
 	}
-	i.tree.Store(t.cloneInsert(value, node))
+	i.tree.Store(t.cloneInsert(value, node, &i.arena))
 }
 
 // Delete removes node from the set associated with value. No-op when

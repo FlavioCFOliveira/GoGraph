@@ -228,8 +228,10 @@ func searchWorkloads() []Workload {
 
 // indexWorkloads drive the three secondary-index kinds. They are written to be
 // COMPARABLE: the same read/write ratio and the same key space, so the only
-// variable is the index's own sharding — one global RWMutex (btree), 256
-// value-hashed shards (hash), 64 padded shards (count).
+// variable is how each index arbitrates concurrent access — a lock-free
+// copy-on-write snapshot with one lock per KEY (btree, since task #2683; it
+// held one global RWMutex before), 256 value-hashed shards (hash), 64 padded
+// shards (count).
 func indexWorkloads() []Workload {
 	const (
 		keys       = 100000
@@ -239,7 +241,7 @@ func indexWorkloads() []Workload {
 	return []Workload{
 		{
 			Name:    "index-btree-rw",
-			Surface: "graph/index/btree (one global RWMutex)",
+			Surface: "graph/index/btree (COW snapshot, per-key locks)",
 			Ops:     24000000,
 			Setup: func(_ string) (Op, func() error, error) {
 				idx := btree.New[int64]()
