@@ -276,7 +276,7 @@ Task execution is the natural continuation of planning. For each unit of work, f
 1. Check whether any open task is already in progress and, if so, continue it.
 2. Identify the next task to start.
 3. Read and fully understand the task — its objective, functional and technical requirements, and acceptance criteria — consulting the **Knowledge Graph** to gauge its scope and impact.
-4. Determine the most appropriate sub-agent for the work and delegate its execution to that specialist (see [Sub-Agents (Specialists)](#sub-agents-specialists)).
+4. Determine the most appropriate sub-agent for the work and delegate its execution to that specialist, under the rule in [Every task is developed under a specialist sub-agent](#every-task-is-developed-under-a-specialist-sub-agent).
 5. Implement the task, then verify that **all** acceptance criteria are satisfied before considering it done.
 6. Close the task with a concise summary of what was done.
 7. Create a **git commit** following conventional-commit conventions and describing what was done, before moving to the next task.
@@ -513,6 +513,47 @@ Your working team comprises **all available sub-agents** — global, user, and p
 | `rust-elite-developer` | Cross-language performance insight: zero-copy patterns, arena allocation, SIMD, lock-free structures. Translate findings to Go. |
 | `rust-perf-engineer` | Hot-path profiling methodology, cache behaviour, concurrency bottleneck diagnosis. Apply findings to Go benchmarks. |
 | `Plan` | Architectural decisions before any sprint begins. Use for evaluating alternative designs when the stakes are high. |
+
+### Every task is developed under a specialist sub-agent
+
+**Every task is developed under the isolation of a sub-agent, and never by the
+coordinating agent directly.** This is not a preference about who types: it keeps
+each task's exploration, dead ends, and file churn out of the coordinating
+context, so the coordinator retains the judgement to verify the result instead of
+having spent itself producing it.
+
+**Choosing the specialist.** Pick the available sub-agent whose expertise matches
+the work the task actually consists of. That match is read from **two** sources,
+and both are mandatory:
+
+- **The task** — its title, its functional, technical and acceptance criteria,
+  and above all its **comment log**. The comments are the brief; the fields alone
+  are not. A task whose fields describe a version upgrade while its comments
+  record that the upgrade already happened and the decision was reversed will
+  send the wrong specialist after the wrong problem.
+- **The sprint the task sits in** — its title, its description, and its comment
+  log. The sprint states the macro objective the task serves, and a task
+  executed outside that objective is executed wrongly even when its own criteria
+  are met.
+
+Read both before choosing, and pass both to the specialist as context. A
+specialist that does not know the sprint's purpose cannot tell which of several
+correct-looking approaches serves it.
+
+**What the coordinator still owns**, and must not delegate:
+
+- reading the task and the sprint, and writing the specialist's brief;
+- **verifying the specialist's claims against independent evidence** — a
+  specialist's report is a finding to check, not a result to relay;
+- the git commits, the `rmp` state transitions, and the task's closing record;
+- every decision reserved to the user by [Decision autonomy](#decision-autonomy).
+
+**Boundaries.** One task at a time, as [Execution](#execution) requires: several
+specialists may run concurrently only when they serve the *same* task with
+independent inputs, or when the user has authorised parallel evaluations subject
+to the cap of two. When two specialists could touch the same files, say so in
+each brief and scope them apart; concurrent edits to one file by two agents
+produce a result neither of them validated.
 
 ### Mandatory consultation rules
 
