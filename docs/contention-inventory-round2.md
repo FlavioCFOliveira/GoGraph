@@ -119,8 +119,8 @@ is what locates the site inside its own profile.
 
 | # | site | blocked / share | provoked by | ceiling @8 | ceiling @1024 | on an engine path? |
 |---:|---|---|---|---|---|---|
-| 1 | `graph/generation/generation.go:152` `releaseRef`, `:162` `Release`, `:185` `Publish` | 64.34 ms @8; 2337.55 s @1024 (`Publish` 82.89%, `releaseRef` 17.11%) | `generation-publish-read`@8 | **47.619x** (2.42% / 7.17%) | 23.878x (0.37% / 13.08%) | **no** |
-| 2 | `graph/index/manager.go:254` `Manager.Apply` -> `graph/index/label/index.go:327` `Index.Add` | 11484 s = **43.88%** of 26172 s @1024; `CreateIndex` 28.34%, `DropIndex` 27.65% | `index-manager-fanout`@1024 | 3.396x (20.65% / 3.40%) | **32.223x** (48.32% / 5.14%) | **no** |
+| 1 | `graph/generation/generation.go:152` `releaseRef`, `:162` `Release`, `:185` `Publish` | 64.34 ms @8; 2337.55 s @1024 (`Publish` 82.89%, `releaseRef` 17.11%) | `generation-publish-read`@8 | **47.619x** (2.42% / 7.17%) | 23.878x (0.37% / 13.08%) | **no — and deliberately so** |
+| 2 | `graph/index/manager.go:254` `Manager.Apply` -> `graph/index/label/index.go:327` `Index.Add` | 11484 s = **43.88%** of 26172 s @1024; `CreateIndex` 28.34%, `DropIndex` 27.65% | `index-manager-fanout`@1024 | 3.396x (20.65% / 3.40%) | **32.223x** (48.32% / 5.14%) | yes — see the correction below |
 | 3 | `bolt/server/serve.go:802` -> `graph/lpg/lpg.go:1388` `applyVersionedInstant` | 9792 s = **98.55%** of 9936 s @1024 | `dst-concurrent-bolt`@1024 | 1.627x (1.43% / 2.15%) | **16.307x** (49.41% / 34.78%) | yes |
 | 4 | `internal/metrics/metrics.go:105` `IncCounter` | 5.23 ms @1024; **82.01% of CPU** @8 | `metrics-emit`@8 | 3.300x (1.90% / 13.48%) | 2.138x (2.15% / 28.86%) | only with a real backend installed |
 | 5 | `store/wal` durable commit, reached via `cypher/api.go:18379` `execUnderBarrier` | 1425.59 s = 99.03% of 1439.51 s @1024 | `dst-disk-wal`@1024 | 3.860x (0.28% / 0.79%) | 1.353x (1.91% / 2.07%) | yes |
@@ -370,23 +370,63 @@ the real pairs:
 The 1024 cell's 2.9% gap does not clear the base arm's own 4.69% spread, so by
 this document's own working rule it is 1.00x within noise, not a 3% effect.
 
+## Correction: site 2 IS on an engine path
+
+**This document first stated that `graph/index.Manager` had no engine caller.
+That was wrong, and the error is recorded here rather than quietly edited out.**
+
+The claim came from a `grep` whose output was truncated at twenty lines. Every
+line that survived the truncation was a doc comment, so the absence of calls
+looked established when it had merely been cut off. A type-aware cross-reference
+over the module (`golang.org/x/tools/go/packages`, resolving each identifier to
+its `types.Object`) finds **113 references to the `Manager` type across 28
+production files**, and a direct count confirms **88 non-comment production
+references** to `index.Manager` under `cypher/`, `graph/`, `store/` and `bolt/`.
+Two of them, read and verified:
+
+- `cypher/exec/index_writeback.go:45` — `IndexBuffer.Commit` calls
+  `mgr.ApplyBatch(b.changes)`, so **every buffered index change on the write path
+  goes through the Manager**.
+- `graph/query/index_seek.go:494` — the seek planner calls `mgr.ListIndexes()`
+  and `mgr.GetIndex(name)` on the read path.
+
+The two godoc quotes that misled me say something narrower than I read into them.
+`graph/index/label/index.go:16` is about the **`label.Index` type as a
+`Subscriber`**, not about the Manager, and the same comment says plainly that
+"every production call site registers a btree or hash index". `graph/query/query.go:12`
+("a future iteration will plug in") is simply **stale** — `index_seek.go` already
+does it.
+
+**One nuance survives, and it matters for the fix.** The measured workload drives
+`Manager.Apply` (singular), and `Apply` itself has **zero** production callers:
+production batches through `ApplyBatch`. But both take the same `m.mu.RLock()`
+over the same subscriber set (`manager.go:254` and `manager.go:262`), so the
+contended object is the one the engine really uses. What differs is the
+**frequency**, because production amortises many changes into one batch. The
+32.223x ceiling is therefore a real ceiling on a real lock, measured through an
+entry point the engine does not itself call — treat it as an upper bound on what
+the engine could recover, not as throughput the engine is losing today.
+
+Site 1 is unaffected by this correction. `graph/generation.Publisher` really has
+no production importer, and `graph/generation/generation.go:33-40` says so
+deliberately: "This package is NOT a second snapshot mechanism in the engine —
+Nothing in the module uses it ... It is a utility a consumer may use to cache a
+derived structure." It is consumer-facing API, so its 0.094x scaling is a defect
+in something the module publishes, not a cap on the module's own queries.
+
 ## What the evidence says to do next
 
-Ranked by ceiling weighted against reachability. **Sites 1 and 2 are exported
-components with no engine caller**, verified against the source rather than
-inferred: `graph/index/label/index.go:16` states "No Index is ever registered
-with a Manager in this module", and `graph/query/query.go:12` says "A future
-iteration will plug in [graph/index.Manager]". `graph/generation.Publisher` is
-imported only by `internal/sim`, `examples/33_generation_swap` and this bench.
-They anti-scale badly and they are public API, so they are real defects — but
-they cap no query the module runs today, and this document ranks them as such.
+Ranked by ceiling weighted against reachability.
 
-1. **`graph/generation` refcount — 47.6x, exported, unwired.** One shared
-   `atomic.Int64` per generation. The obvious remedy is a striped or per-P
-   refcount summed on publish. Highest ceiling in the module by a factor of 12.
-2. **`graph/index` `Manager` fan-out — 32.2x at 1024, exported, unwired.** One
-   `RWMutex` over the whole subscriber set. Worth fixing **before** it is wired
-   into the write path, not after.
+1. **`graph/generation` refcount — 47.6x, exported, deliberately unwired.** One
+   shared `atomic.Int64` per generation. The obvious remedy is a striped or per-P
+   refcount summed on publish. Highest ceiling in the module by a factor of 12,
+   and it caps a consumer's throughput rather than the engine's.
+2. **`graph/index` `Manager` fan-out — 32.2x at 1024, and it IS wired.** One
+   `RWMutex` over the whole subscriber set, taken by `ApplyBatch` on every
+   write-path index writeback and by `ListIndexes`/`GetIndex` on the seek path.
+   Measured through `Apply`, which the engine does not call; see the correction
+   above for what that does and does not license you to claim.
 3. **`store/wal` durable commit — 3.860x at 8, on the engine path.** The highest
    ceiling of any wired site at the concurrency the hardware can actually serve.
 4. **`internal/metrics.IncCounter` — 3.300x at 8** (and that is bought while
