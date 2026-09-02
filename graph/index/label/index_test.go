@@ -125,10 +125,7 @@ func TestIndex_Remove(t *testing.T) {
 		if got := idx.Count(7); got != 0 {
 			t.Fatalf("Count(7) = %d, want 0 after removing last", got)
 		}
-		idx.mu.RLock()
-		_, present := idx.bits[7]
-		idx.mu.RUnlock()
-		if present {
+		if present := idx.labelPresent(7); present {
 			t.Fatalf("label bucket 7 should be deleted after the last Remove emptied it")
 		}
 	})
