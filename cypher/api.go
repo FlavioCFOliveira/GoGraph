@@ -472,13 +472,6 @@ type buildOpts struct {
 	// public BuildPlanWithMutator, which therefore always builds the legacy
 	// nested-loop plan.
 	hashJoinEnabled bool
-	// disableIndexNestedLoopForTest suppresses the #2233 index nested-loop join
-	// substitution only, leaving the hash join in place. It is a TEST SEAM, not an
-	// option: the two plans are mutually exclusive by cost, so the differential
-	// suite cannot otherwise observe both answers for one query. No public setter
-	// exists and production never sets it — which is exactly why the linter cannot
-	// see it being written, since the only writer is the differential test.
-	disableIndexNestedLoopForTest bool //nolint:unused // written only by the in-package differential test; see index_nested_loop_plan_test.go
 	// forceColumnarChainDecline makes [tryBuildColumnarFilterChain],
 	// [tryBuildColumnarExpandFilterChain] and [tryBuildColumnarAggSource] take their
 	// post-build decline path, so the [buildStateSnapshot] restore on it is
