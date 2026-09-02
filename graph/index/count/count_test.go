@@ -63,44 +63,62 @@ func TestApply_DeleteOnZeroFreesKey(t *testing.T) {
 	// shared lock (see [addCell]), so a shared hold here would no longer freeze
 	// the shard. The assertion itself is unchanged — the key must be absent.
 	sh := s.eShardOf(10)
-	sh.mu.Lock()
+	sh.mu.lock()
 	_, present := sh.e.load()[10]
-	sh.mu.Unlock()
+	sh.mu.unlock()
 	if present {
 		t.Fatalf("E(10) key still present after returning to zero")
 	}
 	tsh := s.tShardOf(triKey{1, 10, 2})
-	tsh.mu.Lock()
+	tsh.mu.lock()
 	_, tpresent := tsh.t.load()[triKey{1, 10, 2}]
-	tsh.mu.Unlock()
+	tsh.mu.unlock()
 	if tpresent {
 		t.Fatalf("T(1,10,2) key still present after returning to zero")
 	}
 }
 
-// TestShard_LayoutOneCacheLine pins the 128-byte stride that keeps two shards'
-// hot fields off one another's cache line.
+// TestShard_LayoutSeparatesReadersFromTheLock pins the two layout properties the
+// store's scaling rests on. Neither is expressible as a single size any more, so
+// this test replaced TestShard_LayoutOneCacheLine, which asserted
+// unsafe.Sizeof(shard{}) == cacheLine and could not survive the shard growing a
+// per-P slot array.
 //
 // MEASURED, because the obvious claim is false: `Store` has an alignment of 8,
 // not 128, so `&shards[0]` is NOT line-aligned — over 200 heap-allocated Stores
 // it landed at offset 8 within the line 200/200 times. No shard ever occupies
-// exactly one cache line. What actually prevents false sharing is that the
-// STRIDE equals the line size while the hot region (four table pointers plus the
-// mutex, 56 bytes) is far smaller than it: consecutive shards' hot fields are
-// always 128 bytes apart and therefore never share a line, whatever the base
-// offset. The guarantee is `hotBytes + (base mod cacheLine) <= cacheLine`.
+// exactly one cache line. What actually prevents false sharing is that the STRIDE
+// is a whole number of lines while each hot region is far smaller than one, so
+// consecutive shards' hot fields are always a multiple of 128 bytes apart and
+// therefore never share a line, whatever the base offset.
 //
-// Pinning the size is what preserves that stride. The `shardPad` expression
-// cannot: it is arithmetic over literals with no reference to the struct, so
-// adding a field leaves it unchanged and the build stays green — VERIFIED by
-// appending one uint64 in a scratch copy, which took Sizeof to 136 with
-// `go build` still exiting 0. This test is the only guard.
-func TestShard_LayoutOneCacheLine(t *testing.T) {
+// The two properties:
+//
+//  1. the shard stride is a whole number of cache lines, so shard i's fields
+//     never share a line with shard i+1's;
+//  2. the four published-map pointers — which EVERY [Store.CountE] loads — are a
+//     full line away from the lock's hot words. When they shared a line, every
+//     shared acquire's read-modify-write invalidated the readers' line; moving
+//     the lock off it was worth 1.22x on the hot mixed workload by itself.
+func TestShard_LayoutSeparatesReadersFromTheLock(t *testing.T) {
 	t.Parallel()
-	if got := unsafe.Sizeof(shard{}); got != cacheLine {
-		t.Fatalf("unsafe.Sizeof(shard{}) = %d, want %d: the shard stride no longer equals the "+
-			"cache line, so two shards' hot fields can land in one line and writers to DIFFERENT "+
-			"shards false-share", got, cacheLine)
+	if got := unsafe.Sizeof(shard{}); got%cacheLine != 0 {
+		t.Fatalf("unsafe.Sizeof(shard{}) = %d, want a multiple of %d: the shard stride is no "+
+			"longer a whole number of cache lines, so two shards' hot fields can land in one "+
+			"line and writers to DIFFERENT shards false-share", got, cacheLine)
+	}
+	readEnd := unsafe.Offsetof(shard{}.t) + unsafe.Sizeof(shard{}.t)
+	lockAt := unsafe.Offsetof(shard{}.mu)
+	if lockAt/cacheLine == (readEnd-1)/cacheLine {
+		t.Fatalf("the lock at offset %d shares cache line %d with the published-map pointers "+
+			"(which end at offset %d): every shared acquire will invalidate the line every "+
+			"concurrent reader loads the map pointer from", lockAt, lockAt/cacheLine, readEnd)
+	}
+	// One slot per core, each owning a whole line, is the whole point of the
+	// readers-biased lock: two cores taking the shared hold must not meet.
+	if got := unsafe.Sizeof(rbSlot{}); got != cacheLine {
+		t.Fatalf("unsafe.Sizeof(rbSlot{}) = %d, want %d: two cores' shared-hold counters would "+
+			"share a line, which reproduces the defect the slot array exists to remove", got, cacheLine)
 	}
 }
 

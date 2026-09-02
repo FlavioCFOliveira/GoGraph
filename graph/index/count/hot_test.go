@@ -115,8 +115,8 @@ func applyConcurrent(script [][]int64) *Store {
 // from a zero-valued cell.
 func keyPresent(s *Store, rt uint32) bool {
 	sh := s.eShardOf(rt)
-	sh.mu.Lock()
-	defer sh.mu.Unlock()
+	sh.mu.lock()
+	defer sh.mu.unlock()
 	_, ok := sh.e.load()[rt]
 	return ok
 }

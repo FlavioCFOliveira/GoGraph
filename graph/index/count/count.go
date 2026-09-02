@@ -45,11 +45,13 @@
 //     load the shard's published cell map through an [atomic.Pointer] and read the
 //     cell. The map they observe is immutable, so a concurrent structural change
 //     cannot mutate it under them;
-//   - an increment to an ALREADY-PRESENT cell runs under the shard's SHARED lock
-//     and is a single [atomic.Int64.Add]. The shared lock is not protecting the
+//   - an increment to an ALREADY-PRESENT cell runs under the shard's SHARED hold
+//     and is a single [atomic.Int64.Add]. The shared hold is not protecting the
 //     arithmetic — the arithmetic is already atomic. It is what stops a cell being
 //     unlinked out from under an in-flight increment, which would silently discard
-//     the delta;
+//     the delta. Since rmp #2696 that hold is taken on an [rbMutex], whose shared
+//     side is striped per-P, rather than on a [sync.RWMutex] whose shared side was
+//     one contended word;
 //   - creating a cell, and deleting one that has returned to zero, take the shard's
 //     EXCLUSIVE lock. Those are the only two operations that change a map's
 //     structure, and their frequency is schema-cardinality-bounded rather than
@@ -60,6 +62,55 @@
 //     exclusion, and [addCell] documents the failure it fixes.
 //
 // The store spawns no goroutines.
+//
+// # Why the WRITE path's shared hold is striped (rmp #2696)
+//
+// rmp #2682 removed the read lock and fixed the SPREAD case. It did not fix the
+// single-hot-type case, which was unchanged at 0.319x from 1 to 8 goroutines, and
+// the reason is that the remaining cost was never the counter.
+//
+// MEASURED at HEAD 42a27558, one hot relationship type at 8 goroutines:
+// sync/atomic.(*Int32).Add was 48.85% of ALL CPU, and pprof -peek attributes
+// 100% of it to [sync.RWMutex.RLock] (53.17%) and [sync.RWMutex.RUnlock]
+// (46.83%). The count cell those calls exist to protect — an [atomic.Int64] —
+// was 12.60%. The lock word was the contended object; the counter was not.
+//
+// That distinction decided the design, and it was settled by measurement rather
+// than by argument. Two candidates were built and benchmarked against the same
+// 90%-read/10%-write shape:
+//
+//   - a STRIPED COUNTER summed on read, in the shape of Java's LongAdder: each
+//     cell becomes eight per-line counters, a write picks one, a read sums them.
+//     It bought 1.227x, made an uncontended read 1.92x SLOWER (5.198ns against
+//     2.702ns) and an uncontended write 3.4x slower, because the delete-on-zero
+//     test must sum every stripe on every increment. It loses, and it loses
+//     because it unshares the object that was not shared enough to matter;
+//   - a STRIPED LOCK with the counter left alone — the shape adopted here. It
+//     bought 2.018x on the same benchmark and left the read path exactly as it
+//     was, O(1) and exact, at 0.994x.
+//
+// The generalisable lesson is that on this store the FREQUENT hold is the shared
+// one and the RARE hold is the exclusive one, so the object worth striping is the
+// LOCK. ClickHouse draws the same line explicitly between its two counter
+// families: ProfileEvents is striped per-CPU and summed on read, while
+// CurrentMetrics is a single unstriped atomic precisely because it must be
+// exactly readable at a point in time (src/Common/CurrentMetrics.h). This store
+// is the second kind — the planner reads an exact cardinality, and delete-on-zero
+// needs an exact zero — so striping its counter was the wrong transplant.
+//
+// # The lock-free increment that does not work
+//
+// Recorded because it is the obvious next idea and it is WRONG. Replacing the
+// shared hold with a dead-flag handshake — the writer adds and then checks a flag,
+// the unlinker sets the flag and then re-reads the counter — appears sound and is
+// not. After a SUCCESSFUL unlink the flag stays set, so a writer whose delta was
+// already counted into the zero that justified the unlink also observes it, undoes
+// its delta and re-applies it to the replacement cell. The delta lands twice and
+// the aggregate drifts. MEASURED: with the unlink ablated the same increment is
+// exact over 8x50000 oscillations through zero, and with the unlink restored the
+// same test read 13 against an expected 24. Safe reclamation of a cell that
+// lock-free writers may still hold a pointer to needs epochs or hazard pointers,
+// which is a far larger change than this store's contention warrants.
 //
 // # Why the read path holds no lock (rmp #2682)
 //
@@ -81,6 +132,8 @@
 package count
 
 import (
+	"math/rand/v2"
+	"runtime"
 	"sync"
 	"sync/atomic"
 )
@@ -211,7 +264,7 @@ func (t *table[K]) init() { t.store(make(cells[K])) }
 
 // shard is one stripe of the cell maps.
 //
-// Its RWMutex does NOT guard reads. It guards the two structural operations —
+// Its lock does NOT guard reads. It guards the two structural operations —
 // creating a cell and deleting a cell that has reached zero — against the
 // in-flight increments that could otherwise be discarded by them:
 //
@@ -222,37 +275,191 @@ func (t *table[K]) init() { t.store(make(cells[K])) }
 //     any increment. That is what lets [removeCellIfZero] re-read a counter and
 //     trust the value it sees;
 //   - a read takes mu not at all. See the package documentation.
+//
+// # Layout
+//
+// The four published-map pointers are read by every [Store.CountE] and written
+// only by a structural change, so they are read-mostly and share a line happily.
+// They are padded away from the lock deliberately: when the lock word sat in the
+// same line, every shared acquire's read-modify-write invalidated the line that
+// every concurrent reader was loading the map pointer from. That is false sharing
+// between the lock and the data it does not even protect, and it was measured —
+// moving the lock to its own line, changing nothing else, was worth 1.22x on the
+// hot mixed workload on its own.
 type shard struct {
 	e    table[uint32]
 	dOut table[uint64]
 	dIn  table[uint64]
 	t    table[triKey]
-	mu   sync.RWMutex
-	// pad keeps one shard per cache line, so two independent shards cannot
-	// false-share. Without it the struct is ~56 bytes on a 128-byte line (Apple
-	// silicon), which puts two shards' locks and table pointers in one line and
-	// makes writers to DIFFERENT shards invalidate each other.
-	//
-	// The cost is stated rather than assumed: cacheLine-sized shards at numShards=64
-	// is 8 KiB of shard array, against ~3.5 KiB unpadded. 4.5 KiB more per Store, once.
-	_ [shardPad]byte
+	_    [cacheLine - 4*8]byte
+
+	mu rbMutex
 }
 
-// cacheLine is the padding target. 128 rather than 64 because Apple silicon's
-// line is 128 bytes and x86 prefetches line pairs, so 128 is the safe choice on
-// both.
+// cacheLine is the padding target. 128 rather than 64 because Go's own runtime
+// uses 128 for arm64 — internal/cpu.CacheLinePadSize, whose comment names Apple
+// silicon as the reason — and because macOS reports hw.cachelinesize = 128 on
+// Apple silicon. It is also a multiple of the 64-byte line x86 and Neoverse use,
+// so one padded slot never straddles two lines there either.
+//
+// The literature does not agree on this number and the disagreement is worth
+// recording: ClickHouse pads AArch64 to 64 (src/Common/CacheLine.h) because it
+// targets Neoverse and says so explicitly; LLVM reports 256 for AArch64. On this
+// host the CPU's own L1 line is reported as 64 by CTR_EL0 on Linux while macOS
+// reports 128 for the system-level granule (Wrenger et al., Journal of Systems
+// Architecture, 2024, measured on M1 Ultra). 128 is the conservative choice and
+// the one Go itself makes.
 const cacheLine = 128
 
-// shardPad is the filler that rounds [shard] up to a whole cache line. The terms
-// are the four [table] pointers and the [sync.RWMutex].
+// rbSlot is one core's share of a shard's shared-hold counter. It owns a whole
+// cache line so that two cores taking the shared hold never touch the same one.
+type rbSlot struct {
+	n atomic.Int32
+	_ [cacheLine - 4]byte
+}
+
+// rbToken carries a goroutine's preferred slot between operations. It lives in a
+// [sync.Pool], whose per-P private slot is what gives the affinity: a goroutine
+// running on one P tends to draw back the same token and therefore the same
+// slot. That is the closest an ordinary package can get to a per-P counter —
+// runtime.procPin is not exported, and reaching it needs //go:linkname, which
+// needs unsafe.
 //
-// It is a literal restatement of those widths, NOT a measurement of the struct:
-// the expression reads no field, so it cannot notice a field being ADDED. Measured
-// rather than assumed — appending a fifth uint64 field leaves shardPad at 72,
-// takes the struct to 136 bytes, and still compiles clean. The guard against that
-// is TestShard_LayoutOneCacheLine, which takes unsafe.Sizeof(shard{}); this
-// expression and that test have to be kept in step by hand.
-const shardPad = cacheLine - (4*8+24)%cacheLine
+// The affinity is a best-effort hint and never a correctness input: a token that
+// migrates, or is dropped by a GC and redrawn, costs at most one extra slot
+// collision. Measured against drawing a slot at random on every call, the token
+// was worth 4% (1.937x -> 2.018x on the hot mixed benchmark), which is above
+// this harness's measured 1.6% noise floor.
+type rbToken struct {
+	idx int
+	_   [cacheLine - 8]byte
+}
+
+// rbMutex is a reader-writer lock whose SHARED side scales with the cores.
+//
+// # Why not sync.RWMutex
+//
+// On this store the FREQUENT hold is the shared one — every increment takes it —
+// and the rare hold is the exclusive one, taken only when a cell is created or
+// deleted, which is schema-cardinality-bounded. A [sync.RWMutex]'s shared acquire
+// is two read-modify-writes on ONE int32 that every core must own exclusively in
+// turn, so it serialises at the cache-coherence level however short the critical
+// section is. MEASURED at HEAD: sync/atomic.(*Int32).Add was 48.85% of all CPU in
+// the one-hot-type workload at 8 goroutines, and 100% of it came from RWMutex's
+// RLock and RUnlock — against 12.60% for the count cell those calls protect. The
+// lock word, not the counter, was the contended object.
+//
+// # The structure
+//
+// It is the readers-biased (big-reader) shape: a reader registers in a per-P slot
+// on its own cache line, and a writer announces itself and then waits for every
+// slot to drain. Prior art: Linux's brlock, and puzpuzpuz/xsync's RBMutex, which
+// selects its slot the same way, from a token held in a sync.Pool.
+//
+// # Why it is correct
+//
+// A reader increments its slot and then re-reads the writer flag; a writer sets
+// the flag and then reads the slots. Go's memory model specifies that sync/atomic
+// behaves as sequentially consistent, so in the single total order at least one of
+// the pair observes the other: either the writer sees the reader's registration
+// and waits, or the reader sees the flag, stands down, and takes the fallback
+// [sync.RWMutex] — which the writer also holds exclusively. The fallback is what
+// makes the losing side SAFE rather than merely unlikely, and it is also what
+// keeps a writer from starving, since Go's RWMutex blocks readers arriving behind
+// a waiting writer.
+//
+// The zero value is not usable; construct with [newRBMutex].
+type rbMutex struct {
+	// pending is read by every shared acquire and written only by a writer, so
+	// it is a read-mostly line that stays Shared on every core between the rare
+	// structural changes.
+	pending atomic.Bool
+	_       [cacheLine - 1]byte
+
+	slots  []rbSlot
+	tokens *sync.Pool
+
+	// fallback carries any shared hold that raced a writer, and the writer's own
+	// exclusive hold. w serialises writers so only one drains the slots at a time.
+	fallback sync.RWMutex
+	w        sync.Mutex
+
+	// tail rounds rbMutex to a whole number of cache lines so that [shard],
+	// which embeds it after its own line of map pointers, keeps a stride that is
+	// a multiple of the line size. Without it the stride was 328 bytes and
+	// consecutive shards' hot fields drifted across line boundaries.
+	//
+	// The terms are pending plus its pad (128), the slots slice header (24), the
+	// pool pointer (8), fallback (24) and w (16) — 200, rounded up to 256. It is
+	// a literal restatement of those widths and CANNOT notice a field being
+	// added, exactly as the shard padding it replaces could not;
+	// TestShard_LayoutSeparatesReadersFromTheLock is the guard that can, and the
+	// two must be kept in step by hand.
+	_ [56]byte
+}
+
+// newRBMutex returns a lock with n per-P slots drawing tokens from pool.
+func newRBMutex(n int, pool *sync.Pool) rbMutex {
+	return rbMutex{slots: make([]rbSlot, n), tokens: pool}
+}
+
+// rlock takes the shared hold and returns the slot [rbMutex.runlock] must
+// release, or -1 when the caller fell back to the plain reader lock.
+func (m *rbMutex) rlock() int {
+	if m.pending.Load() {
+		m.fallback.RLock()
+		return -1
+	}
+	t, _ := m.tokens.Get().(*rbToken)
+	if t == nil {
+		t = new(rbToken)
+	}
+	if t.idx == 0 {
+		// Slots are numbered from 1 in the token so that a zero value means
+		// "never assigned" rather than "slot 0".
+		t.idx = 1 + int(rand.UintN(uint(len(m.slots)))) //nolint:gosec // G115: len(slots) >= 1 by construction.
+	}
+	slot := (t.idx - 1) % len(m.slots)
+	m.tokens.Put(t)
+
+	m.slots[slot].n.Add(1)
+	if m.pending.Load() {
+		// A writer announced itself between the two checks. Stand down and take
+		// the fallback, which the writer does hold against.
+		m.slots[slot].n.Add(-1)
+		m.fallback.RLock()
+		return -1
+	}
+	return slot
+}
+
+// runlock releases the hold rlock returned.
+func (m *rbMutex) runlock(slot int) {
+	if slot < 0 {
+		m.fallback.RUnlock()
+		return
+	}
+	m.slots[slot].n.Add(-1)
+}
+
+// lock takes the exclusive hold, excluding every shared holder on either path.
+func (m *rbMutex) lock() {
+	m.w.Lock()
+	m.pending.Store(true)
+	for i := range m.slots {
+		for m.slots[i].n.Load() != 0 {
+			runtime.Gosched()
+		}
+	}
+	m.fallback.Lock()
+}
+
+// unlock releases the exclusive hold.
+func (m *rbMutex) unlock() {
+	m.fallback.Unlock()
+	m.pending.Store(false)
+	m.w.Unlock()
+}
 
 // Store is the sharded relationship count-store. Its zero value is not usable;
 // construct one with [New].
@@ -266,6 +473,12 @@ const shardPad = cacheLine - (4*8+24)%cacheLine
 // documentation gives the structural reason each of those holds.
 type Store struct {
 	shards [numShards]shard
+
+	// tokens hands out the per-P slot hints every shard's shared hold uses. It
+	// is per-Store rather than package-level: a package-level pool would be
+	// hidden global mutable state, which this module forbids, and a Store-scoped
+	// one costs only the pool's own per-P array.
+	tokens sync.Pool
 
 	// budget is the per-relabel out-degree fan-out ceiling (design §3.3.1,
 	// EngineOptions.MaxLabelRecountEdges). A relabel of a node with more than
@@ -294,12 +507,36 @@ func New(maxRecountEdges int) *Store {
 		tDirtyA:   make(map[uint32]struct{}),
 		tDirtyB:   make(map[uint32]struct{}),
 	}
+	s.tokens.New = func() any { return new(rbToken) }
+	// One slot per schedulable core. GOMAXPROCS is read once here rather than
+	// per operation: it is dynamic in go1.27, but the slot array only needs to
+	// be wide enough to spread the cores that actually run concurrently, and a
+	// stale width costs at most an extra collision, never correctness.
+	//
+	// This sizing is what the lock costs in memory, and the cost is large:
+	// MEASURED, an empty Store went from 24,000 to 123,712 bytes, +4.15x, of
+	// which 64 shards x GOMAXPROCS slots x 128 bytes is the dominant term. On a
+	// host with far more cores it grows linearly with them.
+	//
+	// Four slots measured indistinguishably from ten on this 10-core host
+	// (0.718x against 0.729x scaling at 8 goroutines, inside the harness's
+	// measured noise), so the array is over-provisioned HERE. It is nevertheless
+	// sized by GOMAXPROCS rather than capped at a literal, because the number a
+	// cap should take is unknown without measuring a many-core host, and the
+	// module's mandate is to scale with the hardware it is given. Allocating a
+	// shard's slots lazily, on its first contended acquire, would remove the
+	// waste without the guess; that is left for a task that can measure it.
+	slots := runtime.GOMAXPROCS(0)
+	if slots < 1 {
+		slots = 1
+	}
 	for i := range s.shards {
 		sh := &s.shards[i]
 		sh.e.init()
 		sh.dOut.init()
 		sh.dIn.init()
 		sh.t.init()
+		sh.mu = newRBMutex(slots, &s.tokens)
 	}
 	return s
 }
@@ -414,17 +651,17 @@ func (s *Store) Apply(d Delta) {
 // takes it to exactly zero, where it is deleted — so the bounded-growth
 // property the delete exists for is unchanged.
 func addCell[K comparable](sh *shard, tab *table[K], k K, delta int64) {
-	sh.mu.RLock()
+	slot := sh.mu.rlock()
 	if cell := tab.load()[k]; cell != nil {
 		if cell.Add(delta) != 0 {
-			sh.mu.RUnlock() // Tier 1.
+			sh.mu.runlock(slot) // Tier 1.
 			return
 		}
-		sh.mu.RUnlock()
+		sh.mu.runlock(slot)
 		removeCellIfZero(sh, tab, k) // Tier 2.
 		return
 	}
-	sh.mu.RUnlock()
+	sh.mu.runlock(slot)
 	insertCell(sh, tab, k, delta) // Tier 3.
 }
 
@@ -433,8 +670,8 @@ func addCell[K comparable](sh *shard, tab *table[K], k K, delta int64) {
 // [addCell] for why the re-read is mandatory and why a concurrent second caller
 // is harmless.
 func removeCellIfZero[K comparable](sh *shard, tab *table[K], k K) {
-	sh.mu.Lock()
-	defer sh.mu.Unlock()
+	sh.mu.lock()
+	defer sh.mu.unlock()
 
 	old := tab.load()
 	cell := old[k]
@@ -457,8 +694,8 @@ func removeCellIfZero[K comparable](sh *shard, tab *table[K], k K) {
 // exclusive lock, because another writer may have created the cell while this one
 // waited for the lock; see tier 3 of [addCell].
 func insertCell[K comparable](sh *shard, tab *table[K], k K, delta int64) {
-	sh.mu.Lock()
-	defer sh.mu.Unlock()
+	sh.mu.lock()
+	defer sh.mu.unlock()
 
 	old := tab.load()
 	if cell := old[k]; cell != nil {
@@ -631,7 +868,7 @@ func (s *Store) Snapshot() Snapshot {
 	}
 	for i := range s.shards {
 		sh := &s.shards[i]
-		sh.mu.Lock()
+		sh.mu.lock()
 		for rt, c := range sh.e.load() {
 			if v := c.Load(); v != 0 {
 				snap.E[rt] = v
@@ -652,7 +889,7 @@ func (s *Store) Snapshot() Snapshot {
 				snap.T[[3]uint32{k.a, k.rt, k.b}] = v
 			}
 		}
-		sh.mu.Unlock()
+		sh.mu.unlock()
 	}
 	s.dmu.RLock()
 	snap.DirtyDOut = keysOf(s.dDirtyOut)
@@ -688,9 +925,9 @@ func (s *Store) Cells() int {
 	n := 0
 	for i := range s.shards {
 		sh := &s.shards[i]
-		sh.mu.Lock()
+		sh.mu.lock()
 		n += len(sh.e.load()) + len(sh.dOut.load()) + len(sh.dIn.load()) + len(sh.t.load())
-		sh.mu.Unlock()
+		sh.mu.unlock()
 	}
 	return n
 }
@@ -720,12 +957,12 @@ func keysOf(m map[uint32]struct{}) []uint32 {
 func (s *Store) RecomputeReset() {
 	for i := range s.shards {
 		sh := &s.shards[i]
-		sh.mu.Lock()
+		sh.mu.lock()
 		sh.e.init()
 		sh.dOut.init()
 		sh.dIn.init()
 		sh.t.init()
-		sh.mu.Unlock()
+		sh.mu.unlock()
 	}
 	s.dmu.Lock()
 	clear(s.dDirtyOut)
