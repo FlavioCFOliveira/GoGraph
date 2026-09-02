@@ -580,6 +580,12 @@ type buildOpts struct {
 	// the whole point, and why [nodeScalarUseMemo] is itself safe for concurrent
 	// use.
 	scalarUseMemo *nodeScalarUseMemo
+	// countVarMemo is the plan-cache entry's cross-execution memo for
+	// [rewriteCountVarToCountStar] (rmp #2693). Same provenance and same
+	// nil-means-no-memo contract as scalarUseMemo above; see [countVarRewriteMemo]
+	// for what it holds and why it is bounded, and
+	// [rewriteCountVarToCountStarFor] for the routing.
+	countVarMemo *countVarRewriteMemo
 }
 
 // evalRow is the canonical bridge from a per-row closure to [expr.Eval] /
@@ -2419,7 +2425,12 @@ func (e *Engine) runRead(ctx context.Context, query string, params map[string]ex
 	// (ir.ContainsWrite on the already-built plan) rather than by
 	// re-scanning the query text, since the plan is already available and
 	// authoritative.
-	if ir.ContainsWrite(plan) {
+	//
+	// Read from the entry's memo rather than walked here (rmp #2693): the walk
+	// allocates one slice per plan node through ir.LogicalPlan.Children, and the
+	// answer is a pure function of a plan the cache holds immutable. See
+	// [planCacheEntry.containsWrite].
+	if entry.containsWrite {
 		return nil, fmt.Errorf("cypher: Run does not execute write or DDL statements; use RunInTx or RunAny instead: %w", ErrWriteInReadOnlyTx)
 	}
 
@@ -2573,18 +2584,19 @@ func (e *Engine) buildReadPhysical(
 	// ONE instant (rmp #2289). A nil snapshot yields a view of the current
 	// value, which is what the rendering paths pass and what a writer needs.
 	rv := e.g.ReadAt(snap)
-	walker := &lpgNodeWalker{g: rv}
-	labelSrc := &lpgLabelResolver{g: rv, eng: e}
-	// Allocate a per-run subquery evaluator so EXISTS { … } / COUNT { … }
-	// expressions encountered inside Filter/Project closures can drive their
-	// inner pipelines against the current outer row (task-396).
-	subEval := newSubqueryEvaluator(walker, labelSrc, queryReg, rv)
-	// Allocate a per-run pattern evaluator so WHERE (a)-[:T]->(b) existential
-	// predicates can be evaluated against the live graph (task-961). It
-	// receives the Engine's per-query element budget so a pattern
-	// comprehension over a supernode anchor cannot build an unbounded
-	// result list — the same bound collect() enforces (#1294, #1298).
-	patEval := newPatternEvaluator(rv, e.maxCollectItems)
+	// ONE heap object for the five per-execution build objects, not five (rmp
+	// #2693). The walker, the label resolver, the per-run subquery evaluator (so
+	// EXISTS { … } / COUNT { … } inside Filter/Project closures can drive their
+	// inner pipelines against the current outer row, task-396), the per-run
+	// pattern evaluator (so WHERE (a)-[:T]->(b) existential predicates can be
+	// evaluated against the live graph, task-961, carrying the Engine's per-query
+	// element budget so a pattern comprehension over a supernode anchor cannot
+	// build an unbounded result list — the same bound collect() enforces, #1294,
+	// #1298) and the build options all have exactly the same lifetime and are all
+	// mutually reachable, so they are allocated together. See [readBuildScaffold]
+	// for why that is safe and why it is not pooled.
+	var sc readBuildScaffold
+	walker, labelSrc, subEval, patEval, bopts := (&sc).init(ctx, e, rv, queryReg)
 	// Adjacency-answered count gating (#2232 / #2235, knob added by rmp #2647). The
 	// polarity flips here on purpose: the Engine field is positive to match its
 	// siblings, the evaluator field is NEGATIVE so that the zero value keeps both
@@ -2594,7 +2606,6 @@ func (e *Engine) buildReadPhysical(
 	// optimisation. Set before either evaluator is handed to a build.
 	subEval.adjacencyCountsDisabled = !e.adjacencyCountRewritesEnabled
 	patEval.adjacencyCountsDisabled = !e.adjacencyCountRewritesEnabled
-	bopts := &buildOpts{subEval: subEval, patEval: patEval, queryCtx: ctx, maxCollectItems: e.maxCollectItems}
 	// Hand the subquery evaluator this query's parameters and build options so an
 	// inner plan is compiled in a scope that can resolve them (rmp #2507). It has
 	// to happen HERE rather than at construction because bopts holds subEval, so
@@ -2615,6 +2626,7 @@ func (e *Engine) buildReadPhysical(
 	// build.
 	if entry != nil {
 		bopts.scalarUseMemo = &entry.scalarUse
+		bopts.countVarMemo = &entry.countVarRewrite
 	}
 	// Adjacency cache sharing (#2143, #2251): the SAME cache instance serves every
 	// concurrent Run call, so a traversing pattern amortises its O(V+E) CSR pair
@@ -4710,6 +4722,23 @@ type planCacheEntry struct {
 	// query with no single-edge pattern pays nothing at build time. nil when the
 	// query has no candidate.
 	anchorSwapCandidates []anchorSite
+	// containsWrite memoises [ir.ContainsWrite] on this plan — whether the query
+	// mutates the graph, which is what decides whether [Engine.Run] rejects it. It
+	// is the same class as the fields above (a pure function of the immutable plan,
+	// computed once at entry creation), and it is here because the walk is NOT
+	// free: ContainsWrite descends through [ir.LogicalPlan.Children], and every
+	// implementation of Children builds a fresh slice, so the check cost one heap
+	// allocation per plan node on EVERY execution of an already-cached plan.
+	//
+	// Measured on bench/contention's cypher-read-label-small
+	// ("MATCH (n:N) RETURN count(n)", whose plan has three nodes) with
+	// -memprofilerate=1: 3 of the 4 allocations the read path made BEFORE it even
+	// opened its snapshot were these Children slices, out of 33 for the whole read
+	// (rmp #2693). The cost grows with plan size, so a wide plan paid more.
+	//
+	// A bool needs no lazy filling and no concurrency argument beyond the entry's
+	// own: it is written before loadOrStore publishes the entry, and never again.
+	containsWrite bool
 	// scalarUse memoises [analyseNodeScalarUse] across executions of this plan
 	// (rmp #2383). It is the same class as the four fields above — a pure function
 	// of the immutable plan — but it is filled LAZILY rather than at entry
@@ -4726,6 +4755,12 @@ type planCacheEntry struct {
 	// value it holds is immutable once stored, so concurrent readers observe a
 	// fully built analysis or none.
 	scalarUse nodeScalarUseMemo
+	// countVarRewrite memoises [rewriteCountVarToCountStar] across executions of
+	// this plan (rmp #2693). Filled lazily from the build's own call site for the
+	// same reason scalarUse is: predicting which aggregation nodes the build will
+	// reach would duplicate knowledge that lives in the builder. See
+	// [countVarRewriteMemo].
+	countVarRewrite countVarRewriteMemo
 }
 
 // nodeScalarUseMemo memoises [analyseNodeScalarUse] per AST expression for the
@@ -4974,6 +5009,11 @@ func (e *Engine) buildPlanCacheEntry(query string) (*planCacheEntry, error) {
 		reorderCandidates:    reorderCandidates,
 		anchorSwapCandidates: anchorSwapCandidates, paramTypes: paramTypes,
 		pushedSeekHints: pushedSeekHints,
+		// Computed OUTSIDE the semaErr == nil guard above, unlike its neighbours: a
+		// semantically-invalid entry never reaches execution today, but a memo whose
+		// validity depends on a caller's check order is a trap, and this one costs a
+		// single plan walk on a cache miss. See [planCacheEntry.containsWrite].
+		containsWrite: ir.ContainsWrite(plan),
 	}
 	actual, _ := e.cache.loadOrStore(query, entry)
 	return actual, nil
@@ -9744,7 +9784,13 @@ func buildOperatorRec(
 		// tryBuildCountRows and the columnar countStarKernel, for the Selection- and
 		// Expand-child shapes no leaf pushdown can serve. Returns p unchanged unless
 		// the null-safety walk passes; never mutates the cached logical plan.
-		p = rewriteCountVarToCountStar(p)
+		//
+		// Routed through the plan-cache entry's memo (rmp #2693): the rewrite is a
+		// pure function of an immutable plan node, and when it fires it allocates the
+		// EagerAggregation copy and its Aggregates slice — twice per execution of a
+		// plan whose answer cannot change. See [rewriteCountVarToCountStarFor], which
+		// falls back to the direct call on any build with no entry behind it.
+		p = rewriteCountVarToCountStarFor(bopts, p)
 		// Parallel-reduce fast path (#1672): a group-by-less count(*) /
 		// count(<scan-var>) over a bare full-node scan is served by a
 		// ParallelCountScan that sums per-worker partial counters, avoiding both

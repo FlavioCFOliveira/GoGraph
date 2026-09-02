@@ -106,7 +106,17 @@ func (pe *patternEvaluator) bind(params map[string]expr.Value, subEval expr.Subq
 // no cap, >0 → that exact budget); it is resolved once here so the hot append
 // path compares against a single non-negative ceiling.
 func newPatternEvaluator(g *lpg.ReadView[string, float64], maxCollectItems int) *patternEvaluator {
-	return &patternEvaluator{g: g, maxCollectItems: resolvePatternCompBudget(maxCollectItems)}
+	pe := &patternEvaluator{}
+	pe.init(g, maxCollectItems)
+	return pe
+}
+
+// init sets up an evaluator IN PLACE, so that a caller which already owns
+// storage for one — [readBuildScaffold] — can initialise it without a second
+// heap allocation. [newPatternEvaluator] is this plus the allocation.
+func (pe *patternEvaluator) init(g *lpg.ReadView[string, float64], maxCollectItems int) {
+	pe.g = g
+	pe.maxCollectItems = resolvePatternCompBudget(maxCollectItems)
 }
 
 // resolvePatternCompBudget maps the EngineOptions.MaxCollectItems encoding to

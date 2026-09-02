@@ -276,6 +276,12 @@ func (e *subqueryEvaluator) degreeShapeFor(sub ast.Expression, row expr.RowConte
 	if !ok {
 		sh = nil
 	}
+	// Created on first write, not at construction (rmp #2693). A query with no
+	// EXISTS/COUNT subquery never reaches this line, and an empty map is one heap
+	// allocation on every execution of every such query.
+	if e.degree == nil {
+		e.degree = make(map[ast.Expression]*degreeShape)
+	}
 	e.degree[sub] = sh
 	return sh
 }

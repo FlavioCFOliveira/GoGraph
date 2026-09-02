@@ -286,6 +286,11 @@ func (e *subqueryEvaluator) labelledHopShapeFor(sub ast.Expression, row expr.Row
 	if !ok {
 		sh = nil
 	}
+	// Created on first write, for the same reason as the sibling memos and in the
+	// same shape [patternEvaluator.labelledHop] below already uses (rmp #2693).
+	if e.labelledHop == nil {
+		e.labelledHop = make(map[ast.Expression]*labelledHopShape)
+	}
 	e.labelledHop[sub] = sh
 	return sh
 }
