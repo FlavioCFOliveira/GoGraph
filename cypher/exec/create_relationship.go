@@ -156,6 +156,18 @@ func (op *CreateRelationship) Next(out *Row) (bool, error) {
 	// a duplicate (src, dst) is collapsed and the handle is not stored; the
 	// read path there falls back to the per-pair / per-CREATE-index union,
 	// which the *At writes below keep populated.
+	//
+	// That collapse is why [lpg.Graph.AddEdgeH] documents its handle as
+	// ADVISORY in simple-graph mode, and it is the reason the emitted row's
+	// identity (below) can safely be this handle: a Cypher write never
+	// reaches the collapse. Both mutator adapters reject a duplicate ordered
+	// pair on a non-multigraph graph with ErrParallelEdgeInSimpleGraph
+	// BEFORE any mutation (rmp #1856, cypher/api.go), so every AddEdgeH that
+	// returns here stamped its handle on a real slot. And were the guard ever
+	// removed, the row identity would be no worse than the by-handle writes
+	// immediately below it, which are keyed by the very same handle: an
+	// unstored handle already orphans this CREATE's inline properties, so it
+	// could not orphan a later SET any harder.
 	actualSrcID, actualDstID, handle, err := op.mutator.AddEdgeH(srcLabel, dstLabel, 0)
 	if err != nil {
 		return false, fmt.Errorf("exec: CreateRelationship AddEdge: %w", err)
@@ -210,8 +222,27 @@ func (op *CreateRelationship) Next(out *Row) (bool, error) {
 			relProps[p.key] = v
 		}
 	}
+	// ID is the STABLE PER-EDGE HANDLE this CREATE just allocated — the same
+	// identity the by-handle label/property writes above recorded under, and
+	// the one a later MATCH of this edge resolves from its adjacency slot.
+	//
+	// It used to be a synthetic `src<<32|dst` packing, which broke two
+	// contracts at once (rmp #2705). Every consumer of a post-projection
+	// relationship binding reads this field AS the handle — [resolveEntity]
+	// in set.go, its whole-entity twin in set_all.go, remove.go, and the
+	// MERGE outer-target resolvers — so a standalone `SET r.k` / `REMOVE r.k`
+	// on a CREATE-bound variable mirrored its write into an ORPHAN by-handle
+	// bag keyed by the packing, while the read path routed exclusively to the
+	// real handle's bag and reported null: a silent lost write. And `id(r)`
+	// returns this field verbatim, so it disagreed with the `id(r)` the same
+	// relationship reports through MATCH.
+	//
+	// Two parallel CREATEs between the same ordered pair also shared one
+	// packed value and therefore compared EQUAL under
+	// [expr.RelationshipValue.Equal] / Hash, so DISTINCT collapsed two
+	// distinct relationships into one. Distinct handles separate them.
 	rel := expr.RelationshipValue{
-		ID:         uint64(actualSrcID)<<32 | uint64(actualDstID), // synthetic edge ID
+		ID:         handle,
 		StartID:    uint64(actualSrcID),
 		EndID:      uint64(actualDstID),
 		Type:       op.relType,

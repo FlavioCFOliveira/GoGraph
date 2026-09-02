@@ -13030,7 +13030,23 @@ func edgePropsToExprMap(g *lpg.ReadView[string, float64], srcKey, dstKey string)
 // PropBytes maps to expr.Null exactly as it would through the coalesced path
 // (the temporal storage contract, graph/lpg/edge_property.go). Returns nil (an
 // absent map) when the handle is 0, was never written, or the pair carries no
-// properties for it — the caller then falls back to the per-pair map.
+// properties for it.
+//
+// A nil return is NOT a fallback signal. This sentence used to end "— the caller
+// then falls back to the per-pair map", which described the pre-#1684 ladder in
+// which the by-handle map was an OVERRIDE layered over the coalesced one. It has
+// not been true since #1684 made the routing EXCLUSIVE, and the two statements
+// contradicted each other for long enough to be worth naming (rmp #2705). The
+// exclusive behaviour is the intended one, and it is what runs: [buildEdgeProps]
+// decides the route once per row from the by-handle MEMBERSHIP signal
+// (hasByHandleEntry, resolved from the separate by-handle LABEL store) — never
+// from whether this map came back empty. So a bound instance that has a
+// by-handle label and an empty property bag correctly reports keys(r) = [] and
+// r.k IS NULL, instead of inheriting a propertied parallel sibling's keys from
+// the per-pair union. The per-pair store is reached only when the membership
+// signal is absent altogether (a 0-handle simple-graph or pre-handle edge, or a
+// Go-API edge that stamped a handle but wrote the per-pair store only). See
+// [lazyRelResolver] and [expr.RelSource], which state the same exclusivity.
 //
 // Designed as the reusable by-handle property accessor: it is keyed purely on
 // (srcKey, dstKey, handle) so the same primitive serves the path / VLE renderers

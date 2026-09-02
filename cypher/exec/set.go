@@ -202,6 +202,7 @@ func (op *SetProperty) Next(out *Row) (bool, error) {
 		if err := op.applyToRelationship(ent, childRow); err != nil {
 			return false, err
 		}
+		op.refreshRelRowProperties(childRow, ent)
 	} else {
 		// Node target: dispatch to node property methods.
 		if err := op.applyToNode(ent.nodeKey, childRow); err != nil {
@@ -591,6 +592,51 @@ func (op *SetProperty) refreshNodeRowProperties(row Row, pv any) {
 	}
 	nv.Properties = props
 	row[colIdx] = nv
+}
+
+// refreshRelRowProperties updates the row's RelationshipValue slot (when
+// present) from the authoritative post-write graph state, so a downstream
+// `RETURN r.<key>` / `properties(r)` in the SAME statement observes
+// read-your-own-writes.
+//
+// It is the relationship counterpart of [SetProperty.refreshNodeRowProperties]
+// and it exists for the same reason: a row slot materialised by a WRITE clause
+// (CREATE / MERGE) or by an upstream projection carries a property snapshot
+// taken BEFORE this SET, and a projection reading that slot never consults the
+// graph again. Without the refresh, `MERGE (a)-[r:T]->(b) SET r.since = 2020
+// RETURN r.since` returned null even though the write was durably applied and a
+// following `MATCH` reported 2020 (rmp #2705). The node arm has always had this
+// refresh, which is why the same clause landed for `SET a.since = 1` and read
+// back stale for `SET r.since = 2020`.
+//
+// The whole map is rebuilt rather than the single key patched, because a
+// REPLACE (`SET r = {…}`) and a SET-to-null both remove keys, and because the
+// authoritative post-write map is one mutator call away. It mirrors
+// [SetAllProperties.refreshRowEntity] — including its routing rule: the
+// instance's OWN by-handle bag when its stable handle resolves and the bag is
+// non-empty, the per-pair aggregate otherwise, which is exactly how reads
+// route. Refreshing from the aggregate would leak a parallel twin's keys into
+// this row's snapshot (#2502).
+//
+// No-op when the slot holds a raw IntegerValue edge id (a projection re-reads
+// the graph live for that shape), or when the column is out of range.
+func (op *SetProperty) refreshRelRowProperties(row Row, ent entityBinding) {
+	colIdx, ok := op.schema[op.entityVar]
+	if !ok || colIdx >= len(row) {
+		return
+	}
+	rv, isRel := row[colIdx].(expr.RelationshipValue)
+	if !isRel {
+		return
+	}
+	props := op.mutator.EdgeProperties(ent.relSrcKey, ent.relDstKey)
+	if ent.relHandle != 0 {
+		if bag := op.mutator.EdgePropertiesByHandle(ent.relSrcKey, ent.relDstKey, ent.relHandle); len(bag) > 0 {
+			props = bag
+		}
+	}
+	rv.Properties = lpgPropsToMapValue(props)
+	row[colIdx] = rv
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

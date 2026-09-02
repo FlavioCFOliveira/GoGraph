@@ -221,6 +221,16 @@ type MergePattern struct {
 	// not re-evaluated once per frontier binding. Indexed by hop position; len
 	// == len(hops) after runForRow computes it.
 	hopPropsForRow [][]propLiteral
+	// hopCreateHandles holds, per hop position, the stable per-edge handle
+	// [MergePattern.createChain] allocated for that hop on THIS driving row, or
+	// 0 when the row took the match path (no edge was created). It is the
+	// create-path half of [MergePattern.hopHandle], which is the single place
+	// every write and every emitted binding resolves a hop's edge identity —
+	// so a created hop names the instance createChain actually wrote to rather
+	// than the pair's first slot, which in a multigraph is a DIFFERENT edge
+	// when the pattern added a parallel hop over an already-connected bound
+	// pair. Reset per driving row in [MergePattern.runForRow].
+	hopCreateHandles []uint64
 
 	matchedIdx int
 
@@ -497,10 +507,7 @@ func (op *MergePattern) applySetAllActions(b binding, evalRow Row, actions []Mer
 			if err != nil {
 				return err
 			}
-			// binding carries no per-edge identity, so the instance is pinned
-			// the same way the per-property path pins it: the first handle on
-			// the resolved pair, with 0 meaning "no handle" (simple graph).
-			handle, _ := op.mutator.FirstEdgeHandle(srcKey, dstKey)
+			handle := op.hopHandle(hopIdx, srcKey, dstKey)
 			if err := applyWholeEntityValueToEdge(
 				op.mutator, a.TargetVar, srcKey, dstKey, handle, a.IsReplace, v,
 			); err != nil {
@@ -670,6 +677,14 @@ func (op *MergePattern) runForRow(childRow Row) error {
 			return hpErr
 		}
 		op.hopPropsForRow[i] = props
+	}
+	// Reset the per-row create handles: a hop that is MATCHED this row must not
+	// inherit the handle a previous row's create allocated for it.
+	if cap(op.hopCreateHandles) < len(op.hops) {
+		op.hopCreateHandles = make([]uint64, len(op.hops))
+	} else {
+		op.hopCreateHandles = op.hopCreateHandles[:len(op.hops)]
+		clear(op.hopCreateHandles)
 	}
 
 	bindings, err := op.search(childRow)
@@ -1109,6 +1124,12 @@ func (op *MergePattern) createChain(childRow Row) (binding, error) {
 		if err != nil {
 			return nil, fmt.Errorf("AddEdge: %w", err)
 		}
+		// Publish the created instance's identity for this row, so the emitted
+		// binding, the ON CREATE actions and any later standalone SET all name
+		// the edge whose by-handle metadata is written just below.
+		if i < len(op.hopCreateHandles) {
+			op.hopCreateHandles[i] = handle
+		}
 		if hop.relType != "" {
 			op.mutator.SetEdgeLabel(srcKey, dstKey, hop.relType)
 			op.mutator.SetEdgeLabelByHandle(srcKey, dstKey, handle, hop.relType)
@@ -1148,6 +1169,42 @@ func (op *MergePattern) createChain(childRow Row) (binding, error) {
 func (op *MergePattern) freshNodeKey() string {
 	n := globalNodeCounter.Add(1)
 	return synthKeyPrefix + mergeKeyInfix + fmt.Sprintf("%x", n)
+}
+
+// hopHandle resolves the stable per-edge handle that identifies the ONE
+// relationship instance hop hopIdx is bound to on the resolved storage pair
+// (srcKey -> dstKey). It is the single identity every write and every emitted
+// binding for that hop must agree on, because the engine's read path routes a
+// bound relationship's properties EXCLUSIVELY by handle: a write under any
+// other value lands in a bag no read consults.
+//
+// Two sources, in order:
+//
+//   - The handle [MergePattern.createChain] allocated for this hop on this
+//     driving row, when the row took the create path. This is the instance
+//     whose by-handle type and inline properties createChain wrote, and in a
+//     multigraph it is NOT the pair's first slot whenever the pattern added a
+//     parallel hop over an already-connected bound pair.
+//   - Otherwise (the match path) the pair's first handle. A MERGE binds a
+//     single logical (src, dst) edge rather than a specific parallel instance —
+//     the binding carries no per-edge identity — so the first slot is the only
+//     instance this operator can name, and it is the one the ON MATCH arms have
+//     always pinned.
+//
+// Returns 0 when neither source yields a handle (an edge stamped without one:
+// simple-graph or pre-handle storage). Every caller treats 0 as "per-pair store
+// only", never as a handle.
+func (op *MergePattern) hopHandle(hopIdx int, srcKey, dstKey string) uint64 {
+	if hopIdx >= 0 && hopIdx < len(op.hopCreateHandles) {
+		if h := op.hopCreateHandles[hopIdx]; h != 0 {
+			return h
+		}
+	}
+	h, ok := op.mutator.FirstEdgeHandle(srcKey, dstKey)
+	if !ok {
+		return 0
+	}
+	return h
 }
 
 // emitRow extends childRow with every chain position's binding (fresh
@@ -1194,8 +1251,16 @@ func (op *MergePattern) emitRow(childRow Row, b binding) (Row, error) {
 				}
 			}
 		}
+		// ID is the hop's STABLE PER-EDGE HANDLE, resolved by the same
+		// [MergePattern.hopHandle] the ON CREATE / ON MATCH arms use, so the
+		// emitted binding names exactly the instance this operator's own
+		// writes landed on. It used to be a synthetic `src<<32|dst` packing,
+		// which every consumer of a post-projection relationship binding then
+		// read AS a handle (set.go, set_all.go, remove.go): a standalone
+		// `SET r.k` after the MERGE mirrored into an orphan by-handle bag that
+		// no read consults, and `id(r)` disagreed with MATCH (rmp #2705).
 		row[hop.relCol] = expr.RelationshipValue{
-			ID:         uint64(b[srcIdx])<<32 | uint64(b[dstIdx]),
+			ID:         op.hopHandle(i, srcKey, dstKey),
 			StartID:    uint64(b[srcIdx]),
 			EndID:      uint64(b[dstIdx]),
 			Type:       hop.relType,
@@ -1259,13 +1324,7 @@ func (op *MergePattern) applyActions(b binding, evalRow Row, actions []mergeActi
 			if !ok1 || !ok2 {
 				continue
 			}
-			// binding carries no per-edge identity, so the instance is pinned the
-			// only way this arm can pin it: the first handle on the resolved pair,
-			// with 0 meaning "no handle" (simple graph).
-			handle, hasHandle := op.mutator.FirstEdgeHandle(srcKey, dstKey)
-			if !hasHandle {
-				handle = 0
-			}
+			handle := op.hopHandle(hopIdx, srcKey, dstKey)
 			if err := op.applyRelAction(srcKey, dstKey, handle, act, evalRow, evals); err != nil {
 				return err
 			}
