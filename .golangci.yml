@@ -13,6 +13,18 @@ linters:
     - gosec
     - govet
     - ineffassign
+    # staticcheck's checks run in this module ONLY through golangci-lint —
+    # the `staticcheck` entry below. The standalone `staticcheck` binary is
+    # not a project gate, and the module carries no `staticcheck.conf`: the
+    # four that once existed were removed with task #2680, because
+    # golangci-lint honours none of them and this file never referenced
+    # them. So `//nolint:` is the module's single suppression vocabulary;
+    # there is no `//lint:ignore` directive in the tree, and standalone
+    # staticcheck cannot see a `//nolint:` one. Should that binary ever be
+    # reintroduced, note that its configuration scopes by DIRECTORY only —
+    # a `[staticcheck "<path>"]` table name fails to parse (`expected '.'
+    # or ']' to end table name`) — so each per-package override needs its
+    # own directory-level config file.
     - staticcheck
     - unused
     - gocritic
