@@ -2,6 +2,8 @@ package hash
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"testing"
 
@@ -197,5 +199,73 @@ func TestIndexes_HashDeserializeShortPayload(t *testing.T) {
 	dst := New[int64]()
 	if err := dst.Deserialize(bytes.NewReader(truncated)); !errors.Is(err, index.ErrIndexCorrupted) {
 		t.Fatalf("truncated payload = %v, want ErrIndexCorrupted", err)
+	}
+}
+
+// TestSerializeWireFormatIsPinned holds the on-disk format byte for byte across
+// round three of rmp #2692.
+//
+// Round three split where a posting list's ids come FROM: an empty or singleton
+// key is serialized out of [entry.meta] and everything wider out of a published
+// [snapshot]. The format itself must not have moved an inch — a stored index is
+// read back by [Index.Deserialize] from a previous build, and
+// cypher/index_hydration.go hydrates engines from images written earlier — and a
+// round-trip test cannot see a format change, because it writes and reads with
+// the same code.
+//
+// So the expected digest is not this build's own output. It was measured on the
+// ROUND-TWO build, whose serializer read every tier out of a snapshot, with
+// byte-identical probe code, and pasted here. A build that hashes differently
+// has changed the format, whatever its round trips say.
+//
+// The fixture deliberately includes keys that arrive at the singleton tier by
+// DEMOTION as well as directly, because those are exactly the keys whose ids
+// now come from a different place than they did.
+func TestSerializeWireFormatIsPinned(t *testing.T) {
+	t.Parallel()
+
+	// Measured on the round-two build (rmp #2692), probe code identical to the
+	// fixture below.
+	const (
+		wantLen    = 3292
+		wantDigest = "f85eddc732eb9651ec61abeedf5d26af5ec335890d03aea590dbde2835d0adc3"
+	)
+
+	idx := New[int64]()
+	// Every width from 1 to 13: the singleton, small and bitmap tiers.
+	for v := int64(0); v < 40; v++ {
+		width := int(v)%13 + 1
+		for n := range width {
+			idx.Insert(v, graph.NodeID(uint64(v)*100+uint64(n)+1))
+		}
+	}
+	// Keys that reach the singleton tier by demotion rather than directly.
+	for v := int64(100); v < 110; v++ {
+		for n := range 20 {
+			idx.Insert(v, graph.NodeID(uint64(v)*100+uint64(n)+1))
+		}
+		for n := 1; n < 20; n++ {
+			idx.Delete(v, graph.NodeID(uint64(v)*100+uint64(n)+1))
+		}
+	}
+	var buf bytes.Buffer
+	if err := idx.Serialize(&buf); err != nil {
+		t.Fatalf("Serialize: %v", err)
+	}
+	sum := sha256.Sum256(buf.Bytes())
+	got := hex.EncodeToString(sum[:])
+	if buf.Len() != wantLen || got != wantDigest {
+		t.Errorf("the serialized image is %d bytes, sha256 %s; want %d bytes, "+
+			"sha256 %s: the on-disk format has changed, so an index written by an "+
+			"earlier build is no longer the image this one writes",
+			buf.Len(), got, wantLen, wantDigest)
+	}
+	// A digest is only worth pinning if it is the digest of something valid.
+	dst := New[int64]()
+	if err := dst.Deserialize(bytes.NewReader(buf.Bytes())); err != nil {
+		t.Fatalf("Deserialize: %v", err)
+	}
+	if got, want := dst.DistinctValues(), idx.DistinctValues(); got != want {
+		t.Fatalf("DistinctValues after the round trip = %d, want %d", got, want)
 	}
 }
