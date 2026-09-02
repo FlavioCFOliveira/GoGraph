@@ -6,6 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
@@ -112,7 +113,16 @@ func TestLabelIndexAddWindow_BitmapReaderNeverLosesARow(t *testing.T) {
 				seen      atomic.Int64 // bag-present observations the readers made
 				peakOpen  atomic.Int64 // highest idxAddActive any reader observed
 			)
-			ctx := context.Background()
+			// A WRITE THAT WAITS FOR THE FRONTIER MUST STILL BE ABLE TO FAIL.
+			// [Session.ApplyVersionedCtx] waits for this session's own commits to
+			// become visible, and that wait is bounded by the transactions it waits
+			// on rather than by any timer — so a commit timestamp that is never
+			// discharged would hang this test for the whole `go test` timeout
+			// instead of reporting anything. The bound turns that into a
+			// diagnosable failure. It is three orders of magnitude above the
+			// measured frontier lag below, so it can only fire on a genuine stall.
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
 
 			for r := range readers {
 				readersWG.Add(1)
@@ -151,6 +161,56 @@ func TestLabelIndexAddWindow_BitmapReaderNeverLosesARow(t *testing.T) {
 				writersWG.Add(1)
 				go func(worker int) {
 					defer writersWG.Done()
+					// EACH WRITER COMMITS THROUGH ITS OWN SESSION, and that is a
+					// requirement of this workload rather than a convenience
+					// (rmp #2689).
+					//
+					// A worker re-labels the SAME nodes on every round — the stride
+					// is disjoint, so no two workers ever share a node — which makes
+					// every write after the first an overwrite of the worker's own
+					// committed version. Sessionless, that is exactly the shape the
+					// commit frontier cannot serve: the frontier is CONTIGUOUS, so a
+					// commit stays invisible while any EARLIER allocated timestamp is
+					// still in flight, and [Graph.ApplyVersionedCtx] returns before
+					// its own instant publishes. The next transaction then starts
+					// BELOW the worker's own last commit, finds its own version at
+					// the chain head, and is refused with
+					// [mvcc.ErrSerializationConflict] on a node no other transaction
+					// ever touched. rmp #2328 named that the spurious self-conflict
+					// and rmp #2359 recorded it for this very store at this very
+					// writer count; [Session.ApplyVersionedCtx] is what closes it,
+					// by waiting for the session's own floor before taking a start
+					// timestamp.
+					//
+					// MEASURED here, under the cover gate's own conditions
+					// (GOGRAPH_PARALLEL_SUITE=1 over the whole module under
+					// coverage), with an instrumented copy of this writer loop: 796
+					// refusals in 22 086 commits, and in 200 of 200 sampled the
+					// blocking head was the worker's own previous commit on that same
+					// node — never another writer's in-flight version
+					// (Conflict.ConcurrentWriter() false in all 200) and never an
+					// aborted one. The frontier sat ~2 200 commits behind the
+					// worker's own acknowledged commit, because one writer had been
+					// descheduled inside its commit critical section on a machine
+					// oversubscribed ten to one.
+					//
+					// A BOUNDED RETRY WAS THE OTHER CANDIDATE AND IT IS NOT ENOUGH,
+					// measured rather than reasoned: the instrumented loop retried
+					// each refusal and ten of the sixteen workers still made no
+					// progress in 64 attempts, because outlasting the stall means
+					// waiting milliseconds, which a retry loop can only do by
+					// reimplementing [mvcc.Clock.AwaitVisible] badly. The session
+					// waits exactly as long as the frontier needs and no longer:
+					// once it has waited, its start timestamp is at or above its own
+					// floor, so a self-conflict is impossible by construction rather
+					// than improbable.
+					//
+					// It changes nothing else about what this test exercises. The
+					// write path is the same [Graph.applyVersionedInstant] bracket,
+					// the delta is still pushed, the add is still hoisted — and the
+					// peakOpen assertion below is what would catch it if the wait
+					// ever serialised the writers instead of overlapping them.
+					sess := g.NewSession()
 					for round := range addWindowRounds {
 						name := addWindowLabel(round)
 						for i := worker; i < len(ids); i += writers {
@@ -159,7 +219,7 @@ func TestLabelIndexAddWindow_BitmapReaderNeverLosesARow(t *testing.T) {
 							if tc.disarmed {
 								err = g.SetNodeLabel(key, name)
 							} else {
-								err = g.ApplyVersionedCtx(ctx, func(tx WriteTx) error {
+								err = sess.ApplyVersionedCtx(ctx, func(tx WriteTx) error {
 									return g.Writer(tx).SetNodeLabel(key, name)
 								})
 							}
