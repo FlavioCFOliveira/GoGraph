@@ -221,7 +221,16 @@ func (wv WriteView[N, W]) RemoveEdgeByHandle(src, dst N, handle uint64) bool {
 
 // RemoveAllEdgesFrom is [Graph.RemoveAllEdgesFrom] inside this view's
 // transaction.
-func (wv WriteView[N, W]) RemoveAllEdgesFrom(src N) { wv.g.removeAllEdgesFromInfo(src, wv.w) }
+//
+// It reports whether the removal was APPLIED, exactly as
+// [WriteView.RemoveEdgeByHandle] does: FALSE means this transaction hit a
+// write-write conflict on the adjacency and nothing was mutated. A caller that
+// journals an inverse MUST gate the journal entry on it — an inverse recorded
+// for a removal that never happened re-creates an arc the conflicting peer
+// still owns (rmp #2694).
+func (wv WriteView[N, W]) RemoveAllEdgesFrom(src N) bool {
+	return wv.g.removeAllEdgesFromInfo(src, wv.w)
+}
 
 // ── per-pair relationship types and properties ───────────────────────────────
 

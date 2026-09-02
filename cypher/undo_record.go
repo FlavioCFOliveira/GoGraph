@@ -549,6 +549,77 @@ func (m mutationUndo) recordRemoveEdge(pre *removedEdgePreimage, wasPresent bool
 	})
 }
 
+// relDeleteCounter is the openCypher relationships-deleted counter both write
+// adapters carry. It exists so [journalAllOutEdgesRemoved] can serve either
+// without a type switch and without allocating a closure: a pointer receiver
+// stored in a single-method interface stays in the interface's data word.
+type relDeleteCounter interface {
+	countRelDeleted()
+}
+
+// captureAllOutEdgePreimages snapshots every outgoing edge of n listed in
+// outgoing, in the same order, so a bulk [lpg.WriteView.RemoveAllEdgesFrom] can
+// be inverted edge by edge.
+//
+// It MUST run BEFORE the removal: the pre-image records the per-pair labels,
+// properties and CREATE-multiplicity counter that the removal clears. The
+// journal, by contrast, must run AFTER it — see [journalAllOutEdgesRemoved] for
+// why the two cannot be one loop.
+//
+// When undo is inactive nothing invertible is needed, so only the presence flag
+// the effect counter reads is filled in; the O(out-degree) metadata copies are
+// skipped exactly as they were before.
+func captureAllOutEdgePreimages(
+	r mutationUndo, g *lpg.Graph[string, float64], n string, outgoing []string,
+) []removedEdgePreimage {
+	if len(outgoing) == 0 {
+		return nil
+	}
+	pre := make([]removedEdgePreimage, len(outgoing))
+	for i, dst := range outgoing {
+		if r.active() {
+			pre[i] = r.captureRemovedEdge(n, dst)
+			continue
+		}
+		pre[i] = removedEdgePreimage{src: n, dst: dst, hadEdge: g.AdjList().HasEdge(n, dst)}
+	}
+	return pre
+}
+
+// journalAllOutEdgesRemoved records the inverse of every edge a bulk
+// [lpg.WriteView.RemoveAllEdgesFrom] actually removed, and counts each as a
+// deleted relationship.
+//
+// # Why this may only run once the removal has APPLIED (rmp #2694)
+//
+// The bulk removal is a non-commutative adjacency write and can be REFUSED: a
+// concurrent transaction with an in-flight append on the same node wins, and
+// [Graph.removeAllEdgesFromInfo] then returns false having mutated nothing. The
+// journal used to be written before the call, unconditionally, so a refused
+// removal still left one inverse per edge in the undo log — and an inverse
+// re-adds its edge through [Graph.AddEdgeHIfAbsent].
+//
+// That is harmless only while the edge is still there, which is what made it
+// look safe: the re-add is then a no-op. It stops being a no-op the moment the
+// WINNING transaction rolls back first, because its own rollback withdraws the
+// arc and the refused transaction's rollback then re-creates it. Measured: an
+// uncommitted `CREATE (x)-[:K]->(z)` and an uncommitted `DETACH DELETE x`,
+// rolled back in that order, left the arc in the adjacency after BOTH
+// rollbacks — a rolled-back edge surviving, which is an Atomicity violation.
+//
+// So the presence flag is not enough; applied-ness is the gate, and it is the
+// same gate [lpgMutatorAdapter.RemoveEdgeByHandle] has always used for the
+// instance-precise removal.
+func journalAllOutEdgesRemoved(r mutationUndo, c relDeleteCounter, pre []removedEdgePreimage) {
+	for i := range pre {
+		if !pre[i].hadEdge {
+			continue
+		}
+		c.countRelDeleted()
+		r.recordRemoveEdge(&pre[i], true)
+	}
+}
+
 // _ pins graph.NodeID into this file's imports so a future inverse that needs a
 // NodeID-keyed restore has the type in scope; the helpers above operate on node
 // keys, matching the adapter surface.

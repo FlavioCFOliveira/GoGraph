@@ -19544,17 +19544,11 @@ func (a *lpgMutatorAdapter) RemoveAllEdgesFrom(n string) {
 	r := a.rec()
 	// Snapshot outgoing neighbours for undo recording and side-effect counting.
 	outgoing := a.OutNeighbours(n)
-	for _, dst := range outgoing {
-		present := a.g.AdjList().HasEdge(n, dst)
-		var pre removedEdgePreimage
-		if r.active() {
-			pre = r.captureRemovedEdge(n, dst)
-		}
-		if present {
-			a.countRelDeleted()
-		}
-		r.recordRemoveEdge(&pre, present)
-	}
+	// Pre-images are captured BEFORE the removal (it clears the per-pair
+	// surfaces they describe) but journalled only AFTER it, and only if it
+	// applied — see [lpg.WriteView.RemoveAllEdgesFrom] and
+	// [journalAllOutEdgesRemoved].
+	pre := captureAllOutEdgePreimages(r, a.g, n, outgoing)
 	// Count-store (#2082): decrement every out-edge slot's E/D/T before the bulk
 	// removal (per-slot type + endpoint labels). The node's in-edges are counted
 	// by the detach_delete caller's InNeighbours RemoveEdge loop.
@@ -19564,7 +19558,10 @@ func (a *lpgMutatorAdapter) RemoveAllEdgesFrom(n string) {
 	// Snapshot incoming neighbours for directed graphs: outgoing-only bulk
 	// removal won't remove edges pointing at n; those are handled by the
 	// detach_delete caller's InNeighbours loop via individual RemoveEdge calls.
-	a.w().RemoveAllEdgesFrom(n)
+	if !a.w().RemoveAllEdgesFrom(n) {
+		return
+	}
+	journalAllOutEdgesRemoved(r, a, pre)
 }
 
 // OutDegree returns the number of outgoing edges from n.
@@ -20464,24 +20461,28 @@ func (a *walMutatorAdapter) RemoveAllEdgesFrom(n string) {
 	// Snapshot outgoing neighbours for undo recording, WAL emission, and
 	// side-effect counting before the bulk removal clears the adjacency.
 	outgoing := a.OutNeighbours(n)
-	for _, dst := range outgoing {
-		present := a.g.AdjList().HasEdge(n, dst)
-		var pre removedEdgePreimage
-		if r.active() {
-			pre = r.captureRemovedEdge(n, dst)
-		}
-		if present {
-			a.countRelDeleted()
-		}
-		_ = a.tx.RemoveEdge(n, dst) //nolint:errcheck // ErrTxFinished impossible here
-		r.recordRemoveEdge(&pre, present)
-	}
+	// Pre-images are captured BEFORE the removal (it clears the per-pair
+	// surfaces they describe) but journalled only AFTER it, and only if it
+	// applied — see [lpg.WriteView.RemoveAllEdgesFrom] and
+	// [journalAllOutEdgesRemoved].
+	pre := captureAllOutEdgePreimages(r, a.g, n, outgoing)
 	// Count-store (#2082): decrement every out-edge slot before the bulk removal.
 	if a.cs() != nil {
 		countAllOutEdgesRemoved(a.g, a.cs(), a.countBuf(), n)
 	}
 	// Bulk-remove from the in-memory graph (O(d) instead of O(d²)).
-	a.w().RemoveAllEdgesFrom(n)
+	if !a.w().RemoveAllEdgesFrom(n) {
+		return
+	}
+	// The WAL frames go with the journal, for the same reason (rmp #2694): a
+	// refused removal removed nothing, so emitting its frames would durably
+	// record a deletion this transaction never performed. A refused transaction
+	// cannot commit, but the frames must not be written on the strength of that
+	// alone — the WAL is the durable truth and it may only describe work done.
+	for _, dst := range outgoing {
+		_ = a.tx.RemoveEdge(n, dst) //nolint:errcheck // ErrTxFinished impossible here
+	}
+	journalAllOutEdgesRemoved(r, a, pre)
 }
 
 // OutDegree returns the number of outgoing edges from n.

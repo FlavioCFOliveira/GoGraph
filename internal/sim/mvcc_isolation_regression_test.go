@@ -23,8 +23,15 @@ package sim
 //     refused by the post-insert endpoint cross-check left the arc physically
 //     in the slot, and the next committed append on the node published it
 //     (rmp #2446 family; fix in graph/lpg addEdgeInfo/addEdgeHInfo).
+//   - TestMVCCRegression_DetachDeleteDoesNotWipeAConcurrentAppend — seed 29:
+//     the BULK edge removal `DETACH DELETE` uses took no adjacency claim, so it
+//     wiped a concurrent transaction's in-flight arc and then restored it from
+//     its own undo journal — a rolled-back edge surviving both rollbacks
+//     (rmp #2694; fix in graph/lpg removeAllEdgesFromInfo and the cypher
+//     mutator adapters).
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -363,5 +370,49 @@ func TestMVCCRegression_RefusedEdgeCreateLeavesNoArc(t *testing.T) {
 	ac := engineCount(t, eng, "MATCH (a:Person {name:'a'})-[r:KNOWS]->(c:Person {name:'c'}) RETURN count(r)")
 	if total != 1 || ab != 0 || ac != 1 {
 		t.Fatalf("refused edge create leaked an arc: total=%d a->b=%d a->c=%d, want 1,0,1", total, ab, ac)
+	}
+}
+
+// TestMVCCRegression_DetachDeleteDoesNotWipeAConcurrentAppend is seed 29 of the
+// multi-session mode, at the two tick counts whose terminal drain exposed it
+// (rmp #2694).
+//
+// The drain rolls back every still-open transaction in session order, and this
+// seed leaves two of them interleaved on the same node: session 0 holds an
+// uncommitted `CREATE (a)-[:KNOWS]->(b)` out of `mv-s0-m2`, session 2 an
+// uncommitted `DETACH DELETE` of that same node. Rolling them back in that
+// order left the created edge in the graph:
+//
+//	[ACID_CONSISTENCY] tick=60 op="edge count": edge-count mismatch: oracle=3 engine=4
+//
+// The mechanism, and the four-way outcome matrix that shows it is not confined
+// to rollback, are pinned at the layers that own it —
+// graph/lpg TestConflict_AdjacencyBulkRemovalRefusedByConcurrentAppend and
+// cypher TestMVCCDetachDeleteRollback_DoesNotResurrectPeerArc. This test is the
+// end-to-end witness: it is the schedule the DST actually found, and it is what
+// makes the two synthetic reproductions above answerable to a real workload.
+//
+// Both ticks are run because the divergence heals: the seed is clean at 55-59
+// and again at 62-72, so a sweep that sampled only round numbers would miss it.
+func TestMVCCRegression_DetachDeleteDoesNotWipeAConcurrentAppend(t *testing.T) {
+	for _, ticks := range []int{60, 61} {
+		res, err := RunMVCCSessions(context.Background(),
+			MVCCSessionsConfig{Seed: 29, Ticks: ticks, Sessions: 4})
+		if err != nil {
+			t.Fatalf("ticks=%d: %v", ticks, err)
+		}
+		if !res.Clean() {
+			t.Errorf("ticks=%d: violations=%v foldErrors=%v",
+				ticks, res.Violations, res.FoldErrors)
+		}
+		// Non-vacuity: the schedule must actually have rolled transactions back
+		// and committed others, or "clean" would mean "nothing happened". These
+		// are the counters the defect was recorded with.
+		if res.TxCommitted != 11 || res.TxRolledBack != 3 {
+			t.Errorf("ticks=%d: committed=%d rolledBack=%d, want 11 and 3 — the "+
+				"schedule this regression pins has changed and the test no "+
+				"longer exercises the interleaving it was written for",
+				ticks, res.TxCommitted, res.TxRolledBack)
+		}
 	}
 }

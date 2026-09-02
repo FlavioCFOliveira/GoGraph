@@ -64,8 +64,6 @@ package lpg
 
 import (
 	"context"
-	"fmt"
-	"os"
 	"sync"
 	"sync/atomic"
 
@@ -2439,11 +2437,6 @@ func (g *Graph[N, W]) removeEdgeInfo(src, dst N, tx *writeCtx) {
 	defer g.reclaimAfterDirectWrite(tx)
 	srcID, srcOK := g.adj.Mapper().Lookup(src)
 	dstID, dstOK := g.adj.Mapper().Lookup(dst)
-	if os.Getenv("LPG_DEBUG_ABORT") != "" {
-		fmt.Printf("DBG removeEdgeInfo src=%v dst=%v srcOK=%v dstOK=%v txnil=%v undoing=%v\n",
-			src, dst, srcOK, dstOK, tx == nil, tx != nil && tx.undoing.Load())
-	}
-
 	// An arc removal is the NON-COMMUTATIVE adjacency write: it may not step over
 	// another transaction's in-flight append or removal on this source. Checked
 	// before anything is captured or mutated, so a doomed transaction leaves the
@@ -2487,9 +2480,6 @@ func (g *Graph[N, W]) removeEdgeInfo(src, dst N, tx *writeCtx) {
 	}
 
 	g.adj.Writer(tx.adjTx()).RemoveEdge(src, dst)
-	if os.Getenv("LPG_DEBUG_ABORT") != "" {
-		fmt.Printf("DBG removeEdgeInfo after adjlist remove: HasEdge=%v\n", g.adj.HasEdge(src, dst))
-	}
 	// Deferred, not immediate: the bump must follow the LAST write to any
 	// epoch-keyed state, and the label/property re-assertion below is such a
 	// write. A reader that samples the epoch between an immediate bump and that
@@ -2752,19 +2742,62 @@ func (g *Graph[N, W]) RemoveAllEdgesFrom(src N) {
 // removeAllEdgesFromInfo is [Graph.RemoveAllEdgesFrom] with an explicit write transaction; tx is
 // nil for a direct Go-API mutation, which is committed the instant it is made
 // and takes no conflict check. See [writeCtx].
-func (g *Graph[N, W]) removeAllEdgesFromInfo(src N, tx *writeCtx) {
+//
+// It reports whether the removal was APPLIED. FALSE means tx hit a write-write
+// conflict on the adjacency and NOTHING was mutated — the same signal
+// [Graph.removeEdgeByHandleInfo] returns, and callers that journal an inverse
+// must consult it before recording one (rmp #2694).
+func (g *Graph[N, W]) removeAllEdgesFromInfo(src N, tx *writeCtx) bool {
 	srcID, ok := g.adj.Mapper().Lookup(src)
 	if !ok {
-		return
+		return false
 	}
 	// Snapshot the outgoing neighbours BEFORE the bulk removal so we know
 	// which per-pair state buckets to clear afterwards.
 	nbs, _ := g.adj.LoadEntry(srcID)
 	if len(nbs) == 0 {
-		return
+		return false
 	}
 	dstIDs := make([]graph.NodeID, len(nbs))
 	copy(dstIDs, nbs)
+
+	// THE BULK ARC REMOVAL IS STILL AN ARC REMOVAL (rmp #2694).
+	//
+	// It is the same NON-COMMUTATIVE adjacency write [Graph.removeEdgeInfo] and
+	// [Graph.removeEdgeByHandleInfo] both guard, and it was the one path that
+	// never took the claim rmp #2300 introduced. It does not remove the arcs THIS
+	// transaction can see: [AdjList.removeAllEdgesFromTx] publishes a nil entry,
+	// so it wipes the whole slot INCLUDING a concurrent transaction's in-flight
+	// append. Measured on the interleaving that found this — an uncommitted
+	// `CREATE (x)-[:K]->(z)` in one transaction, an uncommitted
+	// `DETACH DELETE x` in another — the delete erased the peer's arc, the peer's
+	// rollback then had nothing left to withdraw, and the delete's OWN rollback
+	// put the arc back: a rolled-back edge survived both rollbacks
+	// (`[ACID_CONSISTENCY] edge-count mismatch: oracle=3 engine=4`, seed 29 of
+	// [sim.RunMVCCSessions] at ticks 60 and 61).
+	//
+	// Claimed BEFORE anything is mutated, so a refused transaction leaves the
+	// adjacency untouched — the property [Graph.removeEdgeInfo] states for the
+	// per-edge path, and the reason the peer's own rollback stays sound.
+	//
+	// The undirected case claims each destination too: the mirror removal below
+	// mutates that node's entry, so an in-flight append there is a write this
+	// removal may not step over either.
+	if tx != nil {
+		if err := g.adjVer.noteExclusive(srcID, tx); err != nil {
+			return false
+		}
+		if !g.adj.Directed() {
+			for _, dstID := range dstIDs {
+				if dstID == srcID {
+					continue // the self-loop's mirror is this same entry
+				}
+				if err := g.adjVer.noteExclusive(dstID, tx); err != nil {
+					return false
+				}
+			}
+		}
+	}
 
 	// Bulk-remove from the adjacency layer. For undirected graphs this also
 	// removes the mirror entries from each dst's list.
@@ -2780,6 +2813,7 @@ func (g *Graph[N, W]) removeAllEdgesFromInfo(src N, tx *writeCtx) {
 			g.clearEdgePairState(edgeKey{src: dstID, dst: srcID}, tx)
 		}
 	}
+	return true
 }
 
 // clearEdgePairState drops the per-pair edge-label and edge-property bags for

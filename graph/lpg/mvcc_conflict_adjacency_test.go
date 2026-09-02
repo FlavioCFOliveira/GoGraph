@@ -9,10 +9,16 @@ package lpg
 // Every other store here answers one question — may I displace the newest
 // version at this key? — and one test shape covers it. Adjacency has a TABLE:
 //
-//	append(A→B)      ‖ append(A→C)      → conflict   (rmp #2445)
-//	append(A→B)      ‖ removeEdge(A→C)  → conflict
-//	removeEdge(A→B)  ‖ removeEdge(A→C)  → conflict
-//	append(A→B)      ‖ append(Z→C)      → both commit (disjoint sources)
+//	append(A→B)      ‖ append(A→C)             → conflict   (rmp #2445)
+//	append(A→B)      ‖ removeEdge(A→C)         → conflict
+//	removeEdge(A→B)  ‖ removeEdge(A→C)         → conflict
+//	append(A→B)      ‖ removeAllEdgesFrom(A)   → conflict   (rmp #2694)
+//	append(A→B)      ‖ append(Z→C)             → both commit (disjoint sources)
+//
+// The fourth row lives in mvcc_conflict_bulk_edge_removal_test.go, because the
+// bulk removal `DETACH DELETE` uses was the one non-commutative adjacency write
+// that never took the claim, and the consequence needed more than a refusal
+// assertion to state.
 //
 // The first row used to read "both commit" — appends were treated as
 // commutative facts. The DST multi-session mode disproved the premise
