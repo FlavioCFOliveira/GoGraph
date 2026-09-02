@@ -18333,6 +18333,59 @@ func (e *Engine) runInTxSession(ctx context.Context, sess *lpg.Session[string, f
 // reader resolving through [mvcc.Visible] sees all of the statement or none of it
 // (rmp #2300, #2320). The shared hold that remains excludes only DDL.
 //
+// # What the bracket guarantees, and what it does not (rmp #2697)
+//
+// Enumerated because a change here is a change to the module's ACID write path.
+// Each item names the mechanism that actually supplies the guarantee — which is,
+// in every case, NOT the exclusion of writers from one another.
+//
+//   - ATOMICITY comes from the COMMIT RECORD. Every version the statement writes
+//     is stamped with the one [mvcc.TxState] minted by lpg.Graph.beginWrite, and
+//     lpg.Graph.endWrite publishes it with a single atomic store. A failed
+//     statement is unwound by the undo log (replayUndoOnPanic,
+//     [Result.rollbackUnderBarrier]) BEFORE the bracket unwinds, so a rolled-back
+//     transaction is never published. THE CONSTRAINT ON ANY FIX: the undo must
+//     complete before publication.
+//
+//   - ISOLATION comes from the PER-OBJECT VERSION CHAINS. The statement reads
+//     through [lpg.Graph.WriterViewOf] — its own transaction's view — and a
+//     write-write collision is arbitrated by the per-object latch, recorded on the
+//     transaction, and checked here as a backstop (rmp #2354). Writers are NOT
+//     serialised here and must not be: rmp #2320 established that exclusion is
+//     unnecessary once every version resolves through its own commit record.
+//
+//   - DURABILITY BEFORE VISIBILITY is the one ordering this bracket enforces
+//     directly. [Result.commitUnderBarrier] runs the WAL fsync
+//     ([txn.Tx.CommitWALOnly]) BEFORE committing the index buffer and BEFORE the
+//     bracket unwinds to publish, so THE FSYNC IS INSIDE THE BRACKET. THE
+//     CONSTRAINT ON ANY FIX: nothing may move publication ahead of the fsync — a
+//     reader must never observe a transaction a crash could erase.
+//
+//   - INDEX AND COUNT-STORE PUBLICATION ride on that same ordering: buf.Commit and
+//     cbuf.Commit run after the fsync and before the unwind, so a reader that sees
+//     a graph write sees the matching index entry and count.
+//
+//   - CATALOG STABILITY is what the shared hold is actually for. It excludes DDL
+//     (the exclusive acquisition in [lpg.Graph.ApplyAtomically]) for the
+//     statement's duration, so the plan, the index writes and the constraint
+//     checks all observe one catalog.
+//
+// # Why "inside the barrier" does not mean "serialised" (rmp #2697)
+//
+// The fsync being inside this bracket costs a durable writer nothing AGAINST OTHER
+// WRITERS, because the bracket is held SHARED and [mvcc.Gate]'s weak path is an
+// atomic add on a striped padded slot (rmp #2337), not an RWMutex. Measured, not
+// assumed: in block profiles of cypher-write-mem, mvcc-session-write and
+// dst-disk-wal at 1024 goroutines, this function's own FLAT delay is ZERO in all
+// three — its large cumulative share is that of a parent frame wrapping the whole
+// write path — and the gate appears nowhere in any of them. store/txn's writer
+// admission is an in-flight counter, not a semaphore (rmp #2306), and its
+// enter/exit pair together held under 1e-4% of blocked time on every workload
+// profiled. What the fsync IS inside that genuinely serialises is
+// store/wal's own writer mutex and group-commit condition plus store/txn's
+// apply-turn gate, which together hold ~99% of blocked time on dst-disk-wal.
+// Widening this bracket cannot move any of them.
+//
 // The re-entrancy constraint survives and is stricter than it looks: nothing inside
 // may call g.View / g.ApplyAtomically / g.ApplyVersioned, because visMu is
 // non-re-entrant and Go's RWMutex prefers a queued writer, so a nested SHARED

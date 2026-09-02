@@ -414,6 +414,52 @@ Nothing in the module uses it ... It is a utility a consumer may use to cache a
 derived structure." It is consumer-facing API, so its 0.094x scaling is a defect
 in something the module publishes, not a cap on the module's own queries.
 
+## Correction: the write-barrier rows rank a CUMULATIVE frame, and the durable ceiling is confounded
+
+**Rows 5, 8 and 9 of the ranked inventory attribute blocked time to
+`cypher/api.go:18379` `execUnderBarrier`. That frame holds ZERO of it.**
+Established by rmp #2697 and verified independently from the same profiles:
+
+| workload | `execUnderBarrier` flat | cumulative |
+|---|---:|---:|
+| `cypher-write-mem`@1024 | **0 (0%)** | 84.90% |
+| `mvcc-session-write`@1024 | **0 (0%)** | 89.62% |
+| `dst-disk-wal`@1024 | **0 (0%)** | 99.08% |
+
+The ranking above was produced with `go tool pprof -top -cum -lines`. Cumulative
+attribution locates a *subsystem*; it does not identify where goroutines
+actually block, because a parent frame inherits everything beneath it.
+`execUnderBarrier` wraps the whole write path, so it inherits all of it. **A
+cumulative share is not a bottleneck**, exactly as a mutex share is not a
+ceiling — the same lesson this document already records, arrived at from the
+other direction.
+
+Worse, the frame's name misled the reading and its own godoc did not: it says
+"THE NAME IS HISTORICAL … concurrent writers DO run alongside this one". The
+bracket is held **shared**, and `mvcc.Gate`'s weak path is an atomic add on a
+striped padded slot, not an RWMutex. Writers are not serialised there.
+
+**Where the delay actually is**, from the same profiles:
+
+- `cypher-write-mem` — `lpg.setNodeLabelInfo` **46.0%**, `HasNodeLabel` 11.7%,
+  `Mapper.Lookup` 9.3%, `planCache.get` 6.4%, antlr 5.2%
+- `mvcc-session-write` — `setNodeLabelInfo` 36.5%, `Mapper.Lookup` 10.2%,
+  `label.Index.mutate` 9.7%, antlr 9.2%, `AwaitVisible` 9.2%
+- `dst-disk-wal` — `waitApplyTurn` **49.9%**, `wal.AppendRun` 22.2%,
+  `wal.syncToLocked` 24.4% — about 99% in `store/wal` plus the apply gate
+
+**And the 3.860x durable ceiling is confounded.** `dstDiskCeiling`
+(`bench/contention/ceiling_arms.go:475`) builds a fresh `sim.NewSimDisk` per
+replica, so the arm unshares the harness's own simulated-disk mutex alongside
+the module's structures. It is not a clean measure of what the engine could
+recover, and row 5 must not be read as one.
+
+One further measured caution recorded here because it bounds every ratio in
+this document: the write path already runs at **649%, 669% and 506% of ten
+nominal cores**, against this host's practical ceiling of **7.61x, not 10x**
+(4 performance + 6 efficiency cores). At ~650% it is near capacity, and the
+blocked time is a symptom of hundredfold oversubscription rather than its cause.
+
 ## What the evidence says to do next
 
 Ranked by ceiling weighted against reachability.
