@@ -595,10 +595,86 @@ func (g *Graph[N, W]) labelBitmapNeedsFilter(s *Snapshot) bool {
 //
 // Safe for concurrent use.
 func (g *Graph[N, W]) LabelCountExact(lid LabelID, s *Snapshot) (int64, bool) {
+	// THE GATE IS SAMPLED ON BOTH SIDES OF THE CARDINALITY, and the second
+	// sample is the whole of rmp #2688.
+	//
+	// One sample taken BEFORE the read decides "no correction is needed" from an
+	// observation strictly OLDER than the number it goes on to return. A write
+	// raises this gate ([nodeLabelShard.pushLabelDelta], under the label shard's
+	// write lock) BEFORE it touches the bitmap ([Graph.setNodeLabelInfo] calls
+	// nodeIdx.Add afterwards), so a gate load that precedes the write pairs with
+	// a cardinality read that follows it, and the answer is a PRESENT-TIME number
+	// reported as exact for a snapshot that predates it. [label.Index.Count]
+	// takes its own read lock, so it lands BETWEEN the individual Add calls of a
+	// multi-node transaction and the number can be MID-BATCH — a partially
+	// applied transaction, which is an Atomicity break and not merely a stale
+	// read.
+	//
+	// MEASURED end to end by internal/sim's ST7 before this second sample
+	// existed: two counts in ONE read transaction returned 480 then 481, and 266
+	// then 265. The batch is 5 nodes, so neither 481 nor 266 is a whole
+	// transaction, and the DECREASE is this branch answering first and the
+	// filtered branch answering second.
+	//
+	// This is the same correction [Graph.labelBitmapAsOfFiltered] already makes by
+	// sampling its suspect set before AND after the clone (rmp #2326/#2686); the
+	// count path kept the single sample. [Graph.LabelCountBound] never had the
+	// defect because it reads the cardinality FIRST and the gate second.
+	//
+	// # Why the second sample is sound
+	//
+	// A write that could make the raw count disagree with s raises the gate before
+	// it touches the index, and keeps it raised until its version record is
+	// RECLAIMED. So a write landing across this call is still holding the gate up
+	// when the second sample reads it, and the answer is refused. A write older
+	// than s is already correct for s. Those two cases are exhaustive.
+	//
+	// # !! CROSS-COMPONENT DEPENDENCY: THIS RESTS ON THE RECLAMATION HORIZON !!
+	//
+	// The argument above is NOT self-contained. Its load-bearing step is "keeps it
+	// raised until its record is reclaimed", and that only holds because
+	// reclamation CANNOT PASS A LIVE READER: [mvcc.Horizon.Oldest] caps the
+	// watermark at the oldest active reader's start instant, and every reclaimer
+	// here frees only records at or below that watermark
+	// ([Graph.reclaimLabelVersions], [Graph.reclaimNodeLife]). A snapshot pinned by
+	// [Graph.BeginRead] therefore forbids reclaiming any record NEWER than itself,
+	// which is exactly the set this function needs to still be there when it takes
+	// its second sample.
+	//
+	// IF THAT EVER CHANGES — a watermark that may pass a live reader, a reclaimer
+	// that frees above the watermark, an optimisation that releases a horizon slot
+	// early, or a fallback reported above an active reader (the rmp #2420 shape) —
+	// THEN THIS FUNCTION SILENTLY RETURNS TORN COUNTS AGAIN, without this file
+	// being touched. A change to reclamation or to the horizon must re-verify this
+	// call site. [mvcc.Horizon.StaleLeaves] is the standing detector for the
+	// corruption that would break it and must stay zero.
+	//
+	// For a present-time reader (s == nil) nothing holds reclamation back, but
+	// there is nothing to be wrong about either: any value between the two samples
+	// is a legitimate present-time answer. The one present-time hazard is the
+	// mirror — a row briefly missing from the bitmap — and idxAddActive gates that
+	// at both samples.
+	//
+	// The cost is one to three relaxed atomic loads on a path that already takes a
+	// read lock to count a bitmap, and the early return is kept FIRST so a graph
+	// that is already churning declines without reading the cardinality at all.
 	if g.labelBitmapNeedsFilter(s) {
 		return 0, false
 	}
-	return int64(g.nodeIdx.Count(uint32(lid))), true
+	g.fireLabelCountGateProbe()
+	n := int64(g.nodeIdx.Count(uint32(lid)))
+	if g.labelBitmapNeedsFilter(s) {
+		return 0, false
+	}
+	return n, true
+}
+
+// fireLabelCountGateProbe runs the test-only seam described on
+// [Graph.labelCountGateProbe]. It is a nil check in production.
+func (g *Graph[N, W]) fireLabelCountGateProbe() {
+	if p := g.labelCountGateProbe; p != nil {
+		p()
+	}
 }
 
 // LabelCountBound returns an UPPER BOUND on the number of nodes carrying lid as
@@ -678,9 +754,21 @@ func (g *Graph[N, W]) LabelsCountExact(lids []LabelID, s *Snapshot) (int64, bool
 	for i, l := range lids {
 		raw[i] = uint32(l)
 	}
+	g.fireLabelCountGateProbe()
 	n, ok := g.nodeIdx.IntersectCardinality(raw...)
 	if !ok {
 		return 0, false
+	}
+	// The second gate sample, for the same reason and with the same soundness
+	// argument (and the same horizon dependency) as [Graph.LabelCountExact]
+	// (rmp #2688): the zero-alloc branch was reached on a gate reading taken
+	// BEFORE the cardinality, so a write landing across the two returned a
+	// present-time conjunction count to a snapshot reader. This one CORRECTS
+	// rather than declining, exactly as the gate above it does, because refusing
+	// the conjunction whenever any label history is live made the intersection
+	// optimisation never engage at all (rmp #2326).
+	if g.labelBitmapNeedsFilter(s) {
+		return int64(g.LabelsBitmapAsOf(lids, s).GetCardinality()), true
 	}
 	return int64(n), true
 }

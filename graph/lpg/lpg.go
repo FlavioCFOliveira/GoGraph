@@ -370,6 +370,31 @@ type Graph[N comparable, W any] struct {
 	// mvcc_labels.go.
 	labelDeltas      bool
 	labelDeltaActive atomic.Int64
+
+	// labelCountGateProbe is a TEST-ONLY seam, nil in production and with no
+	// exported setter, called by [Graph.LabelCountExact] and
+	// [Graph.LabelsCountExact] BETWEEN their two gate samples — so a test can
+	// make a write land exactly inside the window the second sample exists to
+	// close (rmp #2688).
+	//
+	// It exists because a CONCURRENT ORACLE CANNOT PIN THIS WINDOW, which was
+	// measured rather than assumed: a 3-reader race gave 110 exact answers in a
+	// whole run and 0 violations against the DEFECTIVE build, and a 96-reader
+	// race did not finish. The window is a few nanoseconds between two atomic
+	// loads, and a reader cannot establish the truth faster than it closes. It is
+	// the same conclusion, for the same function, that
+	// TestLabelIndexAddWindow_PresentTimeCountDeclinesWhileAnAddIsInFlight
+	// already records for the present-time add window: drive the state directly,
+	// because the race stays green against a build with no gate at all.
+	//
+	// It follows the HOUSE PATTERN for this package: [Graph.disarmMVCCForTest] is
+	// the same shape — an unexported seam with no exported setter, reachable only
+	// from this package's own tests, existing because the capability it provides
+	// cannot be obtained any other way. This is not a one-off.
+	//
+	// The cost in production is one nil load and a predictable branch, on a path
+	// that immediately takes the label index's read lock.
+	labelCountGateProbe func()
 	// mvccClock mints commit timestamps and transaction ids from the two
 	// disjoint ranges either side of mvcc.TxIDBase, so one uint64 on a
 	// version's commit record distinguishes in-flight from committed. Shared
