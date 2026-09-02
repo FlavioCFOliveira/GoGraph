@@ -81,7 +81,11 @@ func readWorkload(name, surface string, n, ops int, query string) Workload {
 // All is safe for concurrent use: every call builds a fresh slice of fresh
 // [Workload] values, so no caller can mutate the registry another caller sees.
 func All() []Workload {
-	return append(coreWorkloads(), surfaceWorkloads()...)
+	all := coreWorkloads()
+	all = append(all, surfaceWorkloads()...)
+	all = append(all, dstWorkloads()...)
+	all = append(all, unreachedWorkloads()...)
+	return all
 }
 
 // coreWorkloads is the registry as it stood at rmp #2678: Cypher read and
@@ -253,7 +257,13 @@ func mixedIsWrite(worker, iter int) bool {
 // ByName is safe for concurrent use: it allocates a fresh [Workload] per call
 // and shares no state between callers.
 func ByName(name string) (Workload, bool) {
-	for _, w := range All() {
+	if w, ok := lookupBase(name); ok {
+		return w, true
+	}
+	// Ceiling arms are addressable by name but are deliberately not part of
+	// [All], so a sweep never walks them; see the note at the head of
+	// ceiling_arms.go.
+	for _, w := range ceilingArms() {
 		if w.Name == name {
 			return w, true
 		}
