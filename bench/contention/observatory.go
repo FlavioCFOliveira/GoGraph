@@ -76,23 +76,45 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"runtime/pprof"
 	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
-// levels is the goroutine ladder every workload walks. These are the exact
-// concurrency levels Compliance Mandate 3 obliges the module to publish numbers
-// for.
+// levels is the goroutine ladder every workload walks. 1, 8, 64, 256 and 1024
+// are the concurrency levels Compliance Mandate 3 obliges the module to publish
+// numbers for; 2, 3, 4 and 6 are here because that mandated ladder CANNOT SEE
+// THE KNEE.
 //
-// On a 10-core host only the 1..8 region is a scaling signal; 64 and above are
-// deliberate oversubscription, where the question is not "does it go faster"
-// (it cannot) but "does it degrade gracefully and where does it block".
-var levels = []int{1, 8, 64, 256, 1024}
+// This was measured, not anticipated. A fine-grained ladder on
+// cypher-read-label-small reads:
+//
+//	level    1     2     3     4     6     8    64
+//	scaling  1.00  1.44  1.67  1.65  1.54  1.46  1.50
+//
+// Throughput peaks at 3-4 goroutines and then DECAYS. The mandated ladder jumps
+// 1 -> 8 and so samples only the falling side, which reads as a flat curve and
+// invites the conclusion that some lock is holding throughput at ~1.5x. A task
+// was opened on exactly that reading (rmp #2691) and refuted by probe: deleting
+// the suspected lock bought 0%.
+//
+// The knee lands on the PERFORMANCE-core count, not the core count. This host is
+// 4P + 6E (hw.perflevel0/1.logicalcpu), while runtime.NumCPU and GOMAXPROCS both
+// report 10 and neither predicts it. Any reading of these numbers that treats
+// the machine as N uniform cores will mis-locate the scaling region: on a
+// heterogeneous host the region worth calling "scaling" ends near the P-core
+// count, and 8 is already past it.
+//
+// Above the core count the question stops being "does it go faster" (it cannot)
+// and becomes "does it degrade gracefully, and where does it block".
+var levels = []int{1, 2, 3, 4, 6, 8, 64, 256, 1024}
 
 // Levels returns the goroutine ladder every workload walks.
 //
@@ -178,6 +200,19 @@ type Metrics struct {
 	// meaningless without them.
 	GoMaxProcs int `json:"gomaxprocs"`
 	NumCPU     int `json:"numcpu"`
+	// PerfCores and EffCores split NumCPU by core class, and they are recorded
+	// because NumCPU ALONE IS MISLEADING on a heterogeneous machine.
+	//
+	// Measured: on a 4P+6E host, throughput on a read workload peaks at 3-4
+	// goroutines and decays thereafter, while NumCPU and GOMAXPROCS both report
+	// 10. A reader who takes 10 as the scaling region concludes that something
+	// is capping throughput at ~1.5x and goes hunting a lock that does not
+	// exist (rmp #2691). The scaling region ends near PerfCores.
+	//
+	// Zero means the split could not be determined, which is the honest value
+	// for a platform that does not report it -- not an assertion of homogeneity.
+	PerfCores int `json:"perf_cores"`
+	EffCores  int `json:"eff_cores"`
 }
 
 // Result pairs the two windows of one measurement. Each half is produced by its
@@ -342,6 +377,8 @@ func drive(w Workload, opFn Op, level, ops int, profiled bool) Metrics {
 		Errors:     errs.Load(),
 		GoMaxProcs: runtime.GOMAXPROCS(0),
 		NumCPU:     runtime.NumCPU(),
+		PerfCores:  perfCores,
+		EffCores:   effCores,
 
 		LatencySampleEvery: sampleEvery,
 		LatencySamples:     len(all),
@@ -537,4 +574,44 @@ func writeJSON(path string, v any) error {
 	}
 	b = append(b, '\n')
 	return os.WriteFile(path, b, 0o600)
+}
+
+// perfCores and effCores split the machine's cores by class, or are 0 when the
+// platform does not report the split.
+//
+// They are read once at init rather than per measurement: the topology cannot
+// change under a running process, and a syscall per measurement would be cost
+// inside the window being measured.
+var perfCores, effCores = readCoreClasses()
+
+// readCoreClasses reads the performance/efficiency core split. It returns 0, 0
+// on any platform or error path, which callers must read as "unknown" rather
+// than as "homogeneous" -- the distinction matters, because assuming
+// homogeneity on a heterogeneous host mis-locates the scaling region.
+//
+// darwin exposes the split via sysctl. Other platforms return unknown; adding
+// them is a matter of reading the right interface, not of changing the contract.
+func readCoreClasses() (perf, eff int) {
+	if runtime.GOOS != "darwin" {
+		return 0, 0
+	}
+	// Both keys in ONE invocation with LITERAL arguments. An earlier draft took
+	// the key as a parameter, which is a variable reaching exec.Command and is
+	// correctly flagged by gosec G204. Suppressing that would have been the
+	// wrong fix: the argument does not need to be dynamic at all.
+	out, err := exec.Command("sysctl", "-n",
+		"hw.perflevel0.logicalcpu", "hw.perflevel1.logicalcpu").Output()
+	if err != nil {
+		return 0, 0
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) != 2 {
+		return 0, 0
+	}
+	p0, err0 := strconv.Atoi(fields[0])
+	p1, err1 := strconv.Atoi(fields[1])
+	if err0 != nil || err1 != nil {
+		return 0, 0
+	}
+	return p0, p1
 }
