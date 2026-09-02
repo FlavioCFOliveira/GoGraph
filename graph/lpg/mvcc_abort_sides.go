@@ -286,8 +286,9 @@ func (g *Graph[N, W]) tombstoneAborted(id graph.NodeID) {
 		next = cur.Clone()
 	}
 	next.Add(uint64(id))
-	g.tombstones.Store(next)
+	// Counter first, bitmap second — see [Graph.removeNodeInfo] (rmp #2687).
 	g.tombstoneActive.Add(1)
+	g.tombstones.Store(next)
 	g.tombstoneMu.Unlock()
 	g.BumpTopoGeneration()
 }
@@ -311,6 +312,8 @@ func (g *Graph[N, W]) reviveAborted(id graph.NodeID) {
 	}
 	next := cur.Clone()
 	next.Remove(uint64(id))
+	// Bitmap first, counter second on the way DOWN, so the count never falls
+	// short of the published set — see [Graph.removeNodeInfo] (rmp #2687).
 	g.tombstones.Store(next)
 	g.tombstoneActive.Add(-1)
 	g.tombstoneMu.Unlock()

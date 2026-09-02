@@ -1926,11 +1926,45 @@ func (g *Graph[N, W]) internEndpoint(n N, tx *writeCtx) {
 // resolve the ordering when it removes that barrier.
 func (g *Graph[N, W]) revive(id graph.NodeID, tx *writeCtx) {
 	revived := false
+	// THE REVIVAL IS RECORDED BEFORE THE FLIP — the exact mirror of rmp #2687's
+	// repair on the retirement side, and it closes the mirror-image window.
+	//
+	// This method clears the tombstone and only then restores the label bitmaps.
+	// In between, the node is ALIVE and absent from every one of its bitmaps, and
+	// a present-time reader that takes the raw bitmap silently LOSES it — the
+	// direction mvcc_index.go calls unrecoverable, because no per-row predicate
+	// can put back a row the candidate set never offered. MEASURED against a
+	// drained substrate, where no leftover death record was covering for it: 54
+	// lost rows in 5342 reads (TestDeleteVisibility_ReviveIsTheMirrorOfRetirement).
+	//
+	// Recording the birth first is what makes the changeover atomic. The record
+	// raises the churn gate for every label the bag names — [Graph.noteNodeRevived]
+	// reads the bag for exactly that reason — and puts the node in the suspect
+	// set, so from here on every present-time reader runs the correction over it.
+	// The correction's answer is `labelBagTest && NodeExistsAsOf(id, nil)`, and
+	// with a nil snapshot that second half IS `!IsTombstoned(id)`: before the flip
+	// it refuses to add the node, after the flip it adds it back. The restore
+	// below then merely materialises what the correction was already reporting.
+	//
+	// It stays OUTSIDE the tombstone lock, which is what the previous comment
+	// here was protecting: noteNodeRevived takes a life-shard lock, and taking one
+	// UNDER the tombstone lock would invert the order the reclaimer uses. Moving
+	// it earlier keeps it unnested.
+	//
+	// The pre-check is not exact, and the fallback below is why that is safe. A
+	// node that is tombstoned now can be revived by a racing caller before this
+	// one reaches the flip, in which case the record written here is still
+	// truthful — the node is alive, and the peer wrote an equivalent one. The
+	// reverse, a node NOT tombstoned here that a racing DELETE tombstones before
+	// the flip, leaves this call doing the reviving with nothing recorded, which
+	// the deferred fallback covers exactly as before.
+	noted := false
+	if g.IsTombstoned(id) {
+		g.noteNodeRevived(id, tx)
+		noted = true
+	}
 	defer func() {
-		// Recorded OUTSIDE the tombstone lock, and after it: noteNodeRevived
-		// takes a shard lock of its own, and taking one under the tombstone
-		// lock would invert the order the reclaimer uses.
-		if revived {
+		if revived && !noted {
 			g.noteNodeRevived(id, tx)
 		}
 	}()
@@ -1938,6 +1972,10 @@ func (g *Graph[N, W]) revive(id graph.NodeID, tx *writeCtx) {
 	if cur := g.tombstones.Load(); cur != nil && cur.Contains(uint64(id)) {
 		next := cur.Clone()
 		next.Remove(uint64(id))
+		// The counter comes DOWN only after the bitmap is out (rmp #2687), which is
+		// the mirror of the raise above: the count may exceed the published set for
+		// an instant but never fall short of it, so [Graph.IsTombstoned]'s zero fast
+		// path stays the honest claim its comment makes.
 		g.tombstones.Store(next)
 		g.tombstoneActive.Add(-1)
 		revived = true
@@ -3075,16 +3113,39 @@ func (g *Graph[N, W]) setNodeLabelInfo(n N, name string, tx *writeCtx) error {
 	// and the sweep collects only what the watermark has passed — which this
 	// transaction is holding back. Either way the sweep cannot remove an entry
 	// this add is about to re-assert.
+	// A DEAD NODE IS NEVER PUT INTO A LABEL BITMAP (rmp #2687).
+	//
+	// The bag write above is unconditional and must stay so: a tombstoned node
+	// keeps its labels precisely so [Graph.revive] can restore them through
+	// [Graph.restoreLabelBitmaps]. The BITMAP is the part that must not carry it —
+	// that is the whole contract [Graph.stripLabelBitmaps] exists to uphold, "so
+	// label-index consumers see the node as absent without consulting
+	// IsTombstoned". Adding the entry back for a node that is already dead breaks
+	// it, and breaks it PERMANENTLY: the delta this write pushed keeps the node
+	// correctable only until the reclaimer takes it, after which the entry is in
+	// no suspect source and every present-time reader is handed a deleted node.
+	//
+	// MEASURED, deterministically: tombstone a node, then label it, then
+	// ReclaimNow — LabelBitmapAsOf(lid, nil) reports it. That sequence is not
+	// hypothetical, it is the shape recovery replays, which applies the snapshot's
+	// tombstone set BEFORE the snapshot's labels while the label capture walks the
+	// mapper (tombstoned slots included) and the label bag survives tombstoning.
+	// Pinned by TestDeleteVisibility_LabellingADeadNodeDoesNotIndexIt.
+	//
+	// The check is the lock-free accelerator, whose zero fast path costs one
+	// atomic load on a graph that has never deleted anything, and it is taken
+	// under the shard lock so it is ordered against the bag write it guards.
+	indexable := !g.IsTombstoned(id)
 	gated := versioned && tx != nil && g.mvccArmed
 	hoist := false
 	if gated {
 		hoist = g.idxAddActive.Add(1) > 1
 	}
-	if !hoist {
+	if indexable && !hoist {
 		g.nodeIdx.Add(uint32(lid), id)
 	}
 	sh.mu.Unlock()
-	if hoist {
+	if indexable && hoist {
 		g.nodeIdx.Add(uint32(lid), id)
 	}
 	if gated {
@@ -3192,6 +3253,55 @@ func (g *Graph[N, W]) removeNodeInfo(n N, tx *writeCtx) {
 			g.reclaimAfterDirectWrite(tx)
 		}
 	}()
+	// THE INDEX ENTRIES ARE RETIRED BEFORE THE IDENTITY IS (rmp #2687).
+	//
+	// [Graph.NodeExistsAsOf] with a nil snapshot IS `!IsTombstoned(id)`, so for a
+	// PRESENT-TIME reader the tombstone bitmap is the authority on existence and
+	// the label bitmap is a candidate set derived from it. The two therefore have
+	// to change over at ONE instant, and they did not: the flip came first and
+	// the strip after, and in between the node was dead, still in every label
+	// bitmap, and present in NO suspect source — so
+	// [Graph.labelBitmapAsOfFiltered] took its short-circuit and handed the dead
+	// node to the reader. [exec.NodeByLabelScan] emits every member of that
+	// bitmap and consults no tombstone, so the row reached the caller: an ACID
+	// Consistency break, reachable from the plain Go API.
+	//
+	// DEFERRAL is what makes moving the registration here a closure of that
+	// window rather than a trade for the mirror one. While versioning is armed
+	// the strip REMOVES NOTHING. It records a deferred removal, which raises
+	// idxPendingActive and so makes every present-time reader from this instant
+	// on take the correction, and puts the node in the suspect set the correction
+	// walks — while leaving the entry physically in the bitmap until the
+	// watermark passes it. So between here and the flip the correction re-checks
+	// the node, finds it ALIVE, and keeps it; from the flip on the same re-check
+	// finds it dead and drops it. The changeover is the flip itself, in both
+	// directions, with no window on either side.
+	//
+	// PRIOR ART, and it agrees. PostgreSQL states this ordering as an invariant
+	// rather than an optimisation: VACUUM removes a dead tuple's INDEX entries
+	// before the heap line pointer is marked LP_UNUSED, "to preserve a basic
+	// invariant that all index AMs rely on: no extant index tuple can ever be
+	// allowed to contain a TID that points to an LP_UNUSED line pointer in the
+	// heap" (src/backend/access/heap/vacuumlazy.c, REL_17_2). Memgraph arrives at
+	// the same place from the other end — it removes the index entry at delete
+	// time not at all, and its read-time filter is UNCONDITIONAL, because a
+	// vertex's `deleted` flag and its delta pointer are the same word, read under
+	// one shared lock (src/storage/v2/vertex.hpp, v3.9.0): a reader cannot
+	// observe the death without also observing what corrects for it. GoGraph's
+	// filter is CONDITIONAL — gated on the suspect set — which is exactly why the
+	// registration has to precede the death here.
+	//
+	// The IMMEDIATE branches stay BELOW the flip, where they were. A removal that
+	// cannot be deferred — a disarmed substrate, or an undo replay — takes the
+	// entry out for real, and hoisting THAT above the flip would open the mirror
+	// window: a live node absent from the index, with no correction on a disarmed
+	// graph able to put it back. PostgreSQL's order is right for PostgreSQL
+	// because its index is never authoritative; a disarmed GoGraph's is, so the
+	// premise does not carry and the order must not be copied there.
+	deferrable := g.indexRemovalDeferrable(tx)
+	if deferrable {
+		g.stripLabelBitmaps(id, bagLids, tx)
+	}
 	g.tombstoneMu.Lock()
 	cur := g.tombstones.Load()
 	if cur == nil || !cur.Contains(uint64(id)) {
@@ -3203,8 +3313,23 @@ func (g *Graph[N, W]) removeNodeInfo(n N, tx *writeCtx) {
 			next = cur.Clone()
 		}
 		next.Add(uint64(id))
-		g.tombstones.Store(next)
+		// THE COUNTER GOES UP BEFORE THE BITMAP GOES OUT (rmp #2687).
+		//
+		// [Graph.IsTombstoned] short-circuits on `tombstoneActive == 0` and its
+		// comment claims that "a 0 observed here means no tombstone is committed".
+		// With the store first that claim was FALSE for the width of one
+		// instruction: the published bitmap already carried the id while the
+		// counter still read zero, so IsTombstoned — which IS
+		// NodeExistsAsOf(id, nil), the present-time authority on existence —
+		// reported the node ALIVE while the bitmap said it was gone. MEASURED at
+		// 19 disagreements in 2938 samples under -race, and it is what made
+		// [Graph.correctBitmapOver] keep a retired node in a reader's answer.
+		//
+		// Raising it first can only ever OVER-count, which costs a reader the
+		// bitmap probe it would have skipped and tells it the truth either way.
+		// Both are under tombstoneMu, so no other writer interleaves.
 		g.tombstoneActive.Add(1)
+		g.tombstones.Store(next)
 		// Tombstoning changes the LIVE edge topology every CSR-position-keyed
 		// cache is derived from: csr.BuildFromAdjListLive omits the arcs incident
 		// to a tombstoned node, so a cache built before this call describes a
@@ -3224,7 +3349,12 @@ func (g *Graph[N, W]) removeNodeInfo(n N, tx *writeCtx) {
 	// via RemoveNodeLabel (the Cypher executor delete path), and
 	// correct when RemoveNode is called directly via the Go API without
 	// prior label removal.
-	g.stripLabelBitmaps(id, bagLids, tx)
+	//
+	// Reached only when the removal could NOT be deferred; the deferrable case
+	// was registered ABOVE the flip, for the reason given there (rmp #2687).
+	if !deferrable {
+		g.stripLabelBitmaps(id, bagLids, tx)
+	}
 }
 
 // stripLabelBitmaps removes id from every label bitmap in lids.
@@ -3997,21 +4127,36 @@ func (g *Graph[N, W]) RestoreTombstones(ids []graph.NodeID) {
 	if len(ids) == 0 {
 		return
 	}
-	// PIN THE CHURN GATE FOR ANY LABEL THIS LEAVES DISAGREEING (rmp #2686).
+	// RETIRE THE INDEX ENTRIES THIS LEAVES DISAGREEING (rmp #2687).
 	//
 	// This is the fourth path that retires a node, and the only exported one. It
-	// records no death instant and strips no label bitmap, so an id it tombstones
-	// while the label index still carries it is a permanent disagreement that
-	// nothing will ever revisit — exactly the shape [Graph.tombstoneAborted] has,
-	// and pinned the same way, before the flip that creates it.
+	// records no death instant, so an id it tombstones while the label index still
+	// carries it lands in NO suspect source — and the correction in
+	// [Graph.correctBitmapOver] walks suspects, so nothing can ever reach the
+	// entry. Raising the churn gate, which is all this used to do, does not help:
+	// the gate only forces the reader onto the slow path, and the slow path then
+	// finds nothing to correct. MEASURED on a drained substrate: after
+	// RestoreTombstones the node was tombstoned AND still reported by
+	// LabelBitmapAsOf(lid, nil), and it stayed reported after a full ReclaimNow —
+	// a deleted node handed to every present-time reader for the life of the
+	// process. Pinned by TestDeleteVisibility_RestoreTombstonesRetiresTheEntries.
 	//
-	// Recovery, the intended caller, pins nothing: it runs before the graph is
-	// published, and the ids it restores have no index entry yet. The probe is
-	// there because the method is exported and the precondition is a documented
-	// contract rather than an enforced one.
+	// So the divergence is REMOVED rather than flagged. The probe stays exact —
+	// only a label the index actually carries is touched — which is what keeps the
+	// intended caller free: recovery applies the tombstone set before it applies
+	// any label (store/recovery, self-sufficient path), so every bag is empty
+	// here, the loop allocates nothing and no removal is registered.
+	//
+	// The removal goes through the same deferral as [Graph.removeNodeInfo] and
+	// therefore BEFORE the flip, for the reason set out there: while versioning is
+	// armed the deferral changes no bitmap, it only makes the node correctable, so
+	// registering it first closes the over-report window without opening the
+	// mirror. This method documents that it may not be called concurrently with a
+	// reader, so neither window should be reachable at all — but the contract is
+	// documented rather than enforced, and the safe order costs nothing.
 	for _, id := range ids {
 		if !g.IsTombstoned(id) {
-			g.pinChurnForDivergentBag(id, false)
+			g.retireDivergentIndexEntries(id)
 		}
 	}
 	g.tombstoneMu.Lock()
@@ -4029,8 +4174,9 @@ func (g *Graph[N, W]) RestoreTombstones(ids []graph.NodeID) {
 		}
 	}
 	if added > 0 {
-		g.tombstones.Store(next)
+		// Counter first, bitmap second — see [Graph.removeNodeInfo] (rmp #2687).
 		g.tombstoneActive.Add(added)
+		g.tombstones.Store(next)
 		// The THIRD tombstone transition, alongside RemoveNode and revive: it flips
 		// LiveNodeFilter from nil to non-nil, which changes what
 		// csr.BuildFromAdjListLive emits. Recovery calls this before publishing the

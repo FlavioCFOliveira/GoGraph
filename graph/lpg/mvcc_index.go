@@ -126,10 +126,7 @@ type deferredIdx struct {
 // made by a transaction that is aborting. This is the same exemption
 // [writeCtx.undoing] already grants the conflict test, and for the same reason.
 func (g *Graph[N, W]) deferLabelIndexRemoval(lid uint32, id graph.NodeID, tx *writeCtx) bool {
-	if !g.mvccArmed {
-		return false
-	}
-	if tx != nil && tx.undoing.Load() {
+	if !g.indexRemovalDeferrable(tx) {
 		return false
 	}
 	info, ts := g.deferralStamp(tx)
@@ -150,6 +147,30 @@ func (g *Graph[N, W]) deferLabelIndexRemoval(lid uint32, id graph.NodeID, tx *wr
 		g.labelChurn.raise(LabelID(lid))
 	}
 	return true
+}
+
+// indexRemovalDeferrable reports whether a label-index removal made by tx will be
+// DEFERRED — recorded now and applied to the bitmap only once the reclamation
+// watermark has passed it — or applied to the bitmap immediately.
+//
+// It is the predicate [Graph.deferLabelIndexRemoval] decides on, lifted out so a
+// caller can ASK BEFORE IT WRITES. [Graph.removeNodeInfo] is the caller that has
+// to: a deferred removal changes no bitmap, so registering it before the
+// tombstone flip closes the window in which a dead node is still indexed and
+// correctable by nothing (rmp #2687), whereas an immediate one does change the
+// bitmap, so hoisting it above the flip would open the mirror window instead.
+// The two cases therefore sit on opposite sides of the flip, and this is what
+// tells them apart.
+//
+// It depends only on tx and on the substrate's arm — never on the label or the
+// node — so one call covers a whole retirement.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) indexRemovalDeferrable(tx *writeCtx) bool {
+	if !g.mvccArmed {
+		return false
+	}
+	return tx == nil || !tx.undoing.Load()
 }
 
 // cancelDeferredIndexRemoval withdraws a pending removal because the entry has

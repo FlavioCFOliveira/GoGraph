@@ -300,6 +300,38 @@ func (g *Graph[N, W]) raiseChurnFor(lids []LabelID) []LabelID {
 	return lids
 }
 
+// retireDivergentIndexEntries takes id out of every label bitmap that still
+// carries it, for a path that tombstones a node WITHOUT going through
+// [Graph.removeNodeInfo] (rmp #2687).
+//
+// It is the repair for what [Graph.pinChurnForDivergentBag] can only flag. That
+// pin raises the churn gate so a reader takes the slow path, but the slow path
+// corrects over the SUSPECT set, and a node retired with no death record, no
+// label delta and no deferred removal is in none of those sources — so the
+// reader takes the slow path and finds nothing to correct, and the entry is
+// reported for the life of the process. Removing the entry instead leaves
+// nothing to correct.
+//
+// The probe on [label.Index.Has] is what keeps it free where there is no
+// divergence: a caller whose nodes have no index entry does no work beyond one
+// bag read, which the pin already cost.
+//
+// Registered through [Graph.deferLabelIndexRemoval], so while versioning is
+// armed the entry is not removed here at all — it is recorded, which makes the
+// node a suspect and leaves the correction to decide. That is what allows the
+// call to sit BEFORE the tombstone flip without opening the mirror window; see
+// [Graph.removeNodeInfo] for the full argument.
+func (g *Graph[N, W]) retireDivergentIndexEntries(id graph.NodeID) {
+	for _, lid := range g.nodeLabelBagLids(id) {
+		if !g.nodeIdx.Has(uint32(lid), id) {
+			continue
+		}
+		if !g.deferLabelIndexRemoval(uint32(lid), id, nil) {
+			g.nodeIdx.Remove(uint32(lid), id)
+		}
+	}
+}
+
 // pinChurnForDivergentBag takes a hold that is NEVER released, for every label
 // where the node's bag and the label index are about to stop agreeing and
 // nothing will ever reconcile them.

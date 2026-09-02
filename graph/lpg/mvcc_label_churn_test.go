@@ -22,9 +22,11 @@ package lpg
 
 import (
 	"fmt"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/RoaringBitmap/roaring/v2/roaring64"
 
@@ -561,6 +563,9 @@ func (s *settledDead) snapshot() *roaring64.Bitmap {
 // different places, and a hole in any one of them is a different defect.
 func TestLabelChurnGate_NoReaderSeesADeadNode(t *testing.T) {
 	const population = 120
+	// readerCount is named so the warm-up below can wait for exactly as many
+	// first reads as there are readers.
+	const readerCount = 3
 
 	// run seeds `population` nodes carrying Retired, drains the substrate so the
 	// gate for Retired reads zero, starts three readers, and hands the driver a
@@ -589,7 +594,7 @@ func TestLabelChurnGate_NoReaderSeesADeadNode(t *testing.T) {
 			wg    sync.WaitGroup
 			dead  settledDead
 		)
-		for r := 0; r < 3; r++ {
+		for r := 0; r < readerCount; r++ {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
@@ -606,6 +611,21 @@ func TestLabelChurnGate_NoReaderSeesADeadNode(t *testing.T) {
 					}
 				}
 			}()
+		}
+
+		// WARM UP before the driver moves (rmp #2687). Without this the retirement
+		// can complete before a single reader goroutine is scheduled, and the
+		// non-vacuity guard below then fails the test with "the readers completed
+		// no read" — not because anything is wrong, but because nothing ran.
+		// MEASURED at GOMAXPROCS=1: 40 such failures in 10 runs, identically on
+		// this build and on the one before rmp #2687 touched the delete path.
+		// Bounded so a reader that returns early on a violation cannot hang the
+		// test; the guard below still fails if the wait bought nothing.
+		for deadline := time.Now().Add(5 * time.Second); reads.Load() < readerCount; {
+			if time.Now().After(deadline) {
+				break
+			}
+			runtime.Gosched()
 		}
 
 		retire(t, g, keys, ids, &dead)
