@@ -411,6 +411,37 @@ cover-gate: ## Enforce aggregate (>=85%) and per-package (>=75%) coverage gates
 bench: ## Run benchmarks ($(BENCH_PATTERN), count=$(BENCH_COUNT))
 	$(GO) test -bench=$(BENCH_PATTERN) -benchmem -count=$(BENCH_COUNT) -run=^$$ $(PACKAGES)
 
+# ── Vulnerability gate ─────────────────────────────────────────────
+# Until rmp #2722 there was NO gate. `govulncheck` appeared in no Makefile
+# target, no `make ci` path and no `.sh`/`.yml`/`.yaml` file in the repository —
+# only as prose in CONTRIBUTING.md §4 and SECURITY.md describing a command a
+# human was expected to remember to type. That is why it could stop working for
+# an entire toolchain bump without anyone noticing: a gate nobody invokes cannot
+# fail loudly, it simply never runs.
+#
+# The gate asserts that ANALYSIS HAPPENED — a non-empty set of loaded root
+# packages covering every package `go list ./...` reports — and evaluates that
+# assertion BEFORE it looks at the exit status, because the failure mode
+# recorded against v0.12.0 was a scanner that "exits 0 while performing no
+# analysis at all" (CONTRIBUTING.md §4). scripts/vulncheck_gate.sh carries the
+# full reasoning; scripts/test_vulncheck_gate.sh proves the assertion can fail
+# by feeding the gate deliberately broken scanners, including a real
+# govulncheck built against another Go minor.
+#
+# It needs the network: govulncheck consults https://vuln.go.dev. An
+# unreachable database FAILS the gate rather than skipping it — a scan that
+# could not consult the vulnerability database is not a clean scan. Point
+# VULNCHECK_DB at a mirror on an air-gapped host.
+GOVULNCHECK_VERSION ?= v1.7.0
+
+.PHONY: vulncheck
+vulncheck: ## Vulnerability gate: govulncheck over the module, asserting analysis really happened rather than trusting the exit code (rmp #2722)
+	GO=$(GO) GOVULNCHECK_VERSION=$(GOVULNCHECK_VERSION) bash scripts/vulncheck_gate.sh
+
+.PHONY: test-vulncheck-gate
+test-vulncheck-gate: ## Prove `vulncheck` can FAIL: feed it deliberately broken scanners and require it to reject each one (rmp #2722)
+	GO=$(GO) bash scripts/test_vulncheck_gate.sh
+
 .PHONY: lint
 lint: ## Run golangci-lint (auto-install if missing)
 	@if ! command -v golangci-lint >/dev/null 2>&1; then \
@@ -420,13 +451,13 @@ lint: ## Run golangci-lint (auto-install if missing)
 	golangci-lint run $(PACKAGES)
 
 .PHONY: ci
-ci: shell-guard tidy fmt vet build test-short test-timing test-uninstrumented lint cover-gate ## Full CI pipeline: tidy + fmt + vet + build + test-short + test-timing + test-uninstrumented + lint + cover-gate
+ci: shell-guard tidy fmt vet build vulncheck test-short test-timing test-uninstrumented lint cover-gate ## Full CI pipeline: tidy + fmt + vet + build + vulncheck + test-short + test-timing + test-uninstrumented + lint + cover-gate
 
 .PHONY: ci-soak
-ci-soak: shell-guard tidy fmt vet build test-soak test-timing test-uninstrumented lint cover-gate ## CI pipeline with soak layer: like ci but runs test-soak
+ci-soak: shell-guard tidy fmt vet build vulncheck test-soak test-timing test-uninstrumented lint cover-gate ## CI pipeline with soak layer: like ci but runs test-soak
 
 .PHONY: ci-nightly
-ci-nightly: shell-guard tidy fmt vet build test-nightly test-timing test-uninstrumented lint cover-gate ## CI pipeline with nightly layer: like ci but runs test-nightly
+ci-nightly: shell-guard tidy fmt vet build vulncheck test-nightly test-timing test-uninstrumented lint cover-gate ## CI pipeline with nightly layer: like ci but runs test-nightly
 
 .PHONY: smoke
 smoke: ## Quick PR pre-flight: tidy + fmt + vet + build + short unit tests (no race, no lint, no cover-gate)
@@ -488,9 +519,9 @@ release-accuracy: ## Release-accuracy checks only (Phase A): CHANGELOG/release-n
 	@echo "release-accuracy: all accuracy checks passed"
 
 .PHONY: release-preflight
-release-preflight: ## Canonical LOCAL release gate (`make release` calls this) — release-accuracy + the full `make ci` correctness+coverage gate + headline bench. `make ci` runs the suite ONCE (tidy/fmt/vet/build/test-short[-race,./...]/lint/cover-gate; the TCK =100% baseline in TestTCKExecution runs inside the -race and coverage passes), so release-preflight SUBSUMES `make ci` — do not run both. The release.yml CI job runs only `release-accuracy`.
+release-preflight: ## Canonical LOCAL release gate (`make release` calls this) — release-accuracy + the full `make ci` correctness+coverage gate + headline bench. `make ci` runs the suite ONCE (tidy/fmt/vet/build/vulncheck/test-short[-race,./...]/lint/cover-gate; the TCK =100% baseline in TestTCKExecution runs inside the -race and coverage passes), so release-preflight SUBSUMES `make ci` — do not run both. The release.yml CI job runs only `release-accuracy`.
 	@$(MAKE) release-accuracy
-	@echo "release-preflight: running the full correctness + coverage gate (make ci: tidy/fmt/vet/build/test-short[-race]/lint/cover-gate; TCK =100% baseline enforced inside)…"
+	@echo "release-preflight: running the full correctness + coverage gate (make ci: tidy/fmt/vet/build/vulncheck/test-short[-race]/lint/cover-gate; TCK =100% baseline enforced inside)…"
 	@$(MAKE) ci
 	@if [ -x scripts/run_headline_bench.sh ]; then \
 	  echo "release-preflight: running headline bench regression gate (informational on a release tag — see docs/release.md for the canonical PR-time gate)…"; \
