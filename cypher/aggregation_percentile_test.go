@@ -45,8 +45,11 @@ func isPercentileNotImplErr(err error) bool {
 		strings.Contains(s, "unknown aggregate")
 }
 
-// drainPercentile drains res into a record slice, skipping the test if the
-// iteration error signals that percentile is not yet implemented.
+// drainPercentile drains res into a record slice and FAILS the test if the
+// iteration error signals that percentile is missing: the aggregate is
+// implemented and openCypher-TCK-covered, so that error is a regression, not a
+// reason to skip (rmp #2261). The comment previously said "skipping", which the
+// body has not done since #2261 (rmp #2709).
 func drainPercentile(t *testing.T, res *cypher.Result) []map[string]any {
 	t.Helper()
 	var rows []map[string]any

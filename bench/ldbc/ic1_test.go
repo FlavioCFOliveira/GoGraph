@@ -37,7 +37,11 @@ ORDER BY friend.lastName`
 
 	results, err := runICQuery(ctx, session, query)
 	if err != nil {
-		t.Skipf("IC1 query not supported: %v", err)
+		// An error here is a GoGraph defect, not an environment precondition:
+		// the query runs against this process's own in-process Bolt server over
+		// the canonical seeded graph. Skipping would convert an engine failure
+		// into a green run (rmp #2709).
+		t.Fatalf("IC1 query failed: %v", err)
 	}
 
 	// AC#1: exactly one row.

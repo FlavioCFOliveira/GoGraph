@@ -265,6 +265,48 @@ test-timing: ## [layer: short] Serially re-run the wall-clock/throughput gates o
 test-short-timings: ## [layer: short] Alias for test-short, kept as the named entry point for ad-hoc budget exploration (SOFT_BUDGET/HARD_BUDGET/SHORT_TIMEOUT overridable)
 	$(MAKE) test-short
 
+# ── The uninstrumented phase ──────────────────────────────────────
+# UNINSTR_PKGS are the packages holding short-layer assertions whose SUBJECT is
+# the Go runtime's own allocation behaviour, and which therefore cannot run
+# under either instrumentation the rest of `ci` applies.
+#
+# bolt/packstream is here because rmp #2709 found that its
+# TestDecoder_ChargeUpperBoundsGoAllocation — the self-guarding half of security
+# finding #1849, the proof that the decoded-memory charge UPPER-BOUNDS real Go
+# allocation — ran in NO phase of `make ci` at all:
+#
+#   test-short   -race                → the file is //go:build !race: compiled out
+#   test-timing  -race                → same, and the package is not in TIMING_PKGS
+#   cover-gate   -covermode=atomic    → compiled in, then skipped by the test's own
+#                                       testing.CoverMode() guard
+#
+# Each of those three guards is individually correct, and each is documented at
+# its site. Their INTERSECTION was the defect: two locally-sound decisions that
+# between them left a security invariant asserting nowhere. Neither guard can be
+# relaxed — the race detector disables the tiny allocator and adds shadow memory,
+# the coverage counters allocate on their own account, and the charge bounds
+# PRODUCTION memory — so the only correct fix is a phase that applies neither.
+#
+# The list holds PACKAGES, not -run patterns, so a future allocation assertion
+# added to one of them is picked up without editing this file. Adding a package
+# here costs a full uninstrumented run of it: bolt/packstream measures 0.39-0.53 s
+# (Apple M4, darwin/arm64, go1.26.6, 2026-09-03, host at loadavg 6.45), which is
+# why the whole package runs rather than a single -run filter.
+#
+# -p 1 serialises the package test binaries. runtime.MemStats is per-PROCESS, so
+# a second package cannot pollute the subject's counters directly; what -p 1
+# removes is CPU and memory CONTENTION between concurrently running binaries
+# while one of them is measuring. With a single package in the list today it is
+# a no-op that costs nothing and stops the list growing into a measurement
+# hazard.
+UNINSTR_PKGS = ./bolt/packstream
+
+UNINSTR_TIMEOUT ?= 5m
+
+.PHONY: test-uninstrumented
+test-uninstrumented: ## [layer: short] Run the allocation-measuring packages with NEITHER the race detector NOR coverage instrumentation — the only phase in which they assert (rmp #2709)
+	$(GO) test -count=1 -p 1 -timeout=$(UNINSTR_TIMEOUT) $(UNINSTR_PKGS)
+
 # SOAK_TIMEOUT / NIGHTLY_TIMEOUT — the deferred layers need an EXPLICIT
 # per-package timeout (rmp #2259).
 #
@@ -378,13 +420,13 @@ lint: ## Run golangci-lint (auto-install if missing)
 	golangci-lint run $(PACKAGES)
 
 .PHONY: ci
-ci: shell-guard tidy fmt vet build test-short test-timing lint cover-gate ## Full CI pipeline: tidy + fmt + vet + build + test-short + test-timing + lint + cover-gate
+ci: shell-guard tidy fmt vet build test-short test-timing test-uninstrumented lint cover-gate ## Full CI pipeline: tidy + fmt + vet + build + test-short + test-timing + test-uninstrumented + lint + cover-gate
 
 .PHONY: ci-soak
-ci-soak: shell-guard tidy fmt vet build test-soak test-timing lint cover-gate ## CI pipeline with soak layer: like ci but runs test-soak
+ci-soak: shell-guard tidy fmt vet build test-soak test-timing test-uninstrumented lint cover-gate ## CI pipeline with soak layer: like ci but runs test-soak
 
 .PHONY: ci-nightly
-ci-nightly: shell-guard tidy fmt vet build test-nightly test-timing lint cover-gate ## CI pipeline with nightly layer: like ci but runs test-nightly
+ci-nightly: shell-guard tidy fmt vet build test-nightly test-timing test-uninstrumented lint cover-gate ## CI pipeline with nightly layer: like ci but runs test-nightly
 
 .PHONY: smoke
 smoke: ## Quick PR pre-flight: tidy + fmt + vet + build + short unit tests (no race, no lint, no cover-gate)
