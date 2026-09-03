@@ -70,6 +70,16 @@ type ChunkedReader struct {
 	// SetInboundBudget. See ChunkedReader's type doc.
 	budget          *packstream.InboundBudget
 	maxMessageBytes int
+	// hdr is the scratch space for the 2-byte big-endian chunk-length header
+	// read at the top of every chunk iteration. It is a field rather than a
+	// ReadMessage local because io.ReadFull takes an io.Reader INTERFACE, so a
+	// local [2]byte cannot stay on the stack: escape analysis reports
+	// "moved to heap: header", costing one heap object per inbound message.
+	// Hoisting it here pays that allocation once per reader instead. Sound
+	// because ChunkedReader is documented NOT safe for concurrent use, and
+	// because the header is fully consumed (decoded to chunkLen) before the
+	// next read overwrites it — it is never aliased by a returned message.
+	hdr [2]byte
 }
 
 // NewChunkedReader returns a ChunkedReader that reads from r with the
@@ -147,7 +157,6 @@ func (cr *ChunkedReader) SetInboundBudget(b *packstream.InboundBudget) {
 // client cannot coerce a single multi-gigabyte allocation by streaming
 // non-zero chunks indefinitely.
 func (cr *ChunkedReader) ReadMessage() ([]byte, error) {
-	var header [2]byte
 	var msg []byte
 
 	// charged tracks the bytes this call has reserved from the shared inbound
@@ -166,7 +175,7 @@ func (cr *ChunkedReader) ReadMessage() ([]byte, error) {
 
 	for {
 		// Read the 2-byte chunk length.
-		_, err := io.ReadFull(cr.r, header[:])
+		_, err := io.ReadFull(cr.r, cr.hdr[:])
 		if err != nil {
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
 				if msg == nil {
@@ -177,7 +186,7 @@ func (cr *ChunkedReader) ReadMessage() ([]byte, error) {
 			return nil, fmt.Errorf("bolt chunk: read length: %w", err)
 		}
 
-		chunkLen := int(binary.BigEndian.Uint16(header[:]))
+		chunkLen := int(binary.BigEndian.Uint16(cr.hdr[:]))
 		if chunkLen == 0 {
 			if msg == nil {
 				// Standalone 00 00 with no in-progress message body: a Bolt
