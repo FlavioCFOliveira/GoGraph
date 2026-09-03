@@ -161,7 +161,39 @@ func (t *OracleTx) ApplyCreate(cypher string, params map[string]any) OracleResul
 // ApplyMatch models [tmplSetAge] and pure reads inside the transaction. A SET
 // on a node visible to the transaction is decided now (against the
 // begin-snapshot plus own writes) and folded at Commit; a miss is a committed
-// zero-effect result.
+// zero-effect result; and a SET that stores the value the transaction already
+// observes is not a write at all (see below).
+//
+// # Value-preserving writes are not writes (rmp #2717)
+//
+// The engine records NO version for a property write whose value equals the
+// one already stored: graph/lpg/property.go, setNodePropertyInfo, whose delta
+// push is guarded by `case !propValuesDefinitelyEqual(prev, value)`. The
+// conflict test in front of it is unconditional (the rmp #2324 fix), so a
+// write that reaches the guard is one whose stored head IS visible to the
+// writing transaction — the value it leaves behind is byte-identical to the
+// value that was there, and the transaction therefore neither conflicts with
+// a concurrent writer of that node nor makes a concurrent writer conflict.
+//
+// The workspace must model it the same way. Recording it as a pending update
+// makes [OracleTx.Commit] refuse to fold a transaction whose target a
+// concurrently committed DETACH DELETE removed — a commit the engine was
+// entitled to acknowledge, because the resulting state is exactly what BOTH
+// serial orders produce (the SET changes nothing, so "SET then DELETE" and
+// "DELETE then SET-misses" both end with the node gone). Measured on seeds
+// 22 (crash arm), 500 and 572 (no-crash arm) of the MVCC sessions mode: in
+// all three the SET re-asserted the age the node was CREATEd with.
+//
+// Recording it was also wrong in the APPLY direction: the fold wrote the
+// re-asserted value over a newer one a concurrent transaction had committed in
+// the meantime. The engine keeps the newer value (the value-preserving write
+// pushed no version, so the other writer never conflicted), so the model was
+// silently drifting away from it.
+//
+// The strict refusal is kept for a value-CHANGING SET, which is a real write:
+// there the engine does refuse one of the two transactions with
+// [mvcc.ErrSerializationConflict], so a clean commit of both would be a
+// genuine isolation finding.
 func (t *OracleTx) ApplyMatch(cypher string, params map[string]any) OracleResult {
 	if t.finished {
 		return t.record(cypher, params, OracleResult{ErrorMsg: "oracle: op on finished tx"})
@@ -181,8 +213,44 @@ func (t *OracleTx) ApplyMatch(cypher string, params map[string]any) OracleResult
 	if !t.visible(name) {
 		return t.record(cypher, params, OracleResult{Committed: true}) // MATCH miss
 	}
+	if cur, ok := t.AgeOf(name); ok && oracleValuesDefinitelyEqual(cur, params["age"]) {
+		// Value-preserving write: the engine records no version, so neither
+		// does the workspace. Nothing to fold, nothing to validate.
+		return t.record(cypher, params, OracleResult{Committed: true})
+	}
 	t.ageSet[name] = params["age"]
 	return t.record(cypher, params, OracleResult{Committed: true})
+}
+
+// oracleValuesDefinitelyEqual reports whether two modelled property values are
+// CERTAINLY the same, mirroring lpg's propValuesDefinitelyEqual (and its name):
+// the answer is "definitely equal" or "not known to be equal", never
+// "different". Only the comparable scalar kinds the transactional workload
+// stores are compared; anything else — a slice, a map, a nil, a type mismatch —
+// is assumed changed.
+//
+// The conservative direction is the safe one, for the same reason it is in the
+// engine. A false "not equal" records a pending update that folds to the value
+// already there: harmless. A false "equal" would DROP a real write from the
+// model, and the checker above this layer would stop seeing it — a blind spot,
+// which is strictly worse than a spurious finding.
+func oracleValuesDefinitelyEqual(a, b any) bool {
+	switch av := a.(type) {
+	case int64:
+		bv, ok := b.(int64)
+		return ok && av == bv
+	case string:
+		bv, ok := b.(string)
+		return ok && av == bv
+	case float64:
+		bv, ok := b.(float64)
+		return ok && av == bv
+	case bool:
+		bv, ok := b.(bool)
+		return ok && av == bv
+	default:
+		return false
+	}
 }
 
 // ApplyMerge models [tmplMergePerson] inside the transaction: MERGE by name is

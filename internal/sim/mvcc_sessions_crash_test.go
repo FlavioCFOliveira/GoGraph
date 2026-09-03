@@ -128,3 +128,55 @@ func TestMVCCSessionsCrash_LostCommittedTransactionInjection(t *testing.T) {
 		t.Fatalf("no durability-kind finding: %v", v)
 	}
 }
+
+// TestMVCCSessionsCrash_ValuePreservingSetSeeds is the rmp #2717 end-to-end
+// regression: the three seeds a 1000-seed sweep of the Ticks=1200,Sessions=6
+// shape found refusing a fold, each on the same shape — a session SET an age
+// equal to the one the node already carried, another session DETACH DELETEd
+// that node and committed first, and the engine acknowledged both. The engine
+// records no version for a value-preserving property write
+// (graph/lpg/property.go, propValuesDefinitelyEqual), so both commits are
+// correct and the refusal was the workspace's, not the engine's.
+//
+// Seed 22 runs the crash arm (which is where the finding was first seen);
+// seeds 500 and 572 run the SAME shape with crash injection OFF, which is what
+// proves the finding was never crash-specific.
+func TestMVCCSessionsCrash_ValuePreservingSetSeeds(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name string
+		cfg  MVCCSessionsConfig
+	}{
+		{"crash/seed=22", mvccCrashConfig(22)},
+		{"nocrash/seed=500", mvccDeepConfig(500)},
+		{"nocrash/seed=572", mvccDeepConfig(572)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := RunMVCCSessions(ctx, tc.cfg)
+			if err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if len(res.FoldErrors) > 0 {
+				t.Fatalf("fold refusal returned: %v", res.FoldErrors)
+			}
+			if !res.Clean() {
+				t.Fatalf("violations=%v", res.Violations)
+			}
+			// Non-vacuity: the run must have reached the far end of its tick
+			// budget, not stopped early at a finding.
+			if res.TxCommitted == 0 || res.Statements < 400 {
+				t.Fatalf("run did not go deep enough to reach the reproducer: %+v", res)
+			}
+		})
+	}
+}
+
+// mvccDeepConfig is [mvccTestConfig] at the crash configuration's tick depth
+// with crash injection OFF — the arm that separates "needs a crash" from
+// "needs depth".
+func mvccDeepConfig(seed uint64) MVCCSessionsConfig {
+	cfg := mvccTestConfig(seed)
+	cfg.Ticks = 1200
+	return cfg
+}
