@@ -173,6 +173,15 @@ func (in explainInputs) walk(emit planLineSink, params map[string]expr.Value) {
 // [Engine.ProfileTable] for measured row counts, and compare the two tables when
 // you need to know whether an estimate held.
 //
+// Comparing them is a manual step here, and both incumbents make it automatic:
+// Neo4j puts "Estimated Rows" and "Rows" in ADJACENT COLUMNS of one PROFILE table
+// (renderAsTreeTable.scala, 5.26.16) and PostgreSQL prints the cost estimate and
+// the "actual" group on ONE line (explain.c, REL_17). GoGraph's two tables also
+// render two DIFFERENT plans — this one the logical plan, ProfileTable the
+// physical one — so their rows do not correspond one to one and cannot simply be
+// placed side by side. That is recorded as a gap, not a defect, in
+// docs/explain-profile-honesty-audit-2026-09-03.md.
+//
 // No rows are produced and the graph is not modified. A DDL statement has no
 // query plan and renders as a single explanatory row.
 func (e *Engine) ExplainTable(query string, params map[string]expr.Value) (s string, err error) {
@@ -239,23 +248,36 @@ func (e *Engine) ExplainTable(query string, params map[string]expr.Value) (s str
 // Rows and Time (ms) are MEASURED: the profiling wrapper counts the rows an
 // operator returned and times its own Next calls.
 //
-// DbHits is DERIVED, not counted at the storage layer. rmp #2238 established the
-// count at the wrapper on the argument that an access-path operator reads exactly
-// one record per row it emits — a node record per row of a scan or seek, a
-// relationship record per row of an expand — so an operator marked
-// [exec.StorageRecordScan] reports its own row count and every other operator
-// reports 0. That makes the column a faithful measure of RECORDS READ BY ACCESS
-// PATHS and NOT a count of physical storage accesses: it charges nothing for a
-// property read, which is a documented divergence from Neo4j (see docs/cypher.md),
-// and it can never disagree with the Rows column for an access-path operator
-// because it is that column.
+// DbHits is MIXED, and the column does not say which cell is which. Read it
+// together with the operator's name:
+//
+//   - For an operator marked [exec.StorageRecordScan] — the scan, seek and
+//     single-hop-expand leaves — the cell is DERIVED: it IS the Rows cell, on the
+//     contract that such an operator reads one record per row it emits. It can
+//     therefore never disagree with Rows, which is why the two columns are equal
+//     on every such line.
+//   - For [exec.VarLengthExpand] the cell is MEASURED: the operator reports the
+//     relationship slots its BFS actually read, which is not its row count.
+//   - For every other operator the cell is 0. That is the honest answer for a pure
+//     row transformer, and an UNDER-REPORT for [exec.ShortestPath],
+//     [exec.AllShortestPaths] and the morsel-parallel leaves, which read storage
+//     and report none. The parallel leaves say so in their Operator cell.
+//
+// In every case the column counts ACCESS-PATH record reads and never property
+// reads, which is a documented divergence from Neo4j (see docs/cypher.md). Neo4j
+// counts real kernel cursor accesses and charges a hit for a record it read and
+// then rejected; GoGraph charges nothing for a rejected read, so a filtered plan
+// reads cheaper here than it was. The gaps are enumerated on
+// [exec.StorageRecordScan] and audited in
+// docs/explain-profile-honesty-audit-2026-09-03.md.
 //
 // The morsel-parallel tier is reported as ONE node, by construction rather than
 // by omission: a parallel leaf builds and drives a private sub-plan per morsel on
 // a worker goroutine, the builder clears the profiler from the per-worker build
 // options so no worker times anything, and the leaf implements no PlanChildren so
-// the tree stops there. Its row, db-hit and time figures are the whole parallel
-// phase attributed to the driving goroutine. See the "parallel tier" section of
+// the tree stops there. Its ROW and TIME figures are the whole parallel phase
+// attributed to the driving goroutine; its DB-HITS figure is 0 because nothing
+// counted them, which its Operator cell states. See the "parallel tier" section of
 // the [exec.Profiler] documentation.
 func (e *Engine) ProfileTable(ctx context.Context, query string, params map[string]expr.Value) (s string, err error) {
 	defer recoverQueryPanic(&err, "cypher.ProfileTable", "cypher.ProfileTable.panics")

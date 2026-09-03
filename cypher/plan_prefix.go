@@ -124,6 +124,16 @@ func (e *Engine) runPlanPrefixed(
 // "what would this run?" before the caller has bound anything — which is what
 // [Engine.Explain] already does, and what Neo4j does. PROFILE, which executes,
 // requires them like any other execution.
+//
+// The cost of that leniency, measured under rmp #2720 and pinned by
+// TestExplainFidelity_UnboundParameterDivergesFromTheRun: where an access-path
+// gate DOES need the value, an EXPLAIN without it renders a plan the run will not
+// build. `EXPLAIN MATCH (n:P) WHERE n.age = $a RETURN n.name` with no parameters
+// renders a NodeByLabelScan; the same statement run with $a bound builds a
+// NodeByIndexRangeScan. Nothing in the rendered plan says the value was missing,
+// so a reader is shown a full scan for a query that seeks. Every other condition
+// tested — cold, on a plan-cache hit, and with the parameter bound — reproduces
+// the executed tree exactly.
 func (e *Engine) runExplainPrefixed(
 	ctx context.Context,
 	entry *planCacheEntry,

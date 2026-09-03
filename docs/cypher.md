@@ -1366,21 +1366,44 @@ Profiling is off unless `Profile` is called: the instrumentation is a wrapper th
 builder installs only when asked, so an ordinary `Run` executes the same code as a
 build in which profiling does not exist.
 
-> **Divergence from Neo4j.** `dbhits` counts **records read from storage**, one per
-> row an access-path operator emits: a node record per row of a scan or index seek,
-> a relationship record per row of an expand. An operator that only transforms rows
-> its children produced reports `0`, because it read no storage.
+> **What `dbhits` is, exactly.** Unlike `rows` and `time`, which are measured for
+> every operator, `dbhits` comes from one of three places, and the rendered figure
+> does not say which:
 >
-> Neo4j additionally charges a db-hit per **property read**, so its figures for a
-> filter-heavy or projection-heavy plan are larger than GoGraph's, and the two are
-> not comparable in absolute terms. The ratio between two GoGraph plans is the
-> intended use.
+> - **Derived** — for a scan, an index seek or a single-hop expand, the figure IS
+>   the `rows` figure. Those operators are marked internally as reading one record
+>   per row they emit, so the count is taken at the operator boundary and needs no
+>   counter threaded through any accessor. That is why `rows` and `dbhits` are
+>   equal on every such line.
+> - **Measured** — a variable-length expansion (`-[*m..n]->`) reports the
+>   relationship slots its BFS actually read, from the counter its traversal budget
+>   already maintains. That number is not its row count and is usually far larger.
+> - **Zero** — every other operator. For a pure row transformer that is the honest
+>   answer: it read no storage. For `shortestPath`, `allShortestPaths` and the
+>   morsel-parallel leaves it is an **under-report** — they read storage and count
+>   none of it. The parallel leaves say so in their own plan line
+>   (`[parallel tier; db-hits not counted]`).
 >
-> The reason is the cost of the alternative. Counting property reads means threading
-> a counter into the property accessors — the hottest path in the engine — so every
-> ordinary query would carry a branch that exists only for a diagnostic. Counting at
-> the access-path boundary instead needs no threading at all, which is why an
-> ordinary `Run` executes no counting code rather than merely skipping it.
+> Two further gaps are worth knowing before you compare two plans:
+>
+> - A single-hop expand with a **relationship-type filter** walks every slot of the
+>   source node's adjacency and counts only the slots it emitted. On a node with
+>   100 out-edges of which one is `:KNOWS`, `-->` reports 100 db-hits and
+>   `-[:KNOWS]->` reports 1, for the same 100-slot walk.
+> - **Property reads are never counted.** Neo4j charges a db-hit per property
+>   access, so its figures for a filter-heavy or projection-heavy plan are larger
+>   than GoGraph's, and the two are not comparable in absolute terms. The ratio
+>   between two GoGraph plans is the intended use — and only between plans whose
+>   access paths are of the same kind.
+>
+> The reason property reads are not counted is the cost of the alternative:
+> threading a counter into the property accessors — the hottest path in the engine —
+> so every ordinary query would carry a branch that exists only for a diagnostic.
+> Counting at the access-path boundary instead needs no threading at all, which is
+> why an ordinary `Run` executes no counting code rather than merely skipping it.
+> The full classification of every figure `EXPLAIN` and `PROFILE` print, with the
+> measurements behind each claim above, is in
+> [`explain-profile-honesty-audit-2026-09-03.md`](explain-profile-honesty-audit-2026-09-03.md).
 
 ### `Engine.ExplainTable` and `Engine.ProfileTable` — the same, as a table
 
@@ -1438,8 +1461,10 @@ cells are easy to mistake:
 - **`Rows`** is every operator's emitted rows added together — a cost measure, not
   the result's row count. The result's row count is the **root** operator's
   `Rows`, on the table's first data line.
-- **`DbHits`** is the query's total storage-record reads, subject to the
-  divergence noted above.
+- **`DbHits`** is the sum of every operator's `DbHits` cell, so it inherits every
+  qualification above: it is a **lower bound** on the query's storage-record reads,
+  not a total, whenever the plan contains a type-filtered expand, a
+  `shortestPath`, or a morsel-parallel leaf.
 - **`Time (ms)`** is the whole query's elapsed time, because the root operator's
   time already includes every child's.
 

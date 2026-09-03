@@ -90,6 +90,44 @@ func (op *Expand) PlanDetail() string {
 	return "ExpandInto filter"
 }
 
+// PlanDetail names the morsel-parallel tier and states plainly that this leaf's
+// db-hits are not counted.
+//
+// The tier is a physical decision a reader needs to see — the same class as the
+// label a scan iterates — and without it a parallel leaf renders bare, so nothing
+// tells a reader that the operator's whole sub-plan collapsed into one line.
+//
+// The db-hits clause is here because the alternative would be worse. A
+// morsel-parallel leaf reads one node reference per node its workers walk, and
+// implements neither [StorageRecordScan] nor storageAccessCounter, so its DbHits
+// cell reads 0 for a full scan of the graph. Zero is also what a pure row
+// transformer reports, and the column has no way to tell "counted, and it is
+// zero" from "not counted at all" — Neo4j's renderer leaves such a cell BLANK and
+// prints "x + ?" for a total it could not complete
+// (renderAsTreeTable.scala / renderSummary.scala, 5.26.16), and PostgreSQL
+// suppresses an unmeasured figure rather than printing 0 (explain.c, REL_17).
+// GoGraph's column prints the zero, so the qualification is put where the reader
+// will see it next to the number (rmp #2720).
+//
+// Marking the leaf [StorageRecordScan] instead was rejected: its emitted row
+// count is NOT its node-walk count whenever the fused sub-plan carries a
+// Selection, which is exactly the min-label shape the parallel scan is built for,
+// so the marker would replace an obvious zero with a plausible wrong number.
+func (op *ParallelScanProject) PlanDetail() string { return parallelPlanDetail }
+
+// PlanDetail names the tier and its db-hits gap, as [ParallelScanProject.PlanDetail]
+// does. An aggregate leaf emits one row per group while walking the whole label,
+// so for it the row count is not even close to the node-walk count.
+func (op *ParallelAggregateScan) PlanDetail() string { return parallelPlanDetail }
+
+// PlanDetail names the tier and its db-hits gap, as [ParallelScanProject.PlanDetail]
+// does. A count leaf emits exactly one row however many nodes it walked.
+func (op *ParallelCountScan) PlanDetail() string { return parallelPlanDetail }
+
+// parallelPlanDetail is the shared detail string of the morsel-parallel leaves, so
+// the three cannot drift apart in what they tell a reader.
+const parallelPlanDetail = "parallel tier; db-hits not counted"
+
 // PlanDetail reports the build side of the columnar join, as [HashJoin.PlanDetail]
 // does for the row-mode one.
 func (op *ColumnarHashJoin) PlanDetail() string {

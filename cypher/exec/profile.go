@@ -48,11 +48,17 @@ import (
 // downgrade a columnar plan to row mode.
 //
 // Every measurement therefore lives here, db-hits included: rmp #2238 folded them
-// into this Profiler by deriving the count at the wrapper — an operator that reads
-// records from storage reads exactly one per row it emits ([StorageRecordScan]) —
-// rather than threading a counter through the storage accessors, which is what
-// keeps the cost-when-off guarantee absolute. cypher/explain's own DbHitsCounter
-// and InstrumentedScan are superseded by that and have no caller.
+// into this Profiler by deriving the count at the wrapper from the rows a marked
+// operator emits ([StorageRecordScan]), rather than threading a counter through the
+// storage accessors, which is what keeps the cost-when-off guarantee absolute.
+// cypher/explain's own DbHitsCounter and InstrumentedScan are superseded by that
+// and have no caller.
+//
+// That derivation is a MODEL, and rmp #2720 measured where it breaks: it holds for
+// the scan and seek leaves, and fails for a traversal and for a filtered expand.
+// [StorageRecordScan] enumerates every case and says what was done about each; an
+// operator that can report its own count implements [storageAccessCounter] and its
+// figure is measured rather than inferred.
 //
 // What cypher/explain still contributes is PRESENTATION. Its FormatReport renders
 // a plan and its measurements as a fixed-width columnar table where this package's
@@ -87,6 +93,15 @@ import (
 // wrapper. Showing the inside would mean rendering one sub-tree per morsel, or
 // merging N morsel sub-trees into one synthetic tree; both change what PROFILE
 // reports, so neither is done here.
+//
+// Its ROWS and TIME are therefore real measurements of the whole phase, and its
+// DB-HITS are not measured at all: the leaf claims neither [StorageRecordScan] nor
+// [storageAccessCounter], so the cell reads 0 for a full scan of the graph. The
+// same query below the parallel threshold plans a [NodeByLabelScan] and reports
+// one db-hit per node, so the identical work reports 0 or N according to a
+// threshold the reader did not set. The leaves' [PlanDetail] states this next to
+// the number, which is the only place the current column shape allows it to be
+// said (rmp #2720).
 //
 // Sharing one Profiler between two concurrently executing queries is meaningless
 // rather than unsafe — the measurements would belong to two unrelated trees — so
@@ -254,26 +269,39 @@ func (p *profiledOp) rowCountHint() (int, bool) {
 
 func (p *profiledOp) planUnwrap() Operator { return p.inner }
 
-// planStats reports the measured rows and time, plus the db-hits DERIVED from
-// them.
+// planStats reports the measured rows and time, plus the db-hits.
 //
-// Db-hits are not accumulated in the hot path, and that is the whole design. The
-// task's own framing was that a wrapper cannot count them because the accesses
-// happen inside an operator rather than at its boundary — true in general, and
-// false for the operators where the count is actually defined. An operator that
-// reads records from storage reads exactly one per row it emits ([StorageRecordScan]
-// documents why), so the boundary row count IS the access count; an operator that
-// only transforms its children's rows touches no storage and its count is zero.
+// Db-hits come from one of two places, in this order:
 //
-// Deriving rather than threading is what keeps the cost-when-off property absolute:
-// no counter is passed through any storage accessor, so a non-PROFILE Run executes
-// not just no counting but no counting CODE — there is no branch to skip.
+//   - a MEASURED count, when the operator implements [storageAccessCounter] and
+//     can report the records it actually read at no cost to a non-PROFILE run; or
+//   - a count DERIVED from the emitted rows, when the operator implements
+//     [StorageRecordScan] — a marker that asserts one record read per row emitted.
+//
+// Every other operator reports zero, which is the honest answer for a pure row
+// transformer and an UNDER-REPORT for an operator that reads storage without
+// claiming either interface. [StorageRecordScan] enumerates which is which, and
+// names the operators whose true count this file cannot reach.
+//
+// Deriving rather than threading is what keeps the cost-when-off property absolute
+// for the derived set: no counter is passed through any storage accessor, so a
+// non-PROFILE Run executes not just no counting but no counting CODE — there is no
+// branch to skip. [storageAccessCounter] is admitted only where the operator
+// ALREADY maintains the counter for its own reasons, so it costs a non-PROFILE run
+// nothing either.
 func (p *profiledOp) planStats() (int64, time.Duration, int64) {
 	return p.rows, p.elapsed, p.dbHits()
 }
 
 // dbHits returns the storage accesses attributable to the wrapped operator.
+//
+// The measured counter wins over the derived one wherever both are available: a
+// figure the operator counted is never worse than a figure inferred from its
+// boundary.
 func (p *profiledOp) dbHits() int64 {
+	if c, ok := p.inner.(storageAccessCounter); ok {
+		return c.storageAccesses()
+	}
 	if _, ok := p.inner.(StorageRecordScan); ok {
 		return p.rows
 	}
@@ -332,30 +360,57 @@ var (
 // StorageRecordScan — which operators have db-hits at all
 // ─────────────────────────────────────────────────────────────────────────────
 
-// StorageRecordScan marks an operator that READS RECORDS FROM STORAGE, one record
-// per row it emits, so its logical storage-access count (its db-hits) equals its
-// emitted row count (rmp #2238).
+// StorageRecordScan marks an operator whose emitted row count IS its logical
+// storage-access count: it reads exactly one record per row it emits, so the
+// boundary count the profiling wrapper already has is the access count
+// (rmp #2238).
 //
 // # Why a marker rather than a counter
 //
 // Db-hits exist to distinguish a selective seek from a scan that filtered
 // afterwards: both can emit the same handful of rows while touching wildly
-// different amounts of storage. That distinction lives entirely in the LEAVES —
-// which records were read — and every operator above them consumes rows its
-// children already produced, touching no storage of its own.
+// different amounts of storage.
 //
-// For a leaf, "records read" and "rows emitted" are the same number by
-// construction:
+// For the operators listed below, "records read" and "rows emitted" are the same
+// number by construction:
 //
-//   - a label or all-nodes scan yields one node record per emitted row;
-//   - an index seek, seek-set or range scan yields one node record per posting-list
-//     entry it emits;
-//   - an expand yields one relationship record per emitted neighbour.
+//   - a label or all-nodes scan yields one node reference per emitted row;
+//   - an index seek, seek-set or range scan yields one node reference per
+//     posting-list entry it emits;
+//   - a single-hop expand yields one relationship slot per EMITTED neighbour.
 //
 // So the count is available at the operator boundary, where the profiling wrapper
 // already sits, and needs no counter threaded through any accessor. That is not a
 // shortcut but the point: with nothing threaded, a non-PROFILE Run executes no
 // counting CODE AT ALL — there is not even a nil check to skip on the hot path.
+//
+// # Where the identity does NOT hold, and what is done about it
+//
+// The identity is a property of these particular operators, not a law of access
+// paths, and rmp #2720 measured three places where it fails. Each is stated here
+// rather than left for a reader of a `dbhits=` figure to discover:
+//
+//   - A TRAVERSAL operator reads many relationship records per emitted row.
+//     [VarLengthExpand] therefore does NOT carry this marker; it implements
+//     [storageAccessCounter] instead and reports the count it already maintains
+//     for its traversal budget, so its figure is MEASURED. Measured on a 200-way
+//     fan with one 3-hop chain, `-[*3..3]->` emitted one row for 202 relationship
+//     slots read — a 202x under-report before the counter was wired.
+//   - [ShortestPath] and [AllShortestPaths] read relationship records and carry
+//     NEITHER interface, so they report 0. Their own totalEdgesTraversed counter
+//     covers only the exhaustive path-predicate search and not the bidirectional
+//     BFS, so wiring it would report an authoritative-looking zero for the common
+//     path; reporting 0 with this note is the lesser misstatement of the two.
+//   - A single-hop [Expand] with a relationship-type filter reads every slot of
+//     the source's adjacency run and emits only the admitted ones (the edgeSkip
+//     branch), so its figure counts EMITTED edges, not slots read. Measured: an
+//     out-degree-100 node with one :KNOWS edge reports 1 db-hit for the same
+//     100-slot CSR walk that `-->` reports 100 for. Correcting it needs a counter
+//     the operator does not have, whose per-slot increment a non-PROFILE run would
+//     pay — the trade this marker exists to avoid — so it is recorded, not fixed.
+//   - The morsel-parallel leaves ([ParallelScanProject], [ParallelAggregateScan],
+//     [ParallelCountScan]) carry neither interface and report 0 for a full scan.
+//     Their [PlanDetail] says so in the rendered plan.
 //
 // # What this deliberately does not count
 //
@@ -368,8 +423,9 @@ var (
 // leaf reads with guessed property reads would be less useful than one whose
 // meaning is exact.
 //
-// An operator that does not implement this interface reports 0 db-hits, which is
-// the honest answer for a pure row transformer.
+// An operator that implements neither this interface nor [storageAccessCounter]
+// reports 0 db-hits, which is the honest answer for a pure row transformer and an
+// under-report for the operators named above.
 type StorageRecordScan interface {
 	// storageRecordPerRow is a marker. It is unexported so only operators in this
 	// package can claim to read storage, which keeps the guarantee auditable: the
@@ -384,4 +440,30 @@ func (*NodeByIndexSeekSet) storageRecordPerRow()   {}
 func (*NodeByIndexRangeScan) storageRecordPerRow() {}
 func (*Expand) storageRecordPerRow()               {}
 func (*OptionalExpand) storageRecordPerRow()       {}
-func (*VarLengthExpand) storageRecordPerRow()      {}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// storageAccessCounter — operators that COUNT their own storage accesses
+// ─────────────────────────────────────────────────────────────────────────────
+
+// storageAccessCounter is implemented by an operator that can report the number
+// of storage records it actually read, rather than having that number inferred
+// from the rows it emitted ([StorageRecordScan]).
+//
+// It is admitted only where the operator ALREADY maintains the counter for its
+// own reasons — a traversal budget, a safety cap — so implementing it costs a
+// non-PROFILE run nothing, and the cost-when-off guarantee this file's Profiler
+// documents is untouched. An operator that would have to add a per-record
+// increment to satisfy it must NOT implement it: paying every ordinary query for
+// a diagnostic is the trade [StorageRecordScan] exists to refuse.
+//
+// The method is unexported so only operators in this package can claim to have
+// measured their accesses, which keeps the set of measured sources auditable.
+//
+// A figure reported here is MEASURED. A figure from [StorageRecordScan] is
+// DERIVED. The rendered plan does not distinguish them, which rmp #2720 records
+// as a known limitation of the output rather than of the accounting.
+type storageAccessCounter interface {
+	// storageAccesses returns the storage records this operator has read over its
+	// whole lifetime, including any Init it has been restarted by.
+	storageAccesses() int64
+}
