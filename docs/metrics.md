@@ -369,7 +369,6 @@ retaining objects between calls):
 | `search.pool.dfs.get` / `.put` | `dfsPool` acquire / release (iterative DFS). |
 | `search.pool.bfs_do.get` / `.put` | `bfsDoScratchPool` acquire / release (direction-optimising BFS). |
 | `search.pool.dijkstra.get` / `.put` | `dijkstraPool[W]` acquire / release (all Dijkstra variants). |
-| `cypher.pool.slab.get` / `.put` | `SlabPool` acquire / release (Cypher row-slab allocator). |
 | `bolt.pool.encoder.get` / `.put` | `EncodePool` acquire / release (Bolt PackStream encoder). |
 | `bolt.pool.decoder.get` / `.put` | `DecodePool` acquire / release (Bolt PackStream decoder). |
 
