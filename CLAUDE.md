@@ -526,11 +526,11 @@ having spent itself producing it.
 the work the task actually consists of. That match is read from **two** sources,
 and both are mandatory:
 
-- **The task** — its title, its functional, technical and acceptance criteria,
-  and above all its **comment log**. The comments are the brief; the fields alone
-  are not. A task whose fields describe a version upgrade while its comments
-  record that the upgrade already happened and the decision was reversed will
-  send the wrong specialist after the wrong problem.
+- **The task** — its title, its objective, its functional, technical and
+  acceptance criteria, and above all its **comment log**. The comments are the
+  brief; the fields alone are not. A task whose fields describe a version
+  upgrade while its comments record that the upgrade already happened and the
+  decision was reversed will send the wrong specialist after the wrong problem.
 - **The sprint the task sits in** — its title, its description, and its comment
   log. The sprint states the macro objective the task serves, and a task
   executed outside that objective is executed wrongly even when its own criteria
