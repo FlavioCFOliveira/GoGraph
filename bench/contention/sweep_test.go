@@ -64,12 +64,20 @@ const envSweepWorkloads = "GOGRAPH_CONTENTION_WORKLOADS"
 // published "re-measured on a quiet host" floor would have been the old
 // contaminated one.
 //
+// This is now ENFORCED, not merely documented: the test refuses to run at all
+// when cmd/go has signalled that it will cache the result, and because Go stores
+// only passing results the refusal itself can never be cached either. See
+// requireFreshRun in cachegate_test.go for the mechanism and its proof.
+//
 // Always pass -count=1.
 func TestSweep(t *testing.T) {
 	root := os.Getenv(envSweepDir)
 	if root == "" {
 		t.Skipf("set %s=<abs dir> to run the contention sweep, and pass -v or its output is discarded", envSweepDir)
 	}
+	// The campaign is on. Refuse to produce numbers cmd/go would be entitled
+	// to replay in place of the next run's; see cachegate_test.go.
+	requireFreshRun(t)
 	if !filepath.IsAbs(root) {
 		t.Fatalf("%s must be absolute (the child runs in its own temp cwd), got %q", envSweepDir, root)
 	}

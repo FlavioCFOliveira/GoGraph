@@ -28,6 +28,42 @@ window supplying throughput and latency, and a profiled window supplying lock
 attribution. The profiles and the heap are both cumulative per process with no
 reset API, so sharing a process lets the first window contaminate the second.
 
+### Freshness audit — which numbers are proved to come from a real run (rmp #2713)
+
+`go test` caches a passing package result and, on a later invocation with the
+same binary, the same cacheable flags and the same environment variables, prints
+that stored result instead of running anything. A replay reprints the previous
+run's throughput, its latency and even its reported test duration; the only tell
+is `(cached)` in place of the elapsed time on the `ok` line. This document was
+written before that hazard was known, so nothing warned about it at the time and
+every number here had to be re-checked against surviving evidence.
+
+**The hazard is now closed at the source.** `bench/contention` refuses to
+measure whenever cmd/go has signalled that it intends to store the result, and
+Go stores only *passing* results — so a run that publishes numbers is never
+cacheable and a cached measurement can no longer exist. See
+`bench/contention/cachegate_test.go`.
+
+**What was audited.** Every surviving file on this host carrying a
+`bench/contention` package-result line: **312 files, 327 result lines**. Exactly
+**one** historical campaign `(cached)` result exists and it belongs to a
+different document — the Bolt evaluation's noise-floor retake. None of this
+document's campaigns is among them.
+
+| Published numbers | Verdict | Evidence |
+|---|---|---|
+| The scaling table (25 workloads x 5 levels, and `ops/s at 1`); the round-2 column of "Round 1 verified" | **Verified fresh** | Driven by a script that passes `-count=1`. Its log ends `ok … 1025.498s`, not `(cached)`, and the wrapper's own clock brackets the run 16:40:48 -> 16:57:54 UTC = **1026 s**, matching the reported 1025.26 s; a replay would have shown a bracket of about a second against the same reported duration. Its 966 artefact files span 1024.5 s. `summary.tsv` reproduces every cell checked — 8 workloads x 5 scaling cells plus 8 level-1 throughputs, **0 mismatches**. |
+| The ranked inventory's ceilings and spreads; the level-1 handicap table; the `cypher-write-mem` validity control | **Verified fresh** | Same construction: `-count=1`, log ends `ok … 2795.218s`, wrapper bracket 17:04:05 -> 17:50:41 UTC = **2796 s** against a reported 2794.85 s, artefacts spanning 2794.4 s. `ceiling.tsv` reproduces all 15 ranked ratios checked, all 6 handicap ratios and all 3 validity-control rows, spreads included. |
+| Every blocked-time and share figure; the CPU-profile shares; the rmp #2697 `execUnderBarrier` correction table | **Verified fresh** | Re-derived from the surviving profiles rather than from any console line: `generation-publish-read@1024` yields **2337.55 s** and `index-hash-rw@1024` yields **273.74 s**, both exactly as published, and the profiles' own embedded capture times (17:56:41 and 17:43:30 WEST) fall inside the logged sweep window. |
+| The noise floor: eighteen A-vs-A ratios, the +/-2.4% rule, the 38.88% and 19.23% spreads | **Verified fresh** | Two probe logs ending `ok … 206.583s` and `ok … 197.816s`, each bracketed by loadavg lines whose own clock (17:14 -> 17:18 and 17:21 -> 17:25) matches the reported duration. Their `ceiling.tsv` files carry the published `0.3888` and `0.1923` spreads. Unrelated to caching: the first probe's directory also holds 12 files from an earlier partial run at 17:07–17:08; the published `ceiling.tsv` is written wholesale from the final run's rows, so those leftovers did not enter the figures. |
+| The `dst-mvcc-sessions` row and its `loadavg 1.74 before / 2.60 after` | **Verified fresh** | Driven with `-count=1`; the log records `loadavg_before: { 1,74 … }` and `loadavg_after: { 2,60 … }` — the published pair — and ends `ok … 12.968s`. |
+| The fault-rate probe table (5000 / 559 / 4441 / 561); the error-class probe (9 / 30720 staggered, **2163 / 30720** with the barrier, 1934 + 229 classes); the seed 29 / 102 / 215 replays; the `Manager` cross-reference counts (113 and 88); the **649% / 669% / 506%** core-utilisation figures | **Cannot be verified** | No surviving log reproduces any of them. The only files on this host containing these figures are this document and the working notes written from it. The 312-file scan bounds the risk — no cached campaign result exists anywhere in this document's lineage — but that is a statement about the population, not evidence about these particular numbers. |
+
+Nothing in this table is a claim that an unverified number is wrong. It is a
+claim that the evidence needed to prove it fresh no longer exists, which is a
+different and weaker statement — and the honest one. Replacing the unverified
+figures is not part of rmp #2713.
+
 ### The noise floor is not one number
 
 Measured first and twice, A-vs-A — the same code on both sides, driven by exactly

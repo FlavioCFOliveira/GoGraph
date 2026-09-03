@@ -22,6 +22,42 @@ reset API, so sharing a process lets the first window contaminate the second —
 when they shared one, the *profiled* window measured faster than the unprofiled
 one in five runs of six.
 
+### Freshness audit — which numbers are proved to come from a real run (rmp #2713)
+
+`go test` caches a passing package result and, on a later invocation with the
+same binary, the same cacheable flags and the same environment variables, prints
+that stored result instead of running anything. A replay reprints the previous
+run's throughput, its latency and even its reported test duration; the only tell
+is `(cached)` in place of the elapsed time on the `ok` line. This document was
+written before that hazard was known, so nothing in the reproduction command
+recorded below warned about it, and every number here had to be re-checked
+against surviving evidence.
+
+**The hazard is now closed at the source.** `bench/contention` refuses to
+measure whenever cmd/go has signalled that it intends to store the result, and
+Go stores only *passing* results — so a run that publishes numbers is never
+cacheable and a cached measurement can no longer exist. See
+`bench/contention/cachegate_test.go`.
+
+**What was audited.** Every surviving file on this host carrying a
+`bench/contention` package-result line: **312 files, 327 result lines**. Exactly
+**one** historical campaign `(cached)` result exists and it belongs to a
+different document — the Bolt evaluation's noise-floor retake. One further
+cached line is a whole-module `go test ./...` gate run in which this package's
+measurement entry points were skipped and published nothing.
+
+| Published numbers | Verdict | Evidence |
+|---|---|---|
+| The scaling table; the `before (ops/s)` column; sites 1–8 shares and blocked times; the three refuted leads | **Verified fresh** | The campaign log ends `ok … 393.834s`, not `(cached)`. Its run directory holds its own bracket — `loadavg.before` = `{1,40 2,45 3,99}`, `loadavg.after` = `{5,65 6,18 5,43}` — written at 15:24:07 and 15:30:41 on 2026‑09‑01, **394 s apart**, matching the 393.8 s reported; its 758 artefact files span 394.2 s. `summary.tsv` reproduces every published cell checked (10 of 10 throughput cells, 25 of 25 scaling cells). The surviving `cypher-write-mem@1024/probe/mutex.pb.gz` independently re-derives the published **402.96 s** total, with an embedded capture time of 15:25:25 — inside the bracket. |
+| The clean re-measurement at `29860f7a`: the `after` column, the anti-scaling table, the 71.2 s, the `index-hash-rw` validity control | **Verified fresh** | Its log ends `ok … 71.243s`. Its run directory's own `loadavg.before` = `{2,88 …}` and `loadavg.after` = `{7,67 …}`, written at 23:42:02 and 23:43:30, are exactly the **2.88 / 7.67** published; 283 artefact files in one contiguous window. |
+| Site 3's follow-ups: **0.348 / 0.354 / 0.357** at zero write fraction; the **7.9×** pure-read and **1.6×** mixed control arm; the **7.61×** host ceiling | **Cannot be verified** | No surviving log, summary or artefact reproduces these figures — a search of the whole session that produced them finds no file containing `0.348`. The session retains roughly 200 campaign logs from that phase and **none carries a `(cached)` result line**, which bounds the risk; it does not establish that any particular figure above came from a fresh run. |
+| The `graph/index/label` ceiling behind rmp #2685 ("only ~4%") | **Cannot be verified** | Same: no surviving log ties that figure to a run. |
+
+Nothing in this table is a claim that an unverified number is wrong. It is a
+claim that the evidence needed to prove it fresh no longer exists, which is a
+different and weaker statement — and the honest one. Replacing the unverified
+figures is not part of rmp #2713.
+
 ### Reading the numbers honestly
 
 - **The host has 10 cores.** Only the 1 → 8 region is a scaling signal. At 64 and
