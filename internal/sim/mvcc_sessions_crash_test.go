@@ -198,6 +198,52 @@ func mvccDeepConfig(seed uint64) MVCCSessionsConfig {
 // reclamation-sensitive finding becomes countable moves between processes even
 // though the defect is stable. The seeds here are byte-identical over repeats,
 // but the gate must not depend on that for a mode that can reach reclamation.
+// TestMVCCSessionsCrash_InboundArcLeakSeeds is the seed gate for rmp #2725: the
+// two seeds of the 1000-seed sweep whose edge-count checker fired on an arc
+// that no committed transaction created.
+//
+// Both are on the NO-CRASH arm at the crash configuration's tick depth, so the
+// finding needs depth and not a crash. The interleaving is a transaction with an
+// uncommitted `CREATE (a)-[:KNOWS]->(b)` and a `DETACH DELETE b` whose per-edge
+// in-arc removal was refused on a's adjacency; the delete journalled an inverse
+// for that refusal anyway, and once the creator had rolled its own arc back the
+// delete's rollback re-created it. Both were unclean at `cd91a8bc` (seed 447
+// created the leak at tick 215 and surfaced it at 349, when a later append on
+// the SAME source republished the entry) and are the named reproducers the
+// diagnosis (docs/mvcc-life-record-defects-2026-09-03.md, family 2) left behind.
+//
+// The mechanism is pinned at the layers that own it:
+// graph/lpg TestConflict_EdgeRemovalReportsItsRefusal and
+// cypher TestMVCCDetachDeleteRollback_DoesNotResurrectPeerInboundArc.
+//
+// NO TICK IS ASSERTED, for the reason given on
+// [TestMVCCSessionsCrash_SplitLifePairSeeds].
+func TestMVCCSessionsCrash_InboundArcLeakSeeds(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	ctx := context.Background()
+	for _, seed := range []uint64{447, 760} {
+		t.Run(fmt.Sprintf("nocrash/seed=%d", seed), func(t *testing.T) {
+			res, err := RunMVCCSessions(ctx, mvccDeepConfig(seed))
+			if err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if len(res.FoldErrors) > 0 {
+				t.Fatalf("fold refusal returned: %v", res.FoldErrors)
+			}
+			if !res.Clean() {
+				t.Fatalf("violations=%v", res.Violations)
+			}
+			// Non-vacuity: the leak is built out of a ROLLBACK that overlaps a
+			// peer's write, so a schedule with no rollbacks cannot exercise it,
+			// and a run that stopped early would never reach the later append
+			// that republishes the entry and makes the leak observable.
+			if res.TxCommitted == 0 || res.TxRolledBack == 0 || res.Statements < 400 {
+				t.Fatalf("run did not exercise the reproducer: %+v", res)
+			}
+		})
+	}
+}
+
 func TestMVCCSessionsCrash_SplitLifePairSeeds(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	ctx := context.Background()

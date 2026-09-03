@@ -19193,6 +19193,16 @@ func (a *lpgMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 // strips the per-pair edge labels/properties once the pair is fully
 // disconnected, so re-creating an edge between the same endpoints does not
 // resurrect the deleted relationship's type or properties.
+//
+// The edges-removed counter and the undo inverse are gated on the removal
+// having APPLIED, not on the presence probe alone (rmp #2725): a per-edge
+// removal is a non-commutative adjacency write and can be REFUSED by a
+// concurrent transaction's in-flight append on the same source, in which case
+// [lpg.WriteView.RemoveEdge] mutates nothing. An inverse recorded for that
+// re-adds an arc this transaction never removed. The same gate
+// [lpgMutatorAdapter.RemoveEdgeByHandle] has always used (rmp #2018) and that
+// the bulk path took at rmp #2694 — this was the loop they both missed, the one
+// DETACH DELETE uses for the victim's INBOUND arcs.
 func (a *lpgMutatorAdapter) RemoveEdge(src, dst string) {
 	present := a.g.AdjList().HasEdge(src, dst)
 	r := a.rec()
@@ -19200,15 +19210,21 @@ func (a *lpgMutatorAdapter) RemoveEdge(src, dst string) {
 	if r.active() {
 		pre = r.captureRemovedEdge(src, dst)
 	}
+	// Count-store (#2082): capture the removed first-slot instance's type and
+	// endpoint labels before the adjacency removal — it reads state the removal
+	// clears, so it cannot move below the gate. Enqueuing it for a refused
+	// removal is harmless: the deltas sit in the per-transaction
+	// [exec.CountBuffer], a refused transaction cannot commit, and
+	// [exec.CountBuffer.Rollback] discards them unapplied.
+	if present && a.cs() != nil {
+		countEdgeRemovedFirstSlot(a.g, a.cs(), a.countBuf(), src, dst)
+	}
+	if !a.w().RemoveEdge(src, dst) {
+		return
+	}
 	if present {
 		a.countRelDeleted()
-		// Count-store (#2082): capture the removed first-slot instance's type and
-		// endpoint labels before the adjacency removal.
-		if a.cs() != nil {
-			countEdgeRemovedFirstSlot(a.g, a.cs(), a.countBuf(), src, dst)
-		}
 	}
-	a.w().RemoveEdge(src, dst)
 	r.recordRemoveEdge(&pre, present)
 }
 
@@ -20170,13 +20186,21 @@ func (a *walMutatorAdapter) RemoveEdge(src, dst string) {
 	if r.active() {
 		pre = r.captureRemovedEdge(src, dst)
 	}
+	if present && a.cs() != nil { // count-store (#2082): capture before the removal
+		countEdgeRemovedFirstSlot(a.g, a.cs(), a.countBuf(), src, dst)
+	}
+	// The counter, the WAL frame and the undo inverse all wait on the removal
+	// having APPLIED — see the [lpgMutatorAdapter.RemoveEdge] twin (rmp #2725).
+	// The frame waits for the reason rmp #2694 gave for the bulk path: a refused
+	// removal removed nothing, so emitting its frame would durably record a
+	// deletion this transaction never performed. A refused transaction cannot
+	// commit, but the WAL is the durable truth and may only describe work done.
+	if !a.w().RemoveEdge(src, dst) {
+		return
+	}
 	if present {
 		a.countRelDeleted()
-		if a.cs() != nil { // count-store (#2082): capture before the removal
-			countEdgeRemovedFirstSlot(a.g, a.cs(), a.countBuf(), src, dst)
-		}
 	}
-	a.w().RemoveEdge(src, dst)
 	_ = a.tx.RemoveEdge(src, dst) //nolint:errcheck // ErrTxFinished impossible here
 	r.recordRemoveEdge(&pre, present)
 }

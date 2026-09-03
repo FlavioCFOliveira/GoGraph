@@ -311,7 +311,7 @@ func (t *labelTx[N, W]) addEdge(src, dst N, w W) error {
 // removeEdge removes an arc inside this transaction — the NON-COMMUTATIVE
 // adjacency write, refused by any concurrent adjacency write to the same source,
 // append included. See [adjVersions].
-func (t *labelTx[N, W]) removeEdge(src, dst N) { t.g.removeEdgeInfo(src, dst, t.ctx) }
+func (t *labelTx[N, W]) removeEdge(src, dst N) bool { return t.g.removeEdgeInfo(src, dst, t.ctx) }
 
 // setEdgeLabel writes a pair's relationship type inside this transaction. It
 // reaches the overflow store when the pair already carries one.

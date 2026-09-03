@@ -2427,29 +2427,52 @@ func (g *Graph[N, W]) NextEdgeHandle() uint64 { return g.nextEdgeHandle() }
 // using [adjlist.AdjList.RemoveEdge] directly; that path does not touch
 // labels or properties.
 func (g *Graph[N, W]) RemoveEdge(src, dst N) {
-	g.removeEdgeInfo(src, dst, nil)
+	// The applied-report is dropped here and only here: an untransacted mutation
+	// takes no conflict check, so it can never be refused, and [graph.Graph]
+	// declares this method void.
+	_ = g.removeEdgeInfo(src, dst, nil)
 }
 
 // removeEdgeInfo is [Graph.RemoveEdge] with an explicit write transaction; tx is
 // nil for a direct Go-API mutation, which is committed the instant it is made
 // and takes no conflict check. See [writeCtx].
-func (g *Graph[N, W]) removeEdgeInfo(src, dst N, tx *writeCtx) {
+//
+// It reports whether the removal was APPLIED. FALSE means tx hit a write-write
+// conflict on the adjacency and NOTHING was mutated; TRUE means the removal ran,
+// whether or not an arc was actually there to take out — the caller's own
+// presence probe answers that second question, and only this one answers the
+// first (rmp #2725).
+//
+// A caller that journals an inverse MUST consult it, exactly as
+// [Graph.removeAllEdgesFromInfo] (rmp #2694) and [Graph.removeEdgeByHandleInfo]
+// (rmp #2018) require. This path was the one that still did not report, so a
+// refused per-edge removal left an inverse in the undo log that RE-ADDS an arc
+// this transaction never took out. When the winning peer rolls back FIRST its
+// own rollback withdraws the arc, and the refused transaction's rollback then
+// re-creates it: a rolled-back edge surviving both rollbacks, belonging to no
+// transaction. See [WriteView.RemoveEdge].
+//
+// It differs from [Graph.removeAllEdgesFromInfo], which also returns false when
+// there was nothing to remove: here false means REFUSED and nothing else, so a
+// caller can distinguish "lost the race" from "no such edge".
+func (g *Graph[N, W]) removeEdgeInfo(src, dst N, tx *writeCtx) bool {
 	defer g.reclaimAfterDirectWrite(tx)
 	srcID, srcOK := g.adj.Mapper().Lookup(src)
 	dstID, dstOK := g.adj.Mapper().Lookup(dst)
 	// An arc removal is the NON-COMMUTATIVE adjacency write: it may not step over
 	// another transaction's in-flight append or removal on this source. Checked
 	// before anything is captured or mutated, so a doomed transaction leaves the
-	// adjacency untouched (rmp #2300). Recorded rather than returned — this
-	// primitive is void by contract, which is exactly the case
-	// [writeCtx.conflictErr] exists for.
+	// adjacency untouched (rmp #2300). The typed conflict is RECORDED on tx by
+	// [writeCtx.conflictErr] rather than returned — this primitive's own return
+	// is the boolean applied-report, not an error — and the false below is what
+	// tells the caller not to journal an inverse for it (rmp #2725).
 	if srcOK && tx != nil {
 		if err := g.adjVer.noteExclusive(srcID, tx); err != nil {
-			return
+			return false
 		}
 		if !g.adj.Directed() && dstOK {
 			if err := g.adjVer.noteExclusive(dstID, tx); err != nil {
-				return
+				return false
 			}
 		}
 	}
@@ -2501,10 +2524,10 @@ func (g *Graph[N, W]) removeEdgeInfo(src, dst N, tx *writeCtx) {
 				g.reassertPairProps(dst, src, revProps)
 			}
 		}
-		return
+		return true
 	}
 	if !srcOK || !dstOK {
-		return
+		return true
 	}
 	g.clearEdgePairState(edgeKey{src: srcID, dst: dstID}, tx)
 	if !g.adj.Directed() {
@@ -2513,6 +2536,10 @@ func (g *Graph[N, W]) removeEdgeInfo(src, dst N, tx *writeCtx) {
 		// endpoint order).
 		g.clearEdgePairState(edgeKey{src: dstID, dst: srcID}, tx)
 	}
+	// TRUE even when clearEdgePairState was refused on a side store: the ARC is
+	// gone from the adjacency by now, so the inverse is owed and the caller must
+	// journal it. This return answers only "did the adjacency removal apply".
+	return true
 }
 
 // RemoveEdgeByHandle removes the single parallel edge instance identified by
@@ -2553,8 +2580,13 @@ func (g *Graph[N, W]) removeEdgeByHandleInfo(src, dst N, handle uint64, tx *writ
 		// The transaction-carrying form: the exported one passes a nil writeCtx, so
 		// this whole removal would resolve its commit record through the ambient slot
 		// and publish on whichever transaction that names (rmp #2320).
-		g.removeEdgeInfo(src, dst, tx)
-		return had
+		//
+		// The presence probe alone is NOT the answer this function owes (rmp
+		// #2725): a removal refused on the adjacency claim mutates nothing, and
+		// returning `had` would tell the caller to journal an inverse for it. The
+		// caller journals on THIS return, so it has to carry both facts.
+		applied := g.removeEdgeInfo(src, dst, tx)
+		return had && applied
 	}
 
 	srcID, srcOK := g.adj.Mapper().Lookup(src)
