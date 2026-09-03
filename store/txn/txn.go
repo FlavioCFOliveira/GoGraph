@@ -989,9 +989,113 @@ type Op[N comparable, W any] struct {
 // alone, so two transactions overlap freely and a write-write conflict between
 // them is detected and reported rather than prevented by exclusion.
 type Tx[N comparable, W any] struct {
-	store    *Store[N, W]
-	ops      []Op[N, W]
-	finished bool
+	store *Store[N, W]
+	ops   []Op[N, W]
+	// applyGateSeq is the dense store sequence [Tx.appendOnly] minted for this
+	// transaction. It is valid only while applyGateMinted is true.
+	//
+	// The sequence lives on the Tx rather than only in appendOnly's return
+	// values because the OBLIGATION it creates outlives the call that mints it:
+	// once minted, the sequence must take its turn in the apply gate and advance
+	// it, on every exit from the commit — return, error, and PANIC. The commit
+	// entry points therefore register [Tx.finishCommit] BEFORE calling
+	// appendOnly, and that deferred call can only find the sequence here (rmp
+	// #2727). Every field below is written and read by the single goroutine that
+	// owns the Tx, exactly like finished, so none needs synchronisation.
+	applyGateSeq uint64
+	// applyGateMinted records that a sequence was minted, so the apply-gate
+	// obligation exists. False for an empty commit and for the cap rejection,
+	// which mint nothing.
+	applyGateMinted bool
+	// applyGateTaken records that [Tx.waitApplyTurn] has returned for
+	// applyGateSeq, so the turn is held and must not be waited for twice.
+	applyGateTaken bool
+	// applyGateDone records that [Tx.advanceApply] has run for applyGateSeq, so
+	// the gate is discharged and must not be advanced twice.
+	applyGateDone bool
+	// writerReleased records that this transaction's admitted-writer
+	// registration has been handed back, so [Store.exitWriter] runs exactly once
+	// per Tx no matter which of the three terminal paths gets there first.
+	writerReleased bool
+	finished       bool
+}
+
+// takeApplyTurn blocks until this transaction's minted sequence is next in the
+// apply chain, at most once per transaction. It is a no-op when no sequence was
+// minted (an empty commit or the cap rejection) or when the turn is already
+// held.
+//
+// The turn is ALWAYS taken before the gate is advanced — that is what
+// [Tx.closeApplyGate] guarantees on the paths that never reach here — so the
+// gate can never publish a sequence out of order.
+func (t *Tx[N, W]) takeApplyTurn() {
+	if !t.applyGateMinted || t.applyGateTaken {
+		return
+	}
+	t.applyGateTaken = true
+	t.waitApplyTurn(t.applyGateSeq)
+}
+
+// closeApplyGate discharges the apply-gate obligation a minted sequence creates,
+// exactly once, and is safe to call from a defer on every exit path — including
+// a panic unwinding out of [Tx.appendOnly] itself.
+//
+// # Why the wait is inside it, and why a bare advance would be a correctness bug
+//
+// Sequences are dense and the gate's whole job is to order the in-memory apply
+// by them. Advancing without first taking the turn would set appliedSeq = seq
+// while a LOWER sequence had not applied, which both lets seq+1 apply out of
+// order and drives appliedSeq BACKWARDS when the true predecessor advances
+// afterwards — a wedge on top of an ordering violation. So the repair does
+// exactly what the success path does, in the same order: wait, then advance.
+// The only difference is that nothing is applied in between, which is correct
+// because a transaction that panicked out of its commit must not apply — the
+// same decision the append-error and fsync-error branches already make.
+//
+// The wait cannot deadlock. Every minted sequence now advances from this defer,
+// so the predecessor a repair waits on is itself guaranteed to advance; before
+// rmp #2727 that was exactly what did not hold, and a single panicking committer
+// parked every later committer on the store for ever.
+func (t *Tx[N, W]) closeApplyGate() {
+	if !t.applyGateMinted || t.applyGateDone {
+		return
+	}
+	t.takeApplyTurn()
+	t.applyGateDone = true
+	t.advanceApply(t.applyGateSeq)
+}
+
+// releaseWriter hands this transaction's admitted-writer registration back to
+// the store, exactly once per Tx.
+//
+// The registration is taken once, in [Store.BeginCtx], and three terminal paths
+// can reach its release: [Tx.Commit], [Tx.CommitWALOnly], and [Tx.Rollback] —
+// and, on a panic, a containment boundary that calls Rollback after the commit's
+// own deferred release has already run (cypher's recoverFinishPanic, rmp #2707).
+// The guard is what lets the commit paths defer the release from BEFORE the
+// sequence is minted without any risk of a second decrement: an unpaired
+// exitWriter would drive [Store.inflight] negative, and drainInflight waits for
+// exactly zero, so it would never return.
+func (t *Tx[N, W]) releaseWriter() {
+	if t.writerReleased {
+		return
+	}
+	t.writerReleased = true
+	t.store.exitWriter()
+}
+
+// finishCommit is the single deferred finaliser both durable commit entry points
+// register BEFORE minting a sequence, so no exit from the commit — return,
+// error, or panic — can leave either obligation outstanding (rmp #2707, #2727).
+//
+// The order is the historical one and is load-bearing in one direction only: the
+// apply gate is advanced FIRST, then the writer registration is released, so a
+// quiesce ([Store.RunUnderCommitLock], the seam the checkpointer and
+// store.DB.Close take) that observes inflight reach zero can never be observing
+// a store that still owes an apply-gate advance.
+func (t *Tx[N, W]) finishCommit() {
+	t.closeApplyGate()
+	t.releaseWriter()
 }
 
 // AddEdge buffers an AddEdge(src, dst, w) operation on the graph.
@@ -1387,6 +1491,13 @@ func (t *Tx[N, W]) Commit() error {
 		metrics.IncCounter("store.txn.Commit.errors", 1)
 		return ErrTxFinished
 	}
+	// Registered BEFORE the sequence is minted, so NO exit from this function —
+	// return, error, or panic — can leave a hole in the dense sequence chain or
+	// the store's writer registration leaked (rmp #2727). It advances the apply
+	// gate and then pairs the in-flight registration [Store.BeginCtx] made, in
+	// that order, so a draining RunUnderCommitLock never observes a zero
+	// in-flight count while a commit still owes the gate an advance.
+	defer t.finishCommit()
 
 	// Group-commit phase 1 — APPEND: cap check, mint the transaction sequence,
 	// encode and append every op frame plus the OpCommit marker. Contiguity of a
@@ -1403,11 +1514,7 @@ func (t *Tx[N, W]) Commit() error {
 	// — a store-only writer has no instant to restore. The MVCC path is
 	// [Tx.CommitWALOnly], which is handed the timestamp its caller allocated before
 	// the fsync.
-	seq, hasSeq, mark, appendErr := t.appendOnly(0)
-	// Pair the in-flight registration appendOnly made: cleared only after the
-	// entire commit (SyncGroup + apply gate) below has finished, so a draining
-	// RunUnderCommitLock never closes the WAL mid-fsync.
-	defer t.store.exitWriter()
+	hasSeq, mark, appendErr := t.appendOnly(0)
 
 	if !hasSeq {
 		// No sequence was minted (empty commit, or the cap-check rejection
@@ -1430,7 +1537,8 @@ func (t *Tx[N, W]) Commit() error {
 
 	// A sequence was minted (hasSeq). It MUST advance the apply gate exactly
 	// once, in every outcome below (append error, fsync failure, apply error,
-	// or success), or a gap would wedge every higher-sequence committer.
+	// or success) AND on a panic, or a gap would wedge every higher-sequence
+	// committer. That is what the deferred [Tx.finishCommit] above guarantees.
 
 	// Group-commit phase 2 — DURABILITY with the semaphore free: a single
 	// coalesced fsync covers this transaction's marker and every other
@@ -1445,8 +1553,10 @@ func (t *Tx[N, W]) Commit() error {
 	// lower-sequence transaction has applied (or been skipped), so the
 	// in-memory view is mutated in WAL order and no Graph.View reader observes
 	// an out-of-order or pre-durable state.
-	t.waitApplyTurn(seq)
-	defer t.advanceApply(seq)
+	//
+	// The matching advance is the deferred [Tx.finishCommit]'s. It runs after the
+	// apply below, exactly as the `defer t.advanceApply(seq)` it replaced did.
+	t.takeApplyTurn()
 
 	if appendErr != nil {
 		// The append did not complete (encode/append failure). No durable,
@@ -1513,8 +1623,10 @@ func (t *Tx[N, W]) Commit() error {
 // dense per-store transaction sequence shared by [Tx.Commit] and CommitWALOnly;
 // if CommitWALOnly minted a sequence without advancing the gate, a later
 // [Tx.Commit] on the same store would wait on appliedSeq forever. Taking the
-// turn and immediately advancing (applying nothing) keeps the chain dense
-// whether or not the two commit paths are mixed on one store. The caller (the
+// turn and advancing it (applying nothing) keeps the chain dense whether or not
+// the two commit paths are mixed on one store — and both halves happen on EVERY
+// exit, panic included, because the advance is deferred through
+// [Tx.finishCommit] before the sequence is minted (rmp #2727). The caller (the
 // Cypher engine's commitUnderBarrier, #1281) has already applied the mutations
 // eagerly inside the visibility barrier, and CommitWALOnly returning only after
 // the covering fsync preserves durable-before-visible.
@@ -1525,8 +1637,10 @@ func (t *Tx[N, W]) CommitWALOnly(commitTS uint64) error {
 		return ErrTxFinished
 	}
 
-	seq, hasSeq, mark, appendErr := t.appendOnly(commitTS)
-	defer t.store.exitWriter()
+	// See [Tx.Commit] for why this is registered before the mint.
+	defer t.finishCommit()
+
+	hasSeq, mark, appendErr := t.appendOnly(commitTS)
 	if !hasSeq {
 		if appendErr != nil {
 			metrics.IncCounter("store.txn.CommitWALOnly.errors", 1)
@@ -1540,10 +1654,10 @@ func (t *Tx[N, W]) CommitWALOnly(commitTS uint64) error {
 		return nil
 	}
 	syncErr := t.store.wal.SyncGroup(mark)
-	// A sequence was minted: take its apply-gate turn and advance it, applying
-	// nothing, so the dense chain stays intact for any Commit on this store.
-	t.waitApplyTurn(seq)
-	t.advanceApply(seq)
+	// A sequence was minted: take its apply-gate turn, applying nothing, so the
+	// dense chain stays intact for any Commit on this store. The advance is
+	// [Tx.finishCommit]'s, deferred above.
+	t.takeApplyTurn()
 	if appendErr != nil {
 		metrics.IncCounter("store.txn.CommitWALOnly.errors", 1)
 		return appendErr
@@ -1642,8 +1756,14 @@ func releaseApplySlot(ch chan struct{}) { applySlotPool.Put(ch) }
 // contiguous in sequence order, followed by its marker — so recovery's
 // all-or-nothing replay is unaffected.
 //
+// The minted sequence is NOT returned. It is recorded on the Tx
+// ([Tx.applyGateSeq]) at the instant of the mint, because the obligation it
+// creates outlives this call: the caller's deferred [Tx.finishCommit], which is
+// registered before this function is entered, is what discharges it, and on a
+// panic unwinding out of here there are no return values for it to read (rmp
+// #2727).
+//
 // The return values:
-//   - seq is the assigned transaction sequence (valid only when hasSeq is true);
 //   - hasSeq is true once a sequence has been MINTED (txnSeq.Add) — true for any
 //     non-empty transaction, even one whose subsequent encode/append failed. A
 //     minted sequence MUST take its turn in the apply gate and advance it, or a
@@ -1652,23 +1772,27 @@ func releaseApplySlot(ch chan struct{}) { applySlotPool.Put(ch) }
 //     and decides whether to apply based on err and the SyncGroup result.
 //     hasSeq is false only for an empty commit and for the cap-check rejection,
 //     both of which mint no sequence.
+//   - watermark is the run's own durability watermark, to be handed to
+//     [wal.Writer.SyncGroup]; it is returned even on error, for the reason that
+//     function documents.
 //   - err is non-nil when the cap check, encoding, or append failed.
 //
-// The semaphore is released exactly once, on every path, via
-// releaseAfterAppend; the Tx is marked finished at the same time.
+// The Tx is marked finished on every path out of this function, so a second
+// Commit / CommitWALOnly / Rollback is rejected with [ErrTxFinished].
 //
-// markInflight is called here, while the semaphore is still held, so the commit
-// is registered as in-flight BEFORE the semaphore is released — the happens-
-// before that lets [Store.RunUnderCommitLock] observe it (#1507 quiesce
-// boundary). The caller MUST pair it with exactly one [Store.doneInflight] once
-// the whole commit (SyncGroup + apply gate) finishes.
-func (t *Tx[N, W]) appendOnly(commitTS uint64) (seq uint64, hasSeq bool, watermark int64, err error) {
+// The store's admitted-writer registration is NOT touched here. It is taken in
+// [Store.BeginCtx] and released by [Tx.releaseWriter], which the caller's
+// deferred [Tx.finishCommit] runs after the apply gate has been advanced — so a
+// draining [Store.RunUnderCommitLock] (#1507 quiesce boundary) observes the
+// count reach zero only once every commit it was waiting for has finished both
+// its fsync and its gate turn.
+func (t *Tx[N, W]) appendOnly(commitTS uint64) (hasSeq bool, watermark int64, err error) {
 	if len(t.ops) == 0 {
 		// Empty commit: mint no sequence and write no marker. The caller still
 		// runs SyncGroup to flush any prior buffered tail (the historical
 		// no-op-with-Sync behaviour), then applies nothing.
 		t.markFinished()
-		return 0, false, 0, nil
+		return false, 0, nil
 	}
 	// Bounded resources / Durability: reject an over-cap transaction BEFORE
 	// minting a sequence or writing any frame, so a transaction recovery could
@@ -1679,15 +1803,23 @@ func (t *Tx[N, W]) appendOnly(commitTS uint64) (seq uint64, hasSeq bool, waterma
 	if t.store.maxTxnOps > 0 && len(t.ops) > t.store.maxTxnOps {
 		metrics.IncCounter("store.txn.appendOnly.txnTooLarge", 1)
 		t.markFinished()
-		return 0, false, 0, fmt.Errorf("%w: %d ops > cap %d", ErrTransactionTooLarge, len(t.ops), t.store.maxTxnOps)
+		return false, 0, fmt.Errorf("%w: %d ops > cap %d", ErrTransactionTooLarge, len(t.ops), t.store.maxTxnOps)
 	}
-	// Mint the sequence. From here hasSeq is true on every return: the sequence
-	// is consumed, so the caller must advance the apply gate past it even if the
-	// append below fails (a gap would deadlock the dense sequence chain). A
-	// partial append is harmless on disk — recovery discards any frames not
-	// followed by a durable matching OpCommit marker — and the err makes the
-	// caller skip the in-memory apply.
-	seq = t.store.txnSeq.Add(1)
+	// Mint the sequence, and RECORD IT ON THE Tx in the same step. From here
+	// hasSeq is true on every return: the sequence is consumed, so the apply gate
+	// must be advanced past it even if the append below fails (a gap would
+	// deadlock the dense sequence chain). A partial append is harmless on disk —
+	// recovery discards any frames not followed by a durable matching OpCommit
+	// marker — and the err makes the caller skip the in-memory apply.
+	//
+	// The two statements are adjacent and in this order on purpose: the
+	// obligation begins at the Add, and the caller's deferred [Tx.finishCommit]
+	// can only discharge an obligation it can SEE. Recording the sequence on the
+	// Tx is what makes the window between the mint and the caller's apply-gate
+	// turn survivable by a panic (rmp #2727) — the caller's return values do not
+	// exist yet while that window is open.
+	seq := t.store.txnSeq.Add(1)
+	t.applyGateSeq, t.applyGateMinted = seq, true
 	// One scratch buffer, borrowed from the pool, is reused for every op frame
 	// and the trailing OpCommit marker. wal.Append copies each encoded payload
 	// into its bufio buffer synchronously, so the scratch is safe to reset and
@@ -1722,12 +1854,12 @@ func (t *Tx[N, W]) appendOnly(commitTS uint64) (seq uint64, hasSeq bool, waterma
 	})
 	if aerr != nil {
 		t.markFinished()
-		return seq, true, mark, aerr
+		return true, mark, aerr
 	}
 	// Frames + marker are buffered. Release the semaphore so the next
 	// transaction can append while this one fsyncs (group-commit coalescing).
 	t.markFinished()
-	return seq, true, mark, nil
+	return true, mark, nil
 }
 
 // Rollback discards buffered ops without touching the WAL or graph.
@@ -1738,7 +1870,7 @@ func (t *Tx[N, W]) Rollback() error {
 		return ErrTxFinished
 	}
 	t.markFinished()
-	t.store.exitWriter()
+	t.releaseWriter()
 	return nil
 }
 
