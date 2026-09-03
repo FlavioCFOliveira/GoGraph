@@ -343,3 +343,106 @@ func BenchmarkIndex_DeleteWideBitmap(b *testing.B) {
 		})
 	}
 }
+
+// spineBenchKeys is the key count the contention observatory's index-hash-rw
+// workload uses, so the two instruments measure the same fixture.
+const spineBenchKeys = 100_000
+
+// BenchmarkIndex_SpineParallel is the CHEAP local gate on the lock-free shard
+// spine (rmp #2699). bench/contention is the authoritative instrument for this
+// surface, but it is opt-in and costs minutes; these two run in seconds and
+// would catch a reintroduced shared-line write on either path.
+//
+// The numbers that motivated the geometry, measured on an Apple M4 against a
+// reconstruction of the pre-#2699 map-behind-an-RWMutex spine in the same
+// binary, benchstat over n=10:
+//
+//	Cardinality serial    14.93n -> 11.09n   -25.70% (p=0.000)
+//	Cardinality parallel   9.522n ->  2.075n  -78.20% (p=0.000)
+//	Insert      serial    28.85n -> 22.50n   -22.01% (p=0.000)
+//	Insert      parallel  14.305n ->  6.070n  -57.57% (p=0.000)
+//
+// Both paths are allocation-free and must stay so; ReportAllocs is on for that
+// reason rather than for decoration.
+func BenchmarkIndex_SpineParallel(b *testing.B) {
+	seedIndex := func() *Index[int64] {
+		idx := New[int64]()
+		for v := range spineBenchKeys {
+			idx.Insert(int64(v), graph.NodeID(uint64(v))) //nolint:gosec // G115: bounded loop index
+		}
+		return idx
+	}
+
+	// Cardinality is the 90% side of the mixed workload: a pure read.
+	b.Run("Cardinality", func(b *testing.B) {
+		idx := seedIndex()
+		b.ReportAllocs()
+		b.ResetTimer()
+		b.RunParallel(func(pb *testing.PB) {
+			i := 0
+			for pb.Next() {
+				_ = idx.Cardinality(int64(i % spineBenchKeys))
+				i++
+			}
+		})
+	})
+
+	// Insert against an EXISTING key is the 10% side: it takes the entry lock
+	// but never the shard writer lock, which is the case the spine must not
+	// serialise.
+	b.Run("InsertExisting", func(b *testing.B) {
+		idx := seedIndex()
+		b.ReportAllocs()
+		b.ResetTimer()
+		b.RunParallel(func(pb *testing.PB) {
+			i := 0
+			for pb.Next() {
+				idx.Insert(int64(i%spineBenchKeys), graph.NodeID(spineBenchKeys+1))
+				i++
+			}
+		})
+	})
+}
+
+// BenchmarkIndex_DeleteChurn measures the STEADY-STATE cost of a Delete that
+// empties its value, which is the path that reaps and therefore the path
+// [reclaimTrigger] taxes.
+//
+// Each iteration inserts one fresh key and removes one old one, so the
+// population stays flat and tombstones accrue at the rate a real churning index
+// produces them. A benchmark that only inserted would never reap, and one that
+// only deleted would drain the fixture and stop measuring the steady state.
+func BenchmarkIndex_DeleteChurn(b *testing.B) {
+	const window = 50_000
+	idx := New[int64]()
+	for v := range window {
+		idx.Insert(int64(v), graph.NodeID(uint64(v))) //nolint:gosec // G115: bounded loop index
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		k := int64(window + i)
+		idx.Insert(k, graph.NodeID(1))
+		idx.Delete(int64(i), graph.NodeID(uint64(i%window))) //nolint:gosec // G115: bounded loop index
+	}
+}
+
+// BenchmarkIndex_DeleteChurnSparse is the same churn on a SPARSE index — fewer
+// keys than shards — which is where the reclamation floor earns its place.
+//
+// With 256 shards a small index puts one or two keys in each, so a ratio-only
+// reclaim trigger fires on almost every reap and rebuilds a table per Delete.
+// See [reclaimTrigger].
+func BenchmarkIndex_DeleteChurnSparse(b *testing.B) {
+	const window = 400
+	idx := New[int64]()
+	for v := range window {
+		idx.Insert(int64(v), graph.NodeID(uint64(v))) //nolint:gosec // G115: bounded loop index
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		idx.Insert(int64(window+i), graph.NodeID(1))
+		idx.Delete(int64(i), graph.NodeID(uint64(i%window))) //nolint:gosec // G115: bounded loop index
+	}
+}

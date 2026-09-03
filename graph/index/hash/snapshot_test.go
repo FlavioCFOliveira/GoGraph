@@ -357,7 +357,7 @@ func TestEveryPublishedEntryResolvesToAnImage(t *testing.T) {
 	fresh.deleteLocked(2)
 	fresh.mu.Unlock()
 	idx.shard(int64(1000)).nonEmpty.Add(-1)
-	idx.shard(int64(1000)).reap(1000, e) // stale pointer: declines
+	func() { s, h := idx.locate(int64(1000)); s.reap(h, 1000, e) }() // stale pointer: declines
 	if !idx.keyPresent(1000) {
 		t.Fatal("could not construct an empty-but-present entry")
 	}

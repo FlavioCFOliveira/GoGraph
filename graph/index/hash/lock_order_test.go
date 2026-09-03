@@ -511,7 +511,7 @@ func TestShardReap_RefusesRepopulatedEntry(t *testing.T) {
 	// Stand in for the concurrent Insert that lands in the window.
 	idx.Insert(value, graph.NodeID(2))
 
-	idx.shard(value).reap(value, e)
+	func() { s, h := idx.locate(value); s.reap(h, value, e) }()
 
 	if !idx.keyPresent(value) {
 		t.Fatal("reap dropped a key whose set is NOT empty: the ids a concurrent " +
@@ -555,7 +555,7 @@ func TestShardReap_RefusesDisplacedEntry(t *testing.T) {
 			"distinguish the pointer identity check it exists to exercise")
 	}
 
-	idx.shard(value).reap(value, stale)
+	func() { s, h := idx.locate(value); s.reap(h, value, stale) }()
 
 	if !idx.keyPresent(value) {
 		t.Fatal("reap acted on an entry other than the one it was asked about")
@@ -812,7 +812,7 @@ func TestIndex_SerializeSkipsEmptyEntry(t *testing.T) {
 		t.Fatal("removing the only id did not empty the set")
 	}
 	idx.shard(int64(2)).nonEmpty.Add(-1)
-	idx.shard(int64(2)).reap(2, e) // stale pointer: declines, key stays, set empty
+	func() { s, h := idx.locate(int64(2)); s.reap(h, 2, e) }() // stale pointer: declines, key stays, set empty
 	if !idx.keyPresent(2) {
 		t.Fatal("could not construct an empty-but-present entry")
 	}

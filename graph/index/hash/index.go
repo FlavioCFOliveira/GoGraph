@@ -9,10 +9,13 @@
 //
 // Index is safe for concurrent use by any number of goroutines with no
 // external synchronisation; [Index] documents the full contract, including
-// the two-level lock geometry and the lock order every code path in this
-// package obeys. Keys are distributed over the shards by
+// the lock geometry and the lock order every code path in this package
+// obeys. Every READ path is lock-free: a shard's value-to-entry table is an
+// open-addressed array of atomically published slots, so a reader only issues
+// loads. Keys are distributed over the shards by
 // [maphash.Comparable] of the key itself, so a shard holds an arbitrary
-// subset of the key space rather than a [graph.NodeID] band.
+// subset of the key space rather than a [graph.NodeID] band; the same hash
+// also drives the probe within the shard, so a lookup hashes the key once.
 package hash
 
 import (
@@ -24,6 +27,7 @@ import (
 	"hash/maphash"
 	"io"
 	"math"
+	"runtime"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -50,11 +54,111 @@ import (
 // measured ratio landed between 0.98 and 1.10 against an ~11% noise floor, so
 // the effect is not distinguishable from noise, and it would cost 24 KB per
 // index for no demonstrated gain. The contention this package actually had was
-// not false sharing between shard locks — it was readers parking on a shard
-// RWMutex, which the per-entry geometry described on [Index] removes.
+// not false sharing between shard locks — it was readers on the shard RWMutex,
+// which [hashShard] no longer has.
+//
+// # Round three re-tested BOTH figures against the lock-free spine (rmp #2699)
+//
+// Both verdicts survive, and one of them for a NEW reason. Re-measured on this
+// host with the index-hash-rw mix, medians of six interleaved rounds:
+//
+//   - Padding the shard to a 128-byte line bought 1.035x at 8 goroutines
+//     against a 21.3% round spread — still inside the noise. Once the reads take
+//     no lock there is nothing left to falsely share: a reader only LOADS from
+//     the shard, and a line that is only read stays Shared on every core at
+//     once. Padding the lock-free shard measured 3.064x where leaving it
+//     unpadded measured 3.117x — no difference, at 4x the shard array.
+//   - Raising shardCount to 4096 bought 1.126x at 8 goroutines, at 16x the
+//     shard array, and it is REFUTED as a fix rather than merely declined: the
+//     problem was never that 256 shards collide too often, it was the two
+//     read-modify-writes each acquire performed. Deleting them bought 3.55x.
+//
+// The shard array is unchanged at 10 240 bytes: hashShard is still 40 bytes,
+// because the 24-byte RWMutex was replaced by an 8-byte writer Mutex plus the
+// two 8-byte counters (used, tombs) the table needs. What DID change is the
+// empty case — a shard allocates no table until it takes a key, where before New
+// built 256 empty Go maps on the heap. Measured: the spine of a key-less index
+// fell from 28 504 to 10 880 bytes.
 const (
 	shardCount = 256
 	shardMask  = shardCount - 1
+	// shardBits is log2(shardCount). [probeStart] skips exactly these bits,
+	// because they are the ones the shard choice already consumed.
+	shardBits = 8
+
+	// loadNum/loadDen is the open-addressed table's maximum load factor, 3/4.
+	//
+	// It is the standard ceiling for LINEAR probing, and linear probing is what
+	// this table uses because a probe walks consecutive slots: a slot is 16
+	// bytes for an int64 key (24 for a string), so eight of them fit one
+	// 128-byte line of this host and the overwhelmingly common one- or two-step
+	// probe touches ONE line. At 3/4 the mean successful probe is about 2.5
+	// slots; pushing the ceiling to 7/8 to match a Go map's would take it past
+	// 4.5, and was MEASURED at -32% throughput at one goroutine and -23% at
+	// eight over four interleaved rounds — it saves footprint and costs far more
+	// than it saves.
+	loadNum = 3
+	loadDen = 4
+
+	// minTableSlots is the smallest table a shard ever allocates. Eight slots
+	// are one 128-byte cache line for an int64 key, so the smallest table is
+	// also the smallest useful unit of memory; a wider key scales that up.
+	minTableSlots = 8
+
+	// reclaimTrigger is when [hashShard.reap] rebuilds a shard's table to drop
+	// its tombstones: a reap reclaims when the shard has no live key left at
+	// all, or when tombs*reclaimTrigger >= used — at 2, once the dead slots have
+	// caught up with the live ones.
+	//
+	// Some trigger is OBLIGATORY, not optional. Reclamation is the only thing
+	// that stops an emptied shard retaining every key it ever held (see
+	// [hashShard.reclaim]), so the question was never whether but where.
+	//
+	// # Note which way it runs
+	//
+	// The condition is tombs >= used/reclaimTrigger, so a LARGER value reclaims
+	// SOONER, not later. That is the opposite of what the name suggests on first
+	// reading, and it is why the arms below are labelled by their effect.
+	//
+	// # 2 rather than 4, and the reason is the READ path
+	//
+	// Measured on a 100 000-key index drained to 10% live, per arm (rmp #2699):
+	//
+	//	arm  tombs  slots   heap KB  mean unsuccessful probe
+	//	none 90000  262144   5096      1.83
+	//	2     3023   34688   1101      1.76
+	//	4     1521   25376    939      2.40
+	//
+	// Reclaiming sooner (4) does save another 15% of the table, but it rebuilds
+	// to a table sized from a smaller live count, so the surviving keys sit at a
+	// higher load factor and every unsuccessful probe grows 36%. Probing is on
+	// the hot read path and the memory difference is 162 KB on a 100 000-key
+	// index, so 2 is kept.
+	//
+	// No reclamation at all — the state this shipped in briefly — retained 4.63x
+	// the heap and 7.6x the slots of the setting kept here.
+	//
+	// # There is deliberately NO absolute floor
+	//
+	// A second condition, "and tombs >= minTableSlots", was implemented to stop
+	// sparse shards rebuilding an 8-slot table on nearly every Delete, and then
+	// REFUTED by measurement: against floors of 1, 8 and 32 the churn allocated
+	// 1.025 / 1.023 / 1.023 mallocs per operation at 400 keys and was identical
+	// to three decimal places at 5 000 and 100 000, while Delete ns/op, retained
+	// heap and probe length were all inside their spreads. The floor changed
+	// nothing measurable on any axis, so it is not here.
+	//
+	// # What it costs Delete
+	//
+	// A Delete that trips the trigger REBUILDS the shard's table, so it
+	// allocates and runs in O(table) where the map spine's delete() was always
+	// O(1) and never shrank. It is amortised — a rebuild leaves tombs at 0, so
+	// the next one needs another live-count worth of reaps — and it was NOT
+	// resolvable in the steady-state benchmark: BenchmarkIndex_DeleteChurn and
+	// its Sparse variant put every arm, reclamation disabled included, within
+	// 0.9% of each other against spreads of 1.1% to 4.7%. The amortised cost is
+	// real but below this harness's noise floor.
+	reclaimTrigger = 2
 )
 
 var seed = maphash.MakeSeed()
@@ -66,14 +170,15 @@ var seed = maphash.MakeSeed()
 // Index is safe for concurrent use by any number of goroutines, for every
 // exported operation, with no external synchronisation.
 //
-// There are two lock levels and one lock-free level.
+// There is ONE lock level and two lock-free levels.
 //
-// The SPINE lock (hashShard.mu, one per shard) guards its shard's value→entry
-// map STRUCTURE: it is taken shared to look a value up and exclusively to
-// create or drop one. Each value's [entry] then carries its OWN lock, which
-// serialises WRITERS of that value against each other. So two writers touching
-// different values never contend, and a reader never takes a lock any writer of
-// another value holds.
+// The SPINE — a shard's value→entry table — is read with NO LOCK AT ALL since
+// rmp #2699: it is an open-addressed table of atomically published slots, so a
+// reader only issues loads (see [hashShard]). Its WRITER mutex, hashShard.w, is
+// taken solely to create, revive or tombstone a key, and readers never touch it.
+// Each value's [entry] then carries its OWN lock, which serialises WRITERS of
+// that value against each other. So two writers touching different values never
+// contend, and a reader never takes a lock any writer of another value holds.
 //
 // Above that, each entry publishes its posting list WITHOUT a lock. A reader
 // starts from one atomic word, [entry.meta], which carries the tier tag and —
@@ -153,40 +258,58 @@ var seed = maphash.MakeSeed()
 // park/unpark. A ceiling probe put the available win at 1.26x at concurrency 1
 // rising to 7.90x at 1024.
 //
-// # Lock order — SPINE before ENTRY, never the reverse
+// Round two left the shard RWMutex in place for the map probe alone, and rmp
+// #2699 measured what that cost: at 8 goroutines sync/atomic.(*Int32).Add was
+// 24.50% of all CPU, with pprof -peek attributing 100% of it to RLock, RUnlock
+// and Unlock, against 2.8% for the same word at ONE goroutine — so the other
+// ~22 points were cache-coherence traffic and nothing else. Round three replaced
+// the map with the open-addressed table described on [hashShard], and the read
+// paths now take no lock at all.
 //
-// A goroutine may acquire a shard's mu and then an entry.mu. It must NEVER
-// acquire a shard's mu while holding any entry.mu. Every path in this file
+// # Lock order — SHARD WRITER before ENTRY, never the reverse
+//
+// A goroutine may acquire a shard's w and then an entry.mu. It must NEVER
+// acquire a shard's w while holding any entry.mu. Every path in this file
 // obeys it:
 //
 //   - [Index.Lookup], [Index.LookupAppend], [Index.Cardinality] and
-//     [Index.Contains] release the shard lock before touching entry.mu at all —
-//     and touch it only when the value's snapshot is a shared bitmap-tier one.
+//     [Index.Contains] take NO shard lock at all, so they cannot participate in
+//     an inversion. They touch entry.mu only when the value's snapshot is a
+//     shared bitmap-tier one.
 //   - [Index.Insert]'s creation path, [hashShard.reap] and [Index.Deserialize]
-//     take the shard lock first and entry.mu second.
+//     take the shard writer lock first and entry.mu second.
 //   - [Index.Insert] and [Index.Delete] detect a stale entry through the
-//     entry's own dead flag rather than by re-reading the shard map, so they
-//     never need the shard lock while holding an entry lock. See [entry.dead]
-//     for the deadlock that avoids.
+//     entry's own dead flag rather than by re-reading the shard table, so they
+//     never need the shard writer lock while holding an entry lock. See
+//     [entry.dead] for the deadlock that avoids.
 //
 // No operation in this package holds two entry locks at once, and no operation
-// holds two shard locks at once.
+// holds two shard writer locks at once.
+//
+// Removing the reader side of the spine STRICTLY WEAKENS the deadlock surface:
+// a lock that is never taken cannot be taken out of order, so the one-way order
+// above now constrains writers alone.
 //
 // # What the per-entry locks cost: a multi-value read is no longer one image
 //
-// [Index.DistinctValues] and [Index.Serialize] sample each shard, and Serialize
-// each value within it, under that shard's lock and — for a bitmap-tier value —
-// that entry's own lock. Their
-// answer is therefore assembled from per-shard (and per-entry) images taken at
-// slightly different instants rather than from one image of the whole index.
-// That was already true across shards before rmp #2692 — writers have never
-// taken an index-wide lock — and it is why [Index.Deserialize] is confined to
-// engine construction by its caller; see cypher/index_hydration.go.
+// [Index.DistinctValues] answers from the per-shard non-empty counters, and
+// [Index.Serialize] walks each shard's published table taking, for a bitmap-tier
+// value, that entry's own lock. Their answer is therefore assembled from images
+// taken at slightly different instants rather than from one image of the whole
+// index. That was already true across shards before rmp #2692 — writers have
+// never taken an index-wide lock — and it is why [Index.Deserialize] is confined
+// to engine construction by its caller; see cypher/index_hydration.go.
+//
+// Since rmp #2699 removed the spine read lock, Serialize's image is assembled
+// per SLOT rather than per SHARD: a key created part-way through one shard's
+// walk may or may not appear, where before the walk excluded creations in that
+// shard for its duration. See [Index.Serialize] for why that stays inside the
+// contract the method already published.
 //
 // A [Index.Delete] that empties a value's set is now TWO critical sections —
-// the removal under the entry lock, then the reap under the shard write lock —
+// the removal under the entry lock, then the reap under the shard writer lock —
 // where it used to be one. A concurrent reader can therefore observe the value
-// present in the map with an empty set. [Index.DistinctValues] is defined not
+// present in the table with an empty set. [Index.DistinctValues] is defined not
 // to count such an entry, because a caller depends on its zero
 // (cypher.hashIndexKind, rmp #1983); every other read path answers the same for
 // an empty entry as for an absent one.
@@ -627,12 +750,12 @@ type entry struct {
 
 	// dead marks an entry that has been detached from its shard's map —
 	// reaped because it became empty, or displaced wholesale by
-	// [Index.Deserialize]. It is set under mu BEFORE the entry leaves the map,
-	// which is what lets a mutator holding mu learn that its entry is stale
-	// WITHOUT reading the map.
+	// [Index.Deserialize]. It is set under mu BEFORE the entry stops being
+	// reachable from its shard's table, which is what lets a mutator holding mu
+	// learn that its entry is stale WITHOUT reading the table.
 	//
 	// That is not a convenience, it is the deadlock avoidance. The obvious
-	// alternative — hold the entry lock and re-read the shard map to confirm
+	// alternative — hold the entry lock and re-read the shard table to confirm
 	// the entry is still the published one — acquires the two locks in the
 	// order entry-then-spine, while reap acquires them spine-then-entry. That
 	// ABBA inversion was implemented in the sibling label index, measured, and
@@ -814,7 +937,7 @@ func (e *entry) currentLocked(m uint64) (set index.NodeSet, card uint64) {
 //
 // The image is stored BEFORE the entry can be reached by any other goroutine,
 // which is what lets every reader resolve the entry with no regard for a
-// half-built one: an entry in a shard map always has a published image, and on
+// half-built one: an entry in a shard table always has a published image, and on
 // the inline tags that image is one word that was written before the entry
 // escaped this frame.
 func newEntry(set index.NodeSet) *entry {
@@ -986,15 +1109,187 @@ func (e *entry) toArray() []uint64 {
 	}
 }
 
-// hashShard is one shard of the key space: a value→entry map behind the SPINE
-// lock, plus a running count of the entries in it whose set is non-empty.
+// slot is one position in a shard's open-addressed table.
+//
+// key is a PLAIN field while e is atomic, and that asymmetry IS the publication
+// protocol rather than an oversight. A writer stores key first and publishes e
+// second. The Go memory model's sync/atomic clause states that "if the effect of
+// an atomic operation A is observed by atomic operation B, then A is
+// synchronized before B"; the plain write of key is sequenced before the writer's
+// Store, and the plain read is sequenced after the reader's Load, so a Load that
+// observes that Store puts write(key) happens-before read(key). It is therefore
+// NOT a data race by the specification, rather than merely unlikely to be one.
+// (Sequential consistency also holds, but it is a stronger property than this
+// argument needs; synchronized-before is the clause that carries it.)
+//
+// A reader must therefore NEVER read key without having first loaded a non-nil e
+// from the SAME slot. That rule is currently enforced by review alone.
+//
+// key is WRITE-ONCE for the life of a table, and that is what keeps the plain
+// field free of a data race rather than merely unlikely to race. A slot whose
+// value is reaped is TOMBSTONED, not cleared, and a tombstoned slot is only ever
+// revived for the SAME key (see [hashShard.slotFor]); a tombstone is never
+// handed to a different key. Reclaiming tombstones is the rehash's job, and a
+// rehash builds a NEW table that no reader is holding yet.
+type slot[V comparable] struct {
+	key V
+	e   atomic.Pointer[entry]
+}
+
+// table is one shard's open-addressed, linearly probed slot array.
+//
+// Its SHAPE is immutable: len(slots) never changes, and a published slot never
+// returns to nil. Growth allocates a whole new table and publishes it with one
+// atomic store, so a reader holding the old table keeps reading a consistent
+// older image rather than a half-rehashed one.
+type table[V comparable] struct {
+	slots []slot[V]
+	mask  uint64
+}
+
+// newTable returns a table sized to hold n keys at or below [loadNum]/[loadDen],
+// rounded up to a power of two so the probe index is a mask rather than a
+// division.
+func newTable[V comparable](n int) *table[V] {
+	want := n*loadDen/loadNum + 1
+	sz := minTableSlots
+	for sz < want {
+		sz <<= 1
+	}
+	return &table[V]{slots: make([]slot[V], sz), mask: uint64(sz - 1)}
+}
+
+// tombstone marks a slot whose key has been reaped. It is a sentinel ADDRESS,
+// compared but NEVER DEREFERENCED, and it is shared by every shard of every
+// Index of every key type in the process.
+//
+// # Never take a lock on it
+//
+// It is a real *entry, so it has a real sync.RWMutex, and that mutex is
+// process-global. No path takes it today — [hashShard.reap] leaves on e != want,
+// [Index.Insert] only reaches the entry lock with a live entry, [hashShard.find]
+// answers nil for it, and every export_test helper filters it out — and no path
+// ever should. A future caller that locked this entry would serialise every hash
+// index in the program on one word, which is the exact opposite of what the
+// lock-free spine bought (rmp #2699).
+//
+// A reaped slot must not be cleared to nil: linear probing terminates on nil, so
+// clearing a slot in the middle of a probe chain would strand every key that had
+// probed past it — the classic open-addressing deletion hazard, and the
+// tombstone is the classic answer to it.
+var tombstone = new(entry)
+
+// probeStart derives the first probe index from a key's hash.
+//
+// The LOW shardBits of the hash already chose the shard, so every key in one
+// shard shares them; feeding those bits to the probe would put every key of a
+// shard on one chain. The high bits are used instead, so ONE [maphash.Comparable]
+// call serves both the shard choice and the probe. That single-hash property is
+// half of why this table beats the map it replaced even with one goroutine: the
+// map hashed the key a second time inside mapaccess (rmp #2699).
+func probeStart(h uint64) uint64 { return h >> shardBits }
+
+// hashShard is one shard of the key space: an open-addressed value→entry table
+// read WITHOUT any lock, a writer mutex that serialises mutations of that table,
+// and a running count of the entries in it whose set is non-empty.
+//
+// # Why the reads take no lock (rmp #2699)
+//
+// This shard used to hold `entries map[V]*entry` behind a [sync.RWMutex], and
+// every read — [Index.Lookup], [Index.Cardinality], [Index.Contains],
+// [Index.LookupAppend] — took that RWMutex for reading purely to make ONE map
+// probe safe. A shared acquire is two read-modify-writes on a single int32 that
+// every core must own exclusively in turn, so it serialises readers at the
+// cache-coherence level however short the critical section is.
+//
+// MEASURED on the index-hash-rw workload, 8 goroutines, Apple M4: sync/atomic.
+// (*Int32).Add was 24.50% of all CPU and pprof -peek attributed 100% of it to
+// RWMutex's RLock, RUnlock and Unlock — against 4% for the answer those calls
+// protected. At one goroutine the same word cost 2.8%, so the other ~22 points
+// were pure coherence traffic and nothing else.
+//
+// A reader here only LOADS: the table pointer, then a slot's entry pointer. Read
+// -only lines stay in the Shared state on every core at once, so a read now
+// generates no coherence traffic at all.
+//
+// Three cheaper repairs were built and MEASURED FIRST, on a faithful model of
+// this shard geometry, and all three are refuted (rmp #2699; medians of six
+// interleaved rounds, against a 0.2% median-of-six noise floor):
+//
+//   - padding the shard onto its own 128-byte line bought 1.035x at 8
+//     goroutines against a 21.3% round spread — indistinguishable from noise.
+//     Once the reads take no lock there is nothing left to falsely share, and
+//     padding the LOCK-FREE shard measured 3.064x where leaving it unpadded
+//     measured 3.117x: no difference, at 4x the shard array. It stays unpadded.
+//   - raising shardCount 16x to 4096 bought 1.126x, at 16x the shard array,
+//     because 160 KB of shard no longer fits the L1 the 10 KB one did. The
+//     problem was never that 256 shards collide too often.
+//   - the readers-biased rbMutex from graph/index/count (rmp #2696) bought
+//     1.344x and cost 37x the shard array (382,976 bytes against 10,240),
+//     because its sync.Pool token round trip is ~7.55 ns against a whole
+//     operation of ~17 ns. That design suits the count store, whose shared hold
+//     guards a counter behind a much longer critical section; it does not suit
+//     this one.
+//
+// # What deleting the lock actually bought, measured IN THIS PACKAGE
+//
+// benchstat over n=10, this spine against a reconstruction of the map-behind-an
+// -RWMutex one in the SAME binary and the same process, Apple M4:
+//
+//	Cardinality serial     14.93n -> 11.09n   -25.70% (p=0.000)
+//	Cardinality parallel-8  9.522n ->  2.075n  -78.20% (p=0.000)
+//	Insert      serial     28.85n -> 22.50n   -22.01% (p=0.000)
+//	Insert      parallel-8 14.305n ->  6.070n  -57.57% (p=0.000)
+//
+// Both paths remain allocation-free, in both arms.
+//
+// On bench/contention's index-hash-rw workload the scaling curve moved from
+// 2.034x to 4.876x at 8 goroutines and from 1.823x to 3.452x at 1024, and total
+// blocked time at 1024 fell from 300.02 s to 120.08 s. The serial gain is not
+// contention at all: it is the SECOND HASH. The map hashed the key again inside
+// mapaccess, and [probeStart] makes one maphash.Comparable serve both the shard
+// choice and the probe.
 type hashShard[V comparable] struct {
-	entries map[V]*entry
-	mu      sync.RWMutex
+	// tbl is the published table, or nil while the shard holds no key. The nil
+	// is deliberate: a shard with no keys pays for no slot array at all, which
+	// matters because every Index carries shardCount of these whether or not it
+	// is ever populated, and a real index is far narrower than shardCount.
+	//
+	// Both paths that publish a table honour it: [hashShard.rehash] is only
+	// reached from an insertion, and [Index.Deserialize] publishes nil for a
+	// shard its payload gives no key to. A table, once allocated, is NOT
+	// released when the last key is reaped — see [hashShard.reap] for what that
+	// costs and why it is left that way.
+	tbl atomic.Pointer[table[V]]
+
+	// w serialises WRITERS against each other. Readers never take it. It is also
+	// what makes every write to used and tombs mutually exclusive; those two are
+	// atomic solely so the lock-free read path may READ them for a panic
+	// message, never so they may be written without holding w.
+	w sync.Mutex
+
+	// used counts the slots in the published table that are not nil — LIVE keys
+	// plus tombstones — because that, not the live count, is what fills the
+	// table and what the load factor must be measured against.
+	//
+	// It is WRITTEN only under w. It is atomic anyway, and solely so that
+	// [hashShard.find] — which holds no lock at all — can name it in the panic
+	// it raises when the load-factor invariant is broken. A plain int would make
+	// that diagnostic read a data race, and CLAUDE.md admits no exception to
+	// "zero data races", not even on a path that is about to abort the process.
+	// The hot read path never touches this word, so the atomic costs it nothing;
+	// the writers that do touch it already hold w.
+	used atomic.Int64
+
+	// tombs counts the tombstoned slots among used. It is what lets a rehash
+	// choose the new size from the LIVE count, so a shard that has churned
+	// through many keys shrinks back instead of doubling for ever. It is atomic
+	// for the same reason as used, and written only under w.
+	tombs atomic.Int64
 
 	// nonEmpty counts the entries in this shard whose set holds at least one
 	// NodeID. It exists so [Index.DistinctValues] stays O(shardCount) — walking
-	// the maps and taking every entry's read lock would make it O(entries),
+	// the tables and taking every entry's read lock would make it O(entries),
 	// which on a 10 000 000-distinct-value index is a complexity regression —
 	// while still refusing to count the empty-but-unreaped entry the per-entry
 	// geometry made observable (see [Index]).
@@ -1011,62 +1306,218 @@ type hashShard[V comparable] struct {
 //
 // The returned Index is safe for concurrent use.
 func New[V comparable]() *Index[V] {
-	idx := &Index[V]{}
-	for i := range idx.shards {
-		idx.shards[i].entries = make(map[V]*entry)
-	}
-	return idx
+	// No shard table is allocated here. A shard grows one on its first key, so
+	// an empty index costs shardCount zero values and nothing on the heap.
+	return &Index[V]{}
 }
 
 func (i *Index[V]) shard(v V) *hashShard[V] {
 	return &i.shards[maphash.Comparable(seed, v)&shardMask]
 }
 
-// lookup returns value's entry under the SPINE read lock, which it releases
-// before returning. The caller therefore holds no lock on return and is free to
-// acquire the entry's own lock, which is what keeps the lock order one-way.
+// locate returns the shard that owns v together with the hash it was chosen
+// with, so the caller can drive the shard's probe without hashing v again.
+func (i *Index[V]) locate(v V) (*hashShard[V], uint64) {
+	h := maphash.Comparable(seed, v)
+	return &i.shards[h&shardMask], h
+}
+
+// find returns value's entry, or nil when this shard does not hold value.
 //
-// The returned entry may have been reaped by the time the caller locks it;
-// callers that mutate detect that through [entry.dead], and callers that only
-// read need not care, because a reaped entry is empty and stays empty.
+// It takes NO LOCK, and that is the entire point of the shard's geometry; see
+// [hashShard] for the measurement that removed the lock this replaced.
 //
-// # Only the MUTATORS call this; the read paths spell it out (rmp #2692)
+// The probe reads two things and both are atomic loads: the table pointer, then
+// each slot's entry pointer. A slot's key is read ONLY after a non-nil entry has
+// been loaded from that same slot, which is the publication protocol described
+// on [slot] and is what makes the plain key field race-free.
 //
-// This helper cannot be inlined — it holds a map access and two mutex calls, so
-// it is far over the inlining budget — and on the inline-tier read path that
-// un-inlined call was the ENTIRE residual cost of round two over the pre-#2692
-// baseline. Measured, interleaved, n=6, on the same host in one session:
-// BenchmarkIndex_SeekSingleton/Append read 17.16 ns through this helper against
-// a 16.53 ns baseline (+3.84%, p=0.009) and 16.62 ns with the four lines
-// spelled out at the call site (p=0.818 against baseline — no detectable
-// difference at all). BenchmarkIndex_CardinalityInlineTier moved the same way,
-// from +2.24%/+2.18% to no detectable difference.
+// A key found under a tombstone answers "absent", which is the same answer an
+// absent key gets, because a reaped value holds no NodeID.
 //
-// So [Index.Lookup], [Index.LookupAppend], [Index.Cardinality] and
-// [Index.Contains] do not call this. [Index.Insert] and [Index.Delete] do: they
-// call it inside a retry loop and around a whole locked mutation, so one call
-// is not measurable against that, and the loop is much easier to read with the
-// shard read factored out.
+// # It races an Insert benignly, exactly as the RWMutex version did
 //
-// Two hypotheses for that residual were tested FIRST and both refuted, so the
-// obvious explanations do not need re-testing:
+// A reader that loads the table before a concurrent [Index.Insert] publishes a
+// new key does not see that key. That is a valid linearisation — the read is
+// ordered before the insert — and it is the same observation the shard RWMutex
+// permitted, which never spanned more than the one map probe either.
 //
-//   - "It is the *entry indirection." No: the ceiling probe that deleted the
-//     entry read lock kept the indirection and lost nothing (see [snapshot]).
-//   - "It is the second dereference, entry -> snapshot, landing on a cold cache
-//     line." No: co-locating the first snapshot inside the entry, so that both
-//     live in one 64-byte allocation, measured 16.82 ns against 16.83 ns for the
-//     separate allocation — no difference — while costing 16 extra bytes on
-//     every key that is ever re-published. Declined.
-func (s *hashShard[V]) lookup(value V) (*entry, bool) {
-	s.mu.RLock()
-	e, ok := s.entries[value]
-	s.mu.RUnlock()
-	return e, ok
+// A reader can never MISS a key that was already published in the table it
+// loaded: a published slot never returns to nil (see [table]), so no nil can
+// appear part-way along an occupied probe chain and terminate the scan early.
+func (s *hashShard[V]) find(h uint64, value V) *entry {
+	t := s.tbl.Load()
+	if t == nil {
+		return nil
+	}
+	i := probeStart(h) & t.mask
+	for probes := 0; ; probes++ {
+		if probes > len(t.slots) {
+			// UNREACHABLE unless used has drifted from the table's true
+			// occupancy, exactly as in [hashShard.slotFor], and it PANICS for
+			// the same reason even though this is the read path.
+			//
+			// The tempting alternative — return nil, "not found" — is FAIL-
+			// SILENT, which CLAUDE.md forbids by name: it answers "absent" for
+			// a key that is present, which is a Consistency violation under
+			// Compliance Mandate 2 that no caller can detect, and it corrupts
+			// every query result built on it. A loud stop is strictly better
+			// than a quiet wrong answer from an index.
+			//
+			// Nor is the unbounded loop this replaces a safe default: with a
+			// table that has no free slot left it spins at 100% CPU for ever,
+			// which was demonstrated rather than supposed (rmp #2699).
+			//
+			// It costs nothing. Interleaved A/B, n=6, medians: 2.069 ns
+			// unbounded against 2.052 ns bounded on the parallel Cardinality
+			// benchmark, and 6.384 against 6.269 on InsertExisting — both
+			// differences inside their 7.9% and 23.2% round spreads.
+			panic(fmt.Sprintf(
+				"hash: shard table corrupt: probed %d of %d slots without finding a free one "+
+					"(used=%d tombs=%d); the load factor invariant is broken",
+				probes, len(t.slots), s.used.Load(), s.tombs.Load()))
+		}
+		sl := &t.slots[i]
+		e := sl.e.Load()
+		if e == nil {
+			return nil
+		}
+		if sl.key == value {
+			if e == tombstone {
+				return nil
+			}
+			return e
+		}
+		i = (i + 1) & t.mask
+	}
+}
+
+// slotFor returns the table and slot index that value belongs at, together with
+// whatever that slot holds now: nil for an empty slot, [tombstone] for a reaped
+// one, or the live entry already published under value.
+//
+// It grows or rehashes the table first when one more key would push it past the
+// load factor, so the returned index is always usable. The caller holds w.
+//
+// A tombstone whose key differs from value is PROBED PAST, never taken: reusing
+// it would overwrite that slot's key while a reader might be reading it, which
+// is exactly the race the write-once rule on [slot] exists to exclude.
+func (s *hashShard[V]) slotFor(h uint64, value V) (*table[V], uint64, *entry) {
+	t := s.tbl.Load()
+	if t == nil || (int(s.used.Load())+1)*loadDen > len(t.slots)*loadNum {
+		t = s.rehash()
+	}
+	i := probeStart(h) & t.mask
+	for probes := 0; ; probes++ {
+		if probes > len(t.slots) {
+			// UNREACHABLE unless used has drifted from the table's true
+			// occupancy: the load factor is enforced immediately above, so a
+			// nil slot is guaranteed to exist and this walk must meet one
+			// within a single lap of the table.
+			//
+			// That is a programmer error, not a runtime condition, and CLAUDE.md
+			// requires those to surface immediately rather than be recovered.
+			// The alternative is strictly worse and was measured: an
+			// undercounted used fills the table and spins this loop for ever at
+			// 100% CPU while holding w, which neither -race nor goleak nor any
+			// functional test can see. slotFor returns no error, so a sentinel
+			// would have to ripple through Insert; the panic stops the
+			// corruption here, with a stack that names the counters.
+			panic(fmt.Sprintf(
+				"hash: shard table corrupt: probed %d of %d slots without finding a free one "+
+					"(used=%d tombs=%d); the load factor invariant is broken",
+				probes, len(t.slots), s.used.Load(), s.tombs.Load()))
+		}
+		sl := &t.slots[i]
+		e := sl.e.Load()
+		if e == nil {
+			return t, i, nil
+		}
+		if sl.key == value {
+			return t, i, e
+		}
+		i = (i + 1) & t.mask
+	}
+}
+
+// reclaim drops the shard's tombstones, releasing the table ENTIRELY when no
+// live key is left. The caller holds w.
+//
+// It exists because [hashShard.rehash] has exactly one other caller,
+// [hashShard.slotFor], which is only ever reached from an insertion. Before this,
+// a shard that was emptied and never written to again kept a tombstone — and
+// therefore a reference to the key it carries — for the life of the index. See
+// TestTable_EmptiedIndexReleasesItsSlots.
+//
+// Releasing the table on the last removal is what restores the map spine's
+// behaviour exactly: delete() freed the key immediately, and a nil table frees
+// the whole slot array. [hashShard.find] already answers a nil table, so nothing
+// downstream has to learn about this.
+// shouldReclaim reports whether the shard's tombstones are worth rebuilding
+// away. The caller holds w. See [reclaimTrigger] for the two thresholds and why
+// the absolute floor is there as well as the ratio.
+func (s *hashShard[V]) shouldReclaim() bool {
+	if s.used.Load()-s.tombs.Load() == 0 {
+		// Fully emptied: release unconditionally, however small. This is the
+		// case that made the retention unbounded IN TIME, because a shard with
+		// no live key will never be probed by an insert again.
+		return true
+	}
+	return s.tombs.Load()*reclaimTrigger >= s.used.Load()
+}
+
+func (s *hashShard[V]) reclaim() {
+	if s.used.Load()-s.tombs.Load() == 0 {
+		s.tbl.Store(nil)
+		s.used.Store(0)
+		s.tombs.Store(0)
+		return
+	}
+	s.rehash()
+}
+
+// rehash publishes a fresh table holding every LIVE key of the current one and
+// none of its tombstones. The caller holds w.
+//
+// It always returns a USABLE table, including when the shard has no live key,
+// because [hashShard.slotFor] probes the result. Releasing a table altogether is
+// [hashShard.reclaim]'s job, not this one's.
+//
+// The new size is derived from the live count, not from the old table's length,
+// so a shard that has churned through many keys shrinks back instead of doubling
+// for ever. Reclaiming tombstones is this method's only other job: nothing else
+// ever clears one, because clearing a slot in a published table would strand the
+// keys probing past it.
+//
+// The new table is filled while it is still PRIVATE to this frame and published
+// with one store, so no reader ever observes a half-built table.
+func (s *hashShard[V]) rehash() *table[V] {
+	old := s.tbl.Load()
+	live := int(s.used.Load() - s.tombs.Load())
+	nt := newTable[V](live + 1)
+	if old != nil {
+		for i := range old.slots {
+			sl := &old.slots[i]
+			e := sl.e.Load()
+			if e == nil || e == tombstone {
+				continue
+			}
+			j := probeStart(maphash.Comparable(seed, sl.key)) & nt.mask
+			for nt.slots[j].e.Load() != nil {
+				j = (j + 1) & nt.mask
+			}
+			nt.slots[j].key = sl.key
+			nt.slots[j].e.Store(e)
+		}
+	}
+	s.used.Store(int64(live))
+	s.tombs.Store(0)
+	s.tbl.Store(nt)
+	return nt
 }
 
 // reap drops value from the shard when the entry the caller emptied is still
-// the published one AND is still empty, so the map does not accumulate keys
+// the published one AND is still empty, so the table does not accumulate keys
 // whose set holds nothing. A completed [Index.Delete] that removed the last
 // NodeID therefore leaves the key absent, exactly as the single-critical-section
 // Delete this replaced did.
@@ -1078,38 +1529,81 @@ func (s *hashShard[V]) lookup(value V) (*entry, bool) {
 // a concurrent [Index.Insert] re-added a node between the removal and this
 // call, and reap declines for that too.
 //
-// Lock order: SPINE then ENTRY, released in the reverse order. The dead flag is
-// published under the entry lock BEFORE the entry leaves the map, so a mutator
+// Lock order: SHARD WRITER then ENTRY, released in the reverse order. The dead
+// flag is published under the entry lock BEFORE the slot is tombstoned, so a
+// mutator
 // that already holds this entry lock observes dead and retries rather than
 // writing into a detached entry.
 //
 // It does not touch nonEmpty: the caller already decremented it when the set
 // became empty, and an empty entry contributes nothing to that count whether it
-// is in the map or not.
-func (s *hashShard[V]) reap(value V, want *entry) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	e, ok := s.entries[value]
-	if !ok || e != want {
+// is reachable from the table or not.
+func (s *hashShard[V]) reap(h uint64, value V, want *entry) {
+	var reaped bool
+	s.w.Lock()
+	defer s.w.Unlock()
+	t := s.tbl.Load()
+	if t == nil {
 		return
 	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	// An entry is empty exactly when its meta tag is metaEmpty: [entry.publish]
-	// derives that tag from the set's own cardinality, so the word is the whole
-	// answer and no snapshot has to be loaded to obtain it.
-	if e.meta.Load()&metaTagMask != metaEmpty {
-		return
+	i := probeStart(h) & t.mask
+	for {
+		sl := &t.slots[i]
+		e := sl.e.Load()
+		if e == nil {
+			return
+		}
+		if sl.key == value {
+			// A tombstone is not want either, so the already-reaped case falls
+			// out of this same comparison and needs no separate test.
+			if e != want {
+				return
+			}
+			// The entry lock is released EXPLICITLY rather than by defer,
+			// because this acquire sits inside the probe loop and a deferred
+			// release there would hold it until the whole function returns —
+			// harmless while every path below returns immediately, and a leak
+			// the moment one does not (gocritic deferInLoop).
+			e.mu.Lock()
+			// An entry is empty exactly when its meta tag is metaEmpty:
+			// [entry.publish] derives that tag from the set's own cardinality,
+			// so the word is the whole answer and no snapshot has to be loaded
+			// to obtain it.
+			if e.meta.Load()&metaTagMask == metaEmpty {
+				e.dead = true
+				// TOMBSTONE, never nil: see [tombstone]. The slot keeps its
+				// key, so a later Insert of the same value revives this very
+				// slot rather than allocating a second one for it.
+				sl.e.Store(tombstone)
+				s.tombs.Add(1)
+				reaped = true
+			}
+			e.mu.Unlock()
+			if reaped && s.shouldReclaim() {
+				// Reclaimed with w still held and the ENTRY LOCK RELEASED: the
+				// rebuild walks the whole table, and holding one entry's lock
+				// across it would park every writer of that value for the
+				// duration for no reason. See [reclaimTrigger] for the
+				// threshold and what it costs Delete.
+				s.reclaim()
+			}
+			return
+		}
+		i = (i + 1) & t.mask
 	}
-	e.dead = true
-	delete(s.entries, value)
 }
 
 // nanKey reports whether v is a float32 or float64 IEEE 754 NaN.
-// Go maps use the language == operator: NaN != NaN is always true, so
-// inserting a NaN key creates an entry that can never be looked up or
-// deleted, causing unbounded accumulation (task #1408). The Insert,
-// Delete and Lookup methods skip NaN values entirely to prevent this.
+// Key comparison uses the language == operator — the shard table compares
+// slot.key == value, exactly as the Go map it replaced did — and NaN != NaN is
+// always true, so inserting a NaN key creates an entry that can never be looked
+// up or deleted, causing unbounded accumulation (task #1408). The Insert, Delete
+// and Lookup methods skip NaN values entirely to prevent this.
+//
+// [Index.Deserialize] does NOT filter them: a crafted image naming a NaN key
+// installs an unreachable slot. That is unchanged from the map spine, where the
+// same image installed an unreachable map key; the difference is that a slot
+// also lengthens the probe chains around it instead of being inert.
 //
 //nolint:gocritic // dupSubExpr: f != f is the canonical generic NaN test.
 func nanKey[V comparable](v V) bool {
@@ -1123,17 +1617,19 @@ func nanKey[V comparable](v V) bool {
 }
 
 // Insert records that node carries the given value. Insert is a no-op
-// when value is a float32 or float64 NaN: Go map equality is language-
-// fixed (NaN != NaN), so a NaN map key can never be looked up or
-// deleted; skipping it prevents unbounded accumulation (task #1408).
+// when value is a float32 or float64 NaN: Go equality is language-fixed
+// (NaN != NaN), so a NaN key can never be looked up or deleted;
+// skipping it prevents unbounded accumulation (task #1408).
 //
 // Safe for concurrent use. It contends only with other operations on the SAME
-// value, plus the brief shared shard lookup; creating a value not yet in the
-// index additionally takes that shard's write lock for the publication alone.
+// value: the shard lookup that precedes it takes no lock at all. Creating a
+// value not yet in the index additionally takes that shard's WRITER lock for
+// the publication alone.
 //
 // The retry loop exists because an entry can be reaped or displaced between the
 // shard lookup and the entry lock. It terminates: the next iteration either
-// misses the map, and creates a fresh entry under the shard write lock which no
+// misses the table, and creates a fresh entry under the shard writer lock which
+// no
 // concurrent reaper can drop before this call has published and filled it (reap
 // needs the entry lock the creator still holds, and refuses a non-empty set),
 // or finds a live entry and writes into it.
@@ -1156,28 +1652,43 @@ func (i *Index[V]) Insert(value V, node graph.NodeID) {
 		return
 	}
 	id := uint64(node)
-	s := i.shard(value)
+	s, h := i.locate(value)
 	for {
-		e, ok := s.lookup(value)
-		if !ok {
-			s.mu.Lock()
-			if e, ok = s.entries[value]; !ok {
+		e := s.find(h, value)
+		if e == nil {
+			s.w.Lock()
+			t, pos, cur := s.slotFor(h, value)
+			if cur == nil || cur == tombstone {
 				// The entry is built COMPLETE and only then published, so no
 				// entry lock is needed and none is taken: the set is mutated
 				// while it is still private to this frame, and no reader or
-				// reaper can reach a half-formed entry. Only the SPINE lock is
+				// reaper can reach a half-formed entry. Only the WRITER lock is
 				// held here, so the lock order cannot be inverted either.
 				var set index.NodeSet
 				set.Add(id)
-				s.entries[value] = newEntry(set)
+				sl := &t.slots[pos]
+				if cur == nil {
+					// The key is written BEFORE the entry is published, which
+					// is the protocol on [slot]; a reader that sees the entry
+					// therefore sees this key.
+					sl.key = value
+					s.used.Add(1)
+				} else {
+					// Reviving this slot's own tombstone. Its key already IS
+					// value — slotFor matched on it — so the key is not
+					// rewritten and stays write-once.
+					s.tombs.Add(-1)
+				}
+				sl.e.Store(newEntry(set))
 				// Unconditional: a brand-new entry has just taken its first
 				// node, so this is definitionally an empty -> non-empty
 				// transition. Add's wasEmpty return has nothing to add.
 				s.nonEmpty.Add(1)
-				s.mu.Unlock()
+				s.w.Unlock()
 				return
 			}
-			s.mu.Unlock()
+			e = cur
+			s.w.Unlock()
 		}
 		e.mu.Lock()
 		if !e.dead {
@@ -1192,8 +1703,11 @@ func (i *Index[V]) Insert(value V, node graph.NodeID) {
 			return
 		}
 		// Reaped or displaced between the lookup and the lock. Drop the entry
-		// lock and start again from the shard — never read the shard map here.
+		// lock and start again from the shard — never read the shard table here.
+		// See [Index.Delete] for why this terminates, and for the one window in
+		// which it spins before it does.
 		e.mu.Unlock()
+		runtime.Gosched()
 	}
 }
 
@@ -1210,19 +1724,38 @@ func (i *Index[V]) Delete(value V, node graph.NodeID) {
 	if nanKey(value) {
 		return
 	}
-	s := i.shard(value)
+	s, h := i.locate(value)
 	for {
-		e, ok := s.lookup(value)
-		if !ok {
+		e := s.find(h, value)
+		if e == nil {
 			return
 		}
 		e.mu.Lock()
 		if e.dead {
 			// Reaped or displaced between the lookup and the lock. Drop the
 			// entry lock and start again from the shard — never read the shard
-			// map here. This terminates: a dead entry is already out of the
-			// map, so the next lookup misses and returns.
+			// table here.
+			//
+			// # Why this terminates, and the ONE window where it spins first
+			//
+			// For a REAPED entry it terminates immediately: reap tombstones the
+			// slot under the same entry lock it sets dead under, so the next
+			// find misses and this returns.
+			//
+			// For a DISPLACED one it does not, and the earlier claim that it did
+			// was measured false (rmp #2699). [Index.Deserialize] marks every
+			// old entry dead BEFORE it publishes the replacement table, so
+			// inside that window an entry is dead AND still published, and this
+			// loop spins on it. It still terminates — the table store ends the
+			// window — but the caller BUSY-SPINS rather than parking, where
+			// before #2699 it blocked on the shard read lock the swap held.
+			// Gosched yields the P so the spin cannot starve the goroutine doing
+			// the swap on a single-P runtime.
+			//
+			// Deserialize is confined to engine construction by its caller
+			// (cypher/index_hydration.go), so the window is short and rare.
 			e.mu.Unlock()
+			runtime.Gosched()
 			continue
 		}
 		nowEmpty := e.deleteLocked(uint64(node))
@@ -1231,7 +1764,7 @@ func (i *Index[V]) Delete(value V, node graph.NodeID) {
 		}
 		e.mu.Unlock()
 		if nowEmpty {
-			s.reap(value, e)
+			s.reap(h, value, e)
 		}
 		return
 	}
@@ -1242,20 +1775,18 @@ func (i *Index[V]) Delete(value V, node graph.NodeID) {
 // a NaN (see [Index.Insert] for the rationale).
 // Clone avoids returning the live bitmap to the caller, which could
 // otherwise be mutated by concurrent writers.
-// Safe for concurrent use. The shard lock is released before the entry lock is
-// taken, so this read blocks no writer of any other value.
+// Safe for concurrent use, and it takes NO SHARD LOCK: the spine probe is
+// lock-free (rmp #2699), so this read blocks no writer of any value at all, up
+// to the bitmap-tier entry lock below.
 func (i *Index[V]) Lookup(value V) *roaring64.Bitmap {
 	if nanKey(value) {
 		return roaring64.New()
 	}
-	// SPINE read lock, released before the entry is touched: the one-way lock
-	// order (see [Index]). Spelled out rather than calling [hashShard.lookup],
-	// which does not inline — see there for the measurement.
-	s := i.shard(value)
-	s.mu.RLock()
-	e, ok := s.entries[value]
-	s.mu.RUnlock()
-	if !ok {
+	// LOCK-FREE: one atomic load of the shard's table and one of the slot's
+	// entry. No lock is taken at all on this path (rmp #2699; see [hashShard]).
+	s, h := i.locate(value)
+	e := s.find(h, value)
+	if e == nil {
 		return roaring64.New()
 	}
 	for {
@@ -1308,20 +1839,18 @@ func (i *Index[V]) Lookup(value V) *roaring64.Bitmap {
 // independent snapshot, so the caller may iterate them after the lock is
 // released, exactly as with the cloned bitmap Lookup returns.
 //
-// Safe for concurrent use. The shard lock is released before the entry lock is
-// taken, so this read blocks no writer of any other value.
+// Safe for concurrent use, and it takes NO SHARD LOCK: the spine probe is
+// lock-free (rmp #2699), so this read blocks no writer of any value at all, up
+// to the bitmap-tier entry lock below.
 func (i *Index[V]) LookupAppend(value V, dst []uint64) []uint64 {
 	if nanKey(value) {
 		return dst
 	}
-	// SPINE read lock, released before the entry is touched: the one-way lock
-	// order (see [Index]). Spelled out rather than calling [hashShard.lookup],
-	// which does not inline — see there for the measurement.
-	s := i.shard(value)
-	s.mu.RLock()
-	e, ok := s.entries[value]
-	s.mu.RUnlock()
-	if !ok {
+	// LOCK-FREE: one atomic load of the shard's table and one of the slot's
+	// entry. No lock is taken at all on this path (rmp #2699; see [hashShard]).
+	s, h := i.locate(value)
+	e := s.find(h, value)
+	if e == nil {
 		return dst
 	}
 	for {
@@ -1355,19 +1884,17 @@ func (i *Index[V]) LookupAppend(value V, dst []uint64) []uint64 {
 // It is exposed for query planners to choose between index lookup
 // and full-scan plans.
 //
-// Safe for concurrent use, and this is the read the per-entry geometry exists
-// for: the shard lock is held only for the map read and released before the
-// entry lock is taken, so a concurrent [Index.Insert] on ANY other value in the
-// same shard no longer parks this caller (rmp #2692; see [Index]).
+// Safe for concurrent use, and this is the read the spine geometry exists for.
+// Round two (rmp #2692) stopped a concurrent [Index.Insert] on any OTHER value
+// in the same shard from parking this caller; round three (rmp #2699) removed
+// the shard lock from this path altogether, so the probe issues loads only and
+// generates no cache-coherence traffic. See [hashShard].
 func (i *Index[V]) Cardinality(value V) uint64 {
-	// SPINE read lock, released before the entry is touched: the one-way lock
-	// order (see [Index]). Spelled out rather than calling [hashShard.lookup],
-	// which does not inline — see there for the measurement.
-	s := i.shard(value)
-	s.mu.RLock()
-	e, ok := s.entries[value]
-	s.mu.RUnlock()
-	if !ok {
+	// LOCK-FREE: one atomic load of the shard's table and one of the slot's
+	// entry. No lock is taken at all on this path (rmp #2699; see [hashShard]).
+	s, h := i.locate(value)
+	e := s.find(h, value)
+	if e == nil {
 		return 0
 	}
 	for {
@@ -1395,17 +1922,15 @@ func (i *Index[V]) Cardinality(value V) uint64 {
 // Contains reports whether node is in the set associated with value.
 // Faster than Lookup when only existence matters.
 //
-// Safe for concurrent use. The shard lock is released before the entry lock is
-// taken, so this read blocks no writer of any other value.
+// Safe for concurrent use, and it takes NO SHARD LOCK: the spine probe is
+// lock-free (rmp #2699), so this read blocks no writer of any value at all, up
+// to the bitmap-tier entry lock below.
 func (i *Index[V]) Contains(value V, node graph.NodeID) bool {
-	// SPINE read lock, released before the entry is touched: the one-way lock
-	// order (see [Index]). Spelled out rather than calling [hashShard.lookup],
-	// which does not inline — see there for the measurement.
-	s := i.shard(value)
-	s.mu.RLock()
-	e, ok := s.entries[value]
-	s.mu.RUnlock()
-	if !ok {
+	// LOCK-FREE: one atomic load of the shard's table and one of the slot's
+	// entry. No lock is taken at all on this path (rmp #2699; see [hashShard]).
+	s, h := i.locate(value)
+	e := s.find(h, value)
+	if e == nil {
 		return false
 	}
 	for {
@@ -1433,10 +1958,10 @@ func (i *Index[V]) Contains(value V, node graph.NodeID) bool {
 // that is, the number of keys whose NodeID set is NON-EMPTY. Exposed for
 // cardinality estimation by the query planner.
 //
-// # Why non-empty rather than "keys in the map"
+// # Why non-empty rather than "keys in the table"
 //
 // [Index.Delete] removes the last NodeID under the entry lock and drops the key
-// under the shard write lock, in that order, so a key can transiently be
+// under the shard writer lock, in that order, so a key can transiently be
 // present with an empty set (see [Index]). This method must not count it:
 // cypher.hashIndexKind reads DistinctValues() == 0 as the authoritative "this
 // string hash index holds no data" test, and a false non-zero would pin a
@@ -1732,8 +2257,8 @@ func assignAny[V any](dst *V, src any) {
 // the documented supported types.
 //
 // Safe for concurrent use. Serialize holds one shard's read lock at a time and,
-// within it, each value's entry read lock — the permitted SPINE-then-ENTRY
-// order (see [Index]). The image is therefore per-shard consistent rather than
+// within it, each value's entry read lock — no shard lock is taken at all
+// (see [Index]). The image is therefore per-shard consistent rather than
 // index-wide consistent; callers needing a whole-index point-in-time image must
 // quiesce writers themselves. That was already true before the per-entry
 // geometry, because no writer has ever taken an index-wide lock.
@@ -1742,24 +2267,47 @@ func (i *Index[V]) Serialize(w io.Writer) error {
 		key []byte
 		ids []uint64
 	}
-	// Snapshot every shard under its RLock and materialise into a
-	// flat slice. We sort the slice by raw key bytes for
-	// deterministic output (helps fixture diffs and test stability).
-	var entries []wireEntry
+	// Snapshot every shard from the table it has published NOW, and materialise
+	// into a flat slice. We sort the slice by raw key bytes for deterministic
+	// output (helps fixture diffs and test stability).
+	//
+	// The shard read lock this used to hold is gone with the rest of the spine
+	// lock (rmp #2699), and that WEAKENS the image by one step: it was assembled
+	// per SHARD, and is now assembled per SLOT. Concretely, a key created by a
+	// concurrent Insert part-way through one shard's walk may or may not appear,
+	// where before the walk excluded creations in that shard for its duration.
+	//
+	// Every other property is unchanged, and the caller's contract already
+	// covered this case: the image was never index-wide consistent, because no
+	// writer has ever taken an index-wide lock, and the method doc has always
+	// required a caller that needs a point-in-time image to quiesce its own
+	// writers. A key REAPED mid-walk still cannot corrupt the output — the walk
+	// holds the entry, and an emptied entry yields no ids and is skipped below.
+	// Sized from the index's own key count rather than from the first shard's
+	// table length, which is about 1/256 of it and, after a hydration that gave
+	// most shards no table at all, could be as little as 8.
+	entries := make([]wireEntry, 0, i.DistinctValues())
 	for k := range i.shards {
 		s := &i.shards[k]
-		s.mu.RLock()
-		if entries == nil {
-			entries = make([]wireEntry, 0, len(s.entries))
+		t := s.tbl.Load()
+		if t == nil {
+			continue
 		}
-		for v, e := range s.entries {
+		for si := range t.slots {
+			sl := &t.slots[si]
+			// The entry is loaded FIRST and the key read only after it proves
+			// non-nil: the publication protocol on [slot].
+			e := sl.e.Load()
+			if e == nil || e == tombstone {
+				continue
+			}
+			v := sl.key
 			b, err := encodeValue(v)
 			if err != nil {
-				s.mu.RUnlock()
 				return err
 			}
 			// Clone the bytes so we do not retain references into the
-			// shard map's key (string headers can be aliased safely
+			// slot's key (string headers can be aliased safely
 			// but []byte keys are not allowed for comparable maps).
 			cp := make([]byte, len(b))
 			copy(cp, b)
@@ -1767,8 +2315,9 @@ func (i *Index[V]) Serialize(w io.Writer) error {
 			// representation-independent wire form, identical to the
 			// pre-refactor bm.ToArray().
 			//
-			// Lock order: SPINE (held) then ENTRY, one entry at a time — and
-			// no entry lock at all for an immutable snapshot.
+			// It takes the ENTRY lock only for a bitmap-tier image, and no lock
+			// at all for an immutable snapshot. No shard lock is held, so there
+			// is no lock order to respect here any more.
 			ids := e.toArray()
 			if len(ids) == 0 {
 				// An empty posting list is not emitted. Before rmp #2692 an
@@ -1782,7 +2331,6 @@ func (i *Index[V]) Serialize(w io.Writer) error {
 			}
 			entries = append(entries, wireEntry{key: cp, ids: ids})
 		}
-		s.mu.RUnlock()
 	}
 	sort.Slice(entries, func(a, b int) bool {
 		return bytes.Compare(entries[a].key, entries[b].key) < 0
@@ -1842,8 +2390,9 @@ func (i *Index[V]) Serialize(w io.Writer) error {
 // atomic would break the per-shard consistency each reader does rely on.
 //
 // Within a shard the swap is safe against an in-flight mutator: every displaced
-// entry is marked dead under its OWN lock, while the shard write lock is held
-// (the permitted SPINE-then-ENTRY order), so a mutator parked on a displaced
+// entry is marked dead under its OWN lock, while the shard writer lock is held
+// (the permitted SHARD-WRITER-then-ENTRY order), so a mutator parked on a
+// displaced
 // entry learns it is stale and retries against the new map instead of writing
 // into an entry nothing will ever read again. Marking every displaced entry
 // also drains those in-flight mutations before the non-empty counter is
@@ -1891,10 +2440,13 @@ func (i *Index[V]) Deserialize(r io.Reader) error {
 
 	// Build the fresh maps, then swap them in shard by shard.
 	//
-	// Only the MAPS are held here, not [shardCount]hashShard[V]: a shard now
-	// carries a sync.RWMutex and an atomic.Int64, so a stack array of 256 of
-	// them would put 256 mutexes and 256 counters in this frame purely to be
-	// thrown away after their maps were extracted.
+	// Only the MAPS are held here, not [shardCount]hashShard[V]: a shard carries
+	// a writer mutex, two counters and an atomic.Int64, so a stack array of 256
+	// of them would put all of that in this frame purely to be thrown away after
+	// their contents were extracted. A map is also the right INTERMEDIATE shape
+	// even though the published form is a table, because the parse must be
+	// duplicate-proof and a map deduplicates by construction; see the
+	// non-empty-count comment below for why that matters.
 	var fresh [shardCount]map[V]*entry
 	for k := range fresh {
 		fresh[k] = make(map[V]*entry)
@@ -1974,21 +2526,55 @@ func (i *Index[V]) Deserialize(r io.Reader) error {
 	// across shards.
 	for k := range i.shards {
 		s := &i.shards[k]
-		s.mu.Lock()
-		for _, e := range s.entries {
-			// Lock order: SPINE (held) then ENTRY, one at a time. Marking the
-			// displaced entry dead makes an in-flight mutator retry against the
-			// new map rather than write into an entry nothing will ever read
-			// again — and, because marking needs the entry lock, it also waits
-			// out any mutation already in progress, so every counter update
-			// that belongs to the OLD map lands before the Store below.
-			e.mu.Lock()
-			e.dead = true
-			e.mu.Unlock()
+		s.w.Lock()
+		// The replacement table is built COMPLETE and private to this frame,
+		// then published with one store, so no reader ever observes a shard
+		// half-way between the two images.
+		//
+		// A shard that receives NO key is published as a nil table rather than
+		// as an empty one. That is not a micro-optimisation: hydration is the
+		// path by which every index in the engine is born (cypher/
+		// index_hydration.go), and a real index is far narrower than
+		// shardCount. Allocating unconditionally cost 2048 slots — 32 KB for an
+		// int64 key, 48 KB for a string one — to hydrate a TWO-KEY index, in
+		// every one of the 256 shards. [hashShard.find] already answers a nil
+		// table, so the nil costs no branch that was not there anyway.
+		var nt *table[V]
+		if len(fresh[k]) > 0 {
+			nt = newTable[V](len(fresh[k]))
 		}
-		s.entries = fresh[k]
+		for v, e := range fresh[k] {
+			j := probeStart(maphash.Comparable(seed, v)) & nt.mask
+			for nt.slots[j].e.Load() != nil {
+				j = (j + 1) & nt.mask
+			}
+			nt.slots[j].key = v
+			nt.slots[j].e.Store(e)
+		}
+		if old := s.tbl.Load(); old != nil {
+			for si := range old.slots {
+				e := old.slots[si].e.Load()
+				if e == nil || e == tombstone {
+					continue
+				}
+				// Marking the displaced entry dead makes an in-flight mutator
+				// retry against the new table rather than write into an entry
+				// nothing will ever read again — and, because marking needs the
+				// entry lock, it also waits out any mutation already in
+				// progress, so every counter update that belongs to the OLD
+				// table lands before the Store below. Only the writer lock is
+				// held here, and readers hold none, so there is no order to
+				// invert.
+				e.mu.Lock()
+				e.dead = true
+				e.mu.Unlock()
+			}
+		}
+		s.tbl.Store(nt)
+		s.used.Store(int64(len(fresh[k])))
+		s.tombs.Store(0)
 		s.nonEmpty.Store(freshNonEmpty[k])
-		s.mu.Unlock()
+		s.w.Unlock()
 	}
 	return nil
 }

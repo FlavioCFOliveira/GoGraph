@@ -1,23 +1,46 @@
 package hash
 
-import "github.com/FlavioCFOliveira/GoGraph/graph/index"
+import (
+	"fmt"
 
-// keyPresent reports whether value's shard currently holds a map entry for it,
-// regardless of whether that entry's set is empty.
+	"github.com/FlavioCFOliveira/GoGraph/graph/index"
+)
+
+// keyPresent reports whether value's shard currently holds a published entry for
+// it, regardless of whether that entry's set is empty. A tombstoned slot reads
+// as absent.
 //
-// It exists so a test can assert on the shard map's STRUCTURE — that an emptied
+// It exists so a test can assert on the shard TABLE's STRUCTURE — that an emptied
 // value's entry is DROPPED, not merely emptied — which no exported operation can
 // distinguish: Lookup, Cardinality and Contains all answer the same for an absent
 // value and for a present-but-empty one, and [Index.DistinctValues] is defined to
 // ignore an empty entry precisely so it cannot see the difference either.
 //
-// It takes the shard read lock, so it is safe to call concurrently.
+// It takes no lock at all — the shard read path has none since rmp #2699 — so
+// it is safe to call concurrently.
 func (i *Index[V]) keyPresent(value V) bool {
-	s := i.shard(value)
-	s.mu.RLock()
-	_, ok := s.entries[value]
-	s.mu.RUnlock()
-	return ok
+	s, h := i.locate(value)
+	return s.find(h, value) != nil
+}
+
+// forEachEntry calls fn for every entry published in every shard, in table
+// order. It is the export-test replacement for ranging the shard tables, and it
+// takes no shard lock because the read path has none.
+func (i *Index[V]) forEachEntry(fn func(v V, e *entry)) {
+	for k := range i.shards {
+		t := i.shards[k].tbl.Load()
+		if t == nil {
+			continue
+		}
+		for si := range t.slots {
+			sl := &t.slots[si]
+			e := sl.e.Load()
+			if e == nil || e == tombstone {
+				continue
+			}
+			fn(sl.key, e)
+		}
+	}
 }
 
 // nonEmptySum returns the SIGNED sum of every shard's non-empty counter.
@@ -38,7 +61,9 @@ func (i *Index[V]) nonEmptySum() int64 {
 // entryFor returns value's published entry, so a test can hold the pointer
 // [hashShard.reap] takes as its identity argument.
 func (i *Index[V]) entryFor(value V) (*entry, bool) {
-	return i.shard(value).lookup(value)
+	s, h := i.locate(value)
+	e := s.find(h, value)
+	return e, e != nil
 }
 
 // markEntryDead force-kills value's entry the way [hashShard.reap] does, but
@@ -51,21 +76,36 @@ func (i *Index[V]) entryFor(value V) (*entry, bool) {
 // are exercised through: production only reaches a dead entry through a race a
 // test cannot schedule deterministically.
 func (i *Index[V]) markEntryDead(value V) bool {
-	s := i.shard(value)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	e, ok := s.entries[value]
-	if !ok {
+	s, h := i.locate(value)
+	s.w.Lock()
+	defer s.w.Unlock()
+	t := s.tbl.Load()
+	if t == nil {
 		return false
 	}
-	e.mu.Lock()
-	if e.meta.Load()&metaTagMask != metaEmpty {
-		s.nonEmpty.Add(-1)
+	pos := probeStart(h) & t.mask
+	for {
+		sl := &t.slots[pos]
+		e := sl.e.Load()
+		if e == nil {
+			return false
+		}
+		if sl.key == value {
+			if e == tombstone {
+				return false
+			}
+			e.mu.Lock()
+			if e.meta.Load()&metaTagMask != metaEmpty {
+				s.nonEmpty.Add(-1)
+			}
+			e.dead = true
+			e.mu.Unlock()
+			sl.e.Store(tombstone)
+			s.tombs.Add(1)
+			return true
+		}
+		pos = (pos + 1) & t.mask
 	}
-	e.dead = true
-	e.mu.Unlock()
-	delete(s.entries, value)
-	return true
 }
 
 // isDead reports e's dead flag under e's own read lock.
@@ -137,8 +177,9 @@ func (e *entry) isSharedTier() bool {
 // It reports false when the value is not on the bitmap tier, so a test cannot
 // pass on a no-op injection.
 func (i *Index[V]) forceBitmapCard(value V, card uint64) bool {
-	e, ok := i.shard(value).lookup(value)
-	if !ok {
+	s, h := i.locate(value)
+	e := s.find(h, value)
+	if e == nil {
 		return false
 	}
 	e.mu.Lock()
@@ -151,7 +192,7 @@ func (i *Index[V]) forceBitmapCard(value V, card uint64) bool {
 	return true
 }
 
-// imageTagMismatches sweeps every entry reachable from a shard map and counts
+// imageTagMismatches sweeps every entry reachable from a shard table and counts
 // those whose [entry.meta] tag disagrees with what the entry actually
 // publishes. The per-class counts come back too, so a test can refuse to pass
 // on a sweep that examined nothing.
@@ -178,31 +219,26 @@ func (i *Index[V]) forceBitmapCard(value V, card uint64) bool {
 // wrong payload is caught by the functional read parity tests instead, which
 // see the wrong ids.
 func (i *Index[V]) imageTagMismatches() (mismatches, inlineEntries, snapshotEntries int) {
-	for k := range i.shards {
-		s := &i.shards[k]
-		s.mu.RLock()
-		for _, e := range s.entries {
-			e.mu.RLock()
-			m := e.meta.Load()
-			sn := e.snap.Load()
-			switch {
-			case m&metaPtrBit == 0:
-				inlineEntries++
-				if sn != nil {
-					mismatches++
-				}
-			case sn == nil:
+	i.forEachEntry(func(_ V, e *entry) {
+		e.mu.RLock()
+		m := e.meta.Load()
+		sn := e.snap.Load()
+		switch {
+		case m&metaPtrBit == 0:
+			inlineEntries++
+			if sn != nil {
 				mismatches++
-			default:
-				snapshotEntries++
-				if (m&metaTagMask == metaBitmap) != sn.shared {
-					mismatches++
-				}
 			}
-			e.mu.RUnlock()
+		case sn == nil:
+			mismatches++
+		default:
+			snapshotEntries++
+			if (m&metaTagMask == metaBitmap) != sn.shared {
+				mismatches++
+			}
 		}
-		s.mu.RUnlock()
-	}
+		e.mu.RUnlock()
+	})
 	return mismatches, inlineEntries, snapshotEntries
 }
 
@@ -212,24 +248,20 @@ func (i *Index[V]) imageTagMismatches() (mismatches, inlineEntries, snapshotEntr
 // The retry loops in [Index.Insert] and [Index.Delete] terminate only because
 // that count is always zero at rest: a mutator that observes dead drops the
 // entry lock and looks the value up again, and the loop makes progress solely
-// because a dead entry has already left the map, so the next lookup misses. An
+// because a dead entry's slot has already been tombstoned, so the next find
+// misses. An
 // entry that were dead AND still published would spin those loops for ever —
 // a liveness failure the race detector cannot see and a functional test would
 // read as a hang. So the precondition is asserted directly.
 func (i *Index[V]) deadPublishedCount() int {
 	var n int
-	for k := range i.shards {
-		s := &i.shards[k]
-		s.mu.RLock()
-		for _, e := range s.entries {
-			e.mu.RLock()
-			if e.dead {
-				n++
-			}
-			e.mu.RUnlock()
+	i.forEachEntry(func(_ V, e *entry) {
+		e.mu.RLock()
+		if e.dead {
+			n++
 		}
-		s.mu.RUnlock()
-	}
+		e.mu.RUnlock()
+	})
 	return n
 }
 
@@ -247,25 +279,208 @@ func (i *Index[V]) deadPublishedCount() int {
 // It also pins the other half of the encoding: OFF the bitmap tier the payload
 // must be zero, except on metaSingleton where the payload is the id itself.
 func (i *Index[V]) bitmapCardMismatches() (mismatches, sharedEntries int) {
-	for k := range i.shards {
-		s := &i.shards[k]
-		s.mu.RLock()
-		for _, e := range s.entries {
-			e.mu.RLock()
-			m := e.meta.Load()
-			sn := e.snap.Load()
-			switch {
-			case sn != nil && sn.shared:
-				sharedEntries++
-				if m>>metaShift != sn.set.Cardinality() {
-					mismatches++
-				}
-			case m&metaTagMask != metaSingleton && m>>metaShift != 0:
+	i.forEachEntry(func(_ V, e *entry) {
+		e.mu.RLock()
+		m := e.meta.Load()
+		sn := e.snap.Load()
+		switch {
+		case sn != nil && sn.shared:
+			sharedEntries++
+			if m>>metaShift != sn.set.Cardinality() {
 				mismatches++
 			}
-			e.mu.RUnlock()
+		case m&metaTagMask != metaSingleton && m>>metaShift != 0:
+			mismatches++
 		}
-		s.mu.RUnlock()
-	}
+		e.mu.RUnlock()
+	})
 	return mismatches, sharedEntries
+}
+
+// tableStats reports the geometry of the shard that owns value: the published
+// table's slot count, the number of non-nil slots, and how many of those are
+// tombstones. It takes the WRITER lock, because used and tombs are guarded by
+// it and are not atomic.
+func (i *Index[V]) tableStats(value V) (slots, used, tombs int) {
+	s, _ := i.locate(value)
+	s.w.Lock()
+	defer s.w.Unlock()
+	if t := s.tbl.Load(); t != nil {
+		slots = len(t.slots)
+	}
+	return slots, int(s.used.Load()), int(s.tombs.Load())
+}
+
+// slotIndexOf returns the index of the slot in value's shard whose key equals
+// value, and how many slots in that shard carry that key. A count above one is
+// a corrupt table: a key must occupy exactly one slot.
+//
+// It counts TOMBSTONED slots as well as live ones, and that is deliberate rather
+// than sloppy: the invariant under test is that a revive reuses the key's OWN
+// slot, so a test must be able to see a key that exists only as a tombstone.
+func (i *Index[V]) slotIndexOf(value V) (idx, count int) {
+	s, _ := i.locate(value)
+	idx = -1
+	t := s.tbl.Load()
+	if t == nil {
+		return idx, 0
+	}
+	for si := range t.slots {
+		sl := &t.slots[si]
+		if sl.e.Load() == nil {
+			continue
+		}
+		if sl.key == value {
+			count++
+			if idx < 0 {
+				idx = si
+			}
+		}
+	}
+	return idx, count
+}
+
+// duplicateKeyCount reports how many keys occupy more than one slot, across
+// every shard, counting each surplus slot once. It must always be zero.
+//
+// Like [Index.slotIndexOf] it counts TOMBSTONED slots, and that is what gives it
+// teeth: TestTable_ProbeChainSurvivesReap calls it with 10 000 live tombstones,
+// and a [hashShard.slotFor] that probed past a matching tombstone instead of
+// reviving it would put the key in two slots — which is exactly the mutant this
+// catches.
+func (i *Index[V]) duplicateKeyCount() int {
+	var dup int
+	for k := range i.shards {
+		t := i.shards[k].tbl.Load()
+		if t == nil {
+			continue
+		}
+		seen := make(map[V]int)
+		for si := range t.slots {
+			sl := &t.slots[si]
+			if sl.e.Load() == nil {
+				continue
+			}
+			seen[sl.key]++
+		}
+		for _, n := range seen {
+			if n > 1 {
+				dup += n - 1
+			}
+		}
+	}
+	return dup
+}
+
+// maxTableSlots returns the largest published table in the index, so a churn
+// test can assert the tables do not grow without bound.
+func (i *Index[V]) maxTableSlots() int {
+	var mx int
+	for k := range i.shards {
+		if t := i.shards[k].tbl.Load(); t != nil && len(t.slots) > mx {
+			mx = len(t.slots)
+		}
+	}
+	return mx
+}
+
+// loadFactorViolations counts the shards whose published table holds more
+// non-nil slots than the load factor permits. A violation is a liveness bug,
+// not merely a performance one: [hashShard.find] probes until it meets a nil,
+// so a table with no nil slot left would spin for ever.
+func (i *Index[V]) loadFactorViolations() int {
+	var bad int
+	for k := range i.shards {
+		s := &i.shards[k]
+		s.w.Lock()
+		if t := s.tbl.Load(); t != nil {
+			if int(s.used.Load())*loadDen > len(t.slots)*loadNum {
+				bad++
+			}
+			nils := 0
+			for si := range t.slots {
+				if t.slots[si].e.Load() == nil {
+					nils++
+				}
+			}
+			if nils == 0 {
+				bad++
+			}
+		}
+		s.w.Unlock()
+	}
+	return bad
+}
+
+// countingMismatches RECOUNTS every shard's table from the structure and reports
+// the shards whose maintained used/tombs disagree with it, plus a description of
+// the first disagreement.
+//
+// # Why this exists when loadFactorViolations already looks like a guard
+//
+// [Index.loadFactorViolations] compares s.used — the COUNTER — against the
+// table's length. It therefore cannot falsify s.used: it measures the counter
+// against itself. That blindness was demonstrated, not theorised. Mutating
+// [Index.Deserialize]'s `s.used = len(fresh[k])` to `s.used = 0` leaves the
+// ENTIRE package suite green (`go test ./graph/index/hash/` exits 0), while the
+// resulting undercount stops [hashShard.slotFor] rehashing when it must, fills
+// the table, and spins [hashShard.find] for ever at 100% CPU while holding the
+// shard's writer lock. Neither -race nor goleak nor any functional test sees it,
+// because it is a liveness failure and not a wrong answer.
+//
+// The termination argument on [table] depends on used being exact. This is the
+// only assertion in the package that can prove it is.
+func (i *Index[V]) countingMismatches() (bad int, detail string) {
+	for k := range i.shards {
+		s := &i.shards[k]
+		s.w.Lock()
+		if t := s.tbl.Load(); t != nil {
+			nonNil, tombs := 0, 0
+			for si := range t.slots {
+				e := t.slots[si].e.Load()
+				if e == nil {
+					continue
+				}
+				nonNil++
+				if e == tombstone {
+					tombs++
+				}
+			}
+			if int64(nonNil) != s.used.Load() || int64(tombs) != s.tombs.Load() {
+				bad++
+				if detail == "" {
+					detail = fmt.Sprintf("shard %d: used=%d realNonNil=%d tombs=%d realTombs=%d slots=%d",
+						k, s.used.Load(), nonNil, s.tombs.Load(), tombs, len(t.slots))
+				}
+			}
+		}
+		s.w.Unlock()
+	}
+	return bad, detail
+}
+
+// tablesAllocated reports how many shards currently hold a table, so a test can
+// assert that a narrow index does not pay for shardCount slot arrays.
+func (i *Index[V]) tablesAllocated() (n, slots int) {
+	for k := range i.shards {
+		if t := i.shards[k].tbl.Load(); t != nil {
+			n++
+			slots += len(t.slots)
+		}
+	}
+	return n, slots
+}
+
+// occupancy sums every shard's maintained used and tombs counters, so a test can
+// assert that emptying an index actually RELEASES its slots rather than leaving
+// them tombstoned.
+func (i *Index[V]) occupancy() (used, tombs int) {
+	for k := range i.shards {
+		s := &i.shards[k]
+		s.w.Lock()
+		used += int(s.used.Load())
+		tombs += int(s.tombs.Load())
+		s.w.Unlock()
+	}
+	return used, tombs
 }
