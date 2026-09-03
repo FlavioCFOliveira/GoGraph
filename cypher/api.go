@@ -2784,23 +2784,39 @@ func (e *Engine) explainPhysical(entry *planCacheEntry, params map[string]expr.V
 // a build in which profiling does not exist (rmp #2222 AC 3).
 func (e *Engine) Profile(ctx context.Context, query string, params map[string]expr.Value) (s string, err error) {
 	defer recoverQueryPanic(&err, "cypher.Profile", "cypher.Profile.panics")
+	tree, err := e.profilePlanTree(ctx, query, params)
+	if err != nil {
+		return "", err
+	}
+	return exec.RenderPlanNode(&tree), nil
+}
+
+// profilePlanTree executes query with profiling installed and returns the
+// captured physical plan tree with its per-operator measurements.
+//
+// It is the whole of PROFILE except the rendering, shared by [Engine.Profile]
+// (indented tree) and [Engine.ProfileTable] (columnar table) so the two describe
+// the same run of the same plan rather than two independent executions. It
+// installs no panic recovery of its own: both callers install theirs before
+// calling in.
+func (e *Engine) profilePlanTree(ctx context.Context, query string, params map[string]expr.Value) (exec.PlanNode, error) {
 	if ir.IsDDL(query) {
-		return "", fmt.Errorf("cypher: Profile: DDL has no query plan")
+		return exec.PlanNode{}, fmt.Errorf("cypher: Profile: DDL has no query plan")
 	}
 	entry, autoParams, err := e.parseAndAnalyse(query)
 	params = mergeAutoParams(params, autoParams)
 	if err != nil {
-		return "", err
+		return exec.PlanNode{}, err
 	}
 	if entry.semaErr != nil {
-		return "", entry.semaErr
+		return exec.PlanNode{}, entry.semaErr
 	}
 	if queryHasWritingClause(query) {
-		return "", fmt.Errorf("cypher: Profile: refusing to execute a writing statement; " +
+		return exec.PlanNode{}, fmt.Errorf("cypher: Profile: refusing to execute a writing statement; " +
 			"use Explain for its plan, or RunInTx to execute it")
 	}
 	if err := checkParamPresence(entry.paramRefs, params); err != nil {
-		return "", err
+		return exec.PlanNode{}, err
 	}
 
 	var (
@@ -2843,12 +2859,12 @@ func (e *Engine) Profile(ctx context.Context, query string, params map[string]ex
 		}
 	}()
 	if buildErr != nil {
-		return "", fmt.Errorf("cypher: build plan: %w", buildErr)
+		return exec.PlanNode{}, fmt.Errorf("cypher: build plan: %w", buildErr)
 	}
 	if drainErr != nil {
-		return "", drainErr
+		return exec.PlanNode{}, drainErr
 	}
-	return exec.RenderPlanNode(&tree), nil
+	return tree, nil
 }
 
 // ExplainLogical returns the LOGICAL plan for query, annotated with the index
@@ -2887,6 +2903,20 @@ func (e *Engine) ExplainLogical(query string, params map[string]expr.Value) (s s
 // back to for a writing statement, whose physical tree is unreachable outside a
 // transaction.
 func (e *Engine) explainLogical(entry *planCacheEntry, params map[string]expr.Value) string {
+	in := e.explainInputsFor(entry)
+	return explainWithIndexes(in.plan, in.idxMgr, params, in.graph, in.labelSrc,
+		in.reorderSwaps, in.anchorSwaps, in.seekHints, in.prefixSeek)
+}
+
+// explainInputsFor gathers the live planner state the logical-plan walk reads:
+// the index manager and graph view it probes for access-path rewrites, the label
+// resolver behind the estimates, and the count-store-gated swap sets.
+//
+// It is shared by [Engine.explainLogical] (which renders a tree) and
+// [Engine.ExplainTable] (which renders a table) so both read the same providers
+// under the same gates; before rmp #2701 this body was inline in explainLogical
+// and a second renderer would have had to assemble its own copy.
+func (e *Engine) explainInputsFor(entry *planCacheEntry) explainInputs {
 	plan := entry.plan
 	// Reflect the count-store-gated reordering peepholes in the rendered plan so
 	// EXPLAIN shows the physically-built shape, not just the written logical order:
@@ -2913,7 +2943,16 @@ func (e *Engine) explainLogical(entry *planCacheEntry, params map[string]expr.Va
 			anchorSwaps = computeAnchorSwaps(sites, labelSrc)
 		}
 	}
-	return explainWithIndexes(plan, e.g.IndexManager(), params, e.g.ReadAt(nil), labelSrc, reorderSwaps, anchorSwaps, entry.pushedSeekHints, e.prefixSeekEnabled)
+	return explainInputs{
+		plan:         plan,
+		idxMgr:       e.g.IndexManager(),
+		graph:        e.g.ReadAt(nil),
+		labelSrc:     labelSrc,
+		reorderSwaps: reorderSwaps,
+		anchorSwaps:  anchorSwaps,
+		seekHints:    entry.pushedSeekHints,
+		prefixSeek:   e.prefixSeekEnabled,
+	}
 }
 
 // explainWithIndexes walks plan and renders operator names, substituting
@@ -2933,8 +2972,27 @@ func (e *Engine) explainLogical(entry *planCacheEntry, params map[string]expr.Va
 // not build.
 func explainWithIndexes(plan ir.LogicalPlan, idxMgr *index.Manager, params map[string]expr.Value, g *lpg.ReadView[string, float64], labelSrc *lpgLabelResolver, reorderSwaps map[*ir.Apply]bool, anchorSwaps map[*ir.Expand]bool, seekHints map[*ir.Selection]bool, prefixSeek bool) string {
 	var b strings.Builder
-	explainWithIndexesNode(&b, plan, idxMgr, params, g, labelSrc, reorderSwaps, anchorSwaps,
-		seekHints, prefixSeek, "", true, true)
+	in := explainInputs{
+		plan:         plan,
+		idxMgr:       idxMgr,
+		graph:        g,
+		labelSrc:     labelSrc,
+		reorderSwaps: reorderSwaps,
+		anchorSwaps:  anchorSwaps,
+		seekHints:    seekHints,
+		prefixSeek:   prefixSeek,
+	}
+	// The tree sink writes the line's parts back to back, which is exactly the
+	// byte sequence this renderer wrote before the walk was split from the
+	// rendering (rmp #2701). [Engine.ExplainTable] drives the same walk with a
+	// sink that builds table rows instead.
+	in.walk(func(l planLine) {
+		b.WriteString(l.prefix)
+		b.WriteString(l.connector)
+		b.WriteString(l.text)
+		b.WriteString(l.annot)
+		b.WriteByte('\n')
+	}, params)
 	return b.String()
 }
 
@@ -2966,7 +3024,7 @@ func physicalExpandLabel(e *ir.Expand) string {
 // regardless, reads the estimate providers live (see explain_estimate.go), and
 // never changes the rendered plan shape, the executed plan, or any result.
 func explainWithIndexesNode(
-	b *strings.Builder,
+	emit planLineSink,
 	plan ir.LogicalPlan,
 	idxMgr *index.Manager,
 	params map[string]expr.Value,
@@ -2987,7 +3045,7 @@ func explainWithIndexesNode(
 	// built shape. Render the hint's child in its place. A hint a seek DOES claim
 	// is left to the seek-name substitution below, which renders it as the seek.
 	if sel, ok := plan.(*ir.Selection); ok && seekHints[sel] && !seekClaimsHint(sel, params, idxMgr, explainGraph) {
-		explainWithIndexesNode(b, sel.Child, idxMgr, params, explainGraph,
+		explainWithIndexesNode(emit, sel.Child, idxMgr, params, explainGraph,
 			labelSrc, reorderSwaps, anchorSwaps, seekHints, prefixSeek, prefix, isRoot, isLast)
 		return
 	}
@@ -2998,7 +3056,7 @@ func explainWithIndexesNode(
 	// fresh Expand not present in anchorSwaps, so the recursion never re-fires.
 	if sel, ok := plan.(*ir.Selection); ok && len(anchorSwaps) > 0 {
 		if site, ok := matchAnchorSite(sel); ok && anchorSwaps[site.exp] {
-			explainWithIndexesNode(b, mirrorAnchorSite(&site), idxMgr, params, explainGraph,
+			explainWithIndexesNode(emit, mirrorAnchorSite(&site), idxMgr, params, explainGraph,
 				labelSrc, reorderSwaps, anchorSwaps, seekHints, prefixSeek, prefix, isRoot, isLast)
 			return
 		}
@@ -3058,6 +3116,8 @@ func explainWithIndexesNode(
 	// after the operator detail, never affecting the rendered shape. The rewritten
 	// range-scan / min-label LEAF lines carry their own annotations below.
 	var annot string
+	var est estimate
+	var hasEst bool
 	switch opName {
 	case "NodeByIndexSeek", "NodeByIndexSeekSet", "Selection":
 		// A Selection — whether left as a Selection, subsumed into a hash index
@@ -3066,26 +3126,25 @@ func explainWithIndexesNode(
 		// single range: equi-depth histogram + certified error). A bare label
 		// predicate or any other shape yields no annotation.
 		if sel, ok := plan.(*ir.Selection); ok {
-			annot = selectionEstimateAnnotation(sel, labelSrc, params)
+			est, annot, hasEst = selectionEstimate(sel, labelSrc, params)
 		}
 	case "NodeByLabelScan":
 		if scan, ok := plan.(*ir.NodeByLabelScan); ok {
-			annot = labelScanAnnotation(labelSrc, scan.Label)
+			est, annot, hasEst = labelScanEstimate(labelSrc, scan.Label)
 		}
 	case "AllNodesScan":
-		annot = scanEstimateAnnotation(plan, labelSrc, explainGraph)
+		est, annot, hasEst = scanEstimate(plan, labelSrc, explainGraph)
 	case "Expand", "ExpandInto":
 		// Both names denote an *ir.Expand — "ExpandInto" is the display name for one
 		// whose destination is already bound (#2149) — so both get the same
 		// cardinality annotation.
 		if exp, ok := plan.(*ir.Expand); ok {
-			annot = expandEstimateAnnotation(exp, labelSrc)
+			est, annot, hasEst = expandEstimate(exp, labelSrc)
 		}
 	}
 
-	b.WriteString(prefix)
-	b.WriteString(connector)
-	b.WriteString(opName)
+	var text strings.Builder
+	text.WriteString(opName)
 	// Surface the scanned label and the expand direction so a re-rooted single-edge
 	// pattern (#2090 — different scanned label AND flipped direction) and a swapped
 	// CartesianProduct drive order (#2091 — the anchored-label order changes) are
@@ -3093,19 +3152,26 @@ func explainWithIndexesNode(
 	// the index/range/min-label rewrites below render their own leaf line.
 	if opName == "NodeByLabelScan" {
 		if scan, ok := plan.(*ir.NodeByLabelScan); ok {
-			b.WriteString(" [")
-			b.WriteString(scan.NodeVar)
-			b.WriteByte(':')
-			b.WriteString(scan.Label)
-			b.WriteByte(']')
+			text.WriteString(" [")
+			text.WriteString(scan.NodeVar)
+			text.WriteByte(':')
+			text.WriteString(scan.Label)
+			text.WriteByte(']')
 		}
 	}
 	if exp, ok := plan.(*ir.Expand); ok {
-		b.WriteByte(' ')
-		b.WriteString(physicalExpandLabel(exp))
+		text.WriteByte(' ')
+		text.WriteString(physicalExpandLabel(exp))
 	}
-	b.WriteString(annot)
-	b.WriteByte('\n')
+	emit(planLine{
+		prefix:    prefix,
+		connector: connector,
+		text:      text.String(),
+		annot:     annot,
+		est:       est,
+		hasEst:    hasEst,
+		node:      plan,
+	})
 
 	// When a Selection was rewritten to an index seek, skip its scan child
 	// (the child would be NodeByLabelScan which is subsumed by the seek). A
@@ -3119,29 +3185,36 @@ func explainWithIndexesNode(
 	// When a range seek fires, the Selection keeps its Filter on top but its
 	// NodeByLabelScan child is replaced by a NodeByIndexRangeScan leaf.
 	if rangeSeek {
-		b.WriteString(nextPrefix)
-		b.WriteString("└─ NodeByIndexRangeScan")
+		leaf := planLine{prefix: nextPrefix, connector: "└─ ", text: "NodeByIndexRangeScan"}
 		// The range scan produces exactly the in-range index rows (an exact
 		// count the seek already established is selective) — an estExact estimate.
 		if sel, ok := plan.(*ir.Selection); ok {
-			b.WriteString(rangeSeekLeafAnnotation(sel, idxMgr, explainGraph, params, prefixSeek))
+			leaf.est, leaf.annot, leaf.hasEst = rangeSeekLeafEstimate(sel, idxMgr, explainGraph, params, prefixSeek)
+			// The leaf REPLACES the Selection's scan child, so it exposes that
+			// child's variables — the rewrite changes the access path, not the
+			// bindings.
+			leaf.node = sel.Child
 		}
-		b.WriteByte('\n')
+		emit(leaf)
 		return
 	}
 
 	// When the min-label scan fires, the Selection keeps its residual Filter on
 	// top but its NodeByLabelScan child is re-anchored on the smaller label.
 	if minLabelFired {
-		b.WriteString(nextPrefix)
-		b.WriteString("└─ NodeByLabelScan [")
-		b.WriteString(minLabelVar)
-		b.WriteByte(':')
-		b.WriteString(minLabel)
-		b.WriteString("]")
+		leaf := planLine{
+			prefix:    nextPrefix,
+			connector: "└─ ",
+			text:      "NodeByLabelScan [" + minLabelVar + ":" + minLabel + "]",
+		}
 		// The re-anchored scan produces the exact live count of the chosen label.
-		b.WriteString(labelScanAnnotation(labelSrc, minLabel))
-		b.WriteByte('\n')
+		leaf.est, leaf.annot, leaf.hasEst = labelScanEstimate(labelSrc, minLabel)
+		if sel, ok := plan.(*ir.Selection); ok {
+			// Re-anchoring changes which label is scanned, not which variable the
+			// scan binds, so the leaf exposes the replaced child's variables.
+			leaf.node = sel.Child
+		}
+		emit(leaf)
 		return
 	}
 
@@ -3153,7 +3226,7 @@ func explainWithIndexesNode(
 		children = []ir.LogicalPlan{children[1], children[0]}
 	}
 	for i, child := range children {
-		explainWithIndexesNode(b, child, idxMgr, params, explainGraph, labelSrc, reorderSwaps, anchorSwaps, seekHints, prefixSeek, nextPrefix, false, i == len(children)-1)
+		explainWithIndexesNode(emit, child, idxMgr, params, explainGraph, labelSrc, reorderSwaps, anchorSwaps, seekHints, prefixSeek, nextPrefix, false, i == len(children)-1)
 	}
 }
 

@@ -47,10 +47,18 @@ import (
 // interface, so wrapping from cypher/explain would strip the marker and silently
 // downgrade a columnar plan to row mode.
 //
-// The measurements therefore live here; cypher/explain keeps its DbHits counter
-// and report formatter, and folding db-hits into this Profiler is tracked
-// separately (rmp #2238) since it needs a counter threaded through the storage
-// accessors rather than a wrapper.
+// Every measurement therefore lives here, db-hits included: rmp #2238 folded them
+// into this Profiler by deriving the count at the wrapper — an operator that reads
+// records from storage reads exactly one per row it emits ([StorageRecordScan]) —
+// rather than threading a counter through the storage accessors, which is what
+// keeps the cost-when-off guarantee absolute. cypher/explain's own DbHitsCounter
+// and InstrumentedScan are superseded by that and have no caller.
+//
+// What cypher/explain still contributes is PRESENTATION. Its FormatReport renders
+// a plan and its measurements as a fixed-width columnar table where this package's
+// [RenderPlanNode] renders an indented tree, and rmp #2701 wired it to
+// cypher.Engine.ProfileTable, which flattens the [PlanNode] tree this Profiler
+// produced into that table. Both renderings describe one run of one plan.
 //
 // # Concurrency
 //

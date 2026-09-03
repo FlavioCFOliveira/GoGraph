@@ -1282,8 +1282,10 @@ during materialisation, before the surplus reaches the caller.
 
 ## Inspecting a query plan
 
-Three surfaces, answering three different questions. All are Go APIs; none is
-reachable as a Cypher `EXPLAIN` / `PROFILE` prefix.
+Three questions — what runs, what the planner thought, what it cost — across five
+Go APIs: three that render an indented tree and two that render the same
+information as a fixed-width table. None is reachable as a Cypher `EXPLAIN` /
+`PROFILE` prefix; the parser has no such statement form.
 
 ### `Engine.Explain` — what runs
 
@@ -1377,6 +1379,72 @@ build in which profiling does not exist.
 > ordinary query would carry a branch that exists only for a diagnostic. Counting at
 > the access-path boundary instead needs no threading at all, which is why an
 > ordinary `Run` executes no counting code rather than merely skipping it.
+
+### `Engine.ExplainTable` and `Engine.ProfileTable` — the same, as a table
+
+`ExplainTable` and `ProfileTable` return what `ExplainLogical` and `Profile`
+return, rendered as a Neo4j-style fixed-width table instead of an indented tree.
+The point of the table is comparison: a column of right-aligned numbers reads
+across operators, where numbers scattered along lines of varying indentation do
+not.
+
+```
++-----------------------+----------+------+
+| Operator              | Est.Rows | Vars |
++-----------------------+----------+------+
+| ProduceResults        |        - | n    |
+| └─ Projection         |        - | n    |
+|    └─ NodeByIndexSeek |        - | n    |
++-----------------------+----------+------+
+```
+
+```
++--------------------------------+------+--------+-----------+
+| Operator                       | Rows | DbHits | Time (ms) |
++--------------------------------+------+--------+-----------+
+| Project                        |    1 |      0 |     0.000 |
+| └─ NodeByIndexSeek [seek="p3"] |    1 |      1 |     0.000 |
++--------------------------------+------+--------+-----------+
+| Total                          |    2 |      1 |     0.000 |
++--------------------------------+------+--------+-----------+
+```
+
+Each is the **same walk** as its tree counterpart, not a second derivation of the
+plan: `ExplainTable` and `ExplainLogical` share one traversal that performs the
+index-seek substitutions, applies the count-store-gated reorderings and computes
+the estimates, and `ProfileTable` and `Profile` render one captured measurement
+tree from one execution. Neither pair can disagree about which access path runs.
+
+Two things the table shows that the tree does not, and two it does not show:
+
+- The **`Vars` column** lists the variables each operator exposes; no tree
+  rendering prints them.
+- Alignment makes two operators' figures directly comparable.
+- The table has no room for the estimate's **provenance tag** or its certified
+  error term. `Est.Rows` carries the number and one marker: a bare `40` is an
+  exact maintained count, `~40` is a derived (statistics or heuristic) figure, and
+  `-` means no estimate is available — either none is derivable for that operator
+  shape, or the statistic behind it is absent or stale. Reach for
+  `ExplainLogical` when the provenance is what you need.
+- `Est.Rows` is an **estimate throughout**: `ExplainTable` executes nothing, so
+  even an "exact" cell states what the operator *would* read, never what it did.
+  `ProfileTable`'s `Rows` is the measured figure.
+
+`ProfileTable`'s `Total` line needs reading with care, because two of its three
+cells are easy to mistake:
+
+- **`Rows`** is every operator's emitted rows added together — a cost measure, not
+  the result's row count. The result's row count is the **root** operator's
+  `Rows`, on the table's first data line.
+- **`DbHits`** is the query's total storage-record reads, subject to the
+  divergence noted above.
+- **`Time (ms)`** is the whole query's elapsed time, because the root operator's
+  time already includes every child's.
+
+`ProfileTable` carries every caveat `Profile` carries: the query really runs and
+its rows are discarded, a writing statement is refused, times are inclusive of
+children, and an operator the instrumentation did not reach is marked
+`(not measured)` rather than left to read as one that cost nothing.
 
 ---
 
