@@ -91,6 +91,11 @@ arm spreads beside it.
   keep twice over — see [Big share, small ceiling](#big-share-small-ceiling).
 - `scaling_vs_1` is throughput at level *N* over throughput at level 1, both from
   the unprofiled window.
+- **A ceiling is read against its own level-1 cell, never on its own.** A ceiling
+  arm must read 1.000x where there is nothing yet to unshare; whatever it reads
+  instead is its construction bias, and the bias runs in BOTH directions across
+  the thirteen arms here. A ceiling quoted without that cell has no established
+  direction — see [the corrected section](#the-ceiling-arms-bias-runs-both-ways--corrected-rmp-2712).
 
 ## Round 1 verified: every fix holds
 
@@ -153,7 +158,7 @@ partitioning could actually buy. Blocked time is cumulative mutex delay over all
 goroutines, so the absolute figures at 1024 are large by construction; the share
 is what locates the site inside its own profile.
 
-| # | site | blocked / share | provoked by | ceiling @8 | ceiling @1024 | on an engine path? |
+| # | site | blocked / share | provoked by | ceiling @8 (raw) | ceiling @1024 (raw) | on an engine path? |
 |---:|---|---|---|---|---|---|
 | 1 | `graph/generation/generation.go:152` `releaseRef`, `:162` `Release`, `:185` `Publish` | 64.34 ms @8; 2337.55 s @1024 (`Publish` 82.89%, `releaseRef` 17.11%) | `generation-publish-read`@8 | **47.619x** (2.42% / 7.17%) | 23.878x (0.37% / 13.08%) | **no — and deliberately so** |
 | 2 | `graph/index/manager.go:254` `Manager.Apply` -> `graph/index/label/index.go:327` `Index.Add` | 11484 s = **43.88%** of 26172 s @1024; `CreateIndex` 28.34%, `DropIndex` 27.65% | `index-manager-fanout`@1024 | 3.396x (20.65% / 3.40%) | **32.223x** (48.32% / 5.14%) | yes — see the correction below |
@@ -172,7 +177,14 @@ is what locates the site inside its own profile.
 Spreads in parentheses are (base arm, ceiling arm) five-round min/max as a
 fraction of the median. Every ratio called a result above clears both.
 
-### The ceiling arms understate, they do not flatter
+**The two ceiling columns above are RAW.** They are not normalised by each arm's
+own level-1 cell, and three of the thirteen arms are *faster* than their base
+before anything has been unshared — so not every ceiling here is a lower bound.
+The corrected figures, and the direction of each arm's bias, are in the next
+section; where a raw and a normalised figure disagree, the normalised one is the
+better estimate.
+
+### The ceiling arms' bias runs BOTH ways — corrected (rmp #2712)
 
 A ceiling arm does not delete a lock — module code is not the harness's to
 change, and a deleted lock measures a program that does not exist. It **removes
@@ -180,21 +192,296 @@ the sharing**: it builds `GOMAXPROCS` independent copies of the fixture the base
 workload shares and routes each worker to one. The path through the module is
 byte-identical; only the number of goroutines meeting on one object changes.
 
-That construction carries a handicap, and the level-1 cell measures it. At level
-1 there is nothing to unshare, so the pair must read 1.00x — and several do not:
+That construction carries a bias, and the level-1 cell measures it: at level 1
+there is one worker meeting one replica, so nothing has been unshared and the
+pair must read 1.000x.
 
-| arm | ratio @1 | what the handicap is |
-|---|---|---|
-| `metrics-emit` | 0.627x | 10 Prometheus registries instead of 1: worse locality, more resident state |
-| `index-count-hot` | 0.864x | 10 count stores instead of 1 |
-| `generation-publish-read` | 0.893x | 10 CSR publishers instead of 1 |
-| `index-hash-rw` | 0.949x | 10 hash indexes instead of 1 |
-| `index-btree-rw` | 0.950x | 10 btree indexes instead of 1 |
-| `cypher-read-label-small` | 0.960x | 10 engines and 10 graphs instead of 1 |
+**What this section published before, and why it was wrong.** It listed six arms,
+every one of them below 1.00, and concluded: *"Every ceiling above 1.00x is
+therefore a lower bound."* The table it drew that conclusion from had been
+filtered to the arms that sat below 1.00 — **seven of the thirteen arms were
+omitted entirely** — and three of those seven sit **above** 1.00 by more than the
+tolerance, with two more above it inside the tolerance. For an arm above 1.00 the
+arm is faster than its base before anything has been unshared, so its ceiling is
+an **upper** bound to be discounted, not a lower bound to be trusted.
+The worst case is the headline of ranked row 3: `dst-concurrent-bolt`'s
+**16.307x** was published un-normalised against an arm that reads **1.078x** at
+level 1, and the corrected figure is **15.127x**.
 
-**Every ceiling above 1.00x is therefore a lower bound.** `metrics-emit`'s 3.300x
-is bought while paying a 37% locality penalty; the sharing costs more than the
-raw ratio says.
+#### Every arm's level-1 cell, and the direction it implies
+
+Direction is decided against the same working rule the rest of this document
+uses: the departure from 1.000 must clear the wider of the ±2.4% floor and the
+anchor row's own two arm spreads.
+
+| arm | cell @1 | base spread | arm spread | tolerance | direction of the bias |
+|---|---:|---:|---:|---:|---|
+| `metrics-emit` | 0.627x | 0.89% | 1.25% | ±2.40% | arm handicapped → its ceilings are **lower** bounds |
+| `index-count-hot` | 0.864x | 1.30% | 14.76% | ±14.76% | **not a result** by this document's own rule — see the note below |
+| `generation-publish-read` | 0.893x | 1.83% | 4.11% | ±4.11% | arm handicapped → **lower** bounds |
+| `index-hash-rw` | 0.949x | 1.89% | 0.76% | ±2.40% | arm handicapped → **lower** bounds |
+| `index-btree-rw` | 0.950x | 1.78% | 1.28% | ±2.40% | arm handicapped → **lower** bounds |
+| `cypher-read-label-small` | 0.960x | 0.67% | 1.16% | ±2.40% | arm handicapped → **lower** bounds |
+| `index-manager-fanout` | 0.976x | 1.81% | 3.31% | ±3.31% | inside the tolerance — no direction |
+| `lpg-neighbours-read` | 0.987x | 1.99% | 0.70% | ±2.40% | inside the tolerance — no direction |
+| `cypher-write-mem` | 1.004x | 1.73% | 1.07% | ±2.40% | inside the tolerance — no direction |
+| `mvcc-session-write` | 1.012x | 0.60% | 0.93% | ±2.40% | inside the tolerance — no direction |
+| `dst-disk-wal` | 1.025x | 0.46% | 0.16% | ±2.40% | **arm favoured** → **upper** bounds (marginal: 0.1 pp clear) |
+| `cypher-mixed-rw` | 1.034x | 1.75% | 0.92% | ±2.40% | **arm favoured** → **upper** bounds |
+| `dst-concurrent-bolt` | 1.078x | 0.95% | 0.62% | ±2.40% | **arm favoured** → **upper** bounds |
+
+Five arms understate their ceilings, three flatter them, and five establish no
+direction from this campaign — `index-count-hot` among them, whose cause is
+nonetheless settled by a dedicated experiment further down. There is no single
+direction, and there never was: the old table found one only because it had
+dropped every arm that pointed the other way.
+
+**Where these cells come from.** All thirteen are rows of the round-2 campaign's
+own `ceiling.tsv` (14 pairs × 3 levels × 5 interleaved rounds, loadavg **2.18
+before / 8.10 after**, exit 0) — the same 42-row file the freshness audit above
+reproduced this document's ranked ceilings, handicap ratios and validity-control
+rows from. Six of the thirteen were already published here and are covered
+directly by that audit's *verified fresh* verdict. The other seven were never
+published, so the audit never checked them one by one: they are as fresh as the
+file they share and the audit established that file's provenance, but that is a
+statement about the file rather than a per-figure check, and it is recorded here
+as the weaker claim it is. **No figure corrected in this section derives from an
+input the audit marked "cannot be verified".**
+
+#### What dividing by the level-1 cell removes, and what it does not
+
+Normalising removes the part of the construction bias that is **constant across
+the ladder** — the arm's per-operation routing wrapper, its extra resident state,
+its allocator and cache effects — because that part is present at level 1 too.
+
+It does **not** remove a bias that **grows with the level**, and this package has
+a large one. `drive` (`bench/contention/observatory.go:291`) holds the **total**
+operation count fixed and splits it across the workers, so at level *N* > 1 each
+of an arm's replicas accumulates roughly 1/min(*N*, replicas) of the writes the
+base's single fixture accumulates — and a smaller fixture answers a cheaper
+query. That effect is exactly **zero** at level 1 (one worker, one replica, the
+same writes), so the anchor cannot see it and the division cannot remove it.
+
+**For every arm whose per-operation cost depends on state its fixture
+accumulates, the normalised figure is therefore still an upper bound**, by an
+amount this task did not measure. The clear cases are the arms that write a graph
+or a log on every operation: `cypher-write-mem`, `mvcc-session-write`,
+`cypher-mixed-rw`, `dst-concurrent-bolt` and `dst-disk-wal`. The two read-only
+arms — `cypher-read-label-small` and `lpg-neighbours-read` — are exempt, because
+their fixtures do not grow.
+
+#### Corrected ceilings: raw, and normalised by the arm's own level-1 cell
+
+Row numbers are the ranked inventory's. **Bold** marks a correction large enough
+to change how the row should be read.
+
+| # | arm | cell @1 | ceiling @8: raw → normalised | ceiling @1024: raw → normalised |
+|---:|---|---:|---:|---:|
+| 1 | `generation-publish-read` | 0.893x | 47.619x → **53.348x** | 23.878x → **26.751x** |
+| 2 | `index-manager-fanout` | 0.976x | 3.396x → 3.479x | 32.223x → 33.012x |
+| 3 | `dst-concurrent-bolt` | **1.078x** | 1.627x → **1.509x** | **16.307x → 15.127x** |
+| 4 | `metrics-emit` | 0.627x | 3.300x → **5.263x** | 2.138x → **3.410x** |
+| 5 | `dst-disk-wal` | 1.025x | 3.860x → 3.765x | 1.353x → 1.320x |
+| 6 | `index-count-hot` | 0.864x | 2.916x → 3.374x | 2.392x → 2.767x |
+| 7 | `index-hash-rw` | 0.949x | 1.960x → 2.066x | 1.531x → 1.614x |
+| 8 | `cypher-write-mem` | 1.004x | 1.262x → 1.257x | 1.702x → 1.695x |
+| 9 | `mvcc-session-write` | 1.012x | 1.308x → 1.292x | 1.712x → 1.691x |
+| 10 | `cypher-read-label-small` | 0.960x | 1.152x → 1.200x | 1.116x → 1.163x |
+| 11 | `cypher-mixed-rw` | **1.034x** | 1.111x → 1.074x | 1.272x → 1.230x |
+| 12 | `index-btree-rw` | 0.950x | 0.948x → **0.998x** | 1.005x → 1.058x |
+| 13 | `lpg-neighbours-read` | 0.987x | 1.004x → 1.017x | 1.001x → 1.014x |
+
+Two readings change materially. `metrics-emit` is the largest understatement in
+the document: its 3.300x at 8 is really **5.263x**, and its 2.138x at 1024 is
+**3.410x**. `dst-concurrent-bolt`'s 16.307x headline is really **15.127x**, and
+it is an upper bound rather than a lower one, so 15.127x is the ceiling's
+optimistic end and not its pessimistic one.
+
+**A caveat that must travel with this table.** For the five arms whose level-1
+cell does not clear its tolerance — rows 2, 6, 8, 9 and 13 — the correction the
+division applies is itself smaller than the instrument can resolve, so for those
+rows the raw and the normalised figure are equally good estimates and the
+normalised one carries no extra authority. Row 6 is the awkward case: its
+campaign cell (0.864x) fails its own 14.76% spread, while the dedicated
+experiment reported below puts the same arm at 0.879x with a 1.75% base spread.
+The direction of its correction is settled; its magnitude is not, and 3.374x
+would be 3.314x if the experiment's cell were used instead.
+
+One reading is repaired rather than changed. Row 12's raw 0.948x at 8 reads like
+a ceiling arm running *slower* than the base with eight cores available; it is
+not, it is 0.998x with the arm's own 5% handicap taken out. The conclusion —
+`graph/index/btree` is exhausted, there is nothing behind its sharing — is
+unaffected, but the number that supported it was an artefact.
+
+#### The cause of each departure, and how firmly it is established
+
+The technical requirement behind rmp #2712 is that a cell which departs from
+1.000 by more than the noise be given a **cause**, not merely a number. What
+follows separates what was measured for this task from what is still an
+assertion, because the previous version of this section stated causes it had not
+measured — and two of them are now known to be wrong.
+
+**`metrics-emit`, 0.627x — established, and the cause published here before was
+wrong.** This section blamed "10 Prometheus registries instead of 1: worse
+locality, more resident state". The arm installs exactly **one** registry, and
+its own godoc (`bench/contention/ceiling_arms.go:408`) says so: what it
+replicates is the metric **name**, not the backend, deliberately, so that the
+counter's cache-line cost is separated from the registry's lookup cost. The real
+cause is an allocation asymmetry that replicating the name introduces.
+`metricsOp` (`bench/contention/workloads_unreached.go:261`) builds every metric
+name by concatenating a suffix; the base workload passes `""`, the arm passes
+`.rN`. Measured on this host (`go test -bench -benchmem -count=3`, Apple M4,
+go1.27.0):
+
+| concatenation | ns/op | B/op | allocs/op |
+|---|---:|---:|---:|
+| `"bench.contention.ops" + ""` (base) | 3.18 | 0 | **0** |
+| `"bench.contention.ops" + ".r3"` (arm) | 12.24 | 24 | **1** |
+
+The empty-suffix case takes the Go runtime's `concatstrings` fast path and
+returns the operand without allocating. At 1.3125 concatenations per operation
+(a counter always, a latency every 4, a gauge every 16) the arm pays about 11.9
+ns/op and 1.31 allocations the base never pays. The in-situ level-1 gap is
+**13.46 ns/op** in this campaign (22.62 vs 36.08 ns/op, from the 44.20M/s and
+27.71M/s cells above) and **13.25 ns/op** in the rmp #2698 re-measurement (23.25
+vs 36.50). The concatenation accounts for the great majority of it either way.
+The allocation counts reproduced exactly; the ns/op figures above were taken on a
+host that was not quiet, and rmp #2698's reading of the same benchmark gave 3.174
+and 16.17 ns/op — the mechanism is identical, the arithmetic is tighter with the
+numbers measured here.
+
+**`index-hash-rw` 0.949x, `index-count-hot` 0.864x, `generation-publish-read`
+0.893x — the cause is the arm's ROUTING WRAPPER, not the replica count.** This
+section blamed "10 hash indexes instead of 1", "10 count stores instead of 1",
+"10 CSR publishers instead of 1". At level 1 the single worker meets replica 0
+and the other nine are never touched, so the replica count has no obvious way to
+cost anything — and a single-variable experiment says it does not.
+`ceilingReplicas()` returns `GOMAXPROCS(0)`, so a child run at `GOMAXPROCS=1`
+builds **exactly one replica** and then differs from its base workload only by
+the wrapper: `run(ctx, set.pick(worker), worker, iter)`, which costs a modulo, a
+bounds-checked slice load (`bench/contention/ceiling_arms.go:107`) and an
+indirect call through a func value that the base workload's directly-captured
+closure does not make.
+
+Level 1, five interleaved rounds per cell, ten times the declared operation
+count, one window per child process, loadavg **4.86 before / 6.54 after**. The
+ns/op columns are the one-replica condition, where the wrapper is the only
+remaining difference:
+
+| arm | cell @1, replicas = 10 | cell @1, replicas = 1 | base ns/op | arm ns/op | delta |
+|---|---|---|---:|---:|---:|
+| `index-hash-rw` | 0.903x (34.91% / 25.73%) | **0.946x (2.93% / 1.65%)** | 14.49 | 15.32 | **0.83 ns** |
+| `index-count-hot` | 0.880x (1.75% / 7.01%) | 0.879x (13.42% / 0.21%) | 4.86 | 5.53 | **0.67 ns** |
+| `generation-publish-read` | 0.879x (16.96% / 4.69%) | 0.862x (37.96% / 48.18%) | 7.31 | 8.49 | **1.18 ns** |
+
+Dropping the replica count from ten to one leaves each handicap where it was, so
+the handicap is not the replica count. And the three deltas — 0.83, 0.67 and
+1.18 ns/op across three unrelated data structures — are a roughly **constant
+per-operation cost**, which is what a fixed wrapper predicts and what "ten copies
+instead of one" does not. Confidence: **established** for `index-hash-rw`, whose
+one-replica cell carries 2.93% / 1.65% spreads and lands on the campaign's own
+0.949x; **established** for `index-count-hot`, whose two point estimates differ
+by 0.1% and whose ten-replica cell is tight; **supported but not established**
+for `generation-publish-read`, whose one-replica cells carry 38% and 48% spreads.
+The host was not quiet throughout: another agent's test suites were running.
+
+**`index-count-hot`, a note on its 0.864x.** The campaign's own level-1 row does
+not clear its ceiling arm's five-round spread of 14.76%, so by this document's
+working rule that cell is not a result and the old table should not have listed
+it as one. The dedicated experiment above does clear its spreads and puts the
+same arm at 0.879x with a 1.75% base spread, so the arm really is handicapped;
+the direction rests on that experiment, not on the campaign row.
+
+**`cypher-read-label-small` 0.960x and `index-btree-rw` 0.950x — NOT
+established.** Their level-1 operations cost 971 ns and 40.9 ns, so the ~0.8 ns
+wrapper is 0.08% of the first operation and 2.0% of the second, against
+deficits of 4.0% and 5.0% — so it explains essentially none of
+`cypher-read-label-small`'s and under half of `index-btree-rw`'s. Something else
+carries the rest, and this task did not measure it. The causes this section gave
+for them are assertions, not measurements, and are retained only as hypotheses:
+ten engines and ten graphs, and ten btree indexes, in place of one.
+
+**`dst-concurrent-bolt`, 1.078x — mechanism established, and the cause recorded
+in rmp #2712 is refuted at level 1.** rmp #2712 and
+`docs/bolt-evaluation-2026-09-03.md` both give the cause as "its ten replicas
+each accumulate a tenth of the writes and so answer cheaper queries against a
+smaller graph". That cannot operate at level 1. `drive` splits a **fixed** total
+of 2000 operations across the workers and `replicaSet.pick` routes worker *i* to
+replica *i* mod *N*, so at level 1 the one worker meets replica 0 and that single
+replica accumulates **all** 2000 operations — exactly what the base workload's
+single server accumulates. Nine replicas stay empty. The effect is real, but it
+is a property of levels above 1 and is precisely the level-dependent bias the
+anchor cannot remove; it is not what the level-1 cell measures.
+
+What does differ at level 1 is the live heap, and through it the garbage
+collector. Measured with `GODEBUG=gctrace=1`, one window per child process, level
+1, the identical 2000 operations, five interleaved pairs:
+
+| | base | ceiling arm |
+|---|---:|---:|
+| live heap after GC (median) | 3 MB | 7 MB |
+| next-GC goal (median) | 7 MB | 15 MB |
+| GC cycles in the window | 1643 – 1656 | 777 – 815 |
+
+Ten Bolt servers where the base has one raise the live heap about 2.3×; Go's
+pacer sets the next heap goal proportional to the live heap, so the goal is about
+2.1× larger and the identical workload finishes in **about half** the GC cycles.
+Across the five independent process pairs the base's cycle count varies by 0.8%
+and the arm's by 4.9%, and their ratio stays between **2.03 and 2.12** — the
+effect dwarfs its own scatter. The heap figures corroborate the refutation on
+their own: if the writes
+really were spread across ten replicas the live heap would be about the base's,
+not 2.3× it. 7 MB is one written server plus nine idle ones.
+
+Raising `GOGC` to 800 for both arms — a single variable applied identically —
+moved the paired median from 1.069x to 1.033x and lifted the base arm's
+throughput by about 37% against the ceiling arm's 13%, both in the direction the
+mechanism predicts. That is consistent, but it does not fix a magnitude: the host
+was not quiet (loadavg 4.48 → 6.91) and the per-round ratios ranged 0.60x to
+1.38x. **The mechanism is established; how much of the 7.8% it accounts for is
+not.**
+
+The *direction*, by contrast, is not in doubt. Three independent campaigns put
+this cell above 1.00 with tight spreads: **1.078x** here (0.95% / 0.62%), and
+**1.0959x** and **1.0954x** in the two Bolt-evaluation probes at HEAD `d4f49b85`
+(`docs/bolt-evaluation-2026-09-03.md`, which normalises its own 10.353x at 64 to
+9.46x). A fourth reading taken for this task on a loaded host gives the same
+point estimate, **1.098x**, but with 23.26% and 42.56% spreads — and the probe's
+own tolerance rule therefore declined to call a direction from it, which is the
+rule working correctly. It corroborates the value; it establishes nothing by
+itself.
+
+**`cypher-mixed-rw` 1.034x and `dst-disk-wal` 1.025x — direction established
+marginally, cause NOT established.** Both clear the ±2.4% floor, by 1.0 and 0.1
+percentage points. `cypher-mixed-rw` was re-measured for this task and
+reproduces: **1.036x** (spreads 1.44% / 0.33%, three interleaved rounds, loadavg
+2.88 → 2.81), which clears the floor on its own and puts the arm's raw 1.098x at
+8 in that run at 1.060x normalised. `dst-disk-wal` was not re-measured, and at a
+tenth of a point clear of the floor it should be read as provisional. Neither cause was measured for this task. Both arms' fixtures
+accumulate state on every operation, so the GC-pacing mechanism established above
+for `dst-concurrent-bolt` is the obvious candidate; `dstDiskCeiling` additionally
+unshares the harness's own simulated disk, a confound this document already
+records against row 5.
+
+#### This is now enforced, not merely documented
+
+`bench/contention` no longer lets a ceiling be published without its level-1
+cell. `TestCeilingProbe` refuses a ladder that omits level 1 before any window
+runs; `normaliseByAnchor` refuses to normalise a pair whose level-1 cell is
+missing or unusable, and that pair's rows are dropped rather than published raw;
+and `writeProbeSummary` refuses to write `ceiling.tsv` at all if a row reaches it
+without an anchor. `ceiling.tsv` now carries `ratio_at_1`, `ratio_normalised`,
+`anchor_tolerance` and `direction` beside every raw ratio, and the probe's log
+prints the correction as well as its result.
+
+All three refusals are proved non-vacuous in `bench/contention/normalise_test.go`:
+each one was mutated and the test that covers it fails, then passes again on
+restore. The outermost guard is covered twice over, because a pure-predicate test
+would not have been enough — neutering the `if` while leaving the predicate
+correct keeps every in-process test green, so the probe is also driven as a child
+process on a ladder of `8` alone, and that arm asserts both that it refuses and
+that the artefact directory is still **empty** afterwards. A guard that fires
+only after the campaign has been measured is not this guard.
 
 ## The mutex profiler is blind to the module's worst site
 
@@ -227,10 +514,16 @@ Round 1's central lesson repeated twice this round, now with the ceiling numbers
 that prove it. These two sites hold the largest shares of their profiles in the
 Cypher paths, and partitioning them is worth almost nothing:
 
-| site | share of its profile | ceiling @8 |
-|---|---:|---:|
-| `cypher/plan_cache.go:85` `planCache.get` | 61.48% | **1.111x** |
-| `cypher/api.go:4933` `parseAndAnalyse` | 53.29% | **1.152x** |
+| site | share of its profile | ceiling @8 raw | normalised |
+|---|---:|---:|---:|
+| `cypher/plan_cache.go:85` `planCache.get` | 61.48% | 1.111x | **1.074x** |
+| `cypher/api.go:4933` `parseAndAnalyse` | 53.29% | 1.152x | **1.200x** |
+
+The two corrections run in opposite directions, which is the point of the
+section above: `cypher-mixed-rw`'s arm is favoured at level 1 (1.034x) so its
+ceiling shrinks, `cypher-read-label-small`'s is handicapped (0.960x) so its
+ceiling grows. Neither correction changes the conclusion — both sites are worth
+almost nothing — but neither ceiling was what it was published as.
 
 `planCache.get` was the #2 site of round 1 at 74.68%, and #2691 addressed it.
 It still holds 61.48% of `cypher-mixed-rw`@1024's delay — **and there is 11% left
@@ -498,34 +791,40 @@ blocked time is a symptom of hundredfold oversubscription rather than its cause.
 
 ## What the evidence says to do next
 
-Ranked by ceiling weighted against reachability.
+Ranked by ceiling weighted against reachability. Every ceiling below is given as
+**raw → normalised** by the arm's own level-1 cell; the normalised figure is the
+better estimate, and the ranking is unchanged by the correction.
 
-1. **`graph/generation` refcount — 47.6x, exported, deliberately unwired.** One
-   shared `atomic.Int64` per generation. The obvious remedy is a striped or per-P
-   refcount summed on publish. Highest ceiling in the module by a factor of 12,
-   and it caps a consumer's throughput rather than the engine's.
-2. **`graph/index` `Manager` fan-out — 32.2x at 1024, and it IS wired.** One
-   `RWMutex` over the whole subscriber set, taken by `ApplyBatch` on every
+1. **`graph/generation` refcount — 47.6x → 53.3x at 8, exported, deliberately
+   unwired.** One shared `atomic.Int64` per generation. The obvious remedy is a
+   striped or per-P refcount summed on publish. Highest ceiling in the module by
+   a factor of 12, and it caps a consumer's throughput rather than the engine's.
+   Its arm is handicapped at level 1 (0.893x), so even 53.3x is a lower bound.
+2. **`graph/index` `Manager` fan-out — 32.2x → 33.0x at 1024, and it IS wired.**
+   One `RWMutex` over the whole subscriber set, taken by `ApplyBatch` on every
    write-path index writeback and by `ListIndexes`/`GetIndex` on the seek path.
    Measured through `Apply`, which the engine does not call; see the correction
    above for what that does and does not license you to claim.
-3. **`store/wal` durable commit — 3.860x at 8, on the engine path.** The highest
-   ceiling of any wired site at the concurrency the hardware can actually serve.
-4. **`internal/metrics.IncCounter` — 3.300x at 8** (and that is bought while
-   paying a 37% locality handicap, so the true figure is higher). With the real
-   Prometheus backend installed the surface scales at 0.445x: eight goroutines
-   emit metrics at less than half the rate one does. What enabling metrics costs
-   against the no-op default was NOT measured here and must not be inferred from
-   this number.
-5. **`graph/index/count` hot type — 2.916x at 8, on the engine path.** Round 1's
-   #2682 fixed the *spread* case; the *single hot type* case is still 0.328x, and
-   is atomic contention rather than lock contention.
-6. **`graph/index/hash` Insert — 1.960x at 8.** #2692 cut its blocked time from
-   1199.90 s to 273.74 s and turned 0.916x into 1.742x, but the site still holds
-   97.91% of its profile and there is roughly 2x left behind it.
-7. **The write barrier `cypher/api.go:18379` — 1.70x at 1024.** Modest, but it is
-   the single point every write in the module passes through.
+3. **`store/wal` durable commit — 3.860x → 3.765x at 8, on the engine path.** The
+   highest ceiling of any wired site at the concurrency the hardware can actually
+   serve. Read it as an **upper** bound twice over: its arm is favoured at level 1
+   (1.025x), and `dstDiskCeiling` also unshares the harness's own simulated disk.
+4. **`internal/metrics.IncCounter` — 3.300x → 5.263x at 8.** The largest
+   correction in the document: the arm pays a 37% handicap at level 1, which is
+   its own metric-name allocation and not the locality this document previously
+   blamed. With the real Prometheus backend installed the surface scales at
+   0.445x: eight goroutines emit metrics at less than half the rate one does.
+   What enabling metrics costs against the no-op default was NOT measured here
+   and must not be inferred from this number.
+5. **`graph/index/count` hot type — 2.916x → 3.374x at 8, on the engine path.**
+   Round 1's #2682 fixed the *spread* case; the *single hot type* case is still
+   0.328x, and is atomic contention rather than lock contention.
+6. **`graph/index/hash` Insert — 1.960x → 2.066x at 8.** #2692 cut its blocked
+   time from 1199.90 s to 273.74 s and turned 0.916x into 1.742x, but the site
+   still holds 97.91% of its profile and there is roughly 2x left behind it.
+7. **The write barrier `cypher/api.go:18379` — 1.70x → 1.69x at 1024.** Modest,
+   but it is the single point every write in the module passes through.
 
-Stop below that line. `graph/index/btree` reads 0.948x / 1.005x and
-`lpg-neighbours-read` reads 1.004x / 1.001x: their sharing costs nothing, and no
-amount of sharding would repay the effort.
+Stop below that line. `graph/index/btree` reads 0.948x → 0.998x and 1.005x →
+1.058x, and `lpg-neighbours-read` reads 1.004x → 1.017x and 1.001x → 1.014x:
+their sharing costs nothing, and no amount of sharding would repay the effort.
