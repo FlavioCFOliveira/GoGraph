@@ -59,8 +59,54 @@ the active backend:
   one mutex acquire + one map insertion or counter add per event.
   Used by the smoke test to assert metric names; not intended for
   production use.
-* **Prometheus backend (out-of-tree)**: cost is bounded by the
-  Prometheus histogram implementation the consumer wires in.
+* **Prometheus backend (in-tree, `metrics.NewPrometheusRegistry`)**:
+  measured against the no-op default on the same operation mix
+  (a counter every operation, a latency observation on one in four,
+  a gauge on one in sixteen), Apple M4, Go 1.27.1, by
+  `BenchmarkEmit` / `BenchmarkEmitParallel` in
+  `internal/metrics/emit_backend_bench_test.go`:
+
+  | goroutines | no-op | Prometheus | enabled cost |
+  |---|---|---|---|
+  | 1 | 4.28 ns/op | 16.5 ns/op | +12.2 ns/op (3.9x) |
+  | 8 | 0.83 ns/op | 4.34 ns/op | +3.5 ns/op (5.2x) |
+  | 64 | 0.70 ns/op | 4.13 ns/op | +3.4 ns/op (5.9x) |
+
+  Enabling the backend therefore costs roughly 12 ns per emission on
+  one goroutine, and the cost per emission FALLS as goroutines are
+  added because emission scales with the cores. Reproduce with:
+
+  ```
+  go test -run='^$' -bench=BenchmarkEmit -benchmem -cpu=1,8,64 -count=6 ./internal/metrics/
+  ```
+
+  A consumer that wires its own backend instead pays whatever that
+  implementation costs; the numbers above describe the in-tree one.
+
+### Emission under concurrency
+
+A counter is one atomic word, so several goroutines incrementing the
+same series would serialise on one cache line — and did: before
+rmp #2698 the in-tree registry ran 47.6 ns/op at 8 goroutines against
+8.35 ns/op at one, a SCALING of 0.18x, meaning adding cores made
+emission slower in absolute terms. That is a defect against the
+extreme-concurrency mandate rather than a tuning opportunity.
+
+A series now grows per-core accumulators the first time two goroutines
+are observed emitting to it concurrently, and is summed at scrape time.
+The measured effect on `BenchmarkIncCounterParallel` is 47.6 -> 1.70 ns/op
+at 8 goroutines and 50.2 -> 1.76 ns/op at 64, against a cost of
++13% on the uncontended single-goroutine path (8.35 -> 9.46 ns/op).
+
+Nothing about the exposition changes: the same names, labels, types and
+values are produced whether or not a series has been promoted, which
+`TestExposition_IdenticalWhetherPromoted` asserts byte-for-byte.
+
+The memory is paid only by series that are actually contended. Each
+promoted series costs 4 KiB; the unconditional cost is one pointer per
+series, 3,920 bytes across the module's full cardinality of 268 counters
+and 222 histograms. See `internal/metrics/prometheus/striped.go` for the
+design and `footprint_test.go` for the measurement.
 
 The instrumentation is intentionally confined to the public entry
 point of each blocking operation. Inner hot loops (heap-pop, BFS
