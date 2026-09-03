@@ -507,7 +507,24 @@ func withProfiling(outDir string, fn func() Metrics) (m Metrics, err error) {
 		return m, fmt.Errorf("close cpu profile: %w", err)
 	}
 
-	for _, p := range []string{"mutex", "block", "goroutine"} {
+	// "heap" is written alongside the contention profiles because this package
+	// had NO allocation attribution at all: it could rank where goroutines
+	// block but not what a workload allocates, so an allocation-rate finding
+	// could only be asserted, never located.
+	//
+	// The heap profile's alloc_space and alloc_objects samples are CUMULATIVE
+	// for the process's lifetime, which is normally a hazard and is exactly
+	// what makes it correct here: this package already runs one window per
+	// fresh child, so the cumulative totals are this window's totals and
+	// nothing else's. In a shared process they would be the sum of every
+	// window that ran before.
+	//
+	// runtime.GC is called first because the profile is only updated at a GC
+	// cycle; without it the last allocations of the window are missing from
+	// the in_use views. It costs one collection at the very end of the window,
+	// after the clock has stopped, so it perturbs no reported number.
+	runtime.GC()
+	for _, p := range []string{"mutex", "block", "goroutine", "heap"} {
 		if err := writeProfile(outDir, p); err != nil {
 			return m, err
 		}

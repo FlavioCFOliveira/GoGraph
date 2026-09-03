@@ -58,6 +58,24 @@ const envCeilingRepeats = "GOGRAPH_CONTENTION_CEILING_REPEATS"
 // each arm's own rounds (min/max as a fraction of the median). A ratio that
 // does not clear the arms' own spread is not a result, and the spread is
 // printed beside the ratio so that cannot be quietly forgotten.
+//
+// # Run it with -count=1
+//
+// Go CACHES test results, and this test is cacheable: its inputs are the test
+// binary, its arguments and the environment variables it reads. Re-running a
+// campaign with the same env therefore REPLAYS THE PREVIOUS RUN'S OUTPUT
+// instead of measuring, and the replay is nearly silent -- the only tell is
+// "(cached)" in place of the elapsed time on the final ok line, while every
+// throughput number, every loadavg bracket around it and the reported test
+// duration all look like a fresh measurement.
+//
+// This was not hypothesised, it happened: a re-take of the A-vs-A noise floor
+// returned nine ratios byte-identical to the run 10 minutes earlier, including
+// the 102.86s duration, in a window that actually took under a second. A
+// published "re-measured on a quiet host" floor would have been the old
+// contaminated one.
+//
+// Always pass -count=1.
 func TestCeilingProbe(t *testing.T) {
 	root := os.Getenv(envCeilingDir)
 	if root == "" {

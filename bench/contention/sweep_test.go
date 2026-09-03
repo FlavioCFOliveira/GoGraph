@@ -47,6 +47,24 @@ const envSweepWorkloads = "GOGRAPH_CONTENTION_WORKLOADS"
 // passing package and all three reappear under -v. Printf is used below rather
 // than t.Logf only because it prints the path unadorned by a file:line prefix;
 // it does not escape the capture, and nothing in the test framework can.
+//
+// # Run it with -count=1
+//
+// Go CACHES test results, and this test is cacheable: its inputs are the test
+// binary, its arguments and the environment variables it reads. Re-running a
+// campaign with the same env therefore REPLAYS THE PREVIOUS RUN'S OUTPUT
+// instead of measuring, and the replay is nearly silent -- the only tell is
+// "(cached)" in place of the elapsed time on the final ok line, while every
+// throughput number, every loadavg bracket around it and the reported test
+// duration all look like a fresh measurement.
+//
+// This was not hypothesised, it happened: a re-take of the A-vs-A noise floor
+// returned nine ratios byte-identical to the run 10 minutes earlier, including
+// the 102.86s duration, in a window that actually took under a second. A
+// published "re-measured on a quiet host" floor would have been the old
+// contaminated one.
+//
+// Always pass -count=1.
 func TestSweep(t *testing.T) {
 	root := os.Getenv(envSweepDir)
 	if root == "" {

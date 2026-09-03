@@ -85,6 +85,7 @@ func All() []Workload {
 	all = append(all, surfaceWorkloads()...)
 	all = append(all, dstWorkloads()...)
 	all = append(all, unreachedWorkloads()...)
+	all = append(all, boltWorkloads()...)
 	return all
 }
 
