@@ -191,7 +191,17 @@ func (op *HashJoin) buildTable() error {
 		if op.budget.charge(r) {
 			return ErrHashJoinMemoryExceeded
 		}
-		// Own a stable snapshot of the build row across the entire probe phase.
+		// The copy is REQUIRED and cannot be elided (rmp #2702): cp is retained
+		// in op.table for the ENTIRE probe phase — hundreds of thousands of
+		// child Next calls later — and [Row]'s contract lets the build child
+		// reuse its backing slice on every one of them.
+		//
+		// Measured (rmp #2702, MemProfileRate=1, no -race): 20 000 copies /
+		// 320 000 B on a 20 000-row build side, 0.30% of the query's allocs/op.
+		// When BOTH arms are ChunkProducers the planner substitutes
+		// [ColumnarHashJoin] instead (cypher/hash_join_plan.go:245), which
+		// retains build-side row-IDS into a column-major buffer and allocates
+		// NOTHING here — measured zero on `MATCH (a:P),(b:P) WHERE a.x=b.x`.
 		cp := make(Row, len(r))
 		copy(cp, r)
 		h := canonicalKeyHash(key)
@@ -255,7 +265,26 @@ func (op *HashJoin) Next(out *Row) (bool, error) {
 			// NULL/NaN probe key matches nothing — skip without a table lookup.
 			continue
 		}
-		// Snapshot the probe row so it stays valid while we scan the bucket.
+		// The copy is retained in op.probeRow across the whole bucket scan, i.e.
+		// across many HashJoin.Next calls, and emit reads it on each of them.
+		//
+		// It also NORMALISES A NIL ROW TO A NON-NIL ONE, which this loop's
+		// `op.probeRow != nil` sentinel above depends on: make(Row, 0) is
+		// non-nil, whereas a child that returns true without assigning *out
+		// leaves pr nil. Dropping the copy would make a zero-width probe row
+		// read as "no active probe row" and silently lose its matches.
+		//
+		// This is the one row-copy site in the package whose RETENTION alone
+		// would not require it (rmp #2702): the probe child is not advanced
+		// again until the bucket is drained, so its buffer cannot be reused
+		// under us as the code stands. That is a whole-pipeline invariant no
+		// contract states, and the sentinel above depends on the copy anyway, so
+		// it is kept deliberately rather than by omission.
+		//
+		// Measured (rmp #2702, MemProfileRate=1, no -race): 160 000 copies /
+		// 10 240 000 B on a 160 000-row probe side — 2.36% of the query's
+		// allocs/op and 2.92% of its B/op, the largest share any single
+		// row-copy site reaches by bytes.
 		cp := make(Row, len(pr))
 		copy(cp, pr)
 		op.probeRow = cp

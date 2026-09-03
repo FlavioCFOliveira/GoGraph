@@ -114,6 +114,17 @@ func (op *Eager) Init(ctx context.Context) error {
 		if op.budget.charge(row) {
 			return ErrEagerMemoryExceeded
 		}
+		// The copy is REQUIRED and cannot be elided (rmp #2702): op.rows is
+		// replayed from Next AFTER the child has been drained to exhaustion, so
+		// by the time a buffered row is read its producer's buffer has been
+		// overwritten many times over ([Row]'s contract lets the producer reuse
+		// one backing slice across Next calls).
+		//
+		// It costs nothing on a READ workload, because Eager cannot appear in a
+		// read-only plan: its only IR producer is ir.mergeClause under
+		// ContainsDelete (cypher/ir/writes.go:240), and the two remaining
+		// exec.NewEager sites are both gated on ir.ContainsWrite
+		// (cypher/api.go:10078, 10126).
 		cp := make(Row, len(row))
 		copy(cp, row)
 		op.rows = append(op.rows, cp)
