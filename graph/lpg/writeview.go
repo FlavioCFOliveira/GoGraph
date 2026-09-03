@@ -168,7 +168,27 @@ func (wv WriteView[N, W]) NoteConstraintTouch(n N) error {
 func (wv WriteView[N, W]) AddNode(n N) error { return wv.g.addNodeInfo(n, wv.w) }
 
 // RemoveNode is [Graph.RemoveNode] inside this view's transaction.
-func (wv WriteView[N, W]) RemoveNode(n N) { wv.g.removeNodeInfo(n, wv.w) }
+//
+// It reports whether the removal was ADMITTED, as [WriteView.RemoveEdge],
+// [WriteView.RemoveEdgeByHandle] and [WriteView.RemoveAllEdgesFrom] already do:
+// FALSE means this transaction hit a write-write conflict on the node — its
+// existence record, its properties, its labels or its adjacency — and the node
+// was NOT retired.
+//
+// A caller that journals an inverse MUST gate the journal entry on it, and must
+// gate any side-effect COUNTER on it too. An inverse recorded for a retirement
+// that never happened revives a node the conflicting peer went on to delete for
+// real, and the revival restores no labels and no properties — the peer's commit
+// removed them — so what comes back is a BARE node that no transaction ever
+// created, alive in the present with no life record (rmp #2726, the node mirror
+// of rmp #2694 and rmp #2725). The counter must move with the journal entry
+// because the inverse's DecrNodesRemoved is what reverses the increment.
+//
+// TRUE does not mean a node was taken out: a removal of an already-tombstoned or
+// never-interned key is admitted and retires nothing, and reports true. The
+// caller's own presence probe answers that; this answers only whether the write
+// was ADMITTED — the same reading [WriteView.RemoveEdge] takes.
+func (wv WriteView[N, W]) RemoveNode(n N) bool { return wv.g.removeNodeInfo(n, wv.w) }
 
 // Revive is [Graph.Revive] inside this view's transaction.
 func (wv WriteView[N, W]) Revive(n N) { wv.g.reviveInfo(n, wv.w) }

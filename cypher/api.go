@@ -19376,14 +19376,27 @@ func (a *lpgMutatorAdapter) RemoveNode(n string) {
 		return
 	}
 	wasLive := !a.g.IsTombstoned(id)
+	// The index fan-out captures the node's PRE-removal state, so it has to stay
+	// AHEAD of the removal. It is safe there even when the removal is refused:
+	// every refusal in [lpg.Graph.removeNodeInfo] dooms the transaction, and a
+	// transaction that cannot commit takes the [exec.IndexBuffer.Rollback] branch,
+	// which discards these changes rather than fanning them out.
 	if wasLive && indexFanoutActive(a.g, a.buf) {
 		enqueueNodeRemovalChanges(a.g, a.buf, n, id)
 	}
-	if wasLive {
-		a.countNodeDeleted()
+	applied := a.w().RemoveNode(n)
+	// THE COUNTER AND THE INVERSE GATE TOGETHER, on the OUTCOME rather than on
+	// the pre-probe above (rmp #2726). Journalling an inverse for a retirement
+	// that never happened revives a node the conflicting peer went on to delete
+	// for real, and it comes back BARE — the peer's commit took its labels and
+	// properties with it. They gate together because the inverse's
+	// DecrNodesRemoved is what reverses the increment: gating one alone would
+	// leave the counter permanently inflated.
+	if !wasLive || !applied {
+		return
 	}
-	a.w().RemoveNode(n)
-	a.rec().recordRemoveNode(n, wasLive)
+	a.countNodeDeleted()
+	a.rec().recordRemoveNode(n, true)
 }
 
 // IsTombstoned reports whether the NodeID has been tombstoned.
@@ -20312,14 +20325,26 @@ func (a *walMutatorAdapter) RemoveNode(n string) {
 		return
 	}
 	wasLive := !a.g.IsTombstoned(id)
+	// The index fan-out captures the node's PRE-removal state, so it has to stay
+	// AHEAD of the removal. It is safe there even when the removal is refused:
+	// every refusal in [lpg.Graph.removeNodeInfo] dooms the transaction, and a
+	// transaction that cannot commit takes the [exec.IndexBuffer.Rollback] branch,
+	// which discards these changes rather than fanning them out.
 	if wasLive && indexFanoutActive(a.g, a.buf) {
 		enqueueNodeRemovalChanges(a.g, a.buf, n, id)
 	}
+	applied := a.w().RemoveNode(n)
+	if !applied {
+		// See the lpgMutatorAdapter twin (rmp #2726). The WAL frame is gated too,
+		// for the reason rmp #2725 gated the edge one: a frame for a retirement
+		// this transaction was refused would make the refusal DURABLE, and replay
+		// would apply what the engine declined.
+		return
+	}
 	if wasLive {
 		a.countNodeDeleted()
+		a.rec().recordRemoveNode(n, true)
 	}
-	a.w().RemoveNode(n)
-	a.rec().recordRemoveNode(n, wasLive)
 	_ = a.tx.RemoveNode(n) //nolint:errcheck // ErrTxFinished impossible here; not-found is safe to ignore
 }
 

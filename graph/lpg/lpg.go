@@ -3258,16 +3258,40 @@ func (g *Graph[N, W]) setNodeLabelInfo(n N, name string, tx *writeCtx) error {
 // fully-deleted node state. No-op when n was never interned or is
 // already tombstoned.
 func (g *Graph[N, W]) RemoveNode(n N) {
-	g.removeNodeInfo(n, nil)
+	// The report is discarded because there is nothing here to report: this
+	// entry point passes a nil transaction, and every refusal below sits inside
+	// `if g.mvccArmed && tx != nil`, so an untransacted removal is always
+	// admitted. Widening this exported signature would carry no information.
+	// Callers that CAN be refused go through [WriteView.RemoveNode], which
+	// returns it.
+	_ = g.removeNodeInfo(n, nil)
 }
 
 // removeNodeInfo is [Graph.RemoveNode] with an explicit write transaction; tx is nil
 // for a direct Go-API mutation, which is committed the instant it is made and takes
 // no conflict check. See [writeCtx].
-func (g *Graph[N, W]) removeNodeInfo(n N, tx *writeCtx) {
+//
+// It reports whether the removal was ADMITTED. FALSE means this transaction hit a
+// write-write conflict and the node was NOT retired; the contract, and why a caller
+// that journals an inverse must gate on it, are on [WriteView.RemoveNode] (rmp
+// #2726). Every false return below is taken either before any mutation at all or
+// on a path that has already DOOMED the transaction, so a false never leaves a
+// half-applied retirement behind.
+//
+// A FALSE ALWAYS COMES WITH A DOOMED TRANSACTION. All four refusal doors —
+// [Graph.noteNodeDied], the node-property head, the node-label head and
+// [adjVersions.noteExclusive] — record the conflict through
+// [writeCtx.conflictErr], whose own contract is that the transaction is doomed
+// however the caller treats the return. Callers rely on this: the Cypher
+// adapters leave the secondary-index fan-out enqueued ahead of the removal
+// because a transaction that cannot commit discards that buffer instead of
+// fanning it out.
+func (g *Graph[N, W]) removeNodeInfo(n N, tx *writeCtx) bool {
 	id, ok := g.adj.Mapper().Lookup(n)
 	if !ok {
-		return
+		// Nothing to remove and nothing refused, which is ADMITTED — the same
+		// reading [WriteView.RemoveEdge] gives a removal of an absent edge.
+		return true
 	}
 	// A SCOPED CHURN HOLD ACROSS THE WHOLE RETIREMENT (rmp #2686).
 	//
@@ -3304,7 +3328,11 @@ func (g *Graph[N, W]) removeNodeInfo(n N, tx *writeCtx) {
 		// delete that lost its conflict check had already mutated present
 		// state that a rollback could not fully restore.
 		if !g.noteNodeDied(id, tx, bagLids) {
-			return
+			// NOTHING has been mutated: the claim runs before every write, which
+			// is rmp #2444's ordering. Reporting the refusal is what stops the
+			// caller journalling an inverse for a retirement that never happened
+			// (rmp #2726).
+			return false
 		}
 		claimed = true
 		// CROSS-CHECK the node's other stores: a pending write by another
@@ -3315,11 +3343,11 @@ func (g *Graph[N, W]) removeNodeInfo(n N, tx *writeCtx) {
 		// abort machinery if the transaction rolls back.
 		if head := g.nodePropHeadFor(id); tx.conflicts(head) {
 			_ = tx.conflictErr(mvcc.StoreNodeProperties, head)
-			return
+			return false
 		}
 		if head := g.nodeLabelHeadFor(id); tx.conflicts(head) {
 			_ = tx.conflictErr(mvcc.StoreNodeLabels, head)
-			return
+			return false
 		}
 		// Claim the node's adjacency EXCLUSIVELY: a pending edge append touching
 		// this node (either endpoint — appends stamp both since rmp #2444) is a
@@ -3327,7 +3355,7 @@ func (g *Graph[N, W]) removeNodeInfo(n N, tx *writeCtx) {
 		// append's own cross-check sees. noteExclusive records the conflict on
 		// the transaction itself.
 		if err := g.adjVer.noteExclusive(id, tx); err != nil {
-			return
+			return false
 		}
 	}
 	died := false
@@ -3446,6 +3474,7 @@ func (g *Graph[N, W]) removeNodeInfo(n N, tx *writeCtx) {
 	if !deferrable {
 		g.stripLabelBitmaps(id, bagLids, tx)
 	}
+	return true
 }
 
 // stripLabelBitmaps removes id from every label bitmap in lids.

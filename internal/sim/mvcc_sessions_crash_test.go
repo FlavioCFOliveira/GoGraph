@@ -244,6 +244,61 @@ func TestMVCCSessionsCrash_InboundArcLeakSeeds(t *testing.T) {
 	}
 }
 
+// TestMVCCSessionsCrash_RefusedNodeRemovalSeeds is the seed gate for rmp #2726:
+// the last unclean seed of the 1000-seed sweep, and the third and final family
+// of the #2723 diagnosis (docs/mvcc-life-record-defects-2026-09-03.md).
+//
+// Seed 790 held a live node the workload never creates — no `:Person`, no
+// `name`, `tombstoned=false existsPresent=true` — and sometimes an arc pointing
+// at it. The producer is a DETACH DELETE refused on an ALREADY-DOOMED
+// transaction: the removal mutated nothing, the adapter journalled its inverse
+// off a present-state probe anyway, a peer then deleted the node for real and
+// committed, and the doomed transaction's rollback REVIVED it. The revival
+// restores no labels and no properties, because the peer's commit took them —
+// hence a bare node. The mechanism is pinned at the layer that owns it by
+// graph/lpg TestConflict_NodeRemovalReportsItsRefusalWhenDoomed and at the
+// adapter layer by cypher TestMVCCDeleteNodeRollback_DoesNotResurrectPeerDeletedNode.
+//
+// The seed was unclean 12 times out of 12 at `13467da4` — after BOTH of the
+// other two families were fixed — and is clean 12 out of 12 here.
+//
+// NO TICK IS ASSERTED, for the reason given on
+// [TestMVCCSessionsCrash_SplitLifePairSeeds], and this seed is the one that
+// forced the rule: 12 processes at the diagnosis put the same finding at ticks
+// 140, 150 and 170.
+//
+// The non-vacuity gate deliberately does NOT require TxRolledBack: the producer
+// is a CONFLICT-CONCEDED rollback, and unclean runs of this seed recorded
+// TxRolledBack=0 with TxConflicted=4 and TxDoomed=2. Requiring a voluntary
+// rollback here — as the two sibling gates do, correctly, for their own
+// mechanisms — would gate on the wrong outcome.
+func TestMVCCSessionsCrash_RefusedNodeRemovalSeeds(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	ctx := context.Background()
+	for _, seed := range []uint64{790} {
+		t.Run(fmt.Sprintf("crash/seed=%d", seed), func(t *testing.T) {
+			res, err := RunMVCCSessions(ctx, mvccCrashConfig(seed))
+			if err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if len(res.FoldErrors) > 0 {
+				t.Fatalf("fold refusal returned: %v", res.FoldErrors)
+			}
+			if !res.Clean() {
+				t.Fatalf("violations=%v", res.Violations)
+			}
+			// Non-vacuity: the run must have reached the far end of its tick
+			// budget, must have crashed, and must have DOOMED a transaction —
+			// a refused removal on a doomed transaction is the whole mechanism,
+			// so a schedule with no conflicts cannot exercise it.
+			if res.TxCommitted == 0 || res.TxConflicted == 0 || res.TxDoomed == 0 ||
+				res.Crashes == 0 || res.Statements < 400 {
+				t.Fatalf("run did not exercise the reproducer: %+v", res)
+			}
+		})
+	}
+}
+
 func TestMVCCSessionsCrash_SplitLifePairSeeds(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	ctx := context.Background()

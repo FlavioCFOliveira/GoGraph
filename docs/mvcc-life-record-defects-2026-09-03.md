@@ -1,7 +1,12 @@
 # Three engine-side ACID defects in the MVCC life-record store
 
 **Date:** 2026-09-03 · **Task:** rmp #2723 · **Diagnosed at:** `bec5b4a9`
-**Status:** diagnosed, **not fixed**. Each family needs its own task and its own regression gate.
+**Status: ALL THREE FIXED**, each in its own task with its own regression gate —
+family 1 as #2724 (`cd91a8bc`), family 2 as #2725 (`13467da4`), family 3 as #2726.
+The diagnosis below is preserved as written on 2026-09-03; **two of its three
+mechanisms were subsequently REFUTED by the fixes**, and each is corrected in
+place under a "CORRECTED" heading rather than rewritten, so the reasoning that
+led there stays legible.
 
 A 1000-seed sweep of the DST MVCC-sessions mode surfaced three violation
 families. All three are **engine defects**, not harness modelling errors. This
@@ -126,6 +131,20 @@ an append on the same source. Bisected: clean at 348, unclean at 349.
 Site **not pinned to a line** — the ordering and trigger are established, the
 offending statement is not.
 
+### CORRECTED by #2725 (`13467da4`) — the mechanism above is half wrong
+
+Step 2 says the deleter "records a versioned removal of `W`'s pending arc;
+`removeNodeInfo` is then refused". Measured white-box, **the removal is refused
+FIRST and mutates nothing** — the writer's arc is physically untouched through
+the deleter's whole statement. The leak is entirely an **undo entry journalled
+for a removal that never happened**: `cypher/api.go:19197-19210` pre-probes with
+`HasEdge`, calls a **void** `RemoveEdge` whose refusal is therefore invisible,
+and journals the inverse off the *probe* rather than the *outcome*.
+
+`removeEdgeInfo` now returns its refusal and the adapters gate on it. **This is
+#2694 one edge direction over** — that task fixed the bulk out-edge path and left
+the per-edge in-edge loop.
+
 ---
 
 ## Family 3 — an unnamed node the workload never creates
@@ -147,6 +166,37 @@ wrong single-direction branch — the `died` branch calls `reviveAborted`, which
 clears the tombstone with **no birth instant**. That is the same information-loss
 root as family 1, which is why one cause behind two symptoms is plausible. Not
 established.
+
+### CORRECTED by #2726 — the hypothesis is REFUTED, and so is the shared root
+
+A white-box trace of seed 790 shows **`reclaimAbortedLife` never touches the
+leaked node**; `reviveAborted` is never called for it, and the run's only two
+reclaim events decide correctly on other ids. **#2724's `wasAlive` neither fixes
+nor could have fixed this — different root cause, and no record-layout change is
+needed for it.**
+
+The real producer is **#2725's mechanism one entity kind over**:
+`cypher/api.go:19373` and `:20322` pre-probe with `IsTombstoned`, call a **void**
+`WriteView.RemoveNode` whose refusal is invisible, and journal the revive off the
+probe. `writeview.go` was the only removal primitive never converted to report
+its outcome. The node returns **bare** because the peer's committed statement had
+already removed its labels and properties, and `revive` restores only what the
+label bag still holds.
+
+**Why the obvious reproduction fails:** two transactions racing to delete the
+same node passes 8/8, because whichever lands first tombstones it and the
+loser's own probe then reads `wasLive == false` and suppresses the inverse. The
+defect needs the node **still live** at the refusal, which only an
+**already-doomed** transaction produces — exactly what `TxRolledBack:0,
+TxConflicted:4, TxDoomed:2` was saying.
+
+**A second symptom the matrix caught:** the bogus revive *consumes* the
+tombstone, so a legitimate inverse running afterwards finds nothing to revive and
+silently no-ops — losing the node entirely.
+
+Seed 790 also proved **more** reliable than recorded here: 12/12 unclean, not
+intermittent. The detection tick and the leaked node's id both move; the finding
+does not.
 
 ---
 

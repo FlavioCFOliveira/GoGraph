@@ -297,8 +297,10 @@ func (t *labelTx[N, W]) propsOf(id graph.NodeID) propBag {
 func (t *labelTx[N, W]) addNode(n N) error { return t.g.addNodeInfo(n, t.ctx) }
 
 // removeNode removes a node inside this transaction, recording its death at the
-// transaction's instant.
-func (t *labelTx[N, W]) removeNode(n N) { t.g.removeNodeInfo(n, t.ctx) }
+// transaction's instant, and reports whether the removal was ADMITTED — the
+// same answer, for the same reason, as [labelTx.removeEdge]. See
+// [WriteView.RemoveNode] (rmp #2726).
+func (t *labelTx[N, W]) removeNode(n N) bool { return t.g.removeNodeInfo(n, t.ctx) }
 
 // addEdge appends an arc inside this transaction — the COMMUTATIVE adjacency
 // write, which never conflicts with another transaction's append and is refused
