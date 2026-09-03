@@ -57,7 +57,7 @@ type idxEntry struct {
 //
 // Lazily allocated, so a graph that has never removed a label holds nothing.
 type deferredIdx struct {
-	pending map[idxEntry]lifeStamp
+	pending map[idxEntry]commitStamp
 	mu      sync.Mutex
 }
 
@@ -133,10 +133,10 @@ func (g *Graph[N, W]) deferLabelIndexRemoval(lid uint32, id graph.NodeID, tx *wr
 	k := idxEntry{id: id, lid: lid}
 	g.idxDeferred.mu.Lock()
 	if g.idxDeferred.pending == nil {
-		g.idxDeferred.pending = make(map[idxEntry]lifeStamp, 8)
+		g.idxDeferred.pending = make(map[idxEntry]commitStamp, 8)
 	}
 	_, existed := g.idxDeferred.pending[k]
-	g.idxDeferred.pending[k] = lifeStamp{info: info, ts: ts}
+	g.idxDeferred.pending[k] = commitStamp{info: info, ts: ts}
 	g.idxDeferred.mu.Unlock()
 	if !existed {
 		g.idxPendingActive.Add(1)

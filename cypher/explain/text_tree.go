@@ -35,6 +35,14 @@ type estimator interface {
 // leave EstRows empty, which renders as an empty cell rather than "-": "-" is
 // the renderer's marker for "this node offers no estimate", and inventing it
 // for a caller who simply did not fill the field would be a fabrication.
+//
+// # Concurrency
+//
+// A PlanRow is a plain value carrying no shared state and no synchronisation of
+// its own. Distinct rows are safe for concurrent use; a SINGLE row is not — it
+// must not be written by one goroutine while another reads it, exactly as for
+// any struct. [FormatPlanTable] only reads the rows it is handed, so a slice of
+// rows no longer being mutated is safe for concurrent rendering.
 type PlanRow struct {
 	// Operator is the operator's display name, prefixed with its tree indent.
 	Operator string

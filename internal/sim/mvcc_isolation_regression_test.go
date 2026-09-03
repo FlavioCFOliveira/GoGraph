@@ -416,3 +416,91 @@ func TestMVCCRegression_DetachDeleteDoesNotWipeAConcurrentAppend(t *testing.T) {
 		}
 	}
 }
+
+// TestMVCCRegression_SplitLifePairKeepsNodeVisibleToOldReaders is the
+// SPLIT-PAIR case #2445 left uncovered (rmp #2724, diagnosed in #2723).
+//
+// #2445's own regression above stops at the rollback, and that is exactly the
+// blind spot: the life store is one record deep per direction, a published
+// rollback of a DETACH DELETE leaves a died+born pair over the node's committed
+// birth, and `aliveBefore(born, died) = died.seq < born.seq` reads that pair
+// correctly only while BOTH halves still belong to the rolled-back transaction.
+// A later, unrelated delete replaces the died half; the surviving pair then
+// reads born-then-died, and every reader older than the rollback loses a node
+// whose birth committed before it began.
+//
+// The two arms differ in ONE factor — whether the doomed delete rolls back
+// before or after the reader pins its snapshot — because that factor is what
+// decides whether the reader's snapshot predates the overwritten birth. The
+// second delete never commits: a reader that loses the node while it is merely
+// PENDING has taken a dirty read as well as a moved snapshot.
+func TestMVCCRegression_SplitLifePairKeepsNodeVisibleToOldReaders(t *testing.T) {
+	for _, arm := range []struct {
+		name         string
+		rollbackable bool // roll the doomed delete back BEFORE the reader pins
+	}{
+		{"doomed rollback before the reader pins", true},
+		{"doomed rollback after the reader pins", false},
+	} {
+		t.Run(arm.name, func(t *testing.T) {
+			store := regressionStore(t)
+			eng := store.Engine()
+			seeder := eng.NewSession()
+			mustExecCommit(t, seeder, "CREATE (n:Person {name:'x', age:1})", nil)
+			mustExecCommit(t, seeder, "CREATE (n:Person {name:'y', age:2})", nil)
+
+			doomed, err := eng.NewSession().BeginTx(t.Context())
+			if err != nil {
+				t.Fatalf("begin doomed: %v", err)
+			}
+			if _, err := doomed.ExecAny("MATCH (n:Person {name:'x'}) DETACH DELETE n", nil); err != nil {
+				t.Fatalf("doomed delete: %v", err)
+			}
+			if arm.rollbackable {
+				if err := doomed.Rollback(); err != nil {
+					t.Fatalf("doomed rollback: %v", err)
+				}
+			}
+
+			reader, err := eng.NewSession().BeginReadTx(t.Context())
+			if err != nil {
+				t.Fatalf("begin reader: %v", err)
+			}
+			defer func() { _ = reader.Rollback() }()
+			if got := txCountScalar(t, reader, "MATCH (n:Person) RETURN count(n)"); got != 2 {
+				t.Fatalf("reader at BEGIN: count=%d, want 2", got)
+			}
+			if !arm.rollbackable {
+				if err := doomed.Rollback(); err != nil {
+					t.Fatalf("doomed rollback: %v", err)
+				}
+			}
+			if got := txCountScalar(t, reader, "MATCH (n:Person) RETURN count(n)"); got != 2 {
+				t.Fatalf("reader after the doomed rollback: count=%d, want 2", got)
+			}
+
+			// The unrelated later delete. It replaces the died half of the pair
+			// the rollback left behind; the reader must not notice, whether it
+			// is pending or committed.
+			second, err := eng.NewSession().BeginTx(t.Context())
+			if err != nil {
+				t.Fatalf("begin second delete: %v", err)
+			}
+			defer func() { _ = second.Rollback() }()
+			if _, err := second.ExecAny("MATCH (n:Person {name:'x'}) DETACH DELETE n", nil); err != nil {
+				t.Fatalf("second delete: %v", err)
+			}
+			if got := txCountScalar(t, reader, "MATCH (n:Person) RETURN count(n)"); got != 2 {
+				t.Fatalf("reader lost a committed node to a PENDING unrelated delete "+
+					"(dirty read): count=%d, want 2", got)
+			}
+			if err := second.Commit(); err != nil {
+				t.Fatalf("commit second delete: %v", err)
+			}
+			if got := txCountScalar(t, reader, "MATCH (n:Person) RETURN count(n)"); got != 2 {
+				t.Fatalf("reader lost a committed node to a COMMITTED unrelated delete "+
+					"(snapshot moved): count=%d, want 2", got)
+			}
+		})
+	}
+}

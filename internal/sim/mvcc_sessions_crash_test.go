@@ -180,3 +180,55 @@ func mvccDeepConfig(seed uint64) MVCCSessionsConfig {
 	cfg.Ticks = 1200
 	return cfg
 }
+
+// TestMVCCSessionsCrash_SplitLifePairSeeds is the seed gate for rmp #2724: the
+// five seeds of the 1000-seed sweep whose snapshot-stability checker fired on
+// the split life pair — a rolled-back DETACH DELETE overwriting a node's
+// committed birth, made observable by any later unrelated delete.
+//
+// Two arms, because the finding is not crash-specific: 815 and 875 reproduce
+// with crash injection OFF at the crash configuration's tick depth, and 486,
+// 699 and 932 reproduce with it on. All five were unclean at `83657c2d` and are
+// the named reproducers the diagnosis (docs/mvcc-life-record-defects-2026-09-03.md)
+// left behind; the mechanism itself is pinned at the layer that owns it by
+// graph/lpg TestNodeLife_RolledBackDeleteSurvivesAnUnrelatedDelete.
+//
+// NO TICK IS ASSERTED. `graph/lpg/mvcc_vacuum.go` runs its sweep on a
+// background goroutine with wall-clock backoff, so the tick at which a
+// reclamation-sensitive finding becomes countable moves between processes even
+// though the defect is stable. The seeds here are byte-identical over repeats,
+// but the gate must not depend on that for a mode that can reach reclamation.
+func TestMVCCSessionsCrash_SplitLifePairSeeds(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name string
+		cfg  MVCCSessionsConfig
+	}{
+		{"nocrash/seed=815", mvccDeepConfig(815)},
+		{"nocrash/seed=875", mvccDeepConfig(875)},
+		{"crash/seed=486", mvccCrashConfig(486)},
+		{"crash/seed=699", mvccCrashConfig(699)},
+		{"crash/seed=932", mvccCrashConfig(932)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := RunMVCCSessions(ctx, tc.cfg)
+			if err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if len(res.FoldErrors) > 0 {
+				t.Fatalf("fold refusal returned: %v", res.FoldErrors)
+			}
+			if !res.Clean() {
+				t.Fatalf("violations=%v", res.Violations)
+			}
+			// Non-vacuity: the run must have reached the far end of its tick
+			// budget rather than stopping early, and it must actually have
+			// rolled transactions back — a rolled-back DELETE is the whole
+			// mechanism, so a schedule with no rollbacks cannot exercise it.
+			if res.TxCommitted == 0 || res.TxRolledBack == 0 || res.Statements < 400 {
+				t.Fatalf("run did not exercise the reproducer: %+v", res)
+			}
+		})
+	}
+}

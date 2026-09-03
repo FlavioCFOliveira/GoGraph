@@ -1480,6 +1480,9 @@ Cypher grammar accepts ahead of any query the grammar itself parses:
 
 ```cypher
 EXPLAIN MATCH (n:Person) WHERE n.age > 30 RETURN n
+```
+
+```cypher
 PROFILE MATCH (n:Person) WHERE n.age > 30 RETURN n
 ```
 
