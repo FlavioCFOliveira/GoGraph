@@ -20202,12 +20202,30 @@ func (a *walMutatorAdapter) RemoveEdge(src, dst string) {
 	if present && a.cs() != nil { // count-store (#2082): capture before the removal
 		countEdgeRemovedFirstSlot(a.g, a.cs(), a.countBuf(), src, dst)
 	}
-	// The counter, the WAL frame and the undo inverse all wait on the removal
-	// having APPLIED — see the [lpgMutatorAdapter.RemoveEdge] twin (rmp #2725).
-	// The frame waits for the reason rmp #2694 gave for the bulk path: a refused
-	// removal removed nothing, so emitting its frame would durably record a
-	// deletion this transaction never performed. A refused transaction cannot
-	// commit, but the WAL is the durable truth and may only describe work done.
+	// All three effects wait on the removal not being REFUSED — see the
+	// [lpgMutatorAdapter.RemoveEdge] twin (rmp #2725). The reason rmp #2694 gave
+	// for the bulk path applies here: a refused removal removed nothing, so
+	// emitting its frame would durably record a deletion this transaction never
+	// performed. A refused transaction cannot commit, but the WAL is the durable
+	// truth and may only describe work done.
+	//
+	// The counter and the undo inverse wait on a SECOND condition the frame does
+	// not: `present`, i.e. an arc was actually there to take out. [Graph.RemoveEdge]
+	// returns true for "the removal ran, whether or not an arc was actually there"
+	// — its own godoc says so — so on a shape where the arc is already gone this
+	// emits a frame that removes nothing.
+	//
+	// Measured under rmp #2706, and it is NOT hypothetical on an undirected
+	// engine: `RemoveAllEdgesFrom` retires both directions, so every call the
+	// in-edge sweep at cypher/exec/detach_delete.go:263 then makes is a no-op.
+	// An undirected fan-out of 64 writes 128 frames for 64 removed edges — 2.000
+	// per edge, 48.7% of the delete transaction's WAL bytes — while every
+	// directed shape measures exactly 1.000. Gating the frame on `present` was
+	// shown to recover an identical graph, with negative controls that correctly
+	// reported a difference where those frames are real in-edges. It is NOT done
+	// here because whether Cypher over an undirected LPG is a supported
+	// configuration at all is unsettled, and that question decides the fix:
+	// rmp #2734.
 	if !a.w().RemoveEdge(src, dst) {
 		return
 	}
