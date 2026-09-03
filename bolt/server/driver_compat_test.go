@@ -79,15 +79,15 @@ type checkResult struct {
 //   - 28/37 — after #2189 (entity structures), #2212 and #2190 (write statistics,
 //     including MERGE created-vs-matched and the index/constraint counters) and #2191's
 //     imp_user fix, which turned a DEGRADED silent-accept into a PASS by failing closed.
+//   - 30/37 — after #2721 accepted EXPLAIN and PROFILE as statement prefixes in the
+//     ANTLR grammar and published the captured plan in the terminal SUCCESS metadata,
+//     so ResultSummary.Plan() and Profile() are populated.
 //
-// The 8 remaining failures and 1 degraded result, each a known gap with a cause:
+// The 6 remaining failures and 1 degraded result, each a known gap with a cause:
 //
 //   - temporal / Point2D / []byte PARAMETER round-trips — cypher.BindParams rejects
 //     packstream.Struct and []uint8. Inbound temporal and spatial parameters are simply
 //     not implemented; outbound temporals already work (#2189 left them untouched).
-//   - EXPLAIN / PROFILE — not accepted as query prefixes. Engine.Explain() exists as a
-//     Go method; there is no statement-level prefix, so ResultSummary.Plan()/Profile()
-//     stay nil.
 //   - ResultSummary.StatementType — the server never sends the `type` metadata field.
 //   - SHOW TRANSACTIONS — the DDL parser has no SHOW TRANSACTIONS form (the operator
 //     API added in #2176 is reachable another way).
@@ -95,8 +95,18 @@ type checkResult struct {
 //   - DEGRADED ResultSummary timing (t_first / t_last) — the server does not measure
 //     them, so the driver reports -1ms. A feature, not a defect.
 //
+// Two limitations remain INSIDE the EXPLAIN / PROFILE pair, neither of them a check
+// here, and both documented in docs/cypher.md:
+//
+//   - PROFILE refuses a WRITING statement, because the profiling wrapper is installed
+//     by the read builder. EXPLAIN accepts one and renders its logical plan.
+//   - Neither prefix may precede a schema statement (CREATE/DROP INDEX|CONSTRAINT,
+//     SHOW): those are parsed by the hand-written DDL parser, which the Cypher grammar
+//     does not cover, so a prefixed one is a syntax error — and therefore executes
+//     nothing, which is the property that matters.
+//
 // Raise this whenever a check is fixed. Never lower it.
-const compatPassFloor = 28
+const compatPassFloor = 30
 
 // runCheck evaluates one check, converting a panic into a FAIL so a driver-side panic
 // (which the audit hit on ResultSummary.Database().Name()) is a recorded incompatibility

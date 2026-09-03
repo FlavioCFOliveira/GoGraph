@@ -1284,8 +1284,10 @@ during materialisation, before the surplus reaches the caller.
 
 Three questions — what runs, what the planner thought, what it cost — across five
 Go APIs: three that render an indented tree and two that render the same
-information as a fixed-width table. None is reachable as a Cypher `EXPLAIN` /
-`PROFILE` prefix; the parser has no such statement form.
+information as a fixed-width table. Two of the three questions are also reachable
+from Cypher itself, as the `EXPLAIN` and `PROFILE` statement prefixes; see
+[The `EXPLAIN` and `PROFILE` statement prefixes](#the-explain-and-profile-statement-prefixes)
+below.
 
 ### `Engine.Explain` — what runs
 
@@ -1445,6 +1447,85 @@ cells are easy to mistake:
 its rows are discarded, a writing statement is refused, times are inclusive of
 children, and an operator the instrumentation did not reach is marked
 `(not measured)` rather than left to read as one that cost nothing.
+
+### The `EXPLAIN` and `PROFILE` statement prefixes
+
+A statement may be written with an `EXPLAIN` or a `PROFILE` prefix, which the
+Cypher grammar accepts ahead of any query the grammar itself parses:
+
+```cypher
+EXPLAIN MATCH (n:Person) WHERE n.age > 30 RETURN n
+PROFILE MATCH (n:Person) WHERE n.age > 30 RETURN n
+```
+
+The two are syntactically identical and differ in **execution**:
+
+- **`EXPLAIN` executes nothing.** It plans the statement and returns the
+  statement's own column signature with **zero rows**. A side-effecting statement
+  prefixed with `EXPLAIN` — `EXPLAIN MATCH (n) DETACH DELETE n` — leaves the
+  graph untouched; the prefix diverts before any transaction is opened.
+- **`PROFILE` executes the statement.** It returns the query's real rows, plus
+  each operator's measured rows, db-hits and time.
+
+#### Where the plan comes back
+
+The plan is **not** returned as result rows. It travels beside the result:
+
+| Surface | `EXPLAIN` | `PROFILE` |
+|---|---|---|
+| Go | `Result.Plan()` — an `*exec.PlanNode` | `Result.Profile()` — an `*exec.PlanNode` with measurements |
+| Bolt | the `plan` field of the terminal SUCCESS, which the drivers surface as `ResultSummary.Plan()` | the `profile` field, surfaced as `ResultSummary.Profile()` |
+
+At most one of the two is ever populated, which is what lets a reader tell the
+planner's **estimates** apart from measurements of a run that happened. This is
+the shape Neo4j returns, and it is the reason for it: a driver consuming
+`EXPLAIN MATCH (n) RETURN n` expects the query's own column signature, and the
+plan where its `ResultSummary` looks for one. Returning the rendered plan as a
+one-column result set would have made it invisible to every driver.
+
+Render a captured tree with `exec.RenderPlanNode`, which prints exactly what
+`Engine.Explain` prints for the same statement — the prefix and the Go APIs share
+one captured tree and one set of renderers.
+
+```go
+r, err := eng.Run(ctx, "EXPLAIN MATCH (n:Person) RETURN n", nil)
+// ...
+fmt.Println(exec.RenderPlanNode(r.Plan()))
+```
+
+`EXPLAIN` renders the **physical** plan for a reading statement and the
+**logical** plan for a writing one, exactly as `Engine.Explain` does and for the
+same reason: a write's operators bind to an open transaction, and opening one is
+precisely what `EXPLAIN` must not do.
+
+Both prefixes carry the statement's **plan-time notifications** — the
+Cartesian-product warning among them — so `EXPLAIN` surfaces the planner's
+advisories without running the query, which is one of the things it is for.
+
+`EXPLAIN` does **not** require parameters to be supplied: planning reads a
+parameter's value only where an access-path gate needs it, and a plan is a useful
+answer before anything is bound. `PROFILE` executes, so it requires them like any
+other execution and reports `ParameterMissing` when one is absent.
+
+#### Two limitations
+
+- **`PROFILE` refuses a writing statement**, returning an error rather than
+  executing it, because the profiling instrumentation is installed by the read
+  builder. This is the same refusal `Engine.Profile` applies. Use `EXPLAIN` for a
+  writing statement's plan, or run it without a prefix to execute it.
+- **Neither prefix may precede a schema statement** (`CREATE`/`DROP`
+  `INDEX`/`CONSTRAINT`, `SHOW …`). Those are parsed by a separate, hand-written
+  DDL parser that the Cypher grammar does not cover, so a prefixed schema
+  statement is a **syntax error** — and therefore executes nothing, which is the
+  property that matters.
+
+`EXPLAIN` and `PROFILE` are **not reserved words**. They are recognised as a
+prefix only at the very start of a statement, and remain usable as ordinary
+identifiers everywhere else, as they are in Neo4j:
+
+```cypher
+MATCH (explain:Explain) RETURN explain.profile AS profile
+```
 
 ---
 

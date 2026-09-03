@@ -2405,6 +2405,15 @@ func (e *Engine) runRead(ctx context.Context, query string, params map[string]ex
 	if entry.semaErr != nil {
 		return nil, entry.semaErr
 	}
+
+	// ── 1a-1. EXPLAIN / PROFILE prefix (rmp #2721) ───────────────────────────
+	// Diverted HERE, before the write rejection below and before any build: an
+	// EXPLAIN must execute nothing, and a prefixed WRITING statement must reach
+	// the plan path rather than be refused as a write Run cannot execute — it is
+	// not going to execute it either. See cypher/plan_prefix.go.
+	if entry.planMode != parser.PlanModeNone {
+		return e.runPlanPrefixed(ctx, entry, params, at)
+	}
 	plan := entry.plan
 
 	// ── 1a-2. Reject a write/DDL query up front, with a clear, actionable
@@ -2819,11 +2828,52 @@ func (e *Engine) profilePlanTree(ctx context.Context, query string, params map[s
 		return exec.PlanNode{}, err
 	}
 
-	var (
-		tree     exec.PlanNode
-		buildErr error
-		drainErr error
-	)
+	r, tree, err := e.profileMaterialised(ctx, entry, params, nil)
+	if err != nil {
+		return exec.PlanNode{}, err
+	}
+	for r.Next() {
+		// Drain: the measurements are the product, the rows are not. The rows are
+		// already materialised at this point, so this walks a buffer and touches no
+		// operator — which is why capturing the tree before it (inside
+		// profileMaterialised) reports the same measurements the capture after it
+		// used to.
+	}
+	drainErr := r.Err()
+	if cerr := r.Close(); cerr != nil && drainErr == nil {
+		drainErr = cerr
+	}
+	if drainErr != nil {
+		return exec.PlanNode{}, drainErr
+	}
+	return tree, nil
+}
+
+// profileMaterialised builds entry's plan with the profiling instrumentation
+// installed, drains it into a materialised [Result] under one read instant, and
+// captures the measured plan tree.
+//
+// It is the shared half of PROFILE: [Engine.profilePlanTree] (and through it
+// [Engine.Profile] and [Engine.ProfileTable]) discards the rows because the
+// measurements are its product, while the PROFILE statement prefix returns them
+// because a client that prefixed a statement still asked for its answer. Both
+// therefore describe ONE run of ONE plan built by the one builder, which is the
+// property that keeps the Cypher surface and the Go surface from disagreeing.
+//
+// The returned Result is OPEN and belongs to the caller, which must Close it.
+// The returned tree is a value copy, so it survives that Close.
+//
+// at is the caller's pinned read view when one exists and nil otherwise, in
+// which case this opens and releases its own snapshot. The error is the BUILD
+// error only; a drain error stays on the Result, exactly as [Engine.Run] leaves
+// it, so both callers report it the way their own contract requires.
+func (e *Engine) profileMaterialised(
+	ctx context.Context,
+	entry *planCacheEntry,
+	params map[string]expr.Value,
+	at *pinnedView,
+) (res *Result, tree exec.PlanNode, err error) {
+	var buildErr error
 	queryReg := newNowAwareRegistry(e.reg, time.Now())
 	// PROFILE executes the query, so it must read EXACTLY as Run does or its
 	// measurements describe a query nobody runs. Run takes a snapshot and no lock
@@ -2834,8 +2884,13 @@ func (e *Engine) profilePlanTree(ctx context.Context, query string, params map[s
 	// into a writer stall for the length of a diagnostic query. Removing it makes
 	// the two paths agree again — which was the stated intent of the comment that
 	// stood here.
-	snap := e.g.BeginRead()
-	defer e.g.EndRead(snap)
+	var snap *lpg.Snapshot
+	if at != nil {
+		snap = at.snap
+	} else {
+		snap = e.g.BeginRead()
+		defer e.g.EndRead(snap)
+	}
 	func() {
 		prof := exec.NewProfiler()
 		op, cols, berr := e.buildReadPhysical(ctx, entry, entry.plan, params, queryReg, prof, snap)
@@ -2847,24 +2902,16 @@ func (e *Engine) profilePlanTree(ctx context.Context, query string, params map[s
 		r := newResultWithLimit(rs, cols, nil, nil, nil, e.maxResultRows, e.maxResultBytes)
 		r.globalMem = e.globalMem
 		r.materialize()
-		for r.Next() {
-			// Drain: the measurements are the product, the rows are not.
-		}
-		drainErr = r.Err()
-		// Capture the tree BEFORE Close, while the wrappers still hold their
-		// counters, so the rendering survives teardown.
+		// Capture the tree BEFORE any Close, while the wrappers still hold their
+		// counters, so the rendering survives teardown. materialize has already
+		// driven every operator to exhaustion, so the counters are final here.
 		tree = exec.PlanTree(op)
-		if cerr := r.Close(); cerr != nil && drainErr == nil {
-			drainErr = cerr
-		}
+		res = r
 	}()
 	if buildErr != nil {
-		return exec.PlanNode{}, fmt.Errorf("cypher: build plan: %w", buildErr)
+		return nil, exec.PlanNode{}, fmt.Errorf("cypher: build plan: %w", buildErr)
 	}
-	if drainErr != nil {
-		return exec.PlanNode{}, drainErr
-	}
-	return tree, nil
+	return res, tree, nil
 }
 
 // ExplainLogical returns the LOGICAL plan for query, annotated with the index
@@ -4754,6 +4801,17 @@ func bindNumeric(v any) (expr.Value, bool) {
 type planCacheEntry struct {
 	plan    ir.LogicalPlan
 	semaErr *sema.SemanticError
+	// planMode records the EXPLAIN / PROFILE prefix the statement was written
+	// with, as the GRAMMAR recognised it (rmp #2721). It is a property of the
+	// statement rather than of the plan, and it lives on the entry because the
+	// entry is the one thing every execution path already holds after parsing —
+	// so no path can execute a prefixed statement without having seen it.
+	//
+	// It does not contaminate the cache: entries are keyed on query TEXT, so
+	// "MATCH (n) RETURN n" and "EXPLAIN MATCH (n) RETURN n" are different keys
+	// with different entries, and the plan under each is byte-identical because
+	// the prefix produces no AST node. See cypher/plan_prefix.go.
+	planMode parser.PlanMode
 	// paramTypes memoises sema.InferParamTypesWithResolver(plan, …) — the
 	// per-parameter type inference. It depends on the plan AND the index schema,
 	// so it is valid only while this entry lives; every schema mutation
@@ -5013,7 +5071,7 @@ func (e *Engine) parseAndAnalyse(query string) (*planCacheEntry, map[string]stri
 // entry for the rewritten text and fall back to the original when the rewrite
 // does not parse.
 func (e *Engine) buildPlanCacheEntry(query string) (*planCacheEntry, error) {
-	astNode, err := parser.Parse(query)
+	astNode, planMode, err := parser.ParseStatement(query)
 	if err != nil {
 		return nil, fmt.Errorf("cypher: parse: %w", err)
 	}
@@ -5072,6 +5130,7 @@ func (e *Engine) buildPlanCacheEntry(query string) (*planCacheEntry, error) {
 	}
 	entry := &planCacheEntry{
 		plan: plan, semaErr: semaErr, paramRefs: paramRefs, notifications: notifications,
+		planMode:             planMode,
 		reorderCandidates:    reorderCandidates,
 		anchorSwapCandidates: anchorSwapCandidates, paramTypes: paramTypes,
 		pushedSeekHints: pushedSeekHints,
@@ -5315,6 +5374,15 @@ type Result struct {
 	// [Result.Counters]. nil for a read-only statement, which is what lets a caller
 	// distinguish "no writes attempted" from "writes attempted that changed nothing".
 	counters *exec.QueryCounters
+
+	// planNode holds the query plan captured for a statement written with an
+	// EXPLAIN or PROFILE prefix (rmp #2721), and planMode says which of the two —
+	// which is what decides whether the figures on it are the planner's ESTIMATES
+	// or measurements of a run that happened. Both are the zero value for an
+	// ordinary statement, so [Result.Plan] and [Result.Profile] return nil.
+	// See cypher/plan_prefix.go.
+	planNode *exec.PlanNode
+	planMode parser.PlanMode
 
 	closed atomic.Bool // tripped by Close; checked by the finalizer
 }
@@ -18216,6 +18284,15 @@ func (e *Engine) runInTxSession(ctx context.Context, sess *lpg.Session[string, f
 	// Sema fast-path: short-circuit scope violations before opening a tx.
 	if entry.semaErr != nil {
 		return nil, entry.semaErr
+	}
+
+	// EXPLAIN / PROFILE prefix (rmp #2721). Diverted here — before the schema
+	// hold, before txn.Store.Begin, and before any mutator exists — because an
+	// EXPLAIN must not open a write transaction, let alone apply one. This is the
+	// path RunAny takes for a prefixed WRITING statement, since its textual
+	// writing-clause classifier sees the CREATE/DELETE that follows the prefix.
+	if entry.planMode != parser.PlanModeNone {
+		return e.runPlanPrefixed(ctx, entry, params, nil)
 	}
 	plan := entry.plan
 

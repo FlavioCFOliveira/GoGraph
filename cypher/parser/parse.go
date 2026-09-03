@@ -251,24 +251,49 @@ func recoverParseScript(p *gen.CypherParser) (tree gen.IScriptContext, err error
 // Parse lexes and parses a Cypher query string and converts the resulting
 // parse tree into a typed AST node. It returns the first error encountered.
 //
+// A statement written with an EXPLAIN or PROFILE prefix parses here exactly as
+// the same statement without one, and the prefix is discarded. Callers that must
+// honour it — the engine does, because EXPLAIN may not execute — call
+// [ParseStatement] instead.
+//
 // Errors:
 //   - [*ParseError] — syntax error from the ANTLR lexer/parser.
 //   - [*SemaError]  — unsupported grammar rule encountered during tree walking.
 func Parse(query string) (ast.Query, error) {
+	q, _, err := ParseStatement(query)
+	return q, err
+}
+
+// ParseStatement is [Parse] with the statement's EXPLAIN / PROFILE prefix
+// reported alongside the AST.
+//
+// The AST is identical either way: the prefix is a statement-level instruction
+// to the engine, not a clause, so it changes nothing the scope analyser or the
+// IR translator sees. What it changes is whether the engine is allowed to
+// execute the statement at all — see [PlanMode] and cypher/plan_prefix.go.
+//
+// The prefix is recognised by the GRAMMAR (`script` in
+// cypher/parser/grammar/CypherParser.g4), so `RETURN explain` — where `explain`
+// is an ordinary identifier — still parses as a plain statement with
+// [PlanModeNone], which a textual scan for a leading keyword could not
+// distinguish reliably.
+//
+// Errors: as [Parse].
+func ParseStatement(query string) (ast.Query, PlanMode, error) {
 	// Reject over-length or excessively nested input before any lexing or
 	// parsing. Deep bracket nesting drives unbounded parser/visitor recursion
 	// into a fatal Go stack overflow that recover() cannot catch, so the guard
 	// must run first — once the stack has overflowed there is no recovery path.
 	// See guard.go.
 	if err := guardInput(query); err != nil {
-		return nil, err
+		return nil, PlanModeNone, err
 	}
 
 	// Validate string-literal escape sequences before any rewriting so that
 	// `normalizeSingleQuotes` does not silently hide a malformed `\u…`
 	// escape under a benign-looking double-quoted form.
 	if err := validateUnicodeEscapes(query); err != nil {
-		return nil, err
+		return nil, PlanModeNone, err
 	}
 
 	// Strip shortestPath()/allShortestPaths() wrappers from named MATCH path
@@ -300,7 +325,7 @@ func Parse(query string) (ast.Query, error) {
 	stream.Fill()
 	collectErrCharErrors(lexErrListener, stream)
 	if len(lexErrListener.errs) > 0 {
-		return nil, lexErrListener.errs[0]
+		return nil, PlanModeNone, lexErrListener.errs[0]
 	}
 
 	p := gen.NewCypherParser(stream)
@@ -310,15 +335,15 @@ func Parse(query string) (ast.Query, error) {
 
 	tree, panicErr := recoverParseScript(p)
 	if panicErr != nil {
-		return nil, panicErr
+		return nil, PlanModeNone, panicErr
 	}
 
 	// Report lex errors first.
 	if len(lexErrListener.errs) > 0 {
-		return nil, lexErrListener.errs[0]
+		return nil, PlanModeNone, lexErrListener.errs[0]
 	}
 	if len(parseErrListener.errs) > 0 {
-		return nil, parseErrListener.errs[0]
+		return nil, PlanModeNone, parseErrListener.errs[0]
 	}
 
 	// Walk the parse tree.
@@ -326,7 +351,7 @@ func Parse(query string) (ast.Query, error) {
 	result := v.visit(tree)
 
 	if se, ok := result.(*SemaError); ok {
-		return nil, se
+		return nil, PlanModeNone, se
 	}
 
 	// The arithmetic visitors (VisitAddSubExpression / VisitMultDivExpression
@@ -336,14 +361,14 @@ func Parse(query string) (ast.Query, error) {
 	// for the rationale.
 	if q, ok := result.(ast.Query); ok {
 		applyShortestMarkers(q, spMarkers)
-		return q, nil
+		return q, v.planMode, nil
 	}
 	if sq, ok := result.(*ast.SingleQuery); ok {
 		applyShortestMarkers(sq, spMarkers)
-		return sq, nil
+		return sq, v.planMode, nil
 	}
 
-	return nil, &ParseError{Message: "visitor produced no AST node"}
+	return nil, PlanModeNone, &ParseError{Message: "visitor produced no AST node"}
 }
 
 // ParseStrict lexes and parses a Cypher query string and returns all syntax

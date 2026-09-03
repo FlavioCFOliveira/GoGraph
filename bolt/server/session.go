@@ -1409,12 +1409,18 @@ func (s *Session) handlePull(ctx context.Context, m *proto.Pull) ([]any, error) 
 	// SUCCESS metadata, as Neo4j does.
 	var notifications []packstream.Value
 	var stats map[string]packstream.Value
+	var planMeta, profileMeta map[string]packstream.Value
 	if !hasMore && s.result != nil {
 		notifications = notificationsToValues(s.result.Notifications())
 		// Capture the write statistics BEFORE drainResult nils the cursor (#2190).
 		// This is the SUCCESS the driver turns into the ResultSummary, so it is the
 		// only place the counters can reach the client.
 		stats = resultStats(s.result.Counters())
+		// Same window, same reason, for the plan an EXPLAIN / PROFILE statement
+		// captured (rmp #2721): the driver builds ResultSummary.Plan()/Profile()
+		// from THIS message, and drainResult is about to drop the cursor holding
+		// the tree.
+		planMeta, profileMeta = resultPlanMetadata(s.result)
 	}
 
 	// Transition state based on has_more.
@@ -1463,6 +1469,15 @@ func (s *Session) handlePull(ctx context.Context, m *proto.Pull) ([]any, error) 
 		// SUCCESS is unchanged by #2190.
 		if len(stats) > 0 {
 			meta["stats"] = stats
+		}
+		// At most one of the two is ever non-nil; a statement with no EXPLAIN /
+		// PROFILE prefix publishes neither, leaving its SUCCESS byte-identical to
+		// what it was before rmp #2721.
+		if planMeta != nil {
+			meta["plan"] = planMeta
+		}
+		if profileMeta != nil {
+			meta["profile"] = profileMeta
 		}
 	}
 	responses = append(responses, &proto.Success{Metadata: meta})
@@ -1542,8 +1557,14 @@ func (s *Session) handleDiscard(m *proto.Discard) ([]any, error) {
 	// DISCARD still applied the statement's writes — it only discards the ROWS — so its
 	// terminal SUCCESS must report them, exactly as a PULL's does.
 	var stats map[string]packstream.Value
+	var planMeta, profileMeta map[string]packstream.Value
 	if !hasMore && s.result != nil {
 		stats = resultStats(s.result.Counters())
+		// A DISCARD terminates the stream, so the driver builds its ResultSummary
+		// from this SUCCESS: the captured plan must reach it here too, or a client
+		// that DISCARDed a PROFILE would get a summary with no profile in it
+		// (rmp #2721).
+		planMeta, profileMeta = resultPlanMetadata(s.result)
 	}
 	if !hasMore {
 		s.drainResult()
@@ -1563,6 +1584,12 @@ func (s *Session) handleDiscard(m *proto.Discard) ([]any, error) {
 		meta["db"] = s.databaseName()
 		if len(stats) > 0 {
 			meta["stats"] = stats
+		}
+		if planMeta != nil {
+			meta["plan"] = planMeta
+		}
+		if profileMeta != nil {
+			meta["profile"] = profileMeta
 		}
 	}
 	return []any{&proto.Success{Metadata: meta}}, nil

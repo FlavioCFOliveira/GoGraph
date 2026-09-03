@@ -128,6 +128,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/ir"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/parser"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 	cmetrics "github.com/FlavioCFOliveira/GoGraph/internal/metrics"
@@ -610,6 +611,20 @@ func (tx *ExplicitTx) Exec(query string, params map[string]expr.Value) (res *Res
 	}
 	if entry.semaErr != nil {
 		return nil, entry.semaErr
+	}
+
+	// EXPLAIN / PROFILE prefix (rmp #2721). Diverted before the mutator is built
+	// and before the statement takes the schema barrier, so an EXPLAIN inside an
+	// open write transaction still executes nothing.
+	//
+	// The plan is built — and, for PROFILE, executed — against its OWN read
+	// snapshot rather than this transaction's uncommitted state, exactly as
+	// [Engine.Explain] and [Engine.Profile] do when called on the same engine. A
+	// prefixed statement therefore does not observe writes this transaction has
+	// not committed. That is a diagnostic reading the committed graph, not a
+	// statement of the transaction.
+	if entry.planMode != parser.PlanModeNone {
+		return tx.eng.runPlanPrefixed(tx.ctx, entry, params, nil)
 	}
 	plan := entry.plan
 	if err := checkParamPresence(entry.paramRefs, params); err != nil {

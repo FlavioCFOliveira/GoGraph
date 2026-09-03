@@ -34,6 +34,37 @@ re-applied after any upstream refresh:
   as the last parser rule and listed in `updatingStatement`). Implements the
   openCypher FOREACH updating clause.
 
+- **EXPLAIN / PROFILE statement prefixes** (rmp #2721) — the `EXPLAIN` and
+  `PROFILE` lexer tokens, placed immediately after `FOREACH` and before `ID` for
+  the same reason FOREACH is there (they take the last keyword token ids and
+  shift no keyword id above them); the optional prefix in `script`
+  (`(EXPLAIN | PROFILE)? query SEMI? EOF`); and both tokens listed in the
+  `symbol` parser rule.
+
+  The `symbol` listing is **load bearing, not cosmetic**. Promoting two words to
+  lexer tokens removes them from the accepted language wherever an identifier is
+  legal, and `MATCH (explain) RETURN explain` parses at every revision before
+  this change. Listing them in `symbol` (rather than in `reservedWord`, which
+  would make `name` ambiguous) keeps them usable as variables, labels, property
+  keys and map keys — which is also how Neo4j treats them. Removing the two
+  alternatives from `symbol` and regenerating makes
+  `TestPlanPrefix_IdentifiersSurviveTokenisation` fail on all seven of its cases,
+  one of them with a parser panic.
+
+  The prefix is spelt INLINE in `script` rather than as a rule of its own: a new
+  parser rule shifts every later rule index, which invalidates the
+  `CypherParserRULE_*` constants the patch appends by hand. An added alternative
+  inside an existing rule shifts no rule index — `go vet` on the regenerated
+  package and the identical `EnterRule` indices in the diff confirm it.
+
+  The change DID shift ATN state numbers: adding an alternative to `script`,
+  which is rule 0, moved every `p.SetState(N)` in every later rule by **+3** and
+  every `AdaptivePredict` decision number by **+1**. `gen-patches.patch` pins
+  absolute state numbers, so it stopped applying and was regenerated with those
+  two offsets applied. Keyword token ids 1–89 are unchanged (`EXPLAIN`=90,
+  `PROFILE`=91); `ID` and the literal/whitespace tokens below it moved by +2,
+  exactly as FOREACH moved them before.
+
 ## How to update
 
 1. Identify the new commit hash:

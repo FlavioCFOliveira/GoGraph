@@ -20,6 +20,13 @@ import (
 // unwrap the typed values.  Errors are propagated by returning a *SemaError.
 type visitor struct {
 	gen.BaseCypherParserVisitor
+	// planMode records the EXPLAIN / PROFILE prefix the `script` rule matched,
+	// if any. It is written once by [visitor.VisitScript] and read by
+	// [ParseStatement] after the walk. It lives here rather than on the AST
+	// because it is a property of the STATEMENT, not of any clause: every AST
+	// node below is identical whether the prefix was written or not, which is
+	// exactly what makes the prefix free of semantic side effects.
+	planMode PlanMode
 }
 
 // newVisitor allocates a zero-value visitor ready to use.
@@ -119,8 +126,21 @@ type mergeAction struct {
 // Script / Query dispatch
 // -------------------------------------------------------------------------
 
-// VisitScript is the entry point. The script rule wraps a single query.
+// VisitScript is the entry point. The script rule wraps a single query, behind
+// an optional EXPLAIN / PROFILE prefix.
+//
+// The prefix is recorded on the visitor and does NOT appear in the returned AST:
+// `EXPLAIN MATCH (n) RETURN n` and `MATCH (n) RETURN n` produce the identical
+// tree, so the scope analyser, the IR translator and every plan-shaping pass
+// behave identically for both. What the prefix changes is what the ENGINE does
+// with the plan, which is decided in cypher/plan_prefix.go.
 func (v *visitor) VisitScript(ctx *gen.ScriptContext) interface{} {
+	switch {
+	case ctx.EXPLAIN() != nil:
+		v.planMode = PlanModeExplain
+	case ctx.PROFILE() != nil:
+		v.planMode = PlanModeProfile
+	}
 	return v.visit(ctx.Query())
 }
 
