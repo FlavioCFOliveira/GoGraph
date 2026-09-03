@@ -404,6 +404,57 @@ func (g *Graph[N, W]) delNodePropertyInfo(n N, key string, tx *writeCtx) {
 		return
 	}
 	s := g.nodePropShardFor(id)
+	// THE SHARED-LOCK PRE-PASS (rmp #2710).
+	//
+	// # What it is for
+	//
+	// Measured on dst-concurrent-bolt@64 (Apple M4, 10 cores, 2000 operations,
+	// counters in the task record): of 3 190 784 calls that reached the
+	// EXCLUSIVE shard lock, 451 024 (14.1%) found no bag for the node at all
+	// and 1 204 394 (37.7%) found a bag without the key — 51.9% that mutated
+	// nothing — and a further 1 466 514 (46.0%) were refused by the write-write
+	// conflict test, which also mutates nothing. Only 68 852 (2.2%) removed a
+	// property. So 97.8% of the exclusive acquisitions took a lock that
+	// excludes every other writer on the shard in order to change no state.
+	//
+	// That is worth fixing here rather than by narrowing the critical section,
+	// because the body is not what costs. In the same window 87% of this
+	// function's CPU was the lock and unlock machinery itself and 9% was
+	// everything else it does, so there is no expensive callee to hoist the way
+	// rmp #2681 hoisted [label.Index.Add] out of the label shard's lock — the
+	// analogous lever does not exist on this path. The number of EXCLUSIVE
+	// acquisitions is the lever, and a question answered under a read lock
+	// costs no writer anything.
+	//
+	// # Why a read lock is enough for these three outcomes
+	//
+	// The cross-store rule in mvcc_node_conflict.go is that each side CLAIMS in
+	// its own store under that shard's lock BEFORE it cross-checks the others,
+	// and that ordering is what makes the detection race-free without a
+	// per-node lock. NONE of the three outcomes resolved here makes a claim:
+	// the delta push and the bag mutation are both reached only when the key is
+	// present and the conflict test passed, and that outcome is the one case
+	// this pre-pass declines to answer. A no-op delete publishes nothing, so
+	// there is no claim whose ordering could be disturbed.
+	//
+	// The read lock still excludes every writer, so the bag, the delta head and
+	// the decision taken from them are one consistent observation — exactly the
+	// guarantee the exclusive lock gave. What changes is only that the same
+	// observation no longer serialises the other readers of this shard.
+	//
+	// A concurrent writer that adds the key between this pre-pass and the
+	// caller's return is not a lost update and not a new window: the exclusive
+	// form permits the identical interleaving, since a delete that arrives
+	// before the write is a valid serial order in both.
+	switch g.delNodePropertyShared(s, id, keyID, tx) {
+	case delPropRefused:
+		// The conflict path returns WITHOUT the existence cross-check, exactly
+		// as the exclusive body below does — see its own early return.
+		return
+	case delPropNothingToRemove:
+		_ = g.crossCheckNodeLife(id, tx)
+		return
+	}
 	s.mu.Lock()
 	if bag, ok2 := s.m[id]; ok2 {
 		// MVCC P2 (rmp #2279), inert unless armed. Deleting a key that is not
@@ -437,6 +488,85 @@ func (g *Graph[N, W]) delNodePropertyInfo(n N, key string, tx *writeCtx) {
 	// cannot return an error, so the conflict is recorded on the transaction
 	// and commit refuses it, exactly like the in-shard check above.
 	_ = g.crossCheckNodeLife(id, tx)
+}
+
+// delPropOutcome is what the shared-lock pre-pass of
+// [Graph.delNodePropertyInfo] was able to settle without an exclusive lock.
+type delPropOutcome uint8
+
+const (
+	// delPropNeedsExclusive means the key is present and the write is not
+	// refused, so the removal must be redone under the exclusive lock. The
+	// pre-pass decides NOTHING in this case: everything it observed is re-read
+	// there, because the shard is unlocked in between and a concurrent writer
+	// may have changed the bag.
+	delPropNeedsExclusive delPropOutcome = iota
+	// delPropNothingToRemove means the node carries no bag, or a bag without
+	// this key, so the removal has nothing to do. The caller still runs the
+	// existence cross-check, exactly as the exclusive body does on this outcome.
+	delPropNothingToRemove
+	// delPropRefused means the write-write conflict test refused the write and
+	// recorded it on the transaction. The caller returns immediately WITHOUT
+	// the existence cross-check.
+	//
+	// THIS OUTCOME IS WHY THE PRE-PASS RETURNS THREE VALUES AND NOT A BOOL.
+	// The exclusive body's conflict branch unlocks and returns without reaching
+	// [Graph.crossCheckNodeLife], while every other path falls through to it. A
+	// two-valued pre-pass would have collapsed "refused" into "nothing to
+	// remove" and started cross-checking a node whose write was already
+	// refused — a behaviour change on the cross-store seam of rmp #2444,
+	// invisible to any test that does not race a DETACH DELETE against a
+	// refused property delete.
+	delPropRefused
+)
+
+// delNodePropertyShared answers, under the shard's READ lock, whether a delete
+// of keyID from id needs the exclusive lock at all. See the pre-pass commentary
+// in [Graph.delNodePropertyInfo] for why a read lock suffices for the two
+// outcomes it settles, and for the measurement that motivates it.
+//
+// It never mutates the shard. The only state it can change is the
+// TRANSACTION's, through [writeCtx.conflictErr] on the refused path, which
+// records the conflict on tx and touches no shard at all.
+func (g *Graph[N, W]) delNodePropertyShared(s *nodePropShard, id graph.NodeID, keyID PropertyKeyID, tx *writeCtx) delPropOutcome {
+	s.mu.RLock()
+	bag, ok := s.m[id]
+	if !ok {
+		s.mu.RUnlock()
+		return delPropNothingToRemove
+	}
+	if _, had := bag.get(keyID); !had {
+		// The key is absent, so [propBag.del] under the exclusive lock would
+		// rescan the same buffer, remove nothing and write the identical bag
+		// back. The ONE thing it would still do is drop an entry whose bag is
+		// empty, preserving the delete-when-empty contract — so an empty bag is
+		// handed to the exclusive path rather than settled here.
+		//
+		// No writer stores an empty bag today: [Graph.setNodePropertyInfo]
+		// always stores at least the key it just set, and this function's
+		// exclusive body and both abort reclaimers in mvcc_abort_reclaim.go
+		// delete the entry instead when the bag empties. The guard is defence
+		// in depth against a future writer that forgets, not a case reached now.
+		empty := bag.empty()
+		s.mu.RUnlock()
+		if empty {
+			return delPropNeedsExclusive
+		}
+		return delPropNothingToRemove
+	}
+	if g.propDeltasEnabled() {
+		// The same unconditional head test the exclusive body runs, over the
+		// same shard lock held in shared mode, so the head and the decision
+		// taken from it are ONE consistent observation. A refusal claims
+		// nothing, which is what lets it be settled without excluding writers.
+		if head := s.headStamp(id); tx.conflicts(head) {
+			_ = tx.conflictErr(mvcc.StoreNodeProperties, head)
+			s.mu.RUnlock()
+			return delPropRefused
+		}
+	}
+	s.mu.RUnlock()
+	return delPropNeedsExclusive
 }
 
 // NodeProperties returns a snapshot of every property currently

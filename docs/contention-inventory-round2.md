@@ -162,7 +162,7 @@ is what locates the site inside its own profile.
 |---:|---|---|---|---|---|---|
 | 1 | `graph/generation/generation.go:152` `releaseRef`, `:162` `Release`, `:185` `Publish` | 64.34 ms @8; 2337.55 s @1024 (`Publish` 82.89%, `releaseRef` 17.11%) | `generation-publish-read`@8 | **47.619x** (2.42% / 7.17%) | 23.878x (0.37% / 13.08%) | **no — and deliberately so** |
 | 2 | `graph/index/manager.go:254` `Manager.Apply` -> `graph/index/label/index.go:327` `Index.Add` | 11484 s = **43.88%** of 26172 s @1024; `CreateIndex` 28.34%, `DropIndex` 27.65% | `index-manager-fanout`@1024 | 3.396x (20.65% / 3.40%) | **32.223x** (48.32% / 5.14%) | yes — see the correction below |
-| 3 | `bolt/server/serve.go:802` -> `graph/lpg/lpg.go:1388` `applyVersionedInstant` | 9792 s = **98.55%** of 9936 s @1024 | `dst-concurrent-bolt`@1024 | 1.627x (1.43% / 2.15%) | **16.307x** (49.41% / 34.78%) | yes |
+| 3 | ~~`bolt/server/serve.go:802` -> `graph/lpg/lpg.go:1388` `applyVersionedInstant`~~ **CORRECTED — see below** | 9792 s = **98.55%** of 9936 s @1024 | `dst-concurrent-bolt`@1024 | 1.627x (1.43% / 2.15%) | **16.307x** (49.41% / 34.78%) | yes |
 | 4 | `internal/metrics/metrics.go:105` `IncCounter` | 5.23 ms @1024; **82.01% of CPU** @8 | `metrics-emit`@8 | 3.300x (1.90% / 13.48%) | 2.138x (2.15% / 28.86%) | only with a real backend installed |
 | 5 | `store/wal` durable commit, reached via `cypher/api.go:18379` `execUnderBarrier` | 1425.59 s = 99.03% of 1439.51 s @1024 | `dst-disk-wal`@1024 | 3.860x (0.28% / 0.79%) | 1.353x (1.91% / 2.07%) | yes |
 | 6 | `graph/index/count/count.go:346` `Store.Apply` | 4.90 ms @1024; `atomic.Int32.Add` **44.85% of CPU** @8 | `index-count-hot`@8 | 2.916x (0.45% / 26.25%) | 2.392x (0.16% / 24.10%) | yes |
@@ -828,3 +828,84 @@ better estimate, and the ranking is unchanged by the correction.
 Stop below that line. `graph/index/btree` reads 0.948x → 0.998x and 1.005x →
 1.058x, and `lpg-neighbours-read` reads 1.004x → 1.017x and 1.001x → 1.014x:
 their sharing costs nothing, and no amount of sharding would repay the effort.
+
+---
+
+## Correction to ranked row 3 — measured 2026-09-03 (rmp #2710)
+
+Row 3 above is **misattributed at the leaf, and its provoking workload is not
+measuring what the row implies**. Both corrections are defects in how the number
+was derived, not in the measurement itself. Established at HEAD `225b08d5`,
+Apple M4, 10 cores, go1.27.1, darwin/arm64.
+
+### 1. The leaf is `graph/lpg` node-property shard locks, not the Bolt server
+
+`serve.go:802` is the `handleConn` call — a cumulative frame that inherits every
+byte of Bolt work beneath it by construction — and `applyVersionedInstant` is the
+write barrier, which rmp #2697 established holds zero delay. Peeked to its
+callers at `dst-concurrent-bolt`@64 (mutex profile, `SetMutexProfileFraction(1)`,
+so every contention event is sampled):
+
+| site | delay | share of all mutex delay |
+|---|---:|---:|
+| `graph/lpg/property.go` `delNodePropertyInfo` | 153.03 s | **62.8%** |
+| `graph/lpg/property.go` `setNodePropertyInfo` | 51.85 s | **21.3%** |
+| everything in `bolt/server` | — | **< 0.2%** |
+
+Means of n=8 interleaved runs. `sync.(*Mutex).Unlock` carries 42.9% of the delay
+flat, but 98.67% of it is reached from `sync.(*RWMutex).Unlock` inline — it is the
+RWMutex's own internal mutex, **not** a second global lock, and the hypothesis
+that one existed is refuted.
+
+### 2. The @64 collapse is dominated by fixture cross-talk, not by the engine
+
+`dst-concurrent-bolt` runs the **same 2000 operations at every level**. Counting
+the calls that reach the node-property shard lock (temporary counters, one
+counting-only run per level):
+
+| level | `delNodePropertyInfo` calls | per operation | removed a property |
+|---:|---:|---:|---:|
+| 1 | 11 264 | 5.6 | 100.0% |
+| 8 | 13 312 | 6.7 | 88.3% |
+| 64 | 3 190 784 | **1 595.4** | **2.2%** |
+
+**A 283x amplification of the work for an unchanged operation count.** The cause
+is in the harness fixture, not the engine: every `sim.RunConcurrent` call runs
+`probeWireParamTypes` (`internal/sim/wire_param_types.go`), whose per-call fixture
+uses a **fixed label `WireParam` and a fixed id `wp-1`** against the **one shared
+`SimServer`** all `level` workers drive. With no uniqueness constraint on that id,
+concurrent probes leave many live matching nodes, so each probe's
+`MATCH (n:WireParam {id:$id}) SET n.s = $nul` and its `DETACH DELETE` fan out
+across every worker's nodes instead of its own.
+
+Consequently **the 0.453 scaling figure at @64 is not a clean measure of engine
+write scaling**, and a change that removes lock contention there will not move it
+much — which is exactly what was measured (below). The level-1 and level-8 cells
+are unaffected by the cross-talk and remain sound.
+
+### 3. What the fix changed, and what it did not
+
+`delNodePropertyInfo` now settles its three non-mutating outcomes under the
+shard's **shared** lock (`graph/lpg/property.go`, `delNodePropertyShared`). At @64,
+97.8% of its exclusive acquisitions removed nothing: 14.1% found no bag, 37.7%
+found a bag without the key, 46.0% were refused by the conflict test.
+
+Interleaved A/B, n=8 per arm, arms alternated ABABAB, loadavg bracketed on every
+run:
+
+| metric | baseline | with the pre-pass | delta |
+|---|---:|---:|---:|
+| `delNodePropertyInfo` mutex delay | 153.03 s (sd 5.32) | **7.03 s** (sd 2.72) | **−95.4%** |
+| total mutex delay | 243.99 s (sd 11.60) | 145.16 s (sd 43.89) | −40.5% |
+| `setNodePropertyInfo` mutex delay | 51.85 s (sd 5.17) | 65.79 s (sd 21.20) | +26.9% |
+| ops/s @64 | 253.4 (sd 22.5) | 277.0 (sd 25.0) | +9.3%, Welch t=1.98 |
+
+**The throughput gain is NOT established.** +9.3% sits inside this cell's own
+noise: the A-vs-A spread measured here is **±32.8%** (n=8), wider still than the
+±11.5% the Bolt evaluation published for it, and t=1.98 is p≈0.07 two-sided. The
+mutex-delay result is unambiguous; the throughput result is not, and the reason is
+§2 — removing the *waiting* does not remove the *work*.
+
+No regression at any swept level of `cypher-write-mem` or `mvcc-session-write`
+(18 cells, worst −1.97% at `mvcc-session-write`@1024, t=−1.88, not significant;
+the two cells that appeared to move at n=2 collapsed to noise at n=5).
