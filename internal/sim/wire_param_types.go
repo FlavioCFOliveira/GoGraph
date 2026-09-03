@@ -47,14 +47,104 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"sync"
 
 	"github.com/FlavioCFOliveira/GoGraph/bolt/proto"
 )
 
-// wireParamLabel is the node label the parameter-matrix probe writes under. It
-// is distinct from every workload label so the probe can clean up by label
-// without touching the population.
-const wireParamLabel = "WireParam"
+// wireParamLabelPrefix prefixes the node label the parameter-matrix probe
+// writes under. It is distinct from every workload label so the probe can clean
+// up by label without touching the population.
+//
+// The full label is this prefix plus a PER-PROBE slot (see [wireParamSlotPool]).
+//
+// # Why the label is not fixed (rmp #2728)
+//
+// It was, and that was a defect. Several callers drive ONE shared [SimServer]
+// concurrently — bench/contention's dst-concurrent-bolt runs `level` goroutines
+// each calling [RunConcurrent], and every call probes before it spawns any
+// connection — so with a fixed label and a fixed id, concurrent probes left many
+// live nodes matching the same `MATCH (n:WireParam ...)`. Each probe's
+// `SET n.s = $nul` and `DETACH DELETE n` then fanned out over every OTHER
+// probe's node.
+//
+// Measured on this fixture, 64 concurrent probes over 1984 operations against
+// one shared server: 2,028,689 graph/lpg delNodePropertyInfo calls, 1022.5 per
+// operation, against 6.0 per operation at one probe at a time — a 170x work
+// amplification produced by the FIXTURE, not by the engine, of which 97.9%
+// removed nothing. The probe also reported 13,808 spurious divergences, because
+// its own `count(*) == 1` and `count(*) == 0` assertions are false when another
+// probe's node is live. Private per-probe fixtures remove the sharing at its
+// root; see [wireParamFixture].
+const wireParamLabelPrefix = "WireParam"
+
+// wireParamSlots hands each in-flight probe a private fixture slot, so two
+// probes that overlap in time never share a label or an id (rmp #2728).
+//
+// Slots are RECYCLED rather than handed out monotonically, so the number of
+// distinct labels the engine ever registers is bounded by the peak number of
+// SIMULTANEOUS probes rather than by the number of probes run. A monotone
+// counter would register one label per probe and grow the engine's label
+// registry without bound over a long run, which the module's bounded-resources
+// rule forbids.
+var wireParamSlots wireParamSlotPool
+
+// wireParamSlotPool is a free list of fixture slot numbers. It is safe for
+// concurrent use by any number of goroutines.
+//
+// A slot is returned to the free list only when the probe that held it VERIFIED
+// its own cleanup. A probe that could not delete its node retires the slot
+// instead: recycling it would hand the leftover node to the next probe and
+// reintroduce exactly the cross-talk the pool exists to remove. Retirement is
+// bounded by the number of failed cleanups, which on a healthy server is zero.
+type wireParamSlotPool struct {
+	mu   sync.Mutex
+	free []int
+	next int
+}
+
+// acquire returns a slot number no other in-flight probe holds.
+func (p *wireParamSlotPool) acquire() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if n := len(p.free); n > 0 {
+		slot := p.free[n-1]
+		p.free = p.free[:n-1]
+		return slot
+	}
+	slot := p.next
+	p.next++
+	return slot
+}
+
+// release returns slot to the free list. The caller must have verified that no
+// node survives under the slot's label.
+func (p *wireParamSlotPool) release(slot int) {
+	p.mu.Lock()
+	p.free = append(p.free, slot)
+	p.mu.Unlock()
+}
+
+// wireParamFixture is one probe's private fixture: the label its node is created
+// under and the id that node carries. Both carry the slot number, so a node that
+// ever escapes cleanup names the probe that leaked it.
+type wireParamFixture struct {
+	slot  int
+	label string
+	id    string
+}
+
+// newWireParamFixture reserves a slot and derives the fixture from it. The
+// caller must release the slot through [wireParamSlotPool.release] once, and
+// only once, it has verified that nothing survives under the label.
+func newWireParamFixture() wireParamFixture {
+	slot := wireParamSlots.acquire()
+	return wireParamFixture{
+		slot:  slot,
+		label: fmt.Sprintf("%s_%d", wireParamLabelPrefix, slot),
+		id:    fmt.Sprintf("wp-%d", slot),
+	}
+}
 
 // wireParamListStringRendering is the DEFECTIVE encoding a list column had
 // before rmp #2513: its String() rendering instead of a PackStream List. It is
@@ -72,6 +162,11 @@ const wireParamListStringRendering = "[1, 2, 3]"
 // again before returning, so the caller's eventual-consistency oracle
 // (acknowledged creates vs engine node count) is unaffected. It runs on the
 // caller's goroutine before any connection spawns.
+//
+// It is also ISOLATED: its fixture is private to this call (see
+// [wireParamFixture]), so any number of probes may run concurrently against one
+// shared srv without touching each other's nodes. Both properties are needed —
+// neutrality alone let concurrent probes fan out across each other (rmp #2728).
 func probeWireParamTypes(ctx context.Context, srv *SimServer) []string {
 	c, err := srv.Dial()
 	if err != nil {
@@ -92,10 +187,15 @@ func probeWireParamTypes(ctx context.Context, srv *SimServer) []string {
 		return recs, true
 	}
 
+	fx := newWireParamFixture()
 	fails = append(fails, wireParamEchoProbe(q)...)
 	fails = append(fails, wireParamListProbe(q)...)
-	fails = append(fails, wireParamMapCreateProbe(q)...)
-	fails = append(fails, wireParamCleanup(q)...)
+	fails = append(fails, wireParamMapCreateProbe(q, fx)...)
+	cleanupFails, cleaned := wireParamCleanup(q, fx)
+	fails = append(fails, cleanupFails...)
+	if cleaned {
+		wireParamSlots.release(fx.slot)
+	}
 	return fails
 }
 
@@ -191,10 +291,10 @@ func wireParamListEncodingProbe(q wireQueryFn, list []any) []string {
 // Boolean parameter as pattern-predicate seek keys (literal/parameter parity on
 // the access path) and a Null parameter through SET, which must remove the
 // property rather than store a null.
-func wireParamMapCreateProbe(q wireQueryFn) []string {
+func wireParamMapCreateProbe(q wireQueryFn, fx wireParamFixture) []string {
 	var fails []string
 	props := map[string]any{
-		"id": "wp-1",
+		"id": fx.id,
 		"f":  2.5,
 		"b":  true,
 		"s":  "x",
@@ -202,14 +302,14 @@ func wireParamMapCreateProbe(q wireQueryFn) []string {
 		"l":  []any{int64(1), int64(2), int64(3)},
 	}
 	if _, ok := q("wire param map CREATE",
-		"CREATE (n:"+wireParamLabel+" $props)", map[string]any{"props": props}); !ok {
+		"CREATE (n:"+fx.label+" $props)", map[string]any{"props": props}); !ok {
 		return fails
 	}
 
 	// Read every scalar property back with its native type.
 	recs, ok := q("wire param property read-back",
-		"MATCH (n:"+wireParamLabel+" {id:$id}) RETURN n.f AS f, n.b AS b, n.s AS s, n.i AS i",
-		map[string]any{"id": "wp-1"})
+		"MATCH (n:"+fx.label+" {id:$id}) RETURN n.f AS f, n.b AS b, n.s AS s, n.i AS i",
+		map[string]any{"id": fx.id})
 	if ok {
 		if len(recs) != 1 {
 			fails = append(fails, fmt.Sprintf("wire param property read-back: got %d rows, want 1", len(recs)))
@@ -224,13 +324,13 @@ func wireParamMapCreateProbe(q wireQueryFn) []string {
 	// AND come back over the wire as a PackStream List (rmp #2513) — the
 	// equality check alone would pass even with a stringifying encoder.
 	recs, ok = q("wire param stored list equality",
-		"MATCH (n:"+wireParamLabel+" {id:$id}) RETURN n.l = $l AS eq",
-		map[string]any{"id": "wp-1", "l": []any{int64(1), int64(2), int64(3)}})
+		"MATCH (n:"+fx.label+" {id:$id}) RETURN n.l = $l AS eq",
+		map[string]any{"id": fx.id, "l": []any{int64(1), int64(2), int64(3)}})
 	if ok {
 		fails = append(fails, expectSingleWireValue("wire param stored list equality", recs, true)...)
 	}
 	recs, ok = q("wire param stored list read-back",
-		"MATCH (n:"+wireParamLabel+" {id:$id}) RETURN n.l AS l", map[string]any{"id": "wp-1"})
+		"MATCH (n:"+fx.label+" {id:$id}) RETURN n.l AS l", map[string]any{"id": fx.id})
 	if ok {
 		fails = append(fails, expectSingleWireValue("wire param stored list read-back", recs,
 			[]any{int64(1), int64(2), int64(3)})...)
@@ -239,37 +339,45 @@ func wireParamMapCreateProbe(q wireQueryFn) []string {
 	// Float and Boolean parameters as pattern-predicate seek keys: the shape a
 	// literal/parameter divergence would break first.
 	recs, ok = q("wire param float seek",
-		"MATCH (n:"+wireParamLabel+" {f:$f}) RETURN count(*) AS c", map[string]any{"f": 2.5})
+		"MATCH (n:"+fx.label+" {f:$f}) RETURN count(*) AS c", map[string]any{"f": 2.5})
 	if ok {
 		fails = append(fails, expectSingleWireValue("wire param float seek", recs, int64(1))...)
 	}
 	recs, ok = q("wire param bool seek",
-		"MATCH (n:"+wireParamLabel+" {b:$b}) RETURN count(*) AS c", map[string]any{"b": true})
+		"MATCH (n:"+fx.label+" {b:$b}) RETURN count(*) AS c", map[string]any{"b": true})
 	if ok {
 		fails = append(fails, expectSingleWireValue("wire param bool seek", recs, int64(1))...)
 	}
 
 	// A Null parameter through SET removes the property.
 	recs, ok = q("wire param null SET",
-		"MATCH (n:"+wireParamLabel+" {id:$id}) SET n.s = $nul RETURN n.s IS NULL AS gone",
-		map[string]any{"id": "wp-1", "nul": nil})
+		"MATCH (n:"+fx.label+" {id:$id}) SET n.s = $nul RETURN n.s IS NULL AS gone",
+		map[string]any{"id": fx.id, "nul": nil})
 	if ok {
 		fails = append(fails, expectSingleWireValue("wire param null SET", recs, true)...)
 	}
 	return fails
 }
 
-// wireParamCleanup removes the probe's node and asserts none survives, so the
-// caller's node-count oracle sees a net-zero effect from the whole probe.
-func wireParamCleanup(q wireQueryFn) []string {
-	if _, ok := q("wire param cleanup", "MATCH (n:"+wireParamLabel+") DETACH DELETE n", nil); !ok {
-		return nil
+// wireParamCleanup removes the probe's node and asserts none survives under its
+// private label, so the caller's node-count oracle sees a net-zero effect from
+// the whole probe.
+//
+// It reports cleaned=true only when the check actually ran and saw an empty
+// label. The caller keys slot recycling on that: an unverified cleanup retires
+// the slot rather than handing a possibly-live node to the next probe. A failed
+// statement is reported through q's accumulator, so returning no descriptions
+// here never loses the diagnosis.
+func wireParamCleanup(q wireQueryFn, fx wireParamFixture) (fails []string, cleaned bool) {
+	if _, ok := q("wire param cleanup", "MATCH (n:"+fx.label+") DETACH DELETE n", nil); !ok {
+		return nil, false
 	}
-	recs, ok := q("wire param cleanup check", "MATCH (n:"+wireParamLabel+") RETURN count(*) AS c", nil)
+	recs, ok := q("wire param cleanup check", "MATCH (n:"+fx.label+") RETURN count(*) AS c", nil)
 	if !ok {
-		return nil
+		return nil, false
 	}
-	return expectSingleWireValue("wire param cleanup check", recs, int64(0))
+	fails = expectSingleWireValue("wire param cleanup check", recs, int64(0))
+	return fails, len(fails) == 0
 }
 
 // expectSingleWireValue asserts recs holds exactly one row whose single column

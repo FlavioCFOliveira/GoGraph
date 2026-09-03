@@ -79,10 +79,15 @@ const dstConcurrentOpsPerConn = 4
 // [sim.ConcurrentResult.Consistent] is deliberately NOT checked. It compares the
 // engine's live node count against THIS call's acknowledged creates, and every
 // other worker is committing to the same shared server at the same time, so it
-// is false by construction here and asserting it would be a lie. The two
+// is false by construction here and asserting it would be a lie. The three
 // oracles that survive the sharing are checked instead: a recovered panic in a
-// connection goroutine, and an unexpected transport error. Both are properties
-// of one call's own goroutines and neither is perturbed by a concurrent caller.
+// connection goroutine, an unexpected transport error, and the Bolt parameter
+// matrix. The first two are properties of one call's own goroutines. The third
+// became sharable only at rmp #2728, which made the probe's fixture private per
+// call; before that its own assertions were false whenever a neighbour's node
+// was live, and this arm discarded them for that reason. Checking it here is
+// what makes a return of that cross-talk fail the measurement instead of
+// silently inflating it.
 func dstConcurrentWorkload() Workload {
 	return Workload{
 		Name:    "dst-concurrent-bolt",
@@ -125,6 +130,10 @@ func dstConcurrentOp(ctx context.Context, srv *sim.SimServer, worker, iter int) 
 	}
 	if res.TransportErrors != 0 {
 		return fmt.Errorf("RunConcurrent: %d transport error(s)", res.TransportErrors)
+	}
+	if n := len(res.WireParamFailures); n != 0 {
+		return fmt.Errorf("RunConcurrent: %d Bolt parameter-matrix divergence(s), first: %s",
+			n, res.WireParamFailures[0])
 	}
 	return nil
 }

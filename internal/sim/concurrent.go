@@ -262,6 +262,13 @@ func RunConcurrent(ctx context.Context, srv *SimServer, cfg ConcurrentConfig) (C
 	// by read-back. The probe is population-neutral (it deletes the single node
 	// it creates), so it perturbs neither the node-count oracle below nor the
 	// per-connection seed streams.
+	//
+	// Callers may run many RunConcurrent calls against ONE srv at the same time —
+	// bench/contention's dst-concurrent-bolt does exactly that — so the probe's
+	// fixture is private to this call (rmp #2728). Neutrality alone was never
+	// enough: with a shared fixture the probes stayed neutral by deleting each
+	// OTHER's nodes, which corrupted their own oracles and amplified the engine
+	// work the arm was there to measure.
 	res.WireParamFailures = probeWireParamTypes(ctx, srv)
 
 	if cfg.ContendedCounters <= 0 {

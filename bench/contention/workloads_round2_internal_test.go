@@ -3,6 +3,7 @@ package contention
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -146,4 +147,79 @@ func TestCeilingArmsAreNotSwept(t *testing.T) {
 			t.Errorf("%s is in All(); ceiling arms must be reachable only through ByName", arm.Name)
 		}
 	}
+}
+
+// driveSmokeConcurrent runs a workload's Setup once and then issues
+// opsPerWorker operations from each of workers goroutines against that ONE
+// fixture, failing the test on any error.
+//
+// It is the concurrent counterpart of [driveSmoke], and the distinction is not
+// cosmetic: [driveSmoke] drives a single goroutine, so it cannot reach any
+// property that only exists while several of the harness's workers share the
+// workload's fixture — which for dst-concurrent-bolt is the whole point of the
+// arm. It remains a smoke driver, not a measurement.
+func driveSmokeConcurrent(t *testing.T, w Workload, workers, opsPerWorker int) {
+	t.Helper()
+	op, teardown, err := w.Setup(t.TempDir())
+	if err != nil {
+		t.Fatalf("%s: Setup: %v", w.Name, err)
+	}
+	t.Cleanup(func() {
+		if teardown == nil {
+			return
+		}
+		if err := teardown(); err != nil {
+			t.Errorf("%s: teardown: %v", w.Name, err)
+		}
+	})
+
+	ctx := context.Background()
+	errs := make([]error, workers)
+	var wg sync.WaitGroup
+	for worker := range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range opsPerWorker {
+				if err := op(ctx, worker, i); err != nil {
+					errs[worker] = err
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	for worker, err := range errs {
+		if err != nil {
+			t.Errorf("%s: worker %d: %v", w.Name, worker, err)
+		}
+	}
+}
+
+// dstConcurrentSmokeWorkers and dstConcurrentSmokeOps size the shared-fixture
+// smoke run.
+//
+// Sized to the base rate of the event, not for spectacle: the cross-talk this
+// test exists to catch appears from TWO simultaneous callers upward, so four
+// workers makes detection overwhelming while keeping the run near a tenth of a
+// second — one operation costs roughly 2.6 ms.
+const (
+	dstConcurrentSmokeWorkers = 4
+	dstConcurrentSmokeOps     = 4
+)
+
+// TestDstConcurrentBoltSharesOneServerCleanly drives dst-concurrent-bolt the way
+// the sweep drives it — several workers against ONE shared [sim.SimServer] — and
+// requires every operation to succeed.
+//
+// This is the arm-level regression gate for rmp #2728. That defect was invisible
+// to [TestRound2WorkloadsDrive] by construction: it issues its operations on one
+// goroutine, so the arm's defining property — the sharing — was never exercised
+// in the test layer at all, and a fixture that only misbehaves when two callers
+// overlap could not fail anything. The failure it now catches arrives through
+// the Bolt parameter matrix, which [dstConcurrentOp] began asserting once rmp
+// #2728 made the probe's fixture private and the oracle therefore sharable.
+func TestDstConcurrentBoltSharesOneServerCleanly(t *testing.T) {
+	driveSmokeConcurrent(t, dstConcurrentWorkload(), dstConcurrentSmokeWorkers, dstConcurrentSmokeOps)
 }

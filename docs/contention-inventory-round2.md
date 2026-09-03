@@ -130,7 +130,7 @@ curves in this round are all surfaces round 1 never reached.
 | `index-count-spread` | 1.000 | 2.470 | 2.633 | 2.652 | 2.713 | 118,285,913 |
 | `mvcc-explicit-tx` | 1.000 | 2.242 | 2.365 | 1.875 | 1.266 | 123,072 |
 | `centrality-pagerank` | 1.000 | 2.217 | 3.683 | 3.863 | 3.544 | 10,428 |
-| `dst-concurrent-bolt` | 1.000 | 2.206 | **0.470** | **0.274** | **0.127** | 595 |
+| ~~`dst-concurrent-bolt`~~ † | ~~1.000~~ | ~~2.206~~ | ~~0.470~~ | ~~0.274~~ | ~~0.127~~ | ~~595~~ |
 | `mvcc-session-write` | 1.000 | 2.182 | 2.203 | 1.869 | 1.385 | 370,156 |
 | `dst-disk-wal` | 1.000 | 2.174 | 10.423 | 28.116 | 44.583 | 1,168 |
 | `cypher-write-mem` | 1.000 | 2.104 | 2.080 | 1.744 | 1.388 | 363,503 |
@@ -150,6 +150,67 @@ curves in this round are all surfaces round 1 never reached.
 (5 levels x 2 windows, exit 0, loadavg 1.74 before / 2.60 after). It is not
 comparable to the rows above as a contention ranking and is not ranked below —
 see [dst-mvcc-sessions shares nothing, and that is the point](#dst-mvcc-sessions-shares-nothing-and-that-is-the-point).
+
+### † dst-concurrent-bolt is SUPERSEDED: this row measured the HARNESS (rmp #2728)
+
+Every `RunConcurrent` call runs `probeWireParamTypes` before it spawns a
+connection, and that probe's fixture used a **fixed label and a fixed id
+against the one shared `SimServer`** all `level` workers drove. With no
+uniqueness constraint, many probe nodes matched the same
+`MATCH (n:WireParam ...)` at once, so each probe's `SET n.s = $nul` and
+`DETACH DELETE n` **fanned out over every other probe's node**. The row's
+scaling column is that fan-out, not engine write scaling.
+
+**Reproduced at HEAD by counting the engine calls, not by inference.** A
+temporary counter on `graph/lpg.delNodePropertyInfo`, driving the arm's own
+operation at 1/2/4/8/16 workers x 8 operations each:
+
+| workers | per operation, private fixture | per operation, shared fixture |
+|---:|---:|---:|
+| 1 | 6.0 | 6.0 |
+| 2 | 6.0 | 6.1 |
+| 4 | 6.0 | 7.2 |
+| 8 | 6.0 | 8.8 |
+| 16 | 6.0 | 14.1 |
+
+**6.0 is the whole cost of one probe** — one property removed by the null `SET`
+plus the five that survive to the `DETACH DELETE` — and with a private fixture
+it is **flat at every level**, which is what a fixture that does not share must
+be. The shared fixture instead grows with the level, and it compounds with the
+number of operations in flight as well: the original attribution measured
+**1022.5 calls per operation at level 64** over a 1984-operation window, of
+which **97.9% removed nothing**.
+
+**The wasted work was not the worst of it.** The probe's own `count(*) == 1` and
+`count(*) == 0` assertions are false whenever a neighbour's node is live, so the
+arm's parameter-matrix oracle was **corrupted from level 2 upward** — 2,003
+spurious divergences at level 2, 7,835 at level 8 — and sixteen concurrent
+probes leaked **64 nodes** while filling the log with
+`mvcc: serialization conflict`, because their cleanup transactions conflicted
+over the shared node set and aborted. So the caption's "levels 1 and 8 are
+unaffected" was true of the *work* only.
+
+**Fixed and gated at both levels.** Each probe now holds a private fixture slot
+(`internal/sim.wireParamSlotPool`), and slots are recycled rather than minted
+per probe so the engine's label cardinality stays bounded by peak concurrency.
+Three gates hold it: `internal/sim.TestWireParamTypes_ConcurrentProbesDoNotCrossTalk`,
+`TestWireParamFixture_IdentifiersCarryTheSlot`, and — at the arm itself —
+`bench/contention.TestDstConcurrentBoltSharesOneServerCleanly`, which drives the
+workload the way the sweep drives it. All three are mutation-proven: restoring
+the fixed label and id fails every one of them, while the pre-existing
+single-goroutine smoke test `TestRound2WorkloadsDrive` still **passes** — which
+is precisely the blindness the arm-level gate closes. `dstConcurrentOp` now
+also asserts the parameter matrix, an oracle it had to discard while the
+fixture was shared.
+
+**No replacement figure is published here.** The cell must be re-swept on HEAD
+in a quiet window (rmp #2730) before any number is put back in the table.
+
+**And judge it against the right floor when that happens.** The A-vs-A floor for
+this cell is **bimodal**: 43 of 46 interleaved runs sit within ±4% of the median
+while three fall 24-32% below it. So a **single run carries ±32%** — which is
+what #2710 measured and reported as ±32.8% — while a **median of ten interleaved
+runs carries ±4%**. The ±11.5% previously published describes neither regime.
 
 ## Ranked inventory
 
