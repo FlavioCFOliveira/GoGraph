@@ -126,14 +126,15 @@ func TestConcurrentTx_QuiescenceVerifierFires(t *testing.T) {
 	defer func() { _ = srv.Close() }()
 
 	// A real node that the fabricated "refused" ledger claims was refused.
-	if _, err := seedContendedCounter(srv, 0); err != nil {
+	space := counterSpace{ns: "verifier-fires", n: 1}
+	if _, err := seedContendedCounter(srv, space, 0); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
 	missing, phantom, _, err := verifyTxQuiescence(srv,
 		[]string{"never-created-marker"},
-		[]string{wireCounterName(0)},
-		0)
+		[]string{space.name(0)},
+		counterSpace{ns: space.ns, n: 0})
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}

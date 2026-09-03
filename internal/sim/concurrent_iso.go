@@ -61,10 +61,10 @@ func observeBatch(batchSize int, v int64) (torn bool) {
 // monotonicity (when contended counters exist) and the batch population's
 // atomicity + per-connection monotonicity. Read failures under overload are
 // bounded rejects, not oracle violations.
-func isoReaderOp(client *WireClient, seed *Seed, contendedCounters int, c *counters, wl *writerLog) (stop bool) {
-	if contendedCounters > 0 {
-		k := seed.IntN(contendedCounters)
-		v, ok, stop := wireScalar(client, tmplWireCounterRead, map[string]any{"name": wireCounterName(k)}, c)
+func isoReaderOp(client *WireClient, seed *Seed, space counterSpace, c *counters, wl *writerLog) (stop bool) {
+	if space.n > 0 {
+		k := seed.IntN(space.n)
+		v, ok, stop := wireScalar(client, tmplWireCounterRead, map[string]any{"name": space.name(k)}, c)
 		if stop {
 			return true
 		}
