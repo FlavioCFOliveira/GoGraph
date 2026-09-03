@@ -1790,6 +1790,17 @@ func applyOrAccumulate[N comparable, W any](
 // the `store.recovery.applyOp.fallbackZeroWeight` counter is
 // incremented.
 //
+// It also returns false when the graph REFUSES a decoded op — every mutation
+// whose lpg.Graph primitive can fail (node add, node label, node property, edge
+// add, and the edge-property ops, by pair and by handle) is checked, a
+// per-op `store.recovery.applyOp.*Errors` counter is incremented, and replay
+// fail-stops. A refusal is not a torn frame: it means an already-durable,
+// already-acknowledged write cannot be reconstructed (a caller-installed
+// [lpg.Graph.SetValidator] rejecting it is the reachable case, since ReplayWAL
+// takes a caller-supplied graph), and applying the rest of the transaction on
+// top of the missing write would publish a state no committed transaction ever
+// produced. Silently dropping it instead is the rmp #2707 defect.
+//
 // touched, when non-nil, accumulates the NODE labels and NODE property keys this
 // op writes, so recovery can report which secondary indexes the replayed WAL
 // could have invalidated (rmp #2490). A nil touched disables the accounting
@@ -1971,7 +1982,10 @@ func applyOpCodec[N comparable, W any](
 			if verr != nil {
 				return false
 			}
-			_ = g.SetEdgeProperty(src, dst, key, val) //nolint:errcheck // no schema validator during WAL replay
+			if err := g.SetEdgeProperty(src, dst, key, val); err != nil {
+				metrics.IncCounter("store.recovery.applyOp.setEdgePropertyErrors", 1)
+				return false
+			}
 		case txn.OpDelEdgeProperty:
 			g.DelEdgeProperty(src, dst, key)
 		}

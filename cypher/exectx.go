@@ -998,16 +998,47 @@ func (tx *ExplicitTx) recoverExecPanic(errp *error) {
 }
 
 // recoverFinishPanic is the deferred recover boundary for [ExplicitTx.Commit] and
-// [ExplicitTx.Rollback]. release runs via its own defer (registered after this
-// one, so it executes first on unwind and the writer serialisation is freed
-// regardless); this handler only converts a panic raised during the in-barrier
-// finalisation to an error wrapping [ErrInternalPanic].
+// [ExplicitTx.Rollback]. It rolls the WAL transaction back — exactly as its
+// sibling [ExplicitTx.recoverExecPanic] does — and converts a panic raised
+// during the in-barrier finalisation to an error wrapping [ErrInternalPanic].
+//
+// The WAL rollback is what CLEARS THE STORE'S WRITER REGISTRATION, and nothing
+// else on this path does (rmp #2707). release() does not: its own doc records
+// why — "on a WAL-backed engine the store's writer registration is cleared by
+// walTx's own Commit/Rollback" — and on the panic path neither Commit nor
+// Rollback has run. Without this line [txn.Store]'s in-flight count leaks by
+// one, and [txn.Store.drainInflight] is an UNCANCELLABLE wait for that count to
+// reach zero, so the next [txn.Store.RunUnderCommitLock] — the seam the
+// checkpointer and store.DB.Close both take — never returns: shutdown hangs for
+// ever and the WAL grows unbounded. A leaked containment boundary is worse than
+// the panic it contains.
+//
+// It is safe on EVERY panic instant, which is the property that lets one
+// unconditional call cover the whole finalisation:
+//
+//   - Panic BEFORE the WAL fsync (the reachable window): the transaction is
+//     unfinished, so Rollback discards the buffered ops and calls exitWriter
+//     exactly once. Nothing durable is discarded — no OpCommit marker was ever
+//     fsynced, so recovery would drop those frames anyway.
+//   - Panic AFTER the WAL fsync: [txn.Tx.CommitWALOnly] has already marked the
+//     transaction finished and already called exitWriter through its own defer,
+//     so Rollback short-circuits on the finished flag, returns ErrTxFinished,
+//     and does NOT decrement the count a second time. A durable commit is never
+//     undone here: Rollback "discards buffered ops without touching the WAL".
+//
+// release is NOT called here, and must not be: it runs via its own defer,
+// registered AFTER this one at both call sites, so on unwind it executes FIRST
+// (defers are LIFO) and the transaction is already finished by the time this
+// handler runs.
 //
 // errp must be a pointer for the same named-return reason as [recoverExecPanic].
 //
 //nolint:gocritic // ptrToRefParam: errp must be the caller's named-return pointer
 func (tx *ExplicitTx) recoverFinishPanic(errp *error) {
 	if r := recover(); r != nil {
+		if tx.walTx != nil {
+			_ = tx.walTx.Rollback() //nolint:errcheck // rollback error is not actionable while converting a panic
+		}
 		convertQueryPanic(r, errp, "cypher.ExplicitTx.finish", "cypher.ExplicitTx.finish.panics")
 	}
 }
