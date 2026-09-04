@@ -247,6 +247,11 @@ type Session struct {
 	// is open. It is minted at BEGIN and cleared by unregisterTx.
 	txID string
 
+	// txEnt is the registry entry this session registered for txID, held directly
+	// so that reporting progress needs no lookup and therefore no registry lock.
+	// It is nil exactly when txID is empty. See [Session.reportTx].
+	txEnt *txEntry
+
 	// remote is the client address reported in a transaction listing.
 	remote string
 
@@ -723,24 +728,32 @@ func (s *Session) registerTx(mode string, cancel func()) {
 	_ = s.terminateSignal()
 	id := s.txReg.nextID(s.id)
 	s.txID = id
-	s.txReg.register(&txEntry{
-		id:        id,
-		principal: s.identity.Principal,
-		remote:    s.remote,
-		mode:      mode,
-		state:     s.state.String(),
-		terminate: func() { s.requestTerminate(cancel) },
-	})
+	// The entry is kept on the session as well as handed to the registry: it is how
+	// reportTx reaches its own record without a map lookup under the registry's
+	// process-global mutex.
+	s.txEnt = newTxEntry(id, s.identity.Principal, s.remote, mode, s.state.String(),
+		func() { s.requestTerminate(cancel) })
+	s.txReg.register(s.txEnt)
 }
 
 // reportTx refreshes the registry's view of the open transaction: its state and,
 // when query is non-empty, the statement it is running. Called after each
 // message so a listing shows what the transaction is actually doing.
+//
+// It writes through the entry this session registered rather than looking the id
+// up in the registry, so the highest-frequency operation on the registry — once
+// per inbound message for as long as a transaction is open — takes no
+// process-global lock and touches no cache line another session shares
+// (rmp #2714). [txEntry.setStatus] then publishes nothing at all unless a field
+// actually moved.
+//
+// This runs on the session's message loop and on no other goroutine, which is the
+// single-writer discipline [txEntry] relies on.
 func (s *Session) reportTx(query string) {
-	if s.txReg == nil || s.txID == "" {
+	if s.txEnt == nil {
 		return
 	}
-	s.txReg.update(s.txID, s.state.String(), query)
+	s.txEnt.setStatus(s.state.String(), query)
 }
 
 // unregisterTx removes the transaction from the registry. Idempotent, because
@@ -751,6 +764,7 @@ func (s *Session) unregisterTx() {
 	}
 	s.txReg.unregister(s.txID)
 	s.txID = ""
+	s.txEnt = nil
 	// Drain any terminate request that arrived for the transaction just ended, so
 	// it cannot be observed against the NEXT one.
 	if s.terminate != nil {
