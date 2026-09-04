@@ -102,10 +102,16 @@ var (
 	// not wrap [ErrTornFrame]) so recovery's corruption classifier treats it
 	// as corruption rather than a benign tail.
 	ErrTornFrameMasksData = errors.New("wal: torn frame hides later valid frames (corrupt length)")
-	// ErrFrameTooLarge indicates the frame's declared payload length
-	// exceeds maxFrameSize. A length field this large is treated as
-	// corruption: the frame is rejected before any allocation, so a
-	// crafted or corrupted length cannot force a large one-shot make.
+	// ErrFrameTooLarge indicates a frame payload longer than maxFrameSize.
+	//
+	// On DECODE the length is a declared one and is treated as corruption: the
+	// frame is rejected before any allocation, so a crafted or corrupted length
+	// cannot force a large one-shot make.
+	//
+	// On ENCODE it is a real payload, and the rejection is a durability guard
+	// (rmp #2742): a frame this large could be written but never read back, so
+	// [Encode] refuses it before any byte reaches the writer and the commit
+	// fails rather than being acknowledged.
 	ErrFrameTooLarge = errors.New("wal: frame payload length exceeds maximum")
 )
 
@@ -135,7 +141,20 @@ func Encode(w io.Writer, f Frame) (int, error) {
 	if f.Version == 0 {
 		f.Version = CurrentVersion
 	}
-	//nolint:gosec // G115: UNGUARDED on encode. Decode rejects plen>maxFrameSize=1<<30 at format.go:210, so a 1-4 GiB payload writes a frame replay is required to refuse. Lead from #2708
+	// AGGREGATE BOUND (rmp #2742). The per-field guards in store/txn bound each
+	// string a frame carries, but only the framer sees the assembled payload: a
+	// property list of many individually-legal elements still adds up. Refusing
+	// here, before a byte is written, is what stops a commit being acknowledged
+	// for a frame [Decode] is then required to refuse — the "assembled but not
+	// replayable" record PostgreSQL closed off in commit 8fcb32db98 by bounding
+	// the whole record in XLogRecordAssemble against XLogRecordMaxSize, for the
+	// same reason. Above 4 GiB the uint32 cast below would silently wrap; the
+	// 1 GiB ceiling is reached first and rejects both cases.
+	if len(f.Payload) > maxFrameSize {
+		metrics.IncCounter("store.wal.Encode.errors", 1)
+		return 0, ErrFrameTooLarge
+	}
+	//nolint:gosec // G115: bounded by the len(f.Payload)>maxFrameSize (1<<30) rejection at format.go:153, so the cast is unreachable for any payload the uint32 could not represent (rmp #2742)
 	plen := uint32(len(f.Payload))
 
 	// Build the 14-byte header on the stack — no per-frame heap allocation.

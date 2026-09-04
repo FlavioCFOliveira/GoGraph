@@ -160,7 +160,7 @@ func writeIndexDefRecord(w io.Writer, d IndexDefSpec) (int64, error) {
 	}
 	total := int64(1)
 	for _, s := range [...]string{d.Name, d.Label, d.Property} {
-		//nolint:gosec // G115: NO local guard, unlike its sibling constraints.go:158; bounded only caller-side by checkWALSchemaString at store/txn/txn.go:2176, which caps a DDL identifier at 65535 bytes
+		//nolint:gosec // G115: NO local guard, unlike its sibling constraints.go:158; bounded only caller-side by checkWALSchemaString at store/txn/txn.go:2231, which caps a DDL identifier at 65535 bytes
 		if err := binary.Write(w, binary.LittleEndian, uint32(len(s))); err != nil {
 			return 0, err
 		}

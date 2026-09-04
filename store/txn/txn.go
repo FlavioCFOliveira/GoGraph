@@ -1485,6 +1485,18 @@ func (t *Tx[N, W]) DropIndex(name string) error {
 // transaction only on reading the durable marker, so a crash that tears
 // the batch at any point recovers all of the transaction or none of it
 // (audit gap F1, see docs/acid-audit.md).
+//
+// # Refusals
+//
+// Commit returns [ErrFieldTooLong], having made nothing durable and applied
+// nothing, when any buffered op carries a string too long for the length prefix
+// its WAL frame reserves: 65535 bytes for a label, a property key, or a schema
+// identifier; 4 GiB for a property value. The check lives at the encoder rather
+// than at the buffering mutators because the encoder is the one point every
+// writer passes, and the only one whose error no caller can discard — the
+// Cypher engine's adapter deliberately ignores the mutators' return value
+// (rmp #2742). The transaction consumes a sequence, applies nothing, and leaves
+// the store usable for the next one.
 func (t *Tx[N, W]) Commit() error {
 	defer metrics.Time("store.txn.Commit").Stop()
 	if t.finished {
@@ -1630,6 +1642,13 @@ func (t *Tx[N, W]) Commit() error {
 // Cypher engine's commitUnderBarrier, #1281) has already applied the mutations
 // eagerly inside the visibility barrier, and CommitWALOnly returning only after
 // the covering fsync preserves durable-before-visible.
+//
+// It refuses an unencodable field exactly as [Tx.Commit] does, with
+// [ErrFieldTooLong]. An eager caller must undo its in-memory writes on that
+// error; the Cypher engine's commitUnderBarrier already does, through
+// rollbackUnderBarrier, so an over-long label rejects the whole statement
+// atomically rather than leaving visible a label the WAL never recorded
+// (rmp #2742).
 func (t *Tx[N, W]) CommitWALOnly(commitTS uint64) error {
 	defer metrics.Time("store.txn.CommitWALOnly").Stop()
 	if t.finished {
@@ -2152,33 +2171,89 @@ func appendOpConstraintBody[N comparable, W any](buf []byte, op Op[N, W]) ([]byt
 		return nil, err
 	}
 	buf = append(buf, byte(op.ConstraintKind))
-	//nolint:gosec // G115: bounded by checkWALSchemaString("constraint label") at txn.go:2145, which fail-stops any identifier over maxWALSchemaStringLen (65535) before this prefix is written
+	//nolint:gosec // G115: bounded by checkWALSchemaString("constraint label") at txn.go:2164, which fail-stops any identifier over maxWALSchemaStringLen (65535) before this prefix is written
 	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Label)))
 	buf = append(buf, op.Label...)
-	//nolint:gosec // G115: bounded by checkWALSchemaString("constraint property") at txn.go:2148, which fail-stops any identifier over maxWALSchemaStringLen (65535)
+	//nolint:gosec // G115: bounded by checkWALSchemaString("constraint property") at txn.go:2167, which fail-stops any identifier over maxWALSchemaStringLen (65535)
 	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Key)))
 	buf = append(buf, op.Key...)
-	//nolint:gosec // G115: bounded by checkWALSchemaString("constraint name") at txn.go:2151, which fail-stops any identifier over maxWALSchemaStringLen (65535)
+	//nolint:gosec // G115: bounded by checkWALSchemaString("constraint name") at txn.go:2170, which fail-stops any identifier over maxWALSchemaStringLen (65535)
 	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.ConstraintName)))
 	buf = append(buf, op.ConstraintName...)
 	return buf, nil
 }
 
-// maxWALSchemaStringLen is the largest byte length the uint16 length prefix in
-// the schema op-body encoders can represent without truncation. Schema
-// identifiers are capped far below this at the DDL boundary (#1903); this bound
-// is the encoder's own fail-stop guard.
+// maxWALSchemaStringLen is the largest byte length a uint16 length prefix in
+// the op-body encoders can represent without truncation. It bounds every
+// uint16-prefixed string on the wire: the schema identifiers (constraint and
+// index label, property and name) and the graph vocabulary the mutation frames
+// carry (node and edge labels, property keys). Schema identifiers are capped far
+// below this at the DDL boundary (cypher/ir maxSchemaIdentifierLen, #1903);
+// labels and property keys reaching the embedded Go API are bounded HERE and
+// nowhere else.
 const maxWALSchemaStringLen = 1<<16 - 1
 
-// checkWALSchemaString rejects a schema identifier whose byte length would
-// overflow the uint16 length prefix, converting silent truncation into a
-// fail-stop commit error (#1903).
+// maxWALValueLen is the largest byte length a uint32 length prefix in the
+// property-value encoders can represent without truncation. It bounds a
+// property string, a property byte value, a list element payload, and a list
+// element count. Nothing upstream bounds a property value, so — like
+// [maxWALSchemaStringLen] for the uint16 fields — this is the only bound there
+// is.
+const maxWALValueLen = math.MaxUint32
+
+// maxWALValueLenInt is [maxWALValueLen] as an int, clamped to what the
+// platform's int can hold, so [checkWALValueLen] can compare a len() against it
+// with NO conversion. The conversion is what has to go: gosec reports
+// `uint64(n)` on an int parameter as a G115 overflow even though every caller
+// passes a len(), which the language guarantees non-negative — and suppressing
+// a report on a bounds check is precisely the pattern that hid rmp #2742.
+//
+// On a 64-bit platform the clamp is a no-op. On a 32-bit one an int cannot
+// reach MaxUint32 at all, so the clamped bound is unreachable — which is the
+// correct behaviour there, because no slice can be long enough to truncate the
+// uint32 prefix in the first place.
+const maxWALValueLenInt = maxWALValueLen & math.MaxInt
+
+// ErrFieldTooLong is the sentinel every WAL length-prefix refusal wraps. A
+// commit that would have to truncate a field's length prefix fails with it
+// instead, so the caller sees a typed, testable error rather than an
+// acknowledgement of a write recovery will read back wrong.
+//
+// It reaches the caller from [Tx.Commit] and [Tx.CommitWALOnly] (through
+// [Tx.appendOnly]); the offending transaction consumes a sequence and applies
+// nothing, and the store stays usable for the next one.
+var ErrFieldTooLong = errors.New("txn: field too long for its WAL length prefix")
+
+// checkWALSchemaString rejects a string whose byte length would overflow the
+// uint16 length prefix its frame reserves, converting silent truncation into a
+// fail-stop commit error (#1903 for the schema encoders, rmp #2742 for the five
+// mutation encoders the guard originally missed).
 func checkWALSchemaString(what, s string) error {
 	if len(s) > maxWALSchemaStringLen {
-		return fmt.Errorf("txn: %s is too long to encode (%d bytes; maximum %d)",
-			what, len(s), maxWALSchemaStringLen)
+		return errFieldTooLong(what, len(s), maxWALSchemaStringLen)
 	}
 	return nil
+}
+
+// checkWALValueLen is [checkWALSchemaString] for a uint32-prefixed payload: a
+// property value, a list element, or a list element count (rmp #2742).
+func checkWALValueLen(what string, n int) error {
+	if n > maxWALValueLenInt {
+		return errFieldTooLong(what, n, maxWALValueLen)
+	}
+	return nil
+}
+
+// errFieldTooLong builds the refusal.
+//
+// It is a separate function, and not the body of the two checks above, so that
+// those stay under the inliner's budget: they sit on the commit hot path (every
+// label, key and value of every op) and must cost a compare and a
+// well-predicted branch, not a call. Verified with
+// `go build -gcflags='-m' ./store/txn/`, which reports both checks
+// "can inline" and this one not.
+func errFieldTooLong(what string, n int, maxLen uint64) error {
+	return fmt.Errorf("%w: %s is %d bytes, maximum %d", ErrFieldTooLong, what, n, maxLen)
 }
 
 // appendOpIndexBody appends the body of an [OpCreateIndex] / [OpDropIndex]
@@ -2203,13 +2278,13 @@ func appendOpIndexBody[N comparable, W any](buf []byte, op Op[N, W]) ([]byte, er
 		return nil, err
 	}
 	buf = append(buf, byte(op.IndexKind))
-	//nolint:gosec // G115: bounded by checkWALSchemaString("index name") at txn.go:2196, which fail-stops any identifier over maxWALSchemaStringLen (65535)
+	//nolint:gosec // G115: bounded by checkWALSchemaString("index name") at txn.go:2271, which fail-stops any identifier over maxWALSchemaStringLen (65535)
 	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.ConstraintName)))
 	buf = append(buf, op.ConstraintName...)
-	//nolint:gosec // G115: bounded by checkWALSchemaString("index label") at txn.go:2199, which fail-stops any identifier over maxWALSchemaStringLen (65535)
+	//nolint:gosec // G115: bounded by checkWALSchemaString("index label") at txn.go:2274, which fail-stops any identifier over maxWALSchemaStringLen (65535)
 	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Label)))
 	buf = append(buf, op.Label...)
-	//nolint:gosec // G115: bounded by checkWALSchemaString("index property") at txn.go:2202, which fail-stops any identifier over maxWALSchemaStringLen (65535)
+	//nolint:gosec // G115: bounded by checkWALSchemaString("index property") at txn.go:2277, which fail-stops any identifier over maxWALSchemaStringLen (65535)
 	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Key)))
 	buf = append(buf, op.Key...)
 	return buf, nil
@@ -2217,7 +2292,15 @@ func appendOpIndexBody[N comparable, W any](buf []byte, op Op[N, W]) ([]byte, er
 
 // encodeOpNodeOnly writes the [Src, zero, label] tail for OpKinds that
 // operate on a single node (OpAddNode, OpRemoveNode, OpRemoveNodeLabel).
+//
+// The label is bounded first, before any byte is emitted, exactly as
+// [appendOpConstraintBody] bounds a schema identifier. Until rmp #2742 it was
+// not: a 65536-byte label recovered as 0 bytes and a 70000-byte one as a WRONG
+// 4464 bytes, with every call — SetNodeLabel, Commit, wal.Close — returning nil.
 func encodeOpNodeOnly[N comparable, W any](buf []byte, op Op[N, W], codec Codec[N]) ([]byte, error) {
+	if err := checkWALSchemaString("node label", op.Label); err != nil {
+		return nil, err
+	}
 	var zero N
 	var err error
 	if buf, err = codec.Encode(buf, op.Src); err != nil {
@@ -2226,7 +2309,7 @@ func encodeOpNodeOnly[N comparable, W any](buf []byte, op Op[N, W], codec Codec[
 	if buf, err = codec.Encode(buf, zero); err != nil {
 		return nil, err
 	}
-	//nolint:gosec // G115: UNGUARDED, unlike the sibling schema encoders at txn.go:2145-2151. REPRODUCED: a 65536-byte node label recovers as 0 bytes and a 70000-byte one as a WRONG 4464 bytes, with Commit returning nil. Lead from #2708
+	//nolint:gosec // G115: bounded by checkWALSchemaString("node label") at txn.go:2301, which fail-stops any label over maxWALSchemaStringLen (65535) before this prefix is written (rmp #2742)
 	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Label)))
 	buf = append(buf, op.Label...)
 	return buf, nil
@@ -2234,7 +2317,15 @@ func encodeOpNodeOnly[N comparable, W any](buf []byte, op Op[N, W], codec Codec[
 
 // encodeOpNodeProperty writes the [Src, zero, keyLen, key, (value)] tail
 // for OpSetNodeProperty / OpDelNodeProperty.
+//
+// The key is uint16-prefixed and bounded here; the VALUE is uint32-prefixed and
+// bounded inside [encodePropertyValue]. The two limits differ by design — a
+// 70000-byte property value is legitimate and must keep working, a 70000-byte
+// property key cannot be represented (rmp #2742).
 func encodeOpNodeProperty[N comparable, W any](buf []byte, op Op[N, W], codec Codec[N]) ([]byte, error) {
+	if err := checkWALSchemaString("node property key", op.Key); err != nil {
+		return nil, err
+	}
 	var zero N
 	var err error
 	if buf, err = codec.Encode(buf, op.Src); err != nil {
@@ -2243,11 +2334,13 @@ func encodeOpNodeProperty[N comparable, W any](buf []byte, op Op[N, W], codec Co
 	if buf, err = codec.Encode(buf, zero); err != nil {
 		return nil, err
 	}
-	//nolint:gosec // G115: UNGUARDED, unlike the sibling schema encoders at txn.go:2145-2151; a property key over 65535 bytes silently truncates its length prefix and corrupts the WAL record. Lead from #2708
+	//nolint:gosec // G115: bounded by checkWALSchemaString("node property key") at txn.go:2326, which fail-stops any key over maxWALSchemaStringLen (65535) before this prefix is written (rmp #2742)
 	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Key)))
 	buf = append(buf, op.Key...)
 	if op.Kind == OpSetNodeProperty {
-		buf = encodePropertyValue(buf, op.Value)
+		if buf, err = encodePropertyValue(buf, op.Value); err != nil {
+			return nil, err
+		}
 	}
 	return buf, nil
 }
@@ -2268,7 +2361,12 @@ func encodeOpEdgeNoTail[N comparable, W any](buf []byte, op Op[N, W], codec Code
 
 // encodeOpEdgeProperty writes [Src, Dst, keyLen, key, (value)] for
 // OpSetEdgeProperty / OpDelEdgeProperty.
+//
+// Key and value are bounded exactly as in [encodeOpNodeProperty] (rmp #2742).
 func encodeOpEdgeProperty[N comparable, W any](buf []byte, op Op[N, W], codec Codec[N]) ([]byte, error) {
+	if err := checkWALSchemaString("edge property key", op.Key); err != nil {
+		return nil, err
+	}
 	var err error
 	if buf, err = codec.Encode(buf, op.Src); err != nil {
 		return nil, err
@@ -2276,18 +2374,29 @@ func encodeOpEdgeProperty[N comparable, W any](buf []byte, op Op[N, W], codec Co
 	if buf, err = codec.Encode(buf, op.Dst); err != nil {
 		return nil, err
 	}
-	//nolint:gosec // G115: UNGUARDED, unlike the sibling schema encoders at txn.go:2145-2151; an edge property key over 65535 bytes silently truncates its length prefix. Lead from #2708
+	//nolint:gosec // G115: bounded by checkWALSchemaString("edge property key") at txn.go:2367, which fail-stops any key over maxWALSchemaStringLen (65535) before this prefix is written (rmp #2742)
 	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Key)))
 	buf = append(buf, op.Key...)
 	if op.Kind == OpSetEdgeProperty || op.Kind == OpSetEdgePropertyByHandle {
-		buf = encodePropertyValue(buf, op.Value)
+		if buf, err = encodePropertyValue(buf, op.Value); err != nil {
+			return nil, err
+		}
 	}
 	return buf, nil
 }
 
 // encodeOpEdgeWeighted writes [Src, Dst, weight, labelLen, label] for
 // OpAddEdgeWeighted. The weight bytes are omitted when wcodec is nil.
+//
+// The label is bounded as in [encodeOpNodeOnly] (rmp #2742). No current [Tx]
+// method sets Op.Label on a kind routed here — [Tx.AddEdge] and
+// [Tx.AddEdgeWithHandle] emit OpAddEdgeH with an empty label — so the guard is
+// unreachable through today's public API; it bounds the wire kind, not the
+// caller, and the wire kind is still decoded by recovery.
 func encodeOpEdgeWeighted[N comparable, W any](buf []byte, op Op[N, W], codec Codec[N], wcodec WeightCodec[W]) ([]byte, error) {
+	if err := checkWALSchemaString("edge label", op.Label); err != nil {
+		return nil, err
+	}
 	var err error
 	if buf, err = codec.Encode(buf, op.Src); err != nil {
 		return nil, err
@@ -2300,7 +2409,7 @@ func encodeOpEdgeWeighted[N comparable, W any](buf []byte, op Op[N, W], codec Co
 			return nil, err
 		}
 	}
-	//nolint:gosec // G115: UNGUARDED, unlike the sibling schema encoders at txn.go:2145-2151; an edge label over 65535 bytes silently truncates its length prefix. Lead from #2708
+	//nolint:gosec // G115: bounded by checkWALSchemaString("edge label") at txn.go:2397, which fail-stops any label over maxWALSchemaStringLen (65535) before this prefix is written (rmp #2742)
 	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Label)))
 	buf = append(buf, op.Label...)
 	return buf, nil
@@ -2308,7 +2417,15 @@ func encodeOpEdgeWeighted[N comparable, W any](buf []byte, op Op[N, W], codec Co
 
 // encodeOpEdgeWithLabel writes [Src, Dst, labelLen, label] for the
 // default group (OpAddEdge, OpSetNodeLabel, OpSetEdgeLabel).
+//
+// The label is bounded as in [encodeOpNodeOnly] (rmp #2742). This encoder
+// serves both a node label (OpSetNodeLabel) and an edge label
+// (OpAddEdge, OpSetEdgeLabel, and OpSetEdgeLabelByHandle through its caller),
+// so the refusal names the field generically.
 func encodeOpEdgeWithLabel[N comparable, W any](buf []byte, op Op[N, W], codec Codec[N]) ([]byte, error) {
+	if err := checkWALSchemaString("label", op.Label); err != nil {
+		return nil, err
+	}
 	var err error
 	if buf, err = codec.Encode(buf, op.Src); err != nil {
 		return nil, err
@@ -2316,13 +2433,15 @@ func encodeOpEdgeWithLabel[N comparable, W any](buf []byte, op Op[N, W], codec C
 	if buf, err = codec.Encode(buf, op.Dst); err != nil {
 		return nil, err
 	}
-	//nolint:gosec // G115: UNGUARDED, unlike the sibling schema encoders at txn.go:2145-2151; a node or edge label over 65535 bytes silently truncates its length prefix. Lead from #2708
+	//nolint:gosec // G115: bounded by checkWALSchemaString("label") at txn.go:2426, which fail-stops any label over maxWALSchemaStringLen (65535) before this prefix is written (rmp #2742)
 	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Label)))
 	buf = append(buf, op.Label...)
 	return buf, nil
 }
 
 // encodePropertyValue appends the wire encoding of a [lpg.PropertyValue] to buf.
+// It fails stop, before writing a length prefix, on any payload too long for
+// the uint32 prefix that describes it (rmp #2742) — see [checkWALValueLen].
 //
 // Format:
 //
@@ -2343,12 +2462,15 @@ func encodeOpEdgeWithLabel[N comparable, W any](buf []byte, op Op[N, W], codec C
 //	[elem-payload-len]byte elem-payload
 //
 // Nested PropList elements are not permitted.
-func encodePropertyValue(buf []byte, v lpg.PropertyValue) []byte {
+func encodePropertyValue(buf []byte, v lpg.PropertyValue) ([]byte, error) {
 	buf = append(buf, byte(v.Kind()))
 	switch v.Kind() {
 	case lpg.PropString:
 		s, _ := v.String()
-		//nolint:gosec // G115: UNGUARDED. No caller bounds len(s); a string >=4 GiB truncates to a wrong prefix. checkWALSchemaString (txn.go:2176) guards schema ops only, never property values
+		if err := checkWALValueLen("property string value", len(s)); err != nil {
+			return nil, err
+		}
+		//nolint:gosec // G115: bounded by checkWALValueLen("property string value") at txn.go:2470, which fail-stops any value over maxWALValueLen (MaxUint32) before this prefix is written (rmp #2742)
 		buf = binary.LittleEndian.AppendUint32(buf, uint32(len(s)))
 		buf = append(buf, s...)
 	case lpg.PropInt64:
@@ -2369,13 +2491,16 @@ func encodePropertyValue(buf []byte, v lpg.PropertyValue) []byte {
 		buf = binary.AppendVarint(buf, t.UnixNano())
 	case lpg.PropBytes:
 		bs, _ := v.Bytes()
-		//nolint:gosec // G115: UNGUARDED. No caller bounds len(bs); a byte value >=4 GiB truncates to a wrong prefix. checkWALSchemaString (txn.go:2176) guards schema ops only
+		if err := checkWALValueLen("property bytes value", len(bs)); err != nil {
+			return nil, err
+		}
+		//nolint:gosec // G115: bounded by checkWALValueLen("property bytes value") at txn.go:2494, which fail-stops any value over maxWALValueLen (MaxUint32) before this prefix is written (rmp #2742)
 		buf = binary.LittleEndian.AppendUint32(buf, uint32(len(bs)))
 		buf = append(buf, bs...)
 	case lpg.PropList:
-		buf = encodeTxnListProp(buf, v)
+		return encodeTxnListProp(buf, v)
 	}
-	return buf
+	return buf, nil
 }
 
 // encodeTxnListProp appends the list wire encoding to buf (without the leading
@@ -2383,9 +2508,12 @@ func encodePropertyValue(buf []byte, v lpg.PropertyValue) []byte {
 //
 //	uint32 LE element-count
 //	element-count × ( uint8 elem-kind | uint32 elem-payload-len | [elem-payload-len]byte elem-payload )
-func encodeTxnListProp(buf []byte, v lpg.PropertyValue) []byte {
+func encodeTxnListProp(buf []byte, v lpg.PropertyValue) ([]byte, error) {
 	elems, _ := v.List()
-	//nolint:gosec // G115: UNGUARDED. No caller bounds len(elems); >=2^32 elements truncate the count. The decoder clamps its cap hint (txnListCapHint, txn.go:2468); the encoder has no bound
+	if err := checkWALValueLen("property list element count", len(elems)); err != nil {
+		return nil, err
+	}
+	//nolint:gosec // G115: bounded by checkWALValueLen("property list element count") at txn.go:2513, which fail-stops any count over maxWALValueLen (MaxUint32) before this prefix is written (rmp #2742)
 	buf = binary.LittleEndian.AppendUint32(buf, uint32(len(elems)))
 	for _, elem := range elems {
 		// Encode the element into a temporary buffer to measure its length.
@@ -2415,12 +2543,15 @@ func encodeTxnListProp(buf []byte, v lpg.PropertyValue) []byte {
 			bs, _ := elem.Bytes()
 			payload = append(payload, bs...)
 		}
+		if err := checkWALValueLen("property list element payload", len(payload)); err != nil {
+			return nil, err
+		}
 		buf = append(buf, byte(elem.Kind()))
-		//nolint:gosec // G115: UNGUARDED. No caller bounds len(payload); an element >=4 GiB truncates. The decoder bounds payloadLen against the buffer (txn.go:2505); the encoder does not
+		//nolint:gosec // G115: bounded by checkWALValueLen("property list element payload") at txn.go:2546, which fail-stops any element over maxWALValueLen (MaxUint32) before this prefix is written (rmp #2742)
 		buf = binary.LittleEndian.AppendUint32(buf, uint32(len(payload)))
 		buf = append(buf, payload...)
 	}
-	return buf
+	return buf, nil
 }
 
 // decodePropertyValue parses a [lpg.PropertyValue] from the head of buf.

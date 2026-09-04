@@ -614,7 +614,10 @@ func TestTx_EncodePropertyValue_RoundtripAllKinds(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			buf := encodePropertyValue(nil, c.val)
+			buf, encErr := encodePropertyValue(nil, c.val)
+			if encErr != nil {
+				t.Fatalf("encodePropertyValue: %v", encErr)
+			}
 			got, rest, err := decodePropertyValue(buf)
 			if err != nil {
 				t.Fatalf("decodePropertyValue: %v", err)
