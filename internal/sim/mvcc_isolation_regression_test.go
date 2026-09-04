@@ -39,6 +39,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"testing"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
@@ -656,6 +657,21 @@ func TestMVCCRegression_RefusedRetirementPhasesStrandNothing(t *testing.T) {
 
 // regressionRows renders one projected column of an engine query, as a string,
 // so an arm can compare against a literal.
+// regressionRows renders a query's rows in a SORTED, order-independent form.
+//
+// # Why sorted (rmp #2751)
+//
+// None of these queries carries an ORDER BY, and openCypher does not specify row
+// order without one, so comparing the emission order against a literal tests
+// something the specification does not guarantee. It bites in both directions:
+// the multi-row arm read ["y" "x"] under `make ci`'s cover gate while passing 30
+// times out of 30 in isolation, and — the worse half — an assertion that happens
+// to match one ordering says nothing about the SET that came back.
+//
+// Sorting is deliberately not the same as dropping the check. These arms exist
+// to prove a refused retirement strands nothing, so the property is the
+// multiset: a MISSING row still shortens the result and a DUPLICATE still
+// lengthens it, and both still fail. Only the permutation is forgiven.
 func regressionRows(t *testing.T, eng *cypher.Engine, q string) string {
 	t.Helper()
 	res, err := eng.Run(context.Background(), q, nil)
@@ -670,6 +686,7 @@ func regressionRows(t *testing.T, eng *cypher.Engine, q string) string {
 		t.Fatalf("query %q drain: %v", q, err)
 	}
 	_ = res.Close()
+	sort.Strings(out)
 	return fmt.Sprint(out)
 }
 

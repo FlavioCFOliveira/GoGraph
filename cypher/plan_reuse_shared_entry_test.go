@@ -41,6 +41,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"testing"
 	"time"
@@ -625,14 +626,33 @@ func TestReadPathAllocationCeiling(t *testing.T) {
 		observed int64
 		failures int
 	)
-	allocs := testing.AllocsPerRun(200, func() {
-		got, err := runSharedEntryShape(ctx, eng, readPathAllocQuery)
-		if err != nil {
-			failures++
-			return
-		}
-		observed = got
-	})
+	// MINIMUM of several samples, not one sample (rmp #2746 follow-up).
+	//
+	// testing.AllocsPerRun reads runtime.MemStats.Mallocs, which is
+	// PROCESS-GLOBAL: anything else allocating anywhere in this test binary
+	// during the measurement window is counted here too. Under `make ci` the
+	// cover gate runs every package at once and the host reached loadavg 13,
+	// and this gate read 32.0 against a ceiling of 20 while passing 30 times out
+	// of 30 in isolation. Nothing had been added to the read path.
+	//
+	// Contamination can only ADD allocations, never remove them, so the minimum
+	// across samples is the robust estimator of the true count while a single
+	// sample is an upper bound on a quiet host and meaningless on a busy one.
+	// The lower-bound check below still fails if the minimum drops, so this
+	// cannot hide a gate that stopped measuring.
+	const allocSamples = 5
+	allocs := math.Inf(1)
+	for i := 0; i < allocSamples; i++ {
+		sample := testing.AllocsPerRun(200, func() {
+			got, err := runSharedEntryShape(ctx, eng, readPathAllocQuery)
+			if err != nil {
+				failures++
+				return
+			}
+			observed = got
+		})
+		allocs = math.Min(allocs, sample)
+	}
 	// The oracle: prove the work actually happened. An allocation count measured
 	// over a function that errored out immediately would be beautifully low and
 	// entirely meaningless.
