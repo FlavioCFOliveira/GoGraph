@@ -96,6 +96,18 @@ var (
 	// true for any structural rejection, so callers that already test
 	// for ErrFileCorrupted keep working.
 	ErrHeaderInconsistent = fmt.Errorf("%w: header layout inconsistent", ErrFileCorrupted)
+	// ErrNotRepresentable indicates an in-memory CSR whose section counts
+	// have no representation in the on-disk format, so [WriteToFile] refuses
+	// it rather than emitting a file it could never read back.
+	//
+	// It is the WRITE-side answer to the condition [Header.validate] answers
+	// with [ErrHeaderInconsistent] on the read side: [Layout] returning a zero
+	// totalBytes. The two are deliberately distinct errors because the two
+	// inputs are — a file that may be corrupt or hostile on one side, the
+	// caller's own oversized CSR on the other, which is not corruption and
+	// must not be reported as it. What the two sides agree on is the VERDICT
+	// (rmp #2744).
+	ErrNotRepresentable = errors.New("csrfile: layout not representable on disk")
 )
 
 // Header is the in-memory representation of the 64-byte file
@@ -243,6 +255,37 @@ func Layout(nVertices, nEdges uint64, weight WeightKind) (header Header, totalBy
 		return Header{}, 0
 	}
 	return header, totalBytes
+}
+
+// layoutForWrite is [Layout] with its zero-totalBytes contract enforced, and is
+// the writer's sole entry to Layout.
+//
+// Layout signals "these counts have no on-disk representation" by returning a
+// ZERO Header alongside a zero totalBytes, and its godoc names TWO callers that
+// must reject that rather than proceed: "the writer and [Header.validate]".
+// Header.validate did; internal/sim's csrfile access matrix did; the writer read
+// the zero totalBytes into a variable and carried on (rmp #2744).
+//
+// Proceeding was never merely untidy. The zero Header's VerticesOffset is 0, so
+// the first thing writeSections computes is a padding run of
+// VerticesOffset - HeaderSize, which underflows uint64 to 18446744073709551552
+// and panics in make([]byte, n) with "makeslice: len out of range" — after the
+// temp file has been created, and with no deferred cleanup to remove it. That
+// panic is pinned by TestWriteSections_ZeroHeaderPanics, so this guard cannot
+// be mistaken for decoration.
+//
+// The guard is unreachable through [WriteToFile] today: totalBytes only reaches
+// zero on an arithmetic overflow needing on the order of 2^61 in-memory
+// elements, or on a WeightKind out of range, which weightKindOf cannot produce.
+// It is enforced rather than assumed because both of those are properties of
+// OTHER code, and Layout's contract does not offer callers the choice.
+func layoutForWrite(nVertices, nEdges uint64, weight WeightKind) (Header, uint64, error) {
+	header, total := Layout(nVertices, nEdges, weight)
+	if total == 0 {
+		return Header{}, 0, fmt.Errorf("%w: NVertices=%d NEdges=%d weight=%d",
+			ErrNotRepresentable, nVertices, nEdges, weight)
+	}
+	return header, total, nil
 }
 
 // EncodeHeader writes h into a fresh HeaderSize-byte slice.

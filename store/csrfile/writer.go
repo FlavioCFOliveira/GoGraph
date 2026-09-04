@@ -102,6 +102,13 @@ var ErrPublishedNotDurable = errors.New("csrfile: published but durability unpro
 // Any other type produces an error wrapping [ErrUnknownWeightKind] and NAMING
 // the type, so the limit is discoverable without reading this list.
 //
+// A CSR whose section counts have no on-disk representation produces an error
+// wrapping [ErrNotRepresentable], and nothing is written. This is unreachable
+// for any CSR that fits in memory — it needs section counts on the order of
+// 2^61 — but it is checked rather than assumed, because [Layout] requires every
+// caller to check and proceeding would panic rather than write a bad file
+// (rmp #2744); see [layoutForWrite].
+//
 // int, uint and uintptr are PLATFORM-DEPENDENT widths, persisted at 8 bytes
 // deliberately. They are 8 bytes on every platform GoGraph builds for today and
 // store/snapshot already made this choice, so the two formats agree. The cost is
@@ -143,7 +150,10 @@ func writeToFileWith[W any](fsys fs, path string, c *csr.CSR[W]) (Header, error)
 		weightKind = WeightAbsent
 	}
 
-	header, total := Layout(uint64(len(verts)), uint64(len(edges)), weightKind)
+	header, total, err := layoutForWrite(uint64(len(verts)), uint64(len(edges)), weightKind)
+	if err != nil {
+		return Header{}, err
+	}
 
 	tmp := path + ".tmp"
 	// Create the temp file mode 0600: the CSR payload contains full
@@ -156,7 +166,7 @@ func writeToFileWith[W any](fsys fs, path string, c *csr.CSR[W]) (Header, error)
 	// On the DESCRIPTOR, not the path (rmp #2580). A path-based os.Truncate here
 	// re-resolved a predictable name moments after the create, which is a TOCTOU
 	// window an attacker who can write the directory could step into.
-	//nolint:gosec // G115: total derives from Layout(len(verts),len(edges)) at writer.go:146; reaching 1<<63 needs ~2^60 in-memory elements, and a negative length fail-stops on Truncate's EINVAL here
+	//nolint:gosec // G115: total comes from layoutForWrite, which fail-stops above on Layout's zero-totalBytes signal, so total is at least HeaderSize+4 here; reaching 1<<63 needs ~2^60 in-memory elements, and a negative length fail-stops on Truncate's EINVAL
 	if err := f.Truncate(int64(total)); err != nil {
 		_ = f.Close()        // best-effort: already on error path, truncate err preserved
 		_ = fsys.Remove(tmp) // best-effort: tmp file cleanup, truncate err preserved
