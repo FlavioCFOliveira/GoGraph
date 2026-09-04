@@ -171,6 +171,7 @@ func (o *GraphOracle) applySchemaMutation(cypher string, params map[string]any) 
 		return OracleResult{Committed: true}, true
 	case tmplMergeProps:
 		if found {
+			//nolint:forcetypeassert // Op.Cypher and Op.Params are co-constructed by this file's only two producers (schema_mutation.go:106, 135), and the tmplMergeProps template is always paired with a map[string]any under "props"
 			for k, v := range params["props"].(map[string]any) {
 				o.nodes[id].Properties[k] = v
 			}
@@ -179,6 +180,7 @@ func (o *GraphOracle) applySchemaMutation(cypher string, params map[string]any) 
 	case tmplReplaceProps:
 		if found {
 			np := make(map[string]any)
+			//nolint:forcetypeassert // Op.Cypher and Op.Params are co-constructed by this file's only two producers (schema_mutation.go:106, 135), and the tmplMergeProps template is always paired with a map[string]any under "props"
 			for k, v := range params["props"].(map[string]any) {
 				np[k] = v
 			}

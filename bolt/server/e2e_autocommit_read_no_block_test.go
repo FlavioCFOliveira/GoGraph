@@ -73,7 +73,7 @@ func TestE2E_ConcurrentAutocommitReadsRunInParallel(t *testing.T) {
 
 	runRead := func() (time.Duration, error) {
 		sess := drv.NewSession(ctx, neo4j.SessionConfig{})
-		defer func() { _ = sess.Close(ctx) }() //nolint:errcheck
+		defer func() { _ = sess.Close(ctx) }()
 		start := time.Now()
 		// A read heavy enough (a few ms) that the serialisation signal dominates
 		// fixed per-request overhead (goroutine scheduling, driver pool mutex,
@@ -256,7 +256,7 @@ func TestE2E_AutocommitReadDoesNotAcquireWriterLock(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		sessR := drvR.NewSession(ctx, neo4j.SessionConfig{})
-		defer func() { _ = sessR.Close(ctx) }() //nolint:errcheck
+		defer func() { _ = sessR.Close(ctx) }()
 
 		rCtx, cancel := context.WithTimeout(ctx, readTimeout)
 		defer cancel()

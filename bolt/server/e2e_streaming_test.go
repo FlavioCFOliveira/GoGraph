@@ -28,7 +28,7 @@ func TestE2E_Streaming100kRows(t *testing.T) {
 	driver, _ := newDriverForTest(t)
 
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer session.Close(ctx) //nolint:errcheck
+	defer session.Close(ctx)
 
 	var memBefore runtime.MemStats
 	runtime.ReadMemStats(&memBefore)

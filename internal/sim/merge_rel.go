@@ -56,6 +56,7 @@ func (o *GraphOracle) applyMergeKnowsN(params map[string]any) OracleResult {
 	}
 	k := edgeKey{src: srcID, dst: dstID, label: "KNOWS"}
 	if e, exists := o.edges[k]; exists {
+		//nolint:forcetypeassert // the oracle writes Properties["n"] only as int64 (the MERGE creation path in this file), so the ON MATCH increment reads back an int64
 		e.Properties["n"] = e.Properties["n"].(int64) + 1 // ON MATCH SET r.n=r.n+1
 		return OracleResult{Committed: true}
 	}
@@ -77,6 +78,7 @@ func CheckMergeRel(tick int64, oracle *GraphOracle, engine *EngineAdapter) []Vio
 		if !ok {
 			continue
 		}
+		//nolint:forcetypeassert // nv comes from the same oracle map this file populates exclusively with int64 counters
 		want := nv.(int64)
 		q := fmt.Sprintf("MATCH (a:Person {name:'%s'})-[r:KNOWS]->(b:Person {name:'%s'}) RETURN r.n", e.Src, e.Dst)
 		got, err := engine.projectRowStrings(ctx, q, 1)

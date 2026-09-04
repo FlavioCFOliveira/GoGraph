@@ -61,7 +61,7 @@ func Run(ctx context.Context, spec Spec) Report {
 		for q := 0; q < spec.Queries; q++ {
 			src := graph.NodeID(uint64(q) % spec.Vertices)
 			t2 := time.Now()
-			// nolint:errcheck // benchmark intentionally times the
+			// The benchmark intentionally times the
 			// Dijkstra call regardless of its error result; errors on
 			// synthetic inputs are not expected and would corrupt the
 			// latency distribution if individually logged.

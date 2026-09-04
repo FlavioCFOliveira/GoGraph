@@ -31,6 +31,19 @@ linters:
     - gocyclo
     - prealloc
     - revive
+    # --- Restored by #2708 -------------------------------------------------
+    # These four were named by 150 //nolint directives that suppressed nothing
+    # because the linters were not enabled. Enabling them makes those
+    # directives live again, so the concern each one documents is checked
+    # against FUTURE code instead of merely described.
+    - containedctx
+    - forcetypeassert
+    - nilerr
+    - wastedassign
+    # nolintlint is the meta-check that keeps this file honest: it rejects a
+    # directive that is malformed, unexplained, or not linter-specific. Without
+    # it the 164 inert directives above accumulated unchallenged for months.
+    - nolintlint
   exclusions:
     # cypher/parser/gen is the ANTLR-generated Go output (CypherLexer +
     # CypherParser). The generator emits idiomatic-Java style (unused
@@ -94,6 +107,13 @@ linters:
       - linters: [gocritic]
         path: "cypher/funcs/essentials\\.go"
         text: "builtinShadow"
+      # forcetypeassert in tests: an unchecked type assertion in a test panics
+      # at the asserting line, which fails the test loudly and points straight
+      # at the offending value — the diagnostic a test wants. Rewriting 265 test
+      # assertions to comma-ok would replace a precise panic with a less precise
+      # nil-deref later, so production keeps the check and tests do not.
+      - linters: [forcetypeassert]
+        path: "_test\\.go"
       # gosec G104: standalone res.Close() in tests — teardown, not production code.
       - linters: [gosec]
         path: "_test\\.go"
@@ -149,21 +169,6 @@ linters:
       - linters: [gosec]
         path: "cypher/"
         text: "G115"
-      # gosec G115 in bolt/server/session.go: element-ID bookmark conversions
-      # cast atomic.Uint64 counter values to int64. The counter is monotonically
-      # increasing from 0; it will not reach 2^63 within the session lifetime.
-      - linters: [gosec]
-        path: "bolt/server/session\\.go"
-        text: "G115"
-      # gosec G115 in bolt/server/entity_struct.go: the Bolt protocol types an
-      # entity id as a signed INTEGER, so encoding a graph.NodeID (uint64) onto
-      # the wire is necessarily a uint64 → int64 conversion. Node and
-      # relationship ids are assigned monotonically from 0, so the sign bit is
-      # never set for any reachable id. These are the same casts the map-shaped
-      # encoder in session.go made before #2189 moved them into this file.
-      - linters: [gosec]
-        path: "bolt/server/entity_struct\\.go"
-        text: "G115"
       # gosec G115 in ds/: int → int32 casts in union-find are bounded by the
       # caller-supplied n (node count); int32 represents up to ~2.1 billion nodes.
       - linters: [gosec]
@@ -187,12 +192,6 @@ linters:
       - linters: [gosec]
         path: "internal/sim/"
         text: "G115"
-      # gosec G115 in store/: WAL offsets, snapshot sizes, and codec widths are
-      # bounded by 64-bit address space; the narrowing casts mirror the on-disk
-      # format widths which are always within range.
-      - linters: [gosec]
-        path: "store/"
-        text: "G115"
       # gosec G115 in bench/: benchmark and soak harnesses cast graph dimensions
       # and R-MAT parameters between uint64 and uint32/int; the values are
       # bounded by the generated graph size, which fits addressable memory.
@@ -207,6 +206,33 @@ linters:
       - linters: [gosec]
         path: "_test\\.go"
         text: "G306"
+      # gocritic whyNoLint: three directives whose justification is deliberately
+      # NOT an inline suffix. whyNoLint only recognises an explanation written
+      # after the directive on the same line, so a justification that needs a
+      # paragraph is invisible to it. These three are the paragraph kind, and
+      # #2708 verified each one rather than assuming it:
+      #   * bolt/server/serve.go — the handshake SetDeadline pair, explained by
+      #     the eight-line policy comment above serve.go:966 (why the bound is a
+      #     fixed package value, and why it is cleared before the message loop).
+      #   * cypher/funcs/temporal.go — the openCypher "invalid temporal input
+      #     yields NULL, not an error" rule. Turning these into errors would
+      #     break TCK conformance, so the justification is the specification
+      #     itself, not a line of local prose.
+      #   * cypher/sema/analyse.go — a gocyclo complexity metric with no
+      #     correctness content, under a doc comment about the rule it walks.
+      # Scoped to these three files so an unexplained directive added anywhere
+      # else in the module is still challenged.
+      # Both gocritic's whyNoLint and nolintlint's require-explanation ask the
+      # same question, so each file is excluded from both by one regex.
+      - linters: [gocritic, nolintlint]
+        path: "bolt/server/serve\\.go"
+        text: "whyNoLint|should provide explanation"
+      - linters: [gocritic, nolintlint]
+        path: "cypher/funcs/temporal\\.go"
+        text: "whyNoLint|should provide explanation"
+      - linters: [gocritic, nolintlint]
+        path: "cypher/sema/analyse\\.go"
+        text: "whyNoLint|should provide explanation"
       # gocritic: unnamedResult is a style preference, not a defect; allowed in
       # both production and test code where the return-type signature is
       # self-documenting.
@@ -308,6 +334,20 @@ linters:
         - name: unused-parameter
         - name: unreachable-code
         - name: redefines-builtin-id
+    nolintlint:
+      # allow-unused is deliberately TRUE, and this is the one setting in this
+      # block that is a scoping decision rather than a standard. With it false,
+      # nolintlint reports 876 directives in this tree that suppress nothing —
+      # overwhelmingly //nolint:gosec G115 sites sitting under a path-based
+      # gosec exclusion that already removes the finding, so the per-site
+      # directive never fires. That backlog is real and worth clearing, but it
+      # is a separate job from restoring the checks; flip this to false when it
+      # is taken on.
+      allow-unused: true
+      # Every directive must say WHY, and must name the linter it suppresses.
+      # These two are what stop a directive from decaying into a fossil.
+      require-explanation: true
+      require-specific: true
     gosec:
       excludes: []
     gocritic:
@@ -317,7 +357,6 @@ linters:
         - style
       disabled-checks:
         - ifElseChain
-        - whyNoLint
 
 formatters:
   enable:

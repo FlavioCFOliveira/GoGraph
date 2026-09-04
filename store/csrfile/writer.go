@@ -156,6 +156,7 @@ func writeToFileWith[W any](fsys fs, path string, c *csr.CSR[W]) (Header, error)
 	// On the DESCRIPTOR, not the path (rmp #2580). A path-based os.Truncate here
 	// re-resolved a predictable name moments after the create, which is a TOCTOU
 	// window an attacker who can write the directory could step into.
+	//nolint:gosec // G115: total derives from Layout(len(verts),len(edges)) at writer.go:146; reaching 1<<63 needs ~2^60 in-memory elements, and a negative length fail-stops on Truncate's EINVAL here
 	if err := f.Truncate(int64(total)); err != nil {
 		_ = f.Close()        // best-effort: already on error path, truncate err preserved
 		_ = fsys.Remove(tmp) // best-effort: tmp file cleanup, truncate err preserved
@@ -250,6 +251,7 @@ func writeSections[W any](w io.Writer, h hash.Hash32, header Header, verts []uin
 		if err := streamLE(w, weightsAsBytes(weights, header.Weight.Size())); err != nil {
 			return err
 		}
+		//nolint:gosec // G115: WeightKind.Size (format.go:61) is a total switch returning only 0,1,2,4,8, so the int is non-negative and the conversion is exact
 		wrote = header.WeightsOffset + uint64(header.Weight.Size())*uint64(len(edges))
 	}
 	// Pad up to the CRC trailer offset.

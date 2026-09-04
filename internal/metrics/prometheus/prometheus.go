@@ -298,9 +298,11 @@ func sanitize(name string) string {
 // WriteText still emits one line per metric.
 func (r *Registry) getOrCreateCounter(rawName string) *counter {
 	if v, ok := r.counterByRaw.Load(rawName); ok {
+		//nolint:forcetypeassert // counterByRaw is unexported and written only at prometheus.go:307, which stores the *counter obtained just above; counters, gauges and histograms occupy three separate map pairs (prometheus.go:237-244), so a name cannot collide across kinds
 		return v.(*counter)
 	}
 	actual, _ := r.counters.LoadOrStore(sanitize(rawName), &counter{})
+	//nolint:forcetypeassert // r.counters is written only by the LoadOrStore at prometheus.go:304, whose zero value is a &counter{}, so the map holds nothing but *counter
 	c := actual.(*counter)
 	r.counterByRaw.Store(rawName, c)
 	return c
@@ -310,9 +312,11 @@ func (r *Registry) getOrCreateCounter(rawName string) *counter {
 // it on first sight; mirrors getOrCreateCounter.
 func (r *Registry) getOrCreateGauge(rawName string) *gauge {
 	if v, ok := r.gaugeByRaw.Load(rawName); ok {
+		//nolint:forcetypeassert // gaugeByRaw is unexported and written only at prometheus.go:321, which stores the *gauge obtained just above; the three metric kinds occupy separate map pairs (prometheus.go:237-244)
 		return v.(*gauge)
 	}
 	actual, _ := r.gauges.LoadOrStore(sanitize(rawName), &gauge{})
+	//nolint:forcetypeassert // r.gauges is written only by the LoadOrStore at prometheus.go:318, whose zero value is a &gauge{}, so the map holds nothing but *gauge
 	g := actual.(*gauge)
 	r.gaugeByRaw.Store(rawName, g)
 	return g
@@ -322,9 +326,11 @@ func (r *Registry) getOrCreateGauge(rawName string) *gauge {
 // creating it on first sight; mirrors getOrCreateCounter.
 func (r *Registry) getOrCreateHistogram(rawName string) *histogram {
 	if v, ok := r.histByRaw.Load(rawName); ok {
+		//nolint:forcetypeassert // histByRaw is unexported and written only at prometheus.go:335, which stores the *histogram obtained just above; the three metric kinds occupy separate map pairs (prometheus.go:237-244)
 		return v.(*histogram)
 	}
 	actual, _ := r.hists.LoadOrStore(sanitize(rawName), &histogram{})
+	//nolint:forcetypeassert // r.hists is written only by the LoadOrStore at prometheus.go:332, whose zero value is a &histogram{}, so the map holds nothing but *histogram
 	h := actual.(*histogram)
 	r.histByRaw.Store(rawName, h)
 	return h
@@ -403,8 +409,10 @@ func (r *Registry) WriteText(w io.Writer) error {
 	var cNames []string
 	cSnap := make(map[string]uint64)
 	r.counters.Range(func(k, v any) bool {
+		//nolint:forcetypeassert // the only write to r.counters is the LoadOrStore at prometheus.go:304, whose key is the sanitize(rawName) string
 		name := k.(string)
 		cNames = append(cNames, name)
+		//nolint:forcetypeassert // the only write to r.counters is the LoadOrStore at prometheus.go:304, whose value is a &counter{}
 		cSnap[name] = v.(*counter).load()
 		return true
 	})
@@ -420,8 +428,10 @@ func (r *Registry) WriteText(w io.Writer) error {
 	var gNames []string
 	gSnap := make(map[string]float64)
 	r.gauges.Range(func(k, v any) bool {
+		//nolint:forcetypeassert // the only write to r.gauges is the LoadOrStore at prometheus.go:318, whose key is the sanitize(rawName) string
 		name := k.(string)
 		gNames = append(gNames, name)
+		//nolint:forcetypeassert // the only write to r.gauges is the LoadOrStore at prometheus.go:318, whose value is a &gauge{}
 		gSnap[name] = v.(*gauge).load()
 		return true
 	})
@@ -440,7 +450,9 @@ func (r *Registry) WriteText(w io.Writer) error {
 	}
 	hSnap := make(map[string]histSnap)
 	r.hists.Range(func(k, v any) bool {
+		//nolint:forcetypeassert // the only write to r.hists is the LoadOrStore at prometheus.go:332, whose key is the sanitize(rawName) string
 		name := k.(string)
+		//nolint:forcetypeassert // the only write to r.hists is the LoadOrStore at prometheus.go:332, whose value is a &histogram{}
 		h := v.(*histogram)
 		hNames = append(hNames, name)
 		var snap histSnap

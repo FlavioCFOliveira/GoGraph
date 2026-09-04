@@ -47,7 +47,7 @@ func TestSec_Bolt_SlowlorisMidMessageStallReclaimed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer conn.Close() //nolint:errcheck
+	defer conn.Close()
 
 	// Complete the handshake so the server enters the message loop (the idle
 	// ConnTimeout, not the handshake bound, is what must reclaim this).
@@ -85,7 +85,7 @@ func TestSec_Bolt_SlowlorisSlowDripReclaimed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer conn.Close() //nolint:errcheck
+	defer conn.Close()
 
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
 	boltHandshake(t, conn)

@@ -18,7 +18,7 @@ func TestE2E_MatchReturn(t *testing.T) {
 	driver, _ := newDriverForTest(t)
 
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer session.Close(ctx) //nolint:errcheck
+	defer session.Close(ctx)
 
 	names := []string{"Alice", "Bob", "Carol"}
 
@@ -61,7 +61,7 @@ func TestE2E_MatchReturn_NodeMap(t *testing.T) {
 	driver, _ := newDriverForTest(t)
 
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer session.Close(ctx) //nolint:errcheck
+	defer session.Close(ctx)
 
 	runWrite(ctx, t, session,
 		`CREATE (n:Product {sku: $sku, price: $price})`,

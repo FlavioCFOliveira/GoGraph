@@ -136,7 +136,7 @@ func TestRunInTx_DeleteReturn(t *testing.T) {
 			// drain
 		}
 		drainErr := res2.Err()
-		_ = res2.Close() //nolint:errcheck
+		_ = res2.Close()
 		if drainErr == nil {
 			t.Fatalf("DELETE+RETURN u.foo: expected DeletedEntityAccess error, got success")
 		}

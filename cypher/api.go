@@ -4996,6 +4996,7 @@ func (m *nodeScalarUseMemo) get(x ast.Expression) (map[string]*nodeScalarUse, bo
 	}
 	if v, ok := m.m.Load(x); ok {
 		m.hits.Add(1)
+		//nolint:forcetypeassert // the analysis cache is unexported and only ever stores *nodeScalarAnalysis
 		a := v.(*nodeScalarAnalysis)
 		return a.uses, a.bailout
 	}
@@ -5011,6 +5012,7 @@ func (m *nodeScalarUseMemo) get(x ast.Expression) (map[string]*nodeScalarUse, bo
 	if !loaded {
 		m.entries.Add(1)
 	}
+	//nolint:forcetypeassert // LoadOrStore returns the value already in the analysis cache, which only stores *nodeScalarAnalysis
 	a := actual.(*nodeScalarAnalysis)
 	return a.uses, a.bailout
 }
@@ -15420,7 +15422,7 @@ func exprReferencesVarName(e ast.Expression, target string) bool {
 	return false
 }
 
-//nolint:gocyclo,cyclop // dispatches over every projection kind and variable type; splitting would obscure the data-flow
+//nolint:gocyclo // dispatches over every projection kind and variable type; splitting would obscure the data-flow
 func buildIRProjection(
 	items []ir.ProjectionItem,
 	child exec.Operator,
@@ -16937,6 +16939,7 @@ func tryBuildColumnarProjection(
 		if werr := cp.WithChunkInput(chunkFillers); werr != nil {
 			// Preconditions are already checked above; on the (unreachable) error
 			// keep the byte-identical row-input path rather than failing the query.
+			//nolint:nilerr // WithChunkInput validates both preconditions (exec/columnar_project.go:170,173) before it mutates anything (exec/columnar_project.go:175-176), so on error cp is still the unmodified row-input operator and the query result is byte-identical
 			return cp, true, nil
 		}
 	}
@@ -16992,6 +16995,7 @@ func tryBuildColumnarScalarPassthrough(
 	if werr := cp.WithScalarChunkInput(chunkFillers); werr != nil {
 		// Preconditions are already checked above; on the (unreachable) error keep
 		// the byte-identical row-input path rather than failing the query.
+		//nolint:nilerr // WithChunkInput validates both preconditions (exec/columnar_project.go:170,173) before it mutates anything (exec/columnar_project.go:175-176), so on error cp is still the unmodified row-input operator and the query result is byte-identical
 		return cp, true, nil
 	}
 	return cp, true, nil
@@ -17159,6 +17163,7 @@ func tryBuildColumnarAggInput(
 		if werr := cp.WithChunkInput(chunkFillers); werr != nil {
 			// Preconditions are already checked above; on the (unreachable) error keep
 			// the byte-identical row-input path rather than failing the query.
+			//nolint:nilerr // WithScalarChunkInput validates both preconditions (exec/columnar_project.go:196,199) before it mutates anything (exec/columnar_project.go:201-202), so on error cp is still the unmodified row-input operator and the query result is byte-identical
 			return cp, true, nil
 		}
 	}

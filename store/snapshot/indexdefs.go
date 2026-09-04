@@ -129,6 +129,7 @@ func WriteIndexDefs(w io.Writer, specs []IndexDefSpec) (size int64, crc uint32, 
 		metrics.IncCounter("store.snapshot.WriteIndexDefs.errors", 1)
 		return 0, 0, err
 	}
+	//nolint:gosec // G115: NO writer guard; overflow needs 2^32 index defs. ReadIndexDefs rejects count > 1<<20 at indexdefs.go:212, so the reader's cap binds 4096x earlier
 	if err := binary.Write(tee, binary.LittleEndian, uint32(len(ordered))); err != nil {
 		metrics.IncCounter("store.snapshot.WriteIndexDefs.errors", 1)
 		return 0, 0, err
@@ -159,6 +160,7 @@ func writeIndexDefRecord(w io.Writer, d IndexDefSpec) (int64, error) {
 	}
 	total := int64(1)
 	for _, s := range [...]string{d.Name, d.Label, d.Property} {
+		//nolint:gosec // G115: NO local guard, unlike its sibling constraints.go:158; bounded only caller-side by checkWALSchemaString at store/txn/txn.go:2176, which caps a DDL identifier at 65535 bytes
 		if err := binary.Write(w, binary.LittleEndian, uint32(len(s))); err != nil {
 			return 0, err
 		}

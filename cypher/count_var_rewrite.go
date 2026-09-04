@@ -388,6 +388,7 @@ func (m *countVarRewriteMemo) get(p *ir.EagerAggregation) *ir.EagerAggregation {
 	}
 	if v, ok := m.m.Load(p); ok {
 		m.hits.Add(1)
+		//nolint:forcetypeassert // the memo map is unexported and only ever stores *ir.EagerAggregation
 		return v.(*ir.EagerAggregation)
 	}
 	m.misses.Add(1)
@@ -399,6 +400,7 @@ func (m *countVarRewriteMemo) get(p *ir.EagerAggregation) *ir.EagerAggregation {
 	if !loaded {
 		m.entries.Add(1)
 	}
+	//nolint:forcetypeassert // LoadOrStore returns the value already in the memo map, which only stores *ir.EagerAggregation
 	return actual.(*ir.EagerAggregation)
 }
 

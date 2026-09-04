@@ -297,6 +297,7 @@ func writeProperties[N comparable, W any](
 			metrics.IncCounter("store.snapshot.WriteProperties.errors", 1)
 			return 0, 0, fmt.Errorf("snapshot: property key too long: %d bytes", len(key))
 		}
+		//nolint:gosec // G115: bounded by the len(key) > MaxUint32 fail-stop at properties.go:296, which aborts WriteProperties before the prefix is emitted
 		if err := binary.Write(tee, binary.LittleEndian, uint32(len(key))); err != nil {
 			metrics.IncCounter("store.snapshot.WriteProperties.errors", 1)
 			return 0, 0, err
@@ -376,6 +377,7 @@ func writeNodePropRecord(w io.Writer, scratch []byte, rec *NodePropertyEntry) (i
 	binary.LittleEndian.PutUint64(hdr[0:8], rec.NodeID)
 	binary.LittleEndian.PutUint32(hdr[8:12], rec.KeyIdx)
 	hdr[12] = byte(rec.Kind)
+	//nolint:gosec // G115: bounded by the len(ValueBytes) > MaxUint32 fail-stop at properties.go:366, the first statement of writeNodePropRecord
 	binary.LittleEndian.PutUint32(hdr[13:17], uint32(len(rec.ValueBytes)))
 	if _, err := w.Write(hdr); err != nil {
 		return 0, err
@@ -405,6 +407,7 @@ func writeEdgePropRecord(w io.Writer, scratch []byte, rec *EdgePropertyEntry) (i
 	binary.LittleEndian.PutUint64(hdr[8:16], rec.Dst)
 	binary.LittleEndian.PutUint32(hdr[16:20], rec.KeyIdx)
 	hdr[20] = byte(rec.Kind)
+	//nolint:gosec // G115: bounded by the len(ValueBytes) > MaxUint32 fail-stop at properties.go:398, the first statement of writeEdgePropRecord
 	binary.LittleEndian.PutUint32(hdr[21:25], uint32(len(rec.ValueBytes)))
 	if _, err := w.Write(hdr); err != nil {
 		return 0, err
@@ -602,6 +605,7 @@ func encodePropertyValue(v lpg.PropertyValue) ([]byte, error) {
 	case lpg.PropInt64:
 		i, _ := v.Int64()
 		out := make([]byte, fixed64ValueSize)
+		//nolint:gosec // G115: int64->uint64 is a same-width bit reinterpretation, reversed exactly by the int64(Uint64) decode at properties.go:1055
 		binary.LittleEndian.PutUint64(out, uint64(i))
 		return out, nil
 	case lpg.PropFloat64:
@@ -622,7 +626,9 @@ func encodePropertyValue(v lpg.PropertyValue) ([]byte, error) {
 		// within the second. time.Unix(sec, nsec) reconstitutes the
 		// instant exactly; we force .UTC() at decode time to drop the
 		// caller's location (snapshots travel between machines).
+		//nolint:gosec // G115: int64->uint64 is a same-width bit reinterpretation, reversed exactly by the int64(Uint64) decode at properties.go:1071
 		binary.LittleEndian.PutUint64(out[0:8], uint64(t.Unix()))
+		//nolint:gosec // G115: time.Time.Nanosecond() is documented to return an int in [0,999999999], which widens to uint64 losslessly; decoded back at properties.go:1073
 		binary.LittleEndian.PutUint64(out[8:16], uint64(t.Nanosecond()))
 		return out, nil
 	case lpg.PropBytes:
@@ -649,6 +655,7 @@ func encodePropertyValue(v lpg.PropertyValue) ([]byte, error) {
 func encodeListPropertyValue(v lpg.PropertyValue) ([]byte, error) {
 	elems, _ := v.List()
 	var buf []byte
+	//nolint:gosec // G115: 2^32 elements imply len(buf) >= 5*2^32, rejected by the MaxUint32 fail-stop at properties.go:366/398 - but only on the properties.bin path, not via edgehandles.go:267
 	buf = binary.LittleEndian.AppendUint32(buf, uint32(len(elems)))
 	for _, elem := range elems {
 		if elem.Kind() == lpg.PropList {
@@ -659,6 +666,7 @@ func encodeListPropertyValue(v lpg.PropertyValue) ([]byte, error) {
 			return nil, err
 		}
 		buf = append(buf, byte(elem.Kind()))
+		//nolint:gosec // G115: payload is appended to buf, so len(payload) >= 2^32 implies len(buf) > MaxUint32 and is rejected at properties.go:366/398 - not on the edgehandles.go:267 path
 		buf = binary.LittleEndian.AppendUint32(buf, uint32(len(payload)))
 		buf = append(buf, payload...)
 	}
@@ -712,6 +720,7 @@ func encodePropertyValueInto(a *propValueArena, v lpg.PropertyValue) ([]byte, er
 	case lpg.PropInt64:
 		i, _ := v.Int64()
 		b := a.reserve(fixed64ValueSize)
+		//nolint:gosec // G115: int64->uint64 is a same-width bit reinterpretation, reversed exactly by the int64(Uint64) decode at properties.go:1055 (arena variant of :605)
 		binary.LittleEndian.PutUint64(b, uint64(i))
 		return b, nil
 	case lpg.PropFloat64:
@@ -731,7 +740,9 @@ func encodePropertyValueInto(a *propValueArena, v lpg.PropertyValue) ([]byte, er
 	case lpg.PropTime:
 		t, _ := v.Time()
 		b := a.reserve(timeValueSize)
+		//nolint:gosec // G115: int64->uint64 is a same-width bit reinterpretation, reversed exactly by the int64(Uint64) decode at properties.go:1071 (arena variant of :625)
 		binary.LittleEndian.PutUint64(b[0:8], uint64(t.Unix()))
+		//nolint:gosec // G115: time.Time.Nanosecond() is documented to return an int in [0,999999999], which widens to uint64 losslessly (arena variant of :626)
 		binary.LittleEndian.PutUint64(b[8:16], uint64(t.Nanosecond()))
 		return b, nil
 	case lpg.PropBytes:
@@ -1040,6 +1051,7 @@ func decodePropertyValue(kind lpg.PropertyKind, raw []byte) (lpg.PropertyValue, 
 		if len(raw) != fixed64ValueSize {
 			return lpg.PropertyValue{}, fmt.Errorf("%w: int64 value size %d", ErrPropertiesCorrupted, len(raw))
 		}
+		//nolint:gosec // G115: exact inverse of the uint64(int64) written at properties.go:609/724; len(raw) is pinned to 8 by the check at properties.go:1052
 		return lpg.Int64Value(int64(binary.LittleEndian.Uint64(raw))), nil
 	case lpg.PropFloat64:
 		if len(raw) != fixed64ValueSize {
@@ -1055,7 +1067,9 @@ func decodePropertyValue(kind lpg.PropertyKind, raw []byte) (lpg.PropertyValue, 
 		if len(raw) != timeValueSize {
 			return lpg.PropertyValue{}, fmt.Errorf("%w: time value size %d", ErrPropertiesCorrupted, len(raw))
 		}
+		//nolint:gosec // G115: exact inverse of uint64(t.Unix()) written at properties.go:630/744; len(raw) is pinned to 16 by the check at properties.go:1067
 		sec := int64(binary.LittleEndian.Uint64(raw[0:8]))
+		//nolint:gosec // G115: exact inverse of uint64(t.Nanosecond()) written at properties.go:632/746; len(raw) is pinned to 16 by the check at properties.go:1067
 		nsec := int64(binary.LittleEndian.Uint64(raw[8:16]))
 		return lpg.TimeValue(time.Unix(sec, nsec).UTC()), nil
 	case lpg.PropBytes:

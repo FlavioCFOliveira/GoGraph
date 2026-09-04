@@ -364,7 +364,7 @@ func TestIndexDurability_StorelessListIndexes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CREATE INDEX: %v", err)
 	}
-	for r.Next() { //nolint:revive
+	for r.Next() { //nolint:revive // empty-block: draining the cursor IS the work; the rows are irrelevant, only that Next runs to completion before Close is checked below
 	}
 	if cerr := r.Close(); cerr != nil {
 		t.Fatalf("Close: %v", cerr)

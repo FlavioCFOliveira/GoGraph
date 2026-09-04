@@ -53,7 +53,7 @@ func anyFloatInvalid[W Weight](weights []W) bool {
 	switch any(zero).(type) {
 	case float64:
 		for _, w := range weights {
-			f := any(w).(float64) //nolint:errcheck // type-asserted by the outer switch
+			f := any(w).(float64) //nolint:forcetypeassert // the enclosing `case float64:` of the switch on any(zero) pins W to exactly float64, so any(w) holds a float64
 			if math.IsNaN(f) || math.IsInf(f, 0) {
 				return true
 			}
@@ -61,7 +61,7 @@ func anyFloatInvalid[W Weight](weights []W) bool {
 		return false
 	case float32:
 		for _, w := range weights {
-			g := float64(any(w).(float32)) //nolint:errcheck // type-asserted by the outer switch
+			g := float64(any(w).(float32)) //nolint:forcetypeassert // the enclosing `case float32:` of the switch on any(zero) pins W to exactly float32, so any(w) holds a float32
 			if math.IsNaN(g) || math.IsInf(g, 0) {
 				return true
 			}

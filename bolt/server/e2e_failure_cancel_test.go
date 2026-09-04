@@ -39,7 +39,7 @@ func TestE2E_FailureCancel(t *testing.T) {
 	driver, _ := newDriverForTest(t)
 
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer session.Close(ctx) //nolint:errcheck
+	defer session.Close(ctx)
 
 	queryCtx, cancel := context.WithCancel(ctx)
 
@@ -101,7 +101,7 @@ func TestE2E_FailureCancel(t *testing.T) {
 	defer freshCancel()
 
 	session2 := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer session2.Close(ctx) //nolint:errcheck
+	defer session2.Close(ctx)
 
 	result2, err := session2.Run(freshCtx, "RETURN 1 AS n", nil)
 	if err != nil {

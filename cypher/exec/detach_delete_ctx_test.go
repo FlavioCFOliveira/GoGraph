@@ -36,9 +36,9 @@ import (
 // the first in-sweep poll (swept == 0) — isolating the in-sweep check with no
 // dependence on scheduling or sweep speed.
 type cancelAfterNPolls struct {
-	context.Context
-	n     int64
-	calls atomic.Int64
+	context.Context //nolint:containedctx // this type IS a context.Context implementation, not a struct storing one: it embeds the parent for Deadline/Done/Value and overrides Err to cancel after a fixed number of polls
+	n               int64
+	calls           atomic.Int64
 }
 
 func (c *cancelAfterNPolls) Err() error {

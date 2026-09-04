@@ -312,6 +312,7 @@ func writeLabels[N comparable, W any](w io.Writer, g *lpg.Graph[N, W], at *lpg.S
 			metrics.IncCounter("store.snapshot.WriteLabels.errors", 1)
 			return 0, 0, fmt.Errorf("snapshot: label name too long: %d bytes", len(name))
 		}
+		//nolint:gosec // G115: bounded by the len(name) > MaxUint32 fail-stop at labels.go:311, which aborts WriteLabels before the prefix is emitted
 		if err := binary.Write(tee, binary.LittleEndian, uint32(len(name))); err != nil {
 			metrics.IncCounter("store.snapshot.WriteLabels.errors", 1)
 			return 0, 0, err

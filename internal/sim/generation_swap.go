@@ -743,11 +743,13 @@ type genSwapRegistry struct {
 // slot returns g's shadow slot, creating it if this is its first sighting.
 func (r *genSwapRegistry) slot(g *generation.Generation[struct{}]) *genSwapSlot {
 	if v, ok := r.m.Load(g); ok {
+		//nolint:forcetypeassert // the slot map is unexported and only ever stores *genSwapSlot
 		return v.(*genSwapSlot)
 	}
 	fresh := &genSwapSlot{}
 	fresh.seq.Store(-1)
 	v, _ := r.m.LoadOrStore(g, fresh)
+	//nolint:forcetypeassert // LoadOrStore returns the value already in the slot map, which only stores *genSwapSlot
 	return v.(*genSwapSlot)
 }
 
@@ -1783,6 +1785,7 @@ func runGenerationCloseArm(ctx context.Context, cfg GenerationSwapConfig, plan *
 	// The quiescent audit again: every generation the readers ever held must
 	// be back at zero now that they are all joined.
 	reg.m.Range(func(k, _ any) bool {
+		//nolint:forcetypeassert // every key in this Range is a *generation.Generation[struct{}], the only key type the harness stores in this map
 		g := k.(*generation.Generation[struct{}])
 		if rc := g.Refcount(); rc != 0 {
 			ev.Arm2RefcountNonZero++

@@ -141,7 +141,7 @@ type nullValue struct{}
 
 // Null is the NULL singleton. Comparisons against NULL always return Null.
 //
-//nolint:gochecknoglobals // package-level singleton is the intended design (3VL null)
+// The package-level singleton is the intended design (3VL null).
 var Null Value = nullValue{}
 
 func (nullValue) Kind() Kind     { return KindNull }

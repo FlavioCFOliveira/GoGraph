@@ -28,7 +28,7 @@ func TestIC1_FriendsOfFriends(t *testing.T) {
 	ctx := context.Background()
 
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer session.Close(ctx) //nolint:errcheck
+	defer session.Close(ctx)
 
 	const query = `MATCH (start:Person {id: 1})-[:KNOWS*1..3]-(friend:Person)
 WHERE friend.firstName = 'Alice' AND friend.id <> 1

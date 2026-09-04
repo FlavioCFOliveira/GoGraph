@@ -25,7 +25,7 @@ func TestE2E_MergeIdempotence(t *testing.T) {
 
 	// First MERGE — must create one node (AC#1).
 	s1 := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer s1.Close(ctx) //nolint:errcheck
+	defer s1.Close(ctx)
 
 	runWrite(ctx, t, s1, `MERGE (n:Person {email: $email})`, map[string]any{
 		"email": "a@b",
@@ -48,7 +48,7 @@ func TestE2E_MergeIdempotence(t *testing.T) {
 	// second identical MERGE is a no-op: AC#2 (zero nodes created) and AC#3
 	// (final count = 1) are asserted over the live Bolt wire (#1761).
 	s2 := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer s2.Close(ctx) //nolint:errcheck
+	defer s2.Close(ctx)
 
 	runWrite(ctx, t, s2, `MERGE (n:Person {email: $email})`, map[string]any{
 		"email": "a@b",

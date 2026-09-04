@@ -1010,6 +1010,7 @@ func eval3VLXOR(left, right Value) (Value, error) {
 		return Null, nil
 	}
 	// Both operands are non-null and (per the guard above) Boolean.
+	//nolint:forcetypeassert // logicalOperandError (eval.go:921-929) returns nil only for Null or BoolValue, and BOTH operands pass it (eval.go:1003, 1006) before Null is ruled out at eval.go:1009
 	return BoolValue(bool(left.(BoolValue)) != bool(right.(BoolValue))), nil
 }
 
@@ -1564,6 +1565,7 @@ func evalUnaryOp(n *ast.UnaryOp, row RowContext, st *evalCallState, params map[s
 		if err := logicalOperandError(n.Operator, operand); err != nil {
 			return nil, err
 		}
+		//nolint:forcetypeassert // logicalOperandError (eval.go:921-929) returns nil only for Null or BoolValue, and the operand passes it before Null is ruled out earlier in this function
 		return BoolValue(!bool(operand.(BoolValue))), nil
 
 	case "-":

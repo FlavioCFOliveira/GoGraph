@@ -28,8 +28,8 @@ import (
 // deterministic, with no dependence on goroutine scheduling or traversal speed
 // (the source of the historical flake under load and -coverpkg instrumentation).
 type cancelAfterFirstCheck struct {
-	context.Context
-	calls atomic.Int64
+	context.Context //nolint:containedctx // this type IS a context.Context implementation, not a struct storing one: it embeds the parent for Deadline/Done/Value and overrides Err to cancel after a fixed number of polls
+	calls           atomic.Int64
 }
 
 func (c *cancelAfterFirstCheck) Err() error {

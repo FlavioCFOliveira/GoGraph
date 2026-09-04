@@ -223,7 +223,7 @@ type ExplicitTx struct {
 	// context (optionally with a transaction timeout) supplied to BeginTx, so a
 	// cancelled connection or an elapsed tx_timeout interrupts an in-flight Exec
 	// and the writer mutex can never be held indefinitely.
-	ctx context.Context
+	ctx context.Context //nolint:containedctx // the connection context bounding every statement on this handle, as the four lines of comment above specify; it is supplied to BeginTx and never outlives the handle
 
 	// buf accumulates the secondary-index changes of every statement; committed
 	// once on Commit, discarded on Rollback. Shared by all statement mutators.

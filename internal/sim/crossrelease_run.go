@@ -467,6 +467,7 @@ func currentOpSignature(ctx context.Context, eng *EngineAdapter, op Op) (string,
 		res, err = eng.Run(ctx, op.Cypher, op.Params)
 	}
 	if err != nil {
+		//nolint:nilerr // an engine rejection is an observable outcome, encoded as the literal rows signature "error" and compared against the other release at crossrelease_run.go:397
 		return "error", nil
 	}
 	// Render via the SAME Record-map + %v encoding the prior-release helper uses

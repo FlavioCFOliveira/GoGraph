@@ -51,6 +51,7 @@ func Reinterpret[T any](data []byte, n int) []T {
 	// buffer can satisfy the requirement. Fall through to the same
 	// "data too short" panic with the saturated requirement so the
 	// failure is deterministic rather than an out-of-bounds slice.
+	//nolint:gosec // G115: n<0 is rejected at reinterpret.go:36 and size==0 at reinterpret.go:44; size is an unsafe.Sizeof result and never negative. bits.Mul64 then detects the product overflow
 	hi, lo := bits.Mul64(uint64(size), uint64(n))
 	need := int(lo) //nolint:gosec // overflow guarded by hi/lo checks below
 	if hi != 0 || lo > uint64(math.MaxInt) {

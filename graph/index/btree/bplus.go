@@ -392,12 +392,16 @@ func inodeChild[V cmp.Ordered](n *inode[V], target V) int {
 // immediately.
 func (t *bplus[V]) findLeaf(target V) *leaf[V] {
 	if t.height == 1 {
+		//nolint:forcetypeassert // guarded by t.height == 1 at bplus.go:394; height 1 means the root IS the leaf, and root and height are written in lockstep by th
 		return t.root.(*leaf[V])
 	}
+	//nolint:forcetypeassert // reached only when t.height >= 2, the height==1 branch having returned at bplus.go:396; height rises past 1 only in cloneInsert's root split (bplus.go:589-595) and in bulkPack (bplus.go:855-858), both of which set root to an *inode[V] in the same statement
 	n := t.root.(*inode[V])
 	for h := t.height; h > 2; h-- {
+		//nolint:forcetypeassert // the loop at bplus.go:400 runs while h > 2, so n is at level >= 3 and the child taken is at level >= 2, which the level invariant types *inode[V]
 		n = n.children[inodeChild(n, target)].(*inode[V])
 	}
+	//nolint:forcetypeassert // after the loop at bplus.go:400 exits, n is at level 2 exactly, so its child is at level 1, which the level invariant types *leaf[V]
 	return n.children[inodeChild(n, target)].(*leaf[V])
 }
 
@@ -471,12 +475,14 @@ func (c *cursor[V]) seek(t *bplus[V], target V) {
 	c.depth = 0
 	cur := t.root
 	for d := 0; d <= t.height-2; d++ {
+		//nolint:forcetypeassert // the loop at bplus.go:477 bounds d <= t.height-2, so cur is at level >= 2, which the level invariant types *inode[V]
 		n := cur.(*inode[V])
 		ci := inodeChild(n, target)
 		c.stack[d] = cursorFrame[V]{n: n, ci: ci}
 		c.depth = d + 1
 		cur = n.children[ci]
 	}
+	//nolint:forcetypeassert // after the loop at bplus.go:477, d == height-1 so cur is at level 1; when height == 1 the body never runs and cur is the leaf root
 	c.leaf = cur.(*leaf[V])
 	c.off = leafSearch(c.leaf, target)
 	c.settle()
@@ -489,11 +495,13 @@ func (c *cursor[V]) seekFirst(t *bplus[V]) {
 	c.depth = 0
 	cur := t.root
 	for d := 0; d <= t.height-2; d++ {
+		//nolint:forcetypeassert // the loop at bplus.go:497 bounds d <= t.height-2, so cur is at level >= 2, which the level invariant types *inode[V]
 		n := cur.(*inode[V])
 		c.stack[d] = cursorFrame[V]{n: n, ci: 0}
 		c.depth = d + 1
 		cur = n.children[0]
 	}
+	//nolint:forcetypeassert // after the loop at bplus.go:497, d == height-1 so cur is at level 1; when height == 1 the body never runs and cur is the leaf root
 	c.leaf = cur.(*leaf[V])
 	c.off = 0
 	c.settle()
@@ -540,11 +548,13 @@ func (c *cursor[V]) nextLeaf() {
 		c.depth = d + 1
 		// The child sits at depth d+1; internal levels run to height-2.
 		for nd := d + 1; nd <= c.height-2; nd++ {
+			//nolint:forcetypeassert // the loop at bplus.go:550 bounds nd <= c.height-2, so cur is at level >= 2; c.height is read from the same immutable snapshot captured at bplus.go:474/494
 			n := cur.(*inode[V])
 			c.stack[nd] = cursorFrame[V]{n: n, ci: 0}
 			c.depth = nd + 1
 			cur = n.children[0]
 		}
+		//nolint:forcetypeassert // after the loop at bplus.go:550, nd == height-1 so cur is at level 1, which the level invariant types *leaf[V]
 		c.leaf = cur.(*leaf[V])
 		c.off = 0
 		return
@@ -591,8 +601,10 @@ func (t *bplus[V]) cloneInsert(value V, node uint64, a *entryArena) *bplus[V] {
 // split, the separator + right sibling to promote into the parent.
 func cloneInsertInto[V cmp.Ordered](cur any, level int, value V, e *entry) (any, *insertNode[V]) {
 	if level == 1 {
+		//nolint:forcetypeassert // guarded by level == 1 at bplus.go:603; level starts at t.height (bplus.go:585) and drops by one per recursion (bplus.go:610), and level 1 is a *leaf[V]
 		return cloneInsertLeaf(cur.(*leaf[V]), value, e)
 	}
+	//nolint:forcetypeassert // reached only when level >= 2, the level==1 branch having returned at bplus.go:605; level >= 2 is an *inode[V] by the level invariant
 	n := cur.(*inode[V])
 	ci := inodeChild(n, value)
 	child, promoted := cloneInsertInto(n.children[ci], level-1, value, e)
@@ -697,6 +709,7 @@ func (t *bplus[V]) cloneRemove(value V) *bplus[V] {
 // no keys and must be dropped from its parent.
 func cloneRemoveFrom[V cmp.Ordered](cur any, level int, value V) (next any, gone, removed bool) {
 	if level == 1 {
+		//nolint:forcetypeassert // guarded by level == 1 at bplus.go:711; level starts at t.height (bplus.go:679) and drops by one per recursion (bplus.go:727), and level 1 is a *leaf[V]
 		l := cur.(*leaf[V])
 		off := leafSearch(l, value)
 		if off >= len(l.keys) || keyCompare(l.keys[off], value) != 0 {
@@ -708,6 +721,7 @@ func cloneRemoveFrom[V cmp.Ordered](cur any, level int, value V) (next any, gone
 		}
 		return nl, len(nl.keys) == 0, true
 	}
+	//nolint:forcetypeassert // reached only when level >= 2, the level==1 branch having returned at bplus.go:713; level >= 2 is an *inode[V] by the level invariant
 	n := cur.(*inode[V])
 	ci := inodeChild(n, value)
 	child, childGone, removed := cloneRemoveFrom(n.children[ci], level-1, value)

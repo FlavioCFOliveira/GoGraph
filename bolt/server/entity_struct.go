@@ -89,6 +89,7 @@ func nodeToStruct(x expr.NodeValue, boltMajor uint8) packstream.Struct {
 		labels[i] = l
 	}
 	fields := []packstream.Value{
+		//nolint:gosec // G115: Bolt types an entity id as a signed Integer. A NodeID is packNodeID(shard,idx) with idx=len(s.reverse) (graph/mapper.go:346); id>=1<<63 needs 2^55 nodes in one of 256 shards
 		int64(x.ID),
 		labels,
 		propsToPackstream(x.Properties, boltMajor),
@@ -103,8 +104,11 @@ func nodeToStruct(x expr.NodeValue, boltMajor uint8) packstream.Struct {
 // its endpoints.
 func relationshipToStruct(x expr.RelationshipValue, boltMajor uint8) packstream.Struct {
 	fields := []packstream.Value{
+		//nolint:gosec // G115: Bolt types an entity id as a signed Integer. Relationship handles are handleSeq.Add(1) (graph/adjlist/adjlist.go:643,218): they start at 1 and are never reused, so 1<<63 needs 2^63 AddEdge calls
 		int64(x.ID),
+		//nolint:gosec // G115: Bolt types an entity id as a signed Integer. A NodeID is packNodeID(shard,idx) with idx=len(s.reverse) (graph/mapper.go:346); id>=1<<63 needs 2^55 nodes in one of 256 shards
 		int64(x.StartID),
+		//nolint:gosec // G115: Bolt types an entity id as a signed Integer. A NodeID is packNodeID(shard,idx) with idx=len(s.reverse) (graph/mapper.go:346); id>=1<<63 needs 2^55 nodes in one of 256 shards
 		int64(x.EndID),
 		x.Type,
 		propsToPackstream(x.Properties, boltMajor),
@@ -123,6 +127,7 @@ func relationshipToStruct(x expr.RelationshipValue, boltMajor uint8) packstream.
 // form a Path carries, which omits the endpoints because the path's indices supply them.
 func unboundRelationshipToStruct(x expr.RelationshipValue, boltMajor uint8) packstream.Struct {
 	fields := []packstream.Value{
+		//nolint:gosec // G115: Bolt types an entity id as a signed Integer. Relationship handles are handleSeq.Add(1) (graph/adjlist/adjlist.go:643,218): they start at 1 and are never reused, so 1<<63 needs 2^63 AddEdge calls
 		int64(x.ID),
 		x.Type,
 		propsToPackstream(x.Properties, boltMajor),

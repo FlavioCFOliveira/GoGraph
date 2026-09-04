@@ -221,6 +221,7 @@ func Layout(nVertices, nEdges uint64, weight WeightKind) (header Header, totalBy
 	if weight != WeightAbsent {
 		header.WeightsOffset = off
 		// AlignUp(WeightsOffset + Weight.Size()*NEdges).
+		//nolint:gosec // G115: WeightKind.Size (format.go:61) is a total switch returning only 0,1,2,4,8; Layout rejects kind>weightKindMax at format.go:177, so the int is never negative
 		wBytes, wof := mulOverflow(uint64(weight.Size()), nEdges)
 		if wof {
 			return Header{}, 0
@@ -329,6 +330,7 @@ func (h Header) validate(fileLen int) error {
 			h.VerticesOffset, h.EdgesOffset, h.WeightsOffset, h.TailCRCOffset,
 			want.VerticesOffset, want.EdgesOffset, want.WeightsOffset, want.TailCRCOffset)
 	}
+	//nolint:gosec // G115: fileLen is a len() result from reader.go:103 (len(mm)) and reader.go:170 (len(buf)); the builtin len is non-negative by the Go spec
 	if uint64(total) != uint64(fileLen) {
 		return fmt.Errorf("%w: file size %d, header layout requires %d",
 			ErrHeaderInconsistent, fileLen, total)

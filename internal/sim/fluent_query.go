@@ -1399,7 +1399,7 @@ func (p *FluentQueryProbes) runProbe(
 // scatter the shared model/substrate/CSR setup across helpers that each need all
 // three, and the probe list is the readable form of what the scenario covers.
 //
-//nolint:gocyclo,maintidx // one battery of independent probes; splitting it would
+//nolint:gocyclo // one battery of independent probes; splitting it would
 func (p *FluentQueryProbes) Check(
 	ctx context.Context, tick int64, g *lpg.Graph[string, float64], eng *EngineAdapter,
 	o *GraphOracle, perturb fqPerturb,

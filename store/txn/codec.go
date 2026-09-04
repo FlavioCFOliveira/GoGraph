@@ -43,6 +43,7 @@ type stringCodec struct{}
 func NewStringCodec() Codec[string] { return stringCodec{} }
 
 func (stringCodec) Encode(buf []byte, v string) ([]byte, error) {
+	//nolint:gosec // G115: UNGUARDED, unlike the sibling encoder at codec.go:204 which rejects len>math.MaxUint32; a node key >=4 GiB truncates and Decode (codec.go:57) then reads the wrong body
 	buf = binary.LittleEndian.AppendUint32(buf, uint32(len(v)))
 	return append(buf, v...), nil
 }
@@ -203,6 +204,7 @@ func (binaryMarshalerCodec[N, P]) Encode(buf []byte, v N) ([]byte, error) {
 	if uint64(len(data)) > math.MaxUint32 {
 		return buf, fmt.Errorf("txn/codec: BinaryMarshaler payload exceeds uint32 (%d bytes)", len(data))
 	}
+	//nolint:gosec // G115: bounded by the len(data)>math.MaxUint32 rejection at codec.go:204, three lines above, so the cast is unreachable for any oversize payload
 	buf = binary.LittleEndian.AppendUint32(buf, uint32(len(data)))
 	return append(buf, data...), nil
 }

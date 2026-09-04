@@ -28,7 +28,7 @@ func TestIC2_RecentMessages(t *testing.T) {
 	ctx := context.Background()
 
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer session.Close(ctx) //nolint:errcheck
+	defer session.Close(ctx)
 
 	const query = `MATCH (start:Person {id: 1})-[:KNOWS]-(friend:Person)
 WHERE friend.id > 2

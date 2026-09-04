@@ -38,7 +38,7 @@ func TestE2E_ResultStats_CreateCounters(t *testing.T) {
 	ctx := context.Background()
 	driver, _ := newDriverForTest(t)
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer session.Close(ctx) //nolint:errcheck
+	defer session.Close(ctx)
 
 	summary := summaryFor(ctx, t, session, `CREATE (:Person {name: 'x', age: 42})`)
 	c := summary.Counters()
@@ -67,7 +67,7 @@ func TestE2E_ResultStats_RelationshipAndDelete(t *testing.T) {
 	ctx := context.Background()
 	driver, _ := newDriverForTest(t)
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer session.Close(ctx) //nolint:errcheck
+	defer session.Close(ctx)
 
 	created := summaryFor(ctx, t, session, `CREATE (:A)-[:KNOWS {since: 2020}]->(:B)`).Counters()
 	if got := created.NodesCreated(); got != 2 {
@@ -106,7 +106,7 @@ func TestE2E_ResultStats_MergeCreateVersusMatch(t *testing.T) {
 	ctx := context.Background()
 	driver, _ := newDriverForTest(t)
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer session.Close(ctx) //nolint:errcheck
+	defer session.Close(ctx)
 
 	first := summaryFor(ctx, t, session, `MERGE (n:M {k: 1})`).Counters()
 	if !first.ContainsUpdates() || first.NodesCreated() != 1 {
@@ -127,7 +127,7 @@ func TestE2E_ResultStats_ReadOnlyReportsNoUpdates(t *testing.T) {
 	ctx := context.Background()
 	driver, _ := newDriverForTest(t)
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer session.Close(ctx) //nolint:errcheck
+	defer session.Close(ctx)
 
 	summaryFor(ctx, t, session, `CREATE (:R {p: 1})`)
 
@@ -147,7 +147,7 @@ func TestE2E_ResultStats_SetAndRemoveBothCountAsPropertiesSet(t *testing.T) {
 	ctx := context.Background()
 	driver, _ := newDriverForTest(t)
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer session.Close(ctx) //nolint:errcheck
+	defer session.Close(ctx)
 
 	summaryFor(ctx, t, session, `CREATE (:S {a: 1, b: 2})`)
 

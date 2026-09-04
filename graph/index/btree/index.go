@@ -764,6 +764,7 @@ func decodeOrdered[V cmp.Ordered](b []byte) (V, error) {
 
 // assignAny copies src into *dst, treating dst as an any.
 func assignAny[V any](dst *V, src any) {
+	//nolint:forcetypeassert // a Go type switch matches the EXACT dynamic type, so inside each case of the caller's switch V is identically that case's type and src is a literal built in the same case; a defined type such as `type Cost float64` falls to default and returns ErrIndexValueTypeUnsupported
 	*dst = src.(V)
 }
 

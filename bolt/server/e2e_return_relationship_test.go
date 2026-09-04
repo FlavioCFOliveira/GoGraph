@@ -28,7 +28,7 @@ func TestE2E_ReturnRelationshipShape(t *testing.T) {
 	driver, _ := newDriverForTest(t)
 
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer session.Close(ctx) //nolint:errcheck
+	defer session.Close(ctx)
 
 	runWrite(ctx, t, session,
 		`CREATE (a:Person {name:'Alice'})-[r:KNOWS {since: $since}]->(b:Person {name:'Bob'})`,

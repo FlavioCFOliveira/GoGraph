@@ -156,7 +156,7 @@ func seedSocialGraphViaDriver(t *testing.T, driver neo4j.DriverWithContext) {
 	t.Helper()
 	ctx := context.Background()
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer session.Close(ctx) //nolint:errcheck
+	defer session.Close(ctx)
 
 	for _, q := range socialGraphSeedQueries {
 		q := q // capture

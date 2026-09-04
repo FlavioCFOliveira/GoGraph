@@ -227,6 +227,7 @@ func (r *Reader) bindSlices() {
 	}
 	if r.header.Weight != WeightAbsent && r.header.NEdges > 0 {
 		off := r.header.WeightsOffset
+		//nolint:gosec // G115: Size() returns only 0,1,2,4,8 (format.go:61); this is the product Layout already computed via mulOverflow (format.go:225) and validate pinned to fileLen (format.go:334)
 		size := uint64(r.header.Weight.Size()) * r.header.NEdges
 		r.weightBytes = r.buf[off : off+size]
 	}

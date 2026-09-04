@@ -152,7 +152,7 @@ func BenchmarkIndexSeek_vs_LabelScan(b *testing.B) {
 			if err := res.Err(); err != nil {
 				b.Fatal(err)
 			}
-			res.Close() //nolint:errcheck
+			res.Close()
 		}
 	})
 
@@ -168,7 +168,7 @@ func BenchmarkIndexSeek_vs_LabelScan(b *testing.B) {
 			if err := res.Err(); err != nil {
 				b.Fatal(err)
 			}
-			res.Close() //nolint:errcheck
+			res.Close()
 		}
 	})
 }

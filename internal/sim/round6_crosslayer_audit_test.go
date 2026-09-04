@@ -67,6 +67,9 @@ func TestCrossLayer_AckedCommitSurvivesCrash(t *testing.T) {
 	// the WAL's in-process bufio buffer is lost. See [SimDisk.CrashProcess] for
 	// the primitive that names this level; a power failure would additionally
 	// discard everything written through to the disk but never fsync'd.)
+	//nolint:wastedassign // dropping the reference IS the modelled kill -9: the
+	// live store object must become unreachable before the reopen below, so the
+	// assignment is the test's crash primitive, not a stray write.
 	store = nil
 
 	// RECOVER from a fresh store object reading the same SimDisk image.

@@ -301,6 +301,7 @@ func (d *diffEngine) stepSignature(ctx context.Context, top TracedOp) (string, e
 		// at this op is.
 		n, _ := d.engine.NodeCount()
 		e, _ := d.engine.EdgeCount()
+		//nolint:nilerr // the rejection is encoded into the returned signature as "error nodes=N edges=E" and compared between variants at differential.go:237
 		return fmt.Sprintf("error nodes=%d edges=%d", n, e), nil
 	}
 

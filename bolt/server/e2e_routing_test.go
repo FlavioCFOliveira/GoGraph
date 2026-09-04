@@ -72,7 +72,7 @@ func TestE2E_RoutingTable(t *testing.T) {
 	// AC#2 (indirect): a query routed through the resolved table must succeed,
 	// confirming the advertised address was used for all three roles.
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer session.Close(ctx) //nolint:errcheck
+	defer session.Close(ctx)
 
 	result, err := session.Run(ctx, "RETURN 1 AS n", nil)
 	if err != nil {

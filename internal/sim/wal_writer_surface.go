@@ -1567,6 +1567,7 @@ func RunWALRealFSGuards(dir string) (WALGuardResult, error) {
 	if lerr := os.Symlink(victim, linkedWAL); lerr != nil {
 		r.Skipped = true
 		r.SkipReason = "symlink creation unavailable: " + lerr.Error()
+		//nolint:nilerr // an unavailable symlink is reported through r.Skipped/r.SkipReason, which checkWALRealFSGuards reads at wal_writer_surface.go:1608
 		return r, nil
 	}
 	if lw, lerr := wal.Open(linkedWAL); lerr == nil {
@@ -1582,6 +1583,7 @@ func RunWALRealFSGuards(dir string) (WALGuardResult, error) {
 	if lerr := os.Symlink(victim, lockBase+".lock"); lerr != nil {
 		r.Skipped = true
 		r.SkipReason = "symlink creation for the LOCK sentinel unavailable: " + lerr.Error()
+		//nolint:nilerr // an unavailable symlink is reported through r.Skipped/r.SkipReason, which checkWALRealFSGuards reads at wal_writer_surface.go:1608
 		return r, nil
 	}
 	if lw, lerr := wal.Open(lockBase); lerr == nil {

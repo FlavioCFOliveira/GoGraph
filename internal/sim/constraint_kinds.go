@@ -265,6 +265,7 @@ func (st *constraintKindState) numCreateOp(seed *Seed) Op {
 	if iv, ok := val.(int64); ok {
 		return Op{Kind: OpCreate, Cypher: tmplCreateNum, Params: map[string]any{"val": iv}}
 	}
+	//nolint:forcetypeassert // val reaches this arm only from the float64 case of the generator's own type switch
 	return Op{Kind: OpCreate, Cypher: tmplCreateNum, Params: map[string]any{"val": val.(float64)}}
 }
 
@@ -436,6 +437,7 @@ func (st *constraintKindState) note(op Op, committed bool) {
 		st.arms[arm(armNumCommit, armNumReject)]++
 		if !committed {
 			if _, isFloat := op.Params["val"].(float64); isFloat {
+				//nolint:forcetypeassert // Op.Params for tmplCreateNum is built by this file's generator, which always stores a float64 under "val" (constraint_kinds.go:269)
 				if f := op.Params["val"].(float64); f == math.Trunc(f) && st.isInt[f] {
 					st.arms[armNumRejectFloat]++
 				}

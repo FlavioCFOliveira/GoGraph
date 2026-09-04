@@ -162,6 +162,7 @@ func (b *bank) transfer(ctx context.Context, sh *anomaly.Shard, i, j, amount int
 	id := anomaly.TxID(b.txSeq.Add(1))
 	if cerr := tx.Commit(); cerr != nil {
 		sh.Record(anomaly.Txn{ID: id, Start: start, Aborted: true, Ops: ops})
+		//nolint:nilerr // a refused commit is recorded as anomaly.Txn{Aborted:true}, which arms the G1a dirty-read check at internal/anomaly/dsg.go:157
 		return nil // a refused write is the engine working, not a failure
 	}
 	sh.Record(anomaly.Txn{ID: id, Start: start, Commit: b.tick(), Ops: ops})

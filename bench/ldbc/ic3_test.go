@@ -29,7 +29,7 @@ func TestIC3_FriendsInCountries(t *testing.T) {
 	ctx := context.Background()
 
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer session.Close(ctx) //nolint:errcheck
+	defer session.Close(ctx)
 
 	const query = `MATCH (start:Person {id: 1})-[:KNOWS*1..2]-(friend:Person)
 WHERE friend.lastName STARTS WITH 'B'

@@ -74,7 +74,9 @@ var castagnoli = crc32.MakeTable(crc32.Castagnoli)
 // (ReadLabels / ReadProperties / ReadMapper* / readEdgeHandleStrTable),
 // mirroring the inline clamp tombstones.go and edgehandles.go already apply.
 func capHint(count uint64, maxCap int) int {
+	//nolint:gosec // G115: maxCap is one of the four 1<<20 constants (properties.go:156, labels.go:91, mapper.go:70, edgehandles.go:88); capHint is unexported, so it is never negative
 	if count < uint64(maxCap) {
+		//nolint:gosec // G115: guarded by writer.go:78: count < uint64(maxCap), and maxCap is always the positive constant 1<<20, so int(count) is exact
 		return int(count)
 	}
 	return maxCap

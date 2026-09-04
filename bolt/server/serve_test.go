@@ -147,7 +147,7 @@ func TestServe_HandshakeHello(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer conn.Close() //nolint:errcheck
+	defer conn.Close()
 
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 
@@ -162,7 +162,7 @@ func TestServe_HandshakeHello(t *testing.T) {
 	}
 
 	// Close the client connection cleanly.
-	conn.Close() //nolint:errcheck
+	conn.Close()
 
 	// Shutdown the server.
 	shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -215,7 +215,7 @@ func TestServe_MaxConnections(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial conn1: %v", err)
 	}
-	defer conn1.Close() //nolint:errcheck
+	defer conn1.Close()
 
 	// Give conn1 a chance to be accepted and acquire the semaphore slot.
 	time.Sleep(20 * time.Millisecond)
@@ -225,7 +225,7 @@ func TestServe_MaxConnections(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial conn2: %v", err)
 	}
-	defer conn2.Close() //nolint:errcheck
+	defer conn2.Close()
 
 	_ = conn2.SetDeadline(time.Now().Add(2 * time.Second))
 	readBuf := make([]byte, 1)
@@ -238,5 +238,5 @@ func TestServe_MaxConnections(t *testing.T) {
 	cancel()
 	shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutCancel()
-	_ = srv.Shutdown(shutCtx) //nolint:errcheck
+	_ = srv.Shutdown(shutCtx)
 }

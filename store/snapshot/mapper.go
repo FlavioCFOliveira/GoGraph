@@ -180,6 +180,7 @@ func writeMapperStringN(w io.Writer, m *graph.Mapper[string], include func(graph
 			return 0, 0, 0, fmt.Errorf("snapshot: mapper key too long: %d bytes", len(pairs[i].Key))
 		}
 		binary.LittleEndian.PutUint64(scratch[0:8], uint64(pairs[i].ID))
+		//nolint:gosec // G115: bounded by the len(Key) > MaxUint32 fail-stop at mapper.go:178, which aborts WriteMapperString before the prefix is packed
 		binary.LittleEndian.PutUint32(scratch[8:12], uint32(len(pairs[i].Key)))
 		if _, err := tee.Write(scratch[:12]); err != nil {
 			metrics.IncCounter("store.snapshot.WriteMapperString.errors", 1)
@@ -323,6 +324,7 @@ func writeMapperN[N comparable](w io.Writer, m *graph.Mapper[N], codec keyEncode
 			return 0, 0, 0, fmt.Errorf("snapshot: mapper key too long: %d bytes", len(keys[i]))
 		}
 		binary.LittleEndian.PutUint64(scratch[0:8], uint64(ids[i]))
+		//nolint:gosec // G115: bounded by the len(keys[i]) > MaxUint32 fail-stop at mapper.go:322, which aborts WriteMapper before the prefix is packed
 		binary.LittleEndian.PutUint32(scratch[8:12], uint32(len(keys[i])))
 		if _, err := tee.Write(scratch[:12]); err != nil {
 			metrics.IncCounter("store.snapshot.WriteMapper.errors", 1)

@@ -1347,6 +1347,7 @@ func (s *Session) handlePull(ctx context.Context, m *proto.Pull) ([]any, error) 
 			// enterFailed drains the cursor and rolls back any open explicit
 			// transaction (TX_STREAMING), releasing the writer serialisation (#1312).
 			s.enterFailed()
+			//nolint:nilerr // the cancellation is reported to the peer as a RequestInterrupted FAILURE inside the returned responses slice, which serve.go:1354 writes to the wire; handlePull's error return is reserved for internal failures (serve.go:1321)
 			return []any{&proto.Failure{
 				Code:    "Neo.TransientError.General.RequestInterrupted",
 				Message: ctx.Err().Error(),
@@ -2324,7 +2325,7 @@ func exprToPackstream(v any, boltMajor uint8) packstream.Value {
 // by [packstream.Encoder.WriteValue] with the typed packstream.ErrNestingTooDeep
 // — a clean per-query error — rather than being silently truncated here.
 //
-//nolint:gocyclo,cyclop // dispatch over all expr.Value kinds; complexity is irreducible
+//nolint:gocyclo // dispatch over all expr.Value kinds; complexity is irreducible
 func exprValueToPackstream(v expr.Value, boltMajor uint8) packstream.Value {
 	if v == nil {
 		return nil

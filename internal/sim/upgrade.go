@@ -205,6 +205,7 @@ func CheckCorruptImageRejected(ctx context.Context, seed uint64) error {
 	// past the bad frame).
 	reopened, err := OpenSimStore(disk, simulatorStoreConfig())
 	if err != nil {
+		//nolint:nilerr // polarity inversion: a rejected reopen IS the pass verdict for the fail-stop contract; the failure verdict is the error returned at upgrade.go:212 and asserted by upgrade_test.go:81
 		return nil // correct: corruption rejected fail-stop.
 	}
 	_ = reopened.Close()

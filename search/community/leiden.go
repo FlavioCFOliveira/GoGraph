@@ -713,6 +713,7 @@ var graphBufFreeListPool = sync.Pool{New: func() any { return &graphBufFreeList{
 // acquireBufFreeList borrows a (possibly pre-populated) free list from the
 // cross-call pool.
 func acquireBufFreeList() *graphBufFreeList {
+	//nolint:forcetypeassert // graphBufFreeListPool is an unexported package-level sync.Pool whose New returns *graphBufFreeList, and every Put in this package passes *graphBufFreeList
 	return graphBufFreeListPool.Get().(*graphBufFreeList)
 }
 
@@ -822,6 +823,7 @@ type aggScratch struct {
 
 var aggScratchPool = sync.Pool{New: func() any { return &aggScratch{} }}
 
+//nolint:forcetypeassert // aggScratchPool is an unexported package-level sync.Pool whose New returns *aggScratch, and every Put in this package passes *aggScratch
 func acquireAggScratch() *aggScratch { return aggScratchPool.Get().(*aggScratch) }
 
 func releaseAggScratch(sc *aggScratch) { aggScratchPool.Put(sc) }

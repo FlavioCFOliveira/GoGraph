@@ -353,10 +353,10 @@ func TestBindParams_TypeConversions(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if int64(out["u"].(expr.IntegerValue)) != 7 { //nolint:forcetypeassert
+		if int64(out["u"].(expr.IntegerValue)) != 7 {
 			t.Errorf("uint: got %v", out["u"])
 		}
-		if int64(out["u64"].(expr.IntegerValue)) != 99 { //nolint:forcetypeassert
+		if int64(out["u64"].(expr.IntegerValue)) != 99 {
 			t.Errorf("uint64: got %v", out["u64"])
 		}
 	})
@@ -367,10 +367,10 @@ func TestBindParams_TypeConversions(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if float64(out["f32"].(expr.FloatValue)) != float64(float32(1.5)) { //nolint:forcetypeassert
+		if float64(out["f32"].(expr.FloatValue)) != float64(float32(1.5)) {
 			t.Errorf("float32: got %v", out["f32"])
 		}
-		if float64(out["f64"].(expr.FloatValue)) != 2.5 { //nolint:forcetypeassert
+		if float64(out["f64"].(expr.FloatValue)) != 2.5 {
 			t.Errorf("float64: got %v", out["f64"])
 		}
 	})

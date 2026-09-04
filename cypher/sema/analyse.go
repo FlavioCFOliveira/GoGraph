@@ -19,7 +19,7 @@ import (
 // registry; sema fails closed (no UnknownFunction reports) when the
 // hook is nil, preserving the pre-hook behaviour.
 //
-//nolint:gochecknoglobals // hook for cross-package wiring; set once at init
+// Hook for cross-package wiring; set once at init.
 var IsKnownFunction func(qualifiedLowerName string) bool
 
 // knownAggregates is the closed set of aggregate function names that

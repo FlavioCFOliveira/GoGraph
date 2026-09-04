@@ -21,7 +21,7 @@ func TestE2E_CreateRelationshipWithProperties(t *testing.T) {
 	driver, _ := newDriverForTest(t)
 
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer session.Close(ctx) //nolint:errcheck
+	defer session.Close(ctx)
 
 	// CREATE two nodes and a relationship with three properties.
 	runWrite(ctx, t, session,

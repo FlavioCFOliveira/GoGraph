@@ -669,8 +669,8 @@ func pageRankBuildReverseStructure(verts []uint64, edges []graph.NodeID, n int) 
 //
 // Complexity: O(V + E) work per iterate call, O(workers) extra space.
 type pageRankEngine struct {
-	ctx      context.Context
-	done     chan int // fan-in: each worker reports its index on completion
+	ctx      context.Context //nolint:containedctx // per-run cancellation scope for the worker fan-out; pageRankEngine is constructed inside a single PageRank call and discarded with it, so the context never outlives the call
+	done     chan int        // fan-in: each worker reports its index on completion
 	quit     chan struct{}
 	revVerts []uint64
 	revEdges []graph.NodeID

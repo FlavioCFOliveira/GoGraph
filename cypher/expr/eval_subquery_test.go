@@ -17,7 +17,7 @@ import (
 type fakeSubEval struct {
 	existsResult bool
 	countResult  int64
-	gotCtx       context.Context
+	gotCtx       context.Context //nolint:containedctx // the test fake records the context EvalWith passed so the test can assert it was threaded through
 }
 
 func (f *fakeSubEval) EvalExists(ctx context.Context, _ *ast.ExistsSubquery, _ RowContext, _ map[string]Value) (Value, error) {

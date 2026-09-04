@@ -163,6 +163,7 @@ func WriteEdgeHandles[N comparable, W any](w io.Writer, g *lpg.Graph[N, W], at *
 			if uint64(len(n)) > uint64(^uint32(0)) {
 				return fmt.Errorf("snapshot: edgehandles string too long: %d bytes", len(n))
 			}
+			//nolint:gosec // G115: bounded by the len(n) > MaxUint32 fail-stop at edgehandles.go:163, which rejects the write before the prefix is emitted
 			if err := writeU32(uint32(len(n))); err != nil {
 				return err
 			}
@@ -227,6 +228,7 @@ func writeEdgeHandleRecord(w io.Writer, scratch []byte, r *edgeHandleRaw, labelI
 	binary.LittleEndian.PutUint64(scratch[0:8], r.src)
 	binary.LittleEndian.PutUint64(scratch[8:16], r.dst)
 	binary.LittleEndian.PutUint64(scratch[16:24], r.handle)
+	//nolint:gosec // G115: NO writer guard; overflow needs 2^32 labels on ONE edge handle, i.e. >=64 GiB of string headers, so it is unreachable in addressable memory
 	binary.LittleEndian.PutUint32(scratch[24:28], uint32(len(r.labels)))
 	if _, err := w.Write(scratch[:28]); err != nil {
 		return 0, err
@@ -243,6 +245,7 @@ func writeEdgeHandleRecord(w io.Writer, scratch []byte, r *edgeHandleRaw, labelI
 		}
 		total += 4
 	}
+	//nolint:gosec // G115: NO writer guard; overflow needs 2^32 properties on ONE edge handle, i.e. >=64 GiB of headers; the reader clamps its allocation via capHint at edgehandles.go:478
 	binary.LittleEndian.PutUint32(scratch[0:4], uint32(len(r.propKeys)))
 	if _, err := w.Write(scratch[:4]); err != nil {
 		return 0, err
@@ -260,6 +263,7 @@ func writeEdgeHandleRecord(w io.Writer, scratch []byte, r *edgeHandleRaw, labelI
 		// Per-property header: keyIdx(4) | kind(1) | valLen(4) = 9 bytes.
 		binary.LittleEndian.PutUint32(scratch[0:4], ki)
 		scratch[4] = byte(r.propVals[j].Kind())
+		//nolint:gosec // G115: NO GUARD: unlike properties.go:366/398 this writer never checks len(valBytes) before the uint32 prefix, so a property value >=4 GiB truncates here. Tracked as a lead from #2708
 		binary.LittleEndian.PutUint32(scratch[5:9], uint32(len(valBytes)))
 		if _, err := w.Write(scratch[:9]); err != nil {
 			return 0, err

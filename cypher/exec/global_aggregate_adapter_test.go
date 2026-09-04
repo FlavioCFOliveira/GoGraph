@@ -33,7 +33,7 @@ func (op *emptyChildOp) Close() error                 { op.closeCalls++; return 
 type fixedRowOp struct {
 	rows     []Row
 	cursor   int
-	ctxCheck context.Context
+	ctxCheck context.Context //nolint:containedctx // the test fake records the context it was handed so the test can assert the adapter threaded it through
 }
 
 func (op *fixedRowOp) Init(ctx context.Context) error { op.ctxCheck = ctx; op.cursor = 0; return nil }

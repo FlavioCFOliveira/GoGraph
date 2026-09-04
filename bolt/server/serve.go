@@ -1472,6 +1472,7 @@ var respBufPool = sync.Pool{
 // sendResponse encodes a single proto response message and writes it as a
 // chunked Bolt message, reusing a pooled buffer+encoder (#1518).
 func sendResponse(cw *proto.ChunkedWriter, msg any) error {
+	//nolint:forcetypeassert // respBufPool is an unexported package-level sync.Pool whose New returns *respBuf, and every Put in this package passes *respBuf, so Get cannot yield another type
 	rb := respBufPool.Get().(*respBuf)
 	// Reset the encoder's internal bufio.Writer (discards any bytes left
 	// buffered by a prior mid-encode error) and clear the byte buffer.

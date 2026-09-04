@@ -633,6 +633,7 @@ func (c *Checkpointer[N, W]) loop(ctx context.Context) {
 func (c *Checkpointer[N, W]) runCheckpoint() error {
 	start := c.clk.Now()
 	defer func() {
+		//nolint:gosec // G115: Since is never negative: clock.Clock is an internal/ package so implementers are module-closed; realClock uses monotonic time.Since and Fake clamps Advance/Set (internal/clock/fake.go:92,106)
 		c.lastDuration.Store(uint64(c.clk.Since(start).Nanoseconds()))
 	}()
 	return c.runNonBlocking()

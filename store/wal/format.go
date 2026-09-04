@@ -135,6 +135,7 @@ func Encode(w io.Writer, f Frame) (int, error) {
 	if f.Version == 0 {
 		f.Version = CurrentVersion
 	}
+	//nolint:gosec // G115: UNGUARDED on encode. Decode rejects plen>maxFrameSize=1<<30 at format.go:210, so a 1-4 GiB payload writes a frame replay is required to refuse. Lead from #2708
 	plen := uint32(len(f.Payload))
 
 	// Build the 14-byte header on the stack — no per-frame heap allocation.

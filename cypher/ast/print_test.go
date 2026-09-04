@@ -363,9 +363,8 @@ func validQueryGen() *rapid.Generator[string] {
 		hasVar := rapid.Bool().Draw(t, "hasVar")
 		hasLabel := rapid.Bool().Draw(t, "hasLabel")
 		out := "("
-		varName := ""
 		if hasVar {
-			varName = varNames.Draw(t, "var")
+			varName := varNames.Draw(t, "var")
 			out += varName
 		}
 		if hasLabel {

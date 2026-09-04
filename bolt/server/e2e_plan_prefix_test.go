@@ -30,7 +30,7 @@ func TestE2E_PlanPrefix_ExplainPopulatesPlan(t *testing.T) {
 	ctx := context.Background()
 	driver, _ := newDriverForTest(t)
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer session.Close(ctx) //nolint:errcheck
+	defer session.Close(ctx)
 
 	if _, err := session.Run(ctx, `CREATE (:Plan {n: 1}), (:Plan {n: 2})`, nil); err != nil {
 		t.Fatalf("seed: %v", err)
@@ -100,7 +100,7 @@ func TestE2E_PlanPrefix_ProfilePopulatesProfileAndReturnsRows(t *testing.T) {
 	ctx := context.Background()
 	driver, _ := newDriverForTest(t)
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer session.Close(ctx) //nolint:errcheck
+	defer session.Close(ctx)
 
 	if _, err := session.Run(ctx, `CREATE (:Prof {n: 1}), (:Prof {n: 2}), (:Prof {n: 3})`, nil); err != nil {
 		t.Fatalf("seed: %v", err)
@@ -155,7 +155,7 @@ func TestE2E_PlanPrefix_ProfileSurvivesDiscard(t *testing.T) {
 	// FetchSize 1 guarantees the first PULL reports has_more, so Consume ends the
 	// stream with a DISCARD rather than with the PULL that already exhausted it.
 	session := driver.NewSession(ctx, neo4j.SessionConfig{FetchSize: 1})
-	defer session.Close(ctx) //nolint:errcheck
+	defer session.Close(ctx)
 
 	if _, err := session.Run(ctx, `CREATE (:Disc {n: 1}), (:Disc {n: 2}), (:Disc {n: 3}), (:Disc {n: 4})`, nil); err != nil {
 		t.Fatalf("seed: %v", err)
@@ -186,7 +186,7 @@ func TestE2E_PlanPrefix_ExplainOfWriteChangesNothing(t *testing.T) {
 	ctx := context.Background()
 	driver, _ := newDriverForTest(t)
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer session.Close(ctx) //nolint:errcheck
+	defer session.Close(ctx)
 
 	count := func() int64 {
 		t.Helper()

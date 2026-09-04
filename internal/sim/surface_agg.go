@@ -466,5 +466,6 @@ func surfaceScalar(ctx context.Context, engine *EngineAdapter, query string) (in
 // reaching through the concrete result adapter exactly as [CheckExprLiterals]
 // does — the checker's narrow [Result] view has no float or list accessor.
 func rawValueAt(res Result, i int) expr.Value {
+	//nolint:forcetypeassert // res is produced by this harness's own engine adapter, whose only result implementation is *resultAdapter
 	return res.(*resultAdapter).res.ValueAt(i)
 }

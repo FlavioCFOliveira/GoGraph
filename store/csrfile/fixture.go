@@ -46,6 +46,7 @@ func BuildFixture(spec FixtureSpec) (*csr.CSR[struct{}], error) {
 		}
 	}
 	r := rand.New(rand.NewPCG(spec.Seed, 0x9E3779B97F4A7C15)) //nolint:gosec // deterministic fixture RNG
+	//nolint:gosec // G115: UNGUARDED. Vertices>=1<<32 truncates, and Vertices==1<<32 makes universe 0 so fixture.go:52 divides by zero - the same panic Vertices==0 with Edges>0 reaches today. Lead from #2708
 	universe := uint32(spec.Vertices)
 	for i := uint64(0); i < spec.Edges; i++ {
 		src := uint32(r.Uint32() % universe)

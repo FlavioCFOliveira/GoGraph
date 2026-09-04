@@ -54,7 +54,7 @@ import (
 // on it so an eligibility change cannot silently stop firing — the runtime
 // counter, never another rendering.
 //
-//nolint:gochecknoglobals // process-wide diagnostic counter, matching degreeRewriteCount
+// Process-wide diagnostic counter, matching degreeRewriteCount.
 var labelledHopRewriteCount atomic.Uint64
 
 // labelledHopShape describes a recognised `(anchor)-[:T]->(:L…)` pattern: a

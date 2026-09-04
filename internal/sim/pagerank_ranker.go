@@ -319,9 +319,9 @@ const prLabelKeyType = "pprof.labelContextKey"
 // prLabelProbe is safe for concurrent use: the engine's workers look up the
 // label key from their own goroutines, and both counters are atomic.
 type prLabelProbe struct {
-	context.Context
-	label atomic.Int64
-	other atomic.Int64
+	context.Context //nolint:containedctx // this probe IS a context.Context implementation: it embeds the parent and counts Value lookups by label; both counters are atomic, as the type's godoc states
+	label           atomic.Int64
+	other           atomic.Int64
 }
 
 // Value counts the lookup and delegates.

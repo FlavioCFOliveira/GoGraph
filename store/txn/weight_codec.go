@@ -128,6 +128,7 @@ func (binaryMarshalerWeightCodec[W, P]) Encode(buf []byte, w W) ([]byte, error) 
 	if uint64(len(data)) > math.MaxUint32 {
 		return buf, fmt.Errorf("txn/weight_codec: BinaryMarshaler payload exceeds uint32 (%d bytes)", len(data))
 	}
+	//nolint:gosec // G115: bounded by the len(data)>math.MaxUint32 rejection at weight_codec.go:128, three lines above, so the cast is unreachable for any oversize payload
 	buf = binary.LittleEndian.AppendUint32(buf, uint32(len(data)))
 	return append(buf, data...), nil
 }

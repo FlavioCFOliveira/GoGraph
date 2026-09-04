@@ -106,7 +106,7 @@ func (r *Registry) Resolve(name string) (expr.BuiltinFn, bool) {
 // DefaultRegistry is the pre-populated registry containing all essential
 // built-ins. It is safe for concurrent use.
 //
-//nolint:gochecknoglobals // package-level singleton; immutable after init
+// Package-level singleton; immutable after init.
 var DefaultRegistry = buildDefaultRegistry()
 
 func buildDefaultRegistry() *Registry {
@@ -794,6 +794,7 @@ func fnToFloat(args []expr.Value) (expr.Value, error) {
 	case expr.StringValue:
 		f, err := strconv.ParseFloat(strings.TrimSpace(string(v)), 64)
 		if err != nil {
+			//nolint:nilerr // an unparseable string yields NULL per openCypher, pinned by TCK TypeConversion3.feature scenario [2]; the type-error path stays an error at essentials.go:802
 			return expr.Null, nil // non-parseable → NULL
 		}
 		return expr.FloatValue(f), nil

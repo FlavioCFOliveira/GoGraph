@@ -2237,6 +2237,7 @@ func decodeValue[V comparable](b []byte) (V, error) {
 // assignAny copies src into *dst, treating dst as an any. The
 // caller must guarantee dst's concrete type matches src.
 func assignAny[V any](dst *V, src any) {
+	//nolint:forcetypeassert // a Go type switch matches the EXACT dynamic type, so inside each case of the caller's switch V is identically that case's type and src is a literal built in the same case; a defined type falls to default and is rejected before reaching here
 	*dst = src.(V)
 }
 

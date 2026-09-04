@@ -116,7 +116,7 @@ func TestServer_TLS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TLS dial: %v", err)
 	}
-	defer tlsConn.Close() //nolint:errcheck
+	defer tlsConn.Close()
 
 	_ = tlsConn.SetDeadline(time.Now().Add(5 * time.Second))
 
@@ -139,7 +139,7 @@ func TestServer_TLS(t *testing.T) {
 	}
 
 	// Shutdown the server.
-	tlsConn.Close() //nolint:errcheck
+	tlsConn.Close()
 	shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutCancel()
 	if err := srv.Shutdown(shutCtx); err != nil {

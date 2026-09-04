@@ -1732,6 +1732,7 @@ var applySlotPool = sync.Pool{
 	New: func() any { return make(chan struct{}, 1) },
 }
 
+//nolint:forcetypeassert // applySlotPool is an unexported package-level sync.Pool whose New returns chan struct{}, and every Put in this package passes chan struct{}
 func acquireApplySlot() chan struct{} { return applySlotPool.Get().(chan struct{}) }
 
 func releaseApplySlot(ch chan struct{}) { applySlotPool.Put(ch) }
@@ -1977,6 +1978,7 @@ var encodeScratchPool = sync.Pool{
 
 // getEncodeScratch borrows a zero-length, capacity-retaining scratch buffer.
 func getEncodeScratch() *[]byte {
+	//nolint:forcetypeassert // encodeScratchPool is an unexported package-level sync.Pool whose New returns *[]byte, and every Put in this package passes *[]byte
 	return encodeScratchPool.Get().(*[]byte)
 }
 
@@ -2150,10 +2152,13 @@ func appendOpConstraintBody[N comparable, W any](buf []byte, op Op[N, W]) ([]byt
 		return nil, err
 	}
 	buf = append(buf, byte(op.ConstraintKind))
+	//nolint:gosec // G115: bounded by checkWALSchemaString("constraint label") at txn.go:2145, which fail-stops any identifier over maxWALSchemaStringLen (65535) before this prefix is written
 	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Label)))
 	buf = append(buf, op.Label...)
+	//nolint:gosec // G115: bounded by checkWALSchemaString("constraint property") at txn.go:2148, which fail-stops any identifier over maxWALSchemaStringLen (65535)
 	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Key)))
 	buf = append(buf, op.Key...)
+	//nolint:gosec // G115: bounded by checkWALSchemaString("constraint name") at txn.go:2151, which fail-stops any identifier over maxWALSchemaStringLen (65535)
 	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.ConstraintName)))
 	buf = append(buf, op.ConstraintName...)
 	return buf, nil
@@ -2198,10 +2203,13 @@ func appendOpIndexBody[N comparable, W any](buf []byte, op Op[N, W]) ([]byte, er
 		return nil, err
 	}
 	buf = append(buf, byte(op.IndexKind))
+	//nolint:gosec // G115: bounded by checkWALSchemaString("index name") at txn.go:2196, which fail-stops any identifier over maxWALSchemaStringLen (65535)
 	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.ConstraintName)))
 	buf = append(buf, op.ConstraintName...)
+	//nolint:gosec // G115: bounded by checkWALSchemaString("index label") at txn.go:2199, which fail-stops any identifier over maxWALSchemaStringLen (65535)
 	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Label)))
 	buf = append(buf, op.Label...)
+	//nolint:gosec // G115: bounded by checkWALSchemaString("index property") at txn.go:2202, which fail-stops any identifier over maxWALSchemaStringLen (65535)
 	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Key)))
 	buf = append(buf, op.Key...)
 	return buf, nil
@@ -2218,6 +2226,7 @@ func encodeOpNodeOnly[N comparable, W any](buf []byte, op Op[N, W], codec Codec[
 	if buf, err = codec.Encode(buf, zero); err != nil {
 		return nil, err
 	}
+	//nolint:gosec // G115: UNGUARDED, unlike the sibling schema encoders at txn.go:2145-2151. REPRODUCED: a 65536-byte node label recovers as 0 bytes and a 70000-byte one as a WRONG 4464 bytes, with Commit returning nil. Lead from #2708
 	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Label)))
 	buf = append(buf, op.Label...)
 	return buf, nil
@@ -2234,6 +2243,7 @@ func encodeOpNodeProperty[N comparable, W any](buf []byte, op Op[N, W], codec Co
 	if buf, err = codec.Encode(buf, zero); err != nil {
 		return nil, err
 	}
+	//nolint:gosec // G115: UNGUARDED, unlike the sibling schema encoders at txn.go:2145-2151; a property key over 65535 bytes silently truncates its length prefix and corrupts the WAL record. Lead from #2708
 	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Key)))
 	buf = append(buf, op.Key...)
 	if op.Kind == OpSetNodeProperty {
@@ -2266,6 +2276,7 @@ func encodeOpEdgeProperty[N comparable, W any](buf []byte, op Op[N, W], codec Co
 	if buf, err = codec.Encode(buf, op.Dst); err != nil {
 		return nil, err
 	}
+	//nolint:gosec // G115: UNGUARDED, unlike the sibling schema encoders at txn.go:2145-2151; an edge property key over 65535 bytes silently truncates its length prefix. Lead from #2708
 	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Key)))
 	buf = append(buf, op.Key...)
 	if op.Kind == OpSetEdgeProperty || op.Kind == OpSetEdgePropertyByHandle {
@@ -2289,6 +2300,7 @@ func encodeOpEdgeWeighted[N comparable, W any](buf []byte, op Op[N, W], codec Co
 			return nil, err
 		}
 	}
+	//nolint:gosec // G115: UNGUARDED, unlike the sibling schema encoders at txn.go:2145-2151; an edge label over 65535 bytes silently truncates its length prefix. Lead from #2708
 	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Label)))
 	buf = append(buf, op.Label...)
 	return buf, nil
@@ -2304,6 +2316,7 @@ func encodeOpEdgeWithLabel[N comparable, W any](buf []byte, op Op[N, W], codec C
 	if buf, err = codec.Encode(buf, op.Dst); err != nil {
 		return nil, err
 	}
+	//nolint:gosec // G115: UNGUARDED, unlike the sibling schema encoders at txn.go:2145-2151; a node or edge label over 65535 bytes silently truncates its length prefix. Lead from #2708
 	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Label)))
 	buf = append(buf, op.Label...)
 	return buf, nil
@@ -2335,6 +2348,7 @@ func encodePropertyValue(buf []byte, v lpg.PropertyValue) []byte {
 	switch v.Kind() {
 	case lpg.PropString:
 		s, _ := v.String()
+		//nolint:gosec // G115: UNGUARDED. No caller bounds len(s); a string >=4 GiB truncates to a wrong prefix. checkWALSchemaString (txn.go:2176) guards schema ops only, never property values
 		buf = binary.LittleEndian.AppendUint32(buf, uint32(len(s)))
 		buf = append(buf, s...)
 	case lpg.PropInt64:
@@ -2355,6 +2369,7 @@ func encodePropertyValue(buf []byte, v lpg.PropertyValue) []byte {
 		buf = binary.AppendVarint(buf, t.UnixNano())
 	case lpg.PropBytes:
 		bs, _ := v.Bytes()
+		//nolint:gosec // G115: UNGUARDED. No caller bounds len(bs); a byte value >=4 GiB truncates to a wrong prefix. checkWALSchemaString (txn.go:2176) guards schema ops only
 		buf = binary.LittleEndian.AppendUint32(buf, uint32(len(bs)))
 		buf = append(buf, bs...)
 	case lpg.PropList:
@@ -2370,6 +2385,7 @@ func encodePropertyValue(buf []byte, v lpg.PropertyValue) []byte {
 //	element-count × ( uint8 elem-kind | uint32 elem-payload-len | [elem-payload-len]byte elem-payload )
 func encodeTxnListProp(buf []byte, v lpg.PropertyValue) []byte {
 	elems, _ := v.List()
+	//nolint:gosec // G115: UNGUARDED. No caller bounds len(elems); >=2^32 elements truncate the count. The decoder clamps its cap hint (txnListCapHint, txn.go:2468); the encoder has no bound
 	buf = binary.LittleEndian.AppendUint32(buf, uint32(len(elems)))
 	for _, elem := range elems {
 		// Encode the element into a temporary buffer to measure its length.
@@ -2400,6 +2416,7 @@ func encodeTxnListProp(buf []byte, v lpg.PropertyValue) []byte {
 			payload = append(payload, bs...)
 		}
 		buf = append(buf, byte(elem.Kind()))
+		//nolint:gosec // G115: UNGUARDED. No caller bounds len(payload); an element >=4 GiB truncates. The decoder bounds payloadLen against the buffer (txn.go:2505); the encoder does not
 		buf = binary.LittleEndian.AppendUint32(buf, uint32(len(payload)))
 		buf = append(buf, payload...)
 	}
