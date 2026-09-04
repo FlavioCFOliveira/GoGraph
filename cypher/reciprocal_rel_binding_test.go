@@ -52,7 +52,7 @@ func runSeed(t *testing.T, eng *cypher.Engine, seed []string) {
 		if err != nil {
 			t.Fatalf("seed %q: %v", q, err)
 		}
-		for res.Next() { //nolint:revive // drain the writer so the statement commits
+		for res.Next() { // drain the writer so the statement commits
 		}
 		if err := res.Err(); err != nil {
 			res.Close()
@@ -204,7 +204,7 @@ func TestReciprocalRelBinding_DurableStore(t *testing.T) {
 		if rerr != nil {
 			t.Fatalf("seed %q: %v", q, rerr)
 		}
-		for res.Next() { //nolint:revive // drain before commit
+		for res.Next() { // drain before commit
 		}
 		if cerr := res.Close(); cerr != nil {
 			t.Fatalf("seed commit %q: %v", q, cerr)

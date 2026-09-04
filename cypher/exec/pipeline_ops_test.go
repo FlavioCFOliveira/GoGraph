@@ -300,7 +300,7 @@ func TestEagerAggregation_Collect(t *testing.T) {
 	collected := make(map[string]int)
 	for _, row := range result {
 		k := string(row[0].(expr.StringValue))
-		lv := row[1].(expr.ListValue) //nolint:forcetypeassert // test assertion
+		lv := row[1].(expr.ListValue) // test assertion
 		collected[k] = len(lv)
 	}
 	if collected["A"] != 2 {

@@ -63,7 +63,7 @@ func main() {
 // threshold; 0 otherwise.
 func run() int {
 	flag.Parse()
-	if err := os.MkdirAll(*flagOutDir, 0o750); err != nil { //nolint:gosec // owner-visible profile dir
+	if err := os.MkdirAll(*flagOutDir, 0o750); err != nil { // owner-visible profile dir
 		log.Printf("mkdir out: %v", err)
 		return 1
 	}
@@ -140,7 +140,7 @@ func reader(ctx context.Context, wg *sync.WaitGroup, snap *atomic.Pointer[csr.CS
 		default:
 		}
 		c := snap.Load()
-		src := graph.NodeID(r.IntN(int(c.MaxNodeID())))
+		src := graph.NodeID(r.IntN(int(c.MaxNodeID()))) //nolint:gosec // G115: MaxNodeID is bounded by the node count this soak generated, which is orders of magnitude below MaxInt.
 		switch r.IntN(2) {
 		case 0:
 			search.BFS(c, src, func(_ graph.NodeID, _ int) bool { return true })
@@ -159,7 +159,7 @@ func writer(ctx context.Context, wg *sync.WaitGroup, a *adjlist.AdjList[int, int
 	defer ticker.Stop()
 	rebuildTicker := time.NewTicker(2 * time.Second)
 	defer rebuildTicker.Stop()
-	n := int(a.MaxNodeID())
+	n := int(a.MaxNodeID()) //nolint:gosec // G115: MaxNodeID is bounded by the node count this soak generated, which is orders of magnitude below MaxInt.
 	for {
 		select {
 		case <-ctx.Done():

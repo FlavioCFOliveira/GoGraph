@@ -69,7 +69,7 @@ func TestGlobalAggregateAdapter_EmptyInputEmitsNeutralRow(t *testing.T) {
 	if err := adapter.Init(context.Background()); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
-	defer adapter.Close() //nolint:errcheck // best effort
+	defer adapter.Close() // best effort
 
 	// First Next: empty child → synthetic neutral row.
 	var row Row
@@ -121,7 +121,7 @@ func TestGlobalAggregateAdapter_NonEmptyPassThrough(t *testing.T) {
 	if err := adapter.Init(context.Background()); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
-	defer adapter.Close() //nolint:errcheck // best effort
+	defer adapter.Close() // best effort
 
 	var row Row
 	ok, err := adapter.Next(&row)

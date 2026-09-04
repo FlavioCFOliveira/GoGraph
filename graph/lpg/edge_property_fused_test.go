@@ -271,7 +271,7 @@ func TestFused_EquivalenceUndirected(t *testing.T) {
 // broad differential check that the fused path never diverges from the contract.
 func TestFused_RandomisedEquivalence(t *testing.T) {
 	t.Parallel()
-	rng := rand.New(rand.NewSource(0x1646))
+	rng := rand.New(rand.NewSource(0x1646)) //nolint:gosec // G404: math/rand seeded from a fixed constant — this test asserts a reproducible sequence, which a CSPRNG would destroy.
 	ref := New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
 	fused := New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
 	const sources = 50

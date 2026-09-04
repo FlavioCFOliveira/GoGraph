@@ -345,7 +345,7 @@ type boltWireReader struct {
 // It carries one arm per PackStream marker family; splitting the table would hide
 // the very thing the reader exists to make readable.
 //
-//nolint:gocyclo // the marker table is the point; see above.
+// the marker table is the point; see above.
 func (r *boltWireReader) value(depth int) (any, error) {
 	if depth > boltWireMaxDepth {
 		return nil, fmt.Errorf("packstream: nesting deeper than %d at offset %d", boltWireMaxDepth, r.i)
@@ -1295,7 +1295,7 @@ func (r *boltVersionRunner) driveArm(ctx context.Context, t *boltVersionTarget) 
 	c, got, err := r.connectAt(ctx, exactSlots(t.Version))
 	if err != nil {
 		arm.NegotiateErr = "canonical-rejected"
-		return arm, nil //nolint:nilerr // a refused negotiation is EVIDENCE; the clause below adjudicates it.
+		return arm, nil // a refused negotiation is EVIDENCE; the clause below adjudicates it.
 	}
 	arm.Canonical = got
 	r.probeGoodCredentials(c, &arm)
@@ -1319,7 +1319,7 @@ func (r *boltVersionRunner) driveArm(ctx context.Context, t *boltVersionTarget) 
 	work, spelled, err := r.connectAt(ctx, slots)
 	if err != nil {
 		arm.NegotiateErr = "spelled-rejected"
-		return arm, nil //nolint:nilerr // a refused negotiation is EVIDENCE; the clause below adjudicates it.
+		return arm, nil // a refused negotiation is EVIDENCE; the clause below adjudicates it.
 	}
 	arm.Spelled = spelled
 	defer func() { _ = work.Close() }()
@@ -2163,7 +2163,7 @@ func checkBoltVersionLogonContract(e *BoltVersionMatrixEvidence) []Violation {
 // It carries one branch per probe per side of the 5.1 split; the paired shape is
 // what makes the contract readable, and splitting it would scatter the pairing.
 //
-//nolint:gocyclo // the paired table is the point; see above.
+// the paired table is the point; see above.
 func checkBoltVersionArmAuth(a *BoltVersionArm, t *boltVersionTarget) []Violation {
 	var v []Violation
 	p := &a.Auth

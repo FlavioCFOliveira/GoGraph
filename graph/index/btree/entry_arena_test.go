@@ -57,7 +57,7 @@ func TestEntryArenaAllocIsDistinctAndZeroed(t *testing.T) {
 		}
 		// Write through it, so a later alloc that aliased this slot would be
 		// caught by the emptiness check above rather than only by the map.
-		e.set.Add(uint64(i)) //nolint:gosec // G115: i is a bounded non-negative loop index
+		e.set.Add(uint64(i)) // G115: i is a bounded non-negative loop index
 	}
 	if len(seen) != n {
 		t.Fatalf("got %d distinct entries, want %d", len(seen), n)
@@ -76,7 +76,7 @@ func TestEntryPointersAreDistinctPerKey(t *testing.T) {
 	t.Run("insert", func(t *testing.T) {
 		ix := New[int64]()
 		for i := range keys {
-			ix.Insert(int64(i), graph.NodeID(uint64(i))) //nolint:gosec // G115: bounded non-negative
+			ix.Insert(int64(i), graph.NodeID(uint64(i))) // G115: bounded non-negative
 		}
 		assertDistinctEntries(t, ix, keys)
 	})
@@ -86,7 +86,7 @@ func TestEntryPointersAreDistinctPerKey(t *testing.T) {
 		nodes := make([]graph.NodeID, keys)
 		for i := range values {
 			values[i] = int64(i)
-			nodes[i] = graph.NodeID(uint64(i)) //nolint:gosec // G115: bounded non-negative
+			nodes[i] = graph.NodeID(uint64(i)) // G115: bounded non-negative
 		}
 		ix := New[int64]()
 		if err := ix.BulkLoadSorted(values, nodes); err != nil {
@@ -115,7 +115,7 @@ func assertDistinctEntries(t *testing.T, ix *Index[int64], keys int) {
 		if got := ix.Cardinality(k); got != 1 {
 			t.Fatalf("key %d has cardinality %d, want 1", k, got)
 		}
-		if bm := ix.Lookup(k); bm == nil || !bm.Contains(uint64(i)) { //nolint:gosec // G115: bounded non-negative
+		if bm := ix.Lookup(k); bm == nil || !bm.Contains(uint64(i)) { // G115: bounded non-negative
 			t.Fatalf("key %d does not hold node %d", k, i)
 		}
 	}
@@ -134,12 +134,12 @@ func TestEntryIdentitySurvivesPathCopy(t *testing.T) {
 	before := make(map[int64]*entry, seeded)
 	for i := range seeded {
 		k := int64(i * 1000)
-		ix.Insert(k, graph.NodeID(uint64(i))) //nolint:gosec // G115: bounded non-negative
+		ix.Insert(k, graph.NodeID(uint64(i))) // G115: bounded non-negative
 		before[k] = ix.tree.Load().get(k)
 	}
 	// Force many splits and several levels of path copying around them.
 	for i := range 20000 {
-		ix.Insert(int64(i), graph.NodeID(uint64(1_000_000+i))) //nolint:gosec // G115: bounded non-negative
+		ix.Insert(int64(i), graph.NodeID(uint64(1_000_000+i))) // G115: bounded non-negative
 	}
 	for k, want := range before {
 		got := ix.tree.Load().get(k)
@@ -160,18 +160,18 @@ func TestDetachedEntrySlotIsNeverHandedToANewKey(t *testing.T) {
 	dead := make(map[*entry]bool, n)
 	for i := range n {
 		k := int64(i)
-		ix.Insert(k, graph.NodeID(uint64(i))) //nolint:gosec // G115: bounded non-negative
+		ix.Insert(k, graph.NodeID(uint64(i))) // G115: bounded non-negative
 		dead[ix.tree.Load().get(k)] = true
 	}
 	for i := range n {
-		ix.Delete(int64(i), graph.NodeID(uint64(i))) //nolint:gosec // G115: bounded non-negative
+		ix.Delete(int64(i), graph.NodeID(uint64(i))) // G115: bounded non-negative
 	}
 	if got := ix.DistinctValues(); got != 0 {
 		t.Fatalf("index still holds %d keys after deleting all of them", got)
 	}
 	for i := range n {
 		k := int64(1000 + i)
-		ix.Insert(k, graph.NodeID(uint64(2000+i))) //nolint:gosec // G115: bounded non-negative
+		ix.Insert(k, graph.NodeID(uint64(2000+i))) // G115: bounded non-negative
 		if e := ix.tree.Load().get(k); dead[e] {
 			t.Fatalf("new key %d was given the slot of a detached entry (%p)", k, e)
 		}

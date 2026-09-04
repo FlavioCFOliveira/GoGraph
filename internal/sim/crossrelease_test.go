@@ -157,7 +157,7 @@ func repoRoot(t *testing.T) string {
 // repo root for the caller.
 func requireTagOrSkip(t *testing.T, root, tag string) {
 	t.Helper()
-	if err := exec.Command("git", "-C", root, "rev-parse", "--verify", "--quiet", "refs/tags/"+tag).Run(); err != nil {
+	if err := exec.Command("git", "-C", root, "rev-parse", "--verify", "--quiet", "refs/tags/"+tag).Run(); err != nil { //nolint:gosec // G204: fixed argv — git rev-parse against the repo root and a tag name the test derived from its own release table.
 		t.Skipf("cross-release: tag %s not present (environment precondition)", tag)
 	}
 }

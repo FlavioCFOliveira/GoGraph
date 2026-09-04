@@ -91,7 +91,7 @@ func execInTx(tx *cypher.ExplicitTx, q string) error {
 	if err != nil {
 		return err
 	}
-	for r.Next() { //nolint:revive // draining is the point
+	for r.Next() { // draining is the point
 	}
 	if rerr := r.Err(); rerr != nil {
 		_ = r.Close()

@@ -510,7 +510,7 @@ func parsePropLiteralDeferred(s string) ([]propLiteral, error) {
 			// Non-literal expression (variable ref, property access, arithmetic):
 			// silently defer. The physical builder is responsible for installing a
 			// PropsEvalFn that evaluates these at runtime.
-			continue //nolint:nilerr // intentional: non-literal values are deferred, not an error
+			continue // intentional: non-literal values are deferred, not an error
 		}
 		out = append(out, propLiteral{key: key, value: pv})
 	}
@@ -740,7 +740,7 @@ func parsePropLiteralWithParamsCtx(s string, params map[string]expr.Value, merge
 			}
 			// Non-literal expression or unresolvable param: silently defer.
 			// A PropsEvalFn is responsible for evaluating these at runtime.
-			continue //nolint:nilerr // intentional: non-literal values are deferred
+			continue // intentional: non-literal values are deferred
 		}
 		out = append(out, propLiteral{key: key, value: pv})
 	}

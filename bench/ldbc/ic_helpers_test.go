@@ -129,7 +129,7 @@ func startICServer(t *testing.T) (addr string, driver neo4j.DriverWithContext) {
 	t.Cleanup(func() {
 		shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer shutCancel()
-		_ = srv.Shutdown(shutCtx) //nolint:errcheck // shutdown errors not actionable in teardown
+		_ = srv.Shutdown(shutCtx) // shutdown errors not actionable in teardown
 		srvCancel()
 		select {
 		case <-serveErr:

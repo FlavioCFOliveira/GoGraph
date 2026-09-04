@@ -140,7 +140,7 @@ func TestRelationshipIdentity_SurvivesATopologyChangeInTheSameStatement(t *testi
 	if err != nil {
 		t.Fatalf("statement: %v", err)
 	}
-	for res.Next() { //nolint:revive // intentional full drain
+	for res.Next() { // intentional full drain
 	}
 	if err := res.Err(); err != nil {
 		t.Fatalf("drain: %v", err)

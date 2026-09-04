@@ -130,7 +130,7 @@ func TestWriteSnapshotCSRCtx_ParentFsyncSurfaceErrors(t *testing.T) {
 	// inside the locked-down parent; that itself fails before fsync.
 	// To keep the test focused on fsync, we restore the parent
 	// permissions to 0o750 and instead probe the helper directly.
-	t.Cleanup(func() { _ = os.Chmod(parent, 0o750) })
+	t.Cleanup(func() { _ = os.Chmod(parent, 0o750) }) //nolint:gosec // G302: 0o750 restores the traversal bit this test stripped to probe EACCES; without +x the temp dir cannot be removed at cleanup.
 
 	// Direct probe: confirm parentDirFsync fails when the parent is
 	// chmod 0 (cannot open even for read).

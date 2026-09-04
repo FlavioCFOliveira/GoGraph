@@ -655,7 +655,7 @@ var castagnoli = crc32.MakeTable(crc32.Castagnoli)
 // supported set matches [hash.Index] for the types that are both
 // comparable and ordered.
 //
-//nolint:gocyclo // type switch over supported ordered kinds
+// type switch over supported ordered kinds
 func encodeOrdered[V cmp.Ordered](v V) ([]byte, error) {
 	switch x := any(v).(type) {
 	case string:
@@ -694,7 +694,7 @@ func encodeOrdered[V cmp.Ordered](v V) ([]byte, error) {
 
 // decodeOrdered is the inverse of [encodeOrdered].
 //
-//nolint:gocyclo // type switch over supported ordered kinds
+// type switch over supported ordered kinds
 func decodeOrdered[V cmp.Ordered](b []byte) (V, error) {
 	var zero V
 	switch any(zero).(type) {
@@ -856,7 +856,7 @@ func (i *Index[V]) Serialize(w io.Writer) error {
 // graph. A single NaN entry in the leading position is the legitimate
 // post-fix encoding and loads normally.
 //
-//nolint:gocyclo // index deserialize: header + per-entry decode + per-step bounds checks
+// index deserialize: header + per-entry decode + per-step bounds checks
 func (i *Index[V]) Deserialize(r io.Reader) error {
 	all, err := io.ReadAll(r)
 	if err != nil {

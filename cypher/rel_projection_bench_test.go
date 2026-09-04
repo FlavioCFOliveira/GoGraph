@@ -66,7 +66,7 @@ func seedRelGraph(b testing.TB, eng *cypher.Engine, nNodes, fanout int) {
 		if err != nil {
 			b.Fatalf("seed %q: %v", q, err)
 		}
-		for res.Next() { //nolint:revive // intentional full drain
+		for res.Next() { // intentional full drain
 		}
 		if err := res.Err(); err != nil {
 			b.Fatalf("seed drain %q: %v", q, err)
@@ -104,7 +104,7 @@ func benchmarkRelProjection(b *testing.B, nNodes, fanout int) {
 		if err != nil {
 			b.Fatalf("Exec: %v", err)
 		}
-		for res.Next() { //nolint:revive // intentional full drain
+		for res.Next() { // intentional full drain
 		}
 		if err := res.Err(); err != nil {
 			b.Fatalf("drain: %v", err)
@@ -133,7 +133,7 @@ func BenchmarkScalarFilterProjection(b *testing.B) {
 		if err != nil {
 			b.Fatalf("seed: %v", err)
 		}
-		for res.Next() { //nolint:revive // drain
+		for res.Next() { // drain
 		}
 		_ = res.Close()
 	}
@@ -145,7 +145,7 @@ func BenchmarkScalarFilterProjection(b *testing.B) {
 		if err != nil {
 			b.Fatalf("Exec: %v", err)
 		}
-		for res.Next() { //nolint:revive // drain
+		for res.Next() { // drain
 		}
 		if err := res.Err(); err != nil {
 			b.Fatalf("drain: %v", err)

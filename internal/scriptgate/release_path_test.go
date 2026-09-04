@@ -10,7 +10,7 @@ import (
 // readRepoFile reads a repo-relative file or fails the test.
 func readRepoFile(t *testing.T, rel string) string {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join(repoRoot(t), rel))
+	b, err := os.ReadFile(filepath.Join(repoRoot(t), rel)) //nolint:gosec // G304: rel is a repo-relative path chosen by the caller; repoRoot(t) is located by walking up to go.mod.
 	if err != nil {
 		t.Fatalf("read %s: %v", rel, err)
 	}

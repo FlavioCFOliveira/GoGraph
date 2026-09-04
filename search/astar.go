@@ -122,7 +122,7 @@ func AStarInto[W Weight](
 //   - *path may be non-nil; it is truncated to 0 length before use
 //     and its underlying array is reused if cap permits.
 //
-//nolint:gocyclo // canonical A*: NaN/Inf gate + precondition checks + heap loop + reconstruction
+// canonical A*: NaN/Inf gate + precondition checks + heap loop + reconstruction
 func aStarCore[W Weight](
 	ctx context.Context,
 	c *csr.CSR[W],

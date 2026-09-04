@@ -510,7 +510,7 @@ func formatOffsetSec(secs int) string {
 // as "PT0S". Sub-second precision (Nanos) is folded into the seconds
 // component as a decimal fraction.
 //
-//nolint:gocyclo // Sequential ISO-8601 component emission; the branches are flat and uniform — splitting hides the layout.
+// Sequential ISO-8601 component emission; the branches are flat and uniform — splitting hides the layout.
 func formatDuration(d DurationValue) string {
 	if d.Months == 0 && d.Days == 0 && d.Seconds == 0 && d.Nanos == 0 {
 		return "PT0S"
@@ -605,7 +605,7 @@ func formatDuration(d DurationValue) string {
 // Returns NULL-able semantics: callers receiving an error should treat the
 // value as openCypher TYPE_ERROR (today: surfaced as expr.Null by the caller).
 //
-//nolint:gocyclo // ISO-8601 date is a multi-shape grammar; one switch over length+separator presence is the clearest realisation.
+// ISO-8601 date is a multi-shape grammar; one switch over length+separator presence is the clearest realisation.
 func ParseDate(s string) (DateValue, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -864,7 +864,7 @@ func ParseTime(s string) (TimeValue, error) {
 // offsetSec is set to 0 when no zone is present. Both compact (HHMMSS) and
 // extended (HH:MM:SS) forms are accepted.
 //
-//nolint:gocyclo,gocritic // Sequential extract of multiple optional fields; the named-result signature is the natural Go idiom for this multi-value parser.
+//nolint:gocritic // Sequential extract of multiple optional fields; the named-result signature is the natural Go idiom for this multi-value parser.
 func parseTimeComponents(s string) (h, m, sec, ns, offsetSec int, err error) {
 	// Extract the zone suffix first.
 	rest := s
@@ -1153,7 +1153,7 @@ func offsetLocation(offsetSec int) *time.Location {
 // internally the parser absorbs fractional months/days as fractional seconds added
 // to the appropriate component.
 //
-//nolint:gocyclo // Sequential state-machine over ISO-8601 duration components.
+// Sequential state-machine over ISO-8601 duration components.
 func ParseDuration(s string) (DurationValue, error) {
 	s = strings.TrimSpace(s)
 	if s == "" || (s[0] != 'P' && s[0] != 'p') {
@@ -1693,7 +1693,7 @@ func SubTimes(a, b TimeValue) DurationValue {
 //	  years, months, days, hours, minutes, seconds, milliseconds, microseconds,
 //	  nanoseconds, monthsOfYear, ...
 //
-//nolint:gocyclo // Sequential field dispatch over six temporal kinds; splitting hides the mapping.
+// Sequential field dispatch over six temporal kinds; splitting hides the mapping.
 func temporalAccessor(v Value, key string) (Value, bool) {
 	switch t := v.(type) {
 	case DateValue:
@@ -1714,7 +1714,7 @@ func temporalAccessor(v Value, key string) (Value, bool) {
 
 // dateAccessor returns components of a Date value.
 //
-//nolint:gocyclo // Direct accessor table; splitting would hide the field mapping.
+// Direct accessor table; splitting would hide the field mapping.
 func dateAccessor(d DateValue, key string) (Value, bool) {
 	t := d.ToTime()
 	switch key {
@@ -1750,7 +1750,7 @@ func dateAccessor(d DateValue, key string) (Value, bool) {
 
 // localDateTimeAccessor returns components of a LocalDateTime.
 //
-//nolint:gocyclo // Direct accessor table; splitting would hide the field mapping.
+// Direct accessor table; splitting would hide the field mapping.
 func localDateTimeAccessor(v LocalDateTimeValue, key string) (Value, bool) {
 	if dv, ok := dateAccessor(DateFromTime(v.T), key); ok {
 		return dv, true
@@ -1779,7 +1779,7 @@ func localDateTimeAccessor(v LocalDateTimeValue, key string) (Value, bool) {
 
 // dateTimeAccessor returns components of a DateTime.
 //
-//nolint:gocyclo // Direct accessor table; splitting would hide the field mapping.
+// Direct accessor table; splitting would hide the field mapping.
 func dateTimeAccessor(v DateTimeValue, key string) (Value, bool) {
 	if dv, ok := localDateTimeAccessor(LocalDateTimeValue(v), key); ok {
 		return dv, true
@@ -1847,7 +1847,7 @@ func timeAccessor(v TimeValue, key string) (Value, bool) {
 
 // durationAccessor returns components of a Duration.
 //
-//nolint:gocyclo // Direct accessor table; splitting would hide the field mapping.
+// Direct accessor table; splitting would hide the field mapping.
 func durationAccessor(d DurationValue, key string) (Value, bool) {
 	switch key {
 	case "years":

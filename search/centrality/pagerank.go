@@ -134,7 +134,7 @@ func PageRank[W any](c *csr.CSR[W], opts PageRankOptions) (ranks []float64, iter
 // parallel SpMV by ~3%. [PageRanker.Run] carries the reusable variant for
 // repeated queries.
 //
-//nolint:gocyclo // canonical power-iteration: defaults + live detection + iteration loop
+// canonical power-iteration: defaults + live detection + iteration loop
 func PageRankCtx[W any](ctx context.Context, c *csr.CSR[W], opts PageRankOptions) (ranks []float64, iterations int, err error) {
 	defer metrics.Time("search.centrality.PageRankCtx").Stop()
 	opts, err = validatePageRankOptions(opts)
@@ -377,7 +377,7 @@ func newPageRankState[W any](c *csr.CSR[W]) *pageRankState[W] {
 // vectors are re-seeded each call so a reused state yields a result
 // identical to a one-shot call. opts must already be validated/defaulted.
 //
-//nolint:gocyclo // canonical power-iteration: live re-seed + parallel/serial dispatch + iteration loop
+// canonical power-iteration: live re-seed + parallel/serial dispatch + iteration loop
 func (st *pageRankState[W]) run(ctx context.Context, c *csr.CSR[W], opts PageRankOptions) (ranks []float64, iterations int, err error) {
 	// Hoist every field the hot loop touches into locals so the loop body
 	// reads stack/registers rather than chasing the *pageRankState pointer

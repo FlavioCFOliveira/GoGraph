@@ -255,7 +255,7 @@ func TestSortComparatorIsAllocationFree(t *testing.T) {
 // buffered implementation over many random permutations, including the identity
 // and full-reversal edge cases.
 func TestPermuteRows(t *testing.T) {
-	rng := rand.New(rand.NewPCG(0x2652, 0x2652))
+	rng := rand.New(rand.NewPCG(0x2652, 0x2652)) //nolint:gosec // G404: math/rand/v2 PCG seeded from a fixed constant — this test asserts a reproducible sequence, which a CSPRNG would destroy.
 	for _, n := range []int{0, 1, 2, 3, 7, 64, 501} {
 		for trial := 0; trial < 20; trial++ {
 			perm := make([]int, n)

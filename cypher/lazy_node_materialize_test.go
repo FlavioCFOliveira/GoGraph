@@ -277,7 +277,7 @@ func TestLazy_DeletedEntityViaScalarPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed CREATE: %v", err)
 	}
-	for res.Next() { //nolint:revive // drain
+	for res.Next() { // drain
 	}
 	if err := res.Err(); err != nil {
 		t.Fatalf("seed drain: %v", err)
@@ -289,7 +289,7 @@ func TestLazy_DeletedEntityViaScalarPath(t *testing.T) {
 	res2, err := eng.RunInTx(ctx, `MATCH (n:Person) WHERE n.age > 0 DELETE n RETURN n.name AS x`, nil)
 	failed := err != nil
 	if err == nil {
-		for res2.Next() { //nolint:revive // drain
+		for res2.Next() { // drain
 		}
 		if res2.Err() != nil {
 			failed = true

@@ -220,7 +220,7 @@ func TestRandom_WattsStrogatz_ShardFullPropagates(t *testing.T) {
 // does not generate at normal (n, k); a direct unit test pins the
 // contract.
 //
-//nolint:gosec // G404: math/rand/v2 is the pinned PRNG for catalogue determinism.
+// G404: math/rand/v2 is the pinned PRNG for catalogue determinism.
 func TestRandom_WattsStrogatz_PickRewireTargetSaturated(t *testing.T) {
 	t.Parallel()
 	const n = 5

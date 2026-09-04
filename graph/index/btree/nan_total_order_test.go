@@ -218,7 +218,7 @@ func TestInsert_SortedInvariant_Rapid(t *testing.T) {
 			} else {
 				v = rapid.Float64().Draw(rt, "v")
 			}
-			node := graph.NodeID(uint64(op)) //nolint:gosec // op ∈ [0, 64)
+			node := graph.NodeID(uint64(op)) // op ∈ [0, 64)
 			idx.Insert(v, node)
 			if !sortedInvariantHolds(idx) {
 				rt.Fatalf("sorted invariant broken after Insert(%v, %d)", v, node)
@@ -249,7 +249,7 @@ func craftFloat64Payload(t *testing.T, keys []float64) []byte {
 		_ = binary.Write(&body, binary.LittleEndian, uint32(8))
 		_ = binary.Write(&body, binary.LittleEndian, math.Float64bits(k))
 		_ = binary.Write(&body, binary.LittleEndian, uint64(1))
-		_ = binary.Write(&body, binary.LittleEndian, uint64(i+1)) //nolint:gosec // tiny test corpus
+		_ = binary.Write(&body, binary.LittleEndian, uint64(i+1)) // tiny test corpus
 	}
 	checksum := crc32.Checksum(body.Bytes(), castagnoli)
 	var payload bytes.Buffer
@@ -336,7 +336,7 @@ func BenchmarkIndex_CardinalityFloat64(b *testing.B) {
 	nodes := make([]graph.NodeID, n)
 	for i := range values {
 		values[i] = float64(i)
-		nodes[i] = graph.NodeID(uint64(i)) //nolint:gosec // i < 1e6
+		nodes[i] = graph.NodeID(uint64(i)) // i < 1e6
 	}
 	idx := New[float64]()
 	if err := idx.BulkLoad(values, nodes); err != nil {
@@ -357,7 +357,7 @@ func BenchmarkIndex_CardinalityString(b *testing.B) {
 	nodes := make([]graph.NodeID, n)
 	for i := range values {
 		values[i] = "user-" + string(rune('a'+i%26)) + "-" + itoaPad(i)
-		nodes[i] = graph.NodeID(uint64(i)) //nolint:gosec // i < 1e5
+		nodes[i] = graph.NodeID(uint64(i)) // i < 1e5
 	}
 	idx := New[string]()
 	if err := idx.BulkLoad(values, nodes); err != nil {

@@ -369,7 +369,7 @@ func peelOuterDestRebinding(p LogicalPlan, outerVars map[string]struct{}) (Logic
 // a fresh schema scope (Projection / EagerAggregation) because peeling
 // across such a boundary would lift a Selection above the projection
 // that produced its inner-side variable.
-func deepPeelOuterRebindings(p LogicalPlan, outerVars map[string]struct{}, hoisted *[]*Selection) LogicalPlan { //nolint:gocyclo // case-per-operator dispatch
+func deepPeelOuterRebindings(p LogicalPlan, outerVars map[string]struct{}, hoisted *[]*Selection) LogicalPlan { // case-per-operator dispatch
 	if p == nil {
 		return nil
 	}
@@ -1133,7 +1133,7 @@ func isPureBoundRelPath(pp *ast.PathPattern, outputVars map[string]struct{}) boo
 // live_output_vars_scope_test.go, which enumerates every LogicalPlan
 // implementation in this package and fails when a new one appears
 // unclassified.
-func liveOutputVars(plan LogicalPlan) map[string]struct{} { //nolint:gocyclo // case-per-operator dispatch
+func liveOutputVars(plan LogicalPlan) map[string]struct{} { // case-per-operator dispatch
 	if plan == nil {
 		return nil
 	}

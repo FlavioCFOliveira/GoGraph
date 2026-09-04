@@ -85,7 +85,7 @@ func Hungarian(cost []float64, n, m int) (Assignment, error) {
 // Returns [ErrInvalidInput] when n > m. See [Hungarian] for details and
 // the transposition workaround.
 //
-//nolint:gocyclo // textbook Hungarian: validation + dual update + augment
+// textbook Hungarian: validation + dual update + augment
 func HungarianCtx(ctx context.Context, cost []float64, n, m int) (Assignment, error) {
 	defer metrics.Time("search.HungarianCtx").Stop()
 	if n == 0 || m == 0 {

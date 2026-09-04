@@ -29,7 +29,7 @@ func runParallelCappedQuery(t *testing.T, opts *EngineOptions, q string) error {
 	if err != nil {
 		return err
 	}
-	for res.Next() { //nolint:revive // drain to trigger the cap check
+	for res.Next() { // drain to trigger the cap check
 	}
 	drainErr := res.Err()
 	_ = res.Close()

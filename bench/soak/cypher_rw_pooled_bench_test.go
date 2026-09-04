@@ -110,11 +110,11 @@ func boltOpen(addr string, life time.Duration) (*boltConn, error) {
 	// finish its reply instead of logging a broken pipe on every teardown — noise
 	// that would mask a real error.
 	if err := conn.SetDeadline(time.Now().Add(life)); err != nil {
-		_ = conn.Close() //nolint:errcheck // failing path
+		_ = conn.Close() // failing path
 		return nil, fmt.Errorf("boltOpen SetDeadline: %w", err)
 	}
 	if err := boltHandshakeRaw(conn); err != nil {
-		_ = conn.Close() //nolint:errcheck // failing path
+		_ = conn.Close() // failing path
 		return nil, fmt.Errorf("boltOpen negotiate: %w", err)
 	}
 	c := &boltConn{
@@ -130,11 +130,11 @@ func boltOpen(addr string, life time.Duration) (*boltConn, error) {
 			"agent":       "bench-pooled/1.0",
 		},
 	}); err != nil {
-		_ = conn.Close() //nolint:errcheck // failing path
+		_ = conn.Close() // failing path
 		return nil, fmt.Errorf("boltOpen sendHello: %w", err)
 	}
 	if _, err := recvSuccess(c.cr); err != nil {
-		_ = conn.Close() //nolint:errcheck // failing path
+		_ = conn.Close() // failing path
 		return nil, fmt.Errorf("boltOpen recvHello: %w", err)
 	}
 	return c, nil
@@ -196,8 +196,8 @@ func (c *boltConn) runWrite(query string) error {
 
 // close says GOODBYE and closes the socket. Errors are ignored: teardown.
 func (c *boltConn) close() {
-	_ = sendMsg(c.cw, &proto.Goodbye{}) //nolint:errcheck // teardown
-	_ = c.conn.Close()                  //nolint:errcheck // teardown
+	_ = sendMsg(c.cw, &proto.Goodbye{}) // teardown
+	_ = c.conn.Close()                  // teardown
 }
 
 // benchPool holds one pre-opened connection per parallel goroutine.

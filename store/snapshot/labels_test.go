@@ -246,7 +246,7 @@ func TestLabels_WriteEmptyGraph_RoundTrips(t *testing.T) {
 // label sets per node and per edge. The post-restart label sets
 // must equal the originals modulo ordering.
 //
-//nolint:gocyclo // property test: nested generators + dual-set assertions
+// property test: nested generators + dual-set assertions
 func TestLabels_PropertyRoundtrip(t *testing.T) {
 	t.Parallel()
 	rootTmp := t.TempDir()

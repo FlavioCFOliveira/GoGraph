@@ -77,7 +77,7 @@ func TestDDL_CreateIndex_CommittedNeverReportsCanceled(t *testing.T) {
 		res, err := eng.RunInTx(ctx, `CREATE INDEX idx_p_v FOR (n:P) ON (n.v)`, nil)
 		var drainErr error
 		if err == nil {
-			for res.Next() { //nolint:revive // drain to completion
+			for res.Next() { // drain to completion
 			}
 			drainErr = res.Err()
 			_ = res.Close()

@@ -62,7 +62,7 @@ func TestDDL_WithinLimitAccepted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("normal CREATE INDEX rejected: %v", err)
 	}
-	for res.Next() { //nolint:revive // drain
+	for res.Next() { // drain
 	}
 	if err := res.Err(); err != nil {
 		t.Fatalf("normal CREATE INDEX iteration error: %v", err)

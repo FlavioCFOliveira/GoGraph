@@ -103,7 +103,7 @@ func TestRecovery_OrphanedPendingOpsDiscardedOnTxnSeqMismatch(t *testing.T) {
 	spliced := make([]byte, 0, len(raw)-(spliceEnd-spliceStart))
 	spliced = append(spliced, raw[:spliceStart]...)
 	spliced = append(spliced, raw[spliceEnd:]...)
-	if err := os.WriteFile(walPath, spliced, 0o600); err != nil {
+	if err := os.WriteFile(walPath, spliced, 0o600); err != nil { //nolint:gosec // G703: the directory component is a path this test created and the leaf name is a literal, so no traversal segment can enter.
 		t.Fatalf("WriteFile (spliced WAL): %v", err)
 	}
 

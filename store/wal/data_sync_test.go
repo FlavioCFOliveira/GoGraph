@@ -21,7 +21,7 @@ func TestDataSync_RealFile_DurableRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "data_sync_real")
 
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o600)
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o600) //nolint:gosec // G304: path is under this test's own temp dir.
 	if err != nil {
 		t.Fatalf("OpenFile: %v", err)
 	}
@@ -41,7 +41,7 @@ func TestDataSync_RealFile_DurableRoundTrip(t *testing.T) {
 	// Read the bytes back through an independent handle. This proves the
 	// data AND the file-size growth reached the file system — the exact
 	// pair fdatasync must make durable on an append.
-	got, err := os.ReadFile(path)
+	got, err := os.ReadFile(path) //nolint:gosec // G304: path is under this test's own temp dir.
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}

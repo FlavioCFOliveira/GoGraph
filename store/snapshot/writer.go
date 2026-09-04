@@ -135,7 +135,7 @@ func WriteCSRWithWeightCodec[W any](w io.Writer, c *csr.CSR[W], wenc weightEncod
 // writeCSRWith is the implementation behind [WriteCSR] and
 // [WriteCSRWithWeightCodec].
 //
-//nolint:gocyclo // CSR serialisation: header + vertices + edges + two weight layouts + optional handles
+// CSR serialisation: header + vertices + edges + two weight layouts + optional handles
 func writeCSRWith[W any](w io.Writer, c *csr.CSR[W], wenc weightEncoder[W]) (size int64, crc uint32, err error) {
 	defer metrics.Time("store.snapshot.WriteCSR").Stop()
 	bw := bufio.NewWriterSize(w, 1<<20)
@@ -587,7 +587,7 @@ func WriteSnapshotCSRCtx[W any](ctx context.Context, dir string, c *csr.CSR[W]) 
 // historical bytes and durability ordering exactly while the simulator can
 // supply an in-memory disk.
 //
-//nolint:gocyclo // snapshot publish: dir prep + CSR write + manifest write + atomic rename + ctx ticks
+// snapshot publish: dir prep + CSR write + manifest write + atomic rename + ctx ticks
 func writeSnapshotCSRCtxWith[W any](ctx context.Context, fsys fileSystem, dir string, c *csr.CSR[W]) error {
 	defer metrics.Time("store.snapshot.WriteSnapshotCSRCtx").Stop()
 	if err := ctx.Err(); err != nil {

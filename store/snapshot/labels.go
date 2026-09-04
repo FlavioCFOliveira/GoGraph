@@ -221,7 +221,7 @@ func WriteLabels[N comparable, W any](w io.Writer, g *lpg.Graph[N, W], at *lpg.S
 // is no package-level mutable state, so writeLabels stays exactly as re-entrant
 // and safe for concurrent independent calls as the code it replaced.
 //
-//nolint:gocyclo // labels write: header + string table + node records + edge records, each guarded
+// labels write: header + string table + node records + edge records, each guarded
 func writeLabels[N comparable, W any](w io.Writer, g *lpg.Graph[N, W], at *lpg.Snapshot, snapReg func(*lpg.LabelRegistry) []string) (size int64, crc uint32, err error) {
 	defer metrics.Time("store.snapshot.WriteLabels").Stop()
 
@@ -615,7 +615,7 @@ func buildNameIndex(names []string) map[string]uint32 {
 // helpers do this); this function only enforces the structural
 // contract.
 //
-//nolint:gocyclo // labels read: header + string table + node records + edge records, each bounds-checked
+// labels read: header + string table + node records + edge records, each bounds-checked
 func ReadLabels(r io.Reader) (LabelsReadback, error) {
 	defer metrics.Time("store.snapshot.ReadLabels").Stop()
 	br := bufio.NewReader(r)

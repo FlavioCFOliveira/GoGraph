@@ -538,7 +538,7 @@ func (a *analyser) checkQuantifierPredicateTypes(lc *ast.ListComprehension, pos 
 // the list element kind is "string" we still flag `x + 'suffix'` because
 // the TCK examples only exercise arithmetic; a future refinement could
 // permit the string-concat case.
-func quantifierPredicateUsesArithOn(e ast.Expression, varName string) bool { //nolint:gocyclo // structural walker
+func quantifierPredicateUsesArithOn(e ast.Expression, varName string) bool { // structural walker
 	if e == nil {
 		return false
 	}

@@ -56,7 +56,7 @@ func assertRunsOrdered(t *testing.T, which string, c *CSR[float64], iter int) {
 // handle component of the key observable at all — and that include a handle-0 slot,
 // the "no handle" sentinel a run may legitimately carry.
 func TestBuildReverse_RunsAreNeighbourAndHandleOrdered_2151(t *testing.T) {
-	rng := rand.New(rand.NewSource(20482151))
+	rng := rand.New(rand.NewSource(20482151)) //nolint:gosec // G404: math/rand seeded from a fixed constant — this test asserts a reproducible sequence, which a CSPRNG would destroy.
 	const (
 		iterations = 200
 		nodes      = 24

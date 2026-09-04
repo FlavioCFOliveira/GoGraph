@@ -136,7 +136,7 @@ type edgeHandleRaw struct {
 // byte-stable across writes of the same logical state — the cross-process
 // byte-equality contract the snapshot relies on.
 //
-//nolint:gocyclo // edgehandles write: collect + two string tables + per-record labels + per-record props, each guarded
+// edgehandles write: collect + two string tables + per-record labels + per-record props, each guarded
 func WriteEdgeHandles[N comparable, W any](w io.Writer, g *lpg.Graph[N, W], at *lpg.Snapshot) (size int64, crc uint32, emitted bool, err error) {
 	defer metrics.Time("store.snapshot.WriteEdgeHandles").Stop()
 
@@ -331,7 +331,7 @@ func sortedSetKeys(set map[string]struct{}) []string {
 // past its table, an unknown property kind, or a truncated record all surface
 // as [ErrEdgeHandlesCorrupted].
 //
-//nolint:gocyclo // edgehandles read: header + two string tables + per-record labels + per-record props, each bounds-checked
+// edgehandles read: header + two string tables + per-record labels + per-record props, each bounds-checked
 func ReadEdgeHandles(r io.Reader) (EdgeHandlesReadback, error) {
 	defer metrics.Time("store.snapshot.ReadEdgeHandles").Stop()
 	br := bufio.NewReader(r)

@@ -94,7 +94,7 @@ func TestRunInTx_DurableThenVisible_RecoversWithoutClose(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunInTx CREATE: %v", err)
 	}
-	for res.Next() { //nolint:revive // intentional full drain
+	for res.Next() { // intentional full drain
 	}
 	if derr := res.Err(); derr != nil {
 		t.Fatalf("drain error: %v", derr)
@@ -106,7 +106,7 @@ func TestRunInTx_DurableThenVisible_RecoversWithoutClose(t *testing.T) {
 	// fsync was deferred to the finalizer/Close — exactly what a crash skips —
 	// so the recovered graph is empty; post-fix it already ran in the barrier.)
 	runtime.SetFinalizer(res, nil)
-	res = nil //nolint:ineffassign,wastedassign // drop the reference; the crash is now modelled
+	res = nil //nolint:wastedassign // drop the reference; the crash is now modelled
 
 	// (1) A concurrent Run on the SAME engine observes the row — it is visible.
 	count, err := eng.Run(ctx, `MATCH (n:Person {name: "alice"}) RETURN count(*) AS c`, nil)

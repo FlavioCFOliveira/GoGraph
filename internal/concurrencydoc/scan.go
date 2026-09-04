@@ -188,7 +188,7 @@ func Scan(repoRoot string) (*ScanResult, error) {
 		if err != nil {
 			// Record and continue; do not abort the whole walk.
 			res.SkippedDirs = append(res.SkippedDirs, fmt.Sprintf("%s: walk error: %v", path, err))
-			return nil //nolint:nilerr // a per-entry walk error must not abort the scan
+			return nil // a per-entry walk error must not abort the scan
 		}
 		if !d.IsDir() {
 			return nil

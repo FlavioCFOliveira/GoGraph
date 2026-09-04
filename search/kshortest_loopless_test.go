@@ -14,7 +14,7 @@ func TestKShortestPathsLoopless_TwoPaths(t *testing.T) {
 	})
 	src, _ := a.Mapper().Lookup(0)
 	dst, _ := a.Mapper().Lookup(3)
-	got := KShortestPathsLoopless(c, src, dst, 2) //nolint:staticcheck // deliberately exercises the deprecated bare entry to keep it covered
+	got := KShortestPathsLoopless(c, src, dst, 2) // deliberately exercises the deprecated bare entry to keep it covered
 	if len(got) != 2 {
 		t.Fatalf("got %d paths, want 2", len(got))
 	}
@@ -31,7 +31,7 @@ func TestKShortestPathsLoopless_NoPath(t *testing.T) {
 	c, a := buildWeightedCSR(t, []weightedEdge{{0, 1, 1}, {2, 3, 1}})
 	src, _ := a.Mapper().Lookup(0)
 	dst, _ := a.Mapper().Lookup(3)
-	if got := KShortestPathsLoopless(c, src, dst, 3); len(got) != 0 { //nolint:staticcheck // deliberately exercises the deprecated bare entry to keep it covered
+	if got := KShortestPathsLoopless(c, src, dst, 3); len(got) != 0 { // deliberately exercises the deprecated bare entry to keep it covered
 		t.Fatalf("expected no paths, got %d", len(got))
 	}
 }
@@ -46,7 +46,7 @@ func TestKShortestPathsLoopless_VsYen(t *testing.T) {
 	src, _ := a.Mapper().Lookup(0)
 	dst, _ := a.Mapper().Lookup(3)
 	yen := YenKShortest(c, src, dst, 3)
-	loopless := KShortestPathsLoopless(c, src, dst, 3) //nolint:staticcheck // deliberately exercises the deprecated bare entry to keep it covered
+	loopless := KShortestPathsLoopless(c, src, dst, 3) // deliberately exercises the deprecated bare entry to keep it covered
 	if len(yen) != len(loopless) {
 		t.Fatalf("yen len=%d, loopless len=%d", len(yen), len(loopless))
 	}
@@ -104,7 +104,7 @@ func TestKShortestPathsLooplessCtx_CancelledMidEnumeration(t *testing.T) {
 // TestEppsteinKShortest_DeprecatedAlias keeps the deprecated alias
 // covered so the wrapper does not silently break in future refactors.
 //
-//nolint:staticcheck // intentional exercise of the deprecated API
+// intentional exercise of the deprecated API
 func TestEppsteinKShortest_DeprecatedAlias(t *testing.T) {
 	t.Parallel()
 	c, a := buildWeightedCSR(t, []weightedEdge{

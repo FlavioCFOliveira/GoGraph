@@ -119,7 +119,7 @@ var ErrInvalidTransition = errors.New("bolt: invalid state transition")
 // that is a genuine failure to open a transaction. The two differ on purpose;
 // until rmp #2561 they differed by accident and nothing said so.
 //
-//nolint:gocyclo // Bolt v5 state machine has O(states×messages) branches; splitting it would obscure the protocol spec.
+// Bolt v5 state machine has O(states×messages) branches; splitting it would obscure the protocol spec.
 func Transition(current State, msg any, success bool) (State, error) {
 	// GOODBYE and RESET are universal transitions from any non-DEFUNCT state.
 	switch msg.(type) {

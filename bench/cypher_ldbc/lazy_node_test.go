@@ -84,7 +84,7 @@ func runLazyQuery(b *testing.B, query string) {
 		if err != nil {
 			b.Fatalf("run: %v", err)
 		}
-		for res.Next() { //nolint:revive // drain every row so the per-row projection/filter closures execute
+		for res.Next() { // drain every row so the per-row projection/filter closures execute
 		}
 		if err := res.Err(); err != nil {
 			b.Fatalf("drain: %v", err)

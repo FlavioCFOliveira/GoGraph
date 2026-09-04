@@ -114,7 +114,7 @@ func WriteIndexes(dir string, m *index.Manager) ([]IndexFileEntry, error) {
 // OS backend reproduces the historical behaviour byte-for-byte while the
 // simulator can supply an in-memory disk.
 //
-//nolint:gocyclo // per-index write + per-index serialize + per-index sync
+// per-index write + per-index serialize + per-index sync
 func writeIndexesWith(fsys fileSystem, dir string, m *index.Manager) ([]IndexFileEntry, error) {
 	defer metrics.Time("store.snapshot.WriteIndexes").Stop()
 	if m == nil || m.Count() == 0 {

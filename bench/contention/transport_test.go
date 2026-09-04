@@ -203,7 +203,7 @@ func runTransportCampaign(t *testing.T, root, mode string, labels []string) {
 	levels := transportLevels(t)
 	queries := transportQueryKeys(t)
 
-	if err := os.MkdirAll(root, 0o750); err != nil {
+	if err := os.MkdirAll(root, 0o750); err != nil { //nolint:gosec // G703: root is the operator-supplied artefact directory this suite asserts is absolute; the directory name carries no caller-controlled segment.
 		t.Fatalf("mkdir %s: %v", root, err)
 	}
 	before := loadavg(t)
@@ -292,10 +292,10 @@ func runTransportCampaign(t *testing.T, root, mode string, labels []string) {
 
 	report := renderTransportReport(mode, runs, labels, before, after, replicas)
 	fmt.Print(report)
-	if err := os.WriteFile(filepath.Join(root, "report.txt"), []byte(report), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "report.txt"), []byte(report), 0o600); err != nil { //nolint:gosec // G703: the directory component is a path this test created and the leaf name is a literal, so no traversal segment can enter.
 		t.Fatalf("write report: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "raw.tsv"), []byte(renderTransportRaw(runs)), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "raw.tsv"), []byte(renderTransportRaw(runs)), 0o600); err != nil { //nolint:gosec // G703: the directory component is a path this test created and the leaf name is a literal, so no traversal segment can enter.
 		t.Fatalf("write raw: %v", err)
 	}
 	fmt.Printf("transport %s campaign complete: %s\n", mode, filepath.Join(root, "report.txt"))

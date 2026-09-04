@@ -235,7 +235,7 @@ func TestRandom_Regular_BuildExhaustsBudget(t *testing.T) {
 // (nil, false). The test calls the helper directly with a
 // deterministic PRNG to pin the contract.
 //
-//nolint:gosec // G404: math/rand/v2 is the pinned PRNG for catalogue determinism; the test seed is fixed and inert.
+// G404: math/rand/v2 is the pinned PRNG for catalogue determinism; the test seed is fixed and inert.
 func TestRandom_Regular_AttemptRejectsDegenerateInputs(t *testing.T) {
 	t.Parallel()
 	r := newDeterministicRand(0xDEAD)

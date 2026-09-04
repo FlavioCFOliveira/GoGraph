@@ -38,8 +38,8 @@ func writeTestPair(t *testing.T, dir, cn string) (string, string) {
 	}
 	certPath := filepath.Join(dir, fmt.Sprintf("%s.crt", cn))
 	keyPath := filepath.Join(dir, fmt.Sprintf("%s.key", cn))
-	certPEM, _ := os.Create(certPath)
-	keyPEM, _ := os.Create(keyPath)
+	certPEM, _ := os.Create(certPath) //nolint:gosec // G304: certPath is filepath.Join(dir, ...) where dir is this test's temp dir.
+	keyPEM, _ := os.Create(keyPath)   //nolint:gosec // G304: keyPath is filepath.Join(dir, ...) where dir is this test's temp dir.
 	defer func() { _ = certPEM.Close() }()
 	defer func() { _ = keyPEM.Close() }()
 	_ = pem.Encode(certPEM, &pem.Block{Type: "CERTIFICATE", Bytes: der})

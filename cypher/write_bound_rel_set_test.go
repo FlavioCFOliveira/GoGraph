@@ -69,7 +69,7 @@ func wbrWrite(t *testing.T, eng *cypher.Engine, query string, params map[string]
 	if err != nil {
 		t.Fatalf("RunInTxAny(%q): %v", query, err)
 	}
-	for res.Next() { //nolint:revive // drain to run the write to completion
+	for res.Next() { // drain to run the write to completion
 	}
 	if err := res.Err(); err != nil {
 		t.Fatalf("RunInTxAny(%q) result error: %v", query, err)
@@ -272,7 +272,7 @@ func TestWriteBoundRelationship_SetInsideExplicitTransaction(t *testing.T) {
 		_ = tx.Rollback()
 		t.Fatalf("ExecAny: %v", err)
 	}
-	for res.Next() { //nolint:revive // drain
+	for res.Next() { // drain
 	}
 	if err := res.Err(); err != nil {
 		_ = tx.Rollback()

@@ -38,7 +38,7 @@ func runReduceQueryExpectErr(tb testing.TB, q string) error {
 		return err
 	}
 	defer res.Close()
-	for res.Next() { //nolint:revive // drain the stream to surface the lazy error
+	for res.Next() { // drain the stream to surface the lazy error
 	}
 	if e := res.Err(); e != nil {
 		return e

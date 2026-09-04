@@ -134,7 +134,7 @@ func TestWriteRows_LaterStatementsObserveEarlierStatements(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Exec %q: %v", q, err)
 		}
-		for res.Next() { //nolint:revive // intentional full drain
+		for res.Next() { // intentional full drain
 		}
 		if err := res.Err(); err != nil {
 			t.Fatalf("Exec %q drain: %v", q, err)

@@ -545,7 +545,7 @@ func (s *Session) inFlightCount() int {
 // identifier in log messages.
 func randomID() string {
 	var b [8]byte
-	_, _ = rand.Read(b[:]) //nolint:errcheck // rand.Read never fails on supported platforms
+	_, _ = rand.Read(b[:]) // rand.Read never fails on supported platforms
 	return hex.EncodeToString(b[:])
 }
 
@@ -872,7 +872,7 @@ func (s *Session) txClosed() {
 func (s *Session) abortTx() {
 	s.drainResult()
 	if s.tx != nil {
-		_ = s.tx.Rollback() //nolint:errcheck // best-effort rollback on failure/teardown; error not actionable
+		_ = s.tx.Rollback() // best-effort rollback on failure/teardown; error not actionable
 		s.tx = nil
 	}
 	// Count the transaction closed (idempotent: a no-op when a prior COMMIT/
@@ -1089,7 +1089,7 @@ func (s *Session) handleReset() ([]any, error) {
 
 	// Roll back and discard any active explicit transaction.
 	if s.tx != nil {
-		_ = s.tx.Rollback() //nolint:errcheck // best-effort cleanup on reset
+		_ = s.tx.Rollback() // best-effort cleanup on reset
 		s.tx = nil
 		// Orderly end: count the transaction closed. Idempotent via txAccounted.
 		s.txClosed()
@@ -1120,7 +1120,7 @@ func (s *Session) handleReset() ([]any, error) {
 func (s *Session) handleGoodbye() ([]any, error) {
 	s.drainResult()
 	if s.tx != nil {
-		_ = s.tx.Rollback() //nolint:errcheck // best-effort cleanup on goodbye
+		_ = s.tx.Rollback() // best-effort cleanup on goodbye
 		s.tx = nil
 		// Orderly end: count the transaction closed. Idempotent via txAccounted.
 		s.txClosed()
@@ -1257,7 +1257,7 @@ func (s *Session) handleRun(ctx context.Context, m *proto.Run) ([]any, error) {
 	next, transErr := Transition(s.state, m, runErr == nil)
 	if transErr != nil {
 		if result != nil {
-			_ = result.Close() //nolint:errcheck // best-effort close on unexpected path
+			_ = result.Close() // best-effort close on unexpected path
 		}
 		if cancel != nil {
 			cancel() // no PULL will follow; release the deadline now
@@ -1299,7 +1299,7 @@ func (s *Session) handleRun(ctx context.Context, m *proto.Run) ([]any, error) {
 	}}, nil
 }
 
-//nolint:gocyclo // pull loop has context cancellation, cursor error, has_more peek, and state transition branches; complexity is irreducible.
+// pull loop has context cancellation, cursor error, has_more peek, and state transition branches; complexity is irreducible.
 func (s *Session) handlePull(ctx context.Context, m *proto.Pull) ([]any, error) {
 	if s.state != StateStreaming && s.state != StateTxStreaming {
 		return s.failTransition(m)
@@ -1751,7 +1751,7 @@ func (s *Session) handleBegin(ctx context.Context, m *proto.Begin) ([]any, error
 	// legitimate burst of concurrent BEGINs from one principal (rmp #2175). The
 	// slot is released by txClosed, which every teardown path reaches.
 	if qerr := s.acquireTxQuota(); qerr != nil {
-		_ = tx.Rollback() //nolint:errcheck // best-effort cleanup; error not actionable
+		_ = tx.Rollback() // best-effort cleanup; error not actionable
 		incCounter(metricTxQuotaRejected)
 		s.log.Warn("bolt: BEGIN refused; principal is at its open-transaction cap",
 			slog.String("session", s.id), slog.String("err", qerr.Error()))
@@ -1792,7 +1792,7 @@ func (s *Session) handleBegin(ctx context.Context, m *proto.Begin) ([]any, error
 		// Roll back the just-opened transaction so the writer serialisation is not
 		// leaked on the (unreachable in practice) illegal-transition path, and give
 		// back the quota slot with it.
-		_ = tx.Rollback() //nolint:errcheck // best-effort cleanup; error not actionable
+		_ = tx.Rollback() // best-effort cleanup; error not actionable
 		s.releaseTxQuota()
 		return s.failTransition(m)
 	}
@@ -1885,7 +1885,7 @@ func (s *Session) handleRollback() ([]any, error) {
 
 	// Roll back the transaction if one is active.
 	if s.tx != nil {
-		_ = s.tx.Rollback() //nolint:errcheck // rollback errors are not actionable; best-effort cleanup
+		_ = s.tx.Rollback() // rollback errors are not actionable; best-effort cleanup
 		s.tx = nil
 		// Orderly end: count the transaction closed. Idempotent via txAccounted.
 		s.txClosed()
@@ -1948,7 +1948,7 @@ func (s *Session) abortStream(err error) ([]any, error) {
 func (s *Session) drainResult() {
 	s.peeked = nil
 	if s.result != nil {
-		_ = s.result.Close() //nolint:errcheck // best-effort drain; error is not actionable here
+		_ = s.result.Close() // best-effort drain; error is not actionable here
 		s.result = nil
 		s.columns = nil
 	}
@@ -2357,7 +2357,7 @@ func exprToPackstream(v any, boltMajor uint8) packstream.Value {
 // by [packstream.Encoder.WriteValue] with the typed packstream.ErrNestingTooDeep
 // — a clean per-query error — rather than being silently truncated here.
 //
-//nolint:gocyclo // dispatch over all expr.Value kinds; complexity is irreducible
+// dispatch over all expr.Value kinds; complexity is irreducible
 func exprValueToPackstream(v expr.Value, boltMajor uint8) packstream.Value {
 	if v == nil {
 		return nil

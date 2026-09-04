@@ -134,7 +134,7 @@ func TestIndex_ConcurrentMutateAndReap_ParityAndLockOrder(t *testing.T) {
 		readerWG.Add(1)
 		go func(seed uint64) {
 			defer readerWG.Done()
-			rng := rand.New(rand.NewPCG(seed, 0xF00D))
+			rng := rand.New(rand.NewPCG(seed, 0xF00D)) //nolint:gosec // G404: math/rand/v2 PCG seeded from the test's own parameter — this test asserts a reproducible sequence, which a CSPRNG would destroy.
 			for {
 				select {
 				case <-stopReaders:
@@ -182,7 +182,7 @@ func TestIndex_ConcurrentMutateAndReap_ParityAndLockOrder(t *testing.T) {
 			go func(w int, m model) {
 				defer writerWG.Done()
 				lo := uint64(w) * parityBand
-				rng := rand.New(rand.NewPCG(uint64(w)+1, 0xC0FFEE))
+				rng := rand.New(rand.NewPCG(uint64(w)+1, 0xC0FFEE)) //nolint:gosec // G404: math/rand/v2 PCG seeded from the test's own parameter — this test asserts a reproducible sequence, which a CSPRNG would destroy.
 				for range parityRounds {
 					lbl := uint32(rng.IntN(parityLabels))
 					switch {

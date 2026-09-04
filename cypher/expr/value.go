@@ -1028,7 +1028,7 @@ func (v PathValue) Equal(other Value) Value {
 // cross-type ordering stable; relative order among temporal kinds follows the
 // openCypher 9 §3.4 total order.
 //
-//nolint:gocyclo // Flat lookup over every known kind; splitting hides the order table.
+// Flat lookup over every known kind; splitting hides the order table.
 func kindOrder(k Kind) int {
 	switch k {
 	case KindMap:
@@ -1250,7 +1250,7 @@ func cmpUint64(a, b uint64) int {
 // the same Kind. Extracted from [Compare] to keep cyclomatic complexity within
 // the project's gocyclo limit (≤15).
 //
-//nolint:gocyclo // One branch per kind; the table is the entire point of the function — extraction would obscure the per-kind comparator wiring.
+// One branch per kind; the table is the entire point of the function — extraction would obscure the per-kind comparator wiring.
 func compareSameKind(k Kind, a, b Value) int {
 	switch k {
 	case KindInteger:

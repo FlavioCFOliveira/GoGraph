@@ -167,7 +167,7 @@ func ApplyCSRToGraph[N comparable, W any](g *lpg.Graph[N, W], rb *CSRReadback) e
 // on disk, and applying zero weights instead would discard committed data
 // (rmp #2526).
 //
-//nolint:gocyclo // CSR apply walks every src slot, resolves endpoints, decodes weight by W type
+// CSR apply walks every src slot, resolves endpoints, decodes weight by W type
 func ApplyCSRToGraphWithWeightCodec[N comparable, W any](g *lpg.Graph[N, W], rb *CSRReadback, wdec weightDecoder[W]) error {
 	defer metrics.Time("store.snapshot.ApplyCSRToGraph").Stop()
 	if len(rb.Vertices) == 0 {
@@ -361,7 +361,7 @@ func ApplyCSRToGraphWithWeightCodec[N comparable, W any](g *lpg.Graph[N, W], rb 
 // and bump the `store.snapshot.ApplyCSR.weightFallback` counter so
 // observability surfaces the loss.
 //
-//nolint:gocyclo // CSR weight decode: one branch per supported W type
+// CSR weight decode: one branch per supported W type
 func decodeCSRWeight[W any](buf []byte) W {
 	var zero W
 	if _, ok := any(zero).(struct{}); ok {

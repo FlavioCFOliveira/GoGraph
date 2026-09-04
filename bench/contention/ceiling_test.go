@@ -97,7 +97,7 @@ func TestCeilingProbe(t *testing.T) {
 	repeats := probeRepeats(t)
 	requireAnchorLevel(t, levels)
 
-	if err := os.MkdirAll(root, 0o750); err != nil {
+	if err := os.MkdirAll(root, 0o750); err != nil { //nolint:gosec // G703: root is the operator-supplied artefact directory this suite asserts is absolute; the directory name carries no caller-controlled segment.
 		t.Fatalf("mkdir %s: %v", root, err)
 	}
 	fmt.Printf("ceiling probe artefacts: %s\n", root)
@@ -483,5 +483,5 @@ func writeProbeSummary(root string, rows []probeRow) error {
 			r.BaseMedian, r.CeilMedian, r.Ratio, r.BaseSpread, r.CeilSpread,
 			r.RatioAt1, r.Normalised, r.AnchorTol, direction(r))
 	}
-	return os.WriteFile(filepath.Join(root, "ceiling.tsv"), b.Bytes(), 0o600)
+	return os.WriteFile(filepath.Join(root, "ceiling.tsv"), b.Bytes(), 0o600) //nolint:gosec // G703: the directory component is a path this test created and the leaf name is a literal, so no traversal segment can enter.
 }

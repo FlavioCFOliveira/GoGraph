@@ -419,7 +419,7 @@ func execExpectConstraintViolation(t *testing.T, eng *cypher.Engine, query strin
 		}
 		return
 	}
-	for res.Next() { //nolint:revive // drain to trigger the write + constraint check
+	for res.Next() { // drain to trigger the write + constraint check
 	}
 	iterErr := res.Err()
 	_ = res.Close()

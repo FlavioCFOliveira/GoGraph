@@ -97,7 +97,7 @@ func idxRunOne(t *testing.T, eng *cypher.Engine, q string) error {
 	if err != nil {
 		return err
 	}
-	for r.Next() { //nolint:revive // drain to commit write
+	for r.Next() { // drain to commit write
 	}
 	rerr := r.Err()
 	if cerr := r.Close(); cerr != nil && rerr == nil {
@@ -364,7 +364,7 @@ func TestIndexDurability_StorelessListIndexes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CREATE INDEX: %v", err)
 	}
-	for r.Next() { //nolint:revive // empty-block: draining the cursor IS the work; the rows are irrelevant, only that Next runs to completion before Close is checked below
+	for r.Next() { // empty-block: draining the cursor IS the work; the rows are irrelevant, only that Next runs to completion before Close is checked below
 	}
 	if cerr := r.Close(); cerr != nil {
 		t.Fatalf("Close: %v", cerr)

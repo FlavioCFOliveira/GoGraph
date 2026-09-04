@@ -27,7 +27,7 @@ import (
 // The test exercises the canonical string-keyed [string, int64]
 // shape that the v3 writer auto-detects via the internal type-switch.
 //
-//nolint:gocyclo // recovery test: per-element assertions across nodes, edges, labels, properties
+// recovery test: per-element assertions across nodes, edges, labels, properties
 func TestRecovery_V3Snapshot_WALAbsent_SelfSufficient(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

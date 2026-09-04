@@ -55,7 +55,7 @@ func Write(w io.Writer, a *adjlist.AdjList[string, int64]) (int, error) {
 // checked every 4096 records; on cancellation flushes the buffer
 // and returns (recordsWritten, wrapped ctx.Err()).
 //
-//nolint:gocyclo // JSONL write: per-node and per-edge encode + ctx tick
+// JSONL write: per-node and per-edge encode + ctx tick
 func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64]) (int, error) {
 	defer metrics.Time("graph.io.jsonl.Write").Stop()
 	bw := bufio.NewWriterSize(w, 64*1024)
@@ -141,7 +141,7 @@ func WriteWithProps(w io.Writer, g *lpg.Graph[string, int64]) (int, error) {
 // WriteWithPropsCtx is the context-aware variant of [WriteWithProps].
 // ctx.Err() is checked every 4096 records.
 //
-//nolint:gocyclo // JSONL write: node/edge/property phases + ctx tick
+// JSONL write: node/edge/property phases + ctx tick
 func WriteWithPropsCtx(ctx context.Context, w io.Writer, g *lpg.Graph[string, int64]) (int, error) {
 	defer metrics.Time("graph.io.jsonl.WriteWithProps").Stop()
 	bw := bufio.NewWriterSize(w, 64*1024)

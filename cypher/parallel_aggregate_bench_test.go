@@ -199,7 +199,7 @@ func drainConcurrentQuery(eng *cypher.Engine, q string) error {
 	if err != nil {
 		return err
 	}
-	for res.Next() { //nolint:revive // intentional full drain
+	for res.Next() { // intentional full drain
 	}
 	if err := res.Err(); err != nil {
 		_ = res.Close()

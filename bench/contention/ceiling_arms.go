@@ -309,7 +309,7 @@ func indexHashRWCeiling() Workload {
 		func(_ int, _ string) (*hash.Index[int64], error) {
 			idx := hash.New[int64]()
 			for i := range ceilingIndexKeys {
-				idx.Insert(int64(i), graph.NodeID(uint64(i))) //nolint:gosec // G115: i is a bounded loop index
+				idx.Insert(int64(i), graph.NodeID(uint64(i))) // G115: i is a bounded loop index
 			}
 			return idx, nil
 		},
@@ -332,7 +332,7 @@ func indexBtreeRWCeiling() Workload {
 		func(_ int, _ string) (*btree.Index[int64], error) {
 			idx := btree.New[int64]()
 			for i := range ceilingIndexKeys {
-				idx.Insert(int64(i), graph.NodeID(uint64(i))) //nolint:gosec // G115: i is a bounded loop index
+				idx.Insert(int64(i), graph.NodeID(uint64(i))) // G115: i is a bounded loop index
 			}
 			return idx, nil
 		},

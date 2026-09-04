@@ -67,6 +67,8 @@ func TestBulkLoadOracle_NoGoroutineLeak(t *testing.T) {
 // degenerated — an empty fixture, a fault that never bit, a cap that was never
 // crossed, a crash that changed nothing — passes the happy test above and fails
 // here.
+//
+//nolint:gocyclo // one linear oracle: build the fixture, run the bulk load, then assert every non-vacuity clause in sequence.
 func TestBulkLoadOracle_NonVacuous(t *testing.T) {
 	t.Parallel()
 	sc := bulkLoadOracleScenario()

@@ -92,7 +92,7 @@ func installPersonNameIndex(g *lpg.Graph[string, float64]) {
 }
 
 func drainResultIdx(r *cypher.Result) {
-	defer r.Close() //nolint:errcheck // test helper
+	defer r.Close() // test helper
 	for r.Next() {
 	}
 }

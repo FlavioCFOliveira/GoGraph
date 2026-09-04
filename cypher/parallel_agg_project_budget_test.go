@@ -104,7 +104,7 @@ func runParAggBudget(t *testing.T, eng *Engine, q string) error {
 	if runErr != nil {
 		return runErr
 	}
-	for res.Next() { //nolint:revive // drain so the pre-projection actually runs
+	for res.Next() { // drain so the pre-projection actually runs
 	}
 	drainErr := res.Err()
 	_ = res.Close()
@@ -232,7 +232,7 @@ func TestParallelAggPreProjection_ThreeSitesIdenticalVerdict(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		for res.Next() { //nolint:revive // drain so the pre-projection actually runs
+		for res.Next() { // drain so the pre-projection actually runs
 		}
 		drainErr := res.Err()
 		_ = res.Close()

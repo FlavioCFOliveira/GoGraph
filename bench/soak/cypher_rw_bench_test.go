@@ -142,9 +142,9 @@ func boltDialWrite(ctx context.Context, addr, query string) error {
 		return fmt.Errorf("boltDialWrite dial: %w", err)
 	}
 	if tc, ok := conn.(*net.TCPConn); ok {
-		_ = tc.SetLinger(0) //nolint:errcheck // best-effort SO_LINGER(0)
+		_ = tc.SetLinger(0) // best-effort SO_LINGER(0)
 	}
-	defer func() { _ = conn.Close() }() //nolint:errcheck // close on teardown
+	defer func() { _ = conn.Close() }() // close on teardown
 
 	if dl, ok := ctx.Deadline(); ok {
 		if err := conn.SetDeadline(dl); err != nil {

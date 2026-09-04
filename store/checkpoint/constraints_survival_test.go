@@ -51,7 +51,7 @@ func csRunOne(t *testing.T, eng *cypher.Engine, q string) error {
 	if err != nil {
 		return err
 	}
-	for r.Next() { //nolint:revive // drain to run the write to completion
+	for r.Next() { // drain to run the write to completion
 	}
 	rerr := r.Err()
 	if cerr := r.Close(); cerr != nil && rerr == nil {

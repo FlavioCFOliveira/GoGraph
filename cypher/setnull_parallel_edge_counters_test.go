@@ -41,7 +41,7 @@ func runCountedParams(t *testing.T, eng *cypher.Engine, query string, params map
 	if err != nil {
 		t.Fatalf("RunInTx(%q): %v", query, err)
 	}
-	for res.Next() { //nolint:revive // drain
+	for res.Next() { // drain
 	}
 	if err := res.Err(); err != nil {
 		t.Fatalf("Err(%q): %v", query, err)

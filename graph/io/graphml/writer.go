@@ -28,7 +28,7 @@ func Write(w io.Writer, a *adjlist.AdjList[string, int64]) error {
 // checked at the start of node and edge encoding; on cancellation
 // returns the wrapped ctx.Err.
 //
-//nolint:gocyclo // GraphML write: XML header + key declaration + graph open + nodes + edges + close
+// GraphML write: XML header + key declaration + graph open + nodes + edges + close
 func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64]) error {
 	defer metrics.Time("graph.io.graphml.Write").Stop()
 	if err := ctx.Err(); err != nil {

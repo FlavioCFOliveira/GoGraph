@@ -115,7 +115,7 @@ func TestNodeValueRapid_RoundTrip(t *testing.T) {
 			if !exists {
 				rt.Fatalf("properties: key %q missing", k)
 			}
-			wantStr := string(wantVal.(expr.StringValue)) //nolint:forcetypeassert // generator always produces StringValue
+			wantStr := string(wantVal.(expr.StringValue)) // generator always produces StringValue
 			if gotVal != wantStr {
 				rt.Fatalf("properties[%q]: want %q, got %v", k, wantStr, gotVal)
 			}
@@ -160,11 +160,11 @@ func TestNodeValueRapid_LabelOrderPreserved(t *testing.T) {
 		Properties: expr.MapValue{},
 	}
 	got := exprValueToPackstream(nv, 5)
-	st := got.(packstream.Struct)               //nolint:forcetypeassert // known type
-	labels := st.Fields[1].([]packstream.Value) //nolint:forcetypeassert // known type
+	st := got.(packstream.Struct)               // known type
+	labels := st.Fields[1].([]packstream.Value) // known type
 	want := []string{"Z", "A", "M", "B"}
 	for i, wl := range want {
-		if labels[i].(string) != wl { //nolint:forcetypeassert // known type
+		if labels[i].(string) != wl { // known type
 			t.Errorf("label[%d]: want %q, got %v", i, wl, labels[i])
 		}
 	}

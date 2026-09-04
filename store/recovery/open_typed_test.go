@@ -38,7 +38,7 @@ import (
 // engine's, per index and only for a payload recovery certified usable; see
 // cypher/index_hydration.go.
 //
-//nolint:gocyclo // test: end-to-end recovery + label + property + index assertions
+// test: end-to-end recovery + label + property + index assertions
 func TestOpen_StringInt64(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

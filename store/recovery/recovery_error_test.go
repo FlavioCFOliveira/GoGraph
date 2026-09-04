@@ -208,7 +208,7 @@ func TestOpen_NonExistentWALPathBubblesError(t *testing.T) {
 		t.Fatal(err)
 	}
 	walPath := filepath.Join(dir, "wal")
-	if err := os.WriteFile(walPath, []byte{}, 0o600); err != nil { //nolint:gosec // t.TempDir
+	if err := os.WriteFile(walPath, []byte{}, 0o600); err != nil { // t.TempDir
 		t.Fatal(err)
 	}
 	if err := os.Chmod(dir, 0); err != nil {

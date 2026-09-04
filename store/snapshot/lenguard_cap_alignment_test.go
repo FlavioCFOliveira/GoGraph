@@ -342,7 +342,7 @@ func craftEdgeHandleRecordWithLabelCount(labelCount int) []byte {
 	_ = binary.Write(&b, binary.LittleEndian, uint64(1)) // src
 	_ = binary.Write(&b, binary.LittleEndian, uint64(2)) // dst
 	_ = binary.Write(&b, binary.LittleEndian, uint64(3)) // handle
-	//nolint:gosec // G115: test-only crafted header; the whole point is an out-of-range count
+	// G115: test-only crafted header; the whole point is an out-of-range count
 	_ = binary.Write(&b, binary.LittleEndian, uint32(labelCount))
 	return b.Bytes()
 }

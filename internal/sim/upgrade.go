@@ -302,7 +302,7 @@ func checkCorruptImageRejected(ctx context.Context, seed uint64, reopen reopenFu
 				ErrCorruptImageCheckAborted, err.Error(), ctxErr)
 		}
 		if isWALCorruptionFailStop(err) {
-			//nolint:nilerr // polarity inversion: a reopen refused with a WAL CORRUPTION verdict IS the pass for the fail-stop contract; every other error falls through to the failure below.
+			// polarity inversion: a reopen refused with a WAL CORRUPTION verdict IS the pass for the fail-stop contract; every other error falls through to the failure below.
 			return nil // correct: corruption rejected fail-stop.
 		}
 		return fmt.Errorf("sim: corrupt-image: the reopen failed, but NOT with a WAL corruption verdict, so the fail-stop contract is unproven: %w", err)

@@ -71,7 +71,7 @@ func TestCommit_WALFsyncFailure_UndoFailure_SurfacesErrUndoFailed(t *testing.T) 
 		t.Fatalf("Exec CREATE: %v", execErr)
 	}
 	// Drain the result to completion before touching the undo log.
-	for res.Next() { //nolint:revive // intentional full drain
+	for res.Next() { // intentional full drain
 	}
 	if drainErr := res.Err(); drainErr != nil {
 		t.Fatalf("result drain: %v", drainErr)

@@ -328,7 +328,7 @@ func TestPrint_RoundTrip(t *testing.T) {
 //	UNWIND <list> AS <var> RETURN <var>
 //	<SingleQuery> UNION [ALL] <SingleQuery>
 //
-//nolint:gocyclo // Test generator with one branch per query shape; complexity is structural.
+// Test generator with one branch per query shape; complexity is structural.
 func validQueryGen() *rapid.Generator[string] {
 	// Fixed vocabularies.
 	labels := rapid.SampledFrom([]string{"Person", "Company", "City", "Tag", "Event"})

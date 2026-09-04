@@ -72,7 +72,7 @@ func TestRecovery_UnreadableWAL(t *testing.T) {
 		t.Fatalf("Chmod(wal, 0): %v", err)
 	}
 	// Always restore permissions so t.TempDir cleanup can remove the file.
-	defer func() { _ = os.Chmod(walPath, 0o600) }() //nolint:gosec // test cleanup
+	defer func() { _ = os.Chmod(walPath, 0o600) }() // test cleanup
 
 	// 4. Recovery must fail with a non-nil error.
 	_, err = Open[string, int64](dir, OptionsFromTxn(opts))

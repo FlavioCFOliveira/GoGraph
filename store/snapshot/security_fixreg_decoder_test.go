@@ -143,7 +143,7 @@ func writeSnapshotDir(t *testing.T, dir, compName string, csr, comp []byte, decl
 			{Name: compName, Size: declaredSize, CRC32C: crc32.Checksum(comp, castagnoli)},
 		},
 	}
-	mf, err := os.OpenFile(filepath.Join(dir, "manifest.json"), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	mf, err := os.OpenFile(filepath.Join(dir, "manifest.json"), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600) //nolint:gosec // G304: dir is this test's temp dir and the filename is a literal.
 	if err != nil {
 		t.Fatalf("open manifest: %v", err)
 	}

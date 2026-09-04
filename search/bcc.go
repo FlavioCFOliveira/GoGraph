@@ -45,7 +45,7 @@ func HopcroftTarjanBCC[W any](c *csr.CSR[W]) BCCResult {
 // [HopcroftTarjanBCC]. ctx.Err() is checked at every outer-DFS root;
 // on cancellation returns (zero BCCResult, wrapped ctx.Err()).
 //
-//nolint:gocyclo // canonical Hopcroft-Tarjan: DFS frame stack + edge-stack + articulation + bridge detection
+// canonical Hopcroft-Tarjan: DFS frame stack + edge-stack + articulation + bridge detection
 func HopcroftTarjanBCCCtx[W any](ctx context.Context, c *csr.CSR[W]) (BCCResult, error) {
 	defer metrics.Time("search.HopcroftTarjanBCCCtx").Stop()
 	maxID := int(c.MaxNodeID())

@@ -623,7 +623,7 @@ func (c *Checkpointer[N, W]) loop(ctx context.Context) {
 				// (via setErr inside runCheckpoint) so observability
 				// surfaces; there is no caller to return to from the
 				// loop, so the value itself is intentionally discarded.
-				_ = c.runCheckpoint() //nolint:errcheck // error captured in stats
+				_ = c.runCheckpoint() // error captured in stats
 				lastFire = c.clk.Now()
 			}
 		}

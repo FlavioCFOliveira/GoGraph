@@ -54,7 +54,7 @@ func BenchmarkSerializeDenseContiguous(b *testing.B) {
 // most work on: run encoding cannot shrink it, so the clone bought nothing.
 func BenchmarkSerializeSparse(b *testing.B) {
 	benchLabel(b, func(i *Index) {
-		r := rand.New(rand.NewPCG(1, 2))
+		r := rand.New(rand.NewPCG(1, 2)) //nolint:gosec // G404: math/rand/v2 PCG seeded from a fixed constant — this test asserts a reproducible sequence, which a CSPRNG would destroy.
 		for k := 0; k < 100_000; k++ {
 			i.Add(1, graph.NodeID(r.Uint64N(10_000_000)))
 		}

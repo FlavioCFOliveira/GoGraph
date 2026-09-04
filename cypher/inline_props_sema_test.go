@@ -62,7 +62,7 @@ func TestBuildPropertySelection_ParameterIsRejectedBySema(t *testing.T) {
 		res, err := eng.Run(context.Background(), q, params)
 		if err == nil {
 			if res != nil {
-				for res.Next() { //nolint:revive // full drain
+				for res.Next() { // full drain
 				}
 				err = res.Err()
 				_ = res.Close()

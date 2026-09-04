@@ -32,7 +32,7 @@ import (
 //   - [btree.Index.Lookup]: b-tree range / key lookup returning a
 //     [*roaring64.Bitmap].
 //
-//nolint:gocyclo // test: build + all-three-index snapshot + restart + per-index query assertions
+// test: build + all-three-index snapshot + restart + per-index query assertions
 func TestRecovery_IndexesSurvive(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

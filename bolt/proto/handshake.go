@@ -52,7 +52,7 @@ var SupportedVersions = []Version{
 // Returns ErrBadMagic if the magic preamble is wrong, ErrNoCommonVersion if no
 // version matches, or an I/O error if the connection fails mid-handshake.
 //
-//nolint:gocyclo // handshake has multiple sequential error checks + version-matching loops; splitting would obscure the protocol flow.
+// handshake has multiple sequential error checks + version-matching loops; splitting would obscure the protocol flow.
 func Negotiate(ctx context.Context, conn net.Conn) (Version, error) {
 	if deadline, ok := ctx.Deadline(); ok {
 		if err := conn.SetDeadline(deadline); err != nil {

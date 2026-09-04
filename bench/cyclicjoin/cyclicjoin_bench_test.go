@@ -29,7 +29,7 @@ func drain(tb testing.TB, eng *cypher.Engine, q string) {
 	if err != nil {
 		tb.Fatal(err)
 	}
-	for res.Next() { //nolint:revive // intentional full drain
+	for res.Next() { // intentional full drain
 	}
 	if err := res.Err(); err != nil {
 		tb.Fatal(err)

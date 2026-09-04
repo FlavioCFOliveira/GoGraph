@@ -234,7 +234,7 @@ func runWriteCollect(ctx context.Context, engine *EngineAdapter, query string, p
 	if err != nil {
 		return nil, err
 	}
-	for res.Next() { //nolint:revive // draining is the point
+	for res.Next() { // draining is the point
 	}
 	drainErr := res.Err()
 	var counters *exec.QueryCounters
@@ -256,7 +256,7 @@ func scalarCountWithParams(ctx context.Context, engine *EngineAdapter, query str
 	if res.Next() {
 		got, _ = res.IntAt(0)
 	}
-	for res.Next() { //nolint:revive // draining is the point
+	for res.Next() { // draining is the point
 	}
 	drainErr := res.Err()
 	_ = res.Close()

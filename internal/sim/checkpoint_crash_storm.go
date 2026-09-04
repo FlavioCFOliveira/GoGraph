@@ -319,7 +319,7 @@ func (l *checkpointStormLedger) absorb(res *ConcurrentResult) {
 // evidence alongside the report (nil == passed). Tests use it to assert on what
 // the run actually exercised and to drive the sensitivity seams.
 //
-//nolint:gocyclo // one cycle is one linear crash protocol: open, serve, race a clean then an interrupted checkpoint, crash, reopen, adjudicate.
+// one cycle is one linear crash protocol: open, serve, race a clean then an interrupted checkpoint, crash, reopen, adjudicate.
 func runCheckpointCrashStormWith(
 	ctx context.Context, seed uint64, size checkpointStormConfig, opts checkpointStormOptions,
 ) (*checkpointStormEvidence, *SimReport, error) {

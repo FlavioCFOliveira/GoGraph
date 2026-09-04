@@ -203,7 +203,7 @@ func (s lfrBase) Build(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
 //   - maxCom < minCom;
 //   - muPercent < 0 or muPercent > 100.
 //
-//nolint:gocritic // paramTypeCombine: signature is pinned by the brief (n, gammaPercent, betaPercent, avgDeg, maxDeg, minCom, maxCom, muPercent int, seed uint64).
+// paramTypeCombine: signature is pinned by the brief (n, gammaPercent, betaPercent, avgDeg, maxDeg, minCom, maxCom, muPercent int, seed uint64).
 func LFR(n, gammaPercent, betaPercent, avgDeg, maxDeg, minCom, maxCom, muPercent int, seed uint64) Shape[int, int64] {
 	validateLFRParams(n, gammaPercent, betaPercent, avgDeg, maxDeg, minCom, maxCom, muPercent)
 	return lfrBase{
@@ -234,7 +234,7 @@ func LFR(n, gammaPercent, betaPercent, avgDeg, maxDeg, minCom, maxCom, muPercent
 // declaration order, so the first failure points at the first
 // out-of-range knob.
 //
-//nolint:gocyclo,gocritic // gocyclo: 12 disjoint range checks form one validation pass; splitting would obscure intent. paramTypeCombine: signature mirrors LFR.
+// gocyclo: 12 disjoint range checks form one validation pass; splitting would obscure intent. paramTypeCombine: signature mirrors LFR.
 func validateLFRParams(n, gammaPercent, betaPercent, avgDeg, maxDeg, minCom, maxCom, muPercent int) {
 	if n < 50 || n > 50_000 {
 		panic(fmt.Sprintf("shapegen: LFR requires 50 <= n <= 50000, got %d", n))
@@ -280,7 +280,7 @@ func validateLFRParams(n, gammaPercent, betaPercent, avgDeg, maxDeg, minCom, max
 // matching the branch-free err-thread convention shared across the
 // random family.
 //
-//nolint:gosec,gocyclo,gocritic // G404: math/rand/v2 is the pinned PRNG for catalogue determinism. gocyclo: phase orchestration with err-gated sequencing is a single intent. paramTypeCombine: signature mirrors LFR.
+//nolint:gosec // G404: math/rand/v2 is the pinned PRNG for catalogue determinism. gocyclo: phase orchestration with err-gated sequencing is a single intent. paramTypeCombine: signature mirrors LFR.
 func buildLFR(
 	g *lpg.Graph[int, int64],
 	n, gammaPercent, betaPercent, avgDeg, maxDeg, minCom, maxCom, muPercent int,
@@ -342,7 +342,7 @@ func buildLFR(
 // per node, in node order, so the seed-to-output map is a pure
 // function of (n, minDeg, maxDeg, gamma, seed).
 //
-//nolint:gosec // G404: math/rand/v2 is the pinned PRNG for catalogue determinism; see LFR godoc.
+// G404: math/rand/v2 is the pinned PRNG for catalogue determinism; see LFR godoc.
 func lfrSampleDegrees(r *rand.Rand, degrees []int, n, minDeg, maxDeg int, gamma float64) {
 	exp := 1.0 - gamma
 	minTerm := math.Pow(float64(minDeg), exp)
@@ -383,7 +383,7 @@ func lfrSampleDegrees(r *rand.Rand, degrees []int, n, minDeg, maxDeg int, gamma 
 // seed) once the degree-sampling phase has consumed its share of
 // the PRNG stream.
 //
-//nolint:gosec // G404: math/rand/v2 is the pinned PRNG for catalogue determinism; see LFR godoc.
+// G404: math/rand/v2 is the pinned PRNG for catalogue determinism; see LFR godoc.
 func lfrSampleCommunitySizes(r *rand.Rand, n, minCom, maxCom int, beta float64) []int {
 	exp := 1.0 - beta
 	minTerm := math.Pow(float64(minCom), exp)
@@ -601,7 +601,7 @@ func lfrAttachCommunityLabels(g *lpg.Graph[int, int64], nodeCom []int) error {
 // (u, v) order. The first AddEdge error short-circuits the
 // insertion loop.
 //
-//nolint:gosec // G404: math/rand/v2 is the pinned PRNG for catalogue determinism; see LFR godoc.
+// G404: math/rand/v2 is the pinned PRNG for catalogue determinism; see LFR godoc.
 func lfrRealiseEdges(
 	g *lpg.Graph[int, int64],
 	degrees, nodeCom []int,
@@ -662,7 +662,7 @@ func lfrRealiseEdges(
 // to the running pair set. Self-loops and parallel pairings are
 // dropped at generation time (the Erased Configuration Model).
 //
-//nolint:gosec // G404: math/rand/v2 is the pinned PRNG for catalogue determinism.
+// G404: math/rand/v2 is the pinned PRNG for catalogue determinism.
 func lfrPairIntraCommunity(r *rand.Rand, members, kIntra []int, pairs map[[2]int]struct{}) {
 	if len(members) < 2 {
 		return
@@ -710,7 +710,7 @@ func lfrPairIntraCommunity(r *rand.Rand, members, kIntra []int, pairs map[[2]int
 // dropped at generation time so the realised mixing parameter
 // matches the requested mu from above.
 //
-//nolint:gosec // G404: math/rand/v2 is the pinned PRNG for catalogue determinism.
+// G404: math/rand/v2 is the pinned PRNG for catalogue determinism.
 func lfrPairInterCommunity(r *rand.Rand, kInter, nodeCom []int, pairs map[[2]int]struct{}) {
 	stubs := make([]int, 0, len(kInter))
 	for v := 0; v < len(kInter); v++ {

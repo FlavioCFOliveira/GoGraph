@@ -114,7 +114,7 @@ func TestCommit_FinalisationPanic_DoesNotWedgeTheStore(t *testing.T) {
 	if execErr != nil {
 		t.Fatalf("Exec CREATE: %v", execErr)
 	}
-	for res.Next() { //nolint:revive // intentional full drain
+	for res.Next() { // intentional full drain
 	}
 	if drainErr := res.Err(); drainErr != nil {
 		t.Fatalf("result drain: %v", drainErr)

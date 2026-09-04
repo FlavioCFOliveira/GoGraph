@@ -65,7 +65,7 @@ func TestReverseIndexAgreesWithFullScan(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			const nodes = 60
-			rng := rand.New(rand.NewSource(int64(len(name))))
+			rng := rand.New(rand.NewSource(int64(len(name)))) //nolint:gosec // G404: math/rand seeded from the test's own parameter — this test asserts a reproducible sequence, which a CSPRNG would destroy.
 			a := New[string, float64](cfg)
 			for i := 0; i < nodes; i++ {
 				if err := a.AddNode(fmt.Sprintf("n%d", i)); err != nil {

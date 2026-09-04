@@ -461,7 +461,7 @@ func WriteCaptureFS[W any](fsys fileSystem, dir string, capt *Capture[W], constr
 // published bytes are identical to those a streaming write of the same instant
 // would have produced, and no component can observe a later state than another.
 //
-//nolint:gocyclo // snapshot publish: dir prep + CSR + labels + properties + mapper + constraints + indexdefs + manifest + atomic rename + ctx ticks
+// snapshot publish: dir prep + CSR + labels + properties + mapper + constraints + indexdefs + manifest + atomic rename + ctx ticks
 func writeCaptureCore[W any](
 	ctx context.Context,
 	fsys fileSystem,

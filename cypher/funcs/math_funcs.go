@@ -77,8 +77,8 @@ func fnAtan2(args []expr.Value) (expr.Value, error) {
 			return nil, &TypeError{Function: "atan2", ArgIndex: i, Got: a.Kind(), Want: "Float or Integer"}
 		}
 	}
-	y, _ := toFloat64(args[0]) //nolint:forcetypeassert // type-checked above
-	x, _ := toFloat64(args[1]) //nolint:forcetypeassert // type-checked above
+	y, _ := toFloat64(args[0]) // type-checked above
+	x, _ := toFloat64(args[1]) // type-checked above
 	return expr.FloatValue(math.Atan2(y, x)), nil
 }
 

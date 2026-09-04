@@ -32,7 +32,7 @@ func HierholzerUndirected[W any](c *csr.CSR[W]) ([]graph.NodeID, error) {
 // [HierholzerUndirected]. ctx.Err() is checked every 4096 trail
 // steps; on cancellation returns (nil, wrapped ctx.Err()).
 //
-//nolint:gocyclo // canonical Hierholzer with twin-edge consumption
+// canonical Hierholzer with twin-edge consumption
 func HierholzerUndirectedCtx[W any](ctx context.Context, c *csr.CSR[W]) ([]graph.NodeID, error) {
 	defer metrics.Time("search.HierholzerUndirectedCtx").Stop()
 	maxID := int(c.MaxNodeID())

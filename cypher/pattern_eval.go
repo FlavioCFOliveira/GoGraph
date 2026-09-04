@@ -696,7 +696,7 @@ func (pe *patternEvaluator) matchSteps(ctx context.Context, srcID graph.NodeID, 
 
 // matchSingleHop follows a single fixed-length hop and recurses.
 //
-//nolint:gocyclo // direction × filter × recursion branches; extracted helpers bring each below 15
+// direction × filter × recursion branches; extracted helpers bring each below 15
 func (pe *patternEvaluator) matchSingleHop(ctx context.Context, srcID graph.NodeID, s step, remaining []step, row expr.RowContext) (bool, error) {
 	mapper := pe.g.AdjList().Mapper()
 

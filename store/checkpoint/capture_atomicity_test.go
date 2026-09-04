@@ -390,7 +390,7 @@ func copySnapshotTree(t *testing.T, src, dst string) {
 			if rerr != nil {
 				return rerr
 			}
-			if werr := os.WriteFile(dp, buf, 0o600); werr != nil {
+			if werr := os.WriteFile(dp, buf, 0o600); werr != nil { //nolint:gosec // G703: the directory component is a path this test created and the leaf name is a literal, so no traversal segment can enter.
 				return werr
 			}
 		}

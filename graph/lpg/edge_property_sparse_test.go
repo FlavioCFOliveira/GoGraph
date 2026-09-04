@@ -296,7 +296,7 @@ func TestSparse_DenseDifferentialRoundTrip(t *testing.T) {
 	t.Parallel()
 	key := PropertyKeyID(1)
 	const length = 40
-	rng := rand.New(rand.NewSource(99))
+	rng := rand.New(rand.NewSource(99)) //nolint:gosec // G404: math/rand seeded from a fixed constant — this test asserts a reproducible sequence, which a CSPRNG would destroy.
 	// Build a sparse int64 column at ~25% fill.
 	var block *edgePropCols
 	present := map[int]int64{}
@@ -358,7 +358,7 @@ func TestSparse_PropertyBasedOracle(t *testing.T) {
 
 func runSparseOracle(t *testing.T, seed int64) {
 	t.Helper()
-	rng := rand.New(rand.NewSource(seed))
+	rng := rand.New(rand.NewSource(seed)) //nolint:gosec // G404: math/rand seeded from the test's own parameter — this test asserts a reproducible sequence, which a CSPRNG would destroy.
 	// Many distinct keys -> each is set on few slots of the wide node -> every
 	// column is sparse. A mix of kinds covers the de-boxed sparse backings.
 	keys := []PropertyKeyID{1, 2, 3, 4, 5, 6, 7, 8}

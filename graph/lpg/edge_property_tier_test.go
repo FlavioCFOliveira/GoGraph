@@ -267,7 +267,7 @@ func TestEdgePropTier_FullScanPropertyBased(t *testing.T) {
 
 func runPublicOracle(t *testing.T, seed int64) {
 	t.Helper()
-	rng := rand.New(rand.NewSource(seed))
+	rng := rand.New(rand.NewSource(seed)) //nolint:gosec // G404: math/rand seeded from the test's own parameter — this test asserts a reproducible sequence, which a CSPRNG would destroy.
 	g := New[string, int64](adjlist.Config{Directed: true, Multigraph: true})
 	nodes := []string{"a", "b", "c"}
 	keys := []string{"k1", "k2"}

@@ -1605,7 +1605,7 @@ func (s *hashShard[V]) reap(h uint64, value V, want *entry) {
 // same image installed an unreachable map key; the difference is that a slot
 // also lengthens the probe chains around it instead of being inert.
 //
-//nolint:gocritic // dupSubExpr: f != f is the canonical generic NaN test.
+// dupSubExpr: f != f is the canonical generic NaN test.
 func nanKey[V comparable](v V) bool {
 	switch f := any(v).(type) {
 	case float64:
@@ -2162,7 +2162,7 @@ func encodeValue[V comparable](v V) ([]byte, error) {
 // Like encodeValue it supports the subset of types documented above;
 // any other V returns [index.ErrIndexValueTypeUnsupported].
 //
-//nolint:gocyclo // type switch over supported value kinds
+// type switch over supported value kinds
 func decodeValue[V comparable](b []byte) (V, error) {
 	var zero V
 	switch any(zero).(type) {
@@ -2399,7 +2399,7 @@ func (i *Index[V]) Serialize(w io.Writer) error {
 // also drains those in-flight mutations before the non-empty counter is
 // restated, which is what makes the restated count exact.
 //
-//nolint:gocyclo // index deserialize: header + per-entry decode + per-step bounds checks
+// index deserialize: header + per-entry decode + per-step bounds checks
 func (i *Index[V]) Deserialize(r io.Reader) error {
 	all, err := io.ReadAll(r)
 	if err != nil {

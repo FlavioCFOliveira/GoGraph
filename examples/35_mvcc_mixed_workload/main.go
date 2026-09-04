@@ -291,7 +291,7 @@ func drain(ctx context.Context, eng *cypher.Engine, q string, params map[string]
 	if err != nil {
 		return err
 	}
-	for res.Next() { //nolint:revive // full drain
+	for res.Next() { // full drain
 	}
 	if err := res.Err(); err != nil {
 		_ = res.Close()

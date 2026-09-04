@@ -25,7 +25,7 @@ import (
 // TestTCKReport generates and writes the per-feature TCK pass-rate report.
 // The test passes unconditionally; the generated file is committed alongside
 // the code so reviewers can see the coverage delta.
-func TestTCKReport(t *testing.T) { //nolint:gocyclo // Report generation loops over several maps; extracted helpers would not reduce real complexity.
+func TestTCKReport(t *testing.T) { // Report generation loops over several maps; extracted helpers would not reduce real complexity.
 	scenarios, err := tck.LoadScenarios()
 	if err != nil {
 		t.Fatalf("loading TCK scenarios: %v", err)
@@ -115,9 +115,9 @@ func TestTCKReport(t *testing.T) { //nolint:gocyclo // Report generation loops o
 
 	// Write the report file.
 	reportPath := filepath.Join("testdata", "parser-report.md")
-	if err := os.MkdirAll(filepath.Dir(reportPath), 0o750); err != nil { //nolint:gosec // directory is created inside the test module tree
+	if err := os.MkdirAll(filepath.Dir(reportPath), 0o750); err != nil { // directory is created inside the test module tree
 		t.Logf("could not create testdata dir: %v (skipping file write)", err)
-	} else if err := os.WriteFile(reportPath, []byte(report), 0o600); err != nil { //nolint:gosec // test report file
+	} else if err := os.WriteFile(reportPath, []byte(report), 0o600); err != nil { // test report file
 		t.Logf("could not write report: %v (skipping file write)", err)
 	}
 

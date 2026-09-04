@@ -50,7 +50,7 @@ func buildParallelMultiTypeEngine(t *testing.T) *cypher.Engine {
 		if err != nil {
 			t.Fatalf("setup %q: %v", q, err)
 		}
-		for res.Next() { //nolint:revive // drain
+		for res.Next() { // drain
 		}
 		if cerr := res.Err(); cerr != nil {
 			t.Fatalf("setup %q result error: %v", q, cerr)
@@ -68,7 +68,7 @@ func countRunRows(t *testing.T, eng *cypher.Engine, query string) int {
 	if err != nil {
 		t.Fatalf("Run %q: %v", query, err)
 	}
-	defer res.Close() //nolint:errcheck // test cleanup
+	defer res.Close() // test cleanup
 	var n int
 	for res.Next() {
 		n++

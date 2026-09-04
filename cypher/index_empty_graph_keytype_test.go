@@ -50,7 +50,7 @@ func TestCreateIndexEmptyGraph_IntegerParamMatches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CREATE (n:L {p: 5}): %v", err)
 	}
-	for res.Next() { //nolint:revive // drain
+	for res.Next() { // drain
 	}
 	if cerr := res.Err(); cerr != nil {
 		t.Fatalf("CREATE node result error: %v", cerr)
@@ -97,7 +97,7 @@ func TestCreateIndexEmptyGraph_IntegerParamMatches_WhereForm(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CREATE (n:L {p: 7}): %v", err)
 	}
-	for res.Next() { //nolint:revive // drain
+	for res.Next() { // drain
 	}
 	if cerr := res.Err(); cerr != nil {
 		t.Fatalf("CREATE node result error: %v", cerr)

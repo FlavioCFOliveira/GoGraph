@@ -59,7 +59,7 @@ func PersonalisedPushPageRank[W any](c *csr.CSR[W], src graph.NodeID, opts PPRPu
 // [PersonalisedPushPageRank]. ctx.Err() is checked every 4096 worklist
 // pops; on cancellation returns (nil, wrapped ctx.Err()).
 //
-//nolint:gocyclo // canonical ACL push: defaults + worklist loop + dangling teleport
+// canonical ACL push: defaults + worklist loop + dangling teleport
 func PersonalisedPushPageRankCtx[W any](ctx context.Context, c *csr.CSR[W], src graph.NodeID, opts PPRPushOptions) ([]float64, error) {
 	defer metrics.Time("search.centrality.PersonalisedPushPageRankCtx").Stop()
 	if hasInvalidFloat(opts.Damping, opts.Epsilon) {

@@ -30,7 +30,7 @@ import (
 // path. This test continues to validate the snapshot path in
 // isolation.
 //
-//nolint:gocyclo // test: per-property kind assertions across node and edge
+// test: per-property kind assertions across node and edge
 func TestRecovery_PropertiesSurviveRestart(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

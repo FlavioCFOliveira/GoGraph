@@ -32,7 +32,7 @@ import (
 // Closes the acceptance criterion "round-trip tests cover label,
 // hash and btree implementations" + "indexes survive restart".
 //
-//nolint:gocyclo // test: build + snapshot + reopen + per-index hydrate + per-index assert
+// test: build + snapshot + reopen + per-index hydrate + per-index assert
 func TestRecovery_IndexesSurviveRestart(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

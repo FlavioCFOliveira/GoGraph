@@ -206,7 +206,7 @@ func newPropValueArena() *propValueArena { return &propValueArena{} }
 // parameters — there is no package-level mutable state, so writeProperties stays
 // exactly as re-entrant and safe for concurrent independent calls as before.
 //
-//nolint:gocyclo // properties write: header + key table + node records + edge records, each guarded
+// properties write: header + key table + node records + edge records, each guarded
 func writeProperties[N comparable, W any](
 	w io.Writer,
 	g *lpg.Graph[N, W],
@@ -774,7 +774,7 @@ func encodePropertyValueInto(a *propValueArena, v lpg.PropertyValue) ([]byte, er
 // CRC matches the file bytes (the [LoadSnapshotFull] helper does
 // this); this function only enforces the structural contract.
 //
-//nolint:gocyclo // properties read: header + key table + node records + edge records, each bounds-checked
+// properties read: header + key table + node records + edge records, each bounds-checked
 func ReadProperties(r io.Reader) (PropertiesReadback, error) {
 	defer metrics.Time("store.snapshot.ReadProperties").Stop()
 	br := bufio.NewReader(r)
@@ -922,7 +922,7 @@ func readLenPrefixedValue(br *bufio.Reader, n uint32) ([]byte, error) {
 
 // readNodePropRecord parses one node property record.
 //
-//nolint:gocyclo // record read: id + keyIdx + kind + length-prefixed value with bounds checks
+// record read: id + keyIdx + kind + length-prefixed value with bounds checks
 func readNodePropRecord(br *bufio.Reader, out *NodePropertyEntry, keyCount uint64) error {
 	if err := binary.Read(br, binary.LittleEndian, &out.NodeID); err != nil {
 		return fmt.Errorf("%w: %w", ErrPropertiesCorrupted, err)
@@ -962,7 +962,7 @@ func readNodePropRecord(br *bufio.Reader, out *NodePropertyEntry, keyCount uint6
 
 // readEdgePropRecord parses one edge property record.
 //
-//nolint:gocyclo // record read: src + dst + keyIdx + kind + length-prefixed value with bounds checks
+// record read: src + dst + keyIdx + kind + length-prefixed value with bounds checks
 func readEdgePropRecord(br *bufio.Reader, out *EdgePropertyEntry, keyCount uint64) error {
 	if err := binary.Read(br, binary.LittleEndian, &out.Src); err != nil {
 		return fmt.Errorf("%w: %w", ErrPropertiesCorrupted, err)
@@ -1173,7 +1173,7 @@ func decodeListPropertyValue(raw []byte) (lpg.PropertyValue, error) {
 // `store.snapshot.ApplyProperties.edgeMissing`; this matches
 // [lpg.Graph.SetEdgeProperty]'s own no-op-on-missing-edge contract.
 //
-//nolint:gocyclo // apply: bounds + mapper resolve + edge resolve + kind decode
+// apply: bounds + mapper resolve + edge resolve + kind decode
 func ApplyPropertiesToGraph[N comparable, W any](g *lpg.Graph[N, W], rb PropertiesReadback) error {
 	defer metrics.Time("store.snapshot.ApplyPropertiesToGraph").Stop()
 	adj := g.AdjList()
@@ -1223,7 +1223,7 @@ func ApplyPropertiesToGraph[N comparable, W any](g *lpg.Graph[N, W], rb Properti
 			metrics.IncCounter("store.snapshot.ApplyProperties.unresolved", 1)
 			continue
 		}
-		_ = g.SetEdgeProperty(srcN, dstN, rb.Keys[ep.KeyIdx], v) //nolint:errcheck // no schema validator during snapshot restore
+		_ = g.SetEdgeProperty(srcN, dstN, rb.Keys[ep.KeyIdx], v) // no schema validator during snapshot restore
 	}
 	return nil
 }

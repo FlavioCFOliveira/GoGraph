@@ -194,9 +194,9 @@ func boltDial(ctx context.Context, addr, query string) error {
 	// This prevents ephemeral port exhaustion on macOS when the soak runs
 	// many short-lived connections concurrently alongside other test packages.
 	if tc, ok := conn.(*net.TCPConn); ok {
-		_ = tc.SetLinger(0) //nolint:errcheck // best-effort; not fatal if unsupported
+		_ = tc.SetLinger(0) // best-effort; not fatal if unsupported
 	}
-	defer func() { _ = conn.Close() }() //nolint:errcheck // close on teardown path
+	defer func() { _ = conn.Close() }() // close on teardown path
 
 	// Propagate context deadline to connection I/O.
 	if dl, ok := ctx.Deadline(); ok {

@@ -114,7 +114,7 @@ func BuildFixture(spec FixtureSpec) (*csr.CSR[struct{}], error) {
 	}
 	a := adjlist.New[uint32, struct{}](adjlist.Config{Directed: true, Multigraph: spec.Multigraph})
 	for i := uint64(0); i < spec.Vertices; i++ {
-		//nolint:gosec // G115: spec.validate rejected Vertices > math.MaxUint32 above, and i < spec.Vertices, so this conversion is exact
+		// G115: spec.validate rejected Vertices > math.MaxUint32 above, and i < spec.Vertices, so this conversion is exact
 		if err := a.AddNode(uint32(i)); err != nil {
 			return nil, fmt.Errorf("csrfile.BuildFixture: AddNode(%d): %w", i, err)
 		}

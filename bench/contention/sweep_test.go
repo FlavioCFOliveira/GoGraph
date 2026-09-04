@@ -112,7 +112,7 @@ func TestSweep(t *testing.T) {
 		workloads = filtered
 	}
 
-	if err := os.MkdirAll(root, 0o750); err != nil {
+	if err := os.MkdirAll(root, 0o750); err != nil { //nolint:gosec // G703: root is the operator-supplied artefact directory this suite asserts is absolute; the directory name carries no caller-controlled segment.
 		t.Fatalf("mkdir %s: %v", root, err)
 	}
 	// Printed before the work starts, so the path is known even if the sweep
@@ -212,7 +212,7 @@ func writeSummary(root string, rows []contention.Result) error {
 			float64(e.P50Nanos)/1000, float64(e.P99Nanos)/1000, e.Errors,
 			r.Probe.OpsPerSec, slow)
 	}
-	return os.WriteFile(filepath.Join(root, "summary.tsv"), b.Bytes(), 0o600)
+	return os.WriteFile(filepath.Join(root, "summary.tsv"), b.Bytes(), 0o600) //nolint:gosec // G703: the directory component is a path this test created and the leaf name is a literal, so no traversal segment can enter.
 }
 
 // runCmd runs a command and returns its combined output.

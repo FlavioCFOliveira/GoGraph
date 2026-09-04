@@ -70,7 +70,7 @@ func TestSec_Cypher_StringConcat_DoublingBypassesBudget(t *testing.T) {
 		t.Fatalf("Run(%q): unexpected non-EvalError: %v", q, err)
 	}
 	defer res.Close()
-	for res.Next() { //nolint:revive // drain
+	for res.Next() { // drain
 	}
 	iterErr := res.Err()
 	var ee *expr.EvalError
@@ -105,7 +105,7 @@ func TestSec_Cypher_StringConcat_PlainConcatBypassesBudget(t *testing.T) {
 		t.Fatalf("Run(%q): unexpected non-EvalError: %v", q, err)
 	}
 	defer res.Close()
-	for res.Next() { //nolint:revive // drain
+	for res.Next() { // drain
 	}
 	iterErr := res.Err()
 	var ee *expr.EvalError

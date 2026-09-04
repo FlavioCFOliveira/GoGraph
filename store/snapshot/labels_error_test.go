@@ -410,7 +410,7 @@ func TestLoadSnapshotFull_MissingCSR(t *testing.T) {
 		Version: ManifestVersion,
 		Files:   []FileEntry{}, // empty
 	}
-	mf, _ := os.Create(filepath.Join(dir, "manifest.json")) //nolint:gosec,errcheck // t.TempDir
+	mf, _ := os.Create(filepath.Join(dir, "manifest.json")) //nolint:gosec // t.TempDir
 	_ = WriteManifest(mf, m)
 	_ = mf.Close()
 	_, err := LoadSnapshotFull(dir)

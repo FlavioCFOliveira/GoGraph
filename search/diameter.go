@@ -39,7 +39,7 @@ func Diameter[W any](c *csr.CSR[W]) (lo, hi int, exact bool) {
 // leaves an O(V*(V+E)) uninterruptible window); on cancellation returns
 // the bounds reached so far together with the wrapped ctx.Err().
 //
-//nolint:gocyclo // 2-sweep + iFUB refinement: precondition checks + sweeps + level walk
+// 2-sweep + iFUB refinement: precondition checks + sweeps + level walk
 func DiameterCtx[W any](ctx context.Context, c *csr.CSR[W]) (lo, hi int, exact bool, err error) {
 	defer metrics.Time("search.DiameterCtx").Stop()
 	n := int(c.MaxNodeID())

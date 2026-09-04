@@ -141,7 +141,7 @@ func TestServerMetrics_RejectedConnection(t *testing.T) {
 	defer conn2.Close()
 	_ = conn2.SetDeadline(time.Now().Add(2 * time.Second))
 	var buf [4]byte
-	_, _ = io.ReadFull(conn2, buf[:]) //nolint:errcheck // expect EOF/typed close on the rejected connection
+	_, _ = io.ReadFull(conn2, buf[:]) // expect EOF/typed close on the rejected connection
 
 	if !waitFor(func() bool { return probe.get("bolt.server.conn.rejected") >= 1 }, 2*time.Second) {
 		t.Fatalf("bolt.server.conn.rejected = %d, want >= 1 after a connection was refused", probe.get("bolt.server.conn.rejected"))

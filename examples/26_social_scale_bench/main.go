@@ -560,12 +560,12 @@ func profileCSRDegrees(vertices []uint64, threshold int) csrDegreeProfile {
 	var arcs, sumSq, aboveArcs, aboveSumSq, aboveVerts uint64
 	p.minDeg = -1
 	for i := 0; i+1 < len(vertices); i++ {
-		d := int(vertices[i+1] - vertices[i])
+		d := int(vertices[i+1] - vertices[i]) //nolint:gosec // G115: a CSR offset array is monotonically non-decreasing, so the difference is non-negative and at most the arc count.
 		if d == 0 {
 			continue // a source with no out-arcs is not part of the distribution
 		}
 		degrees = append(degrees, d)
-		d64 := uint64(d)
+		d64 := uint64(d) //nolint:gosec // G115: d is a CSR out-degree, non-negative by the line above and known non-zero here.
 		arcs += d64
 		sumSq += d64 * d64
 		if p.minDeg < 0 || d < p.minDeg {
@@ -1000,7 +1000,7 @@ func uniqueHexID(rng *rand.Rand, seen map[string]struct{}) string {
 	var b [12]byte
 	for {
 		for i := range b {
-			b[i] = byte(rng.Intn(256))
+			b[i] = byte(rng.Intn(256)) //nolint:gosec // G115: rng.Intn(256) returns [0,256), exactly the byte range.
 		}
 		id := hex.EncodeToString(b[:])
 		if _, dup := seen[id]; dup {

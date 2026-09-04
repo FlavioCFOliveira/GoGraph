@@ -352,7 +352,7 @@ func buildBulk(idx *btree.Index[int64], keys int) error {
 	nodes := make([]graph.NodeID, keys)
 	for i := range values {
 		values[i] = int64(i)
-		nodes[i] = graph.NodeID(uint64(i)) //nolint:gosec // G115: i is a bounded non-negative loop index
+		nodes[i] = graph.NodeID(uint64(i)) // G115: i is a bounded non-negative loop index
 	}
 	if err := idx.BulkLoadSorted(values, nodes); err != nil {
 		return fmt.Errorf("entryheap: bulk load: %w", err)

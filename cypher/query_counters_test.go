@@ -43,7 +43,7 @@ func runCounted(t *testing.T, eng *cypher.Engine, query string) *exec.QueryCount
 	if err != nil {
 		t.Fatalf("RunInTx(%q): %v", query, err)
 	}
-	for res.Next() { //nolint:revive // drain
+	for res.Next() { // drain
 	}
 	if err := res.Err(); err != nil {
 		t.Fatalf("Err(%q): %v", query, err)
@@ -291,7 +291,7 @@ func TestQueryCounters_RolledBackStatementReportsNothing(t *testing.T) {
 	// A failing statement: a type error the executor rejects at run time.
 	res, err := eng.RunInTx(context.Background(), `CREATE (n:N) SET n.p = 1/0`, nil)
 	if err == nil {
-		for res.Next() { //nolint:revive // drain
+		for res.Next() { // drain
 		}
 		err = res.Err()
 		_ = res.Close()

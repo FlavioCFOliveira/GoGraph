@@ -303,7 +303,7 @@ func diamondEdgeSchedule(k, sink int) [][2]int {
 // this single deviation from the project's lowercase-parameter
 // convention.
 //
-//nolint:gosec,gocritic // G404: math/rand/v2 is the pinned PRNG for catalogue determinism; captLocal: L is pinned as a catalogue parameter name by the brief.
+//nolint:gocritic // G404: math/rand/v2 is the pinned PRNG for catalogue determinism; captLocal: L is pinned as a catalogue parameter name by the brief.
 func Layered(L, w, density int, seed uint64) Shape[int, int64] {
 	if L < 1 || L > 100 {
 		panic(fmt.Sprintf("shapegen: Layered requires 1 <= L <= 100, got %d", L))
@@ -507,7 +507,7 @@ func buildLengauerTarjan(g *lpg.Graph[int, int64]) error {
 // (parent, child) is inserted. The PRNG is a deterministically-
 // seeded [math/rand/v2.PCG] and is consumed once per parent draw.
 //
-//nolint:gosec // G404: math/rand/v2 is the pinned PRNG for catalogue determinism; see BuildDepDAG godoc.
+// G404: math/rand/v2 is the pinned PRNG for catalogue determinism; see BuildDepDAG godoc.
 func BuildDepDAG(depth, fanIn, fanOut int, seed uint64) Shape[int, int64] {
 	if depth < 0 || depth > 20 {
 		panic(fmt.Sprintf("shapegen: BuildDepDAG requires 0 <= depth <= 20, got %d", depth))
@@ -639,7 +639,7 @@ func buildDepDAG(g *lpg.Graph[int, int64], depth, fanIn, fanOut int, seed uint64
 // [1, 1000], once for the sign Bernoulli draw — so the seed-to-
 // output map is a pure function of the (n, signMix, seed) tuple.
 //
-//nolint:gosec // G404: math/rand/v2 is the pinned PRNG for catalogue determinism; see NegativeWeightAcyclic godoc.
+// G404: math/rand/v2 is the pinned PRNG for catalogue determinism; see NegativeWeightAcyclic godoc.
 func NegativeWeightAcyclic(n, signMix int, seed uint64) Shape[int, int64] {
 	if n < 0 || n > 100 {
 		panic(fmt.Sprintf("shapegen: NegativeWeightAcyclic requires 0 <= n <= 100, got %d", n))

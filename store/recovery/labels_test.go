@@ -26,7 +26,7 @@ import (
 // runs after replay (idempotent here, but the key path verified by
 // the test).
 //
-//nolint:gocyclo // test: per-commit assertions across node and edge labels
+// test: per-commit assertions across node and edge labels
 func TestRecovery_LabelsSurviveRestart(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

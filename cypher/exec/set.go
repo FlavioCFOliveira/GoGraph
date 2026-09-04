@@ -173,7 +173,7 @@ func (op *SetProperty) Init(ctx context.Context) error {
 
 // Next pulls one row from the child and applies the property mutation.
 //
-//nolint:gocyclo // three assignment modes (single, merge, replace) × optional constraint enforcement
+// three assignment modes (single, merge, replace) × optional constraint enforcement
 func (op *SetProperty) Next(out *Row) (bool, error) {
 	if err := op.ctx.Err(); err != nil {
 		return false, err
@@ -353,7 +353,7 @@ func resolveRelHandle(rc *RelCols, row Row, _, _ string, _ GraphMutator) uint64 
 // applyToNode applies the configured property mutation to a node identified by
 // its mutator-facing key.
 //
-//nolint:gocyclo // three assignment modes (single, merge, replace) × optional constraint enforcement
+// three assignment modes (single, merge, replace) × optional constraint enforcement
 func (op *SetProperty) applyToNode(nodeKey string, row Row) error {
 	if op.propertyKey != "" {
 		// AST-eval path: when the IR carries a parsed expression for the

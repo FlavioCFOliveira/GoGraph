@@ -80,7 +80,7 @@ func BenchmarkCountE_SpreadSerial(b *testing.B) {
 	b.ResetTimer()
 	var sink int64
 	for i := range b.N {
-		sink += s.CountE(uint32(i % types)) //nolint:gosec // G115: i%types is bounded by types.
+		sink += s.CountE(uint32(i % types)) // G115: i%types is bounded by types.
 	}
 	if sink == 0 {
 		b.Fatal("CountE returned 0 throughout: the cells are missing")
@@ -152,7 +152,7 @@ func BenchmarkCells(b *testing.B) {
 	for _, n := range []int{1, 1024} {
 		b.Run(strconv.Itoa(n), func(b *testing.B) {
 			s := New(0)
-			for rt := range uint32(n) { //nolint:gosec // G115: n is a small positive literal.
+			for rt := range uint32(n) { // G115: n is a small positive literal.
 				s.Apply(EDelta(rt, 1))
 			}
 			b.ReportAllocs()

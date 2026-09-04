@@ -176,7 +176,7 @@ func (c *schemaChecker) withClause(w *ast.With) {
 	}
 }
 
-//nolint:gocyclo // One branch per concrete UpdatingClause type; complexity is structural, not reducible.
+// One branch per concrete UpdatingClause type; complexity is structural, not reducible.
 func (c *schemaChecker) updatingClause(uc ast.UpdatingClause) {
 	switch v := uc.(type) {
 	case *ast.Set:
@@ -242,7 +242,7 @@ func (c *schemaChecker) projection(p *ast.Projection) {
 // expr walks the expression tree and checks every BinaryOp that pairs a
 // Property access with a literal.
 //
-//nolint:gocyclo // Structural switch over concrete Expression types; not reducible.
+// Structural switch over concrete Expression types; not reducible.
 func (c *schemaChecker) expr(e ast.Expression) {
 	if e == nil {
 		return

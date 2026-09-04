@@ -92,7 +92,7 @@ func TestListTCKFailures(t *testing.T) {
 	emit("UNDEF", undefs)
 
 	if path := os.Getenv("GOGRAPH_TCK_FAILURES_OUT"); path != "" {
-		if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+		if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil { //nolint:gosec // G306: 0o644 on a human-readable TCK diagnostic report; it is a local test artefact and holds no secret.
 			t.Fatalf("write failures file: %v", err)
 		}
 		t.Logf("wrote %d failures + %d undefined to %s", len(fails), len(undefs), path)
@@ -183,7 +183,7 @@ func TestListTCKFailuresDetail(t *testing.T) {
 		fmt.Fprintln(&b)
 	}
 	if path := os.Getenv("GOGRAPH_TCK_FAILURES_DETAIL_OUT"); path != "" {
-		if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+		if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil { //nolint:gosec // G306: 0o644 on a human-readable TCK diagnostic report; it is a local test artefact and holds no secret.
 			t.Fatalf("write: %v", err)
 		}
 		t.Logf("wrote %d failures to %s", len(fails), path)

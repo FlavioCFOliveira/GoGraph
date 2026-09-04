@@ -990,7 +990,7 @@ func (tx *ExplicitTx) release() {
 func (tx *ExplicitTx) recoverExecPanic(errp *error) {
 	if r := recover(); r != nil {
 		if tx.walTx != nil {
-			_ = tx.walTx.Rollback() //nolint:errcheck // rollback error is not actionable while converting a panic
+			_ = tx.walTx.Rollback() // rollback error is not actionable while converting a panic
 		}
 		tx.release()
 		convertQueryPanic(r, errp, "cypher.ExplicitTx.Exec", "cypher.ExplicitTx.Exec.panics")
@@ -1037,7 +1037,7 @@ func (tx *ExplicitTx) recoverExecPanic(errp *error) {
 func (tx *ExplicitTx) recoverFinishPanic(errp *error) {
 	if r := recover(); r != nil {
 		if tx.walTx != nil {
-			_ = tx.walTx.Rollback() //nolint:errcheck // rollback error is not actionable while converting a panic
+			_ = tx.walTx.Rollback() // rollback error is not actionable while converting a panic
 		}
 		convertQueryPanic(r, errp, "cypher.ExplicitTx.finish", "cypher.ExplicitTx.finish.panics")
 	}

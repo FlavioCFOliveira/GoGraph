@@ -1940,7 +1940,7 @@ func (v *visitor) VisitPropertyExpression(ctx *gen.PropertyExpressionContext) in
 
 // VisitAtom dispatches to the concrete atom variant.
 //
-//nolint:gocyclo // dispatch over all atom alternatives; complexity is inherent
+// dispatch over all atom alternatives; complexity is inherent
 func (v *visitor) VisitAtom(ctx *gen.AtomContext) interface{} {
 	if l := ctx.Literal(); l != nil {
 		return v.visit(l)
@@ -3336,7 +3336,7 @@ func isHex(b byte) bool {
 // Returns true on the first PathPattern found; the caller is responsible
 // for converting that into a SemaError with the appropriate position.
 //
-//nolint:gocyclo // dispatcher over every Expression concrete type; complexity is essentially the cardinality of the AST
+// dispatcher over every Expression concrete type; complexity is essentially the cardinality of the AST
 func containsBareRelChainPattern(expr ast.Expression) bool {
 	if expr == nil {
 		return false

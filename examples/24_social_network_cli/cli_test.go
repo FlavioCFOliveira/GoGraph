@@ -136,7 +136,7 @@ func captureStdout(t *testing.T, fn func()) string {
 // joined relative to the test's working directory.
 func readGolden(t *testing.T, name string) string {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join("testdata", name))
+	b, err := os.ReadFile(filepath.Join("testdata", name)) //nolint:gosec // G304: a fixture name under this package's own testdata/ directory.
 	if err != nil {
 		t.Fatalf("read golden %q: %v", name, err)
 	}

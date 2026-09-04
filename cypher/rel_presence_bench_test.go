@@ -32,7 +32,7 @@ func seedFriendGraph(b *testing.B, eng *cypher.Engine, nNodes int) {
 		if err != nil {
 			b.Fatalf("seed %q: %v", q, err)
 		}
-		for res.Next() { //nolint:revive // intentional full drain
+		for res.Next() { // intentional full drain
 		}
 		if err := res.Err(); err != nil {
 			b.Fatalf("seed drain %q: %v", q, err)
@@ -62,7 +62,7 @@ func BenchmarkRelPresenceIsNotNull(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		for res.Next() { //nolint:revive // intentional full drain
+		for res.Next() { // intentional full drain
 		}
 		if err := res.Err(); err != nil {
 			b.Fatal(err)
@@ -86,7 +86,7 @@ func BenchmarkRelValueComparison(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		for res.Next() { //nolint:revive // intentional full drain
+		for res.Next() { // intentional full drain
 		}
 		if err := res.Err(); err != nil {
 			b.Fatal(err)

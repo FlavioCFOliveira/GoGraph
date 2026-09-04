@@ -124,7 +124,7 @@ func Leiden[W any](c *csr.CSR[W], opts LeidenOptions) Partition {
 // checked at every pass boundary; on cancellation returns (zero
 // Partition, wrapped ctx.Err()).
 //
-//nolint:gocyclo // canonical Leiden: defaults + pass loop dispatches three phases through helpers
+// canonical Leiden: defaults + pass loop dispatches three phases through helpers
 func LeidenCtx[W any](ctx context.Context, c *csr.CSR[W], opts LeidenOptions) (Partition, error) {
 	defer metrics.Time("search.community.LeidenCtx").Stop()
 	if opts.MaxIterations <= 0 {
@@ -319,7 +319,7 @@ type aggGraph struct {
 // aggGraphFromCSR builds the initial aggGraph from c (using only live
 // NodeIDs). idMap[level0Compact] returns the original CSR NodeID.
 //
-//nolint:gocyclo // two-pass CSR build + degree + identity-lift initialisation
+// two-pass CSR build + degree + identity-lift initialisation
 func aggGraphFromCSR[W any](c *csr.CSR[W], mask []bool) (g *aggGraph, idMap []int) {
 	maxID := int(c.MaxNodeID())
 	compact := make([]int, maxID)
@@ -462,7 +462,7 @@ func (g *aggGraph) modularity(comm []int, resolution float64) float64 {
 // improves or MaxIterations is reached. Returns true if at least one
 // node moved.
 //
-//nolint:gocyclo // canonical Louvain inner loop: sigma maintenance + per-node best-community search
+// canonical Louvain inner loop: sigma maintenance + per-node best-community search
 func (g *aggGraph) localMove(comm []int, opts LeidenOptions) bool {
 	if g.m2 == 0 {
 		return false
@@ -549,7 +549,7 @@ func (g *aggGraph) localMove(comm []int, opts LeidenOptions) bool {
 // are subsets of its parent community. Produces a refined partition
 // in fresh community IDs; returned slice is comm-indexed.
 //
-//nolint:gocyclo // canonical Leiden refinement: per-parent singleton restart with restricted moves
+// canonical Leiden refinement: per-parent singleton restart with restricted moves
 func (g *aggGraph) refine(parent []int, opts LeidenOptions) []int {
 	if g.m2 == 0 {
 		return parent
@@ -861,7 +861,7 @@ func releaseAggScratch(sc *aggScratch) { aggScratchPool.Put(sc) }
 // variant with non-integer weights would make the chosen order
 // load-bearing, which this canonical (first-emission) order already pins.
 //
-//nolint:gocyclo // canonical aggregation: dense renumber + counting-sort super-edge coalesce + lifted projection
+// canonical aggregation: dense renumber + counting-sort super-edge coalesce + lifted projection
 func (g *aggGraph) aggregate(parent, refined []int, out *graphBufs) (newG *aggGraph, newComm []int) {
 	// Transient scratch (relabel maps, counting-sort scatter buffers,
 	// coalesce accumulator) is drawn from a pool and reused across every

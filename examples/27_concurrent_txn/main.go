@@ -1097,7 +1097,7 @@ func execInTx(tx *cypher.ExplicitTx, query string, params map[string]any) error 
 	if err != nil {
 		return err
 	}
-	for res.Next() { //nolint:revive // drain the (empty) result stream
+	for res.Next() { // drain the (empty) result stream
 	}
 	if err := res.Err(); err != nil {
 		_ = res.Close()
@@ -1501,7 +1501,7 @@ func runWriteAny(ctx context.Context, eng *cypher.Engine, query string, params m
 // error encountered. For a write result, Close is what fsyncs the WAL (or rolls
 // the transaction back), so it must always run.
 func drainClose(res *cypher.Result) error {
-	for res.Next() { //nolint:revive // drain the result stream
+	for res.Next() { // drain the result stream
 	}
 	if err := res.Err(); err != nil {
 		_ = res.Close()

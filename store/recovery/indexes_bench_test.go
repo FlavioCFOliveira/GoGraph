@@ -41,7 +41,7 @@ import (
 //	             (key, NodeID) tuple.
 const indexesBenchN = 100_000
 
-//nolint:gocyclo // bench: setup + snapshot + payload cache + two sub-benchmarks
+// bench: setup + snapshot + payload cache + two sub-benchmarks
 func BenchmarkIndexesRecoveryVsRebuild(b *testing.B) {
 	if testing.Short() {
 		b.Skip("skipping 10^5-node benchmark under -short")

@@ -170,7 +170,7 @@ func TestCheckpoint_SnapshotUnderBarrier_NoPartialTransaction(t *testing.T) {
 					writerErr.Store(&e)
 					return
 				}
-				for res.Next() { //nolint:revive // drain to run the write to completion
+				for res.Next() { // drain to run the write to completion
 				}
 				if cerr := res.Close(); cerr != nil { // Close commits the WAL tx
 					e := cerr

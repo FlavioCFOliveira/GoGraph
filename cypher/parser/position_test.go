@@ -28,7 +28,7 @@ type posEntry struct {
 	endPos ast.Position
 }
 
-//nolint:gocyclo // exhaustive AST walk — complexity is expected here.
+// exhaustive AST walk — complexity is expected here.
 func walkQuery(q ast.Query, out *[]posEntry) {
 	switch n := q.(type) {
 	case *ast.SingleQuery:
@@ -168,7 +168,7 @@ func walkPathPattern(pp *ast.PathPattern, out *[]posEntry) {
 	}
 }
 
-//nolint:gocyclo // intentionally exhaustive expression walker.
+// intentionally exhaustive expression walker.
 func walkExpr(e ast.Expression, out *[]posEntry) {
 	if e == nil {
 		return

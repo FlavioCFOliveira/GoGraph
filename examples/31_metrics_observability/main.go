@@ -776,7 +776,7 @@ func cypherWrite(ctx context.Context, eng *cypher.Engine, query string, params m
 	if err != nil {
 		return err
 	}
-	for res.Next() { //nolint:revive // drain any rows so the write commits cleanly.
+	for res.Next() { // drain any rows so the write commits cleanly.
 	}
 	if err := res.Err(); err != nil {
 		_ = res.Close()

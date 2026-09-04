@@ -721,7 +721,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) (err error) {
 	go pprof.Do(acceptCtx, pprof.Labels("component", "bolt-server-close-waiter"), func(_ context.Context) {
 		defer closeWG.Done()
 		<-acceptCtx.Done()
-		_ = ln.Close() //nolint:errcheck // closing to unblock Accept; error is not actionable
+		_ = ln.Close() // closing to unblock Accept; error is not actionable
 	})
 
 	defer func() {
@@ -774,7 +774,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) (err error) {
 			// becomes live, so the accepted/closed gauge alone cannot reveal it.
 			incCounter(metricConnRejected)
 			s.log.Warn("bolt: max connections reached, rejecting", slog.String("remote", conn.RemoteAddr().String()))
-			_ = conn.Close() //nolint:errcheck // best-effort close on rejection path
+			_ = conn.Close() // best-effort close on rejection path
 			continue
 		}
 
@@ -850,7 +850,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 	if ln != nil {
 		// Unblock Accept so the accept loop can observe context cancellation.
-		_ = ln.Close() //nolint:errcheck // close error is not actionable during shutdown
+		_ = ln.Close() // close error is not actionable during shutdown
 	}
 
 	// Wait for active connections with a drain timeout.
@@ -1062,7 +1062,7 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	// reclaim from a leaked transaction (#1309). sess.Close is idempotent.
 	defer func() {
 		cancelConn()
-		_ = conn.Close() //nolint:errcheck // close error is not actionable on teardown
+		_ = conn.Close() // close error is not actionable on teardown
 		<-readerDone
 		sess.Close()
 	}()
@@ -1406,7 +1406,7 @@ func sendRead(ctx context.Context, ch chan<- readResultT, res readResultT) bool 
 // the per-read deadline (now owned by the reader goroutine) no longer covers.
 func (s *Server) writeResponse(cw *proto.ChunkedWriter, conn net.Conn, msg any, remote string) bool {
 	if s.opts.ConnTimeout > 0 {
-		_ = conn.SetWriteDeadline(time.Now().Add(s.opts.ConnTimeout)) //nolint:errcheck // a write error below tears the conn down anyway
+		_ = conn.SetWriteDeadline(time.Now().Add(s.opts.ConnTimeout)) // a write error below tears the conn down anyway
 	}
 	if err := sendResponse(cw, msg); err != nil {
 		s.log.Warn("bolt: write error",

@@ -1330,7 +1330,7 @@ type Engine struct {
 	// What it buys is a differential. With it set the query must return exactly what
 	// the columnar chain returns, because declining is supposed to fall back to the
 	// byte-identical serial build. Before #2665 it returned nothing at all.
-	forceColumnarChainDeclineForTest bool //nolint:unused // written only by the in-package differential test; see profile_plan_parity_test.go
+	forceColumnarChainDeclineForTest bool // written only by the in-package differential test; see profile_plan_parity_test.go
 
 	// rangeSeekEnabled gates the range-predicate btree index seek (#1505). True
 	// by default; set false by EngineOptions.DisableRangeIndexSeek. When false
@@ -2306,7 +2306,7 @@ func convertQueryPanic(r any, errp *error, entrypoint, counter string) {
 func recoverWriteQueryPanic(errp *error, txp **txn.Tx[string, float64], entrypoint, counter string) {
 	if r := recover(); r != nil {
 		if txp != nil && *txp != nil {
-			_ = (*txp).Rollback() //nolint:errcheck // rollback error is not actionable while converting a panic
+			_ = (*txp).Rollback() // rollback error is not actionable while converting a panic
 		}
 		convertQueryPanic(r, errp, entrypoint, counter)
 	}
@@ -4773,7 +4773,7 @@ func bindNumeric(v any) (expr.Value, bool) {
 	case int64:
 		return expr.IntegerValue(t), true
 	case uint:
-		return expr.IntegerValue(int64(t)), true //nolint:gosec // intentional truncation documented
+		return expr.IntegerValue(int64(t)), true // intentional truncation documented
 	case uint8:
 		return expr.IntegerValue(int64(t)), true
 	case uint16:
@@ -4781,7 +4781,7 @@ func bindNumeric(v any) (expr.Value, bool) {
 	case uint32:
 		return expr.IntegerValue(int64(t)), true
 	case uint64:
-		return expr.IntegerValue(int64(t)), true //nolint:gosec // intentional truncation documented
+		return expr.IntegerValue(int64(t)), true // intentional truncation documented
 	case float32:
 		return expr.FloatValue(float64(t)), true
 	case float64:
@@ -10514,7 +10514,7 @@ var parallelScanProjectBuildCount = &planseam.ParallelScanProjectBuilds
 // will (re)populate, and returns (nil, false, nil). A genuine build error from the
 // validating build is returned as (nil, false, err).
 //
-//nolint:gocyclo // structural shape match — one guard per rejected IR shape; no hidden branches
+// structural shape match — one guard per rejected IR shape; no hidden branches
 func tryBuildParallelScanProject(
 	proj *ir.Projection,
 	walker nodeWalkerIface,
@@ -10775,7 +10775,7 @@ func projectionItemsAreScalar(items []ir.ProjectionItem) bool {
 // A zero-argument call to a temporal constructor is the clock form (rejected); the
 // argument-bearing form is pure (accepted), so the deny-set membership is gated on
 // len(Args) == 0 for the temporal names while rand/randomUUID reject unconditionally.
-func exprHasNonScalar(e ast.Expression) bool { //nolint:gocyclo // per-AST-node dispatch; no hidden branches
+func exprHasNonScalar(e ast.Expression) bool { // per-AST-node dispatch; no hidden branches
 	switch n := e.(type) {
 	case nil:
 		return false
@@ -11216,7 +11216,7 @@ var allNodesCountScanBuildCount atomic.Uint64
 // arms carry, applied PER WORKER and undivided, for a bound of
 // W*(maxResultBytes + one column) in flight; see [applyWorkerAggRowBudget] (#2668).
 //
-//nolint:gocyclo // structural shape match — one guard per rejected IR shape
+// structural shape match — one guard per rejected IR shape
 func tryBuildParallelAggregateScan(
 	p *ir.EagerAggregation,
 	walker nodeWalkerIface,
@@ -20110,7 +20110,7 @@ func (a *walMutatorAdapter) AddNode(n string) (graph.NodeID, error) {
 	if err := a.w().AddNode(n); err != nil {
 		return 0, err
 	}
-	_ = a.tx.AddNode(n) //nolint:errcheck // tx is non-nil; only ErrTxFinished possible, which cannot occur here
+	_ = a.tx.AddNode(n) // tx is non-nil; only ErrTxFinished possible, which cannot occur here
 	id, _ := a.g.AdjList().Mapper().Lookup(n)
 	if !existed {
 		a.countNodeCreated()
@@ -20131,7 +20131,7 @@ func (a *walMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 	if err := a.w().AddEdge(src, dst, w); err != nil {
 		return 0, 0, err
 	}
-	_ = a.tx.AddEdge(src, dst, w) //nolint:errcheck // ErrNoWeightCodec cannot occur — store has wcodec via NewEngineWithStore
+	_ = a.tx.AddEdge(src, dst, w) // ErrNoWeightCodec cannot occur — store has wcodec via NewEngineWithStore
 	srcID, _ := a.g.AdjList().Mapper().Lookup(src)
 	dstID, _ := a.g.AdjList().Mapper().Lookup(dst)
 	if !srcExisted {
@@ -20175,7 +20175,7 @@ func (a *walMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 	if err != nil {
 		return 0, 0, 0, err
 	}
-	_ = a.tx.AddEdgeWithHandle(src, dst, w, handle) //nolint:errcheck // ErrNoWeightCodec cannot occur — store has wcodec via NewEngineWithStore
+	_ = a.tx.AddEdgeWithHandle(src, dst, w, handle) // ErrNoWeightCodec cannot occur — store has wcodec via NewEngineWithStore
 	srcID, _ := a.g.AdjList().Mapper().Lookup(src)
 	dstID, _ := a.g.AdjList().Mapper().Lookup(dst)
 	if !srcExisted {
@@ -20240,7 +20240,7 @@ func (a *walMutatorAdapter) RemoveEdge(src, dst string) {
 	if present {
 		a.countRelDeleted()
 	}
-	_ = a.tx.RemoveEdge(src, dst) //nolint:errcheck // ErrTxFinished impossible here
+	_ = a.tx.RemoveEdge(src, dst) // ErrTxFinished impossible here
 	r.recordRemoveEdge(&pre, present)
 }
 
@@ -20272,7 +20272,7 @@ func (a *walMutatorAdapter) RemoveEdgeByHandle(src, dst string, handle uint64) {
 	if removed {
 		a.countRelDeleted()
 	}
-	_ = a.tx.RemoveEdgeByHandle(src, dst, handle) //nolint:errcheck // ErrTxFinished impossible here
+	_ = a.tx.RemoveEdgeByHandle(src, dst, handle) // ErrTxFinished impossible here
 	r.recordRemoveEdge(&pre, removed)
 }
 
@@ -20299,7 +20299,7 @@ func (a *walMutatorAdapter) SetNodeLabel(n, label string) error {
 		a.countLabelAdded()
 	}
 	r.recordSetNodeLabel(n, label, hadLabel)
-	_ = a.tx.SetNodeLabel(n, label) //nolint:errcheck // ErrTxFinished impossible here
+	_ = a.tx.SetNodeLabel(n, label) // ErrTxFinished impossible here
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
 			Op:    index.OpAddNodeLabel,
@@ -20331,7 +20331,7 @@ func (a *walMutatorAdapter) RemoveNodeLabel(n, label string) {
 		a.countLabelRemoved()
 	}
 	r.recordRemoveNodeLabel(n, label, hadLabel)
-	_ = a.tx.RemoveNodeLabel(n, label) //nolint:errcheck // ErrTxFinished impossible here
+	_ = a.tx.RemoveNodeLabel(n, label) // ErrTxFinished impossible here
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
 			Op:    index.OpRemoveNodeLabel,
@@ -20371,7 +20371,7 @@ func (a *walMutatorAdapter) RemoveNode(n string) {
 		a.countNodeDeleted()
 		a.rec().recordRemoveNode(n, true)
 	}
-	_ = a.tx.RemoveNode(n) //nolint:errcheck // ErrTxFinished impossible here; not-found is safe to ignore
+	_ = a.tx.RemoveNode(n) // ErrTxFinished impossible here; not-found is safe to ignore
 }
 
 // IsTombstoned reports whether the NodeID has been tombstoned.
@@ -20401,7 +20401,7 @@ func (a *walMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 	r.recordSetNodeProperty(n, key, prev, had)
 	// PreValidated: a.w().SetNodeProperty above already ran the schema validator
 	// on this value, and a stateful validator must not see it twice (rmp #2602).
-	_ = a.tx.SetNodePropertyPreValidated(n, key, value) //nolint:errcheck // ErrTxFinished impossible here
+	_ = a.tx.SetNodePropertyPreValidated(n, key, value) // ErrTxFinished impossible here
 	if a.buf != nil {
 		ch := index.Change{
 			Op:       index.OpSetNodeProperty,
@@ -20442,7 +20442,7 @@ func (a *walMutatorAdapter) DelNodeProperty(n, key string) {
 	}
 	a.w().DelNodeProperty(n, key)
 	r.recordDelNodeProperty(n, key, prev, had)
-	_ = a.tx.DelNodeProperty(n, key) //nolint:errcheck // ErrTxFinished impossible here
+	_ = a.tx.DelNodeProperty(n, key) // ErrTxFinished impossible here
 	if a.buf != nil {
 		ch := index.Change{
 			Op:       index.OpDelNodeProperty,
@@ -20500,7 +20500,7 @@ func (a *walMutatorAdapter) SetEdgeLabel(src, dst, label string) {
 	hadLabel := r.active() && a.g.HasEdgeLabel(src, dst, label)
 	a.w().SetEdgeLabel(src, dst, label)
 	r.recordSetEdgeLabel(src, dst, label, hadLabel)
-	_ = a.tx.SetEdgeLabel(src, dst, label) //nolint:errcheck // ErrTxFinished impossible here
+	_ = a.tx.SetEdgeLabel(src, dst, label) // ErrTxFinished impossible here
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
 			Op:    index.OpAddEdgeLabel,
@@ -20525,7 +20525,7 @@ func (a *walMutatorAdapter) SetEdgeProperty(src, dst, key string, value lpg.Prop
 	a.countPropertySet()
 	r.recordSetEdgeProperty(src, dst, key, prev, had)
 	// PreValidated: see the SetNodeProperty twin (rmp #2602).
-	_ = a.tx.SetEdgePropertyPreValidated(src, dst, key, value) //nolint:errcheck // ErrTxFinished impossible here
+	_ = a.tx.SetEdgePropertyPreValidated(src, dst, key, value) // ErrTxFinished impossible here
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
 			Op:       index.OpSetEdgeProperty,
@@ -20561,7 +20561,7 @@ func (a *walMutatorAdapter) delEdgePropertyUncounted(src, dst, key string) {
 	}
 	a.w().DelEdgeProperty(src, dst, key)
 	r.recordDelEdgeProperty(src, dst, key, prev, had)
-	_ = a.tx.DelEdgeProperty(src, dst, key) //nolint:errcheck // ErrTxFinished impossible here
+	_ = a.tx.DelEdgeProperty(src, dst, key) // ErrTxFinished impossible here
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
 			Op:       index.OpDelEdgeProperty,
@@ -20664,7 +20664,7 @@ func (a *walMutatorAdapter) RemoveEdgeInstance(src, dst string, idx int64) {
 // uses, so the per-pair and per-handle stores stay atomic together.
 func (a *walMutatorAdapter) SetEdgeLabelByHandle(src, dst string, handle uint64, label string) {
 	a.w().SetEdgeLabelByHandle(src, dst, handle, label)
-	_ = a.tx.SetEdgeLabelByHandle(src, dst, handle, label) //nolint:errcheck // ErrTxFinished impossible here
+	_ = a.tx.SetEdgeLabelByHandle(src, dst, handle, label) // ErrTxFinished impossible here
 	// Count-store (#2082): the single authoritative once-per-edge typing hook.
 	if a.cs() != nil {
 		countEdgeTyped(a.g, a.cs(), a.countBuf(), src, dst, label)
@@ -20685,7 +20685,7 @@ func (a *walMutatorAdapter) SetEdgePropertyByHandle(src, dst string, handle uint
 	}
 	r.recordSetEdgePropertyByHandle(src, dst, handle, key, prev, had)
 	// PreValidated: see the SetNodeProperty twin (rmp #2602).
-	_ = a.tx.SetEdgePropertyByHandlePreValidated(src, dst, handle, key, value) //nolint:errcheck // ErrTxFinished impossible here
+	_ = a.tx.SetEdgePropertyByHandlePreValidated(src, dst, handle, key, value) // ErrTxFinished impossible here
 	return nil
 }
 func (a *walMutatorAdapter) DelEdgePropertyByHandle(src, dst string, handle uint64, key string) {
@@ -20697,14 +20697,14 @@ func (a *walMutatorAdapter) DelEdgePropertyByHandle(src, dst string, handle uint
 	}
 	a.w().DelEdgePropertyByHandle(src, dst, handle, key)
 	r.recordDelEdgePropertyByHandle(src, dst, handle, key, prev, had)
-	_ = a.tx.DelEdgePropertyByHandle(src, dst, handle, key) //nolint:errcheck // ErrTxFinished impossible here
+	_ = a.tx.DelEdgePropertyByHandle(src, dst, handle, key) // ErrTxFinished impossible here
 }
 func (a *walMutatorAdapter) EdgePropertiesByHandle(src, dst string, handle uint64) map[string]lpg.PropertyValue {
 	return a.g.EdgePropertiesByHandle(src, dst, handle)
 }
 func (a *walMutatorAdapter) RemoveEdgeInstanceByHandle(src, dst string, handle uint64) {
 	a.w().RemoveEdgeInstanceByHandle(src, dst, handle)
-	_ = a.tx.RemoveEdgeInstanceByHandle(src, dst, handle) //nolint:errcheck // ErrTxFinished impossible here
+	_ = a.tx.RemoveEdgeInstanceByHandle(src, dst, handle) // ErrTxFinished impossible here
 }
 
 // RecordConstraintInverse is [lpgMutatorAdapter.RecordConstraintInverse] for the
@@ -20767,7 +20767,7 @@ func (a *walMutatorAdapter) RemoveAllEdgesFrom(n string) {
 	// cannot commit, but the frames must not be written on the strength of that
 	// alone — the WAL is the durable truth and it may only describe work done.
 	for _, dst := range outgoing {
-		_ = a.tx.RemoveEdge(n, dst) //nolint:errcheck // ErrTxFinished impossible here
+		_ = a.tx.RemoveEdge(n, dst) // ErrTxFinished impossible here
 	}
 	journalAllOutEdgesRemoved(r, a, pre)
 }

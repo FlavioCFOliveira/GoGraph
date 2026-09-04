@@ -345,7 +345,7 @@ type snapshotCorruptionFixture struct {
 // alongside the report (nil == passed). Tests use it to assert on what the run
 // actually exercised and to drive the sensitivity seams.
 //
-//nolint:gocyclo // one arm per component plus the guard, tolerance and gap arms; splitting the dispatch would hide the sweep.
+// one arm per component plus the guard, tolerance and gap arms; splitting the dispatch would hide the sweep.
 func runSnapshotCorruptionWith(
 	ctx context.Context, seed uint64, opts snapshotCorruptionOptions,
 ) (*snapshotCorruptionEvidence, *SimReport, error) {

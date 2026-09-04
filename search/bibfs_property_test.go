@@ -91,7 +91,7 @@ func TestProperty_BiBFS_PathLength_EQ_BFSDistance(t *testing.T) {
 			rt.Fatalf("BiBFS error: %v", err)
 		}
 
-		pathLen := len(path) - 1 //nolint:gocritic // arithmetic comment, not commented-out code
+		pathLen := len(path) - 1 // arithmetic comment, not commented-out code
 		if pathLen != bfsDist {
 			rt.Fatalf(
 				"BiBFS path length=%d edges != BFS hops=%d (src=%d dst=%d path=%v)",

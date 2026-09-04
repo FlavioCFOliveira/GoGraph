@@ -277,7 +277,7 @@ func validateDijkstraWeights[W Weight](weights []W) error {
 //   - len(dist), len(parent), len(found) all equal c.MaxNodeID();
 //   - heap has been reset to empty.
 //
-//nolint:gocyclo // canonical Dijkstra: heap loop + relaxation
+// canonical Dijkstra: heap loop + relaxation
 func dijkstraCore[W Weight](
 	ctx context.Context,
 	c *csr.CSR[W],
@@ -358,7 +358,7 @@ func dijkstraCore[W Weight](
 // Concurrency: identical to [dijkstraCore] — the caller's slices are
 // written in place; concurrent callers must supply separate buffers.
 //
-//nolint:gocyclo // mirrors dijkstraCore body
+// mirrors dijkstraCore body
 func dijkstraCoreWithWeights[W Weight](
 	ctx context.Context,
 	c *csr.CSR[W],

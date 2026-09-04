@@ -254,7 +254,7 @@ func TestWriteProbeSummaryPublishesBothFigures(t *testing.T) {
 	if err := writeProbeSummary(root, rows); err != nil {
 		t.Fatalf("writeProbeSummary: %v", err)
 	}
-	b, err := os.ReadFile(filepath.Join(root, "ceiling.tsv"))
+	b, err := os.ReadFile(filepath.Join(root, "ceiling.tsv")) //nolint:gosec // G304: root is the operator-supplied artefact directory this suite asserts is absolute; the leaf name is a literal.
 	if err != nil {
 		t.Fatalf("read ceiling.tsv: %v", err)
 	}

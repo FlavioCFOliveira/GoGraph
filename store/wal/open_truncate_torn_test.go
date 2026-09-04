@@ -134,8 +134,8 @@ func TestOpen_PreservesGenuineCorruption(t *testing.T) {
 		t.Fatalf("ReadFile: %v", err)
 	}
 	frameSize := HeaderSize + len("frame-0")
-	raw[frameSize+HeaderSize] ^= 0xFF // first payload byte of frame-1
-	if err := os.WriteFile(path, raw, 0o600); err != nil {
+	raw[frameSize+HeaderSize] ^= 0xFF                      // first payload byte of frame-1
+	if err := os.WriteFile(path, raw, 0o600); err != nil { //nolint:gosec // G703: the directory component is a path this test created and the leaf name is a literal, so no traversal segment can enter.
 		t.Fatalf("WriteFile: %v", err)
 	}
 	originalSize := int64(len(raw))

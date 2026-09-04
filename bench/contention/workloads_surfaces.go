@@ -160,7 +160,7 @@ func searchWorkloads() []Workload {
 			Setup: func(_ string) (Op, func() error, error) {
 				c := seedCSR(bfsNodes)
 				op := func(_ context.Context, worker, iter int) error {
-					src := graph.NodeID((worker*7919 + iter) % bfsNodes)
+					src := graph.NodeID((worker*7919 + iter) % bfsNodes) //nolint:gosec // G115: (worker*7919+iter) is non-negative and the modulo by the bfsNodes constant bounds it below it.
 					seen := 0
 					search.BFS(c, src, func(_ graph.NodeID, _ int) bool {
 						seen++
@@ -186,7 +186,7 @@ func searchWorkloads() []Workload {
 					return nil, nil, fmt.Errorf("new SSSP: %w", err)
 				}
 				op := func(_ context.Context, worker, iter int) error {
-					src := graph.NodeID((worker*7919 + iter) % n)
+					src := graph.NodeID((worker*7919 + iter) % n) //nolint:gosec // G115: (worker*7919+iter) is non-negative and the modulo by n=5000 bounds it below it.
 					d, err := s.From(src)
 					if err != nil {
 						return err
@@ -251,7 +251,7 @@ func indexWorkloads() []Workload {
 				op := func(_ context.Context, worker, iter int) error {
 					k := int64((worker*7919 + iter) % keys)
 					if (worker+iter)%writeEvery == 0 {
-						idx.Insert(k, graph.NodeID(uint64(keys+worker)))
+						idx.Insert(k, graph.NodeID(uint64(keys+worker))) //nolint:gosec // G115: keys and worker are both non-negative loop/worker indices, so the sum cannot set the sign bit.
 						return nil
 					}
 					if got := idx.Cardinality(k); got == 0 {
@@ -274,7 +274,7 @@ func indexWorkloads() []Workload {
 				op := func(_ context.Context, worker, iter int) error {
 					k := int64((worker*7919 + iter) % keys)
 					if (worker+iter)%writeEvery == 0 {
-						idx.Insert(k, graph.NodeID(uint64(keys+worker)))
+						idx.Insert(k, graph.NodeID(uint64(keys+worker))) //nolint:gosec // G115: keys and worker are both non-negative loop/worker indices, so the sum cannot set the sign bit.
 						return nil
 					}
 					if got := idx.Cardinality(k); got == 0 {
@@ -316,7 +316,7 @@ func indexWorkloads() []Workload {
 					cs.Apply(count.EDelta(rt, 1))
 				}
 				op := func(_ context.Context, worker, iter int) error {
-					rt := uint32((worker*7919 + iter) % types)
+					rt := uint32((worker*7919 + iter) % types) //nolint:gosec // G115: (worker*7919+iter) is non-negative and the modulo by types=4096 bounds it far below uint32.
 					if (worker+iter)%writeEvery == 0 {
 						cs.Apply(count.EDelta(rt, 1))
 						return nil

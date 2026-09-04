@@ -586,8 +586,8 @@ func biGraphCases(t *testing.T) []struct {
 	// Randomised graphs. Small enough to enumerate every pair exhaustively, dense
 	// enough that the two frontiers actually meet in the middle.
 	for i, seed := range []uint64{1, 2, 3, 7, 11, 13} {
-		rng := rand.New(rand.NewPCG(seed, seed*2+1))
-		n := 8 + int(rng.Uint64()%7) // 8..14
+		rng := rand.New(rand.NewPCG(seed, seed*2+1)) //nolint:gosec // G404: math/rand/v2 PCG seeded from the test's own parameter — this test asserts a reproducible sequence, which a CSPRNG would destroy.
+		n := 8 + int(rng.Uint64()%7)                 // 8..14
 		m := n + int(rng.Uint64()%uint64(2*n))
 		edges := make([][2]int, 0, m)
 		for k := 0; k < m; k++ {

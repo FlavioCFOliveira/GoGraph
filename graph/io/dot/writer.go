@@ -33,7 +33,7 @@ func Write(w io.Writer, a *adjlist.AdjList[string, int64]) error {
 // checked once per source vertex; on cancellation flushes the buffer
 // and returns the wrapped ctx.Err.
 //
-//nolint:gocyclo // DOT write: header + per-source resolve + per-edge encode + ctx tick
+// DOT write: header + per-source resolve + per-edge encode + ctx tick
 func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64]) error {
 	defer metrics.Time("graph.io.dot.Write").Stop()
 	bw := bufio.NewWriterSize(w, 64*1024)

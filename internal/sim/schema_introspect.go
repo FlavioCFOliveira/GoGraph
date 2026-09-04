@@ -463,7 +463,7 @@ func CheckSchemaIntrospection(tick int64, model *SchemaModel, engine *EngineAdap
 		add(ViolationGraphIntegrity, "schema introspection (db.schema.visualization)",
 			fmt.Sprintf("CALL db.schema.visualization() failed: %v", err))
 	} else {
-		for res.Next() { //nolint:revive // draining is the point
+		for res.Next() { // draining is the point
 		}
 		if derr := res.Err(); derr != nil {
 			add(ViolationGraphIntegrity, "schema introspection (db.schema.visualization)",

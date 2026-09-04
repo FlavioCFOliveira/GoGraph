@@ -131,7 +131,7 @@ func TestTable_ReviveReusesTheSameSlot(t *testing.T) {
 	idx := New[int64]()
 	const seeded = 8000
 	for i := range seeded {
-		idx.Insert(int64(i), graph.NodeID(uint64(i))) //nolint:gosec // G115: bounded loop index
+		idx.Insert(int64(i), graph.NodeID(uint64(i))) // G115: bounded loop index
 	}
 
 	// The key is SEARCHED FOR, not assumed. Two things have to hold for this
@@ -164,7 +164,7 @@ func TestTable_ReviveReusesTheSameSlot(t *testing.T) {
 	}
 	_, usedBefore, tombsBefore := idx.tableStats(int64(k))
 
-	idx.Delete(k, graph.NodeID(uint64(k))) //nolint:gosec // G115: k is a bounded index
+	idx.Delete(k, graph.NodeID(uint64(k))) // G115: k is a bounded index
 	_, usedAfterDel, tombsAfterDel := idx.tableStats(int64(k))
 	if usedAfterDel != usedBefore {
 		t.Fatalf("used = %d after reap, want it unchanged at %d: a tombstone still occupies its slot",
@@ -303,11 +303,11 @@ func TestTable_ConcurrentChurnIsRaceFreeAndConsistent(t *testing.T) {
 			defer writersWG.Done()
 			for r := range rounds {
 				for i := range keys {
-					idx.Insert(key(w, i), graph.NodeID(uint64(w*keys+i))) //nolint:gosec // G115: bounded loop indices
+					idx.Insert(key(w, i), graph.NodeID(uint64(w*keys+i))) // G115: bounded loop indices
 				}
 				for i := range keys {
 					if (i+r)%2 == 0 {
-						idx.Delete(key(w, i), graph.NodeID(uint64(w*keys+i))) //nolint:gosec // G115: bounded loop indices
+						idx.Delete(key(w, i), graph.NodeID(uint64(w*keys+i))) // G115: bounded loop indices
 					}
 				}
 			}
@@ -319,7 +319,7 @@ func TestTable_ConcurrentChurnIsRaceFreeAndConsistent(t *testing.T) {
 		readersWG.Add(1)
 		go func(g int) {
 			defer readersWG.Done()
-			rng := rand.New(rand.NewPCG(uint64(g), 2))
+			rng := rand.New(rand.NewPCG(uint64(g), 2)) //nolint:gosec // G404: math/rand/v2 PCG seeded from the test's own parameter — this test asserts a reproducible sequence, which a CSPRNG would destroy.
 			for {
 				select {
 				case <-stop:
@@ -338,7 +338,7 @@ func TestTable_ConcurrentChurnIsRaceFreeAndConsistent(t *testing.T) {
 				// severed probe chain or a slot handed to another key would
 				// answer with a different writer's id here.
 				if bm := idx.Lookup(k); bm.GetCardinality() == 1 {
-					if !bm.Contains(uint64(w*keys + i)) { //nolint:gosec // G115: bounded loop indices
+					if !bm.Contains(uint64(w*keys + i)) { // G115: bounded loop indices
 						bogus.Add(1)
 					}
 				}
@@ -381,18 +381,18 @@ func TestTable_DeserializeOverTombstonesKeepsAccountingExact(t *testing.T) {
 
 	src := New[int64]()
 	for i := range n {
-		src.Insert(int64(i), graph.NodeID(uint64(i))) //nolint:gosec // G115: bounded loop index
+		src.Insert(int64(i), graph.NodeID(uint64(i))) // G115: bounded loop index
 	}
 
 	// Churn the DESTINATION so its tables are full of tombstones when the swap
 	// lands on them.
 	dst := New[int64]()
 	for i := range n {
-		dst.Insert(int64(i+n), graph.NodeID(uint64(i))) //nolint:gosec // G115: bounded loop index
+		dst.Insert(int64(i+n), graph.NodeID(uint64(i))) // G115: bounded loop index
 	}
 	for i := range n {
 		if i%2 == 0 {
-			dst.Delete(int64(i+n), graph.NodeID(uint64(i))) //nolint:gosec // G115: bounded loop index
+			dst.Delete(int64(i+n), graph.NodeID(uint64(i))) // G115: bounded loop index
 		}
 	}
 	if bad, detail := dst.countingMismatches(); bad != 0 {
@@ -425,7 +425,7 @@ func TestTable_DeserializeOverTombstonesKeepsAccountingExact(t *testing.T) {
 	// cannot catch it on their own — this is what turns the lie into a hang,
 	// and the test times out rather than failing if the accounting is wrong.
 	for i := range n {
-		dst.Insert(int64(i+2*n), graph.NodeID(uint64(i))) //nolint:gosec // G115: bounded loop index
+		dst.Insert(int64(i+2*n), graph.NodeID(uint64(i))) // G115: bounded loop index
 	}
 	if bad, detail := dst.countingMismatches(); bad != 0 {
 		t.Fatalf("used/tombs accounting wrong after post-swap inserts in %d shards: %s", bad, detail)
@@ -555,14 +555,14 @@ func TestTable_EmptiedIndexReleasesItsSlots(t *testing.T) {
 		keys[i] = strings.Repeat("x", 64) + fmt.Sprintf("%06d", i)
 	}
 	for i := range n {
-		idx.Insert(keys[i], graph.NodeID(uint64(i))) //nolint:gosec // G115: bounded loop index
+		idx.Insert(keys[i], graph.NodeID(uint64(i))) // G115: bounded loop index
 	}
 	if used, _ := idx.occupancy(); used != n {
 		t.Fatalf("pre-condition: occupancy used=%d, want %d", used, n)
 	}
 
 	for i := range n {
-		idx.Delete(keys[i], graph.NodeID(uint64(i))) //nolint:gosec // G115: bounded loop index
+		idx.Delete(keys[i], graph.NodeID(uint64(i))) // G115: bounded loop index
 	}
 
 	if got := idx.DistinctValues(); got != 0 {

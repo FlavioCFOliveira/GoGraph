@@ -348,7 +348,7 @@ func ReadIntoCtx(ctx context.Context, r io.Reader) (*adjlist.AdjList[string, int
 // On any error the returned graph is nil (see [ReadIntoCtx]); the import
 // is all-or-nothing at the in-memory level.
 //
-//nolint:gocyclo // GraphML decode + key lookup + per-edge parse + ctx tick
+// GraphML decode + key lookup + per-edge parse + ctx tick
 func ReadIntoCappedCtx(ctx context.Context, r io.Reader, maxBytes int64) (*adjlist.AdjList[string, int64], int, error) {
 	defer metrics.Time("graph.io.graphml.ReadInto").Stop()
 	if maxBytes > 0 {

@@ -1011,7 +1011,7 @@ func recoveryGraphConfig(gc *snapshot.GraphConfig) adjlist.Config {
 // replay stops with [ErrTransactionTooLarge] rather than buffering an
 // unbounded marker-less run.
 //
-//nolint:gocyclo // recovery: snapshot probe + labels load + WAL open + per-frame decode + per-frame apply + ctx ticks + labels apply
+// recovery: snapshot probe + labels load + WAL open + per-frame decode + per-frame apply + ctx ticks + labels apply
 func openCodec[N comparable, W any](
 	ctx context.Context,
 	fsys recoveryFS,
@@ -1810,7 +1810,7 @@ func applyOrAccumulate[N comparable, W any](
 // The Op is taken by pointer to keep the inner recovery loop
 // allocation-free; the function does not mutate op.
 //
-//nolint:gocyclo // recovery: per-frame walk through codec, optional weight codec, trailing label/key, and property value
+// recovery: per-frame walk through codec, optional weight codec, trailing label/key, and property value
 func applyOpCodec[N comparable, W any](
 	g *lpg.Graph[N, W],
 	op *Op,

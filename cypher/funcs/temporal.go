@@ -130,7 +130,7 @@ func fnDate(args []expr.Value) (expr.Value, error) {
 //     without an explicit month, the base's month-within-quarter offset is
 //     preserved (e.g. November is the 2nd month of Q4 → August in Q3).
 //
-//nolint:gocyclo // Sequential overlay of map fields onto a DateValue; each branch is uniform — splitting hides the field-priority logic.
+// Sequential overlay of map fields onto a DateValue; each branch is uniform — splitting hides the field-priority logic.
 func dateFromMap(m expr.MapValue) (expr.Value, error) {
 	// Base from {date: ...} or {datetime: ...} if present. The base may be
 	// any temporal kind carrying a date component (Date, LocalDateTime,
@@ -752,7 +752,7 @@ func fnLocalTime(args []expr.Value) (expr.Value, error) {
 	return nil, &ArityError{Function: "localtime", Got: len(args), Want: "0..1"}
 }
 
-//nolint:gocyclo // Sequential type-switch over the documented arg shapes; each branch is one short conversion.
+// Sequential type-switch over the documented arg shapes; each branch is one short conversion.
 func fnTime(args []expr.Value) (expr.Value, error) {
 	switch len(args) {
 	case 0:
@@ -887,7 +887,7 @@ func fnDuration(args []expr.Value) (expr.Value, error) {
 //
 // Fractional values are supported.
 //
-//nolint:gocyclo // Sequential extraction; each branch is uniform.
+// Sequential extraction; each branch is uniform.
 func durationFromMap(m expr.MapValue) expr.Value {
 	var (
 		months  float64

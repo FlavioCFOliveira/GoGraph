@@ -41,7 +41,7 @@ func seedFieldExtractorGraph(t *testing.T) *cypher.Engine {
 		if err != nil {
 			t.Fatalf("seed %q: %v", q, err)
 		}
-		for res.Next() { //nolint:revive // drain
+		for res.Next() { // drain
 		}
 		if err := res.Err(); err != nil {
 			t.Fatalf("seed drain %q: %v", q, err)
@@ -61,7 +61,7 @@ func firstFieldRecord(t *testing.T, eng *cypher.Engine, q string) map[string]int
 	if err != nil {
 		t.Fatalf("run %q: %v", q, err)
 	}
-	defer res.Close() //nolint:errcheck // read-only query
+	defer res.Close() // read-only query
 	if !res.Next() {
 		if err := res.Err(); err != nil {
 			t.Fatalf("run %q: %v", q, err)

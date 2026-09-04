@@ -368,7 +368,7 @@ func BenchmarkIndex_SpineParallel(b *testing.B) {
 	seedIndex := func() *Index[int64] {
 		idx := New[int64]()
 		for v := range spineBenchKeys {
-			idx.Insert(int64(v), graph.NodeID(uint64(v))) //nolint:gosec // G115: bounded loop index
+			idx.Insert(int64(v), graph.NodeID(uint64(v))) // G115: bounded loop index
 		}
 		return idx
 	}
@@ -416,14 +416,14 @@ func BenchmarkIndex_DeleteChurn(b *testing.B) {
 	const window = 50_000
 	idx := New[int64]()
 	for v := range window {
-		idx.Insert(int64(v), graph.NodeID(uint64(v))) //nolint:gosec // G115: bounded loop index
+		idx.Insert(int64(v), graph.NodeID(uint64(v))) // G115: bounded loop index
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		k := int64(window + i)
 		idx.Insert(k, graph.NodeID(1))
-		idx.Delete(int64(i), graph.NodeID(uint64(i%window))) //nolint:gosec // G115: bounded loop index
+		idx.Delete(int64(i), graph.NodeID(uint64(i%window))) // G115: bounded loop index
 	}
 }
 
@@ -437,12 +437,12 @@ func BenchmarkIndex_DeleteChurnSparse(b *testing.B) {
 	const window = 400
 	idx := New[int64]()
 	for v := range window {
-		idx.Insert(int64(v), graph.NodeID(uint64(v))) //nolint:gosec // G115: bounded loop index
+		idx.Insert(int64(v), graph.NodeID(uint64(v))) // G115: bounded loop index
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		idx.Insert(int64(window+i), graph.NodeID(1))
-		idx.Delete(int64(i), graph.NodeID(uint64(i%window))) //nolint:gosec // G115: bounded loop index
+		idx.Delete(int64(i), graph.NodeID(uint64(i%window))) // G115: bounded loop index
 	}
 }

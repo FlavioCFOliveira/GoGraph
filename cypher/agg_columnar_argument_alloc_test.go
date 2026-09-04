@@ -82,7 +82,7 @@ func drainOnce(t *testing.T, eng *cypher.Engine, query string) {
 	if err != nil {
 		t.Fatalf("Run(%q): %v", query, err)
 	}
-	for res.Next() { //nolint:revive // intentional full drain
+	for res.Next() { // intentional full drain
 	}
 	if err := res.Err(); err != nil {
 		t.Fatalf("Err(%q): %v", query, err)

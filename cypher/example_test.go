@@ -83,7 +83,7 @@ func ExampleEngine_RunInTx() {
 		fmt.Println("write error:", err)
 		return
 	}
-	for write.Next() { //nolint:revive // a write query streams no result rows; drain then close
+	for write.Next() { // a write query streams no result rows; drain then close
 	}
 	if err := write.Err(); err != nil {
 		fmt.Println("write error:", err)

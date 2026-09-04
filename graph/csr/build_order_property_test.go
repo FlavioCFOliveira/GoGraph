@@ -43,7 +43,7 @@ func TestCSR_BuildOrder_Independent_1000Iterations(t *testing.T) {
 		// Build adjlist a1 with edges in original order.
 		a1 := adjlist.New[int, int64](adjlist.Config{Directed: true, Multigraph: true})
 		for _, e := range edges {
-			_ = a1.AddEdge(e.src, e.dst, e.w) //nolint:errcheck // multigraph AddEdge is infallible
+			_ = a1.AddEdge(e.src, e.dst, e.w) // multigraph AddEdge is infallible
 		}
 
 		// Build adjlist a2 with edges in shuffled order.
@@ -54,7 +54,7 @@ func TestCSR_BuildOrder_Independent_1000Iterations(t *testing.T) {
 		})
 		a2 := adjlist.New[int, int64](adjlist.Config{Directed: true, Multigraph: true})
 		for _, e := range shuffled {
-			_ = a2.AddEdge(e.src, e.dst, e.w) //nolint:errcheck // multigraph AddEdge is infallible
+			_ = a2.AddEdge(e.src, e.dst, e.w) // multigraph AddEdge is infallible
 		}
 
 		c1 := csr.BuildFromAdjList(a1)

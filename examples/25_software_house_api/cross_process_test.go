@@ -29,7 +29,7 @@ type serverProc struct {
 func buildServerBinary(t *testing.T) string {
 	t.Helper()
 	bin := filepath.Join(t.TempDir(), "shapi")
-	cmd := exec.Command("go", "build", "-o", bin, ".")
+	cmd := exec.Command("go", "build", "-o", bin, ".") //nolint:gosec // G204: fixed argv — "go build" with a literal flag and an output path under this test's temp dir.
 	cmd.Dir = "."
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Skipf("go build skipped: %v\n%s", err, out)
@@ -54,7 +54,7 @@ func freeAddr(t *testing.T) string {
 func startServer(t *testing.T, bin, dataDir string, client *http.Client) *serverProc {
 	t.Helper()
 	addr := freeAddr(t)
-	cmd := exec.Command(bin, "-d", dataDir, "-addr", addr)
+	cmd := exec.Command(bin, "-d", dataDir, "-addr", addr) //nolint:gosec // G204: bin is the executable this test just built; every flag and value is a literal or a temp-dir path.
 	cmd.Env = os.Environ()
 	var errBuf bytes.Buffer
 	cmd.Stderr = &errBuf

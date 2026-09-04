@@ -438,7 +438,7 @@ func (r *certRotationRunner) project(realPath string) error {
 	if err != nil {
 		return fmt.Errorf("sim: cert rotation read image for %s: %w", realPath, err)
 	}
-	//nolint:gosec // G306: certificate files are world-readable by design; the key is written 0600 below.
+	// G306: certificate files are world-readable by design; the key is written 0600 below.
 	perm := os.FileMode(0o644)
 	if filepath.Ext(realPath) == ".key" {
 		perm = 0o600
