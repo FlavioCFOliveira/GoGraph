@@ -64,12 +64,12 @@ sweep is its own load), exit 0 read from inside the log.
 
 | workload | 1 | 8 | 64 | 256 | 1024 | ops/s@1 |
 |---|---|---|---|---|---|---:|
-| `bolt-wire-read` | 1.000 | 1.459 | 1.597 | 1.683 | 1.714 | 77,002 |
+| `bolt-wire-read` ‡ | 1.000 | 1.459 | 1.597 | 1.683 | 1.714 | 77,002 |
 | `bolt-connect-churn` | 1.000 | 1.640 | 2.115 | 2.605 | 3.142 | 26,680 |
 | `dst-concurrent-bolt` | 1.000 | 2.200 | **0.453** | **0.344** | **0.130** | 600 |
 | `bolt-tx-read` *(new)* | 1.000 | 1.706 | 1.926 | 2.143 | 1.828 | 47,998 |
 | `bolt-tx-read-noquota` *(new)* | 1.000 | 1.714 | 1.869 | 2.110 | 1.792 | 48,465 |
-| `bolt-wire-rows` *(new)* | 1.000 | **1.087** | **1.115** | 1.315 | 1.312 | 12,106 |
+| `bolt-wire-rows` *(new)* ‡ | 1.000 | **1.087** | **1.115** | 1.315 | 1.312 | 12,106 |
 | `bolt-wire-read-metrics` *(new)* | 1.000 | 1.458 | 1.549 | 1.632 | 1.624 | 78,380 |
 | `bolt-connect-churn-quiet` *(new)* | 1.000 | 1.669 | 2.063 | 2.511 | 2.937 | 27,720 |
 
@@ -128,11 +128,45 @@ that sizing stated in the task rather than hidden.
 * **`bolt-wire-rows` scales 1.087x at 8**, the worst Bolt path measured — but its
   block profile is **38–53% `sync.(*Cond).Wait`** in the harness's own `SimConn`
   condvar (`internal/sim/simconn.go:193`), so it is **not attributed** to the module.
-* **The observatory's Bolt numbers may understate the real server.** Over real TCP
-  with the official driver, `examples/23_bolt_server` scales **2.96x at 8** and
-  **3.97x at 64** (35,627 → 105,471 → 141,437 q/s; p50 71 µs, p99 166 µs) where the
-  pipe-based `bolt-wire-read` reads 1.459x at 8. The two workloads also differ in
-  query cost, so the gap is **not claimed** as transport. Registered as spike **#2711**.
+  **Spike #2711 has now settled what that means** — see the ‡ note below.
+* **The observatory's Bolt numbers DO understate the real server — SETTLED by spike
+  #2711, and the mechanism is not what it looked like.** The gap above was measured
+  with a different transport AND a different client AND a different query, so it
+  attributed nothing. Re-taken with the transport as the only variable, the same
+  server and the same client running byte-identical Cypher scale **1.538x** better
+  over a loopback socket at 8 goroutines and **2.025x** better at 64 on
+  `bolt-wire-read`'s statement, and **1.344x / 1.414x** on `bolt-wire-rows`'. Floor
+  **±1.8%** on a scaling ratio. But the pipe is **faster in absolute terms at almost
+  every cell** (the socket reaches only 0.31–0.59x of its throughput on the count
+  statement, at every level from 1 to 1024), and the factor **shrinks monotonically
+  as the operation gets more expensive** — 1.538 → 1.344 → 1.108 across three
+  statements spanning 47x in cost. The pipe is not contending; it is cheap, and a
+  cheaper transport leaves a larger share of the operation in whatever does not
+  parallelise. **One cell of fourteen is a genuine exception** — the 100-row
+  statement at 1024 goroutines, where the socket wins by 3.8% — and it is fully
+  attributed to the pipe's per-inbound-message timer goroutine, not to anything in
+  `bolt/server`. Full correction, the rows it applies to, and the rows it deliberately
+  does NOT apply to: `docs/contention-inventory-round2.md`, the ‡ sections.
+
+### ‡ what spike #2711 changes about these two rows
+
+Both marked rows' **scaling columns** understate the same server over a socket, by
+the factors above. Their **`ops/s at 1` columns are not affected** — the pipe is the
+faster transport there by 3.3x and 1.4x respectively.
+
+Two rows in this table run over the same pipe and were **not** measured, so no
+factor may be carried across to them: `bolt-tx-read` / `bolt-tx-read-noquota` (four
+messages per operation rather than two, so more exposed, magnitude unknown) and
+`bolt-wire-read-metrics`. `bolt-connect-churn` and `bolt-connect-churn-quiet` are
+excluded on principle: they dial per operation, which is a TCP handshake on a socket
+and a channel send on the pipe, so not even the sign is predictable.
+
+The refuted hypothesis in the table above — **per-RECORD `SetWriteDeadline`** — was
+re-tested by #2711 at 1024 goroutines with a single-variable probe that drops the
+call outright, and refuted again: **1.008**, inside the floor. What #2711 did find
+is the pipe's **per-inbound-message goroutine and timer** in
+`halfPipe.waitDeadline`, worth **1.03–1.24 µs per message**, which is the entire
+cause of the one cell where the socket beats the pipe (`rows`@1024).
 * **Allocations are already tight.** On a 100-row read the *entire server* is
   **15.35%** of allocated objects (~2 objects per row); the rest is the client
   driver, so the 1,449 allocs/op figure must not be attributed to Bolt.

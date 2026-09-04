@@ -138,7 +138,7 @@ curves in this round are all surfaces round 1 never reached.
 | `cypher-mixed-rw` | 1.000 | 1.789 | 1.740 | 1.494 | 1.334 | 492,737 |
 | `bolt-connect-churn` | 1.000 | 1.566 | 2.078 | 2.523 | 2.733 | 27,382 |
 | `cypher-read-label-small` | 1.000 | 1.555 | 1.619 | 1.576 | 1.528 | 1,012,488 |
-| `bolt-wire-read` | 1.000 | 1.484 | 1.606 | 1.705 | 1.711 | 75,572 |
+| `bolt-wire-read` ‡ | 1.000 | 1.484 | 1.606 | 1.705 | 1.711 | 75,572 |
 | `dst-disk-fault-wal` | 1.000 | **0.989** | **0.862** | **0.768** | **0.585** | 177,585 |
 | `index-manager-fanout` | 1.000 | **0.773** | **0.650** | **0.505** | **0.089** | 7,381,596 |
 | `metrics-emit` | 1.000 | **0.445** | **0.446** | **0.440** | **0.465** | 44,385,276 |
@@ -150,6 +150,164 @@ curves in this round are all surfaces round 1 never reached.
 (5 levels x 2 windows, exit 0, loadavg 1.74 before / 2.60 after). It is not
 comparable to the rows above as a contention ranking and is not ranked below —
 see [dst-mvcc-sessions shares nothing, and that is the point](#dst-mvcc-sessions-shares-nothing-and-that-is-the-point).
+
+### ‡ bolt-wire-read's scaling column UNDERSTATES the same server over a socket (rmp #2711)
+
+**Exactly one row in the table above is marked, and it is the only Bolt row whose
+statement was measured over both transports.** The correction is deliberately
+narrow: it is a statement about that row's *scaling column*, not a licence to
+discount Bolt throughput generally, and the paragraph below names precisely which
+other rows share the cause and were nevertheless left unmeasured.
+
+Every Bolt workload in `bench/contention` reaches the server through
+`internal/sim.SimListener`, an in-memory pipe, so no published Bolt scaling number
+had ever been taken over a socket.
+
+| | |
+|---|---|
+| Instrument | `bench/contention/workloads_transport.go` and `transport_test.go`, added by this task |
+| Entry points | `TestTransportNoiseFloor` and `TestTransportAB`, each opt-in via its own output directory, each behind `requireFreshRun` and run with `-count=1 -v` |
+| HEAD | `ad570cbc`, branch `feature/353-gograph-optimization-laboratory` |
+| Module code measured | byte-identical to `ad570cbc` except `internal/sim/wireclient.go`, which is harness-only and additive (a second constructor plus a field split; the delivery path in `simconn.go` and `simlistener.go` is untouched) |
+| Host | Apple M4, **10 cores** (4 performance + 6 efficiency), `go1.27.1 darwin/arm64`, `GOMAXPROCS=10` recorded in every child's `metrics.json` |
+| Build mode | **no `-race`.** Every figure in these sections is a non-race build |
+| Campaigns | 8, totalling **968 fresh child processes**; each ran to exit 0 read from inside its own log, with loadavg bracketed either side |
+| Host load | 1-minute loadavg **1.73 to 2.17** before each campaign, **6.03 to 8.29** after (the campaign is its own load). One campaign window was abandoned unmeasured when a video call appeared at 97% CPU; nothing published here was taken during it |
+| Errors | every cell asserts `Errors == 0` and the run fails otherwise; **no cell reported an error** |
+
+
+**Measured with the transport as the ONLY variable.** One `bolt/server` built from
+one options literal, one `sim.WireClient` (reached through the new
+`sim.NewWireClientNetConn`, so both arms emit byte-identical request bytes through
+the same encoder and framer), the same Cypher text character for character, the
+same operation count, the same `drive` machinery, and connections established at
+the same point in the run. The arms differ in the `net.Conn` and the
+`net.Listener` and in nothing else. Each arm of each cell is a fresh child
+process; arms are interleaved and the order is flipped between replicas.
+
+| statement | pipe cost/op | pipe scaling @8 | socket scaling @8 | socket/pipe @8 | @64 |
+|---|---:|---:|---:|---:|---:|
+| `MATCH (n) RETURN count(n)` (`bolt-wire-read`) | 13.5 µs | 1.523 | 2.342 | **1.538x** | **2.025x** |
+| `UNWIND range(1, 100) AS i RETURN i` (`bolt-wire-rows`) | 83.6 µs | 1.054 | 1.416 | **1.344x** | **1.414x** |
+| `UNWIND range(1, 1000) AS i RETURN i` (cost lever, no committed row) | 640 µs | 0.992 | 1.099 | **1.108x** | **1.108x** |
+
+**Noise floor, re-measured for this campaign: ±1.9% on a throughput ratio and
+±1.8% on a scaling ratio** (A-vs-A, both transports, same machinery, medians of
+five interleaved replicas; 16 cells across levels 1 to 1024, worst deviation 1.86%).
+Every factor above clears it by between **6x and 57x**. Two further campaigns reproduce them
+independently: 1.485 / 1.899 and 1.239 / 1.320 with nine replicas, and 1.505 /
+1.904 and 1.214 / 1.313 pooled from the floor campaign itself.
+
+**Which rows are affected, and which were not measured.** `bolt-wire-read` is
+marked because its exact statement was measured. `bolt-wire-rows`,
+`bolt-wire-read-metrics`, `bolt-tx-read` and `bolt-tx-read-noquota` — all in
+`docs/bolt-evaluation-2026-09-03.md` — run over the same pipe and are subject to
+the same cause; `bolt-wire-rows` was measured (the second row of the table) and
+the other three were NOT, so their magnitude is unknown. `bolt-connect-churn` and
+`bolt-connect-churn-quiet` are explicitly excluded: they open a NEW connection per
+operation, which on a socket is a TCP handshake and on the pipe is a channel send,
+so not even the SIGN of the effect can be predicted from this campaign and neither
+row should be adjusted on the strength of it. `dst-concurrent-bolt` is already
+struck out for a different reason (rmp #2728).
+
+### The pipe is NOT the contention limiter the spike hypothesised — REFUTED
+
+The gap above is a property of the scaling RATIO, and reading it as "the pipe
+serialises the server and caps its throughput" is wrong. Four independent results
+say so. (One cell is a genuine, small exception, and it has its own section
+below: at 1024 goroutines on the 100-row statement the socket wins by 3.8%.)
+
+1. **The pipe is FASTER in absolute terms at almost every cell.** Socket over pipe
+   throughput on the count statement runs **0.305 / 0.457 / 0.579 / 0.594 / 0.578**
+   at levels 1 / 8 / 64 / 256 / 1024 (levels 1, 64, 256 and 1024 from the ceiling
+   campaign, level 8 from the nine-replica A/B; both arms pre-dialled, so the
+   comparison is like for like). On this statement the socket never reaches
+   parity — it still loses by **1.73x** at 1024, where it has had every chance to
+   catch up. Across all three statements the pipe wins **13 of the 14 cells
+   measured**; the exception is the 100-row statement at 1024, worth 3.8%. A
+   transport that is faster than the alternative nearly everywhere is not what
+   caps the server.
+2. **The ratio shrinks as the operation gets more expensive.** Across three
+   statements spanning 47x in cost per operation the factor falls monotonically,
+   1.538 -> 1.344 -> 1.108 at level 8 and 2.025 -> 1.414 -> 1.108 at level 64. A
+   fixed per-operation transport cost diluting a shared serial component predicts
+   exactly that; a serialising pipe does not.
+3. **`halfPipe`'s mutex and condvar are per connection** (`internal/sim/simconn.go`:
+   one pair per `SimConn`, one `sync.Cond` per direction). There is no lock shared
+   across connections in the pipe for goroutines to contend on.
+4. **Removing the pipe's own per-message cost makes its scaling ratio WORSE, not
+   better** — 1.306 -> 1.150 at count@8 — because it lifts level 1 more than level
+   8. The pipe's overhead was FLATTERING the published ratio, not depressing it.
+
+The `sync.(*Cond).Wait` share of the pipe's block profile, which prompted the
+spike, is where a request/response peer correctly parks waiting for its partner.
+Parked time is not lost throughput.
+
+### The one cell where the pipe DOES limit, and its cause
+
+`UNWIND range(1, 100)` at **1024** goroutines is the single measured cell where the
+socket wins on absolute throughput, and two campaigns agree on it: **16,624 against
+16,012 op/s (+3.8%)** pooled over ten replicas per arm, and **16,242 against 15,772
+(+3.0%)** over five. The floor was re-measured AT 256 AND 1024 for this statement
+before the claim was made — four A-vs-A ratios, 0.9967 to 1.0171, so **±1.7%** —
+and the crossover clears it. At 256 the pipe is still ahead, by 3.7% (five
+replicas) and 4.6% (ten), so the crossover sits between 256 and 1024.
+
+It is fully attributed, by a single-variable probe rather than by a profile.
+`halfPipe.waitDeadline` (`internal/sim/simconn.go:143-154`) arms a `clock.Timer`,
+allocates a channel and **spawns a goroutine on every blocking wait that carries a
+non-zero deadline** — and `bolt/server`'s reader goroutine sets a read deadline
+before every single read (`bolt/server/serve.go:1110-1111`, taken whenever
+`ConnTimeout > 0`, which a harness server always sets), so that is one goroutine,
+one timer and one channel per inbound message. A socket pays none of it: `SetReadDeadline` on a
+netFD updates a poller deadline and wakes nobody.
+
+| arm at `rows`@1024 | ops/s | vs pipe |
+|---|---:|---:|
+| pipe, unchanged | 15,989 | 1.000 |
+| pipe, per-record `SetWriteDeadline` dropped | 16,115 | 1.008 (inside the floor) |
+| pipe, read deadline CLEARED so `waitDeadline` takes its zero-deadline path | **16,650** | **1.041** |
+| real socket | 16,658 | 1.042 |
+
+Clearing the read deadline closes the entire crossover: the probe lands within
+**0.05%** of the socket. The per-record `SetWriteDeadline` broadcast — the other
+candidate, and the one the block profile's line number pointed at
+(`internal/sim/simconn.go:193` is `setWriteDeadline`) — buys 0.8%, inside the floor,
+and is refuted at 1024 exactly as it already was at 1/8/64.
+
+Sized at level 1, where nothing else competes, the mechanism costs
+**1.03 µs per inbound message** on the count statement and **1.24 µs** on the
+100-row one. Two statements differing 6.8x in cost per operation yielding the same
+ABSOLUTE per-message figure is the signature of a per-message cost, and it is what
+makes this a measurement rather than a fitted number. Dropping the
+`setReadDeadline` mutex and broadcast as well buys a further 0.9%, inside the
+floor, so the cost is the timer and the goroutine, not the broadcast.
+
+**This is a harness cost, not a module defect.** It taxes every pipe-based Bolt
+measurement by about 1 µs per message, and no library code path pays it:
+`internal/sim` is imported only by `bench/contention` and `cmd/sim`, never by the
+module's own packages.
+
+### Lead, not a finding: WHERE a connection is dialled moves throughput 15-20%
+
+Established while checking that this campaign's own sim arm stands in faithfully
+for the committed workloads, and reported because it is a property of the server
+and the runtime rather than of the pipe.
+
+Dialling N connections from one goroutine before the measured window, instead of
+letting each worker dial its own inside its first operation, costs throughput at
+level 8 on **both** transports: x0.850 / x0.809 / x0.847 on the pipe for the three
+statements, and x0.903 / x0.795 / x0.848 on the socket. Over 20,000 operations
+that is not a start-up cost.
+
+It was bisected against the three ways this campaign's arm differed from the
+committed workload, one variable at a time: a lazily-dialling arm reproduces the
+committed workload to within 1% (1.2589 against 1.2497 at `rows`@8), while a
+`slog.Default` logger and a `*SimConn`-typed client are both within 1.7% of
+changing nothing. Every committed Bolt workload dials lazily, so no published row
+is affected — but any future arm that pre-dials is not comparable with them, and
+the effect is worth understanding on its own: connection pools warm up in exactly
+that burst pattern.
 
 ### † dst-concurrent-bolt is SUPERSEDED: this row measured the HARNESS (rmp #2728)
 

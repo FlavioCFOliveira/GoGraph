@@ -232,6 +232,8 @@ func TestMeasurementEntryPointsRefuseACacheableRun(t *testing.T) {
 	}{
 		{"TestSweep", "GOGRAPH_CONTENTION_SWEEP_DIR"},
 		{"TestCeilingProbe", "GOGRAPH_CONTENTION_CEILING_DIR"},
+		{"TestTransportNoiseFloor", envTransportFloorDir},
+		{"TestTransportAB", envTransportABDir},
 	}
 
 	for _, e := range entries {
@@ -380,6 +382,12 @@ func contentionEnv(set map[string]string) []string {
 		"GOGRAPH_CONTENTION_LEVELS",
 		"GOGRAPH_CONTENTION_WORKLOADS",
 		"GOGRAPH_CONTENTION_OPS_SCALE",
+		envTransportFloorDir,
+		envTransportABDir,
+		envTransportReplicas,
+		envTransportLevels,
+		envTransportQueries,
+		envTransportArms,
 	}
 	drop := make(map[string]bool, len(known))
 	for _, k := range known {
