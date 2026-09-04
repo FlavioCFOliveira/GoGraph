@@ -102,6 +102,7 @@ func boltWorkloads() []Workload {
 		boltTxReadWorkload("bolt-tx-read-noquota", -1),
 		boltWireRowsWorkload(),
 		boltWireReadMetricsWorkload(),
+		boltWireRowsMetricsWorkload(),
 		boltConnectChurnQuietWorkload(),
 	}
 }
@@ -296,6 +297,44 @@ func boltWireReadMetricsWorkload() Workload {
 			return op, teardown, nil
 		},
 	}
+}
+
+// boltWireRowsMetricsWorkload is bolt-wire-rows with the real metrics backend
+// installed. It is the row-streaming counterpart of
+// [boltWireReadMetricsWorkload] and exists for the same reason, plus one more
+// that is specific to the per-message histograms (rmp #2715).
+//
+// A metric emission that is free when no backend is installed proves nothing:
+// rmp #2698's whole finding was that the no-op path and the real path behave
+// completely differently, and that the shape which looks obviously right — a
+// cached metric handle — measured 0.081x, WORSE than the full lookup. So a
+// per-message histogram added to bolt/server has to be priced on the path where
+// it actually costs something, and bolt-wire-read-metrics alone prices only the
+// one-row shape. This arm prices the hundred-row one, where the RUN/PULL pair
+// carries a hundred RECORD writes between the two observations.
+//
+// It is byte-identical to bolt-wire-rows except for the backend install and its
+// removal on teardown, exactly as bolt-wire-read-metrics is to bolt-wire-read.
+func boltWireRowsMetricsWorkload() Workload {
+	w := boltWireRowsWorkload()
+	w.Name = "bolt-wire-rows-metrics"
+	w.Surface = "bolt/server streaming sink, bolt/proto chunking, " +
+		"bolt/packstream encode [real metrics backend installed]"
+	inner := w.Setup
+	w.Setup = func(dir string) (Op, func() error, error) {
+		metrics.SetBackend(prometheus.New())
+		op, teardown, err := inner(dir)
+		if err != nil {
+			metrics.SetBackend(nil)
+			return nil, nil, err
+		}
+		return op, func() error {
+			err := teardown()
+			metrics.SetBackend(nil)
+			return err
+		}, nil
+	}
+	return w
 }
 
 // boltClient returns this worker's connected [sim.WireClient], dialling and

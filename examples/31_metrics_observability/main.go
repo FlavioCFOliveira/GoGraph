@@ -29,6 +29,11 @@
 //     - graph/io/csv        — a WriteCtx + ReadIntoCtx round-trip;
 //     - bolt/packstream     — an encoder acquired from and returned to the
 //     pooled EncodePool;
+//     - bolt/server         — a real Bolt v5 server on a real TCP socket,
+//     driven by the official neo4j-go-driver through an autocommit read, a
+//     committed explicit transaction and a rolled-back one, so the
+//     per-message latency histograms and the connection/transaction
+//     counters are populated by genuine wire traffic;
 //     - relationship count-store — a CREATE / DELETE / SET-label /
 //     REMOVE-label write burst that lights the count-store observability
 //     counters (delta.applied, relabel.dirtied) and the reopen recompute
@@ -78,6 +83,7 @@ import (
 	"io"
 	"log"
 	"math/rand"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -90,6 +96,7 @@ import (
 	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/bolt/packstream"
+	"github.com/FlavioCFOliveira/GoGraph/bolt/server"
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/examples/internal/exprof"
@@ -100,6 +107,8 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 	"github.com/FlavioCFOliveira/GoGraph/metrics"
 	"github.com/FlavioCFOliveira/GoGraph/search"
+
+	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 )
 
 const (
@@ -454,7 +463,14 @@ func driveWorkload(
 		return fmt.Errorf("count-store workload: %w", err)
 	}
 
-	// 8. The MVCC substrate — concurrency control is MVCC and nothing else, so
+	// 8. The Bolt network surface — a real server on a real socket, driven by
+	//    the official neo4j driver, so the per-message latency histograms are
+	//    populated by genuine wire traffic (rmp #2715).
+	if err = driveBoltServer(ctx, w, eng); err != nil {
+		return fmt.Errorf("bolt server workload: %w", err)
+	}
+
+	// 9. The MVCC substrate — concurrency control is MVCC and nothing else, so
 	//    its health IS the module's health. Drive the write side deliberately so
 	//    the writer, commit, abort, conflict and chain-depth series are all
 	//    non-trivially populated rather than left at their zero values.
@@ -897,6 +913,33 @@ var expectedMetrics = []expectedMetric{
 	{"graph.io.csv.ReadInto", "histogram", "csv.ReadIntoCtx"},
 	{"bolt.pool.encoder.get", "counter", "packstream.EncodePool.Get"},
 	{"bolt.pool.encoder.put", "counter", "packstream.EncodePool.Put"},
+	// The Bolt network surface, per message type (rmp #2715). These are the
+	// only series in this list produced by traffic over a real socket, and they
+	// are the module's own measurement of its network latency — before them the
+	// p50/p99 quoted for Bolt came from a CLIENT-side stopwatch that no
+	// deployment can emit.
+	//
+	// Seven of the thirteen names in the closed set appear here, because seven
+	// is what this workload's three session shapes deterministically send: the
+	// official driver opens with HELLO + LOGON, an autocommit read is RUN +
+	// PULL, and the two explicit transactions add BEGIN, COMMIT and ROLLBACK.
+	// DISCARD, RESET, ROUTE, LOGOFF and GOODBYE are NOT pinned — the driver
+	// does not send them on these paths, or does not send them reliably, and a
+	// presence fact that depends on a client library's discretion is not a
+	// fact. Their names are proven closed, distinct and correctly attributed by
+	// bolt/server/msgmetrics_internal_test.go and driven over the raw wire by
+	// bolt/server/msgmetrics_wire_test.go.
+	{"bolt.server.HandleMessage.message.hello", "histogram", "Bolt HELLO over the wire"},
+	{"bolt.server.HandleMessage.message.logon", "histogram", "Bolt LOGON over the wire"},
+	{"bolt.server.HandleMessage.message.run", "histogram", "Bolt RUN over the wire"},
+	{"bolt.server.HandleMessage.message.pull", "histogram", "Bolt PULL over the wire"},
+	{"bolt.server.HandleMessage.message.begin", "histogram", "Bolt BEGIN over the wire"},
+	{"bolt.server.HandleMessage.message.commit", "histogram", "Bolt COMMIT over the wire"},
+	{"bolt.server.HandleMessage.message.rollback", "histogram", "Bolt ROLLBACK over the wire"},
+	{"bolt.server.conn.accepted", "counter", "bolt/server accept loop"},
+	{"bolt.server.conn.closed", "counter", "bolt/server connection teardown"},
+	{"bolt.server.tx.opened", "counter", "Bolt BEGIN that acquired a transaction"},
+	{"bolt.server.tx.closed", "counter", "Bolt COMMIT / ROLLBACK"},
 	{"cypher.countstore.recompute", "histogram", "Engine reopen recompute (#2087)"},
 	{"cypher.countstore.delta.applied", "counter", "count-store commit fan-out (#2087)"},
 	{"cypher.countstore.relabel.dirtied", "counter", "count-store relabel (#2087)"},
@@ -1080,4 +1123,158 @@ func humanBytes(n uint64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.2f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The Bolt network surface
+// ─────────────────────────────────────────────────────────────────────────────
+
+// driveBoltServer starts a real bolt/server over a real TCP socket, connects
+// the official neo4j-go-driver as a real client, and drives one session of
+// each shape — an autocommit read, an explicit transaction committed, and an
+// explicit transaction rolled back — so the per-message latency histograms
+// (bolt.server.HandleMessage.message.<type>, rmp #2715) are populated by
+// genuine wire traffic rather than by a direct call.
+//
+// Why over a socket and not by calling Session.HandleMessage directly: the
+// histograms exist so a DEPLOYED GoGraph can report its own Bolt latency. A
+// demonstration that skipped the listener, the handshake and the chunked
+// framing would show the metric working on a path no operator runs. The
+// numbers it produces are the server's own, which is the gap this closes — the
+// p50/p99 previously quoted for the Bolt surface came from a client-side
+// stopwatch in examples/23_bolt_server and no deployment can emit them.
+//
+// The facts it writes are deterministic (row counts and the committed write
+// delta); the observed latencies are volatile and appear only as "# "
+// telemetry, through the histograms themselves.
+func driveBoltServer(ctx context.Context, w io.Writer, eng *cypher.Engine) error {
+	// The explicit NoAuthHandler{} value is the opt-in that lets a development
+	// example run without credentials; the server is secure-by-default and
+	// refuses to start with a nil Auth handler.
+	srv, err := server.NewServer(eng, server.Options{
+		MaxConnections: 8,
+		ConnTimeout:    30 * time.Second,
+		Auth:           server.NoAuthHandler{},
+	})
+	if err != nil {
+		return fmt.Errorf("new server: %w", err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return fmt.Errorf("listen: %w", err)
+	}
+	addr := ln.Addr().String()
+
+	serveCtx, serveCancel := context.WithCancel(ctx)
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.Serve(serveCtx, ln) }()
+
+	driveErr := driveBoltClient(ctx, w, addr)
+
+	// Shut down with a deadline, then cancel Serve and drain its goroutine.
+	// Serve returns only once every connection goroutine has finished, so the
+	// drain is what makes the example goroutine-leak clean.
+	shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutErr := srv.Shutdown(shutCtx)
+	shutCancel()
+	serveCancel()
+	<-serveErr
+
+	if driveErr != nil {
+		return driveErr
+	}
+	if shutErr != nil {
+		return fmt.Errorf("shutdown: %w", shutErr)
+	}
+	return nil
+}
+
+// boltCanaryName is the SERVICE created over the Bolt wire. It is distinct from
+// the in-process canary so the two write paths cannot be confused for each
+// other in the node counts.
+const boltCanaryName = "svc-bolt-canary"
+
+// driveBoltClient connects the official driver to addr and runs the three
+// session shapes. It closes its own driver before returning, which is what
+// sends GOODBYE and lets that histogram populate too.
+func driveBoltClient(ctx context.Context, w io.Writer, addr string) error {
+	driver, err := neo4j.NewDriverWithContext("bolt://"+addr, neo4j.NoAuth())
+	if err != nil {
+		return fmt.Errorf("bolt driver: %w", err)
+	}
+	defer func() { _ = driver.Close(ctx) }()
+
+	// 1. Autocommit read — RUN then PULL, with no transaction messages.
+	sess := driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+	before, err := boltCount(ctx, sess)
+	if err != nil {
+		_ = sess.Close(ctx)
+		return fmt.Errorf("bolt autocommit read: %w", err)
+	}
+	if err := sess.Close(ctx); err != nil {
+		return fmt.Errorf("bolt read session close: %w", err)
+	}
+
+	// 2. An explicit transaction, COMMITted — BEGIN, RUN, PULL, COMMIT.
+	wsess := driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
+	defer func() { _ = wsess.Close(ctx) }()
+	tx, err := wsess.BeginTransaction(ctx)
+	if err != nil {
+		return fmt.Errorf("bolt begin (commit arm): %w", err)
+	}
+	if _, err := tx.Run(ctx, "CREATE (s:SERVICE {name:$name})",
+		map[string]any{"name": boltCanaryName}); err != nil {
+		return fmt.Errorf("bolt tx create: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("bolt commit: %w", err)
+	}
+
+	// 3. An explicit transaction, ROLLED BACK — BEGIN, RUN, PULL, ROLLBACK. The
+	//    write it attempts must leave no trace, which the count below proves.
+	rtx, err := wsess.BeginTransaction(ctx)
+	if err != nil {
+		return fmt.Errorf("bolt begin (rollback arm): %w", err)
+	}
+	if _, err := rtx.Run(ctx, "CREATE (s:SERVICE {name:$name})",
+		map[string]any{"name": boltCanaryName + "-rolled-back"}); err != nil {
+		return fmt.Errorf("bolt tx create (rollback arm): %w", err)
+	}
+	if err := rtx.Rollback(ctx); err != nil {
+		return fmt.Errorf("bolt rollback: %w", err)
+	}
+
+	after, err := boltCount(ctx, wsess)
+	if err != nil {
+		return fmt.Errorf("bolt autocommit read (after): %w", err)
+	}
+
+	fmt.Fprintf(w, "bolt.services_before=%d\n", before)
+	fmt.Fprintf(w, "bolt.services_after=%d\n", after)
+	fmt.Fprintf(w, "bolt.commit_delta=%d\n", after-before)
+	return nil
+}
+
+// boltCount runs the SERVICE count as an autocommit read over the Bolt wire and
+// returns it. It is the assertion that the wire path produced a real result:
+// without it the example would light the histograms just as happily against a
+// server that answered nothing.
+func boltCount(ctx context.Context, sess neo4j.SessionWithContext) (int64, error) {
+	res, err := sess.Run(ctx, "MATCH (s:"+labelService+") RETURN count(s) AS n", nil)
+	if err != nil {
+		return 0, err
+	}
+	rec, err := res.Single(ctx)
+	if err != nil {
+		return 0, err
+	}
+	v, ok := rec.Get("n")
+	if !ok {
+		return 0, errors.New("count query returned no column n")
+	}
+	n, ok := v.(int64)
+	if !ok {
+		return 0, fmt.Errorf("count column n is %T, want int64", v)
+	}
+	return n, nil
 }

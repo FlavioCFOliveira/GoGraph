@@ -17,6 +17,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 	"github.com/FlavioCFOliveira/GoGraph/internal/clock"
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 // serverAgent is the agent string advertised in SUCCESS metadata after HELLO.
@@ -561,7 +562,24 @@ func randomID() string {
 // trailing SUCCESS or FAILURE. A sink write failure is surfaced as an error
 // wrapping [errRecordWrite]: the connection framing is unrecoverable and the
 // caller must tear the connection down without writing anything further.
+//
+// # Observability
+//
+// Every call records a latency observation under
+// "bolt.server.HandleMessage.message.<type>", the module's per-message Bolt
+// histogram; see msgmetrics.go for the naming and for why the message type is
+// carried in the name. The window is dispatch plus handler execution — it
+// EXCLUDES the framing read that produced msg and the trailing response write
+// the caller performs, and INCLUDES the RECORD writes a PULL streams through
+// its own sink. It is emitted here, on the exported entry point, rather than in
+// the serve loop, so a session driven directly through HandleMessage is
+// observed on exactly the same terms as one driven over a socket.
 func (s *Session) HandleMessage(ctx context.Context, msg any) ([]any, error) {
+	// The observation covers every return path below, the context-cancellation
+	// early return included. metrics.Time returns a value, so the deferred
+	// value-receiver call is open-coded and allocates nothing.
+	defer metrics.Time(msgLatencySeries[msgKindOf(msg)]).Stop()
+
 	// Propagate context cancellation before doing any work. failWith routes
 	// through enterFailed, which reclaims any open explicit transaction even on
 	// this early-return path that never reaches dispatch (#1312).

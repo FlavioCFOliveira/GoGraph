@@ -80,6 +80,25 @@ func TestRun(t *testing.T) {
 		t.Errorf("csv.roundtrip.edges_match = %d, want 1", got)
 	}
 
+	// The Bolt wire path is a real client against a real socket, and the two
+	// explicit transactions must have opposite effects: the committed one adds
+	// exactly one SERVICE, the rolled-back one adds none. Asserting the DELTA
+	// rather than the absolute count is what makes this a test of the wire
+	// path's transactional behaviour and not of every earlier step's node
+	// arithmetic. Without it the example would light the per-message histograms
+	// just as happily against a server whose COMMIT did nothing.
+	boltBefore := mustInt(t, facts, "bolt.services_before")
+	boltAfter := mustInt(t, facts, "bolt.services_after")
+	if got := mustInt(t, facts, "bolt.commit_delta"); got != 1 {
+		t.Errorf("bolt.commit_delta = %d, want 1 (the committed transaction adds one "+
+			"SERVICE and the rolled-back one adds none); before=%d after=%d",
+			got, boltBefore, boltAfter)
+	}
+	if boltAfter-boltBefore != 1 {
+		t.Errorf("bolt.services_after - bolt.services_before = %d, want 1",
+			boltAfter-boltBefore)
+	}
+
 	// Every expected instrumented metric must be present in the exposition.
 	for _, m := range expectedMetrics {
 		key := "metric.present." + m.name
