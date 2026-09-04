@@ -3515,47 +3515,50 @@ func (e *Engine) createBTreeIndexLocked(ctx context.Context, p *ir.CreateIndex, 
 		}
 	}
 
-	// Wrap BOTH registrations inside one visibility barrier so readers calling
-	// Graph.View never observe a partially-registered index pair: either both
-	// the user btree and its numeric companion are visible, or neither is.
-	var registered, numRegistered bool
-	if barrierErr := e.g.ApplyAtomically(func() error {
-		if cerr := idxMgr.CreateIndex(p.Name, idx); cerr != nil {
-			if p.IfNotExists && errors.Is(cerr, index.ErrIndexExists) {
-				return nil
-			}
-			return fmt.Errorf("exec: CreateIndex %q: %w", p.Name, cerr)
-		}
-		registered = true
-		// Register the companion under its internal name when it was built (a
-		// nil numIdx means the binding failed on an empty graph — the user
-		// index is still created and the companion is rebuilt on a later CREATE
-		// INDEX). A pre-existing companion (a second CREATE INDEX on the same
-		// (label, property) under a different user name) is absorbed: it
-		// already covers this pair, so the numeric seek stays served.
-		// numRegistered tracks whether WE created it, so the unwind below never
-		// drops a companion another live user index still relies on.
-		if numIdx != nil {
-			if cerr := idxMgr.CreateIndex(numName, numIdx); cerr == nil {
-				numRegistered = true
-			} else if !errors.Is(cerr, index.ErrIndexExists) {
-				return fmt.Errorf("exec: CreateIndex %q (numeric companion): %w", numName, cerr)
-			}
-		}
-		e.ClearPlanCache()
-		return nil
-	}); barrierErr != nil {
+	// Register BOTH indexes through the exec-layer DDL operator, which wraps the
+	// pair in ONE invocation of the visibility barrier (rmp #2703). The single
+	// barrier is what keeps a concurrent write transaction's index-change
+	// fan-out — which runs under a SHARED hold of the same gate
+	// ApplyAtomically takes exclusively — from landing BETWEEN the two
+	// registrations, where it would reach the user btree and be missed
+	// permanently by the companion, whose backfill snapshot predates it. See
+	// [exec.NewCreateIndexPairOp] for the full argument and the gate that
+	// enforces it.
+	//
+	// The companion slot is left ZERO when no companion was built (a nil numIdx
+	// means the binding failed on an empty graph — the user index is still
+	// created and the companion is rebuilt on a later CREATE INDEX). It must be
+	// left zero rather than assigned, because an interface holding a typed nil
+	// pointer is not nil. A pre-existing companion (a second CREATE INDEX on
+	// the same (label, property) under a different user name) is absorbed by
+	// the operator: it already covers this pair, so the numeric seek stays
+	// served, and CompanionRegistered stays false so the unwind below never
+	// drops a companion another live user index still relies on.
+	var companion exec.IndexRegistration
+	if numIdx != nil {
+		companion = exec.IndexRegistration{Name: numName, Sub: numIdx}
+	}
+	op := exec.NewCreateIndexPairOp(
+		exec.IndexRegistration{Name: p.Name, Sub: idx},
+		companion,
+		p.IfNotExists,
+		idxMgr,
+		e.g.ApplyAtomically,
+		e.ClearPlanCache,
+	)
+	if barrierErr := applyDDLOp(ctx, op); barrierErr != nil {
 		// The barrier ran the closure to completion or not at all; if the user
 		// index was registered before the companion failed, unwind it so the
 		// manager never keeps a user index without its companion.
-		if registered {
+		if op.Registered() {
 			_ = idxMgr.DropIndex(p.Name)
 		}
-		if numRegistered {
+		if op.CompanionRegistered() {
 			_ = idxMgr.DropIndex(numName)
 		}
 		return nil, barrierErr
 	}
+	registered, numRegistered := op.Registered(), op.CompanionRegistered()
 	if !registered {
 		// IF NOT EXISTS absorbed an already-registered name: no schema change,
 		// no WAL record.
