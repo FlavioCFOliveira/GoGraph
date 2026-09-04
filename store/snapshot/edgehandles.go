@@ -155,24 +155,9 @@ func WriteEdgeHandles[N comparable, W any](w io.Writer, g *lpg.Graph[N, W], at *
 	writeU32 := func(v uint32) error { return binary.Write(tee, binary.LittleEndian, v) }
 	writeU64 := func(v uint64) error { return binary.Write(tee, binary.LittleEndian, v) }
 	writeStrTable := func(names []string) error {
-		if err := writeU64(uint64(len(names))); err != nil {
-			return err
-		}
-		total += 8
-		for _, n := range names {
-			if uint64(len(n)) > uint64(^uint32(0)) {
-				return fmt.Errorf("snapshot: edgehandles string too long: %d bytes", len(n))
-			}
-			//nolint:gosec // G115: bounded by the len(n) > MaxUint32 fail-stop at edgehandles.go:163, which rejects the write before the prefix is emitted
-			if err := writeU32(uint32(len(n))); err != nil {
-				return err
-			}
-			if _, err := tee.Write([]byte(n)); err != nil {
-				return err
-			}
-			total += 4 + int64(len(n))
-		}
-		return nil
+		n, err := writeEdgeHandleStrTable(tee, names)
+		total += n
+		return err
 	}
 
 	if err := writeU32(edgeHandlesMagic); err != nil {
@@ -228,7 +213,10 @@ func writeEdgeHandleRecord(w io.Writer, scratch []byte, r *edgeHandleRaw, labelI
 	binary.LittleEndian.PutUint64(scratch[0:8], r.src)
 	binary.LittleEndian.PutUint64(scratch[8:16], r.dst)
 	binary.LittleEndian.PutUint64(scratch[16:24], r.handle)
-	//nolint:gosec // G115: NO writer guard; overflow needs 2^32 labels on ONE edge handle, i.e. >=64 GiB of string headers, so it is unreachable in addressable memory
+	if err := checkSnapshotPerRecordCount("edge handle label count", len(r.labels)); err != nil {
+		return 0, err
+	}
+	//nolint:gosec // G115: bounded by checkSnapshotPerRecordCount just above, which fail-stops at maxPerRecordCount (1 Mi) — the ceiling readEdgeHandleRecord now enforces, so writer and reader admit exactly the same records (rmp #2743)
 	binary.LittleEndian.PutUint32(scratch[24:28], uint32(len(r.labels)))
 	if _, err := w.Write(scratch[:28]); err != nil {
 		return 0, err
@@ -245,7 +233,10 @@ func writeEdgeHandleRecord(w io.Writer, scratch []byte, r *edgeHandleRaw, labelI
 		}
 		total += 4
 	}
-	//nolint:gosec // G115: NO writer guard; overflow needs 2^32 properties on ONE edge handle, i.e. >=64 GiB of headers; the reader clamps its allocation via capHint at edgehandles.go:478
+	if err := checkSnapshotPerRecordCount("edge handle property count", len(r.propKeys)); err != nil {
+		return 0, err
+	}
+	//nolint:gosec // G115: bounded by checkSnapshotPerRecordCount just above, which fail-stops at maxPerRecordCount (1 Mi) — the ceiling readEdgeHandleRecord now enforces (rmp #2743)
 	binary.LittleEndian.PutUint32(scratch[0:4], uint32(len(r.propKeys)))
 	if _, err := w.Write(scratch[:4]); err != nil {
 		return 0, err
@@ -263,7 +254,10 @@ func writeEdgeHandleRecord(w io.Writer, scratch []byte, r *edgeHandleRaw, labelI
 		// Per-property header: keyIdx(4) | kind(1) | valLen(4) = 9 bytes.
 		binary.LittleEndian.PutUint32(scratch[0:4], ki)
 		scratch[4] = byte(r.propVals[j].Kind())
-		//nolint:gosec // G115: NO GUARD: unlike properties.go:366/398 this writer never checks len(valBytes) before the uint32 prefix, so a property value >=4 GiB truncates here. Tracked as a lead from #2708
+		if err := checkSnapshotValueLen("edge handle property value", len(valBytes)); err != nil {
+			return 0, err
+		}
+		//nolint:gosec // G115: bounded by checkSnapshotValueLen just above — the guard this site lacked entirely until rmp #2743, which is why a value >=4 GiB used to TRUNCATE its prefix here while its siblings properties.go/writeNodePropRecord and /writeEdgePropRecord fail-stopped. Now all three refuse at maxValueLen (1 GiB), the cap their readers enforce
 		binary.LittleEndian.PutUint32(scratch[5:9], uint32(len(valBytes)))
 		if _, err := w.Write(scratch[:9]); err != nil {
 			return 0, err
@@ -394,6 +388,32 @@ func failEdgeHandles(err error) (EdgeHandlesReadback, error) {
 	return EdgeHandlesReadback{}, fmt.Errorf("%w: %w", ErrEdgeHandlesCorrupted, err)
 }
 
+// writeEdgeHandleStrTable emits a length-prefixed string table and returns the
+// byte count. It is the exact dual of [readEdgeHandleStrTable] and is a
+// package-level function, rather than the closure it was, so the guard it
+// applies is reachable from a test without reconstructing the format by hand
+// (rmp #2743).
+func writeEdgeHandleStrTable(w io.Writer, names []string) (int64, error) {
+	if err := binary.Write(w, binary.LittleEndian, uint64(len(names))); err != nil {
+		return 0, err
+	}
+	total := int64(8)
+	for _, n := range names {
+		if err := checkSnapshotStringLen("edge handle string-table entry", len(n)); err != nil {
+			return total, err
+		}
+		//nolint:gosec // G115: bounded by checkSnapshotStringLen just above, which fail-stops at maxStringTableLen (1 MiB) — the cap readEdgeHandleStrTable enforces (rmp #2743)
+		if err := binary.Write(w, binary.LittleEndian, uint32(len(n))); err != nil {
+			return total, err
+		}
+		if _, err := w.Write([]byte(n)); err != nil {
+			return total, err
+		}
+		total += 4 + int64(len(n))
+	}
+	return total, nil
+}
+
 // readEdgeHandleStrTable reads a length-prefixed string table. A hostile
 // length (up to the 1<<30 ceiling, a ~16 GiB string-header allocation) is
 // bounded to edgeHandlesCapHintMax: the count is validated against the
@@ -414,7 +434,7 @@ func readEdgeHandleStrTable(br *bufio.Reader) ([]string, error) {
 		if err := binary.Read(br, binary.LittleEndian, &slen); err != nil {
 			return nil, err
 		}
-		if slen > 1<<20 {
+		if slen > maxStringTableLen {
 			return nil, fmt.Errorf("implausible string length %d", slen)
 		}
 		buf := make([]byte, slen)
@@ -442,8 +462,17 @@ func readEdgeHandleRecord(br *bufio.Reader, labels, keys []string) (EdgeHandleRe
 	if err := binary.Read(br, binary.LittleEndian, &labelCount); err != nil {
 		return rec, err
 	}
-	if uint64(labelCount) > edgeHandlesMaxCount {
-		return rec, fmt.Errorf("implausible label count %d", labelCount)
+	// A per-record ceiling that CAN fail. This compared labelCount against
+	// edgeHandlesMaxCount (1<<40) until rmp #2743: labelCount is a uint32, so
+	// that condition was true for no value the type can hold — the check read as
+	// protection and provided none, and the append loop below grew unclamped for
+	// any count a large enough body could satisfy. maxPerRecordCount is
+	// reachable by a uint32, so a crafted header is now rejected here, on the
+	// count, before a single label index is read. The writer refuses the same
+	// ceiling (checkSnapshotPerRecordCount in writeEdgeHandleRecord), so the two
+	// halves admit exactly the same records.
+	if uint64(labelCount) > maxPerRecordCount {
+		return rec, fmt.Errorf("implausible label count %d (max %d)", labelCount, maxPerRecordCount)
 	}
 	for j := uint32(0); j < labelCount; j++ {
 		var li uint32
@@ -459,15 +488,18 @@ func readEdgeHandleRecord(br *bufio.Reader, labels, keys []string) (EdgeHandleRe
 	if err := binary.Read(br, binary.LittleEndian, &propCount); err != nil {
 		return rec, err
 	}
-	if uint64(propCount) > edgeHandlesMaxCount {
-		return rec, fmt.Errorf("implausible prop count %d", propCount)
+	// The sibling of the label ceiling above, and vacuous in exactly the same way
+	// before rmp #2743: a uint32 never exceeds 1<<40.
+	if uint64(propCount) > maxPerRecordCount {
+		return rec, fmt.Errorf("implausible prop count %d (max %d)", propCount, maxPerRecordCount)
 	}
 	if propCount > 0 {
 		// Clamp the eager map reservation to edgeHandlesCapHintMax exactly as
 		// every sibling reader (and this file's own string-table reader at
 		// readEdgeHandleStrTable) does: propCount is a u32 read from a possibly
-		// hostile/corrupt file and is validated here only against the loose
-		// edgeHandlesMaxCount (1<<40) plausibility ceiling. make(map, hint)
+		// hostile/corrupt file and is validated above against maxPerRecordCount
+		// (1 Mi) — a ceiling a uint32 CAN exceed, unlike the edgeHandlesMaxCount
+		// (1<<40) comparison it replaced, which could not fail. make(map, hint)
 		// eagerly pre-allocates hash buckets proportional to the hint, so an
 		// unclamped propCount near uint32-max would attempt a multi-gigabyte
 		// allocation and OOM the process at recovery before the per-property

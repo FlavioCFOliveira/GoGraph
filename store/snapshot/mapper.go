@@ -175,12 +175,12 @@ func writeMapperStringN(w io.Writer, m *graph.Mapper[string], include func(graph
 	// binary.Write reflection with zero per-record allocations, byte-identically.
 	var scratch [12]byte
 	for i := range pairs {
-		if uint64(len(pairs[i].Key)) > uint64(^uint32(0)) {
+		if err := checkMapperKeyLen(len(pairs[i].Key)); err != nil {
 			metrics.IncCounter("store.snapshot.WriteMapperString.errors", 1)
-			return 0, 0, 0, fmt.Errorf("snapshot: mapper key too long: %d bytes", len(pairs[i].Key))
+			return 0, 0, 0, err
 		}
 		binary.LittleEndian.PutUint64(scratch[0:8], uint64(pairs[i].ID))
-		//nolint:gosec // G115: bounded by the len(Key) > MaxUint32 fail-stop at mapper.go:178, which aborts WriteMapperString before the prefix is packed
+		//nolint:gosec // G115: bounded by checkMapperKeyLen just above, which aborts WriteMapperString at maxMapperKeyLen (1 GiB) — the cap ReadMapper* enforces (rmp #2743)
 		binary.LittleEndian.PutUint32(scratch[8:12], uint32(len(pairs[i].Key)))
 		if _, err := tee.Write(scratch[:12]); err != nil {
 			metrics.IncCounter("store.snapshot.WriteMapperString.errors", 1)
@@ -319,12 +319,12 @@ func writeMapperN[N comparable](w io.Writer, m *graph.Mapper[N], codec keyEncode
 	// byte-identically.
 	var scratch [12]byte
 	for i := range ids {
-		if uint64(len(keys[i])) > uint64(^uint32(0)) {
+		if err := checkMapperKeyLen(len(keys[i])); err != nil {
 			metrics.IncCounter("store.snapshot.WriteMapper.errors", 1)
-			return 0, 0, 0, fmt.Errorf("snapshot: mapper key too long: %d bytes", len(keys[i]))
+			return 0, 0, 0, err
 		}
 		binary.LittleEndian.PutUint64(scratch[0:8], uint64(ids[i]))
-		//nolint:gosec // G115: bounded by the len(keys[i]) > MaxUint32 fail-stop at mapper.go:322, which aborts WriteMapper before the prefix is packed
+		//nolint:gosec // G115: bounded by checkMapperKeyLen just above, which aborts WriteMapper at maxMapperKeyLen (1 GiB) — the cap ReadMapper* enforces (rmp #2743)
 		binary.LittleEndian.PutUint32(scratch[8:12], uint32(len(keys[i])))
 		if _, err := tee.Write(scratch[:12]); err != nil {
 			metrics.IncCounter("store.snapshot.WriteMapper.errors", 1)
