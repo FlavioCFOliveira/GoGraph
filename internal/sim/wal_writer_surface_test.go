@@ -20,6 +20,8 @@ package sim
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -653,7 +655,16 @@ func TestWALGuards_LockAndSymlinkRefusal(t *testing.T) {
 	}
 	t.Log(r)
 	if r.Skipped {
+		if r.LockGuardsAttempted || r.SymlinkWALAttempted {
+			t.Fatalf("a whole-record skip was raised LATE, discarding measured verdicts: %s", r)
+		}
 		t.Skipf("the platform cannot express the WAL guards: %s", r.SkipReason)
+	}
+	// Every axis must have run on a platform that did not declare a whole-record
+	// skip. Asserting this — rather than only reading the verdicts — is what
+	// stops a silently unexercised axis from reading as a clean one.
+	if !r.LockGuardsAttempted || !r.SymlinkWALAttempted || !r.SymlinkLockAttempted || !r.VictimChecked {
+		t.Fatalf("an axis was not exercised on a platform that declared no skip: %s", r)
 	}
 
 	for _, viol := range checkWALRealFSGuards(&r) {
@@ -675,6 +686,8 @@ func TestWALGuards_GateDetectsEachDefect(t *testing.T) {
 	t.Parallel()
 
 	healthy := WALGuardResult{
+		LockGuardsAttempted: true, SymlinkWALAttempted: true,
+		SymlinkLockAttempted: true, VictimChecked: true,
 		SecondOpenErr: wal.ErrWALLocked, SecondOpenIsLocked: true,
 		SymlinkedWALErr:  errors.New("too many levels of symbolic links"),
 		SymlinkedLockErr: errors.New("too many levels of symbolic links"),
@@ -714,6 +727,19 @@ func TestWALGuards_GateDetectsEachDefect(t *testing.T) {
 			doctor:  func(r *WALGuardResult) { r.VictimIntact = false },
 			wantMsg: "was MODIFIED through a symlink",
 		},
+		{
+			name:    "the first open failed",
+			doctor:  func(r *WALGuardResult) { r.FirstOpenErr = errors.New("permission denied") },
+			wantMsg: "the first wal.Open failed",
+		},
+		{
+			name: "no axis ran at all and no skip was declared",
+			doctor: func(r *WALGuardResult) {
+				r.LockGuardsAttempted, r.SymlinkWALAttempted = false, false
+				r.SymlinkLockAttempted, r.VictimChecked = false, false
+			},
+			wantMsg: "exercised NO guard",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -748,6 +774,89 @@ func TestWALGuards_SkippedRunMakesNoClaim(t *testing.T) {
 	}
 	if !strings.Contains(broken.String(), "SKIPPED") {
 		t.Errorf("a skipped result does not render as skipped: %s", broken.String())
+	}
+}
+
+// TestWALGuards_UnavailableLockAxisKeepsTheCWE59Verdict is the regression proof
+// for rmp #2745: one unavailable axis must no longer discard the axes already
+// measured, and above all not the CWE-59 symlink detection for the WAL PATH.
+//
+// # How the axis is made unavailable for real
+//
+// No mocking: the LOCK sentinel's link is made impossible by pre-creating a
+// plain file at the sentinel path, so os.Symlink returns EEXIST — the same class
+// of failure the arm handles on a platform where linking is unprivileged. The
+// WAL-path symlink refusal is exercised BEFORE that point, so before this fix
+// the late whole-record skip threw its verdict away and checkWALRealFSGuards
+// returned nil having judged nothing at all.
+func TestWALGuards_UnavailableLockAxisKeepsTheCWE59Verdict(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, guardLockBaseName+guardLockSuffix)
+	if err := os.WriteFile(blocker, []byte("occupied"), 0o600); err != nil {
+		t.Fatalf("pre-create the LOCK sentinel path: %v", err)
+	}
+
+	r, err := RunWALRealFSGuards(dir)
+	if err != nil {
+		t.Fatalf("RunWALRealFSGuards: %v", err)
+	}
+	t.Log(r)
+	// A whole-record skip is legitimate ONLY before any axis has run. Raised
+	// later it discards verdicts already measured, which is the defect itself.
+	if r.Skipped {
+		if r.LockGuardsAttempted || r.SymlinkWALAttempted {
+			t.Fatalf("a whole-record skip was raised LATE, after measured axes (lock=%t symlinkWAL=%t): it discards their verdicts, including the CWE-59 detection — %s",
+				r.LockGuardsAttempted, r.SymlinkWALAttempted, r)
+		}
+		t.Skipf("the platform cannot express the WAL guards at all: %s", r.SkipReason)
+	}
+
+	// The unavailable axis is reported as unmeasured, not as clean.
+	if r.SymlinkLockAttempted {
+		t.Fatalf("the LOCK-sentinel link was expected to be uncreatable here: %s", r)
+	}
+	if len(r.Unmeasured) == 0 || !strings.Contains(strings.Join(r.Unmeasured, "; "), "LOCK-sentinel") {
+		t.Errorf("the unavailable LOCK-sentinel axis was not reported as unmeasured: %s", r)
+	}
+
+	// The four verdicts measured before it SURVIVE.
+	if !r.LockGuardsAttempted {
+		t.Errorf("the single-writer lock verdicts were discarded: %s", r)
+	}
+	if !r.SecondOpenIsLocked {
+		t.Errorf("the second open was not refused with wal.ErrWALLocked: %s", r)
+	}
+	if r.ReopenAfterCloseErr != nil {
+		t.Errorf("reopen after close failed: %v", r.ReopenAfterCloseErr)
+	}
+	if !r.SymlinkWALAttempted {
+		t.Fatalf("the CWE-59 WAL-path symlink detection was DISCARDED by the unavailable LOCK axis: %s", r)
+	}
+	if r.SymlinkedWALErr == nil {
+		t.Errorf("wal.Open followed a symlinked WAL path (CWE-59): %s", r)
+	}
+	if !r.VictimChecked || !r.VictimIntact {
+		t.Errorf("the victim-integrity verdict did not survive: %s", r)
+	}
+
+	// The honest record passes.
+	if v := checkWALRealFSGuards(&r); len(v) > 0 {
+		t.Fatalf("the adjudicator rejected an honest partially-measured record:\n%s", violationText(v))
+	}
+
+	// MUTATION: the surviving CWE-59 verdict is genuinely ADJUDICATED, not merely
+	// stored. Feed the adjudicator the same partially-measured record with the
+	// symlink followed, and it must fail.
+	followed := r
+	followed.SymlinkedWALErr = nil
+	v := checkWALRealFSGuards(&followed)
+	if len(v) == 0 {
+		t.Fatalf("the adjudicator ACCEPTED a followed symlinked WAL path on a partially-measured record: the CWE-59 clause cannot fail and proves nothing")
+	}
+	if joined := violationText(v); !strings.Contains(joined, "FOLLOWED a symlinked WAL path") {
+		t.Errorf("the violation does not name the CWE-59 defect:\n%s", joined)
 	}
 }
 

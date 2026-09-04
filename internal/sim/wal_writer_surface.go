@@ -62,6 +62,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
@@ -1479,12 +1480,35 @@ func checkWALLifecycle(r *WALLifecycleResult) []Violation {
 // they never will be while SimDisk has no link or lock semantics. This arm is
 // their only representation here.
 type WALGuardResult struct {
-	// Skipped reports that the platform cannot express the guards (Windows has
-	// no O_NOFOLLOW, and symlink creation may be unprivileged); the adjudicator
-	// then makes no claim.
+	// Skipped reports that the platform can express NOTHING here — Windows has
+	// no O_NOFOLLOW and privileged symlink creation — so the arm exercised no
+	// guard at all and the adjudicator makes no claim.
+	//
+	// It is deliberately NOT set when only SOME axis could not be exercised. A
+	// whole-record skip raised LATE discards every guard already measured above
+	// it, and because the adjudicator returns early on Skipped it then reports
+	// success having judged nothing. That is precisely how an unavailable LOCK
+	// sentinel used to throw away a live CWE-59 symlink detection (rmp #2745).
+	// A partial failure is recorded PER AXIS instead, below.
 	Skipped bool
-	// SkipReason explains a skip.
+	// SkipReason explains a whole-record skip.
 	SkipReason string
+
+	// LockGuardsAttempted, SymlinkWALAttempted, SymlinkLockAttempted and
+	// VictimChecked report which axes were actually exercised. The adjudicator
+	// judges every attempted axis and stays silent only about the others, so one
+	// unavailable axis can no longer silence the rest.
+	//
+	// They are also this arm's WITNESS: a record that declares no skip and yet
+	// attempted nothing is itself a violation, because an oracle that observed
+	// nothing cannot fail and therefore proves nothing.
+	LockGuardsAttempted  bool
+	SymlinkWALAttempted  bool
+	SymlinkLockAttempted bool
+	VictimChecked        bool
+	// Unmeasured names each axis that could not be exercised, and why. It is
+	// reported, never silently dropped: an axis nobody ran is unknown, not clean.
+	Unmeasured []string
 
 	// FirstOpenErr is the error of the first (expected successful) open.
 	FirstOpenErr error
@@ -1514,10 +1538,36 @@ func (r WALGuardResult) String() string {
 	if r.Skipped {
 		return "wal-guards: SKIPPED — " + r.SkipReason
 	}
-	return fmt.Sprintf("wal-guards: firstOpen=%v secondOpen=%v isLocked=%t reopenAfterClose=%v symlinkedWAL=%v symlinkedLock=%v victimIntact=%t",
+	s := fmt.Sprintf("wal-guards: firstOpen=%v secondOpen=%v isLocked=%t reopenAfterClose=%v symlinkedWAL=%v symlinkedLock=%v victimIntact=%t"+
+		" [attempted: lock=%t symlinkWAL=%t symlinkLock=%t victim=%t]",
 		r.FirstOpenErr, r.SecondOpenErr, r.SecondOpenIsLocked, r.ReopenAfterCloseErr,
-		r.SymlinkedWALErr, r.SymlinkedLockErr, r.VictimIntact)
+		r.SymlinkedWALErr, r.SymlinkedLockErr, r.VictimIntact,
+		r.LockGuardsAttempted, r.SymlinkWALAttempted, r.SymlinkLockAttempted, r.VictimChecked)
+	if len(r.Unmeasured) > 0 {
+		s += " unmeasured: " + strings.Join(r.Unmeasured, "; ")
+	}
+	return s
 }
+
+// noteUnmeasured records that one axis could not be exercised. It is the narrow
+// replacement for the whole-record skip this arm used to raise late: the axis is
+// reported as unknown while every axis already measured keeps its verdict.
+func (r *WALGuardResult) noteUnmeasured(axis string, cause error) {
+	r.Unmeasured = append(r.Unmeasured, axis+": "+cause.Error())
+}
+
+// The fixed entry names [RunWALRealFSGuards] creates inside the caller's
+// directory. They are named constants rather than literals so a test can make a
+// specific axis unavailable — by pre-creating the entry it needs — without
+// duplicating a path that could later drift out of step with the harness.
+const (
+	guardWALName       = "guarded.wal"
+	guardVictimName    = "victim.bin"
+	guardLinkedWALName = "linked.wal"
+	guardLockBaseName  = "lockguard.wal"
+	// guardLockSuffix is wal.Open's LOCK sentinel suffix for a WAL path.
+	guardLockSuffix = ".lock"
+)
 
 // RunWALRealFSGuards drives [wal.Open]'s single-writer lock and its symlink
 // refusal against a REAL directory, which the caller owns and cleans up (a test
@@ -1536,7 +1586,10 @@ func RunWALRealFSGuards(dir string) (WALGuardResult, error) {
 	}
 
 	// --- the single-writer lock ---
-	walPath := filepath.Join(dir, "guarded.wal")
+	// Marked attempted BEFORE the first open so a first-open failure is judged
+	// by its own clause rather than silently read as "not measured".
+	r.LockGuardsAttempted = true
+	walPath := filepath.Join(dir, guardWALName)
 	w1, err := wal.Open(walPath)
 	r.FirstOpenErr = err
 	if err != nil {
@@ -1558,52 +1611,83 @@ func RunWALRealFSGuards(dir string) (WALGuardResult, error) {
 	}
 
 	// --- the symlink refusal ---
-	victim := filepath.Join(dir, "victim.bin")
+	//
+	// Each symlink axis is exercised INDEPENDENTLY. An axis whose link cannot be
+	// created is recorded as unmeasured and the run continues, because the guards
+	// above and beside it were already observed and their verdicts are real. The
+	// LOCK-sentinel link is the one that fails in practice (an existing entry at
+	// the sentinel path makes os.Symlink return EEXIST), and it used to discard
+	// the WAL-path CWE-59 detection measured immediately before it.
+	victim := filepath.Join(dir, guardVictimName)
 	want := []byte("OUTSIDE-VICTIM-CONTENT")
 	if werr := os.WriteFile(victim, want, 0o600); werr != nil {
 		return r, fmt.Errorf("sim: wal-guards write victim: %w", werr)
 	}
-	linkedWAL := filepath.Join(dir, "linked.wal")
+	linkedWAL := filepath.Join(dir, guardLinkedWALName)
 	if lerr := os.Symlink(victim, linkedWAL); lerr != nil {
-		r.Skipped = true
-		r.SkipReason = "symlink creation unavailable: " + lerr.Error()
-		//nolint:nilerr // an unavailable symlink is reported through r.Skipped/r.SkipReason, which checkWALRealFSGuards reads at wal_writer_surface.go:1608
-		return r, nil
-	}
-	if lw, lerr := wal.Open(linkedWAL); lerr == nil {
-		_ = lw.Close()
-		r.SymlinkedWALErr = nil
+		r.noteUnmeasured("the WAL-path symlink refusal", lerr)
 	} else {
-		r.SymlinkedWALErr = lerr
+		r.SymlinkWALAttempted = true
+		if lw, oerr := wal.Open(linkedWAL); oerr == nil {
+			_ = lw.Close()
+			r.SymlinkedWALErr = nil
+		} else {
+			r.SymlinkedWALErr = oerr
+		}
 	}
 
 	// The LOCK sentinel is opened before any WAL data is read or written, so a
 	// symlinked sentinel is a separate escape route with its own O_NOFOLLOW.
-	lockBase := filepath.Join(dir, "lockguard.wal")
-	if lerr := os.Symlink(victim, lockBase+".lock"); lerr != nil {
-		r.Skipped = true
-		r.SkipReason = "symlink creation for the LOCK sentinel unavailable: " + lerr.Error()
-		//nolint:nilerr // an unavailable symlink is reported through r.Skipped/r.SkipReason, which checkWALRealFSGuards reads at wal_writer_surface.go:1608
-		return r, nil
-	}
-	if lw, lerr := wal.Open(lockBase); lerr == nil {
-		_ = lw.Close()
-		r.SymlinkedLockErr = nil
+	lockBase := filepath.Join(dir, guardLockBaseName)
+	if lerr := os.Symlink(victim, lockBase+guardLockSuffix); lerr != nil {
+		r.noteUnmeasured("the LOCK-sentinel symlink refusal", lerr)
 	} else {
-		r.SymlinkedLockErr = lerr
+		r.SymlinkLockAttempted = true
+		if lw, oerr := wal.Open(lockBase); oerr == nil {
+			_ = lw.Close()
+			r.SymlinkedLockErr = nil
+		} else {
+			r.SymlinkedLockErr = oerr
+		}
 	}
 
-	got, rerr := os.ReadFile(victim) //nolint:gosec // the harness's own temp-dir victim file
-	if rerr != nil {
-		return r, fmt.Errorf("sim: wal-guards read victim: %w", rerr)
+	// The victim is read whenever at least one link was actually opened through:
+	// that is the only way its bytes could have changed, and it is the property
+	// that ultimately matters. With neither link created there is nothing to say.
+	if r.SymlinkWALAttempted || r.SymlinkLockAttempted {
+		got, rerr := os.ReadFile(victim) //nolint:gosec // the harness's own temp-dir victim file
+		if rerr != nil {
+			return r, fmt.Errorf("sim: wal-guards read victim: %w", rerr)
+		}
+		r.VictimChecked = true
+		r.VictimIntact = bytes.Equal(got, want)
+	} else {
+		r.noteUnmeasured("the victim-file integrity check", errors.New("no symlink could be created, so nothing could have written through one"))
 	}
-	r.VictimIntact = bytes.Equal(got, want)
 	return r, nil
 }
 
-// checkWALRealFSGuards adjudicates the two process-level guards. It is a PURE
-// function of the observed result, and it makes NO claim about a skipped run:
-// a platform that cannot express the guards is uninformative, not faulty.
+// checkWALRealFSGuards adjudicates the process-level guards. It is a PURE
+// function of the observed result, and it makes NO claim about a guard that was
+// not exercised: a platform that cannot express an axis is uninformative there,
+// not faulty.
+//
+// # Silence is per axis, never per record
+//
+// The adjudicator judges every axis the run ATTEMPTED and stays silent only
+// about the axes it did not. Only a whole-record [WALGuardResult.Skipped] — the
+// platform expressing nothing at all — silences everything, and that flag is now
+// raised in exactly one place, before any guard runs.
+//
+// The distinction is the whole point of rmp #2745. An unavailable LOCK-sentinel
+// link used to set Skipped and return, and this function's early return on
+// Skipped then threw away four verdicts already MEASURED: the first open, the
+// single-writer lock, the lock's release on Close, and — the one that matters
+// most — the CWE-59 detection for a symlinked WAL PATH, whose wal.Open had
+// already been performed. The gate reported success having judged none of them.
+//
+// An attempted-nothing record that does not declare a skip is itself a
+// violation: an oracle that observed nothing cannot fail, and so proves nothing.
 func checkWALRealFSGuards(r *WALGuardResult) []Violation {
 	if r.Skipped {
 		return nil
@@ -1612,29 +1696,40 @@ func checkWALRealFSGuards(r *WALGuardResult) []Violation {
 	add := func(kind ViolationKind, msg string) {
 		v = append(v, Violation{Kind: kind, Op: "<wal-guards>", Message: msg + " — " + r.String()})
 	}
-	if r.FirstOpenErr != nil {
-		add(ViolationOracleDeviation, fmt.Sprintf("the first wal.Open failed (%v); nothing below was tested", r.FirstOpenErr))
+
+	if !r.LockGuardsAttempted && !r.SymlinkWALAttempted && !r.SymlinkLockAttempted {
+		add(ViolationOracleDeviation,
+			"the WAL-guard arm declared no skip and yet exercised NO guard: a gate that observes nothing cannot fail and therefore proves nothing")
 		return v
 	}
-	if !r.SecondOpenIsLocked {
-		add(ViolationACIDConsistency, fmt.Sprintf(
-			"a second wal.Open against a locked WAL returned %v, want wal.ErrWALLocked: two writers appending to one file interleave their frames and corrupt the log",
-			r.SecondOpenErr))
+
+	if r.LockGuardsAttempted {
+		switch {
+		case r.FirstOpenErr != nil:
+			add(ViolationOracleDeviation, fmt.Sprintf(
+				"the first wal.Open failed (%v); the remaining lock guards were not reached", r.FirstOpenErr))
+		default:
+			if !r.SecondOpenIsLocked {
+				add(ViolationACIDConsistency, fmt.Sprintf(
+					"a second wal.Open against a locked WAL returned %v, want wal.ErrWALLocked: two writers appending to one file interleave their frames and corrupt the log",
+					r.SecondOpenErr))
+			}
+			if r.ReopenAfterCloseErr != nil {
+				add(ViolationOracleDeviation, fmt.Sprintf(
+					"reopening after Close failed with %v: the lock is not released by its owner, which strands the WAL until the process exits",
+					r.ReopenAfterCloseErr))
+			}
+		}
 	}
-	if r.ReopenAfterCloseErr != nil {
-		add(ViolationOracleDeviation, fmt.Sprintf(
-			"reopening after Close failed with %v: the lock is not released by its owner, which strands the WAL until the process exits",
-			r.ReopenAfterCloseErr))
-	}
-	if r.SymlinkedWALErr == nil {
+	if r.SymlinkWALAttempted && r.SymlinkedWALErr == nil {
 		add(ViolationACIDConsistency,
 			"wal.Open FOLLOWED a symlinked WAL path: the mutation stream would be appended to whatever the link points at (CWE-59, security finding #1843)")
 	}
-	if r.SymlinkedLockErr == nil {
+	if r.SymlinkLockAttempted && r.SymlinkedLockErr == nil {
 		add(ViolationACIDConsistency,
 			"wal.Open FOLLOWED a symlinked LOCK sentinel: the lock file is opened before any WAL data, so this is a second escape route past O_NOFOLLOW (CWE-59)")
 	}
-	if !r.VictimIntact {
+	if r.VictimChecked && !r.VictimIntact {
 		add(ViolationACIDConsistency,
 			"the victim file outside the WAL directory was MODIFIED through a symlink: the refusal is reported but does not hold")
 	}

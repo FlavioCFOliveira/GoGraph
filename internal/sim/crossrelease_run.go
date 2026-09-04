@@ -297,10 +297,16 @@ type CrossReleaseDivergence struct {
 	CurrentRows string
 	// Reason explains the classification.
 	Reason string
-	// Index is the op index that diverged.
+	// Index is the op index that diverged. A negative index marks a divergence
+	// about the run as a whole rather than about one op.
 	Index int
 	// Benign reports whether the divergence is an expected/benign class.
 	Benign bool
+	// PriorCommitted / CurrentCommitted are the two sides' COMMIT outcomes for
+	// this op. They are meaningful on every divergence, and they are the whole
+	// content of a divergence whose Reason names the commit axis.
+	PriorCommitted   bool
+	CurrentCommitted bool
 }
 
 // CrossReleaseDiffResult is the outcome of a cross-release DIFFERENTIAL run:
@@ -317,6 +323,14 @@ type CrossReleaseDiffResult struct {
 	PriorEdges   int64
 	CurrentNodes int64
 	CurrentEdges int64
+	// PriorCommits / CurrentCommits are how many ops each side reported as
+	// committed. They are the commit axis's WITNESS: a run in which neither side
+	// committed anything compares false against false for every op and would
+	// agree vacuously — rmp #2729's failure mode, where 192 contended
+	// transactions produced zero commits and the oracle compared 0 with 0 and
+	// passed. A zero here is therefore itself a divergence.
+	PriorCommits   int
+	CurrentCommits int
 	// Agreed reports whether no UNEXPECTED (non-benign) divergence occurred.
 	Agreed bool
 	// FinalCountsMatch reports whether the prior and current end-state counts
@@ -331,11 +345,12 @@ func (r CrossReleaseDiffResult) String() string {
 	if !r.Agreed {
 		verdict = "DIVERGED"
 	}
-	fmt.Fprintf(&b, "cross-release differential %s vs current: %s (%d classified divergences); end-state prior(n=%d e=%d) current(n=%d e=%d) match=%v",
-		r.Tag, verdict, len(r.Divergences), r.PriorNodes, r.PriorEdges, r.CurrentNodes, r.CurrentEdges, r.FinalCountsMatch)
+	fmt.Fprintf(&b, "cross-release differential %s vs current: %s (%d classified divergences); end-state prior(n=%d e=%d) current(n=%d e=%d) match=%v; commits prior=%d current=%d",
+		r.Tag, verdict, len(r.Divergences), r.PriorNodes, r.PriorEdges, r.CurrentNodes, r.CurrentEdges, r.FinalCountsMatch,
+		r.PriorCommits, r.CurrentCommits)
 	for _, d := range r.Divergences {
-		fmt.Fprintf(&b, "\n  op %d %s %q: prior=%s current=%s benign=%v (%s)",
-			d.Index, d.Op.Kind, d.Op.Cypher, d.PriorRows, d.CurrentRows, d.Benign, d.Reason)
+		fmt.Fprintf(&b, "\n  op %d %s %q: prior=%s current=%s priorCommitted=%v currentCommitted=%v benign=%v (%s)",
+			d.Index, d.Op.Kind, d.Op.Cypher, d.PriorRows, d.CurrentRows, d.PriorCommitted, d.CurrentCommitted, d.Benign, d.Reason)
 	}
 	return b.String()
 }
@@ -391,17 +406,9 @@ func RunCrossReleaseDifferential(ctx context.Context, repoRoot, tag string, seed
 	}
 	result.FinalCountsMatch = prior.Nodes == cur.nodes && prior.Edges == cur.edges
 
-	for i, op := range opStream {
-		pr := prior.Ops[i].Rows
-		cr := cur.rows[i]
-		if canonicalHelperRowsMatch(pr, cr) {
-			continue
-		}
-		div := classifyDivergence(i, op, pr, cr)
-		result.Divergences = append(result.Divergences, div)
-		if !div.Benign {
-			result.Agreed = false
-		}
+	result.Divergences, result.PriorCommits, result.CurrentCommits = diffCrossReleaseOps(opStream, prior.Ops, cur)
+	if !allBenign(result.Divergences) {
+		result.Agreed = false
 	}
 
 	// An end-state count mismatch that is not explained by a benign per-op
@@ -420,12 +427,20 @@ func RunCrossReleaseDifferential(ctx context.Context, repoRoot, tag string, seed
 	return result, nil
 }
 
-// currentSignatures holds the current in-process engine's per-op signatures and
-// final counts for a differential run.
+// currentSignatures holds the current in-process engine's per-op observations
+// and final counts for a differential run.
 type currentSignatures struct {
-	rows  []string
-	nodes int64
-	edges int64
+	rows []string
+	// committed is the per-op COMMIT axis, captured with the same meaning the
+	// prior-release helper gives it (cmd/sim-xrelease-helper execOp): false when
+	// the engine rejected the op outright, and otherwise whether the result
+	// drained without error. It is a genuinely independent observation — an op
+	// can produce a full row signature and still fail mid-drain — so it was never
+	// implied by rows, and until rmp #2745 the current side did not capture it at
+	// all while the prior side's value was parsed and dropped.
+	committed []bool
+	nodes     int64
+	edges     int64
 }
 
 // replayCurrentSignatures replays opStream against a fresh current in-process
@@ -435,16 +450,20 @@ type currentSignatures struct {
 func replayCurrentSignatures(ctx context.Context, opStream []Op) (currentSignatures, error) {
 	v := EngineVariant{Name: "current"}
 	eng := v.buildEngine()
-	out := currentSignatures{rows: make([]string, 0, len(opStream))}
+	out := currentSignatures{
+		rows:      make([]string, 0, len(opStream)),
+		committed: make([]bool, 0, len(opStream)),
+	}
 	for i, op := range opStream {
 		if err := ctx.Err(); err != nil {
 			return currentSignatures{}, err
 		}
-		sig, err := currentOpSignature(ctx, eng, op)
+		sig, committed, err := currentOpSignature(ctx, eng, op)
 		if err != nil {
 			return currentSignatures{}, fmt.Errorf("sim: cross-release: current op %d: %w", i, err)
 		}
 		out.rows = append(out.rows, sig)
+		out.committed = append(out.committed, committed)
 	}
 	n, _ := eng.NodeCount()
 	e, _ := eng.EdgeCount()
@@ -454,29 +473,28 @@ func replayCurrentSignatures(ctx context.Context, opStream []Op) (currentSignatu
 }
 
 // currentOpSignature runs one op against the current engine and returns the
-// canonical row signature, encoded identically to the prior helper's
-// canonicalRows so prior and current signatures compare byte-for-byte.
-func currentOpSignature(ctx context.Context, eng *EngineAdapter, op Op) (string, error) {
-	var (
-		res Result
-		err error
-	)
+// canonical row signature — encoded identically to the prior helper's
+// canonicalRows so the two compare byte-for-byte — together with whether the op
+// COMMITTED, defined exactly as the helper defines it: false on an engine
+// rejection, otherwise whether the result drained without error.
+func currentOpSignature(ctx context.Context, eng *EngineAdapter, op Op) (sig string, committed bool, err error) {
+	var res Result
 	if op.Kind.IsWrite() {
 		res, err = eng.RunWrite(ctx, op.Cypher, op.Params)
 	} else {
 		res, err = eng.Run(ctx, op.Cypher, op.Params)
 	}
 	if err != nil {
-		//nolint:nilerr // an engine rejection is an observable outcome, encoded as the literal rows signature "error" and compared against the other release at crossrelease_run.go:397
-		return "error", nil
+		//nolint:nilerr // an engine rejection is an observable outcome, encoded as the literal rows signature "error" with committed=false, and compared against the other release by diffCrossReleaseOps.
+		return "error", false, nil
 	}
 	// Render via the SAME Record-map + %v encoding the prior-release helper uses
 	// (cmd/sim-xrelease-helper canonicalRows), so prior and current signatures
 	// compare byte-for-byte. The differential's own canonicalRows is for the
 	// in-process variant pair and is not reused here.
-	sig := canonicalRecordSignature(res)
+	sig, drained := canonicalRecordSignature(res)
 	_ = res.Close()
-	return sig, nil
+	return sig, drained, nil
 }
 
 // canonicalRecordSignature drains a current-engine result and renders an
@@ -484,10 +502,10 @@ func currentOpSignature(ctx context.Context, eng *EngineAdapter, op Op) (string,
 // canonicalRows: each row's columns read from Record (a column-name -> value
 // map) and rendered with %v, sorted, and joined. Reading through the adapter's
 // underlying *cypher.Result keeps the encoding in lockstep with the helper.
-func canonicalRecordSignature(res Result) string {
+func canonicalRecordSignature(res Result) (sig string, drained bool) {
 	ra, ok := res.(*resultAdapter)
 	if !ok {
-		return "<non-adapter-result>"
+		return "<non-adapter-result>", false
 	}
 	cols := ra.res.Columns()
 	var out []string
@@ -499,7 +517,87 @@ func canonicalRecordSignature(res Result) string {
 		out = append(out, strings.Join(parts, ","))
 	}
 	sort.Strings(out)
-	return "[" + strings.Join(out, "|") + "]"
+	// The drain error is read the way the prior-release helper reads it, so the
+	// commit axis means the same thing on both sides.
+	return "[" + strings.Join(out, "|") + "]", ra.res.Err() == nil
+}
+
+// diffCrossReleaseOps adjudicates the prior-vs-current comparison for every op
+// on BOTH observable axes and returns the classified divergences together with
+// each side's commit count.
+//
+// # Why the commit axis is compared and not merely captured
+//
+// The two axes are independent. The prior-release helper defines committed as
+// "the engine did not reject the op AND the result drained without error"
+// (cmd/sim-xrelease-helper execOp), so an op can produce an identical row
+// signature on both sides and still differ on whether it committed — a
+// regression that fails mid-drain is invisible to a rows-only comparison.
+// [HelperOpResult.Committed] was parsed out of the helper's line protocol and
+// then never read; the current side did not even capture its counterpart. The
+// commit axis was collected and dropped (rmp #2745).
+//
+// A row divergence can be benign (an unordered LIMIT selects legitimately
+// different rows in two releases). A COMMIT divergence never is: whether a
+// transaction commits is not plan-dependent, so the two releases disagreeing
+// about it is a behavioural change in every case.
+func diffCrossReleaseOps(opStream []Op, prior []HelperOpResult, cur currentSignatures) (divs []CrossReleaseDivergence, priorCommits, currentCommits int) {
+	n := len(opStream)
+	if len(prior) != n || len(cur.rows) != n || len(cur.committed) != n {
+		return []CrossReleaseDivergence{{
+			Index:       -1,
+			PriorRows:   fmt.Sprintf("%d op results", len(prior)),
+			CurrentRows: fmt.Sprintf("%d row signatures, %d commit flags", len(cur.rows), len(cur.committed)),
+			Reason: fmt.Sprintf(
+				"the two sides produced a different number of observations for %d ops, so nothing could be compared", n),
+		}}, 0, 0
+	}
+
+	for i, op := range opStream {
+		priorCommitted, currentCommitted := prior[i].Committed, cur.committed[i]
+		if priorCommitted {
+			priorCommits++
+		}
+		if currentCommitted {
+			currentCommits++
+		}
+
+		if !canonicalHelperRowsMatch(prior[i].Rows, cur.rows[i]) {
+			d := classifyDivergence(i, op, prior[i].Rows, cur.rows[i])
+			d.PriorCommitted, d.CurrentCommitted = priorCommitted, currentCommitted
+			divs = append(divs, d)
+		}
+		if priorCommitted != currentCommitted {
+			divs = append(divs, CrossReleaseDivergence{
+				Index:            i,
+				Op:               op,
+				PriorRows:        prior[i].Rows,
+				CurrentRows:      cur.rows[i],
+				PriorCommitted:   priorCommitted,
+				CurrentCommitted: currentCommitted,
+				Benign:           false,
+				Reason: fmt.Sprintf(
+					"the COMMIT outcome differs: prior committed=%v, current committed=%v — whether an op commits is not plan-dependent, so this is a behavioural change",
+					priorCommitted, currentCommitted),
+			})
+		}
+	}
+
+	// The witness. Comparing the commit axis proves nothing if neither side ever
+	// committed: every op then matches false against false and the axis agrees
+	// vacuously. Requiring at least one commit per side is structural — it does
+	// not depend on how many ops the caller chose to run.
+	if n > 0 && (priorCommits == 0 || currentCommits == 0) {
+		divs = append(divs, CrossReleaseDivergence{
+			Index:       -1,
+			PriorRows:   fmt.Sprintf("%d/%d committed", priorCommits, n),
+			CurrentRows: fmt.Sprintf("%d/%d committed", currentCommits, n),
+			Benign:      false,
+			Reason: "the commit axis observed NO commit on at least one side, so its agreement is vacuous: " +
+				"the run exercised nothing the comparison could distinguish",
+		})
+	}
+	return divs, priorCommits, currentCommits
 }
 
 // classifyDivergence labels a prior-vs-current per-op difference. A query whose
