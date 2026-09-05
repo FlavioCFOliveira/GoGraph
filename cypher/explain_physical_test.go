@@ -290,16 +290,23 @@ func runToCompletion(t *testing.T, eng *Engine, q string) {
 	}
 }
 
-// stripAnnotations removes the per-node measurements so two renderings can be
+// stripAnnotations removes the per-node ANNOTATIONS so two renderings can be
 // compared on structure alone.
+//
+// Three markers can open the annotation group, and all three are stripped. Since
+// rmp #2765 a line may carry the planner's cardinality estimate — " (est. rows=…"
+// — either alone (an EXPLAIN, which measures nothing) or leading the measured
+// group (a PROFILE). Stripping only " (rows=" would leave the estimate on the
+// EXPLAIN side and the whole group on the PROFILE side, and the two would compare
+// unequal for every plan that has an estimate at all: the comparison this helper
+// exists to make would fail on a difference that is not structural.
 func stripAnnotations(plan string) string {
 	lines := strings.Split(plan, "\n")
 	for i, ln := range lines {
-		if k := strings.Index(ln, " (rows="); k >= 0 {
-			ln = ln[:k]
-		}
-		if k := strings.Index(ln, " (not measured)"); k >= 0 {
-			ln = ln[:k]
+		for _, marker := range []string{" (est. rows=", " (rows=", " (not measured)"} {
+			if k := strings.Index(ln, marker); k >= 0 {
+				ln = ln[:k]
+			}
 		}
 		lines[i] = ln
 	}

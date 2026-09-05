@@ -401,22 +401,31 @@ func TestProfileTableRowsRemoved_ColumnAppearsOnlyWhenSomethingRemoves(t *testin
 	}
 
 	// The Filter's cell carries the figure; the scan's is blank; the Total's is blank.
+	//
+	// The column is located by its HEADER rather than by a fixed index: rmp #2765
+	// inserted an Est.Rows column to the LEFT of Rows, which moves Removed one place
+	// right whenever some operator carries an estimate. A positional read would then
+	// have asserted about the Time column while still passing on some plans.
+	removedCol, okCol := tableColumnIndex(withFilter, "Removed")
+	if !okCol {
+		t.Fatalf("no Removed column header in the filtered plan's table:\n%s", withFilter)
+	}
 	var filterCell, scanCell, totalCell string
 	for _, line := range strings.Split(withFilter, "\n") {
 		if !strings.HasPrefix(line, "|") || strings.Contains(line, "Operator") {
 			continue
 		}
-		cols := strings.Split(line, "|")
-		if len(cols) < 6 {
+		cols := strings.Split(strings.Trim(line, "|"), "|")
+		if len(cols) <= removedCol {
 			continue
 		}
-		cell := strings.TrimSpace(cols[4])
+		cell := strings.TrimSpace(cols[removedCol])
 		switch {
-		case strings.Contains(cols[1], "Filter"):
+		case strings.Contains(cols[0], "Filter"):
 			filterCell = cell
-		case strings.Contains(cols[1], "NodeByLabelScan"):
+		case strings.Contains(cols[0], "NodeByLabelScan"):
 			scanCell = cell
-		case strings.Contains(cols[1], "Total"):
+		case strings.Contains(cols[0], "Total"):
 			totalCell = cell
 		}
 	}

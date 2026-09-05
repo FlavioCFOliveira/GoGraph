@@ -128,10 +128,21 @@ func profiledCells(plan, operator string) (rows, dbhits int64, dbhitsKnown, foun
 // a cell leaves the gates below reading the cells they actually name.
 //
 // No rendered value contains ", ", which is what makes the split exact: rows,
-// db-hits and removed are decimal counts or "?", and a time.Duration rounded to a
+// db-hits and removed are decimal counts or "?", the estimate is a count with an
+// optional "~" and a one-word provenance tag, and a time.Duration rounded to a
 // microsecond never contains a space.
+//
+// The ANCHOR is the one thing that is still positional, and it has to be: the
+// group has to be found before it can be split. rmp #2765 put an OPTIONAL
+// "est. rows=" cell at the FRONT of it — where both reference engines put the
+// estimate, immediately before the row count it is compared with — so the group no
+// longer always begins with "rows=". Both openings are tried, and the estimate's
+// first because it is the one that can precede the other.
 func profiledFields(trimmed string) (map[string]string, bool) {
-	i := strings.Index(trimmed, "(rows=")
+	i := strings.Index(trimmed, "(est. rows=")
+	if i < 0 {
+		i = strings.Index(trimmed, "(rows=")
+	}
 	if i < 0 {
 		return nil, false
 	}

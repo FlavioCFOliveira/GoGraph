@@ -156,7 +156,43 @@ type PlanNode struct {
 	// A node that was never instrumented at all (Profiled false) also has this
 	// false: nothing counted it either.
 	RowsRemovedByFilterKnown bool
+
+	// Est is the planner's cardinality estimate for the LOGICAL node whose lowering
+	// produced this operator, together with that estimate's provenance. Its zero
+	// value ([EstimateAbsent]) means there is no estimate, which is the honest
+	// default for a node nobody attributed one to.
+	//
+	// It is the ONLY figure on this struct that is neither measured nor derived from
+	// a measurement: it is what the planner PREDICTED before anything ran, which is
+	// why it is rendered with an `est.` qualifier in the tree and under its own
+	// Est.Rows column in the table, never mixed in with [Rows].
+	//
+	// Placing it beside [Rows] is the whole of rmp #2765, and closes divergence D3 of
+	// docs/explain-profile-honesty-audit-2026-09-03.md §5 — "the largest gap" — where
+	// the estimate and the measurement lived in two tables over two different plans
+	// and could not be compared. Both incumbents put them side by side; the citations
+	// are on [PlanEstimate].
+	//
+	// It is populated only by [PlanTreeWithEstimates], so an ordinary
+	// [cypher.Engine.Run] neither computes nor carries it. Note that it is set
+	// independently of [Profiled]: an EXPLAIN captures estimates without measuring
+	// anything, which is exactly the pairing a reader of an un-run plan wants.
+	Est PlanEstimate
 }
+
+// PlanEstimates maps a physical operator to the planner's cardinality estimate for
+// the logical node whose lowering produced it.
+//
+// A key that is PRESENT with an [EstimateAbsent] source is not the same as a key
+// that is missing: the first says a logical node claimed this operator and had no
+// estimate to give, the second that nothing has claimed it yet. The cypher
+// package's builder relies on that distinction to enforce first-claim-wins, which
+// is what keeps a pass-through parent from re-attributing its child's operator.
+//
+// The map is written during one single-goroutine build and only read afterwards,
+// so it is not safe for concurrent use. The morsel-parallel per-worker build
+// options clear it for exactly the reason they clear the profiler.
+type PlanEstimates map[Operator]PlanEstimate
 
 // PlanTree builds the physical plan tree rooted at op.
 //
@@ -164,6 +200,25 @@ type PlanNode struct {
 // concrete type. When op is a profiling wrapper the wrapper is transparent: the
 // node carries the wrapped operator's name with the wrapper's measurements.
 func PlanTree(op Operator) PlanNode {
+	return PlanTreeWithEstimates(op, nil)
+}
+
+// PlanTreeWithEstimates is [PlanTree] with the planner's cardinality estimates
+// attached to the nodes est claims (rmp #2765).
+//
+// est is keyed on the operator the builder returned for a logical node, BEFORE any
+// profiling wrapper: a plan-shape recogniser that unwraps a child and re-wraps it
+// changes the wrapper's identity but never the wrapped operator's, so keying on the
+// inner value is what keeps an estimate attached across such a substitution. A nil
+// or missing entry leaves the node's [PlanNode.Est] at its zero value, which every
+// renderer reads as "no estimate" and prints as nothing (tree) or [EstRowsUnknown]
+// (table).
+//
+// Nothing here derives, infers or interpolates an estimate. A node absent from est
+// gets none — a wrong correspondence between a logical estimate and a physical
+// operator would be worse than no correspondence at all, because it would read as
+// a planner error that never happened.
+func PlanTreeWithEstimates(op Operator, est PlanEstimates) PlanNode {
 	if op == nil {
 		return PlanNode{Name: "(empty)"}
 	}
@@ -183,12 +238,15 @@ func PlanTree(op Operator) PlanNode {
 	if d, ok := inner.(PlanDetail); ok {
 		n.Detail = d.PlanDetail()
 	}
+	// Looked up on the UNWRAPPED operator, which is the identity the builder
+	// recorded and the only one that survives an unwrap-and-rebuild substitution.
+	n.Est = est[inner]
 	if kids, ok := inner.(PlanChildren); ok {
 		for _, c := range kids.PlanChildren() {
 			if c == nil {
 				continue
 			}
-			n.Children = append(n.Children, PlanTree(c))
+			n.Children = append(n.Children, PlanTreeWithEstimates(c, est))
 		}
 	}
 	return n
@@ -217,6 +275,21 @@ func operatorName(op Operator) string {
 //	      └─ NodeByLabelScan [b:P]
 //
 // A profiled plan appends each operator's emitted rows and self time.
+//
+// # It carries NO cardinality estimates, and has no in-tree caller
+//
+// This is [PlanTree] followed by [RenderPlanNode], so the tree it walks has no
+// [PlanNode.Est] on any node and the rendering shows no `est. rows=` — which since
+// rmp #2765 makes it DIFFER from what [cypher.Engine.Explain] prints for the same
+// operator tree. That is why Engine.Explain no longer calls it: a plan-rendering
+// caller wants [PlanTreeWithEstimates] and the estimates map its build collected.
+//
+// Nothing in this module calls it any more, tests included. It is kept because
+// removing an exported function is an API change and because it remains the right
+// shorthand for a caller that genuinely holds only an operator tree — a build that
+// collected no estimates has nothing to render — but a caller reaching for it
+// because it is the shortest path to a string will get a plan quietly missing a
+// column, and should not.
 func RenderPlan(op Operator) string {
 	tree := PlanTree(op)
 	return RenderPlanNode(&tree)
@@ -286,9 +359,24 @@ func writePlanNode(b *strings.Builder, n *PlanNode, prefix, childPrefix string, 
 		b.WriteString(n.Detail)
 		b.WriteString("]")
 	}
+	// The estimate leads the parenthesis, immediately before the row count it is
+	// meant to be compared with — the adjacency both incumbents chose, and the point
+	// of carrying it at all (rmp #2765). It is qualified with `est.` and tagged with
+	// its provenance so it cannot be read as one of the measurements that follow it,
+	// and it is OMITTED rather than zeroed when the operator has none.
+	//
+	// It is printed for an UNPROFILED node too, which is why it sits outside the
+	// switch below: an EXPLAIN carries estimates and no measurements, and a plan that
+	// shows what the planner predicted is exactly what EXPLAIN is for.
+	estText, hasEst := EstRowsAnnotation(n.Est)
 	switch {
 	case n.Profiled:
-		fmt.Fprintf(b, " (rows=%d, dbhits=%s", n.Rows, DbHitsCell(n.DbHits, n.DbHitsKnown))
+		b.WriteString(" (")
+		if hasEst {
+			b.WriteString(estText)
+			b.WriteString(", ")
+		}
+		fmt.Fprintf(b, "rows=%d, dbhits=%s", n.Rows, DbHitsCell(n.DbHits, n.DbHitsKnown))
 		// Omitted entirely for an operator that removes no rows, rather than
 		// printed as a zero it never earned (rmp #2764). PostgreSQL reaches the
 		// same omission through its `if (plan->qual)` guard; here the operator's
@@ -298,7 +386,15 @@ func writePlanNode(b *strings.Builder, n *PlanNode, prefix, childPrefix string, 
 		}
 		fmt.Fprintf(b, ", time=%s)", n.Time.Round(time.Microsecond))
 	case anyMeasured:
+		// An unmeasured node in a measured plan still shows its estimate: the label
+		// says nothing was counted here, which does not stop the planner having
+		// predicted something.
+		if hasEst {
+			b.WriteString(" (" + estText + ")")
+		}
 		b.WriteString(" (not measured)")
+	case hasEst:
+		b.WriteString(" (" + estText + ")")
 	}
 	b.WriteString("\n")
 

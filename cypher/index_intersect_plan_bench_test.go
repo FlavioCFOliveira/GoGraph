@@ -83,14 +83,14 @@ func benchPlanBuild(b *testing.B, fx iiBenchFixture, q string) {
 	ctx := context.Background()
 	// One untimed build so any lazily-initialised planner state (the index
 	// manager's listing, the label registry's interning) is warm in both arms.
-	_, _, warmErr := fx.eng.buildReadPhysical(ctx, entry, entry.plan, nil, reg, nil, nil)
+	_, _, warmErr := fx.eng.buildReadPhysical(ctx, entry, entry.plan, nil, reg, nil, nil, nil)
 	if warmErr != nil {
 		b.Fatalf("warm build: %v", warmErr)
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		op, _, buildErr := fx.eng.buildReadPhysical(ctx, entry, entry.plan, nil, reg, nil, nil)
+		op, _, buildErr := fx.eng.buildReadPhysical(ctx, entry, entry.plan, nil, reg, nil, nil, nil)
 		if buildErr != nil {
 			b.Fatalf("build: %v", buildErr)
 		}

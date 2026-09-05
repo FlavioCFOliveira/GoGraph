@@ -1,0 +1,29 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+                             │ docs/benchmarks/plan-estimate-physical-2026-09-05-raw/r6_A_base_allphases.txt │ docs/benchmarks/plan-estimate-physical-2026-09-05-raw/r6_F_final_allphases.txt │
+                             │                                    sec/op                                     │                         sec/op                           vs base               │
+PlanReusePhases/1parse-10                                                                        53.88n ± 1%                                               54.23n ± 1%       ~ (p=0.165 n=10)
+PlanReusePhases/2snapshot-10                                                                     77.80n ± 1%                                               77.28n ± 1%       ~ (p=0.138 n=10)
+PlanReusePhases/3build-10                                                                        584.1n ± 1%                                               585.7n ± 0%       ~ (p=0.197 n=10)
+PlanReusePhases/4full-10                                                                         963.9n ± 1%                                               981.7n ± 1%  +1.85% (p=0.000 n=10)
+geomean                                                                                          220.4n                                                    221.6n       +0.52%
+
+                             │ docs/benchmarks/plan-estimate-physical-2026-09-05-raw/r6_A_base_allphases.txt │ docs/benchmarks/plan-estimate-physical-2026-09-05-raw/r6_F_final_allphases.txt │
+                             │                                     B/op                                      │                         B/op                           vs base                 │
+PlanReusePhases/1parse-10                                                                         48.00 ± 0%                                              48.00 ± 0%       ~ (p=1.000 n=10) ¹
+PlanReusePhases/2snapshot-10                                                                      96.00 ± 0%                                              96.00 ± 0%       ~ (p=1.000 n=10) ¹
+PlanReusePhases/3build-10                                                                       1.469Ki ± 0%                                            1.469Ki ± 0%       ~ (p=1.000 n=10) ¹
+PlanReusePhases/4full-10                                                                        2.336Ki ± 0%                                            2.336Ki ± 0%       ~ (p=1.000 n=10) ¹
+geomean                                                                                           358.8                                                   358.8       +0.00%
+¹ all samples are equal
+
+                             │ docs/benchmarks/plan-estimate-physical-2026-09-05-raw/r6_A_base_allphases.txt │ docs/benchmarks/plan-estimate-physical-2026-09-05-raw/r6_F_final_allphases.txt │
+                             │                                   allocs/op                                   │                       allocs/op                        vs base                 │
+PlanReusePhases/1parse-10                                                                         1.000 ± 0%                                              1.000 ± 0%       ~ (p=1.000 n=10) ¹
+PlanReusePhases/2snapshot-10                                                                      2.000 ± 0%                                              2.000 ± 0%       ~ (p=1.000 n=10) ¹
+PlanReusePhases/3build-10                                                                         15.00 ± 0%                                              15.00 ± 0%       ~ (p=1.000 n=10) ¹
+PlanReusePhases/4full-10                                                                          21.00 ± 0%                                              21.00 ± 0%       ~ (p=1.000 n=10) ¹
+geomean                                                                                           5.010                                                   5.010       +0.00%
+¹ all samples are equal

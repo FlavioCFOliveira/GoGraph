@@ -376,17 +376,50 @@ func CapturePlanBaseline(engine PlanEngine, probes ...ParityProbe) (*PlanBaselin
 		if err != nil {
 			return nil, fmt.Errorf("sim: plan baseline: Explain param %q: %w", p.Param, err)
 		}
-		b.plans = append(b.plans, lit, par)
+		b.plans = append(b.plans, planShape(lit), planShape(par))
 	}
 	return b, nil
 }
 
+// planShape strips the planner's cardinality-estimate annotation from a rendered
+// physical plan, leaving the operator tree.
+//
+// It exists because rmp #2765 put the estimate — " (est. rows=N provenance)" — on
+// every operator of the PHYSICAL rendering, and an estimate is a function of LIVE
+// DATA: the label count behind it moves whenever the workload creates or deletes a
+// node, and the statistics behind it move whenever a rebuild runs. Both are exactly
+// what the scenarios around this file do between one rendering and the next.
+//
+// Every comparison in this package asks about plan SHAPE — did the plan cache
+// rebuild to the same plan, did a statistics refresh change which plan is chosen —
+// and none asks about the estimate's VALUE. Comparing the raw strings therefore
+// reported a drift for a graph that merely grew by eighteen nodes, and turned the
+// statistics-refresh report channel into a detector of its own annotation. Neither
+// is a statement about the planner.
+//
+// The estimate is the only data-dependent part of the rendering, so stripping it is
+// enough: operator names come from the concrete Go types that were built, and the
+// details are structural.
+func planShape(plan string) string {
+	lines := strings.Split(plan, "\n")
+	for i, ln := range lines {
+		if k := strings.Index(ln, " (est. rows="); k >= 0 {
+			lines[i] = ln[:k]
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
 // CheckPlanStability re-renders every baseline probe through engine and
-// returns a [ViolationOracleDeviation] for each rendering that is not
-// byte-identical to its captured baseline. It is meant to run after each
+// returns a [ViolationOracleDeviation] for each rendering whose plan SHAPE is not
+// identical to its captured baseline. It is meant to run after each
 // crash/recovery (the plan cache was rebuilt from scratch) and at the end of a
 // scenario; probes are compared in capture order so messages are
 // deterministic.
+//
+// The comparison is over [planShape], not over the raw rendering: the cardinality
+// estimates the physical plan carries since rmp #2765 move with the live data these
+// scenarios churn, and a changed estimate is not a changed plan.
 func CheckPlanStability(tick int64, base *PlanBaseline, engine PlanEngine) []Violation {
 	c := &InvariantChecker{}
 	for i, p := range base.probes {
@@ -405,7 +438,7 @@ func (c *InvariantChecker) checkOnePlanStable(tick int64, engine PlanEngine, sha
 			fmt.Sprintf("shape %q (%s arm): Explain %q failed: %v", shape, arm, query, err))
 		return
 	}
-	if got != want {
+	if planShape(got) != want {
 		c.add(ViolationOracleDeviation, tick, "plan stability",
 			fmt.Sprintf("shape %q (%s arm): plan drifted from its baseline after a plan-cache rebuild\nquery: %s\nbaseline plan:\n%s\ncurrent plan:\n%s",
 				shape, arm, query, want, got))

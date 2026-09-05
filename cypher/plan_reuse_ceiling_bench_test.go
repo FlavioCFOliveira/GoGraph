@@ -190,7 +190,7 @@ func BenchmarkPrebuiltTreeCeiling(b *testing.B) {
 	snap := eng.g.BeginRead()
 	defer eng.g.EndRead(snap)
 	queryReg := newNowAwareRegistry(eng.reg, time.Now())
-	op, cols, err := eng.buildReadPhysical(ctx, entry, entry.plan, nil, queryReg, nil, snap)
+	op, cols, err := eng.buildReadPhysical(ctx, entry, entry.plan, nil, queryReg, nil, snap, nil)
 	if err != nil {
 		b.Fatalf("buildReadPhysical: %v", err)
 	}
@@ -226,7 +226,7 @@ func BenchmarkPrebuiltTreeCeilingParallel(b *testing.B) {
 		snap := eng.g.BeginRead()
 		defer eng.g.EndRead(snap)
 		queryReg := newNowAwareRegistry(eng.reg, time.Now())
-		op, cols, berr := eng.buildReadPhysical(ctx, entry, entry.plan, nil, queryReg, nil, snap)
+		op, cols, berr := eng.buildReadPhysical(ctx, entry, entry.plan, nil, queryReg, nil, snap, nil)
 		if berr != nil {
 			b.Fatalf("buildReadPhysical: %v", berr)
 		}

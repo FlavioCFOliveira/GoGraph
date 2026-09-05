@@ -261,6 +261,27 @@ type buildOpts struct {
 	// and cannot be wrapped twice.
 	profiler *exec.Profiler
 
+	// estimates, when non-nil, collects the planner's cardinality estimate for the
+	// logical node behind each operator the builder returns, so a rendered PHYSICAL
+	// plan can show the prediction beside the measurement (rmp #2765). It is nil for
+	// every ordinary query and non-nil only on the three plan-RENDERING build paths
+	// ([Engine.explainPhysical], [Engine.runExplainPrefixed],
+	// [Engine.profileMaterialised]).
+	//
+	// It is ONE pointer rather than the map and resolver it holds, because the query
+	// path pays for every word of this struct on every execution and this field is
+	// dead weight on all of them. Measured on cypher-read-label-small: carrying it as
+	// two fields cost +1.00% on the build phase against HEAD with the recording branch
+	// removed, which is the same +1.13% the whole change cost — i.e. the fields, not
+	// the work.
+	//
+	// Like profiler it is consulted in exactly one place — [buildOperator] — and like
+	// profiler it MUST be cleared by [buildOpts.forWorker]: it holds a map shared by a
+	// value copy, and a morsel-parallel build writes it from every worker goroutine,
+	// which is `fatal error: concurrent map writes` rather than a data race the
+	// detector would merely report (the shape of rmp #2664).
+	estimates *planEstimateCollector
+
 	// nodeResolver backs [expr.LazyNodeValue] for the lazy node-materialisation
 	// fast path. It is created once per build (it depends only on the graph) and
 	// shared across every row and every node column, so the lazy path costs no
@@ -2529,7 +2550,7 @@ func (e *Engine) runRead(ctx context.Context, query string, params map[string]ex
 	// wakes the vacuum when a departing reader lets the watermark advance. Same
 	// throttle, same convergence, none of it on the query.
 	func() {
-		op, cols, err := e.buildReadPhysical(ctx, entry, plan, params, queryReg, nil, snap)
+		op, cols, err := e.buildReadPhysical(ctx, entry, plan, params, queryReg, nil, snap, nil)
 		if err != nil {
 			buildErr = err
 			return
@@ -2573,6 +2594,13 @@ func (e *Engine) runRead(ctx context.Context, query string, params map[string]ex
 // it is threaded onto the build options so the single wrapping point in
 // [buildOperator] instruments every node. Passing nil is what makes profiling
 // free when it is off.
+//
+// estimates is nil for an ordinary execution and non-nil only for a build whose
+// plan will be RENDERED — the two EXPLAIN paths and the PROFILE one. It is threaded
+// onto the same build options and filled at the same single point, so the caller
+// gets back, in the map it supplied, the planner's cardinality estimate for every
+// operator a logical node claimed (rmp #2765). Passing nil is what keeps the
+// estimate providers off the query path entirely.
 func (e *Engine) buildReadPhysical(
 	ctx context.Context,
 	entry *planCacheEntry,
@@ -2581,6 +2609,7 @@ func (e *Engine) buildReadPhysical(
 	queryReg expr.FunctionRegistry,
 	prof *exec.Profiler,
 	snap *lpg.Snapshot,
+	estimates exec.PlanEstimates,
 ) (exec.Operator, []string, error) {
 	// EVERY read this build binds goes through rv, so the whole query observes
 	// ONE instant (rmp #2289). A nil snapshot yields a view of the current
@@ -2622,6 +2651,17 @@ func (e *Engine) buildReadPhysical(
 	// comprehension is evaluated rather than answered false (rmp #2507).
 	patEval.bind(params, subEval)
 	bopts.profiler = prof
+	if estimates != nil {
+		// The collector, with the LIVE resolver built exactly as
+		// [Engine.explainInputsFor] builds the one the logical walk reads, so the
+		// estimate a physical operator carries is the same number the logical table
+		// prints for the node it came from. Two allocations on a rendering build; none
+		// at all on the query path, which passes no map.
+		bopts.estimates = &planEstimateCollector{
+			into: estimates,
+			src:  &lpgLabelResolver{g: e.g.ReadAt(nil), eng: e},
+		}
+	}
 	// Point the build at this plan's cross-execution analysis memo (rmp #2383).
 	// entry is nil on no read path today, but the guard keeps the coupling
 	// one-directional: a future caller without an entry loses the memo, not the
@@ -2768,11 +2808,16 @@ func (e *Engine) explainPhysical(entry *planCacheEntry, params map[string]expr.V
 	// #2304 made View exclusive.
 	snap := e.g.BeginRead()
 	defer e.g.EndRead(snap)
-	op, _, err := e.buildReadPhysical(context.Background(), entry, entry.plan, params, queryReg, nil, snap)
+	// The estimates the planner derived, collected during the build and rendered
+	// beside the operators they were derived for. EXPLAIN measures nothing, so they
+	// are the only figures this rendering has (rmp #2765).
+	est := planEstimatesFor(entry.plan)
+	op, _, err := e.buildReadPhysical(context.Background(), entry, entry.plan, params, queryReg, nil, snap, est)
 	if err != nil {
 		return "", fmt.Errorf("cypher: build plan: %w", err)
 	}
-	return exec.RenderPlan(op), nil
+	tree := exec.PlanTreeWithEstimates(op, est)
+	return exec.RenderPlanNode(&tree), nil
 }
 
 // Profile executes query with the given params and returns the PHYSICAL plan
@@ -2899,7 +2944,8 @@ func (e *Engine) profileMaterialised(
 	}
 	func() {
 		prof := exec.NewProfiler()
-		op, cols, berr := e.buildReadPhysical(ctx, entry, entry.plan, params, queryReg, prof, snap)
+		est := planEstimatesFor(entry.plan)
+		op, cols, berr := e.buildReadPhysical(ctx, entry, entry.plan, params, queryReg, prof, snap, est)
 		if berr != nil {
 			buildErr = berr
 			return
@@ -2911,7 +2957,7 @@ func (e *Engine) profileMaterialised(
 		// Capture the tree BEFORE any Close, while the wrappers still hold their
 		// counters, so the rendering survives teardown. materialize has already
 		// driven every operator to exhaustion, so the counters are final here.
-		tree = exec.PlanTree(op)
+		tree = exec.PlanTreeWithEstimates(op, est)
 		res = r
 	}()
 	if buildErr != nil {
@@ -9175,6 +9221,11 @@ func wrapWithColumnPassthrough(child exec.Operator, cols []string, schema map[st
 // constructed with its child already wrapped and runs its capability
 // type-assertions against the wrapper. [exec.Profiler.Wrap] therefore preserves
 // whatever the child exposes; see its documentation for why that is load-bearing.
+//
+// It is also the one place a logical node and the operator built from it are both
+// in hand, which is why the cardinality-estimate attribution happens here too
+// (rmp #2765). See plan_estimate_physical.go for the attribution rule and for the
+// shapes it deliberately declines to map.
 func buildOperator(
 	plan ir.LogicalPlan,
 	walker nodeWalkerIface,
@@ -9188,7 +9239,26 @@ func buildOperator(
 	bopts *buildOpts,
 ) (exec.Operator, error) {
 	op, err := buildOperatorRec(plan, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
-	if err != nil || bopts == nil || bopts.profiler == nil {
+	// ONE early-out for the ordinary query, which has neither an estimate collector
+	// nor a profiler. Keeping the common case on a single short-circuit chain is not
+	// cosmetic: this function runs once per operator of every query, and splitting
+	// the chain into two sequential guards was MEASURED at +1.0% on the build phase
+	// of cypher-read-label-small (rmp #2765). Anything added here must stay behind
+	// this line.
+	if err != nil || bopts == nil || (bopts.estimates == nil && bopts.profiler == nil) {
+		return op, err
+	}
+	// Claim the operator for this logical node and record the planner's estimate for
+	// it (rmp #2765). Recorded on the UNWRAPPED operator, before the profiling
+	// wrapper below, because that identity survives an unwrap-and-rebuild
+	// substitution while the wrapper's does not — see [exec.PlanTreeWithEstimates].
+	// The claim is written on the way OUT of the recursion, so a child has always
+	// claimed its operator before its parent sees it, which is what makes
+	// "the deepest node owns it" true by construction rather than by inspection.
+	if bopts.estimates != nil {
+		recordPlanEstimate(bopts.estimates, plan, op, walker, params)
+	}
+	if bopts.profiler == nil {
 		return op, err
 	}
 	return bopts.profiler.Wrap(op), nil
@@ -10912,6 +10982,14 @@ func (b *buildOpts) forWorker() *buildOpts {
 	// and two time.Now calls per row that no reader could ever see. The parallel
 	// tier is measured as one node, which is what exec.Profiler documents.
 	cp.profiler = nil
+	// SHARED MAP, and the more dangerous of the two: a concurrent map write is a
+	// runtime THROW, not a detector report. estimates is written by buildOperator on
+	// whichever goroutine builds, and the per-morsel subtree is built on a worker, so
+	// a shared copy would have N workers writing one map. Clearing it costs the
+	// rendered plan nothing for the same reason clearing the profiler does — a
+	// morsel-parallel leaf implements no exec.PlanChildren, so nothing built below it
+	// is ever reachable from the output (rmp #2765).
+	cp.estimates = nil
 	return &cp
 }
 

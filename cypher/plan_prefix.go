@@ -160,11 +160,16 @@ func (e *Engine) runExplainPrefixed(
 		snap = e.g.BeginRead()
 		defer e.g.EndRead(snap)
 	}
-	op, cols, err := e.buildReadPhysical(ctx, entry, entry.plan, params, queryReg, nil, snap)
+	// The planner's cardinality estimates, collected during the build so the captured
+	// tree — and through it the Bolt `plan` metadata a driver reads — carries the
+	// numbers the planner acted on (rmp #2765, closing divergence D9). An EXPLAIN
+	// measures nothing, so these are the only figures it has to publish.
+	est := planEstimatesFor(entry.plan)
+	op, cols, err := e.buildReadPhysical(ctx, entry, entry.plan, params, queryReg, nil, snap, est)
 	if err != nil {
 		return nil, fmt.Errorf("cypher: build plan: %w", err)
 	}
-	node := exec.PlanTree(op)
+	node := exec.PlanTreeWithEstimates(op, est)
 	return newPlanResult(cols, &node, parser.PlanModeExplain), nil
 }
 

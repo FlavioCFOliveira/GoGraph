@@ -1312,6 +1312,20 @@ types (`ColumnarHashJoin`, `ParallelScanProject`, …) rather than being hidden
 behind their row-mode equivalents. This is the surface to reach for when a query
 is slow.
 
+Each operator the planner estimated also carries **that estimate and its
+provenance**, in the same vocabulary `ExplainLogical` uses:
+
+```
+Project
+└─ Filter (est. rows=3 exact)
+   └─ NodeByLabelScan [Person] (est. rows=1000 exact)
+```
+
+The `est.` prefix is what stops the figure being read as a measurement — `Explain`
+executes nothing, so there is none. An operator the planner had no estimate for
+prints **nothing**, never a fabricated number: `Project` above is not estimated
+because no logical node the planner estimates lowers to it.
+
 A **writing** statement renders the logical plan and says so on its first line: a
 write's operators bind to an open transaction, so there is no physical tree to
 walk outside one.
@@ -1327,9 +1341,22 @@ ProduceResults
    └─ NodeByLabelScan [n:Person] (est. rows=0, exact)
 ```
 
-Estimates belong to logical nodes and have no counterpart on a built operator, so
-they are visible only here. Reach for this when a plan looks wrong and you suspect
-the estimate that drove it.
+Estimates are DERIVED for logical nodes, and this is the surface that shows them
+all — with the full provenance tag and, for a histogram range estimate, the
+certified error term. The physical surfaces carry the same estimate for every
+operator a logical node's lowering produced (see `Engine.Explain` above and
+`Engine.Profile` below); what they cannot show is an estimate for a node that has
+no operator of its own, and what they do not print is the provenance in words.
+
+Two shapes have an estimate here and none on the physical plan, because the
+operator they describe is **synthesised during the build and has no logical node
+at all**: the `NodeByIndexRangeScan` a range seek substitutes for a scan child, and
+the re-anchored scan the minimum-cardinality multi-label rewrite chooses. This
+surface synthesises a line for both; a physical plan has nothing to attach an
+estimate to, and renders `-`.
+
+Reach for this when a plan looks wrong and you suspect the estimate that drove it,
+or when the provenance or the error term is what you need.
 
 ### `Engine.Profile` — what it cost
 
@@ -1343,8 +1370,17 @@ ColumnarProject (rows=1, dbhits=?, time=17µs)
 
 ColumnarProject (rows=8, dbhits=?, time=25µs)
 └─ ColumnarFilter (rows=8, dbhits=?, removed=292, time=24µs)
-   └─ NodeByLabelScan [P] (rows=300, dbhits=300, time=2µs)
+   └─ NodeByLabelScan [P] (est. rows=300 exact, rows=300, dbhits=300, time=2µs)
 ```
+
+The planner's **estimate leads the parenthesis**, immediately before the row count
+it is meant to be read against — so a prediction and its outcome sit side by side
+on one line, which is what tells you whether the plan was chosen on a good guess.
+It is qualified with `est.` and tagged with its provenance so it cannot be mistaken
+for one of the measurements that follow it, and it is **omitted entirely** for an
+operator the planner did not estimate. PostgreSQL does the same thing with the
+opposite marker, printing its estimate unqualified and prefixing the measured group
+with the word `actual`.
 
 Those two plans are the reason `dbhits` and `removed` are reported. They return a
 comparable handful of rows over the same 300-node graph, and only those two figures
@@ -1530,32 +1566,56 @@ not.
 ```
 
 ```
-+--------------------------------+------+--------+-----------+
-| Operator                       | Rows | DbHits | Time (ms) |
-+--------------------------------+------+--------+-----------+
-| Project                        |    1 |      ? |     0.000 |
-| └─ NodeByIndexSeek [seek="p3"] |    1 |      1 |     0.000 |
-+--------------------------------+------+--------+-----------+
-| Total                          |    2 |  1 + ? |     0.000 |
-+--------------------------------+------+--------+-----------+
++--------------------------------+----------+------+--------+-----------+
+| Operator                       | Est.Rows | Rows | DbHits | Time (ms) |
++--------------------------------+----------+------+--------+-----------+
+| Project                        |        - |    1 |      ? |     0.000 |
+| └─ NodeByIndexSeek [seek="p3"] |        1 |    1 |      1 |     0.000 |
++--------------------------------+----------+------+--------+-----------+
+| Total                          |          |    2 |  1 + ? |     0.000 |
++--------------------------------+----------+------+--------+-----------+
 ```
 
-A **`Removed` column appears only when some operator in the plan removes rows**, so
-a plan with no filter and no expansion renders exactly the four columns above. When
-it does appear, an operator that removes no rows leaves its cell blank, and the
-`Total` cell is blank too — no plan-wide total is claimed:
+`ProfileTable`'s **`Est.Rows` column sits immediately left of `Rows`**, so the
+planner's prediction and the measured outcome are read as a pair on one line. That
+is the point of the column and the reason for its position: a plan chosen on a bad
+guess is otherwise indistinguishable from one chosen on a good guess. Both
+incumbents arrange it the same way — Neo4j puts `Estimated Rows` immediately before
+`Rows` in one `PROFILE` table, and PostgreSQL prints `(cost=… rows=…)` and
+`(actual … rows=…)` on one line.
+
+Here is the same pairing when the estimate is **wrong**, which is the case the
+column exists for. The value queried falls outside the exact 32-entry
+most-common-value list, so the planner falls back to the 1/NDV average and
+under-predicts by an order of magnitude:
 
 ```
-+---------------------------+------+----------+---------+-----------+
-| Operator                  | Rows |   DbHits | Removed | Time (ms) |
-+---------------------------+------+----------+---------+-----------+
-| Project                   |    3 |        ? |         |     0.177 |
-| └─ Filter                 |    3 |        ? |     997 |     0.175 |
-|    └─ NodeByLabelScan [P] | 1000 |     1000 |         |     0.020 |
-+---------------------------+------+----------+---------+-----------+
-| Total                     | 1006 | 1000 + ? |         |     0.177 |
-+---------------------------+------+----------+---------+-----------+
++--------------------------------+----------+------+----------+---------+-----------+
+| Operator                       | Est.Rows | Rows |   DbHits | Removed | Time (ms) |
++--------------------------------+----------+------+----------+---------+-----------+
+| Project                        |        - |   90 |        ? |         |     0.834 |
+| └─ Filter                      |       ~9 |   90 |        ? |    3600 |     0.812 |
+|    └─ NodeByLabelScan [Person] |     3690 | 3690 |     3690 |         |     0.080 |
++--------------------------------+----------+------+----------+---------+-----------+
+| Total                          |          | 3870 | 3690 + ? |         |     0.834 |
++--------------------------------+----------+------+----------+---------+-----------+
 ```
+
+Two columns **appear only when some operator in the plan carries their figure**, so
+a plan with no filter, no expansion and nothing estimated renders exactly the four
+columns `Operator`/`Rows`/`DbHits`/`Time (ms)`:
+
+- **`Est.Rows`** — present when at least one operator carries an estimate. An
+  operator with none renders `-`, and the `Total` cell is blank: estimates are
+  per-operator predictions, and a sum over the few operators that have one would be
+  a floor presented as a total.
+- **`Removed`** — present when at least one operator removes rows. An operator that
+  removes none leaves its cell **blank**, and the `Total` cell is blank too — no
+  plan-wide total is claimed.
+
+Note that a blank `Est.Rows` cell and a `-` are different: only the `Total` row is
+blank, because it claims nothing; a data row always carries either a figure or the
+`-` that says there is none.
 
 Each is the **same walk** as its tree counterpart, not a second derivation of the
 plan: `ExplainTable` and `ExplainLogical` share one traversal that performs the
@@ -1572,11 +1632,19 @@ Two things the table shows that the tree does not, and two it does not show:
   error term. `Est.Rows` carries the number and one marker: a bare `40` is an
   exact maintained count, `~40` is a derived (statistics or heuristic) figure, and
   `-` means no estimate is available — either none is derivable for that operator
-  shape, or the statistic behind it is absent or stale. Reach for
-  `ExplainLogical` when the provenance is what you need.
-- `Est.Rows` is an **estimate throughout**: `ExplainTable` executes nothing, so
-  even an "exact" cell states what the operator *would* read, never what it did.
-  `ProfileTable`'s `Rows` is the measured figure.
+  shape, or the statistic behind it is absent or stale. A genuine estimate of
+  **zero renders `0`**, never `-`: an operator the planner expects to emit no rows
+  has a real estimate, and usually the interesting one. Reach for `ExplainLogical`
+  when the provenance is what you need.
+- `Est.Rows` is an **estimate in both tables**: even an "exact" cell states what
+  the operator *would* read, never what it did. In `ExplainTable` nothing is
+  executed at all; in `ProfileTable` the measured figure is `Rows`, in the column
+  immediately to its right.
+- The two tables' `Est.Rows` columns describe **different plans** — `ExplainTable`
+  the logical one, `ProfileTable` the physical one — and agree, node for node,
+  wherever a logical node has an operator of its own. They diverge in one
+  direction only: the two build-synthesised leaves named under `ExplainLogical`
+  above have an estimate in the logical table and `-` in the physical one.
 
 `ProfileTable`'s `Total` line needs reading with care, because two of its three
 cells are easy to mistake:
@@ -1636,6 +1704,22 @@ the shape Neo4j returns, and it is the reason for it: a driver consuming
 `EXPLAIN MATCH (n) RETURN n` expects the query's own column signature, and the
 plan where its `ResultSummary` looks for one. Returning the rendered plan as a
 one-column result set would have made it invisible to every driver.
+
+On Bolt, each plan node's `args` map carries what the node has to say beyond its
+name:
+
+| `args` key | Present when | Meaning |
+|---|---|---|
+| `Details` | the operator has an inline detail | the scanned label, the expanded pattern |
+| `EstimatedRows` | the planner estimated this operator | the predicted row count, on `plan` and on `profile` alike — an `EXPLAIN` ran nothing, so this is the only number it has |
+| `EstimatedRowsSource` | `EstimatedRows` is present | `exact`, `stats` or `heuristic` — the provenance, which no reference implementation publishes |
+| `RowsRemovedByFilter` | the operator reports rejections | the candidate rows it read and discarded |
+
+Every one of them is **omitted rather than zeroed** when the figure does not exist,
+which is the same rule that omits `dbHits` for an operator whose accesses nobody
+counted and omits the page-cache keys GoGraph does not measure. `EstimatedRows` is
+`EstimatedRows` because that is Neo4j's own argument name, so a driver written
+against Neo4j finds it where it already looks.
 
 Render a captured tree with `exec.RenderPlanNode`, which prints exactly what
 `Engine.Explain` prints for the same statement — the prefix and the Go APIs share

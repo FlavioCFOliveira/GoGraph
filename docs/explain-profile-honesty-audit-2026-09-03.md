@@ -1237,3 +1237,308 @@ but it is worth recording that **this figure is what made it visible**: before
 * The expression-closure operators are still classified by TYPE, not per instance.
 * The rendered plan still does not distinguish a MEASURED db-hits figure from a
   DERIVED one (rmp #2720's standing limitation of the output).
+
+---
+
+## Addendum — 2026-09-05, rmp #2765 (sprint 355)
+
+This section records what changed after the audit and what the work refuted about
+its own brief. Nothing earlier in the document has been edited.
+
+### Divergence D3 — "the largest gap" — is CLOSED
+
+§5 recorded D3 as **estimated and actual never side by side**, and called it the
+largest gap in the plan surfaces: `Engine.ExplainTable` rendered the LOGICAL plan
+with `Est.Rows` and executed nothing, `Engine.ProfileTable` rendered the PHYSICAL
+plan with the measured `Rows`, and "their rows do not correspond one to one, so
+they cannot simply be placed side by side". A plan chosen on a bad guess was
+therefore indistinguishable from one chosen on a good guess.
+
+The planner's estimate now travels onto the PHYSICAL plan node and is rendered
+beside the measurement on every physical surface:
+
+* `exec.PlanNode` gained `Est exec.PlanEstimate` — a row count plus its provenance
+  (`EstimateExact` / `EstimateStats` / `EstimateHeuristic`, and `EstimateAbsent` as
+  the zero value).
+* `Engine.ProfileTable` gained an **`Est.Rows` column immediately left of `Rows`**,
+  using the cell conventions `ExplainTable` already established: `N` exact, `~N`
+  approximate, `-` no estimate. Like the `Removed` column of #2764 it appears only
+  when some operator carries the figure, and its `Total` cell is always blank.
+* `Engine.Profile`'s indented rendering leads each operator's parenthesis with
+  `est. rows=N provenance`, before the measured `rows=`. The `est.` qualifier is
+  what stops it being read as a measurement, and it is omitted entirely — never
+  zeroed — for an operator with no estimate.
+* `Engine.Explain` and the `EXPLAIN` prefix carry it too, which follows
+  necessarily: both render the same captured `exec.PlanNode` through the same
+  `exec.RenderPlanNode`, and `TestPlanPrefix_ExplainMatchesEngineExplain` requires
+  them to agree byte for byte. `Engine.Explain` previously printed no numbers at
+  all.
+
+### Divergence D9 is CLOSED
+
+§5's D9 recorded that the Bolt `plan` metadata **carries no estimates**, so a
+driver's `ResultSummary.Plan()` received operator names and no numbers. Each plan
+node's `args` map now carries `EstimatedRows` — Neo4j's own argument name, read at
+5.26.16 — and `EstimatedRowsSource`, which no reference implementation publishes and
+which is the provenance §5 credits GoGraph with leading on. Both are OMITTED rather
+than zeroed for an operator with no estimate, and both are published for an
+`EXPLAIN` as well as a `PROFILE`: an estimate is a prediction made before anything
+ran, so an `EXPLAIN` has one and it is the only number an `EXPLAIN` has.
+
+### How the logical estimate is mapped onto a physical operator
+
+The mapping is the hard half of this change, and it is structural rather than
+inferred. `buildOperator` is the single funnel every physical operator passes
+through on its way out of the recursive lowering, so it is the one place where a
+logical node and the operator built from it are both in hand. The rule applied
+there is:
+
+> **The first (deepest) logical node whose lowering RETURNS a given operator owns
+> it.**
+
+Every operator is CLAIMED — with an estimate when one is derivable and with an
+explicitly empty one when it is not — and a claim is never overwritten. That single
+rule covers three lowerings that return an operator they did not build, without a
+special case for any of them: a `Selection` whose pushed seek hint no seek claimed
+returns its child's operator unchanged, a `Selection` over a `shortestPath` fuses
+its predicate into the child and returns the child, and an `Expand` built without a
+graph returns its child untraversed. In all three the child claimed the operator
+first.
+
+### Refuted: the rule is not observable through any query the engine can plan
+
+The brief for #2765 treated the mapping as the task's principal risk. Measured, the
+risk is smaller than that and in a different place: **no query the engine can plan
+today can be mis-attributed by removing the rule.** Applying a mutation that deletes
+first-claim-wins and re-running `./cypher/ ./cypher/exec/ ./cypher/explain/
+./bolt/server/` changes no rendered plan, and the reason is structural in each of
+the three cases:
+
+* a dropped seek hint's predicate is a correlated key equality — a VARIABLE, not a
+  literal or a parameter, on the far side — so `selectionEstimate` declines before
+  the rule can matter;
+* the `shortestPath` and no-graph cases have a child that is not a scan leaf, which
+  `selectionEstimate` and `expandEstimate` also decline.
+
+The rule is therefore defence in depth rather than a live correction, and it is
+gated at the level it is implemented (`TestPlanEstimate_AttributionRules`) with that
+stated plainly, rather than through a query that cannot exercise it.
+
+### Refuted: reading the estimate through the build's own snapshot LOSES it
+
+The obvious implementation reads the estimate through the resolver the physical
+build already holds — the one pinned to the query's MVCC snapshot. That is what the
+run measures against, so it looks strictly more correct. It is not usable, and the
+reason was measured rather than argued.
+
+`lpgLabelResolver.ResolveLabelCount` answers "EXACT or nothing" and declines the
+moment any MVCC history is live, which in a mixed read/write workload is always —
+the finding that motivated `ResolveLabelCountBound` in rmp #2392.
+`statsRangeEstimateInner` takes that count as its Δ/N denominator with
+`n, _ := src.ResolveLabelCount(label)`, does not distinguish the decline from a real
+zero, and its `n <= 0` guard then demotes the whole estimate to `estFallback`. Read
+through the snapshot resolver, `MATCH (p:Person) WHERE p.age < 30 RETURN p` on a
+400-node fixture renders:
+
+```
+logical  (ExplainTable)   Selection  Est.Rows = ~84      (stats, err=0.0039)
+physical (ProfileTable)   Filter     Est.Rows = -
+```
+
+The same node of the same plan, with a figure on one surface and an absence on the
+other, the absence appearing and disappearing with unrelated write traffic. The
+estimates are therefore read through a LIVE resolver, built exactly as
+`Engine.explainInputsFor` builds the one the logical walk reads, so the two surfaces
+agree by construction (`TestProfileEstimate_PhysicalAndLogicalAgreeAboutTheSameNode`).
+Plan DECISIONS — the min-label re-anchor, the anchor swap, the disjoint reorder —
+continue to read the build's pinned snapshot, untouched.
+
+**Found, not fixed:** the `n, _ :=` conflation in `statsRangeEstimateInner` is a
+defect in the estimate provider — "cannot answer exactly" and "no live rows" are
+different facts and only the second justifies demotion. It belongs to the
+planner-statistics work (#2766), because nothing #2765 does may change what the
+planner decides.
+
+### Two shapes that CANNOT be mapped, and render `-` on purpose
+
+Both are leaves SYNTHESISED during the build, with no logical node at all:
+
+* the `NodeByIndexRangeScan` a range seek substitutes for a `Selection`'s scan child
+  (#1505) — the `ir.NodeByLabelScan` it replaces is never built; and
+* the re-anchored scan the minimum-cardinality multi-label rewrite chooses (#2077) —
+  the label it scans is picked at BUILD time.
+
+`ExplainTable` shows an estimate for both because that renderer SYNTHESISES a line
+for each and calls `rangeSeekLeafEstimate` / `labelScanEstimate` for it. There is no
+operator-side equivalent to derive one from, so the physical surfaces render `-`.
+Reaching them would need a second estimate-computation site inside each rewrite;
+that was not done, because a wrong correspondence between an estimate and an
+operator reads as a planner error that never happened, which is worse than an
+absence. Two further families are likewise unmapped: the morsel-parallel leaves
+(their sub-plan is rebuilt per morsel from fresh IR on a worker goroutine, and the
+per-worker build options clear the collector for the same reason they clear the
+profiler — rmp #2664's defect with a different field) and the columnar fusion
+chains (which build `ColumnarFilter`/`ColumnarProject` directly and discard the
+operators `buildOperator` produced).
+
+### Found while doing this: two sim oracles were comparing a data-dependent string
+
+`internal/sim`'s plan-stability checker (`CheckPlanStability`) and the
+statistics-refresh report channel (`StatsRegime.PlanChanges`) both compared
+`Engine.Explain` renderings for byte equality. With the estimate in that rendering
+they immediately reported false positives:
+
+* the plan-stability oracle failed the index-diversity scenario with *"plan drifted
+  from its baseline after a plan-cache rebuild"* for a graph that had merely grown
+  from 3001 to 3019 nodes — a changed estimate, not a changed plan;
+* `PlanChanges` went from 0 to 2 on a statistics rebuild, which is guaranteed once
+  the rendering carries a statistics-derived figure, and turned a channel that
+  reports *"the planner chose differently"* into one that reports *"my own
+  annotation moved"*.
+
+Both now compare `sim.planShape`, the rendering with the estimate annotation
+stripped. The estimate is the only data-dependent part of the physical rendering:
+operator names are the concrete Go types that were built, and the details are
+structural.
+
+### Cost on the ordinary query path
+
+Measured with the project's own `BenchmarkPlanReusePhases` on
+cypher-read-label-small (`MATCH (n:N) RETURN count(n) AS c`), two test binaries
+built from HEAD and from this tree and run **interleaved** A/B/A, 10 rounds,
+`-benchtime=2s`, on an Apple M4 (10 cores, darwin/arm64, go1.27.1), plain build:
+
+| Metric | HEAD | this tree | verdict |
+|---|---|---|---|
+| `3build` allocs/op | 15.00 ± 0% | 15.00 ± 0% | identical, all samples equal (p=1.000) |
+| `4full` allocs/op | 21.00 ± 0% | 21.00 ± 0% | identical, all samples equal (p=1.000) |
+| `3build` B/op | 1.469Ki | 1.469Ki | identical, all samples equal |
+| `4full` B/op | 2.336Ki | 2.336Ki | identical, all samples equal |
+
+Raw data, every arm and every `benchstat` comparison:
+`docs/benchmarks/plan-estimate-physical-2026-09-05-raw/`.
+
+The **noise floor** was measured first, same binary against itself under the same
+interleaving: `~ (p=0.739)` and `~ (p=0.670)`, geomean −0.02%.
+
+**No timing claim is made**, because the host was not idle (load average 2.3–4.4
+throughout). What was observed, for the record: a reproducible sub-2% difference on
+`4full`, which two single-variable experiments failed to attribute to the work —
+
+* adding the per-operator recording branch on top of an otherwise identical tree
+  measured as **no difference** (`~ p=0.093`, `~ p=0.481`, geomean +0.13%);
+* inserting 160 lines of never-executed code into `api.go` immediately before
+  `buildOperatorRec` also measured as **no difference** (`~ p=0.896`, `~ p=0.315`,
+  geomean −0.16%), which REFUTES code layout as the explanation at this magnitude;
+* `buildOperator` is not inlined in either tree (cost 172 and 255 against a budget
+  of 80), so inlining is not the explanation either.
+
+Two changes made in response, each measured: folding the collector's two build-option
+fields into ONE pointer (+1.13% → +0.92% geomean) and restoring `buildOperator`'s
+single short-circuit early-out so the ordinary query still exits on one chain
+(+0.92% → +0.68%). The residual is left, named: merging `buildOpts.profiler` and
+`buildOpts.estimates` into one "this build renders its plan" field would make the
+struct grow by zero words and the guard identical to HEAD's.
+
+### The gates, and the per-site mutations that prove them
+
+The #2764 addendum's lesson — *"a counter with N increment sites needs N deletions,
+not one mutation of the value it returns"* — applies here in a different shape.
+There is no counter; there is a MAPPING and a set of rendering rules, and each rule
+is a site that can be deleted on its own without any other site noticing. 29
+mutations were applied ONE AT A TIME to the working tree, with
+`go test -count=1 -p 1 ./cypher/ ./cypher/exec/ ./cypher/explain/ ./bolt/server/`
+re-run after each and the tree restored before the next.
+
+**Every one was killed**, and every kill is a behavioural assertion rather than a
+compile error. Six of them survived the FIRST sweep and are the reason the sweep was
+worth running: `AllNodesScan` and `Expand` had no query planning them (M05, M08),
+the two attribution rules had no gate at all (M02, M03), the pass-through-Filter
+guard had none (M04), and no test asked what happens to a predicate shape the
+estimator does not recognise (M10). Five gates were added to close them.
+
+| # | mutation | first failure |
+|---|---|---|
+| M01 | delete the recording call in `buildOperator` | `ProfileTable has no Est.Rows and Rows header pair` |
+| M02 | remove first-claim-wins | `a second logical node re-attributed an already-claimed operator: {Rows:600 Source:exact} became {Rows:1 Source:heuristic}` |
+| M03 | stop writing empty claims | `an operator whose logical node has no estimate was left UNCLAIMED` |
+| M04 | drop the pass-through-Filter guard | `a Selection lowered against a walker with no graph was given the estimate {Rows:1 Source:heuristic}` |
+| M05 | `AllNodesScan` never estimated | `no Est.Rows column for "MATCH (n) RETURN n"` |
+| M06 | `NodeByLabelScan` never estimated | `ProfileTable has no Est.Rows and Rows header pair` |
+| M07 | `Selection` never estimated | `the Filter's Est.Rows cell is "-", want a tilde-marked approximation` |
+| M08 | `Expand` never estimated | `the Expand's Est.Rows cell is "-", want "3"` |
+| M09 | publish a stale statistic as EXACT | `the stale range estimate rendered "84", want "-"` |
+| M10 | publish an underivable shape as an exact 0 | `the Filter's Est.Rows cell is "0", want "-"` |
+| M11 | read through the build's snapshot resolver | `the fresh range estimate is "-", want a tilde-marked approximation` |
+| M12 | `EstRowsCell` prints 0 for no estimate | `the Project's Est.Rows cell is "~0", want "-"` |
+| M13 | `EstRowsCell` drops the tilde | `the Filter's Est.Rows cell is "9", want a tilde-marked approximation` |
+| M14 | tree prints an estimate for an operator that has none | `plan with DisableParallelScan:true is` … `Project (est. rows=- )` / `└─ LabelCountScan (est. rows=- )`, want the two bare lines |
+| M15 | `PlanTreeWithEstimates` does not attach | `ProfileTable has no Est.Rows and Rows header pair` |
+| M16 | tree never prints the estimate | `the EXPLAIN rendering does not carry "(est. rows=60 exact)"` |
+| M17 | column never rendered | `ProfileTable has no Est.Rows and Rows header pair` |
+| M18 | column always rendered | `a plan in which nothing was estimated still rendered an Est.Rows column` |
+| M19 | column moved RIGHT of `Rows` | `Est.Rows is column 2 and Rows is column 1` |
+| M20 | `ProfileTable` drops the estimate | `ProfileTable has no Est.Rows and Rows header pair` |
+| M21 | never published on the wire | `explain published no args map` |
+| M22 | published unconditionally | `the un-estimated Project published EstimatedRows=0` |
+| M23 | publication gated on `profiled` | `the estimated scan published no EstimatedRows key` |
+| M24 | `EXPLAIN`-prefix capture drops it | `rendered plan differs` |
+| M25 | `Engine.Explain` drops it | `the EXPLAIN rendering does not carry "(est. rows=60 exact)"` |
+| M26 | `PROFILE` drops it | `ProfileTable has no Est.Rows and Rows header pair` |
+| M27 | collector never installed | `ProfileTable has no Est.Rows and Rows header pair` |
+| M28 | early-out ignores the collector | `the EXPLAIN rendering does not carry "(est. rows=60 exact)"` |
+| M29 | `forWorker` stops clearing the collector | `WARNING: DATA RACE` in 6 tests, including `TestProfile_ParallelScanTierIsOneNodeAndRaceFree_2664` |
+
+M29 is the concurrency half and it is the one that could not be gated by an
+assertion: with the clearing removed, a morsel-parallel PROFILE writes one shared
+map from every worker goroutine. It is killed by `-race` on real planned queries,
+which is what shows the clearing is EXERCISED and not merely present.
+
+### Found while doing this, NOT fixed: `TestReadPathAllocationCeiling` is still load-sensitive
+
+`TestReadPathAllocationCeiling` failed **four times** while this task was being
+validated, reporting 32.0, 32.0, 38.0 and 32.0 allocations against its ceiling of
+20 — a FALSE regression report of the exact shape the gate exists to catch. Three
+of the four were under mutations that cannot touch the read path at all (a change
+to a `default:` branch of an estimate-conversion switch, a change to a Bolt `if`,
+and a change that DISABLES the estimate collector); the fourth was an ordinary
+`go test ./cypher/` immediately after a `golangci-lint` run.
+
+What every occurrence has in common is **concurrent compilation**, not load as
+such:
+
+* isolated (`-run '^TestReadPathAllocationCeiling$'`), this tree reads exactly
+  **20.00**, ten times out of ten;
+* 20 consecutive `go test ./cypher/` runs — 10 on this tree and 10 on HEAD,
+  interleaved, at load average 3.8–4.4 — produced **zero** failures on either;
+* `benchstat` over ten interleaved rounds reports allocs/op IDENTICAL to HEAD, all
+  samples equal, p=1.000.
+
+rmp #2753 moved the measurement into a child process to escape sibling test
+goroutines, and its own comment records 20.00 isolated against 32.00 contaminated —
+32.00 is precisely the number that came back here. The child escapes the siblings
+but still shares the machine with whatever else the toolchain is doing.
+
+**Limit of this finding:** the reproducer is concurrent compilation, and it was not
+run against HEAD, so this does not establish that HEAD is equally susceptible — only
+that this change's allocation count is identical to HEAD's and that the isolated
+reading is exactly the calibrated 20.00.
+
+### Still open after #2765
+
+* The two build-synthesised leaves and the two operator families named above carry
+  no estimate; the physical `Est.Rows` cell reads `-` for them.
+* `statsRangeEstimateInner`'s `n, _ := src.ResolveLabelCount(label)` conflates
+  "cannot answer exactly" with "no live rows" (#2766).
+* D11 stands: `EXPLAIN` on a WRITING statement still captures a LOGICAL tree, and
+  that capture carries no estimates — the estimates on it belong to the logical
+  walk, which renders them in words with a certified error term the physical
+  renderer cannot reproduce. Nothing marks the captured tree as logical either.
+* The `Est.Rows` column carries the number and an approximation marker only; the
+  provenance in words remains available on `ExplainLogical` and, since this task, on
+  the indented physical renderings and the Bolt `args`.
+* `TestReadPathAllocationCeiling` remains sensitive to load outside its own process
+  (above).
+* One reducible cost is named and not taken: merging `buildOpts.profiler` and
+  `buildOpts.estimates` into a single "this build renders its plan" field would make
+  the struct grow by zero words and `buildOperator`'s early-out identical to HEAD's.

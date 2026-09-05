@@ -169,18 +169,26 @@ func (in explainInputs) walk(emit planLineSink, params map[string]expr.Value) {
 // Every figure in the Est.Rows column is an ESTIMATE the planner derived before
 // running anything — the column is named for that, and nothing here is measured.
 // A cell reading "40" is an exact maintained count of what the operator WOULD
-// read, not a count of what it DID; ExplainTable executes nothing. Use
-// [Engine.ProfileTable] for measured row counts, and compare the two tables when
-// you need to know whether an estimate held.
+// read, not a count of what it DID; ExplainTable executes nothing.
 //
-// Comparing them is a manual step here, and both incumbents make it automatic:
-// Neo4j puts "Estimated Rows" and "Rows" in ADJACENT COLUMNS of one PROFILE table
-// (renderAsTreeTable.scala, 5.26.16) and PostgreSQL prints the cost estimate and
-// the "actual" group on ONE line (explain.c, REL_17). GoGraph's two tables also
-// render two DIFFERENT plans — this one the logical plan, ProfileTable the
-// physical one — so their rows do not correspond one to one and cannot simply be
-// placed side by side. That is recorded as a gap, not a defect, in
-// docs/explain-profile-honesty-audit-2026-09-03.md.
+// To see an estimate against what actually happened, use [Engine.ProfileTable],
+// which since rmp #2765 carries its OWN Est.Rows column immediately left of the
+// measured Rows — the arrangement both incumbents chose (Neo4j orders
+// ESTIMATED_ROWS before ROWS in one PROFILE table, renderAsTreeTable.scala:212 at
+// 5.26.16; PostgreSQL prints the cost estimate and the "actual" group on one line,
+// explain.c:1811 and :1853 at REL_17_STABLE). That closed divergence D3 of
+// docs/explain-profile-honesty-audit-2026-09-03.md, which had recorded the manual
+// comparison as the audit's largest gap.
+//
+// The two tables still render two DIFFERENT plans — this one the logical plan,
+// ProfileTable the physical one — so they are not read side by side. What they do
+// is AGREE, node for node, wherever a logical node has an operator of its own: the
+// physical table carries the same estimate this walk derives, computed by the same
+// providers through the same helpers. They diverge in exactly one direction, and
+// only for the two leaves this renderer SYNTHESISES in a rewrite's place (the
+// range-seek scan and the min-label re-anchored scan): those have a line and an
+// estimate here, and no logical node for the physical plan to attach one to, so
+// they render "-" there. See cypher/plan_estimate_physical.go.
 //
 // No rows are produced and the graph is not modified. A DDL statement has no
 // query plan and renders as a single explanatory row.
@@ -211,19 +219,37 @@ func (e *Engine) ExplainTable(query string, params map[string]expr.Value) (s str
 // ProfileTable executes query and returns the measured PHYSICAL plan as a
 // Neo4j-style columnar table:
 //
-//	+-----------------------------+------+--------+-----------+
-//	| Operator                    | Rows | DbHits | Time (ms) |
-//	+-----------------------------+------+--------+-----------+
-//	| Project                     |   40 |      ? |     0.032 |
-//	| └─ NodeByLabelScan [Person] |   40 |     40 |     0.003 |
-//	+-----------------------------+------+--------+-----------+
-//	| Total                       |   80 | 40 + ? |     0.032 |
-//	+-----------------------------+------+--------+-----------+
+//	+-----------------------------+----------+------+--------+-----------+
+//	| Operator                    | Est.Rows | Rows | DbHits | Time (ms) |
+//	+-----------------------------+----------+------+--------+-----------+
+//	| Project                     |        - |   40 |      ? |     0.032 |
+//	| └─ NodeByLabelScan [Person] |       40 |   40 |     40 |     0.003 |
+//	+-----------------------------+----------+------+--------+-----------+
+//	| Total                       |          |   80 | 40 + ? |     0.032 |
+//	+-----------------------------+----------+------+--------+-----------+
 //
 // The "?" is not a defect in the projection: a Project evaluates a
 // caller-supplied expression, and a GoGraph expression can walk the graph (a
 // pattern predicate or a pattern comprehension does), so nothing counted what
-// this operator may have read. See [exec.PlanNode.DbHitsKnown].
+// this operator may have read. See [exec.PlanNode.DbHitsKnown]. Its "-" in
+// Est.Rows is a different statement again: no logical node the planner estimates
+// lowers to a final projection, so there is no figure rather than an uncounted one.
+//
+// # Est.Rows, immediately left of Rows
+//
+// The first column is the planner's PREDICTION and the second what actually
+// happened, adjacent so the pair reads on one line — which is what tells a reader
+// whether the plan was chosen on a good guess or a bad one (rmp #2765, closing
+// divergence D3, "the largest gap"). The cell conventions are
+// [Engine.ExplainTable]'s: a bare number is an exact maintained count, "~N" an
+// approximation, "-" no estimate at all. A number is never fabricated, and a
+// genuine estimate of ZERO renders "0".
+//
+// The column appears only when some operator in the plan carries an estimate, and
+// the Total row's cell is always blank: estimates are per-operator predictions, and
+// a sum over the subset that has one would be a floor presented as a total. Which
+// operators have one, and which shapes deliberately cannot, is set out in
+// cypher/plan_estimate_physical.go.
 //
 // It is [Engine.Profile] in a table rather than a tree, over the SAME measured
 // plan: ProfileTable and Profile run the identical build-and-drain and render
@@ -341,7 +367,13 @@ func profileReportFromPlan(root *exec.PlanNode) explain.ProfileReport {
 			// plan-wide total accompanies it — see explain.FormatReport for why.
 			RowsRemovedByFilter:      nonNegative(n.RowsRemovedByFilter),
 			RowsRemovedByFilterKnown: n.RowsRemovedByFilterKnown,
-			ElapsedNs:                n.Time.Nanoseconds(),
+			// The planner's PREDICTION, carried through with its provenance exactly as
+			// the two measured-or-not figures above are. It renders in its own column
+			// immediately left of Rows, so the prediction and the outcome are read on one
+			// line (rmp #2765). An operator no logical node claimed has the zero value
+			// here, which the formatter renders "-" and never as a number.
+			Est:       n.Est,
+			ElapsedNs: n.Time.Nanoseconds(),
 		})
 		rep.TotalRows += nonNegative(n.Rows)
 		// The total sums the KNOWN cells only and records that it did. Adding an

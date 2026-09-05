@@ -373,19 +373,30 @@ func TestProfileTable_TotalsAreTheDocumentedArithmetic(t *testing.T) {
 // whether the cell carried the "?" marker; dbhits is the numeric part, which is
 // 0 for a bare "?".
 func totalCells(out string) (rows, dbhits int64, uncertain, ok bool) {
+	// Columns are located by their HEADER, not by their index. Two of this table's
+	// columns are conditional — Removed since rmp #2764, Est.Rows since rmp #2765 —
+	// and Est.Rows is inserted to the LEFT of Rows, so a fixed index reads a
+	// different column for the same plan depending on what the plan contains. That
+	// is a harness that silently changes what it asserts, which is worse than one
+	// that fails.
+	rowsCol, okR := tableColumnIndex(out, "Rows")
+	hitsCol, okH := tableColumnIndex(out, "DbHits")
+	if !okR || !okH {
+		return 0, 0, false, false
+	}
 	for _, l := range strings.Split(out, "\n") {
 		if !strings.HasPrefix(l, "| Total") {
 			continue
 		}
 		cells := strings.Split(strings.Trim(l, "|"), "|")
-		if len(cells) < 3 {
+		if len(cells) <= rowsCol || len(cells) <= hitsCol {
 			return 0, 0, false, false
 		}
-		r, err1 := strconv.ParseInt(strings.TrimSpace(cells[1]), 10, 64)
+		r, err1 := strconv.ParseInt(strings.TrimSpace(cells[rowsCol]), 10, 64)
 		if err1 != nil {
 			return 0, 0, false, false
 		}
-		hits := strings.TrimSpace(cells[2])
+		hits := strings.TrimSpace(cells[hitsCol])
 		unc := strings.Contains(hits, "?")
 		hits = strings.TrimSpace(strings.TrimSuffix(hits, "?"))
 		hits = strings.TrimSpace(strings.TrimSuffix(hits, "+"))
@@ -399,6 +410,30 @@ func totalCells(out string) (rows, dbhits int64, uncertain, ok bool) {
 		return r, d, unc, true
 	}
 	return 0, 0, false, false
+}
+
+// tableColumnIndex returns the index, within a row split on "|" after trimming the
+// outer bars, of the column whose header cell is exactly header.
+//
+// It exists because this table's column SET is not fixed: Removed (rmp #2764) and
+// Est.Rows (rmp #2765) appear only when some operator carries the figure, and
+// Est.Rows appears to the left of Rows rather than at the end. Every cell reader in
+// the test suite therefore has to name the column it wants instead of counting to
+// it. ok is false when no header row is found or the header is absent, which the
+// callers report as a harness failure rather than as an engine one.
+func tableColumnIndex(out, header string) (int, bool) {
+	for _, l := range strings.Split(out, "\n") {
+		if !strings.HasPrefix(l, "| Operator") {
+			continue
+		}
+		for i, c := range strings.Split(strings.Trim(l, "|"), "|") {
+			if strings.TrimSpace(c) == header {
+				return i, true
+			}
+		}
+		return 0, false
+	}
+	return 0, false
 }
 
 // TestExplainTable_DoesNotExecute holds the EXPLAIN contract for the new entry

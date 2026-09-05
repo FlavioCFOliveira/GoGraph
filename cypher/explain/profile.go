@@ -70,6 +70,22 @@ type OperatorStats struct {
 	// assembled by hand: a caller that has not thought about rejection should not
 	// have the table assert that its operators rejected nothing.
 	RowsRemovedByFilterKnown bool
+	// Est is the planner's cardinality ESTIMATE for this operator and that
+	// estimate's provenance, mirroring [exec.PlanNode.Est] on the node this row was
+	// flattened from (rmp #2765).
+	//
+	// It is the one field here that is not a measurement, and the table keeps it in
+	// its own column — Est.Rows, immediately LEFT of Rows — so the two can be read
+	// against each other line by line. That adjacency is the whole point: it is what
+	// tells a reader whether the plan they are looking at was chosen on a good guess
+	// or a bad one, and it is the arrangement both incumbents chose (citations on
+	// [exec.PlanEstimate]).
+	//
+	// Its zero value is [exec.EstimateAbsent], so a report assembled by a caller that
+	// never considered estimates claims none — the same honest default the two
+	// *Known flags above have, reached here through the enum rather than a companion
+	// bool because provenance is part of the figure.
+	Est exec.PlanEstimate
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -221,9 +237,48 @@ type ProfileReport struct {
 // When NO operator reports the figure the column is not rendered at all and the
 // table is byte-identical to the four-column form above. That is Neo4j's rule for
 // an argument no plan node carries (renderAsTreeTable.scala, 5.26.16).
+//
+// # The Est.Rows column, present only when something was estimated
+//
+// When at least one operator carries the planner's cardinality estimate
+// ([OperatorStats.Est]), a column appears IMMEDIATELY LEFT of Rows so the
+// prediction and the measurement can be read against each other on one line
+// (rmp #2765, closing divergence D3):
+//
+//	+--------------------------+----------+------+--------+-----------+
+//	| Operator                 | Est.Rows | Rows | DbHits | Time (ms) |
+//	+--------------------------+----------+------+--------+-----------+
+//	| Filter                   |      ~10 |    3 |      ? |     0.412 |
+//	| └─ NodeByLabelScan [P]   |     1000 | 1000 |   1000 |     0.203 |
+//	+--------------------------+----------+------+--------+-----------+
+//	| Total                    |          | 1003 |   1000 |     0.412 |
+//	+--------------------------+----------+------+--------+-----------+
+//
+// The adjacency and the column order are Neo4j's, read at 5.26.16: Header.ALL
+// lists ESTIMATED_ROWS immediately before ROWS (renderAsTreeTable.scala:212) and
+// RenderAsTreeTableTest.scala:277 asserts that header verbatim. GoGraph keeps its
+// own shorter spelling, Est.Rows, because that is what [cypher.Engine.ExplainTable]
+// already prints and a reader moving between the two tables should not have to
+// translate.
+//
+// The cell conventions are [exec.EstRowsCell]'s and are shared with that table: a
+// bare number is an EXACT maintained count, a leading tilde marks an
+// approximation, and "-" means no estimate — either none was derivable for the
+// operator's shape, or the statistic behind it was stale. A fabricated number is
+// never printed, and an estimate of genuine ZERO prints "0" rather than "-".
+//
+// The Total row's Est.Rows cell is BLANK, for the same reason the Removed total is:
+// only some operators carry an estimate, so a sum would be a floor presented as a
+// total. Unlike db-hits there is not even a well-defined question a plan-wide
+// estimate total would answer — estimates are per-operator predictions, not a cost
+// that accumulates.
+//
+// When NO operator carries an estimate the column is dropped and the table is
+// byte-identical to the form above without it — Neo4j's rule again.
 func FormatReport(r ProfileReport) string {
 	type row struct {
 		name    string
+		est     string
 		rows    string
 		dbhits  string
 		removed string
@@ -231,7 +286,11 @@ func FormatReport(r ProfileReport) string {
 	}
 
 	const (
-		hdrName    = "Operator"
+		hdrName = "Operator"
+		// The SAME constant the logical plan table uses (text_tree.go), so the two
+		// tables cannot drift into two spellings of one column. A reader moving between
+		// ExplainTable and ProfileTable should not have to translate.
+		hdrEst     = hdrEstRows
 		hdrRows    = "Rows"
 		hdrDbHits  = "DbHits"
 		hdrRemoved = "Removed"
@@ -248,11 +307,22 @@ func FormatReport(r ProfileReport) string {
 			break
 		}
 	}
+	// Same rule, same reason, decided over the whole report before any cell is
+	// rendered: a plan in which nothing was estimated renders no Est.Rows column at
+	// all rather than a column of dashes.
+	showEst := false
+	for _, op := range r.Operators {
+		if op.Est.Source.Known() {
+			showEst = true
+			break
+		}
+	}
 
 	rows := make([]row, len(r.Operators))
 	for i, op := range r.Operators {
 		rows[i] = row{
 			name:    op.Name,
+			est:     exec.EstRowsCell(op.Est),
 			rows:    fmt.Sprintf("%d", op.Rows),
 			dbhits:  exec.DbHitsCell(int64(op.DbHits), op.DbHitsKnown),
 			removed: exec.RowsRemovedCell(int64(op.RowsRemovedByFilter), op.RowsRemovedByFilterKnown),
@@ -261,6 +331,7 @@ func FormatReport(r ProfileReport) string {
 	}
 	totalRow := row{
 		name:    "Total",
+		est:     "", // no plan-wide estimate is claimed; see the doc comment above
 		rows:    fmt.Sprintf("%d", r.TotalRows),
 		dbhits:  exec.DbHitsTotalCell(int64(r.TotalDbHits), r.TotalDbHitsUncertain),
 		removed: "", // no plan-wide total is claimed; see the doc comment above
@@ -272,6 +343,10 @@ func FormatReport(r ProfileReport) string {
 	// into the column, and a byte measurement pads those rows short so the
 	// right-hand border walks left with the tree depth.
 	wName := maxWidth(0, hdrName)
+	wEst := 0
+	if showEst {
+		wEst = maxWidth(0, hdrEst)
+	}
 	wRows := maxWidth(0, hdrRows)
 	wDbHits := maxWidth(0, hdrDbHits)
 	wRemoved := 0
@@ -281,6 +356,9 @@ func FormatReport(r ProfileReport) string {
 	wElapsed := maxWidth(0, hdrElapsed)
 	for _, rr := range rows {
 		wName = maxWidth(wName, rr.name)
+		if showEst {
+			wEst = maxWidth(wEst, rr.est)
+		}
 		wRows = maxWidth(wRows, rr.rows)
 		wDbHits = maxWidth(wDbHits, rr.dbhits)
 		if showRemoved {
@@ -294,8 +372,11 @@ func FormatReport(r ProfileReport) string {
 	wDbHits = maxWidth(wDbHits, totalRow.dbhits)
 	wElapsed = maxWidth(wElapsed, totalRow.elapsed)
 
-	sep := fmt.Sprintf("+-%s-+-%s-+-%s-+",
-		strings.Repeat("-", wName),
+	sep := fmt.Sprintf("+-%s-+", strings.Repeat("-", wName))
+	if showEst {
+		sep += fmt.Sprintf("-%s-+", strings.Repeat("-", wEst))
+	}
+	sep += fmt.Sprintf("-%s-+-%s-+",
 		strings.Repeat("-", wRows),
 		strings.Repeat("-", wDbHits),
 	)
@@ -309,6 +390,10 @@ func FormatReport(r ProfileReport) string {
 	writeLine := func(rr row) {
 		b.WriteString("| ")
 		b.WriteString(padRight(rr.name, wName))
+		if showEst {
+			b.WriteString(" | ")
+			b.WriteString(padLeft(rr.est, wEst))
+		}
 		b.WriteString(" | ")
 		b.WriteString(padLeft(rr.rows, wRows))
 		b.WriteString(" | ")
@@ -324,7 +409,7 @@ func FormatReport(r ProfileReport) string {
 
 	b.WriteString(sep)
 	b.WriteByte('\n')
-	writeLine(row{name: hdrName, rows: hdrRows, dbhits: hdrDbHits, removed: hdrRemoved, elapsed: hdrElapsed})
+	writeLine(row{name: hdrName, est: hdrEst, rows: hdrRows, dbhits: hdrDbHits, removed: hdrRemoved, elapsed: hdrElapsed})
 	b.WriteString(sep)
 	b.WriteByte('\n')
 	for _, rr := range rows {
