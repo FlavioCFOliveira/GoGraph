@@ -44,7 +44,7 @@ COVER_PROFILE=${COVER_PROFILE:-cover.out}
 COVER_LIB_PROFILE=${COVER_LIB_PROFILE:-cover.lib.out}
 # bench/contention is an env-gated sweep harness, not library code: its surface is
 # unreachable unless GOGRAPH_CONTENTION_SWEEP_DIR is set (see sweep_test.go).
-COVER_EXCLUDE=${COVER_EXCLUDE:-'github.com/FlavioCFOliveira/GoGraph/(examples|cmd|bench/soak|bench/ldbc|bench/dimacs9|bench/cypher_ldbc|bench/comparison/ggserver|bench/contention|cypher/parser/gen)'}
+COVER_EXCLUDE=${COVER_EXCLUDE:-'github.com/FlavioCFOliveira/GoGraph/(examples|cmd|bench/soak|bench/ldbc|bench/dimacs9|bench/cypher_ldbc|bench/comparison/ggserver|bench/contention|bench/entryheap|cypher/parser/gen)'}
 MIN_TOTAL=${MIN_TOTAL:-85.0}
 MIN_PER_PKG=${MIN_PER_PKG:-75.0}
 
