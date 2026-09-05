@@ -198,6 +198,24 @@ type Expand struct {
 	// narrowed the range, so an expand-into seek is not charged for the block it
 	// skipped rather than read.
 	fwdBase, revBase uint64
+	// slotsRejected counts the adjacency slots this operator consumed and then
+	// DISCARDED, over its whole lifetime (rmp #2764). It is the complement of the
+	// slots that reached an emission, so it and [Expand.storageAccesses] compose
+	// exactly — see [Expand.rowsRemovedByFilter] for the identity and how it was
+	// proved. Bumped only on branches the operator already takes to reject a slot;
+	// nothing is added on the path that emits. Like slotsRead it survives re-Init.
+	//
+	// It is charged in the four CALLERS of [Expand.advanceFwdEdge] and
+	// [Expand.advanceRevEdge] rather than inside them, which is a measured decision
+	// and not a stylistic one: those two functions are the innermost code of every
+	// expansion, and adding ANY statement to them costs a few percent on a
+	// single-hop unfiltered walk even when the statement never executes. Measured —
+	// a dead counter of exactly this shape, added to the unchanged operator, cost
+	// +3.11% (p=0.003) on BenchmarkExpandDir_InVsOut_Baseline/OUT_deg1_sources, a
+	// benchmark with no type filter and no morphism in which no rejection branch is
+	// ever taken. Charging in the callers leaves both functions byte-identical to
+	// their pre-#2764 form and halves that cost.
+	slotsRejected int64
 
 	// Columnar fan-out cursor and multiplicity re-emit state (FillChunk path).
 	cScratchLen    int   // rows currently held in cScratch
@@ -492,9 +510,11 @@ func (op *Expand) tryFwdEdge(out *Row) (emitted, handled bool) {
 	case edgeNone:
 		return false, false
 	case edgeSkip:
+		op.slotsRejected++
 		return false, true
 	default: // edgeEmit
 		if !op.dstMatchesInto(dst) {
+			op.slotsRejected++
 			return false, true // expand-into: not the bound destination — skip
 		}
 		op.buildRow(out, src, edge, dst)
@@ -512,9 +532,11 @@ func (op *Expand) tryRevEdge(out *Row) (emitted, handled bool) {
 	case edgeNone:
 		return false, false
 	case edgeSkip:
+		op.slotsRejected++
 		return false, true
 	default: // edgeEmit
 		if !op.dstMatchesInto(dst) {
+			op.slotsRejected++
 			return false, true // expand-into: not the bound destination — skip
 		}
 		op.buildRow(out, src, edge, dst)
@@ -1084,6 +1106,102 @@ func (op *Expand) storageAccesses() int64 {
 	return op.slotsRead + int64(op.fwdStart-op.fwdBase) + int64(op.revStart-op.revBase)
 }
 
+// rowsRemovedByFilter reports the adjacency slots this expansion consumed and then
+// DISCARDED. It implements the rowsRemovedCounter marker in rows_removed.go, so
+// PROFILE renders a figure for this operator rather than omitting the cell
+// (rmp #2764).
+//
+// # Why the operator needs it even though it already reports db-hits
+//
+// Since rmp #2761 [Expand.storageAccesses] reports the slots the cursors WALKED
+// and the wrapper reports the rows EMITTED, so a reader might try to subtract one
+// from the other. That difference is not this number, for two reasons that pull in
+// opposite directions: a multigraph CREATE multiplicity re-emits one admitted
+// triplet several times ([Expand.maybeQueueMultiplicity]), inflating Rows above the
+// admitted slots; and an expand-into SEEK narrows the cursor before the walk
+// begins, so the slots it jumped over appear in neither figure. The subtraction is
+// therefore an estimate; this is a count.
+//
+// # What it counts, exactly
+//
+// Every one of the four fates a consumed slot can meet other than emission, each
+// counted where the operator already branches to reject it:
+//
+//   - the relationship-TYPE filter, forward ([Expand.passesFilter]) and reverse
+//     ([Expand.reverseEdgePassesFilter]) — the fate that made refutation 2 of the
+//     honesty audit invisible from the reader's side;
+//   - CYPHERMORPHISM, which rejects a relationship already bound earlier in the
+//     same pattern (openCypher 9 §3.2.2);
+//   - the undirected SELF-LOOP deduplication, which drops a reverse self-loop the
+//     forward pass has already emitted;
+//   - the expand-into DESTINATION comparison ([Expand.dstMatchesInto]), which drops
+//     a neighbour that is not the already-bound target.
+//
+// The last two are not "filters" in PostgreSQL's sense — one is a de-duplication
+// and one is a join condition — and that is a DIVERGENCE this operator's figure
+// makes deliberately, recorded here rather than left for a reader to infer. It is
+// made because the figure's contract is "candidate rows this operator read and
+// discarded", which is the question a reader of an expensive Expand is asking;
+// splitting one operator's discard count into four unlabelled numbers would answer
+// a question nobody asked. PostgreSQL can split (`Rows Removed by Filter` vs
+// `by Join Filter` vs `by Index Recheck`) because it prints the qual beside each
+// figure; GoGraph prints no expression next to an Expand.
+//
+// # How the exactness is established, not argued
+//
+// Every slot the cursors consume leaves through exactly one of two exits: a
+// rejection counted here, or an emission. So
+//
+//	storageAccesses() == rowsRemovedByFilter() + slots that reached an emission
+//
+// holds at every instant at which no advance is half-finished, in BOTH the row-mode
+// and columnar paths, and both sides of it are counted independently — one from the
+// cursor positions, one from the reject branches. It was verified with a temporary
+// probe that panicked on disagreement across the package's expand tests and the
+// engine-level PROFILE tests, then removed. That is what makes the figure
+// falsifiable rather than plausible: an increment placed on the wrong branch, or
+// one branch left uncounted, breaks the identity.
+//
+// # One asymmetry between the two paths, stated rather than hidden
+//
+// The expand-into DESTINATION comparison exists only on the row-mode path:
+// [Expand.fillOneChunkRow] emits every slot the shared advance admits and leaves
+// the residual equality to the Selection above it, which is sound (the result is a
+// superset the Selection then narrows) but means a columnar expand-into reports no
+// rejections from that source. With the seek enabled — the default whenever a
+// destination is bound — the cursor is narrowed to the destination's run before the
+// walk, so the comparison rejects nothing on either path and the two agree. They
+// can differ only when [Expand.WithExpandIntoSeek] has disabled the seek, which is
+// a differential-test seam and not a planner choice.
+//
+// # Where the charge is taken, and why not one level deeper
+//
+// Every rejection leaves [Expand.advanceFwdEdge] or [Expand.advanceRevEdge] as the
+// single status `edgeSkip`, and there are exactly FOUR callers of those two
+// functions — [Expand.tryFwdEdge], [Expand.tryRevEdge] and the two arms of
+// [Expand.fillOneChunkRow]. The charge is taken in all four, on the branch each
+// already takes to retry, plus at the two expand-into comparisons which live in the
+// callers already. So the mapping from rejection to increment stays one-to-one
+// while the two advance functions keep the exact source they had before rmp #2764.
+//
+// That is a MEASURED decision. Those functions are the innermost code of every
+// expansion, and a statement added to them costs a few percent even when it never
+// runs: a dead counter of exactly this shape, added to the unchanged operator, cost
+// +3.11% (p=0.003, n=8) on BenchmarkExpandDir_InVsOut_Baseline/OUT_deg1_sources —
+// a benchmark with neither a type filter nor a morphism, in which no rejection
+// branch is ever taken. Charging inside the advance functions measured +4.90% on
+// that arm and +5.35% on its sibling; charging in the callers leaves the sibling
+// unchanged and the first at +2.16%, inside the envelope the dead counter defines.
+//
+// # Cost
+//
+// One integer increment on branches the operator had already decided to take, and
+// on which it does no other work; nothing at all on the path that emits. That is
+// PostgreSQL's placement of the same counter (execScan.c:255, REL_17_STABLE) and
+// the reason rows_removed.go admits a per-record increment where
+// [storageAccessCounter] refuses one.
+func (op *Expand) rowsRemovedByFilter() int64 { return op.slotsRejected }
+
 // Close releases resources and closes the child operator.
 func (op *Expand) Close() error {
 	op.fwdVerts = nil
@@ -1235,6 +1353,7 @@ func (op *Expand) fillOneChunkRow(dst *Chunk) (appended, done bool, err error) {
 				op.maybeQueueMultiplicityChunk(src, edge, d)
 				return true, false, nil
 			}
+			op.slotsRejected++
 			continue // skipped (filtered / morphism-rejected)
 		}
 		if src, edge, d, st := op.advanceRevEdge(); st != edgeNone {
@@ -1243,6 +1362,7 @@ func (op *Expand) fillOneChunkRow(dst *Chunk) (appended, done bool, err error) {
 				op.maybeQueueMultiplicityChunk(src, edge, d)
 				return true, false, nil
 			}
+			op.slotsRejected++
 			continue // skipped reverse edge
 		}
 		eos, aerr := op.advanceInputChunk()

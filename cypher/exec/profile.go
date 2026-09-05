@@ -271,6 +271,11 @@ type profiledNode interface {
 	// accompanying int64 is then meaningless and must not be rendered as a zero
 	// (rmp #2760).
 	planStats() (int64, time.Duration, int64, bool)
+	// planRowsRemoved returns the candidate rows the operator read and discarded,
+	// and whether it reports that figure at all. A false means the operator removes
+	// no rows — a property of the operator, not a measurement gap — and every
+	// renderer then OMITS the cell rather than printing a zero (rmp #2764).
+	planRowsRemoved() (int64, bool)
 }
 
 // profiledOp measures one operator: the rows it emits and the wall-clock time
@@ -376,6 +381,24 @@ func (p *profiledOp) dbHits() (int64, bool) {
 	}
 	if _, ok := p.inner.(noStorageAccess); ok {
 		return 0, true
+	}
+	return 0, false
+}
+
+// planRowsRemoved returns the rows the wrapped operator read and discarded, and
+// whether it counts them at all.
+//
+// Unlike [profiledOp.dbHits] there is no derivation and no fallback: an operator
+// either implements rowsRemovedCounter, in which case the figure is MEASURED and
+// exact, or it does not, in which case there is no figure. Nothing is inferred from
+// the row count here, because the two are not related — a Filter's rows say
+// nothing about how many it rejected, which is precisely why this figure had to be
+// added (rmp #2764).
+//
+// It is consulted HERE, in the wrapper, which only a PROFILE run allocates.
+func (p *profiledOp) planRowsRemoved() (int64, bool) {
+	if c, ok := p.inner.(rowsRemovedCounter); ok {
+		return c.rowsRemovedByFilter(), true
 	}
 	return 0, false
 }

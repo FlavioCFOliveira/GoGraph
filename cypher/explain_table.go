@@ -335,7 +335,13 @@ func profileReportFromPlan(root *exec.PlanNode) explain.ProfileReport {
 			Rows:        nonNegative(n.Rows),
 			DbHits:      nonNegative(n.DbHits),
 			DbHitsKnown: n.DbHitsKnown,
-			ElapsedNs:   n.Time.Nanoseconds(),
+			// Carried through with its flag, exactly as DbHits is: the table's
+			// Removed column exists only when some operator reports the figure, and
+			// a cell is blank rather than 0 for one that does not (rmp #2764). No
+			// plan-wide total accompanies it — see explain.FormatReport for why.
+			RowsRemovedByFilter:      nonNegative(n.RowsRemovedByFilter),
+			RowsRemovedByFilterKnown: n.RowsRemovedByFilterKnown,
+			ElapsedNs:                n.Time.Nanoseconds(),
 		})
 		rep.TotalRows += nonNegative(n.Rows)
 		// The total sums the KNOWN cells only and records that it did. Adding an

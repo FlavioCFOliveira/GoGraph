@@ -109,6 +109,53 @@ type PlanNode struct {
 	// A node that was never instrumented at all (Profiled false) also has this
 	// false: nothing counted it either.
 	DbHitsKnown bool
+
+	// RowsRemovedByFilter is the number of candidate rows this operator read and
+	// then DISCARDED because a predicate said no — PostgreSQL's `Rows Removed by
+	// Filter`, whose mechanism was read at REL_17_STABLE and is transcribed on
+	// exec's rowsRemovedCounter (cypher/exec/rows_removed.go).
+	//
+	// It is the figure that separates a selective access path from a scan that
+	// filtered afterwards FROM THE READER'S SIDE. [DbHits] answers the same question
+	// from the storage side and cannot finish it: db-hits are charged on the
+	// operator that READ the record, so a plan whose scan reads a million rows and
+	// whose Filter emits three shows the million on the scan and nothing on the
+	// Filter, and the two are only connected by a subtraction the reader has to
+	// guess at. This says it directly. The gap is divergence D2 of
+	// docs/explain-profile-honesty-audit-2026-09-03.md §5, which calls it "the
+	// sharpest missing figure" (rmp #2764).
+	//
+	// It is always MEASURED — never derived, never estimated. Three operator
+	// families report it: [Filter] and [ColumnarFilter] count the rows their
+	// predicate rejected, and [Expand], [OptionalExpand] and the columnar expand
+	// count the adjacency slots their type filter, cyphermorphism check,
+	// self-loop deduplication and expand-into comparison discarded.
+	//
+	// Like the other measured columns it is a LIFETIME total across re-Init, never a
+	// per-invocation average — a divergence from PostgreSQL, which divides by
+	// `nloops`, recorded with the rest on exec's rowsRemovedCounter.
+	RowsRemovedByFilter int64
+
+	// RowsRemovedByFilterKnown reports whether RowsRemovedByFilter is a figure at
+	// all. It is false for an operator that removes no rows, and every renderer then
+	// OMITS the cell rather than printing 0 — the same rule [DbHitsKnown] applies,
+	// and PostgreSQL's own (`if (plan->qual)` guards every one of its 19 print
+	// sites, so a node with no filter expression prints nothing).
+	//
+	// The two flags say different things when false, and the renderings differ to
+	// match. A false [DbHitsKnown] is an admission — "this operator reads storage
+	// and nobody counted it" — and renders as "?". A false here is a PROPERTY of the
+	// operator — "this operator removes no rows, so there is no figure" — and renders
+	// as nothing at all.
+	//
+	// GoGraph diverges from PostgreSQL in the other direction for a MEASURED zero:
+	// PostgreSQL suppresses a zero count in text mode ("they're not interesting
+	// enough", explain.c:3638), GoGraph prints `removed=0`, because a filter that
+	// rejected nothing is exactly the finding a reader of a slow plan is looking for.
+	//
+	// A node that was never instrumented at all (Profiled false) also has this
+	// false: nothing counted it either.
+	RowsRemovedByFilterKnown bool
 }
 
 // PlanTree builds the physical plan tree rooted at op.
@@ -128,6 +175,7 @@ func PlanTree(op Operator) PlanNode {
 		// the node after it rather than after the wrapper.
 		inner = p.planUnwrap()
 		n.Rows, n.Time, n.DbHits, n.DbHitsKnown = p.planStats()
+		n.RowsRemovedByFilter, n.RowsRemovedByFilterKnown = p.planRowsRemoved()
 		n.Profiled = true
 	}
 
@@ -188,6 +236,20 @@ func RenderPlan(op Operator) string {
 // ([DbHitsUnknown]) rather than `dbhits=0`, which would read as an operator that
 // touched no storage (rmp #2760). [PlanNode.DbHitsKnown] carries the state.
 //
+// And once more for the rows an operator REMOVED: `removed=N` appears only on an
+// operator that removes rows, and is absent — not zero — everywhere else
+// ([PlanNode.RowsRemovedByFilterKnown], rmp #2764). So a plan reading
+//
+//	Filter (rows=3, dbhits=?, removed=997, time=1.2ms)
+//	└─ NodeByLabelScan [n:P] (rows=1000, dbhits=1000, time=0.8ms)
+//
+// says plainly that 1000 rows were read to answer with 3, where the same plan
+// answered by a seek reads
+//
+//	NodeByIndexSeek [n:P(age)] (rows=3, dbhits=3, time=0.1ms)
+//
+// with no removed cell at all, because a seek removes nothing.
+//
 // Such nodes USED to exist: instrumentation is applied at one point, the value the
 // recursive builder returns, and a composite lowering emits several operators for a
 // single logical node, of which only the outermost passed through it. rmp #2237
@@ -226,8 +288,15 @@ func writePlanNode(b *strings.Builder, n *PlanNode, prefix, childPrefix string, 
 	}
 	switch {
 	case n.Profiled:
-		fmt.Fprintf(b, " (rows=%d, dbhits=%s, time=%s)",
-			n.Rows, DbHitsCell(n.DbHits, n.DbHitsKnown), n.Time.Round(time.Microsecond))
+		fmt.Fprintf(b, " (rows=%d, dbhits=%s", n.Rows, DbHitsCell(n.DbHits, n.DbHitsKnown))
+		// Omitted entirely for an operator that removes no rows, rather than
+		// printed as a zero it never earned (rmp #2764). PostgreSQL reaches the
+		// same omission through its `if (plan->qual)` guard; here the operator's
+		// own rowsRemovedCounter claim decides.
+		if n.RowsRemovedByFilterKnown {
+			fmt.Fprintf(b, ", removed=%d", n.RowsRemovedByFilter)
+		}
+		fmt.Fprintf(b, ", time=%s)", n.Time.Round(time.Microsecond))
 	case anyMeasured:
 		b.WriteString(" (not measured)")
 	}

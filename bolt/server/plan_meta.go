@@ -57,6 +57,22 @@ const (
 	// planArgDetails carries the operator's own inline detail — the scanned
 	// label, the expanded pattern — under the key Neo4j uses for the same thing.
 	planArgDetails = "Details"
+	// planArgRowsRemoved carries the candidate rows an operator read and then
+	// discarded, under PostgreSQL's own name for the concept (rmp #2764).
+	//
+	// It goes in `args` and NOT at the top level, which is a wire-protocol fact
+	// rather than a preference: the driver's parseProfile reads a FIXED set of
+	// top-level keys — dbHits, rows, time, and the three pageCache ones — and
+	// discards every other, so a new top-level key would reach no caller. `args`
+	// is read wholesale into ProfiledPlan.Arguments (neo4j-go-driver v5.28.4,
+	// neo4j/internal/bolt/hydrator.go, parsePlanOpIdArgsChildren), so a figure put
+	// there is surfaced to the driver's user verbatim.
+	//
+	// The name is PostgreSQL's `Rows Removed by Filter` in the CamelCase spelling
+	// the args map uses for every other key (Neo4j's own arguments are `DbHits`,
+	// `EstimatedRows`, `Details`). Neo4j has no equivalent argument, so there is no
+	// incumbent spelling to match and the recognisable name is the right one.
+	planArgRowsRemoved = "RowsRemovedByFilter"
 )
 
 // resultPlanMetadata renders the plan a statement captured, as the pair of
@@ -92,8 +108,23 @@ func planNodeMetadata(n *exec.PlanNode, profiled bool) map[string]packstream.Val
 	m := map[string]packstream.Value{
 		planKeyOperatorType: n.Name,
 	}
+	args := map[string]packstream.Value{}
 	if n.Detail != "" {
-		m[planKeyArgs] = map[string]packstream.Value{planArgDetails: n.Detail}
+		args[planArgDetails] = n.Detail
+	}
+	// The rejection figure is an ARG rather than a top-level key, and it is written
+	// only when the operator reports one. An operator that removes no rows sends
+	// nothing, on the same reasoning that omits dbHits below and the page-cache keys
+	// above: an absent key is "no figure", a 0 would be a measurement claim
+	// (rmp #2764). Unlike dbHits this is also written for an EXPLAIN-shaped node —
+	// it cannot be, in practice, because an EXPLAIN never runs an operator and so no
+	// operator ever claims the figure, but the guard is the flag rather than the
+	// mode, so the two cannot disagree.
+	if profiled && n.RowsRemovedByFilterKnown {
+		args[planArgRowsRemoved] = n.RowsRemovedByFilter
+	}
+	if len(args) > 0 {
+		m[planKeyArgs] = args
 	}
 	if profiled {
 		// rows and time are emitted for every node, including one the

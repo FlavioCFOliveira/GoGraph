@@ -1334,21 +1334,24 @@ the estimate that drove it.
 ### `Engine.Profile` — what it cost
 
 Executes the query and returns the physical plan annotated with each operator's
-emitted rows, its logical storage accesses (`dbhits`), and the time attributed to
-it:
+emitted rows, its logical storage accesses (`dbhits`), the rows it read and then
+discarded (`removed`), and the time attributed to it:
 
 ```
 ColumnarProject (rows=1, dbhits=?, time=17µs)
 └─ NodeByIndexSeek [seek="n7"] (rows=1, dbhits=1, time=0s)
 
 ColumnarProject (rows=8, dbhits=?, time=25µs)
-└─ ColumnarFilter (rows=8, dbhits=?, time=24µs)
+└─ ColumnarFilter (rows=8, dbhits=?, removed=292, time=24µs)
    └─ NodeByLabelScan [P] (rows=300, dbhits=300, time=2µs)
 ```
 
-Those two plans are the reason `dbhits` is reported. They return a comparable
-handful of rows over the same 300-node graph, and only the access counts show that
-the second read every record in the label.
+Those two plans are the reason `dbhits` and `removed` are reported. They return a
+comparable handful of rows over the same 300-node graph, and only those two figures
+show that the second read every record in the label and threw almost all of them
+away. `dbhits` says it from the storage side, on the operator that did the reading;
+`removed` says it from the reader's side, on the operator that did the discarding.
+Neither alone finishes the sentence.
 
 Times are **inclusive** of an operator's children, because a pipelined operator's
 `Next` pulls from them — subtract a node's children for its exclusive cost, as
@@ -1455,6 +1458,59 @@ build in which profiling does not exist.
 > measurements behind each claim above, is in
 > [`explain-profile-honesty-audit-2026-09-03.md`](explain-profile-honesty-audit-2026-09-03.md).
 
+> **What `removed` is, exactly.** It is the number of candidate rows an operator
+> read and then **discarded because a predicate said no** — PostgreSQL's
+> `Rows Removed by Filter`, whose mechanism was read at `REL_17_STABLE` and whose
+> concept name GoGraph publishes verbatim on the Bolt wire as
+> `args.RowsRemovedByFilter`.
+>
+> Unlike `dbhits` it is never derived and never estimated: it is always a count of
+> decisions the operator took. Three families report it, and **every other operator
+> omits the cell entirely** rather than printing `0`:
+>
+> - `Filter` and `ColumnarFilter` count the rows their predicate rejected. NULL and
+>   FALSE both count, because both drop the row (openCypher 9 §4.1.3).
+> - `Expand`, `OptionalExpand` and the columnar expand count the adjacency slots
+>   they consumed and discarded — by the relationship-type filter, by
+>   cyphermorphism, by the undirected self-loop deduplication, or by the
+>   expand-into destination comparison. Two of those four are not "filters" in
+>   PostgreSQL's sense; the figure's contract here is "candidate rows read and
+>   discarded", which is the question a reader of an expensive expansion is asking.
+>
+> **A blank cell and a `?` cell mean different things.** A `?` under `DbHits` is an
+> admission — the operator reads storage and nobody counted it. An absent `removed=`
+> (or a blank `Removed` cell in the table) is a *property* of the operator: it
+> removes no rows, so there is no figure. A scan and an index seek are always in the
+> second category.
+>
+> **A `removed=0` is a measurement, and a useful one.** GoGraph prints it where
+> PostgreSQL suppresses it (`explain.c:3638`, "they're not interesting enough"),
+> because a filter that rejected nothing is exactly what you want to see above an
+> index that answered the predicate on its own:
+>
+> ```
+> Filter (rows=3, dbhits=?, removed=997, time=239µs)
+> └─ NodeByLabelScan [P] (rows=1000, dbhits=1000, time=22µs)
+>
+> Filter (rows=3, dbhits=?, removed=0, time=1µs)
+> └─ NodeByIndexRangeScan [range=7..7] (rows=3, dbhits=3, time=0s)
+> ```
+>
+> Both plans answer with the same three rows. The first read 1000 records to do it.
+>
+> **The figure is a lifetime total**, summed across every re-`Init` an operator sees
+> under an `Apply` — the same convention `rows` and `dbhits` follow. PostgreSQL
+> divides its figure by `nloops` and reports a per-loop average; GoGraph prints no
+> `loops` column, so dividing would produce a number incomparable with the `rows`
+> beside it.
+>
+> **There is no plan-wide total.** `PROFILE`'s table leaves the `Removed` column's
+> `Total` cell blank. `DbHits` can be totalled because every operator is classified,
+> so the sum is either complete or explicitly `N + ?`; rejection is reported by three
+> families only, and other operators discard rows for reasons this figure would
+> misdescribe — `LIMIT` on a count, `DISTINCT` by merging, `SemiApply` on an inner
+> plan's emptiness. A summed cell would be a floor presented as a total.
+
 ### `Engine.ExplainTable` and `Engine.ProfileTable` — the same, as a table
 
 `ExplainTable` and `ProfileTable` return what `ExplainLogical` and `Profile`
@@ -1482,6 +1538,23 @@ not.
 +--------------------------------+------+--------+-----------+
 | Total                          |    2 |  1 + ? |     0.000 |
 +--------------------------------+------+--------+-----------+
+```
+
+A **`Removed` column appears only when some operator in the plan removes rows**, so
+a plan with no filter and no expansion renders exactly the four columns above. When
+it does appear, an operator that removes no rows leaves its cell blank, and the
+`Total` cell is blank too — no plan-wide total is claimed:
+
+```
++---------------------------+------+----------+---------+-----------+
+| Operator                  | Rows |   DbHits | Removed | Time (ms) |
++---------------------------+------+----------+---------+-----------+
+| Project                   |    3 |        ? |         |     0.177 |
+| └─ Filter                 |    3 |        ? |     997 |     0.175 |
+|    └─ NodeByLabelScan [P] | 1000 |     1000 |         |     0.020 |
++---------------------------+------+----------+---------+-----------+
+| Total                     | 1006 | 1000 + ? |         |     0.177 |
++---------------------------+------+----------+---------+-----------+
 ```
 
 Each is the **same walk** as its tree counterpart, not a second derivation of the
@@ -1516,6 +1589,8 @@ cells are easy to mistake:
   `N + ?` to say so. Read `N + ?` as a **lower bound** on the query's
   storage-record reads. Even a plain `N` remains a lower bound, because property
   reads are not counted for any operator — see the note above.
+- **`Removed`** has no `Total` cell at all — see the note above. Read the column
+  operator by operator.
 - **`Time (ms)`** is the whole query's elapsed time, because the root operator's
   time already includes every child's.
 
@@ -1544,7 +1619,7 @@ The two are syntactically identical and differ in **execution**:
   prefixed with `EXPLAIN` — `EXPLAIN MATCH (n) DETACH DELETE n` — leaves the
   graph untouched; the prefix diverts before any transaction is opened.
 - **`PROFILE` executes the statement.** It returns the query's real rows, plus
-  each operator's measured rows, db-hits and time.
+  each operator's measured rows, db-hits, rows removed by its filter, and time.
 
 #### Where the plan comes back
 

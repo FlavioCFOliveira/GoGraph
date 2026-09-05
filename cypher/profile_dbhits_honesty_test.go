@@ -94,19 +94,19 @@ func profiledCells(plan, operator string) (rows, dbhits int64, dbhitsKnown, foun
 		if !strings.HasPrefix(trimmed, operator) {
 			continue
 		}
-		// The suffix is " (rows=%d, dbhits=%s, time=%s)", where the db-hits cell is
-		// either a decimal count or "?".
-		i := strings.Index(trimmed, "(rows=")
-		if i < 0 {
+		f, ok := profiledFields(trimmed)
+		if !ok {
 			return 0, 0, false, false
 		}
-		var r int64
-		var cell, ms string
-		if _, err := fmt.Sscanf(trimmed[i:], "(rows=%d, dbhits=%s time=%s", &r, &cell, &ms); err != nil {
+		r, err := strconv.ParseInt(f["rows"], 10, 64)
+		if err != nil {
 			return 0, 0, false, false
 		}
-		cell = strings.TrimSuffix(cell, ",")
-		if cell == "?" {
+		cell, present := f["dbhits"]
+		if !present {
+			return 0, 0, false, false
+		}
+		if cell == exec.DbHitsUnknown {
 			return r, 0, false, true
 		}
 		d, err := strconv.ParseInt(cell, 10, 64)
@@ -116,6 +116,71 @@ func profiledCells(plan, operator string) (rows, dbhits int64, dbhitsKnown, foun
 		return r, d, true, true
 	}
 	return 0, 0, false, false
+}
+
+// profiledFields splits the "(k=v, k=v, ...)" measurement suffix of one rendered
+// plan line into its pairs.
+//
+// It replaced an fmt.Sscanf of the fixed shape "(rows=%d, dbhits=%s time=%s",
+// which broke the moment rmp #2764 inserted an OPTIONAL "removed=" cell between
+// two of those three. A positional parser encodes the renderer's field ORDER into
+// every caller; this one encodes only the separator, so adding, moving or omitting
+// a cell leaves the gates below reading the cells they actually name.
+//
+// No rendered value contains ", ", which is what makes the split exact: rows,
+// db-hits and removed are decimal counts or "?", and a time.Duration rounded to a
+// microsecond never contains a space.
+func profiledFields(trimmed string) (map[string]string, bool) {
+	i := strings.Index(trimmed, "(rows=")
+	if i < 0 {
+		return nil, false
+	}
+	body := trimmed[i+1:]
+	j := strings.LastIndex(body, ")")
+	if j < 0 {
+		return nil, false
+	}
+	out := map[string]string{}
+	for _, kv := range strings.Split(body[:j], ", ") {
+		k, v, found := strings.Cut(kv, "=")
+		if !found {
+			return nil, false
+		}
+		out[k] = v
+	}
+	return out, true
+}
+
+// profiledRemoved reports the "removed=" cell of the first line naming operator,
+// and whether that cell was rendered at all (rmp #2764).
+//
+// The two booleans are distinct on purpose and both are load bearing. found=false
+// means no line named the operator, which is a HARNESS failure — the query did not
+// plan what the test believed. known=false means the line was there and carried NO
+// removed cell, which is an ENGINE statement: this operator removes no rows. A
+// helper that collapsed the two would let a mis-planned query pass as a proof that
+// the figure is correctly omitted.
+func profiledRemoved(plan, operator string) (removed int64, known, found bool) {
+	for _, line := range strings.Split(plan, "\n") {
+		trimmed := strings.TrimLeft(line, "│└├─ ")
+		if !strings.HasPrefix(trimmed, operator) {
+			continue
+		}
+		f, ok := profiledFields(trimmed)
+		if !ok {
+			return 0, false, false
+		}
+		cell, present := f["removed"]
+		if !present {
+			return 0, false, true
+		}
+		n, err := strconv.ParseInt(cell, 10, 64)
+		if err != nil {
+			return 0, false, false
+		}
+		return n, true, true
+	}
+	return 0, false, false
 }
 
 // broomGraph builds a Root with `fan` out-edges, of which exactly one continues

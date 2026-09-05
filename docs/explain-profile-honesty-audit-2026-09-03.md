@@ -941,3 +941,299 @@ under a `CorrelatedApply`. Out of scope for #2763 and reported rather than fixed
 * The expression-closure operators are still classified by TYPE, not per instance.
 * The rendered plan still does not distinguish a MEASURED figure from a DERIVED one
   (rmp #2720's standing limitation of the output).
+
+## Addendum — 2026-09-05, rmp #2764 (sprint 355)
+
+### D2 is FIXED: `PROFILE` now says how many rows a filter threw away
+
+§5 recorded divergence **D2** — no `Rows Removed by Filter` equivalent — and called
+it *"the sharpest missing figure"*. It is now reported, as `removed=`, by three
+operator families: `Filter`, `ColumnarFilter`, and `Expand` / `OptionalExpand` /
+the columnar expand.
+
+The gap it closes is not a missing number but a missing *distinction*. Over 1000
+`:P` nodes of which exactly 3 carry `age = 7`:
+
+```
+Project (rows=3, dbhits=?, time=242µs)
+└─ Filter (rows=3, dbhits=?, removed=997, time=239µs)
+   └─ NodeByLabelScan [P] (rows=1000, dbhits=1000, time=22µs)
+```
+
+and the same query, same answer, once an index on `:P(age)` exists:
+
+```
+Project (rows=3, dbhits=?, time=2µs)
+└─ Filter (rows=3, dbhits=?, removed=0, time=1µs)
+   └─ NodeByIndexRangeScan [range=7..7] (rows=3, dbhits=3, time=0s)
+```
+
+Both plans return three rows. Before #2764 the two differed only in an operator
+name; now the first says plainly that 997 rows were read to answer with 3, and the
+second says the access path removed nothing and the residual `Filter` above it
+rejected nothing either. The access path itself carries **no** `removed=` cell in
+either plan — a scan and a seek remove no rows, so they have no figure, and the
+cell is omitted rather than printed as `0`.
+
+### What PostgreSQL actually does, read at REL_17_STABLE
+
+Read at commit `018bfcfd9fa4e520970ba3bda370f78bb473c365`, not recalled:
+
+| property | PostgreSQL | file:line |
+|---|---|---|
+| the counter | one `double nfiltered1` on `Instrumentation`, "# of tuples removed by scanqual or joinqual" | `src/include/executor/instrument.h:89` |
+| how it is bumped | `InstrCountFiltered1(node, 1)` — **one per rejected tuple**, in the `else` arm of the qual test the executor already branches on | `src/include/nodes/execnodes.h:1223-1227`; `src/backend/executor/execScan.c:255` |
+| how many increment sites | 9 across the executor | `execScan.c`, `nodeNestloop.c`, `nodeAgg.c`, `nodeWindowAgg.c`, `nodeMergejoin.c`, `nodeGroup.c` (×2), `nodeHashjoin.c`, `nodeModifyTable.c` |
+| how many print sites | **19** for `"Rows Removed by Filter"` (plus 3 `by Index Recheck`, 3 `by Join Filter`, 1 `by Conflict Filter`) | `src/backend/commands/explain.c` |
+| when it prints — the plan | every print site is wrapped in `if (plan->qual)`: a node with no filter expression prints **nothing** | e.g. `explain.c:2176-2178` |
+| when it prints — the run | `show_instrumentation_count` returns immediately unless `es->analyze && planstate->instrument` | `explain.c:3622, 3628-3629` |
+| whether it prints a zero | **no, in text mode** — `/* In text mode, suppress zero counts; they're not interesting enough */` | `explain.c:3638-3639` |
+| what value it prints | `nfiltered / nloops` — a per-loop **average**, as a `double` | `explain.c:3641` |
+
+**Followed here:** the concept and the name (`RowsRemovedByFilter` on the Bolt
+wire), the increment placed on the branch the operator already takes, and the rule
+that an operator which cannot remove rows prints nothing rather than a zero. That
+last is also the house rule #2760 established for db-hits, reached by PostgreSQL
+through its `if (plan->qual)` guard rather than through a flag.
+
+**Diverged, deliberately, on three points:**
+
+1. **A measured zero IS printed.** PostgreSQL suppresses it in text mode; GoGraph
+   prints `removed=0` for an operator that *can* remove rows and removed none.
+   "This operator has no filter" and "this filter rejected nothing, so it bought
+   you nothing" are different facts, and the second is the finding a reader of the
+   index plan above actually wants. Suppressing it would collapse the distinction
+   the figure exists to draw.
+2. **The figure is a lifetime total, never divided.** GoGraph prints no `loops`
+   column and its inner-side operators already report lifetime totals across
+   re-`Init` (§5, D5). Dividing this one figure by an invocation count the rest of
+   the output does not show would make it incomparable with the `rows` beside it.
+3. **There is no plan-wide total.** Db-hits has one because *every* operator is
+   classified, so the sum is either complete or explicitly `x + ?`. This figure is
+   reported by three families only, and other operators discard rows for reasons it
+   would misdescribe. The `Removed` column's `Total` cell is therefore blank.
+
+### `Expand`'s figure covers four fates, and two of them are not "filters"
+
+`Expand`'s `removed=` counts every fate a consumed adjacency slot can meet other
+than emission: the relationship-**type** filter (forward and reverse),
+**cyphermorphism**, the undirected **self-loop deduplication**, and the
+**expand-into destination** comparison. The last two are a de-duplication and a
+join condition, which PostgreSQL would not file under `Rows Removed by Filter` —
+it splits them across three labels because it prints the qual beside each figure.
+GoGraph prints no expression next to an `Expand`, so splitting one operator's
+discard count into four unlabelled numbers would answer a question nobody asked.
+The divergence is recorded on `Expand.rowsRemovedByFilter` rather than left to be
+inferred.
+
+### The figure is EXACT, and that was proved rather than argued
+
+Every counted operator satisfies an identity against a figure counted
+**independently**, which is what makes the count falsifiable:
+
+| operator | identity | the other side is counted by |
+|---|---|---|
+| `Filter` | `rows + removed == rows pulled from the child` | the child's own profiling wrapper |
+| `ColumnarFilter` | `appended + removed == source rows examined` | the scratch cursor |
+| `Expand` | `rows + removed == dbhits` | the cursor positions (`storageAccesses`, rmp #2761) |
+
+The `Expand` identity is the strongest, because its two sides are derived from
+unrelated state: `storageAccesses` reads the cursor positions, `removed` counts
+reject branches. A temporary probe asserting
+`storageAccesses() == rowsRemovedByFilter() + admitted` on every `Next` and
+`FillChunk` return was installed and run over `./cypher/exec/`, `./cypher/`, and
+the **full 3897-scenario TCK**: zero disagreements. The probe was then shown not to
+be vacuous — deleting one increment produced
+`PROBE-2764 Next: slotsRead=2 != rejected=0 + admitted=1` — and removed, with a
+repository-wide residue scan confirming nothing was left behind.
+
+### Where the charge is taken: a placement decided by measurement
+
+Every rejection leaves `advanceFwdEdge` / `advanceRevEdge` as the single status
+`edgeSkip`, and those two functions have exactly **four** callers. The first
+implementation charged inside them, at the five reject branches. It was moved out,
+for a measured reason:
+
+`advanceFwdEdge` and `advanceRevEdge` are the innermost code of every expansion,
+and *any* statement added to them costs a few percent on a single-hop unfiltered
+walk **even when the statement never executes**. Measured: a **dead** counter of
+exactly the same shape — an unread `int64` field plus seven increments of it in the
+same branches — added to the *unchanged* operator cost **+3.11% (p=0.003, n=8)** on
+`BenchmarkExpandDir_InVsOut_Baseline/OUT_deg1_sources`, a benchmark with neither a
+type filter nor a morphism, in which no rejection branch is ever taken.
+
+| arm | `OUT_deg1_sources` | `IN_deg1_sources` |
+|---|---|---|
+| charge inside `advance*Edge` | +4.90% (p=0.000) | +5.35% (p=0.000) |
+| **dead counter, same shape, on HEAD** | **+3.11% (p=0.003)** | ~ (p=0.959) |
+| charge in the four callers (shipped) | +1.26% (p=0.050) | ~ (p=0.798) |
+
+The shipped placement leaves both advance functions byte-identical to their
+pre-#2764 source, and the residual +1.26% sits inside the envelope the dead counter
+defines. Inlining decisions are unchanged (`-gcflags=-m`, diffed with line numbers
+stripped: the only difference is that the two new accessor methods are inlinable),
+and `unsafe.Sizeof` grew by 8 bytes on each of `Expand` (552→560), `Filter` (40→48)
+and `ColumnarFilter` (120→128) — no size-class crossing, which the identical
+`B/op` confirms.
+
+### Cost: no allocation change anywhere; no significant timing change
+
+`benchstat`, 8 interleaved A/B rounds, `-benchmem -count=1` per round, **no
+`-race`**, go1.27.1 darwin/arm64, Apple M4 (10 cores).
+
+`./cypher/exec/`, 11 filter and expand benchmarks: **geomean sec/op −0.01%**, 10 of
+11 `~`; the exception is `OUT_deg1_sources` above. **`allocs/op` and `B/op`
+identical on every benchmark** ("all samples are equal" on all 11 allocation rows).
+
+`./cypher/`, the 5 columnar-shape filter benchmarks: geomean +0.76%, allocations
+identical. That figure is **not attributable to the counting**: the same tree with
+every increment deleted measures **+0.61%** against the same baseline, so the
+diffuse ~1% is the code the change carries, not the work it does.
+
+**The host was not idle.** Load average ran 1.5–3.2 throughout, with `osascript`,
+`iTerm2` and `system_profiler` competing. A same-vs-same noise floor was measured
+first and was tight (geomean −0.06%, every benchmark `~`, allocations identical),
+which is why the timing figures are reported at all; the allocation figures are
+load-invariant and stand unconditionally.
+
+### The mutation that found a real hole
+
+Eleven mutations were run against the new gates. Ten were killed immediately. The
+eleventh was not, and it is the valuable one: **deleting all four of `Expand`'s
+reverse-cursor increments left `go test ./cypher/ ./cypher/exec/` fully green.**
+Half of `Expand`'s rejection accounting was unproved.
+
+Four arms were added to close it, three at engine level and one at exec level:
+
+| branch | query / fixture | rows | db-hits | removed |
+|---|---|---|---|---|
+| reverse type filter | `MATCH (h:Hub)<-[:KNOWS]-(x)`, 99 `:LIKES` + 1 `:KNOWS` in-edge | 1 | 100 | 99 |
+| undirected self-loop dedup | `MATCH (s:Solo)--(x)`, one self-loop + one out-edge | 2 | 3 | 1 |
+| reverse cyphermorphism | `MATCH (a:M1)-[r1:E]->(b)--(c)`, one edge | 0 | 1 | 1 |
+| expand-into comparison | `newSeekExpand`, seek OFF, bound dst | 1 | 4 | 3 |
+
+The expand-into arm also **checks a claim the code makes about itself**: with the
+seek enabled — the default whenever a destination is bound — the cursor is narrowed
+to the destination's run before the walk, so the comparison rejects nothing (`4
+slots / 3 removed` becomes `1 slot / 0 removed`). That was documented as a property
+and is now measured as one.
+
+A second mutation found a weakness in a *test* rather than in the code: an
+even/odd predicate rejects on strict alternation, so a counter that counted every
+other rejection passed. The columnar exec gates now filter on multiples of 7, which
+rejects in runs of six.
+
+### Then a PER-SITE deletion sweep found a second hole, and refuted the method above
+
+The mutations above were mostly **return-value** mutations — `removed / 2`,
+`removed - 1`. That method is weaker than it looks, and the weakness is exact: a
+return-value mutation **cannot distinguish an increment site that is reached from
+one that is not**, because it perturbs the total whatever produced it. Deleting the
+increment *at its site* can.
+
+So every one of the eight sites was deleted individually and
+`go test -count=1 ./cypher/ ./cypher/exec/ ./cypher/explain/ ./bolt/server/` re-run.
+**Two survived — not the one already known.**
+
+| site | where | before | after |
+|---|---|---|---|
+| S1 | row-mode FORWARD `edgeSkip` (`tryFwdEdge`) | killed | killed |
+| S2 | row-mode FORWARD expand-into (`tryFwdEdge`) | killed | killed |
+| S3 | row-mode REVERSE `edgeSkip` (`tryRevEdge`) | killed | killed |
+| S4 | row-mode REVERSE expand-into (`tryRevEdge`) | killed | killed |
+| **S5** | **COLUMNAR FORWARD `edgeSkip` (`fillOneChunkRow`)** | **SURVIVED** | killed |
+| **S6** | **COLUMNAR REVERSE `edgeSkip` (`fillOneChunkRow`)** | **SURVIVED** | killed |
+| S7 | `Filter.Next` | killed | killed |
+| S8 | `ColumnarFilter.FillChunk` | killed | killed |
+
+The reason is structural and worth stating, because it is the same reason the
+reverse-cursor sites went unproved before them. `Expand`'s two paths share their
+edge **decisions** (`advanceFwdEdge` / `advanceRevEdge`) but not their
+**accounting**: `fillOneChunkRow` charges the rejection itself, at its own two
+`continue` arms. Every gate that drove the row path therefore left the columnar
+charge untouched. `TestProfileDbHits_ColumnarExpandCountsSlotsWalked` (#2761) does
+drive a type-filtered expand through `FillChunk` — and asserts `storageAccesses`,
+which says nothing about rejections.
+
+Three gates closed it, subject/control in both directions:
+
+* `TestColumnarExpandRowsRemoved_CountsWhatFillChunkDiscarded` (exec) — a
+  `columnarExpand` driven through `FillChunk` and never `Next`, across four
+  per-call caps, with `DbHits == Rows + RowsRemovedByFilter` asserted on both arms.
+* `TestColumnarExpandRowsRemoved_AgreesWithTheRowPath` (exec) — the same fixture
+  and config driven both ways. Two charge sites for one decision is exactly the
+  shape that lets them drift, and nothing else compared them. It kills S1, S3, S5
+  and S6.
+* `TestProfileRowsRemoved_ColumnarExpandReportsThroughAPlannedQuery` (engine) —
+  four real queries, proving the **planner** reaches both columnar charge sites.
+
+Post-fix sweep, with the exact message each deletion now produces:
+
+| site | first failure |
+|---|---|
+| S1 | `` type-filtered `-[:KNOWS]->`: Expand reported removed=0, want 99 `` |
+| S2 | `rowsRemovedByFilter()=0, want 3. The expand-into comparison is the only branch that can reject here` |
+| S3 | `reverse type filter: Expand reported removed=0, want 99` |
+| S4 | `rowsRemovedByFilter()=0, want 1` |
+| S5 | `forward subject: columnarExpand reported removed=0, want 99` |
+| S6 | `reverse subject: columnarExpand reported removed=0, want 99` |
+| S7 | `the Filter reported removed=0, want 997. It pulled 1000 rows from the scan and emitted 3` |
+| S8 | `the ColumnarFilter reported removed=0, want 997` |
+
+`Filter` and `ColumnarFilter` (S7, S8) were killed by site deletion as well as by
+the return-value mutations, so the weaker method was not hiding anything there —
+but only the sweep proves that, which is the point.
+
+**The general lesson, recorded because it outlives this task:** a counter with N
+increment sites needs N deletions, not one mutation of the value it returns. Where
+two execution paths share a decision but charge it separately — as GoGraph's row
+and columnar operators do throughout — the number of sites is larger than the
+number of *concepts*, and the extra sites are exactly the ones no existing test
+reaches.
+
+### A census gate was built, and here is why it was warranted
+
+`cypher/exec/rows_removed_classification_test.go` classifies every operator in the
+package as REPORTS or SILENT, with a mandatory reason, derived from the package AST
+exactly as `dbhits_classification_test.go` is.
+
+Two states looks too small to need a census. It is warranted because the
+**interesting half is the silent one, and the silence is a judgement**. `Limit` and
+`Skip` drop rows on a count; `Distinct` and the aggregations collapse them;
+`SemiApply` and `AntiSemiApply` drop an outer row on an inner plan's emptiness;
+`HashJoin`, `ExpandIntersect` and `IndexNestedLoopJoin` discard candidates. Each
+could plausibly have been folded in, and each was excluded for a different reason.
+Without the census an exclusion and an oversight look identical — both are an
+operator with no marker method. The census entries marked `GAP:` are the ones that
+reject by a predicate and are **not yet counted**, listed as gaps rather than
+implied:
+
+* `HashJoin` / `ColumnarHashJoin` — PostgreSQL reports these under a *different*
+  label (`Rows Removed by Join Filter`), which is the shape a follow-up should take.
+* `SemiApply` / `AntiSemiApply` — an `EXISTS` filter by another name; counting it
+  needs a decision about whether the figure belongs on the driver or the inner plan.
+* `ExpandIntersect`, `IndexNestedLoopJoin` — uncounted, as their db-hits are.
+* `ShortestPath` / `AllShortestPaths` / `VarLengthExpand` — each rejects arcs while
+  walking; each counts the slots it *read* (#2763, #2761) but not the ones it rejected.
+* the three morsel-parallel leaves — their per-morsel sub-plan filters, but the
+  sub-plan is not instrumented; a per-morsel fold like #2762's would be needed.
+
+### Found while doing this, NOT fixed: a residual `Filter` above an exact index range
+
+The index plan quoted at the top of this addendum shows
+`NodeByIndexRangeScan [range=7..7]` with a `Filter (removed=0)` above it. The range
+is a point range that answers `age = 7` exactly, so the `Filter` re-checks a
+predicate the access path has already fully applied and rejects nothing. It is a
+planner question (#2765–#2767), out of scope here, and reported rather than fixed —
+but it is worth recording that **this figure is what made it visible**: before
+#2764 the redundant `Filter` was indistinguishable from a selective one.
+
+### Still open after #2764
+
+* The `GAP:` entries in the census above — nine operators that reject by a
+  predicate and do not yet report it.
+* The count-store leaves (`AllNodesCountScan`, `LabelCountScan`) remain UNCOUNTED
+  for db-hits.
+* The expression-closure operators are still classified by TYPE, not per instance.
+* The rendered plan still does not distinguish a MEASURED db-hits figure from a
+  DERIVED one (rmp #2720's standing limitation of the output).

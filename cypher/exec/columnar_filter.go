@@ -169,10 +169,18 @@ func (op *ColumnarFilter) FillChunk(dst *Chunk, maxRows int) (int, error) {
 			}
 			keep = expr.IsTruthy(v)
 		}
-		if keep {
-			dst.AppendRowFrom(op.scratch, row)
-			appended++
+		if !keep {
+			// The reject branch the operator already takes, and the ONLY place the
+			// columnar path bumps the shared counter — the boxed fallback above
+			// returns its decision here rather than going through [Filter.Next], so
+			// a row it rejects would otherwise be invisible (rmp #2764). The
+			// accepted path below gains neither an increment nor a branch: the
+			// `if keep` test was already here, only inverted.
+			op.removed++
+			continue
 		}
+		dst.AppendRowFrom(op.scratch, row)
+		appended++
 	}
 	return appended, nil
 }
