@@ -1,5 +1,19 @@
 # Do `EXPLAIN` and `PROFILE` report factually and honestly?
 
+> **SUPERSEDED — this document describes a tree that no longer exists.**
+>
+> It audited `feature/353-gograph-optimization-laboratory` at `c533d3e7`, and sprint 355
+> (rmp #2760 to #2767) then changed the behaviour it describes. The eight addenda below
+> record what each task claimed **at the time it landed**; several were later revised by a
+> subsequent task, and some did not survive re-measurement.
+>
+> **The current record is
+> [`explain-profile-honesty-audit-2026-09-05.md`](explain-profile-honesty-audit-2026-09-05.md)**,
+> which re-derives every classification by measurement on the closing tree `83ba8d8b`,
+> gives a closed / narrowed / unchanged verdict for each of D1 to D11, and lists what the
+> sprint left open. Read this document only for history; read that one for what the
+> instruments do now.
+
 **Audit date:** 2026-09-03 · **Tree:** `feature/353-gograph-optimization-laboratory`, base commit
 `c533d3e777251692845ba52435ac33e8412c0808` · **rmp task:** #2720 (sprint 353)
 

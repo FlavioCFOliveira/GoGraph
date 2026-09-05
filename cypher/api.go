@@ -1427,10 +1427,15 @@ type Engine struct {
 	// D(label,relType,dir) / T(labelA,relType,labelB) statistics from the write
 	// path (via the mutator adapters' CountBuffer, flushed in commitUnderBarrier
 	// after the WAL fsync) and feeds estExact estimates to the planner via the
-	// count-estimate provider (task #2083). It is always non-nil. As of P2 the
-	// provider is inert — nothing on the query path consumes its estimates yet
-	// (P3 wires the join-order reorder) — so the store is maintained but its
-	// reads change no plan.
+	// count-estimate provider (task #2083). It is always non-nil.
+	//
+	// The provider is NOT inert, and the three statistics differ. D is consumed on
+	// the query path by the anchor swap ([swapCandidate.gate]), so a count-store
+	// read can change a plan. E and T have no non-test consumer: their providers
+	// ([relCardinalityEstimate], [tripleCardinalityEstimate]) are proven correct in
+	// isolation and wired to nothing. The blanket "inert" this comment carried was
+	// already false when D reached the anchor swap, and is corrected here rather
+	// than left to be believed (rmp #2768).
 	countStore *count.Store
 
 	// statsCollector holds the best-effort approximate planner statistics (NDV /
@@ -1443,10 +1448,12 @@ type Engine struct {
 	// SetNodeProperty / DelNodeProperty guard before any [statsCollector.Tracking]
 	// atomic, task #2101). It is an [atomic.Pointer] because the install
 	// ([RefreshStatistics]) races the lock-free reads on the write path (adapter
-	// construction) and the read path (resolver construction). As of #2097/#2098
-	// the statistics ship INERT — #2099 renders them display-only in EXPLAIN, no
-	// plan consumes them — so absence is harmless (a consumer falls back to its
-	// exact-count plan).
+	// construction) and the read path (resolver construction). Absence stays
+	// harmless: a consumer falls back to its exact-count plan, and the
+	// trustworthiness veto ([planStaysDefault]) keeps the default plan rather than
+	// acting on a missing statistic. The statistics shipped INERT from #2097/#2098
+	// until rmp #2766, which wired them to the join reorder; they are no longer
+	// display-only.
 	statsCollector atomic.Pointer[statsCollector]
 
 	// misestimated is the set of tracked (label, property) pairs a PROFILE has
@@ -6720,9 +6727,11 @@ type lpgLabelResolver struct {
 	// resolver at its pre-statistics two-word footprint (task #2101). It is nil
 	// for resolver instances built without an engine (the write-path build at
 	// execUnderBarrier, and some tests), in which case both Counts and Statistics
-	// report absence and every estimate provider falls back to estFallback. As of
-	// #2097/#2098/#2099 nothing on the query path GATES on these estimates (they
-	// are inert / display-only), so absence is harmless.
+	// report absence and every estimate provider falls back to estFallback.
+	// Absence is harmless because estFallback is untrustworthy by construction, so
+	// the veto ([planStaysDefault]) keeps today's default plan. Since rmp #2766 the
+	// query path DOES gate on these estimates — the join reorder consumes them —
+	// so the claim that they are inert or display-only no longer holds.
 	eng *Engine
 }
 

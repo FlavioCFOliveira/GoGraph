@@ -372,7 +372,18 @@ maintained from the write path and read by the exact-count estimate providers:
 Planner-statistics events (`cypher/stats_metrics.go` and `cypher/plan_qerror.go`,
 tasks #2102 and #2767, design `docs/statistics-design.md`). Statistics are
 best-effort, maintained OFF the write path, and rebuilt only when a caller invokes
-`Engine.RefreshStatistics`; an engine that never refreshed emits none of these:
+`Engine.RefreshStatistics`; an engine that never refreshed emits none of the first
+four.
+
+**The two q-error series are the exception, and fire without any refresh.** Their
+gate is the estimate's PROVENANCE, not the presence of a statistics collector
+(`qErrorQualifies`, `cypher/plan_qerror.go`): a `NodeByLabelScan`'s estimate is
+tagged exact because it is a LIVE LABEL COUNT, which no collector maintains and no
+refresh rebuilds. So `PROFILE MATCH (n:Person) RETURN n` emits `cypher.stats.qerror`
+on a stats-free engine. That is deliberate — a label count is still a prediction the
+planner acted on — but it means a non-zero `qerror.high` does not by itself imply a
+stale statistic, and `Engine.StatsMisestimatedPairs` (which names one) can stay at
+zero while the histogram fires.
 
 | Metric                          | Kind      | Description                                                                                                     |
 | ------------------------------- | --------- | ----------------------------------------------------------------------------------------------------------------- |

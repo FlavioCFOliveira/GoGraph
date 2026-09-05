@@ -1520,13 +1520,13 @@ build in which profiling does not exist.
 > second category.
 >
 > **A `removed=0` is a measurement, and a useful one.** GoGraph prints it where
-> PostgreSQL suppresses it (`explain.c:3638`, "they're not interesting enough"),
+> PostgreSQL suppresses it (`explain.c:3637`, "they're not interesting enough"),
 > because a filter that rejected nothing is exactly what you want to see above an
 > index that answered the predicate on its own:
 >
 > ```
 > Filter (rows=3, dbhits=?, removed=997, time=239µs)
-> └─ NodeByLabelScan [P] (rows=1000, dbhits=1000, time=22µs)
+> └─ NodeByLabelScan [P] (est. rows=1000 exact, rows=1000, dbhits=1000, time=22µs)
 >
 > Filter (rows=3, dbhits=?, removed=0, time=1µs)
 > └─ NodeByIndexRangeScan [range=7..7] (rows=3, dbhits=3, time=0s)
@@ -1619,9 +1619,10 @@ blank, because it claims nothing; a data row always carries either a figure or t
 
 Each is the **same walk** as its tree counterpart, not a second derivation of the
 plan: `ExplainTable` and `ExplainLogical` share one traversal that performs the
-index-seek substitutions, applies the count-store-gated reorderings and computes
-the estimates, and `ProfileTable` and `Profile` render one captured measurement
-tree from one execution. Neither pair can disagree about which access path runs.
+index-seek substitutions, applies the reorderings — gated by the count store and,
+since #2766, by the property statistics — and computes the estimates, and
+`ProfileTable` and `Profile` render one captured measurement tree from one
+execution. Neither pair can disagree about which access path runs.
 
 Two things the table shows that the tree does not, and two it does not show:
 

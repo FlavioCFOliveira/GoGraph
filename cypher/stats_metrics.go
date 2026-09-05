@@ -8,11 +8,15 @@ package cypher
 // observation adds a single time.Now pair — negligible.
 //
 // None of it touches the write path. The statistics are maintained OFF the write
-// path — [Engine.RefreshStatistics] is the sole, caller-driven rebuild — and the
-// estimate providers are display-only (consulted by EXPLAIN, never by the
-// executed plan), so a write on an engine that never refreshed statistics (the
-// lazy collector stays unallocated) emits nothing; verified by
-// BenchmarkEngWriteAutocommit staying flat at 34 allocs/op.
+// path — [Engine.RefreshStatistics] is the sole, caller-driven rebuild — so a
+// write on an engine that never refreshed statistics (the lazy collector stays
+// unallocated) emits nothing; verified by BenchmarkEngWriteAutocommit staying
+// flat.
+//
+// The providers are no longer display-only. Until rmp #2766 they were consulted
+// by EXPLAIN and by nothing else; that task wired them to the disjoint-component
+// join reorder, so a property statistic can now change a plan. What has not
+// changed is that the READ path consults them and the WRITE path does not.
 //
 // The names share the cypher.stats.* namespace and render in the Prometheus
 // exposition with dots mapped to underscores (see examples/31_metrics_observability).

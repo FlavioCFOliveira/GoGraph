@@ -68,9 +68,11 @@ type PlanNode struct {
 	// Unlike Rows and Time it is NOT uniformly a measurement. It is meaningful only
 	// when DbHitsKnown is true, and then it comes from one of three places:
 	//
-	//   - MEASURED, for an operator implementing exec's storageAccessCounter —
-	//     today [VarLengthExpand], which reports the relationship slots its BFS
-	//     actually read;
+	//   - MEASURED, for an operator implementing exec's storageAccessCounter. The
+	//     authoritative list is the compile-time census beside that interface's
+	//     declaration in profile.go; do not restate it here, because a restatement
+	//     is what drifted (rmp #2768). It covers the expansions, both shortest-path
+	//     operators and the three morsel-parallel leaves;
 	//   - DERIVED from the emitted row count, for an operator marked
 	//     [StorageRecordScan], whose contract asserts one record read per row;
 	//   - a KNOWN ZERO, for an operator marked exec's noStorageAccess, which opens
@@ -84,12 +86,15 @@ type PlanNode struct {
 	// DbHitsKnown reports whether DbHits is a figure at all.
 	//
 	// It is false for an operator that reads storage and claims none of the three
-	// markers — [ShortestPath], [AllShortestPaths], the morsel-parallel leaves,
-	// the count-store leaves, and every operator holding a caller-supplied
-	// expression closure that can reach the graph ([Filter], [Project], [Sort],
-	// [Top], [Unwind], the hash joins, [RollUpApply], [ProcedureCallOp]). DbHits
-	// is then 0 only because an int64 has to hold something, and NO renderer may
-	// print it as a count.
+	// markers — the count-store leaves, and every operator holding a
+	// caller-supplied expression closure that can reach the graph ([Filter],
+	// [Project], [Sort], [Top], [Unwind], the hash joins, [RollUpApply],
+	// [ProcedureCallOp]). DbHits is then 0 only because an int64 has to hold
+	// something, and NO renderer may print it as a count.
+	//
+	// [ShortestPath], [AllShortestPaths] and the morsel-parallel leaves were in
+	// that list until rmp #2762 and #2763 taught them to count; the census in
+	// profile.go is the one place that says which operators are which.
 	//
 	// The distinction exists because it could not previously be drawn: both a pure
 	// projection and a parallel scan of 2000 nodes printed `dbhits=0`, so the

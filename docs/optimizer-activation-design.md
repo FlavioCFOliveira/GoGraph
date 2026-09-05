@@ -4,16 +4,33 @@ Status: design spike — **no production code changed** by this document.
 rmp task: #1504 (sprint S-PA3 #190). Downstream increments: #1505 (range index seeks), #1506 (hash join).
 Date: 2026-06-15.
 
-> **Implementation note (v0.3.1).** The two downstream increments this spike
-> scoped have **shipped**: a physical **hash join** for disconnected equi-join
-> patterns (`exec.HashJoin`, #1506) and a **range-predicate B+tree index seek**
-> (`NodeByIndexRangeScan`, #1505), both as plan-build physical substitutions
-> proven against differential tests to return an identical result multiset. The
-> logical `cypher/ir/rewrite` Driver remains **unwired** (the guard test stays
-> green). Statements below such as "no hash join exists" describe the
-> pre-implementation premise this spike was written against; see
-> [docs/benchmarks/history/LEDGER.md](benchmarks/history/LEDGER.md) rows 0013
-> (#1506) and 0014 (#1505) for the measured outcome.
+> **Implementation note — updated 2026-09-05 (rmp #2768, sprint 355).** This is a
+> June 2026 design spike, and the tree has moved past it in four ways. Its
+> reasoning is kept as the record of how these decisions were taken; its
+> **present-tense status claims are corrected inline below**, each marked
+> `SUPERSEDED`. In summary:
+>
+> 1. **Both downstream increments shipped.** A physical **hash join** for
+>    disconnected equi-join patterns (`exec.HashJoin`, #1506) and a
+>    **range-predicate B+tree index seek** (`NodeByIndexRangeScan`, #1505), both as
+>    plan-build physical substitutions proven against differential tests to return
+>    an identical result multiset. See
+>    [docs/benchmarks/history/LEDGER.md](benchmarks/history/LEDGER.md) rows 0013
+>    (#1506) and 0014 (#1505).
+> 2. **Join reordering shipped too, and is ON BY DEFAULT** — the opposite of the
+>    "deferred / ship last, if ever" sequencing below. It is
+>    `cypher/join_reorder_plan.go`, enabled at `cypher/api.go:1716`
+>    (`joinReorderEnabled: !opts.DisableJoinReorder`). Since rmp #2766 its gate
+>    reads the **property statistics**, not label ratios.
+> 3. **The estimator is not inert.** Label counts are `EstExact` unconditionally,
+>    the relationship count store is `EstExact`, and histogram range estimates are
+>    `EstStats`. The "fixed 30% range selectivity" and the "`1e9` AllNodes sandbag"
+>    this document reasons about **no longer exist anywhere in `cypher/`**.
+> 4. **`cypher/ir/rewrite/`, `cypher/plan/` and `cypher/rewrite_not_wired_test.go`
+>    were DELETED** in `80954706` (2026-06-22, "delete the dead cost-based
+>    planner", #1666). Every passage below that proposes wiring, transforming or
+>    guarding them describes packages that no longer exist. §1.1, §1.2 and
+>    Increment C are historical for that reason.
 
 This document evaluates whether — and how — the dormant cost-based optimizer in
 `cypher/ir/rewrite/` and `cypher/plan/` can be safely activated in the GoGraph
@@ -24,6 +41,9 @@ today's default.
 The guard test `cypher/rewrite_not_wired_test.go`
 (`TestCypherEngine_RewritePackageNotWired`) remains green: this spike wires
 nothing.
+
+> **SUPERSEDED.** That test, and both packages it guarded, were deleted in
+> `80954706` (#1666). Nothing named `RewritePackageNotWired` exists in the tree.
 
 ---
 
@@ -63,11 +83,24 @@ The unifying invariant (see §2.1) mechanically enforces no-regression: with
 today's all-`Fallback`/`Heuristic` estimator, every gate fails closed, so the
 planner reproduces the current plan exactly.
 
+> **SUPERSEDED.** The premise ("all-`Fallback`/`Heuristic`") is no longer true, so
+> the conclusion no longer follows. The estimator produces `EstExact` for label
+> counts and the count store and `EstStats` for histogram ranges, and the planner
+> does deviate from the written plan — via the min-label re-anchor, the hash join,
+> the range seek and, since rmp #2766, the disjoint-component reorder. The veto
+> itself is intact and is still the safety property; what changed is that it now
+> passes for some estimates instead of vetoing all of them.
+
 ---
 
 ## 1. Inventory
 
 ### 1.1 `cypher/ir/rewrite/` — logical rewrite framework (UNWIRED)
+
+> **SUPERSEDED — this package was DELETED** in `80954706` (2026-06-22, #1666),
+> together with its guard test. The description below is a June 2026 inventory of
+> code that no longer exists; its conclusion ("None is a candidate for near-term
+> wiring") is what led to the deletion.
 
 A bottom-up, fixpoint rewrite `Driver` (`rule.go`, `defaultMaxIter = 16`)
 applying an ordered `Registry` of `Rule`s via `WalkAndReplace`. The walker
@@ -90,6 +123,15 @@ result-identity guarantee, or (c) is semantically unsafe (`FusionRules` #1).
 None is a candidate for near-term wiring.
 
 ### 1.2 `cypher/plan/` — cost-based physical planner (UNWIRED, built + unit-tested)
+
+> **SUPERSEDED — every file in this table was DELETED.** `cypher/plan/` went with
+> `cypher/ir/rewrite/` in `80954706` (2026-06-22, #1666). `SelectScanStrategy`,
+> `fallbackAllNodeCount`, `EnumerateLeftDeep` and the rest do not exist in the tree;
+> `grep -rn SelectScanStrategy --include='*.go' .` returns nothing. The table below
+> is a June 2026 inventory of code that has since been removed, and the assessments
+> in its last column are why. What replaced it is documented in §4's corrections and
+> in `cypher/estimate.go`, `cypher/stats_estimate.go` and
+> `cypher/join_reorder_plan.go`.
 
 | Component | What it does | Coverage | Correct / complete / stubbed |
 |---|---|---|---|
@@ -174,6 +216,15 @@ Why this is the linchpin: today's estimator is entirely `EstFallback` /
 inert** — it can only reproduce today's default plan — and it lights up one
 decision at a time exactly as each real statistic comes online. This is how we
 get a strict no-regression guarantee *for free* during rollout.
+
+> **SUPERSEDED — the rule stands, its premise does not.** The trustworthiness veto
+> described in the paragraph above is still exactly what the code enforces. But the
+> estimator is no longer all-`Fallback`/`Heuristic`: `labelCardinalityEstimate`
+> returns `estExact` on every path, the relationship count store returns `estExact`,
+> and `statsRangeEstimateInner` returns `estStats` for a fresh histogram. Neither
+> the fixed 30% range selectivity nor the `1e9` AllNodes sandbag exists in
+> `cypher/` any more. The "lights up one decision at a time" prediction is what
+> actually happened — rmp #2766 is the first decision to light up.
 
 ### 2.2 Range-predicate index seek — result-identity argument and hazards
 
@@ -325,19 +376,49 @@ conservative, empirically-grounded margins (graph-theory-expert):
   always scan). Note the fixed 30% constant **fails condition (1) by
   construction** (0.30 > 0.05), so the crude estimator can never trigger a range
   seek — correct and harmless until histograms exist.
+  > **SUPERSEDED.** Both constants were revised by measurement when #1505 shipped:
+  > `rangeSeekMaxSelectivity = 0.10` (not 0.05) and `rangeSeekMinLabelPopulation =
+  > 64` (not ~1024). `cypher/range_seek_plan.go` records the 1024 floor as measured
+  > false by more than an order of magnitude (rmp #2367). The gate also reads an
+  > **exact** label population rather than an estimate, and the fixed-30% constant
+  > it reasons about no longer exists.
 - **Kill the `1e9` AllNodes sandbag.** AllNodes should carry an **exact** total
   node count (`EstExact`), so it competes honestly and is never beaten by a
-  non-trustworthy alternative.
+  non-trustworthy alternative. — **DONE.** `AllNodesScan` carries the exact live
+  total tagged `estExact`; no `1e9` sandbag exists in `cypher/`.
 - **Hash join.** Asymptotically strictly better for an equi-join; the only loss
   case is the tiny-input constant factor, neutralised by a **size floor** (use
   hash join only when both sides ≥ ~64, calibrate by benchmark) plus the equi-join
   predicate requirement plus `EstStats`/`EstExact` side cardinalities.
-- **Join reordering (deferred).** Errors compound *multiplicatively* along the
-  join chain (Ioannidis & Christodoulakis, SIGMOD 1991). Gate hardest: reorder
+- **Join reordering — SHIPPED (rmp #2766), not deferred.** Errors compound
+  *multiplicatively* along the join chain (Ioannidis & Christodoulakis, SIGMOD
+  1991), and the gate this bullet prescribed is the gate that was built: reorder
   only when every selectivity on both the candidate and the written order is
-  `EstStats`/`EstExact`, the candidate is `≥ 3×` cheaper, and the chain is short
-  (`n ≤ 4`). Label-ratio selectivity is `EstHeuristic` → fails the gate → no
-  reorder today. Keep the developer-written order as the safe default.
+  `EstStats`/`EstExact`, and the candidate clears a `≥ 3×` margin
+  (`joinReorderStatsMargin = 3.0`, `cypher/join_reorder_plan.go:141`, whose comment
+  cites this section as its source).
+  > **SUPERSEDED in two particulars.**
+  > 1. "Label-ratio selectivity is `EstHeuristic` → fails the gate → no reorder
+  >    today" is no longer true. Since #2766 a filtered component's emitted rows do
+  >    not come from a label ratio at all: `reorderFilteredRows`
+  >    (`cypher/join_reorder_plan.go:452-507`) calls `statsEqualityEstimate` /
+  >    `statsRangeEstimate`, which return `estExact` for an MCV hit and `estStats`
+  >    for a fresh histogram. Both are trustworthy, so the veto **passes** and a
+  >    reorder happens.
+  > 2. The shipped gate is a **minimax over two cost rules**, not one. `Apply`
+  >    re-`Init`s the inner arm per outer ROW, so the drain-aware rule is
+  >    `cost = D(outer) + R(outer)·D(inner)`, which reduces to the emitted-row rule
+  >    when `D == R`. A swap must win under **both**, because the planner cannot see
+  >    which realisation it will get. The price is that some genuinely reorderable
+  >    shapes are declined.
+  >
+  > It is not left-deep enumeration: it is a structural peephole over disjoint
+  > `Apply` arms, so it shipped without `EnumerateLeftDeep` and without Increment
+  > C's preconditions. Measured effect on a skewed disjoint join: counted db-hits
+  > fall from 160 400 to 800 (−99.50%) for an identical result — see
+  > [explain-profile-honesty-audit-2026-09-05.md](explain-profile-honesty-audit-2026-09-05.md)
+  > §6. "Keep the developer-written order as the safe default" remains true
+  > wherever the gate does not clear.
 - **benchstat gate.** Per CLAUDE.md, every structural change runs
   `go test -bench=. -benchmem -count=10` before/after, compared with `benchstat`.
   Add a representative query-mix benchmark (point-seek, range, equi-join,
@@ -368,6 +449,9 @@ trustworthiness veto, and inert under the current estimator.
   fragile estimate; lowest estimate-risk.
 - **Reuse:** `IndexRegistry`, `LabelCount` (exact), `StatsManager`. Does **not**
   require `EnumerateLeftDeep` (that is join *reordering*, deferred).
+  > **SUPERSEDED.** Still true that the hash join does not need
+  > `EnumerateLeftDeep` — but join reordering is no longer deferred, and it did not
+  > need `EnumerateLeftDeep` either (see §4).
 
 ### Increment B — Range-predicate btree index seek (#1505) — SECOND
 
@@ -388,6 +472,12 @@ trustworthiness veto, and inert under the current estimator.
   provenance added), `IndexRegistry`, `cardinality.go`, `StatsManager`.
 
 ### Increment C — Logical rewrites / join reordering — LAST (and only if justified)
+
+> **SUPERSEDED, and the sequencing was overtaken.** Join reordering shipped in rmp
+> #2766 as a structural peephole (see §4), ahead of any logical-rewrite work and
+> without the preconditions below. The `cypher/ir/rewrite/` package this increment
+> proposes wiring was deleted in `80954706` (#1666), so the rest of this increment
+> describes work on code that no longer exists.
 
 - Wire selected rules from `cypher/ir/rewrite/` and/or `EnumerateLeftDeep` **only
   after** A and B have proven the `Estimate{Source}` veto in production, **and
@@ -430,6 +520,14 @@ trustworthiness veto, and inert under the current estimator.
 - Citations: openCypher 9 §3.2 (null/3VL), §3.4 (comparability), §8.4 (WHERE),
   §10 (OPTIONAL MATCH); CIP2016-06-14; the TCK "in order:" convention.
 
+> **Note on this section.** These are the recommendations as given in June 2026.
+> Three have since been overtaken by measurement: the planner is no longer
+> "provably inert" (the estimator produces `EstExact` and `EstStats`), the
+> range-seek constants shipped as `S ≤ 0.10` and `N_label ≥ 64` rather than
+> `S ≤ 0.05` and `N_label ≥ 1024`, and join reordering shipped (rmp #2766) rather
+> than being deferred. The reasoning is kept as the record of how the decisions
+> were taken; §4 carries the corrections.
+
 **graph-theory-expert (cardinality / join ordering / no-regression):**
 - Make estimate **provenance** first-class (`Estimate{Rows, Source}`); a
   `Fallback` estimate anywhere on a candidate path is an **absolute veto**. This
@@ -449,5 +547,7 @@ trustworthiness veto, and inert under the current estimator.
 ## 7. Verification (this spike)
 
 - `go build ./...` — green (no production imports changed).
-- `TestCypherEngine_RewritePackageNotWired` — green (nothing wired).
+- `TestCypherEngine_RewritePackageNotWired` — green (nothing wired) at the time of
+  the spike. **That test no longer exists**; it was deleted with the packages it
+  guarded in `80954706` (#1666).
 - This document adds no code; it is a design artefact only.
