@@ -26,11 +26,14 @@ package cypher_test
 //     run would pay for, so the divergence stands as a known property. Pinning it
 //     is what stops it being re-described as an exact count in a future doc: the
 //     test fails if the number silently changes, in EITHER direction.
-//  3. The morsel-parallel leaves count no db-hits for a full scan, so their cell
-//     must render as "?" and their plan line must name the gap. Without both, the
-//     identical query reports N db-hits below the parallel threshold and 0 above
-//     it, with nothing to tell a reader that the second zero means "not counted"
-//     (rmp #2760 made the state itself renderable; #2720 added the words).
+//  3. The morsel-parallel leaves must report the node references their workers
+//     consumed, and must report the SAME figure as the serial plan for the same
+//     query on the same graph. This gate inverted at rmp #2762: it used to assert
+//     the cell rendered "?" because nothing counted the walk, having asserted
+//     before rmp #2760 only that the plan line said so in words (#2720). What it
+//     asserts now is parity across the parallel threshold — the setting the reader
+//     did not choose — for all THREE leaves, each driven by a query whose row count
+//     differs from its node walk so that a rows-derived figure cannot pass.
 //
 // Peer behaviour these gates were calibrated against, read in source: Neo4j
 // 5.26.16 counts REAL kernel cursor accesses (OperatorProfileEvent implements
@@ -359,90 +362,259 @@ func TestProfileDbHits_ColumnarExpandCountsSlotsWalked(t *testing.T) {
 	}
 }
 
-// TestProfileDbHits_ParallelLeafDeclaresItsGap is gate 3.
-//
-// A morsel-parallel leaf counts no db-hits while scanning the whole label, and
-// until rmp #2760 it printed the same `dbhits=0` a pure row transformer prints.
-// The control arm is the SAME query below the parallel threshold, which plans a
-// NodeByLabelScan and reports one db-hit per node: the two arms together are what
-// make the leaf's figure a reporting gap rather than a fact about the workload.
-//
-// Since rmp #2760 the gate asserts the STATE, not the words: the leaf's cell must
-// render as unknown ("?") and the control's as the number. The PlanDetail marker
-// #2720 added is still asserted, because it says in words which gap the "?" is.
-func TestProfileDbHits_ParallelLeafDeclaresItsGap(t *testing.T) {
-	t.Parallel()
-	const nodes = 2000
+// parallelHonestyNodes is the fixture size for gate 3. It sits above the subject
+// arm's threshold and below the control arm's, which is the only difference
+// between the two engines.
+const parallelHonestyNodes = 2000
 
-	seed := func(threshold int) *cypher.Engine {
-		g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
-		eng := cypher.NewEngineWithOptions(g, cypher.EngineOptions{ParallelScanThreshold: threshold})
-		t.Cleanup(func() { _ = eng.Close() })
-		for i := 0; i < nodes; i++ {
-			runHonestyWrite(t, eng, fmt.Sprintf("CREATE (:B {v:%d})", i%100))
-		}
-		return eng
+// parallelHonestyGroups is the number of distinct `v` values the fixture carries,
+// so a GROUP BY over `v` yields far fewer rows than there are nodes. That gap is
+// what makes gate 3's aggregate arm discriminating.
+const parallelHonestyGroups = 100
+
+// parallelHonestyEngine seeds a fresh engine holding parallelHonestyNodes :B
+// nodes, each with a group property `v` in [0, parallelHonestyGroups) and a
+// distinct `k`. threshold is the engine's ParallelScanThreshold: pass a low value
+// for the parallel arm and one above the node count for the serial control.
+func parallelHonestyEngine(t *testing.T, threshold int) *cypher.Engine {
+	t.Helper()
+	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	eng := cypher.NewEngineWithOptions(g, cypher.EngineOptions{ParallelScanThreshold: threshold})
+	t.Cleanup(func() { _ = eng.Close() })
+	for i := 0; i < parallelHonestyNodes; i++ {
+		runHonestyWrite(t, eng, fmt.Sprintf("CREATE (:B {v:%d, k:%d})", i%parallelHonestyGroups, i))
 	}
+	return eng
+}
 
-	const q = "MATCH (n:B) RETURN n.v"
+// TestProfileDbHits_ParallelLeavesCountTheirWorkersNodeWalk is gate 3.
+//
+// # What it used to assert, and why that inverted
+//
+// This gate was TestProfileDbHits_ParallelLeafDeclaresItsGap, and it asserted the
+// OPPOSITE of what it asserts now: that a morsel-parallel leaf renders its db-hits
+// cell as unknown ("?") because nothing counted its workers' node walk. Its own
+// failure message said what would have to happen for it to be rewritten — "if a
+// later task (#2762) taught the leaf to count, this gate is what forces its
+// documentation and its markers to be updated together". rmp #2762 is that task,
+// and this is that rewrite.
+//
+// # The shape of each arm
+//
+// One arm per leaf, and each arm is a PAIR of PROFILE runs over IDENTICAL graphs
+// that differ only in ParallelScanThreshold — the setting a reader never chose and
+// cannot see in the output. The subject arm plans the morsel-parallel leaf; the
+// control arm plans the serial pipeline. The assertion is that the two report the
+// SAME db-hits figure for the same work, which is precisely what
+// docs/explain-profile-honesty-audit-2026-09-03.md §3 refutation 3 measured them
+// failing to do:
+//
+//	ParallelScanThreshold = 20000 :  NodeByLabelScan     rows=2000  dbhits=2000
+//	ParallelScanThreshold = 10    :  ParallelScanProject rows=2000  dbhits=0
+//
+// # Why each arm is discriminating rather than coincidental
+//
+// A gate whose expected db-hits equalled the expected rows would pass on a leaf
+// marked [exec.StorageRecordScan], which derives db-hits FROM rows — the exact
+// misreport rmp #2762 had to avoid. Every arm therefore drives a shape whose row
+// count differs from its node walk:
+//
+//   - the fused scan carries a WHERE admitting 1 in parallelHonestyGroups nodes,
+//     so rows=20 against dbhits=2000;
+//   - the aggregate groups 2000 nodes into 100, so rows=100;
+//   - the count emits one row for the whole graph, so rows=1.
+//
+// Each arm asserts the inequality explicitly, so an accidental fixture change that
+// made rows equal the node count would fail here rather than quietly making the
+// arm vacuous.
+func TestProfileDbHits_ParallelLeavesCountTheirWorkersNodeWalk(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 
-	// Control: below the threshold, the same query plans a serial label scan.
-	serial, err := seed(nodes*10).Profile(ctx, q, nil)
-	if err != nil {
-		t.Fatalf("Profile(serial): %v", err)
+	// profile runs q at the given threshold and returns the rendered plan.
+	profile := func(t *testing.T, threshold int, q string) string {
+		t.Helper()
+		plan, err := parallelHonestyEngine(t, threshold).Profile(ctx, q, nil)
+		if err != nil {
+			t.Fatalf("Profile(threshold=%d, %q): %v", threshold, q, err)
+		}
+		return plan
 	}
-	serialRows, serialHits, serialKnown, ok := profiledCells(serial, "NodeByLabelScan")
-	if !ok {
-		t.Fatalf("the control arm did not plan a NodeByLabelScan, so this gate has no "+
-			"baseline:\n%s", serial)
-	}
-	if !serialKnown {
-		t.Fatalf("control arm: the serial NodeByLabelScan rendered its db-hits as "+
-			"unknown. It carries exec.StorageRecordScan, so its cell is a derived "+
-			"figure and must be a number — otherwise the subject arm below has "+
-			"nothing to be compared against:\n%s", serial)
-	}
-	if serialHits != serialRows || serialHits != nodes {
-		t.Fatalf("control arm: rows=%d dbhits=%d, want %d for both:\n%s",
-			serialRows, serialHits, nodes, serial)
+	const (
+		parallelThreshold = 10
+		serialThreshold   = parallelHonestyNodes * 10
+	)
+
+	// cells locates one operator and fails the arm — rather than returning a zero —
+	// when it is absent, because an absent operator means the arm planned something
+	// else entirely and proved nothing.
+	cells := func(t *testing.T, plan, operator, role string) (rows, hits int64) {
+		t.Helper()
+		r, d, known, ok := profiledCells(plan, operator)
+		if !ok {
+			t.Fatalf("the %s arm planned no %s, so this arm covers NOTHING — it did not "+
+				"exercise the operator it names:\n%s", role, operator, plan)
+		}
+		if !known {
+			t.Fatalf("the %s arm's %s rendered its db-hits as %q. Since rmp #2762 every "+
+				"operator in this gate counts or derives its accesses, so an unknown cell "+
+				"means the marker interface was dropped:\n%s",
+				role, operator, exec.DbHitsUnknown, plan)
+		}
+		return r, d
 	}
 
-	// Subject: above the threshold, the parallel leaf.
-	parallel, err := seed(10).Profile(ctx, q, nil)
+	t.Run("ParallelScanProject", func(t *testing.T) {
+		t.Parallel()
+		// `n.k + 1` rather than a bare `n.k`: the columnar filter chain claims a plain
+		// property projection at every threshold, and the parallel tier would then never
+		// be reached (the same reason recorded in
+		// docs/benchmarks/min-label-anchor-vs-parallel-scan-2026-08-26.md).
+		const q = "MATCH (n:B) WHERE n.v = 0 RETURN n.k + 1"
+		wantRows := int64(parallelHonestyNodes / parallelHonestyGroups)
+
+		serial := profile(t, serialThreshold, q)
+		_, serialHits := cells(t, serial, "NodeByLabelScan", "serial control")
+		if serialHits != parallelHonestyNodes {
+			t.Fatalf("control: NodeByLabelScan reported dbhits=%d, want %d. The control is "+
+				"the baseline the subject is compared against, so a wrong baseline makes the "+
+				"comparison meaningless:\n%s", serialHits, parallelHonestyNodes, serial)
+		}
+
+		parallel := profile(t, parallelThreshold, q)
+		parRows, parHits := cells(t, parallel, "ParallelScanProject", "parallel subject")
+		if parRows != wantRows {
+			t.Fatalf("the parallel leaf emitted %d rows, want %d. This arm is discriminating "+
+				"only because the predicate admits far fewer rows than it scans:\n%s",
+				parRows, wantRows, parallel)
+		}
+		if parHits != serialHits {
+			t.Errorf("ParallelScanProject reported dbhits=%d where the serial plan for the "+
+				"IDENTICAL query on an identical graph reported %d. The two arms differ only "+
+				"in ParallelScanThreshold, a setting the reader did not choose and cannot see "+
+				"in the output, so the figures must agree (rmp #2762, audit §3 refutation 3)."+
+				"\nparallel:\n%s\nserial control:\n%s", parHits, serialHits, parallel, serial)
+		}
+		if parHits == parRows {
+			t.Errorf("ParallelScanProject reported dbhits=%d equal to its %d emitted rows. "+
+				"The fused sub-plan filtered %d nodes down to %d, so a figure that tracks "+
+				"rows is the exact under-report a StorageRecordScan marker would have "+
+				"produced:\n%s", parHits, parRows, parallelHonestyNodes, parRows, parallel)
+		}
+	})
+
+	t.Run("ParallelAggregateScan", func(t *testing.T) {
+		t.Parallel()
+		const q = "MATCH (n) RETURN n.v AS g, count(*) AS c ORDER BY g"
+
+		serial := profile(t, serialThreshold, q)
+		_, serialHits := cells(t, serial, "AllNodesScan", "serial control")
+		if serialHits != parallelHonestyNodes {
+			t.Fatalf("control: AllNodesScan reported dbhits=%d, want %d:\n%s",
+				serialHits, parallelHonestyNodes, serial)
+		}
+
+		parallel := profile(t, parallelThreshold, q)
+		parRows, parHits := cells(t, parallel, "ParallelAggregateScan", "parallel subject")
+		if parRows != parallelHonestyGroups {
+			t.Fatalf("the aggregate leaf emitted %d rows, want %d groups:\n%s",
+				parRows, parallelHonestyGroups, parallel)
+		}
+		if parHits != serialHits {
+			t.Errorf("ParallelAggregateScan reported dbhits=%d where the serial pipeline's "+
+				"AllNodesScan reported %d over the same graph. Both walk every node; only "+
+				"the threshold differs (rmp #2762).\nparallel:\n%s\nserial control:\n%s",
+				parHits, serialHits, parallel, serial)
+		}
+		if parHits == parRows {
+			t.Errorf("ParallelAggregateScan reported dbhits=%d equal to its %d emitted rows. "+
+				"Its rows are GROUPS: a figure tracking them would report the size of the "+
+				"aggregate's OUTPUT for a walk of %d nodes:\n%s",
+				parHits, parRows, parallelHonestyNodes, parallel)
+		}
+	})
+
+	t.Run("ParallelCountScan", func(t *testing.T) {
+		t.Parallel()
+		const q = "MATCH (n) RETURN count(*)"
+
+		// This leaf has no scanning serial twin, and the gate says so rather than
+		// papering over it. Below the threshold the SAME query plans an
+		// AllNodesCountScan, which answers from the maintained live-node counter in
+		// O(1): it walks nothing, counts nothing, and honestly renders "?". Asserting
+		// that here is what stops this explanation going stale — if the sub-threshold
+		// plan ever becomes a real scan, this fails and the control below can be
+		// replaced by the direct twin.
+		countControl := profile(t, serialThreshold, q)
+		if _, _, known, ok := profiledCells(countControl, "AllNodesCountScan"); !ok || known {
+			t.Fatalf("the sub-threshold plan for %q is no longer an AllNodesCountScan with "+
+				"an unknown db-hits cell (found=%v, known=%v). The comment above and the "+
+				"substitute control below both depend on that being so:\n%s",
+				q, ok, known, countControl)
+		}
+
+		// The substitute control: the same whole-graph node walk, done serially, by the
+		// query whose sub-threshold plan IS a scan.
+		serial := profile(t, serialThreshold, "MATCH (n) RETURN n.k")
+		_, serialHits := cells(t, serial, "AllNodesScan", "serial control")
+		if serialHits != parallelHonestyNodes {
+			t.Fatalf("control: AllNodesScan reported dbhits=%d, want %d:\n%s",
+				serialHits, parallelHonestyNodes, serial)
+		}
+
+		parallel := profile(t, parallelThreshold, q)
+		parRows, parHits := cells(t, parallel, "ParallelCountScan", "parallel subject")
+		if parRows != 1 {
+			t.Fatalf("the count leaf emitted %d rows, want exactly 1:\n%s", parRows, parallel)
+		}
+		if parHits != serialHits {
+			t.Errorf("ParallelCountScan reported dbhits=%d where a serial walk of the same "+
+				"%d-node graph reported %d. The count leaf reads every node reference its "+
+				"workers consume, so the two must agree (rmp #2762).\nparallel:\n%s\n"+
+				"serial control:\n%s", parHits, parallelHonestyNodes, serialHits, parallel, serial)
+		}
+		if parHits == parRows {
+			t.Errorf("ParallelCountScan reported dbhits=%d equal to its single emitted row. "+
+				"This is the extreme case of a derived figure being unrelated to the work: "+
+				"rows=1 for a walk of %d nodes:\n%s", parHits, parallelHonestyNodes, parallel)
+		}
+	})
+}
+
+// TestProfileDbHits_ParallelLeafPlanDetailNoLongerClaimsItIsUncounted is the
+// documentation half of gate 3.
+//
+// The rendered plan carries two statements about a parallel leaf: the db-hits
+// number, and the PlanDetail beside the operator name. Until rmp #2762 that detail
+// read "parallel tier; db-hits not counted", which was true. It is not any more,
+// and a plan line that contradicts its own number is worse than one that says
+// nothing — so this asserts the old words are GONE and that what replaced them
+// still names the tier.
+//
+// Asserting the absence alone would pass on a leaf that rendered no detail at all,
+// which would lose the one thing the detail is for: telling a reader that an
+// operator's whole fused sub-plan — filter, projection, every worker and every
+// morsel — collapsed into this single line, with no children below it to subtract.
+func TestProfileDbHits_ParallelLeafPlanDetailNoLongerClaimsItIsUncounted(t *testing.T) {
+	t.Parallel()
+
+	plan, err := parallelHonestyEngine(t, 10).Profile(context.Background(), "MATCH (n) RETURN n.k", nil)
 	if err != nil {
-		t.Fatalf("Profile(parallel): %v", err)
+		t.Fatalf("Profile: %v", err)
 	}
-	parRows, _, parKnown, ok := profiledCells(parallel, "ParallelScanProject")
-	if !ok {
-		t.Fatalf("the subject arm did not plan a ParallelScanProject, so this gate "+
-			"covers nothing:\n%s", parallel)
+	if _, _, _, ok := profiledCells(plan, "ParallelScanProject"); !ok {
+		t.Fatalf("no ParallelScanProject in the plan, so this gate covers nothing:\n%s", plan)
 	}
-	if parRows != nodes {
-		t.Fatalf("the parallel leaf emitted %d rows, want %d:\n%s", parRows, nodes, parallel)
+	if strings.Contains(plan, "db-hits not counted") {
+		t.Errorf("the parallel leaf's plan line still says its db-hits are not counted, "+
+			"beside a db-hits number it now measures (rmp #2762). A detail that "+
+			"contradicts the cell next to it is a worse defect than the missing figure "+
+			"it used to describe:\n%s", plan)
 	}
-	if parKnown {
-		t.Errorf("the parallel leaf rendered a db-hits FIGURE for a scan of all %d "+
-			"nodes, but nothing counts its workers' node walk. The identical query "+
-			"reports dbhits=%d below the parallel threshold, so a number here would "+
-			"be a measurement claim the engine cannot stand behind — the cell must "+
-			"render %q (rmp #2760). If a later task (#2762) taught the leaf to count, "+
-			"this gate is what forces its documentation and its markers to be updated "+
-			"together.\nparallel:\n%s\nserial control:\n%s",
-			nodes, serialHits, exec.DbHitsUnknown, parallel, serial)
-	}
-	if !strings.Contains(parallel, "db-hits not counted") {
-		t.Errorf("the parallel leaf's plan line no longer says its db-hits are "+
-			"uncounted. The \"?\" says a figure is missing; this detail says WHICH "+
-			"gap it is, and rmp #2720 added it for that reason:\n%s", parallel)
-	}
-	// The "?" must actually reach the rendered line: asserting the parsed state
-	// alone would pass even if the renderer printed a zero, because the parser
-	// would then report known=true — but only this pins the exact glyph a reader
-	// sees, and the mutation that reverts the renderer to "%d" is caught here.
-	if !strings.Contains(parallel, "dbhits="+exec.DbHitsUnknown) {
-		t.Errorf("the parallel leaf's line does not render dbhits=%s; a reader is "+
-			"shown a number for storage nobody counted:\n%s",
-			exec.DbHitsUnknown, parallel)
+	if !strings.Contains(plan, "parallel tier") {
+		t.Errorf("the parallel leaf renders no \"parallel tier\" detail at all. The "+
+			"detail is what tells a reader the whole fused phase — filter, projection, "+
+			"every worker, every morsel — is attributed to this one line with no children "+
+			"to subtract; removing it rather than correcting it loses that:\n%s", plan)
 	}
 }

@@ -1,0 +1,96 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkParallelAggregate_Concurrent/conc=1/impl=parallel-10         	      66	  17133767 ns/op	83518463 B/op	 1203866 allocs/op
+BenchmarkParallelAggregate_Concurrent/conc=1/impl=serial-10           	      67	  16418552 ns/op	10071940 B/op	  199835 allocs/op
+BenchmarkParallelAggregate_Concurrent/conc=8/impl=parallel-10         	       8	 136187849 ns/op	668080735 B/op	 9630399 allocs/op
+BenchmarkParallelAggregate_Concurrent/conc=8/impl=serial-10           	      21	  49124494 ns/op	80575494 B/op	 1598673 allocs/op
+BenchmarkParallelAggregate_Concurrent/conc=64/impl=parallel-10        	       2	 846373438 ns/op	5344337792 B/op	77041931 allocs/op
+BenchmarkParallelAggregate_Concurrent/conc=64/impl=serial-10          	       4	 295754354 ns/op	644611240 B/op	12789396 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/cypher	10.170s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkParallelAggregate_Concurrent/conc=1/impl=parallel-10         	      67	  17251706 ns/op	83518555 B/op	 1203867 allocs/op
+BenchmarkParallelAggregate_Concurrent/conc=1/impl=serial-10           	      76	  16765936 ns/op	10071939 B/op	  199835 allocs/op
+BenchmarkParallelAggregate_Concurrent/conc=8/impl=parallel-10         	       8	 138272214 ns/op	668080801 B/op	 9630397 allocs/op
+BenchmarkParallelAggregate_Concurrent/conc=8/impl=serial-10           	      22	  48236277 ns/op	80575860 B/op	 1598673 allocs/op
+BenchmarkParallelAggregate_Concurrent/conc=64/impl=parallel-10        	       2	 837942666 ns/op	5344323708 B/op	77041939 allocs/op
+BenchmarkParallelAggregate_Concurrent/conc=64/impl=serial-10          	       4	 291095688 ns/op	644604664 B/op	12789381 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/cypher	10.370s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkParallelAggregate_Concurrent/conc=1/impl=parallel-10         	      66	  17211961 ns/op	83518880 B/op	 1203868 allocs/op
+BenchmarkParallelAggregate_Concurrent/conc=1/impl=serial-10           	      69	  16825146 ns/op	10071940 B/op	  199835 allocs/op
+BenchmarkParallelAggregate_Concurrent/conc=8/impl=parallel-10         	       8	 136473693 ns/op	668081725 B/op	 9630400 allocs/op
+BenchmarkParallelAggregate_Concurrent/conc=8/impl=serial-10           	      20	  51731910 ns/op	80575450 B/op	 1598673 allocs/op
+BenchmarkParallelAggregate_Concurrent/conc=64/impl=parallel-10        	       2	 883681396 ns/op	5344338852 B/op	77041946 allocs/op
+BenchmarkParallelAggregate_Concurrent/conc=64/impl=serial-10          	       4	 289976510 ns/op	644603600 B/op	12789380 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/cypher	10.289s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkParallelAggregate_Concurrent/conc=1/impl=parallel-10         	      67	  17567455 ns/op	83518729 B/op	 1203867 allocs/op
+BenchmarkParallelAggregate_Concurrent/conc=1/impl=serial-10           	      69	  16724142 ns/op	10071941 B/op	  199835 allocs/op
+BenchmarkParallelAggregate_Concurrent/conc=8/impl=parallel-10         	       8	 136414328 ns/op	668080429 B/op	 9630398 allocs/op
+BenchmarkParallelAggregate_Concurrent/conc=8/impl=serial-10           	      25	  50303280 ns/op	80575678 B/op	 1598673 allocs/op
+BenchmarkParallelAggregate_Concurrent/conc=64/impl=parallel-10        	       2	 865491834 ns/op	5344322132 B/op	77041874 allocs/op
+BenchmarkParallelAggregate_Concurrent/conc=64/impl=serial-10          	       4	 292383490 ns/op	644604104 B/op	12789380 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/cypher	10.595s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkParallelAggregate_Concurrent/conc=1/impl=parallel-10         	      66	  17159310 ns/op	83518589 B/op	 1203867 allocs/op
+BenchmarkParallelAggregate_Concurrent/conc=1/impl=serial-10           	      72	  16690427 ns/op	10071940 B/op	  199835 allocs/op
+BenchmarkParallelAggregate_Concurrent/conc=8/impl=parallel-10         	       8	 134498396 ns/op	668082217 B/op	 9630404 allocs/op
+BenchmarkParallelAggregate_Concurrent/conc=8/impl=serial-10           	      22	  49533822 ns/op	80576121 B/op	 1598674 allocs/op
+BenchmarkParallelAggregate_Concurrent/conc=64/impl=parallel-10        	       2	 865193646 ns/op	5344325636 B/op	77041937 allocs/op
+BenchmarkParallelAggregate_Concurrent/conc=64/impl=serial-10          	       4	 298279354 ns/op	644609852 B/op	12789395 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/cypher	10.345s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkParallelAggregate_Concurrent/conc=1/impl=parallel-10         	      68	  17652014 ns/op	83518478 B/op	 1203866 allocs/op
+BenchmarkParallelAggregate_Concurrent/conc=1/impl=serial-10           	      75	  16345028 ns/op	10071939 B/op	  199835 allocs/op
+BenchmarkParallelAggregate_Concurrent/conc=8/impl=parallel-10         	       8	 138286156 ns/op	668081269 B/op	 9630405 allocs/op
+BenchmarkParallelAggregate_Concurrent/conc=8/impl=serial-10           	      22	  48699314 ns/op	80575960 B/op	 1598674 allocs/op
+BenchmarkParallelAggregate_Concurrent/conc=64/impl=parallel-10        	       2	 854391375 ns/op	5344333140 B/op	77041963 allocs/op
+BenchmarkParallelAggregate_Concurrent/conc=64/impl=serial-10          	       4	 288070552 ns/op	644609224 B/op	12789392 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/cypher	10.365s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkParallelAggregate_Concurrent/conc=1/impl=parallel-10         	      73	  17218686 ns/op	83518318 B/op	 1203866 allocs/op
+BenchmarkParallelAggregate_Concurrent/conc=1/impl=serial-10           	      75	  16627469 ns/op	10071940 B/op	  199835 allocs/op
+BenchmarkParallelAggregate_Concurrent/conc=8/impl=parallel-10         	       8	 137111625 ns/op	668082921 B/op	 9630397 allocs/op
+BenchmarkParallelAggregate_Concurrent/conc=8/impl=serial-10           	      24	  49243566 ns/op	80575622 B/op	 1598673 allocs/op
+BenchmarkParallelAggregate_Concurrent/conc=64/impl=parallel-10        	       2	 861456292 ns/op	5344332792 B/op	77041938 allocs/op
+BenchmarkParallelAggregate_Concurrent/conc=64/impl=serial-10          	       4	 294734646 ns/op	644605060 B/op	12789384 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/cypher	10.582s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkParallelAggregate_Concurrent/conc=1/impl=parallel-10         	      63	  17423591 ns/op	83518499 B/op	 1203866 allocs/op
+BenchmarkParallelAggregate_Concurrent/conc=1/impl=serial-10           	      73	  16604322 ns/op	10071939 B/op	  199835 allocs/op
+BenchmarkParallelAggregate_Concurrent/conc=8/impl=parallel-10         	       8	 139128906 ns/op	668081234 B/op	 9630399 allocs/op
+BenchmarkParallelAggregate_Concurrent/conc=8/impl=serial-10           	      25	  49129673 ns/op	80575885 B/op	 1598674 allocs/op
+BenchmarkParallelAggregate_Concurrent/conc=64/impl=parallel-10        	       2	 859887792 ns/op	5344330356 B/op	77041903 allocs/op
+BenchmarkParallelAggregate_Concurrent/conc=64/impl=serial-10          	       4	 295106875 ns/op	644606184 B/op	12789388 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/cypher	10.476s

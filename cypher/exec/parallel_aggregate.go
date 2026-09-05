@@ -35,10 +35,14 @@ package exec
 // AllNodesScan.Init / ParallelScan.Init), splits the owned slice into disjoint
 // morsels of [DefaultMorselSize] IDs, and launches up to GOMAXPROCS worker
 // goroutines. Each worker owns a PRIVATE int64 counter and counts the IDs in
-// the morsels it dequeues; workers never touch shared mutable state and never
-// touch the graph after the single-threaded collection. There is no per-row
-// output channel — that funnel is exactly the scaling ceiling this operator
-// removes.
+// the morsels it dequeues, and never touches the graph after the single-threaded
+// collection. There is no per-row output channel — that funnel is exactly the
+// scaling ceiling this operator removes.
+//
+// Since rmp #2762 a worker touches exactly one shared word — op.storageReads,
+// the db-hits figure this leaf reports — and touches it once per MORSEL rather
+// than once per node. [ParallelCountScan.countWorker] states why that
+// granularity is required rather than merely preferred.
 //
 // The first call to Next joins every worker synchronously via wg.Wait on the
 // caller's goroutine, then sums the per-worker partials into the single result
@@ -69,6 +73,7 @@ import (
 	"fmt"
 	"runtime/pprof"
 	"sync"
+	"sync/atomic"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/graph"
@@ -88,6 +93,13 @@ type ParallelCountScan struct {
 	cancel  context.CancelFunc // cancels the worker context
 
 	partials []int64 // one private counter per worker; read only after wg.Wait
+
+	// storageReads accumulates the node references the workers consumed, for
+	// [ParallelCountScan.storageAccesses] (rmp #2762). It is the ONE piece of
+	// shared mutable state a worker touches, and it is touched once per MORSEL —
+	// see [ParallelCountScan.countWorker] for why that is not the per-row atomic
+	// the sibling leaf's #2649 audit removed.
+	storageReads atomic.Int64
 
 	wg         sync.WaitGroup
 	morselSize int
@@ -170,7 +182,7 @@ func (op *ParallelCountScan) Init(ctx context.Context) error {
 		go func() {
 			defer op.wg.Done()
 			pprof.Do(wCtx, pprof.Labels("component", "cypher-parallel-count-scan", "worker", fmt.Sprintf("%d", i)), func(ctx context.Context) {
-				op.partials[i] = countWorker(ctx, workCh)
+				op.partials[i] = op.countWorker(ctx, workCh)
 			})
 		}()
 	}
@@ -178,10 +190,20 @@ func (op *ParallelCountScan) Init(ctx context.Context) error {
 }
 
 // countWorker dequeues morsels and returns the count of NodeIDs processed until
-// the work channel drains or ctx is cancelled. It owns only its private return
-// value and the immutable morsel sub-slices it reads; it touches no shared
-// mutable state and no graph state.
-func countWorker(ctx context.Context, workCh <-chan []graph.NodeID) int64 {
+// the work channel drains or ctx is cancelled. It owns its private return value
+// and the immutable morsel sub-slices it reads, and touches no graph state.
+//
+// It touches exactly one piece of shared mutable state — op.storageReads — and
+// touches it once per MORSEL, never once per node. That granularity is the whole
+// of rmp #2762's concurrency discipline, and it is a correctness requirement of
+// CLAUDE.md's mandate 3 rather than a tuning preference: a per-node atomic on a
+// morsel-parallel scan is a contention defect. The sibling leaf measured exactly
+// that shape — two process-shared atomics bumped per produced row — at 18.9% of
+// flat CPU, and it stopped the operator scaling past four workers (rmp #2649,
+// see [budgetTally]). With [DefaultMorselSize] at 1024 this is one atomic add per
+// 1024 node references, on a counter no worker ever reads back, so no worker ever
+// waits on another.
+func (op *ParallelCountScan) countWorker(ctx context.Context, workCh <-chan []graph.NodeID) int64 {
 	var n int64
 	for morsel := range workCh {
 		if ctx.Err() != nil {
@@ -190,10 +212,50 @@ func countWorker(ctx context.Context, workCh <-chan []graph.NodeID) int64 {
 		// Every NodeID in a bare full-node scan binds a non-null node, so both
 		// count(*) and count(<scan-var>) increment once per ID — the per-morsel
 		// length is the exact contribution.
-		n += int64(len(morsel))
+		//
+		// The same length is this morsel's storage-access contribution, and for the
+		// same reason: the operator's access path yielded exactly these node
+		// references and this worker consumed every one of them. It is accumulated
+		// in the worker-local `read` and published in one atomic add below.
+		read := int64(len(morsel))
+		n += read
+		op.storageReads.Add(read)
 	}
 	return n
 }
+
+// storageAccesses reports the node references this leaf's workers consumed. It
+// implements the storageAccessCounter marker in profile.go, so PROFILE renders
+// this operator's cell as MEASURED rather than as the UNKNOWN "?" it printed
+// between rmp #2760 and #2762 — and the bare 0 it printed before #2760.
+//
+// # Why the emitted row count could never have been this number
+//
+// A count leaf emits exactly ONE row however many nodes it walked, so
+// [StorageRecordScan]'s derivation — one record read per row emitted — is wrong
+// here by the whole graph. That is why the leaf never carried that marker, and
+// why this figure had to be counted rather than inferred.
+//
+// # What it counts, exactly
+//
+// One access per node reference the operator's access path yielded and a worker
+// consumed. Init walks the node source once, on the calling goroutine, and splits
+// that walk into disjoint morsels covering it exactly; a worker then consumes
+// whole morsels. So a completed scan reports the same figure a serial full-node
+// scan of the same graph reports — the parity rmp #2762 restored — and a scan cut
+// short by cancellation reports the morsels that were dequeued rather than the
+// ones that were not.
+//
+// A node reference is counted ONCE even though two phases touch it: Init's walk
+// of the access path, and the worker's consumption of the morsel slice Init
+// already owns. Charging both would put the parallel plan at 2N against the
+// serial plan's N for identical work, which is a threshold-dependent figure of
+// exactly the kind this task removed.
+//
+// Init does NOT reset the counter, which is [storageAccessCounter]'s documented
+// contract: the figure covers the operator's whole lifetime, including any Init
+// it has been restarted by.
+func (op *ParallelCountScan) storageAccesses() int64 { return op.storageReads.Load() }
 
 // Next emits the single aggregated row on its first call. It joins every worker
 // synchronously (wg.Wait) on the calling goroutine, then sums the per-worker

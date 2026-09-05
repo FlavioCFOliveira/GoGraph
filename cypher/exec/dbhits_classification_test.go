@@ -54,10 +54,14 @@ const (
 // oversight. Two distinct causes appear:
 //
 //   - READS STORAGE, COUNTS NOTHING — the operator opens an access path and has
-//     no counter to report. Tasks #2762 (parallel leaves) and #2763 (shortest
-//     path) exist to convert some of these to MEASURED; #2761 already did it for
-//     Expand, OptionalExpand and columnarExpand, which is why the DERIVED group
-//     now holds only access-path leaves.
+//     no counter to report. Task #2763 (shortest path) exists to convert the
+//     remaining big one; #2761 already did it for Expand, OptionalExpand and
+//     columnarExpand — which is why the DERIVED group now holds only access-path
+//     leaves — and #2762 did it for the three morsel-parallel leaves, which is why
+//     they have moved from this group to MEASURED. What survives here is the
+//     count-store leaves, whose two answering paths (an O(1) maintained counter
+//     and a full materialisation) would need two different figures, and the two
+//     row-at-a-time operators that seek or intersect per outer row.
 //   - HOLDS AN EXPRESSION CLOSURE — the operator evaluates a caller-supplied
 //     expression, and a GoGraph expression can WALK THE GRAPH: cypher's evalRow
 //     bridge passes expr.PatternEvaluator, whose EvalPattern /
@@ -76,10 +80,13 @@ var dbHitsCensus = map[string]struct {
 	reason string
 }{
 	// ── MEASURED ───────────────────────────────────────────────────────────────
-	"VarLengthExpand": {classMeasured, "reports totalEdgesVisited, a counter its traversal budget already maintains"},
-	"Expand":          {classMeasured, "reports the adjacency slots its cursors consumed, walked or rejected; recovered from the cursor positions in O(1) per input row, never per slot (rmp #2761)"},
-	"OptionalExpand":  {classMeasured, "forwards the inner Expand's slot count; the inner operator is private to it and is never a node of the rendered plan (rmp #2761)"},
-	"columnarExpand":  {classMeasured, "embeds *Expand and inherits its counter"},
+	"VarLengthExpand":       {classMeasured, "reports totalEdgesVisited, a counter its traversal budget already maintains"},
+	"Expand":                {classMeasured, "reports the adjacency slots its cursors consumed, walked or rejected; recovered from the cursor positions in O(1) per input row, never per slot (rmp #2761)"},
+	"OptionalExpand":        {classMeasured, "forwards the inner Expand's slot count; the inner operator is private to it and is never a node of the rendered plan (rmp #2761)"},
+	"columnarExpand":        {classMeasured, "embeds *Expand and inherits its counter"},
+	"ParallelScanProject":   {classMeasured, "reports the node references its morsel workers consumed; each worker charges a whole morsel in one atomic add after the sub-plan's scan leaf has read it, never one per node (rmp #2762)"},
+	"ParallelAggregateScan": {classMeasured, "as ParallelScanProject, charged in runMorsel so the budget==1 inline path counts identically; its rows are GROUPS, so no derivation from rows could have worked (rmp #2762)"},
+	"ParallelCountScan":     {classMeasured, "as ParallelScanProject; its worker already accumulates the morsel lengths for the count itself, and publishes the same figure once per morsel (rmp #2762)"},
 
 	// ── DERIVED ────────────────────────────────────────────────────────────────
 	"AllNodesScan":         {classDerived, "one node reference per emitted row"},
@@ -111,15 +118,12 @@ var dbHitsCensus = map[string]struct {
 	"Foreach":                {classZero, "drives an inner plan that is measured in its own right"},
 
 	// ── UNKNOWN: reads storage, counts nothing ─────────────────────────────────
-	"ShortestPath":          {classUnknown, "bidirectional BFS reads relationship records; totalEdgesTraversed covers only the exhaustive search (rmp #2763)"},
-	"AllShortestPaths":      {classUnknown, "as ShortestPath (rmp #2763)"},
-	"ExpandIntersect":       {classUnknown, "walks two CSR ranges and intersects them"},
-	"IndexNestedLoopJoin":   {classUnknown, "seeks the index once per outer row"},
-	"ParallelScanProject":   {classUnknown, "workers scan the label; the tier is one node by construction (rmp #2762)"},
-	"ParallelAggregateScan": {classUnknown, "as ParallelScanProject (rmp #2762)"},
-	"ParallelCountScan":     {classUnknown, "as ParallelScanProject (rmp #2762)"},
-	"LabelCountScan":        {classUnknown, "answers from a maintained counter when it can, and otherwise MATERIALISES the label bitmap; it counts neither path"},
-	"AllNodesCountScan":     {classUnknown, "answers from a maintained counter when it can, and otherwise WALKS every node id; it counts neither path"},
+	"ShortestPath":        {classUnknown, "bidirectional BFS reads relationship records; totalEdgesTraversed covers only the exhaustive search (rmp #2763)"},
+	"AllShortestPaths":    {classUnknown, "as ShortestPath (rmp #2763)"},
+	"ExpandIntersect":     {classUnknown, "walks two CSR ranges and intersects them"},
+	"IndexNestedLoopJoin": {classUnknown, "seeks the index once per outer row"},
+	"LabelCountScan":      {classUnknown, "answers from a maintained counter when it can, and otherwise MATERIALISES the label bitmap; it counts neither path"},
+	"AllNodesCountScan":   {classUnknown, "answers from a maintained counter when it can, and otherwise WALKS every node id; it counts neither path"},
 
 	// ── UNKNOWN: holds a caller-supplied expression closure ────────────────────
 	"Filter":           {classUnknown, "predFn may be a pattern predicate, which walks adjacency"},

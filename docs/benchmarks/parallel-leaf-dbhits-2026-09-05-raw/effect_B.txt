@@ -1,0 +1,34 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+                                                      │    base     │               head                │
+                                                      │   sec/op    │   sec/op     vs base              │
+ParallelAggregate_Concurrent/conc=1/impl=parallel-10    17.24m ± 2%   17.21m ± 1%       ~ (p=0.574 n=8)
+ParallelAggregate_Concurrent/conc=1/impl=serial-10      16.66m ± 2%   16.90m ± 1%  +1.46% (p=0.007 n=8)
+ParallelAggregate_Concurrent/conc=8/impl=parallel-10    136.8m ± 2%   136.5m ± 1%       ~ (p=0.721 n=8)
+ParallelAggregate_Concurrent/conc=8/impl=serial-10      49.19m ± 2%   49.32m ± 2%       ~ (p=0.878 n=8)
+ParallelAggregate_Concurrent/conc=64/impl=parallel-10   860.7m ± 3%   861.0m ± 3%       ~ (p=0.721 n=8)
+ParallelAggregate_Concurrent/conc=64/impl=serial-10     293.6m ± 2%   295.2m ± 1%       ~ (p=0.195 n=8)
+geomean                                                 88.73m        89.02m       +0.33%
+
+                                                      │     base     │                head                │
+                                                      │     B/op     │     B/op      vs base              │
+ParallelAggregate_Concurrent/conc=1/impl=parallel-10    79.65Mi ± 0%   79.65Mi ± 0%       ~ (p=0.936 n=8)
+ParallelAggregate_Concurrent/conc=1/impl=serial-10      9.605Mi ± 0%   9.605Mi ± 0%       ~ (p=0.984 n=8)
+ParallelAggregate_Concurrent/conc=8/impl=parallel-10    637.1Mi ± 0%   637.1Mi ± 0%       ~ (p=0.442 n=8)
+ParallelAggregate_Concurrent/conc=8/impl=serial-10      76.84Mi ± 0%   76.84Mi ± 0%       ~ (p=0.505 n=8)
+ParallelAggregate_Concurrent/conc=64/impl=parallel-10   4.977Gi ± 0%   4.977Gi ± 0%       ~ (p=1.000 n=8)
+ParallelAggregate_Concurrent/conc=64/impl=serial-10     614.7Mi ± 0%   614.7Mi ± 0%       ~ (p=0.721 n=8)
+geomean                                                 221.3Mi        221.3Mi       +0.00%
+
+                                                      │    base     │                head                 │
+                                                      │  allocs/op  │  allocs/op   vs base                │
+ParallelAggregate_Concurrent/conc=1/impl=parallel-10    1.204M ± 0%   1.204M ± 0%       ~ (p=0.886 n=8)
+ParallelAggregate_Concurrent/conc=1/impl=serial-10      199.8k ± 0%   199.8k ± 0%       ~ (p=1.000 n=8) ¹
+ParallelAggregate_Concurrent/conc=8/impl=parallel-10    9.630M ± 0%   9.630M ± 0%       ~ (p=0.851 n=8)
+ParallelAggregate_Concurrent/conc=8/impl=serial-10      1.599M ± 0%   1.599M ± 0%       ~ (p=1.000 n=8)
+ParallelAggregate_Concurrent/conc=64/impl=parallel-10   77.04M ± 0%   77.04M ± 0%       ~ (p=0.505 n=8)
+ParallelAggregate_Concurrent/conc=64/impl=serial-10     12.79M ± 0%   12.79M ± 0%       ~ (p=0.818 n=8)
+geomean                                                 3.924M        3.924M       +0.00%
+¹ all samples are equal

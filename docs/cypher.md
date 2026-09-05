@@ -1385,15 +1385,21 @@ build in which profiling does not exist.
 >   Its counter is not a per-slot increment — the expansion cursors already advance
 >   one position per slot, so the count is recovered from them in O(1) per input
 >   row, never per slot.
+>
+>   The **morsel-parallel leaves** measure too: each reports the node references its
+>   workers consumed, so the same query reports the same figure whether the planner
+>   put it above or below the parallel threshold. Their rows say nothing about it —
+>   a parallel aggregate emits one row per group, and a parallel count exactly one
+>   row, for a walk of every node. Their counter costs the scan nothing per record:
+>   a worker charges a whole morsel in one atomic add, never one per node.
 > - **A known `0`** — an operator that opens no access path at all: `Limit`, `Skip`,
 >   `Distinct`, `Eager`, `Union`, the aggregations, and the `Apply` family, whose
 >   own cost is entirely in the children the plan already shows. Each of these
 >   claims the zero explicitly in the engine, so the cell is a measurement.
 > - **`?` — not counted.** Nothing observed this operator's storage accesses, so
 >   the engine reports no figure rather than a `0` that would read as "touched
->   nothing". It covers `shortestPath` and `allShortestPaths`, the morsel-parallel
->   leaves (which also say so in their plan line,
->   `[parallel tier; db-hits not counted]`), the count-store leaves, and **every
+>   nothing". It covers `shortestPath` and `allShortestPaths`, the count-store
+>   leaves, and **every
 >   operator that evaluates one of your expressions** — `Filter`, `Project`, `Sort`,
 >   `Top`, `UNWIND`, the hash joins and procedure calls. The last group is the
 >   surprising one, and it is real: a GoGraph expression can walk the graph, so
@@ -1406,8 +1412,18 @@ build in which profiling does not exist.
 > figures. When any cell is `?` the total renders as `N + ?` — a **floor**, not the
 > query's whole storage cost. A plain number means every operator reported.
 >
-> Two further properties are worth knowing before you compare two plans:
+> Three further properties are worth knowing before you compare two plans:
 >
+> - **A morsel-parallel leaf is one line for a whole phase.** `ParallelScanProject`,
+>   `ParallelAggregateScan` and `ParallelCountScan` fuse the scan with the filter and
+>   the projection (or the aggregate) and run them on worker goroutines. Nothing is
+>   rendered below the line — its plan detail says so — and its rows, time and
+>   db-hits are all totals for the whole phase. There is no per-worker breakdown:
+>   PostgreSQL prints one (`Worker N:` sub-entries under `ANALYZE, VERBOSE`) and
+>   divides its headline `actual rows` by the participant count, so its parallel node
+>   reports a per-worker average; GoGraph sums, as Neo4j does, because the figure
+>   exists so you can compare the parallel plan against the serial one and an average
+>   is not comparable with anything.
 > - An **expand into an already-bound destination** — the hop that closes a cycle,
 >   as in `MATCH (a)-[:K]->(b)-[:K]->(a)` — narrows its cursor to that
 >   destination's block by binary search instead of walking the run. It reports the

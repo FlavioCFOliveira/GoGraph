@@ -30,11 +30,19 @@ import (
 //
 // Both directions are asserted, because a server that simply never sent the key
 // would satisfy the first alone and would publish no db-hits at all.
+//
+// The uncounted node in the fixture used to be a ParallelScanProject. rmp #2762
+// taught the morsel-parallel leaves to count, so that name would now describe an
+// operator whose cell IS a figure — a fixture asserting the opposite of what the
+// engine does, even though the map-building code under test never sees an
+// operator. It is a Filter instead: an operator whose predicate can be a pattern
+// predicate that walks adjacency, which nothing counts, so it remains genuinely
+// UNKNOWN (see exec.noStorageAccess, "the bar for claiming it").
 func TestPlanNodeMetadata_OmitsUncountedDbHits(t *testing.T) {
 	t.Parallel()
 
 	tree := exec.PlanNode{
-		Name: "ParallelScanProject", Detail: "parallel tier; db-hits not counted",
+		Name:     "Filter",
 		Profiled: true, Rows: 2000, DbHits: 0, DbHitsKnown: false,
 		Children: []exec.PlanNode{{
 			Name: "NodeByLabelScan", Detail: "B",
@@ -45,10 +53,10 @@ func TestPlanNodeMetadata_OmitsUncountedDbHits(t *testing.T) {
 	m := planNodeMetadata(&tree, true)
 
 	if _, present := m[planKeyDbHits]; present {
-		t.Errorf("the uncounted operator published %s=%v. Nothing counted its workers' "+
-			"node walk, so a value on this key is a measurement claim the engine "+
-			"cannot stand behind — the same reason pageCacheHits/pageCacheMisses are "+
-			"omitted rather than zeroed.", planKeyDbHits, m[planKeyDbHits])
+		t.Errorf("the uncounted operator published %s=%v. Nothing counted the storage "+
+			"its predicate can reach, so a value on this key is a measurement claim "+
+			"the engine cannot stand behind — the same reason pageCacheHits/"+
+			"pageCacheMisses are omitted rather than zeroed.", planKeyDbHits, m[planKeyDbHits])
 	}
 	// The measured fields that ARE known must still be published, or the omission
 	// above would be indistinguishable from profiling not reaching the node.

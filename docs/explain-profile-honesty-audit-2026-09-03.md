@@ -394,7 +394,8 @@ gofmt -l cypher/ cypher/exec/                       # empty
 Environment: darwin 25.5.0 (arm64), Go toolchain as pinned by `go.mod`. The host was **not**
 quiet — the sprint's other specialist was running concurrently — which is why this document
 contains no timing comparison. Every figure quoted here is a count or a structural equality,
-and neither is affected by load.
+and neither is affected by load. (The rmp #2761 and #2762 addenda below DO contain timing
+comparisons; each states its own conditions and its own measured noise floor.)
 
 ---
 
@@ -570,3 +571,180 @@ finding.
   remain UNCOUNTED.
 * §7's limit stands: `ParallelAggregateScan` and `ParallelCountScan` are still
   classified from the interface set rather than from an observed run.
+
+## Addendum — 2026-09-05, rmp #2762 (sprint 355)
+
+### Refutation 3 is FIXED: the morsel-parallel leaves count their workers' node walk
+
+§3's refutation 3 recorded the same query reporting `dbhits=2000` below the parallel
+threshold and `dbhits=0` above it. rmp #2760 turned that `0` into `?`, which stopped it
+being a false claim but left it an absent measurement. **It is now a measurement.**
+
+`ParallelScanProject`, `ParallelAggregateScan` and `ParallelCountScan` all implement
+`exec.storageAccessCounter` and report the node references their workers consumed. The
+same 2000-node fixture, planned both ways by nothing but `ParallelScanThreshold`:
+
+```
+ParallelScanThreshold = 20000 :  NodeByLabelScan [B]  rows=2000  dbhits=2000
+ParallelScanThreshold = 10    :  ParallelScanProject  rows=2000  dbhits=2000
+```
+
+### All three leaves were reached by a REAL query, not by an interface assertion
+
+§7's standing limit — "`ParallelAggregateScan` and `ParallelCountScan` are still
+classified from the interface set rather than from an observed run" — is discharged.
+Each was planned and PROFILEd end to end, and each subject arm is paired with the
+serial plan for the same graph:
+
+| leaf | query | subject (threshold 10) | serial control (threshold 20000) |
+|---|---|---|---|
+| `ParallelScanProject` | `MATCH (n:B) WHERE n.v = 0 RETURN n.k + 1` | rows=20, **dbhits=2000** | `NodeByLabelScan` rows=2000, dbhits=2000 |
+| `ParallelAggregateScan` | `MATCH (n) RETURN n.v AS g, count(*) AS c ORDER BY g` | rows=100, **dbhits=2000** | `AllNodesScan` rows=2000, dbhits=2000 |
+| `ParallelCountScan` | `MATCH (n) RETURN count(*)` | rows=1, **dbhits=2000** | see below |
+
+Every subject query was chosen so that **rows ≠ node walk**, which is what makes the
+assertion a statement about a counter rather than one a `StorageRecordScan` row
+derivation would also satisfy. `RETURN n.k + 1` rather than a bare `RETURN n.k` because
+the columnar filter chain claims a plain property projection at every threshold and the
+parallel tier would never be reached.
+
+**`ParallelCountScan` has no scanning serial twin, and the gate says so rather than
+papering over it.** Below the threshold the same `count(*)` plans an
+`AllNodesCountScan`, which answers from the maintained live-node counter in O(1): it
+walks nothing, counts nothing, and honestly renders `?`. Its control is therefore the
+same whole-graph walk done serially by another query (`MATCH (n) RETURN n.k` →
+`AllNodesScan`, dbhits=2000). The test asserts the sub-threshold `count(*)` plan really
+is an uncounted `AllNodesCountScan`, so this explanation cannot go stale unnoticed.
+
+### Where the count is taken, and why it is not a per-record atomic
+
+A worker charges a whole MORSEL in one atomic add, immediately after that morsel's
+sub-plan `Init` has read it — `AllNodesScan.Init` collects every id it will emit in one
+pass, so the figure is known there in O(1) and the row loop needs no increment. With
+`DefaultMorselSize` at 1024 that is **one atomic add per 1024 node references**, on a
+counter no worker reads back.
+
+This is a correctness requirement of CLAUDE.md mandate 3, not tuning. The sibling
+counter on this very operator measured the alternative: before rmp #2649 every produced
+row bumped two process-shared atomics, which cost **18.9% of flat CPU** and stopped the
+operator scaling past four workers.
+
+Charging at morsel scan-`Init` rather than after the drain also keeps the figure exact
+when `ParallelScanProject`'s row loop exits early on the result budget: the records were
+read either way.
+
+**A node reference is counted ONCE**, although two phases touch it — the leaf's `Init`
+walks the access path on the calling goroutine, and the worker's morsel scan re-reads
+the slice `Init` already owns. Charging both would report 2N where the serial plan
+reports N for identical work, which is the same threshold-dependent figure this task
+removed, wearing a different sign.
+
+### Read in the reference engines: PostgreSQL divides, Neo4j sums
+
+**PostgreSQL** (REL_17_STABLE, commit `018bfcfd9fa4e520970ba3bda370f78bb473c365`) keeps
+a per-worker `Instrumentation` array under ANALYZE — each worker calls `InstrEndLoop`
+then `InstrAggNode` into its own slot (`execParallel.c:1275`, `:1297`), the leader folds
+them into the node's figure (`:1039-1043`) and keeps the per-worker copies (`:1057-1058`)
+— and under ANALYZE **plus VERBOSE** emits a separate `Worker N:` sub-entry per worker
+(`explain.c:1893-1941`, `:4544-4551`, flushed at `:4595-4614`). Its headline figure is
+then a **per-worker average**: `explain.c:1841-1847` computes
+`rows = instrument->ntuples / nloops`, and `instrument.c:184-186` has summed both
+`ntuples` and `nloops` across participants. `src/test/regress/expected/select_parallel.out:589-620`
+shows the consequence — a `Parallel Seq Scan` printing `rows=2000 loops=15` scanned
+30 000, where 15 = 3 rescans × (4 workers + leader).
+
+**Neo4j 5.26.16** (commit `679feffbfb7a9189aba360ea98eef7fc3371e275`) sums instead.
+`ProfilingTracerData.java:33-41` accumulates `dbHits +=` per operator id,
+`PlanDescriptionBuilder.scala:123-141` attaches exactly one `DbHits` argument per plan
+node, and `ProfileDbHitsTestBase.scala:172-178` asserts that a parallel all-nodes scan
+reports one total equal to the node count. (That clone is community-only, so the
+enterprise parallel runtime's own accumulator was not read; the conclusion rests on the
+`QueryProfile.operatorProfile(int)` contract, the plan-description builder, and the
+runtime spec-suite assertion, all of which are in it.)
+
+**GoGraph follows Neo4j, and neither half of the PostgreSQL design fits.** The
+per-worker sub-entries would have nothing to report: cypher's `buildOpts.forWorker`
+clears the profiler from the per-worker build options, so no worker measures anything,
+and reinstating one would reintroduce the shared-wrapper data race rmp #2664 removed. An
+averaged headline would defeat the purpose of the figure — it exists so a reader can
+compare the parallel plan against the serial one, and an average is not comparable with
+anything. This is stated in `exec.Profiler`'s "parallel tier" section beside the
+citations, so the reason survives the next reader.
+
+### Cost: no significant change in any parallel arm, at any concurrency level
+
+Interleaved A/B/C, three arms rotated **within** each round: `base` (worktree at
+`e6f6384b`), `base2` (a separately built copy of the same source — the **noise floor**),
+and `head`. Apple M4 (10 cores), macOS 26.5.2, go1.27.1, **no `-race`**. Driver:
+`rmp2762-parallel-dbhits-ab.sh`; `loadavg` was recorded before all 39 invocations, all of
+which exited 0. Raw data, both `benchstat` comparisons per set, the load log and the
+driver: `docs/benchmarks/parallel-leaf-dbhits-2026-09-05-raw/`.
+
+*Set A* — `-benchmem -count=1` per round × 5 rounds, `-cpu=1,4,10`, over
+`BenchmarkParallelScan_CountBig`, `BenchmarkParallelScanProject_Scan{Big,FilterBig}`,
+`BenchmarkParallelAggregate_{MinBig,GroupMinBig}` and
+`BenchmarkParallelLabelScan_LabelledProject` (36 benchmarks per round, parallel and
+serial arms of each):
+
+* **No parallel arm moved significantly.** Geomean `sec/op` −0.07%, against a noise-floor
+  geomean of −0.12%.
+* The only three "significant" `sec/op` verdicts are on **serial control** arms
+  (`DisableParallelScan`), which this change cannot reach: −1.90%, −1.41%, −1.16%. The
+  noise floor produced false positives of the same size on the same kind of arm
+  (+1.76%, −0.68%, −1.98%), so ±2% is the floor here.
+* `B/op` and `allocs/op`: every delta is ±0.00%; geomeans −0.01% and −0.04%.
+
+*Set B* — the concurrency evidence, `BenchmarkParallelAggregate_Concurrent` at 1, 8 and
+64 concurrent queries on ONE shared `exec.ParallelGovernor`, 8 rounds:
+
+| conc | parallel arm, base → head | verdict |
+|---|---|---|
+| 1 | 17.24m → 17.21m | ~ (p=0.574, n=8) |
+| 8 | 136.8m → 136.5m | ~ (p=0.721, n=8) |
+| 64 | 860.7m → 861.0m | ~ (p=0.721, n=8) |
+
+The single significant verdict in set B is again a serial control (conc=1, +1.46%,
+p=0.007), and the effect geomean (+0.33%) is *inside* the noise floor's own geomean
+(+0.47%). `B/op` and `allocs/op` are unchanged at every level.
+
+**Honest qualification.** The host was not idle in the strict sense: the sweep itself
+drove the 1-minute load average to 9.6–10.1 on a 10-core machine, and the driver was
+niced (NI 5) by the harness. Both conditions applied identically to all three arms,
+which were rotated within every round, and the noise floor was measured under exactly
+the same conditions — which is what makes the comparison valid rather than the absolute
+numbers portable.
+
+### One stated limit: a parent that never pulls a row
+
+`cypher.profileMaterialised` captures the plan tree after the drain and before any
+`Close`. A parallel leaf is joined by its own first `Next` (`wg.Wait`), so the figure is
+complete for every plan whose parent pulls at least one row — including a `LIMIT 1`,
+verified at `dbhits=20000` on a 20 000-node graph. It is **not** complete when the parent
+pulls none: `RETURN … LIMIT 0` builds the leaf, `Init` launches its workers, `Limit`
+returns false without ever calling the leaf's `Next`, and the capture happens with the
+workers still in flight. MEASURED over 40 consecutive PROFILEs: `dbhits=0` every time,
+alongside `rows=0` and `time=0s`. Zero is what was observed, not what is guaranteed. This
+is a property of WHEN the tree is captured — shared with the rows and time columns — and
+not of the counter. It is recorded in `exec.Profiler` rather than left for a reader of an
+unexpected figure to discover.
+
+### Corrections this addendum makes to earlier text in this document
+
+* §3 refutation 3's `dbhits=0` and the `[parallel tier; db-hits not counted]` plan detail
+  quoted in §6 both describe behaviour that no longer exists. The detail string is now
+  `parallel tier; whole phase on one node` — the part that is still true, since the leaf
+  really does attribute a whole fused phase to one line with no children to subtract.
+* §7's limit "`ParallelAggregateScan` and `ParallelCountScan` are still classified from
+  the interface set rather than from an observed run" is discharged, for those two and
+  for `ParallelScanProject`.
+
+### Still open after #2762
+
+* `shortestPath` / `allShortestPaths` remain UNCOUNTED (#2763).
+* The count-store leaves (`AllNodesCountScan`, `LabelCountScan`) remain UNCOUNTED: each
+  answers from an O(1) maintained counter when it can and materialises otherwise, and the
+  two paths would need different figures.
+* `ExpandIntersect` and `IndexNestedLoopJoin` remain UNCOUNTED.
+* The expression-closure operators are still classified by TYPE, not per instance.
+* The rendered plan still does not distinguish a MEASURED figure from a DERIVED one
+  (rmp #2720's standing limitation of the output).

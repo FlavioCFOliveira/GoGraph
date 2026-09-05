@@ -94,16 +94,72 @@ import (
 // merging N morsel sub-trees into one synthetic tree; both change what PROFILE
 // reports, so neither is done here.
 //
-// Its ROWS and TIME are therefore real measurements of the whole phase, and its
-// DB-HITS are not measured at all: the leaf claims none of [StorageRecordScan],
-// [storageAccessCounter] and [noStorageAccess], so its cell renders as UNKNOWN
-// for a full scan of the graph. The same query below the parallel threshold plans
-// a [NodeByLabelScan] and reports one db-hit per node, so the identical work
-// reports N or "not counted" according to a threshold the reader did not set —
-// which is at least now VISIBLE in the column. Until rmp #2760 the cell read 0,
-// indistinguishable from an operator that read nothing; the leaves' [PlanDetail]
-// said so in words beside the number, which was the only place the column shape
-// then allowed it to be said (rmp #2720).
+// Its ROWS, TIME and — since rmp #2762 — DB-HITS are all real measurements of the
+// whole phase. Each leaf implements [storageAccessCounter] and reports the node
+// references its workers consumed, so the identical query now reports the SAME
+// figure on either side of the parallel threshold: a scan of 2000 :B nodes reports
+// 2000 whether it planned a [NodeByLabelScan] or a [ParallelScanProject]. Before
+// #2762 it reported N below the threshold and "not counted" above it, according to
+// a threshold the reader did not set; before rmp #2760 the cell simply read 0,
+// indistinguishable from an operator that read nothing
+// (docs/explain-profile-honesty-audit-2026-09-03.md §3 refutation 3).
+//
+// The counting obeys the same one-node contract. A worker accumulates in a LOCAL
+// and folds into the leaf's counter with one atomic add per MORSEL — never per
+// node: a per-record atomic on a morsel-parallel scan is a contention defect
+// against CLAUDE.md's mandate 3, and this very tier measured that shape at 18.9%
+// of flat CPU with scaling that stopped at four workers (rmp #2649). Each leaf's
+// storageAccesses godoc states what its figure counts, and that a node reference
+// is charged ONCE even though Init's walk and the morsel scan both touch it —
+// charging both would report 2N for work the serial plan reports as N.
+//
+// # One stated limit: a parent that never pulls a row
+//
+// cypher's profileMaterialised captures the tree after the drain and BEFORE any
+// Close, on the reasoning that materialisation has driven every operator to
+// exhaustion. A morsel-parallel leaf is joined by its own first Next (wg.Wait), so
+// that reasoning holds for every plan whose parent pulls at least one row. It does
+// NOT hold when the parent pulls none: `RETURN ... LIMIT 0` builds the leaf,
+// Init launches its workers, [Limit] then returns false without ever calling the
+// leaf's Next, and the capture happens with the workers still in flight. The
+// figure is then whatever they had completed at that instant. MEASURED over 40
+// consecutive PROFILEs of `MATCH (n:B) RETURN n.v LIMIT 0` on 20 000 nodes: 0
+// every time, alongside rows=0 and time=0s — the workers do not complete a morsel
+// in the microseconds before the capture — but 0 is what was observed, not what is
+// guaranteed. This is a property of WHEN the tree is captured, shared with the rows
+// and time columns, and not of the counter; it is stated here rather than left for
+// a reader of an unexpected figure to discover.
+//
+// # Why not PostgreSQL's per-worker breakdown
+//
+// PostgreSQL takes the other route, and GoGraph deliberately does not follow it.
+// Under ANALYZE it keeps a per-worker Instrumentation array (execParallel.c:1275,
+// :1297 — each worker calls InstrEndLoop then InstrAggNode into its own slot;
+// :1039-1043 — the leader folds them into the node's own figure and :1057-1058
+// keeps the per-worker copies), and under ANALYZE plus VERBOSE explain.c:1893-1941
+// emits a separate "Worker N:" sub-entry per worker (explain.c:4544-4551,
+// flushed by ExplainFlushWorkersState at :4595-4614). Its headline figure is then
+// a PER-WORKER AVERAGE rather than a total: explain.c:1841-1847 computes
+// `rows = instrument->ntuples / nloops`, and instrument.c:184-186 has summed BOTH
+// ntuples and nloops across participants, so a `Parallel Seq Scan` printing
+// `rows=2000 loops=15` scanned 30 000 (regress/expected/select_parallel.out:589-620;
+// 15 = 3 rescans x (4 workers + leader)). Read at REL_17_STABLE, commit
+// 018bfcfd9fa4e520970ba3bda370f78bb473c365.
+//
+// Neither half fits here. The per-worker sub-entries have nothing to report: the
+// builder clears the profiler from the per-worker build options, so no worker
+// measures anything, and reinstating one would reintroduce the shared-wrapper data
+// race rmp #2664 removed. And an averaged headline would defeat the point of this
+// task — the figure exists so a reader can compare the parallel plan with the
+// serial one, and a per-worker average is not comparable with anything. Neo4j
+// 5.26.16 (commit 679feffbfb7a9189aba360ea98eef7fc3371e275) sums instead, which is
+// the model followed here: ProfilingTracerData.java:33-41 accumulates `dbHits +=`
+// per operator id, PlanDescriptionBuilder.scala:123-141 attaches exactly one
+// DbHits argument per plan node, and ProfileDbHitsTestBase.scala:172-178 asserts a
+// parallel all-nodes scan reports one total equal to the node count. (That clone
+// is community-only, so the enterprise parallel runtime's own accumulator was not
+// read; the conclusion rests on the QueryProfile contract, the plan-description
+// builder and the runtime spec-suite assertion, all of which are in it.)
 //
 // Sharing one Profiler between two concurrently executing queries is meaningless
 // rather than unsafe — the measurements would belong to two unrelated trees — so
@@ -436,8 +492,14 @@ var (
 //     admitted under the paragraph below without paying the cost this marker exists
 //     to refuse.
 //   - The morsel-parallel leaves ([ParallelScanProject], [ParallelAggregateScan],
-//     [ParallelCountScan]) carry none of the three markers and render UNKNOWN for
-//     a full scan. Their [PlanDetail] says so in the rendered plan as well.
+//     [ParallelCountScan]) each walk a whole node source across worker goroutines
+//     while emitting the admitted rows, one row per group, or a single row. For all
+//     three the derivation is not merely imprecise but unrelated to the work: a
+//     count leaf reports 1 for a 2000-node walk. Since rmp #2762 they implement
+//     [storageAccessCounter] and report the node references their workers consumed,
+//     folded from a worker-local by ONE atomic add per morsel — never per node,
+//     which is the same refusal the paragraph above makes, at morsel granularity
+//     rather than at row granularity.
 //
 // # What this deliberately does not count
 //
@@ -476,12 +538,31 @@ func (*NodeByIndexRangeScan) storageRecordPerRow() {}
 // of storage records it actually read, rather than having that number inferred
 // from the rows it emitted ([StorageRecordScan]).
 //
-// It is admitted only where the operator ALREADY maintains the counter for its
-// own reasons — a traversal budget, a safety cap — so implementing it costs a
-// non-PROFILE run nothing, and the cost-when-off guarantee this file's Profiler
-// documents is untouched. An operator that would have to add a per-record
-// increment to satisfy it must NOT implement it: paying every ordinary query for
-// a diagnostic is the trade [StorageRecordScan] exists to refuse.
+// # The admission rule: never one increment per record
+//
+// The rule this interface enforces is not "the counter must already exist" but
+// "the counter must never cost a per-RECORD increment", which is the trade
+// [StorageRecordScan] exists to refuse. Three shapes satisfy it, and all three are
+// in use:
+//
+//   - The counter ALREADY EXISTS for the operator's own reasons — a traversal
+//     budget, a safety cap. [VarLengthExpand] reports the figure its budget
+//     maintains, so it costs a non-PROFILE run nothing at all.
+//   - The count is RECOVERED from state that already advances with the work.
+//     [Expand] reads it off its adjacency cursors, which already move one position
+//     per slot consumed, so [Expand.closeSlotWindow] recovers it in O(1) per INPUT
+//     ROW (rmp #2761).
+//   - The count is charged ONCE PER BATCH the operator already processes as a unit.
+//     The morsel-parallel leaves charge each morsel's length once, when its scan
+//     leaf has read it — one add per [DefaultMorselSize] node references, on the
+//     goroutine that read them (rmp #2762).
+//
+// An operator that could satisfy the interface only by incrementing per record
+// must NOT implement it: paying every ordinary query for a diagnostic is the
+// trade this whole design refuses. For a CONCURRENT operator the bar is higher
+// still — a shared atomic per record is a contention defect against CLAUDE.md's
+// mandate 3 and not merely a cost, which is why the third shape above accumulates
+// in a worker LOCAL and publishes once per morsel.
 //
 // The method is unexported so only operators in this package can claim to have
 // measured their accesses, which keeps the set of measured sources auditable.
@@ -494,6 +575,23 @@ type storageAccessCounter interface {
 	// whole lifetime, including any Init it has been restarted by.
 	storageAccesses() int64
 }
+
+// The census of MEASURED operators. Like the [noStorageAccess] block below, this
+// exists so the claim is checked at compile time and readable in one place: an
+// unexported marker method that does not actually satisfy the interface would
+// leave the operator reporting UNKNOWN while its own godoc said it was measured.
+// TestDbHitsClassification_EveryOperatorIsClassified is the drift gate that keeps
+// this list and the hand-written census in
+// cypher/exec/dbhits_classification_test.go from parting company.
+var (
+	_ storageAccessCounter = (*VarLengthExpand)(nil)
+	_ storageAccessCounter = (*Expand)(nil)
+	_ storageAccessCounter = (*OptionalExpand)(nil)
+	_ storageAccessCounter = (*columnarExpand)(nil) // promoted from the embedded *Expand
+	_ storageAccessCounter = (*ParallelScanProject)(nil)
+	_ storageAccessCounter = (*ParallelAggregateScan)(nil)
+	_ storageAccessCounter = (*ParallelCountScan)(nil)
+)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // noStorageAccess — operators whose db-hits are a KNOWN zero
@@ -510,7 +608,9 @@ type storageAccessCounter interface {
 // [StorageRecordScan] nor [storageAccessCounter] rendered `dbhits=0`, and the
 // column could not tell "counted, and it is zero" from "not counted at all".
 // [ParallelScanProject] printed the same 0 for a full scan of 2000 nodes that a
-// pure projection prints for reading nothing. Making the zero an explicit claim
+// pure projection prints for reading nothing. (Since rmp #2762 that leaf counts,
+// and reports 2000; the point the example makes about the COLUMN stands.) Making
+// the zero an explicit claim
 // inverts that: the honest default became UNKNOWN, and only an operator that can
 // stand behind a zero says so here.
 //

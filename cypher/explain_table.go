@@ -265,15 +265,21 @@ func (e *Engine) ExplainTable(query string, params map[string]expr.Value) (s str
 //     therefore never disagree with Rows, which is why the two columns are equal
 //     on every such line.
 //   - For [exec.VarLengthExpand] the cell is MEASURED: the operator reports the
-//     relationship slots its BFS actually read, which is not its row count.
+//     relationship slots its BFS actually read, which is not its row count. The
+//     single-hop expands report the same kind of figure — the adjacency slots they
+//     walked, whatever became of each one.
+//   - For the morsel-parallel leaves the cell is MEASURED too, since rmp #2762:
+//     each reports the node references its workers consumed, so the identical query
+//     reports the SAME figure whether it planned a serial scan or a parallel one.
+//     Their rows say nothing about it — the aggregate leaf emits one row per group
+//     and the count leaf exactly one row, for a walk of the whole node source.
 //   - For an operator that opens no access path — Limit, Skip, Distinct, Eager,
 //     the aggregations, the Apply family — the cell is a KNOWN 0.
 //   - For every other operator the cell is "?": nothing counted its accesses.
-//     That covers [exec.ShortestPath], [exec.AllShortestPaths], the
-//     morsel-parallel leaves, the count-store leaves, and every operator holding
-//     a caller-supplied expression closure that can reach the graph (Filter,
-//     Project, Sort, Top, Unwind, the hash joins, RollUpApply, ProcedureCallOp).
-//     The parallel leaves additionally say so in their Operator cell.
+//     That covers [exec.ShortestPath], [exec.AllShortestPaths], the count-store
+//     leaves, and every operator holding a caller-supplied expression closure that
+//     can reach the graph (Filter, Project, Sort, Top, Unwind, the hash joins,
+//     RollUpApply, ProcedureCallOp).
 //
 // In every case the column counts ACCESS-PATH record reads and never property
 // reads, which is a documented divergence from Neo4j (see docs/cypher.md). Neo4j
@@ -287,10 +293,15 @@ func (e *Engine) ExplainTable(query string, params map[string]expr.Value) (s str
 // by omission: a parallel leaf builds and drives a private sub-plan per morsel on
 // a worker goroutine, the builder clears the profiler from the per-worker build
 // options so no worker times anything, and the leaf implements no PlanChildren so
-// the tree stops there. Its ROW and TIME figures are the whole parallel phase
-// attributed to the driving goroutine; its DB-HITS cell is "?" because nothing
-// counted them, which its Operator cell also states in words. See the "parallel
-// tier" section of the [exec.Profiler] documentation.
+// the tree stops there. All three of its figures are totals for the whole parallel
+// phase: ROWS and TIME as measured on the driving goroutine, and — since rmp #2762
+// — DB-HITS as counted by the workers themselves, one per node reference consumed,
+// folded from a worker-local by a single atomic add per morsel. Its Operator cell
+// says the phase is on one node, which is what a reader needs in order not to go
+// looking for the filter and projection fused inside it. PostgreSQL takes the other
+// route — per-worker sub-entries and a per-worker-average headline — and the
+// "parallel tier" section of the [exec.Profiler] documentation records, with
+// citations, why that is deliberately not followed here.
 func (e *Engine) ProfileTable(ctx context.Context, query string, params map[string]expr.Value) (s string, err error) {
 	defer recoverQueryPanic(&err, "cypher.ProfileTable", "cypher.ProfileTable.panics")
 	tree, err := e.profilePlanTree(ctx, query, params)
