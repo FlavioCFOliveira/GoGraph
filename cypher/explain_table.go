@@ -206,7 +206,7 @@ func (e *Engine) ExplainTable(query string, params map[string]expr.Value) (s str
 	}
 
 	var rows []explain.PlanRow
-	e.explainInputsFor(entry).walk(func(l planLine) {
+	e.explainInputsFor(entry, params).walk(func(l planLine) {
 		rows = append(rows, explain.PlanRow{
 			Operator: l.prefix + l.connector + l.text,
 			EstRows:  l.estCell(),

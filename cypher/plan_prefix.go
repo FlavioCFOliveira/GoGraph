@@ -229,7 +229,7 @@ func (e *Engine) logicalPlanNode(entry *planCacheEntry, params map[string]expr.V
 		have  bool
 		stack []*exec.PlanNode // stack[d] is the node most recently opened at depth d
 	)
-	e.explainInputsFor(entry).walk(func(l planLine) {
+	e.explainInputsFor(entry, params).walk(func(l planLine) {
 		n := exec.PlanNode{Name: l.text}
 		d := l.depth()
 		if d == 0 || !have {

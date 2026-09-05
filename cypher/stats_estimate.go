@@ -15,12 +15,22 @@ package cypher
 // rows from range numerators, and the one-histogram-per-comparable-value-domain
 // split.
 //
-// As of #2097/#2098 these providers ship INERT: nothing on the query path calls
-// them yet. #2099 is the sole intended consumer — it will widen the selective
-// range-index seek to fire under the §3 upper-confidence-bound rule when a fresh
-// estStats range estimate is available. Until then the providers change no plan
-// and are proven correct in isolation by stats_estimate_test.go, the same way the
-// count-estimate provider shipped inert before its peephole consumed it.
+// These providers shipped INERT in #2097/#2098 and stopped being inert in rmp
+// #2766. Two things read them now, and only one of them can change a plan:
+//
+//   - explain_estimate.go annotates the rendered EXPLAIN / PROFILE plan with the
+//     estimate and its provenance (#2099 / rmp #2765) — display only.
+//   - join_reorder_plan.go consults them for the emitted-row cardinality of a
+//     FILTERED component, and may drive a disjoint Cartesian join with the other
+//     arm as a result. That decision is vetoed by [planStaysDefault] for every
+//     verdict but an MCV-exact equality or a fresh histogram range, and for the
+//     latter it is taken over the certified error interval rather than the point
+//     estimate.
+//
+// The selective range-index seek #2099 was to widen under the §3 upper-confidence-
+// bound rule is still NOT wired to them: the seek's own gate remains the exact
+// in-range count. The providers are also proven correct in isolation by
+// stats_estimate_test.go, independently of either consumer.
 
 import (
 	"math"

@@ -30,7 +30,13 @@ const (
 	// from the label index. It is ground truth for the query's pinned snapshot.
 	estExact estSource = iota
 	// estStats is a histogram- or sample-derived count. Trustworthy enough to
-	// drive a plan decision, though not exact. No such source exists yet.
+	// drive a plan decision, though not exact. It is produced by
+	// [statsRangeEstimate] over the equi-depth histograms, and since rmp #2766 it
+	// reaches a real plan decision: the disjoint-component reorder consumes it for
+	// a filtered component's emitted-row estimate. Because it is not exact, that
+	// consumer evaluates the decision over the CERTIFIED ERROR INTERVAL the
+	// provider returns alongside it, not over the point estimate — see
+	// [reorderSwapWins].
 	estStats
 	// estHeuristic is a principled formula over real inputs (e.g. total/distinct).
 	// It is NOT trustworthy on its own: an unvalidated heuristic vetoes to the

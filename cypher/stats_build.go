@@ -63,10 +63,14 @@ func (e *Engine) RefreshStatisticsLocked(ctx context.Context) error {
 // takes no barrier — see the note on the internal builder below for why wrapping
 // it in the old lpg.Graph.View would not have given the property it claimed.
 //
-// Statistics built
-// here ship INERT: no query-path consumer reads them yet (#2099 is the intended
-// consumer), so a rebuild changes no plan. It honours context cancellation,
-// returning ctx.Err() without publishing a partial snapshot.
+// Statistics built here DO change plans, as of rmp #2766. The disjoint-component
+// reorder ([computeReorderSwaps]) reads them to estimate how many rows a filtered
+// component emits — `(a:A {x: 1})` as an arm of a Cartesian — and drives the join
+// with the cheaper side accordingly. That is the only consumer today; every other
+// planner decision still ignores them, and the EXPLAIN / PROFILE renderers read
+// them for display only. A refresh can therefore change the drive order of a
+// disjoint join, never a result. It honours context cancellation, returning
+// ctx.Err() without publishing a partial snapshot.
 func (e *Engine) RefreshStatistics(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err

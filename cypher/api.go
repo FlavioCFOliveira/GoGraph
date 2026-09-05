@@ -2711,12 +2711,18 @@ func (e *Engine) buildReadPhysical(
 	// the plan has memoised order-safe candidates, apply the live cardinality
 	// gate against this query's snapshot. The live node total (for AllNodesScan
 	// components) and every label count are read under View's visibility
-	// barrier, so all cost inputs come from one consistent snapshot. The swap
+	// barrier, so all cost inputs come from one consistent snapshot.
+	//
+	// params is passed because a FILTERED component's row estimate depends on the
+	// bound operand (rmp #2766): `(a:A {x: $p})` and `(a:A {x: 1})` are the same
+	// memoised candidate but not the same selectivity. The structural candidate
+	// set stays parameter-independent and memoised; only this per-query gate reads
+	// a value, so a swap decided for one binding is never reused for another. The swap
 	// changes only emission order and internal column layout, never the
 	// multiset; SuppressReorder (baked into the candidate set) guarantees no
 	// downstream operator observes the change.
 	if e.joinReorderEnabled && len(entry.reorderCandidates) > 0 {
-		bopts.reorderSwap = computeReorderSwaps(entry.reorderCandidates, labelSrc, int64(e.g.LiveOrder()))
+		bopts.reorderSwap = computeReorderSwaps(entry.reorderCandidates, labelSrc, params, int64(e.g.LiveOrder()))
 	}
 	bopts.seekHint = entry.pushedSeekHints
 	// Single-edge anchor-swap gating (#2090): when the Engine permits it and
@@ -3002,7 +3008,7 @@ func (e *Engine) ExplainLogical(query string, params map[string]expr.Value) (s s
 // back to for a writing statement, whose physical tree is unreachable outside a
 // transaction.
 func (e *Engine) explainLogical(entry *planCacheEntry, params map[string]expr.Value) string {
-	in := e.explainInputsFor(entry)
+	in := e.explainInputsFor(entry, params)
 	return explainWithIndexes(in.plan, in.idxMgr, params, in.graph, in.labelSrc,
 		in.reorderSwaps, in.anchorSwaps, in.seekHints, in.prefixSeek)
 }
@@ -3015,7 +3021,11 @@ func (e *Engine) explainLogical(entry *planCacheEntry, params map[string]expr.Va
 // [Engine.ExplainTable] (which renders a table) so both read the same providers
 // under the same gates; before rmp #2701 this body was inline in explainLogical
 // and a second renderer would have had to assemble its own copy.
-func (e *Engine) explainInputsFor(entry *planCacheEntry) explainInputs {
+// params is this render's parameter binding. It reaches the reorder gate because a
+// FILTERED component's selectivity depends on the bound operand (rmp #2766); the
+// rendered plan must be the plan the read path would build for THESE parameters,
+// or EXPLAIN names a drive order the engine does not take.
+func (e *Engine) explainInputsFor(entry *planCacheEntry, params map[string]expr.Value) explainInputs {
 	plan := entry.plan
 	// Reflect the count-store-gated reordering peepholes in the rendered plan so
 	// EXPLAIN shows the physically-built shape, not just the written logical order:
@@ -3034,7 +3044,7 @@ func (e *Engine) explainInputsFor(entry *planCacheEntry) explainInputs {
 	var anchorSwaps map[*ir.Expand]bool
 	if e.joinReorderEnabled {
 		if cands := collectReorderCandidates(plan); len(cands) > 0 {
-			reorderSwaps = computeReorderSwaps(cands, labelSrc, int64(e.g.LiveOrder()))
+			reorderSwaps = computeReorderSwaps(cands, labelSrc, params, int64(e.g.LiveOrder()))
 		}
 	}
 	if e.anchorSwapEnabled {
