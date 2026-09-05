@@ -1,0 +1,9 @@
+goos: darwin
+goarch: arm64
+pkg: ./search/centrality
+BenchmarkBrandes_RandomGraph-10    	     151	   7818335 ns/op	   62243 B/op	      10 allocs/op
+BenchmarkBrandes_RandomGraph-10    	     150	   7820300 ns/op	   62208 B/op	      10 allocs/op
+BenchmarkBrandes_RandomGraph-10    	     152	   7874945 ns/op	   62208 B/op	      10 allocs/op
+BenchmarkBrandes_RandomGraph-10    	     152	   7871496 ns/op	   62243 B/op	      10 allocs/op
+BenchmarkBrandes_RandomGraph-10    	     152	   7804345 ns/op	   62243 B/op	      10 allocs/op
+BenchmarkBrandes_RandomGraph-10    	     152	   7806362 ns/op	   62208 B/op	      10 allocs/op

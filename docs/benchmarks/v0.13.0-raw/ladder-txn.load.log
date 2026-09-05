@@ -1,0 +1,13 @@
+LOAD-GATE ladder-txn block-open started_at=2.28 waited=240s
+round=1 load1_at_round_start=2.28
+round=1 base_lines=14 head_lines=14
+round=2 load1_at_round_start=2.67
+round=2 base_lines=28 head_lines=28
+round=3 load1_at_round_start=3.13
+round=3 base_lines=42 head_lines=42
+round=4 load1_at_round_start=2.54
+round=4 base_lines=56 head_lines=56
+round=5 load1_at_round_start=2.25
+round=5 base_lines=70 head_lines=70
+round=6 load1_at_round_start=2.13
+round=6 base_lines=84 head_lines=84

@@ -1,0 +1,13 @@
+LOAD-GATE r-count block-open started_at=2.41 waited=0s
+round=1 load1_at_round_start=2.41
+round=1 base_lines=9 head_lines=9
+round=2 load1_at_round_start=2.52
+round=2 base_lines=18 head_lines=18
+round=3 load1_at_round_start=2.39
+round=3 base_lines=27 head_lines=27
+round=4 load1_at_round_start=2.42
+round=4 base_lines=36 head_lines=36
+round=5 load1_at_round_start=2.51
+round=5 base_lines=45 head_lines=45
+round=6 load1_at_round_start=3.02
+round=6 base_lines=54 head_lines=54

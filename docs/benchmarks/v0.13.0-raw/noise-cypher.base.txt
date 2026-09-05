@@ -1,0 +1,19 @@
+goos: darwin
+goarch: arm64
+pkg: ./cypher
+BenchmarkColumnarShape_ScanBaseline-10    	     498	   2387104 ns/op	 1082322 B/op	   39558 allocs/op
+BenchmarkColumnarShape_HopBaseline-10     	     332	   3573230 ns/op	 1399218 B/op	   39647 allocs/op
+BenchmarkColumnarShape_ScanBaseline-10    	     494	   2421461 ns/op	 1082322 B/op	   39558 allocs/op
+BenchmarkColumnarShape_HopBaseline-10     	     333	   3552047 ns/op	 1399162 B/op	   39647 allocs/op
+BenchmarkColumnarShape_ScanBaseline-10    	     495	   2395513 ns/op	 1082323 B/op	   39558 allocs/op
+BenchmarkColumnarShape_HopBaseline-10     	     332	   3569032 ns/op	 1399218 B/op	   39647 allocs/op
+BenchmarkColumnarShape_ScanBaseline-10    	     499	   2371076 ns/op	 1082322 B/op	   39558 allocs/op
+BenchmarkColumnarShape_HopBaseline-10     	     333	   3568125 ns/op	 1399161 B/op	   39647 allocs/op
+BenchmarkColumnarShape_ScanBaseline-10    	     505	   2408288 ns/op	 1082322 B/op	   39558 allocs/op
+BenchmarkColumnarShape_HopBaseline-10     	     333	   3561517 ns/op	 1399162 B/op	   39647 allocs/op
+BenchmarkColumnarShape_ScanBaseline-10    	     489	   2414214 ns/op	 1082323 B/op	   39558 allocs/op
+BenchmarkColumnarShape_HopBaseline-10     	     331	   3541917 ns/op	 1399275 B/op	   39647 allocs/op
+BenchmarkColumnarShape_ScanBaseline-10    	     506	   2373488 ns/op	 1082322 B/op	   39558 allocs/op
+BenchmarkColumnarShape_HopBaseline-10     	     334	   3575904 ns/op	 1399105 B/op	   39647 allocs/op
+BenchmarkColumnarShape_ScanBaseline-10    	     498	   2403057 ns/op	 1082322 B/op	   39558 allocs/op
+BenchmarkColumnarShape_HopBaseline-10     	     328	   3545024 ns/op	 1399448 B/op	   39648 allocs/op

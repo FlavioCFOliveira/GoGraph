@@ -1,0 +1,13 @@
+LOAD-GATE ladder-mvcc block-open started_at=2.17 waited=300s
+round=1 load1_at_round_start=2.17
+round=1 base_lines=20 head_lines=20
+round=2 load1_at_round_start=44.02
+round=2 base_lines=40 head_lines=40
+round=3 load1_at_round_start=60.94
+round=3 base_lines=60 head_lines=60
+round=4 load1_at_round_start=82.72
+round=4 base_lines=80 head_lines=80
+round=5 load1_at_round_start=52.30
+round=5 base_lines=100 head_lines=100
+round=6 load1_at_round_start=78.17
+round=6 base_lines=120 head_lines=120

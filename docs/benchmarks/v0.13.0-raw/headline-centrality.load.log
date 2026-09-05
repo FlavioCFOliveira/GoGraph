@@ -1,0 +1,13 @@
+LOAD-GATE headline-centrality block-open started_at=2.38 waited=90s
+round=1 load1_at_round_start=2.38
+round=1 base_lines=1 head_lines=1
+round=2 load1_at_round_start=2.32
+round=2 base_lines=2 head_lines=2
+round=3 load1_at_round_start=2.29
+round=3 base_lines=3 head_lines=3
+round=4 load1_at_round_start=2.40
+round=4 base_lines=4 head_lines=4
+round=5 load1_at_round_start=2.37
+round=5 base_lines=5 head_lines=5
+round=6 load1_at_round_start=2.26
+round=6 base_lines=6 head_lines=6

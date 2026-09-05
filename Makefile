@@ -506,7 +506,7 @@ release-accuracy: ## Release-accuracy checks only (Phase A): CHANGELOG/release-n
 	  || { echo "release-accuracy: CHANGELOG.md is missing a '## [$$v_no_prefix]' entry — promote the Unreleased section first"; exit 1; }
 	@test -f "release-notes/$$VERSION.md" \
 	  || { echo "release-accuracy: release-notes/$$VERSION.md does not exist — draft the long-form notes first"; exit 1; }
-	@echo "release-accuracy: checking README 'Current release' names $$VERSION…"
+	@echo "release-accuracy: checking README 'Current release' names $${VERSION}…"
 	@pat="Current release: \`$$VERSION\`"; grep -qF "$$pat" README.md \
 	  || { echo "release-accuracy: README.md 'Current release' does not name $$VERSION — update the Status block"; exit 1; }
 	@echo "release-accuracy: checking SECURITY.md supported-versions table names $$VERSION's release line…"

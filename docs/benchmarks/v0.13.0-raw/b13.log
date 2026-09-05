@@ -1,0 +1,27 @@
+##### BLOCK 1 — headline set (control: ./search changed by 78 lines)
+=== headline-search START 03:49:18 ===
+OK label=headline-search base_lines=24 head_lines=24
+=== headline-search END rc=0 wall=855s 04:03:33 ===
+=== headline-centrality START 04:03:33 ===
+OK label=headline-centrality base_lines=6 head_lines=6
+=== headline-centrality END rc=0 wall=133s 04:05:46 ===
+##### BLOCK 3 — concurrency ladder 1/8/64/256/1024
+=== ladder-prom START 04:05:46 ===
+OK label=ladder-prom base_lines=30 head_lines=30
+=== ladder-prom END rc=0 wall=108s 04:07:34 ===
+=== ladder-btree START 04:07:34 ===
+OK label=ladder-btree base_lines=30 head_lines=30
+=== ladder-btree END rc=0 wall=417s 04:14:31 ===
+=== ladder-hash START 04:14:31 ===
+OK label=ladder-hash base_lines=90 head_lines=90
+=== ladder-hash END rc=0 wall=291s 04:19:22 ===
+=== ladder-bolt START 04:19:22 ===
+OK label=ladder-bolt base_lines=60 head_lines=60
+=== ladder-bolt END rc=0 wall=350s 04:25:12 ===
+=== ladder-lpg START 04:25:12 ===
+OK label=ladder-lpg base_lines=150 head_lines=150
+=== ladder-lpg END rc=0 wall=720s 04:37:12 ===
+=== ladder-txn START 04:37:12 ===
+OK label=ladder-txn base_lines=84 head_lines=84
+=== ladder-txn END rc=0 wall=530s 04:46:02 ===
+##### B13 DONE 04:46:02
