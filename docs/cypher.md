@@ -1371,14 +1371,20 @@ build in which profiling does not exist.
 > figure at all — it prints `?` — but a number does not say whether it was measured
 > or derived:
 >
-> - **Derived** — for a scan, an index seek or a single-hop expand, the figure IS
->   the `rows` figure. Those operators are marked internally as reading one record
->   per row they emit, so the count is taken at the operator boundary and needs no
->   counter threaded through any accessor. That is why `rows` and `dbhits` are
->   equal on every such line.
+> - **Derived** — for a scan or an index seek, the figure IS the `rows` figure.
+>   Those operators are marked internally as reading one record per row they emit —
+>   nothing inside them filters — so the count is taken at the operator boundary
+>   and needs no counter threaded through any accessor. That is why `rows` and
+>   `dbhits` are equal on every such line.
 > - **Measured** — a variable-length expansion (`-[*m..n]->`) reports the
 >   relationship slots its BFS actually read, from the counter its traversal budget
 >   already maintains. That number is not its row count and is usually far larger.
+>   A **single-hop expand** reports the same kind of figure: the adjacency slots it
+>   walked, whatever became of each one. So `-->` and `-[:KNOWS]->` over a node
+>   with 100 out-edges both report 100 db-hits, while emitting 100 rows and 1 row.
+>   Its counter is not a per-slot increment — the expansion cursors already advance
+>   one position per slot, so the count is recovered from them in O(1) per input
+>   row, never per slot.
 > - **A known `0`** — an operator that opens no access path at all: `Limit`, `Skip`,
 >   `Distinct`, `Eager`, `Union`, the aggregations, and the `Apply` family, whose
 >   own cost is entirely in the children the plan already shows. Each of these
@@ -1400,12 +1406,13 @@ build in which profiling does not exist.
 > figures. When any cell is `?` the total renders as `N + ?` — a **floor**, not the
 > query's whole storage cost. A plain number means every operator reported.
 >
-> Two further gaps are worth knowing before you compare two plans:
+> Two further properties are worth knowing before you compare two plans:
 >
-> - A single-hop expand with a **relationship-type filter** walks every slot of the
->   source node's adjacency and counts only the slots it emitted. On a node with
->   100 out-edges of which one is `:KNOWS`, `-->` reports 100 db-hits and
->   `-[:KNOWS]->` reports 1, for the same 100-slot walk.
+> - An **expand into an already-bound destination** — the hop that closes a cycle,
+>   as in `MATCH (a)-[:K]->(b)-[:K]->(a)` — narrows its cursor to that
+>   destination's block by binary search instead of walking the run. It reports the
+>   block, not the run, because the slots it stepped over were never read. That is
+>   deliberate: charging them would hide the optimisation the seek exists to make.
 > - **Property reads are never counted.** Neo4j charges a db-hit per property
 >   access, so its figures for a filter-heavy or projection-heavy plan are larger
 >   than GoGraph's, and the two are not comparable in absolute terms. The ratio
@@ -1480,8 +1487,8 @@ cells are easy to mistake:
 - **`DbHits`** is the sum of the operator cells that are FIGURES. A cell reading
   `?` was never counted and contributes nothing, and the Total then renders as
   `N + ?` to say so. Read `N + ?` as a **lower bound** on the query's
-  storage-record reads. Even a plain `N` remains a lower bound when the plan
-  contains a type-filtered expand, whose known under-report is described above.
+  storage-record reads. Even a plain `N` remains a lower bound, because property
+  reads are not counted for any operator — see the note above.
 - **`Time (ms)`** is the whole query's elapsed time, because the root operator's
   time already includes every child's.
 

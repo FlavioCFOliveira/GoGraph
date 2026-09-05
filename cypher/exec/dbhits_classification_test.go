@@ -54,8 +54,10 @@ const (
 // oversight. Two distinct causes appear:
 //
 //   - READS STORAGE, COUNTS NOTHING — the operator opens an access path and has
-//     no counter to report. Tasks #2761 (Expand slots), #2762 (parallel leaves)
-//     and #2763 (shortest path) exist to convert some of these to MEASURED.
+//     no counter to report. Tasks #2762 (parallel leaves) and #2763 (shortest
+//     path) exist to convert some of these to MEASURED; #2761 already did it for
+//     Expand, OptionalExpand and columnarExpand, which is why the DERIVED group
+//     now holds only access-path leaves.
 //   - HOLDS AN EXPRESSION CLOSURE — the operator evaluates a caller-supplied
 //     expression, and a GoGraph expression can WALK THE GRAPH: cypher's evalRow
 //     bridge passes expr.PatternEvaluator, whose EvalPattern /
@@ -75,6 +77,9 @@ var dbHitsCensus = map[string]struct {
 }{
 	// ── MEASURED ───────────────────────────────────────────────────────────────
 	"VarLengthExpand": {classMeasured, "reports totalEdgesVisited, a counter its traversal budget already maintains"},
+	"Expand":          {classMeasured, "reports the adjacency slots its cursors consumed, walked or rejected; recovered from the cursor positions in O(1) per input row, never per slot (rmp #2761)"},
+	"OptionalExpand":  {classMeasured, "forwards the inner Expand's slot count; the inner operator is private to it and is never a node of the rendered plan (rmp #2761)"},
+	"columnarExpand":  {classMeasured, "embeds *Expand and inherits its counter"},
 
 	// ── DERIVED ────────────────────────────────────────────────────────────────
 	"AllNodesScan":         {classDerived, "one node reference per emitted row"},
@@ -82,9 +87,6 @@ var dbHitsCensus = map[string]struct {
 	"NodeByIndexSeek":      {classDerived, "one posting per emitted row"},
 	"NodeByIndexSeekSet":   {classDerived, "one posting per emitted row"},
 	"NodeByIndexRangeScan": {classDerived, "one posting per emitted row"},
-	"Expand":               {classDerived, "one relationship slot per EMITTED neighbour; under-reports a type-filtered walk, pinned by TestProfileDbHits_TypeFilteredExpandUnderReports"},
-	"OptionalExpand":       {classDerived, "as Expand, plus the padded non-match rows"},
-	"columnarExpand":       {classDerived, "embeds *Expand and inherits its marker"},
 
 	// ── ZERO ───────────────────────────────────────────────────────────────────
 	"Argument":               {classZero, "re-emits the outer row its Apply driver set"},

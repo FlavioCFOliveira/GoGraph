@@ -392,8 +392,13 @@ var (
 //
 //   - a label or all-nodes scan yields one node reference per emitted row;
 //   - an index seek, seek-set or range scan yields one node reference per
-//     posting-list entry it emits;
-//   - a single-hop expand yields one relationship slot per EMITTED neighbour.
+//     posting-list entry it emits.
+//
+// [Expand] used to be in that list, on the strength of "one relationship slot per
+// EMITTED neighbour". It is not any more: emitted is not read, and rmp #2761 moved
+// it to [storageAccessCounter]. What remains here is the set of access-path LEAVES,
+// for which the boundary count and the access count coincide because nothing inside
+// the operator filters.
 //
 // So the count is available at the operator boundary, where the profiling wrapper
 // already sits, and needs no counter threaded through any accessor. That is not a
@@ -420,11 +425,16 @@ var (
 //     lesser misstatement of the two.
 //   - A single-hop [Expand] with a relationship-type filter reads every slot of
 //     the source's adjacency run and emits only the admitted ones (the edgeSkip
-//     branch), so its figure counts EMITTED edges, not slots read. Measured: an
-//     out-degree-100 node with one :KNOWS edge reports 1 db-hit for the same
-//     100-slot CSR walk that `-->` reports 100 for. Correcting it needs a counter
-//     the operator does not have, whose per-slot increment a non-PROFILE run would
-//     pay — the trade this marker exists to avoid — so it is recorded, not fixed.
+//     branch), so a derived figure counts EMITTED edges, not slots read. Measured
+//     before the correction: an out-degree-100 node with one :KNOWS edge reported
+//     1 db-hit for the same 100-slot CSR walk that `-->` reported 100 for. [Expand]
+//     and [OptionalExpand] therefore do NOT carry this marker either; since
+//     rmp #2761 they implement [storageAccessCounter] and both arms report 100.
+//     The counter that made it possible is not a per-slot increment — the cursors
+//     already advance one position per slot, so the count is recovered in O(1) per
+//     INPUT ROW ([Expand.closeSlotWindow]). That is why it could be
+//     admitted under the paragraph below without paying the cost this marker exists
+//     to refuse.
 //   - The morsel-parallel leaves ([ParallelScanProject], [ParallelAggregateScan],
 //     [ParallelCountScan]) carry none of the three markers and render UNKNOWN for
 //     a full scan. Their [PlanDetail] says so in the rendered plan as well.
@@ -457,8 +467,6 @@ func (*NodeByLabelScan) storageRecordPerRow()      {}
 func (*NodeByIndexSeek) storageRecordPerRow()      {}
 func (*NodeByIndexSeekSet) storageRecordPerRow()   {}
 func (*NodeByIndexRangeScan) storageRecordPerRow() {}
-func (*Expand) storageRecordPerRow()               {}
-func (*OptionalExpand) storageRecordPerRow()       {}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // storageAccessCounter — operators that COUNT their own storage accesses

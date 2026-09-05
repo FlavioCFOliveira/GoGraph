@@ -456,7 +456,7 @@ look, and it is why `Filter`, `Project`, `Sort`, `Top`, `Unwind`, the hash joins
 holds a caller-supplied expression closure, and none can prove what that closure
 reached.
 
-### Still open
+### Still open after #2760
 
 * Deciding the expression-closure operators **per instance** — a `Sort` whose every
   `SortKey.Eval` is nil provably reads nothing, and the planner knows that when it
@@ -464,5 +464,109 @@ reached.
 * `Expand`'s type-filter under-report (§6), the parallel leaves' count and
   `shortestPath`'s count remain uncounted; rmp #2761, #2762 and #2763 exist to
   convert them from UNKNOWN to MEASURED.
+* §7's limit stands: `ParallelAggregateScan` and `ParallelCountScan` are still
+  classified from the interface set rather than from an observed run.
+
+## Addendum — 2026-09-05, rmp #2761 (sprint 355)
+
+### Refutation 2 is FIXED: `Expand` now reports the slots it walked
+
+§3's refutation 2 recorded a 100x under-report as a standing property, on the
+reasoning that correcting it "needs a counter the operator does not have, whose
+per-slot increment a non-PROFILE run would pay". **That reasoning was wrong about
+the cost, and the correction is now in.**
+
+`Expand` and `OptionalExpand` no longer carry `exec.StorageRecordScan`. Both
+implement `storageAccessCounter`, and `columnarExpand` inherits the counter through
+its embedded `*Expand`. The measurement §3 published now reads:
+
+```
+MATCH (r:Root)-->(b)          Expand  rows=100  dbhits=100
+MATCH (r:Root)-[:KNOWS]->(b)  Expand  rows=1    dbhits=100
+```
+
+The rows still differ, which is correct — they are different result sets. The
+db-hits no longer do, which is the point: both arms walk the same 100-slot CSR run
+and reject 99 of them on the relationship type.
+
+**The counter is not a per-slot increment.** The expansion cursors
+(`op.fwdStart` / `op.revStart`) already advance exactly one position per slot
+consumed, so the count is RECOVERED from the cursor positions by
+`Expand.closeSlotWindow` — a fixed two subtractions and an add per INPUT ROW (the
+forward cursor and the reverse one), never one per slot — at the two places
+a cursor moves without having been walked (`loadAdjacency`, which jumps to the next
+source's run, and `Init`, which resets the reverse cursor). The open window is
+added at read time, so a walk cut short by a `LIMIT` still reports what it walked,
+and the accumulator survives re-`Init` so an operator driven once per outer row
+under an `Apply` reports its whole lifetime.
+
+**Exactness was verified, not assumed.** A temporary per-slot probe was added
+beside each `op.fwdStart++` / `op.revStart++` with a panic in `storageAccesses`
+when the two figures disagreed; it ran green over `./cypher/` and `./cypher/exec/`
+in full. The probe was then shown to be discriminating rather than vacuous by
+deleting the `loadAdjacency` window close, which produced 36 disagreements in the
+same suites. The probe is not kept: it is precisely the per-slot cost the design
+avoids. `cypher/exec/expand_slotcount_test.go` keeps the property under an
+independent degree-sum oracle.
+
+**Cost:** interleaved A/B over `BenchmarkExpand*` (`cypher/exec`, n=8) and
+`BenchmarkExpandInto*` (`cypher`, n=8), Apple M4, go1.27.1, no `-race`. `allocs/op`
+and `B/op` are IDENTICAL in every benchmark ("all samples are equal"). `sec/op`
+geomean moved -0.56% (exec) and -0.08% (engine), both toward faster and both inside
+a noise floor measured in the same rounds from two independent builds of the same
+source, which itself produced one "significant" -1.50% (p=0.038). No benchmark
+regressed. Raw data: `docs/benchmarks/expand-slot-counter-2026-09-05-raw/`.
+
+### What is DELIBERATELY outside the figure
+
+Two access-path reads are not counted, and both are binary searches rather than
+walks:
+
+* `Expand.seekIntoRuns` (the expand-into seek) narrows the cursor to the bound
+  destination's contiguous block. The slots it steps over are not read, so charging
+  them would report the Θ(d) walk the seek exists to avoid — the counter would make
+  an optimisation invisible. Pinned by
+  `TestExpandStorageAccesses_SeekIsNotChargedForSlotsItSkipped`, whose control is
+  the same query with the seek off.
+* `Expand.reverseEdgePassesFilter`'s forward-position recovery probes the
+  DESTINATION's forward run when the relationship-type column cannot answer a
+  reverse slot directly. Since rmp #2251 the column answers directly whenever the
+  pair's transpose was established, so this is the fallback and not the path.
+
+### The definition, read in Neo4j source
+
+§3 cited `DefaultNodeCursor.java:199-210` (`tracer.onHasLabel` before returning
+`false`). The closer analogue for a traversal was read for #2761, at the same
+pinned commit `679feff` (tag 5.26.16):
+`community/record-storage-engine/.../RecordRelationshipTraversalCursor.java:159-161`
+calls `tracer.onRelationship(entityReference())` INSIDE the loop
+`do { ... } while (!inUse() || (!traversingDenseNode && !selection.test(getType(), ...)))`.
+A relationship record read and then rejected by the type-and-direction selection is
+therefore still charged. GoGraph's figure now matches that definition.
+
+One structural difference remains and is not a counting difference: Neo4j groups a
+DENSE node's relationships by type in the store, so a type-filtered traversal of a
+dense node reads fewer records rather than counting fewer. GoGraph's CSR has no
+per-type grouping, so it walks the run and counts what it walked.
+
+### Found while doing this, NOT fixed: `exec.OptionalExpand` is unreachable
+
+`exec.OptionalExpand` is built only for an `ir.OptionalExpand`, which
+`cypher/ir/match.go:1960` emits only when `matchPattern` is called with
+`optional=true` — and its sole caller, `cypher/ir/translator.go:375`, passes `false`
+unconditionally. Every `OPTIONAL MATCH` plans an `OptionalApply` over a plain
+`Expand` instead, verified by rendering
+`OPTIONAL MATCH (r:Root)-[:KNOWS]->(b) RETURN b`. So no `PROFILE` output can
+exercise the operator today. Its classification was corrected anyway — it is built,
+censused, and would report the moment the translator wires it — and its arm of the
+gate is an exec-level test rather than an engine-level `PROFILE`. Whether the
+operator should be wired or removed is out of scope for #2761 and is left as a
+finding.
+
+### Still open after #2761
+
+* The expression-closure operators are still classified by TYPE, not per instance.
+* The parallel leaves (#2762) and `shortestPath` / `allShortestPaths` (#2763)
+  remain UNCOUNTED.
 * §7's limit stands: `ParallelAggregateScan` and `ParallelCountScan` are still
   classified from the interface set rather than from an observed run.

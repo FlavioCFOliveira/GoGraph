@@ -187,6 +187,18 @@ type Expand struct {
 	revStart, revEnd uint64
 	pendingRemaining int64
 
+	// slotsRead accumulates the adjacency slots this operator has CONSUMED from
+	// its cursors, over every source it has finished with and every Init it has
+	// been restarted by. The slots of the source currently under the cursor are
+	// NOT in here: [Expand.storageAccesses] adds that open window when it is read,
+	// so a run stopped early by a LIMIT still reports the slots it walked.
+	slotsRead int64
+	// fwdBase/revBase are the cursor positions the CURRENT source's walk started
+	// from. [Expand.loadAdjacency] records them AFTER [Expand.seekIntoRuns] has
+	// narrowed the range, so an expand-into seek is not charged for the block it
+	// skipped rather than read.
+	fwdBase, revBase uint64
+
 	// Columnar fan-out cursor and multiplicity re-emit state (FillChunk path).
 	cScratchLen    int   // rows currently held in cScratch
 	cRow           int   // index of the current input row within cScratch (outer cursor)
@@ -356,7 +368,16 @@ func (op *Expand) Init(ctx context.Context) error {
 	// TestExpand_ReInitResetsMultiplicityQueue here, and at engine level by
 	// TestExpandReInit_ExistsReverseDoesNotLeakPriorSource; all three fail against
 	// the operator as it stood at 35990293.
+	//
+	// CLOSE THE SLOT WINDOW FIRST. Init is the other place a cursor moves without
+	// having been walked, so the slots consumed under the previous source must be
+	// banked before the reset erases the evidence — the convention
+	// [VarLengthExpand.Init] already follows for its own lifetime counter
+	// (rmp #2761). op.slotsRead is deliberately NOT reset: an operator driven once
+	// per outer row under Apply reports its WHOLE lifetime, not its last row.
+	op.closeSlotWindow()
 	op.revStart, op.revEnd = 0, 0
+	op.revBase = 0
 	op.pendingRemaining, op.pendingRow = 0, nil
 	op.inputRow = nil
 	// Reset the columnar fan-out cursor so a re-Init (pooled/re-run operator)
@@ -879,6 +900,10 @@ func (op *Expand) advanceInput() (done bool, err error) {
 
 // loadAdjacency sets the forward and reverse cursor ranges for srcID uid.
 func (op *Expand) loadAdjacency(uid uint64) {
+	// Bank the slots the PREVIOUS source's cursors consumed before they are moved:
+	// this is the only place (with [Expand.Init]) a cursor jumps without having been
+	// walked, so it is the only place the window has to be closed (rmp #2761).
+	op.closeSlotWindow()
 	op.fwdDone = false
 	if uid+1 < uint64(len(op.fwdVerts)) {
 		op.fwdStart = op.fwdVerts[uid]
@@ -900,6 +925,9 @@ func (op *Expand) loadAdjacency(uid uint64) {
 	// cyphermorphism, CREATE-multiplicity re-emission, DirBoth ordering and its
 	// self-loop dedup, the cancellation cadence) is inherited unchanged.
 	op.seekIntoRuns()
+	// Rebase AFTER the seek: a narrowed cursor starts at the bound destination's
+	// run, and the block the binary search stepped over was never read.
+	op.fwdBase, op.revBase = op.fwdStart, op.revStart
 }
 
 // passesRelMorphism reports whether edgeID is absent from all cyphermorphism
@@ -974,6 +1002,86 @@ func (op *Expand) buildRow(out *Row, srcID, edgeID, dstID int64) {
 	op.outBuf[len(op.inputRow)+1] = expr.IntegerValue(edgeID)
 	op.outBuf[len(op.inputRow)+2] = expr.IntegerValue(dstID)
 	*out = op.outBuf
+}
+
+// closeSlotWindow banks the slots consumed since the current source's walk began
+// and re-opens the window at the cursors' present positions.
+//
+// It is called from exactly the two places a cursor moves without having been
+// walked — [Expand.loadAdjacency], which jumps to the next source's run, and
+// [Expand.Init], which resets the reverse cursor to zero. Everywhere else the
+// cursors only ever advance by one per slot consumed, which is what makes the
+// subtraction below an exact count rather than an approximation of one.
+//
+// Rebasing to the CURRENT positions (rather than to zero) is what makes it
+// idempotent: calling it twice in a row adds nothing the second time.
+func (op *Expand) closeSlotWindow() {
+	op.slotsRead += int64(op.fwdStart-op.fwdBase) + int64(op.revStart-op.revBase)
+	op.fwdBase, op.revBase = op.fwdStart, op.revStart
+}
+
+// storageAccesses reports the relationship slots this expansion actually read,
+// which is what a db-hits figure is for. It implements the storageAccessCounter
+// marker in profile.go, so PROFILE renders this operator's cell as MEASURED.
+//
+// # Why the emitted row count is NOT this number
+//
+// Expand walks every slot of the source's adjacency run and emits only the ones
+// the relationship-type filter, the cyphermorphism check and the expand-into
+// comparison all admit (the edgeSkip outcome). So the rows it emits are the
+// ADMITTED slots, not the read ones, and until rmp #2761 the operator carried
+// StorageRecordScan and reported the former. Measured on one :Root with 99 :LIKES
+// and one :KNOWS out-edge (TestProfileDbHits_TypeFilteredExpandCountsSlotsWalked):
+// `-->` and `-[:KNOWS]->` walk the SAME 100 slots and emit 100 rows and 1 row, so
+// the derived figure moved 100x while the storage work did not move at all
+// (rmp #2720, docs/explain-profile-honesty-audit-2026-09-03.md §3 refutation 2).
+//
+// Neo4j 5.26.16 charges the hit regardless of the predicate's outcome:
+// RecordRelationshipTraversalCursor.next() calls tracer.onRelationship() INSIDE
+// the `do { ... } while (!inUse() || !selection.test(getType(), ...))` loop, so a
+// record read and then rejected by the type/direction selection is still counted.
+// Reporting emitted edges was therefore not a different scale from Neo4j's figure
+// but an incompatible definition of it.
+//
+// # Why this costs a non-PROFILE run nothing
+//
+// The counter is maintained UNCONDITIONALLY, which departs from the property
+// StorageRecordScan documents ("no counting CODE AT ALL when off"). It is admitted
+// because the cost is not per slot: the cursors ALREADY advance one position per
+// slot consumed, so the count is recovered from their positions in O(1) per INPUT
+// ROW — two subtractions and an add in [Expand.closeSlotWindow], one for the
+// forward cursor and one for the reverse — and the same again here.
+// There is no per-slot increment and nothing is threaded through any accessor.
+// Measured with benchstat over the expand benchmarks; the comparison is recorded
+// in docs/benchmarks/.
+//
+// # What it counts, exactly, and what it does not
+//
+// It counts SLOTS CONSUMED FROM THE SOURCE'S ADJACENCY CURSOR, forward and
+// reverse, whatever the slot's fate — emitted, type-filtered, morphism-rejected,
+// self-loop-deduplicated, or discarded by the expand-into comparison. The open
+// window is included, so a walk cut short by a LIMIT reports what it walked, and
+// op.slotsRead survives re-Init, so an operator driven once per outer row under an
+// Apply reports its whole lifetime.
+//
+// Two access-path reads are deliberately OUTSIDE it, both binary searches rather
+// than walks:
+//
+//   - [Expand.seekIntoRuns]'s dstRun, which narrows the cursor to the bound
+//     destination's contiguous run. The slots it steps over are not read, so
+//     charging them would report the walk the seek exists to avoid.
+//   - the reverse type filter's forward-position recovery
+//     ([Expand.reverseEdgePassesFilter]), which probes the DESTINATION's forward
+//     run — a different node's adjacency — when the type column cannot answer the
+//     reverse slot directly. Since rmp #2251 the column answers directly whenever
+//     the pair's transpose was established, so this is the fallback and not the
+//     path.
+//
+// Neither is silent: both are stated here, and both are of the same kind as the
+// property reads this column does not count for any operator (see
+// [StorageRecordScan]).
+func (op *Expand) storageAccesses() int64 {
+	return op.slotsRead + int64(op.fwdStart-op.fwdBase) + int64(op.revStart-op.revBase)
 }
 
 // Close releases resources and closes the child operator.

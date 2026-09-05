@@ -1,0 +1,95 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/exec
+cpu: Apple M4
+BenchmarkExpandFilter_Columnar-10                       	     552	   2145690 ns/op	  297744 B/op	      26 allocs/op
+BenchmarkExpandFilter_RowMode-10                        	     670	   1807604 ns/op	 1497693 B/op	  181112 allocs/op
+BenchmarkExpandDir_InVsOut_Baseline/OUT_deg1_sources-10 	    8329	    141810 ns/op	  159937 B/op	   11781 allocs/op
+BenchmarkExpandDir_InVsOut_Baseline/IN_deg1_sources-10  	   13030	     93340 ns/op	   61656 B/op	    7686 allocs/op
+BenchmarkExpandIn_PerEdge_vs_SourceOutdegree/K=16/one_in_edge-10         	 6526695	       185.5 ns/op	     208 B/op	       5 allocs/op
+BenchmarkExpandIn_PerEdge_vs_SourceOutdegree/K=256/one_in_edge-10        	 6074208	       198.5 ns/op	     216 B/op	       6 allocs/op
+BenchmarkExpandIn_PerEdge_vs_SourceOutdegree/K=4096/one_in_edge-10       	 5962484	       199.7 ns/op	     224 B/op	       7 allocs/op
+BenchmarkExpandIn_PerEdge_vs_SourceOutdegree/K=65536/one_in_edge-10      	 5918684	       202.5 ns/op	     224 B/op	       7 allocs/op
+BenchmarkExpandIn_TypeFiltered_vs_SourceOutdegree/K=16/one_in_edge_typed-10         	 1872888	       652.5 ns/op	    1496 B/op	      12 allocs/op
+BenchmarkExpandIn_TypeFiltered_vs_SourceOutdegree/K=256/one_in_edge_typed-10        	  222832	      5302 ns/op	   18256 B/op	      13 allocs/op
+BenchmarkExpandIn_TypeFiltered_vs_SourceOutdegree/K=4096/one_in_edge_typed-10       	   14863	     80650 ns/op	  292465 B/op	      28 allocs/op
+BenchmarkExpandIn_TypeFiltered_vs_SourceOutdegree/K=65536/one_in_edge_typed-10      	     992	   1206226 ns/op	 4552119 B/op	     268 allocs/op
+BenchmarkExpandOut_PerEdge_SingleSource/K=4096-10                                   	   15087	     78111 ns/op	   61656 B/op	    7686 allocs/op
+BenchmarkExpandOut_PerEdge_SingleSource/K=65536-10                                  	     970	   1227329 ns/op	 1044700 B/op	  130566 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/exec
+cpu: Apple M4
+BenchmarkExpandFilter_Columnar-10                       	     553	   2155960 ns/op	  297755 B/op	      26 allocs/op
+BenchmarkExpandFilter_RowMode-10                        	     652	   1852167 ns/op	 1497684 B/op	  181112 allocs/op
+BenchmarkExpandDir_InVsOut_Baseline/OUT_deg1_sources-10 	    8470	    140639 ns/op	  159937 B/op	   11781 allocs/op
+BenchmarkExpandDir_InVsOut_Baseline/IN_deg1_sources-10  	   13119	     91934 ns/op	   61656 B/op	    7686 allocs/op
+BenchmarkExpandIn_PerEdge_vs_SourceOutdegree/K=16/one_in_edge-10         	 6380269	       187.5 ns/op	     208 B/op	       5 allocs/op
+BenchmarkExpandIn_PerEdge_vs_SourceOutdegree/K=256/one_in_edge-10        	 6066238	       195.8 ns/op	     216 B/op	       6 allocs/op
+BenchmarkExpandIn_PerEdge_vs_SourceOutdegree/K=4096/one_in_edge-10       	 6056803	       197.9 ns/op	     224 B/op	       7 allocs/op
+BenchmarkExpandIn_PerEdge_vs_SourceOutdegree/K=65536/one_in_edge-10      	 5913432	       203.2 ns/op	     224 B/op	       7 allocs/op
+BenchmarkExpandIn_TypeFiltered_vs_SourceOutdegree/K=16/one_in_edge_typed-10         	 1855002	       644.6 ns/op	    1496 B/op	      12 allocs/op
+BenchmarkExpandIn_TypeFiltered_vs_SourceOutdegree/K=256/one_in_edge_typed-10        	  225536	      5298 ns/op	   18256 B/op	      13 allocs/op
+BenchmarkExpandIn_TypeFiltered_vs_SourceOutdegree/K=4096/one_in_edge_typed-10       	   14936	     80675 ns/op	  292465 B/op	      28 allocs/op
+BenchmarkExpandIn_TypeFiltered_vs_SourceOutdegree/K=65536/one_in_edge_typed-10      	     998	   1202948 ns/op	 4552118 B/op	     268 allocs/op
+BenchmarkExpandOut_PerEdge_SingleSource/K=4096-10                                   	   15530	     77327 ns/op	   61656 B/op	    7686 allocs/op
+BenchmarkExpandOut_PerEdge_SingleSource/K=65536-10                                  	     973	   1238416 ns/op	 1044700 B/op	  130566 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/exec
+cpu: Apple M4
+BenchmarkExpandFilter_Columnar-10                       	     547	   2186621 ns/op	  297744 B/op	      26 allocs/op
+BenchmarkExpandFilter_RowMode-10                        	     640	   1846932 ns/op	 1497684 B/op	  181112 allocs/op
+BenchmarkExpandDir_InVsOut_Baseline/OUT_deg1_sources-10 	    8318	    144414 ns/op	  159937 B/op	   11781 allocs/op
+BenchmarkExpandDir_InVsOut_Baseline/IN_deg1_sources-10  	   12778	     93993 ns/op	   61656 B/op	    7686 allocs/op
+BenchmarkExpandIn_PerEdge_vs_SourceOutdegree/K=16/one_in_edge-10         	 6510578	       184.2 ns/op	     208 B/op	       5 allocs/op
+BenchmarkExpandIn_PerEdge_vs_SourceOutdegree/K=256/one_in_edge-10        	 6171872	       194.9 ns/op	     216 B/op	       6 allocs/op
+BenchmarkExpandIn_PerEdge_vs_SourceOutdegree/K=4096/one_in_edge-10       	 6054104	       202.4 ns/op	     224 B/op	       7 allocs/op
+BenchmarkExpandIn_PerEdge_vs_SourceOutdegree/K=65536/one_in_edge-10      	 5787943	       202.6 ns/op	     224 B/op	       7 allocs/op
+BenchmarkExpandIn_TypeFiltered_vs_SourceOutdegree/K=16/one_in_edge_typed-10         	 1853786	       647.0 ns/op	    1496 B/op	      12 allocs/op
+BenchmarkExpandIn_TypeFiltered_vs_SourceOutdegree/K=256/one_in_edge_typed-10        	  226998	      5323 ns/op	   18256 B/op	      13 allocs/op
+BenchmarkExpandIn_TypeFiltered_vs_SourceOutdegree/K=4096/one_in_edge_typed-10       	   14710	     80680 ns/op	  292465 B/op	      28 allocs/op
+BenchmarkExpandIn_TypeFiltered_vs_SourceOutdegree/K=65536/one_in_edge_typed-10      	     994	   1201855 ns/op	 4552116 B/op	     268 allocs/op
+BenchmarkExpandOut_PerEdge_SingleSource/K=4096-10                                   	   15378	     78867 ns/op	   61656 B/op	    7686 allocs/op
+BenchmarkExpandOut_PerEdge_SingleSource/K=65536-10                                  	     946	   1277901 ns/op	 1044700 B/op	  130566 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/exec
+cpu: Apple M4
+BenchmarkExpandFilter_Columnar-10                       	     550	   2164526 ns/op	  297745 B/op	      26 allocs/op
+BenchmarkExpandFilter_RowMode-10                        	     654	   1803985 ns/op	 1497690 B/op	  181112 allocs/op
+BenchmarkExpandDir_InVsOut_Baseline/OUT_deg1_sources-10 	    8392	    142505 ns/op	  159937 B/op	   11781 allocs/op
+BenchmarkExpandDir_InVsOut_Baseline/IN_deg1_sources-10  	   12974	     91477 ns/op	   61656 B/op	    7686 allocs/op
+BenchmarkExpandIn_PerEdge_vs_SourceOutdegree/K=16/one_in_edge-10         	 6543306	       185.4 ns/op	     208 B/op	       5 allocs/op
+BenchmarkExpandIn_PerEdge_vs_SourceOutdegree/K=256/one_in_edge-10        	 6206976	       196.9 ns/op	     216 B/op	       6 allocs/op
+BenchmarkExpandIn_PerEdge_vs_SourceOutdegree/K=4096/one_in_edge-10       	 5999328	       200.6 ns/op	     224 B/op	       7 allocs/op
+BenchmarkExpandIn_PerEdge_vs_SourceOutdegree/K=65536/one_in_edge-10      	 5926699	       202.4 ns/op	     224 B/op	       7 allocs/op
+BenchmarkExpandIn_TypeFiltered_vs_SourceOutdegree/K=16/one_in_edge_typed-10         	 1847342	       655.0 ns/op	    1496 B/op	      12 allocs/op
+BenchmarkExpandIn_TypeFiltered_vs_SourceOutdegree/K=256/one_in_edge_typed-10        	  220530	      5442 ns/op	   18256 B/op	      13 allocs/op
+BenchmarkExpandIn_TypeFiltered_vs_SourceOutdegree/K=4096/one_in_edge_typed-10       	   14983	     80279 ns/op	  292465 B/op	      28 allocs/op
+BenchmarkExpandIn_TypeFiltered_vs_SourceOutdegree/K=65536/one_in_edge_typed-10      	     976	   1211354 ns/op	 4552117 B/op	     268 allocs/op
+BenchmarkExpandOut_PerEdge_SingleSource/K=4096-10                                   	   14953	     78986 ns/op	   61656 B/op	    7686 allocs/op
+BenchmarkExpandOut_PerEdge_SingleSource/K=65536-10                                  	     942	   1259626 ns/op	 1044699 B/op	  130566 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/exec
+cpu: Apple M4
+BenchmarkExpandFilter_Columnar-10                       	     555	   2155681 ns/op	  297754 B/op	      26 allocs/op
+BenchmarkExpandFilter_RowMode-10                        	     656	   1832195 ns/op	 1497686 B/op	  181112 allocs/op
+BenchmarkExpandDir_InVsOut_Baseline/OUT_deg1_sources-10 	    8298	    142239 ns/op	  159937 B/op	   11781 allocs/op
+BenchmarkExpandDir_InVsOut_Baseline/IN_deg1_sources-10  	   13304	     90030 ns/op	   61656 B/op	    7686 allocs/op
+BenchmarkExpandIn_PerEdge_vs_SourceOutdegree/K=16/one_in_edge-10         	 6489559	       187.5 ns/op	     208 B/op	       5 allocs/op
+BenchmarkExpandIn_PerEdge_vs_SourceOutdegree/K=256/one_in_edge-10        	 6057477	       196.2 ns/op	     216 B/op	       6 allocs/op
+BenchmarkExpandIn_PerEdge_vs_SourceOutdegree/K=4096/one_in_edge-10       	 6059613	       198.8 ns/op	     224 B/op	       7 allocs/op
+BenchmarkExpandIn_PerEdge_vs_SourceOutdegree/K=65536/one_in_edge-10      	 5908981	       204.8 ns/op	     224 B/op	       7 allocs/op
+BenchmarkExpandIn_TypeFiltered_vs_SourceOutdegree/K=16/one_in_edge_typed-10         	 1837023	       648.1 ns/op	    1496 B/op	      12 allocs/op
+BenchmarkExpandIn_TypeFiltered_vs_SourceOutdegree/K=256/one_in_edge_typed-10        	  223032	      5374 ns/op	   18256 B/op	      13 allocs/op
+BenchmarkExpandIn_TypeFiltered_vs_SourceOutdegree/K=4096/one_in_edge_typed-10       	   14760	     81469 ns/op	  292466 B/op	      28 allocs/op
+BenchmarkExpandIn_TypeFiltered_vs_SourceOutdegree/K=65536/one_in_edge_typed-10      	     974	   1227138 ns/op	 4552117 B/op	     268 allocs/op
+BenchmarkExpandOut_PerEdge_SingleSource/K=4096-10                                   	   15339	     77403 ns/op	   61656 B/op	    7686 allocs/op
+BenchmarkExpandOut_PerEdge_SingleSource/K=65536-10                                  	     969	   1250796 ns/op	 1044700 B/op	  130566 allocs/op
+PASS

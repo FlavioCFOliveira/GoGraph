@@ -206,23 +206,34 @@ func TestProfileDbHits_VarLengthExpandCountsTraversalsNotRows(t *testing.T) {
 	}
 }
 
-// TestProfileDbHits_TypeFilteredExpandUnderReports is gate 2: it PINS a known
-// divergence rather than asserting a correct number.
+// TestProfileDbHits_TypeFilteredExpandCountsSlotsWalked is gate 2: a single-hop
+// Expand must report the adjacency slots it WALKED, not the ones it emitted.
 //
-// A single-hop Expand walks every slot of the source node's adjacency run and
-// counts only the slots it emitted, so a type filter that admits one edge in a
-// hundred reports one db-hit for a hundred-slot walk. Correcting it needs a
-// per-slot counter the operator does not maintain and whose cost a non-PROFILE
-// run would pay, which is the trade the derived model exists to refuse — so the
-// divergence stands, and this test exists to keep it VISIBLE. It fails if the
-// figure changes in either direction: upwards means somebody fixed it and the
-// documentation must follow, downwards means something else broke.
-func TestProfileDbHits_TypeFilteredExpandUnderReports(t *testing.T) {
+// It used to be TestProfileDbHits_TypeFilteredExpandUnderReports, and it pinned
+// the wrong number on purpose: Expand carried exec.StorageRecordScan, so its
+// db-hits were derived from its rows, and a type filter admitting one edge in a
+// hundred reported one db-hit for a hundred-slot walk. rmp #2761 gave the operator
+// a counter and the assertion is inverted with it — the two arms below walk the
+// SAME 100-slot CSR run and must now report the SAME 100 db-hits while emitting
+// 100 rows and 1 row respectively.
+//
+// The control is what makes the subject falsifiable: `-->` and `-[:KNOWS]->` are
+// provably the same walk on this graph, so a figure that still moves between them
+// is tracking rows. The rows are asserted too, in both arms — a "fix" that made
+// the filtered arm emit 100 rows would satisfy the db-hits equality and be a
+// correctness regression.
+//
+// Neo4j 5.26.16 defines the figure the same way:
+// RecordRelationshipTraversalCursor.next() calls tracer.onRelationship() INSIDE
+// the do/while whose condition is the type-and-direction selection test, so a
+// record read and rejected is still charged (rmp #2761).
+func TestProfileDbHits_TypeFilteredExpandCountsSlotsWalked(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
 	eng := cypher.NewEngine(g)
 	t.Cleanup(func() { _ = eng.Close() })
 	const others = 99
+	const slots = others + 1
 	runHonestyWrite(t, eng, "CREATE (:Root {k:0})")
 	for i := 0; i < others; i++ {
 		runHonestyWrite(t, eng, fmt.Sprintf("MATCH (r:Root) CREATE (r)-[:LIKES]->(:Leaf {i:%d})", i))
@@ -239,7 +250,7 @@ func TestProfileDbHits_TypeFilteredExpandUnderReports(t *testing.T) {
 		t.Fatalf("Profile(filtered): %v", err)
 	}
 
-	_, allHits, allKnown, ok := profiledCells(all, "Expand")
+	allRows, allHits, allKnown, ok := profiledCells(all, "Expand")
 	if !ok {
 		t.Fatalf("no Expand in the unfiltered plan:\n%s", all)
 	}
@@ -248,30 +259,103 @@ func TestProfileDbHits_TypeFilteredExpandUnderReports(t *testing.T) {
 		t.Fatalf("no Expand in the filtered plan:\n%s", filtered)
 	}
 
-	// Expand is marked exec.StorageRecordScan, so both cells are DERIVED figures
-	// and must render as numbers. A "?" here would mean the marker was dropped,
-	// which would silently make the pinned under-report below unobservable.
+	// Expand implements exec.storageAccessCounter since rmp #2761, so both cells are
+	// MEASURED figures and must render as numbers. A "?" here would mean the counter
+	// was dropped, which would make every assertion below unobservable.
 	if !allKnown || !filteredKnown {
 		t.Fatalf("Expand rendered its db-hits as unknown (unfiltered known=%v, "+
-			"filtered known=%v); it carries exec.StorageRecordScan, so the cell is a "+
-			"derived figure:\nunfiltered:\n%s\nfiltered:\n%s",
+			"filtered known=%v); it counts its own adjacency slots, so the cell is a "+
+			"measured figure:\nunfiltered:\n%s\nfiltered:\n%s",
 			allKnown, filteredKnown, all, filtered)
 	}
-	if allHits != others+1 {
-		t.Fatalf("the unfiltered expand reported dbhits=%d, want %d — the graph no "+
-			"longer has the shape this gate needs:\n%s", allHits, others+1, all)
+	if allRows != slots || filteredRows != 1 {
+		t.Fatalf("the arms emitted %d and %d rows, want %d and 1 — the graph no longer "+
+			"has the shape this gate needs:\nunfiltered:\n%s\nfiltered:\n%s",
+			allRows, filteredRows, slots, all, filtered)
 	}
-	if filteredRows != 1 {
-		t.Fatalf("the filtered expand emitted %d rows, want 1:\n%s", filteredRows, filtered)
+	if allHits != slots {
+		t.Errorf("the unfiltered expand reported dbhits=%d, want %d — one per slot of "+
+			"the Root's adjacency run:\n%s", allHits, slots, all)
 	}
-	if filteredHits != 1 {
-		t.Errorf("the type-filtered expand reported dbhits=%d, want 1. This test PINS a "+
-			"known under-report (rmp #2720): both queries walk the same %d-slot "+
-			"adjacency run and the filtered one charges only the slot it emitted. If "+
-			"this number is now the true slot count, the fix is welcome — update this "+
-			"test, docs/cypher.md and the StorageRecordScan documentation together, "+
-			"because all three currently state the under-report as a fact.\n%s",
-			filteredHits, others+1, filtered)
+	if filteredHits != slots {
+		t.Errorf("the type-filtered expand reported dbhits=%d, want %d. It walks the "+
+			"SAME %d-slot adjacency run as the unfiltered arm and rejects 99 slots on "+
+			"the relationship type; a slot read and then rejected is still a read "+
+			"(rmp #2761). A figure of 1 here is the pre-#2761 derived count, which "+
+			"tracked emitted rows:\n%s", filteredHits, slots, slots, filtered)
+	}
+	if filteredHits != allHits {
+		t.Errorf("the two arms reported dbhits=%d and dbhits=%d for the same %d-slot "+
+			"CSR walk. They differ only in a predicate applied to slots both of them "+
+			"read, so a db-hits figure that moves between them is not counting storage "+
+			"reads:\nunfiltered:\n%s\nfiltered:\n%s",
+			allHits, filteredHits, slots, all, filtered)
+	}
+}
+
+// TestProfileDbHits_ColumnarExpandCountsSlotsWalked is gate 2's columnar arm.
+//
+// The columnar presentation of a traversal is a DIFFERENT operator in the plan —
+// `columnarExpand`, an exec.columnarExpand embedding the same *exec.Expand — and it
+// is driven through FillChunk, not Next, so it advances the same cursors from a
+// different state machine ([Expand.advanceInputChunk] rather than
+// [Expand.advanceInput]). A correction applied to the row path alone would leave
+// the identical query reporting two different figures according to whether the
+// planner chose the chunked chain, which is the very failure mode rmp #2720
+// recorded for the parallel threshold.
+//
+// The chain is engaged by a post-traversal property filter over the far node
+// (rmp #2106): scan → columnar Expand → ColumnarFilter → ColumnarProject. The
+// operator name in the rendered plan is what proves it engaged; a fallback to row
+// mode would print "Expand" and this test would not find its subject.
+func TestProfileDbHits_ColumnarExpandCountsSlotsWalked(t *testing.T) {
+	t.Parallel()
+	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	eng := cypher.NewEngine(g)
+	t.Cleanup(func() { _ = eng.Close() })
+	const others = 99
+	const slots = others + 1
+	runHonestyWrite(t, eng, "CREATE (:Root {k:0})")
+	for i := 0; i < others; i++ {
+		runHonestyWrite(t, eng, fmt.Sprintf("MATCH (r:Root) CREATE (r)-[:LIKES]->(:Leaf {v:%d})", i))
+	}
+	runHonestyWrite(t, eng, "MATCH (r:Root) CREATE (r)-[:KNOWS]->(:Leaf {v:999})")
+
+	ctx := context.Background()
+	all, err := eng.Profile(ctx, "MATCH (r:Root)-->(p) WHERE p.v >= 0 RETURN p.v", nil)
+	if err != nil {
+		t.Fatalf("Profile(unfiltered): %v", err)
+	}
+	filtered, err := eng.Profile(ctx, "MATCH (r:Root)-[:KNOWS]->(p) WHERE p.v >= 0 RETURN p.v", nil)
+	if err != nil {
+		t.Fatalf("Profile(filtered): %v", err)
+	}
+
+	allRows, allHits, allKnown, ok := profiledCells(all, "columnarExpand")
+	if !ok {
+		t.Fatalf("no columnarExpand in the unfiltered plan — the columnar chain did not "+
+			"engage, so this test has no subject:\n%s", all)
+	}
+	filteredRows, filteredHits, filteredKnown, ok := profiledCells(filtered, "columnarExpand")
+	if !ok {
+		t.Fatalf("no columnarExpand in the filtered plan — the columnar chain did not "+
+			"engage, so this test has no subject:\n%s", filtered)
+	}
+	if !allKnown || !filteredKnown {
+		t.Fatalf("columnarExpand rendered its db-hits as unknown (unfiltered known=%v, "+
+			"filtered known=%v); it embeds *exec.Expand and inherits its counter:\n"+
+			"unfiltered:\n%s\nfiltered:\n%s", allKnown, filteredKnown, all, filtered)
+	}
+	if allRows != slots || filteredRows != 1 {
+		t.Fatalf("the arms emitted %d and %d rows, want %d and 1 — the graph no longer "+
+			"has the shape this gate needs:\nunfiltered:\n%s\nfiltered:\n%s",
+			allRows, filteredRows, slots, all, filtered)
+	}
+	if allHits != slots || filteredHits != slots {
+		t.Errorf("the columnar arms reported dbhits=%d and dbhits=%d, want %d each. The "+
+			"FillChunk path walks the SAME adjacency run as the Next path and must report "+
+			"the same slot count (rmp #2761):\nunfiltered:\n%s\nfiltered:\n%s",
+			allHits, filteredHits, slots, all, filtered)
 	}
 }
 
