@@ -1,0 +1,37 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/exec
+cpu: Apple M4
+                                    │ hoist_base.txt │ hoist_head.txt │
+                                    │                                                 sec/op                                                 │                                      sec/op                                       vs base              │
+ShortestPath_UnitDegreeChain-10                                                                                                  633.9µ ± 2%                                                                        633.0µ ± 1%       ~ (p=0.937 n=6)
+ShortestPath_Layered-10                                                                                                          90.86µ ± 1%                                                                        90.80µ ± 1%       ~ (p=0.734 n=6)
+ShortestPath_LayeredTyped-10                                                                                                     90.86µ ± 1%                                                                        91.09µ ± 1%       ~ (p=0.937 n=6)
+ShortestPath_HighDegreeFan-10                                                                                                    1.569m ± 1%                                                                        1.553m ± 1%       ~ (p=0.132 n=6)
+AllShortestPaths_UnitDegreeChain-10                                                                                              1.123m ± 3%                                                                        1.123m ± 4%       ~ (p=0.937 n=6)
+AllShortestPaths_Layered-10                                                                                                      192.6µ ± 1%                                                                        191.0µ ± 2%       ~ (p=0.394 n=6)
+AllShortestPaths_HighDegreeFan-10                                                                                                1.849m ± 1%                                                                        1.829m ± 2%       ~ (p=0.240 n=6)
+geomean                                                                                                                          441.8µ                                                                             439.9µ       -0.42%
+
+                                    │ hoist_base.txt │ hoist_head.txt │
+                                    │                                                  B/op                                                  │                                       B/op                                        vs base              │
+ShortestPath_UnitDegreeChain-10                                                                                                 1.607Mi ± 0%                                                                       1.607Mi ± 0%       ~ (p=1.000 n=6)
+ShortestPath_Layered-10                                                                                                         252.1Ki ± 0%                                                                       252.1Ki ± 0%       ~ (p=0.494 n=6)
+ShortestPath_LayeredTyped-10                                                                                                    252.1Ki ± 0%                                                                       252.1Ki ± 0%       ~ (p=0.182 n=6)
+ShortestPath_HighDegreeFan-10                                                                                                   4.257Mi ± 0%                                                                       4.257Mi ± 0%       ~ (p=0.556 n=6)
+AllShortestPaths_UnitDegreeChain-10                                                                                             12.95Mi ± 0%                                                                       12.95Mi ± 0%       ~ (p=0.444 n=6)
+AllShortestPaths_Layered-10                                                                                                     453.4Ki ± 0%                                                                       453.4Ki ± 0%       ~ (p=0.364 n=6)
+AllShortestPaths_HighDegreeFan-10                                                                                               4.871Mi ± 0%                                                                       4.871Mi ± 0%       ~ (p=0.370 n=6)
+geomean                                                                                                                         1.419Mi                                                                            1.419Mi       -0.00%
+
+                                    │ hoist_base.txt │ hoist_head.txt │
+                                    │                                               allocs/op                                                │                                   allocs/op                                     vs base                │
+ShortestPath_UnitDegreeChain-10                                                                                                  11.90k ± 0%                                                                      11.90k ± 0%       ~ (p=1.000 n=6) ¹
+ShortestPath_Layered-10                                                                                                           126.0 ± 0%                                                                       126.0 ± 0%       ~ (p=1.000 n=6) ¹
+ShortestPath_LayeredTyped-10                                                                                                      126.0 ± 0%                                                                       126.0 ± 0%       ~ (p=1.000 n=6) ¹
+ShortestPath_HighDegreeFan-10                                                                                                     317.0 ± 0%                                                                       317.0 ± 0%       ~ (p=1.000 n=6) ¹
+AllShortestPaths_UnitDegreeChain-10                                                                                              5.670k ± 0%                                                                      5.670k ± 0%       ~ (p=1.000 n=6) ¹
+AllShortestPaths_Layered-10                                                                                                      2.938k ± 0%                                                                      2.938k ± 0%       ~ (p=1.000 n=6) ¹
+AllShortestPaths_HighDegreeFan-10                                                                                                20.32k ± 0%                                                                      20.32k ± 0%       ~ (p=1.000 n=6) ¹
+geomean                                                                                                                          1.537k                                                                           1.537k       +0.00%
+¹ all samples are equal

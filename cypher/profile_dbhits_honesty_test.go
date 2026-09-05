@@ -618,3 +618,270 @@ func TestProfileDbHits_ParallelLeafPlanDetailNoLongerClaimsItIsUncounted(t *test
 			"to subtract; removing it rather than correcting it loses that:\n%s", plan)
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Gate 4 — shortestPath and allShortestPaths (rmp #2763)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Both operators read relationship records across a BFS and reported none of it:
+// they implemented none of the three markers, so the cell rendered "?" from
+// rmp #2760 and a bare 0 before that. The counter they DID have,
+// totalEdgesTraversed, is incremented only in the exhaustive path-predicate
+// search, so wiring it would have printed an authoritative-looking 0 for the
+// common path — which is why the audit left the gap rather than half-closing it
+// (docs/explain-profile-honesty-audit-2026-09-03.md §6).
+//
+// The four gates below are written so each FAILS on a plausible wrong figure, not
+// merely on a zero:
+//
+//   - a row-derived figure fails: shortestPath emits exactly one row for a walk
+//     of any size, and allShortestPaths' rows move in the OPPOSITE direction from
+//     its walk between the two arms of gate 6;
+//   - a constant fails: gate 4's two arms differ by exactly the slots added while
+//     the rows do not move;
+//   - a figure counting ADMITTED ARCS rather than SLOTS READ fails gate 5, where a
+//     type filter rejects half the run the search still had to walk;
+//   - a figure reset in Init fails gate 7, which drives the operator once per
+//     outer row under a CorrelatedApply and requires the total to be linear in the
+//     row count.
+
+// shortestBroomGraph builds `components` disjoint copies of the fixture the
+// numbers below are derived from. Copy c is:
+//
+//	(:A {k:c}) ──E──▶ (:M {k:c, i:0}) ──E──▶ (:B {k:c})
+//	           ├──E──▶ (:M {k:c, i:1})
+//	           ├─ …                             (fan of them in all)
+//	           └──E──▶ (:M {k:c, i:fan-1})
+//
+// plus `decoys` further out-edges from A of a DIFFERENT relationship type, which
+// exist only so a typed pattern has something to reject.
+//
+// When allToB is set every mid continues to B, so the number of shortest paths
+// becomes fan instead of 1 while the slots walked stay a function of the shape.
+func shortestBroomGraph(t *testing.T, components, fan, decoys int, allToB bool) *cypher.Engine {
+	t.Helper()
+	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	eng := cypher.NewEngine(g)
+	t.Cleanup(func() { _ = eng.Close() })
+	for c := 0; c < components; c++ {
+		runHonestyWrite(t, eng, fmt.Sprintf("CREATE (:A {k:%d})", c))
+		runHonestyWrite(t, eng, fmt.Sprintf("CREATE (:B {k:%d})", c))
+		for i := 0; i < fan; i++ {
+			runHonestyWrite(t, eng, fmt.Sprintf(
+				"MATCH (a:A {k:%d}) CREATE (a)-[:E]->(:M {k:%d, i:%d})", c, c, i))
+		}
+		for i := 0; i < decoys; i++ {
+			runHonestyWrite(t, eng, fmt.Sprintf(
+				"MATCH (a:A {k:%d}) CREATE (a)-[:O]->(:D {k:%d, i:%d})", c, c, i))
+		}
+		if allToB {
+			runHonestyWrite(t, eng, fmt.Sprintf(
+				"MATCH (m:M {k:%d}) MATCH (b:B {k:%d}) CREATE (m)-[:E]->(b)", c, c))
+		} else {
+			runHonestyWrite(t, eng, fmt.Sprintf(
+				"MATCH (m:M {k:%d, i:0}) MATCH (b:B {k:%d}) CREATE (m)-[:E]->(b)", c, c))
+		}
+	}
+	return eng
+}
+
+// profiledShortest profiles q on eng and returns the named operator's rows and
+// db-hits, failing when the operator is absent or its cell is not a figure.
+func profiledShortest(t *testing.T, eng *cypher.Engine, operator, q string) (rows, dbhits int64) {
+	t.Helper()
+	plan, err := eng.Profile(context.Background(), q, nil)
+	if err != nil {
+		t.Fatalf("Profile %q: %v", q, err)
+	}
+	rows, dbhits, known, found := profiledCells(plan, operator)
+	if !found {
+		t.Fatalf("no %s in the plan for %q, so this gate covers nothing:\n%s", operator, q, plan)
+	}
+	if !known {
+		t.Fatalf("%s still reports db-hits %q for %q. Since rmp #2763 it counts the "+
+			"adjacency slots its searches read; a %q here means the marker is gone "+
+			"again and the figure nobody counted is back:\n%s",
+			operator, exec.DbHitsUnknown, q, exec.DbHitsUnknown, plan)
+	}
+	return rows, dbhits
+}
+
+// TestProfileDbHits_ShortestPathCountsItsBFSFrontier is gate 4.
+//
+// The two-sided search on this fixture expands the forward frontier once — node
+// A's whole out-run, `fan` slots — and then the backward frontier once — B's
+// incoming run, 1 slot — and meets. So the figure is fan + 1, for exactly ONE
+// emitted row whatever fan is.
+//
+// The control arm is the second fan. Between the arms the graph gains a known
+// number of relationship slots and the emitted row count does not move at all, so
+// the figure must move by exactly that number. That refutes a row-derived figure
+// (1 in both arms), a constant, and an estimate scaled from anything the plan
+// already reports.
+func TestProfileDbHits_ShortestPathCountsItsBFSFrontier(t *testing.T) {
+	t.Parallel()
+
+	const q = `MATCH (a:A), (b:B) MATCH p = shortestPath((a)-[*]->(b)) RETURN count(p) AS c`
+
+	small, large := 100, 200
+	rowsS, hitsS := profiledShortest(t, shortestBroomGraph(t, 1, small, 0, false), "ShortestPath", q)
+	rowsL, hitsL := profiledShortest(t, shortestBroomGraph(t, 1, large, 0, false), "ShortestPath", q)
+
+	if rowsS != 1 || rowsL != 1 {
+		t.Fatalf("the operator emitted %d and %d rows; the gate needs exactly one in "+
+			"both arms for the row-derived figure to be refutable", rowsS, rowsL)
+	}
+	if want := int64(small + 1); hitsS != want {
+		t.Errorf("fan=%d: dbhits=%d, want %d — node A's out-run of %d slots plus B's "+
+			"in-run of 1, which is every slot the two-sided BFS enumerated",
+			small, hitsS, want, small)
+	}
+	if want := int64(large + 1); hitsL != want {
+		t.Errorf("fan=%d: dbhits=%d, want %d", large, hitsL, want)
+	}
+	if got, want := hitsL-hitsS, int64(large-small); got != want {
+		t.Errorf("the figure moved by %d between the two arms; %d relationship slots "+
+			"were added and the emitted row count stayed at 1 in both. A figure that "+
+			"tracks rows, or a constant, cannot produce this delta", got, want)
+	}
+}
+
+// TestProfileDbHits_ShortestPathChargesSlotsTheTypeFilterRejected is gate 5, and
+// it is the one that pins the DEFINITION rather than a total.
+//
+// Both arms run over the identical graph, in which A has `fan` :E out-edges and
+// `decoys` :O out-edges. The untyped pattern admits every slot of that run; the
+// typed one rejects the :O half — but rejects it AFTER reading the slot, because
+// there is no other way to learn the type. So both must report the same figure:
+// fan + decoys + 1.
+//
+// A figure counting the arcs the filter ADMITTED would report fan + 1 for the
+// typed arm — the same under-report by the filter's selectivity that rmp #2761
+// found in Expand and corrected there. Neo4j 5.26.16 charges the read regardless
+// of the selection's outcome (RecordRelationshipTraversalCursor.next() calls
+// tracer.onRelationship() inside the do/while whose condition is the type test),
+// so this is not a scale difference from the incumbent but the same definition.
+func TestProfileDbHits_ShortestPathChargesSlotsTheTypeFilterRejected(t *testing.T) {
+	t.Parallel()
+
+	const fan, decoys = 100, 100
+	eng := shortestBroomGraph(t, 1, fan, decoys, false)
+
+	untypedRows, untypedHits := profiledShortest(t, eng, "ShortestPath",
+		`MATCH (a:A), (b:B) MATCH p = shortestPath((a)-[*]->(b)) RETURN count(p) AS c`)
+	typedRows, typedHits := profiledShortest(t, eng, "ShortestPath",
+		`MATCH (a:A), (b:B) MATCH p = shortestPath((a)-[:E*]->(b)) RETURN count(p) AS c`)
+
+	if untypedRows != 1 || typedRows != 1 {
+		t.Fatalf("rows were %d and %d, want 1 in both arms", untypedRows, typedRows)
+	}
+	want := int64(fan + decoys + 1)
+	if untypedHits != want || typedHits != want {
+		t.Errorf("untyped=%d typed=%d, want %d for both.\n"+
+			"Both searches walk the SAME %d-slot run out of A (%d :E plus %d :O) and the "+
+			"same one slot into B. The type filter rejects the :O slots only after "+
+			"reading them, so they are storage accesses. A figure counting ADMITTED "+
+			"arcs would report %d for the typed arm.",
+			untypedHits, typedHits, want, fan+decoys, fan, decoys, fan+1)
+	}
+}
+
+// TestProfileDbHits_AllShortestPathsCountsItsBFS is gate 6.
+//
+// allShortestPaths does NOT use the two-sided search — reconstructing the
+// multi-predecessor DAG across a meeting point is materially harder, so the
+// operator stays level-synchronous — and this gate is written from that BFS:
+//
+//	level 1: A's out-run                         = fan slots
+//	level 2: each mid's out-run                  = 1 slot per mid that has one
+//	level 3: dst was found at level 2 → stop
+//
+// The two arms move rows and db-hits in OPPOSITE directions, which is what makes
+// them a control rather than two spot checks. With one mid reaching B the
+// operator emits 1 row for fan+1 slots; with every mid reaching B it emits fan
+// rows for 2·fan slots. A figure derived from rows reports 1 and fan; no scaling
+// of the row count fits both.
+func TestProfileDbHits_AllShortestPathsCountsItsBFS(t *testing.T) {
+	t.Parallel()
+
+	const fan = 100
+	const q = `MATCH (a:A), (b:B) MATCH p = allShortestPaths((a)-[*]->(b)) RETURN count(p) AS c`
+
+	oneRows, oneHits := profiledShortest(t,
+		shortestBroomGraph(t, 1, fan, 0, false), "AllShortestPaths", q)
+	allRows, allHits := profiledShortest(t,
+		shortestBroomGraph(t, 1, fan, 0, true), "AllShortestPaths", q)
+
+	if oneRows != 1 {
+		t.Errorf("one-mid arm emitted %d rows, want 1", oneRows)
+	}
+	if allRows != int64(fan) {
+		t.Errorf("all-mids arm emitted %d rows, want %d", allRows, fan)
+	}
+	if want := int64(fan + 1); oneHits != want {
+		t.Errorf("one-mid arm: dbhits=%d, want %d (A's %d-slot run plus the one mid's "+
+			"single out-slot)", oneHits, want, fan)
+	}
+	if want := int64(2 * fan); allHits != want {
+		t.Errorf("all-mids arm: dbhits=%d, want %d (A's %d-slot run plus one out-slot "+
+			"per mid)", allHits, want, fan)
+	}
+	if oneHits <= oneRows && allHits <= allRows {
+		t.Errorf("db-hits (%d, %d) never exceeded rows (%d, %d) in either arm, so this "+
+			"gate would pass on a figure derived from rows", oneHits, allHits, oneRows, allRows)
+	}
+	if oneRows > allRows && oneHits > allHits {
+		t.Errorf("rows and db-hits moved the same way between the arms (%d→%d rows, "+
+			"%d→%d db-hits); the arms are supposed to move them in opposite directions",
+			oneRows, allRows, oneHits, allHits)
+	}
+}
+
+// TestProfileDbHits_ShortestPathReportsItsWholeLifetimeUnderApply is gate 7, and
+// it is the acceptance criterion "an operator driven once per outer row reports
+// its whole lifetime, not the last invocation".
+//
+// Both operators are planned under a CorrelatedApply here, which re-Inits its
+// inner plan for EVERY outer row. `k` disjoint copies of the fixture, paired by
+// their k property, give exactly k outer rows and k identical searches, so the
+// figure must be exactly k times the one-component figure. A counter reset in
+// Init pins the total at the one-component figure whatever k is — which is the
+// specific wrong answer this gate exists to catch, and it is invisible at k=1.
+func TestProfileDbHits_ShortestPathReportsItsWholeLifetimeUnderApply(t *testing.T) {
+	t.Parallel()
+
+	const fan = 10
+	for _, op := range []struct{ name, fn string }{
+		{"ShortestPath", "shortestPath"},
+		{"AllShortestPaths", "allShortestPaths"},
+	} {
+		t.Run(op.name, func(t *testing.T) {
+			t.Parallel()
+			q := fmt.Sprintf(
+				`MATCH (a:A), (b:B) WHERE a.k = b.k MATCH p = %s((a)-[*]->(b)) RETURN count(p) AS c`,
+				op.fn)
+
+			var base int64
+			for _, k := range []int{1, 2, 3} {
+				rows, hits := profiledShortest(t, shortestBroomGraph(t, k, fan, 0, false), op.name, q)
+				if rows != int64(k) {
+					t.Fatalf("k=%d: the operator was driven for %d rows, want %d; the gate "+
+						"needs one search per component", k, rows, k)
+				}
+				if k == 1 {
+					base = hits
+					if want := int64(fan + 1); base != want {
+						t.Fatalf("k=1: dbhits=%d, want %d", base, want)
+					}
+					continue
+				}
+				if want := base * int64(k); hits != want {
+					t.Errorf("k=%d: dbhits=%d, want %d — %d identical searches at %d slots "+
+						"each. A counter reset in Init reports %d for every k, which is "+
+						"indistinguishable from the correct answer at k=1.",
+						k, hits, want, k, base, base)
+				}
+			}
+		})
+	}
+}

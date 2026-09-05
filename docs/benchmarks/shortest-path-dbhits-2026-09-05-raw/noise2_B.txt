@@ -1,0 +1,156 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/exec
+cpu: Apple M4
+BenchmarkShortestPath_UnitDegreeChain-10        	     558	    630129 ns/op	 1685532 B/op	   11901 allocs/op
+BenchmarkShortestPath_Layered-10                	    3867	     90460 ns/op	  258184 B/op	     126 allocs/op
+BenchmarkShortestPath_LayeredTyped-10           	    3760	     91141 ns/op	  258184 B/op	     126 allocs/op
+BenchmarkShortestPath_HighDegreeFan-10          	     229	   1565473 ns/op	 4463557 B/op	     317 allocs/op
+BenchmarkAllShortestPaths_UnitDegreeChain-10    	     321	   1119854 ns/op	13581815 B/op	    5670 allocs/op
+BenchmarkAllShortestPaths_Layered-10            	    1845	    193851 ns/op	  464290 B/op	    2938 allocs/op
+BenchmarkAllShortestPaths_HighDegreeFan-10      	     193	   1843085 ns/op	 5107414 B/op	   20317 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/cypher/exec	3.311s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/exec
+cpu: Apple M4
+BenchmarkShortestPath_UnitDegreeChain-10        	     544	    640022 ns/op	 1685543 B/op	   11901 allocs/op
+BenchmarkShortestPath_Layered-10                	    3793	     92089 ns/op	  258185 B/op	     126 allocs/op
+BenchmarkShortestPath_LayeredTyped-10           	    3748	     90964 ns/op	  258185 B/op	     126 allocs/op
+BenchmarkShortestPath_HighDegreeFan-10          	     232	   1539362 ns/op	 4463554 B/op	     317 allocs/op
+BenchmarkAllShortestPaths_UnitDegreeChain-10    	     316	   1108854 ns/op	13581817 B/op	    5670 allocs/op
+BenchmarkAllShortestPaths_Layered-10            	    1891	    190807 ns/op	  464290 B/op	    2938 allocs/op
+BenchmarkAllShortestPaths_HighDegreeFan-10      	     193	   1848714 ns/op	 5107413 B/op	   20317 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/cypher/exec	3.307s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/exec
+cpu: Apple M4
+BenchmarkShortestPath_UnitDegreeChain-10        	     560	    637150 ns/op	 1685542 B/op	   11901 allocs/op
+BenchmarkShortestPath_Layered-10                	    3872	     91603 ns/op	  258184 B/op	     126 allocs/op
+BenchmarkShortestPath_LayeredTyped-10           	    3832	     90914 ns/op	  258186 B/op	     126 allocs/op
+BenchmarkShortestPath_HighDegreeFan-10          	     231	   1556389 ns/op	 4463560 B/op	     317 allocs/op
+BenchmarkAllShortestPaths_UnitDegreeChain-10    	     325	   1104572 ns/op	13581814 B/op	    5670 allocs/op
+BenchmarkAllShortestPaths_Layered-10            	    1860	    194010 ns/op	  464290 B/op	    2938 allocs/op
+BenchmarkAllShortestPaths_HighDegreeFan-10      	     194	   1839563 ns/op	 5107427 B/op	   20317 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/cypher/exec	3.324s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/exec
+cpu: Apple M4
+BenchmarkShortestPath_UnitDegreeChain-10        	     554	    637945 ns/op	 1685531 B/op	   11901 allocs/op
+BenchmarkShortestPath_Layered-10                	    3878	     91583 ns/op	  258184 B/op	     126 allocs/op
+BenchmarkShortestPath_LayeredTyped-10           	    3756	     91938 ns/op	  258184 B/op	     126 allocs/op
+BenchmarkShortestPath_HighDegreeFan-10          	     226	   1570177 ns/op	 4463560 B/op	     317 allocs/op
+BenchmarkAllShortestPaths_UnitDegreeChain-10    	     318	   1094906 ns/op	13581809 B/op	    5670 allocs/op
+BenchmarkAllShortestPaths_Layered-10            	    1897	    190663 ns/op	  464290 B/op	    2938 allocs/op
+BenchmarkAllShortestPaths_HighDegreeFan-10      	     193	   1867574 ns/op	 5107414 B/op	   20317 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/cypher/exec	3.320s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/exec
+cpu: Apple M4
+BenchmarkShortestPath_UnitDegreeChain-10        	     560	    632671 ns/op	 1685532 B/op	   11901 allocs/op
+BenchmarkShortestPath_Layered-10                	    3856	     90971 ns/op	  258185 B/op	     126 allocs/op
+BenchmarkShortestPath_LayeredTyped-10           	    3805	     90546 ns/op	  258184 B/op	     126 allocs/op
+BenchmarkShortestPath_HighDegreeFan-10          	     229	   1553931 ns/op	 4463557 B/op	     317 allocs/op
+BenchmarkAllShortestPaths_UnitDegreeChain-10    	     321	   1101580 ns/op	13581809 B/op	    5670 allocs/op
+BenchmarkAllShortestPaths_Layered-10            	    1857	    192061 ns/op	  464290 B/op	    2938 allocs/op
+BenchmarkAllShortestPaths_HighDegreeFan-10      	     194	   1845988 ns/op	 5107415 B/op	   20317 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/cypher/exec	3.310s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/exec
+cpu: Apple M4
+BenchmarkShortestPath_UnitDegreeChain-10        	     550	    637574 ns/op	 1685536 B/op	   11901 allocs/op
+BenchmarkShortestPath_Layered-10                	    3865	     91191 ns/op	  258185 B/op	     126 allocs/op
+BenchmarkShortestPath_LayeredTyped-10           	    3846	     90292 ns/op	  258185 B/op	     126 allocs/op
+BenchmarkShortestPath_HighDegreeFan-10          	     226	   1574221 ns/op	 4463559 B/op	     317 allocs/op
+BenchmarkAllShortestPaths_UnitDegreeChain-10    	     320	   1112017 ns/op	13581804 B/op	    5670 allocs/op
+BenchmarkAllShortestPaths_Layered-10            	    1851	    194147 ns/op	  464290 B/op	    2938 allocs/op
+BenchmarkAllShortestPaths_HighDegreeFan-10      	     190	   1859332 ns/op	 5107412 B/op	   20317 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/cypher/exec	3.340s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/exec
+cpu: Apple M4
+BenchmarkShortestPath_UnitDegreeChain-10        	     544	    643257 ns/op	 1685534 B/op	   11901 allocs/op
+BenchmarkShortestPath_Layered-10                	    3812	     91710 ns/op	  258185 B/op	     126 allocs/op
+BenchmarkShortestPath_LayeredTyped-10           	    3818	     91874 ns/op	  258184 B/op	     126 allocs/op
+BenchmarkShortestPath_HighDegreeFan-10          	     230	   1563062 ns/op	 4463556 B/op	     317 allocs/op
+BenchmarkAllShortestPaths_UnitDegreeChain-10    	     330	   1109661 ns/op	13581817 B/op	    5670 allocs/op
+BenchmarkAllShortestPaths_Layered-10            	    1849	    191940 ns/op	  464290 B/op	    2938 allocs/op
+BenchmarkAllShortestPaths_HighDegreeFan-10      	     195	   1848578 ns/op	 5107412 B/op	   20317 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/cypher/exec	3.329s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/exec
+cpu: Apple M4
+BenchmarkShortestPath_UnitDegreeChain-10        	     562	    631446 ns/op	 1685530 B/op	   11901 allocs/op
+BenchmarkShortestPath_Layered-10                	    3859	     90932 ns/op	  258184 B/op	     126 allocs/op
+BenchmarkShortestPath_LayeredTyped-10           	    3818	     92026 ns/op	  258184 B/op	     126 allocs/op
+BenchmarkShortestPath_HighDegreeFan-10          	     230	   1572269 ns/op	 4463558 B/op	     317 allocs/op
+BenchmarkAllShortestPaths_UnitDegreeChain-10    	     325	   1102861 ns/op	13581824 B/op	    5670 allocs/op
+BenchmarkAllShortestPaths_Layered-10            	    1827	    195370 ns/op	  464290 B/op	    2938 allocs/op
+BenchmarkAllShortestPaths_HighDegreeFan-10      	     194	   1848185 ns/op	 5107409 B/op	   20317 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/cypher/exec	3.319s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/exec
+cpu: Apple M4
+BenchmarkShortestPath_UnitDegreeChain-10        	     549	    642454 ns/op	 1685533 B/op	   11901 allocs/op
+BenchmarkShortestPath_Layered-10                	    3775	     92621 ns/op	  258185 B/op	     126 allocs/op
+BenchmarkShortestPath_LayeredTyped-10           	    3752	     92177 ns/op	  258186 B/op	     126 allocs/op
+BenchmarkShortestPath_HighDegreeFan-10          	     226	   1589200 ns/op	 4463556 B/op	     317 allocs/op
+BenchmarkAllShortestPaths_UnitDegreeChain-10    	     315	   1103023 ns/op	13581820 B/op	    5670 allocs/op
+BenchmarkAllShortestPaths_Layered-10            	    1875	    191535 ns/op	  464290 B/op	    2938 allocs/op
+BenchmarkAllShortestPaths_HighDegreeFan-10      	     192	   1850520 ns/op	 5107416 B/op	   20317 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/cypher/exec	3.317s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/exec
+cpu: Apple M4
+BenchmarkShortestPath_UnitDegreeChain-10        	     556	    634640 ns/op	 1685534 B/op	   11901 allocs/op
+BenchmarkShortestPath_Layered-10                	    3849	     90811 ns/op	  258184 B/op	     126 allocs/op
+BenchmarkShortestPath_LayeredTyped-10           	    3859	     90870 ns/op	  258184 B/op	     126 allocs/op
+BenchmarkShortestPath_HighDegreeFan-10          	     228	   1560680 ns/op	 4463554 B/op	     317 allocs/op
+BenchmarkAllShortestPaths_UnitDegreeChain-10    	     326	   1109193 ns/op	13581813 B/op	    5670 allocs/op
+BenchmarkAllShortestPaths_Layered-10            	    1837	    192053 ns/op	  464291 B/op	    2938 allocs/op
+BenchmarkAllShortestPaths_HighDegreeFan-10      	     196	   1820180 ns/op	 5107418 B/op	   20317 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/cypher/exec	3.312s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/exec
+cpu: Apple M4
+BenchmarkShortestPath_UnitDegreeChain-10        	     562	    635358 ns/op	 1685535 B/op	   11901 allocs/op
+BenchmarkShortestPath_Layered-10                	    3872	     90448 ns/op	  258184 B/op	     126 allocs/op
+BenchmarkShortestPath_LayeredTyped-10           	    3824	     91694 ns/op	  258184 B/op	     126 allocs/op
+BenchmarkShortestPath_HighDegreeFan-10          	     226	   1569749 ns/op	 4463556 B/op	     317 allocs/op
+BenchmarkAllShortestPaths_UnitDegreeChain-10    	     326	   1126794 ns/op	13581816 B/op	    5670 allocs/op
+BenchmarkAllShortestPaths_Layered-10            	    1802	    195928 ns/op	  464290 B/op	    2938 allocs/op
+BenchmarkAllShortestPaths_HighDegreeFan-10      	     196	   1840317 ns/op	 5107410 B/op	   20317 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/cypher/exec	3.330s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/exec
+cpu: Apple M4
+BenchmarkShortestPath_UnitDegreeChain-10        	     543	    644352 ns/op	 1685534 B/op	   11901 allocs/op
+BenchmarkShortestPath_Layered-10                	    3878	     91111 ns/op	  258185 B/op	     126 allocs/op
+BenchmarkShortestPath_LayeredTyped-10           	    3852	     90072 ns/op	  258184 B/op	     126 allocs/op
+BenchmarkShortestPath_HighDegreeFan-10          	     230	   1555079 ns/op	 4463557 B/op	     317 allocs/op
+BenchmarkAllShortestPaths_UnitDegreeChain-10    	     320	   1133303 ns/op	13581804 B/op	    5670 allocs/op
+BenchmarkAllShortestPaths_Layered-10            	    1884	    191305 ns/op	  464290 B/op	    2938 allocs/op
+BenchmarkAllShortestPaths_HighDegreeFan-10      	     194	   1849575 ns/op	 5107419 B/op	   20317 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/cypher/exec	3.337s

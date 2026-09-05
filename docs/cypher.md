@@ -1392,14 +1392,25 @@ build in which profiling does not exist.
 >   a parallel aggregate emits one row per group, and a parallel count exactly one
 >   row, for a walk of every node. Their counter costs the scan nothing per record:
 >   a worker charges a whole morsel in one atomic add, never one per node.
+>
+>   **`shortestPath` and `allShortestPaths`** measure too, and their rows say even
+>   less about the walk: on a node with a 100-way fan of which one edge continues to
+>   the destination, `shortestPath` reports 101 db-hits for **one** row. Both count
+>   the adjacency slots every one of their searches read — the two-sided BFS, the
+>   forward-only search it falls back to, the two cycle searches, and the exhaustive
+>   search a `WHERE` over the path variable triggers — so the figure does not move on
+>   an internal choice you cannot see in the output. As for a single-hop expand, a
+>   slot the relationship-type filter rejects is counted: it had to be read before it
+>   could be judged. The charge is one add per adjacency **run**, never per slot;
+>   the loop's own bound is the charge.
 > - **A known `0`** — an operator that opens no access path at all: `Limit`, `Skip`,
 >   `Distinct`, `Eager`, `Union`, the aggregations, and the `Apply` family, whose
 >   own cost is entirely in the children the plan already shows. Each of these
 >   claims the zero explicitly in the engine, so the cell is a measurement.
 > - **`?` — not counted.** Nothing observed this operator's storage accesses, so
 >   the engine reports no figure rather than a `0` that would read as "touched
->   nothing". It covers `shortestPath` and `allShortestPaths`, the count-store
->   leaves, and **every
+>   nothing". It covers the count-store leaves, the two row-at-a-time operators that
+>   seek or intersect per outer row, and **every
 >   operator that evaluates one of your expressions** — `Filter`, `Project`, `Sort`,
 >   `Top`, `UNWIND`, the hash joins and procedure calls. The last group is the
 >   surprising one, and it is real: a GoGraph expression can walk the graph, so

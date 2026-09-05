@@ -473,12 +473,21 @@ var (
 //     for its traversal budget, so its figure is MEASURED. Measured on a 200-way
 //     fan with one 3-hop chain, `-[*3..3]->` emitted one row for 202 relationship
 //     slots read — a 202x under-report before the counter was wired.
-//   - [ShortestPath] and [AllShortestPaths] read relationship records and carry
-//     NONE of the three markers, so their cell renders UNKNOWN. Their own
-//     totalEdgesTraversed counter covers only the exhaustive path-predicate search
-//     and not the bidirectional BFS, so wiring it would report an
-//     authoritative-looking figure for the common path; declaring the gap is the
-//     lesser misstatement of the two.
+//   - [ShortestPath] and [AllShortestPaths] read relationship records across a
+//     BFS and emit one row per input row (or one per shortest path), so no
+//     derivation from rows could describe the walk: a 100-way fan with one
+//     continuation to dst reads 101 slots and emits ONE row. Until rmp #2763 they
+//     carried none of the three markers and their cell rendered UNKNOWN, because
+//     the only counter they had — totalEdgesTraversed — covers just the
+//     exhaustive path-predicate search and would have reported an
+//     authoritative-looking 0 for the common path. Since #2763 both implement
+//     [storageAccessCounter] and report the adjacency slots every one of their
+//     searches read, charged one add per RUN rather than per slot: the scan loop's
+//     own bound IS the charge, because no scan in either operator breaks out of a
+//     run early ([ShortestPath.scanRun]). totalEdgesTraversed stays a resource
+//     budget and is deliberately NOT added in — it counts ADMITTED ARCS over the
+//     same runs, so summing the two would count one walk twice under two
+//     definitions ([ShortestPath.storageAccesses]).
 //   - A single-hop [Expand] with a relationship-type filter reads every slot of
 //     the source's adjacency run and emits only the admitted ones (the edgeSkip
 //     branch), so a derived figure counts EMITTED edges, not slots read. Measured
@@ -555,7 +564,13 @@ func (*NodeByIndexRangeScan) storageRecordPerRow() {}
 //   - The count is charged ONCE PER BATCH the operator already processes as a unit.
 //     The morsel-parallel leaves charge each morsel's length once, when its scan
 //     leaf has read it — one add per [DefaultMorselSize] node references, on the
-//     goroutine that read them (rmp #2762).
+//     goroutine that read them (rmp #2762). [ShortestPath] and [AllShortestPaths]
+//     apply the same shape at a finer unit: the batch is one node's ADJACENCY RUN,
+//     whose length is the scan loop's own bound, so the charge is one add per run
+//     against a loop of deg(node) iterations (rmp #2763). That the batch charge
+//     equals a per-record one is not an argument in either case — it holds here
+//     because no scan in either operator leaves a run early, and it was verified
+//     with a temporary per-slot probe that panicked on disagreement.
 //
 // An operator that could satisfy the interface only by incrementing per record
 // must NOT implement it: paying every ordinary query for a diagnostic is the
@@ -591,6 +606,8 @@ var (
 	_ storageAccessCounter = (*ParallelScanProject)(nil)
 	_ storageAccessCounter = (*ParallelAggregateScan)(nil)
 	_ storageAccessCounter = (*ParallelCountScan)(nil)
+	_ storageAccessCounter = (*ShortestPath)(nil)
+	_ storageAccessCounter = (*AllShortestPaths)(nil)
 )
 
 // ─────────────────────────────────────────────────────────────────────────────

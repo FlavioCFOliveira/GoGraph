@@ -748,3 +748,196 @@ unexpected figure to discover.
 * The expression-closure operators are still classified by TYPE, not per instance.
 * The rendered plan still does not distinguish a MEASURED figure from a DERIVED one
   (rmp #2720's standing limitation of the output).
+
+## Addendum — 2026-09-05, rmp #2763 (sprint 355)
+
+### §6's last "left unfixed, deliberately" entry is FIXED
+
+§6 recorded `ShortestPath` / `AllShortestPaths` reporting `0` (later `?`) as a
+deliberate gap, on the reasoning that their only counter — `totalEdgesTraversed` —
+covers the exhaustive path-predicate search alone, so wiring it would print an
+authoritative-looking `0` for the common path. **Both now report a measurement.**
+
+Both implement `exec.storageAccessCounter` and report the adjacency slots every one
+of their searches read. The figure is exact and it is not derivable from anything
+else the plan prints: on a 100-way fan whose first mid continues to the
+destination, `shortestPath` reports **101 db-hits for one row**.
+
+| query (fan = 100, one mid continues to B) | rows | db-hits before | db-hits now |
+|---|---|---|---|
+| `shortestPath((a)-[*]->(b))` | 1 | `?` | 101 |
+| `shortestPath((a)-[*]->(b))`, fan = 200 | 1 | `?` | 201 |
+| `allShortestPaths((a)-[*]->(b))` | 1 | `?` | 101 |
+| `allShortestPaths((a)-[*]->(b))`, every mid → B | 100 | `?` | 200 |
+
+The last two rows are the control that refutes a row-derived figure: between them
+the rows go 1 → 100 while the walk goes 101 → 200. No scaling of the row count fits
+both.
+
+### Where the count is taken, and why it is not per-record
+
+Nine scanning sites, all of the same shape: a bounds guard followed by a complete
+walk of one node's adjacency run. **None of them leaves a run early** — every branch
+inside is a `continue` — so the number of slots the loop touches is exactly
+`verts[node+1] - verts[node]`, and one add per RUN is an exact count rather than an
+approximation of one. `ShortestPath.scanRun` computes the loop's own bound and banks
+its length in the same expression, so the two cannot drift; it is inlined at all
+nine call sites (verified with `-gcflags=-m`).
+
+| operator | sites |
+|---|---|
+| `ShortestPath` | `biScan` (the two-sided BFS — the common path), `spExpand` (the forward-only fallback), `bfsShortestCycleForward`'s scan, `branchArcs` (DirBoth cycle), `exhArcs` (exhaustive) |
+| `AllShortestPaths` | `aspExpand` (level-synchronous BFS), `bfsAllShortestCycle`'s scan, `branchArcs`, `exhArcs` |
+
+`AllShortestPaths` is **not** two-sided: `shortest_path_bidir.go` states that the
+two-sided search is deliberately not applied to it, because reconstructing the
+multi-predecessor DAG across a meeting point is materially harder. The addendum
+records that because the task, and §6 before it, described both operators as
+"bidirectional BFS" — only one of them is.
+
+### That the batch charge equals a per-record one was MEASURED, not argued
+
+A temporary per-slot probe was added to all nine loops, incrementing a second
+counter on every iteration and panicking on any disagreement with the per-run
+charge. Under it, `./cypher/exec/`, `./cypher/`, `./cypher/tck/` and `./bolt/...`
+all passed (exit 0) with **zero disagreements**, over 96 operator-lifetime checks at
+`Close` (84 of them on a non-zero walk, largest lifetime 620 slots) and up to 370
+further checks per process at every `Next`.
+
+The probe was then falsified rather than trusted: halving the charge in
+`ShortestPath.scanRun` produced
+`panic: rmp2763 PROBE DISAGREEMENT (Next) in ShortestPath: per-run charge=0, per-slot probe=1`,
+and halving it in `AllShortestPaths.scanRun` produced
+`… in AllShortestPaths: per-run charge=1, per-slot probe=4`. The probe is not
+committed: a permanent second counter would cost every ordinary query exactly what
+this design refuses.
+
+### `totalEdgesTraversed` is deliberately NOT folded into the figure
+
+The task asked for the existing counter to be folded into one lifetime total. **That
+is refuted by the code and was not done**, and the reason is the same one this sprint
+exists for. `totalEdgesTraversed` counts the arcs `exhArcs` RETURNED — after the type
+filter and after handle de-duplication — over the very runs the new counter charges
+the SLOTS of. Adding the two would count one walk twice under two incompatible
+definitions and report up to 2x the storage work on the only path where both are
+live. The exhaustive search instead contributes through its slot charge like every
+other search, so there is one lifetime total with one definition throughout, and the
+budget stays a budget.
+
+### The definition: slots READ, not arcs ADMITTED
+
+A slot the relationship-type filter rejects is charged, because it was read before it
+could be judged. That is `Expand.storageAccesses`'s definition since #2761 and
+Neo4j 5.26.16's (`RecordRelationshipTraversalCursor.next()` calls
+`tracer.onRelationship()` inside the `do { … } while (!inUse() || !selection.test(…))`
+loop). On a graph where A has 100 `:E` and 100 `:O` out-edges, the typed and untyped
+patterns both report **201**; a figure counting admitted arcs would report 101 for the
+typed one.
+
+### What is deliberately outside the figure
+
+* `ShortestPath.scanFwdPos` and both operators' `hopForTraversal` — reconstruction-time
+  recovery of ONE hop's forward position, running over the found path's ≤ d hops and
+  never over the search.
+* `buildRevToFwd`, called from `Init`. It walks both CSRs whole to build a position
+  table: index construction, not a search read. Charging it would make the figure a
+  function of the graph's size rather than of the work the search did.
+
+Both are of the same kind as the property reads no operator's db-hits count.
+
+### Cost: the counter is free; an incidental allocation IMPROVEMENT came with it
+
+Seven purpose-built benchmarks (`cypher/exec/shortest_path_bench_test.go`), chosen to
+bracket rather than flatter the design: a unit-degree chain where the per-run charge
+degenerates to a per-slot charge (the worst case), a layered BFS at out-degree 8, and
+a single 20 000-slot run (the best case), for both operators. Twelve interleaved
+A/B rounds each, `-benchtime=300ms`, no `-race`.
+
+**The host was not idle** — loadavg 2.4–2.9 throughout, recorded before and after every
+invocation in `loadavg_*.log` — so **no timing claim is made**. The noise floor confirms
+why: two builds of *identical* source produced a significant verdict of its own,
+`AllShortestPaths_UnitDegreeChain −1.57% (p=0.045, n=12)`.
+
+The verdict therefore rests on allocation counts, which are exact and load-invariant.
+Isolating the counter alone (the same refactor with and without the `slotsRead +=`
+line):
+
+```
+                                       allocs/op OFF   allocs/op ON    vs
+ShortestPath_UnitDegreeChain-10          11.90k          11.90k        ~ (p=1.000 n=12) all equal
+ShortestPath_Layered-10                   108.0           108.0        ~ (p=1.000 n=12) all equal
+ShortestPath_LayeredTyped-10              108.0           108.0        ~ (p=1.000 n=12) all equal
+ShortestPath_HighDegreeFan-10             314.0           314.0        ~ (p=1.000 n=12) all equal
+AllShortestPaths_UnitDegreeChain-10      5.670k          5.670k        ~ (p=1.000 n=12) all equal
+AllShortestPaths_Layered-10              2.938k          2.938k        ~ (p=1.000 n=12) all equal
+AllShortestPaths_HighDegreeFan-10        20.32k          20.32k        ~ (p=1.000 n=12) all equal
+```
+
+B/op identical too, and every sec/op delta non-significant (geomean +0.07%, inside a
+noise floor that produced a significant result on identical source).
+
+Comparing HEAD against the pre-change baseline instead shows allocations **falling**:
+`ShortestPath_Layered` and `_LayeredTyped` 126 → 108 (−14.29%, p=0.000, n=12) and
+`_HighDegreeFan` 317 → 314 (−0.95%). That is **not** the counter, and the attribution
+was established rather than assumed, by three further interleaved arms:
+
+| arm | change from baseline | `ShortestPath_Layered` allocs/op |
+|---|---|---|
+| baseline | — | 126 |
+| hoist only | `end := verts[node+1]` lifted out of the loop condition, early return KEPT | 126 (no change) |
+| `biScan` loop form only | single exit, bounds precomputed, no early `return next` | **108** |
+| whole refactor, counter removed | all nine sites rewritten | **108** |
+| HEAD (counter on) | + the `slotsRead +=` charge | **108** |
+
+So the whole delta comes from `biScan`'s loop form — removing its early `return next`
+in favour of a single exit over a precomputed range — and the counter adds nothing on
+top. The compiler-level mechanism behind those 18 allocations was **not identified**:
+escape analysis and inlining decisions are identical between the arms
+(`-gcflags='-m -m'` diff shows only line-number shifts), and a memory profile puts
+the difference in `biScan`'s own `pred`/`dist` inserts and `next` append. It is an
+improvement, it is reproducible at ±0% across twelve rounds, and it is reported here
+rather than claimed as a designed gain.
+
+Raw data, exit codes, loadavg logs and the A/B script:
+`docs/benchmarks/shortest-path-dbhits-2026-09-05-raw/`.
+
+### The gates, and the mutations that prove they are exact
+
+Six committed assertions, in `cypher/exec/shortest_path_slotcount_test.go` (definition,
+lifetime, fallback parity) and `cypher/profile_dbhits_honesty_test.go` (four
+end-to-end `PROFILE` gates). Every one was mutation-verified with a **partial
+under-count**, never a zeroing one, so an assertion that only checked for "non-zero"
+could not have passed:
+
+| mutation | caught by | message |
+|---|---|---|
+| halve `ShortestPath.scanRun`'s charge | 6 assertions | `fan=100: storageAccesses() = 50, want 101` |
+| halve `AllShortestPaths.scanRun`'s charge | 3 assertions | `storageAccesses() = 4, want 10 (node 0's 9-slot run plus mid 1's one slot)` |
+| reset `slotsRead` in both `Init`s | 3 assertions | `k=2: dbhits=11, want 22 … A counter reset in Init reports 11 for every k` |
+| refund a type-filtered slot in `biScan` | 2 assertions | `untyped=201 typed=101, want 201 for both` |
+| refund a type-filtered slot in `spExpand` | **initially NONE** | — |
+| refund a type-filtered slot in `aspExpand` | **initially NONE** | — |
+
+The last two escaped: the typed gates all ran through the two-sided search, so the
+forward-only fallback's type-filter branch and `AllShortestPaths`' own were unasserted.
+Two arms were added — a typed forward-only fallback, and a typed `allShortestPaths` —
+and both mutations are now caught
+(`typed(forward-only)=2, want 8`; `untyped=8 typed=2, want 8 for both`). The holes are
+recorded here because a mutation that escapes is the only evidence that a gate was
+missing.
+
+### Found while doing this, NOT fixed: `AllShortestPaths.Init` rebuilds `revToFwd` per outer row
+
+`ShortestPath.Init` guards the `buildRevToFwd` call with `revPrepared`, added by #2220
+after the same rebuild was measured as turning a large win into a 75% regression on the
+#2236 benchmark. `AllShortestPaths.Init` has **no such guard**: for `DirIn`/`DirBoth` it
+rebuilds the O(E) position table on every `Init`, and `Init` runs once per outer row
+under a `CorrelatedApply`. Out of scope for #2763 and reported rather than fixed.
+
+### Still open after #2763
+
+* The count-store leaves (`AllNodesCountScan`, `LabelCountScan`) remain UNCOUNTED.
+* `ExpandIntersect` and `IndexNestedLoopJoin` remain UNCOUNTED.
+* The expression-closure operators are still classified by TYPE, not per instance.
+* The rendered plan still does not distinguish a MEASURED figure from a DERIVED one
+  (rmp #2720's standing limitation of the output).
