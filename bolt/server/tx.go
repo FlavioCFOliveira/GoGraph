@@ -173,7 +173,7 @@ func (tx *Tx) Rollback() error {
 // [cypher.ExplicitTx.Exec]).
 func (tx *Tx) closeCursors() {
 	for _, r := range tx.results {
-		_ = r.Close() //nolint:errcheck // best-effort cursor close; the engine tx owns commit/rollback
+		_ = r.Close() // best-effort cursor close; the engine tx owns commit/rollback
 	}
 	tx.results = nil
 }

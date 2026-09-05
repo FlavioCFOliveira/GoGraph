@@ -271,7 +271,7 @@ func WriteWithProps(w io.Writer, g *lpg.Graph[string, int64]) error {
 // WriteWithPropsCtx is the context-aware variant of [WriteWithProps].
 // ctx.Err() is checked before the node and edge encoding phases.
 //
-//nolint:gocyclo // GraphML typed-property write: key scan + XML emit + node/edge loop
+// GraphML typed-property write: key scan + XML emit + node/edge loop
 func WriteWithPropsCtx(ctx context.Context, w io.Writer, g *lpg.Graph[string, int64]) error {
 	defer metrics.Time("graph.io.graphml.WriteWithProps").Stop()
 	if err := ctx.Err(); err != nil {
@@ -586,7 +586,7 @@ func ReadWithPropsCtx(ctx context.Context, r io.Reader) (*lpg.Graph[string, int6
 // On any error the returned graph is nil (see [ReadWithPropsCtx]); the
 // import is all-or-nothing at the in-memory level.
 //
-//nolint:gocyclo // GraphML typed-property read: key index + node props + edge decode + ctx tick
+// GraphML typed-property read: key index + node props + edge decode + ctx tick
 func ReadWithPropsCappedCtx(ctx context.Context, r io.Reader, maxBytes int64) (*lpg.Graph[string, int64], int, error) {
 	defer metrics.Time("graph.io.graphml.ReadWithProps").Stop()
 	if maxBytes > 0 {

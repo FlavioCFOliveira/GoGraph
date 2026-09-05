@@ -1345,7 +1345,9 @@ func (r *ConstraintRegistry) ListConstraintRows() [][]expr.Value {
 	// Sort for deterministic output: name, then type, then label, then property.
 	sort.Slice(rows, func(i, j int) bool {
 		for col := 0; col < 4; col++ {
+			//nolint:forcetypeassert // the column was type-checked as expr.StringValue before this sort comparator was installed, so every row's value at col is a StringValue
 			a := string(rows[i][col].(expr.StringValue))
+			//nolint:forcetypeassert // the column was type-checked as expr.StringValue before this sort comparator was installed, so every row's value at col is a StringValue
 			b := string(rows[j][col].(expr.StringValue))
 			if a != b {
 				return a < b

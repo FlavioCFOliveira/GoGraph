@@ -41,7 +41,7 @@ func storelessEngineWithGraph(t *testing.T) (*cypher.Engine, *lpg.Graph[string, 
 // statement executed cleanly.
 func drainExec(t *testing.T, res *cypher.Result) error {
 	t.Helper()
-	for res.Next() { //nolint:revive // intentional full drain
+	for res.Next() { // intentional full drain
 	}
 	err := res.Err()
 	_ = res.Close()
@@ -497,7 +497,7 @@ func TestExplicitTx_SequentialTransactionsRace(t *testing.T) {
 			_ = tx.Rollback()
 			return
 		}
-		for res.Next() { //nolint:revive // drain
+		for res.Next() { // drain
 		}
 		_ = res.Close()
 		if err := tx.Commit(); err != nil {

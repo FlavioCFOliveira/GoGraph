@@ -78,7 +78,7 @@ func probeFixture(r *rand.Rand, nSrc, maxDeg, dstSpace int) (verts []uint64, edg
 
 func TestCSRProbe_DifferentialAgainstLinearScan(t *testing.T) {
 	t.Parallel()
-	r := rand.New(rand.NewPCG(20, 26))
+	r := rand.New(rand.NewPCG(20, 26)) //nolint:gosec // G404: math/rand/v2 PCG seeded from a fixed constant — this test asserts a reproducible sequence, which a CSPRNG would destroy.
 	for trial := 0; trial < 200; trial++ {
 		// Span both sides of the insertion-sort cutoff and the probe crossover.
 		nSrc, maxDeg, dstSpace := 1+r.IntN(5), 1+r.IntN(70), 1+r.IntN(10)
@@ -143,7 +143,7 @@ func TestCSRProbe_DifferentialAgainstLinearScan(t *testing.T) {
 // per-row read path, so any allocation would show up per emitted row.
 func TestCSRProbe_ZeroAllocation(t *testing.T) {
 	// No t.Parallel: testing.AllocsPerRun panics in a parallel test.
-	r := rand.New(rand.NewPCG(3, 4))
+	r := rand.New(rand.NewPCG(3, 4)) //nolint:gosec // G404: math/rand/v2 PCG seeded from a fixed constant — this test asserts a reproducible sequence, which a CSPRNG would destroy.
 	verts, edges, handles := probeFixture(r, 4, 64, 8)
 	start, end := verts[0], verts[1]
 

@@ -169,7 +169,7 @@ func (s rggBase) Build(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
 // [Layered], [BarabasiAlbert], [WattsStrogatz], [ErdosRenyiNP],
 // [RMAT], and [RandomRegular].
 //
-//nolint:gosec,gocritic // G404: math/rand/v2 is the pinned PRNG for catalogue determinism; paramTypeCombine: signature is pinned by the brief (n int, radiusPercent int, dim int, seed uint64).
+// G404: math/rand/v2 is the pinned PRNG for catalogue determinism; paramTypeCombine: signature is pinned by the brief (n int, radiusPercent int, dim int, seed uint64).
 func RGG(n, radiusPercent, dim int, seed uint64) Shape[int, int64] {
 	if n < 0 || n > 1000 {
 		panic(fmt.Sprintf("shapegen: RGG requires 0 <= n <= 1000, got %d", n))
@@ -251,7 +251,7 @@ func buildRGG(g *lpg.Graph[int, int64], n, radiusPercent, dim int, seed uint64) 
 // The keys are fixed strings, not parameterised, so the property
 // names form a stable contract with downstream A* heuristics.
 //
-//nolint:gosec // G404: math/rand/v2 is the pinned PRNG for catalogue determinism; see RGG godoc.
+// G404: math/rand/v2 is the pinned PRNG for catalogue determinism; see RGG godoc.
 func rggSamplePoints(g *lpg.Graph[int, int64], coords []float64, r *rand.Rand, n, dim int) error {
 	var err error
 	for i := 0; i < n && err == nil; i++ {

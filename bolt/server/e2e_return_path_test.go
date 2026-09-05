@@ -27,7 +27,7 @@ func TestE2E_ReturnPathShape(t *testing.T) {
 	driver, _ := newDriverForTest(t)
 
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer session.Close(ctx) //nolint:errcheck
+	defer session.Close(ctx)
 
 	// Seed: (a:Start)-[:HOP]->(b:Mid)-[:HOP]->(c:End)
 	runWrite(ctx, t, session,

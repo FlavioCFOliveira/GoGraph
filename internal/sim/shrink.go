@@ -117,7 +117,7 @@ func ShrinkTrace(ctx context.Context, trace Trace, cfg ShrinkConfig) (ShrinkResu
 
 // shrinker carries the ddmin search state.
 type shrinker struct {
-	ctx        context.Context
+	ctx        context.Context //nolint:containedctx // the ddmin search state IS the scoped run: the shrinker is built per shrink attempt and every method is one step of that one run
 	target     violationSignature
 	lastViol   Violation
 	maxIter    int

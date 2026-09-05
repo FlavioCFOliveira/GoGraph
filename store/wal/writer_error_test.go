@@ -171,7 +171,7 @@ func TestReader_TailOffset_AtTornFrame(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = r.Close() }()
-	for range r.Frames() { //nolint:revive
+	for range r.Frames() { //nolint:revive // empty-block: the iteration is the work; the test asserts on r.TailOffset() after the reader has walked every intact frame
 	}
 	if got := r.TailOffset(); got >= info.Size() {
 		t.Fatalf("torn TailOffset = %d, want < %d", got, info.Size())

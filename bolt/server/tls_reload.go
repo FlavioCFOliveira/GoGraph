@@ -185,12 +185,12 @@ func (r *CertReloader) Reload() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	//nolint:gosec // G304: the paths are the operator's own configuration, supplied to NewCertReloader; there is no request-derived input here.
+	// G304: the paths are the operator's own configuration, supplied to NewCertReloader; there is no request-derived input here.
 	certPEM, err := os.ReadFile(r.certPath)
 	if err != nil {
 		return fmt.Errorf("read cert: %w", err)
 	}
-	//nolint:gosec // G304: as above — an operator-configured path, not attacker-controlled.
+	// G304: as above — an operator-configured path, not attacker-controlled.
 	keyPEM, err := os.ReadFile(r.keyPath)
 	if err != nil {
 		return fmt.Errorf("read key: %w", err)

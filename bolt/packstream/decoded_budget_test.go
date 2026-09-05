@@ -129,7 +129,7 @@ func TestDecodedBudgetListAtBoundaryDecodes(t *testing.T) {
 
 	frame := make([]byte, 0, maxN+5)
 	frame = append(frame, markerList32)
-	frame = appendUint32(frame, uint32(maxN)) //nolint:gosec // G115: bounded by the message-cap guard above.
+	frame = appendUint32(frame, uint32(maxN)) // G115: bounded by the message-cap guard above.
 	frame = append(frame, bytes.Repeat([]byte{markerNull}, maxN)...)
 
 	dec := packstream.NewDecoder(bytes.NewReader(frame))

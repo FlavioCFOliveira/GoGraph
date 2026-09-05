@@ -237,7 +237,7 @@ func (s *dataStore) ensureSchema(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("schema %q: %w", q, err)
 		}
-		for res.Next() { //nolint:revive // drain the (empty) DDL result stream
+		for res.Next() { // drain the (empty) DDL result stream
 		}
 		if err := res.Err(); err != nil {
 			_ = res.Close()

@@ -139,7 +139,7 @@ func drainDegreeCliff(ctx context.Context, b *testing.B, eng *cypher.Engine, q s
 	if err != nil {
 		b.Fatal(err)
 	}
-	for res.Next() { //nolint:revive // intentional full drain
+	for res.Next() { // intentional full drain
 	}
 	if err := res.Err(); err != nil {
 		b.Fatal(err)

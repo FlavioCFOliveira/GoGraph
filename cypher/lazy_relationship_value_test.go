@@ -760,7 +760,7 @@ func TestLazyRelationshipDeletedRelationshipTakesTheEagerPath(t *testing.T) {
 				}
 				return
 			}
-			for res.Next() { //nolint:revive // intentional full drain
+			for res.Next() { // intentional full drain
 			}
 			drainErr := res.Err()
 			_ = res.Close()

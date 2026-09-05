@@ -293,6 +293,14 @@ func (op *Top) consumeAndFinish() error {
 				// [Sort.collectAndSort].
 				return ErrSortMemoryExceeded
 			}
+			// The copy is REQUIRED and cannot be elided (rmp #2702): cp is
+			// retained in op.rows across every later child Next, and [Row]'s
+			// contract lets the producer reuse the backing slice.
+			//
+			// Measured (rmp #2702, MemProfileRate=1, no -race): on
+			// `... ORDER BY p.salary LIMIT 10` over 120 000 rows this site fires
+			// 20 times per execution — 0.001% of the query's allocs/op. It is
+			// bounded by the buffer cap, never by the input size.
 			cp := make(Row, len(row))
 			copy(cp, row)
 			if op.budget.charge(cp) {
@@ -603,6 +611,13 @@ func (op *Top) orderArrivalsAndTruncate() {
 // heap invariant. The displaced entry's key block is REUSED rather than
 // reallocated, so a replacement allocates only the row copy.
 func (op *Top) replaceWorst(row Row, scratch []expr.Value, seq int) error {
+	// The copy is REQUIRED and cannot be elided (rmp #2702): cp is retained in
+	// the heap entry until the operator emits, across every later child Next,
+	// and [Row]'s contract lets the producer reuse the backing slice.
+	//
+	// Measured (rmp #2702, MemProfileRate=1, no -race) over 120 000 input rows:
+	// 57 copies per execution when the arriving order already matches the sort
+	// order, 860 when it opposes it — at most 0.05% of the query's allocs/op.
 	cp := make(Row, len(row))
 	copy(cp, row)
 	size := op.budget.sizeOf(cp)

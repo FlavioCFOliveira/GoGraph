@@ -263,7 +263,7 @@ func TestKShortestPathsLooplessFamily_CancelBelowStride(t *testing.T) {
 		{
 			name: "EppsteinKShortestCtx",
 			call: func(ctx context.Context) ([]YenPath[int64], error) {
-				//nolint:staticcheck // the deprecated alias is part of the public Ctx surface and delegates to the fixed body
+				// the deprecated alias is part of the public Ctx surface and delegates to the fixed body
 				return EppsteinKShortestCtx(ctx, c, src, dst, 3)
 			},
 		},

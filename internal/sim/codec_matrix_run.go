@@ -507,6 +507,7 @@ func probeNoWeightCodec(ctx context.Context, seed uint64) (codecWeightCodecProbe
 		return p, fmt.Errorf("sim: no-weight-codec probe: close WAL: %w", closeErr)
 	}
 	if commitErr != nil {
+		//nolint:nilerr // commitErr is recorded as p.committed=false at codec_matrix_run.go:505 and adjudicated as a violation by checkNoWeightCodecContract at codec_matrix_run.go:551
 		return p, nil
 	}
 

@@ -420,7 +420,7 @@ func (st *evalCallState) pattern() (context.Context, PatternEvaluator) {
 	return st.ctx, st.pat
 }
 
-func evalExpr(e ast.Expression, row RowContext, st *evalCallState, params map[string]Value, reg FunctionRegistry) (Value, error) { //nolint:gocyclo // Main dispatch switch; all branches are simple delegations and cannot be split without obscuring the type mapping.
+func evalExpr(e ast.Expression, row RowContext, st *evalCallState, params map[string]Value, reg FunctionRegistry) (Value, error) { // Main dispatch switch; all branches are simple delegations and cannot be split without obscuring the type mapping.
 	switch n := e.(type) {
 	// ── Literals ──────────────────────────────────────────────────────────────
 	case *ast.NullLiteral:
@@ -825,7 +825,7 @@ func subscriptMap(m MapValue, idx Value) Value {
 // Binary operator
 // ─────────────────────────────────────────────────────────────────────────────
 
-func evalBinaryOp(n *ast.BinaryOp, row RowContext, st *evalCallState, params map[string]Value, reg FunctionRegistry) (Value, error) { //nolint:gocyclo // One case per binary operator; splitting would obscure the operator mapping without reducing real complexity.
+func evalBinaryOp(n *ast.BinaryOp, row RowContext, st *evalCallState, params map[string]Value, reg FunctionRegistry) (Value, error) { // One case per binary operator; splitting would obscure the operator mapping without reducing real complexity.
 	// AND and OR short-circuit under 3VL before evaluating right.
 	switch n.Operator {
 	case "AND":
@@ -1010,6 +1010,7 @@ func eval3VLXOR(left, right Value) (Value, error) {
 		return Null, nil
 	}
 	// Both operands are non-null and (per the guard above) Boolean.
+	//nolint:forcetypeassert // logicalOperandError (eval.go:921-929) returns nil only for Null or BoolValue, and BOTH operands pass it (eval.go:1003, 1006) before Null is ruled out at eval.go:1009
 	return BoolValue(bool(left.(BoolValue)) != bool(right.(BoolValue))), nil
 }
 
@@ -1099,8 +1100,8 @@ func compareValues(a, b Value) (int, error) {
 	// definitive non-equality wins over NULLs.
 	ka, kb := a.Kind(), b.Kind()
 	if ka == KindList && kb == KindList {
-		al, _ := a.(ListValue) //nolint:forcetypeassert // kind pre-checked
-		bl, _ := b.(ListValue) //nolint:forcetypeassert // kind pre-checked
+		al, _ := a.(ListValue) // kind pre-checked
+		bl, _ := b.(ListValue) // kind pre-checked
 		return compareListWith3VL(al, bl)
 	}
 	// Same-kind temporal and duration values delegate to compareSameKind,
@@ -1153,7 +1154,7 @@ func compareListWith3VL(al, bl ListValue) (int, error) {
 }
 
 // promoteNumeric promotes Int/Float pairs so that arithmetic is consistent.
-func promoteNumeric(a, b Value) (Value, Value) { //nolint:gocritic // Named returns would add noise; caller always destructures both values.
+func promoteNumeric(a, b Value) (Value, Value) { // Named returns would add noise; caller always destructures both values.
 	_, aIsInt := a.(IntegerValue)
 	_, bIsFloat := b.(FloatValue)
 	if aIsInt && bIsFloat {
@@ -1259,7 +1260,7 @@ func evalArith(st *evalCallState, op string, left, right Value) (Value, error) {
 // least one operand is a temporal kind and the operation has a defined
 // outcome; otherwise (Null, false) leaves dispatch to the numeric path.
 //
-//nolint:gocyclo // One branch per (kind, op) pair; splitting hides the pattern.
+// One branch per (kind, op) pair; splitting hides the pattern.
 func evalTemporalArith(op string, left, right Value) (Value, bool) {
 	// Duration ± Duration, Duration * scalar, Duration / scalar.
 	if ld, lok := left.(DurationValue); lok {
@@ -1535,7 +1536,7 @@ func evalIn(left, right Value) (Value, error) {
 // Unary operator
 // ─────────────────────────────────────────────────────────────────────────────
 
-func evalUnaryOp(n *ast.UnaryOp, row RowContext, st *evalCallState, params map[string]Value, reg FunctionRegistry) (Value, error) { //nolint:gocyclo // One case per unary operator; splitting would add indirection without reducing real complexity.
+func evalUnaryOp(n *ast.UnaryOp, row RowContext, st *evalCallState, params map[string]Value, reg FunctionRegistry) (Value, error) { // One case per unary operator; splitting would add indirection without reducing real complexity.
 	switch n.Operator {
 	case "IS NULL":
 		operand, err := evalExpr(n.Operand, row, st, params, reg)
@@ -1564,6 +1565,7 @@ func evalUnaryOp(n *ast.UnaryOp, row RowContext, st *evalCallState, params map[s
 		if err := logicalOperandError(n.Operator, operand); err != nil {
 			return nil, err
 		}
+		//nolint:forcetypeassert // logicalOperandError (eval.go:921-929) returns nil only for Null or BoolValue, and the operand passes it before Null is ruled out earlier in this function
 		return BoolValue(!bool(operand.(BoolValue))), nil
 
 	case "-":
@@ -1778,7 +1780,7 @@ func evalFunction(n *ast.FunctionInvocation, row RowContext, st *evalCallState, 
 // evalQuantifier handles all(x IN list WHERE pred), any(...), none(...), single(...).
 // It evaluates the source list and counts how many elements satisfy the predicate.
 //
-//nolint:gocyclo // Dispatch over 4 quantifier types × 3-4 count/null branches; extraction would obscure the logic.
+// Dispatch over 4 quantifier types × 3-4 count/null branches; extraction would obscure the logic.
 func evalQuantifier(name string, lc *ast.ListComprehension, row RowContext, st *evalCallState, params map[string]Value, reg FunctionRegistry) (Value, error) {
 	src, err := evalExpr(lc.Source, row, st, params, reg)
 	if err != nil {

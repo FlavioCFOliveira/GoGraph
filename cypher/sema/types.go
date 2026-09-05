@@ -258,7 +258,7 @@ func lookupFunc(ns []string, name string) CypherType {
 //
 // Concurrency: safe for concurrent use — no shared mutable state.
 //
-//nolint:gocyclo // One case per concrete AST type; complexity is structural, not reducible.
+// One case per concrete AST type; complexity is structural, not reducible.
 func InferType(expr ast.Expression) (CypherType, error) {
 	if expr == nil {
 		return TypeNull, nil
@@ -373,7 +373,7 @@ func inferBinaryOp(b *ast.BinaryOp) (CypherType, error) {
 // inferBinaryOpTypes contains the pure type-rule logic so it can be called
 // from both inferBinaryOp and directly from tests.
 //
-//nolint:gocyclo // One case per oC9 operator group; complexity is structural, not reducible.
+// One case per oC9 operator group; complexity is structural, not reducible.
 func inferBinaryOpTypes(op string, lt, rt CypherType, pos ast.Position) (CypherType, error) {
 	// If either side is Any or Null, we cannot statically reject the
 	// combination.  Return the widest safe result type.

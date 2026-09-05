@@ -64,7 +64,7 @@ const (
 	// which pre-processes unsigned integer range bounds into their negated form so
 	// that the ANTLR lexer emits DIGIT tokens instead of ID tokens.
 	//
-	//nolint:unused // retained for documentation; normalizeVarlenBounds resolves the gap
+	// retained for documentation; normalizeVarlenBounds resolves the gap
 	SkipVarlenExplicitBound SkipReason = "varlen-explicit-bound"
 
 	// SkipVarlenDotDot is retained for documentation. The skip condition was
@@ -72,7 +72,7 @@ const (
 	// pre-processes [..], [N..], [..M], [N..M] patterns (without *) to their
 	// equivalent [*..], [*N..], [*..M], [*N..M] forms before lexing.
 	//
-	//nolint:unused // retained for documentation; normalizeVarlenDotDot resolves the gap
+	// retained for documentation; normalizeVarlenDotDot resolves the gap
 	SkipVarlenDotDot SkipReason = "varlen-dotdot"
 
 	// SkipChainedWith is retained for documentation. The skip condition was
@@ -80,7 +80,7 @@ const (
 	// consume readingStatement* segments interleaved with each WITH clause,
 	// enabling unlimited chaining of WITH clauses in a query.
 	//
-	//nolint:unused // retained for documentation; MultiPartQ modification resolves the gap
+	// retained for documentation; MultiPartQ modification resolves the gap
 	SkipChainedWith SkipReason = "chained-with"
 
 	// SkipNegHexOct is retained for documentation. The skip condition was
@@ -88,7 +88,7 @@ const (
 	// rewrites -0x… and -0o… literals to (0-0x…) / (0-0o…) before lexing,
 	// which the grammar accepts as a binary subtraction expression.
 	//
-	//nolint:unused // retained for documentation; normalizeNegHexOct resolves the gap
+	// retained for documentation; normalizeNegHexOct resolves the gap
 	SkipNegHexOct SkipReason = "neg-hex-oct"
 
 	// SkipLeadingDotFloat is retained for documentation. The skip condition was
@@ -96,14 +96,14 @@ const (
 	// correctly via the ANTLR grammar without preprocessing. The skip was
 	// overly conservative.
 	//
-	//nolint:unused // retained for documentation; leading-dot floats parse correctly without a skip
+	// retained for documentation; leading-dot floats parse correctly without a skip
 	SkipLeadingDotFloat SkipReason = "leading-dot-float"
 
 	// SkipZeroDotFloat is retained for documentation. The skip condition was
 	// removed because normalizeZeroDotFloat in cypher/parser/normalize.go
 	// pre-processes 0.NNN literals to .NNN before lexing, resolving the gap.
 	//
-	//nolint:unused // retained for documentation; normalizeZeroDotFloat resolves the gap
+	// retained for documentation; normalizeZeroDotFloat resolves the gap
 	SkipZeroDotFloat SkipReason = "zero-dot-float"
 
 	// SkipDoubleNot is retained for documentation. The skip condition was
@@ -111,7 +111,7 @@ const (
 	// applies double-negation elimination (NOT NOT expr → expr, NOT NOT NOT expr
 	// → NOT expr) before lexing, resolving the grammar gap.
 	//
-	//nolint:unused // retained for documentation; normalizeDoubleNot resolves the gap
+	// retained for documentation; normalizeDoubleNot resolves the gap
 	SkipDoubleNot SkipReason = "double-not"
 
 	// SkipCallNoParen is retained for documentation. The skip condition was
@@ -119,7 +119,7 @@ const (
 	// make the argument parentheses optional for in-query CALL, matching the
 	// behaviour of StandaloneCall.
 	//
-	//nolint:unused // retained for documentation; QueryCallSt modification resolves the gap
+	// retained for documentation; QueryCallSt modification resolves the gap
 	SkipCallNoParen SkipReason = "call-no-paren"
 
 	// SkipOverflowAsSema is retained for documentation. The skip condition was
@@ -127,7 +127,7 @@ const (
 	// parseTimeErrors: the visitor returns a non-nil error for overflow, which
 	// satisfies the TCK expectation of a compile-time SyntaxError.
 	//
-	//nolint:unused // retained for documentation; overflow scenarios now handled via parseTimeErrors
+	// retained for documentation; overflow scenarios now handled via parseTimeErrors
 	SkipOverflowAsSema SkipReason = "overflow-as-sema"
 
 	// SkipGrammarGapLiteral excludes specific literal scenarios where the
@@ -149,7 +149,7 @@ const (
 	// float literals correctly, rounding to the nearest IEEE-754 double without
 	// error; the visitor no longer raises a SemaError for such literals.
 	//
-	//nolint:unused // retained for documentation; long valid floats parse correctly without a skip
+	// retained for documentation; long valid floats parse correctly without a skip
 	SkipLongFloatSema SkipReason = "long-float-sema"
 )
 
@@ -375,7 +375,7 @@ func LoadScenarios() ([]*Scenario, error) {
 //
 // All other lines are treated as scenario body prose and are consumed but
 // not interpreted.
-func parseFeatureFile(filePath string, scanner *bufio.Scanner) ([]*Scenario, error) { //nolint:gocyclo // Gherkin state machine: complexity is inherent to dispatching over five states × multiple line prefixes, plus Scenario Outline expansion.
+func parseFeatureFile(filePath string, scanner *bufio.Scanner) ([]*Scenario, error) { // Gherkin state machine: complexity is inherent to dispatching over five states × multiple line prefixes, plus Scenario Outline expansion.
 	var out []*Scenario
 	var featureName string
 

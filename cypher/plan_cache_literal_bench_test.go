@@ -65,7 +65,7 @@ func newPlanCacheEngine(tb testing.TB) *cypher.Engine {
 		if err != nil {
 			tb.Fatalf("seed %d: %v", i, err)
 		}
-		for res.Next() { //nolint:revive // intentional full drain
+		for res.Next() { // intentional full drain
 		}
 		if err := res.Close(); err != nil {
 			tb.Fatalf("seed close %d: %v", i, err)
@@ -80,7 +80,7 @@ func runPlanCacheQuery(b *testing.B, eng *cypher.Engine, q string, params map[st
 	if err != nil {
 		b.Fatalf("run %q: %v", q, err)
 	}
-	for res.Next() { //nolint:revive // intentional full drain
+	for res.Next() { // intentional full drain
 	}
 	if err := res.Err(); err != nil {
 		b.Fatalf("result %q: %v", q, err)

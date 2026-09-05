@@ -215,7 +215,7 @@ func TestTx_RemoveNodeLabel_Single(t *testing.T) {
 // TestTx_NodeProperty_SetThenDelete exercises SetNodeProperty across
 // every PropertyKind, then DelNodeProperty removes one of them.
 //
-//nolint:gocyclo // table: one assert per property kind
+// table: one assert per property kind
 func TestTx_NodeProperty_SetThenDelete(t *testing.T) {
 	t.Parallel()
 	s, _, cleanup := openTypedStringStore(t)
@@ -313,7 +313,7 @@ func TestTx_NodeProperty_SetThenDelete(t *testing.T) {
 // PropertyKind, then DelEdgeProperty removes one. The edge must exist
 // at apply time, so we seed it via AddEdge in the same transaction.
 //
-//nolint:gocyclo // table: one assert per property kind
+// table: one assert per property kind
 func TestTx_EdgeProperty_SetThenDelete(t *testing.T) {
 	t.Parallel()
 	s, _, cleanup := openTypedStringStore(t)
@@ -589,7 +589,7 @@ func TestTx_Rollback_DiscardsAllOps(t *testing.T) {
 // property ops route through these helpers on Commit; covering every
 // PropertyKind ensures the wire shape is symmetric.
 //
-//nolint:gocyclo // table: one assert per property kind, branch coverage
+// table: one assert per property kind, branch coverage
 func TestTx_EncodePropertyValue_RoundtripAllKinds(t *testing.T) {
 	t.Parallel()
 	knownTime := time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC)
@@ -614,7 +614,10 @@ func TestTx_EncodePropertyValue_RoundtripAllKinds(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			buf := encodePropertyValue(nil, c.val)
+			buf, encErr := encodePropertyValue(nil, c.val)
+			if encErr != nil {
+				t.Fatalf("encodePropertyValue: %v", encErr)
+			}
 			got, rest, err := decodePropertyValue(buf)
 			if err != nil {
 				t.Fatalf("decodePropertyValue: %v", err)
@@ -633,7 +636,7 @@ func TestTx_EncodePropertyValue_RoundtripAllKinds(t *testing.T) {
 // of decodePropertyValue for every kind, anchoring the error messages
 // callers depend on.
 //
-//nolint:gocyclo // table: one short-input case per error branch
+// table: one short-input case per error branch
 func TestTx_DecodePropertyValue_ShortInputs(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -665,7 +668,7 @@ func TestTx_DecodePropertyValue_ShortInputs(t *testing.T) {
 // TestTx_AllMutationKinds_FinishedErrors asserts every mutation API
 // returns ErrTxFinished after the tx has been committed.
 //
-//nolint:gocyclo // table: one assert per buffer method
+// table: one assert per buffer method
 func TestTx_AllMutationKinds_FinishedErrors(t *testing.T) {
 	t.Parallel()
 	s, _, cleanup := openTypedStringStore(t)

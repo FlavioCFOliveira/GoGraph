@@ -253,7 +253,7 @@ func csrfileWeightArms() []csrfileWeightArm {
 		},
 		csrfileArmOf[uint32]{
 			lbl: "uint32", kind: csrfile.WeightUint32,
-			weightAt:  func(m uint64) uint32 { return uint32(m) }, //nolint:gosec // m < csrfileShapeMagnitude
+			weightAt:  func(m uint64) uint32 { return uint32(m) }, // m < csrfileShapeMagnitude
 			decodeRaw: decodeLEUint32,
 		},
 		csrfileArmOf[uint64]{
@@ -632,8 +632,8 @@ func csrfileTruncationCuts(h csrfile.Header) []struct {
 		label string
 		cut   int64
 	}{
-		{"aligned", int64(h.VerticesOffset + csrfile.Alignment)}, //nolint:gosec // header validated by Open
-		{"misaligned", int64(verticesEnd - 3)},                   //nolint:gosec // verticesEnd >= 136 for this fixture
+		{"aligned", int64(h.VerticesOffset + csrfile.Alignment)}, // header validated by Open
+		{"misaligned", int64(verticesEnd - 3)},                   // verticesEnd >= 136 for this fixture
 		{"below-header", csrfile.HeaderSize + 3},
 		{"header-boundary", csrfile.HeaderSize + 4},
 	}
@@ -655,7 +655,7 @@ func csrfileTruncationProbe(
 		arm: arm.label(), label: cutLabel, cut: cut,
 		aligned: cut%int64(csrfile.Alignment) == 0,
 	}
-	disk := NewSimDisk(NewSeed(uint64(cut)+0x7C5F), 0) //nolint:gosec // cut is a small positive length
+	disk := NewSimDisk(NewSeed(uint64(cut)+0x7C5F), 0) // cut is a small positive length
 	fsys := simCSRFS{disk: disk}
 	if err := arm.publish(fsys, csrfileMatrixPath, sh); err != nil {
 		return cell, nil, fmt.Errorf("publish %s: %w", arm.label(), err)
@@ -687,7 +687,7 @@ func csrfileTruncationProbe(
 	aligned, _ := csrfileAlignedCopy(short)
 	cell.reinterpretPanic = csrfileRecover(func() {
 		start := min(int(h.VerticesOffset), len(aligned))
-		_ = csrfile.Reinterpret[uint64](aligned[start:], int(h.NVertices)) //nolint:gosec // NVertices <= 32 here
+		_ = csrfile.Reinterpret[uint64](aligned[start:], int(h.NVertices)) // NVertices <= 32 here
 	})
 
 	var v []Violation
@@ -892,7 +892,7 @@ func runCSRFileAccessMatrix(seed uint64) (csrfileMatrixResult, error) {
 	res.cells = make([]csrfileCell, 0, len(grid))
 	for _, g := range grid {
 		arm := arms[g.arm]
-		disk := NewSimDisk(NewSeed(seed^uint64(g.arm*17+g.pattern)), 0) //nolint:gosec // small non-negative index
+		disk := NewSimDisk(NewSeed(seed^uint64(g.arm*17+g.pattern)), 0) // small non-negative index
 		fsys := simCSRFS{disk: disk}
 		if err := arm.publish(fsys, csrfileMatrixPath, res.shape); err != nil {
 			return res, fmt.Errorf("sim: csrfile matrix publish %s: %w", arm.label(), err)

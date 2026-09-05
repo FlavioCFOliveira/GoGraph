@@ -87,7 +87,7 @@ func runLabelConstraintTx(ctx context.Context, eng *cypher.Engine, q string) err
 	if err != nil {
 		return err
 	}
-	for res.Next() { //nolint:revive // draining is the point
+	for res.Next() { // draining is the point
 	}
 	if rerr := res.Err(); rerr != nil {
 		_ = res.Close()
@@ -264,7 +264,7 @@ func TestSetLabel_RolledBackTransaction_ReleasesReservation(t *testing.T) {
 		_ = tx.Rollback()
 		t.Fatalf("SET b:Person: %v", err)
 	}
-	for r.Next() { //nolint:revive // drained so the write actually runs; see runLabelConstraintTx
+	for r.Next() { // drained so the write actually runs; see runLabelConstraintTx
 	}
 	if err := r.Err(); err != nil {
 		_ = r.Close()

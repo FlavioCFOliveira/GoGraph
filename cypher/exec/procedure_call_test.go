@@ -178,7 +178,7 @@ func TestProcedureCallOp_ErrorPropagates(t *testing.T) {
 	if err := op.Init(ctx); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
-	defer op.Close() //nolint:errcheck // test cleanup
+	defer op.Close() // test cleanup
 	var out exec.Row
 	_, err := op.Next(&out)
 	if err == nil {
@@ -201,7 +201,7 @@ func TestProcedureCallOp_UnknownProcedure(t *testing.T) {
 	if err := op.Init(ctx); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
-	defer op.Close() //nolint:errcheck // test cleanup
+	defer op.Close() // test cleanup
 	var out exec.Row
 	_, err := op.Next(&out)
 	if err == nil {

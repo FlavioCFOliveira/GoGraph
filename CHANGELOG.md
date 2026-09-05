@@ -6,6 +6,48 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **`cypher.Engine.ExplainTable` and `cypher.Engine.ProfileTable`** — the columnar
+  counterparts of `Engine.ExplainLogical` and `Engine.Profile`. Each renders a
+  Neo4j-style fixed-width table (`Operator | Est.Rows | Vars`, and
+  `Operator | Rows | DbHits | Time (ms)` with a `Total` line) instead of an
+  indented tree, which is what makes two operators' figures comparable at a
+  glance. Neither is a second derivation of the plan: `ExplainTable` shares
+  `ExplainLogical`'s single traversal — the one that substitutes index seeks,
+  applies the count-store-gated reorderings and computes the cardinality
+  estimates — and `ProfileTable` renders the same captured measurement tree
+  `Profile` renders, from one execution. `ExplainLogical`, `Explain` and `Profile`
+  return byte-identical output to before. The `Vars` column is new information: no
+  tree rendering prints it. Documented in
+  [docs/cypher.md](docs/cypher.md#inspecting-a-query-plan). (#2701)
+- **`cypher/explain.PlanRow` and `cypher/explain.FormatPlanTable`** — the plan
+  table's row type and renderer, extracted from `TextTree` so the engine and
+  `TextTree` share one formatter. (#2701)
+
+### Fixed
+
+- **`cypher/explain`'s table renderers measured column width in BYTES.** Both
+  `TextTree` and `FormatReport` padded with `len(s)` while their doc comments
+  promised runes, and their tree connectors (`└─`, `├─`, `│`) are multi-byte
+  UTF-8 — so every indented row was padded short and the table's right-hand border
+  walked left as the tree descended. The package's own godoc example rendered a
+  three-line table 47, 43 and 43 display columns wide. Widths are now rune counts.
+  (#2701)
+- **`cypher/explain.TextTree` named operators by their Go type.** It used
+  `reflect.TypeOf`, so a plain `*ir.Apply` rendered as `Apply` where every other
+  plan surface in the module calls it `CartesianProduct`, and an `*ir.Expand` with
+  a bound destination rendered as `Expand` rather than `ExpandInto`. It now asks
+  `ir.OperatorName` — which had been exported for exactly this since the physical
+  renderer needed it — and falls back to the concrete type name only for a node
+  type `ir` does not enumerate. (#2701)
+- **`cypher/explain.TextTree` rendered an estimate of zero rows as `-`**, the
+  marker reserved for "no estimate available", conflating two different facts. A
+  zero estimate now renders as `0`. (#2701)
+- **A stale note in `cypher/exec/profile.go`** said `cypher/explain` "keeps its
+  DbHits counter", which rmp #2238 superseded when it folded db-hits into
+  `exec.Profiler`. (#2701)
+
 ### Removed
 
 - **The dead `cypher/exec.ChunkPool`** (its `NewChunkPool` constructor and its

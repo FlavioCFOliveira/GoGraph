@@ -111,7 +111,7 @@ func TestAssert_Update_OverwritesFile(t *testing.T) {
 	}
 
 	// The file on disk must now contain the new content.
-	written, err := os.ReadFile(path)
+	written, err := os.ReadFile(path) //nolint:gosec // G304: path was created by this test under its own temp dir.
 	if err != nil {
 		t.Fatalf("read after update: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestAssert_Update_CreatesFile(t *testing.T) {
 	if failed(tb) {
 		t.Errorf("update creates file: unexpected failure: %v", tb.errors)
 	}
-	written, err := os.ReadFile(path)
+	written, err := os.ReadFile(path) //nolint:gosec // G304: path was created by this test under its own temp dir.
 	if err != nil {
 		t.Fatalf("read after create: %v", err)
 	}

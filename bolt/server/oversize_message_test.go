@@ -110,7 +110,7 @@ func TestServe_OversizeMessage_ConnectionDropped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer conn.Close() //nolint:errcheck
+	defer conn.Close()
 
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 
@@ -140,7 +140,7 @@ func TestServe_OversizeMessage_ConnectionDropped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("server rejected new connection after oversize drop: %v", err)
 	}
-	defer conn2.Close() //nolint:errcheck
+	defer conn2.Close()
 	_ = conn2.SetDeadline(time.Now().Add(2 * time.Second))
 	boltHandshake(t, conn2)
 
@@ -148,7 +148,7 @@ func TestServe_OversizeMessage_ConnectionDropped(t *testing.T) {
 	cancel()
 	shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutCancel()
-	_ = srv.Shutdown(shutCtx) //nolint:errcheck
+	_ = srv.Shutdown(shutCtx)
 }
 
 // Ensure proto package is imported (proto.Magic used by boltHandshake in serve_test.go).

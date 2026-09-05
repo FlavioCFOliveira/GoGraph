@@ -22,7 +22,7 @@ func TestE2E_DeleteDetachDelete(t *testing.T) {
 	driver, _ := newDriverForTest(t)
 
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer session.Close(ctx) //nolint:errcheck
+	defer session.Close(ctx)
 
 	// Seed the graph.
 	runWrite(ctx, t, session,
@@ -48,7 +48,7 @@ func TestE2E_DeleteDetachDelete(t *testing.T) {
 
 	// The session may be in a failed state; open a new session for subsequent ops.
 	session2 := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer session2.Close(ctx) //nolint:errcheck
+	defer session2.Close(ctx)
 
 	// Verify graph is unchanged after the failed DELETE.
 	countA := runRead(ctx, t, session2, `MATCH (a:A {name:'alice'}) RETURN count(a) AS cnt`, nil)

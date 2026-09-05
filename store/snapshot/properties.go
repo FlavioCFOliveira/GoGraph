@@ -206,7 +206,7 @@ func newPropValueArena() *propValueArena { return &propValueArena{} }
 // parameters — there is no package-level mutable state, so writeProperties stays
 // exactly as re-entrant and safe for concurrent independent calls as before.
 //
-//nolint:gocyclo // properties write: header + key table + node records + edge records, each guarded
+// properties write: header + key table + node records + edge records, each guarded
 func writeProperties[N comparable, W any](
 	w io.Writer,
 	g *lpg.Graph[N, W],
@@ -293,10 +293,11 @@ func writeProperties[N comparable, W any](
 		return 0, 0, err
 	}
 	for _, key := range keys {
-		if uint64(len(key)) > uint64(^uint32(0)) {
+		if err := checkSnapshotStringLen("property key", len(key)); err != nil {
 			metrics.IncCounter("store.snapshot.WriteProperties.errors", 1)
-			return 0, 0, fmt.Errorf("snapshot: property key too long: %d bytes", len(key))
+			return 0, 0, err
 		}
+		//nolint:gosec // G115: bounded by checkSnapshotStringLen("property key") just above, which aborts WriteProperties at maxStringTableLen (1 MiB) — the cap ReadProperties enforces (rmp #2743)
 		if err := binary.Write(tee, binary.LittleEndian, uint32(len(key))); err != nil {
 			metrics.IncCounter("store.snapshot.WriteProperties.errors", 1)
 			return 0, 0, err
@@ -362,8 +363,8 @@ func writeProperties[N comparable, W any](
 // scratch must be a caller-owned buffer of at least 17 bytes, reused across
 // records so the encode allocates nothing per record.
 func writeNodePropRecord(w io.Writer, scratch []byte, rec *NodePropertyEntry) (int64, error) {
-	if uint64(len(rec.ValueBytes)) > uint64(^uint32(0)) {
-		return 0, fmt.Errorf("snapshot: node property value too long: %d bytes", len(rec.ValueBytes))
+	if err := checkSnapshotValueLen("node property value", len(rec.ValueBytes)); err != nil {
+		return 0, err
 	}
 	// Pack the fixed 17-byte header — NodeID(8) | KeyIdx(4) | Kind(1) |
 	// valLen(4) — into the reused scratch buffer and emit it in one Write.
@@ -376,6 +377,7 @@ func writeNodePropRecord(w io.Writer, scratch []byte, rec *NodePropertyEntry) (i
 	binary.LittleEndian.PutUint64(hdr[0:8], rec.NodeID)
 	binary.LittleEndian.PutUint32(hdr[8:12], rec.KeyIdx)
 	hdr[12] = byte(rec.Kind)
+	//nolint:gosec // G115: bounded by checkSnapshotValueLen("node property value"), the first statement of writeNodePropRecord, which fail-stops at maxValueLen (1 GiB) — the cap ReadProperties enforces (rmp #2743)
 	binary.LittleEndian.PutUint32(hdr[13:17], uint32(len(rec.ValueBytes)))
 	if _, err := w.Write(hdr); err != nil {
 		return 0, err
@@ -393,8 +395,8 @@ func writeNodePropRecord(w io.Writer, scratch []byte, rec *NodePropertyEntry) (i
 // scratch must be a caller-owned buffer of at least 25 bytes, reused across
 // records so the encode allocates nothing per record.
 func writeEdgePropRecord(w io.Writer, scratch []byte, rec *EdgePropertyEntry) (int64, error) {
-	if uint64(len(rec.ValueBytes)) > uint64(^uint32(0)) {
-		return 0, fmt.Errorf("snapshot: edge property value too long: %d bytes", len(rec.ValueBytes))
+	if err := checkSnapshotValueLen("edge property value", len(rec.ValueBytes)); err != nil {
+		return 0, err
 	}
 	// Pack the fixed 25-byte header — Src(8) | Dst(8) | KeyIdx(4) | Kind(1) |
 	// valLen(4) — into the reused scratch buffer and emit it in one Write,
@@ -405,6 +407,7 @@ func writeEdgePropRecord(w io.Writer, scratch []byte, rec *EdgePropertyEntry) (i
 	binary.LittleEndian.PutUint64(hdr[8:16], rec.Dst)
 	binary.LittleEndian.PutUint32(hdr[16:20], rec.KeyIdx)
 	hdr[20] = byte(rec.Kind)
+	//nolint:gosec // G115: bounded by checkSnapshotValueLen("edge property value"), the first statement of writeEdgePropRecord, which fail-stops at maxValueLen (1 GiB) — the cap ReadProperties enforces (rmp #2743)
 	binary.LittleEndian.PutUint32(hdr[21:25], uint32(len(rec.ValueBytes)))
 	if _, err := w.Write(hdr); err != nil {
 		return 0, err
@@ -602,6 +605,7 @@ func encodePropertyValue(v lpg.PropertyValue) ([]byte, error) {
 	case lpg.PropInt64:
 		i, _ := v.Int64()
 		out := make([]byte, fixed64ValueSize)
+		//nolint:gosec // G115: int64->uint64 is a same-width bit reinterpretation, reversed exactly by the int64(Uint64) decode at properties.go:1055
 		binary.LittleEndian.PutUint64(out, uint64(i))
 		return out, nil
 	case lpg.PropFloat64:
@@ -622,7 +626,9 @@ func encodePropertyValue(v lpg.PropertyValue) ([]byte, error) {
 		// within the second. time.Unix(sec, nsec) reconstitutes the
 		// instant exactly; we force .UTC() at decode time to drop the
 		// caller's location (snapshots travel between machines).
+		//nolint:gosec // G115: int64->uint64 is a same-width bit reinterpretation, reversed exactly by the int64(Uint64) decode at properties.go:1071
 		binary.LittleEndian.PutUint64(out[0:8], uint64(t.Unix()))
+		//nolint:gosec // G115: time.Time.Nanosecond() is documented to return an int in [0,999999999], which widens to uint64 losslessly; decoded back at properties.go:1073
 		binary.LittleEndian.PutUint64(out[8:16], uint64(t.Nanosecond()))
 		return out, nil
 	case lpg.PropBytes:
@@ -649,6 +655,7 @@ func encodePropertyValue(v lpg.PropertyValue) ([]byte, error) {
 func encodeListPropertyValue(v lpg.PropertyValue) ([]byte, error) {
 	elems, _ := v.List()
 	var buf []byte
+	//nolint:gosec // G115: 2^32 elements imply len(buf) >= 5*2^32; every consumer of encodePropertyValue now fail-stops the result at maxValueLen (1 GiB) before its length prefix is emitted — properties.go via checkSnapshotValueLen in writeNodePropRecord/writeEdgePropRecord, edgehandles.go via the same check at its per-property header (rmp #2743 closed the edgehandles hole this note used to name)
 	buf = binary.LittleEndian.AppendUint32(buf, uint32(len(elems)))
 	for _, elem := range elems {
 		if elem.Kind() == lpg.PropList {
@@ -659,6 +666,7 @@ func encodeListPropertyValue(v lpg.PropertyValue) ([]byte, error) {
 			return nil, err
 		}
 		buf = append(buf, byte(elem.Kind()))
+		//nolint:gosec // G115: payload is appended to buf, so len(payload) >= 2^32 implies len(buf) > MaxUint32; buf is in turn fail-stopped at maxValueLen by checkSnapshotValueLen on BOTH consumers, properties.go and edgehandles.go (rmp #2743)
 		buf = binary.LittleEndian.AppendUint32(buf, uint32(len(payload)))
 		buf = append(buf, payload...)
 	}
@@ -712,6 +720,7 @@ func encodePropertyValueInto(a *propValueArena, v lpg.PropertyValue) ([]byte, er
 	case lpg.PropInt64:
 		i, _ := v.Int64()
 		b := a.reserve(fixed64ValueSize)
+		//nolint:gosec // G115: int64->uint64 is a same-width bit reinterpretation, reversed exactly by the int64(Uint64) decode at properties.go:1055 (arena variant of :605)
 		binary.LittleEndian.PutUint64(b, uint64(i))
 		return b, nil
 	case lpg.PropFloat64:
@@ -731,7 +740,9 @@ func encodePropertyValueInto(a *propValueArena, v lpg.PropertyValue) ([]byte, er
 	case lpg.PropTime:
 		t, _ := v.Time()
 		b := a.reserve(timeValueSize)
+		//nolint:gosec // G115: int64->uint64 is a same-width bit reinterpretation, reversed exactly by the int64(Uint64) decode at properties.go:1071 (arena variant of :625)
 		binary.LittleEndian.PutUint64(b[0:8], uint64(t.Unix()))
+		//nolint:gosec // G115: time.Time.Nanosecond() is documented to return an int in [0,999999999], which widens to uint64 losslessly (arena variant of :626)
 		binary.LittleEndian.PutUint64(b[8:16], uint64(t.Nanosecond()))
 		return b, nil
 	case lpg.PropBytes:
@@ -763,7 +774,7 @@ func encodePropertyValueInto(a *propValueArena, v lpg.PropertyValue) ([]byte, er
 // CRC matches the file bytes (the [LoadSnapshotFull] helper does
 // this); this function only enforces the structural contract.
 //
-//nolint:gocyclo // properties read: header + key table + node records + edge records, each bounds-checked
+// properties read: header + key table + node records + edge records, each bounds-checked
 func ReadProperties(r io.Reader) (PropertiesReadback, error) {
 	defer metrics.Time("store.snapshot.ReadProperties").Stop()
 	br := bufio.NewReader(r)
@@ -808,7 +819,7 @@ func ReadProperties(r io.Reader) (PropertiesReadback, error) {
 			metrics.IncCounter("store.snapshot.ReadProperties.errors", 1)
 			return PropertiesReadback{}, fmt.Errorf("%w: %w", ErrPropertiesCorrupted, err)
 		}
-		if n > 1<<20 {
+		if n > maxStringTableLen {
 			metrics.IncCounter("store.snapshot.ReadProperties.errors", 1)
 			return PropertiesReadback{}, fmt.Errorf("%w: implausible key len %d",
 				ErrPropertiesCorrupted, n)
@@ -911,7 +922,7 @@ func readLenPrefixedValue(br *bufio.Reader, n uint32) ([]byte, error) {
 
 // readNodePropRecord parses one node property record.
 //
-//nolint:gocyclo // record read: id + keyIdx + kind + length-prefixed value with bounds checks
+// record read: id + keyIdx + kind + length-prefixed value with bounds checks
 func readNodePropRecord(br *bufio.Reader, out *NodePropertyEntry, keyCount uint64) error {
 	if err := binary.Read(br, binary.LittleEndian, &out.NodeID); err != nil {
 		return fmt.Errorf("%w: %w", ErrPropertiesCorrupted, err)
@@ -951,7 +962,7 @@ func readNodePropRecord(br *bufio.Reader, out *NodePropertyEntry, keyCount uint6
 
 // readEdgePropRecord parses one edge property record.
 //
-//nolint:gocyclo // record read: src + dst + keyIdx + kind + length-prefixed value with bounds checks
+// record read: src + dst + keyIdx + kind + length-prefixed value with bounds checks
 func readEdgePropRecord(br *bufio.Reader, out *EdgePropertyEntry, keyCount uint64) error {
 	if err := binary.Read(br, binary.LittleEndian, &out.Src); err != nil {
 		return fmt.Errorf("%w: %w", ErrPropertiesCorrupted, err)
@@ -1040,6 +1051,7 @@ func decodePropertyValue(kind lpg.PropertyKind, raw []byte) (lpg.PropertyValue, 
 		if len(raw) != fixed64ValueSize {
 			return lpg.PropertyValue{}, fmt.Errorf("%w: int64 value size %d", ErrPropertiesCorrupted, len(raw))
 		}
+		//nolint:gosec // G115: exact inverse of the uint64(int64) written at properties.go:609/724; len(raw) is pinned to 8 by the check at properties.go:1052
 		return lpg.Int64Value(int64(binary.LittleEndian.Uint64(raw))), nil
 	case lpg.PropFloat64:
 		if len(raw) != fixed64ValueSize {
@@ -1055,7 +1067,9 @@ func decodePropertyValue(kind lpg.PropertyKind, raw []byte) (lpg.PropertyValue, 
 		if len(raw) != timeValueSize {
 			return lpg.PropertyValue{}, fmt.Errorf("%w: time value size %d", ErrPropertiesCorrupted, len(raw))
 		}
+		//nolint:gosec // G115: exact inverse of uint64(t.Unix()) written at properties.go:630/744; len(raw) is pinned to 16 by the check at properties.go:1067
 		sec := int64(binary.LittleEndian.Uint64(raw[0:8]))
+		//nolint:gosec // G115: exact inverse of uint64(t.Nanosecond()) written at properties.go:632/746; len(raw) is pinned to 16 by the check at properties.go:1067
 		nsec := int64(binary.LittleEndian.Uint64(raw[8:16]))
 		return lpg.TimeValue(time.Unix(sec, nsec).UTC()), nil
 	case lpg.PropBytes:
@@ -1159,7 +1173,7 @@ func decodeListPropertyValue(raw []byte) (lpg.PropertyValue, error) {
 // `store.snapshot.ApplyProperties.edgeMissing`; this matches
 // [lpg.Graph.SetEdgeProperty]'s own no-op-on-missing-edge contract.
 //
-//nolint:gocyclo // apply: bounds + mapper resolve + edge resolve + kind decode
+// apply: bounds + mapper resolve + edge resolve + kind decode
 func ApplyPropertiesToGraph[N comparable, W any](g *lpg.Graph[N, W], rb PropertiesReadback) error {
 	defer metrics.Time("store.snapshot.ApplyPropertiesToGraph").Stop()
 	adj := g.AdjList()
@@ -1209,7 +1223,7 @@ func ApplyPropertiesToGraph[N comparable, W any](g *lpg.Graph[N, W], rb Properti
 			metrics.IncCounter("store.snapshot.ApplyProperties.unresolved", 1)
 			continue
 		}
-		_ = g.SetEdgeProperty(srcN, dstN, rb.Keys[ep.KeyIdx], v) //nolint:errcheck // no schema validator during snapshot restore
+		_ = g.SetEdgeProperty(srcN, dstN, rb.Keys[ep.KeyIdx], v) // no schema validator during snapshot restore
 	}
 	return nil
 }

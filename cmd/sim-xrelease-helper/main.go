@@ -276,6 +276,7 @@ func execOp(ctx context.Context, eng *cypher.Engine, op wireOp) (committed bool,
 	if err != nil {
 		// An engine error is a legitimate observable outcome (e.g. a malformed
 		// op rejected). It is not a harness failure; report it as not committed.
+		//nolint:nilerr // an engine rejection is an observable outcome, encoded as committed=false and rows="error" and JSON-encoded to stdout at main.go:230
 		return false, "error", nil
 	}
 	sig := canonicalRows(res)

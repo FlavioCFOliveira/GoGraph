@@ -242,7 +242,7 @@ func (w *world) resultShouldBeEmpty(_ context.Context) (retErr error) {
 			retErr = fmt.Errorf("panic during result iteration: %v", r)
 		}
 	}()
-	defer w.result.Close() //nolint:errcheck // result close is best-effort in test teardown
+	defer w.result.Close() // result close is best-effort in test teardown
 	rows, err := drainResult(w.result)
 	if err != nil {
 		return fmt.Errorf("draining result: %w", err)
@@ -270,7 +270,7 @@ func (w *world) resultShouldBeInAnyOrder(_ context.Context, table *godog.Table) 
 			retErr = fmt.Errorf("panic during result iteration: %v", r)
 		}
 	}()
-	defer w.result.Close() //nolint:errcheck // result close is best-effort in test teardown
+	defer w.result.Close() // result close is best-effort in test teardown
 
 	cols, expected, err := parseExpectedTable(table)
 	if err != nil {
@@ -300,7 +300,7 @@ func (w *world) resultShouldBeInOrder(_ context.Context, table *godog.Table) (re
 			retErr = fmt.Errorf("panic during result iteration: %v", r)
 		}
 	}()
-	defer w.result.Close() //nolint:errcheck // result close is best-effort in test teardown
+	defer w.result.Close() // result close is best-effort in test teardown
 
 	cols, expected, err := parseExpectedTable(table)
 	if err != nil {
@@ -334,7 +334,7 @@ func (w *world) resultShouldBeInAnyOrderIgnoringListOrder(ctx context.Context, t
 			retErr = fmt.Errorf("panic during result iteration: %v", r)
 		}
 	}()
-	defer w.result.Close() //nolint:errcheck // result close is best-effort in test teardown
+	defer w.result.Close() // result close is best-effort in test teardown
 	cols, expected, err := parseExpectedTable(table)
 	if err != nil {
 		return err
@@ -365,7 +365,7 @@ func (w *world) resultShouldBeInOrderIgnoringListOrder(ctx context.Context, tabl
 			retErr = fmt.Errorf("panic during result iteration: %v", r)
 		}
 	}()
-	defer w.result.Close() //nolint:errcheck // result close is best-effort in test teardown
+	defer w.result.Close() // result close is best-effort in test teardown
 	cols, expected, err := parseExpectedTable(table)
 	if err != nil {
 		return err

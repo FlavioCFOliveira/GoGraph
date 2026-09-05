@@ -68,7 +68,7 @@ func endsWithDecimalFloatExponentMarker(buf []byte) bool {
 	return true
 }
 
-//nolint:gocyclo // byte-scanner with per-character branches; same pattern as normalizeVarlenBounds
+// byte-scanner with per-character branches; same pattern as normalizeVarlenBounds
 func normalizeArithmeticMinus(q string) string {
 	if !hasByte(q, '-') {
 		return q
@@ -429,7 +429,7 @@ func normalizeVarlenBounds(q string) string {
 //
 // Fast path: return unchanged if q contains no '.' byte.
 //
-//nolint:gocyclo // byte-scanner with bracket-tracking state; same pattern as normalizeVarlenBounds
+// byte-scanner with bracket-tracking state; same pattern as normalizeVarlenBounds
 func normalizeVarlenDotDot(q string) string {
 	if !hasByte(q, '.') {
 		return q
@@ -600,7 +600,7 @@ func normalizeVarlenDotDot(q string) string {
 //
 // Fast path: return unchanged if q contains no '0' byte.
 //
-//nolint:gocyclo // byte-scanner with per-character branches; same pattern as normalizeVarlenBounds
+// byte-scanner with per-character branches; same pattern as normalizeVarlenBounds
 func normalizeZeroDotFloat(q string) string {
 	if !hasByte(q, '0') {
 		return q
@@ -741,7 +741,7 @@ func normalizeZeroDotFloat(q string) string {
 //
 // Fast path: return unchanged if q contains no '.' byte.
 //
-//nolint:gocyclo // byte-scanner with per-character branches; same pattern as normalizeVarlenBounds
+// byte-scanner with per-character branches; same pattern as normalizeVarlenBounds
 func normalizeLeadingDotFloat(q string) string {
 	if !hasByte(q, '.') {
 		return q
@@ -1071,7 +1071,7 @@ func normalizeDoubleNot(q string) string {
 // containsDoubleNot reports whether q contains at least two consecutive NOT
 // tokens (case-insensitive). Used as a fast path guard for normalizeDoubleNot.
 //
-//nolint:gocyclo // byte-scanner with per-character branches; same pattern as normalizeDoubleNot
+// byte-scanner with per-character branches; same pattern as normalizeDoubleNot
 func containsDoubleNot(q string) bool {
 	n := len(q)
 	for i := 0; i < n; {
@@ -1520,7 +1520,7 @@ func normalizeNegHexOct(q string) string {
 			if parseErr != nil {
 				u, uerr := strconv.ParseUint(digits, 16, 64)
 				if uerr == nil && u == 1<<63 {
-					val = int64(u) //nolint:gosec // INT64_MIN: int64(1<<63) = -9223372036854775808
+					val = int64(u) // reinterprets the 1<<63 bit pattern as INT64_MIN, -9223372036854775808
 					parseErr = nil
 				}
 			}
@@ -1547,7 +1547,7 @@ func normalizeNegHexOct(q string) string {
 				// negated) allow the unsigned value and reinterpret as INT64_MIN.
 				u, uerr := strconv.ParseUint(digits, 8, 64)
 				if uerr == nil && u == 1<<63 {
-					val = int64(u) //nolint:gosec // INT64_MIN: int64(1<<63) = -9223372036854775808
+					val = int64(u) // reinterprets the 1<<63 bit pattern as INT64_MIN, -9223372036854775808
 					parseErr = nil
 				}
 			}
@@ -1816,7 +1816,7 @@ func normalizeFloatExpZeroPad(q string) string {
 //
 // Fast path: return nil if q contains no backslash byte.
 //
-//nolint:gocyclo // byte-scanner with string-state tracking; per-character branches
+// byte-scanner with string-state tracking; per-character branches
 func validateUnicodeEscapes(q string) error {
 	if !hasByte(q, '\\') {
 		return nil
@@ -1993,7 +1993,7 @@ func hasByte(s string, b byte) bool {
 //   - unescaped " → \" (must escape for the double-quoted output)
 //   - unescaped ' → end of string
 //
-//nolint:gocyclo // byte-scanner with one branch per character class (6 outer) and one per escape class (4 inner); extracting further helpers would add indirection without reducing actual complexity
+// byte-scanner with one branch per character class (6 outer) and one per escape class (4 inner); extracting further helpers would add indirection without reducing actual complexity
 func normalizeSingleQuotes(q string) string {
 	// Fast path: nothing to rewrite.
 	if !hasSingleQuote(q) {

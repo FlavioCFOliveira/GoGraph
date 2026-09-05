@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func newTestEntry(tag string) *planCacheEntry { return &planCacheEntry{plan: nil, semaErr: nil} } //nolint:unparam // tag aids future debugging
+func newTestEntry(tag string) *planCacheEntry { return &planCacheEntry{plan: nil, semaErr: nil} } // tag aids future debugging
 
 func TestPlanCache_HitMissEviction(t *testing.T) {
 	t.Parallel()

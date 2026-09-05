@@ -30,7 +30,7 @@ func TestE2E_TemporalRoundTrip(t *testing.T) {
 	driver, _ := newDriverForTest(t)
 
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer session.Close(ctx) //nolint:errcheck
+	defer session.Close(ctx)
 
 	t.Run("Date", func(t *testing.T) {
 		v := single(ctx, t, session, `RETURN date('2020-06-15') AS v`)

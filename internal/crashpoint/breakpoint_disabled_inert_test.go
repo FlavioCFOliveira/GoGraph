@@ -73,7 +73,7 @@ func TestBreakpoint_NoCrashMachineryLinked(t *testing.T) {
 	// package itself plus every transitive (non-test) dependency, one per
 	// line. The argument is a compile-time constant import path, not user
 	// input, so gosec G204 does not apply.
-	cmd := exec.Command("go", "list", "-deps", "-f", "{{.ImportPath}}", crashpointImportPath) //nolint:gosec // G204: fixed import path constant, not user input
+	cmd := exec.Command("go", "list", "-deps", "-f", "{{.ImportPath}}", crashpointImportPath) // G204: fixed import path constant, not user input
 	outBytes, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("go list -deps: %v\n%s", err, outBytes)

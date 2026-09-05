@@ -31,7 +31,7 @@ import (
 // truncateUnit truncates t to the start of the named unit, preserving the
 // original location. Unknown units leave t unchanged.
 //
-//nolint:gocyclo // wide unit switch is uniform and the alternative (a lookup table) trades clarity for indirection
+// wide unit switch is uniform and the alternative (a lookup table) trades clarity for indirection
 func truncateUnit(t time.Time, unit string) time.Time {
 	loc := t.Location()
 	switch strings.ToLower(unit) {
@@ -131,7 +131,7 @@ func sourceToTime(v expr.Value) (time.Time, bool) {
 // newLoc is nil and the override is present, the function falls back to
 // time.UTC.
 //
-//nolint:gocyclo // openCypher fields is a flat dispatch; splitting per kind would obscure the contract
+// openCypher fields is a flat dispatch; splitting per kind would obscure the contract
 func applyOverrides(t time.Time, fields expr.MapValue) time.Time {
 	if fields == nil {
 		return t

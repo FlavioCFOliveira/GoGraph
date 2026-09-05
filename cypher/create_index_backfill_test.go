@@ -39,7 +39,7 @@ func queryNames(t *testing.T, eng *cypher.Engine, label, name string) []string {
 	if err != nil {
 		t.Fatalf("MATCH %s name=%q: %v", label, name, err)
 	}
-	defer res.Close() //nolint:errcheck // test teardown
+	defer res.Close() // test teardown
 	rows := collectRecords(t, res)
 	out := make([]string, 0, len(rows))
 	for _, row := range rows {
@@ -224,7 +224,7 @@ func TestCreateIndexBackfill_WrongLabelNotServed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unlabelled MATCH: %v", err)
 	}
-	defer res.Close() //nolint:errcheck // test teardown
+	defer res.Close() // test teardown
 	if rows := collectRecords(t, res); len(rows) != 2 {
 		t.Fatalf("unlabelled Acme: want 2 rows, got %d", len(rows))
 	}
@@ -253,7 +253,7 @@ func TestCreateIndexBackfill_NonStringValuesSkipped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("integer equality: %v", err)
 	}
-	defer res.Close() //nolint:errcheck // test teardown
+	defer res.Close() // test teardown
 	if rows := collectRecords(t, res); len(rows) != 1 {
 		t.Fatalf("integer equality: want 1 row, got %d", len(rows))
 	}

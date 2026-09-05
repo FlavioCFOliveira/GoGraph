@@ -752,6 +752,7 @@ func expansions(
 			}
 		}
 		pops++
+		//nolint:forcetypeassert // heap.Pop returns an element of fScoreHeap, which is defined as []fScoreItem
 		top := heap.Pop(pq).(fScoreItem)
 		if settled[uint64(top.node)] {
 			continue
@@ -791,6 +792,7 @@ func (h fScoreHeap) Less(i, j int) bool {
 }
 func (h fScoreHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
 
+//nolint:forcetypeassert // fScoreHeap is []fScoreItem; every heap.Push call site in this program passes fScoreItem
 func (h *fScoreHeap) Push(x any) { *h = append(*h, x.(fScoreItem)) }
 
 func (h *fScoreHeap) Pop() any {

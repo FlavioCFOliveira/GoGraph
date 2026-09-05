@@ -148,7 +148,7 @@ func startPipeServer(t *testing.T) net.Conn {
 
 	t.Cleanup(func() {
 		cancel()
-		_ = cliConn.Close() //nolint:errcheck // teardown; unblocks any parked server write
+		_ = cliConn.Close() // teardown; unblocks any parked server write
 		select {
 		case <-serveErr:
 		case <-time.After(10 * time.Second):
@@ -202,7 +202,7 @@ func liveHeapBytes() int64 {
 	runtime.GC()
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
-	return int64(ms.HeapAlloc) //nolint:gosec // G115: HeapAlloc is far below MaxInt64 in any realistic test process
+	return int64(ms.HeapAlloc) // G115: HeapAlloc is far below MaxInt64 in any realistic test process
 }
 
 // waitStableHeapDelta polls the live heap until it has been stable (four

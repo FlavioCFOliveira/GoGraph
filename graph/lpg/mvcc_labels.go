@@ -175,7 +175,7 @@ func (g *Graph[N, W]) LabelDeltaCount() int64 { return g.labelDeltaActive.Load()
 // assignment into a sparse side map, and one atomic increment — none of which
 // depends on the number of nodes in the graph or in the shard. That
 // independence is the property the spike measures.
-func (sh *nodeLabelShard) pushLabelDelta(id graph.NodeID, action uint8, lid LabelID, info *commitInfo, ts uint64, active *atomic.Int64) {
+func (sh *nodeLabelShard) pushLabelDelta(id graph.NodeID, action uint8, lid LabelID, info *commitInfo, ts uint64, active *atomic.Int64, churn *labelChurn) {
 	if sh.d == nil {
 		// Lazily allocated: a shard that is never written keeps no side map, so
 		// a read-only graph pays nothing for the mechanism existing.
@@ -189,6 +189,13 @@ func (sh *nodeLabelShard) pushLabelDelta(id graph.NodeID, action uint8, lid Labe
 		action: action,
 	}
 	active.Add(1)
+	// The PER-LABEL hold this delta owns (rmp #2686). Raised under the shard's
+	// write lock, with the bag write it records, so it is in place before any
+	// reader can see the two versions of the bag differ. Released when the delta
+	// is freed, by [Graph.reclaimLabelVersions] or
+	// [Graph.reclaimAbortedLabelsLocked], which are the only two paths that can
+	// take it off the chain.
+	churn.raise(lid)
 }
 
 // labelBagAsOf reconstructs the label set of id as it was at startTS.

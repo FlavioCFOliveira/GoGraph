@@ -24,7 +24,7 @@ import (
 // that must Intern snapshot keys before replaying WAL frames that
 // may reference both old and new keys.
 //
-//nolint:gocyclo // test: N pre-snapshot ops + M post-snapshot ops + full assertion loop
+// test: N pre-snapshot ops + M post-snapshot ops + full assertion loop
 func TestRecovery_SnapshotPlusWALReplay(t *testing.T) {
 	t.Parallel()
 

@@ -34,7 +34,7 @@ func writeVictim(t *testing.T) (path string, want []byte) {
 // grow it; an O_TRUNC would empty it).
 func assertUntouched(t *testing.T, path string, want []byte) {
 	t.Helper()
-	got, err := os.ReadFile(path)
+	got, err := os.ReadFile(path) //nolint:gosec // G304: path is the victim file this test created under its own temp dir; reading it back is the assertion.
 	if err != nil {
 		t.Fatalf("ReadFile victim: %v", err)
 	}

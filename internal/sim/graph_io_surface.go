@@ -225,7 +225,7 @@ type dotDocument struct {
 // this arm exists to drive. Anything outside that subset is an error: the
 // parser is the oracle here, so it must refuse to guess.
 //
-//nolint:gocyclo // one flat scanner: header + per-statement id/op/attr/terminator
+// one flat scanner: header + per-statement id/op/attr/terminator
 func parseDOT(src string) (dotDocument, error) {
 	d := dotDocument{Triples: make(map[string]int)}
 	p := &dotParser{s: src}
@@ -1254,7 +1254,7 @@ func checkGraphIOMutationAlloc(r *GraphIOSurfaceResult) []Violation {
 // [RunGraphIOSurface] result. It runs whatever the run produced and never
 // consults the non-vacuity gate.
 //
-//nolint:gocyclo // one flat adjudication per arm; splitting it would hide the list
+// one flat adjudication per arm; splitting it would hide the list
 func CheckGraphIOSurface(r *GraphIOSurfaceResult) []Violation {
 	var v []Violation
 	add := func(op, msg string) {
@@ -1361,7 +1361,7 @@ func CheckGraphIOSurface(r *GraphIOSurfaceResult) []Violation {
 // correctness, so a violation here means the run proved too little, not that
 // the module is wrong.
 //
-//nolint:gocyclo // one flat gate per arm; splitting it would hide the list
+// one flat gate per arm; splitting it would hide the list
 func CheckGraphIOSurfaceShape(r *GraphIOSurfaceResult) []Violation {
 	var v []Violation
 	add := func(op, msg string) {
@@ -2108,7 +2108,7 @@ const graphIOMinListGrowth = 1.9
 // within its heap bound, the one declared unreachable still is, and every *Ctx
 // reader stopped mid-parse with a typed cancellation and no partial graph.
 //
-//nolint:gocyclo // one flat adjudication per declaration and per arm
+// one flat adjudication per declaration and per arm
 func CheckGraphIOGuards(r *GraphIOGuardResult) []Violation {
 	var v []Violation
 	add := func(op, msg string) {

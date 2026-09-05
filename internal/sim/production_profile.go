@@ -95,6 +95,22 @@ func shortProductionProfile() productionProfileConfig {
 	return productionProfileConfig{connections: 24, opsPerConn: 8, cycles: 2, counters: 2}
 }
 
+// productionProfileCounterNS is the namespace this scenario's shared contended
+// counters live in (rmp #2729).
+//
+// It is NAMED rather than left to [RunConcurrent]'s seed-derived default because
+// the scenario is ONE logical run spread over several calls: each cycle drives
+// its own [RunConcurrent] against a freshly reopened store with a per-cycle
+// seed, and the adjudication below accumulates every cycle's acknowledged
+// increments and compares the total against the counter's value after recovery.
+// A per-call namespace would give each cycle fresh counters and turn that
+// accumulated total into a comparison against zero.
+//
+// The cycles are strictly sequential — the cycle loop opens, runs, crashes and
+// reopens before the next begins — so exactly one run holds this namespace at
+// any moment, which is what the namespace lease requires.
+const productionProfileCounterNS = "production-profile"
+
 // productionProfileMix is the role population: transactional writers with
 // mixed sizes (contended and disjoint), atomic-batch writers, during-run
 // oracle readers, RYOW probes, plain writers and readers, and overload
@@ -158,6 +174,14 @@ type productionProfileCycleEvidence struct {
 	// NONE — the case that used to crash the process at the counter adjudication
 	// (rmp #2552). Recording it lets a test prove a run entered that case.
 	contendedConnections int
+	// contendedAcked is how many read-modify-write increments this cycle
+	// acknowledged, summed over the counters. It is the non-vacuity witness for
+	// the counter adjudication (rmp #2729): the accumulated total is compared
+	// against the value read back after recovery, and a comparison of zero
+	// against zero would hold however the counters were named. A positive value
+	// is what makes the post-recovery read prove that the names the run WROTE are
+	// the names the adjudication LOOKS UP.
+	contendedAcked int64
 	// recovery is what the post-crash reopen measured (rmp #2469).
 	recovery mvccRecoveryEvidence
 	// substrate is the MVCC-substrate telemetry watched across this cycle's
@@ -241,11 +265,12 @@ func runProductionProfileEvidence(ctx context.Context, seed uint64, size product
 		go func() {
 			defer close(committersDone)
 			res, runErr = RunConcurrent(ctx, srv, ConcurrentConfig{
-				Seed:              seed + uint64(cycle), // a fresh sub-population per cycle
-				Connections:       size.connections,
-				OpsPerConn:        size.opsPerConn,
-				ContendedCounters: size.counters,
-				Mix:               productionProfileMix(),
+				Seed:               seed + uint64(cycle), // a fresh sub-population per cycle
+				Connections:        size.connections,
+				OpsPerConn:         size.opsPerConn,
+				ContendedCounters:  size.counters,
+				ContendedNamespace: productionProfileCounterNS,
+				Mix:                productionProfileMix(),
 			})
 		}()
 
@@ -269,6 +294,9 @@ func runProductionProfileEvidence(ctx context.Context, seed uint64, size product
 		// Population evidence: how many connections this cycle's seeded draw gave
 		// the contended-writer role (possibly none — see the field's doc).
 		cyc.contendedConnections = res.ContendedConnections
+		for _, v := range res.ContendedAcked {
+			cyc.contendedAcked += v
+		}
 
 		// In-cycle health: no panics, no transport faults, ledger conserved,
 		// during-run oracles silent, quiescence verification clean.
@@ -308,7 +336,7 @@ func runProductionProfileEvidence(ctx context.Context, seed uint64, size product
 		}
 		violations = append(violations, foldContendedCounters(cycle, expectedCtr, &res)...)
 		for k := range expectedCtr {
-			issuedSet[wireCounterName(k)] = true
+			issuedSet[contendedCounterName(productionProfileCounterNS, k)] = true
 		}
 
 		// The clients are joined; join the server, then crash the disk without a
@@ -360,7 +388,8 @@ func runProductionProfileEvidence(ctx context.Context, seed uint64, size product
 		// The recovered counters must hold the accumulated acknowledged
 		// increments — zero lost updates ACROSS the crash boundary.
 		for k := range expectedCtr {
-			v, err := engineScalar(ctx, st2, tmplWireCounterRead, map[string]any{"name": wireCounterName(k)})
+			v, err := engineScalar(ctx, st2, tmplWireCounterRead,
+				map[string]any{"name": contendedCounterName(productionProfileCounterNS, k)})
 			if err != nil {
 				_ = st2.Close()
 				return nil, ev, fmt.Errorf("sim: production profile cycle %d counter read: %w", cycle, err)

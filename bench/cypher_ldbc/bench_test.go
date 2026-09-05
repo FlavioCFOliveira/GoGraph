@@ -172,7 +172,7 @@ func TestCypherLDBC_AllQueriesRun(t *testing.T) {
 		t.Run(q.file, func(t *testing.T) {
 			t.Parallel()
 
-			qBytes, err := os.ReadFile(filepath.Join("queries", q.file)) //nolint:gosec // path is a test fixture name, not user input
+			qBytes, err := os.ReadFile(filepath.Join("queries", q.file)) // path is a test fixture name, not user input
 			if err != nil {
 				t.Fatalf("read %s: %v", q.file, err)
 			}

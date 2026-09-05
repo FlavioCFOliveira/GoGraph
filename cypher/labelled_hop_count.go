@@ -54,7 +54,7 @@ import (
 // on it so an eligibility change cannot silently stop firing — the runtime
 // counter, never another rendering.
 //
-//nolint:gochecknoglobals // process-wide diagnostic counter, matching degreeRewriteCount
+// Process-wide diagnostic counter, matching degreeRewriteCount.
 var labelledHopRewriteCount atomic.Uint64
 
 // labelledHopShape describes a recognised `(anchor)-[:T]->(:L…)` pattern: a
@@ -285,6 +285,11 @@ func (e *subqueryEvaluator) labelledHopShapeFor(sub ast.Expression, row expr.Row
 	sh, ok := recogniseLabelledHopPattern(pat, where, row)
 	if !ok {
 		sh = nil
+	}
+	// Created on first write, for the same reason as the sibling memos and in the
+	// same shape [patternEvaluator.labelledHop] below already uses (rmp #2693).
+	if e.labelledHop == nil {
+		e.labelledHop = make(map[ast.Expression]*labelledHopShape)
 	}
 	e.labelledHop[sub] = sh
 	return sh

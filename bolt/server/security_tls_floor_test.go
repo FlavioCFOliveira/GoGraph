@@ -154,7 +154,7 @@ func TestSec_Bolt_TLSModernVersionAccepted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("modern TLS client refused by hardened server: %v", err)
 	}
-	defer conn.Close() //nolint:errcheck
+	defer conn.Close()
 
 	tlsConn, ok := conn.(*tls.Conn)
 	if !ok {

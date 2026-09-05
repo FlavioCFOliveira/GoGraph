@@ -126,7 +126,7 @@ func KShortestPathsLooplessCtx[W Weight](ctx context.Context, c *csr.CSR[W], src
 // When either limit is reached the call returns any paths found so far
 // together with [ErrResourceBudgetExceeded].
 //
-//nolint:gocyclo // canonical best-first k-shortest with NaN/Inf gate + loopless guard + resource caps
+// canonical best-first k-shortest with NaN/Inf gate + loopless guard + resource caps
 func KShortestPathsLooplessCtxWithOpts[W Weight](
 	ctx context.Context,
 	c *csr.CSR[W],

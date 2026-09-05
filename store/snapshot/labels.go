@@ -221,7 +221,7 @@ func WriteLabels[N comparable, W any](w io.Writer, g *lpg.Graph[N, W], at *lpg.S
 // is no package-level mutable state, so writeLabels stays exactly as re-entrant
 // and safe for concurrent independent calls as the code it replaced.
 //
-//nolint:gocyclo // labels write: header + string table + node records + edge records, each guarded
+// labels write: header + string table + node records + edge records, each guarded
 func writeLabels[N comparable, W any](w io.Writer, g *lpg.Graph[N, W], at *lpg.Snapshot, snapReg func(*lpg.LabelRegistry) []string) (size int64, crc uint32, err error) {
 	defer metrics.Time("store.snapshot.WriteLabels").Stop()
 
@@ -308,10 +308,11 @@ func writeLabels[N comparable, W any](w io.Writer, g *lpg.Graph[N, W], at *lpg.S
 		return 0, 0, err
 	}
 	for _, name := range names {
-		if uint64(len(name)) > uint64(^uint32(0)) {
+		if err := checkSnapshotStringLen("label name", len(name)); err != nil {
 			metrics.IncCounter("store.snapshot.WriteLabels.errors", 1)
-			return 0, 0, fmt.Errorf("snapshot: label name too long: %d bytes", len(name))
+			return 0, 0, err
 		}
+		//nolint:gosec // G115: bounded by checkSnapshotStringLen("label name") just above, which aborts WriteLabels at maxStringTableLen (1 MiB) — the cap ReadLabels enforces (rmp #2743)
 		if err := binary.Write(tee, binary.LittleEndian, uint32(len(name))); err != nil {
 			metrics.IncCounter("store.snapshot.WriteLabels.errors", 1)
 			return 0, 0, err
@@ -614,7 +615,7 @@ func buildNameIndex(names []string) map[string]uint32 {
 // helpers do this); this function only enforces the structural
 // contract.
 //
-//nolint:gocyclo // labels read: header + string table + node records + edge records, each bounds-checked
+// labels read: header + string table + node records + edge records, each bounds-checked
 func ReadLabels(r io.Reader) (LabelsReadback, error) {
 	defer metrics.Time("store.snapshot.ReadLabels").Stop()
 	br := bufio.NewReader(r)
@@ -671,7 +672,7 @@ func ReadLabels(r io.Reader) (LabelsReadback, error) {
 			metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
 			return LabelsReadback{}, fmt.Errorf("%w: %w", ErrLabelsCorrupted, err)
 		}
-		if n > 1<<20 {
+		if n > maxStringTableLen {
 			metrics.IncCounter("store.snapshot.ReadLabels.errors", 1)
 			return LabelsReadback{}, fmt.Errorf("%w: implausible string len %d",
 				ErrLabelsCorrupted, n)

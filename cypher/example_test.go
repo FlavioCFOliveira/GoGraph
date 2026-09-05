@@ -9,6 +9,7 @@ package cypher_test
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
@@ -82,7 +83,7 @@ func ExampleEngine_RunInTx() {
 		fmt.Println("write error:", err)
 		return
 	}
-	for write.Next() { //nolint:revive // a write query streams no result rows; drain then close
+	for write.Next() { // a write query streams no result rows; drain then close
 	}
 	if err := write.Err(); err != nil {
 		fmt.Println("write error:", err)
@@ -175,6 +176,68 @@ func ExampleEngine_ExplainLogical() {
 	// ProduceResults
 	// └─ Projection
 	//    └─ NodeByLabelScan [n:Person] (est. rows=0, exact)
+}
+
+// ExampleEngine_ExplainTable returns the same logical plan
+// [cypher.Engine.ExplainLogical] returns, as a Neo4j-style columnar table. The
+// Est.Rows column carries the planner's estimate — an exact count of zero for the
+// label scan over an empty graph — and the Vars column the variables each
+// operator exposes, which no tree rendering prints.
+func ExampleEngine_ExplainTable() {
+	g := lpg.New[string, float64](adjlist.Config{})
+	eng := cypher.NewEngine(g)
+
+	table, err := eng.ExplainTable("MATCH (n:Person) RETURN n", nil)
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+	fmt.Print(table)
+	// Output:
+	// +----------------------------------+----------+------+
+	// | Operator                         | Est.Rows | Vars |
+	// +----------------------------------+----------+------+
+	// | ProduceResults                   |        - | n    |
+	// | └─ Projection                    |        - | n    |
+	// |    └─ NodeByLabelScan [n:Person] |        0 | n    |
+	// +----------------------------------+----------+------+
+}
+
+// ExampleEngine_ProfileTable executes the query and returns the measured
+// physical plan as a columnar table. The measured times vary from run to run, so
+// this example asserts the table's structure rather than embedding them.
+//
+// Note what the Total line means: its Rows cell sums every operator's emitted
+// rows across the plan, so it is a cost measure and not the result's row count —
+// the result's row count is the ROOT operator's Rows, on the first data line.
+func ExampleEngine_ProfileTable() {
+	g := lpg.New[string, float64](adjlist.Config{})
+	for _, key := range []string{"a", "b", "c"} {
+		if err := g.AddNode(key); err != nil {
+			fmt.Println("error:", err)
+			return
+		}
+		if err := g.SetNodeLabel(key, "Person"); err != nil {
+			fmt.Println("error:", err)
+			return
+		}
+	}
+	eng := cypher.NewEngine(g)
+
+	table, err := eng.ProfileTable(context.Background(), "MATCH (n:Person) RETURN n", nil)
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+	fmt.Println("has columns:", strings.Contains(table, "Rows") && strings.Contains(table, "DbHits"))
+	fmt.Println("has scan:", strings.Contains(table, "NodeByLabelScan"))
+	fmt.Println("scan read 3 records:", strings.Contains(table, "|    3 |      3 |"))
+	fmt.Println("has total:", strings.Contains(table, "| Total"))
+	// Output:
+	// has columns: true
+	// has scan: true
+	// scan read 3 records: true
+	// has total: true
 }
 
 // ExampleBindParams converts a map of Go values into the engine's internal

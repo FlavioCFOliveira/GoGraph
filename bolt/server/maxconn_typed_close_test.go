@@ -60,7 +60,7 @@ func TestServe_MaxConnections_TypedClose(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial conn1: %v", err)
 	}
-	defer conn1.Close() //nolint:errcheck
+	defer conn1.Close()
 
 	// Wait for conn1 to be accepted and for the semaphore slot to be taken.
 	time.Sleep(30 * time.Millisecond)
@@ -70,7 +70,7 @@ func TestServe_MaxConnections_TypedClose(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial conn2: %v", err)
 	}
-	defer conn2.Close() //nolint:errcheck
+	defer conn2.Close()
 
 	_ = conn2.SetDeadline(time.Now().Add(2 * time.Second))
 	var buf [4]byte

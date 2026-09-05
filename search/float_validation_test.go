@@ -186,7 +186,7 @@ func TestFloatValidation_KShortestPathsLoopless(t *testing.T) {
 			t.Parallel()
 			c, src, dst := buildPoisonedCSR(t, tc.w)
 
-			if paths := KShortestPathsLoopless(c, src, dst, 3); len(paths) != 0 { //nolint:staticcheck // deliberately exercises the deprecated bare entry's NaN/Inf guard
+			if paths := KShortestPathsLoopless(c, src, dst, 3); len(paths) != 0 { // deliberately exercises the deprecated bare entry's NaN/Inf guard
 				t.Fatalf("KShortestPathsLoopless: len(paths)=%d, want 0 on invalid input", len(paths))
 			}
 			if paths, err := KShortestPathsLooplessCtx(context.Background(), c, src, dst, 3); !errors.Is(err, ErrInvalidInput) || paths != nil {

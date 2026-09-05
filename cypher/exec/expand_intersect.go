@@ -118,7 +118,7 @@ type ExpandIntersectConfig struct {
 // operator driven by a sorted-set intersection.
 type ExpandIntersect struct {
 	input Operator
-	ctx   context.Context
+	ctx   context.Context //nolint:containedctx // per-run cancellation scope, assigned in Init and polled once per Next, exactly as the sibling operators do (see exec/eager.go:48, exec/semi_apply.go:41)
 
 	// src yields the adjacency AND both type filters keyed to it, resolved in Init
 	// rather than held from plan-build time. See [IntersectAdjacencySource].

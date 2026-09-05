@@ -80,7 +80,7 @@ func drainWrite(r *cypher.Result, e error) error {
 	if r == nil {
 		return nil
 	}
-	for r.Next() { //nolint:revive // drain to surface the lazy error / commit
+	for r.Next() { // drain to surface the lazy error / commit
 	}
 	err := r.Err()
 	r.Close()

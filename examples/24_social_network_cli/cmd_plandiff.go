@@ -552,7 +552,7 @@ func medianRunDuration(ctx context.Context, eng *cypher.Engine, q string) (time.
 		if err != nil {
 			return 0, err
 		}
-		for res.Next() { //nolint:revive // intentional full drain
+		for res.Next() { // intentional full drain
 		}
 		if e := res.Err(); e != nil {
 			_ = res.Close()

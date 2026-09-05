@@ -42,7 +42,7 @@ func execWrite(t *testing.T, eng *cypher.Engine, query string) {
 	if err != nil {
 		t.Fatalf("write %q: %v", query, err)
 	}
-	for res.Next() { //nolint:revive // drain
+	for res.Next() { // drain
 	}
 	if cerr := res.Err(); cerr != nil {
 		t.Fatalf("write %q result error: %v", query, cerr)
@@ -57,7 +57,7 @@ func runScalarCount(t *testing.T, eng *cypher.Engine, query string) int64 {
 	if err != nil {
 		t.Fatalf("count query %q: %v", query, err)
 	}
-	defer res.Close() //nolint:errcheck // test cleanup
+	defer res.Close() // test cleanup
 	var got int64
 	var rows int
 	for res.Next() {
@@ -86,7 +86,7 @@ func runScalarProp(t *testing.T, eng *cypher.Engine, query string) (expr.Value, 
 	if err != nil {
 		t.Fatalf("scalar query %q: %v", query, err)
 	}
-	defer res.Close() //nolint:errcheck // test cleanup
+	defer res.Close() // test cleanup
 	var v expr.Value
 	var rows int
 	for res.Next() {

@@ -336,7 +336,7 @@ func drainResult(r *cypher.Result, err error) error {
 	if err != nil {
 		return err
 	}
-	for r.Next() { //nolint:revive // draining is the point
+	for r.Next() { // draining is the point
 	}
 	re := r.Err()
 	_ = r.Close()
@@ -654,7 +654,7 @@ func TestLabelToggle_PerWriterSessionMakesProgress(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		for r.Next() { //nolint:revive // draining is the point
+		for r.Next() { // draining is the point
 		}
 		re := r.Err()
 		_ = r.Close()

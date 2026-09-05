@@ -211,7 +211,7 @@ func TestDegreeRewrite_WhichShapesReachTheDegreePath(t *testing.T) {
 			if err != nil {
 				t.Fatalf("run %q: %v", tc.q, err)
 			}
-			for res.Next() { //nolint:revive // intentional full drain
+			for res.Next() { // intentional full drain
 			}
 			if err := res.Err(); err != nil {
 				t.Fatalf("drain %q: %v", tc.q, err)

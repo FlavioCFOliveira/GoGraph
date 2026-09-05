@@ -86,7 +86,7 @@ func TestLabelTx_CommitIsAtomic(t *testing.T) {
 	// BEHAVIOURAL, before commit: a concurrent reader sees nothing.
 	for n, id := range ids {
 		bag := g.labelBagAsOf(id, before, 0)
-		if bag.has(lid) { //nolint:gocritic // addressable local
+		if bag.has(lid) { // addressable local
 			t.Fatalf("node %s shows an uncommitted label to another reader", n)
 		}
 	}

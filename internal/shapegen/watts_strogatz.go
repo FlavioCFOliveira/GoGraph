@@ -182,7 +182,7 @@ func (s wattsStrogatzBase) Build(cfg adjlist.Config) (*lpg.Graph[int, int64], er
 // u < v. This pins the golden bytes regardless of the rewire draw
 // permutation.
 //
-//nolint:gosec,gocritic // G404: math/rand/v2 is the pinned PRNG for catalogue determinism; paramTypeCombine: signature is pinned by the brief (n int, k int, betaPercent int, seed uint64).
+// G404: math/rand/v2 is the pinned PRNG for catalogue determinism; paramTypeCombine: signature is pinned by the brief (n int, k int, betaPercent int, seed uint64).
 func WattsStrogatz(n, k, betaPercent int, seed uint64) Shape[int, int64] {
 	if n < 4 || n > 10_000 {
 		panic(fmt.Sprintf("shapegen: WattsStrogatz requires 4 <= n <= 10000, got %d", n))
@@ -327,7 +327,7 @@ func buildWattsStrogatz(g *lpg.Graph[int, int64], n, k, betaPercent int, seed ui
 // rejected duplicates — so the seed-to-output map stays stable under
 // any change to the neighbour-set representation.
 //
-//nolint:gosec // G404: math/rand/v2 is the pinned PRNG for catalogue determinism; see WattsStrogatz godoc.
+// G404: math/rand/v2 is the pinned PRNG for catalogue determinism; see WattsStrogatz godoc.
 func pickRewireTarget(r *rand.Rand, srcNeigh map[int]struct{}, i, n int) int {
 	if len(srcNeigh)+1 >= n {
 		return -1
@@ -372,7 +372,7 @@ func pickRewireTarget(r *rand.Rand, srcNeigh map[int]struct{}, i, n int) int {
 // `delete(neigh[i], j)` and `delete(neigh[j], i)` calls below are
 // therefore always effective when the rewire branch fires.
 //
-//nolint:gosec // G404: math/rand/v2 is the pinned PRNG for catalogue determinism; see WattsStrogatz godoc.
+// G404: math/rand/v2 is the pinned PRNG for catalogue determinism; see WattsStrogatz godoc.
 func wattsStrogatzRewireStep(
 	r *rand.Rand,
 	neigh []map[int]struct{},

@@ -33,7 +33,7 @@ import (
 //  5. recovery.Open again: tx2 MUST be visible (WALOps == 2, node "b"
 //     present) and the WAL must end at a clean frame boundary.
 //
-//nolint:gocyclo // test: two commit/recover cycles with per-step asserts
+// test: two commit/recover cycles with per-step asserts
 func TestRecovery_TornTailTruncatedOnReopenForAppend(t *testing.T) {
 	t.Parallel()
 

@@ -35,7 +35,7 @@ func TestE2E_PaginatedPull(t *testing.T) {
 	session := driver.NewSession(ctx, neo4j.SessionConfig{
 		FetchSize: fetchSize,
 	})
-	defer session.Close(ctx) //nolint:errcheck
+	defer session.Close(ctx)
 
 	result, err := session.Run(ctx,
 		"UNWIND range(1, $n) AS i RETURN i",

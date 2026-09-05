@@ -27,7 +27,7 @@ func TestE2E_ReturnNodeShape(t *testing.T) {
 	driver, _ := newDriverForTest(t)
 
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer session.Close(ctx) //nolint:errcheck
+	defer session.Close(ctx)
 
 	runWrite(ctx, t, session,
 		`CREATE (n:Person:Admin {name: $name, age: $age})`,

@@ -20,7 +20,7 @@ import (
 //
 // The test fails if the pass rate across all non-skipped scenarios drops below
 // 100 %, blocking CI on any regression.
-func TestTCKParserOnly(t *testing.T) { //nolint:gocyclo // Test accumulates stats over three loops (skip/run/summary); extracting loops would reduce readability without reducing real complexity.
+func TestTCKParserOnly(t *testing.T) { // Test accumulates stats over three loops (skip/run/summary); extracting loops would reduce readability without reducing real complexity.
 	scenarios, err := tck.LoadScenarios()
 	if err != nil {
 		t.Fatalf("loading TCK scenarios: %v", err)

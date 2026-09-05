@@ -129,7 +129,7 @@ func startICServer(t *testing.T) (addr string, driver neo4j.DriverWithContext) {
 	t.Cleanup(func() {
 		shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer shutCancel()
-		_ = srv.Shutdown(shutCtx) //nolint:errcheck // shutdown errors not actionable in teardown
+		_ = srv.Shutdown(shutCtx) // shutdown errors not actionable in teardown
 		srvCancel()
 		select {
 		case <-serveErr:
@@ -156,7 +156,7 @@ func seedSocialGraphViaDriver(t *testing.T, driver neo4j.DriverWithContext) {
 	t.Helper()
 	ctx := context.Background()
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer session.Close(ctx) //nolint:errcheck
+	defer session.Close(ctx)
 
 	for _, q := range socialGraphSeedQueries {
 		q := q // capture
@@ -176,7 +176,9 @@ func seedSocialGraphViaDriver(t *testing.T, driver neo4j.DriverWithContext) {
 
 // runICQuery executes a Cypher read query via ExecuteRead and returns each
 // record as a map[string]any keyed by column alias. If the query returns an
-// error the caller must handle it (typically t.Skipf for unsupported features).
+// error the caller must FAIL the test: these queries run against this process's
+// own in-process Bolt server over the canonical seeded graph, so an error is a
+// GoGraph defect, never an environment precondition (rmp #2709).
 func runICQuery(ctx context.Context, session neo4j.SessionWithContext, query string) ([]map[string]any, error) {
 	rows, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
 		result, err := tx.Run(ctx, query, nil)

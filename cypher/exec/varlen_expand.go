@@ -253,7 +253,15 @@ type VarLengthExpand struct {
 	maxTotalEdgesTraversed int // aggregate per-query cap (NOT reset per row)
 	edgesVisited           int // traversal counter for the per-row safety cap (reset per input row)
 	totalEdgesVisited      int // traversal counter for the aggregate per-query cap (reset once per Init)
-	resultIdx              int
+	// edgesTraversedPrior carries the traversal counts of every PREVIOUS Init
+	// forward, because totalEdgesVisited is reset by each one. It exists solely so
+	// [VarLengthExpand.storageAccesses] reports the operator's whole lifetime: an
+	// operator re-Init'd once per outer row (the correlated-apply shape) would
+	// otherwise report only its last outer row's traversals as the query's db-hits.
+	// It is accumulated in Init, never per edge, so it costs nothing on the hot
+	// path (rmp #2720).
+	edgesTraversedPrior int
+	resultIdx           int
 
 	dir      Direction
 	inputEOS bool // true after input plan exhausted
@@ -352,7 +360,10 @@ func (op *VarLengthExpand) Init(ctx context.Context) error {
 	op.edgesVisited = 0
 	// The aggregate per-query counter is reset exactly once per operator run
 	// (here in Init), NEVER at the per-input-row reset below, so it accumulates
-	// across every source row (#1478).
+	// across every source row (#1478). Carry the outgoing value into the lifetime
+	// accumulator first, so a re-Init cannot erase traversals PROFILE has yet to
+	// report (rmp #2720).
+	op.edgesTraversedPrior += op.totalEdgesVisited
 	op.totalEdgesVisited = 0
 	// Precompute a reverse-edge-position → forward-edge-position mapping
 	// so the relationship-uniqueness bitset can dedupe the same physical
@@ -835,6 +846,25 @@ func (op *VarLengthExpand) buildRow(out *Row, inputRow Row, ps pathState) {
 	op.outBuf[len(inputRow)] = pathList
 	op.outBuf[len(inputRow)+1] = dstID
 	*out = op.outBuf
+}
+
+// storageAccesses reports the relationship slots this expansion actually read,
+// which is what makes its db-hits a MEASUREMENT rather than an inference.
+//
+// It implements the unexported storageAccessCounter contract in profile.go. A
+// variable-length expansion is the clearest case where "one record read per row
+// emitted" is false: the BFS enumerates every slot of every frontier node's
+// adjacency, and emits a row only for a path whose hop count falls in
+// [minHops..maxHops]. Measured on a 200-way fan with a single 3-hop chain,
+// `-[*1..3]->` and `-[*3..3]->` traverse the SAME 202 slots while emitting 202
+// rows and 1 row respectively — so the derived figure moved 202x while the
+// storage work did not move at all (rmp #2720).
+//
+// The counter it reads is the one the aggregate traversal budget already
+// maintains ([VarLengthExpand.enqueueEdges] increments it per slot for #1478), so
+// reporting it adds no work to any run, profiled or not.
+func (op *VarLengthExpand) storageAccesses() int64 {
+	return int64(op.edgesTraversedPrior + op.totalEdgesVisited)
 }
 
 // Close releases resources.

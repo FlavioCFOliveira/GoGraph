@@ -90,7 +90,7 @@ func TestE2E_TLSRoundtrip(t *testing.T) {
 
 	// AC#2: CREATE/MATCH round-trip.
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer session.Close(ctx) //nolint:errcheck
+	defer session.Close(ctx)
 
 	runWrite(ctx, t, session,
 		`CREATE (n:TLSNode {key: $key})`,

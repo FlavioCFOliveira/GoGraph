@@ -25,7 +25,7 @@ const crashDemoSupported = true
 // the no-op stub on unsupported platforms can share the signature.
 func hardKillSelf() error {
 	_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
-	select {} //nolint:staticcheck // unreachable after SIGKILL; blocks until the signal is delivered
+	select {} // unreachable after SIGKILL; blocks until the signal is delivered
 }
 
 // interpretChildExit reports whether runErr (the result of exec.Cmd.Run on the

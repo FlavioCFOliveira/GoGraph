@@ -179,7 +179,7 @@ func testShapeRoundtrip(
 	relLabel := "E_" + tc.name
 
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer session.Close(ctx) //nolint:errcheck
+	defer session.Close(ctx)
 
 	// ── Seed: single CREATE statement with all nodes and edges ──────────────
 	// Build: (v0:L {nid:'0'}),(v1:L {nid:'1'}),…,(v0)-[:E]->(v1),…

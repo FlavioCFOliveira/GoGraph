@@ -136,7 +136,7 @@ func TestProfiledOperator_Race(t *testing.T) {
 			if err := po.Init(context.Background()); err != nil {
 				return
 			}
-			defer po.Close() //nolint:errcheck
+			defer po.Close()
 			var row exec.Row
 			for {
 				ok, err := po.Next(&row)

@@ -229,8 +229,16 @@ func (op *Sort) collectAndSort() error {
 			return ErrSortMemoryExceeded
 		}
 
-		// Copy the row before appending — the operator contract allows reuse of
-		// the backing slice across Next calls.
+		// The copy is REQUIRED and cannot be elided (rmp #2702): op.rows is
+		// sorted and replayed only after the child is exhausted, and [Row]'s
+		// contract lets the producer reuse the backing slice across Next calls.
+		//
+		// Measured (rmp #2702, MemProfileRate=1, no -race): on
+		// `MATCH (p:Person) RETURN p.firstName ORDER BY p.salary` over 120 000
+		// rows it fires 120 000 times — 6.23% of the query's allocs/op and 2.35%
+		// of its B/op. The `append` on the next line costs FOUR TIMES the bytes
+		// (op.rows grows geometrically at 1.25x for a large slice, so the spine
+		// allocates ~5x its final size) for 29 allocations.
 		cp := make(Row, len(row))
 		copy(cp, row)
 		op.rows = append(op.rows, cp)

@@ -265,6 +265,48 @@ test-timing: ## [layer: short] Serially re-run the wall-clock/throughput gates o
 test-short-timings: ## [layer: short] Alias for test-short, kept as the named entry point for ad-hoc budget exploration (SOFT_BUDGET/HARD_BUDGET/SHORT_TIMEOUT overridable)
 	$(MAKE) test-short
 
+# ── The uninstrumented phase ──────────────────────────────────────
+# UNINSTR_PKGS are the packages holding short-layer assertions whose SUBJECT is
+# the Go runtime's own allocation behaviour, and which therefore cannot run
+# under either instrumentation the rest of `ci` applies.
+#
+# bolt/packstream is here because rmp #2709 found that its
+# TestDecoder_ChargeUpperBoundsGoAllocation — the self-guarding half of security
+# finding #1849, the proof that the decoded-memory charge UPPER-BOUNDS real Go
+# allocation — ran in NO phase of `make ci` at all:
+#
+#   test-short   -race                → the file is //go:build !race: compiled out
+#   test-timing  -race                → same, and the package is not in TIMING_PKGS
+#   cover-gate   -covermode=atomic    → compiled in, then skipped by the test's own
+#                                       testing.CoverMode() guard
+#
+# Each of those three guards is individually correct, and each is documented at
+# its site. Their INTERSECTION was the defect: two locally-sound decisions that
+# between them left a security invariant asserting nowhere. Neither guard can be
+# relaxed — the race detector disables the tiny allocator and adds shadow memory,
+# the coverage counters allocate on their own account, and the charge bounds
+# PRODUCTION memory — so the only correct fix is a phase that applies neither.
+#
+# The list holds PACKAGES, not -run patterns, so a future allocation assertion
+# added to one of them is picked up without editing this file. Adding a package
+# here costs a full uninstrumented run of it: bolt/packstream measures 0.39-0.53 s
+# (Apple M4, darwin/arm64, go1.26.6, 2026-09-03, host at loadavg 6.45), which is
+# why the whole package runs rather than a single -run filter.
+#
+# -p 1 serialises the package test binaries. runtime.MemStats is per-PROCESS, so
+# a second package cannot pollute the subject's counters directly; what -p 1
+# removes is CPU and memory CONTENTION between concurrently running binaries
+# while one of them is measuring. With a single package in the list today it is
+# a no-op that costs nothing and stops the list growing into a measurement
+# hazard.
+UNINSTR_PKGS = ./bolt/packstream
+
+UNINSTR_TIMEOUT ?= 5m
+
+.PHONY: test-uninstrumented
+test-uninstrumented: ## [layer: short] Run the allocation-measuring packages with NEITHER the race detector NOR coverage instrumentation — the only phase in which they assert (rmp #2709)
+	$(GO) test -count=1 -p 1 -timeout=$(UNINSTR_TIMEOUT) $(UNINSTR_PKGS)
+
 # SOAK_TIMEOUT / NIGHTLY_TIMEOUT — the deferred layers need an EXPLICIT
 # per-package timeout (rmp #2259).
 #
@@ -369,6 +411,37 @@ cover-gate: ## Enforce aggregate (>=85%) and per-package (>=75%) coverage gates
 bench: ## Run benchmarks ($(BENCH_PATTERN), count=$(BENCH_COUNT))
 	$(GO) test -bench=$(BENCH_PATTERN) -benchmem -count=$(BENCH_COUNT) -run=^$$ $(PACKAGES)
 
+# ── Vulnerability gate ─────────────────────────────────────────────
+# Until rmp #2722 there was NO gate. `govulncheck` appeared in no Makefile
+# target, no `make ci` path and no `.sh`/`.yml`/`.yaml` file in the repository —
+# only as prose in CONTRIBUTING.md §4 and SECURITY.md describing a command a
+# human was expected to remember to type. That is why it could stop working for
+# an entire toolchain bump without anyone noticing: a gate nobody invokes cannot
+# fail loudly, it simply never runs.
+#
+# The gate asserts that ANALYSIS HAPPENED — a non-empty set of loaded root
+# packages covering every package `go list ./...` reports — and evaluates that
+# assertion BEFORE it looks at the exit status, because the failure mode
+# recorded against v0.12.0 was a scanner that "exits 0 while performing no
+# analysis at all" (CONTRIBUTING.md §4). scripts/vulncheck_gate.sh carries the
+# full reasoning; scripts/test_vulncheck_gate.sh proves the assertion can fail
+# by feeding the gate deliberately broken scanners, including a real
+# govulncheck built against another Go minor.
+#
+# It needs the network: govulncheck consults https://vuln.go.dev. An
+# unreachable database FAILS the gate rather than skipping it — a scan that
+# could not consult the vulnerability database is not a clean scan. Point
+# VULNCHECK_DB at a mirror on an air-gapped host.
+GOVULNCHECK_VERSION ?= v1.7.0
+
+.PHONY: vulncheck
+vulncheck: ## Vulnerability gate: govulncheck over the module, asserting analysis really happened rather than trusting the exit code (rmp #2722)
+	GO=$(GO) GOVULNCHECK_VERSION=$(GOVULNCHECK_VERSION) bash scripts/vulncheck_gate.sh
+
+.PHONY: test-vulncheck-gate
+test-vulncheck-gate: ## Prove `vulncheck` can FAIL: feed it deliberately broken scanners and require it to reject each one (rmp #2722)
+	GO=$(GO) bash scripts/test_vulncheck_gate.sh
+
 .PHONY: lint
 lint: ## Run golangci-lint (auto-install if missing)
 	@if ! command -v golangci-lint >/dev/null 2>&1; then \
@@ -378,13 +451,13 @@ lint: ## Run golangci-lint (auto-install if missing)
 	golangci-lint run $(PACKAGES)
 
 .PHONY: ci
-ci: shell-guard tidy fmt vet build test-short test-timing lint cover-gate ## Full CI pipeline: tidy + fmt + vet + build + test-short + test-timing + lint + cover-gate
+ci: shell-guard tidy fmt vet build vulncheck test-short test-timing test-uninstrumented lint cover-gate ## Full CI pipeline: tidy + fmt + vet + build + vulncheck + test-short + test-timing + test-uninstrumented + lint + cover-gate
 
 .PHONY: ci-soak
-ci-soak: shell-guard tidy fmt vet build test-soak test-timing lint cover-gate ## CI pipeline with soak layer: like ci but runs test-soak
+ci-soak: shell-guard tidy fmt vet build vulncheck test-soak test-timing test-uninstrumented lint cover-gate ## CI pipeline with soak layer: like ci but runs test-soak
 
 .PHONY: ci-nightly
-ci-nightly: shell-guard tidy fmt vet build test-nightly test-timing lint cover-gate ## CI pipeline with nightly layer: like ci but runs test-nightly
+ci-nightly: shell-guard tidy fmt vet build vulncheck test-nightly test-timing test-uninstrumented lint cover-gate ## CI pipeline with nightly layer: like ci but runs test-nightly
 
 .PHONY: smoke
 smoke: ## Quick PR pre-flight: tidy + fmt + vet + build + short unit tests (no race, no lint, no cover-gate)
@@ -446,9 +519,9 @@ release-accuracy: ## Release-accuracy checks only (Phase A): CHANGELOG/release-n
 	@echo "release-accuracy: all accuracy checks passed"
 
 .PHONY: release-preflight
-release-preflight: ## Canonical LOCAL release gate (`make release` calls this) — release-accuracy + the full `make ci` correctness+coverage gate + headline bench. `make ci` runs the suite ONCE (tidy/fmt/vet/build/test-short[-race,./...]/lint/cover-gate; the TCK =100% baseline in TestTCKExecution runs inside the -race and coverage passes), so release-preflight SUBSUMES `make ci` — do not run both. The release.yml CI job runs only `release-accuracy`.
+release-preflight: ## Canonical LOCAL release gate (`make release` calls this) — release-accuracy + the full `make ci` correctness+coverage gate + headline bench. `make ci` runs the suite ONCE (tidy/fmt/vet/build/vulncheck/test-short[-race,./...]/lint/cover-gate; the TCK =100% baseline in TestTCKExecution runs inside the -race and coverage passes), so release-preflight SUBSUMES `make ci` — do not run both. The release.yml CI job runs only `release-accuracy`.
 	@$(MAKE) release-accuracy
-	@echo "release-preflight: running the full correctness + coverage gate (make ci: tidy/fmt/vet/build/test-short[-race]/lint/cover-gate; TCK =100% baseline enforced inside)…"
+	@echo "release-preflight: running the full correctness + coverage gate (make ci: tidy/fmt/vet/build/vulncheck/test-short[-race]/lint/cover-gate; TCK =100% baseline enforced inside)…"
 	@$(MAKE) ci
 	@if [ -x scripts/run_headline_bench.sh ]; then \
 	  echo "release-preflight: running headline bench regression gate (informational on a release tag — see docs/release.md for the canonical PR-time gate)…"; \

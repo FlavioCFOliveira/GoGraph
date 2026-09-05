@@ -270,7 +270,7 @@ func (s *bfsDoScratch) resize(words int) {
 	}
 }
 
-//nolint:gochecknoglobals // package-level pool
+// Package-level pool.
 var bfsDoScratchPool = sync.Pool{New: func() any { return &bfsDoScratch{} }}
 
 func acquireBFSDOScratch() *bfsDoScratch {

@@ -293,7 +293,7 @@ func autocommitLC(t *testing.T, e *Engine, query string) {
 	if err != nil {
 		t.Fatalf("autocommit %q: %v", query, err)
 	}
-	for res.Next() { //nolint:revive // intentional full drain
+	for res.Next() { // intentional full drain
 	}
 	if err := res.Err(); err != nil {
 		t.Fatalf("autocommit %q: %v", query, err)

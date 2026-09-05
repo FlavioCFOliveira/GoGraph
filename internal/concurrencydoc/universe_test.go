@@ -122,7 +122,7 @@ func scanRepoRoot(t *testing.T) string {
 // test on error.
 func runGo(t *testing.T, dir string, args ...string) string {
 	t.Helper()
-	cmd := exec.Command("go", args...)
+	cmd := exec.Command("go", args...) //nolint:gosec // G204: fixed argv — the "go" toolchain with arguments this test assembled from literals.
 	cmd.Dir = dir
 	out, err := cmd.Output()
 	if err != nil {

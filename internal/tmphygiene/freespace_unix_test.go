@@ -30,5 +30,5 @@ func availableBytes(path string) (uint64, error) {
 	}
 	// Bsize is uint32 on darwin and int64 on linux; both widen to uint64
 	// losslessly for any real block size.
-	return st.Bavail * uint64(st.Bsize), nil //nolint:gosec // G115: a filesystem block size is small and non-negative
+	return st.Bavail * uint64(st.Bsize), nil // G115: a filesystem block size is small and non-negative
 }

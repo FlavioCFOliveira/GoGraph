@@ -13,12 +13,37 @@ linters:
     - gosec
     - govet
     - ineffassign
+    # staticcheck's checks run in this module ONLY through golangci-lint —
+    # the `staticcheck` entry below. The standalone `staticcheck` binary is
+    # not a project gate, and the module carries no `staticcheck.conf`: the
+    # four that once existed were removed with task #2680, because
+    # golangci-lint honours none of them and this file never referenced
+    # them. So `//nolint:` is the module's single suppression vocabulary;
+    # there is no `//lint:ignore` directive in the tree, and standalone
+    # staticcheck cannot see a `//nolint:` one. Should that binary ever be
+    # reintroduced, note that its configuration scopes by DIRECTORY only —
+    # a `[staticcheck "<path>"]` table name fails to parse (`expected '.'
+    # or ']' to end table name`) — so each per-package override needs its
+    # own directory-level config file.
     - staticcheck
     - unused
     - gocritic
     - gocyclo
     - prealloc
     - revive
+    # --- Restored by #2708 -------------------------------------------------
+    # These four were named by 150 //nolint directives that suppressed nothing
+    # because the linters were not enabled. Enabling them makes those
+    # directives live again, so the concern each one documents is checked
+    # against FUTURE code instead of merely described.
+    - containedctx
+    - forcetypeassert
+    - nilerr
+    - wastedassign
+    # nolintlint is the meta-check that keeps this file honest: it rejects a
+    # directive that is malformed, unexplained, or not linter-specific. Without
+    # it the 164 inert directives above accumulated unchallenged for months.
+    - nolintlint
   exclusions:
     # cypher/parser/gen is the ANTLR-generated Go output (CypherLexer +
     # CypherParser). The generator emits idiomatic-Java style (unused
@@ -37,32 +62,56 @@ linters:
       # in-progress agent worktree cannot pollute the lint result.
       - \.claude/
     rules:
+      # --- Narrowed by #2746 -------------------------------------------------
+      # Nine rules were removed here, and every path below was anchored with ^.
+      #
+      # The anchoring first, because it was a live blindfold: these regexes are
+      # unanchored substring matches, so `ds/` also matched
+      # examples/20_concurrent_rea[ds/]main.go, `bench/` matched
+      # examples/26_social_scale_[bench/]main.go, and `cypher/` matched
+      # examples/22_[cypher/]main.go. Seven G115 findings in examples/ were
+      # being suppressed by rules this file documents as scoped to library
+      # subtrees, and examples/ has no G115 exclusion of its own. All seven were
+      # inspected and are bounded conversions; each now carries its own
+      # directive naming its bound.
+      #
+      # The nine removals were decided on measured proportionality: how many
+      # findings the blanket removes on its own, against how many the per-site
+      # directives beneath it already carry. Removed (residual findings, now
+      # per-site directives): gocyclo _test.go (1), gosec G302 _test.go (2),
+      # G306 _test.go (3), G115 ds/ (1), G115 bench/ (9), G204 _test.go (13),
+      # G703 _test.go (15), G304 _test.go (19), G404 _test.go (26). Deleting
+      # each made 273 existing directives live again.
+      #
+      # The rules that remain below were kept for the same reason inverted: each
+      # removes far more than its directives ever carried (G115 _test.go 594,
+      # errcheck Close _test.go 321, internal/sim/ 309, cypher/ 285,
+      # forcetypeassert _test.go 269, graph/ 240, search/ 169, unnamedResult
+      # 152), so there the blanket is the right instrument and the per-site
+      # directives under it were the redundant half.
+      # -----------------------------------------------------------------------
       # defer/inline res.Close() without error check is intentional in tests;
       # teardown failures are surfaced via t.Fatalf in the test body.
       - linters: [errcheck]
         path: "_test\\.go"
         text: "Error return value of.*Close.*is not checked"
-      # Table-driven and scenario-driven test functions naturally exceed gocyclo 15.
-      - linters: [gocyclo]
-        path: "_test\\.go"
-        text: "cyclomatic complexity"
       # revive: redefines-builtin-id in essentials.go — cap/min used as local
       # variable names in pre-existing non-exported helpers.
       - linters: [revive]
-        path: "cypher/funcs/essentials\\.go"
+        path: "^cypher/funcs/essentials\\.go"
         text: "redefines-builtin-id"
       # revive: unexported-return for expandOption — intentional unexported
       # functional-option type; renaming would break callers.
       - linters: [revive]
-        path: "cypher/exec/cyphermorphism\\.go"
+        path: "^cypher/exec/cyphermorphism\\.go"
         text: "unexported-return"
       # gocritic: commentedOutCode — inline intent comment in test, not dead code.
       - linters: [gocritic]
-        path: "cypher/funcs/essentials_test\\.go"
+        path: "^cypher/funcs/essentials_test\\.go"
         text: "commentedOutCode"
       # revive: empty-block — intentional no-op guard in cancellation test.
       - linters: [revive]
-        path: "cypher/exec/parallel_test\\.go"
+        path: "^cypher/exec/parallel_test\\.go"
         text: "empty-block"
       # revive: unused-parameter in test helpers where t is required by interface.
       - linters: [revive]
@@ -70,25 +119,32 @@ linters:
         text: "unused-parameter"
       # revive: unexported-return in eval_extra_test helper stub.
       - linters: [revive]
-        path: "cypher/expr/eval_extra_test\\.go"
+        path: "^cypher/expr/eval_extra_test\\.go"
         text: "unused-parameter"
       # gocyclo: ir/explain.go operatorName — large switch with one case per
       # operator type; splitting would add indirection without reducing real complexity.
       - linters: [gocyclo]
-        path: "cypher/ir/explain\\.go"
+        path: "^cypher/ir/explain\\.go"
         text: "cyclomatic complexity"
       # gocritic: builtinShadow in essentials.go — cap/min as local variable names
       # in pre-existing non-exported helpers; renaming would obscure intent.
       - linters: [gocritic]
-        path: "cypher/funcs/essentials\\.go"
+        path: "^cypher/funcs/essentials\\.go"
         text: "builtinShadow"
+      # forcetypeassert in tests: an unchecked type assertion in a test panics
+      # at the asserting line, which fails the test loudly and points straight
+      # at the offending value — the diagnostic a test wants. Rewriting 265 test
+      # assertions to comma-ok would replace a precise panic with a less precise
+      # nil-deref later, so production keeps the check and tests do not.
+      - linters: [forcetypeassert]
+        path: "_test\\.go"
       # gosec G104: standalone res.Close() in tests — teardown, not production code.
       - linters: [gosec]
         path: "_test\\.go"
         text: "G104"
       # staticcheck SA9003: empty branch with explanatory comment in parallel_test.go.
       - linters: [staticcheck]
-        path: "cypher/exec/parallel_test\\.go"
+        path: "^cypher/exec/parallel_test\\.go"
         text: "SA9003"
       # revive: 'cap'/'copy' as local variable names in tests — common idiom for
       # capacity/copy fixtures; renaming obscures intent. Production code remains
@@ -100,30 +156,6 @@ linters:
       - linters: [gocritic]
         path: "_test\\.go"
         text: "builtinShadow"
-      # gosec G204 / G304 / G703: subprocess and file-inclusion warnings in test
-      # code rely on trusted, in-process inputs (test temp dirs, locally built
-      # helper binaries, deterministic test paths). Production code keeps full
-      # gosec coverage.
-      - linters: [gosec]
-        path: "_test\\.go"
-        text: "G204"
-      - linters: [gosec]
-        path: "_test\\.go"
-        text: "G304"
-      - linters: [gosec]
-        path: "_test\\.go"
-        text: "G703"
-      # gosec G404: tests intentionally use math/rand or PCG for deterministic
-      # reproducibility; cryptographic randomness is not required.
-      - linters: [gosec]
-        path: "_test\\.go"
-        text: "G404"
-      # gosec G302: tests sometimes restore directory permissions to 0o750 after
-      # deliberately stripping them to probe EACCES; the executable bit is
-      # required for traversal during the test cleanup.
-      - linters: [gosec]
-        path: "_test\\.go"
-        text: "G302"
       # gosec G115 in test files: test harnesses cast node IDs and protocol
       # constants between int64/uint64/uint16 with documented bounds. These
       # casts mirror the production code they exercise and cannot overflow.
@@ -135,66 +167,63 @@ linters:
       # set in practice). Every site is a Cypher integer-value to graph.NodeID
       # cast where the Cypher value is validated as non-negative before the cast.
       - linters: [gosec]
-        path: "cypher/"
-        text: "G115"
-      # gosec G115 in bolt/server/session.go: element-ID bookmark conversions
-      # cast atomic.Uint64 counter values to int64. The counter is monotonically
-      # increasing from 0; it will not reach 2^63 within the session lifetime.
-      - linters: [gosec]
-        path: "bolt/server/session\\.go"
-        text: "G115"
-      # gosec G115 in bolt/server/entity_struct.go: the Bolt protocol types an
-      # entity id as a signed INTEGER, so encoding a graph.NodeID (uint64) onto
-      # the wire is necessarily a uint64 → int64 conversion. Node and
-      # relationship ids are assigned monotonically from 0, so the sign bit is
-      # never set for any reachable id. These are the same casts the map-shaped
-      # encoder in session.go made before #2189 moved them into this file.
-      - linters: [gosec]
-        path: "bolt/server/entity_struct\\.go"
-        text: "G115"
-      # gosec G115 in ds/: int → int32 casts in union-find are bounded by the
-      # caller-supplied n (node count); int32 represents up to ~2.1 billion nodes.
-      - linters: [gosec]
-        path: "ds/"
+        path: "^cypher/"
         text: "G115"
       # gosec G115 in graph/: all NodeID/property-index conversions are bounded by
       # the LPG node and edge count. The sign bit (uint64 → int64 and int64 → uint64)
       # is never set in practice on any graph that fits in addressable memory.
       - linters: [gosec]
-        path: "graph/"
+        path: "^graph/"
         text: "G115"
       # gosec G115 in search/: all int ↔ uint conversions are over node/edge
       # indices bounded by the graph size, which cannot exceed addressable memory.
       - linters: [gosec]
-        path: "search/"
+        path: "^search/"
         text: "G115"
       # gosec G115 in internal/sim/: the DST search oracle casts between dense node
       # indices and graph.NodeID when building CSRs and collecting reachable sets;
       # the indices are bounded by the modelled node count, which fits addressable
       # memory. Mirrors the search/ and graph/ bounded-conversion exclusions.
       - linters: [gosec]
-        path: "internal/sim/"
+        path: "^internal/sim/"
         text: "G115"
-      # gosec G115 in store/: WAL offsets, snapshot sizes, and codec widths are
-      # bounded by 64-bit address space; the narrowing casts mirror the on-disk
-      # format widths which are always within range.
-      - linters: [gosec]
-        path: "store/"
-        text: "G115"
-      # gosec G115 in bench/: benchmark and soak harnesses cast graph dimensions
-      # and R-MAT parameters between uint64 and uint32/int; the values are
-      # bounded by the generated graph size, which fits addressable memory.
-      # Mirrors the bounded-conversion exclusions applied to the library subtrees
-      # above. bench/ is non-shipping harness code.
-      - linters: [gosec]
-        path: "bench/"
-        text: "G115"
-      # gosec G306 in tests: the TCK failure-lister writes human-readable
-      # diagnostic reports with 0o644. These are local test artefacts, not
-      # secrets; production code keeps the stricter permission check.
-      - linters: [gosec]
-        path: "_test\\.go"
-        text: "G306"
+      # gocritic whyNoLint: three directives whose justification is deliberately
+      # NOT an inline suffix. whyNoLint only recognises an explanation written
+      # after the directive on the same line, so a justification that needs a
+      # paragraph is invisible to it. These three are the paragraph kind, and
+      # #2708 verified each one rather than assuming it:
+      #   * bolt/server/serve.go — the handshake SetDeadline pair, explained by
+      #     the eight-line policy comment above serve.go:966 (why the bound is a
+      #     fixed package value, and why it is cleared before the message loop).
+      #   * cypher/funcs/temporal.go — the openCypher "invalid temporal input
+      #     yields NULL, not an error" rule. Turning these into errors would
+      #     break TCK conformance, so the justification is the specification
+      #     itself, not a line of local prose.
+      #   * cypher/sema/analyse.go — a gocyclo complexity metric with no
+      #     correctness content, under a doc comment about the rule it walks.
+      # Scoped to these three files so an unexplained directive added anywhere
+      # else in the module is still challenged.
+      # Both gocritic's whyNoLint and nolintlint's require-explanation ask the
+      # same question, so each file is excluded from both by one regex.
+      #
+      # Task #2746 added the third alternative. With allow-unused now false,
+      # two of these paragraph-justified directives are also reported as
+      # suppressing nothing (serve.go's SetDeadline pair, analyse.go:2030's
+      # complexity metric), and #2708 proved both justified, so they must not
+      # be deleted. The alternative matches a directive whose recited text ENDS
+      # at the linter list — i.e. one carrying no inline explanation, which is
+      # exactly the shape this block already exists to permit. Every other
+      # directive in these three files carries an explanation, so it is still
+      # challenged when it goes inert.
+      - linters: [gocritic, nolintlint]
+        path: "^bolt/server/serve\\.go"
+        text: "whyNoLint|should provide explanation|directive `//nolint:[a-z,]+` is unused"
+      - linters: [gocritic, nolintlint]
+        path: "^cypher/funcs/temporal\\.go"
+        text: "whyNoLint|should provide explanation|directive `//nolint:[a-z,]+` is unused"
+      - linters: [gocritic, nolintlint]
+        path: "^cypher/sema/analyse\\.go"
+        text: "whyNoLint|should provide explanation|directive `//nolint:[a-z,]+` is unused"
       # gocritic: unnamedResult is a style preference, not a defect; allowed in
       # both production and test code where the return-type signature is
       # self-documenting.
@@ -204,17 +233,17 @@ linters:
       # accept descriptor structs by value for readability; the call sites are
       # not on hot paths.
       - linters: [gocritic]
-        path: "internal/shapegen/graphalytics\\.go"
+        path: "^internal/shapegen/graphalytics\\.go"
         text: "hugeParam"
       - linters: [gocritic]
-        path: "examples/24_social_network_cli/cmd_seed\\.go"
+        path: "^examples/24_social_network_cli/cmd_seed\\.go"
         text: "hugeParam"
       # gocritic: exitAfterDefer in example main programs is the conventional
       # demo pattern; the temp-dir leak on Fatalf is bounded (per-run /tmp
       # entry) and not worth the cost of a typed exit code in didactic code.
       # Production binaries (cmd/) keep the rule active.
       - linters: [gocritic]
-        path: "examples/.*\\.go"
+        path: "^examples/.*\\.go"
         text: "exitAfterDefer"
       # errcheck: fmt.Fprint/Fprintf/Fprintln writes in example programs emit
       # demo output to os.Stdout (or a test buffer), exactly as fmt.Print does
@@ -224,7 +253,7 @@ linters:
       # return (e.g. res.Close) flagged, and production code stays fully
       # checked outside examples/.
       - linters: [errcheck]
-        path: "examples/.*\\.go"
+        path: "^examples/.*\\.go"
         text: "Error return value of `fmt\\.Fprint(f|ln)?` is not checked"
       # gocritic hugeParam: internal/sim's SimConfig is an immutable setup
       # snapshot (~248 B) passed by VALUE on purpose — the deterministic
@@ -233,7 +262,7 @@ linters:
       # config. The one-time copy is negligible; pass-by-pointer would buy
       # nothing and invite aliasing bugs in the harness.
       - linters: [gocritic]
-        path: "internal/sim/"
+        path: "^internal/sim/"
         text: "hugeParam: cfg is heavy"
       # revive unexported-return: internal/sim.SimStore.Config returns the
       # package-internal simStoreConfig deliberately — it exists only so the
@@ -241,7 +270,7 @@ linters:
       # (sim.go maybeCrash). The type is not meant to be constructed by callers,
       # so exporting it would widen the surface for no benefit.
       - linters: [revive]
-        path: "internal/sim/simstore\\.go"
+        path: "^internal/sim/simstore\\.go"
         text: "unexported-return"
       # revive exported (stutter): store/wal.WALFile is the deliberately
       # descriptive name of the minimal open-handle interface a Writer needs
@@ -249,7 +278,7 @@ linters:
       # call sites and is an exported-API change for a published package; the
       # explicit "WAL" qualifier is intentional.
       - linters: [revive]
-        path: "store/wal/writer_vfs\\.go"
+        path: "^store/wal/writer_vfs\\.go"
         text: "type name will be used as wal.WALFile"
   settings:
     errorlint:
@@ -296,6 +325,40 @@ linters:
         - name: unused-parameter
         - name: unreachable-code
         - name: redefines-builtin-id
+    nolintlint:
+      # allow-unused is FALSE, and it is now a gate rather than an aspiration:
+      # a directive that suppresses nothing fails the build. Task #2746 cleared
+      # the backlog that kept it true (measured at 831 reports here, against the
+      # 876 #2708 recorded before the tree moved on).
+      #
+      # Read that number carefully: nolintlint emits one report per unused
+      # (directive, linter) pair, but `issues.uniq-by-line` defaults to TRUE and
+      # collapses every report sharing a line. A directive naming three linters,
+      # all three inert, was counted ONCE. To audit this setting honestly, re-run
+      # with `uniq-by-line: false`; #2746 did, and only then did the last five
+      # inert pairs appear.
+      #
+      # The backlog split in two, and the two halves needed opposite remedies:
+      #   * 488 pairs suppressed nothing even with EVERY exclusion removed —
+      #     gocyclo directives left behind when min-complexity moved 15 -> 51,
+      #     revive directives on `for cond {}` drains (revive's empty-block
+      #     ignores a ForStmt body; only a RangeStmt body is flagged), errcheck
+      #     directives on calls already written `_ = f()`, and gosec directives
+      #     on conversions gosec now proves in range. No exclusion was involved,
+      #     so there was nothing to narrow: the directive went, its reasoning
+      #     stayed behind as prose.
+      #   * 343 pairs named a real finding that a path exclusion removed first.
+      #     Those were decided on measured proportionality — how much the
+      #     blanket removes versus how much the per-site directives already
+      #     carry. The data separated cleanly (residuals of 1-26 against
+      #     72-1100), so the small blankets were narrowed away and their
+      #     directives made live, and the broad ones were kept with their
+      #     redundant per-site directives deleted.
+      allow-unused: false
+      # Every directive must say WHY, and must name the linter it suppresses.
+      # These two are what stop a directive from decaying into a fossil.
+      require-explanation: true
+      require-specific: true
     gosec:
       excludes: []
     gocritic:
@@ -305,7 +368,6 @@ linters:
         - style
       disabled-checks:
         - ifElseChain
-        - whyNoLint
 
 formatters:
   enable:

@@ -37,7 +37,7 @@ import (
 // readSourceFile reads a file from this package's directory. A test binary runs
 // with its package directory as the working directory, so the bare name resolves.
 func readSourceFile(name string) (string, error) {
-	b, err := os.ReadFile(name)
+	b, err := os.ReadFile(name) //nolint:gosec // G304: name is a source file in this package's own directory — a test binary runs with that directory as its working directory (see the readSourceFile doc).
 	return string(b), err
 }
 

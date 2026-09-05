@@ -480,7 +480,7 @@ func engineRunDDLOn(ctx context.Context, engine *EngineAdapter, query string) er
 	if err != nil {
 		return err
 	}
-	for res.Next() { //nolint:revive // draining is the point
+	for res.Next() { // draining is the point
 	}
 	drainErr := res.Err()
 	_ = res.Close()
@@ -497,7 +497,7 @@ func runWriteCommitted(ctx context.Context, engine *EngineAdapter, query string,
 	if err != nil {
 		return false
 	}
-	for res.Next() { //nolint:revive // draining is the point
+	for res.Next() { // draining is the point
 	}
 	drainErr := res.Err()
 	_ = res.Close()

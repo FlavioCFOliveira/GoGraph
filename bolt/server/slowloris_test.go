@@ -38,7 +38,7 @@ func TestServe_SlowlorisHandshakeDisconnect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer conn.Close() //nolint:errcheck // best-effort close on teardown
+	defer conn.Close() // best-effort close on teardown
 
 	// Send a single byte and then stall — never complete the 20-byte handshake.
 	if _, err := conn.Write([]byte{0x60}); err != nil {
@@ -102,7 +102,7 @@ func TestServe_DefaultServerEnforcesHandshakeDeadline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	defer conn.Close() //nolint:errcheck // best-effort close on teardown
+	defer conn.Close() // best-effort close on teardown
 
 	if _, err := conn.Write([]byte{0x60}); err != nil {
 		t.Fatalf("write single byte: %v", err)

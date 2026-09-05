@@ -661,7 +661,7 @@ type rng64 struct {
 
 // newRNG returns an rng64 seeded from seed.
 func newRNG(seed int64) *rng64 {
-	return &rng64{state: uint64(seed)}
+	return &rng64{state: uint64(seed)} //nolint:gosec // G115: a deliberate bit reinterpretation of the seed into SplitMix64 state; every bit pattern is a valid state, so no value is out of range.
 }
 
 // next returns the next 64-bit value from the SplitMix64 stream.
@@ -684,7 +684,7 @@ func (r *rng64) Intn(n int) int {
 	// product, which is uniform for the full uint64 range and avoids the
 	// narrowing conversions gosec flags on raw casts.
 	hi, _ := mul64(r.next(), uint64(n))
-	return int(hi)
+	return int(hi) //nolint:gosec // G115: hi is the high half of next()*uint64(n) under Lemire's reduction, so hi < n, and n > 0 is enforced at the top of Intn.
 }
 
 // mul64 returns the 128-bit product of a and b as (hi, lo) 64-bit halves.

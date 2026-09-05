@@ -377,7 +377,7 @@ func (op *Expand) Init(ctx context.Context) error {
 // input row.  It pulls a new input row whenever the current source's
 // adjacency is exhausted.
 //
-//nolint:gocyclo // complexity driven by direction×filter state machine; see helpers below
+// complexity driven by direction×filter state machine; see helpers below
 func (op *Expand) Next(out *Row) (bool, error) {
 	for {
 		if err := op.ctx.Err(); err != nil {

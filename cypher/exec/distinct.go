@@ -121,7 +121,21 @@ func (op *Distinct) Next(out *Row) (bool, error) {
 			return false, ErrDistinctMemoryExceeded
 		}
 
-		// Copy and store the row.
+		// The copy is REQUIRED for two independent reasons and cannot be elided
+		// (rmp #2702). First, cp is retained in op.seen for the operator's
+		// lifetime as the comparand every later row is tested against by
+		// rowInBucket, long after the producer has reused *out's backing array
+		// ([Row]'s contract). Second, `*out = cp` below hands that SAME slice to
+		// the consumer, so the retained comparand and the emitted row are one
+		// object — a consumer that wrote through the emitted row would silently
+		// corrupt the dedup table.
+		//
+		// Measured (rmp #2702, MemProfileRate=1, no -race): on
+		// `MATCH (p:Person) RETURN DISTINCT p.salary` over 120 000 rows with a
+		// unique key this fires 120 000 times — 19.81% of the query's allocs/op
+		// but only 3.01% of its B/op, since each is a 16-byte one-column Row.
+		// On a low-cardinality key (200 distinct of 120 000) it fires 200 times,
+		// 0.055% of allocs/op.
 		cp := make(Row, len(*out))
 		copy(cp, *out)
 		op.seen[h] = append(bucket, cp)

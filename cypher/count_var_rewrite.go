@@ -82,6 +82,7 @@ package cypher
 
 import (
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
@@ -315,4 +316,106 @@ func countVarWalk(n ir.LogicalPlan, v string, bound *bool) bool {
 		}
 	}
 	return true
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cross-execution memo (rmp #2693)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// countVarRewriteMemo memoises [rewriteCountVarToCountStar] per
+// [ir.EagerAggregation] node for the lifetime of one [planCacheEntry].
+//
+// # Why it exists
+//
+// The rewrite is a pure function of an immutable plan node, and when it FIRES it
+// allocates twice — the EagerAggregation copy and its Aggregates slice, which
+// exist precisely so the cached logical plan is not mutated (see the comment
+// inside [rewriteCountVarToCountStar]). Those two allocations were paid on EVERY
+// execution of a plan whose answer can never change. Measured with
+// -memprofilerate=1 on bench/contention's cypher-read-label-small
+// ("MATCH (n:N) RETURN count(n)" — the count(var) spelling, so the rewrite
+// fires): 2 of the 33 allocations of the whole read (rmp #2693).
+//
+// It is the same class as [nodeScalarUseMemo] and deliberately the same shape,
+// including the ceiling. The concurrency argument is that type's, unchanged: a
+// [planCacheEntry] is shared by every concurrent execution of one query text, so
+// this is read-mostly and reached from many goroutines; stores go through
+// LoadOrStore so every caller receives the SAME rewritten node; and a stored
+// value is immutable, because the rewrite builds a fresh node and no consumer
+// writes to one.
+//
+// # Bound
+//
+// The keys are [ir.EagerAggregation] pointers read off the cached plan, and this
+// package synthesises none — every EagerAggregation is built by the translator in
+// cypher/ir, once per cached plan — so the table is bounded by the plan's own
+// aggregation count. The ceiling is kept anyway, for the reason
+// [nodeScalarUseMemo] documents: a future build path that synthesised a node per
+// execution would otherwise turn this into an unbounded cache, and past the
+// ceiling the memo simply answers from the live rewrite, which is exactly the
+// behaviour that preceded it.
+type countVarRewriteMemo struct {
+	m sync.Map // *ir.EagerAggregation -> *ir.EagerAggregation (possibly the same pointer)
+
+	// entries counts what has been stored, so the ceiling is enforceable without a
+	// Len the sync.Map does not have. Increment-only; a concurrent burst of
+	// first-time stores may overshoot slightly, which is harmless because the bound
+	// is on unbounded GROWTH, not an exact quota.
+	entries atomic.Int64
+
+	// hits and misses exist so a test can prove the memo is CONSULTED rather than
+	// merely present. A memo that is populated and never read is invisible to a
+	// result-identical differential test, which is the only other check this
+	// rewrite has.
+	hits   atomic.Int64
+	misses atomic.Int64
+}
+
+// countVarRewriteMemoMaxEntries is the ceiling on entries in one
+// [countVarRewriteMemo]. It matches [scalarUseMemoMaxEntries] because it bounds
+// the same thing for the same reason on the same shared entry.
+const countVarRewriteMemoMaxEntries = 256
+
+// get returns the memoised rewrite of p, computing and storing it on a miss.
+//
+// The value stored may be p ITSELF — that is the common case, since most
+// aggregations spell no count(<bare variable>) at all — and storing it is the
+// point: a hit that answers "unchanged" is what removes the subtree walk as well
+// as the two allocations.
+func (m *countVarRewriteMemo) get(p *ir.EagerAggregation) *ir.EagerAggregation {
+	if p == nil {
+		return nil
+	}
+	if v, ok := m.m.Load(p); ok {
+		m.hits.Add(1)
+		//nolint:forcetypeassert // the memo map is unexported and only ever stores *ir.EagerAggregation
+		return v.(*ir.EagerAggregation)
+	}
+	m.misses.Add(1)
+	out := rewriteCountVarToCountStar(p)
+	if m.entries.Load() >= countVarRewriteMemoMaxEntries {
+		return out
+	}
+	actual, loaded := m.m.LoadOrStore(p, out)
+	if !loaded {
+		m.entries.Add(1)
+	}
+	//nolint:forcetypeassert // LoadOrStore returns the value already in the memo map, which only stores *ir.EagerAggregation
+	return actual.(*ir.EagerAggregation)
+}
+
+// rewriteCountVarToCountStarFor routes the rewrite of p through the memo on
+// bopts when there is one, and calls [rewriteCountVarToCountStar] directly when
+// there is not.
+//
+// The fallback is not dead code, for the reason [analyseNodeScalarUseFor]'s is
+// not: a [buildOpts] is also built on paths with no plan-cache entry to memoise
+// against — the plan-rendering paths, the write path's own builder, and the
+// scoped child [buildOpts.forSubquery] derives — and those must keep working,
+// just without the memo.
+func rewriteCountVarToCountStarFor(bopts *buildOpts, p *ir.EagerAggregation) *ir.EagerAggregation {
+	if bopts == nil || bopts.countVarMemo == nil {
+		return rewriteCountVarToCountStar(p)
+	}
+	return bopts.countVarMemo.get(p)
 }

@@ -219,7 +219,7 @@ func ApplyAdversarialProps[N comparable, W any](g *lpg.Graph[N, W], mix Mix) {
 // per-node loop completes without aborting the rest of the
 // adversarial soup.
 //
-//nolint:gocritic // paramTypeCombine: the (ints, floats, strs, ...) tail mirrors the AdversarialXxx() corpus order; combining types would obscure intent.
+// paramTypeCombine: the (ints, floats, strs, ...) tail mirrors the AdversarialXxx() corpus order; combining types would obscure intent.
 func applyAdversarialNode[N comparable, W any](
 	g *lpg.Graph[N, W], key N, idx int, mix Mix,
 	ints []int64, floats []float64, strs []string, bs [][]byte, times []time.Time, bools []bool,
@@ -247,28 +247,28 @@ func applyAdversarialNode[N comparable, W any](
 // applyAdversarialEdge stamps the directed edge (src, dst) with the
 // per-kind adversarial selection picked by (srcIdx*7 + edgeIdx).
 //
-//nolint:gocritic // paramTypeCombine: see [applyAdversarialNode].
+// paramTypeCombine: see [applyAdversarialNode].
 func applyAdversarialEdge[N comparable, W any](
 	g *lpg.Graph[N, W], src, dst N, srcIdx, edgeIdx int, mix Mix,
 	ints []int64, floats []float64, strs []string, bs [][]byte, times []time.Time, bools []bool,
 ) {
 	bucket := srcIdx*7 + edgeIdx
 	if mix.Ints {
-		_ = g.SetEdgeProperty(src, dst, AdvKeyInt, lpg.Int64Value(ints[bucket%len(ints)])) //nolint:errcheck // no schema validator in shapegen
+		_ = g.SetEdgeProperty(src, dst, AdvKeyInt, lpg.Int64Value(ints[bucket%len(ints)])) // no schema validator in shapegen
 	}
 	if mix.Floats {
-		_ = g.SetEdgeProperty(src, dst, AdvKeyFloat, lpg.Float64Value(floats[bucket%len(floats)])) //nolint:errcheck // no schema validator in shapegen
+		_ = g.SetEdgeProperty(src, dst, AdvKeyFloat, lpg.Float64Value(floats[bucket%len(floats)])) // no schema validator in shapegen
 	}
 	if mix.Strings {
-		_ = g.SetEdgeProperty(src, dst, AdvKeyString, lpg.StringValue(strs[bucket%len(strs)])) //nolint:errcheck // no schema validator in shapegen
+		_ = g.SetEdgeProperty(src, dst, AdvKeyString, lpg.StringValue(strs[bucket%len(strs)])) // no schema validator in shapegen
 	}
 	if mix.Bytes {
-		_ = g.SetEdgeProperty(src, dst, AdvKeyBytes, lpg.BytesValue(bs[bucket%len(bs)])) //nolint:errcheck // no schema validator in shapegen
+		_ = g.SetEdgeProperty(src, dst, AdvKeyBytes, lpg.BytesValue(bs[bucket%len(bs)])) // no schema validator in shapegen
 	}
 	if mix.Times {
-		_ = g.SetEdgeProperty(src, dst, AdvKeyTime, lpg.TimeValue(times[bucket%len(times)])) //nolint:errcheck // no schema validator in shapegen
+		_ = g.SetEdgeProperty(src, dst, AdvKeyTime, lpg.TimeValue(times[bucket%len(times)])) // no schema validator in shapegen
 	}
 	if mix.Bools {
-		_ = g.SetEdgeProperty(src, dst, AdvKeyBool, lpg.BoolValue(bools[bucket%len(bools)])) //nolint:errcheck // no schema validator in shapegen
+		_ = g.SetEdgeProperty(src, dst, AdvKeyBool, lpg.BoolValue(bools[bucket%len(bools)])) // no schema validator in shapegen
 	}
 }

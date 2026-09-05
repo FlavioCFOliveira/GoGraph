@@ -395,7 +395,7 @@ func uniqueHexID(rng *rand.Rand, seen map[string]struct{}) string {
 	var b [12]byte
 	for {
 		for i := range b {
-			b[i] = byte(rng.Intn(256))
+			b[i] = byte(rng.Intn(256)) //nolint:gosec // G115: rng.Intn(256) returns [0,256), exactly the byte range.
 		}
 		id := hex.EncodeToString(b[:])
 		if _, dup := seen[id]; dup {
@@ -702,7 +702,7 @@ func buildUndirectedKnows(ctx context.Context, g *lpg.Graph[string, float64]) (*
 // the CSR, returning a slice indexed by NodeID with -1 for unreachable nodes.
 // It is a plain textbook BFS, deliberately sharing no code with the engine.
 func bfsDistances(ctx context.Context, c *csr.CSR[float64], src graph.NodeID) ([]int, error) {
-	dist := make([]int, int(c.MaxNodeID())+1)
+	dist := make([]int, int(c.MaxNodeID())+1) //nolint:gosec // G115: MaxNodeID is bounded by the node count of the CSR just built, which fits addressable memory.
 	for i := range dist {
 		dist[i] = -1
 	}
@@ -999,7 +999,7 @@ func execWrite(ctx context.Context, eng *cypher.Engine, query string, params map
 	if err != nil {
 		return err
 	}
-	for res.Next() { //nolint:revive // drain to apply the write; result rows are not needed here.
+	for res.Next() { // drain to apply the write; result rows are not needed here.
 	}
 	if err := res.Err(); err != nil {
 		_ = res.Close()

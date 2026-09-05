@@ -623,7 +623,7 @@ func (c *Checkpointer[N, W]) loop(ctx context.Context) {
 				// (via setErr inside runCheckpoint) so observability
 				// surfaces; there is no caller to return to from the
 				// loop, so the value itself is intentionally discarded.
-				_ = c.runCheckpoint() //nolint:errcheck // error captured in stats
+				_ = c.runCheckpoint() // error captured in stats
 				lastFire = c.clk.Now()
 			}
 		}
@@ -633,6 +633,7 @@ func (c *Checkpointer[N, W]) loop(ctx context.Context) {
 func (c *Checkpointer[N, W]) runCheckpoint() error {
 	start := c.clk.Now()
 	defer func() {
+		//nolint:gosec // G115: Since is never negative: clock.Clock is an internal/ package so implementers are module-closed; realClock uses monotonic time.Since and Fake clamps Advance/Set (internal/clock/fake.go:92,106)
 		c.lastDuration.Store(uint64(c.clk.Since(start).Nanoseconds()))
 	}()
 	return c.runNonBlocking()

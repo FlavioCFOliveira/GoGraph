@@ -29,7 +29,7 @@ func TestIC3_FriendsInCountries(t *testing.T) {
 	ctx := context.Background()
 
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer session.Close(ctx) //nolint:errcheck
+	defer session.Close(ctx)
 
 	const query = `MATCH (start:Person {id: 1})-[:KNOWS*1..2]-(friend:Person)
 WHERE friend.lastName STARTS WITH 'B'
@@ -38,7 +38,11 @@ ORDER BY friend.id`
 
 	results, err := runICQuery(ctx, session, query)
 	if err != nil {
-		t.Skipf("IC3 query not supported: %v", err)
+		// An error here is a GoGraph defect, not an environment precondition:
+		// the query runs against this process's own in-process Bolt server over
+		// the canonical seeded graph. Skipping would convert an engine failure
+		// into a green run (rmp #2709).
+		t.Fatalf("IC3 query failed: %v", err)
 	}
 
 	// AC#1: exactly one row.

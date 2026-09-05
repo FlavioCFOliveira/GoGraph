@@ -92,7 +92,7 @@ func installPersonNameIndex(g *lpg.Graph[string, float64]) {
 }
 
 func drainResultIdx(r *cypher.Result) {
-	defer r.Close() //nolint:errcheck // test helper
+	defer r.Close() // test helper
 	for r.Next() {
 	}
 }
@@ -152,7 +152,7 @@ func BenchmarkIndexSeek_vs_LabelScan(b *testing.B) {
 			if err := res.Err(); err != nil {
 				b.Fatal(err)
 			}
-			res.Close() //nolint:errcheck
+			res.Close()
 		}
 	})
 
@@ -168,7 +168,7 @@ func BenchmarkIndexSeek_vs_LabelScan(b *testing.B) {
 			if err := res.Err(); err != nil {
 				b.Fatal(err)
 			}
-			res.Close() //nolint:errcheck
+			res.Close()
 		}
 	})
 }

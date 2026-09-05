@@ -118,7 +118,7 @@ func TestOrderRuns_MixedHandleAndHandle0(t *testing.T) {
 // each slot's (destination, handle, weight), permuting all columns as one.
 func TestOrderRuns_PreservesMultisetAndPairing(t *testing.T) {
 	t.Parallel()
-	r := rand.New(rand.NewPCG(11, 13))
+	r := rand.New(rand.NewPCG(11, 13)) //nolint:gosec // G404: math/rand/v2 PCG seeded from a fixed constant — this test asserts a reproducible sequence, which a CSPRNG would destroy.
 	for trial := 0; trial < 300; trial++ {
 		nSrc := 1 + r.IntN(6)
 		verts := make([]uint64, nSrc+1)

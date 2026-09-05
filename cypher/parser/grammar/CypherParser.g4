@@ -35,8 +35,23 @@ options {
     tokenVocab = CypherLexer;
 }
 
+// script accepts an optional EXPLAIN / PROFILE statement prefix ahead of the
+// query, as Neo4j does. The two differ in EXECUTION, not in syntax: EXPLAIN
+// plans the query and runs nothing, PROFILE runs it and reports what each
+// operator cost. The grammar records only which prefix was written; the engine
+// decides what that means (see cypher.PlanMode).
+//
+// The prefix is spelt inline here rather than in a rule of its own on purpose:
+// a new parser rule shifts every later rule index, which invalidates the
+// CypherParserRULE_* constants the hand-written post-generation patches append
+// by name (see cypher/parser/grammar/README.md). An added alternative inside an
+// existing rule shifts no rule index.
+//
+// It is unambiguous even though `symbol` also accepts EXPLAIN and PROFILE: no
+// alternative of `query` can begin with a symbol, so a leading EXPLAIN/PROFILE
+// token can only be this prefix.
 script
-    : query SEMI? EOF
+    : (EXPLAIN | PROFILE)? query SEMI? EOF
     ;
 
 // statements
@@ -469,6 +484,14 @@ name
     | reservedWord
     ;
 
+// EXPLAIN and PROFILE are listed here — not in reservedWord — so that they stay
+// usable as ordinary identifiers (variables, labels, property keys, map keys,
+// function names) now that they are lexer tokens. `MATCH (explain) RETURN
+// explain` parses at every revision before they were tokenised, and promoting
+// them without this would have silently removed that from the accepted
+// language. Listing them in `symbol` also covers `name` (name : symbol |
+// reservedWord), so they remain legal wherever a name is; listing them in BOTH
+// would make `name` ambiguous.
 symbol
     : ESC_LITERAL
     | ID
@@ -478,6 +501,8 @@ symbol
     | ANY
     | NONE
     | SINGLE
+    | EXPLAIN
+    | PROFILE
     ;
 
 reservedWord

@@ -38,7 +38,7 @@ func TestBreakpoint_NoOp(t *testing.T) {
 	// Must return without killing the process.
 	crashinject.Breakpoint("some.nonexistent.point")
 	// Empty name must always be a no-op (never matches env value).
-	crashinject.Breakpoint("") //nolint:staticcheck — intentional empty name test
+	crashinject.Breakpoint("") // the empty-argument warning is the point: an empty name must be a no-op and never match the env value
 }
 
 // TestRun_UnknownScenario verifies that an unknown scenario name

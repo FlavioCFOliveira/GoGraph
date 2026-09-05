@@ -39,7 +39,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/internal/shapegen"
 )
 
-//nolint:staticcheck // intentional exercise of the deprecated EppsteinKShortest alias
+// intentional exercise of the deprecated EppsteinKShortest alias
 func TestEppsteinVsYen_LayeredDAG(t *testing.T) {
 	t.Parallel()
 

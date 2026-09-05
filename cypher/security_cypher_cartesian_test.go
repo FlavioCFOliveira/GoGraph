@@ -73,7 +73,7 @@ func runNotifications(t *testing.T, eng *cypher.Engine, q string) []cypher.Notif
 	if err != nil {
 		t.Fatalf("Run(%q): %v", q, err)
 	}
-	for res.Next() { //nolint:revive // drain
+	for res.Next() { // drain
 	}
 	if err := res.Err(); err != nil {
 		t.Fatalf("iterate %q: %v", q, err)
@@ -164,7 +164,7 @@ func TestSec_Cypher_Cartesian_IsCancellable(t *testing.T) {
 		}
 		t.Fatalf("Run(%q): unexpected entry error %v", q, err)
 	}
-	for res.Next() { //nolint:revive // drain until the deadline aborts the product
+	for res.Next() { // drain until the deadline aborts the product
 	}
 	elapsed := time.Since(t0)
 	iterErr := res.Err()

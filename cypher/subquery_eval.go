@@ -67,6 +67,8 @@ type subqueryEvaluator struct {
 	// translated and physically built at most once per outer query. The key is
 	// the unique AST pointer; the value carries the seedable Argument and the
 	// schema layout used to materialise the per-row Row.
+	//
+	// nil until the first subquery is compiled — see [subqueryEvaluator.init].
 	compiled map[ast.Expression]*compiledSubquery
 
 	// degree caches the per-AST degree-rewrite verdict (rmp #2232). A present
@@ -74,12 +76,16 @@ type subqueryEvaluator struct {
 	// the adjacency instead of driving an inner plan; a present nil value is a
 	// pattern already examined and rejected, so the recogniser runs at most once
 	// per subquery occurrence rather than once per outer row.
+	//
+	// nil until the first verdict is recorded — see [subqueryEvaluator.init].
 	degree map[ast.Expression]*degreeShape
 
 	// labelledHop caches the per-AST verdict for the labelled single-hop count
 	// (rmp #2235). It is a SEPARATE map from degree because it is a separate
 	// recogniser: a pattern rejected by one may be accepted by the other, and
 	// sharing a cache would conflate the two verdicts.
+	//
+	// nil until the first verdict is recorded — see [subqueryEvaluator.init].
 	labelledHop map[ast.Expression]*labelledHopShape
 
 	// adjacencyCountsDisabled forbids BOTH adjacency-answered rewrites above, so
@@ -147,16 +153,31 @@ type compiledSubquery struct {
 // newSubqueryEvaluator constructs the evaluator for one query run. The caller
 // supplies every dependency the subquery's compiled pipeline may need.
 func newSubqueryEvaluator(walker nodeWalkerIface, labels labelResolverIface, reg expr.FunctionRegistry, g *lpg.ReadView[string, float64]) *subqueryEvaluator {
-	return &subqueryEvaluator{
-		walker:   walker,
-		labels:   labels,
-		reg:      reg,
-		g:        g,
-		compiled: make(map[ast.Expression]*compiledSubquery),
-		degree:   make(map[ast.Expression]*degreeShape),
+	e := &subqueryEvaluator{}
+	e.init(walker, labels, reg, g)
+	return e
+}
 
-		labelledHop: make(map[ast.Expression]*labelledHopShape),
-	}
+// init sets up an evaluator IN PLACE. It exists so a caller that already owns
+// storage for one — [readBuildScaffold], which holds the whole per-execution
+// build scaffolding in a single heap object — can initialise it without a second
+// allocation. [newSubqueryEvaluator] is this plus the allocation.
+//
+// The three memo maps are NOT created here. They are created on first write, by
+// the three sites that write them, because a query with no EXISTS/COUNT
+// subquery — which is most queries — never touches any of them, and three empty
+// maps cost three heap allocations on every single execution (rmp #2693: 3 of
+// the 33 allocations of a read whose plan is "Project ← LabelCountScan", which
+// has no subquery at all). Reading a nil map is legal Go and returns the zero
+// value with ok == false, which is exactly the "not memoised yet" answer every
+// reader already handles; only the writes need the guard. [patternEvaluator]'s
+// own labelledHop map has been built this way since rmp #2235, so this is the
+// established shape in this package rather than a new one.
+func (e *subqueryEvaluator) init(walker nodeWalkerIface, labels labelResolverIface, reg expr.FunctionRegistry, g *lpg.ReadView[string, float64]) {
+	e.walker = walker
+	e.labels = labels
+	e.reg = reg
+	e.g = g
 }
 
 // EvalExists implements [expr.SubqueryEvaluator]. It drives the compiled
@@ -244,6 +265,9 @@ func (e *subqueryEvaluator) compileExists(sub *ast.ExistsSubquery, row expr.RowC
 	if err != nil {
 		return nil, fmt.Errorf("compile EXISTS subquery: %w", err)
 	}
+	if e.compiled == nil {
+		e.compiled = make(map[ast.Expression]*compiledSubquery)
+	}
 	e.compiled[sub] = cs
 	return cs, nil
 }
@@ -258,6 +282,9 @@ func (e *subqueryEvaluator) compileCount(sub *ast.CountSubquery, row expr.RowCon
 	cs, err := e.compileSubAST(innerAST, row)
 	if err != nil {
 		return nil, fmt.Errorf("compile COUNT subquery: %w", err)
+	}
+	if e.compiled == nil {
+		e.compiled = make(map[ast.Expression]*compiledSubquery)
 	}
 	e.compiled[sub] = cs
 	return cs, nil

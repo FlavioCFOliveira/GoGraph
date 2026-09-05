@@ -49,7 +49,7 @@ func TestNYRouting_DijkstraAStar(t *testing.T) {
 	}
 
 	// Pick 10 canonical (src, dst) pairs from a fixed PRNG seed.
-	r := rand.New(rand.NewPCG(42, 0))
+	r := rand.New(rand.NewPCG(42, 0)) //nolint:gosec // G404: math/rand/v2 PCG seeded from a fixed constant — this test asserts a reproducible sequence, which a CSPRNG would destroy.
 	pairs := make([][2]graph.NodeID, 10)
 	for i := range pairs {
 		pairs[i] = [2]graph.NodeID{

@@ -128,10 +128,17 @@ dependencies:
    pinned version surfaces as a failure, prompting an explicit bump.
 
    ```bash
-   go install golang.org/x/vuln/cmd/govulncheck@latest   # rebuild against the current toolchain
-   govulncheck -scan=module                              # module-level: no source loading, no patterns
-   govulncheck ./...                                     # symbol-level: needs a govulncheck built for this Go minor
+   make vulncheck                                        # the gate: run this, not govulncheck by hand
+   go install golang.org/x/vuln/cmd/govulncheck@latest   # only if the gate says no usable binary
    ```
+
+   **`make vulncheck` is the supported route and it runs inside `make ci`.**
+   It resolves a `govulncheck` built for the current toolchain — ignoring
+   `PATH` order, which may shadow a stale one — and then asserts that the
+   scan *actually analysed the module* rather than reading the exit
+   status. Do not invoke `govulncheck` by hand for a release decision;
+   the whole point of the gate is that the failure below is invisible to
+   a human reading a green exit code.
 
    **Two traps, both hit while preparing `v0.12.0`.** A `govulncheck`
    binary built against an older Go minor than the one on `PATH`
@@ -143,11 +150,18 @@ dependencies:
    either a finding or the literal `No vulnerabilities found.`; treat
    empty output as a failed scan, never as a clean one. Second,
    `govulncheck@v1.3.0`'s source-processing packages are built for
-   go1.26 and **cannot parse go1.27 source**, so symbol-level
-   (reachability) scanning is unavailable under the currently pinned
-   toolchain. Use `-scan=module`, which reads `go.mod` only and accepts
-   **no package patterns**, until an upstream release built for the
-   pinned Go minor is available.
+   go1.26 and **cannot parse go1.27 source**.
+
+   **Both traps are now closed by `make vulncheck` (rmp #2722), and the
+   guidance that stood here is superseded.** This section previously
+   prescribed `-scan=module` "until an upstream release built for the
+   pinned Go minor is available" — **`govulncheck@v1.7.0` is that
+   release**, so module-level scanning is no longer necessary and would
+   now be a *weaker* scan than the gate performs. The gate asserts
+   `scan_level=symbol` precisely so a module-level run cannot pass as
+   full reachability analysis. It also asserts that every package
+   `go list ./...` reports was actually scanned, so a narrowed pattern
+   fails rather than certifying from a fraction of the module.
 
 5. **Upgrade workflow.** To upgrade a dependency:
 

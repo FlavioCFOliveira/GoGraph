@@ -147,7 +147,7 @@ func (s barabasiAlbertBase) Build(cfg adjlist.Config) (*lpg.Graph[int, int64], e
 // succeeds, so the cumulative-sum sampling at step i+1 sees the
 // up-to-date totals.
 //
-//nolint:gosec,gocritic // G404: math/rand/v2 is the pinned PRNG for catalogue determinism; paramTypeCombine: signature is pinned by the brief (n int, m0 int, seed uint64).
+//nolint:gocritic // G404: math/rand/v2 is the pinned PRNG for catalogue determinism; paramTypeCombine: signature is pinned by the brief (n int, m0 int, seed uint64).
 func BarabasiAlbert(n int, m0 int, seed uint64) Shape[int, int64] {
 	if m0 < 1 || m0 > 50 {
 		panic(fmt.Sprintf("shapegen: BarabasiAlbert requires 1 <= m0 <= 50, got %d", m0))
@@ -257,7 +257,7 @@ func buildBarabasiAlbert(g *lpg.Graph[int, int64], n, m0 int, seed uint64) error
 // cumulative-sum entry (cumDeg[i-1]) after the build, so the call
 // site does not need to maintain it explicitly.
 //
-//nolint:gosec // G404: math/rand/v2 is the pinned PRNG for catalogue determinism; see BarabasiAlbert godoc.
+// G404: math/rand/v2 is the pinned PRNG for catalogue determinism; see BarabasiAlbert godoc.
 func barabasiAlbertStep(
 	g *lpg.Graph[int, int64],
 	deg, cumDeg, targets []int,

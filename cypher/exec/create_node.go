@@ -97,7 +97,7 @@ const mergeKeyInfix = "merge_"
 // process (gated by [globalNodeCounterSeededOnce]); subsequent CreateNode
 // operators observe the [sync.Once] as already-fired and skip the scan.
 //
-//nolint:gochecknoglobals // process-wide monotonic counter for unique key generation
+// Process-wide monotonic counter for unique key generation.
 var globalNodeCounter atomic.Uint64
 
 // globalNodeCounterSeededOnce guards the one-shot seed scan triggered by the
@@ -107,7 +107,7 @@ var globalNodeCounter atomic.Uint64
 // All later CreateNode.Init calls observe the Once as already-fired and skip
 // the scan, so the cost is amortised across the lifetime of the process.
 //
-//nolint:gochecknoglobals // paired with globalNodeCounter
+// Paired with globalNodeCounter.
 var globalNodeCounterSeededOnce sync.Once
 
 // CreateNode creates a new graph node per input row, sets its labels and
@@ -510,7 +510,7 @@ func parsePropLiteralDeferred(s string) ([]propLiteral, error) {
 			// Non-literal expression (variable ref, property access, arithmetic):
 			// silently defer. The physical builder is responsible for installing a
 			// PropsEvalFn that evaluates these at runtime.
-			continue //nolint:nilerr // intentional: non-literal values are deferred, not an error
+			continue // intentional: non-literal values are deferred, not an error
 		}
 		out = append(out, propLiteral{key: key, value: pv})
 	}
@@ -740,7 +740,7 @@ func parsePropLiteralWithParamsCtx(s string, params map[string]expr.Value, merge
 			}
 			// Non-literal expression or unresolvable param: silently defer.
 			// A PropsEvalFn is responsible for evaluating these at runtime.
-			continue //nolint:nilerr // intentional: non-literal values are deferred
+			continue // intentional: non-literal values are deferred
 		}
 		out = append(out, propLiteral{key: key, value: pv})
 	}

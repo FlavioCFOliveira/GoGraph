@@ -385,7 +385,7 @@ func TestFn_Abs(t *testing.T) {
 func TestFn_Range(t *testing.T) {
 	t.Run("basic", func(t *testing.T) {
 		v := mustCall(t, "range", expr.IntegerValue(1), expr.IntegerValue(5))
-		lv := v.(expr.ListValue) //nolint:forcetypeassert // test only
+		lv := v.(expr.ListValue) // test only
 		if len(lv) != 5 {
 			t.Errorf("range(1,5) length = %d, want 5", len(lv))
 		}
@@ -399,7 +399,7 @@ func TestFn_Range(t *testing.T) {
 
 	t.Run("with_step", func(t *testing.T) {
 		v := mustCall(t, "range", expr.IntegerValue(0), expr.IntegerValue(10), expr.IntegerValue(2))
-		lv := v.(expr.ListValue) //nolint:forcetypeassert // test only
+		lv := v.(expr.ListValue) // test only
 		if len(lv) != 6 {
 			t.Errorf("range(0,10,2) length = %d, want 6", len(lv))
 		}
@@ -407,7 +407,7 @@ func TestFn_Range(t *testing.T) {
 
 	t.Run("negative_step", func(t *testing.T) {
 		v := mustCall(t, "range", expr.IntegerValue(5), expr.IntegerValue(1), expr.IntegerValue(-1))
-		lv := v.(expr.ListValue) //nolint:forcetypeassert // test only
+		lv := v.(expr.ListValue) // test only
 		if len(lv) != 5 {
 			t.Errorf("range(5,1,-1) length = %d, want 5", len(lv))
 		}
@@ -422,7 +422,7 @@ func TestFn_Range(t *testing.T) {
 
 	t.Run("empty_range", func(t *testing.T) {
 		v := mustCall(t, "range", expr.IntegerValue(5), expr.IntegerValue(1)) // start > end, step=1
-		lv := v.(expr.ListValue)                                              //nolint:forcetypeassert // test only
+		lv := v.(expr.ListValue)                                              // test only
 		if len(lv) != 0 {
 			t.Errorf("range(5,1) length = %d, want 0 (empty)", len(lv))
 		}
@@ -452,7 +452,7 @@ func TestFn_Head_Tail_Last(t *testing.T) {
 
 	t.Run("tail", func(t *testing.T) {
 		v := mustCall(t, "tail", lst)
-		lv := v.(expr.ListValue) //nolint:forcetypeassert // test only
+		lv := v.(expr.ListValue) // test only
 		if len(lv) != 2 {
 			t.Errorf("tail length = %d, want 2", len(lv))
 		}
@@ -542,7 +542,7 @@ func TestFn_Nodes_Relationships(t *testing.T) {
 
 	t.Run("nodes", func(t *testing.T) {
 		v := mustCall(t, "nodes", path)
-		lv := v.(expr.ListValue) //nolint:forcetypeassert // test only
+		lv := v.(expr.ListValue) // test only
 		if len(lv) != 3 {
 			t.Errorf("nodes length = %d, want 3", len(lv))
 		}
@@ -550,7 +550,7 @@ func TestFn_Nodes_Relationships(t *testing.T) {
 
 	t.Run("relationships", func(t *testing.T) {
 		v := mustCall(t, "relationships", path)
-		lv := v.(expr.ListValue) //nolint:forcetypeassert // test only
+		lv := v.(expr.ListValue) // test only
 		if len(lv) != 2 {
 			t.Errorf("relationships length = %d, want 2", len(lv))
 		}
@@ -600,7 +600,7 @@ func TestFn_StringFunctions(t *testing.T) {
 	})
 	t.Run("split", func(t *testing.T) {
 		v := mustCall(t, "split", expr.StringValue("a,b,c"), expr.StringValue(","))
-		lv := v.(expr.ListValue) //nolint:forcetypeassert // test only
+		lv := v.(expr.ListValue) // test only
 		if len(lv) != 3 {
 			t.Errorf("split length = %d, want 3", len(lv))
 		}

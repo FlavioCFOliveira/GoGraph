@@ -500,7 +500,7 @@ func TestProjectionFusionSharedContextMatchesOnePinnedSnapshot(t *testing.T) {
 			if err != nil {
 				return
 			}
-			for res.Next() { //nolint:revive // intentional full drain
+			for res.Next() { // intentional full drain
 			}
 			_ = res.Close()
 		}

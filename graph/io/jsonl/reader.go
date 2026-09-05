@@ -140,7 +140,7 @@ func ReadIntoCtx(ctx context.Context, r io.Reader, cfg adjlist.Config) (*adjlist
 // the moment consumption exceeds the limit, before the offending line
 // is fully buffered; a value of zero or less disables the cap.
 //
-//nolint:gocyclo // JSONL decode + per-row parse + node/edge dispatch + ctx tick
+// JSONL decode + per-row parse + node/edge dispatch + ctx tick
 func ReadIntoCappedCtx(ctx context.Context, r io.Reader, cfg adjlist.Config, maxBytes int64) (*adjlist.AdjList[string, int64], int, error) {
 	defer metrics.Time("graph.io.jsonl.ReadInto").Stop()
 	if maxBytes > 0 {
@@ -241,7 +241,7 @@ func ReadWithPropsCtx(ctx context.Context, r io.Reader, cfg adjlist.Config) (*lp
 // the offending line is fully buffered; a value of zero or less
 // disables the cap.
 //
-//nolint:gocyclo // JSONL decode + node/edge/property dispatch + kind decode + ctx tick
+// JSONL decode + node/edge/property dispatch + kind decode + ctx tick
 func ReadWithPropsCappedCtx(ctx context.Context, r io.Reader, cfg adjlist.Config, maxBytes int64) (*lpg.Graph[string, int64], int, error) {
 	defer metrics.Time("graph.io.jsonl.ReadWithProps").Stop()
 	if maxBytes > 0 {

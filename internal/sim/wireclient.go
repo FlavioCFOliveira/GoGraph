@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"net"
 
 	"github.com/FlavioCFOliveira/GoGraph/bolt/packstream"
 	"github.com/FlavioCFOliveira/GoGraph/bolt/proto"
@@ -35,16 +36,59 @@ import (
 // single-flight per connection (one request, then its response). The concurrent
 // harness gives each goroutine its own WireClient on its own SimConn.
 type WireClient struct {
-	conn *SimConn
-	cr   *proto.ChunkedReader
-	cw   *proto.ChunkedWriter
-	clk  clock.Clock
-	ver  proto.Version
+	// conn is the transport the Bolt bytes travel over. It is a net.Conn
+	// rather than a *SimConn so that ONE client implementation can drive the
+	// in-memory pipe and a real socket, which is what makes a transport A/B a
+	// single-variable comparison; see [NewWireClientNetConn].
+	conn net.Conn
+	// sim is the same connection as conn when this client was built by
+	// [NewWireClient], and nil when it was built by [NewWireClientNetConn].
+	// It is what [WireClient.Conn] returns.
+	sim *SimConn
+	cr  *proto.ChunkedReader
+	cw  *proto.ChunkedWriter
+	clk clock.Clock
+	ver proto.Version
 }
 
-// NewWireClient wraps conn with chunked reader/writer framing. clk is retained
-// for deadline-bearing operations; conn and clk must be non-nil.
+// NewWireClient wraps a [SimConn] with chunked reader/writer framing. clk is
+// retained for deadline-bearing operations; conn and clk must be non-nil.
+//
+// This is the constructor every DST scenario uses, and the only one whose
+// clients answer [WireClient.Conn] with a non-nil [SimConn].
 func NewWireClient(conn *SimConn, clk clock.Clock) *WireClient {
+	c := newWireClient(conn, clk)
+	c.sim = conn
+	return c
+}
+
+// NewWireClientNetConn wraps an ARBITRARY [net.Conn] with the same framing, so
+// the identical Bolt client can be driven over a real socket as well as over a
+// [SimConn].
+//
+// It exists for the transport A/B of rmp #2711. Every committed Bolt workload
+// runs over the in-memory [SimListener], so no published Bolt scaling number had
+// ever been taken over a socket, and the only real-socket comparison in hand
+// used a different client AND a different query — a two-variable difference that
+// cannot attribute anything. Handing this constructor a [net.Conn] from
+// net.Dial, and [NewWireClient] a [SimConn] from the same server's
+// [SimListener], leaves the transport as the ONLY difference between the two
+// arms: same encoder, same framing, same request bytes, same server.
+//
+// The returned client's [WireClient.Conn] is nil, because there is no [SimConn]
+// behind it. Use [WireClient.NetConn] for the transport-agnostic accessor. conn
+// and clk must be non-nil.
+//
+// # Concurrency contract
+//
+// Identical to [NewWireClient]: the returned client is NOT safe for concurrent
+// use. Bolt is single-flight per connection, so one goroutine drives one client.
+func NewWireClientNetConn(conn net.Conn, clk clock.Clock) *WireClient {
+	return newWireClient(conn, clk)
+}
+
+// newWireClient is the single constructor behind both entry points.
+func newWireClient(conn net.Conn, clk clock.Clock) *WireClient {
 	return &WireClient{
 		conn: conn,
 		cr:   proto.NewChunkedReader(conn),
@@ -478,9 +522,19 @@ func (c *WireClient) Request(msg any) (any, error) {
 // Close closes the underlying connection.
 func (c *WireClient) Close() error { return c.conn.Close() }
 
-// Conn returns the underlying SimConn, for callers that need a hard reset
+// Conn returns the underlying [SimConn], for callers that need a hard reset
 // (CloseWithError) to model an abrupt disconnect.
-func (c *WireClient) Conn() *SimConn { return c.conn }
+//
+// It is NIL for a client built by [NewWireClientNetConn], which has no SimConn
+// behind it. Every DST scenario builds its clients with [NewWireClient] and so
+// always gets a non-nil value; a caller that may hold either kind should use
+// [WireClient.NetConn] instead.
+func (c *WireClient) Conn() *SimConn { return c.sim }
+
+// NetConn returns the underlying transport, whichever kind it is. It is never
+// nil, and it is the accessor to reach for when the client may have been built
+// over a real socket by [NewWireClientNetConn].
+func (c *WireClient) NetConn() net.Conn { return c.conn }
 
 // send encodes msg as a PackStream request and writes it as one chunked Bolt
 // message.

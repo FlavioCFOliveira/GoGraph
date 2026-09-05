@@ -188,6 +188,7 @@ func (g *Graph[N, W]) reclaimAbortedLife() int {
 		return 0
 	}
 	var toTombstone, toRevive []graph.NodeID
+	var released []LabelID
 	freed := 0
 	for i := range g.nodeLifeShards {
 		sh := &g.nodeLifeShards[i]
@@ -197,6 +198,7 @@ func (g *Graph[N, W]) reclaimAbortedLife() int {
 				continue
 			}
 			delete(sh.born, id)
+			released = append(released, sh.takeChurnHeld(true, id)...)
 			freed++
 			if d, ok := sh.died[id]; ok && d.at() == mvcc.AbortedTS {
 				// BOTH events belong to the aborted transaction, so the state
@@ -212,6 +214,7 @@ func (g *Graph[N, W]) reclaimAbortedLife() int {
 				// first touched it: restore alive, never re-tombstone the
 				// node the undo just repaired (rmp #2445, same finder).
 				delete(sh.died, id)
+				released = append(released, sh.takeChurnHeld(false, id)...)
 				freed++
 				if aliveBefore(st, d) {
 					toRevive = append(toRevive, id)
@@ -227,6 +230,7 @@ func (g *Graph[N, W]) reclaimAbortedLife() int {
 		for id, st := range sh.died {
 			if st.at() == mvcc.AbortedTS {
 				delete(sh.died, id)
+				released = append(released, sh.takeChurnHeld(false, id)...)
 				freed++
 				// Removed by a transaction that never committed, so it is alive.
 				toRevive = append(toRevive, id)
@@ -249,6 +253,12 @@ func (g *Graph[N, W]) reclaimAbortedLife() int {
 	for _, id := range toRevive {
 		g.reviveAborted(id)
 	}
+	// THE CHURN HOLDS GO LAST, after both flips (rmp #2686). The records are
+	// already gone, so the holds are over-counting from the moment the loops
+	// above deleted them — but the flips are the instant at which a reader's
+	// answer actually changes, and dropping the holds before them would let a
+	// reader take the fast path across exactly that transition.
+	g.labelChurn.releaseAll(released)
 	return freed
 }
 
@@ -256,6 +266,15 @@ func (g *Graph[N, W]) reclaimAbortedLife() int {
 // instant, which is what withdrawing an aborted CREATE means: there is no
 // transaction whose removal it would be.
 func (g *Graph[N, W]) tombstoneAborted(id graph.NodeID) {
+	if !g.IsTombstoned(id) {
+		// The node is about to stop existing with NO life record to say so, and
+		// this call strips no label bitmaps. Any index entry it still carries is
+		// therefore a permanent disagreement that nothing will ever revisit, so
+		// the churn gate is pinned for those labels before the flip that creates
+		// it. See [Graph.pinChurnForDivergentBag] for why the probe is exact
+		// rather than blind, and why the ordinary aborted CREATE pins nothing.
+		g.pinChurnForDivergentBag(id, false)
+	}
 	g.tombstoneMu.Lock()
 	cur := g.tombstones.Load()
 	if cur != nil && cur.Contains(uint64(id)) {
@@ -267,8 +286,9 @@ func (g *Graph[N, W]) tombstoneAborted(id graph.NodeID) {
 		next = cur.Clone()
 	}
 	next.Add(uint64(id))
-	g.tombstones.Store(next)
+	// Counter first, bitmap second — see [Graph.removeNodeInfo] (rmp #2687).
 	g.tombstoneActive.Add(1)
+	g.tombstones.Store(next)
 	g.tombstoneMu.Unlock()
 	g.BumpTopoGeneration()
 }
@@ -276,6 +296,14 @@ func (g *Graph[N, W]) tombstoneAborted(id graph.NodeID) {
 // reviveAborted clears id from the bitmap without recording a birth instant,
 // which is what withdrawing an aborted DELETE means.
 func (g *Graph[N, W]) reviveAborted(id graph.NodeID) {
+	if g.IsTombstoned(id) {
+		// The mirror image of [Graph.tombstoneAborted]: the node is about to
+		// exist again with no life record, and this call restores no label
+		// bitmaps, so a label the bag carries but the index has lost is a
+		// permanent disagreement in the LOSING direction — a silently absent
+		// row. Pinned before the flip, for the same reason.
+		g.pinChurnForDivergentBag(id, true)
+	}
 	g.tombstoneMu.Lock()
 	cur := g.tombstones.Load()
 	if cur == nil || !cur.Contains(uint64(id)) {
@@ -284,6 +312,8 @@ func (g *Graph[N, W]) reviveAborted(id graph.NodeID) {
 	}
 	next := cur.Clone()
 	next.Remove(uint64(id))
+	// Bitmap first, counter second on the way DOWN, so the count never falls
+	// short of the published set — see [Graph.removeNodeInfo] (rmp #2687).
 	g.tombstones.Store(next)
 	g.tombstoneActive.Add(-1)
 	g.tombstoneMu.Unlock()

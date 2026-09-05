@@ -121,6 +121,145 @@ func TestCrossRelease_InProcessHelpersShort(t *testing.T) {
 	}
 }
 
+// TestCrossRelease_CommitAxisIsAdjudicated is the falsifiability proof for the
+// commit axis (rmp #2745). [HelperOpResult.Committed] was parsed out of the
+// prior release's line protocol and then never compared with anything, so a
+// release that stopped committing an op while still returning its rows diverged
+// in total silence.
+//
+// Each case is a constructible wrong input fed to the real adjudicator.
+func TestCrossRelease_CommitAxisIsAdjudicated(t *testing.T) {
+	t.Parallel()
+
+	ops, err := GenerateCrossReleaseOps(0xC0FFEE, 4)
+	if err != nil {
+		t.Fatalf("GenerateCrossReleaseOps: %v", err)
+	}
+	// An agreeing baseline: identical rows, identical commit outcomes, and at
+	// least one commit on each side so the axis is actually witnessed.
+	agreeing := func() ([]HelperOpResult, currentSignatures) {
+		prior := make([]HelperOpResult, len(ops))
+		cur := currentSignatures{
+			rows:      make([]string, len(ops)),
+			committed: make([]bool, len(ops)),
+		}
+		for i := range ops {
+			rows := "[row" + string(rune('a'+i)) + "]"
+			prior[i] = HelperOpResult{Rows: rows, Committed: true}
+			cur.rows[i], cur.committed[i] = rows, true
+		}
+		return prior, cur
+	}
+
+	// The control: the honest input must AGREE, or nothing below means anything.
+	prior, cur := agreeing()
+	divs, pc, cc := diffCrossReleaseOps(ops, prior, cur)
+	if len(divs) != 0 {
+		t.Fatalf("the agreeing control was rejected: %+v", divs)
+	}
+	if pc != len(ops) || cc != len(ops) {
+		t.Fatalf("commit counts = (%d, %d), want (%d, %d)", pc, cc, len(ops), len(ops))
+	}
+
+	t.Run("the current side stops committing an op whose rows are unchanged", func(t *testing.T) {
+		t.Parallel()
+		prior, cur := agreeing()
+		cur.committed[2] = false // rows deliberately left identical.
+		divs, _, _ := diffCrossReleaseOps(ops, prior, cur)
+		if len(divs) == 0 {
+			t.Fatalf("the adjudicator ACCEPTED a commit-outcome divergence: the commit axis cannot fail and therefore proves nothing")
+		}
+		if allBenign(divs) {
+			t.Errorf("a commit-outcome divergence was classified benign: %+v", divs)
+		}
+		if !strings.Contains(divergenceText(divs), "the COMMIT outcome differs") {
+			t.Errorf("the divergence does not name the commit axis: %s", divergenceText(divs))
+		}
+		t.Logf("detected: %s", divergenceText(divs))
+	})
+
+	t.Run("the prior side committed an op the current side rejects", func(t *testing.T) {
+		t.Parallel()
+		prior, cur := agreeing()
+		prior[0].Committed, cur.committed[0] = true, false
+		divs, _, _ := diffCrossReleaseOps(ops, prior, cur)
+		if allBenign(divs) || len(divs) == 0 {
+			t.Fatalf("a prior-committed / current-rejected op was not flagged: %+v", divs)
+		}
+	})
+
+	t.Run("neither side committed anything, so the axis is vacuous", func(t *testing.T) {
+		t.Parallel()
+		prior, cur := agreeing()
+		for i := range ops {
+			prior[i].Committed, cur.committed[i] = false, false
+		}
+		divs, pc, cc := diffCrossReleaseOps(ops, prior, cur)
+		if pc != 0 || cc != 0 {
+			t.Fatalf("commit counts = (%d, %d), want (0, 0)", pc, cc)
+		}
+		// Every op agrees false==false. Without the witness this run would agree.
+		if len(divs) == 0 || allBenign(divs) {
+			t.Fatalf("a run in which NOTHING committed was accepted as agreement: this is exactly rmp #2729's vacuous pass")
+		}
+		if !strings.Contains(divergenceText(divs), "vacuous") {
+			t.Errorf("the divergence does not explain the vacuity: %s", divergenceText(divs))
+		}
+		t.Logf("detected: %s", divergenceText(divs))
+	})
+
+	t.Run("the two sides produced different numbers of observations", func(t *testing.T) {
+		t.Parallel()
+		prior, cur := agreeing()
+		cur.committed = cur.committed[:len(cur.committed)-1]
+		divs, _, _ := diffCrossReleaseOps(ops, prior, cur)
+		if len(divs) == 0 || allBenign(divs) {
+			t.Fatalf("a truncated observation set was accepted: %+v", divs)
+		}
+		if !strings.Contains(divergenceText(divs), "nothing could be compared") {
+			t.Errorf("the divergence does not name the truncation: %s", divergenceText(divs))
+		}
+	})
+}
+
+// TestCrossRelease_CurrentSideCapturesTheCommitAxis pins that the current side
+// actually OBSERVES the commit outcome it is compared on. A comparison against a
+// slice nobody filled in would agree by construction.
+func TestCrossRelease_CurrentSideCapturesTheCommitAxis(t *testing.T) {
+	t.Parallel()
+
+	ops, err := GenerateCrossReleaseOps(0x5217E, 24)
+	if err != nil {
+		t.Fatalf("GenerateCrossReleaseOps: %v", err)
+	}
+	cur, err := replayCurrentSignatures(context.Background(), ops)
+	if err != nil {
+		t.Fatalf("replayCurrentSignatures: %v", err)
+	}
+	if len(cur.committed) != len(ops) {
+		t.Fatalf("committed flags = %d, want %d", len(cur.committed), len(ops))
+	}
+	commits := 0
+	for _, c := range cur.committed {
+		if c {
+			commits++
+		}
+	}
+	if commits == 0 {
+		t.Fatalf("the current side recorded NO commit over %d ops: the captured axis is all-false and would agree with anything", len(ops))
+	}
+	t.Logf("current side committed %d/%d ops", commits, len(ops))
+}
+
+// divergenceText joins divergence reasons for a containment assertion.
+func divergenceText(ds []CrossReleaseDivergence) string {
+	parts := make([]string, 0, len(ds))
+	for _, d := range ds {
+		parts = append(parts, d.Reason)
+	}
+	return strings.Join(parts, " | ")
+}
+
 // TestCrossRelease_ParseHelperOutputShort covers the helper line-protocol decoder
 // (the pure side of the subprocess boundary) without spawning a subprocess: a
 // well-formed stream decodes, and the truncated / out-of-order / missing-done

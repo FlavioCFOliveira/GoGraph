@@ -46,12 +46,25 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 )
 
-// lifeStamp is when something happened to a node: the transaction's shared
-// commit record, or an inline commit timestamp for an untransacted mutation —
-// the same union every other store here uses, for the same reason.
-type lifeStamp struct {
+// commitStamp is WHEN something happened: the transaction's shared commit
+// record, or an inline commit timestamp for an untransacted mutation — the same
+// union every other store here uses, for the same reason.
+type commitStamp struct {
 	info *commitInfo
 	ts   uint64
+}
+
+// lifeStamp is a [commitStamp] with the ordering and the pre-state a node's
+// LIFE events need and nothing else does.
+//
+// The two are separate types because [deferredIdx.pending] stores one entry per
+// (node, label) removal awaiting the watermark — a population that tracks bulk
+// delete churn — and it needs only the instant. Keeping it on the 16-byte half
+// is what lets this one carry [lifeStamp.wasAlive] without charging it to a map
+// that can hold a million entries — the split MORE than pays for the flag, since
+// the deferred half goes from 24 bytes to 16.
+type lifeStamp struct {
+	commitStamp
 	// seq orders two events that a timestamp cannot separate. A node removed
 	// and re-created inside ONE transaction — which is exactly what a
 	// rolled-back DELETE is, the undo log reviving what the statement
@@ -61,6 +74,42 @@ type lifeStamp struct {
 	// node vanished for every reader afterwards; TestRunInTx_DeleteReturn
 	// caught it.
 	seq uint64
+	// wasAlive answers, for a BIRTH record only, whether the node was ALREADY
+	// ALIVE immediately before the transaction that wrote this record first
+	// touched it. It is never set on a death record, where it has no meaning.
+	//
+	// # Why the record has to carry it
+	//
+	// Nearly every birth is a real transition from absent-or-dead to alive, and
+	// for those the flag is false and nothing changes. ONE birth is not: the undo
+	// replay of a rolled-back DELETE, which revives what the statement
+	// tombstoned. That record LOOKS like a birth and is not one — in committed
+	// history the node never died, so nothing was ever reborn — and the whole of
+	// rmp #2724 follows from believing it.
+	//
+	// [aliveBefore] can normally infer the pre-pair state from the pair's own
+	// write order, and for an INTACT rollback pair it does: the death is the
+	// earlier record, and a death only happens to a living node. But the store is
+	// one record deep per direction, so a later, unrelated delete REPLACES the
+	// died half. The surviving pair then reads born-then-died, the inference
+	// flips to "the node was dead before its birth", and every reader older than
+	// the rollback loses a node whose birth committed before it began. Pinned by
+	// TestNodeLife_RolledBackDeleteSurvivesAnUnrelatedDelete here and by
+	// internal/sim TestMVCCRegression_SplitLifePairKeepsNodeVisibleToOldReaders.
+	//
+	// The bit the replacement destroys is knowable only at the instant the revive
+	// is written (see [nodeLifeShard.aliveBeforeTx]) and no later reader can
+	// re-derive it, so it is written down.
+	//
+	// # Why this is not the `primordial` flag rmp #2445 removed
+	//
+	// That flag meant "alive before the CHAIN's first event" and was PROPAGATED
+	// from record to record, which is how it came to be read off a birth that no
+	// longer described the node. This one is a local, per-record fact, decided
+	// once from the two records the write displaces and never copied forward. It
+	// is consulted in strictly one branch of [aliveBefore] that used to answer
+	// with a constant, so it can only change the answer for a birth carrying it.
+	wasAlive bool
 }
 
 // aliveBefore answers what a reader that can see NEITHER recorded event
@@ -78,12 +127,67 @@ type lifeStamp struct {
 // overwritten), and the flag — propagated from that committed birth — told a
 // reader older than the rollback that the still-committed node never existed
 // (rmp #2445, found by the DST multi-session snapshot-stability checker).
+//
+// # The born-first branch is not always "it was not"
+//
+// "A birth only happens to a dead node" holds for every birth the write path
+// records EXCEPT the undo replay's revive, which withdraws a death rather than
+// making one. rmp #2445's repair kept that case right by reading the pair's
+// ORDER — the revive's birth is the later record, so the died-first branch
+// answers it — and that holds only while the died half is still the rollback's
+// own. A later, unrelated delete replaces it, the pair flips to born-first, and
+// the inference below is applied to the one birth for which it is false
+// (rmp #2724).
+//
+// So the born-first branch asks the record instead of assuming.
+// [lifeStamp.wasAlive] is false on every ordinary birth, which is the constant
+// this branch returned before, and true only on a revive that withdrew its own
+// transaction's death.
+//
+// # What this still cannot answer, and why one more field does not fix it
+//
+// A reader older than the node's own CREATION is told the node exists, once a
+// rolled-back delete has republished the birth over the committed one. That is
+// pre-existing — the died-first branch has answered it that way since rmp #2445
+// — and the repair above widens it from the intact pair to the split one,
+// because the same record now carries the same claim in both shapes.
+//
+// The obvious completion was tried and REFUTED, so do not re-attempt it blind:
+// carrying the DISPLACED birth's instant beside the flag and testing the reader
+// against it. It reintroduced the very defect this repair closes, on DST crash
+// seed 932, 10 runs out of 10 and deterministic. The counterexample is a node
+// genuinely deleted and re-created before the rolled-back delete: the displaced
+// birth is then the RESURRECTION's instant, and a reader older than the
+// committed death in between is told the node did not exist when it demonstrably
+// did. Measured: a reader at startTS=1 lost a node whose displaced birth read 3.
+//
+// The question needs the BRACKETING PAIR — the birth before the reader and the
+// death after it — and one record per direction cannot hold both once a birth
+// has been displaced. Closing it is a change to the record layout (keep the
+// displaced birth, or let a rollback WITHDRAW its death instead of republishing
+// a birth, which rmp #2687's ordering currently forbids), not another field.
 func aliveBefore(born, died lifeStamp) bool {
-	return died.seq < born.seq
+	if died.seq < born.seq && !sameTx(born, died) {
+		// The death is the earliest recorded event AND it is committed history
+		// the birth merely follows, so a death happening at all proves the node
+		// was alive before it. The second half is what makes the inference safe:
+		// when ONE transaction wrote both records they are its whole work on this
+		// node, its own earlier birth may be the record this one displaced, and
+		// the death is then not the earliest event at all — only the birth knows.
+		return true
+	}
+	return born.wasAlive
 }
 
+// sameTx reports whether two life records were written by the same transaction.
+//
+// An untransacted mutation (info nil) is committed the instant it is made, so it
+// is never the same "transaction" as anything else — including another
+// untransacted write, which is a genuinely separate event.
+func sameTx(a, b lifeStamp) bool { return a.info != nil && a.info == b.info }
+
 // at returns the instant, resolving the shared record when there is one.
-func (s lifeStamp) at() uint64 {
+func (s commitStamp) at() uint64 {
 	if s.info != nil {
 		return s.info.TS()
 	}
@@ -92,7 +196,7 @@ func (s lifeStamp) at() uint64 {
 
 // visibleTo reports whether an event stamped this way had already happened, as
 // far as a reader at (startTS, txID) is concerned.
-func (s lifeStamp) visibleTo(startTS, txID uint64) bool {
+func (s commitStamp) visibleTo(startTS, txID uint64) bool {
 	return mvcc.Visible(s.at(), startTS, txID)
 }
 
@@ -103,7 +207,30 @@ func (s lifeStamp) visibleTo(startTS, txID uint64) bool {
 type nodeLifeShard struct {
 	born map[graph.NodeID]lifeStamp
 	died map[graph.NodeID]lifeStamp
-	mu   sync.RWMutex
+	// churnBorn and churnDied name the labels whose per-label churn gate the
+	// corresponding life record holds up (rmp #2686).
+	//
+	// A birth or a death moves the node in or out of EVERY label bitmap it is a
+	// member of, so the record's suspicion is not attributable to one label the
+	// way a delta's or a deferred removal's is: the set has to be captured when
+	// the record is written and carried until it is reclaimed, or the release
+	// cannot name the labels the raise took.
+	//
+	// They are SIDE MAPS rather than a field on [lifeStamp] because that type is
+	// also the value of [deferredIdx.pending], where a slice header would be 24
+	// bytes of dead weight on every deferred index removal. Here they are
+	// allocated only when a record actually holds something — which a fresh
+	// node's birth never does, since it carries no labels yet.
+	//
+	// [lifeStamp.wasAlive] went the OTHER way, and the difference is deliberate:
+	// it is one bool (8 bytes after padding, not 24), and unlike a label set it
+	// must be exact on EVERY birth rather than present on a few — a side map that
+	// one future write site forgets to maintain answers false silently, which is
+	// the rmp #2724 defect itself. Travelling with the record makes forgetting
+	// impossible; that is worth 8 bytes on records the watermark keeps sparse.
+	churnBorn map[graph.NodeID][]LabelID
+	churnDied map[graph.NodeID][]LabelID
+	mu        sync.RWMutex
 }
 
 // nodeLifeShardFor selects the shard responsible for id.
@@ -118,7 +245,12 @@ func (g *Graph[N, W]) nodeLifeShardFor(id graph.NodeID) *nodeLifeShard {
 // longer than any reader can remember — which is what makes the absence of a
 // record mean "exists".
 func (g *Graph[N, W]) noteNodeBorn(id graph.NodeID, tx *writeCtx) bool {
-	return g.noteNodeLife(id, tx, true)
+	// carriesLabels is FALSE: [graph.Mapper.InternNewHook] fires only for an id
+	// that has just been interned, so the node's label bag is empty and there is
+	// no bitmap membership for the birth to disturb. Any label it goes on to
+	// acquire arrives through [Graph.setNodeLabelInfo], which pushes a delta
+	// carrying that lid and raises the gate itself.
+	return g.noteNodeLife(id, tx, true, nil)
 }
 
 // noteNodeBornAutocommit is [Graph.noteNodeBorn] outside any transaction, in the
@@ -128,12 +260,18 @@ func (g *Graph[N, W]) noteNodeBorn(id graph.NodeID, tx *writeCtx) bool {
 // before the transaction was threaded through, rather than a closure over a nil
 // pointer.
 func (g *Graph[N, W]) noteNodeBornAutocommit(id graph.NodeID) {
-	g.noteNodeLife(id, nil, true)
+	g.noteNodeLife(id, nil, true, nil)
 }
 
 // noteNodeDied records that id was removed now.
-func (g *Graph[N, W]) noteNodeDied(id graph.NodeID, tx *writeCtx) bool {
-	return g.noteNodeLife(id, tx, false)
+func (g *Graph[N, W]) noteNodeDied(id graph.NodeID, tx *writeCtx, bagLids []LabelID) bool {
+	// bagLids is the node's label bag, READ BY THE CALLER. Retiring the node
+	// takes it out of every one of those labels' bitmaps as far as a reader newer
+	// than the death is concerned, so the churn gate has to be held up for all of
+	// them until the death record is reclaimed. [Graph.removeNodeInfo] needs the
+	// same bag for its own scoped hold and for the bitmap strip, and passes it in
+	// rather than making this read it a second and third time.
+	return g.noteNodeLife(id, tx, false, bagLids)
 }
 
 // noteNodeRevived records that a tombstoned id is live again.
@@ -141,7 +279,12 @@ func (g *Graph[N, W]) noteNodeDied(id graph.NodeID, tx *writeCtx) bool {
 // A revival is a BIRTH as far as a reader is concerned: from this instant the
 // node exists, and before it the death record still applies.
 func (g *Graph[N, W]) noteNodeRevived(id graph.NodeID, tx *writeCtx) bool {
-	return g.noteNodeLife(id, tx, true)
+	// The bag is read HERE, unlike for an ordinary birth: it SURVIVES
+	// tombstoning, and [Graph.restoreLabelBitmaps] puts the node straight back
+	// into every bitmap the bag names — with no delta and no deferred removal to
+	// hold the gate up. A reader older than the revival must still be told the
+	// node is gone, so this is the only birth that has to raise the gate itself.
+	return g.noteNodeLife(id, tx, true, g.nodeLabelBagLids(id))
 }
 
 // noteNodeLife records a birth (alive) or a death, and reports whether the
@@ -159,10 +302,17 @@ func (g *Graph[N, W]) noteNodeRevived(id graph.NodeID, tx *writeCtx) bool {
 // newer than the death must still see the node as gone, and only the record can
 // tell it that. [Graph.NodeExistsAsOf] decides between the two by taking the
 // later of the events that reader can see.
-func (g *Graph[N, W]) noteNodeLife(id graph.NodeID, tx *writeCtx, alive bool) bool {
+func (g *Graph[N, W]) noteNodeLife(id graph.NodeID, tx *writeCtx, alive bool, bagLids []LabelID) bool {
 	if !g.mvccArmed {
 		return true
 	}
+	// THE CHURN GATE IS RAISED FIRST, before the record exists and therefore
+	// before any reader can observe the event (rmp #2686). bagLids is read by the
+	// CALLER, outside this function, because reading it takes the LABEL shard's
+	// lock: the reclaimer and [Graph.correctBitmapOver] take the LIFE lock and the
+	// LABEL lock in that order and never nested, and taking the label lock here —
+	// under the life lock below — would invert it.
+	held := g.raiseChurnFor(bagLids)
 	sh := g.nodeLifeShardFor(id)
 	sh.mu.Lock()
 	// A BIRTH on a slot with NO life record displaces nobody's version, so it
@@ -177,6 +327,8 @@ func (g *Graph[N, W]) noteNodeLife(id graph.NodeID, tx *writeCtx, alive bool) bo
 	// slot). A genuine collision (head != 0) is still refused.
 	if head := sh.headStamp(id); tx.conflicts(head) && (!alive || head != 0) {
 		sh.mu.Unlock()
+		// No record was written, so nothing owns the holds taken above.
+		g.labelChurn.releaseAll(held)
 		_ = tx.conflictErr(mvcc.StoreNodeExistence, head)
 		return false
 	}
@@ -185,21 +337,144 @@ func (g *Graph[N, W]) noteNodeLife(id graph.NodeID, tx *writeCtx, alive bool) bo
 	// first use; it takes no lock of its own and cannot reach back here.
 	info, ts := g.deltaStamp(tx.record())
 	seq := g.lifeSeq.Add(1)
-	st := lifeStamp{info: info, ts: ts, seq: seq}
+	st := lifeStamp{commitStamp: commitStamp{info: info, ts: ts}, seq: seq}
+	if alive {
+		// Decided HERE and nowhere else, because this is the only instant at
+		// which both records this write is about to reorder are still visible
+		// together — and it is under the same shard lock as the write, so no
+		// concurrent life write can slip between the decision and the record it
+		// is stored on. See [lifeStamp.wasAlive] (rmp #2724).
+		st.wasAlive = sh.aliveBeforeTx(id, info)
+	}
+	// The store is one record deep per direction, so writing this one DISPLACES
+	// whatever was there. The displaced record's holds are now owned by nothing,
+	// and are released below — after the unlock, so the union of old and new is
+	// never briefly under-raised.
+	var displaced []LabelID
 	if alive {
 		if sh.born == nil {
 			sh.born = make(map[graph.NodeID]lifeStamp, 8)
 		}
 		sh.born[id] = st
+		displaced = sh.setChurnHeld(true, id, held)
 	} else {
 		if sh.died == nil {
 			sh.died = make(map[graph.NodeID]lifeStamp, 8)
 		}
 		sh.died[id] = st
+		displaced = sh.setChurnHeld(false, id, held)
 	}
 	sh.mu.Unlock()
+	g.labelChurn.releaseAll(displaced)
 	g.nodeLifeActive.Add(1)
 	return true
+}
+
+// aliveBeforeTx reports whether the node was ALREADY ALIVE immediately before
+// the transaction holding info first touched it — the value the birth about to
+// be written carries in [lifeStamp.wasAlive].
+//
+// It is true for exactly one shape: the undo replay of a rolled-back DELETE,
+// where the birth WITHDRAWS a death the same transaction recorded on a node it
+// did not itself create. Every other birth is a real transition into existence.
+//
+// Each clause is load-bearing.
+//
+//   - The death must be THIS transaction's. A death belonging to another
+//     transaction is committed history the new birth genuinely follows — an
+//     ordinary resurrection, before which the node really was dead. An
+//     untransacted mutation (info nil) is committed the instant it is made and
+//     is never withdrawn, so it can never be undoing itself.
+//   - The transaction must not own the birth being displaced, or it CREATED the
+//     node before deleting it and the node was not alive before it. Answering
+//     otherwise resurrects the rmp #2443 phantom: an in-transaction
+//     create+delete+create visible to readers that cannot see the transaction.
+//     An ABSENT birth record means the node predates every live reader, which
+//     is alive.
+//   - When the transaction DOES own the displaced birth, the answer is that
+//     birth's own, because the question is about the instant before the
+//     transaction started — a delete/revive/delete/revive cycle must not forget
+//     across its own second revive what its first one established. The
+//     propagation is bounded to ONE transaction's records, which is what
+//     separates it from the chain-level `primordial` flag rmp #2445 removed for
+//     being copied forward across committed history.
+//
+// The caller must hold the shard's write lock.
+func (sh *nodeLifeShard) aliveBeforeTx(id graph.NodeID, info *commitInfo) bool {
+	if info == nil {
+		return false
+	}
+	died, hasDied := sh.died[id]
+	if !hasDied || died.info != info {
+		return false
+	}
+	born, hasBorn := sh.born[id]
+	if !hasBorn || born.info != info {
+		return true
+	}
+	return born.wasAlive
+}
+
+// setChurnHeld records the labels a life record holds the churn gate up for, and
+// returns the labels the record it displaced held.
+//
+// The map is lazily allocated and the entry is dropped when there is nothing to
+// hold, so a graph whose churn is all on unlabelled nodes never allocates it.
+//
+// The caller must hold the shard's write lock.
+func (sh *nodeLifeShard) setChurnHeld(alive bool, id graph.NodeID, held []LabelID) []LabelID {
+	m := sh.churnDied
+	if alive {
+		m = sh.churnBorn
+	}
+	prev := m[id]
+	switch {
+	case len(held) > 0:
+		if m == nil {
+			m = make(map[graph.NodeID][]LabelID, 8)
+		}
+		m[id] = held
+	case prev != nil:
+		delete(m, id)
+		if len(m) == 0 {
+			m = nil
+		}
+	}
+	if alive {
+		sh.churnBorn = m
+	} else {
+		sh.churnDied = m
+	}
+	return prev
+}
+
+// takeChurnHeld removes and returns the labels the named record held, for a
+// caller that is deleting that record.
+//
+// The caller must hold the shard's write lock.
+func (sh *nodeLifeShard) takeChurnHeld(alive bool, id graph.NodeID) []LabelID {
+	m := sh.churnDied
+	if alive {
+		m = sh.churnBorn
+	}
+	if m == nil {
+		return nil
+	}
+	held, ok := m[id]
+	if !ok {
+		return nil
+	}
+	delete(m, id)
+	if len(m) == 0 {
+		// Dropped so a shard that stops holding anything costs one nil check
+		// again, exactly as born and died do.
+		if alive {
+			sh.churnBorn = nil
+		} else {
+			sh.churnDied = nil
+		}
+	}
+	return held
 }
 
 // headStamp returns the effective timestamp of the LATEST life event recorded
@@ -331,18 +606,21 @@ func (g *Graph[N, W]) reclaimNodeLife(watermark uint64) int {
 		return 0
 	}
 	freed := 0
+	var released []LabelID
 	for i := range g.nodeLifeShards {
 		sh := &g.nodeLifeShards[i]
 		sh.mu.Lock()
 		for id, st := range sh.born {
 			if st.at() <= watermark {
 				delete(sh.born, id)
+				released = append(released, sh.takeChurnHeld(true, id)...)
 				freed++
 			}
 		}
 		for id, st := range sh.died {
 			if st.at() <= watermark {
 				delete(sh.died, id)
+				released = append(released, sh.takeChurnHeld(false, id)...)
 				freed++
 			}
 		}
@@ -357,6 +635,12 @@ func (g *Graph[N, W]) reclaimNodeLife(watermark uint64) int {
 	if freed > 0 {
 		g.nodeLifeActive.Add(-int64(freed))
 	}
+	// AFTER the shard locks, and after the records are gone: a hold outliving the
+	// record it belonged to only over-counts, which is the safe direction. The
+	// records released here are all at or before the watermark, so every live
+	// reader can already see the events they recorded and no correction can turn
+	// on them (rmp #2686).
+	g.labelChurn.releaseAll(released)
 	return freed
 }
 

@@ -26,6 +26,24 @@ the commit and abort counts, the conflict rate and its per-store attribution,
 the retained chain-depth distribution, and the background vacuum's own
 lifecycle and per-pass latency.
 
+And it surfaces the **Bolt network surface**. A real `bolt/server` is started
+on a real TCP socket and driven by the official `neo4j-go-driver` through an
+autocommit read, a committed explicit transaction and a rolled-back one. That
+populates the per-message latency histograms
+`bolt.server.HandleMessage.message.<type>` alongside the connection and
+transaction counters, so an operator can see how long a RUN, a PULL, a BEGIN or
+a COMMIT took **as the server measured it**. That distinction is the point: the
+Bolt latencies previously quoted for GoGraph came from a client-side stopwatch
+in `examples/23_bolt_server`, which no deployment can emit.
+
+Seven of the thirteen message types in the closed label set appear in the
+scrape, because seven is what these three session shapes deterministically
+send. DISCARD, RESET, ROUTE, LOGOFF and GOODBYE are not pinned here — whether a
+client library sends them is its own choice, and a presence fact that depends
+on that is not a fact. They are covered instead by
+`bolt/server/msgmetrics_wire_test.go`, which drives every one of them over the
+raw wire.
+
 ## Domain / scenario
 
 A **service-mesh call graph**: nodes are microservices (`:SERVICE`), edges
@@ -76,6 +94,13 @@ cypher.write_delta=1
 dijkstra.src_reached=196
 csv.roundtrip.edges_match=1
 countstore.cells_positive=1
+bolt.services_before=201
+bolt.services_after=202
+bolt.commit_delta=1
+mvcc.commits.delta=258
+mvcc.conflicts.observed=1
+mvcc.writers.settled=0
+mvcc.chain_depth.deepest_at_least_two=1
 metric.present.cypher.Run=true
 metric.present.cypher.RunInTx=true
 metric.present.cypher.plan_cache.misses=true
@@ -88,11 +113,36 @@ metric.present.graph.io.csv.Write=true
 metric.present.graph.io.csv.ReadInto=true
 metric.present.bolt.pool.encoder.get=true
 metric.present.bolt.pool.encoder.put=true
+metric.present.bolt.server.HandleMessage.message.hello=true
+metric.present.bolt.server.HandleMessage.message.logon=true
+metric.present.bolt.server.HandleMessage.message.run=true
+metric.present.bolt.server.HandleMessage.message.pull=true
+metric.present.bolt.server.HandleMessage.message.begin=true
+metric.present.bolt.server.HandleMessage.message.commit=true
+metric.present.bolt.server.HandleMessage.message.rollback=true
+metric.present.bolt.server.conn.accepted=true
+metric.present.bolt.server.conn.closed=true
+metric.present.bolt.server.tx.opened=true
+metric.present.bolt.server.tx.closed=true
 metric.present.cypher.countstore.recompute=true
 metric.present.cypher.countstore.delta.applied=true
 metric.present.cypher.countstore.relabel.dirtied=true
-metric.present.count=15
-metric.expected.count=15
+metric.present.graph.lpg.ApplyVersioned=true
+metric.present.graph.lpg.EndVersionedTx=true
+metric.present.lpg.mvcc.writers.active=true
+metric.present.lpg.mvcc.commits=true
+metric.present.lpg.mvcc.aborts=true
+metric.present.lpg.mvcc.conflict_rate=true
+metric.present.lpg.mvcc.conflicts=true
+metric.present.lpg.mvcc.conflicts.store.node_properties=true
+metric.present.lpg.mvcc.chain_depth.deepest=true
+metric.present.lpg.mvcc.chain_depth.bucket.1=true
+metric.present.lpg.mvcc.oldest_snapshot_age=true
+metric.present.lpg.mvcc.snapshots.active=true
+metric.present.lpg.mvcc.vacuum.passes=true
+metric.present.lpg.mvcc.vacuum.pass=true
+metric.present.count=40
+metric.expected.count=40
 ```
 
 Followed by `# `-prefixed telemetry that varies per run and per machine,
@@ -129,8 +179,14 @@ and pinned by the test; the observed values behind them are telemetry.
   `relabel.dirtied` counters plus the `recompute` histogram), `search`
   (`Dijkstra`/`DijkstraCtx` latency plus the `search.pool.dijkstra` get/put
   utilisation counters), `graph.io.csv` (`Write`, `ReadInto`), and `bolt`
-  (the `EncodePool` get/put counters). Scaling up thickens the latency
-  histograms so bucket distributions become meaningful.
+  (the `EncodePool` get/put counters, the `bolt.server.conn.*` and
+  `bolt.server.tx.*` counters, and the per-message
+  `bolt.server.HandleMessage.message.<type>` latency histograms). Scaling up
+  thickens the latency histograms so bucket distributions become meaningful.
+- **The server's own view of Bolt latency** — the per-message histograms are
+  the only Bolt timing in the module that a deployed GoGraph can publish. The
+  scrape carries a `_bucket`, `_sum` and `_count` triple per message type, so
+  p50/p99 per message type are derivable from the exposition alone.
 - **The count-store's footprint and write-neutrality** — `countstore.cells_*`
   telemetry shows the store's live-cell count stays bounded by schema
   cardinality (four cells for the single `(:SERVICE)-[:CALLS]->(:SERVICE)`
@@ -177,6 +233,11 @@ and pinned by the test; the observed values behind them are telemetry.
 - `csv.WriteCtx` / `csv.ReadIntoCtx` — instrumented edge-list interchange.
 - `packstream.EncodePool` — the pooled Bolt encoder whose `Get`/`Put` emit
   utilisation counters.
+- `server.NewServer` / `server.Server.Serve` / `server.Server.Shutdown` — the
+  Bolt v5 server, started on a real socket so its per-message latency
+  histograms are populated by genuine wire traffic.
+- `neo4j.NewDriverWithContext` — the official Bolt client, used as a real
+  external consumer rather than an in-process call.
 - `lpg.Graph.ApplyVersioned` / `BeginVersionedTx` / `EndVersionedTx` — the
   instrumented MVCC write brackets: an autocommit transaction, and the
   begin/publish pair of a multi-statement one.

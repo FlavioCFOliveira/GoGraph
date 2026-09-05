@@ -50,7 +50,7 @@ func deleteWALEngineRun(t *testing.T, g *lpg.Graph[string, float64], w *wal.Writ
 		if err != nil {
 			t.Fatalf("RunAny(%q): %v", q, err)
 		}
-		for res.Next() { //nolint:revive // intentional drain
+		for res.Next() { // intentional drain
 		}
 		if rerr := res.Err(); rerr != nil {
 			_ = res.Close()

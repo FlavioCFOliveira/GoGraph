@@ -650,7 +650,7 @@ func TestBuildIndexSeekOperator_StringHash(t *testing.T) {
 	for {
 		ok, err := op.Next(&row)
 		if err != nil {
-			op.Close() //nolint:errcheck // test teardown
+			op.Close() // test teardown
 			t.Fatalf("op.Next: %v", err)
 		}
 		if !ok {
@@ -658,7 +658,7 @@ func TestBuildIndexSeekOperator_StringHash(t *testing.T) {
 		}
 		count++
 	}
-	op.Close() //nolint:errcheck // test teardown
+	op.Close() // test teardown
 	if count != 1 {
 		t.Errorf("expected 1 row from index seek, got %d", count)
 	}
@@ -748,7 +748,7 @@ func TestBuildOperator_NodeByIndexSeekCase(t *testing.T) {
 	for {
 		ok, err := op.Next(&row)
 		if err != nil {
-			op.Close() //nolint:errcheck // test teardown
+			op.Close() // test teardown
 			t.Fatalf("op.Next: %v", err)
 		}
 		if !ok {
@@ -756,7 +756,7 @@ func TestBuildOperator_NodeByIndexSeekCase(t *testing.T) {
 		}
 		count++
 	}
-	op.Close() //nolint:errcheck // test teardown
+	op.Close() // test teardown
 	if count != 1 {
 		t.Errorf("expected 1 row, got %d", count)
 	}

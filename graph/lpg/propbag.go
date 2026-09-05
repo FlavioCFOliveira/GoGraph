@@ -456,6 +456,20 @@ func (b *propBag) del(key PropertyKeyID) (nowEmpty bool) {
 }
 
 // len returns the number of properties in the bag.
+// empty reports whether the bag carries no properties.
+//
+// It is O(1) in BOTH tiers, which is why it exists next to [propBag.len]: len
+// walks the encoded buffer through count to total the records, and the
+// shared-lock pre-pass in [Graph.delNodePropertyInfo] asks this question on
+// every absent-key delete. Emptiness needs no count — a bag is empty exactly
+// when its tier's backing store is.
+func (b *propBag) empty() bool {
+	if b.m != nil {
+		return len(b.m) == 0
+	}
+	return len(b.buf) == 0
+}
+
 func (b *propBag) len() int {
 	if b.m != nil {
 		return len(b.m)

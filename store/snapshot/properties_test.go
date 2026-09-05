@@ -31,7 +31,7 @@ import (
 //   - PropTime: a known UTC instant with nanosecond precision.
 //   - PropBytes: a non-utf8 byte sequence.
 //
-//nolint:gocyclo // round-trip test: one property per kind on node and edge
+// round-trip test: one property per kind on node and edge
 func TestProperties_RoundtripAllKinds(t *testing.T) {
 	t.Parallel()
 
@@ -244,7 +244,7 @@ func TestProperties_ManifestV2_OnlyLabels_Loads(t *testing.T) {
 // manifest with neither labels.bin nor properties.bin. The reader
 // must load cleanly and return empty readbacks for both.
 //
-//nolint:gocyclo // staging path: rewrite manifest + delete two files + dual readback assertions
+// staging path: rewrite manifest + delete two files + dual readback assertions
 func TestProperties_ManifestV2_NoLabelsNoProperties_Loads(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
@@ -399,7 +399,7 @@ func TestProperties_BadMagic_SurfacesErrPropertiesCorrupted(t *testing.T) {
 // across all six kinds. Properties are sampled from the full kind
 // set so the assertion grid exercises decoding for every kind.
 //
-//nolint:gocyclo // property test: nested generators + per-kind value comparison
+// property test: nested generators + per-kind value comparison
 func TestProperties_PropertyRoundtrip(t *testing.T) {
 	t.Parallel()
 	rootTmp := t.TempDir()

@@ -262,6 +262,7 @@ func CheckExprLiterals(tick int64, engine *EngineAdapter) []Violation {
 		}
 		var got []string
 		for res.Next() {
+			//nolint:forcetypeassert // res is produced by this harness's own engine adapter, whose only result implementation is *resultAdapter
 			got = append(got, res.(*resultAdapter).res.ValueAt(0).String())
 		}
 		derr := res.Err()

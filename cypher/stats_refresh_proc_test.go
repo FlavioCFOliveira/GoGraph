@@ -139,7 +139,7 @@ func TestStatsRefreshProc_HonoursCancellation(t *testing.T) {
 
 	res, err := eng.Run(ctx, `CALL db.stats.refresh()`, nil)
 	if err == nil {
-		for res.Next() { //nolint:revive // drain
+		for res.Next() { // drain
 		}
 		err = res.Err()
 		_ = res.Close()
@@ -186,7 +186,7 @@ func TestStatsRefreshProc_DoesNotNestTheBarrier(t *testing.T) {
 			if err != nil {
 				return
 			}
-			for res.Next() { //nolint:revive // drain
+			for res.Next() { // drain
 			}
 			_ = res.Close()
 		}
@@ -269,7 +269,7 @@ func TestStatsRefreshProc_ResultsUnchangedByRefresh(t *testing.T) {
 	if err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
-	for res.Next() { //nolint:revive // drain
+	for res.Next() { // drain
 	}
 	if err := res.Err(); err != nil {
 		t.Fatalf("refresh Err: %v", err)

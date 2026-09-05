@@ -3,6 +3,7 @@ package count
 import (
 	"sync"
 	"testing"
+	"unsafe"
 )
 
 func TestApply_EDCounts(t *testing.T) {
@@ -56,19 +57,68 @@ func TestApply_DeleteOnZeroFreesKey(t *testing.T) {
 		t.Fatalf("E(10) = %d, want 0 after cancel", got)
 	}
 	// The key must have been deleted (bounded growth), not left as a zero cell.
+	//
+	// The map is now the copy-on-write one the shard publishes, and it is read
+	// under the EXCLUSIVE lock rather than the shared one: an increment holds the
+	// shared lock (see [addCell]), so a shared hold here would no longer freeze
+	// the shard. The assertion itself is unchanged — the key must be absent.
 	sh := s.eShardOf(10)
-	sh.mu.RLock()
-	_, present := sh.e[10]
-	sh.mu.RUnlock()
+	sh.mu.lock()
+	_, present := sh.e.load()[10]
+	sh.mu.unlock()
 	if present {
 		t.Fatalf("E(10) key still present after returning to zero")
 	}
 	tsh := s.tShardOf(triKey{1, 10, 2})
-	tsh.mu.RLock()
-	_, tpresent := tsh.t[triKey{1, 10, 2}]
-	tsh.mu.RUnlock()
+	tsh.mu.lock()
+	_, tpresent := tsh.t.load()[triKey{1, 10, 2}]
+	tsh.mu.unlock()
 	if tpresent {
 		t.Fatalf("T(1,10,2) key still present after returning to zero")
+	}
+}
+
+// TestShard_LayoutSeparatesReadersFromTheLock pins the two layout properties the
+// store's scaling rests on. Neither is expressible as a single size any more, so
+// this test replaced TestShard_LayoutOneCacheLine, which asserted
+// unsafe.Sizeof(shard{}) == cacheLine and could not survive the shard growing a
+// per-P slot array.
+//
+// MEASURED, because the obvious claim is false: `Store` has an alignment of 8,
+// not 128, so `&shards[0]` is NOT line-aligned — over 200 heap-allocated Stores
+// it landed at offset 8 within the line 200/200 times. No shard ever occupies
+// exactly one cache line. What actually prevents false sharing is that the STRIDE
+// is a whole number of lines while each hot region is far smaller than one, so
+// consecutive shards' hot fields are always a multiple of 128 bytes apart and
+// therefore never share a line, whatever the base offset.
+//
+// The two properties:
+//
+//  1. the shard stride is a whole number of cache lines, so shard i's fields
+//     never share a line with shard i+1's;
+//  2. the four published-map pointers — which EVERY [Store.CountE] loads — are a
+//     full line away from the lock's hot words. When they shared a line, every
+//     shared acquire's read-modify-write invalidated the readers' line; moving
+//     the lock off it was worth 1.22x on the hot mixed workload by itself.
+func TestShard_LayoutSeparatesReadersFromTheLock(t *testing.T) {
+	t.Parallel()
+	if got := unsafe.Sizeof(shard{}); got%cacheLine != 0 {
+		t.Fatalf("unsafe.Sizeof(shard{}) = %d, want a multiple of %d: the shard stride is no "+
+			"longer a whole number of cache lines, so two shards' hot fields can land in one "+
+			"line and writers to DIFFERENT shards false-share", got, cacheLine)
+	}
+	readEnd := unsafe.Offsetof(shard{}.t) + unsafe.Sizeof(shard{}.t)
+	lockAt := unsafe.Offsetof(shard{}.mu)
+	if lockAt/cacheLine == (readEnd-1)/cacheLine {
+		t.Fatalf("the lock at offset %d shares cache line %d with the published-map pointers "+
+			"(which end at offset %d): every shared acquire will invalidate the line every "+
+			"concurrent reader loads the map pointer from", lockAt, lockAt/cacheLine, readEnd)
+	}
+	// One slot per core, each owning a whole line, is the whole point of the
+	// readers-biased lock: two cores taking the shared hold must not meet.
+	if got := unsafe.Sizeof(rbSlot{}); got != cacheLine {
+		t.Fatalf("unsafe.Sizeof(rbSlot{}) = %d, want %d: two cores' shared-hold counters would "+
+			"share a line, which reproduces the defect the slot array exists to remove", got, cacheLine)
 	}
 }
 
@@ -112,8 +162,13 @@ func TestRecomputeReset_ClearsCells(t *testing.T) {
 	}
 }
 
-// TestConcurrentReadsDuringSerialWrites exercises the documented contract:
-// a single serialised writer with many concurrent readers must be race-free.
+// TestConcurrentReadsDuringSerialWrites drives many concurrent readers against
+// ONE writer. Single-writer is this test's own CONSTRUCTION, not the store's
+// contract: since rmp #2320 the engine's barrier is held SHARED and two writers
+// mutate the store concurrently, which the package "Concurrency contract" section
+// states and which hot_test.go and commutative_test.go exercise. What this test
+// pins is the narrower thing — the lock-free read path stays race-free while a
+// writer churns cells through create and unlink.
 func TestConcurrentReadsDuringSerialWrites(t *testing.T) {
 	s := New(0)
 	var wg sync.WaitGroup
@@ -136,7 +191,9 @@ func TestConcurrentReadsDuringSerialWrites(t *testing.T) {
 			}
 		}()
 	}
-	// Single writer (the serialisation the engine barrier provides).
+	// One writer. NOT the serialisation the engine barrier provides — it provides
+	// none, and has not since rmp #2320 — but a deliberate isolation of the reader
+	// path from writer-versus-writer interleaving, which hot_test.go covers.
 	for i := 0; i < 5000; i++ {
 		s.Apply(EDelta(10, 1))
 		s.Apply(TDelta(1, 10, 2, 1))

@@ -41,7 +41,7 @@ func repoRoot(t *testing.T) string {
 
 func readDoc(t *testing.T, root, rel string) string {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join(root, rel))
+	b, err := os.ReadFile(filepath.Join(root, rel)) //nolint:gosec // G304: rel is a repo-relative documentation path chosen by the caller; root is located by walking up to go.mod.
 	if err != nil {
 		t.Fatalf("read %s: %v", rel, err)
 	}

@@ -472,13 +472,6 @@ type buildOpts struct {
 	// public BuildPlanWithMutator, which therefore always builds the legacy
 	// nested-loop plan.
 	hashJoinEnabled bool
-	// disableIndexNestedLoopForTest suppresses the #2233 index nested-loop join
-	// substitution only, leaving the hash join in place. It is a TEST SEAM, not an
-	// option: the two plans are mutually exclusive by cost, so the differential
-	// suite cannot otherwise observe both answers for one query. No public setter
-	// exists and production never sets it — which is exactly why the linter cannot
-	// see it being written, since the only writer is the differential test.
-	disableIndexNestedLoopForTest bool //nolint:unused // written only by the in-package differential test; see index_nested_loop_plan_test.go
 	// forceColumnarChainDecline makes [tryBuildColumnarFilterChain],
 	// [tryBuildColumnarExpandFilterChain] and [tryBuildColumnarAggSource] take their
 	// post-build decline path, so the [buildStateSnapshot] restore on it is
@@ -580,6 +573,12 @@ type buildOpts struct {
 	// the whole point, and why [nodeScalarUseMemo] is itself safe for concurrent
 	// use.
 	scalarUseMemo *nodeScalarUseMemo
+	// countVarMemo is the plan-cache entry's cross-execution memo for
+	// [rewriteCountVarToCountStar] (rmp #2693). Same provenance and same
+	// nil-means-no-memo contract as scalarUseMemo above; see [countVarRewriteMemo]
+	// for what it holds and why it is bounded, and
+	// [rewriteCountVarToCountStarFor] for the routing.
+	countVarMemo *countVarRewriteMemo
 }
 
 // evalRow is the canonical bridge from a per-row closure to [expr.Eval] /
@@ -1331,7 +1330,7 @@ type Engine struct {
 	// What it buys is a differential. With it set the query must return exactly what
 	// the columnar chain returns, because declining is supposed to fall back to the
 	// byte-identical serial build. Before #2665 it returned nothing at all.
-	forceColumnarChainDeclineForTest bool //nolint:unused // written only by the in-package differential test; see profile_plan_parity_test.go
+	forceColumnarChainDeclineForTest bool // written only by the in-package differential test; see profile_plan_parity_test.go
 
 	// rangeSeekEnabled gates the range-predicate btree index seek (#1505). True
 	// by default; set false by EngineOptions.DisableRangeIndexSeek. When false
@@ -2307,7 +2306,7 @@ func convertQueryPanic(r any, errp *error, entrypoint, counter string) {
 func recoverWriteQueryPanic(errp *error, txp **txn.Tx[string, float64], entrypoint, counter string) {
 	if r := recover(); r != nil {
 		if txp != nil && *txp != nil {
-			_ = (*txp).Rollback() //nolint:errcheck // rollback error is not actionable while converting a panic
+			_ = (*txp).Rollback() // rollback error is not actionable while converting a panic
 		}
 		convertQueryPanic(r, errp, entrypoint, counter)
 	}
@@ -2406,6 +2405,15 @@ func (e *Engine) runRead(ctx context.Context, query string, params map[string]ex
 	if entry.semaErr != nil {
 		return nil, entry.semaErr
 	}
+
+	// ── 1a-1. EXPLAIN / PROFILE prefix (rmp #2721) ───────────────────────────
+	// Diverted HERE, before the write rejection below and before any build: an
+	// EXPLAIN must execute nothing, and a prefixed WRITING statement must reach
+	// the plan path rather than be refused as a write Run cannot execute — it is
+	// not going to execute it either. See cypher/plan_prefix.go.
+	if entry.planMode != parser.PlanModeNone {
+		return e.runPlanPrefixed(ctx, entry, params, at)
+	}
 	plan := entry.plan
 
 	// ── 1a-2. Reject a write/DDL query up front, with a clear, actionable
@@ -2419,7 +2427,12 @@ func (e *Engine) runRead(ctx context.Context, query string, params map[string]ex
 	// (ir.ContainsWrite on the already-built plan) rather than by
 	// re-scanning the query text, since the plan is already available and
 	// authoritative.
-	if ir.ContainsWrite(plan) {
+	//
+	// Read from the entry's memo rather than walked here (rmp #2693): the walk
+	// allocates one slice per plan node through ir.LogicalPlan.Children, and the
+	// answer is a pure function of a plan the cache holds immutable. See
+	// [planCacheEntry.containsWrite].
+	if entry.containsWrite {
 		return nil, fmt.Errorf("cypher: Run does not execute write or DDL statements; use RunInTx or RunAny instead: %w", ErrWriteInReadOnlyTx)
 	}
 
@@ -2573,18 +2586,19 @@ func (e *Engine) buildReadPhysical(
 	// ONE instant (rmp #2289). A nil snapshot yields a view of the current
 	// value, which is what the rendering paths pass and what a writer needs.
 	rv := e.g.ReadAt(snap)
-	walker := &lpgNodeWalker{g: rv}
-	labelSrc := &lpgLabelResolver{g: rv, eng: e}
-	// Allocate a per-run subquery evaluator so EXISTS { … } / COUNT { … }
-	// expressions encountered inside Filter/Project closures can drive their
-	// inner pipelines against the current outer row (task-396).
-	subEval := newSubqueryEvaluator(walker, labelSrc, queryReg, rv)
-	// Allocate a per-run pattern evaluator so WHERE (a)-[:T]->(b) existential
-	// predicates can be evaluated against the live graph (task-961). It
-	// receives the Engine's per-query element budget so a pattern
-	// comprehension over a supernode anchor cannot build an unbounded
-	// result list — the same bound collect() enforces (#1294, #1298).
-	patEval := newPatternEvaluator(rv, e.maxCollectItems)
+	// ONE heap object for the five per-execution build objects, not five (rmp
+	// #2693). The walker, the label resolver, the per-run subquery evaluator (so
+	// EXISTS { … } / COUNT { … } inside Filter/Project closures can drive their
+	// inner pipelines against the current outer row, task-396), the per-run
+	// pattern evaluator (so WHERE (a)-[:T]->(b) existential predicates can be
+	// evaluated against the live graph, task-961, carrying the Engine's per-query
+	// element budget so a pattern comprehension over a supernode anchor cannot
+	// build an unbounded result list — the same bound collect() enforces, #1294,
+	// #1298) and the build options all have exactly the same lifetime and are all
+	// mutually reachable, so they are allocated together. See [readBuildScaffold]
+	// for why that is safe and why it is not pooled.
+	var sc readBuildScaffold
+	walker, labelSrc, subEval, patEval, bopts := (&sc).init(ctx, e, rv, queryReg)
 	// Adjacency-answered count gating (#2232 / #2235, knob added by rmp #2647). The
 	// polarity flips here on purpose: the Engine field is positive to match its
 	// siblings, the evaluator field is NEGATIVE so that the zero value keeps both
@@ -2594,7 +2608,6 @@ func (e *Engine) buildReadPhysical(
 	// optimisation. Set before either evaluator is handed to a build.
 	subEval.adjacencyCountsDisabled = !e.adjacencyCountRewritesEnabled
 	patEval.adjacencyCountsDisabled = !e.adjacencyCountRewritesEnabled
-	bopts := &buildOpts{subEval: subEval, patEval: patEval, queryCtx: ctx, maxCollectItems: e.maxCollectItems}
 	// Hand the subquery evaluator this query's parameters and build options so an
 	// inner plan is compiled in a scope that can resolve them (rmp #2507). It has
 	// to happen HERE rather than at construction because bopts holds subEval, so
@@ -2615,6 +2628,7 @@ func (e *Engine) buildReadPhysical(
 	// build.
 	if entry != nil {
 		bopts.scalarUseMemo = &entry.scalarUse
+		bopts.countVarMemo = &entry.countVarRewrite
 	}
 	// Adjacency cache sharing (#2143, #2251): the SAME cache instance serves every
 	// concurrent Run call, so a traversing pattern amortises its O(V+E) CSR pair
@@ -2779,30 +2793,87 @@ func (e *Engine) explainPhysical(entry *planCacheEntry, params map[string]expr.V
 // a build in which profiling does not exist (rmp #2222 AC 3).
 func (e *Engine) Profile(ctx context.Context, query string, params map[string]expr.Value) (s string, err error) {
 	defer recoverQueryPanic(&err, "cypher.Profile", "cypher.Profile.panics")
+	tree, err := e.profilePlanTree(ctx, query, params)
+	if err != nil {
+		return "", err
+	}
+	return exec.RenderPlanNode(&tree), nil
+}
+
+// profilePlanTree executes query with profiling installed and returns the
+// captured physical plan tree with its per-operator measurements.
+//
+// It is the whole of PROFILE except the rendering, shared by [Engine.Profile]
+// (indented tree) and [Engine.ProfileTable] (columnar table) so the two describe
+// the same run of the same plan rather than two independent executions. It
+// installs no panic recovery of its own: both callers install theirs before
+// calling in.
+func (e *Engine) profilePlanTree(ctx context.Context, query string, params map[string]expr.Value) (exec.PlanNode, error) {
 	if ir.IsDDL(query) {
-		return "", fmt.Errorf("cypher: Profile: DDL has no query plan")
+		return exec.PlanNode{}, fmt.Errorf("cypher: Profile: DDL has no query plan")
 	}
 	entry, autoParams, err := e.parseAndAnalyse(query)
 	params = mergeAutoParams(params, autoParams)
 	if err != nil {
-		return "", err
+		return exec.PlanNode{}, err
 	}
 	if entry.semaErr != nil {
-		return "", entry.semaErr
+		return exec.PlanNode{}, entry.semaErr
 	}
 	if queryHasWritingClause(query) {
-		return "", fmt.Errorf("cypher: Profile: refusing to execute a writing statement; " +
+		return exec.PlanNode{}, fmt.Errorf("cypher: Profile: refusing to execute a writing statement; " +
 			"use Explain for its plan, or RunInTx to execute it")
 	}
 	if err := checkParamPresence(entry.paramRefs, params); err != nil {
-		return "", err
+		return exec.PlanNode{}, err
 	}
 
-	var (
-		tree     exec.PlanNode
-		buildErr error
-		drainErr error
-	)
+	r, tree, err := e.profileMaterialised(ctx, entry, params, nil)
+	if err != nil {
+		return exec.PlanNode{}, err
+	}
+	for r.Next() {
+		// Drain: the measurements are the product, the rows are not. The rows are
+		// already materialised at this point, so this walks a buffer and touches no
+		// operator — which is why capturing the tree before it (inside
+		// profileMaterialised) reports the same measurements the capture after it
+		// used to.
+	}
+	drainErr := r.Err()
+	if cerr := r.Close(); cerr != nil && drainErr == nil {
+		drainErr = cerr
+	}
+	if drainErr != nil {
+		return exec.PlanNode{}, drainErr
+	}
+	return tree, nil
+}
+
+// profileMaterialised builds entry's plan with the profiling instrumentation
+// installed, drains it into a materialised [Result] under one read instant, and
+// captures the measured plan tree.
+//
+// It is the shared half of PROFILE: [Engine.profilePlanTree] (and through it
+// [Engine.Profile] and [Engine.ProfileTable]) discards the rows because the
+// measurements are its product, while the PROFILE statement prefix returns them
+// because a client that prefixed a statement still asked for its answer. Both
+// therefore describe ONE run of ONE plan built by the one builder, which is the
+// property that keeps the Cypher surface and the Go surface from disagreeing.
+//
+// The returned Result is OPEN and belongs to the caller, which must Close it.
+// The returned tree is a value copy, so it survives that Close.
+//
+// at is the caller's pinned read view when one exists and nil otherwise, in
+// which case this opens and releases its own snapshot. The error is the BUILD
+// error only; a drain error stays on the Result, exactly as [Engine.Run] leaves
+// it, so both callers report it the way their own contract requires.
+func (e *Engine) profileMaterialised(
+	ctx context.Context,
+	entry *planCacheEntry,
+	params map[string]expr.Value,
+	at *pinnedView,
+) (res *Result, tree exec.PlanNode, err error) {
+	var buildErr error
 	queryReg := newNowAwareRegistry(e.reg, time.Now())
 	// PROFILE executes the query, so it must read EXACTLY as Run does or its
 	// measurements describe a query nobody runs. Run takes a snapshot and no lock
@@ -2813,8 +2884,13 @@ func (e *Engine) Profile(ctx context.Context, query string, params map[string]ex
 	// into a writer stall for the length of a diagnostic query. Removing it makes
 	// the two paths agree again — which was the stated intent of the comment that
 	// stood here.
-	snap := e.g.BeginRead()
-	defer e.g.EndRead(snap)
+	var snap *lpg.Snapshot
+	if at != nil {
+		snap = at.snap
+	} else {
+		snap = e.g.BeginRead()
+		defer e.g.EndRead(snap)
+	}
 	func() {
 		prof := exec.NewProfiler()
 		op, cols, berr := e.buildReadPhysical(ctx, entry, entry.plan, params, queryReg, prof, snap)
@@ -2826,24 +2902,16 @@ func (e *Engine) Profile(ctx context.Context, query string, params map[string]ex
 		r := newResultWithLimit(rs, cols, nil, nil, nil, e.maxResultRows, e.maxResultBytes)
 		r.globalMem = e.globalMem
 		r.materialize()
-		for r.Next() {
-			// Drain: the measurements are the product, the rows are not.
-		}
-		drainErr = r.Err()
-		// Capture the tree BEFORE Close, while the wrappers still hold their
-		// counters, so the rendering survives teardown.
+		// Capture the tree BEFORE any Close, while the wrappers still hold their
+		// counters, so the rendering survives teardown. materialize has already
+		// driven every operator to exhaustion, so the counters are final here.
 		tree = exec.PlanTree(op)
-		if cerr := r.Close(); cerr != nil && drainErr == nil {
-			drainErr = cerr
-		}
+		res = r
 	}()
 	if buildErr != nil {
-		return "", fmt.Errorf("cypher: build plan: %w", buildErr)
+		return nil, exec.PlanNode{}, fmt.Errorf("cypher: build plan: %w", buildErr)
 	}
-	if drainErr != nil {
-		return "", drainErr
-	}
-	return exec.RenderPlanNode(&tree), nil
+	return res, tree, nil
 }
 
 // ExplainLogical returns the LOGICAL plan for query, annotated with the index
@@ -2882,6 +2950,20 @@ func (e *Engine) ExplainLogical(query string, params map[string]expr.Value) (s s
 // back to for a writing statement, whose physical tree is unreachable outside a
 // transaction.
 func (e *Engine) explainLogical(entry *planCacheEntry, params map[string]expr.Value) string {
+	in := e.explainInputsFor(entry)
+	return explainWithIndexes(in.plan, in.idxMgr, params, in.graph, in.labelSrc,
+		in.reorderSwaps, in.anchorSwaps, in.seekHints, in.prefixSeek)
+}
+
+// explainInputsFor gathers the live planner state the logical-plan walk reads:
+// the index manager and graph view it probes for access-path rewrites, the label
+// resolver behind the estimates, and the count-store-gated swap sets.
+//
+// It is shared by [Engine.explainLogical] (which renders a tree) and
+// [Engine.ExplainTable] (which renders a table) so both read the same providers
+// under the same gates; before rmp #2701 this body was inline in explainLogical
+// and a second renderer would have had to assemble its own copy.
+func (e *Engine) explainInputsFor(entry *planCacheEntry) explainInputs {
 	plan := entry.plan
 	// Reflect the count-store-gated reordering peepholes in the rendered plan so
 	// EXPLAIN shows the physically-built shape, not just the written logical order:
@@ -2908,7 +2990,16 @@ func (e *Engine) explainLogical(entry *planCacheEntry, params map[string]expr.Va
 			anchorSwaps = computeAnchorSwaps(sites, labelSrc)
 		}
 	}
-	return explainWithIndexes(plan, e.g.IndexManager(), params, e.g.ReadAt(nil), labelSrc, reorderSwaps, anchorSwaps, entry.pushedSeekHints, e.prefixSeekEnabled)
+	return explainInputs{
+		plan:         plan,
+		idxMgr:       e.g.IndexManager(),
+		graph:        e.g.ReadAt(nil),
+		labelSrc:     labelSrc,
+		reorderSwaps: reorderSwaps,
+		anchorSwaps:  anchorSwaps,
+		seekHints:    entry.pushedSeekHints,
+		prefixSeek:   e.prefixSeekEnabled,
+	}
 }
 
 // explainWithIndexes walks plan and renders operator names, substituting
@@ -2928,8 +3019,27 @@ func (e *Engine) explainLogical(entry *planCacheEntry, params map[string]expr.Va
 // not build.
 func explainWithIndexes(plan ir.LogicalPlan, idxMgr *index.Manager, params map[string]expr.Value, g *lpg.ReadView[string, float64], labelSrc *lpgLabelResolver, reorderSwaps map[*ir.Apply]bool, anchorSwaps map[*ir.Expand]bool, seekHints map[*ir.Selection]bool, prefixSeek bool) string {
 	var b strings.Builder
-	explainWithIndexesNode(&b, plan, idxMgr, params, g, labelSrc, reorderSwaps, anchorSwaps,
-		seekHints, prefixSeek, "", true, true)
+	in := explainInputs{
+		plan:         plan,
+		idxMgr:       idxMgr,
+		graph:        g,
+		labelSrc:     labelSrc,
+		reorderSwaps: reorderSwaps,
+		anchorSwaps:  anchorSwaps,
+		seekHints:    seekHints,
+		prefixSeek:   prefixSeek,
+	}
+	// The tree sink writes the line's parts back to back, which is exactly the
+	// byte sequence this renderer wrote before the walk was split from the
+	// rendering (rmp #2701). [Engine.ExplainTable] drives the same walk with a
+	// sink that builds table rows instead.
+	in.walk(func(l planLine) {
+		b.WriteString(l.prefix)
+		b.WriteString(l.connector)
+		b.WriteString(l.text)
+		b.WriteString(l.annot)
+		b.WriteByte('\n')
+	}, params)
 	return b.String()
 }
 
@@ -2961,7 +3071,7 @@ func physicalExpandLabel(e *ir.Expand) string {
 // regardless, reads the estimate providers live (see explain_estimate.go), and
 // never changes the rendered plan shape, the executed plan, or any result.
 func explainWithIndexesNode(
-	b *strings.Builder,
+	emit planLineSink,
 	plan ir.LogicalPlan,
 	idxMgr *index.Manager,
 	params map[string]expr.Value,
@@ -2982,7 +3092,7 @@ func explainWithIndexesNode(
 	// built shape. Render the hint's child in its place. A hint a seek DOES claim
 	// is left to the seek-name substitution below, which renders it as the seek.
 	if sel, ok := plan.(*ir.Selection); ok && seekHints[sel] && !seekClaimsHint(sel, params, idxMgr, explainGraph) {
-		explainWithIndexesNode(b, sel.Child, idxMgr, params, explainGraph,
+		explainWithIndexesNode(emit, sel.Child, idxMgr, params, explainGraph,
 			labelSrc, reorderSwaps, anchorSwaps, seekHints, prefixSeek, prefix, isRoot, isLast)
 		return
 	}
@@ -2993,7 +3103,7 @@ func explainWithIndexesNode(
 	// fresh Expand not present in anchorSwaps, so the recursion never re-fires.
 	if sel, ok := plan.(*ir.Selection); ok && len(anchorSwaps) > 0 {
 		if site, ok := matchAnchorSite(sel); ok && anchorSwaps[site.exp] {
-			explainWithIndexesNode(b, mirrorAnchorSite(&site), idxMgr, params, explainGraph,
+			explainWithIndexesNode(emit, mirrorAnchorSite(&site), idxMgr, params, explainGraph,
 				labelSrc, reorderSwaps, anchorSwaps, seekHints, prefixSeek, prefix, isRoot, isLast)
 			return
 		}
@@ -3053,6 +3163,8 @@ func explainWithIndexesNode(
 	// after the operator detail, never affecting the rendered shape. The rewritten
 	// range-scan / min-label LEAF lines carry their own annotations below.
 	var annot string
+	var est estimate
+	var hasEst bool
 	switch opName {
 	case "NodeByIndexSeek", "NodeByIndexSeekSet", "Selection":
 		// A Selection — whether left as a Selection, subsumed into a hash index
@@ -3061,26 +3173,25 @@ func explainWithIndexesNode(
 		// single range: equi-depth histogram + certified error). A bare label
 		// predicate or any other shape yields no annotation.
 		if sel, ok := plan.(*ir.Selection); ok {
-			annot = selectionEstimateAnnotation(sel, labelSrc, params)
+			est, annot, hasEst = selectionEstimate(sel, labelSrc, params)
 		}
 	case "NodeByLabelScan":
 		if scan, ok := plan.(*ir.NodeByLabelScan); ok {
-			annot = labelScanAnnotation(labelSrc, scan.Label)
+			est, annot, hasEst = labelScanEstimate(labelSrc, scan.Label)
 		}
 	case "AllNodesScan":
-		annot = scanEstimateAnnotation(plan, labelSrc, explainGraph)
+		est, annot, hasEst = scanEstimate(plan, labelSrc, explainGraph)
 	case "Expand", "ExpandInto":
 		// Both names denote an *ir.Expand — "ExpandInto" is the display name for one
 		// whose destination is already bound (#2149) — so both get the same
 		// cardinality annotation.
 		if exp, ok := plan.(*ir.Expand); ok {
-			annot = expandEstimateAnnotation(exp, labelSrc)
+			est, annot, hasEst = expandEstimate(exp, labelSrc)
 		}
 	}
 
-	b.WriteString(prefix)
-	b.WriteString(connector)
-	b.WriteString(opName)
+	var text strings.Builder
+	text.WriteString(opName)
 	// Surface the scanned label and the expand direction so a re-rooted single-edge
 	// pattern (#2090 — different scanned label AND flipped direction) and a swapped
 	// CartesianProduct drive order (#2091 — the anchored-label order changes) are
@@ -3088,19 +3199,26 @@ func explainWithIndexesNode(
 	// the index/range/min-label rewrites below render their own leaf line.
 	if opName == "NodeByLabelScan" {
 		if scan, ok := plan.(*ir.NodeByLabelScan); ok {
-			b.WriteString(" [")
-			b.WriteString(scan.NodeVar)
-			b.WriteByte(':')
-			b.WriteString(scan.Label)
-			b.WriteByte(']')
+			text.WriteString(" [")
+			text.WriteString(scan.NodeVar)
+			text.WriteByte(':')
+			text.WriteString(scan.Label)
+			text.WriteByte(']')
 		}
 	}
 	if exp, ok := plan.(*ir.Expand); ok {
-		b.WriteByte(' ')
-		b.WriteString(physicalExpandLabel(exp))
+		text.WriteByte(' ')
+		text.WriteString(physicalExpandLabel(exp))
 	}
-	b.WriteString(annot)
-	b.WriteByte('\n')
+	emit(planLine{
+		prefix:    prefix,
+		connector: connector,
+		text:      text.String(),
+		annot:     annot,
+		est:       est,
+		hasEst:    hasEst,
+		node:      plan,
+	})
 
 	// When a Selection was rewritten to an index seek, skip its scan child
 	// (the child would be NodeByLabelScan which is subsumed by the seek). A
@@ -3114,29 +3232,36 @@ func explainWithIndexesNode(
 	// When a range seek fires, the Selection keeps its Filter on top but its
 	// NodeByLabelScan child is replaced by a NodeByIndexRangeScan leaf.
 	if rangeSeek {
-		b.WriteString(nextPrefix)
-		b.WriteString("└─ NodeByIndexRangeScan")
+		leaf := planLine{prefix: nextPrefix, connector: "└─ ", text: "NodeByIndexRangeScan"}
 		// The range scan produces exactly the in-range index rows (an exact
 		// count the seek already established is selective) — an estExact estimate.
 		if sel, ok := plan.(*ir.Selection); ok {
-			b.WriteString(rangeSeekLeafAnnotation(sel, idxMgr, explainGraph, params, prefixSeek))
+			leaf.est, leaf.annot, leaf.hasEst = rangeSeekLeafEstimate(sel, idxMgr, explainGraph, params, prefixSeek)
+			// The leaf REPLACES the Selection's scan child, so it exposes that
+			// child's variables — the rewrite changes the access path, not the
+			// bindings.
+			leaf.node = sel.Child
 		}
-		b.WriteByte('\n')
+		emit(leaf)
 		return
 	}
 
 	// When the min-label scan fires, the Selection keeps its residual Filter on
 	// top but its NodeByLabelScan child is re-anchored on the smaller label.
 	if minLabelFired {
-		b.WriteString(nextPrefix)
-		b.WriteString("└─ NodeByLabelScan [")
-		b.WriteString(minLabelVar)
-		b.WriteByte(':')
-		b.WriteString(minLabel)
-		b.WriteString("]")
+		leaf := planLine{
+			prefix:    nextPrefix,
+			connector: "└─ ",
+			text:      "NodeByLabelScan [" + minLabelVar + ":" + minLabel + "]",
+		}
 		// The re-anchored scan produces the exact live count of the chosen label.
-		b.WriteString(labelScanAnnotation(labelSrc, minLabel))
-		b.WriteByte('\n')
+		leaf.est, leaf.annot, leaf.hasEst = labelScanEstimate(labelSrc, minLabel)
+		if sel, ok := plan.(*ir.Selection); ok {
+			// Re-anchoring changes which label is scanned, not which variable the
+			// scan binds, so the leaf exposes the replaced child's variables.
+			leaf.node = sel.Child
+		}
+		emit(leaf)
 		return
 	}
 
@@ -3148,7 +3273,7 @@ func explainWithIndexesNode(
 		children = []ir.LogicalPlan{children[1], children[0]}
 	}
 	for i, child := range children {
-		explainWithIndexesNode(b, child, idxMgr, params, explainGraph, labelSrc, reorderSwaps, anchorSwaps, seekHints, prefixSeek, nextPrefix, false, i == len(children)-1)
+		explainWithIndexesNode(emit, child, idxMgr, params, explainGraph, labelSrc, reorderSwaps, anchorSwaps, seekHints, prefixSeek, nextPrefix, false, i == len(children)-1)
 	}
 }
 
@@ -3390,47 +3515,50 @@ func (e *Engine) createBTreeIndexLocked(ctx context.Context, p *ir.CreateIndex, 
 		}
 	}
 
-	// Wrap BOTH registrations inside one visibility barrier so readers calling
-	// Graph.View never observe a partially-registered index pair: either both
-	// the user btree and its numeric companion are visible, or neither is.
-	var registered, numRegistered bool
-	if barrierErr := e.g.ApplyAtomically(func() error {
-		if cerr := idxMgr.CreateIndex(p.Name, idx); cerr != nil {
-			if p.IfNotExists && errors.Is(cerr, index.ErrIndexExists) {
-				return nil
-			}
-			return fmt.Errorf("exec: CreateIndex %q: %w", p.Name, cerr)
-		}
-		registered = true
-		// Register the companion under its internal name when it was built (a
-		// nil numIdx means the binding failed on an empty graph — the user
-		// index is still created and the companion is rebuilt on a later CREATE
-		// INDEX). A pre-existing companion (a second CREATE INDEX on the same
-		// (label, property) under a different user name) is absorbed: it
-		// already covers this pair, so the numeric seek stays served.
-		// numRegistered tracks whether WE created it, so the unwind below never
-		// drops a companion another live user index still relies on.
-		if numIdx != nil {
-			if cerr := idxMgr.CreateIndex(numName, numIdx); cerr == nil {
-				numRegistered = true
-			} else if !errors.Is(cerr, index.ErrIndexExists) {
-				return fmt.Errorf("exec: CreateIndex %q (numeric companion): %w", numName, cerr)
-			}
-		}
-		e.ClearPlanCache()
-		return nil
-	}); barrierErr != nil {
+	// Register BOTH indexes through the exec-layer DDL operator, which wraps the
+	// pair in ONE invocation of the visibility barrier (rmp #2703). The single
+	// barrier is what keeps a concurrent write transaction's index-change
+	// fan-out — which runs under a SHARED hold of the same gate
+	// ApplyAtomically takes exclusively — from landing BETWEEN the two
+	// registrations, where it would reach the user btree and be missed
+	// permanently by the companion, whose backfill snapshot predates it. See
+	// [exec.NewCreateIndexPairOp] for the full argument and the gate that
+	// enforces it.
+	//
+	// The companion slot is left ZERO when no companion was built (a nil numIdx
+	// means the binding failed on an empty graph — the user index is still
+	// created and the companion is rebuilt on a later CREATE INDEX). It must be
+	// left zero rather than assigned, because an interface holding a typed nil
+	// pointer is not nil. A pre-existing companion (a second CREATE INDEX on
+	// the same (label, property) under a different user name) is absorbed by
+	// the operator: it already covers this pair, so the numeric seek stays
+	// served, and CompanionRegistered stays false so the unwind below never
+	// drops a companion another live user index still relies on.
+	var companion exec.IndexRegistration
+	if numIdx != nil {
+		companion = exec.IndexRegistration{Name: numName, Sub: numIdx}
+	}
+	op := exec.NewCreateIndexPairOp(
+		exec.IndexRegistration{Name: p.Name, Sub: idx},
+		companion,
+		p.IfNotExists,
+		idxMgr,
+		e.g.ApplyAtomically,
+		e.ClearPlanCache,
+	)
+	if barrierErr := applyDDLOp(ctx, op); barrierErr != nil {
 		// The barrier ran the closure to completion or not at all; if the user
 		// index was registered before the companion failed, unwind it so the
 		// manager never keeps a user index without its companion.
-		if registered {
+		if op.Registered() {
 			_ = idxMgr.DropIndex(p.Name)
 		}
-		if numRegistered {
+		if op.CompanionRegistered() {
 			_ = idxMgr.DropIndex(numName)
 		}
 		return nil, barrierErr
 	}
+	registered, numRegistered := op.Registered(), op.CompanionRegistered()
 	if !registered {
 		// IF NOT EXISTS absorbed an already-registered name: no schema change,
 		// no WAL record.
@@ -4645,7 +4773,7 @@ func bindNumeric(v any) (expr.Value, bool) {
 	case int64:
 		return expr.IntegerValue(t), true
 	case uint:
-		return expr.IntegerValue(int64(t)), true //nolint:gosec // intentional truncation documented
+		return expr.IntegerValue(int64(t)), true // intentional truncation documented
 	case uint8:
 		return expr.IntegerValue(int64(t)), true
 	case uint16:
@@ -4653,7 +4781,7 @@ func bindNumeric(v any) (expr.Value, bool) {
 	case uint32:
 		return expr.IntegerValue(int64(t)), true
 	case uint64:
-		return expr.IntegerValue(int64(t)), true //nolint:gosec // intentional truncation documented
+		return expr.IntegerValue(int64(t)), true // intentional truncation documented
 	case float32:
 		return expr.FloatValue(float64(t)), true
 	case float64:
@@ -4676,6 +4804,17 @@ func bindNumeric(v any) (expr.Value, bool) {
 type planCacheEntry struct {
 	plan    ir.LogicalPlan
 	semaErr *sema.SemanticError
+	// planMode records the EXPLAIN / PROFILE prefix the statement was written
+	// with, as the GRAMMAR recognised it (rmp #2721). It is a property of the
+	// statement rather than of the plan, and it lives on the entry because the
+	// entry is the one thing every execution path already holds after parsing —
+	// so no path can execute a prefixed statement without having seen it.
+	//
+	// It does not contaminate the cache: entries are keyed on query TEXT, so
+	// "MATCH (n) RETURN n" and "EXPLAIN MATCH (n) RETURN n" are different keys
+	// with different entries, and the plan under each is byte-identical because
+	// the prefix produces no AST node. See cypher/plan_prefix.go.
+	planMode parser.PlanMode
 	// paramTypes memoises sema.InferParamTypesWithResolver(plan, …) — the
 	// per-parameter type inference. It depends on the plan AND the index schema,
 	// so it is valid only while this entry lives; every schema mutation
@@ -4710,6 +4849,23 @@ type planCacheEntry struct {
 	// query with no single-edge pattern pays nothing at build time. nil when the
 	// query has no candidate.
 	anchorSwapCandidates []anchorSite
+	// containsWrite memoises [ir.ContainsWrite] on this plan — whether the query
+	// mutates the graph, which is what decides whether [Engine.Run] rejects it. It
+	// is the same class as the fields above (a pure function of the immutable plan,
+	// computed once at entry creation), and it is here because the walk is NOT
+	// free: ContainsWrite descends through [ir.LogicalPlan.Children], and every
+	// implementation of Children builds a fresh slice, so the check cost one heap
+	// allocation per plan node on EVERY execution of an already-cached plan.
+	//
+	// Measured on bench/contention's cypher-read-label-small
+	// ("MATCH (n:N) RETURN count(n)", whose plan has three nodes) with
+	// -memprofilerate=1: 3 of the 4 allocations the read path made BEFORE it even
+	// opened its snapshot were these Children slices, out of 33 for the whole read
+	// (rmp #2693). The cost grows with plan size, so a wide plan paid more.
+	//
+	// A bool needs no lazy filling and no concurrency argument beyond the entry's
+	// own: it is written before loadOrStore publishes the entry, and never again.
+	containsWrite bool
 	// scalarUse memoises [analyseNodeScalarUse] across executions of this plan
 	// (rmp #2383). It is the same class as the four fields above — a pure function
 	// of the immutable plan — but it is filled LAZILY rather than at entry
@@ -4726,6 +4882,12 @@ type planCacheEntry struct {
 	// value it holds is immutable once stored, so concurrent readers observe a
 	// fully built analysis or none.
 	scalarUse nodeScalarUseMemo
+	// countVarRewrite memoises [rewriteCountVarToCountStar] across executions of
+	// this plan (rmp #2693). Filled lazily from the build's own call site for the
+	// same reason scalarUse is: predicting which aggregation nodes the build will
+	// reach would duplicate knowledge that lives in the builder. See
+	// [countVarRewriteMemo].
+	countVarRewrite countVarRewriteMemo
 }
 
 // nodeScalarUseMemo memoises [analyseNodeScalarUse] per AST expression for the
@@ -4834,6 +4996,7 @@ func (m *nodeScalarUseMemo) get(x ast.Expression) (map[string]*nodeScalarUse, bo
 	}
 	if v, ok := m.m.Load(x); ok {
 		m.hits.Add(1)
+		//nolint:forcetypeassert // the analysis cache is unexported and only ever stores *nodeScalarAnalysis
 		a := v.(*nodeScalarAnalysis)
 		return a.uses, a.bailout
 	}
@@ -4849,6 +5012,7 @@ func (m *nodeScalarUseMemo) get(x ast.Expression) (map[string]*nodeScalarUse, bo
 	if !loaded {
 		m.entries.Add(1)
 	}
+	//nolint:forcetypeassert // LoadOrStore returns the value already in the analysis cache, which only stores *nodeScalarAnalysis
 	a := actual.(*nodeScalarAnalysis)
 	return a.uses, a.bailout
 }
@@ -4912,7 +5076,7 @@ func (e *Engine) parseAndAnalyse(query string) (*planCacheEntry, map[string]stri
 // entry for the rewritten text and fall back to the original when the rewrite
 // does not parse.
 func (e *Engine) buildPlanCacheEntry(query string) (*planCacheEntry, error) {
-	astNode, err := parser.Parse(query)
+	astNode, planMode, err := parser.ParseStatement(query)
 	if err != nil {
 		return nil, fmt.Errorf("cypher: parse: %w", err)
 	}
@@ -4971,9 +5135,15 @@ func (e *Engine) buildPlanCacheEntry(query string) (*planCacheEntry, error) {
 	}
 	entry := &planCacheEntry{
 		plan: plan, semaErr: semaErr, paramRefs: paramRefs, notifications: notifications,
+		planMode:             planMode,
 		reorderCandidates:    reorderCandidates,
 		anchorSwapCandidates: anchorSwapCandidates, paramTypes: paramTypes,
 		pushedSeekHints: pushedSeekHints,
+		// Computed OUTSIDE the semaErr == nil guard above, unlike its neighbours: a
+		// semantically-invalid entry never reaches execution today, but a memo whose
+		// validity depends on a caller's check order is a trap, and this one costs a
+		// single plan walk on a cache miss. See [planCacheEntry.containsWrite].
+		containsWrite: ir.ContainsWrite(plan),
 	}
 	actual, _ := e.cache.loadOrStore(query, entry)
 	return actual, nil
@@ -5209,6 +5379,15 @@ type Result struct {
 	// [Result.Counters]. nil for a read-only statement, which is what lets a caller
 	// distinguish "no writes attempted" from "writes attempted that changed nothing".
 	counters *exec.QueryCounters
+
+	// planNode holds the query plan captured for a statement written with an
+	// EXPLAIN or PROFILE prefix (rmp #2721), and planMode says which of the two —
+	// which is what decides whether the figures on it are the planner's ESTIMATES
+	// or measurements of a run that happened. Both are the zero value for an
+	// ordinary statement, so [Result.Plan] and [Result.Profile] return nil.
+	// See cypher/plan_prefix.go.
+	planNode *exec.PlanNode
+	planMode parser.PlanMode
 
 	closed atomic.Bool // tripped by Close; checked by the finalizer
 }
@@ -9744,7 +9923,13 @@ func buildOperatorRec(
 		// tryBuildCountRows and the columnar countStarKernel, for the Selection- and
 		// Expand-child shapes no leaf pushdown can serve. Returns p unchanged unless
 		// the null-safety walk passes; never mutates the cached logical plan.
-		p = rewriteCountVarToCountStar(p)
+		//
+		// Routed through the plan-cache entry's memo (rmp #2693): the rewrite is a
+		// pure function of an immutable plan node, and when it fires it allocates the
+		// EagerAggregation copy and its Aggregates slice — twice per execution of a
+		// plan whose answer cannot change. See [rewriteCountVarToCountStarFor], which
+		// falls back to the direct call on any build with no entry behind it.
+		p = rewriteCountVarToCountStarFor(bopts, p)
 		// Parallel-reduce fast path (#1672): a group-by-less count(*) /
 		// count(<scan-var>) over a bare full-node scan is served by a
 		// ParallelCountScan that sums per-worker partial counters, avoiding both
@@ -10329,7 +10514,7 @@ var parallelScanProjectBuildCount = &planseam.ParallelScanProjectBuilds
 // will (re)populate, and returns (nil, false, nil). A genuine build error from the
 // validating build is returned as (nil, false, err).
 //
-//nolint:gocyclo // structural shape match — one guard per rejected IR shape; no hidden branches
+// structural shape match — one guard per rejected IR shape; no hidden branches
 func tryBuildParallelScanProject(
 	proj *ir.Projection,
 	walker nodeWalkerIface,
@@ -10590,7 +10775,7 @@ func projectionItemsAreScalar(items []ir.ProjectionItem) bool {
 // A zero-argument call to a temporal constructor is the clock form (rejected); the
 // argument-bearing form is pure (accepted), so the deny-set membership is gated on
 // len(Args) == 0 for the temporal names while rand/randomUUID reject unconditionally.
-func exprHasNonScalar(e ast.Expression) bool { //nolint:gocyclo // per-AST-node dispatch; no hidden branches
+func exprHasNonScalar(e ast.Expression) bool { // per-AST-node dispatch; no hidden branches
 	switch n := e.(type) {
 	case nil:
 		return false
@@ -11031,7 +11216,7 @@ var allNodesCountScanBuildCount atomic.Uint64
 // arms carry, applied PER WORKER and undivided, for a bound of
 // W*(maxResultBytes + one column) in flight; see [applyWorkerAggRowBudget] (#2668).
 //
-//nolint:gocyclo // structural shape match — one guard per rejected IR shape
+// structural shape match — one guard per rejected IR shape
 func tryBuildParallelAggregateScan(
 	p *ir.EagerAggregation,
 	walker nodeWalkerIface,
@@ -12984,7 +13169,23 @@ func edgePropsToExprMap(g *lpg.ReadView[string, float64], srcKey, dstKey string)
 // PropBytes maps to expr.Null exactly as it would through the coalesced path
 // (the temporal storage contract, graph/lpg/edge_property.go). Returns nil (an
 // absent map) when the handle is 0, was never written, or the pair carries no
-// properties for it — the caller then falls back to the per-pair map.
+// properties for it.
+//
+// A nil return is NOT a fallback signal. This sentence used to end "— the caller
+// then falls back to the per-pair map", which described the pre-#1684 ladder in
+// which the by-handle map was an OVERRIDE layered over the coalesced one. It has
+// not been true since #1684 made the routing EXCLUSIVE, and the two statements
+// contradicted each other for long enough to be worth naming (rmp #2705). The
+// exclusive behaviour is the intended one, and it is what runs: [buildEdgeProps]
+// decides the route once per row from the by-handle MEMBERSHIP signal
+// (hasByHandleEntry, resolved from the separate by-handle LABEL store) — never
+// from whether this map came back empty. So a bound instance that has a
+// by-handle label and an empty property bag correctly reports keys(r) = [] and
+// r.k IS NULL, instead of inheriting a propertied parallel sibling's keys from
+// the per-pair union. The per-pair store is reached only when the membership
+// signal is absent altogether (a 0-handle simple-graph or pre-handle edge, or a
+// Go-API edge that stamped a handle but wrote the per-pair store only). See
+// [lazyRelResolver] and [expr.RelSource], which state the same exclusivity.
 //
 // Designed as the reusable by-handle property accessor: it is keyed purely on
 // (srcKey, dstKey, handle) so the same primitive serves the path / VLE renderers
@@ -15221,7 +15422,7 @@ func exprReferencesVarName(e ast.Expression, target string) bool {
 	return false
 }
 
-//nolint:gocyclo,cyclop // dispatches over every projection kind and variable type; splitting would obscure the data-flow
+//nolint:gocyclo // dispatches over every projection kind and variable type; splitting would obscure the data-flow
 func buildIRProjection(
 	items []ir.ProjectionItem,
 	child exec.Operator,
@@ -16738,6 +16939,7 @@ func tryBuildColumnarProjection(
 		if werr := cp.WithChunkInput(chunkFillers); werr != nil {
 			// Preconditions are already checked above; on the (unreachable) error
 			// keep the byte-identical row-input path rather than failing the query.
+			//nolint:nilerr // WithChunkInput validates both preconditions (exec/columnar_project.go:170,173) before it mutates anything (exec/columnar_project.go:175-176), so on error cp is still the unmodified row-input operator and the query result is byte-identical
 			return cp, true, nil
 		}
 	}
@@ -16793,6 +16995,7 @@ func tryBuildColumnarScalarPassthrough(
 	if werr := cp.WithScalarChunkInput(chunkFillers); werr != nil {
 		// Preconditions are already checked above; on the (unreachable) error keep
 		// the byte-identical row-input path rather than failing the query.
+		//nolint:nilerr // WithChunkInput validates both preconditions (exec/columnar_project.go:170,173) before it mutates anything (exec/columnar_project.go:175-176), so on error cp is still the unmodified row-input operator and the query result is byte-identical
 		return cp, true, nil
 	}
 	return cp, true, nil
@@ -16960,6 +17163,7 @@ func tryBuildColumnarAggInput(
 		if werr := cp.WithChunkInput(chunkFillers); werr != nil {
 			// Preconditions are already checked above; on the (unreachable) error keep
 			// the byte-identical row-input path rather than failing the query.
+			//nolint:nilerr // WithScalarChunkInput validates both preconditions (exec/columnar_project.go:196,199) before it mutates anything (exec/columnar_project.go:201-202), so on error cp is still the unmodified row-input operator and the query result is byte-identical
 			return cp, true, nil
 		}
 	}
@@ -18089,6 +18293,15 @@ func (e *Engine) runInTxSession(ctx context.Context, sess *lpg.Session[string, f
 	if entry.semaErr != nil {
 		return nil, entry.semaErr
 	}
+
+	// EXPLAIN / PROFILE prefix (rmp #2721). Diverted here — before the schema
+	// hold, before txn.Store.Begin, and before any mutator exists — because an
+	// EXPLAIN must not open a write transaction, let alone apply one. This is the
+	// path RunAny takes for a prefixed WRITING statement, since its textual
+	// writing-clause classifier sees the CREATE/DELETE that follows the prefix.
+	if entry.planMode != parser.PlanModeNone {
+		return e.runPlanPrefixed(ctx, entry, params, nil)
+	}
 	plan := entry.plan
 
 	if err := checkParamPresence(entry.paramRefs, params); err != nil {
@@ -18277,6 +18490,59 @@ func (e *Engine) runInTxSession(ctx context.Context, sess *lpg.Session[string, f
 // at one commit record, published with a single atomic store, so a concurrent
 // reader resolving through [mvcc.Visible] sees all of the statement or none of it
 // (rmp #2300, #2320). The shared hold that remains excludes only DDL.
+//
+// # What the bracket guarantees, and what it does not (rmp #2697)
+//
+// Enumerated because a change here is a change to the module's ACID write path.
+// Each item names the mechanism that actually supplies the guarantee — which is,
+// in every case, NOT the exclusion of writers from one another.
+//
+//   - ATOMICITY comes from the COMMIT RECORD. Every version the statement writes
+//     is stamped with the one [mvcc.TxState] minted by lpg.Graph.beginWrite, and
+//     lpg.Graph.endWrite publishes it with a single atomic store. A failed
+//     statement is unwound by the undo log (replayUndoOnPanic,
+//     [Result.rollbackUnderBarrier]) BEFORE the bracket unwinds, so a rolled-back
+//     transaction is never published. THE CONSTRAINT ON ANY FIX: the undo must
+//     complete before publication.
+//
+//   - ISOLATION comes from the PER-OBJECT VERSION CHAINS. The statement reads
+//     through [lpg.Graph.WriterViewOf] — its own transaction's view — and a
+//     write-write collision is arbitrated by the per-object latch, recorded on the
+//     transaction, and checked here as a backstop (rmp #2354). Writers are NOT
+//     serialised here and must not be: rmp #2320 established that exclusion is
+//     unnecessary once every version resolves through its own commit record.
+//
+//   - DURABILITY BEFORE VISIBILITY is the one ordering this bracket enforces
+//     directly. [Result.commitUnderBarrier] runs the WAL fsync
+//     ([txn.Tx.CommitWALOnly]) BEFORE committing the index buffer and BEFORE the
+//     bracket unwinds to publish, so THE FSYNC IS INSIDE THE BRACKET. THE
+//     CONSTRAINT ON ANY FIX: nothing may move publication ahead of the fsync — a
+//     reader must never observe a transaction a crash could erase.
+//
+//   - INDEX AND COUNT-STORE PUBLICATION ride on that same ordering: buf.Commit and
+//     cbuf.Commit run after the fsync and before the unwind, so a reader that sees
+//     a graph write sees the matching index entry and count.
+//
+//   - CATALOG STABILITY is what the shared hold is actually for. It excludes DDL
+//     (the exclusive acquisition in [lpg.Graph.ApplyAtomically]) for the
+//     statement's duration, so the plan, the index writes and the constraint
+//     checks all observe one catalog.
+//
+// # Why "inside the barrier" does not mean "serialised" (rmp #2697)
+//
+// The fsync being inside this bracket costs a durable writer nothing AGAINST OTHER
+// WRITERS, because the bracket is held SHARED and [mvcc.Gate]'s weak path is an
+// atomic add on a striped padded slot (rmp #2337), not an RWMutex. Measured, not
+// assumed: in block profiles of cypher-write-mem, mvcc-session-write and
+// dst-disk-wal at 1024 goroutines, this function's own FLAT delay is ZERO in all
+// three — its large cumulative share is that of a parent frame wrapping the whole
+// write path — and the gate appears nowhere in any of them. store/txn's writer
+// admission is an in-flight counter, not a semaphore (rmp #2306), and its
+// enter/exit pair together held under 1e-4% of blocked time on every workload
+// profiled. What the fsync IS inside that genuinely serialises is
+// store/wal's own writer mutex and group-commit condition plus store/txn's
+// apply-turn gate, which together hold ~99% of blocked time on dst-disk-wal.
+// Widening this bracket cannot move any of them.
 //
 // The re-entrancy constraint survives and is stricter than it looks: nothing inside
 // may call g.View / g.ApplyAtomically / g.ApplyVersioned, because visMu is
@@ -18935,6 +19201,16 @@ func (a *lpgMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 // strips the per-pair edge labels/properties once the pair is fully
 // disconnected, so re-creating an edge between the same endpoints does not
 // resurrect the deleted relationship's type or properties.
+//
+// The edges-removed counter and the undo inverse are gated on the removal
+// having APPLIED, not on the presence probe alone (rmp #2725): a per-edge
+// removal is a non-commutative adjacency write and can be REFUSED by a
+// concurrent transaction's in-flight append on the same source, in which case
+// [lpg.WriteView.RemoveEdge] mutates nothing. An inverse recorded for that
+// re-adds an arc this transaction never removed. The same gate
+// [lpgMutatorAdapter.RemoveEdgeByHandle] has always used (rmp #2018) and that
+// the bulk path took at rmp #2694 — this was the loop they both missed, the one
+// DETACH DELETE uses for the victim's INBOUND arcs.
 func (a *lpgMutatorAdapter) RemoveEdge(src, dst string) {
 	present := a.g.AdjList().HasEdge(src, dst)
 	r := a.rec()
@@ -18942,15 +19218,21 @@ func (a *lpgMutatorAdapter) RemoveEdge(src, dst string) {
 	if r.active() {
 		pre = r.captureRemovedEdge(src, dst)
 	}
+	// Count-store (#2082): capture the removed first-slot instance's type and
+	// endpoint labels before the adjacency removal — it reads state the removal
+	// clears, so it cannot move below the gate. Enqueuing it for a refused
+	// removal is harmless: the deltas sit in the per-transaction
+	// [exec.CountBuffer], a refused transaction cannot commit, and
+	// [exec.CountBuffer.Rollback] discards them unapplied.
+	if present && a.cs() != nil {
+		countEdgeRemovedFirstSlot(a.g, a.cs(), a.countBuf(), src, dst)
+	}
+	if !a.w().RemoveEdge(src, dst) {
+		return
+	}
 	if present {
 		a.countRelDeleted()
-		// Count-store (#2082): capture the removed first-slot instance's type and
-		// endpoint labels before the adjacency removal.
-		if a.cs() != nil {
-			countEdgeRemovedFirstSlot(a.g, a.cs(), a.countBuf(), src, dst)
-		}
 	}
-	a.w().RemoveEdge(src, dst)
 	r.recordRemoveEdge(&pre, present)
 }
 
@@ -19102,14 +19384,27 @@ func (a *lpgMutatorAdapter) RemoveNode(n string) {
 		return
 	}
 	wasLive := !a.g.IsTombstoned(id)
+	// The index fan-out captures the node's PRE-removal state, so it has to stay
+	// AHEAD of the removal. It is safe there even when the removal is refused:
+	// every refusal in [lpg.Graph.removeNodeInfo] dooms the transaction, and a
+	// transaction that cannot commit takes the [exec.IndexBuffer.Rollback] branch,
+	// which discards these changes rather than fanning them out.
 	if wasLive && indexFanoutActive(a.g, a.buf) {
 		enqueueNodeRemovalChanges(a.g, a.buf, n, id)
 	}
-	if wasLive {
-		a.countNodeDeleted()
+	applied := a.w().RemoveNode(n)
+	// THE COUNTER AND THE INVERSE GATE TOGETHER, on the OUTCOME rather than on
+	// the pre-probe above (rmp #2726). Journalling an inverse for a retirement
+	// that never happened revives a node the conflicting peer went on to delete
+	// for real, and it comes back BARE — the peer's commit took its labels and
+	// properties with it. They gate together because the inverse's
+	// DecrNodesRemoved is what reverses the increment: gating one alone would
+	// leave the counter permanently inflated.
+	if !wasLive || !applied {
+		return
 	}
-	a.w().RemoveNode(n)
-	a.rec().recordRemoveNode(n, wasLive)
+	a.countNodeDeleted()
+	a.rec().recordRemoveNode(n, true)
 }
 
 // IsTombstoned reports whether the NodeID has been tombstoned.
@@ -19498,17 +19793,11 @@ func (a *lpgMutatorAdapter) RemoveAllEdgesFrom(n string) {
 	r := a.rec()
 	// Snapshot outgoing neighbours for undo recording and side-effect counting.
 	outgoing := a.OutNeighbours(n)
-	for _, dst := range outgoing {
-		present := a.g.AdjList().HasEdge(n, dst)
-		var pre removedEdgePreimage
-		if r.active() {
-			pre = r.captureRemovedEdge(n, dst)
-		}
-		if present {
-			a.countRelDeleted()
-		}
-		r.recordRemoveEdge(&pre, present)
-	}
+	// Pre-images are captured BEFORE the removal (it clears the per-pair
+	// surfaces they describe) but journalled only AFTER it, and only if it
+	// applied — see [lpg.WriteView.RemoveAllEdgesFrom] and
+	// [journalAllOutEdgesRemoved].
+	pre := captureAllOutEdgePreimages(r, a.g, n, outgoing)
 	// Count-store (#2082): decrement every out-edge slot's E/D/T before the bulk
 	// removal (per-slot type + endpoint labels). The node's in-edges are counted
 	// by the detach_delete caller's InNeighbours RemoveEdge loop.
@@ -19518,7 +19807,10 @@ func (a *lpgMutatorAdapter) RemoveAllEdgesFrom(n string) {
 	// Snapshot incoming neighbours for directed graphs: outgoing-only bulk
 	// removal won't remove edges pointing at n; those are handled by the
 	// detach_delete caller's InNeighbours loop via individual RemoveEdge calls.
-	a.w().RemoveAllEdgesFrom(n)
+	if !a.w().RemoveAllEdgesFrom(n) {
+		return
+	}
+	journalAllOutEdgesRemoved(r, a, pre)
 }
 
 // OutDegree returns the number of outgoing edges from n.
@@ -19818,7 +20110,7 @@ func (a *walMutatorAdapter) AddNode(n string) (graph.NodeID, error) {
 	if err := a.w().AddNode(n); err != nil {
 		return 0, err
 	}
-	_ = a.tx.AddNode(n) //nolint:errcheck // tx is non-nil; only ErrTxFinished possible, which cannot occur here
+	_ = a.tx.AddNode(n) // tx is non-nil; only ErrTxFinished possible, which cannot occur here
 	id, _ := a.g.AdjList().Mapper().Lookup(n)
 	if !existed {
 		a.countNodeCreated()
@@ -19839,7 +20131,7 @@ func (a *walMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 	if err := a.w().AddEdge(src, dst, w); err != nil {
 		return 0, 0, err
 	}
-	_ = a.tx.AddEdge(src, dst, w) //nolint:errcheck // ErrNoWeightCodec cannot occur — store has wcodec via NewEngineWithStore
+	_ = a.tx.AddEdge(src, dst, w) // ErrNoWeightCodec cannot occur — store has wcodec via NewEngineWithStore
 	srcID, _ := a.g.AdjList().Mapper().Lookup(src)
 	dstID, _ := a.g.AdjList().Mapper().Lookup(dst)
 	if !srcExisted {
@@ -19883,7 +20175,7 @@ func (a *walMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 	if err != nil {
 		return 0, 0, 0, err
 	}
-	_ = a.tx.AddEdgeWithHandle(src, dst, w, handle) //nolint:errcheck // ErrNoWeightCodec cannot occur — store has wcodec via NewEngineWithStore
+	_ = a.tx.AddEdgeWithHandle(src, dst, w, handle) // ErrNoWeightCodec cannot occur — store has wcodec via NewEngineWithStore
 	srcID, _ := a.g.AdjList().Mapper().Lookup(src)
 	dstID, _ := a.g.AdjList().Mapper().Lookup(dst)
 	if !srcExisted {
@@ -19915,14 +20207,40 @@ func (a *walMutatorAdapter) RemoveEdge(src, dst string) {
 	if r.active() {
 		pre = r.captureRemovedEdge(src, dst)
 	}
+	if present && a.cs() != nil { // count-store (#2082): capture before the removal
+		countEdgeRemovedFirstSlot(a.g, a.cs(), a.countBuf(), src, dst)
+	}
+	// All three effects wait on the removal not being REFUSED — see the
+	// [lpgMutatorAdapter.RemoveEdge] twin (rmp #2725). The reason rmp #2694 gave
+	// for the bulk path applies here: a refused removal removed nothing, so
+	// emitting its frame would durably record a deletion this transaction never
+	// performed. A refused transaction cannot commit, but the WAL is the durable
+	// truth and may only describe work done.
+	//
+	// The counter and the undo inverse wait on a SECOND condition the frame does
+	// not: `present`, i.e. an arc was actually there to take out. [Graph.RemoveEdge]
+	// returns true for "the removal ran, whether or not an arc was actually there"
+	// — its own godoc says so — so on a shape where the arc is already gone this
+	// emits a frame that removes nothing.
+	//
+	// Measured under rmp #2706, and it is NOT hypothetical on an undirected
+	// engine: `RemoveAllEdgesFrom` retires both directions, so every call the
+	// in-edge sweep at cypher/exec/detach_delete.go:263 then makes is a no-op.
+	// An undirected fan-out of 64 writes 128 frames for 64 removed edges — 2.000
+	// per edge, 48.7% of the delete transaction's WAL bytes — while every
+	// directed shape measures exactly 1.000. Gating the frame on `present` was
+	// shown to recover an identical graph, with negative controls that correctly
+	// reported a difference where those frames are real in-edges. It is NOT done
+	// here because whether Cypher over an undirected LPG is a supported
+	// configuration at all is unsettled, and that question decides the fix:
+	// rmp #2734.
+	if !a.w().RemoveEdge(src, dst) {
+		return
+	}
 	if present {
 		a.countRelDeleted()
-		if a.cs() != nil { // count-store (#2082): capture before the removal
-			countEdgeRemovedFirstSlot(a.g, a.cs(), a.countBuf(), src, dst)
-		}
 	}
-	a.w().RemoveEdge(src, dst)
-	_ = a.tx.RemoveEdge(src, dst) //nolint:errcheck // ErrTxFinished impossible here
+	_ = a.tx.RemoveEdge(src, dst) // ErrTxFinished impossible here
 	r.recordRemoveEdge(&pre, present)
 }
 
@@ -19954,7 +20272,7 @@ func (a *walMutatorAdapter) RemoveEdgeByHandle(src, dst string, handle uint64) {
 	if removed {
 		a.countRelDeleted()
 	}
-	_ = a.tx.RemoveEdgeByHandle(src, dst, handle) //nolint:errcheck // ErrTxFinished impossible here
+	_ = a.tx.RemoveEdgeByHandle(src, dst, handle) // ErrTxFinished impossible here
 	r.recordRemoveEdge(&pre, removed)
 }
 
@@ -19981,7 +20299,7 @@ func (a *walMutatorAdapter) SetNodeLabel(n, label string) error {
 		a.countLabelAdded()
 	}
 	r.recordSetNodeLabel(n, label, hadLabel)
-	_ = a.tx.SetNodeLabel(n, label) //nolint:errcheck // ErrTxFinished impossible here
+	_ = a.tx.SetNodeLabel(n, label) // ErrTxFinished impossible here
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
 			Op:    index.OpAddNodeLabel,
@@ -20013,7 +20331,7 @@ func (a *walMutatorAdapter) RemoveNodeLabel(n, label string) {
 		a.countLabelRemoved()
 	}
 	r.recordRemoveNodeLabel(n, label, hadLabel)
-	_ = a.tx.RemoveNodeLabel(n, label) //nolint:errcheck // ErrTxFinished impossible here
+	_ = a.tx.RemoveNodeLabel(n, label) // ErrTxFinished impossible here
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
 			Op:    index.OpRemoveNodeLabel,
@@ -20033,15 +20351,27 @@ func (a *walMutatorAdapter) RemoveNode(n string) {
 		return
 	}
 	wasLive := !a.g.IsTombstoned(id)
+	// The index fan-out captures the node's PRE-removal state, so it has to stay
+	// AHEAD of the removal. It is safe there even when the removal is refused:
+	// every refusal in [lpg.Graph.removeNodeInfo] dooms the transaction, and a
+	// transaction that cannot commit takes the [exec.IndexBuffer.Rollback] branch,
+	// which discards these changes rather than fanning them out.
 	if wasLive && indexFanoutActive(a.g, a.buf) {
 		enqueueNodeRemovalChanges(a.g, a.buf, n, id)
 	}
+	applied := a.w().RemoveNode(n)
+	if !applied {
+		// See the lpgMutatorAdapter twin (rmp #2726). The WAL frame is gated too,
+		// for the reason rmp #2725 gated the edge one: a frame for a retirement
+		// this transaction was refused would make the refusal DURABLE, and replay
+		// would apply what the engine declined.
+		return
+	}
 	if wasLive {
 		a.countNodeDeleted()
+		a.rec().recordRemoveNode(n, true)
 	}
-	a.w().RemoveNode(n)
-	a.rec().recordRemoveNode(n, wasLive)
-	_ = a.tx.RemoveNode(n) //nolint:errcheck // ErrTxFinished impossible here; not-found is safe to ignore
+	_ = a.tx.RemoveNode(n) // ErrTxFinished impossible here; not-found is safe to ignore
 }
 
 // IsTombstoned reports whether the NodeID has been tombstoned.
@@ -20071,7 +20401,7 @@ func (a *walMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 	r.recordSetNodeProperty(n, key, prev, had)
 	// PreValidated: a.w().SetNodeProperty above already ran the schema validator
 	// on this value, and a stateful validator must not see it twice (rmp #2602).
-	_ = a.tx.SetNodePropertyPreValidated(n, key, value) //nolint:errcheck // ErrTxFinished impossible here
+	_ = a.tx.SetNodePropertyPreValidated(n, key, value) // ErrTxFinished impossible here
 	if a.buf != nil {
 		ch := index.Change{
 			Op:       index.OpSetNodeProperty,
@@ -20112,7 +20442,7 @@ func (a *walMutatorAdapter) DelNodeProperty(n, key string) {
 	}
 	a.w().DelNodeProperty(n, key)
 	r.recordDelNodeProperty(n, key, prev, had)
-	_ = a.tx.DelNodeProperty(n, key) //nolint:errcheck // ErrTxFinished impossible here
+	_ = a.tx.DelNodeProperty(n, key) // ErrTxFinished impossible here
 	if a.buf != nil {
 		ch := index.Change{
 			Op:       index.OpDelNodeProperty,
@@ -20170,7 +20500,7 @@ func (a *walMutatorAdapter) SetEdgeLabel(src, dst, label string) {
 	hadLabel := r.active() && a.g.HasEdgeLabel(src, dst, label)
 	a.w().SetEdgeLabel(src, dst, label)
 	r.recordSetEdgeLabel(src, dst, label, hadLabel)
-	_ = a.tx.SetEdgeLabel(src, dst, label) //nolint:errcheck // ErrTxFinished impossible here
+	_ = a.tx.SetEdgeLabel(src, dst, label) // ErrTxFinished impossible here
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
 			Op:    index.OpAddEdgeLabel,
@@ -20195,7 +20525,7 @@ func (a *walMutatorAdapter) SetEdgeProperty(src, dst, key string, value lpg.Prop
 	a.countPropertySet()
 	r.recordSetEdgeProperty(src, dst, key, prev, had)
 	// PreValidated: see the SetNodeProperty twin (rmp #2602).
-	_ = a.tx.SetEdgePropertyPreValidated(src, dst, key, value) //nolint:errcheck // ErrTxFinished impossible here
+	_ = a.tx.SetEdgePropertyPreValidated(src, dst, key, value) // ErrTxFinished impossible here
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
 			Op:       index.OpSetEdgeProperty,
@@ -20231,7 +20561,7 @@ func (a *walMutatorAdapter) delEdgePropertyUncounted(src, dst, key string) {
 	}
 	a.w().DelEdgeProperty(src, dst, key)
 	r.recordDelEdgeProperty(src, dst, key, prev, had)
-	_ = a.tx.DelEdgeProperty(src, dst, key) //nolint:errcheck // ErrTxFinished impossible here
+	_ = a.tx.DelEdgeProperty(src, dst, key) // ErrTxFinished impossible here
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
 			Op:       index.OpDelEdgeProperty,
@@ -20334,7 +20664,7 @@ func (a *walMutatorAdapter) RemoveEdgeInstance(src, dst string, idx int64) {
 // uses, so the per-pair and per-handle stores stay atomic together.
 func (a *walMutatorAdapter) SetEdgeLabelByHandle(src, dst string, handle uint64, label string) {
 	a.w().SetEdgeLabelByHandle(src, dst, handle, label)
-	_ = a.tx.SetEdgeLabelByHandle(src, dst, handle, label) //nolint:errcheck // ErrTxFinished impossible here
+	_ = a.tx.SetEdgeLabelByHandle(src, dst, handle, label) // ErrTxFinished impossible here
 	// Count-store (#2082): the single authoritative once-per-edge typing hook.
 	if a.cs() != nil {
 		countEdgeTyped(a.g, a.cs(), a.countBuf(), src, dst, label)
@@ -20355,7 +20685,7 @@ func (a *walMutatorAdapter) SetEdgePropertyByHandle(src, dst string, handle uint
 	}
 	r.recordSetEdgePropertyByHandle(src, dst, handle, key, prev, had)
 	// PreValidated: see the SetNodeProperty twin (rmp #2602).
-	_ = a.tx.SetEdgePropertyByHandlePreValidated(src, dst, handle, key, value) //nolint:errcheck // ErrTxFinished impossible here
+	_ = a.tx.SetEdgePropertyByHandlePreValidated(src, dst, handle, key, value) // ErrTxFinished impossible here
 	return nil
 }
 func (a *walMutatorAdapter) DelEdgePropertyByHandle(src, dst string, handle uint64, key string) {
@@ -20367,14 +20697,14 @@ func (a *walMutatorAdapter) DelEdgePropertyByHandle(src, dst string, handle uint
 	}
 	a.w().DelEdgePropertyByHandle(src, dst, handle, key)
 	r.recordDelEdgePropertyByHandle(src, dst, handle, key, prev, had)
-	_ = a.tx.DelEdgePropertyByHandle(src, dst, handle, key) //nolint:errcheck // ErrTxFinished impossible here
+	_ = a.tx.DelEdgePropertyByHandle(src, dst, handle, key) // ErrTxFinished impossible here
 }
 func (a *walMutatorAdapter) EdgePropertiesByHandle(src, dst string, handle uint64) map[string]lpg.PropertyValue {
 	return a.g.EdgePropertiesByHandle(src, dst, handle)
 }
 func (a *walMutatorAdapter) RemoveEdgeInstanceByHandle(src, dst string, handle uint64) {
 	a.w().RemoveEdgeInstanceByHandle(src, dst, handle)
-	_ = a.tx.RemoveEdgeInstanceByHandle(src, dst, handle) //nolint:errcheck // ErrTxFinished impossible here
+	_ = a.tx.RemoveEdgeInstanceByHandle(src, dst, handle) // ErrTxFinished impossible here
 }
 
 // RecordConstraintInverse is [lpgMutatorAdapter.RecordConstraintInverse] for the
@@ -20418,24 +20748,28 @@ func (a *walMutatorAdapter) RemoveAllEdgesFrom(n string) {
 	// Snapshot outgoing neighbours for undo recording, WAL emission, and
 	// side-effect counting before the bulk removal clears the adjacency.
 	outgoing := a.OutNeighbours(n)
-	for _, dst := range outgoing {
-		present := a.g.AdjList().HasEdge(n, dst)
-		var pre removedEdgePreimage
-		if r.active() {
-			pre = r.captureRemovedEdge(n, dst)
-		}
-		if present {
-			a.countRelDeleted()
-		}
-		_ = a.tx.RemoveEdge(n, dst) //nolint:errcheck // ErrTxFinished impossible here
-		r.recordRemoveEdge(&pre, present)
-	}
+	// Pre-images are captured BEFORE the removal (it clears the per-pair
+	// surfaces they describe) but journalled only AFTER it, and only if it
+	// applied — see [lpg.WriteView.RemoveAllEdgesFrom] and
+	// [journalAllOutEdgesRemoved].
+	pre := captureAllOutEdgePreimages(r, a.g, n, outgoing)
 	// Count-store (#2082): decrement every out-edge slot before the bulk removal.
 	if a.cs() != nil {
 		countAllOutEdgesRemoved(a.g, a.cs(), a.countBuf(), n)
 	}
 	// Bulk-remove from the in-memory graph (O(d) instead of O(d²)).
-	a.w().RemoveAllEdgesFrom(n)
+	if !a.w().RemoveAllEdgesFrom(n) {
+		return
+	}
+	// The WAL frames go with the journal, for the same reason (rmp #2694): a
+	// refused removal removed nothing, so emitting its frames would durably
+	// record a deletion this transaction never performed. A refused transaction
+	// cannot commit, but the frames must not be written on the strength of that
+	// alone — the WAL is the durable truth and it may only describe work done.
+	for _, dst := range outgoing {
+		_ = a.tx.RemoveEdge(n, dst) // ErrTxFinished impossible here
+	}
+	journalAllOutEdgesRemoved(r, a, pre)
 }
 
 // OutDegree returns the number of outgoing edges from n.

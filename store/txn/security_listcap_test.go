@@ -90,7 +90,10 @@ func TestSec_DecodeTxnListProp_LegitRoundtrip(t *testing.T) {
 		lpg.StringValue("ok"),
 		lpg.BoolValue(true),
 	})
-	buf := encodePropertyValue(nil, orig)
+	buf, encErr := encodePropertyValue(nil, orig)
+	if encErr != nil {
+		t.Fatalf("encodePropertyValue: %v", encErr)
+	}
 	got, rest, err := decodePropertyValue(buf)
 	if err != nil {
 		t.Fatalf("decodePropertyValue: %v", err)

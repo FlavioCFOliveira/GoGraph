@@ -129,6 +129,7 @@ func WriteIndexDefs(w io.Writer, specs []IndexDefSpec) (size int64, crc uint32, 
 		metrics.IncCounter("store.snapshot.WriteIndexDefs.errors", 1)
 		return 0, 0, err
 	}
+	//nolint:gosec // G115: NO writer guard; overflow needs 2^32 index defs. ReadIndexDefs rejects count > 1<<20 at indexdefs.go:212, so the reader's cap binds 4096x earlier
 	if err := binary.Write(tee, binary.LittleEndian, uint32(len(ordered))); err != nil {
 		metrics.IncCounter("store.snapshot.WriteIndexDefs.errors", 1)
 		return 0, 0, err
@@ -159,6 +160,18 @@ func writeIndexDefRecord(w io.Writer, d IndexDefSpec) (int64, error) {
 	}
 	total := int64(1)
 	for _, s := range [...]string{d.Name, d.Label, d.Property} {
+		// The guard this record lacked entirely until rmp #2743, while its
+		// structural twin writeConstraintRecord (constraints.go) has always had
+		// it: same three-string loop, same uint32 prefix, same 1<<16 reader cap.
+		// The nolint that stood here argued the bound came from the caller
+		// (checkWALSchemaString in store/txn), but WriteIndexDefs is EXPORTED and
+		// takes caller-supplied []IndexDefSpec, so that bound is bypassable — and
+		// an identifier between 64 KiB and 4 GiB produced a CRC-valid
+		// indexdefs.bin that ReadIndexDefs is required to refuse.
+		if err := checkSnapshotIndexDefString(len(s)); err != nil {
+			return 0, err
+		}
+		//nolint:gosec // G115: bounded by checkSnapshotIndexDefString just above, the same cap readIndexDefString enforces (rmp #2743)
 		if err := binary.Write(w, binary.LittleEndian, uint32(len(s))); err != nil {
 			return 0, err
 		}

@@ -318,7 +318,7 @@ func TestCountStore_BudgetTripDirtiesOut(t *testing.T) {
 // recompute at the end that must reconcile every cell exactly.
 func TestCountStore_MixedWorkloadMatchesRecount(t *testing.T) {
 	eng, g := newCountEngine(t, 8)
-	rng := rand.New(rand.NewSource(20260723))
+	rng := rand.New(rand.NewSource(20260723)) //nolint:gosec // G404: math/rand seeded from a fixed constant — this test asserts a reproducible sequence, which a CSPRNG would destroy.
 	labels := []string{"A", "B", "C", "D"}
 	types := []string{"R", "S", "T"}
 

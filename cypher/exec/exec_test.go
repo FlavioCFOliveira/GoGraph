@@ -1,16 +1,14 @@
 package exec_test
 
-// exec_test.go — tests for RowSlab, Operator interface, and Drain (tasks-234, 235).
+// exec_test.go — tests for the Operator interface and Drain (tasks-234, 235).
 //
 // Coverage targets:
-//   - RowSlab: zero-alloc hot path after pool warmup, ErrSlabOverflow, race-clean.
 //   - Drain: end-of-stream, error propagation, context cancellation ≤ 100ms, Close always called.
 //   - Pipeline chaining: FilterOperator above SliceOperator.
 
 import (
 	"context"
 	"errors"
-	"sync"
 	"testing"
 	"time"
 
@@ -102,169 +100,6 @@ func (op *infiniteOperator) Next(out *exec.Row) (bool, error) {
 	return true, nil
 }
 func (op *infiniteOperator) Close() error { op.closed = true; return nil }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 1. RowSlab basic allocation
-// ─────────────────────────────────────────────────────────────────────────────
-
-func TestRowSlab_Alloc(t *testing.T) {
-	s := exec.NewRowSlab(3, 8)
-
-	for i := range 8 {
-		row, err := s.Alloc()
-		if err != nil {
-			t.Fatalf("Alloc[%d] unexpected error: %v", i, err)
-		}
-		if len(row) != 3 {
-			t.Fatalf("Alloc[%d] row width = %d, want 3", i, len(row))
-		}
-	}
-	if s.Len() != 8 {
-		t.Errorf("Len() = %d, want 8", s.Len())
-	}
-
-	// 9th alloc must overflow.
-	_, err := s.Alloc()
-	if !errors.Is(err, exec.ErrSlabOverflow) {
-		t.Errorf("expected ErrSlabOverflow, got %v", err)
-	}
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 2. RowSlab Reset — counter and value zeroing
-// ─────────────────────────────────────────────────────────────────────────────
-
-func TestRowSlab_Reset(t *testing.T) {
-	s := exec.NewRowSlab(2, 4)
-	row, _ := s.Alloc()
-	row[0] = expr.IntegerValue(42)
-	row[1] = expr.StringValue("x")
-
-	s.Reset()
-
-	if s.Len() != 0 {
-		t.Errorf("after Reset: Len() = %d, want 0", s.Len())
-	}
-
-	// Reallocate: slots must be nil (zeroed).
-	row2, err := s.Alloc()
-	if err != nil {
-		t.Fatalf("Alloc after Reset: %v", err)
-	}
-	for i, v := range row2 {
-		if v != nil {
-			t.Errorf("slot[%d] after Reset = %v, want nil", i, v)
-		}
-	}
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 2b. RowSlab variable-width methods (AllocRaw / SetRow / GetRow / Cap)
-// ─────────────────────────────────────────────────────────────────────────────
-
-func TestRowSlab_VarWidth(t *testing.T) {
-	t.Parallel()
-	s := exec.NewRowSlab(0, 4) // width=0 → variable-width slab
-	if s.Cap() != 4 {
-		t.Errorf("Cap() = %d, want 4", s.Cap())
-	}
-
-	idx, err := s.AllocRaw()
-	if err != nil {
-		t.Fatalf("AllocRaw: %v", err)
-	}
-	r := exec.Row{expr.StringValue("hello"), expr.IntegerValue(42)}
-	s.SetRow(idx, r)
-
-	got := s.GetRow(idx)
-	if len(got) != 2 || got[0] != expr.StringValue("hello") {
-		t.Errorf("GetRow = %v, want [hello 42]", got)
-	}
-
-	// AllocRaw overflow
-	for range 3 {
-		if _, err := s.AllocRaw(); err != nil {
-			t.Fatalf("unexpected AllocRaw error: %v", err)
-		}
-	}
-	_, err = s.AllocRaw()
-	if !errors.Is(err, exec.ErrSlabOverflow) {
-		t.Errorf("expected ErrSlabOverflow after cap reached, got %v", err)
-	}
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 3. ErrSlabOverflow sentinel
-// ─────────────────────────────────────────────────────────────────────────────
-
-func TestRowSlab_Overflow(t *testing.T) {
-	s := exec.NewRowSlab(1, 2)
-	if _, err := s.Alloc(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.Alloc(); err != nil {
-		t.Fatal(err)
-	}
-	_, err := s.Alloc()
-	if !errors.Is(err, exec.ErrSlabOverflow) {
-		t.Errorf("want ErrSlabOverflow, got %v", err)
-	}
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 4. SlabPool — Get/Put round-trip
-// ─────────────────────────────────────────────────────────────────────────────
-
-func TestSlabPool_RoundTrip(t *testing.T) {
-	pool := exec.NewSlabPool(4, 16)
-	s := pool.Get()
-	if s == nil {
-		t.Fatal("Get returned nil")
-	}
-	row, err := s.Alloc()
-	if err != nil {
-		t.Fatal(err)
-	}
-	row[0] = expr.IntegerValue(1)
-	pool.Put(s)
-
-	// After Put, the slab is reset. Get it again and verify it's clean.
-	s2 := pool.Get()
-	if s2.Len() != 0 {
-		t.Errorf("slab from pool has Len=%d, want 0", s2.Len())
-	}
-	pool.Put(s2)
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 5. RowSlab race safety (concurrent Pools)
-// ─────────────────────────────────────────────────────────────────────────────
-
-func TestSlabPool_ConcurrentAccess(_ *testing.T) {
-	pool := exec.NewSlabPool(2, 64)
-	var wg sync.WaitGroup
-	const goroutines = 32
-	wg.Add(goroutines)
-	for range goroutines {
-		go func() {
-			defer wg.Done()
-			s := pool.Get()
-			for range 64 {
-				row, err := s.Alloc()
-				if errors.Is(err, exec.ErrSlabOverflow) {
-					break
-				}
-				if err != nil {
-					return
-				}
-				row[0] = expr.IntegerValue(1)
-				row[1] = expr.StringValue("v")
-			}
-			pool.Put(s)
-		}()
-	}
-	wg.Wait()
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 6. Drain — end-of-stream, rows collected
@@ -373,24 +208,8 @@ func TestDrain_Empty(t *testing.T) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 10. Benchmarks — RowSlab zero-alloc after warmup
+// 10. Benchmarks
 // ─────────────────────────────────────────────────────────────────────────────
-
-func BenchmarkRowSlab_Alloc(b *testing.B) {
-	pool := exec.NewSlabPool(4, exec.DefaultSlabCapacity)
-	b.ReportAllocs()
-	b.ResetTimer()
-	for range b.N {
-		s := pool.Get()
-		for {
-			_, err := s.Alloc()
-			if err != nil {
-				break
-			}
-		}
-		pool.Put(s)
-	}
-}
 
 func BenchmarkDrain_Throughput(b *testing.B) {
 	const nRows = 1000

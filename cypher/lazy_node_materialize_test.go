@@ -277,24 +277,24 @@ func TestLazy_DeletedEntityViaScalarPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed CREATE: %v", err)
 	}
-	for res.Next() { //nolint:revive // drain
+	for res.Next() { // drain
 	}
 	if err := res.Err(); err != nil {
 		t.Fatalf("seed drain: %v", err)
 	}
-	_ = res.Close() //nolint:errcheck
+	_ = res.Close()
 
 	// `n.age > 0` is a scalar predicate (lazy-eligible); DELETE n stamps n
 	// Deleted; RETURN n.name must surface DeletedEntityAccess.
 	res2, err := eng.RunInTx(ctx, `MATCH (n:Person) WHERE n.age > 0 DELETE n RETURN n.name AS x`, nil)
 	failed := err != nil
 	if err == nil {
-		for res2.Next() { //nolint:revive // drain
+		for res2.Next() { // drain
 		}
 		if res2.Err() != nil {
 			failed = true
 		}
-		_ = res2.Close() //nolint:errcheck
+		_ = res2.Close()
 	}
 	if !failed {
 		t.Fatal("DELETE n ... RETURN n.name: expected DeletedEntityAccess error, got success (a stale lazy read would mask the deletion)")

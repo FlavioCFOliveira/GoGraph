@@ -55,7 +55,7 @@ func seedFusionBenchGraph(b *testing.B, n int) *Engine {
 		if err != nil {
 			b.Fatalf("seed %q: %v", q, err)
 		}
-		for res.Next() { //nolint:revive // intentional full drain
+		for res.Next() { // intentional full drain
 		}
 		if err := res.Err(); err != nil {
 			b.Fatalf("seed drain %q: %v", q, err)

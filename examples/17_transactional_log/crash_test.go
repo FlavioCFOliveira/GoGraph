@@ -73,7 +73,7 @@ func TestRealCrashRecovery(t *testing.T) {
 func buildExampleBinary(t *testing.T) string {
 	t.Helper()
 	bin := filepath.Join(t.TempDir(), "ex17")
-	cmd := exec.Command("go", "build", "-o", bin, ".")
+	cmd := exec.Command("go", "build", "-o", bin, ".") //nolint:gosec // G204: fixed argv — "go build" with a literal flag and an output path under this test's temp dir.
 	cmd.Dir = "."
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Skipf("go build skipped: %v\n%s", err, out)

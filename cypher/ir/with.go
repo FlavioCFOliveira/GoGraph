@@ -181,7 +181,7 @@ func rewriteWithProjectionAliases(pred ast.Expression, proj *ast.Projection) ast
 // is a key in subst is replaced with the mapped expression. Non-leaf
 // nodes are reconstructed only along the path that contains a substitution
 // so unrelated subtrees keep their original pointers.
-func substVarRefs(e ast.Expression, subst map[string]ast.Expression) ast.Expression { //nolint:gocyclo // case-per-AST-node dispatch
+func substVarRefs(e ast.Expression, subst map[string]ast.Expression) ast.Expression { // case-per-AST-node dispatch
 	if e == nil {
 		return nil
 	}
@@ -279,7 +279,7 @@ func rewriteOrderByForAggregation(proj *ast.Projection, items []ProjectionItem) 
 // subst[s.String()]. Used by rewriteOrderByForAggregation to translate
 // grouping-expression references in ORDER BY items into the alias variable
 // they were projected as.
-func substExprByString(e ast.Expression, subst map[string]string) ast.Expression { //nolint:gocyclo // case-per-AST-node dispatch
+func substExprByString(e ast.Expression, subst map[string]string) ast.Expression { // case-per-AST-node dispatch
 	if e == nil {
 		return nil
 	}

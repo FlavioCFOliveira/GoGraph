@@ -170,7 +170,7 @@ func TestDistinct_NoEffect(t *testing.T) {
 		}
 		for res.Next() {
 		}
-		res.Close() //nolint:errcheck // test teardown
+		res.Close() // test teardown
 	}
 
 	res, err := eng.Run(ctx,

@@ -85,7 +85,7 @@ func mallocsFor(t *testing.T, eng *cypher.Engine, q string) uint64 {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	for res.Next() { //nolint:revive // full drain
+	for res.Next() { // full drain
 	}
 	if err := res.Err(); err != nil {
 		t.Fatalf("Err: %v", err)
@@ -119,7 +119,7 @@ func timeQuery(t *testing.T, eng *cypher.Engine, q string, runs int) float64 {
 		if err != nil {
 			t.Fatalf("Run: %v", err)
 		}
-		for res.Next() { //nolint:revive // full drain
+		for res.Next() { // full drain
 		}
 		if err := res.Err(); err != nil {
 			t.Fatalf("Err: %v", err)

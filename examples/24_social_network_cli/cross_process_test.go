@@ -31,7 +31,7 @@ func TestCLI_CrossProcessSnapshotConsistency(t *testing.T) {
 
 	// Build the example binary in an isolated temp dir so the test
 	// cannot pick up a stale executable from the working tree.
-	buildCmd := exec.Command("go", "build", "-o", binary, ".")
+	buildCmd := exec.Command("go", "build", "-o", binary, ".") //nolint:gosec // G204: fixed argv — "go build" with a literal flag and an output path under this test's temp dir.
 	buildCmd.Dir = "."
 	if out, err := buildCmd.CombinedOutput(); err != nil {
 		t.Skipf("go build skipped: %v\n%s", err, string(out))
@@ -39,7 +39,7 @@ func TestCLI_CrossProcessSnapshotConsistency(t *testing.T) {
 
 	dataDir := t.TempDir()
 	runStep := func(args ...string) (string, error) {
-		c := exec.Command(binary, args...)
+		c := exec.Command(binary, args...) //nolint:gosec // G204: binary is the executable this test just built; args are literals assembled by the test.
 		c.Env = os.Environ()
 		var buf bytes.Buffer
 		c.Stdout = &buf
@@ -124,7 +124,7 @@ func TestCLI_CrossProcessCypherCreateSurvives(t *testing.T) {
 	binDir := t.TempDir()
 	binary := filepath.Join(binDir, "social_cli")
 
-	buildCmd := exec.Command("go", "build", "-o", binary, ".")
+	buildCmd := exec.Command("go", "build", "-o", binary, ".") //nolint:gosec // G204: fixed argv — "go build" with a literal flag and an output path under this test's temp dir.
 	buildCmd.Dir = "."
 	if out, err := buildCmd.CombinedOutput(); err != nil {
 		t.Skipf("go build skipped: %v\n%s", err, string(out))
@@ -132,7 +132,7 @@ func TestCLI_CrossProcessCypherCreateSurvives(t *testing.T) {
 
 	dataDir := t.TempDir()
 	runStep := func(args ...string) (string, error) {
-		c := exec.Command(binary, args...)
+		c := exec.Command(binary, args...) //nolint:gosec // G204: binary is the executable this test just built; args are literals assembled by the test.
 		c.Env = os.Environ()
 		var buf bytes.Buffer
 		c.Stdout = &buf

@@ -32,7 +32,7 @@ func TestE2E_ExplicitTxRollback(t *testing.T) {
 	driver, _ := newDriverForTest(t)
 
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer session.Close(ctx) //nolint:errcheck
+	defer session.Close(ctx)
 
 	tx, err := session.BeginTransaction(ctx)
 	if err != nil {
@@ -70,7 +70,7 @@ func TestE2E_ExplicitTxRollback(t *testing.T) {
 
 	// AC#2: a second session also sees zero rows.
 	session2 := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer session2.Close(ctx) //nolint:errcheck
+	defer session2.Close(ctx)
 
 	rows2 := runRead(ctx, t, session2, `MATCH (n:RollbackNode) RETURN count(n) AS cnt`, nil)
 	if cnt, _ := rows2[0]["cnt"].(int64); cnt != 0 {

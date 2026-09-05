@@ -106,7 +106,17 @@ func (pe *patternEvaluator) bind(params map[string]expr.Value, subEval expr.Subq
 // no cap, >0 → that exact budget); it is resolved once here so the hot append
 // path compares against a single non-negative ceiling.
 func newPatternEvaluator(g *lpg.ReadView[string, float64], maxCollectItems int) *patternEvaluator {
-	return &patternEvaluator{g: g, maxCollectItems: resolvePatternCompBudget(maxCollectItems)}
+	pe := &patternEvaluator{}
+	pe.init(g, maxCollectItems)
+	return pe
+}
+
+// init sets up an evaluator IN PLACE, so that a caller which already owns
+// storage for one — [readBuildScaffold] — can initialise it without a second
+// heap allocation. [newPatternEvaluator] is this plus the allocation.
+func (pe *patternEvaluator) init(g *lpg.ReadView[string, float64], maxCollectItems int) {
+	pe.g = g
+	pe.maxCollectItems = resolvePatternCompBudget(maxCollectItems)
 }
 
 // resolvePatternCompBudget maps the EngineOptions.MaxCollectItems encoding to
@@ -686,7 +696,7 @@ func (pe *patternEvaluator) matchSteps(ctx context.Context, srcID graph.NodeID, 
 
 // matchSingleHop follows a single fixed-length hop and recurses.
 //
-//nolint:gocyclo // direction × filter × recursion branches; extracted helpers bring each below 15
+// direction × filter × recursion branches; extracted helpers bring each below 15
 func (pe *patternEvaluator) matchSingleHop(ctx context.Context, srcID graph.NodeID, s step, remaining []step, row expr.RowContext) (bool, error) {
 	mapper := pe.g.AdjList().Mapper()
 

@@ -192,7 +192,7 @@ func TestRangeSeekDifferential_AfterMutation(t *testing.T) {
 		if err != nil {
 			t.Fatalf("write %q: %v", q, err)
 		}
-		for res.Next() { //nolint:revive // drain to commit the write
+		for res.Next() { // drain to commit the write
 		}
 		if err := res.Err(); err != nil {
 			t.Fatalf("write iter %q: %v", q, err)

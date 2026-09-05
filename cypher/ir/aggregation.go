@@ -216,7 +216,7 @@ func extractAggFunc(expr ast.Expression) (*ast.FunctionInvocation, bool) {
 // stdev/stdevp/percentileCont/percentileDisc). Used to decide whether a
 // projection item that is not itself a bare aggregate call should still
 // trigger EagerAggregation insertion.
-func containsAggregate(e ast.Expression) bool { //nolint:gocyclo // per-AST-node dispatch
+func containsAggregate(e ast.Expression) bool { // per-AST-node dispatch
 	if e == nil {
 		return false
 	}
@@ -288,7 +288,7 @@ func containsAggregate(e ast.Expression) bool { //nolint:gocyclo // per-AST-node
 //
 // counter is incremented per extracted aggregate to make names unique
 // across the whole projection.
-func extractAggregatesFromExpr(e ast.Expression, aggs *[]AggregateExpr, counter *int) ast.Expression { //nolint:gocyclo // per-AST-node dispatch
+func extractAggregatesFromExpr(e ast.Expression, aggs *[]AggregateExpr, counter *int) ast.Expression { // per-AST-node dispatch
 	if e == nil {
 		return nil
 	}

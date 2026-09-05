@@ -205,7 +205,7 @@ func (s configModelBase) Build(cfg adjlist.Config) (*lpg.Graph[int, int64], erro
 // order so the golden bytes stay stable regardless of the underlying
 // shuffle permutation.
 //
-//nolint:gosec,gocritic // G404: math/rand/v2 is the pinned PRNG for catalogue determinism; paramTypeCombine: signature is pinned by the brief (n int, d int, seed uint64).
+// G404: math/rand/v2 is the pinned PRNG for catalogue determinism; paramTypeCombine: signature is pinned by the brief (n int, d int, seed uint64).
 func RandomRegular(n, d int, seed uint64) Shape[int, int64] {
 	if n < 1 || n > 1000 {
 		panic(fmt.Sprintf("shapegen: RandomRegular requires 1 <= n <= 1000, got %d", n))
@@ -314,7 +314,7 @@ func buildRandomRegular(g *lpg.Graph[int, int64], n, d int, seed uint64) error {
 // and the seed-to-output map remains a pure function of the original
 // (n, d, seed) tuple.
 //
-//nolint:gosec // G404: math/rand/v2 is the pinned PRNG for catalogue determinism; see RandomRegular godoc.
+// G404: math/rand/v2 is the pinned PRNG for catalogue determinism; see RandomRegular godoc.
 func randomRegularAttempt(r *rand.Rand, n, d int) (map[[2]int]struct{}, bool) {
 	halfEdges := make([]int, n*d)
 	for i := 0; i < n; i++ {
@@ -427,7 +427,7 @@ func randomRegularAttempt(r *rand.Rand, n, d int) (map[[2]int]struct{}, bool) {
 // caller mutations cannot affect Build — mirroring [Multipartite]'s
 // contract.
 //
-//nolint:gocritic // paramTypeCombine: signature is pinned by the brief (degSeq []int, allowMulti bool, seed uint64).
+// paramTypeCombine: signature is pinned by the brief (degSeq []int, allowMulti bool, seed uint64).
 func ConfigurationModel(degSeq []int, allowMulti bool, seed uint64) Shape[int, int64] {
 	for i, deg := range degSeq {
 		if deg < 0 {

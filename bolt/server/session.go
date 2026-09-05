@@ -17,6 +17,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 	"github.com/FlavioCFOliveira/GoGraph/internal/clock"
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 // serverAgent is the agent string advertised in SUCCESS metadata after HELLO.
@@ -246,6 +247,11 @@ type Session struct {
 	// txID is the registry id of the currently-open transaction, empty when none
 	// is open. It is minted at BEGIN and cleared by unregisterTx.
 	txID string
+
+	// txEnt is the registry entry this session registered for txID, held directly
+	// so that reporting progress needs no lookup and therefore no registry lock.
+	// It is nil exactly when txID is empty. See [Session.reportTx].
+	txEnt *txEntry
 
 	// remote is the client address reported in a transaction listing.
 	remote string
@@ -539,7 +545,7 @@ func (s *Session) inFlightCount() int {
 // identifier in log messages.
 func randomID() string {
 	var b [8]byte
-	_, _ = rand.Read(b[:]) //nolint:errcheck // rand.Read never fails on supported platforms
+	_, _ = rand.Read(b[:]) // rand.Read never fails on supported platforms
 	return hex.EncodeToString(b[:])
 }
 
@@ -556,7 +562,24 @@ func randomID() string {
 // trailing SUCCESS or FAILURE. A sink write failure is surfaced as an error
 // wrapping [errRecordWrite]: the connection framing is unrecoverable and the
 // caller must tear the connection down without writing anything further.
+//
+// # Observability
+//
+// Every call records a latency observation under
+// "bolt.server.HandleMessage.message.<type>", the module's per-message Bolt
+// histogram; see msgmetrics.go for the naming and for why the message type is
+// carried in the name. The window is dispatch plus handler execution — it
+// EXCLUDES the framing read that produced msg and the trailing response write
+// the caller performs, and INCLUDES the RECORD writes a PULL streams through
+// its own sink. It is emitted here, on the exported entry point, rather than in
+// the serve loop, so a session driven directly through HandleMessage is
+// observed on exactly the same terms as one driven over a socket.
 func (s *Session) HandleMessage(ctx context.Context, msg any) ([]any, error) {
+	// The observation covers every return path below, the context-cancellation
+	// early return included. metrics.Time returns a value, so the deferred
+	// value-receiver call is open-coded and allocates nothing.
+	defer metrics.Time(msgLatencySeries[msgKindOf(msg)]).Stop()
+
 	// Propagate context cancellation before doing any work. failWith routes
 	// through enterFailed, which reclaims any open explicit transaction even on
 	// this early-return path that never reaches dispatch (#1312).
@@ -723,24 +746,32 @@ func (s *Session) registerTx(mode string, cancel func()) {
 	_ = s.terminateSignal()
 	id := s.txReg.nextID(s.id)
 	s.txID = id
-	s.txReg.register(&txEntry{
-		id:        id,
-		principal: s.identity.Principal,
-		remote:    s.remote,
-		mode:      mode,
-		state:     s.state.String(),
-		terminate: func() { s.requestTerminate(cancel) },
-	})
+	// The entry is kept on the session as well as handed to the registry: it is how
+	// reportTx reaches its own record without a map lookup under the registry's
+	// process-global mutex.
+	s.txEnt = newTxEntry(id, s.identity.Principal, s.remote, mode, s.state.String(),
+		func() { s.requestTerminate(cancel) })
+	s.txReg.register(s.txEnt)
 }
 
 // reportTx refreshes the registry's view of the open transaction: its state and,
 // when query is non-empty, the statement it is running. Called after each
 // message so a listing shows what the transaction is actually doing.
+//
+// It writes through the entry this session registered rather than looking the id
+// up in the registry, so the highest-frequency operation on the registry — once
+// per inbound message for as long as a transaction is open — takes no
+// process-global lock and touches no cache line another session shares
+// (rmp #2714). [txEntry.setStatus] then publishes nothing at all unless a field
+// actually moved.
+//
+// This runs on the session's message loop and on no other goroutine, which is the
+// single-writer discipline [txEntry] relies on.
 func (s *Session) reportTx(query string) {
-	if s.txReg == nil || s.txID == "" {
+	if s.txEnt == nil {
 		return
 	}
-	s.txReg.update(s.txID, s.state.String(), query)
+	s.txEnt.setStatus(s.state.String(), query)
 }
 
 // unregisterTx removes the transaction from the registry. Idempotent, because
@@ -751,6 +782,7 @@ func (s *Session) unregisterTx() {
 	}
 	s.txReg.unregister(s.txID)
 	s.txID = ""
+	s.txEnt = nil
 	// Drain any terminate request that arrived for the transaction just ended, so
 	// it cannot be observed against the NEXT one.
 	if s.terminate != nil {
@@ -840,7 +872,7 @@ func (s *Session) txClosed() {
 func (s *Session) abortTx() {
 	s.drainResult()
 	if s.tx != nil {
-		_ = s.tx.Rollback() //nolint:errcheck // best-effort rollback on failure/teardown; error not actionable
+		_ = s.tx.Rollback() // best-effort rollback on failure/teardown; error not actionable
 		s.tx = nil
 	}
 	// Count the transaction closed (idempotent: a no-op when a prior COMMIT/
@@ -1057,7 +1089,7 @@ func (s *Session) handleReset() ([]any, error) {
 
 	// Roll back and discard any active explicit transaction.
 	if s.tx != nil {
-		_ = s.tx.Rollback() //nolint:errcheck // best-effort cleanup on reset
+		_ = s.tx.Rollback() // best-effort cleanup on reset
 		s.tx = nil
 		// Orderly end: count the transaction closed. Idempotent via txAccounted.
 		s.txClosed()
@@ -1088,7 +1120,7 @@ func (s *Session) handleReset() ([]any, error) {
 func (s *Session) handleGoodbye() ([]any, error) {
 	s.drainResult()
 	if s.tx != nil {
-		_ = s.tx.Rollback() //nolint:errcheck // best-effort cleanup on goodbye
+		_ = s.tx.Rollback() // best-effort cleanup on goodbye
 		s.tx = nil
 		// Orderly end: count the transaction closed. Idempotent via txAccounted.
 		s.txClosed()
@@ -1225,7 +1257,7 @@ func (s *Session) handleRun(ctx context.Context, m *proto.Run) ([]any, error) {
 	next, transErr := Transition(s.state, m, runErr == nil)
 	if transErr != nil {
 		if result != nil {
-			_ = result.Close() //nolint:errcheck // best-effort close on unexpected path
+			_ = result.Close() // best-effort close on unexpected path
 		}
 		if cancel != nil {
 			cancel() // no PULL will follow; release the deadline now
@@ -1267,7 +1299,7 @@ func (s *Session) handleRun(ctx context.Context, m *proto.Run) ([]any, error) {
 	}}, nil
 }
 
-//nolint:gocyclo // pull loop has context cancellation, cursor error, has_more peek, and state transition branches; complexity is irreducible.
+// pull loop has context cancellation, cursor error, has_more peek, and state transition branches; complexity is irreducible.
 func (s *Session) handlePull(ctx context.Context, m *proto.Pull) ([]any, error) {
 	if s.state != StateStreaming && s.state != StateTxStreaming {
 		return s.failTransition(m)
@@ -1347,6 +1379,7 @@ func (s *Session) handlePull(ctx context.Context, m *proto.Pull) ([]any, error) 
 			// enterFailed drains the cursor and rolls back any open explicit
 			// transaction (TX_STREAMING), releasing the writer serialisation (#1312).
 			s.enterFailed()
+			//nolint:nilerr // the cancellation is reported to the peer as a RequestInterrupted FAILURE inside the returned responses slice, which serve.go:1354 writes to the wire; handlePull's error return is reserved for internal failures (serve.go:1321)
 			return []any{&proto.Failure{
 				Code:    "Neo.TransientError.General.RequestInterrupted",
 				Message: ctx.Err().Error(),
@@ -1409,12 +1442,18 @@ func (s *Session) handlePull(ctx context.Context, m *proto.Pull) ([]any, error) 
 	// SUCCESS metadata, as Neo4j does.
 	var notifications []packstream.Value
 	var stats map[string]packstream.Value
+	var planMeta, profileMeta map[string]packstream.Value
 	if !hasMore && s.result != nil {
 		notifications = notificationsToValues(s.result.Notifications())
 		// Capture the write statistics BEFORE drainResult nils the cursor (#2190).
 		// This is the SUCCESS the driver turns into the ResultSummary, so it is the
 		// only place the counters can reach the client.
 		stats = resultStats(s.result.Counters())
+		// Same window, same reason, for the plan an EXPLAIN / PROFILE statement
+		// captured (rmp #2721): the driver builds ResultSummary.Plan()/Profile()
+		// from THIS message, and drainResult is about to drop the cursor holding
+		// the tree.
+		planMeta, profileMeta = resultPlanMetadata(s.result)
 	}
 
 	// Transition state based on has_more.
@@ -1463,6 +1502,15 @@ func (s *Session) handlePull(ctx context.Context, m *proto.Pull) ([]any, error) 
 		// SUCCESS is unchanged by #2190.
 		if len(stats) > 0 {
 			meta["stats"] = stats
+		}
+		// At most one of the two is ever non-nil; a statement with no EXPLAIN /
+		// PROFILE prefix publishes neither, leaving its SUCCESS byte-identical to
+		// what it was before rmp #2721.
+		if planMeta != nil {
+			meta["plan"] = planMeta
+		}
+		if profileMeta != nil {
+			meta["profile"] = profileMeta
 		}
 	}
 	responses = append(responses, &proto.Success{Metadata: meta})
@@ -1542,8 +1590,14 @@ func (s *Session) handleDiscard(m *proto.Discard) ([]any, error) {
 	// DISCARD still applied the statement's writes — it only discards the ROWS — so its
 	// terminal SUCCESS must report them, exactly as a PULL's does.
 	var stats map[string]packstream.Value
+	var planMeta, profileMeta map[string]packstream.Value
 	if !hasMore && s.result != nil {
 		stats = resultStats(s.result.Counters())
+		// A DISCARD terminates the stream, so the driver builds its ResultSummary
+		// from this SUCCESS: the captured plan must reach it here too, or a client
+		// that DISCARDed a PROFILE would get a summary with no profile in it
+		// (rmp #2721).
+		planMeta, profileMeta = resultPlanMetadata(s.result)
 	}
 	if !hasMore {
 		s.drainResult()
@@ -1563,6 +1617,12 @@ func (s *Session) handleDiscard(m *proto.Discard) ([]any, error) {
 		meta["db"] = s.databaseName()
 		if len(stats) > 0 {
 			meta["stats"] = stats
+		}
+		if planMeta != nil {
+			meta["plan"] = planMeta
+		}
+		if profileMeta != nil {
+			meta["profile"] = profileMeta
 		}
 	}
 	return []any{&proto.Success{Metadata: meta}}, nil
@@ -1691,7 +1751,7 @@ func (s *Session) handleBegin(ctx context.Context, m *proto.Begin) ([]any, error
 	// legitimate burst of concurrent BEGINs from one principal (rmp #2175). The
 	// slot is released by txClosed, which every teardown path reaches.
 	if qerr := s.acquireTxQuota(); qerr != nil {
-		_ = tx.Rollback() //nolint:errcheck // best-effort cleanup; error not actionable
+		_ = tx.Rollback() // best-effort cleanup; error not actionable
 		incCounter(metricTxQuotaRejected)
 		s.log.Warn("bolt: BEGIN refused; principal is at its open-transaction cap",
 			slog.String("session", s.id), slog.String("err", qerr.Error()))
@@ -1732,7 +1792,7 @@ func (s *Session) handleBegin(ctx context.Context, m *proto.Begin) ([]any, error
 		// Roll back the just-opened transaction so the writer serialisation is not
 		// leaked on the (unreachable in practice) illegal-transition path, and give
 		// back the quota slot with it.
-		_ = tx.Rollback() //nolint:errcheck // best-effort cleanup; error not actionable
+		_ = tx.Rollback() // best-effort cleanup; error not actionable
 		s.releaseTxQuota()
 		return s.failTransition(m)
 	}
@@ -1825,7 +1885,7 @@ func (s *Session) handleRollback() ([]any, error) {
 
 	// Roll back the transaction if one is active.
 	if s.tx != nil {
-		_ = s.tx.Rollback() //nolint:errcheck // rollback errors are not actionable; best-effort cleanup
+		_ = s.tx.Rollback() // rollback errors are not actionable; best-effort cleanup
 		s.tx = nil
 		// Orderly end: count the transaction closed. Idempotent via txAccounted.
 		s.txClosed()
@@ -1888,7 +1948,7 @@ func (s *Session) abortStream(err error) ([]any, error) {
 func (s *Session) drainResult() {
 	s.peeked = nil
 	if s.result != nil {
-		_ = s.result.Close() //nolint:errcheck // best-effort drain; error is not actionable here
+		_ = s.result.Close() // best-effort drain; error is not actionable here
 		s.result = nil
 		s.columns = nil
 	}
@@ -2297,7 +2357,7 @@ func exprToPackstream(v any, boltMajor uint8) packstream.Value {
 // by [packstream.Encoder.WriteValue] with the typed packstream.ErrNestingTooDeep
 // — a clean per-query error — rather than being silently truncated here.
 //
-//nolint:gocyclo,cyclop // dispatch over all expr.Value kinds; complexity is irreducible
+// dispatch over all expr.Value kinds; complexity is irreducible
 func exprValueToPackstream(v expr.Value, boltMajor uint8) packstream.Value {
 	if v == nil {
 		return nil

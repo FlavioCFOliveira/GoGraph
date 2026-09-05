@@ -295,7 +295,7 @@ type rollbackStats struct {
 // demonstration's facts, and the on-disk byte footprint. The write loop polls
 // ctx for cancellation every cfg.batch packages.
 //
-//nolint:gocyclo // one linear build pipeline: nodes+labels+props, then edges+props, one tx per package.
+// one linear build pipeline: nodes+labels+props, then edges+props, one tx per package.
 func commit(ctx context.Context, dir string, cfg config, w io.Writer) (commitStats, rollbackStats, error) {
 	//nolint:gosec // G404: a seeded math/rand is intentional — the example must
 	// reproduce a fixed dataset for a given -seed; crypto/rand would defeat that.
@@ -486,7 +486,7 @@ func commit(ctx context.Context, dir string, cfg config, w io.Writer) (commitSta
 // recovered counts and sampled values; telemetry is the recovery
 // wall-clock and the live heap before vs after recovery.
 //
-//nolint:gocyclo // the recovery-verification step is a flat sequence of independent property round-trip checks.
+// the recovery-verification step is a flat sequence of independent property round-trip checks.
 func restore(ctx context.Context, dir string, st *commitStats, rb *rollbackStats, w io.Writer) error {
 	before := readMem()
 

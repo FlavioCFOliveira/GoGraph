@@ -80,7 +80,7 @@ func TestE2E_IllegalState(t *testing.T) {
 	// ── AC#1: trigger a server-side Failure via invalid Cypher ──────────────
 	driver1 := newDriver(t)
 	session1 := driver1.NewSession(ctx, neo4j.SessionConfig{})
-	defer session1.Close(ctx) //nolint:errcheck
+	defer session1.Close(ctx)
 
 	result, err := session1.Run(ctx, "THIS IS NOT VALID CYPHER %%%", nil)
 	var failErr error
@@ -111,7 +111,7 @@ func TestE2E_IllegalState(t *testing.T) {
 	// each connection independently starts in the Ready state after HELLO.
 	driver2 := newDriver(t)
 	session2 := driver2.NewSession(ctx, neo4j.SessionConfig{})
-	defer session2.Close(ctx) //nolint:errcheck
+	defer session2.Close(ctx)
 
 	result2, err := session2.Run(ctx, "RETURN 42 AS n", nil)
 	if err != nil {

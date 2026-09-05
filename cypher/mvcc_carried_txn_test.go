@@ -297,7 +297,7 @@ func soleNodeKey(t *testing.T, g *lpg.Graph[string, float64]) string {
 // drain consumes and closes a result, which for a write is what fsyncs or rolls
 // back, so it must always run.
 func drain(r *cypher.Result) error {
-	for r.Next() { //nolint:revive // drain the stream
+	for r.Next() { // drain the stream
 	}
 	if err := r.Err(); err != nil {
 		_ = r.Close()

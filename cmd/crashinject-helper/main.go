@@ -484,7 +484,7 @@ func runWALMidFrame(dir string) {
 	// The CRC field (4B) and the 100-byte payload are missing, so
 	// the WAL reader will surface ErrTornFrame when it tries to read
 	// the remaining 104 bytes.
-	f, err := os.OpenFile(walPath, os.O_RDWR|os.O_APPEND, 0o644) //nolint:gosec
+	f, err := os.OpenFile(walPath, os.O_RDWR|os.O_APPEND, 0o644) //nolint:gosec // G304: walPath is built by this helper from its own flag, not from external input; the helper exists only to corrupt a WAL it just wrote
 	if err != nil {
 		log.Fatalf("open WAL for partial write: %v", err)
 	}
