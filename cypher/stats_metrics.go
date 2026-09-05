@@ -41,6 +41,29 @@ const (
 	// veto keeps the planner on its default plan rather than acting on a missing
 	// or non-fresh statistic.
 	statsMetricLookupFallback = "cypher.stats.lookup.fallback"
+
+	// statsMetricQError observes the Q-ERROR of one operator's cardinality
+	// estimate — max(est, act) / min(est, act), both clamped at 1 — for every
+	// operator of a PROFILEd plan that carries BOTH a trustworthy estimate and a
+	// comparable measurement (rmp #2767, plan_qerror.go). One sample per such
+	// operator per profiled query; a perfect estimate samples 1.
+	//
+	// It is a distribution of a dimensionless ratio carried through the latency
+	// primitive, because the shared Backend has no float-distribution one. The
+	// carrier is [statsQErrorUnit] — one millisecond per unit of q-error — so a
+	// scrape reads the mean q-error as 1000 x (`_sum` / `_count`). See
+	// [statsQErrorUnit] for why that unit and not another.
+	//
+	// It is emitted from the PROFILE path only, and structurally so: nothing on the
+	// [Engine.Run] path can reach the emission. See plan_qerror.go's header.
+	statsMetricQError = "cypher.stats.qerror"
+
+	// statsMetricQErrorHigh counts the subset of q-error samples at or above
+	// [statsQErrorHighFactor] (a counter) — the misestimates large enough that the
+	// planner's own margin for acting on a statistic would have been exceeded. It
+	// is the actionable half of the distribution, and the event behind
+	// [Engine.StatsMisestimatedPairs].
+	statsMetricQErrorHigh = "cypher.stats.qerror.high"
 )
 
 // StatsTrackedPairs reports the number of distinct (label, property) pairs the

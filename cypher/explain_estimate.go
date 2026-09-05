@@ -143,24 +143,68 @@ func labelScanEstimate(labelSrc *lpgLabelResolver, label string) (est estimate, 
 // predicate, a compound AND/OR, an IS NULL, …) or a child that is not a scan
 // leaf — the honest "no derivable estimate" case.
 func selectionEstimate(sel *ir.Selection, labelSrc *lpgLabelResolver, params map[string]expr.Value) (est estimate, annot string, ok bool) {
-	if sel.PredicateExpr == nil || labelSrc == nil {
+	if labelSrc == nil {
 		return estimate{}, "", false
 	}
-	nodeVar, label, isScan := scanLeafNodeVar(sel.Child)
-	if !isScan {
+	sh, okShape := selectionEstimateShape(sel, params)
+	if !okShape {
 		return estimate{}, "", false
 	}
 	// Equality predicate: MCV-exact or 1/NDV heuristic.
-	if prop, lit, okEq := extractEqFromAST(sel.PredicateExpr, nodeVar, params); okEq && lit != nil {
-		e := statsEqualityEstimate(labelSrc, label, prop, lit)
+	if sh.eqLiteral != nil {
+		e := statsEqualityEstimate(labelSrc, sh.label, sh.prop, sh.eqLiteral)
 		return e, estimateAnnotation(e), true
 	}
 	// Single range comparison: equi-depth histogram estimate + certified error.
-	if prop, op, bound, okRange := extractRangeComparison(sel.PredicateExpr, nodeVar, params); okRange {
-		e, absErr := statsRangeEstimate(labelSrc, label, prop, op, bound)
-		return e, estimateAnnotationWithError(e, absErr), true
+	e, absErr := statsRangeEstimate(labelSrc, sh.label, sh.prop, sh.rangeOp, sh.rangeBound)
+	return e, estimateAnnotationWithError(e, absErr), true
+}
+
+// selectionEstimateShape is the (label, property, predicate) decomposition
+// [selectionEstimate] acts on: which statistic answers the Selection, and with
+// which argument.
+//
+// It is factored out of [selectionEstimate] rather than duplicated beside it so
+// that the (label, property) a q-error is attributed to (rmp #2767,
+// [statsPairForSelection]) is by construction the pair the estimate was actually
+// derived from. A second, parallel extraction would be free to drift, and the
+// attribution would then blame the wrong statistic — which is worse than not
+// attributing at all, since the whole point of the accessor is to tell a caller
+// what to refresh.
+//
+// ok is false for a Selection whose child is not a scan leaf, or whose predicate is
+// neither a single equality against a literal nor a single range comparison — the
+// honest "no derivable estimate" case.
+type selectionEstShape struct {
+	// label is the scan leaf's label, "" for an AllNodesScan (which has no
+	// (label, property) statistic and always resolves to estFallback).
+	label string
+	// prop is the property key the predicate reads.
+	prop string
+	// eqLiteral is the right-hand literal of an equality predicate, and nil when
+	// the shape is a range comparison instead. Exactly one of eqLiteral and
+	// rangeBound is non-nil.
+	eqLiteral expr.Value
+	// rangeOp and rangeBound are the comparison, oriented as "prop <op> bound".
+	rangeOp    stats.Op
+	rangeBound expr.Value
+}
+
+func selectionEstimateShape(sel *ir.Selection, params map[string]expr.Value) (selectionEstShape, bool) {
+	if sel == nil || sel.PredicateExpr == nil {
+		return selectionEstShape{}, false
 	}
-	return estimate{}, "", false
+	nodeVar, label, isScan := scanLeafNodeVar(sel.Child)
+	if !isScan {
+		return selectionEstShape{}, false
+	}
+	if prop, lit, okEq := extractEqFromAST(sel.PredicateExpr, nodeVar, params); okEq && lit != nil {
+		return selectionEstShape{label: label, prop: prop, eqLiteral: lit}, true
+	}
+	if prop, op, bound, okRange := extractRangeComparison(sel.PredicateExpr, nodeVar, params); okRange {
+		return selectionEstShape{label: label, prop: prop, rangeOp: op, rangeBound: bound}, true
+	}
+	return selectionEstShape{}, false
 }
 
 // extractRangeComparison decomposes a single comparison predicate

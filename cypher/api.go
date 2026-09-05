@@ -1448,6 +1448,13 @@ type Engine struct {
 	// plan consumes them — so absence is harmless (a consumer falls back to its
 	// exact-count plan).
 	statsCollector atomic.Pointer[statsCollector]
+
+	// misestimated is the set of tracked (label, property) pairs a PROFILE has
+	// caught predicting badly (rmp #2767, [Engine.StatsMisestimatedPairs]). It is
+	// written only from the PROFILE path and cleared by a successful
+	// [Engine.RefreshStatistics], so it is the answer to "is a refresh overdue,
+	// and for what?" rather than a lifetime tally. See [misestimatedPairs].
+	misestimated misestimatedPairs
 }
 
 // statsCollectorOrInit returns the engine's approximate-statistics collector,
@@ -2598,9 +2605,10 @@ func (e *Engine) runRead(ctx context.Context, query string, params map[string]ex
 // estimates is nil for an ordinary execution and non-nil only for a build whose
 // plan will be RENDERED — the two EXPLAIN paths and the PROFILE one. It is threaded
 // onto the same build options and filled at the same single point, so the caller
-// gets back, in the map it supplied, the planner's cardinality estimate for every
-// operator a logical node claimed (rmp #2765). Passing nil is what keeps the
-// estimate providers off the query path entirely.
+// gets back, in the sink it supplied, the planner's cardinality estimate for every
+// operator a logical node claimed (rmp #2765) and the (label, property) statistic
+// each estimate was read from where there is one (rmp #2767). Passing nil is what
+// keeps the estimate providers off the query path entirely.
 func (e *Engine) buildReadPhysical(
 	ctx context.Context,
 	entry *planCacheEntry,
@@ -2609,7 +2617,7 @@ func (e *Engine) buildReadPhysical(
 	queryReg expr.FunctionRegistry,
 	prof *exec.Profiler,
 	snap *lpg.Snapshot,
-	estimates exec.PlanEstimates,
+	estimates *planEstimateSink,
 ) (exec.Operator, []string, error) {
 	// EVERY read this build binds goes through rv, so the whole query observes
 	// ONE instant (rmp #2289). A nil snapshot yields a view of the current
@@ -2656,7 +2664,7 @@ func (e *Engine) buildReadPhysical(
 		// [Engine.explainInputsFor] builds the one the logical walk reads, so the
 		// estimate a physical operator carries is the same number the logical table
 		// prints for the node it came from. Two allocations on a rendering build; none
-		// at all on the query path, which passes no map.
+		// at all on the query path, which passes no sink.
 		bopts.estimates = &planEstimateCollector{
 			into: estimates,
 			src:  &lpgLabelResolver{g: e.g.ReadAt(nil), eng: e},
@@ -2822,7 +2830,7 @@ func (e *Engine) explainPhysical(entry *planCacheEntry, params map[string]expr.V
 	if err != nil {
 		return "", fmt.Errorf("cypher: build plan: %w", err)
 	}
-	tree := exec.PlanTreeWithEstimates(op, est)
+	tree := exec.PlanTreeWithEstimates(op, est.est)
 	return exec.RenderPlanNode(&tree), nil
 }
 
@@ -2963,7 +2971,12 @@ func (e *Engine) profileMaterialised(
 		// Capture the tree BEFORE any Close, while the wrappers still hold their
 		// counters, so the rendering survives teardown. materialize has already
 		// driven every operator to exhaustion, so the counters are final here.
-		tree = exec.PlanTreeWithEstimates(op, est)
+		tree = exec.PlanTreeWithEstimates(op, est.est)
+		// The estimate quality this run turned out to have (rmp #2767). It is the
+		// ONE call site: the comparison needs a measurement, and a measurement exists
+		// only where a Profiler was installed — which is here and nowhere else.
+		// TestQError_ObservationIsReachableOnlyFromTheProfilePath is the gate.
+		e.observeEstimateQuality(op, est)
 		res = r
 	}()
 	if buildErr != nil {

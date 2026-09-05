@@ -517,7 +517,7 @@ func TestProfileEstimate_RunCarriesNoEstimates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildReadPhysical (explain path): %v", err)
 	}
-	withEst := exec.PlanTreeWithEstimates(op2, est)
+	withEst := exec.PlanTreeWithEstimates(op2, est.est)
 	if countEstimatedNodes(&withEst) == 0 {
 		t.Fatalf("a build given an estimates map collected none, so the assertion above "+
 			"proves nothing:\n%s", exec.RenderPlanNode(&withEst))
@@ -701,8 +701,9 @@ func TestPlanEstimate_AttributionRules(t *testing.T) {
 	}
 
 	t.Run("first claim wins", func(t *testing.T) {
-		m := make(exec.PlanEstimates)
-		c := &planEstimateCollector{into: m, src: src}
+		sink := &planEstimateSink{est: make(exec.PlanEstimates)}
+		m := sink.est
+		c := &planEstimateCollector{into: sink, src: src}
 		op := exec.NewNodeByLabelScan("Person", &execLabelAdapter{labelSrc: src})
 
 		recordPlanEstimate(c, scan, op, walker, nil)
@@ -722,8 +723,9 @@ func TestPlanEstimate_AttributionRules(t *testing.T) {
 	})
 
 	t.Run("an unestimated node still claims its operator", func(t *testing.T) {
-		m := make(exec.PlanEstimates)
-		c := &planEstimateCollector{into: m, src: src}
+		sink := &planEstimateSink{est: make(exec.PlanEstimates)}
+		m := sink.est
+		c := &planEstimateCollector{into: sink, src: src}
 		op := exec.NewSingleRowOperator()
 
 		// A node type with no estimate: the claim it writes is EMPTY, and its whole

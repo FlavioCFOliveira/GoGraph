@@ -1542,3 +1542,344 @@ reading is exactly the calibrated 20.00.
 * One reducible cost is named and not taken: merging `buildOpts.profiler` and
   `buildOpts.estimates` into a single "this build renders its plan" field would make
   the struct grow by zero words and `buildOperator`'s early-out identical to HEAD's.
+
+## Addendum — 2026-09-05, rmp #2767 (sprint 355)
+
+This section records what changed after the audit and what the work refuted about
+its own brief. Nothing earlier in the document has been edited.
+
+### Nothing observed how wrong the estimates were. Now something does.
+
+§1 classified every figure the plan surfaces print as MEASURED, DERIVED, ESTIMATED
+or UNCOUNTED, and the sprint's first six tasks made each one either honest or
+explicitly unknown. One thing the classification could not say was whether an
+ESTIMATED figure was any **good** — and until #2765 nothing could say it, because
+the estimate and the measurement lived on two different plans.
+
+With both on the same node, their ratio is available at no extra measurement cost.
+This task emits it:
+
+* **`cypher.stats.qerror`** — a distribution, one sample per qualifying operator of
+  a PROFILEd plan, of the q-error `max(est, act) / min(est, act)` with both operands
+  clamped at 1. A perfect estimate samples exactly 1.
+* **`cypher.stats.qerror.high`** — a counter of the samples at or above **3.0**.
+* **`Engine.StatsMisestimatedPairs`** — how many distinct tracked
+  `(label, property)` statistics a PROFILE has caught above that factor. It mirrors
+  `Engine.StatsTrackedPairs`, and a successful `RefreshStatistics` **clears** it, so
+  it answers "is a refresh overdue, and for what?" rather than accumulating a
+  lifetime tally.
+
+The gap it closes is the one the task named: `RefreshStatistics` is caller-driven by
+design (`cypher/stats_build.go` spawns no goroutine, deliberately), and the caller
+had nothing to drive it from. `cypher/stats_metrics.go` counted refreshes, lookups
+and fallbacks; none of them said whether a lookup produced a GOOD number.
+
+### The threshold is the planner's own margin, reused rather than reinvented
+
+3.0 is `joinReorderStatsMargin` — the factor the disjoint-component reorder already
+demands before it will deviate from the default plan on a histogram-derived
+estimate, grounded in `docs/optimizer-activation-design.md` §4 and, through it, in
+Ioannidis & Christodoulakis (SIGMOD 1991). Two constants with the same job would
+drift, and `TestQError_HighFactorIsThePlannerOwnMargin` fails if they are ever set
+apart.
+
+It is a **reporting** threshold and is documented as one. Crossing it does not prove
+a plan was harmed, and staying under it does not prove one was not: a misestimate
+below the margin can still flip a decision that sat near the boundary.
+
+### Which provenances qualify, and the argument for the boundary
+
+The boundary is exactly `estimate.trustworthy()` — `estExact` and `estStats` in,
+`estHeuristic` and `estFallback`/absent out — re-expressed over `exec.EstimateSource`.
+
+* **Absent is excluded because including it would invert the truth.** The zero value
+  of `exec.PlanEstimate` carries `Rows = 0`, and 0 clamps to 1 in the q-error. An
+  operator that emitted no rows would therefore score a **perfect 1** for an estimate
+  nobody made. That is the acceptance criterion the task states, and it is why the
+  qualification is on the SOURCE and never on the number.
+* **Heuristic is excluded because a refresh cannot fix it.** `estHeuristic` is
+  `1/NDV × N` — the frequency of the *average* value, offered for whichever value was
+  asked about. Under skew its error is arbitrarily large by construction, and
+  re-scanning the graph produces the same average. Since the accessor exists to tell
+  a caller when refreshing would help, admitting an error a refresh cannot repair
+  would drown the signal. It is also the provenance the planner already refuses to
+  act on, so it cannot be the cause of a plan a reader is holding.
+* **Exact and stats are included because they are the two the planner may act on**,
+  and both are read from state a refresh rebuilds.
+
+**The cost of that boundary is real and is stated here rather than hidden.** The
+skewed fixture already in the tree (`seedSkewedGroupGraph`) estimates 9 rows where
+90 are returned — a genuine 10x error — and this metric deliberately reports
+nothing for it. `cypher.stats.qerror` is *the error of estimates the planner may act
+on*, not the error of all estimates, and `docs/metrics.md` says so.
+
+### Found while doing this: an "exact" estimate that has no staleness gate
+
+`statsRangeEstimateInner` demotes a stale histogram to `estFallback` — it computes
+`Δ/N` and vetoes once the firing region closes. `statsEqualityEstimateInner` does
+no such thing: a most-common-value hit returns
+`estimate{rows: float64(cnt), source: estExact}` **unconditionally**, from whatever
+snapshot the last `RefreshStatistics` published.
+
+So an estimate tagged `exact` — the tag whose documented meaning is "ground truth
+for the query's pinned snapshot" — can be arbitrarily stale, and the physical
+`Est.Rows` column renders it as a bare number with no approximation marker. The
+acceptance fixture for this task exploits exactly that: 1000 nodes carry
+`grp = 'hot'`, statistics are refreshed, 990 of them are re-tiered, and the PROFILE
+then reads
+
+```
+| Filter                      |     1000 |   10 |
+| └─ NodeByLabelScan [Person] |     1400 | 1400 |
+```
+
+— an `Est.Rows` of **1000** against a measured **10**, presented as exact.
+
+This is **not fixed here**, deliberately: the demotion rule for an MCV hit is a
+change to what the planner estimates, and #2766 wired those estimates to a real plan
+decision, so altering them changes plan choice — which this task's brief puts out of
+scope. It is recorded as the finding the metric exists to surface, and the metric now
+surfaces it: `q = 100`, one increment of `cypher.stats.qerror.high`, and
+`StatsMisestimatedPairs() == 1` naming `(Person, grp)`.
+
+### Two comparability guards, and why neither is optional
+
+A q-error compares a prediction for ONE pass over an operator with what that
+operator actually emitted. Two things routinely make the second number not that, and
+neither is visible in `PlanNode.Rows`:
+
+* **Re-initialisation.** An operator on the inner side of `Apply`,
+  `CorrelatedApply`, `OptionalApply`, `SemiApply`, `AntiSemiApply`, `Foreach`,
+  `RollUpApply` or `IndexNestedLoopJoin` is `Init`'d once per outer row, and its row
+  count is the SUM over those invocations — the lifetime convention this codebase
+  uses everywhere, and the one PostgreSQL escapes by dividing by `nloops`.
+* **Early termination.** An operator under a `LIMIT`, a `SemiApply` or a result-row
+  cap stops being pulled before end-of-stream, so its count is a lower bound.
+
+Both are measured rather than inferred from the plan's shape: the profiling wrapper
+now counts its `Init` calls and records whether it reached end-of-stream, and
+`exec.PlanRows` reports `complete` only when it was initialised exactly once AND
+drained. Neither costs a non-PROFILE run anything, because the wrapper is the only
+thing that holds them and only a PROFILE build allocates one.
+
+**Measured, on this tree, these are not edge cases** — both figures below were read
+off a run with the guard mutated away, not derived on paper. `MATCH (a:City),
+(b:City)` — two lines — plans an `Apply` whose inner `NodeByLabelScan` is estimated
+at 3 and measures 9; unguarded the pair of samples is `[1 3]`, and that 3 is **at**
+the reporting threshold, so it would increment `cypher.stats.qerror.high` and admit
+a pair on a query where nothing is wrong with the statistics at all. `MATCH
+(p:Person) RETURN p LIMIT 5` on the 1400-node fixture emits `[280]` and one high
+count.
+
+### PROFILE-only is a property of the call graph, not a runtime check
+
+`Engine.observeEstimateQuality` has exactly one call site, in
+`Engine.profileMaterialised` — the single funnel of `Engine.Profile`,
+`Engine.ProfileTable` and the `PROFILE` statement prefix. `Engine.Run`,
+`Engine.RunInTx`, `Engine.Explain`, `Engine.ExplainTable`, `Engine.ExplainLogical`
+and the `EXPLAIN` prefix cannot reach it; there is no `if profiling` on a hot path
+to skip, because the code is not on the hot path.
+
+Three gates hold it:
+
+* `TestQError_ObservationIsReachableOnlyFromTheProfilePath` parses the package and
+  fails if the function acquires a second caller or if its one caller stops being
+  `profileMaterialised`. A behavioural test cannot hold this: it shows the paths it
+  drives are silent, never that no other path exists.
+* `TestQError_RunAndExplainEmitNothing` drives 20 `Run`s and all three EXPLAIN
+  surfaces of a query whose estimate is 100x wrong, and asserts silence — with a
+  control PROFILE of the same query, so the silence cannot be the silence of an
+  engine that emits nothing at all.
+* `benchstat`, below.
+
+### Where the surface is documented
+
+`docs/metrics.md` §`cypher` had drifted: it listed `cypher.Run`, `cypher.RunInTx`,
+`cypher.result.leaked` and the four plan-cache counters, and **nothing else** — the
+five `cypher.countstore.*` series of #2087 and the four `cypher.stats.*` series of
+#2102 had never been added, so a document that calls itself "the authoritative
+companion to the `internal/metrics` package" was missing nine series that ship. All
+nine are now listed alongside this task's two, together with the carrier-unit note a
+reader needs in order to convert a `cypher_stats_qerror_sum` back into a q-error, and
+the three accessors the `Backend` interface cannot express as gauges.
+
+`examples/31_metrics_observability` gained a tenth workload phase that refreshes the
+statistics, makes one of them stale on purpose, and PROFILEs a query that reads it,
+so all five newly documented `cypher.stats.*` names are pinned by
+`metric.present.<name>=true` facts and the misestimation is a deterministic fact
+(`stats.misestimated_pairs=1`, cleared to 0 by the second refresh) rather than a
+hoped-for one. It runs LAST, because refreshing the statistics installs a per-write
+staleness hook and the count-store throughput sample must not be measured with it in
+place.
+
+### The non-PROFILE path is untouched, measured
+
+Interleaved A/B, 10 alternating rounds of each arm from two pre-built test binaries
+(HEAD `8bb4b013` vs this tree), `bench/mtaudit`, Apple M4, darwin/arm64, no `-race`.
+The host was **not** idle: `vm.loadavg` read 2.05 at round 1 and 9.50 at round 10,
+the rise being the benchmark's own work. Interleaving is what makes that acceptable
+— both arms see the same load profile — and the allocation columns are
+load-invariant regardless.
+
+```
+                    │   base (8bb4b013)   │              this tree              │
+                    │       sec/op        │    sec/op     vs base               │
+EngReadProject-10            65.89µ ± 2%     65.15µ ± 5%       ~ (p=0.190 n=10)
+EngReadLabel-10              648.2n ± 1%     653.4n ± 1%       ~ (p=0.110 n=10)
+EngWriteAutocommit-10        1.025µ ± 2%     1.025µ ± 1%       ~ (p=1.000 n=10)
+geomean                      3.524µ          3.520µ       -0.11%
+
+                    │        B/op         │     B/op      vs base               │
+EngReadProject-10           186.0Ki ± 0%    186.0Ki ± 0%       ~ (p=0.265 n=10)
+EngReadLabel-10             2.008Ki ± 0%    2.008Ki ± 0%       ~ (p=1.000 n=10) ¹
+EngWriteAutocommit-10       3.050Ki ± 0%    3.047Ki ± 0%       ~ (p=0.696 n=10)
+geomean                     10.44Ki         10.44Ki       -0.03%
+
+                    │      allocs/op      │   allocs/op   vs base               │
+EngReadProject-10            3.547k ± 0%     3.547k ± 0%       ~ (p=1.000 n=10) ¹
+EngReadLabel-10               19.00 ± 0%      19.00 ± 0%       ~ (p=1.000 n=10) ¹
+EngWriteAutocommit-10         21.00 ± 0%      21.00 ± 0%       ~ (p=1.000 n=10) ¹
+geomean                       112.3           112.3       +0.00%
+¹ all samples are equal
+```
+
+No timing difference is significant at n=10, and **every allocation sample is
+identical** on all three benchmarks — which is the stronger statement, because it
+is a property of the code rather than of the machine.
+
+That is what the structure predicts. The counters live on the profiling wrapper,
+which only a PROFILE build allocates; the sink is nil for every `Engine.Run`; and
+the observation has no call site on the Run path.
+
+### Per-site mutation sweep
+
+37 sites, one mutation each, applied to the tree and reverted afterwards. A
+mutation is **killed** when a gate fails with the message shown; the scope is
+`./cypher/ ./cypher/exec/ ./cypher/explain/` first, then
+`./examples/31_metrics_observability/`, then the full set including
+`./bolt/server/` — a SURVIVED verdict is only recorded after all three.
+
+The sweep ran three times, and the two earlier passes are part of the finding:
+
+* **Pass 1** killed 35 of 38 and left three survivors. It also killed three
+  mutations by COMPILE ERROR rather than by an assertion (`"math" imported and not
+  used`, `declared and not used: complete`, `declared and not used: measured`),
+  which is not a kill at all — it says the mutation was ill-formed, not that a gate
+  saw it. All three were rewritten as compile-valid variants for the later passes.
+* **Pass 2** ran with those variants plus three new gates written for pass 1's
+  survivors. Two survivors remained, and both turned out to be conditions that
+  **cannot fail**:
+  * `if !measured || !complete` in `observeOperatorQError` — because
+    `exec.PlanRows` returned `complete=false` for every operator it returned
+    `measured=false` for, so the first test could never decide anything. `PlanRows`
+    was collapsed to two results and the redundant test removed, which is why the
+    table below has 37 rows and no `M16`.
+  * `if !isScan` in `selectionEstimateShape`, below.
+* **Pass 3** is the table below: **36 killed, 1 survivor.**
+
+| # | File | Mutation | Verdict | Failure message |
+|---|---|---|---|---|
+| M01 | `exec/profile.go` | profiledOp.Init stops counting invocations | killed | `plan_qerror_test.go:210: PROFILE of "MATCH (p:Person) RETURN p" emitted 0 q-error samples [], want exactly 1` |
+| M02 | `exec/profile.go` | profiledOp.Next stops recording end-of-stream | killed | `plan_qerror_test.go:210: PROFILE of "MATCH (p:Person) RETURN p" emitted 0 q-error samples [], want exactly 1` |
+| M03 | `exec/profile.go` | profiledChunkOp.FillChunk never records end-of-stream | killed | `plan_qerror_test.go:548: PROFILE of "MATCH (p:Person) RETURN p.name" emitted 0 q-error samples [], want exactly 1` |
+| M04 | `exec/profile.go` | planRowsComplete accepts a re-initialised operator | killed | `plan_qerror_test.go:327: PROFILE of "MATCH (a:City), (b:City) RETURN a, b" emitted 2 q-error samples [1 3], want exactly 1` |
+| M05 | `exec/profile.go` | PlanRows claims a complete count for an unprofiled operator | killed | `plan_qerror_test.go:703: exec.PlanRows(nil) reported a complete measured row count` |
+| M06 | `plan_qerror.go` | qErrorQualifies drops EstimateExact | killed | `plan_qerror_test.go:210: PROFILE of "MATCH (p:Person) RETURN p" emitted 0 q-error samples [], want exactly 1` |
+| M07 | `plan_qerror.go` | qErrorQualifies drops EstimateStats | killed | `plan_qerror_test.go:649: qErrorQualifies(stats) = false, want true` |
+| M08 | `plan_qerror.go` | qErrorQualifies admits EstimateHeuristic | killed | `plan_qerror_test.go:286: PROFILE of "MATCH (p:Person) WHERE p.grp = 'warm' RETURN p" emitted 2 q-error samples [10 1], want exactly 1` |
+| M09 | `plan_qerror.go` | qErrorQualifies admits EstimateAbsent | killed | `plan_qerror_test.go:210: PROFILE of "MATCH (p:Person) RETURN p" emitted 2 q-error samples [25 1], want exactly 1` |
+| M10 | `plan_qerror.go` | qError stops clamping the estimate at 1 | killed | `plan_qerror_test.go:305: the single sample is 1e+09, want 1` |
+| M11 | `plan_qerror.go` | qError stops clamping the measurement at 1 | killed | `plan_qerror_test.go:305: the single sample is 1e+09, want 1` |
+| M12 | `plan_qerror.go` | qError becomes a one-sided ratio | killed | `plan_qerror_test.go:592: qError(10, 1000) = 1, want 100` |
+| M13 | `plan_qerror.go` | qErrorDuration stops clamping at the carrier ceiling | killed | `plan_qerror_test.go:618: qErrorDuration(1e18) = 2562047h47m16.854775807s, want the clamped 277h46m40s` |
+| M14 | `plan_qerror.go` | qErrorDuration changes the carrier unit | killed | `plan_qerror_test.go:211: the label scan's q-error is 0.001, want exactly 1. Its estimate is the label's LIVE exact count and the scan returned ever...` |
+| M15 | `plan_qerror.go` | the comparability (one pass, drained) guard is dropped | killed | `plan_qerror_test.go:327: PROFILE of "MATCH (a:City), (b:City) RETURN a, b" emitted 2 q-error samples [1 3], want exactly 1` |
+| M17 | `plan_qerror.go` | the q-error distribution is never emitted | killed | `plan_qerror_test.go:210: PROFILE of "MATCH (p:Person) RETURN p" emitted 0 q-error samples [], want exactly 1` |
+| M18 | `plan_qerror.go` | the high-factor threshold admits every sample | killed | `plan_qerror_test.go:216: a perfect estimate incremented cypher.stats.qerror.high 1 times; the counter is for misestimates at or above 3` |
+| M19 | `plan_qerror.go` | the high counter is never incremented | killed | `plan_qerror_test.go:255: cypher.stats.qerror.high = 0, want 1` |
+| M20 | `plan_qerror.go` | the misestimated pair is never recorded | killed | `plan_qerror_test.go:259: StatsMisestimatedPairs = 0, want 1` |
+| M21 | `plan_qerror.go` | the walk stops recursing into children | killed | `plan_qerror_test.go:210: PROFILE of "MATCH (p:Person) RETURN p" emitted 0 q-error samples [], want exactly 1` |
+| M22 | `plan_qerror.go` | the walk looks the estimate up on the profiling wrapper | killed | `plan_qerror_test.go:210: PROFILE of "MATCH (p:Person) RETURN p" emitted 0 q-error samples [], want exactly 1` |
+| M23 | `plan_qerror.go` | the misestimated set loses its ceiling | killed | `plan_qerror_test.go:687: the set grew to 4147, want it to saturate at 4096` |
+| M24 | `plan_qerror.go` | reset stops clearing the set | killed | `plan_qerror_test.go:492: StatsMisestimatedPairs = 1 after a successful refresh, want 0. Every observation in the set was made against the snapshot ...` |
+| M25 | `plan_qerror.go` | the accessor always reports zero | killed | `plan_qerror_test.go:259: StatsMisestimatedPairs = 0, want 1` |
+| M26 | `plan_qerror.go` | statsPairForSelection admits an unlabelled scan leaf | killed | `plan_qerror_test.go:731: statsPairForSelection over an AllNodesScan returned {label: prop:grp}; an unlabelled scan leaf has no (label, property) st...` |
+| M27 | `plan_qerror.go` | statsPairForSelection never resolves a pair | killed | `plan_qerror_test.go:259: StatsMisestimatedPairs = 0, want 1` |
+| M28 | `plan_estimate_physical.go` | the build stops recording which statistic an estimate came from | killed | `plan_qerror_test.go:259: StatsMisestimatedPairs = 0, want 1` |
+| M29 | `plan_estimate_physical.go` | recordPair stops allocating the map lazily | killed | `2026/09/05 19:07:37 ERROR cypher: recovered panic during query execution entrypoint=cypher.ProfileTable panic="assignment to entry in nil map" stac...` |
+| M30 | `explain_estimate.go` | selectionEstimateShape stops recognising an equality predicate | killed | `explain_estimate_test.go:118: heavy-hitter Selection line = " └─ Selection", want it to contain "(est. rows=1230, exact)"` |
+| M31 | `explain_estimate.go` | selectionEstimateShape stops recognising a range predicate | killed | `explain_estimate_test.go:152: range Selection line = " └─ Selection", want a stats annotation with an error term` |
+| M32 | `explain_estimate.go` | selectionEstimateShape stops requiring a scan leaf | **SURVIVED** | `` |
+| M33 | `stats_build.go` | RefreshStatisticsLocked stops clearing the observations | killed | `plan_qerror_test.go:522: StatsMisestimatedPairs = 1 after RefreshStatisticsLocked, want 0` |
+| M34 | `stats_build.go` | RefreshStatistics stops clearing the observations | killed | `plan_qerror_test.go:492: StatsMisestimatedPairs = 1 after a successful refresh, want 0. Every observation in the set was made against the snapshot ...` |
+| M35 | `api.go` | PROFILE stops observing estimate quality | killed | `plan_qerror_test.go:210: PROFILE of "MATCH (p:Person) RETURN p" emitted 0 q-error samples [], want exactly 1` |
+| M36 | `stats_metrics.go` | the distribution's exported name changes | killed | `example_test.go:106: metric.present.cypher.stats.qerror = "false", want "true" (metric absent from the scraped exposition)` |
+| M37 | `stats_metrics.go` | the counter's exported name changes | killed | `example_test.go:106: metric.present.cypher.stats.qerror.high = "false", want "true" (metric absent from the scraped exposition)` |
+| M38 | `plan_qerror.go` | the reporting threshold stops being the planner's own margin | killed | `plan_qerror_test.go:255: cypher.stats.qerror.high = 0, want 1` |
+
+**M32 survives and cannot be made to fail.** The guard is PRE-EXISTING — it is
+`selectionEstimate`'s own scan-leaf precondition from #2099, moved verbatim into
+the factored-out `selectionEstimateShape` and asserted here for the first time
+(`git show 8bb4b013:cypher/explain_estimate.go`, line 149). Removing it changes
+nothing observable because `scanLeafNodeVar` returns an EMPTY node variable for a
+non-scan child, and both `extractEqFromAST` and `extractRangeComparison` require a
+property receiver whose variable name matches it — so the decomposition declines
+one step later, for a different reason, and returns the same `false`. It is kept
+rather than deleted, because relying on that coincidence would make the shape
+silently wrong the day either extractor stopped matching on the node variable.
+`TestQError_ANonScanChildYieldsNoShape` pins the contract even though no mutation
+of the guard can break it.
+
+### Still open after #2767
+
+* **An MCV-sourced `estExact` has no staleness gate.** Recorded above; not fixed
+  here, because the fix changes what the planner estimates and #2766 wired those
+  estimates to a real plan decision.
+* **`Expand`'s estimate ignores an intervening `Selection`.** `expandEstimate`
+  returns the count-store degree cell — the rows the expansion emits when driven by
+  EVERY node of the source label — while `expandFromLabel` walks down THROUGH any
+  residual `Selection` to find that label. So a filtered expand is scored against
+  an unfiltered prediction and its q-error is structurally biased high. That is a
+  real estimate error rather than an instrument error, so it is reported rather
+  than suppressed, but it means the distribution is not a clean measure of
+  statistics freshness on its own. It is not attributable to a `(label, property)`
+  pair, so it does not reach `StatsMisestimatedPairs`.
+* **`estHeuristic` errors are invisible**, by the deliberate boundary above. The
+  10x miss in `seedSkewedGroupGraph` produces no sample.
+* **The columnar fusion chains still carry no estimate** (#2765's limitation 3), so
+  a `Filter` that fuses into a `ColumnarFilter` contributes no q-error at all —
+  measured here on `MATCH (p:Person) WHERE p.rank > 500 RETURN p.grp`, which emits
+  one sample (the scan) where the row-mode form of the same query emits two.
+* **A q-error is only ever computed for an operator that ran to completion in one
+  pass.** A plan built entirely of re-initialised or limited operators contributes
+  nothing, and the surface is silent rather than wrong. There is no `nloops`
+  divisor to recover the per-invocation figure with; adding one would be a change
+  to what PROFILE reports.
+* **Nothing acts on the observation.** No automatic refresh, no adaptive
+  re-planning, no change to plan choice — all explicitly out of scope. The signal
+  exists; what to do with it is a decision for the operator.
+
+### Reproduction
+
+```bash
+# The gates this addendum added
+go test -count=1 -run '^TestQError' ./cypher/ -v
+
+# The packages this task changed, race-enabled
+go test -count=1 -race ./cypher/...
+
+# The compliance gate the change touches
+go test -count=1 -run TestTCKExecution ./cypher/tck/...
+
+# The instrument, end to end
+go run ./examples/31_metrics_observability/ -services 200 -seed 1
+go test -count=1 ./examples/31_metrics_observability/
+
+# Lint and format
+golangci-lint run ./cypher/... ./examples/...
+gofmt -l cypher examples
+```
+
+The mutation sweep, the interleaved A/B benchmark script and their raw logs are
+session artefacts and are not committed; the table above and the `benchstat` output
+are the record.

@@ -26,6 +26,18 @@ the commit and abort counts, the conflict rate and its per-store attribution,
 the retained chain-depth distribution, and the background vacuum's own
 lifecycle and per-pass latency.
 
+And it surfaces the **planner statistics and their quality**. The statistics
+are best-effort and are rebuilt only when a caller asks — there is no background
+worker, by design — which left an operator with a question nothing could answer:
+is a refresh overdue? A dedicated phase refreshes the statistics, then makes one
+of them stale on purpose and PROFILEs a query that reads it. Because the
+planner's estimate and the measured row count now sit on the same plan node, the
+ratio between them — the **q-error** — is available at no extra cost, and it goes
+out as the `cypher.stats.qerror` distribution, the `cypher.stats.qerror.high`
+counter, and the `Engine.StatsMisestimatedPairs` accessor that names how many
+tracked `(label, property)` statistics were caught predicting badly. Only PROFILE
+emits any of it: an `Engine.Run` produces no measurement to compare against.
+
 And it surfaces the **Bolt network surface**. A real `bolt/server` is started
 on a real TCP socket and driven by the official `neo4j-go-driver` through an
 autocommit read, a committed explicit transaction and a rolled-back one. That
@@ -101,6 +113,10 @@ mvcc.commits.delta=258
 mvcc.conflicts.observed=1
 mvcc.writers.settled=0
 mvcc.chain_depth.deepest_at_least_two=1
+stats.tracked_pairs_positive=1
+stats.tier_after_move=5
+stats.misestimated_pairs=1
+stats.misestimated_cleared_by_refresh=1
 metric.present.cypher.Run=true
 metric.present.cypher.RunInTx=true
 metric.present.cypher.plan_cache.misses=true
@@ -127,6 +143,11 @@ metric.present.bolt.server.tx.closed=true
 metric.present.cypher.countstore.recompute=true
 metric.present.cypher.countstore.delta.applied=true
 metric.present.cypher.countstore.relabel.dirtied=true
+metric.present.cypher.stats.refresh=true
+metric.present.cypher.stats.refresh.latency=true
+metric.present.cypher.stats.lookup=true
+metric.present.cypher.stats.qerror=true
+metric.present.cypher.stats.qerror.high=true
 metric.present.graph.lpg.ApplyVersioned=true
 metric.present.graph.lpg.EndVersionedTx=true
 metric.present.lpg.mvcc.writers.active=true
@@ -193,6 +214,19 @@ and pinned by the test; the observed values behind them are telemetry.
   combination) rather than by `|E|`, and `countstore.write_throughput_ops_per_sec`
   samples the autocommit write rate with the store active, so its neutrality
   to the write path is observable.
+- **How wrong the planner's estimates turn out to be** — the statistics are
+  rebuilt only when a caller invokes `RefreshStatistics`, and nothing used to
+  tell a caller when to. Step 10 refreshes, moves 45 of the 50 `core` services
+  to another tier WITHOUT refreshing, and PROFILEs a query that reads the now
+  stale statistic. The profiled plan (telemetry, `# stats.profile|`) shows
+  `Est.Rows = 50` beside `Rows = 5` on the same `Filter` line, the
+  `cypher.stats.qerror` histogram carries that 10x ratio as a sample, and
+  `stats.misestimated_pairs=1` names how many tracked `(label, property)`
+  statistics were caught. A second refresh clears it
+  (`stats.misestimated_cleared_by_refresh=1`), which is what makes the accessor
+  a "refresh overdue?" signal rather than a lifetime tally. Note that the stale
+  estimate is tagged **exact**: the most-common-value provider has no staleness
+  gate, so this metric is the only thing in the module that can see it.
 - **The MVCC substrate under concurrent writers** — `mvcc.commits.delta`
   counts the transactions that published an instant, `mvcc.conflicts.observed`
   proves the conflict path was actually taken rather than hoped for,
@@ -229,6 +263,14 @@ and pinned by the test; the observed values behind them are telemetry.
 - `cypher.Engine.CountStoreCells` — the count-store size indicator the
   metrics backend cannot express as a gauge; read directly for the
   `countstore.cells_*` telemetry.
+- `cypher.Engine.RefreshStatistics` — the sole, caller-driven rebuild of the
+  planner statistics; there is no background worker.
+- `cypher.Engine.ProfileTable` — the profiled physical plan, and the ONLY
+  surface that emits `cypher.stats.qerror`: the comparison needs a measurement,
+  which an `Engine.Run` does not produce.
+- `cypher.Engine.StatsTrackedPairs` / `cypher.Engine.StatsMisestimatedPairs` —
+  how many `(label, property)` statistics the engine holds, and how many of
+  them a PROFILE has caught predicting badly by 3x or more.
 - `search.Dijkstra` — instrumented single-source shortest-path over a CSR.
 - `csv.WriteCtx` / `csv.ReadIntoCtx` — instrumented edge-list interchange.
 - `packstream.EncodePool` — the pooled Bolt encoder whose `Get`/`Put` emit

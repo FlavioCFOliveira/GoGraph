@@ -127,11 +127,45 @@ import (
 // query path two words on a struct it allocates per execution; one pointer makes
 // the invariant structural and costs one.
 type planEstimateCollector struct {
-	// into is the caller's map, which the caller reads back after the build.
-	into exec.PlanEstimates
+	// into is the caller's sink, which the caller reads back after the build.
+	into *planEstimateSink
 	// src is the LIVE label resolver — deliberately not the build's snapshot-pinned
 	// one. See the file header for the measured reason they differ.
 	src *lpgLabelResolver
+}
+
+// planEstimateSink is what a plan-RENDERING build fills in and its caller reads
+// back: the estimate per operator, and — for the operators whose estimate came
+// from a (label, property) statistic — which statistic that was.
+//
+// The two are separate maps rather than one wider value because they have
+// different lifetimes of usefulness and very different population rates. Every
+// claimed operator gets an estimate entry, including the empty claim that enforces
+// first-claim-wins; only a Selection over a scan leaf can ever get a pair, and the
+// pairs map is therefore allocated LAZILY, on the first such Selection. An EXPLAIN
+// of a query with no property predicate allocates nothing for it at all.
+//
+// The sink is written during one single-goroutine build and read afterwards, so it
+// is not safe for concurrent use — the same contract [exec.PlanEstimates] carries,
+// and the reason the morsel-parallel per-worker build options clear the collector.
+type planEstimateSink struct {
+	// est is the estimate each operator's claiming logical node derived.
+	est exec.PlanEstimates
+	// pairs names the (label, property) statistic an estimate was read from, for
+	// the operators where there is one. nil until the first is recorded.
+	//
+	// It is keyed on the same UNWRAPPED operator identity as est, so a consumer
+	// that has one has the other (rmp #2767).
+	pairs map[exec.Operator]statsPair
+}
+
+// recordPair notes that op's estimate was read from the (label, property)
+// statistic, allocating the map on first use.
+func (s *planEstimateSink) recordPair(op exec.Operator, p statsPair) {
+	if s.pairs == nil {
+		s.pairs = make(map[exec.Operator]statsPair, 4)
+	}
+	s.pairs[op] = p
 }
 
 // recordPlanEstimate claims op for plan and records the planner's estimate for it,
@@ -153,13 +187,22 @@ func recordPlanEstimate(
 	walker nodeWalkerIface,
 	params map[string]expr.Value,
 ) {
-	if c == nil || c.into == nil || op == nil || plan == nil {
+	if c == nil || c.into == nil || c.into.est == nil || op == nil || plan == nil {
 		return
 	}
-	if _, claimed := c.into[op]; claimed {
+	if _, claimed := c.into.est[op]; claimed {
 		return
 	}
-	c.into[op] = physicalPlanEstimate(plan, walker, c.src, params)
+	c.into.est[op] = physicalPlanEstimate(plan, walker, c.src, params)
+	// Record WHICH statistic the estimate came from, when it came from one. It is
+	// recorded beside the claim rather than derived later because this is the only
+	// place the logical node and the operator are both in hand, and the pair must be
+	// the one the estimate was actually read from (rmp #2767).
+	if sel, isSel := plan.(*ir.Selection); isSel {
+		if p, okPair := statsPairForSelection(sel, params); okPair {
+			c.into.recordPair(op, p)
+		}
+	}
 }
 
 // physicalPlanEstimate returns the planner's estimate for plan, in the form the
@@ -245,21 +288,23 @@ func toPlanEstimate(e estimate, _ string, ok bool) exec.PlanEstimate {
 	}
 }
 
-// planEstimatesFor returns a map sized for a plan of about n operators, for a build
-// that renders its plan. It exists so the three rendering call sites
+// planEstimatesFor returns a sink sized for a plan of about n operators, for a
+// build that renders its plan. It exists so the three rendering call sites
 // ([Engine.explainPhysical], [Engine.runExplainPrefixed] and
 // [Engine.profileMaterialised]) allocate the same way from one place, and so that
 // the ordinary [Engine.Run] — which passes nil — cannot acquire one by accident.
 //
 // The COLLECTOR is assembled inside [Engine.buildReadPhysical], which is where the
-// live resolver can be built; the caller supplies only the map it will read back.
+// live resolver can be built; the caller supplies only the sink it will read back.
+// Keeping the resolver out of the caller's object is what stops a half-set
+// collector from being representable.
 //
 // The size hint is the logical plan's own node count, which bounds the physical
 // tree only loosely (a composite lowering emits several operators for one logical
 // node, and a rewrite subsumes two into one). It is a hint, not a bound: a map that
 // grows is correct, merely slower, and this path renders a diagnostic.
-func planEstimatesFor(plan ir.LogicalPlan) exec.PlanEstimates {
-	return make(exec.PlanEstimates, logicalPlanSize(plan))
+func planEstimatesFor(plan ir.LogicalPlan) *planEstimateSink {
+	return &planEstimateSink{est: make(exec.PlanEstimates, logicalPlanSize(plan))}
 }
 
 // logicalPlanSize counts the nodes of a logical plan, bounded so a pathological

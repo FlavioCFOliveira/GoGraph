@@ -169,7 +169,7 @@ func (e *Engine) runExplainPrefixed(
 	if err != nil {
 		return nil, fmt.Errorf("cypher: build plan: %w", err)
 	}
-	node := exec.PlanTreeWithEstimates(op, est)
+	node := exec.PlanTreeWithEstimates(op, est.est)
 	return newPlanResult(cols, &node, parser.PlanModeExplain), nil
 }
 

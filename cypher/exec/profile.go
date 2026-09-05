@@ -258,6 +258,49 @@ func UnwrapProfiled(op Operator) Operator {
 	return op
 }
 
+// PlanRows returns the rows a profiling run measured for op, and whether that
+// figure is the operator's COMPLETE output for exactly ONE execution.
+//
+// It is the accessor a consumer needs when it intends to COMPARE the row count
+// with something — a planner estimate, a sibling operator, an expected
+// cardinality. [PlanNode.Rows] alone cannot support such a comparison, because two
+// different things make the number incomparable and neither is visible in it:
+//
+//   - RE-INITIALISATION. An operator on the inner side of an Apply-family operator
+//     is Init'd once per outer row, and its count is the SUM over those
+//     invocations, while any per-node prediction is for one pass. PostgreSQL solves
+//     the same problem by dividing its `actual rows` by `nloops`
+//     (explain.c, REL_17_STABLE); GoGraph reports lifetime totals everywhere
+//     ([PlanNode.RowsRemovedByFilter] documents the same convention), so the
+//     divisor is not available and the honest answer is to say the figure is not
+//     one pass.
+//   - EARLY TERMINATION. An operator under a [Limit], a [SemiApply] or a
+//     result-row cap stops being pulled before end-of-stream, so its count is a
+//     LOWER BOUND. Comparing it with a prediction would report the limit as a
+//     planner error.
+//
+// complete is true only when the operator was Init'd exactly once AND was driven to
+// end-of-stream. It is therefore ALSO false for an operator no [Profiler] wrapped,
+// which is why there is no third result saying so: nothing measured such an
+// operator, so its count is not one execution's output either, and a caller testing
+// both would be writing a condition that cannot fail. The rows are 0 whenever
+// complete is false, and must not be used.
+//
+// # Cost when off
+//
+// The two facts live on the profiling wrapper, which only a PROFILE build
+// allocates ([Profiler.Wrap] is called only when a Profiler was installed). A
+// non-PROFILE run executes neither the counting nor a branch that skips it — the
+// same absolute cost-when-off property [profiledOp.planStats] already rests on.
+func PlanRows(op Operator) (rows int64, complete bool) {
+	p, ok := op.(profiledNode)
+	if !ok {
+		return 0, false
+	}
+	r, _, _, _ := p.planStats()
+	return r, p.planRowsComplete()
+}
+
 // profiledNode is the behaviour [PlanTree] needs from any wrapper variant: the
 // operator it hides, and what that operator did.
 type profiledNode interface {
@@ -276,6 +319,10 @@ type profiledNode interface {
 	// no rows — a property of the operator, not a measurement gap — and every
 	// renderer then OMITS the cell rather than printing a zero (rmp #2764).
 	planRowsRemoved() (int64, bool)
+	// planRowsComplete reports whether the row count is the operator's COMPLETE
+	// output for EXACTLY ONE execution — see [PlanRows] for what makes it false and
+	// why a consumer that compares the count with anything has to ask.
+	planRowsComplete() bool
 }
 
 // profiledOp measures one operator: the rows it emits and the wall-clock time
@@ -291,11 +338,32 @@ type profiledOp struct {
 	inner   Operator
 	elapsed time.Duration
 	rows    int64
+	// inits counts the Init calls the operator received, and ended records whether
+	// it was ever driven to end-of-stream. Together they say whether [profiledOp.rows]
+	// is a complete count of one execution; see [PlanRows].
+	//
+	// They are int/bool rather than atomics for the same reason the counters above
+	// are: one operator tree is driven by one goroutine. The morsel-parallel build
+	// clears the profiler from its per-worker options, so no worker ever holds a
+	// wrapper (rmp #2664).
+	inits int
+	ended bool
 }
 
-// Init delegates. It is not timed: it runs once per query, and folding it into a
+// Init delegates, counting the invocation. It is not timed: folding it into a
 // per-row measurement would distort what the profile is for.
-func (p *profiledOp) Init(ctx context.Context) error { return p.inner.Init(ctx) }
+//
+// The count is what tells a consumer of [profiledOp.rows] whether that figure
+// describes ONE execution. An operator on the inner side of [Apply],
+// [CorrelatedApply], [OptionalApply], [SemiApply], [AntiSemiApply], [Foreach],
+// [RollUpApply] or [IndexNestedLoopJoin] is re-Init'd once per outer row, and its
+// row count is then a LIFETIME SUM over those invocations — the same lifetime
+// convention [PlanNode.RowsRemovedByFilter] documents, and the reason PostgreSQL
+// divides its `actual rows` by `nloops`.
+func (p *profiledOp) Init(ctx context.Context) error {
+	p.inits++
+	return p.inner.Init(ctx)
+}
 
 // Next delegates, counting the row and accumulating the elapsed time.
 func (p *profiledOp) Next(out *Row) (bool, error) {
@@ -304,6 +372,10 @@ func (p *profiledOp) Next(out *Row) (bool, error) {
 	p.elapsed += time.Since(start)
 	if ok {
 		p.rows++
+	} else if err == nil {
+		// End of stream, and not an error path: the row count is now the whole of
+		// what this operator produced for the current invocation.
+		p.ended = true
 	}
 	return ok, err
 }
@@ -403,6 +475,11 @@ func (p *profiledOp) planRowsRemoved() (int64, bool) {
 	return 0, false
 }
 
+// planRowsComplete reports whether the measured row count is the operator's whole
+// output for exactly one execution. See [PlanRows] for the two ways it is false and
+// why both matter to anything that compares the count with a prediction.
+func (p *profiledOp) planRowsComplete() bool { return p.inits == 1 && p.ended }
+
 // profiledChunkOp is the wrapper for an operator that also produces chunks. It
 // preserves [ChunkProducer] so a columnar parent still recognises its child as
 // columnar, and measures the columnar path as well as the row path.
@@ -424,6 +501,17 @@ func (p *profiledChunkOp) FillChunk(dst *Chunk, maxRows int) (int, error) {
 	n, err := p.chunk.FillChunk(dst, maxRows)
 	p.elapsed += time.Since(start)
 	p.rows += int64(n)
+	if err == nil && n < maxRows {
+		// End of stream. A SHORT return is the columnar end-of-stream signal, not
+		// merely a selective batch: [ColumnarFilter.FillChunk] documents that its
+		// scratch cursor persists across calls precisely so that "a short return
+		// (n < maxRows) means the CHILD is exhausted", and every drain in this package
+		// — [Result.materializeColumnar], [ColumnarProject], [ColumnarHashJoin],
+		// [EagerAggregation], [CountRows] — stops on that condition. Waiting for a
+		// literal zero would leave `ended` false for the common case where the last
+		// batch is partial, and no columnar operator would ever report a complete count.
+		p.ended = true
+	}
 	return n, err
 }
 

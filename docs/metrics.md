@@ -357,6 +357,64 @@ Plan-cache event counters (no latency dimension; incremented as raw counters):
 | `cypher.plan_cache.evictions`       | Entry evicted from the bounded LRU plan cache.   |
 | `cypher.plan_cache.invalidations`   | Entry invalidated by a schema change (DDL).      |
 
+Relationship count-store events (`cypher/count_metrics.go`, task #2087, design
+`docs/count-store-design.md`). The store is derived and non-durable; it is
+maintained from the write path and read by the exact-count estimate providers:
+
+| Metric                             | Kind      | Description                                                                                          |
+| ---------------------------------- | --------- | ---------------------------------------------------------------------------------------------------- |
+| `cypher.countstore.recompute`      | histogram | One O(V+E) reopen recompute, start to finish.                                                          |
+| `cypher.countstore.delta.applied`  | counter   | Individual E/D/T cell increments applied on a write transaction's commit fan-out.                       |
+| `cypher.countstore.lookup`         | counter   | Provider consultations that reached a present store.                                                   |
+| `cypher.countstore.lookup.veto`    | counter   | The subset a dirty X-scoped family forced to `estFallback`.                                            |
+| `cypher.countstore.relabel.dirtied`| counter   | Node relabels that marked count cells non-exact.                                                        |
+
+Planner-statistics events (`cypher/stats_metrics.go` and `cypher/plan_qerror.go`,
+tasks #2102 and #2767, design `docs/statistics-design.md`). Statistics are
+best-effort, maintained OFF the write path, and rebuilt only when a caller invokes
+`Engine.RefreshStatistics`; an engine that never refreshed emits none of these:
+
+| Metric                          | Kind      | Description                                                                                                     |
+| ------------------------------- | --------- | ----------------------------------------------------------------------------------------------------------------- |
+| `cypher.stats.refresh`          | counter   | Successful `RefreshStatistics` runs that published a fresh snapshot. A cancelled or failed rebuild is not counted.  |
+| `cypher.stats.refresh.latency`  | histogram | Wall-clock duration of one successful `RefreshStatistics` run.                                                      |
+| `cypher.stats.lookup`           | counter   | Statistics-provider consultations that reached a present collector.                                                 |
+| `cypher.stats.lookup.fallback`  | counter   | The subset yielding `estFallback` — an absent statistic, or a range estimate demoted by staleness.                   |
+| `cypher.stats.qerror`           | histogram | Per-operator **q-error** of a PROFILEd plan: `max(est, act) / min(est, act)`, both clamped at 1. See the note below. |
+| `cypher.stats.qerror.high`      | counter   | The subset of q-error samples at or above 3.0 — the factor the planner itself demands before acting on a statistic. |
+
+**`cypher.stats.qerror` is not a latency.** It is a distribution of a
+dimensionless ratio, carried through the latency primitive because the `Backend`
+interface has no float-distribution one. The carrier is **one millisecond per unit
+of q-error**, so a Prometheus scrape reads the mean q-error as
+`1000 × (cypher_stats_qerror_sum / cypher_stats_qerror_count)`, and the standard
+bucket ladder (100 µs … 5 s) resolves q ∈ [0.1, 5000]. A q-error is ≥ 1 by
+construction; 1 means the estimate was exactly right.
+
+A sample is emitted only for an operator that carries **both** a trustworthy
+estimate and a comparable measurement, which is narrower than "every operator":
+
+* the estimate's provenance must be `exact` or `stats` — the two the planner is
+  permitted to act on. A `heuristic` estimate (the `1/NDV × N` uniformity
+  assumption) and an absent one contribute nothing, so the series is *the error of
+  estimates the planner may act on*, not the error of all estimates;
+* the operator must have been initialised exactly once and driven to end-of-stream.
+  An operator on the inner side of an `Apply` has a row count summed over
+  invocations, and one under a `LIMIT` has a lower bound; scoring either would
+  report the join or the limit as a planner error.
+
+Both series are emitted from the **PROFILE path only** — `Engine.Profile`,
+`Engine.ProfileTable`, and the `PROFILE` statement prefix. `Engine.Run`,
+`Engine.RunInTx` and every `EXPLAIN` surface emit nothing, and that is a property
+of the call graph rather than a runtime check: the comparison is not reachable from
+them at all.
+
+Three size indicators cannot be expressed through the `Backend` and are exported
+as accessors instead: `Engine.CountStoreCells` (live count-store cells),
+`Engine.StatsTrackedPairs` (tracked `(label, property)` pairs) and
+`Engine.StatsMisestimatedPairs` (tracked pairs a PROFILE has caught predicting
+badly by ≥ 3×; cleared by a successful `RefreshStatistics`).
+
 ### Pool utilisation counters
 
 Every named `sync.Pool` emits a `get` and `put` counter so operators can observe
