@@ -50,64 +50,91 @@ Before tagging a new release:
 
 ## Branch and tag protection policy
 
-The `main` branch and the `v*` tag namespace are protected on GitHub.
-The GitHub-native rules below are enforced via repo Settings →
-Branches/Tags and are mirrored here as the canonical reference;
-changes to the repo configuration must be reflected in this file.
+**No GitHub-native branch or tag protection is in force on this
+repository.** That is the measured present state, not the intent, and
+it is stated first because a release document that asserts a control it
+does not have is worse than one that admits the gap — the same
+reasoning this file already applies to commit and tag signing below.
+
+Probed against the live repository on **2026-09-05**, at the
+`v0.13.0` release:
+
+```console
+$ gh api repos/FlavioCFOliveira/GoGraph/branches/main/protection
+{"message":"Branch not protected","status":"404"}
+
+$ gh api repos/FlavioCFOliveira/GoGraph/rulesets
+[]
+
+$ gh api repos/FlavioCFOliveira/GoGraph/tags/protection
+{"message":"Not Found","status":"404"}
+```
+
+Classic branch protection is absent, the newer rulesets mechanism is
+empty, and tag protection is absent. The repository's own history
+corroborates it: `main` carries `f97bbfec`, a **merge commit**, which
+the "require linear history" rule described below as active would have
+rejected outright.
+
+Consequently, on `main` and on the `v*` tag namespace, a direct push
+by an account with write access **succeeds**. Nothing but developer
+discipline stops it.
+
+### What actually gates a release
 
 Correctness and compliance are **not** enforced by GitHub status
 checks — there is no per-push or per-PR CI. The only GitHub Actions
 workflow is `.github/workflows/release.yml`, which runs on a `v*` tag
-push. Every correctness and compliance gate (`go vet`, `go build`,
-`go test -race ./...`, `golangci-lint`, the openCypher TCK
-execution + conformance gate, the coverage gate, the crash-injection
-battery, `govulncheck`, and `go mod tidy`) runs **locally** before a
-developer pushes or tags — via `make ci` for day-to-day work and the
-canonical `make release-preflight` gate before tagging a release.
-Enforcement is by developer discipline plus the local
-`make release-preflight` gate; a change that fails any gate must not
-be merged or tagged.
+push and executes the release-accuracy gate plus goreleaser; it does
+not re-run the correctness gates. Every correctness and compliance
+gate (`go vet`, `go build`, `go test -race ./...`, `golangci-lint`,
+the openCypher TCK execution + conformance gate, the coverage gate,
+the crash-injection battery, `govulncheck`, and `go mod tidy`) runs
+**locally** before a developer pushes or tags — via `make ci` for
+day-to-day work and the canonical `make release-preflight` gate before
+tagging a release.
 
-### `main` branch
+This is the one control that is real, and it is verified per release:
+`make release-preflight` exits non-zero on any failing gate, and the
+releaser reads that exit status from inside the run log. Enforcement
+is by developer discipline plus that local gate; a change that fails
+any gate must not be merged or tagged.
 
-- **Require a pull request before merging.** Direct pushes are
-  rejected by GitHub regardless of the actor's role.
-- **Require at least one approving review.** A maintainer's
-  self-approval does not count.
-- **Dismiss stale approvals on push.** A force-pushed branch loses
+### Intended controls, none of them yet active
+
+The rules below are the **intended** protection regime. They are
+recorded here as a target to configure, explicitly **not** as a
+description of the repository's present state. Adopting any of them
+means changing the repo configuration first and then updating this
+section to match — never the reverse.
+
+On `main`:
+
+- **Require a pull request before merging**, so a direct push is
+  rejected regardless of the actor's role.
+- **Require at least one approving review**, with a maintainer's
+  self-approval not counting.
+- **Dismiss stale approvals on push**, so a force-pushed branch loses
   its review and must be re-approved.
-- **Require linear history.** Merge commits on `main` are rejected;
-  use rebase or squash.
-- **Commit signing is likewise NOT yet in force.** `git log
-  --pretty=%G?` reports `N` — no signature — for every commit in the
-  `v0.12.0` window, for the same reason as the tags below: no signing
-  key is configured on the release workstation. The intended control
-  is to require signed commits from contributors with write access,
-  signing with the key registered at GitHub Settings → SSH and GPG
-  keys; it is stated here as intent, explicitly not as a control
-  currently enforced.
-- **Restrict push for tags `v*`.** Only members of the `releasers`
-  team may push a release tag. The `Release` workflow at
-  `.github/workflows/release.yml` runs the release-accuracy gate and
-  then goreleaser; it does not re-run the correctness gates, which the
-  releaser has already run locally via `make release-preflight` before
-  pushing the tag. The GitHub tag restriction prevents an unreviewed
-  tag from reaching this workflow in the first place.
+- **Require linear history.** Note that this one conflicts with the
+  project's gitflow model, which merges `release/*` into `main` with
+  `--no-ff`; adopting it means changing the branching model too, and
+  that decision has not been taken.
+- **Require signed commits.** `git log --pretty=%G?` reports `N` — no
+  signature — for **all 99 commits** in the `v0.12.0..v0.13.0` window,
+  because no signing key is configured on the release workstation.
 
-### `v*` tags
+On the `v*` tag namespace:
 
-- **Restrict push.** Only the `releasers` team may push a tag
-  matching `v[0-9]*`. Even a maintainer's regular push is
-  rejected.
-- **Tag signing is an intended control that is NOT yet in force.**
-  Release tags are currently annotated but **unsigned** (`git tag -a`):
-  `v0.10.0`, `v0.11.0` and `v0.12.0` all are, and no signing key is
-  configured on the release workstation. This is recorded as the
-  present reality rather than as the policy, because a security
-  document that asserts a control it does not have is worse than one
-  that admits the gap. Adopting `git tag -s` requires a signing key,
-  a documented key-custody process, and the matching GitHub tag rule;
-  until those exist, do not claim signed tags anywhere.
+- **Restrict push** to a `releasers` team, so that an unreviewed tag
+  cannot reach the `Release` workflow in the first place. No such team
+  exists today.
+- **Signed tags.** Release tags are currently annotated but
+  **unsigned** — `v0.10.0`, `v0.11.0`, `v0.12.0` and `v0.13.0` are all
+  `git tag -a` objects, verified with `git cat-file -t`. Adopting
+  `git tag -s` requires a signing key, a documented key-custody
+  process, and the matching GitHub tag rule; until those exist, do not
+  claim signed tags anywhere.
 
 ## Go toolchain upgrade workflow
 

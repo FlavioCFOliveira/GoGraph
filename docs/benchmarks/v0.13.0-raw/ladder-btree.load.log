@@ -1,0 +1,13 @@
+LOAD-GATE ladder-btree block-open started_at=1.82 waited=300s
+round=1 load1_at_round_start=1.82
+round=1 base_lines=5 head_lines=5
+round=2 load1_at_round_start=3.56
+round=2 base_lines=10 head_lines=10
+round=3 load1_at_round_start=4.16
+round=3 base_lines=15 head_lines=15
+round=4 load1_at_round_start=3.56
+round=4 base_lines=20 head_lines=20
+round=5 load1_at_round_start=3.05
+round=5 base_lines=25 head_lines=25
+round=6 load1_at_round_start=2.83
+round=6 base_lines=30 head_lines=30

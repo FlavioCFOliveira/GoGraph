@@ -1,0 +1,33 @@
+goos: darwin
+goarch: arm64
+pkg: ./graph
+BenchmarkMapper_Intern_HotKey_Parallel           	141516950	         8.265 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-8         	16430290	        75.84 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-64        	13340515	        89.53 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-256       	13376515	        89.64 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-1024      	13404644	        89.82 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel           	136978782	         8.704 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-8         	15916500	        75.61 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-64        	13340287	        89.53 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-256       	13473796	        89.30 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-1024      	13438501	        89.41 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel           	140256402	         8.563 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-8         	16297095	        75.19 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-64        	13350868	        89.85 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-256       	13308847	        89.88 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-1024      	14097212	        89.23 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel           	138544810	         8.526 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-8         	15876357	        76.88 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-64        	13430712	        89.62 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-256       	13405736	        89.52 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-1024      	13705102	        89.66 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel           	141657801	         8.408 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-8         	16311541	        75.02 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-64        	13401057	        89.87 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-256       	13498717	        89.54 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-1024      	13409150	        89.82 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel           	141187467	         8.505 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-8         	15918760	        74.45 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-64        	13336278	        89.75 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-256       	13540094	        89.93 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-1024      	13572836	        89.16 ns/op	       0 B/op	       0 allocs/op

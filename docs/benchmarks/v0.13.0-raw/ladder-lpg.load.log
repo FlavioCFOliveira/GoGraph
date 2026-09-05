@@ -1,0 +1,13 @@
+LOAD-GATE ladder-lpg block-open started_at=2.18 waited=270s
+round=1 load1_at_round_start=2.18
+round=1 base_lines=25 head_lines=25
+round=2 load1_at_round_start=11.73
+round=2 base_lines=50 head_lines=50
+round=3 load1_at_round_start=28.10
+round=3 base_lines=75 head_lines=75
+round=4 load1_at_round_start=19.00
+round=4 base_lines=100 head_lines=100
+round=5 load1_at_round_start=35.26
+round=5 base_lines=125 head_lines=125
+round=6 load1_at_round_start=34.68
+round=6 base_lines=150 head_lines=150

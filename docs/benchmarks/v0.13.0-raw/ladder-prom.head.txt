@@ -1,0 +1,33 @@
+goos: darwin
+goarch: arm64
+pkg: ./internal/metrics/prometheus
+BenchmarkIncCounterParallel           	127816302	         9.505 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-8         	726096306	         2.069 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-64        	654025801	         1.783 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-256       	636392643	         1.809 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-1024      	700821666	         1.729 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel           	128610688	         9.219 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-8         	732926624	         2.097 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-64        	649603593	         1.692 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-256       	598869880	         1.822 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-1024      	652695508	         1.678 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel           	127181959	         9.324 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-8         	568950811	         2.024 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-64        	724879893	         1.743 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-256       	676942876	         1.771 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-1024      	707583674	         1.755 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel           	127260142	         9.363 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-8         	726486980	         1.716 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-64        	642878666	         1.800 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-256       	671626910	         1.853 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-1024      	684895346	         1.799 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel           	127015578	         9.374 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-8         	733767866	         1.672 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-64        	675715148	         1.776 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-256       	549725011	         1.839 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-1024      	692273078	         1.754 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel           	128997234	         9.312 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-8         	725129200	         1.737 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-64        	660981006	         1.855 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-256       	637637482	         1.917 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-1024      	683092350	         1.787 ns/op	       0 B/op	       0 allocs/op

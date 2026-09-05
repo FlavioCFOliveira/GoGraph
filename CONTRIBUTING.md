@@ -86,14 +86,23 @@ README or task summary should record the measured numbers.
 
 ## Branch and tag protection
 
-The `main` branch and the `v*` tag namespace are protected on GitHub.
-Contributors cannot push directly to `main`; every change lands via
-a pull request that obtains at least one approving review. There are
-no GitHub status checks — correctness and compliance are enforced
-locally via `make ci` (and `make release-preflight` before tagging),
-which every contributor must run green before pushing. Release tags
-(`v[0-9]*`) can only be pushed by the `releasers` team and must be
-signed. The full policy is documented in
+**There is none.** Neither `main` nor the `v*` tag namespace carries
+any GitHub-native protection: classic branch protection, rulesets and
+tag protection were all probed on 2026-09-05 and all three are absent.
+A direct push to `main`, or of a release tag, by an account with write
+access **succeeds**.
+
+There are likewise no GitHub status checks. Correctness and compliance
+are enforced **locally** via `make ci` (and `make release-preflight`
+before tagging), which every contributor must run green before
+pushing. That local gate is the only real control, so treat running it
+as obligatory rather than advisory — nothing downstream will catch a
+change that skipped it.
+
+Release tags are annotated (`git tag -a`) but **not signed**, and no
+`releasers` team exists. The intended protection regime, the evidence
+that it is not yet active, and what adopting it would require are
+recorded in
 [docs/release.md](docs/release.md#branch-and-tag-protection-policy);
 any change to the repo settings must be reflected there.
 

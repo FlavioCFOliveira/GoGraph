@@ -1,0 +1,33 @@
+goos: darwin
+goarch: arm64
+pkg: ./internal/metrics/prometheus
+BenchmarkIncCounterParallel           	138550950	         8.736 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-8         	26202040	        43.01 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-64        	24316108	        49.02 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-256       	24539646	        49.02 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-1024      	24813403	        48.82 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel           	136978033	         8.771 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-8         	26053279	        48.23 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-64        	23819862	        50.34 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-256       	23930203	        50.33 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-1024      	23793904	        50.06 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel           	139004248	         8.582 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-8         	28129944	        45.41 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-64        	24252937	        48.85 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-256       	24450894	        49.35 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-1024      	24508071	        49.15 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel           	138391383	         8.509 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-8         	25702122	        47.83 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-64        	23833876	        50.18 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-256       	23946538	        50.35 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-1024      	24416048	        49.34 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel           	139000854	         8.456 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-8         	24984493	        47.69 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-64        	23827134	        50.21 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-256       	23872797	        50.36 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-1024      	23895634	        50.11 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel           	139344424	         8.670 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-8         	25509638	        47.79 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-64        	23876736	        50.26 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-256       	24492752	        50.30 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-1024      	24431646	        50.19 ns/op	       0 B/op	       0 allocs/op

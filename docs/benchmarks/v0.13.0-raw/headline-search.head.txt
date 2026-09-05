@@ -1,0 +1,27 @@
+goos: darwin
+goarch: arm64
+pkg: ./search
+BenchmarkBFSDirectionOpt_PowerLaw-10    	      40	  27922400 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDijkstra_Large-10              	     147	   8186837 ns/op	 1129059 B/op	       4 allocs/op
+BenchmarkDijkstra_PostWarmup-10         	     145	   8047093 ns/op	       0 B/op	       0 allocs/op
+BenchmarkYen_K100-10                    	      80	  14723065 ns/op	  459484 B/op	    1280 allocs/op
+BenchmarkBFSDirectionOpt_PowerLaw-10    	      39	  30930876 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDijkstra_Large-10              	     134	   8250539 ns/op	 1130480 B/op	       4 allocs/op
+BenchmarkDijkstra_PostWarmup-10         	     145	   8249722 ns/op	       0 B/op	       0 allocs/op
+BenchmarkYen_K100-10                    	      78	  14895900 ns/op	  459319 B/op	    1280 allocs/op
+BenchmarkBFSDirectionOpt_PowerLaw-10    	      42	  28308896 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDijkstra_Large-10              	     147	   8284251 ns/op	 1129050 B/op	       4 allocs/op
+BenchmarkDijkstra_PostWarmup-10         	     147	   8071271 ns/op	       0 B/op	       0 allocs/op
+BenchmarkYen_K100-10                    	      79	  14724985 ns/op	  459315 B/op	    1280 allocs/op
+BenchmarkBFSDirectionOpt_PowerLaw-10    	      40	  28242431 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDijkstra_Large-10              	     144	   8180314 ns/op	 1129358 B/op	       4 allocs/op
+BenchmarkDijkstra_PostWarmup-10         	     150	   8014943 ns/op	       0 B/op	       0 allocs/op
+BenchmarkYen_K100-10                    	      80	  14831307 ns/op	  459481 B/op	    1280 allocs/op
+BenchmarkBFSDirectionOpt_PowerLaw-10    	      40	  27961714 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDijkstra_Large-10              	     144	   8126538 ns/op	 1129349 B/op	       4 allocs/op
+BenchmarkDijkstra_PostWarmup-10         	     147	   8036644 ns/op	       0 B/op	       0 allocs/op
+BenchmarkYen_K100-10                    	      80	  14867164 ns/op	  459587 B/op	    1280 allocs/op
+BenchmarkBFSDirectionOpt_PowerLaw-10    	      39	  28340718 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDijkstra_Large-10              	     145	   8224863 ns/op	 1129254 B/op	       4 allocs/op
+BenchmarkDijkstra_PostWarmup-10         	     147	   8013984 ns/op	       0 B/op	       0 allocs/op
+BenchmarkYen_K100-10                    	      79	  14932450 ns/op	  459194 B/op	    1280 allocs/op

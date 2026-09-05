@@ -1,0 +1,13 @@
+LOAD-GATE ladder-hash block-open started_at=2.31 waited=30s
+round=1 load1_at_round_start=2.31
+round=1 base_lines=15 head_lines=15
+round=2 load1_at_round_start=3.42
+round=2 base_lines=30 head_lines=30
+round=3 load1_at_round_start=3.15
+round=3 base_lines=45 head_lines=45
+round=4 load1_at_round_start=8.96
+round=4 base_lines=60 head_lines=60
+round=5 load1_at_round_start=5.47
+round=5 base_lines=75 head_lines=75
+round=6 load1_at_round_start=3.77
+round=6 base_lines=90 head_lines=90

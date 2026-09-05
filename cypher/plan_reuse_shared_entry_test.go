@@ -42,6 +42,10 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
+	"os/exec"
+	"regexp"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -599,12 +603,111 @@ const readPathAllocCeiling = 20
 // per-execution overhead — which is exactly why it is the right gate.
 const readPathAllocQuery = "MATCH (n:N) RETURN count(n) AS c"
 
+// readPathAllocChildEnv makes this test binary re-enter as a MEASUREMENT-ONLY
+// child. When it is set, TestReadPathAllocationCeiling measures and prints;
+// when it is not, the test re-execs itself with it set and asserts on what the
+// child printed.
+const readPathAllocChildEnv = "GOGRAPH_READPATH_ALLOC_CHILD"
+
+// readPathAllocMarker is how the child reports its measurement to the parent.
+const readPathAllocMarker = "READPATH_ALLOCS="
+
+var readPathAllocRE = regexp.MustCompile(readPathAllocMarker + `([0-9.]+)`)
+
 // TestReadPathAllocationCeiling is the regression gate for rmp #2693.
 //
 // It measures through the PUBLIC API, not through the benchmark's transcription
 // of the read path, so a change that moved an allocation from the build into Run
 // itself cannot hide from it.
+//
+// # Why this re-execs itself instead of just measuring (rmp #2753)
+//
+// [testing.AllocsPerRun] divides runtime.MemStats.Mallocs, which is
+// PROCESS-GLOBAL. Every goroutine alive anywhere in this test binary during the
+// measurement window is counted here too — including the sibling tests that
+// t.Parallel() and GOGRAPH_PARALLEL_SUITE leave running. That is not a
+// hypothetical: under `make ci` this gate read 32.00 against a ceiling of 20
+// while the read path was untouched, and it did so in BOTH gate phases, stably,
+// which is what ruled out ordinary measurement noise.
+//
+// The cause was established by a controlled 2x2 rather than argued, and BOTH
+// factors are necessary — neither alone reproduces it:
+//
+//	in-binary concurrency | external load | reading
+//	no                    | no            |  20.00
+//	no                    | yes (load 11) |  20.00
+//	yes                   | no            |  20.00
+//	yes                   | yes (load 37) |  32.00   <- the gate's condition
+//
+// Sibling goroutines are the contaminator; external load is the amplifier,
+// because it stretches the window in wall-clock so those siblings get more
+// iterations inside it. Under the gate the cypher package took 199.4s against
+// ~106s alone.
+//
+// Five earlier hypotheses were refuted with measurements (plain build, -race,
+// -cover, GOGC=off/400/1, and a min-of-five estimator); they are recorded on
+// rmp #2753. A sixth — that external load alone sufficed — was refuted here:
+// row 2 above tests exactly that and reads 20.00.
+//
+// So the remedy is not a better estimator on a contaminated process; it is a
+// process with nothing to contaminate it. The child runs THIS test and nothing
+// else, so no sibling test goroutine exists. Raising the ceiling to 32 was
+// rejected outright: the isolated reading is exactly 20, so a raised ceiling
+// would blind the gate to a genuine 12-allocation regression.
 func TestReadPathAllocationCeiling(t *testing.T) {
+	if os.Getenv(readPathAllocChildEnv) == "1" {
+		runReadPathAllocChild(t)
+		return
+	}
+
+	// os.Args[0] is this test binary's own path, not user-supplied input.
+	cmd := exec.Command(os.Args[0], "-test.run", "^TestReadPathAllocationCeiling$", "-test.v") //nolint:gosec // G204: os.Args[0] is the test binary itself
+	cmd.Env = append(os.Environ(), readPathAllocChildEnv+"=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("measurement child failed: %v\n%s", err, out)
+	}
+	m := readPathAllocRE.FindSubmatch(out)
+	if m == nil {
+		// An absent marker is a HARD failure, never a pass. A gate that cannot
+		// find its own measurement has stopped measuring, and silence must not
+		// read as success.
+		t.Fatalf("measurement child printed no %s marker; the gate did not measure anything\n%s",
+			readPathAllocMarker, out)
+	}
+	allocs, err := strconv.ParseFloat(string(m[1]), 64)
+	if err != nil {
+		t.Fatalf("unparseable marker %q: %v", m[1], err)
+	}
+
+	if allocs > float64(readPathAllocCeiling) {
+		t.Errorf("one cache-hit execution of %q allocated %.1f objects, ceiling %d "+
+			"(rmp #2693). An allocation was added to the read path; either remove it or "+
+			"raise readPathAllocCeiling in the same change and record why.",
+			readPathAllocQuery, allocs, readPathAllocCeiling)
+	}
+	// The lower bound is not belt-and-braces: if the count falls well below the
+	// ceiling, the gate has silently stopped measuring the path it was written for
+	// — a query rewritten to a cheaper plan, or a drain that stopped draining —
+	// and a ceiling nobody can reach cannot fail. Raise the constant deliberately
+	// instead of leaving a gate that passes for the wrong reason.
+	if allocs < float64(readPathAllocCeiling)-3 {
+		t.Errorf("one cache-hit execution of %q allocated only %.1f objects against a "+
+			"ceiling of %d. That is a win, but it means this gate is no longer measuring "+
+			"the read path it was calibrated on: lower readPathAllocCeiling to the new "+
+			"measured value so it keeps its teeth.",
+			readPathAllocQuery, allocs, readPathAllocCeiling)
+	}
+	t.Logf("cache-hit read of %q: %.2f allocs/op (ceiling %d), measured in an isolated child",
+		readPathAllocQuery, allocs, readPathAllocCeiling)
+}
+
+// runReadPathAllocChild performs the measurement and prints it. It deliberately
+// does NOT assert: the parent owns the verdict, so a child that somehow measured
+// under contamination reports its number and lets the parent judge it, rather
+// than failing in a place whose output nobody reads.
+func runReadPathAllocChild(t *testing.T) {
+	t.Helper()
 	eng := newSharedEntryRig(t)
 	ctx := context.Background()
 
@@ -626,20 +729,11 @@ func TestReadPathAllocationCeiling(t *testing.T) {
 		observed int64
 		failures int
 	)
-	// MINIMUM of several samples, not one sample (rmp #2746 follow-up).
-	//
-	// testing.AllocsPerRun reads runtime.MemStats.Mallocs, which is
-	// PROCESS-GLOBAL: anything else allocating anywhere in this test binary
-	// during the measurement window is counted here too. Under `make ci` the
-	// cover gate runs every package at once and the host reached loadavg 13,
-	// and this gate read 32.0 against a ceiling of 20 while passing 30 times out
-	// of 30 in isolation. Nothing had been added to the read path.
-	//
-	// Contamination can only ADD allocations, never remove them, so the minimum
-	// across samples is the robust estimator of the true count while a single
-	// sample is an upper bound on a quiet host and meaningless on a busy one.
-	// The lower-bound check below still fails if the minimum drops, so this
-	// cannot hide a gate that stopped measuring.
+	// MINIMUM of several samples. Contamination can only ADD allocations, never
+	// remove them, so the minimum is the robust estimator. In this child there
+	// should be nothing left to contaminate it — the minimum is kept as defence
+	// in depth, not as the fix, because on its own it was measured NOT to be
+	// enough (rmp #2753).
 	const allocSamples = 5
 	allocs := math.Inf(1)
 	for i := 0; i < allocSamples; i++ {
@@ -664,25 +758,5 @@ func TestReadPathAllocationCeiling(t *testing.T) {
 		t.Fatalf("the measured runs returned count = %d, want %d — the allocation count "+
 			"describes the wrong query", observed, sharedEntryNodes)
 	}
-
-	if allocs > float64(readPathAllocCeiling) {
-		t.Errorf("one cache-hit execution of %q allocated %.1f objects, ceiling %d "+
-			"(rmp #2693). An allocation was added to the read path; either remove it or "+
-			"raise readPathAllocCeiling in the same change and record why.",
-			readPathAllocQuery, allocs, readPathAllocCeiling)
-	}
-	// The lower bound is not belt-and-braces: if the count falls well below the
-	// ceiling, the gate has silently stopped measuring the path it was written for
-	// — a query rewritten to a cheaper plan, or a drain that stopped draining —
-	// and a ceiling nobody can reach cannot fail. Raise the constant deliberately
-	// instead of leaving a gate that passes for the wrong reason.
-	if allocs < float64(readPathAllocCeiling)-3 {
-		t.Errorf("one cache-hit execution of %q allocated only %.1f objects against a "+
-			"ceiling of %d. That is a win, but it means this gate is no longer measuring "+
-			"the read path it was calibrated on: lower readPathAllocCeiling to the new "+
-			"measured value so it keeps its teeth.",
-			readPathAllocQuery, allocs, readPathAllocCeiling)
-	}
-	t.Logf("cache-hit read of %q: %.2f allocs/op (ceiling %d)",
-		readPathAllocQuery, allocs, readPathAllocCeiling)
+	fmt.Printf("%s%.2f\n", readPathAllocMarker, allocs)
 }
