@@ -168,7 +168,27 @@ func (wv WriteView[N, W]) NoteConstraintTouch(n N) error {
 func (wv WriteView[N, W]) AddNode(n N) error { return wv.g.addNodeInfo(n, wv.w) }
 
 // RemoveNode is [Graph.RemoveNode] inside this view's transaction.
-func (wv WriteView[N, W]) RemoveNode(n N) { wv.g.removeNodeInfo(n, wv.w) }
+//
+// It reports whether the removal was ADMITTED, as [WriteView.RemoveEdge],
+// [WriteView.RemoveEdgeByHandle] and [WriteView.RemoveAllEdgesFrom] already do:
+// FALSE means this transaction hit a write-write conflict on the node — its
+// existence record, its properties, its labels or its adjacency — and the node
+// was NOT retired.
+//
+// A caller that journals an inverse MUST gate the journal entry on it, and must
+// gate any side-effect COUNTER on it too. An inverse recorded for a retirement
+// that never happened revives a node the conflicting peer went on to delete for
+// real, and the revival restores no labels and no properties — the peer's commit
+// removed them — so what comes back is a BARE node that no transaction ever
+// created, alive in the present with no life record (rmp #2726, the node mirror
+// of rmp #2694 and rmp #2725). The counter must move with the journal entry
+// because the inverse's DecrNodesRemoved is what reverses the increment.
+//
+// TRUE does not mean a node was taken out: a removal of an already-tombstoned or
+// never-interned key is admitted and retires nothing, and reports true. The
+// caller's own presence probe answers that; this answers only whether the write
+// was ADMITTED — the same reading [WriteView.RemoveEdge] takes.
+func (wv WriteView[N, W]) RemoveNode(n N) bool { return wv.g.removeNodeInfo(n, wv.w) }
 
 // Revive is [Graph.Revive] inside this view's transaction.
 func (wv WriteView[N, W]) Revive(n N) { wv.g.reviveInfo(n, wv.w) }
@@ -211,7 +231,24 @@ func (wv WriteView[N, W]) AddEdgeHIfAbsent(src, dst N, w W, handle uint64) (bool
 }
 
 // RemoveEdge is [Graph.RemoveEdge] inside this view's transaction.
-func (wv WriteView[N, W]) RemoveEdge(src, dst N) { wv.g.removeEdgeInfo(src, dst, wv.w) }
+//
+// It reports whether the removal was APPLIED, as
+// [WriteView.RemoveAllEdgesFrom] and [WriteView.RemoveEdgeByHandle] already do:
+// FALSE means this transaction hit a write-write conflict on the adjacency and
+// nothing was mutated. A caller that journals an inverse MUST gate the journal
+// entry on it — an inverse recorded for a removal that never happened re-adds
+// an arc the conflicting peer still owns, and once that peer has rolled its own
+// arc back the inverse leaves an arc no transaction ever created (rmp #2725,
+// the per-edge mirror of rmp #2694).
+//
+// TRUE does not mean an arc was taken out: a removal of an absent edge applies
+// and removes nothing, and reports true. The caller's presence probe answers
+// that; this answers only whether the write was ADMITTED. The two siblings
+// differ here — both fold "nothing to remove" into their false — so a caller
+// switching between them must read each contract rather than assume it.
+func (wv WriteView[N, W]) RemoveEdge(src, dst N) bool {
+	return wv.g.removeEdgeInfo(src, dst, wv.w)
+}
 
 // RemoveEdgeByHandle is [Graph.RemoveEdgeByHandle] inside this view's
 // transaction.
@@ -221,7 +258,16 @@ func (wv WriteView[N, W]) RemoveEdgeByHandle(src, dst N, handle uint64) bool {
 
 // RemoveAllEdgesFrom is [Graph.RemoveAllEdgesFrom] inside this view's
 // transaction.
-func (wv WriteView[N, W]) RemoveAllEdgesFrom(src N) { wv.g.removeAllEdgesFromInfo(src, wv.w) }
+//
+// It reports whether the removal was APPLIED, exactly as
+// [WriteView.RemoveEdgeByHandle] does: FALSE means this transaction hit a
+// write-write conflict on the adjacency and nothing was mutated. A caller that
+// journals an inverse MUST gate the journal entry on it — an inverse recorded
+// for a removal that never happened re-creates an arc the conflicting peer
+// still owns (rmp #2694).
+func (wv WriteView[N, W]) RemoveAllEdgesFrom(src N) bool {
+	return wv.g.removeAllEdgesFromInfo(src, wv.w)
+}
 
 // ── per-pair relationship types and properties ───────────────────────────────
 

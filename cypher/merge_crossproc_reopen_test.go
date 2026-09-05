@@ -75,7 +75,7 @@ func init() {
 			fmt.Fprintf(os.Stderr, "RunInTx: %v\n", err)
 			return 1
 		}
-		for r.Next() { //nolint:revive // drain to run the write to completion
+		for r.Next() { // drain to run the write to completion
 		}
 		if rerr := r.Err(); rerr != nil {
 			fmt.Fprintf(os.Stderr, "result err: %v\n", rerr)

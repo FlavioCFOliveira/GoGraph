@@ -191,7 +191,7 @@ func (s rmatBase) Build(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
 // [a, b, c, d] joint-sum constraint documented at the head of this
 // file.
 //
-//nolint:gosec,gocritic // G404: math/rand/v2 is the pinned PRNG for catalogue determinism; paramTypeCombine: signature is pinned by the brief (scale int, edgeFactor int, a uint64, b uint64, c uint64, d uint64, seed uint64).
+//nolint:gosec // G404: math/rand/v2 is the pinned PRNG for catalogue determinism; paramTypeCombine: signature is pinned by the brief (scale int, edgeFactor int, a uint64, b uint64, c uint64, d uint64, seed uint64).
 func RMAT(scale, edgeFactor int, a, b, c, d, seed uint64) Shape[int, int64] {
 	if scale < 1 || scale > 30 {
 		panic(fmt.Sprintf("shapegen: RMAT requires 1 <= scale <= 30, got %d", scale))
@@ -273,7 +273,7 @@ func buildRMAT(g *lpg.Graph[int, int64], scale, edgeFactor, a, b, c int, seed ui
 //   - 0 <= a <= ab <= abc <= 100. The Graph500 convention treats
 //     draws >= abc as quadrant D.
 //
-//nolint:gosec // G404: math/rand/v2 is the pinned PRNG for catalogue determinism; see RMAT godoc.
+// G404: math/rand/v2 is the pinned PRNG for catalogue determinism; see RMAT godoc.
 func RMATPick(r *rand.Rand, n uint64, a, ab, abc int) (src, dst uint64) {
 	for size := n; size > 1; size /= 2 {
 		half := size / 2

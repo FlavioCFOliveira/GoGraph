@@ -521,6 +521,7 @@ func (w *Writer) appendLocked(payload []byte) error {
 	}
 	w.appendedSize += int64(n)
 	w.frames.Add(1)
+	//nolint:gosec // G115: n is the byte count Encode (format.go:139) returns from w.bw, a *bufio.Writer (writer.go:132); io.Writer forbids a negative n, so the conversion is exact
 	w.bytes.Add(uint64(n))
 	return nil
 }

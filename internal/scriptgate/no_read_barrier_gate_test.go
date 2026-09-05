@@ -46,8 +46,16 @@ func TestNoReadBarrierGate(t *testing.T) {
 		}
 		if info.IsDir() {
 			// Skip VCS, build output and the reference clones a spike may have left.
+			//
+			// ".claude" carries agent tooling state, and in particular NESTED GIT
+			// WORKTREES (.claude/worktrees/*) — a second checkout of this very
+			// module. Without this the walk reads that checkout's own graph/lpg
+			// sources as if they were external callers and reports every
+			// legitimate in-lpg acquisition as a violation: 14 false sites,
+			// enough to turn `make ci` red for the duration of an isolated
+			// agent run. A nested checkout is not this module's source.
 			switch info.Name() {
-			case ".git", "vendor", "testdata":
+			case ".git", "vendor", "testdata", ".claude":
 				return filepath.SkipDir
 			}
 			return nil

@@ -106,7 +106,7 @@ func runWrite(t *testing.T, eng *cypher.Engine, query string) error {
 	if err != nil {
 		return err
 	}
-	for res.Next() { //nolint:revive // intentional full drain
+	for res.Next() { // intentional full drain
 	}
 	drainErr := res.Err()
 	closeErr := res.Close()

@@ -43,6 +43,14 @@ type stringCodec struct{}
 func NewStringCodec() Codec[string] { return stringCodec{} }
 
 func (stringCodec) Encode(buf []byte, v string) ([]byte, error) {
+	// Mirrors the rejection the sibling binaryMarshalerCodec.Encode has always
+	// had. Without it a node key >= 4 GiB truncated its length prefix and
+	// [stringCodec.Decode] then read the wrong body — the uint32 twin of the
+	// uint16 label defect rmp #2742 closed in the op-body encoders.
+	if uint64(len(v)) > math.MaxUint32 {
+		return buf, fmt.Errorf("txn/codec: string node key exceeds uint32 (%d bytes)", len(v))
+	}
+	//nolint:gosec // G115: bounded by the len(v)>math.MaxUint32 rejection at codec.go:50, three lines above, so the cast is unreachable for any oversize key (rmp #2742)
 	buf = binary.LittleEndian.AppendUint32(buf, uint32(len(v)))
 	return append(buf, v...), nil
 }
@@ -203,6 +211,7 @@ func (binaryMarshalerCodec[N, P]) Encode(buf []byte, v N) ([]byte, error) {
 	if uint64(len(data)) > math.MaxUint32 {
 		return buf, fmt.Errorf("txn/codec: BinaryMarshaler payload exceeds uint32 (%d bytes)", len(data))
 	}
+	//nolint:gosec // G115: bounded by the len(data)>math.MaxUint32 rejection at codec.go:211, three lines above, so the cast is unreachable for any oversize payload
 	buf = binary.LittleEndian.AppendUint32(buf, uint32(len(data)))
 	return append(buf, data...), nil
 }

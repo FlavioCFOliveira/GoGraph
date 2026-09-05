@@ -476,7 +476,7 @@ func copyDirInto(t *testing.T, src, dst string) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(dst, e.Name()), b, 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(dst, e.Name()), b, 0o600); err != nil { //nolint:gosec // G703: the directory component is a path this test created and the leaf name is a literal, so no traversal segment can enter.
 			t.Fatal(err)
 		}
 	}

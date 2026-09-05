@@ -46,7 +46,7 @@ func runCountedP(t *testing.T, eng *cypher.Engine, query string, params map[stri
 	if err != nil {
 		t.Fatalf("RunInTxAny(%q): %v", query, err)
 	}
-	for res.Next() { //nolint:revive // drain
+	for res.Next() { // drain
 	}
 	if err := res.Err(); err != nil {
 		t.Fatalf("Err(%q): %v", query, err)

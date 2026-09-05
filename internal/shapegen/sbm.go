@@ -229,7 +229,7 @@ func (s sbmBase) Build(cfg adjlist.Config) (*lpg.Graph[int, int64], error) {
 // constructor takes a defensive copy of both inputs so subsequent
 // caller mutations cannot affect Build.
 //
-//nolint:gocritic // paramTypeCombine: signature is pinned by the brief (blockSizes []int, probPercent [][]int, seed uint64).
+// paramTypeCombine: signature is pinned by the brief (blockSizes []int, probPercent [][]int, seed uint64).
 func SBM(blockSizes []int, probPercent [][]int, seed uint64) Shape[int, int64] {
 	for i, size := range blockSizes {
 		if size < 0 {
@@ -314,7 +314,7 @@ func SBM(blockSizes []int, probPercent [][]int, seed uint64) Shape[int, int64] {
 // every observed 5-seed window. See
 // [TestRandom_PlantedPartition_Recoverability_Soak] in sbm_test.go.
 //
-//nolint:gocritic // paramTypeCombine: signature is pinned by the brief (k int, blockSize int, pInPercent int, pOutPercent int, seed uint64).
+// paramTypeCombine: signature is pinned by the brief (k int, blockSize int, pInPercent int, pOutPercent int, seed uint64).
 func PlantedPartition(k, blockSize, pInPercent, pOutPercent int, seed uint64) Shape[int, int64] {
 	if k < 1 || k > 20 {
 		panic(fmt.Sprintf("shapegen: PlantedPartition requires 1 <= k <= 20, got %d", k))
@@ -381,7 +381,7 @@ func PlantedPartition(k, blockSize, pInPercent, pOutPercent int, seed uint64) Sh
 // upper triangle of the node-by-node matrix. The seed-to-output map is
 // therefore a pure function of (blockSizes, probPercent, seed).
 //
-//nolint:gosec // G404: math/rand/v2 is the pinned PRNG for catalogue determinism; see SBM godoc.
+// G404: math/rand/v2 is the pinned PRNG for catalogue determinism; see SBM godoc.
 func buildSBM(g *lpg.Graph[int, int64], blockSizes []int, probPercent [][]int, seed uint64) error {
 	if err := validateSBM(blockSizes, probPercent); err != nil {
 		return err

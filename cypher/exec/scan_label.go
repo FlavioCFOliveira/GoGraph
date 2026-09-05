@@ -4,14 +4,33 @@ package exec
 //
 // NodeByLabelScan resolves a label name to a Roaring bitmap via
 // label.Index.Intersect and iterates the bitmap with an IntPeekable64
-// iterator.  The bitmap is materialised once during Init; Next consumes it
-// one NodeID at a time with zero additional allocations.
+// iterator.  The bitmap is materialised once during Init; Next consumes it one
+// NodeID at a time.
 //
-// # Zero-alloc contract
+// # Per-row allocation
 //
-// The IntPeekable64 iterator returned by Bitmap.Iterator does not allocate on
-// each HasNext/Next call.  The Row is written into a fixed [1]expr.Value
-// backing buffer.
+// Two of the three per-row costs are eliminated, and the third is NOT:
+//
+//   - The IntPeekable64 iterator returned by Bitmap.Iterator does not allocate
+//     on each HasNext/Next call.
+//   - The Row slice header is not allocated per row either: it is a fixed
+//     [1]expr.Value backing buffer, re-sliced into the caller's *Row.
+//   - The VALUE written into that buffer IS heap-allocated, once per row. This
+//     used to be documented here as a "zero-alloc contract", and that was wrong.
+//     [expr.Value] is an interface and [expr.IntegerValue] is an int64, so
+//     `op.buf[0] = expr.IntegerValue(...)` in [NodeByLabelScan.Next] is an
+//     interface conversion, which the compiler lowers to runtime.convT64. That
+//     boxes 8 bytes on the heap for every NodeID of 256 or more — ids below 256
+//     are served from the runtime's static small-integer table and are free,
+//     which is exactly why the claim survived review on small fixtures. A heap
+//     profile of a labelled scan attributed 83.2% of ALL bytes in the query to
+//     this one assignment (rmp sprint 352 audit).
+//
+// The way out is not a different buffer: it is not going through the interface
+// at all. [NodeByLabelScan.FillChunk] already does that — it appends the same
+// ids, in the same order, as unboxed int64 into a typed [Chunk] column — so a
+// columnar-aware parent pays none of this. Reshaping the row-at-a-time path is
+// tracked separately as the audit's per-node heap-shape item.
 //
 // # Cancellation
 //
@@ -83,7 +102,7 @@ type NodeByLabelScan struct {
 	isrc LabelIntersectResolver
 	ctx  context.Context //nolint:containedctx // stored for per-Next ctx check
 	iter roaring64.IntPeekable64
-	buf  [1]expr.Value // fixed backing buffer — zero-alloc per Next
+	buf  [1]expr.Value // fixed backing buffer — no per-row slice allocation
 	// labels is non-nil only for the multi-label CONJUNCTION form (#2133), in
 	// which case isrc supplies the intersected bitmap and label is unused.
 	labels   []string
@@ -102,8 +121,9 @@ func NewNodeByLabelScan(labelName string, src labelResolver) *NodeByLabelScan {
 //
 // Only the bitmap Init resolves differs from the single-label form: Next, the
 // columnar FillChunk path, the exact rowCountHint and Close all operate on
-// whatever bitmap the scan holds, so the conjunction inherits the zero-alloc
-// contract and the columnar fast path unchanged.
+// whatever bitmap the scan holds, so the conjunction inherits the per-row
+// allocation behaviour documented in the file comment, and the columnar fast
+// path, unchanged.
 //
 // labels must be ordered as the caller wants them intersected (smallest first —
 // see [LabelIntersectResolver]) and must contain at least two entries; a

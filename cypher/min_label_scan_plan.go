@@ -252,7 +252,11 @@ func buildMinLabelScanIfEnabled(
 		Receiver: &ast.Variable{Name: nodeVar},
 		Labels:   residual,
 	}
-	filter := exec.NewFilter(scanOp, newRowPredicate(residualPred, schema, lw.g, params, reg, bopts))
+	// The scan goes through profileIntermediate: this lowering is COMPOSITE, so only
+	// the Filter passes through buildOperator's single wrap point and the re-anchored
+	// scan underneath rendered "(not measured)" under PROFILE (rmp #2665).
+	filter := exec.NewFilter(profileIntermediate(bopts, scanOp),
+		newRowPredicate(residualPred, schema, lw.g, params, reg, bopts))
 	minLabelScanBuildCount.Add(1)
 	return filter, true, nil
 }

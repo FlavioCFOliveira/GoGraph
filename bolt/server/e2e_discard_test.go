@@ -23,7 +23,7 @@ func TestE2E_Discard(t *testing.T) {
 	driver, _ := newDriverForTest(t)
 
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer session.Close(ctx) //nolint:errcheck
+	defer session.Close(ctx)
 
 	result, err := session.Run(ctx,
 		"UNWIND range(1, 1000) AS n RETURN n",

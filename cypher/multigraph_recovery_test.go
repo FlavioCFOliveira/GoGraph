@@ -58,7 +58,7 @@ func mgWriteCycle(t *testing.T, dir string, snap bool, queries ...string) {
 			w.Close()
 			t.Fatalf("RunInTx(%q): %v", q, err)
 		}
-		for r.Next() { //nolint:revive // drain to run the write to completion
+		for r.Next() { // drain to run the write to completion
 		}
 		if rerr := r.Err(); rerr != nil {
 			_ = r.Close()

@@ -301,6 +301,7 @@ func (op *ParallelAggregateScan) Init(ctx context.Context) error {
 		st, err := op.runMorselsInline(ctx, morsels)
 		if err != nil {
 			op.inlineErr = err
+			//nolint:nilerr // the inline error is stashed in op.inlineErr and returned by Next at parallel_aggregate_scan.go:599, before combine() can reach the nil op.states
 			return nil
 		}
 		op.states = []*workerState{st}

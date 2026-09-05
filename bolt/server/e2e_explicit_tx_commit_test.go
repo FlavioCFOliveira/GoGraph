@@ -38,7 +38,7 @@ func TestE2E_ExplicitTxCommit(t *testing.T) {
 
 	// Open an explicit transaction.
 	writeSession := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer writeSession.Close(ctx) //nolint:errcheck
+	defer writeSession.Close(ctx)
 
 	tx, err := writeSession.BeginTransaction(ctx)
 	if err != nil {
@@ -71,7 +71,7 @@ func TestE2E_ExplicitTxCommit(t *testing.T) {
 
 	// AC#2: Post-commit reader sees both writes.
 	readSession := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer readSession.Close(ctx) //nolint:errcheck
+	defer readSession.Close(ctx)
 
 	rows := runRead(ctx, t, readSession, `MATCH (n:TxNode) RETURN n.seq AS seq ORDER BY n.seq`, nil)
 	if len(rows) != 2 {

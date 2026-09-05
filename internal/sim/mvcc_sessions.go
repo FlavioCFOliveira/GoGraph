@@ -171,6 +171,14 @@ type MVCCSessionsResult struct {
 	WriteOverlapTicks int
 	// MaxOpenTx is the high-water mark of simultaneously open transactions.
 	MaxOpenTx int
+	// KnowsEdges is the number of KNOWS edges the committed model holds when
+	// the run returns — every edge some transaction created and committed,
+	// minus those a committed DETACH DELETE removed. It is the mode's
+	// relationship-coverage observable: a run with KnowsEdges == 0 never
+	// exercised the edge-write path at all, so a generator change that
+	// silently stopped drawing CREATE ... KNOWS would show up here rather
+	// than passing unnoticed.
+	KnowsEdges int
 }
 
 // Clean reports whether the run finished with no violations and no fold
@@ -261,6 +269,15 @@ type mvccHarness struct {
 	pairs []mvccPair
 }
 
+// result stamps the end-of-run observables that are read off the model rather
+// than accumulated during the run, and returns the result. Every return path
+// of [RunMVCCSessions] goes through it, so the counters describe the state the
+// run actually reached — including a run cut short at a violation.
+func (h *mvccHarness) result() *MVCCSessionsResult {
+	h.res.KnowsEdges = h.oracle.knowsCount()
+	return h.res
+}
+
 // RunMVCCSessions executes a deterministic multi-session transaction run over
 // a WAL-backed SimDisk store and returns its result. The whole run — schedule,
 // statements, outcomes — is a pure function of cfg.Seed: two calls with the
@@ -327,24 +344,24 @@ func RunMVCCSessions(ctx context.Context, cfg MVCCSessionsConfig) (*MVCCSessions
 			// A fold refusal, or a violation raised by an isolation probe inside
 			// the step, is a finding; stop at first occurrence so the seed
 			// reproduces it at the failing tick.
-			return h.res, nil
+			return h.result(), nil
 		}
 		if tick%cfg.CheckEvery == 0 {
 			if v := h.checker.Check(int64(tick), h.oracle, h.adapter); len(v) > 0 {
 				v = append(v, h.nameDiff(int64(tick))...)
 				h.res.Violations = v
-				return h.res, nil
+				return h.result(), nil
 			}
 			if v := h.checkCommittedPairs(int64(tick)); len(v) > 0 {
 				h.res.Violations = v
-				return h.res, nil
+				return h.result(), nil
 			}
 		}
 		if err := h.maybeCrash(int64(tick)); err != nil {
 			return nil, err
 		}
 		if len(h.res.Violations) > 0 {
-			return h.res, nil
+			return h.result(), nil
 		}
 	}
 
@@ -367,7 +384,7 @@ func RunMVCCSessions(ctx context.Context, cfg MVCCSessionsConfig) (*MVCCSessions
 	if v := h.checker.Check(int64(cfg.Ticks), h.oracle, h.adapter); len(v) > 0 {
 		h.res.Violations = v
 	}
-	return h.res, nil
+	return h.result(), nil
 }
 
 // maybeCrash injects a HOST crash at seed-scheduled ticks
@@ -892,13 +909,16 @@ func (h *mvccHarness) drawStatement(s *mvccSessionState) (string, map[string]any
 	case roll < 0.90 && len(names) >= 2:
 		a := names[s.rng.IntN(len(names))]
 		b := names[s.rng.IntN(len(names))]
-		// Never re-create an edge that already exists in the PRESENT committed
-		// state or in this transaction's own pending set: the engine's
-		// parallel-edge guard checks the present adjacency, so on the
-		// non-multigraph sim store a duplicate CREATE is a typed refusal, not a
-		// no-op. The draw still consumed the same randomness, so the op stream
-		// stays a pure function of the seed.
-		if h.oracle.HasKnowsByName(a, b) || s.otx.PendingKnows(a, b) {
+		// Never re-create an edge the engine's present adjacency already holds
+		// ([mvccHarness.knowsPairTaken]): on the non-multigraph sim store a
+		// duplicate ordered pair is a typed refusal, not a no-op. The draw
+		// still consumed the same randomness, so the op stream stays a pure
+		// function of the seed.
+		//
+		// a == b is deliberately NOT excluded: a BARE self-loop is legal on a
+		// simple graph — only a DUPLICATE of one is refused — and the mode
+		// keeps that coverage.
+		if h.knowsPairTaken(a, b) {
 			q := mvccReadTemplates[s.rng.IntN(len(mvccReadTemplates))]
 			return q, nil, OpMatch
 		}
@@ -922,6 +942,47 @@ func (h *mvccHarness) drawStatement(s *mvccSessionState) (string, map[string]any
 		q := mvccReadTemplates[s.rng.IntN(len(mvccReadTemplates))]
 		return q, nil, OpMatch
 	}
+}
+
+// knowsPairTaken reports whether a KNOWS edge for the ordered pair (a, b)
+// already occupies the engine's PRESENT adjacency, which is exactly the
+// predicate the engine's parallel-edge guard evaluates before it writes:
+// `AdjList().HasEdge(src, dst)` on the live graph, version-blind, with no
+// regard for the writing transaction's snapshot (cypher/api.go,
+// walMutatorAdapter.AddEdgeH). A CREATE for a pair the adjacency already holds
+// is refused with cypher.ErrParallelEdgeInSimpleGraph, and the harness has no
+// concession path for it — only mvcc.ErrSerializationConflict is conceded, so
+// anything else aborts the whole run. The generator must not draw one.
+//
+// The present adjacency is the union of two sets, and BOTH must be excluded:
+//
+//   - the committed model (h.oracle), which the folded commits maintain; and
+//   - every OPEN session's uncommitted workspace — a physical edge inserted by
+//     a still-open transaction of ANOTHER session is already in the shared
+//     adjacency, and the guard cannot see that it is invisible to this
+//     transaction's snapshot.
+//
+// Consulting only the committed model and the drawing session's own workspace
+// missed the second set and aborted 2 of 300 seeds at Ticks=60, Sessions=4
+// (rmp #2695: seed 102 collided with session 2's open transaction, seed 215
+// with session 3's).
+//
+// The set needs no other member. An ABORTED transaction's edges leave the
+// adjacency with it — a rolled-back CREATE is physically undone, so the pair
+// is free again — and a DETACH DELETE of an endpoint, committed or pending,
+// surfaces a later CREATE of the same pair as the typed
+// mvcc.ErrSerializationConflict the harness already concedes, never as the
+// parallel-edge refusal. Both were measured, not assumed.
+func (h *mvccHarness) knowsPairTaken(a, b string) bool {
+	if h.oracle.HasKnowsByName(a, b) {
+		return true
+	}
+	for _, o := range h.sessions {
+		if o.otx != nil && o.otx.PendingKnows(a, b) {
+			return true
+		}
+	}
+	return false
 }
 
 // mirror applies a successfully executed write statement to the transaction's

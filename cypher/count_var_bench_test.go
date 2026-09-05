@@ -37,7 +37,7 @@ func BenchmarkCountRelVar(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		for res.Next() { //nolint:revive // intentional full drain
+		for res.Next() { // intentional full drain
 		}
 		if err := res.Err(); err != nil {
 			b.Fatal(err)
@@ -58,7 +58,7 @@ func BenchmarkCountNodeVar(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		for res.Next() { //nolint:revive // intentional full drain
+		for res.Next() { // intentional full drain
 		}
 		if err := res.Err(); err != nil {
 			b.Fatal(err)
@@ -90,7 +90,7 @@ func BenchmarkCountAllNodes(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		for res.Next() { //nolint:revive // intentional full drain
+		for res.Next() { // intentional full drain
 		}
 		if err := res.Err(); err != nil {
 			b.Fatal(err)
@@ -108,7 +108,7 @@ func seedNodesOnly(b *testing.B, eng *cypher.Engine, n int) {
 		if err != nil {
 			b.Fatalf("seed: %v", err)
 		}
-		for res.Next() { //nolint:revive // intentional full drain
+		for res.Next() { // intentional full drain
 		}
 		if err := res.Err(); err != nil {
 			b.Fatalf("seed drain: %v", err)

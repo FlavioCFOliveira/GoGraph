@@ -237,6 +237,7 @@ func mergedPostingCount(card hashStringCardinality, keys []expr.Value, budget ui
 		if k == nil || k.Kind() != expr.KindString {
 			continue
 		}
+		//nolint:forcetypeassert // k reaches here only from the StringValue arm of the kind switch above, which is what selects this seek-set encoding
 		s := string(k.(expr.StringValue))
 		if _, dup := seen[s]; dup {
 			continue

@@ -56,7 +56,7 @@ func TestSnapshot_SchemaVersionForwardRejected(t *testing.T) {
 	if err := WriteManifest(&patched, m); err != nil {
 		t.Fatalf("WriteManifest: %v", err)
 	}
-	if err := os.WriteFile(manifestPath, patched.Bytes(), 0o600); err != nil { //nolint:gosec // path under t.TempDir
+	if err := os.WriteFile(manifestPath, patched.Bytes(), 0o600); err != nil { // path under t.TempDir
 		t.Fatalf("WriteFile(manifest.json): %v", err)
 	}
 

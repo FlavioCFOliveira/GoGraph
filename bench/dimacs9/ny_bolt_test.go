@@ -73,7 +73,7 @@ func TestNYBolt_ShortestPathCypher(t *testing.T) {
 	})
 
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer session.Close(ctx) //nolint:errcheck
+	defer session.Close(ctx)
 
 	// Seed a 5-node road network as two inline chain CREATE statements.
 	// Chain 1: City0 → City1 → City2 (2 hops from City0)

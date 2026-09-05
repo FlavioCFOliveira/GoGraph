@@ -186,7 +186,7 @@ func TestIntersector_ExhaustedStaysExhausted(t *testing.T) {
 // over randomised inputs, including duplicate-heavy runs (the parallel-edge shape)
 // and widely differing range sizes (the shape that exercises galloping).
 func TestIntersector_Randomised(t *testing.T) {
-	rng := rand.New(rand.NewSource(20482156))
+	rng := rand.New(rand.NewSource(20482156)) //nolint:gosec // G404: math/rand seeded from a fixed constant — this test asserts a reproducible sequence, which a CSPRNG would destroy.
 	for iter := 0; iter < 3000; iter++ {
 		nWays := 1 + rng.Intn(4)
 		universe := 1 + rng.Intn(60)

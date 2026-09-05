@@ -248,7 +248,7 @@ func TestWriteSnapshotCSR_ParentIsRegularFile(t *testing.T) {
 	// error, exercising the failure branch of WriteSnapshotCSRCtx.
 	tmp := t.TempDir()
 	notDir := filepath.Join(tmp, "imposter")
-	if err := os.WriteFile(notDir, []byte("not a dir"), 0o600); err != nil { //nolint:gosec // t.TempDir
+	if err := os.WriteFile(notDir, []byte("not a dir"), 0o600); err != nil { // t.TempDir
 		t.Fatal(err)
 	}
 	dir := filepath.Join(notDir, "snap")
@@ -272,7 +272,7 @@ func TestWriteSnapshotCSR_TmpPathPreexistsAsFile(t *testing.T) {
 	// to fail — exercising one more error branch. (The preceding
 	// os.RemoveAll succeeds even for files.)
 	tmp := dir + ".tmp"
-	if err := os.WriteFile(tmp, nil, 0o600); err != nil { //nolint:gosec // t.TempDir
+	if err := os.WriteFile(tmp, nil, 0o600); err != nil { // t.TempDir
 		t.Fatal(err)
 	}
 	// Make the parent directory read-only AFTER planting the file so
@@ -301,7 +301,7 @@ func TestWriteSnapshotCSR_ReplaceExistingDirectory(t *testing.T) {
 	}
 	// Mutate the live snapshot by appending a stray file then republish.
 	stray := filepath.Join(dir, "stray.bin")
-	if err := os.WriteFile(stray, []byte("garbage"), 0o600); err != nil { //nolint:gosec // t.TempDir
+	if err := os.WriteFile(stray, []byte("garbage"), 0o600); err != nil { // t.TempDir
 		t.Fatal(err)
 	}
 	a2 := adjlist.New[string, int64](adjlist.Config{Directed: true})

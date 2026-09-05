@@ -122,7 +122,7 @@ func BuildFromAdjListLive[N comparable, W any](adj *adjlist.AdjList[N, W], live 
 // [BuildFromAdjListAsOf], which differ only in the instant each entry resolves
 // at.
 //
-//nolint:gocyclo // two-pass build with optional per-arc liveness branch.
+// two-pass build with optional per-arc liveness branch.
 func buildFromAdjList[N comparable, W any](
 	adj *adjlist.AdjList[N, W], live func(graph.NodeID) bool, at adjlist.At,
 ) *CSR[W] {

@@ -38,7 +38,7 @@ func PushRelabelMaxFlow(g *Network, src, sink int) int {
 // int64 excess accumulation, returning (0, [ErrCapacityOverflow]) when
 // they could.
 //
-//nolint:gocyclo // textbook FIFO push-relabel with gap heuristic
+// textbook FIFO push-relabel with gap heuristic
 func PushRelabelMaxFlowCtx(ctx context.Context, g *Network, src, sink int) (int, error) {
 	defer metrics.Time("search.flow.PushRelabelMaxFlowCtx").Stop()
 	n := g.N()

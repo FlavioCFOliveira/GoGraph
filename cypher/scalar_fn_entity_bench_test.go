@@ -50,7 +50,7 @@ func seedScalarFnGraph(b *testing.B, eng *cypher.Engine, nNodes, fanout int) {
 		if err != nil {
 			b.Fatalf("seed %q: %v", q, err)
 		}
-		for res.Next() { //nolint:revive // intentional full drain
+		for res.Next() { // intentional full drain
 		}
 		if err := res.Err(); err != nil {
 			b.Fatalf("seed drain %q: %v", q, err)
@@ -83,7 +83,7 @@ func benchmarkScalarFnEntity(b *testing.B, q string) {
 		if err != nil {
 			b.Fatalf("Exec: %v", err)
 		}
-		for res.Next() { //nolint:revive // intentional full drain
+		for res.Next() { // intentional full drain
 		}
 		if err := res.Err(); err != nil {
 			b.Fatalf("drain: %v", err)

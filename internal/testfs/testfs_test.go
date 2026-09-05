@@ -291,7 +291,7 @@ func TestConcurrentWrites(t *testing.T) {
 // TestWrap verifies that Wrap takes ownership of an existing *os.File.
 func TestWrap(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "wrap_test.bin")
-	raw, err := os.Create(path)
+	raw, err := os.Create(path) //nolint:gosec // G304: path is filepath.Join(t.TempDir(), ...).
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -447,7 +447,7 @@ func TestReturnEIOOnSync_PreservesPreexistingContent(t *testing.T) {
 		t.Fatalf("Sync: err=%v; want ErrSyncFailed", err)
 	}
 
-	got, err := os.ReadFile(path)
+	got, err := os.ReadFile(path) //nolint:gosec // G304: path is filepath.Join(t.TempDir(), ...).
 	if err != nil {
 		t.Fatal(err)
 	}

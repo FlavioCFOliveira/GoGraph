@@ -9,7 +9,9 @@ import (
 )
 
 // EncodePool is a pool of Encoders backed by bytes.Buffer writers.
-// It is safe for concurrent use.
+// It is safe for concurrent use, and its zero value is ready to use:
+// [NewEncodePool] installs the pool's constructor eagerly, and [EncodePool.Get]
+// falls back to constructing an Encoder when it is absent.
 type EncodePool struct {
 	p sync.Pool
 }
@@ -28,7 +30,13 @@ func NewEncodePool() *EncodePool {
 // The caller must call Put when done.
 func (ep *EncodePool) Get(dst *bytes.Buffer) *Encoder {
 	metrics.IncCounter("bolt.pool.encoder.get", 1)
-	enc := ep.p.Get().(*Encoder) //nolint:errcheck // sync.Pool.Get returns the concrete type we put in.
+	// A zero-value EncodePool has a nil sync.Pool.New, so Get returns nil and an
+	// unchecked assertion would panic. Construct on demand instead: the exported
+	// zero value must not be a crash (#2708).
+	enc, ok := ep.p.Get().(*Encoder)
+	if !ok {
+		enc = newEncoderFromBufio(bufio.NewWriter(new(bytes.Buffer)))
+	}
 	enc.Reset(dst)
 	return enc
 }
@@ -40,7 +48,9 @@ func (ep *EncodePool) Put(enc *Encoder) {
 }
 
 // DecodePool is a pool of Decoders backed by bytes.Reader readers.
-// It is safe for concurrent use.
+// It is safe for concurrent use, and its zero value is ready to use:
+// [NewDecodePool] installs the pool's constructor eagerly, and [DecodePool.Get]
+// falls back to constructing a Decoder when it is absent.
 type DecodePool struct {
 	p sync.Pool
 }
@@ -58,7 +68,13 @@ func NewDecodePool() *DecodePool {
 // The caller must call Put when done.
 func (dp *DecodePool) Get(src *bytes.Reader) *Decoder {
 	metrics.IncCounter("bolt.pool.decoder.get", 1)
-	dec := dp.p.Get().(*Decoder) //nolint:errcheck // sync.Pool.Get returns the concrete type we put in.
+	// A zero-value DecodePool has a nil sync.Pool.New, so Get returns nil and an
+	// unchecked assertion would panic. Construct on demand instead: the exported
+	// zero value must not be a crash (#2708).
+	dec, ok := dp.p.Get().(*Decoder)
+	if !ok {
+		dec = newDecoderFromBufio(bufio.NewReader(bytes.NewReader(nil)))
+	}
 	dec.Reset(src)
 	return dec
 }

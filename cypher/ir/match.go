@@ -3,6 +3,7 @@ package ir
 import (
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strings"
 
@@ -368,7 +369,7 @@ func peelOuterDestRebinding(p LogicalPlan, outerVars map[string]struct{}) (Logic
 // a fresh schema scope (Projection / EagerAggregation) because peeling
 // across such a boundary would lift a Selection above the projection
 // that produced its inner-side variable.
-func deepPeelOuterRebindings(p LogicalPlan, outerVars map[string]struct{}, hoisted *[]*Selection) LogicalPlan { //nolint:gocyclo // case-per-operator dispatch
+func deepPeelOuterRebindings(p LogicalPlan, outerVars map[string]struct{}, hoisted *[]*Selection) LogicalPlan { // case-per-operator dispatch
 	if p == nil {
 		return nil
 	}
@@ -1101,12 +1102,38 @@ func isPureBoundRelPath(pp *ast.PathPattern, outputVars map[string]struct{}) boo
 //   - Passthrough operators (Selection, Sort, Top, Limit, Distinct,
 //     NamedPath, Eager, ProduceResults): descend to child. The operator
 //     adds no new bindings of its own beyond what child provides.
+//   - Subquery-filter operators (SemiApply, AntiSemiApply): return the
+//     OUTER side's live outputs only. Their Children() is
+//     {Outer, Inner}, but their own Vars() is documented as
+//     "only outer variables are visible downstream" (see
+//     [SemiApply.Vars] / [AntiSemiApply.Vars]), and openCypher agrees:
+//     CIP2015-05-13-EXISTS states that "any variables introduced in an
+//     <ExistentialSubquery> are not available outside the subquery
+//     context". Walking Inner would leak the subquery's private
+//     bindings into the enclosing scope.
+//   - RollUpApply: the OUTER side's live outputs plus CollectVar, which
+//     mirrors [RollUpApply.Vars] — the pattern-comprehension list is
+//     visible downstream, the Inner pattern's own variables are not.
+//   - Foreach: the OUTER side's live outputs only, mirroring
+//     [Foreach.Vars] ("FOREACH introduces no variable visible after it").
+//     The loop variable and everything the body binds are scoped to the
+//     body: foreachClause builds Inner as
+//     Argument <- Unwind(expr AS loopVar) <- body updating clauses.
 //   - Producers (Scan, Expand, OptionalExpand, VarLengthExpand, Argument,
 //     Apply, CorrelatedApply, OptionalApply, Unwind, ProcedureCall, …):
 //     return the union of self.Vars() and any in-scope child output
 //     (because these operators APPEND their own bindings to the
 //     upstream row layout).
-func liveOutputVars(plan LogicalPlan) map[string]struct{} { //nolint:gocyclo // case-per-operator dispatch
+//
+// THE INVARIANT, for whoever adds the next operator: the default branch
+// computes self.Vars() ∪ ⋃ liveOutputVars(child), which is correct ONLY for
+// operators that forward EVERY child's bindings downstream. Any operator whose
+// Vars() drops a child needs its own arm here. That property is enforced
+// mechanically, not by review — see TestLiveOutputVarsCoversEveryOperator in
+// live_output_vars_scope_test.go, which enumerates every LogicalPlan
+// implementation in this package and fails when a new one appears
+// unclassified.
+func liveOutputVars(plan LogicalPlan) map[string]struct{} { // case-per-operator dispatch
 	if plan == nil {
 		return nil
 	}
@@ -1126,6 +1153,27 @@ func liveOutputVars(plan LogicalPlan) map[string]struct{} { //nolint:gocyclo // 
 			}
 		}
 		return out
+	case *SemiApply:
+		// Outer only — the Inner side's bindings are private to the
+		// subquery. Without this case the default branch below walks
+		// Children(), which includes Inner.
+		return liveOutputVars(p.Outer)
+	case *AntiSemiApply:
+		return liveOutputVars(p.Outer)
+	case *RollUpApply:
+		out = liveOutputVars(p.Outer)
+		if out == nil {
+			out = map[string]struct{}{}
+		}
+		if p.CollectVar != "" {
+			out[p.CollectVar] = struct{}{}
+		}
+		return out
+	case *Foreach:
+		// Outer only. Foreach.Vars() is Outer.Vars(): the loop variable and
+		// the body's bindings are scoped to the body and are not visible
+		// after the FOREACH.
+		return liveOutputVars(p.Outer)
 	case *Selection, *Sort, *Top, *Limit, *Distinct, *Skip, *NamedPath, *Eager, *ProduceResults:
 		for _, c := range plan.Children() {
 			for k := range liveOutputVars(c) {
@@ -1147,6 +1195,75 @@ func liveOutputVars(plan LogicalPlan) map[string]struct{} { //nolint:gocyclo // 
 		}
 		return out
 	}
+}
+
+// liveOutputVarSlice returns the variables in scope at the top of plan as a
+// slice, in a DETERMINISTIC order, for callers that must build an [Argument]
+// rather than test membership.
+//
+// It is the intersection of [collectAllVars] (which fixes the order:
+// first-seen in a pre-order walk) with [liveOutputVars] (which fixes the
+// membership: scope-accurate). Deriving membership from the existing walker
+// rather than duplicating its operator switch is deliberate — a second copy
+// would silently diverge the first time an operator is added to only one of
+// them. The intersection is exactly liveOutputVars, because that walker only
+// ever returns names some node in the subtree reports from Vars(), and
+// collectAllVars unions precisely those.
+//
+// Order matters because the slice becomes [Argument.Variables], which
+// [Explain] renders and the plan-stability tests compare; a map iteration
+// order would make the rendered plan differ run to run.
+//
+// The intersection is only equal to liveOutputVars while every name an arm
+// emits also appears in some node's Vars() within the subtree. That holds
+// today, but it is not structural: the [RollUpApply] arm is the one that emits
+// a name (CollectVar) DIRECTLY rather than via an operator's Vars(), and it is
+// safe purely because CollectVar happens to be in [RollUpApply.Vars] too. An
+// arm added later that emits a name with no matching Vars() entry would make
+// the intersection silently NARROWER than the scope — reintroducing the
+// too-narrow failure this helper exists to prevent.
+//
+// Rather than only detect that, the loop below repairs it: any live name the
+// ordered walk did not supply is appended in sorted order. The check is exact
+// and free — out is a deduplicated subset of live, so len(out) < len(live) iff
+// some live name was missing — and sorting keeps the result deterministic.
+// Repairing rather than panicking is deliberate: this runs on the plan-build
+// path, and a narrowed correlation set is a silent wrong answer. Note the
+// repair does NOT widen the scope: appending the unreachable names makes the
+// result exactly liveOutputVars, which is the scope set, never the wider
+// collectAllVars set whose use here was the defect in the first place.
+func liveOutputVarSlice(plan LogicalPlan) []string {
+	if plan == nil {
+		return nil
+	}
+	live := liveOutputVars(plan)
+	if len(live) == 0 {
+		return nil
+	}
+	ordered := collectAllVars(plan)
+	out := make([]string, 0, len(live))
+	for _, v := range ordered {
+		if _, ok := live[v]; ok {
+			out = append(out, v)
+		}
+	}
+	if len(out) == len(live) {
+		return out
+	}
+	// Some live name was not reachable through collectAllVars. Recover the
+	// remainder deterministically so the scope can never be narrowed.
+	seen := make(map[string]struct{}, len(out))
+	for _, v := range out {
+		seen[v] = struct{}{}
+	}
+	missing := make([]string, 0, len(live)-len(out))
+	for v := range live {
+		if _, ok := seen[v]; !ok {
+			missing = append(missing, v)
+		}
+	}
+	slices.Sort(missing)
+	return append(out, missing...)
 }
 
 // liveRelVars returns the set of relationship-variable names in scope

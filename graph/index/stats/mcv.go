@@ -33,7 +33,9 @@ func (h mcvHeap[T]) Less(i, j int) bool {
 	return h[i].Hash > h[j].Hash // larger hash is less preferred (evicted first)
 }
 func (h mcvHeap[T]) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
-func (h *mcvHeap[T]) Push(x any)   { *h = append(*h, x.(MCVEntry[T])) }
+
+//nolint:forcetypeassert // mcvHeap[T] is an unexported []MCVEntry[T]; every heap.Push call site in this package passes MCVEntry[T]
+func (h *mcvHeap[T]) Push(x any) { *h = append(*h, x.(MCVEntry[T])) }
 func (h *mcvHeap[T]) Pop() any {
 	old := *h
 	n := len(old)
@@ -73,6 +75,7 @@ func BuildTopK[T any](all []MCVEntry[T], k int) *MCVList[T] {
 	// Drain the heap (ascending) then reverse to descending count.
 	out := make([]MCVEntry[T], len(h))
 	for i := len(out) - 1; i >= 0; i-- {
+		//nolint:forcetypeassert // heap.Pop returns an element of mcvHeap[T], which is defined as []MCVEntry[T]
 		out[i] = heap.Pop(&h).(MCVEntry[T])
 	}
 	return &MCVList[T]{entries: out}

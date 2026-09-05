@@ -119,7 +119,7 @@ func (s *hydSession) write(q string) {
 	if err != nil {
 		s.t.Fatalf("RunInTxAny(%q): %v", q, err)
 	}
-	for r.Next() { //nolint:revive // drain to commit the write
+	for r.Next() { // drain to commit the write
 	}
 	rerr := r.Err()
 	if cerr := r.Close(); cerr != nil && rerr == nil {
@@ -296,7 +296,7 @@ func hydReplacePayloadKeepingManifestValid(t testing.TB, dir, name string) {
 	payload = append(payload, trailer[:]...)
 
 	path := filepath.Join(snapDir, snapshot.IndexesDir, name+".bin")
-	if err := os.WriteFile(path, payload, 0o600); err != nil { //nolint:gosec // path under t.TempDir()
+	if err := os.WriteFile(path, payload, 0o600); err != nil { // path under t.TempDir()
 		t.Fatalf("WriteFile(%s): %v", path, err)
 	}
 	// Re-stamp the manifest so the SNAPSHOT-level checks all pass and the only
@@ -987,7 +987,7 @@ func TestIndexHydration_UniqueBackingIndexIsHydrated(t *testing.T) {
 	// Enforcement still works: the constraint rejects a duplicate.
 	r, err := s.eng.RunInTxAny(context.Background(), `CREATE (:Person {email: 'a@x'})`, nil)
 	if err == nil {
-		for r.Next() { //nolint:revive // drain
+		for r.Next() { // drain
 		}
 		err = r.Err()
 		if cerr := r.Close(); cerr != nil && err == nil {

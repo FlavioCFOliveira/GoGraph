@@ -1013,7 +1013,7 @@ func TestRun_BasicIteration(t *testing.T) {
 // TestRun_EmptyPlan verifies a zero-row plan produces an empty result set.
 func TestRun_EmptyPlan(t *testing.T) {
 	rs := exec.Run(context.Background(), newSliceOperator(), []string{"x"})
-	defer rs.Close() //nolint:errcheck // test cleanup
+	defer rs.Close() // test cleanup
 	if rs.Next() {
 		t.Fatal("Next() returned true on empty plan")
 	}
@@ -1030,7 +1030,7 @@ func TestRun_ErrPropagation(t *testing.T) {
 	)
 	op := &errorOperator{inner: inner, failAfter: 1}
 	rs := exec.Run(context.Background(), op, []string{"x"})
-	defer rs.Close() //nolint:errcheck // test cleanup
+	defer rs.Close() // test cleanup
 
 	// Consume the first row.
 	if !rs.Next() {
@@ -1048,7 +1048,7 @@ func TestRun_ErrPropagation(t *testing.T) {
 // TestRun_ColumnsStable verifies Columns() returns the same slice every call.
 func TestRun_ColumnsStable(t *testing.T) {
 	rs := exec.Run(context.Background(), newSliceOperator(), []string{"a", "b", "c"})
-	defer rs.Close() //nolint:errcheck // test cleanup
+	defer rs.Close() // test cleanup
 	c1 := rs.Columns()
 	c2 := rs.Columns()
 	if len(c1) != len(c2) {
@@ -1078,7 +1078,7 @@ func TestRun_ContextCancellation(t *testing.T) {
 	cancel() // pre-cancel
 
 	rs := exec.Run(ctx, newSliceOperator(exec.Row{expr.IntegerValue(1)}), []string{"x"})
-	defer rs.Close() //nolint:errcheck // test cleanup
+	defer rs.Close() // test cleanup
 
 	if rs.Next() {
 		t.Fatal("Next() should return false when context is pre-cancelled")
@@ -1089,7 +1089,7 @@ func TestRun_ContextCancellation(t *testing.T) {
 func TestRun_NarrowRow(t *testing.T) {
 	plan := newSliceOperator(exec.Row{expr.IntegerValue(42)})
 	rs := exec.Run(context.Background(), plan, []string{"a", "b"}) // 2 cols, 1 val
-	defer rs.Close()                                               //nolint:errcheck // test cleanup
+	defer rs.Close()                                               // test cleanup
 
 	if !rs.Next() {
 		t.Fatal("expected a row")
@@ -1136,7 +1136,7 @@ func TestRun_PipelineIntegration(t *testing.T) {
 	}
 
 	rs := exec.Run(context.Background(), lim, []string{"neg"})
-	defer rs.Close() //nolint:errcheck // test cleanup
+	defer rs.Close() // test cleanup
 
 	var results []int64
 	for rs.Next() {

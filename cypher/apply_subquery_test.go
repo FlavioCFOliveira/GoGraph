@@ -1,70 +1,39 @@
 package cypher_test
 
-// apply_subquery_test.go — CALL { … } subquery tests (T727).
+// apply_subquery_test.go — the CALL { … } support boundary (T727).
 //
 // The engine handles CALL procedure(…) YIELD via *ir.ProcedureCall but does
-// NOT currently support CALL { … } inline subqueries (no *ir.CallSubquery in
-// the IR). Attempting to use CALL { … } results in a parser or translator
-// error.
+// NOT support CALL { … } inline subqueries: there is no *ir.CallSubquery in
+// the IR, and the parser rejects the construct outright.
 //
-// This file documents the current support boundary:
+// This file records the current support boundary with an assertion that can
+// actually fail:
 //   - EXISTS { … } / COUNT { … } subqueries in WHERE/RETURN: SUPPORTED
 //     (see subquery_eval_test.go and semi_apply_exists_test.go).
-//   - CALL { … } inline subqueries: NOT SUPPORTED (skipped below).
 //   - CALL procedure() YIELD: SUPPORTED (see procs_engine_test.go).
+//   - CALL { … } inline subqueries: NOT SUPPORTED.
 //
-// When CALL { … } is implemented, remove the t.Skip calls and fill in the
-// expected values.
+// Placeholder tests for the unsupported constructs used to live here and in
+// collect_subquery_test.go, call_in_transactions_test.go and
+// call_in_transactions_rollback_test.go. Every one of them ended in an
+// unconditional t.Skip after a body that never asserted, so none of them could
+// fail whatever the engine did — they reported coverage that did not exist.
+// They were deleted under rmp #2709; the missing features (CALL { }, correlated
+// CALL { }, COLLECT { }, CALL { } IN TRANSACTIONS OF n ROWS and its per-batch
+// rollback contract) are backlog items, not green skips.
 
 import (
 	"context"
 	"testing"
 )
 
-// TestCallSubquery_Simple probes whether the engine accepts a simple inline
-// CALL subquery:
+// TestCallSubquery_ExistsVsCall asserts the supported half of the boundary:
+// EXISTS { … } is lowered to SemiApply at the IR level and executed by
+// exec.SemiApply, so the query must run and return exactly one aggregate row.
 //
-//	CALL { MATCH (n) RETURN n LIMIT 1 } RETURN n
-//
-// Currently unsupported — skipped.
-func TestCallSubquery_Simple(t *testing.T) {
-	t.Parallel()
-	eng := newBareEngine(t)
-
-	const q = `CALL { MATCH (n) RETURN n LIMIT 1 } RETURN n`
-	_, err := eng.Run(context.Background(), q, nil)
-	if err != nil {
-		// Parser or translator rejected the query — CALL subquery not implemented.
-		t.Skipf("CALL { } subquery not yet implemented: %v", err)
-	}
-	// If we reach here the engine accepted the query; drain and assert.
-	t.Skip("CALL { } subquery not yet implemented (accepted without error — remove skip when wired)")
-}
-
-// TestCallSubquery_Correlated probes correlated inline subqueries:
-//
-//	MATCH (n) CALL { WITH n MATCH (n)-[:R]->(m) RETURN m } RETURN n, m
-//
-// Correlated CALL subqueries require an Apply operator driven by outer rows.
-// Currently unsupported — skipped.
-func TestCallSubquery_Correlated(t *testing.T) {
-	t.Parallel()
-	eng := newBareEngine(t)
-
-	const q = `MATCH (n) CALL { WITH n MATCH (n)-[:R]->(m) RETURN m } RETURN n.name AS n, m.name AS m`
-	_, err := eng.Run(context.Background(), q, nil)
-	if err != nil {
-		t.Skipf("correlated CALL { } subquery not yet implemented: %v", err)
-	}
-	t.Skip("correlated CALL { } subquery not yet implemented (accepted without error)")
-}
-
-// TestCallSubquery_ExistsVsCall documents the distinction between EXISTS
-// subqueries (supported) and CALL subqueries (not supported).
-//
-// EXISTS { (n)-->(m) } is lowered to SemiApply at the IR level and executed
-// by exec.SemiApply. CALL { … } is a different IR construct with no physical
-// operator yet.
+// The CALL { … } half is probed but deliberately not asserted: pinning
+// "CALL { } must error" would turn implementing the feature into a test
+// failure. The probe is logged so the boundary is visible in a -v run.
 func TestCallSubquery_ExistsVsCall(t *testing.T) {
 	t.Parallel()
 	eng := newSemiApplyGraph(t) // reuse graph from semi_apply_exists_test.go
@@ -80,12 +49,11 @@ func TestCallSubquery_ExistsVsCall(t *testing.T) {
 		t.Errorf("EXISTS count: got %d rows, want 1", len(rows))
 	}
 
-	// CALL subquery does not work yet — document the boundary.
-	_, callErr := eng.Run(context.Background(),
-		`CALL { MATCH (n:Person) RETURN count(*) AS c } RETURN c`, nil)
-	if callErr == nil {
-		t.Log("CALL { } unexpectedly accepted — update this test if the feature is now implemented")
+	// CALL subquery is not wired yet — probe and log, do not pin.
+	if _, callErr := eng.Run(context.Background(),
+		`CALL { MATCH (n:Person) RETURN count(*) AS c } RETURN c`, nil); callErr == nil {
+		t.Log("CALL { } accepted — the feature may now be implemented; see rmp #2709 for the deleted placeholders")
+	} else {
+		t.Logf("CALL { } still unsupported: %v", callErr)
 	}
-	// callErr != nil is the expected outcome; no assertion needed (this is a
-	// documentation test, not a correctness assertion for implemented code).
 }

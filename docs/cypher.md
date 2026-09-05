@@ -21,7 +21,11 @@ import (
 // CREATE always adds a relationship (including a parallel edge between an
 // existing node pair). Constructing the engine over a non-multigraph graph makes
 // such a CREATE fail with cypher.ErrParallelEdgeInSimpleGraph.
-g   := lpg.New[string, float64](adjlist.Config{Multigraph: true})
+// Directed: true is required too — openCypher relationships are directed,
+// whereas the zero value mirrors every edge back to its source.
+// Weightless: true drops the per-node edge-weight column, which carries no
+// information for the engine (see "Graph configuration" below).
+g   := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true, Weightless: true})
 eng := cypher.NewEngine(g)
 
 res, err := eng.RunInTx(context.Background(),
@@ -51,6 +55,37 @@ writer. The returned `Result` is not safe for concurrent use.
 To classify a query as read or write without running it (for example, to route
 writers to `RunInTx`), call `cypher.QueryHasWritingClause(query)`; this is the
 same textual heuristic `RunAny`/`RunInTxAny` use to dispatch.
+
+### Graph configuration
+
+All three `adjlist.Config` fields in the quick start are deliberate, and the
+first two are required for openCypher semantics rather than merely advisable:
+
+- `Multigraph: true` — openCypher's data model is a multigraph, so two `CREATE`
+  statements between the same ordered pair must yield two relationships. On a
+  simple graph the second one instead fails with
+  `cypher.ErrParallelEdgeInSimpleGraph`. This is the field most easily missed:
+  `adjlist.Config{}` is *not* a multigraph.
+- `Directed: true` — openCypher relationships are directed. On an undirected
+  graph `AddEdge` also inserts the reverse edge, so the stored adjacency no
+  longer matches the direction the query wrote.
+- `Weightless: true` — Cypher has no edge-weight concept: the engine records the
+  zero weight for every relationship, and the one path that reads a weight back
+  (transaction undo, restoring an edge a rolled-back write had removed) therefore
+  only ever reads that same zero. The per-node `[]float64` weight column carries
+  no information, and dropping it removes one heap object per node that has
+  outgoing relationships — measured at 32 B/node for a degree-4 graph and
+  64 B/node for degrees 5–8, the geometric capacity buckets the column is
+  allocated in.
+
+The engine's own openCypher TCK harness builds its graph with `Directed: true,
+Multigraph: true` for exactly these reasons.
+
+`Weightless` is the only one of the three that is an optimisation rather than a
+requirement, and it carries one exclusion: do not set it on a graph you also
+intend to query with a weight-consuming `search/` algorithm (Dijkstra, A\*,
+Bellman-Ford, and the rest), which would then see every edge as weight 0. See
+`adjlist.Config.Weightless` for that contract in full.
 
 ---
 
@@ -1247,8 +1282,12 @@ during materialisation, before the surplus reaches the caller.
 
 ## Inspecting a query plan
 
-Three surfaces, answering three different questions. All are Go APIs; none is
-reachable as a Cypher `EXPLAIN` / `PROFILE` prefix.
+Three questions — what runs, what the planner thought, what it cost — across five
+Go APIs: three that render an indented tree and two that render the same
+information as a fixed-width table. Two of the three questions are also reachable
+from Cypher itself, as the `EXPLAIN` and `PROFILE` statement prefixes; see
+[The `EXPLAIN` and `PROFILE` statement prefixes](#the-explain-and-profile-statement-prefixes)
+below.
 
 ### `Engine.Explain` — what runs
 
@@ -1327,21 +1366,194 @@ Profiling is off unless `Profile` is called: the instrumentation is a wrapper th
 builder installs only when asked, so an ordinary `Run` executes the same code as a
 build in which profiling does not exist.
 
-> **Divergence from Neo4j.** `dbhits` counts **records read from storage**, one per
-> row an access-path operator emits: a node record per row of a scan or index seek,
-> a relationship record per row of an expand. An operator that only transforms rows
-> its children produced reports `0`, because it read no storage.
+> **What `dbhits` is, exactly.** Unlike `rows` and `time`, which are measured for
+> every operator, `dbhits` comes from one of three places, and the rendered figure
+> does not say which:
 >
-> Neo4j additionally charges a db-hit per **property read**, so its figures for a
-> filter-heavy or projection-heavy plan are larger than GoGraph's, and the two are
-> not comparable in absolute terms. The ratio between two GoGraph plans is the
-> intended use.
+> - **Derived** — for a scan, an index seek or a single-hop expand, the figure IS
+>   the `rows` figure. Those operators are marked internally as reading one record
+>   per row they emit, so the count is taken at the operator boundary and needs no
+>   counter threaded through any accessor. That is why `rows` and `dbhits` are
+>   equal on every such line.
+> - **Measured** — a variable-length expansion (`-[*m..n]->`) reports the
+>   relationship slots its BFS actually read, from the counter its traversal budget
+>   already maintains. That number is not its row count and is usually far larger.
+> - **Zero** — every other operator. For a pure row transformer that is the honest
+>   answer: it read no storage. For `shortestPath`, `allShortestPaths` and the
+>   morsel-parallel leaves it is an **under-report** — they read storage and count
+>   none of it. The parallel leaves say so in their own plan line
+>   (`[parallel tier; db-hits not counted]`).
 >
-> The reason is the cost of the alternative. Counting property reads means threading
-> a counter into the property accessors — the hottest path in the engine — so every
-> ordinary query would carry a branch that exists only for a diagnostic. Counting at
-> the access-path boundary instead needs no threading at all, which is why an
-> ordinary `Run` executes no counting code rather than merely skipping it.
+> Two further gaps are worth knowing before you compare two plans:
+>
+> - A single-hop expand with a **relationship-type filter** walks every slot of the
+>   source node's adjacency and counts only the slots it emitted. On a node with
+>   100 out-edges of which one is `:KNOWS`, `-->` reports 100 db-hits and
+>   `-[:KNOWS]->` reports 1, for the same 100-slot walk.
+> - **Property reads are never counted.** Neo4j charges a db-hit per property
+>   access, so its figures for a filter-heavy or projection-heavy plan are larger
+>   than GoGraph's, and the two are not comparable in absolute terms. The ratio
+>   between two GoGraph plans is the intended use — and only between plans whose
+>   access paths are of the same kind.
+>
+> The reason property reads are not counted is the cost of the alternative:
+> threading a counter into the property accessors — the hottest path in the engine —
+> so every ordinary query would carry a branch that exists only for a diagnostic.
+> Counting at the access-path boundary instead needs no threading at all, which is
+> why an ordinary `Run` executes no counting code rather than merely skipping it.
+> The full classification of every figure `EXPLAIN` and `PROFILE` print, with the
+> measurements behind each claim above, is in
+> [`explain-profile-honesty-audit-2026-09-03.md`](explain-profile-honesty-audit-2026-09-03.md).
+
+### `Engine.ExplainTable` and `Engine.ProfileTable` — the same, as a table
+
+`ExplainTable` and `ProfileTable` return what `ExplainLogical` and `Profile`
+return, rendered as a Neo4j-style fixed-width table instead of an indented tree.
+The point of the table is comparison: a column of right-aligned numbers reads
+across operators, where numbers scattered along lines of varying indentation do
+not.
+
+```
++-----------------------+----------+------+
+| Operator              | Est.Rows | Vars |
++-----------------------+----------+------+
+| ProduceResults        |        - | n    |
+| └─ Projection         |        - | n    |
+|    └─ NodeByIndexSeek |        - | n    |
++-----------------------+----------+------+
+```
+
+```
++--------------------------------+------+--------+-----------+
+| Operator                       | Rows | DbHits | Time (ms) |
++--------------------------------+------+--------+-----------+
+| Project                        |    1 |      0 |     0.000 |
+| └─ NodeByIndexSeek [seek="p3"] |    1 |      1 |     0.000 |
++--------------------------------+------+--------+-----------+
+| Total                          |    2 |      1 |     0.000 |
++--------------------------------+------+--------+-----------+
+```
+
+Each is the **same walk** as its tree counterpart, not a second derivation of the
+plan: `ExplainTable` and `ExplainLogical` share one traversal that performs the
+index-seek substitutions, applies the count-store-gated reorderings and computes
+the estimates, and `ProfileTable` and `Profile` render one captured measurement
+tree from one execution. Neither pair can disagree about which access path runs.
+
+Two things the table shows that the tree does not, and two it does not show:
+
+- The **`Vars` column** lists the variables each operator exposes; no tree
+  rendering prints them.
+- Alignment makes two operators' figures directly comparable.
+- The table has no room for the estimate's **provenance tag** or its certified
+  error term. `Est.Rows` carries the number and one marker: a bare `40` is an
+  exact maintained count, `~40` is a derived (statistics or heuristic) figure, and
+  `-` means no estimate is available — either none is derivable for that operator
+  shape, or the statistic behind it is absent or stale. Reach for
+  `ExplainLogical` when the provenance is what you need.
+- `Est.Rows` is an **estimate throughout**: `ExplainTable` executes nothing, so
+  even an "exact" cell states what the operator *would* read, never what it did.
+  `ProfileTable`'s `Rows` is the measured figure.
+
+`ProfileTable`'s `Total` line needs reading with care, because two of its three
+cells are easy to mistake:
+
+- **`Rows`** is every operator's emitted rows added together — a cost measure, not
+  the result's row count. The result's row count is the **root** operator's
+  `Rows`, on the table's first data line.
+- **`DbHits`** is the sum of every operator's `DbHits` cell, so it inherits every
+  qualification above: it is a **lower bound** on the query's storage-record reads,
+  not a total, whenever the plan contains a type-filtered expand, a
+  `shortestPath`, or a morsel-parallel leaf.
+- **`Time (ms)`** is the whole query's elapsed time, because the root operator's
+  time already includes every child's.
+
+`ProfileTable` carries every caveat `Profile` carries: the query really runs and
+its rows are discarded, a writing statement is refused, times are inclusive of
+children, and an operator the instrumentation did not reach is marked
+`(not measured)` rather than left to read as one that cost nothing.
+
+### The `EXPLAIN` and `PROFILE` statement prefixes
+
+A statement may be written with an `EXPLAIN` or a `PROFILE` prefix, which the
+Cypher grammar accepts ahead of any query the grammar itself parses:
+
+```cypher
+EXPLAIN MATCH (n:Person) WHERE n.age > 30 RETURN n
+```
+
+```cypher
+PROFILE MATCH (n:Person) WHERE n.age > 30 RETURN n
+```
+
+The two are syntactically identical and differ in **execution**:
+
+- **`EXPLAIN` executes nothing.** It plans the statement and returns the
+  statement's own column signature with **zero rows**. A side-effecting statement
+  prefixed with `EXPLAIN` — `EXPLAIN MATCH (n) DETACH DELETE n` — leaves the
+  graph untouched; the prefix diverts before any transaction is opened.
+- **`PROFILE` executes the statement.** It returns the query's real rows, plus
+  each operator's measured rows, db-hits and time.
+
+#### Where the plan comes back
+
+The plan is **not** returned as result rows. It travels beside the result:
+
+| Surface | `EXPLAIN` | `PROFILE` |
+|---|---|---|
+| Go | `Result.Plan()` — an `*exec.PlanNode` | `Result.Profile()` — an `*exec.PlanNode` with measurements |
+| Bolt | the `plan` field of the terminal SUCCESS, which the drivers surface as `ResultSummary.Plan()` | the `profile` field, surfaced as `ResultSummary.Profile()` |
+
+At most one of the two is ever populated, which is what lets a reader tell the
+planner's **estimates** apart from measurements of a run that happened. This is
+the shape Neo4j returns, and it is the reason for it: a driver consuming
+`EXPLAIN MATCH (n) RETURN n` expects the query's own column signature, and the
+plan where its `ResultSummary` looks for one. Returning the rendered plan as a
+one-column result set would have made it invisible to every driver.
+
+Render a captured tree with `exec.RenderPlanNode`, which prints exactly what
+`Engine.Explain` prints for the same statement — the prefix and the Go APIs share
+one captured tree and one set of renderers.
+
+```go
+r, err := eng.Run(ctx, "EXPLAIN MATCH (n:Person) RETURN n", nil)
+// ...
+fmt.Println(exec.RenderPlanNode(r.Plan()))
+```
+
+`EXPLAIN` renders the **physical** plan for a reading statement and the
+**logical** plan for a writing one, exactly as `Engine.Explain` does and for the
+same reason: a write's operators bind to an open transaction, and opening one is
+precisely what `EXPLAIN` must not do.
+
+Both prefixes carry the statement's **plan-time notifications** — the
+Cartesian-product warning among them — so `EXPLAIN` surfaces the planner's
+advisories without running the query, which is one of the things it is for.
+
+`EXPLAIN` does **not** require parameters to be supplied: planning reads a
+parameter's value only where an access-path gate needs it, and a plan is a useful
+answer before anything is bound. `PROFILE` executes, so it requires them like any
+other execution and reports `ParameterMissing` when one is absent.
+
+#### Two limitations
+
+- **`PROFILE` refuses a writing statement**, returning an error rather than
+  executing it, because the profiling instrumentation is installed by the read
+  builder. This is the same refusal `Engine.Profile` applies. Use `EXPLAIN` for a
+  writing statement's plan, or run it without a prefix to execute it.
+- **Neither prefix may precede a schema statement** (`CREATE`/`DROP`
+  `INDEX`/`CONSTRAINT`, `SHOW …`). Those are parsed by a separate, hand-written
+  DDL parser that the Cypher grammar does not cover, so a prefixed schema
+  statement is a **syntax error** — and therefore executes nothing, which is the
+  property that matters.
+
+`EXPLAIN` and `PROFILE` are **not reserved words**. They are recognised as a
+prefix only at the very start of a statement, and remain usable as ordinary
+identifiers everywhere else, as they are in Neo4j:
+
+```cypher
+MATCH (explain:Explain) RETURN explain.profile AS profile
+```
 
 ---
 

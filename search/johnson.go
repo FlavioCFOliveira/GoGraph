@@ -232,7 +232,7 @@ type johnsonPlan[W Weight] struct {
 // parallel [JohnsonAPSPParallelCtx] so both compute bit-identical
 // potentials and reweighted edges.
 //
-//nolint:gocyclo // canonical Johnson prologue: NaN/Inf gate + live-mask compaction + virtual-source BF + reweight
+// canonical Johnson prologue: NaN/Inf gate + live-mask compaction + virtual-source BF + reweight
 func johnsonPrepare[W Weight](ctx context.Context, c *csr.CSR[W]) (johnsonPlan[W], error) {
 	// Float Weight types: NaN / +/-Inf in any edge silently corrupts
 	// both the BF reweighting potential h and every per-source
@@ -356,7 +356,7 @@ func johnsonDijkstraSource[W Weight](ctx context.Context, c *csr.CSR[W], p johns
 //
 // Pre-condition: len(h) == int(c.MaxNodeID()).
 //
-//nolint:gocyclo // virtual-source SPFA with SLF + negative-cycle counter and ctx-yield path
+// virtual-source SPFA with SLF + negative-cycle counter and ctx-yield path
 func bellmanFordVirtualSource[W Weight](ctx context.Context, c *csr.CSR[W], h []W) error {
 	maxID := uint64(c.MaxNodeID())
 	if maxID == 0 {

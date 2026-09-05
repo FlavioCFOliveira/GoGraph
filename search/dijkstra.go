@@ -277,7 +277,7 @@ func validateDijkstraWeights[W Weight](weights []W) error {
 //   - len(dist), len(parent), len(found) all equal c.MaxNodeID();
 //   - heap has been reset to empty.
 //
-//nolint:gocyclo // canonical Dijkstra: heap loop + relaxation
+// canonical Dijkstra: heap loop + relaxation
 func dijkstraCore[W Weight](
 	ctx context.Context,
 	c *csr.CSR[W],
@@ -358,7 +358,7 @@ func dijkstraCore[W Weight](
 // Concurrency: identical to [dijkstraCore] — the caller's slices are
 // written in place; concurrent callers must supply separate buffers.
 //
-//nolint:gocyclo // mirrors dijkstraCore body
+// mirrors dijkstraCore body
 func dijkstraCoreWithWeights[W Weight](
 	ctx context.Context,
 	c *csr.CSR[W],
@@ -486,7 +486,7 @@ func releaseDijkstra[W Weight](st *dijkstraState[W]) {
 // [dijkstraPool] dispatches to the corresponding package-level pool
 // in <5ns, with a reflection-keyed fallback for defined types.
 //
-//nolint:gochecknoglobals // per-W pool registry; immutable after init
+// Per-W pool registry; immutable after init.
 var (
 	dijkstraPoolInt     = &sync.Pool{New: func() any { return &dijkstraState[int]{} }}
 	dijkstraPoolInt8    = &sync.Pool{New: func() any { return &dijkstraState[int8]{} }}
@@ -508,7 +508,7 @@ var (
 // of the base Weight types. Used only as a fallback; the base-type
 // cases dispatch through [dijkstraPool]'s type switch first.
 //
-//nolint:gochecknoglobals // fallback registry; one entry per defined Weight type
+// Fallback registry; one entry per defined Weight type.
 var dijkstraPools sync.Map
 
 // dijkstraPool returns the [sync.Pool] of [dijkstraState] values for
@@ -553,18 +553,18 @@ func dijkstraPoolReflect[W Weight]() *sync.Pool {
 	var zero W
 	key := reflectTypeOf(zero)
 	if v, ok := dijkstraPools.Load(key); ok {
-		return v.(*sync.Pool) //nolint:errcheck // statically known type
+		return v.(*sync.Pool) //nolint:forcetypeassert // dijkstraPools is an unexported package-level sync.Map storing only *sync.Pool, keyed by reflect type
 	}
 	p := &sync.Pool{New: func() any { return &dijkstraState[W]{} }}
 	actual, _ := dijkstraPools.LoadOrStore(key, p)
-	return actual.(*sync.Pool) //nolint:errcheck // statically known type
+	return actual.(*sync.Pool) //nolint:forcetypeassert // LoadOrStore returns the value already in dijkstraPools, which only ever stores *sync.Pool
 }
 
 // Per-base-type pools for the heap-only acquire used by [DijkstraInto]
 // and other *Into entrypoints; mirror layout of the dijkstraState
 // pools above.
 //
-//nolint:gochecknoglobals // per-W heap pool registry; immutable after init
+// Per-W heap pool registry; immutable after init.
 var (
 	dijkHeapPoolInt     = &sync.Pool{New: func() any { return &dijkHeap[int]{} }}
 	dijkHeapPoolInt8    = &sync.Pool{New: func() any { return &dijkHeap[int8]{} }}
@@ -581,7 +581,7 @@ var (
 	dijkHeapPoolFloat64 = &sync.Pool{New: func() any { return &dijkHeap[float64]{} }}
 )
 
-//nolint:gochecknoglobals // fallback heap-pool registry
+// Fallback heap-pool registry.
 var dijkHeapPools sync.Map
 
 func dijkHeapPool[W Weight]() *sync.Pool {
@@ -621,11 +621,11 @@ func dijkHeapPoolReflect[W Weight]() *sync.Pool {
 	var zero W
 	key := reflectTypeOf(zero)
 	if v, ok := dijkHeapPools.Load(key); ok {
-		return v.(*sync.Pool) //nolint:errcheck // statically known type
+		return v.(*sync.Pool) //nolint:forcetypeassert // dijkHeapPools is an unexported package-level sync.Map storing only *sync.Pool, keyed by reflect type
 	}
 	p := &sync.Pool{New: func() any { return &dijkHeap[W]{} }}
 	actual, _ := dijkHeapPools.LoadOrStore(key, p)
-	return actual.(*sync.Pool) //nolint:errcheck // statically known type
+	return actual.(*sync.Pool) //nolint:forcetypeassert // LoadOrStore returns the value already in dijkHeapPools, which only ever stores *sync.Pool
 }
 
 func acquireDijkHeap[W Weight]() *dijkHeap[W] {

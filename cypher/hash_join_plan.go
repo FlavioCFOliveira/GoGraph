@@ -207,8 +207,11 @@ func tryBuildHashJoin(
 	// inner-only row using the fresh inner schema (0-based, exactly the row
 	// shape the build operator emits before the join combines arms). The
 	// probe-side (outer) key function uses the outer schema.
-	buildKeySchema := copySchema(innerSchema)
-	probeKeySchema := probeSchema
+	// Freeze both key layouts at plan-build time (#2645): each key fn below runs
+	// once per row, and a rowSchema is written once here and only ever read
+	// afterwards, so both are safe to share across the join's parallel workers.
+	buildKeySchema := newRowSchema(copySchema(innerSchema))
+	probeKeySchema := newRowSchema(probeSchema)
 	innerKeyExpr := key.innerKey
 	outerKeyExpr := key.outerKey
 
@@ -276,8 +279,9 @@ func buildResidualFilter(
 	bopts *buildOpts,
 ) exec.Operator {
 	exprs := residual
+	rs := newRowSchema(schema)
 	return exec.NewFilter(child, func(row exec.Row) (expr.Value, error) {
-		rc := buildRowCtx(row, schema, g, bopts)
+		rc := buildRowCtx(row, rs, g, bopts)
 		for _, e := range exprs {
 			v, err := evalRow(bopts, e, rc, params, reg)
 			if err != nil {

@@ -135,7 +135,11 @@ func (op *UnionAll) Close() error {
 //
 // Union is NOT safe for concurrent use.
 type Union struct {
-	inner *Distinct // Distinct wrapping a UnionAll
+	// inner is the Distinct wrapping a UnionAll — or, on a profiled build, that
+	// Distinct behind its measuring wrapper, which is why the field is an
+	// [Operator] rather than a *Distinct. Only Init/Next/Close are ever called on
+	// it, and [PlanTree] sees through the wrapper.
+	inner Operator
 }
 
 // NewUnion creates a Union operator that deduplicates the concatenation of left
@@ -143,9 +147,30 @@ type Union struct {
 //
 //   - maxDistinct: upper bound on distinct rows; pass 0 to use DefaultMaxDistinct.
 func NewUnion(left, right Operator, maxDistinct int) *Union {
-	ua := NewUnionAll(left, right)
-	d := NewDistinct(ua, maxDistinct)
-	return &Union{inner: d}
+	return NewUnionInstrumented(left, right, maxDistinct, nil)
+}
+
+// NewUnionInstrumented is [NewUnion] with instrument applied to each operator of
+// the composition BELOW the Union itself.
+//
+// UNION lowers to THREE operators, not one — Union over Distinct over UnionAll —
+// and only the outermost is returned to the caller. A caller that instruments what
+// it gets back therefore leaves the other two unmeasured, and a profiled UNION
+// rendered `Distinct (not measured)` over `UnionAll (not measured)` until rmp #2665
+// added the gate that noticed. This is the same obligation every composite
+// lowering in the plan builder carries; it lives here because the composition does.
+//
+// instrument may be nil, in which case this is exactly [NewUnion].
+func NewUnionInstrumented(left, right Operator, maxDistinct int, instrument func(Operator) Operator) *Union {
+	var inner Operator = NewUnionAll(left, right)
+	if instrument != nil {
+		inner = instrument(inner)
+	}
+	inner = NewDistinct(inner, maxDistinct)
+	if instrument != nil {
+		inner = instrument(inner)
+	}
+	return &Union{inner: inner}
 }
 
 // Init initialises the operator.

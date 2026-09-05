@@ -36,8 +36,8 @@ func TestBPlus_Height4_DeleteReinsert_RangeAndSerialize(t *testing.T) {
 	if err := idx.BulkLoadSorted(vals, nodes); err != nil {
 		t.Fatalf("BulkLoadSorted: %v", err)
 	}
-	if idx.tree.height < 4 {
-		t.Fatalf("tree height = %d, want >= 4 to exercise the deep-leaf path; increase n", idx.tree.height)
+	if h := idx.tree.Load().height; h < 4 {
+		t.Fatalf("tree height = %d, want >= 4 to exercise the deep-leaf path; increase n", h)
 	}
 
 	// Delete a full band deep in the middle of the tree, then reinsert one key
@@ -57,14 +57,19 @@ func TestBPlus_Height4_DeleteReinsert_RangeAndSerialize(t *testing.T) {
 		t.Fatalf("Range omits reinserted key %d — forward chain desynced from the tree", base+200)
 	}
 
-	// Chain-vs-tree invariant: keys reachable via the forward chain must equal
-	// the tree's key count. An off-chain live leaf breaks this.
-	chainKeys := 0
-	for l := idx.tree.first; l != nil; l = l.next {
-		chainKeys += len(l.keys)
+	// Scan-vs-tree invariant: keys reachable by an in-order forward walk must
+	// equal the tree's key count. A leaf that the structural removal failed to
+	// detach, or one detached from the scan path but still live in the tree,
+	// breaks this. Forward iteration is the descent cursor now that the leaf
+	// chain is gone (#2683); the invariant it asserts is unchanged.
+	snap := idx.tree.Load()
+	scanKeys := 0
+	var cur cursor[int]
+	for cur.seekFirst(snap); cur.valid(); cur.next() {
+		scanKeys++
 	}
-	if chainKeys != idx.tree.count {
-		t.Fatalf("forward-chain key count %d != tree count %d (off-chain leaf present)", chainKeys, idx.tree.count)
+	if scanKeys != snap.count {
+		t.Fatalf("forward-scan key count %d != tree count %d (off-scan leaf present)", scanKeys, snap.count)
 	}
 
 	// Serialize header/body consistency: a round trip must be lossless.

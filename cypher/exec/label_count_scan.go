@@ -46,8 +46,21 @@ package exec
 //
 // LabelCountScan is NOT safe for concurrent use (the caller drives
 // Init/Next/Close from a single goroutine). Init reads the label index, which is
-// internally synchronised; the read-path driver holds the graph's visibility
-// barrier across the whole query, so the count reflects a consistent snapshot.
+// internally synchronised.
+//
+// It used to say that the read-path driver "holds the graph's visibility barrier
+// across the whole query, so the count reflects a consistent snapshot". THAT HAS
+// BEEN FALSE SINCE rmp #2344, which removed the barrier from reads entirely: a
+// read now takes no barrier at all, and what makes the count consistent is the
+// query's PINNED SNAPSHOT together with the resolver honouring it.
+//
+// The distinction is not academic. rmp #2688 was exactly a count that did NOT
+// honour the snapshot — lpg.Graph.LabelCountExact sampled its staleness gate
+// before reading the cardinality and never re-checked, so a write landing across
+// the two was reported as exact for a snapshot that predated it. A reader
+// reasoning from the deleted sentence would have concluded this operator was
+// safe by construction and looked elsewhere. Consistency here is a property the
+// RESOLVER MUST UPHOLD, not one this operator inherits from a barrier.
 
 import (
 	"context"
@@ -74,9 +87,14 @@ type labelCounter interface {
 //
 // LabelCountScan is NOT safe for concurrent use.
 type LabelCountScan struct {
-	src     labelResolver
-	ctx     context.Context //nolint:containedctx // stored for the per-Next ctx check
-	buf     [1]expr.Value   // fixed backing buffer — zero-alloc per Next
+	src labelResolver
+	ctx context.Context //nolint:containedctx // stored for the per-Next ctx check
+	// buf is inline in the struct and is never re-allocated. It is not
+	// allocation-free end to end: storing the count into it in Next is an
+	// interface conversion, which boxes 8 bytes once per query for a count
+	// >= 256 — see scan_label.go's "Per-row allocation" section for the same
+	// mechanism paid per ROW there. Once per query is the point of this operator.
+	buf     [1]expr.Value
 	label   string
 	count   int64
 	emitted bool

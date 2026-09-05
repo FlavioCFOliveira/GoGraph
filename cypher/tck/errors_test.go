@@ -79,7 +79,7 @@ func (w *world) assertSyntaxError(errType string) error {
 		if _, derr := drainResult(w.result); derr != nil {
 			w.err = derr
 		}
-		w.result.Close() //nolint:errcheck // drained or already-errored result; close is best-effort
+		w.result.Close() // drained or already-errored result; close is best-effort
 		w.result = nil
 	}
 	// An INCONCLUSIVE run is not evidence that the expected error was raised: the
@@ -118,7 +118,7 @@ func (w *world) assertError(errType string) error {
 		if _, derr := drainResult(w.result); derr != nil {
 			w.err = derr
 		}
-		w.result.Close() //nolint:errcheck // drained or already-errored result; close is best-effort
+		w.result.Close() // drained or already-errored result; close is best-effort
 		w.result = nil
 	}
 	// An INCONCLUSIVE run is not evidence that the expected error was raised: the

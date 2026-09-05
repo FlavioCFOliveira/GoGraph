@@ -5,78 +5,82 @@ designed to scale from in-memory graphs to graphs that exceed RAM.
 
 ## Status
 
-**Current release: `v0.12.0`.** This is the project's **fifteenth
+**Current release: `v0.13.0`.** This is the project's **sixteenth
 release**, published at a pre-1.0 baseline: under Semantic Versioning a
 `0.y.z` version signals that the public API is **not yet stable** and may
 change without a major bump while the module matures toward `1.0.0`.
-`v0.12.0` is a pre-1.0 **MINOR** release of **192 commits** across **six
-sprints (345–350) and 176 closed tasks**, and — unlike `v0.11.0` — it
-**breaks nothing**: no exported identifier was removed and no exported
-signature changed, so existing code compiles and upgrades unchanged. The
-release also refreshes the whole supply chain — **every direct dependency
-and every tool and CI pin raised to its latest release**, and the pinned
-toolchain moved `go1.26.5` → `go1.27.0` while the `go` directive stays at
-`go 1.26`, so the minimum Go a consumer needs is unchanged. It adds no
-engine capability. It is a **testing-and-correctness release**.
+`v0.13.0` is a pre-1.0 **MINOR** release of **100 commits** across **two
+sprints (352 and 353) and 86 closed tasks**. Where `v0.12.0` broke nothing,
+this one **carries seven breaking changes** — and every one of them turns a
+previously *silent* failure into a loud one. `go.mod` and
+`go.sum` are **byte-identical** to `v0.12.0` — same pinned toolchain, same
+dependency set — so nothing in the supply chain moved. It is a
+**performance and correctness-hardening release**.
 
-Two things define it. **A deterministic-simulation-testing campaign drove
-every published surface** — MVCC under true concurrency, the full Cypher
-language surface, the storage/durability/MVCC substrate, the Bolt wire, and
-the graph API, search and bulk-load surfaces. That is test infrastructure
-rather than module functionality, and the split is worth stating plainly:
-`internal/sim` accounts for **75.7 %** of the release's changed lines while
-the module's own production code accounts for **5.1 %**. **And the bug
-backlog was emptied** — every known bug resolved, each premise re-validated
-at HEAD first, with seven premises that no longer held recorded as refuted
-rather than reported as fixes.
+Three things define it. **It is the module's two deep-profiling and
+optimisation cycles** — sprint 352 audited the module for bottlenecks and
+then worked the Cypher read path; sprint 353 built a committed contention
+observatory and worked the index, `graph/lpg`, `metrics` and Bolt surfaces
+under concurrency. **27 of the 100 commits are `perf`**, against 4 in the
+whole of `v0.12.0`.
 
-What a user consumes is the **50 defects found and fixed in the shipped
-module**, five of them silent — wrong or lost data with no error anywhere.
-Every edge weight of a non-primitive type was **permanently lost at the
-first checkpoint** (95 of 95 weights present at the WAL boundary, 0 of 191
-after one checkpoint), and bulk import was worse because it bypasses the
-WAL. `MATCH (:Person)-[:KNOWS]->(:Vip) RETURN count(*)` returned **0**
-where the named-source spelling returned 1, on the shipped default.
-Reverse and undirected traversal over a reciprocal edge pair returned **the
-other edge's** properties and endpoints. **Every** Cypher list crossing the
-Bolt wire reached clients as a string. And a write transaction's own
-uncommitted view leaked through the CSR cache, so **committed edges lost
-their types for every reader**. Alongside them: seven ACID fixes spanning
-Consistency, Isolation, Atomicity and Durability, a CWE-59 arbitrary-file
-overwrite in `store/csrfile`, four Bolt security fixes, a data race that
-could produce a wrong answer, six `search` entry points that ignored a
-cancelled context, and a panic reachable from the public API in three calls.
+**Contention stopped being inferred and started being measured.** Before
+this release **nothing in the repository enabled Go's contention
+profilers**, so every prior contention claim rested on the shape of a
+throughput curve and never on lock-site attribution. `bench/contention` is
+the instrument that closes that gap, and it is committed. Four workloads
+that **anti-scaled** — throughput falling as goroutines rise while cores sit
+idle — no longer do: the btree index goes **34.6×** at 1024 goroutines with
+mutex delay falling from 1.99 hours to 120 s, a mixed read/write Cypher
+workload goes **41.1×**, the count store's write path **+468 %**, and
+contended metric emission **−96.4 %**. Every one of those figures is that
+change's own interleaved A/B against a noise floor measured first.
 
-**The most consequential result is a control, not a scenario.** Until this
-release the crash model retained unsynced data across a simulated host
-crash, so the battery **could not fail an engine that stopped calling
-`fsync` at all**. With a durable-length watermark in place, deleting the
-WAL commit fsync now fails loudly — 192 violations, exactly half of 384
-acknowledged commits lost, 33 tests red — where before it failed nothing.
+**A great many published claims were refuted by their own measurement, and
+are recorded as refuted.** The write barrier ranked at 72–99 % of write-path
+blocked time holds **zero** of it — a cumulative share is not a bottleneck.
+The Bolt transport suspected of throttling the wire is not the limiter, and
+the published ratios *understate* a real socket. A ceiling table published
+as "every arm is a lower bound" had been **filtered**, and three of the
+seven omitted arms sit above 1.00. Two silent wrong answers were each
+uncovered by removing the cost that hid them: `PROFILE` rendered a different
+plan from the one that ran and reported `rows=0` with no error, and reverse
+traversal under a correlated `Apply` returned rows for nodes with no
+matching edge — accidentally correct in its typed spelling only, because the
+per-slot type test was acting as an unintended validity filter.
 
-The `v0.11.0` **open plan-choice regression is closed**: the selective
-multi-label query that was ≈21.6× slower in the default configuration is
-**−96.08 %** and no shape regresses. One cost is large and is stated rather
-than omitted: a correctness guard on anonymous pattern heads costs the
-declined shape **62× to 1705×** (rmp #2604 is filed to recover it).
+Alongside them: **eight engine-side ACID fixes**, including three
+life-record families where a rolled-back `DELETE` hid a committed node from
+older readers and a *refused* removal resurrected a node or an arc on
+rollback; two durable formats that now refuse a field they would previously
+have truncated or written unreadably, one of which was discarding the WAL
+behind a snapshot no reader could parse; a panic in the commit window that
+wedged every later committer for ever; and **the vulnerability gate that
+never existed** — `govulncheck` appeared in no Makefile target, no `make ci`
+path and no script anywhere in the repository, so the check was never
+automated and could not fail loudly because it never ran.
+
+Cypher gains `EXPLAIN` and `PROFILE` as **statement prefixes**, so a Bolt
+driver can ask for a plan at all; driver-compat rises 28 → 30 of 37.
 
 The two compliance invariants remain in force: the module is **100 %
 openCypher TCK-compliant at the execution level** (**3 897/3 897 scenarios**,
 16 006/16 006 steps, preserved rather than extended — no `.feature` file
-changed this cycle) and **100 % ACID-compliant**. Every change is gated by
-the project's local validation pipeline, run via `make ci` /
-`make release-preflight` before it lands; at the release tree that gate
-reports **127 packages ok with zero failures** under `go test -race ./...`,
-**0 lint issues**, and **88.3 %** aggregate coverage with every package
-above its 75 % floor. **This release carries no production certification of
-its own** — the most recent one was taken at the `v0.11.0` commit, 192
-commits behind this tag, and the whole-tree soak layer has now gone unrun
-for five consecutive cycles. The module uses the conventional Go path
+changed this cycle, and the count was re-verified across a grammar change)
+and **100 % ACID-compliant**. Every change is gated by the project's local
+validation pipeline, run via `make ci` / `make release-preflight` before it
+lands. **This release carries no production certification of its own** — the
+most recent one was taken at the `v0.11.0` commit, 291 commits behind this
+tag, and the whole-tree soak layer has now gone unrun for six consecutive
+cycles. One openCypher divergence also ships open and the TCK is
+structurally blind to it (rmp #2675: a subquery body's final projection is
+never translated, and zero of 220 feature files contain `COUNT {`). The
+module uses the conventional Go path
 `github.com/FlavioCFOliveira/GoGraph` and is fetchable with
-`go get github.com/FlavioCFOliveira/GoGraph@v0.12.0`. See
+`go get github.com/FlavioCFOliveira/GoGraph@v0.13.0`. See
 [CHANGELOG.md](CHANGELOG.md),
-[release-notes/v0.12.0.md](release-notes/v0.12.0.md) and
-[docs/benchmarks/v0.12.0.md](docs/benchmarks/v0.12.0.md) for the full release
+[release-notes/v0.13.0.md](release-notes/v0.13.0.md) and
+[docs/benchmarks/v0.13.0.md](docs/benchmarks/v0.13.0.md) for the full release
 narrative, the measured performance delta, and what the release does **not**
 establish.
 
@@ -341,22 +345,30 @@ coverage. Every change must pass it before being committed.
 ## Performance
 
 **The authoritative, per-release record for this release is
-[docs/benchmarks/v0.12.0.md](docs/benchmarks/v0.12.0.md)** — run environment,
+[docs/benchmarks/v0.13.0.md](docs/benchmarks/v0.13.0.md)** — run environment,
 method, what the figures do *not* establish, and reproduce commands.
 This section is a summary, not a second source.
 
-`v0.12.0` adds no engine capability, so the throughput and primitive figures
-below are unchanged and are quoted with their original provenance: **each was
-measured first-hand at the `v0.11.0` commit (`ba436a5b`)** on Apple M4
-(10-core), 32 GB, `darwin/arm64`, go1.26.5, on a host gated below a 1-minute
-load average of 2.5, and is recorded in
-[docs/benchmarks/v0.11.0.md](docs/benchmarks/v0.11.0.md). What `v0.12.0`
-changed is set out in
-[its own record](docs/benchmarks/v0.12.0.md) and in
-[release-notes/v0.12.0.md](release-notes/v0.12.0.md#performance--the-honest-account).
+Unlike `v0.12.0`, **`v0.13.0` moved the figures**, and the deltas below were
+measured **first-hand at both trees** rather than carried forward: a `v0.12.0`
+worktree and this release candidate, compiled once each, run **interleaved**
+one repetition at a time with the leading arm alternating, `-race` off,
+`-count=6`, on a host gated below a 1-minute load average of 2.5. The two
+trees pin an **identical `go.mod` and `go.sum`**, so — for the first time since
+`v0.11.0` — no toolchain or dependency change is mixed into any comparison.
+
+The **noise floor was measured before anything was attributed**: both arms
+pointed at the same tree, 14 comparisons, **0 significant**, largest median
+drift **0.87 % on sec/op and 0.00 % on allocations**. Every figure below clears
+it by an order of magnitude. Nothing here is compared against the *published*
+`v0.12.0` numbers, which were taken on a different toolchain patch.
 
 **Durable write throughput, at the concurrency levels the module publishes**
-(`store/txn`, one durable single-edge transaction per op, median of 6):
+(`store/txn`, one durable single-edge transaction per op, median of 6).
+**Carried forward from `v0.11.0` and not re-measured this cycle** — the
+`store/txn` write ladder was run as an A/B in this window and moved only in
+allocated bytes (+2.50 % to +3.37 % B/op at 1/8/64 writers), so the ops/s
+figures below are quoted with their original provenance:
 
 | Writers | 1 | 8 | 64 | 256 | 1024 |
 |---|---:|---:|---:|---:|---:|
@@ -371,40 +383,90 @@ and nothing else; the single-writer rate is this device's fsync rate and is
 unchanged from `v0.10.0`, so nothing was traded for it. At `v0.10.0` this curve
 was flat — the module had no write concurrency.
 
-**Read path under concurrency** — the hot-key intern probe, where every goroutine
-contends for one cache line, is **flat at 75–89 ns/op with zero allocations from
-8 to 1024 goroutines** (a 128× over-subscription of 10 cores). Note `ns/op` under
-`RunParallel` is inverse *aggregate* throughput, not per-goroutine latency.
+**Read path under concurrency.** The engine's read-transaction path was
+measured as a ladder at both trees and is where this release moved most:
+`ReadTx_LockFree` is **−91.40 %** at 1024 goroutines and `ReadTx_WriterLock`
+**−52.56 %**, geomean **−73.04 %** across both benchmarks and all five levels.
+The spread widens to ±32–44 % at 1024, so treat the median there as indicative
+rather than precise. The hot-key intern probe, where every goroutine contends
+for one cache line, remains **flat at 75–89 ns/op with zero allocations from
+8 to 1024 goroutines** (a 128× over-subscription of 10 cores) — carried forward
+from `v0.11.0`. Note `ns/op` under `RunParallel` is inverse *aggregate*
+throughput, not per-goroutine latency.
 
-**Primitive operations** and the guard-band algorithm set (median of 6):
+**Primitive operations** and the guard-band algorithm set — **measured at this
+release candidate**, median of 6, `-race` off:
 
-| Operation | Result |
-|---|---|
-| `Mapper.Intern` (hot key, uncontended) | 8.67 ns/op, 0 B, 0 allocs |
-| `search.Dijkstra` (post-warmup, reusable state) | 8.27 ms, **0 B, 0 allocs** |
-| `search.BFS` direction-optimising (power law) | 29.87 ms, **0 B, 0 allocs** |
-| `search.Yen` k=100 | 14.47 ms, 459 KB, 1,280 allocs |
-| `centrality.Brandes` (random graph) | 8.09 ms, 62 KB, 10 allocs |
+| Operation | Result | vs `v0.12.0` |
+|---|---|---|
+| `search.Dijkstra` (post-warmup, reusable state) | 8.04 ms, **0 B, 0 allocs** | unchanged |
+| `search.Dijkstra` (large) | 8.21 ms, 1.13 MB, 4 allocs | unchanged |
+| `search.BFS` direction-optimising (power law) | 28.28 ms, **0 B, 0 allocs** | unchanged |
+| `search.Yen` k=100 | 14.85 ms, 459 KB, 1,280 allocs | **+2.42 %** |
+| `centrality.Brandes` (random graph) | 7.82 ms, 62 KB, 10 allocs | unchanged |
+| `Mapper.Intern` (hot key, uncontended) | 8.67 ns/op, 0 B, 0 allocs | not re-measured |
+
+This set doubles as the release's **control**: `search` changed by 78 lines in
+this window, so it should not move, and it does not — four of the five are
+statistically indistinguishable and the geomean is **+0.83 %**, inside the
+noise. A large delta here would have been evidence that the *measurement* was
+wrong, not that traversal had improved. `Yen`'s +2.42 % is real but small and
+its cause was not investigated.
 
 The two post-warmup traversal paths allocate **zero** bytes per call, and every
-allocation count above is identical to `v0.10.0` — the zero-allocation hot-path
-mandate holds.
+allocation count above is **byte-identical** to the `v0.12.0` arm measured
+alongside it — the zero-allocation hot-path mandate holds, verified rather than
+asserted.
+
+**What `v0.13.0` changed, measured at both trees** (geomean per block,
+p=0.002 unless stated, `-race` off):
+
+| Block | Delta | Largest single move |
+|---|---:|---|
+| Cypher count pushdown | **−87.65 %** | `Count_LabelStarBig_Serial` −99.97 % (≈3 ms → 880 ns) |
+| Read transaction under concurrency | **−73.04 %** | `ReadTx_LockFree` −91.40 % at 1024 goroutines |
+| `cypher/exec` read-path operators | **−18.93 %** | `Scan_PerNode` −69.97 %; `Sort_10k` −43.59 % |
+| Contended metric emission | **−92.79 %** | `IncCounterParallel` −96.47 % at 1024 |
+| Columnar query shapes | **−4.28 %** | five hop shapes −7.69 % to −9.42 % |
+
+The read-transaction ladder is the one that changes character rather than
+degree: at 1024 goroutines the spread widens to ±32–44 %, so read the median
+with that in mind. Contended metric emission changes **sign** — `v0.12.0`
+anti-scaled, with cost rising 5.8× from 1 to 1024 goroutines; `v0.13.0` scales,
+with cost falling 5.3×.
+
+**Allocations moved as much as time did, on two of the four blocks.** The
+read-transaction ladder falls **−76.29 % allocs/op** geomean (`ReadTx_LockFree`
+249 → **37**, `ReadTx_WriterLock` 306 → **114**) and the count block
+**−90.12 %** (`Count_LabelStarBig_Serial` 199,796 → **19**). Those counts are
+now **constant across the whole 1 → 1024 ladder**, where `v0.12.0`'s drifted
+with concurrency — a structural change, not a tuning one. The `cypher/exec`
+operator block and the columnar shapes are by contrast **flat** (−0.12 % and
+−0.19 %), so their time wins are CPU-side. `-race` is off throughout;
+`allocs/op` is not build-invariant.
 
 **And the costs, because a README that lists only wins is not a faithful one.**
-Graph iteration and bulk write pay **+7–16 %** across seven independent
-benchmarks, WAL recovery is **1.51× slower** (the price of deriving the MVCC clock
-from the WAL), on-disk bytes per node rise **2.9 %**, the uncontended intern path
-is **+14 %**. The `v0.11.0` **open defect** that made a selective multi-label
-query ≈21.6× slower in the default configuration (rmp #2431) is **closed in
-`v0.12.0`** at **−96.08 % sec/op with no shape regressing**
-([docs/benchmarks/min-label-anchor-vs-parallel-scan-2026-08-26.md](docs/benchmarks/min-label-anchor-vs-parallel-scan-2026-08-26.md)).
-The cost `v0.12.0` adds in its place is a correctness guard on anonymous
-pattern heads, which costs the declined shape **62× to 1705×** — stated in full
-in [the release notes](release-notes/v0.12.0.md#what-got-slower--measured-not-minimised),
-with rmp #2604 filed to recover the optimisation.
+Four regressions were measured in this release and none is omitted:
+`graph/index/btree`'s `Index_LookupHot` is **+26.93 %** (geomean, every
+GOMAXPROCS level, p=0.002) where the commit responsible reports its own
+uncontended cost as 6.66 %; `cypher/exec`'s `Drain_Throughput` is **+12.87 %**;
+`IncCounterParallel` pays **+8.32 %** at a single goroutine for its contended
+win; and `CountAllNodes` is **+3.09 %**. Carried forward from `v0.11.0` and not
+re-measured here: graph iteration and bulk write **+7–16 %**, WAL recovery
+**1.51× slower**, on-disk bytes per node **+2.9 %**.
 
-> **Reproduce:** the exact commands are in
-> [docs/benchmarks/v0.11.0.md](docs/benchmarks/v0.11.0.md#7-reproduce); the
+**Three things this release does not establish.** Sprint 353's headline index
+contention claims — 34.6× on the btree spine, 1.91× on the hash index —
+**cannot be verified at release level**: no benchmark common to both trees
+exercises those indexes concurrently, because the instrument that measures them
+(`bench/contention`) is new in `v0.13.0`. They rest on each commit's own local
+A/B. And storage footprint, latency percentiles at the published concurrency
+levels, `bench/mtaudit`'s engine-under-writer ladder, and any non-`darwin/arm64`
+host remain unmeasured.
+
+> **Reproduce:** the exact commands, including the interleaved A/B harness and
+> the noise-floor procedure, are in
+> [docs/benchmarks/v0.13.0.md](docs/benchmarks/v0.13.0.md); the
 > general workflow is `make bench BENCH_PATTERN=. BENCH_COUNT=5` and
 > [docs/profiling.md](docs/profiling.md).
 > Hardware deltas should be reported in CHANGELOG.md alongside

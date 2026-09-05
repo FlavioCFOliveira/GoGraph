@@ -67,7 +67,7 @@ const histB = 256
 // distribution-free guarantee of the equi-depth histogram with MCV-spike
 // isolation.
 func TestHistogram_SelectivityErrorSkewed(t *testing.T) {
-	rng := rand.New(rand.NewSource(0x5747))
+	rng := rand.New(rand.NewSource(0x5747)) //nolint:gosec // G404: math/rand seeded from a fixed constant — this test asserts a reproducible sequence, which a CSPRNG would destroy.
 	const n = 50000
 
 	build := func(sample []int, heavy map[int]bool) *Histogram[int] {
@@ -106,7 +106,7 @@ func TestHistogram_SelectivityErrorSkewed(t *testing.T) {
 // TestHistogram_SelectivityErrorUniform checks the bound on a uniform column too,
 // where equi-depth degenerates to near-equi-width.
 func TestHistogram_SelectivityErrorUniform(t *testing.T) {
-	rng := rand.New(rand.NewSource(99))
+	rng := rand.New(rand.NewSource(99)) //nolint:gosec // G404: math/rand seeded from a fixed constant — this test asserts a reproducible sequence, which a CSPRNG would destroy.
 	const n = 40000
 	sample := make([]int, n)
 	for i := range sample {
@@ -167,7 +167,7 @@ func TestHistogram_Empty(t *testing.T) {
 }
 
 func TestHistogram_MonotoneCumulative(t *testing.T) {
-	rng := rand.New(rand.NewSource(3))
+	rng := rand.New(rand.NewSource(3)) //nolint:gosec // G404: math/rand seeded from a fixed constant — this test asserts a reproducible sequence, which a CSPRNG would destroy.
 	sample := make([]int, 20000)
 	for i := range sample {
 		sample[i] = rng.Intn(5000)

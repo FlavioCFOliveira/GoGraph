@@ -40,11 +40,11 @@ func BenchmarkCertReloader_ParseCostAvoidedBySkip(b *testing.B) {
 	certPath, keyPath := writeBenchPair(b, dir)
 	b.ReportAllocs()
 	for b.Loop() {
-		certPEM, err := os.ReadFile(certPath)
+		certPEM, err := os.ReadFile(certPath) //nolint:gosec // G304: certPath was written by this benchmark under its own temp dir.
 		if err != nil {
 			b.Fatalf("read cert: %v", err)
 		}
-		keyPEM, err := os.ReadFile(keyPath)
+		keyPEM, err := os.ReadFile(keyPath) //nolint:gosec // G304: keyPath was written by this benchmark under its own temp dir.
 		if err != nil {
 			b.Fatalf("read key: %v", err)
 		}

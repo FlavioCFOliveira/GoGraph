@@ -66,7 +66,7 @@ func TestMain(m *testing.M) {
 
 	// Check for goroutine leaks after all servers have been shut down.
 	if leakErr := goleak.Find(); leakErr != nil {
-		os.Stderr.WriteString("goleak: " + leakErr.Error() + "\n") //nolint:errcheck
+		os.Stderr.WriteString("goleak: " + leakErr.Error() + "\n") //nolint:errcheck // TestMain is already failing (code = 1); a failed write to stderr cannot be reported anywhere else and must not mask the leak verdict
 		code = 1
 	}
 

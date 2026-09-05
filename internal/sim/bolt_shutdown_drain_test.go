@@ -343,7 +343,19 @@ func TestBoltShutdownDrain_PublicationIsOneValue(t *testing.T) {
 // stays in the evidence, where the non-vacuity gate reads it as a coverage witness,
 // and out of the rendering, whose stability is asserted here.
 //
-// The DEADLINE-bounded expiry arm is excluded for a fifth reason, and it is a
+// A fifth is the same mistake one field over, and it was caught the same way (rmp
+// #2671): the number of connections LIVE while the commit was parked. It is
+// r.conns.live.Load() SAMPLED at the instant the fsync gate fires, and a sampled
+// live count is not seed-determined — under contention the sampling instant falls
+// either side of a connection teardown. One full `make ci` run in three rendered
+// parked-live=5 where the other two rendered 4; a targeted reproduction then gave 4
+// in 239 of 240 runs of ONE seed under load, and 5 once, while 103 isolated runs on
+// a quiet tree — one of them at load average 22 — never reproduced it at all. Like
+// the peak, it stays in the evidence for the non-vacuity gate ("< 2") and out of the
+// rendering. The lesson both share: a field that is SAMPLED rather than COUNTED
+// cannot sit inside a value asserted to be byte-stable.
+//
+// The DEADLINE-bounded expiry arm is excluded for a sixth reason, and it is a
 // property of the server rather than of the harness: which of Shutdown's two expiry
 // branches reports is a genuine race (the clamped time.After and ctx.Done() come due
 // together and Go's select is uniform when both are ready), so that arm's rendering

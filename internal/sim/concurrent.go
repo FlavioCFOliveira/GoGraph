@@ -35,6 +35,23 @@ type ConcurrentConfig struct {
 	// contended transactional role collides on (rmp #2439). Values <= 0
 	// normalise to 2. Fewer counters means more conflicts.
 	ContendedCounters int
+	// ContendedNamespace separates this run's shared counters from every other
+	// run's (rmp #2729). The counters are shared by every CONNECTION of this
+	// run — that sharing is what the contended role exists to create — and by no
+	// other run, whose acknowledged tally would otherwise be adjudicated against
+	// a value another run had also incremented.
+	//
+	// Name it when several sequential [RunConcurrent] calls form ONE logical run
+	// that must keep the same counters — [runProductionProfileEvidence] does,
+	// because it accumulates each counter's total across crash cycles over one
+	// durable store. Leave it empty and the namespace is derived from Seed, which
+	// is already distinct per call in every caller that drives one shared server
+	// concurrently.
+	//
+	// A namespace is leased to one run at a time per server: an overlapping run
+	// that asks for a namespace already held is refused with a typed error rather
+	// than left to corrupt both oracles.
+	ContendedNamespace string
 }
 
 // ConcurrentMix is the per-connection actor selection for a concurrent run. Each
@@ -115,6 +132,12 @@ type ConcurrentResult struct {
 	// ContendedAcked is, per shared counter, the number of read-modify-write
 	// increments acknowledged; ContendedFinal is each counter's value read at
 	// quiescence. Equality is the zero-lost-updates oracle.
+	//
+	// The equality holds only because the counters are private to this run's
+	// namespace (rmp #2729): a counter another concurrent run also incremented
+	// answers for increments this run never acknowledged, and the oracle would
+	// then report a lost update that never happened — or, with a run that
+	// acknowledged nothing readable, report nothing at all.
 	//
 	// Both are ALWAYS ConcurrentCounters long, on every path, so a caller may
 	// index them by the same k without checking (rmp #2552). A counter no
@@ -221,6 +244,16 @@ func (r *ConcurrentResult) Consistent() bool {
 // no goroutine outlives the call. Every goroutine recovers a panic (recording it
 // in the result and terminating cleanly) so one connection's bug cannot crash
 // the harness or mask a leak.
+//
+// SEVERAL CALLS MAY DRIVE ONE srv AT THE SAME TIME — bench/contention's
+// dst-concurrent-bolt does exactly that — provided each is given a distinct
+// Seed. Every fixture a call owns is private to it: the Bolt parameter probe's
+// node (rmp #2728) and, when the population includes contended writers, the
+// shared counter key space (rmp #2729). The counters are the one fixture whose
+// privacy cannot be structural on its own, because a caller may legitimately
+// want several sequential calls to keep the same counters; a run that asks for a
+// [ConcurrentConfig.ContendedNamespace] another run is already holding against
+// this server is therefore REFUSED with an error, never allowed to share it.
 func RunConcurrent(ctx context.Context, srv *SimServer, cfg ConcurrentConfig) (ConcurrentResult, error) {
 	if cfg.Connections <= 0 {
 		cfg.Connections = 1
@@ -262,20 +295,49 @@ func RunConcurrent(ctx context.Context, srv *SimServer, cfg ConcurrentConfig) (C
 	// by read-back. The probe is population-neutral (it deletes the single node
 	// it creates), so it perturbs neither the node-count oracle below nor the
 	// per-connection seed streams.
+	//
+	// Callers may run many RunConcurrent calls against ONE srv at the same time —
+	// bench/contention's dst-concurrent-bolt does exactly that — so the probe's
+	// fixture is private to this call (rmp #2728). Neutrality alone was never
+	// enough: with a shared fixture the probes stayed neutral by deleting each
+	// OTHER's nodes, which corrupted their own oracles and amplified the engine
+	// work the arm was there to measure.
 	res.WireParamFailures = probeWireParamTypes(ctx, srv)
 
 	if cfg.ContendedCounters <= 0 {
 		cfg.ContendedCounters = 2
 	}
+	// This run's shared counter key space (rmp #2729). Its namespace is the
+	// caller's when the caller named one — several sequential calls may form one
+	// logical run over a persistent store — and derived from the seed otherwise.
+	space := counterSpace{ns: cfg.ContendedNamespace, n: cfg.ContendedCounters}
+	if space.ns == "" {
+		space.ns = defaultContendedNamespace(cfg.Seed)
+	}
+
 	// Seed the shared counters BEFORE any contended connection spawns, over a
 	// setup connection on this goroutine, so every contended transaction finds
 	// its counter committed. The seeded nodes are acknowledged creates like any
 	// other, so they enter the eventual-consistency oracle (added to the tally
 	// after the post-join load below).
+	//
+	// The key space is LEASED for the whole run: the seeding is a
+	// check-then-CREATE with no cross-caller atomicity, and the oracle below
+	// adjudicates each counter against THIS run's acknowledged increments alone,
+	// so a second run holding the same namespace against the same server would
+	// break both. Refusing is fail-stop; sharing was fail-silent.
 	seededCounters := 0
 	if haveContended {
+		if !contendedSpaceLeases.acquire(srv, space.ns) {
+			return res, fmt.Errorf(
+				"sim: contended counter namespace %q is already held by another run against this "+
+					"server: its increments would be adjudicated against this run's acknowledged "+
+					"tally (give each concurrent run a distinct Seed, or a distinct "+
+					"ContendedNamespace)", space.ns)
+		}
+		defer contendedSpaceLeases.release(srv, space.ns)
 		for k := 0; k < cfg.ContendedCounters; k++ {
-			created, err := seedContendedCounter(srv, k)
+			created, err := seedContendedCounter(srv, space, k)
 			if err != nil {
 				return res, fmt.Errorf("sim: seed contended counter %d: %w", k, err)
 			}
@@ -310,7 +372,7 @@ func RunConcurrent(ctx context.Context, srv *SimServer, cfg ConcurrentConfig) (C
 					panics.Add(1)
 				}
 			}()
-			runConnection(ctx, srv, connSeed, role, cfg.OpsPerConn, cfg.ContendedCounters, &counters{
+			runConnection(ctx, srv, connSeed, role, cfg.OpsPerConn, space, &counters{
 				ackedCreates:    &ackedCreates,
 				transportErrors: &transportErrors,
 				boundedRejects:  &boundedRejects,
@@ -368,7 +430,7 @@ func RunConcurrent(ctx context.Context, srv *SimServer, cfg ConcurrentConfig) (C
 	// total — and a counter that nonetheless holds a value nobody acknowledged is
 	// now caught instead of never being looked at.
 	missing, phantom, finals, err := verifyTxQuiescence(srv,
-		res.TxMarkersAcked, res.TxMarkersRefused, cfg.ContendedCounters)
+		res.TxMarkersAcked, res.TxMarkersRefused, space)
 	if err != nil {
 		return res, fmt.Errorf("sim: concurrent tx quiescence verification: %w", err)
 	}
@@ -486,7 +548,7 @@ type writerLog struct {
 // operations (stopping early on ctx cancellation), and closes the connection. It
 // never panics out: a transport error stops the connection cleanly (recorded in
 // the counters), so a connection reset by the server does not crash the harness.
-func runConnection(ctx context.Context, srv *SimServer, connSeed uint64, role concurrentRole, opsPerConn, contendedCounters int, c *counters, wl *writerLog) {
+func runConnection(ctx context.Context, srv *SimServer, connSeed uint64, role concurrentRole, opsPerConn int, space counterSpace, c *counters, wl *writerLog) {
 	client, err := srv.Dial()
 	if err != nil {
 		c.transportErrors.Add(1)
@@ -504,10 +566,10 @@ func runConnection(ctx context.Context, srv *SimServer, connSeed uint64, role co
 	}
 
 	if role == roleTxContended {
-		wl.contendedAcked = make([]int64, contendedCounters)
+		wl.contendedAcked = make([]int64, space.n)
 	}
 	if role == roleIsoReader {
-		wl.isoLastCounter = make([]int64, contendedCounters)
+		wl.isoLastCounter = make([]int64, space.n)
 	}
 	seed := NewSeed(connSeed)
 	uniq := connSeed // per-connection namespace so writers never collide on names
@@ -515,7 +577,7 @@ func runConnection(ctx context.Context, srv *SimServer, connSeed uint64, role co
 		if ctx.Err() != nil {
 			return
 		}
-		if stop := playOneOp(client, role, seed, uniq, op, contendedCounters, c, wl); stop {
+		if stop := playOneOp(client, role, seed, uniq, op, space, c, wl); stop {
 			return
 		}
 	}
@@ -523,7 +585,7 @@ func runConnection(ctx context.Context, srv *SimServer, connSeed uint64, role co
 
 // playOneOp performs one operation for the connection's role and returns true if
 // the connection should stop (a transport error indicating the server closed it).
-func playOneOp(client *WireClient, role concurrentRole, seed *Seed, uniq uint64, op, contendedCounters int, c *counters, wl *writerLog) (stop bool) {
+func playOneOp(client *WireClient, role concurrentRole, seed *Seed, uniq uint64, op int, space counterSpace, c *counters, wl *writerLog) (stop bool) {
 	switch role {
 	case roleWriter:
 		return writerOp(client, seed, uniq, op, c, wl)
@@ -532,13 +594,13 @@ func playOneOp(client *WireClient, role concurrentRole, seed *Seed, uniq uint64,
 	case roleOverload:
 		return overloadOp(client, seed, c)
 	case roleTxWriter:
-		return txWriterOp(client, seed, uniq, op, false, contendedCounters, c, wl)
+		return txWriterOp(client, seed, uniq, op, false, space, c, wl)
 	case roleTxContended:
-		return txWriterOp(client, seed, uniq, op, true, contendedCounters, c, wl)
+		return txWriterOp(client, seed, uniq, op, true, space, c, wl)
 	case roleBatchWriter:
 		return batchWriterOp(client, seed, uniq, op, c, wl)
 	case roleIsoReader:
-		return isoReaderOp(client, seed, contendedCounters, c, wl)
+		return isoReaderOp(client, seed, space, c, wl)
 	case roleRYOWWriter:
 		return ryowWriterOp(client, seed, uniq, op, c, wl)
 	default:

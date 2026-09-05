@@ -67,6 +67,8 @@ type subqueryEvaluator struct {
 	// translated and physically built at most once per outer query. The key is
 	// the unique AST pointer; the value carries the seedable Argument and the
 	// schema layout used to materialise the per-row Row.
+	//
+	// nil until the first subquery is compiled — see [subqueryEvaluator.init].
 	compiled map[ast.Expression]*compiledSubquery
 
 	// degree caches the per-AST degree-rewrite verdict (rmp #2232). A present
@@ -74,13 +76,28 @@ type subqueryEvaluator struct {
 	// the adjacency instead of driving an inner plan; a present nil value is a
 	// pattern already examined and rejected, so the recogniser runs at most once
 	// per subquery occurrence rather than once per outer row.
+	//
+	// nil until the first verdict is recorded — see [subqueryEvaluator.init].
 	degree map[ast.Expression]*degreeShape
 
 	// labelledHop caches the per-AST verdict for the labelled single-hop count
 	// (rmp #2235). It is a SEPARATE map from degree because it is a separate
 	// recogniser: a pattern rejected by one may be accepted by the other, and
 	// sharing a cache would conflate the two verdicts.
+	//
+	// nil until the first verdict is recorded — see [subqueryEvaluator.init].
 	labelledHop map[ast.Expression]*labelledHopShape
+
+	// adjacencyCountsDisabled forbids BOTH adjacency-answered rewrites above, so
+	// every EXISTS/COUNT subquery drives its compiled inner plan. It is set from
+	// [EngineOptions.DisableAdjacencyCountRewrites]; see that field for what the
+	// knob is for and why one flag covers two rewrites.
+	//
+	// The polarity is NEGATIVE so the zero value keeps both rewrites live: an
+	// evaluator constructed without an Engine behaves as it did before the knob
+	// existed. A nested subquery inherits the setting for free, because
+	// [buildOpts.forSubquery] carries THIS evaluator into the child scope.
+	adjacencyCountsDisabled bool
 
 	// params is the enclosing query's fully-resolved parameter map, threaded
 	// into every inner build (rmp #2507).
@@ -136,16 +153,31 @@ type compiledSubquery struct {
 // newSubqueryEvaluator constructs the evaluator for one query run. The caller
 // supplies every dependency the subquery's compiled pipeline may need.
 func newSubqueryEvaluator(walker nodeWalkerIface, labels labelResolverIface, reg expr.FunctionRegistry, g *lpg.ReadView[string, float64]) *subqueryEvaluator {
-	return &subqueryEvaluator{
-		walker:   walker,
-		labels:   labels,
-		reg:      reg,
-		g:        g,
-		compiled: make(map[ast.Expression]*compiledSubquery),
-		degree:   make(map[ast.Expression]*degreeShape),
+	e := &subqueryEvaluator{}
+	e.init(walker, labels, reg, g)
+	return e
+}
 
-		labelledHop: make(map[ast.Expression]*labelledHopShape),
-	}
+// init sets up an evaluator IN PLACE. It exists so a caller that already owns
+// storage for one — [readBuildScaffold], which holds the whole per-execution
+// build scaffolding in a single heap object — can initialise it without a second
+// allocation. [newSubqueryEvaluator] is this plus the allocation.
+//
+// The three memo maps are NOT created here. They are created on first write, by
+// the three sites that write them, because a query with no EXISTS/COUNT
+// subquery — which is most queries — never touches any of them, and three empty
+// maps cost three heap allocations on every single execution (rmp #2693: 3 of
+// the 33 allocations of a read whose plan is "Project ← LabelCountScan", which
+// has no subquery at all). Reading a nil map is legal Go and returns the zero
+// value with ok == false, which is exactly the "not memoised yet" answer every
+// reader already handles; only the writes need the guard. [patternEvaluator]'s
+// own labelledHop map has been built this way since rmp #2235, so this is the
+// established shape in this package rather than a new one.
+func (e *subqueryEvaluator) init(walker nodeWalkerIface, labels labelResolverIface, reg expr.FunctionRegistry, g *lpg.ReadView[string, float64]) {
+	e.walker = walker
+	e.labels = labels
+	e.reg = reg
+	e.g = g
 }
 
 // EvalExists implements [expr.SubqueryEvaluator]. It drives the compiled
@@ -155,7 +187,13 @@ func (e *subqueryEvaluator) EvalExists(ctx context.Context, sub *ast.ExistsSubqu
 	// Degree rewrite (#2232): EXISTS over a degree-answerable pattern is
 	// "degree > 0", which the adjacency answers without an inner plan. Capped at
 	// 1 — the existence question never needs to know the true degree.
-	if sh := e.degreeShapeFor(sub, sub.Pattern, sub.Where, row); sh != nil {
+	//
+	// Only the subquery node is passed: since rmp #2648 the recogniser's view of
+	// the body is derived inside the memo by [subqueryRecogniserBody], so BOTH
+	// spellings — pattern form and single-MATCH block form — reach the same
+	// recogniser. Reading sub.Pattern here is what made the block form
+	// structurally unreachable.
+	if sh := e.degreeShapeFor(sub, row); sh != nil {
 		if n, ok := sh.count(e.g, row, 1); ok {
 			degreeRewriteCount.Add(1)
 			return expr.BoolValue(n > 0), nil
@@ -165,7 +203,7 @@ func (e *subqueryEvaluator) EvalExists(ctx context.Context, sub *ast.ExistsSubqu
 	// ineligible for the degree rewrite above — in Neo4j too — but it is still
 	// one adjacency walk rather than an inner plan. Capped at 1 for the same
 	// reason.
-	if n, ok := e.countLabelledHop(sub, sub.Pattern, sub.Where, row, 1); ok {
+	if n, ok := e.countLabelledHop(sub, row, 1); ok {
 		return expr.BoolValue(n > 0), nil
 	}
 	cs, err := e.compileExists(sub, row)
@@ -186,17 +224,21 @@ func (e *subqueryEvaluator) EvalCount(ctx context.Context, sub *ast.CountSubquer
 	// Degree rewrite (#2232). Uncapped: this entry point owes the caller the
 	// true count. A comparison against a literal reaches the bounded form
 	// through EvalCountBounded instead, which is where short-circuiting lives.
-	// sub.Where is threaded, not nil: an inline WHERE is a Selection neither
-	// recogniser can evaluate, and both must refuse the pattern rather than
-	// answer it without the predicate (rmp #2242).
-	if sh := e.degreeShapeFor(sub, sub.Pattern, sub.Where, row); sh != nil {
+	//
+	// The body's WHERE is still threaded — it is now derived by
+	// [subqueryRecogniserBody] inside the memo rather than read from sub here —
+	// because an inline WHERE is a Selection neither recogniser can evaluate, and
+	// both must refuse the pattern rather than answer it without the predicate
+	// (rmp #2242). That holds identically for a block form's `MATCH … WHERE …`
+	// since rmp #2648.
+	if sh := e.degreeShapeFor(sub, row); sh != nil {
 		if n, ok := sh.count(e.g, row, -1); ok {
 			degreeRewriteCount.Add(1)
 			return expr.IntegerValue(n), nil
 		}
 	}
 	// Labelled single hop (#2235), likewise uncapped here.
-	if n, ok := e.countLabelledHop(sub, sub.Pattern, sub.Where, row, -1); ok {
+	if n, ok := e.countLabelledHop(sub, row, -1); ok {
 		return expr.IntegerValue(n), nil
 	}
 	cs, err := e.compileCount(sub, row)
@@ -223,6 +265,9 @@ func (e *subqueryEvaluator) compileExists(sub *ast.ExistsSubquery, row expr.RowC
 	if err != nil {
 		return nil, fmt.Errorf("compile EXISTS subquery: %w", err)
 	}
+	if e.compiled == nil {
+		e.compiled = make(map[ast.Expression]*compiledSubquery)
+	}
 	e.compiled[sub] = cs
 	return cs, nil
 }
@@ -237,6 +282,9 @@ func (e *subqueryEvaluator) compileCount(sub *ast.CountSubquery, row expr.RowCon
 	cs, err := e.compileSubAST(innerAST, row)
 	if err != nil {
 		return nil, fmt.Errorf("compile COUNT subquery: %w", err)
+	}
+	if e.compiled == nil {
+		e.compiled = make(map[ast.Expression]*compiledSubquery)
 	}
 	e.compiled[sub] = cs
 	return cs, nil
@@ -352,13 +400,17 @@ func (e *subqueryEvaluator) prepareDrive(ctx context.Context, cs *compiledSubque
 }
 
 // outerVarsFromRow returns the variable names present in row, in
-// deterministic order, excluding the smuggled subquery-context sentinel.
+// deterministic order.
+//
+// It used to filter out a reserved sentinel key, because [expr.EvalWith]
+// smuggled its per-evaluation state through the RowContext and every row this
+// function saw carried it. That state is now an explicit parameter inside the
+// evaluator (#2653), so a RowContext holds nothing but real variable bindings
+// and the filter — along with the duplicated copy of the sentinel constant that
+// this file had to keep in step with cypher/expr — is gone.
 func outerVarsFromRow(row expr.RowContext) []string {
 	out := make([]string, 0, len(row))
 	for k := range row {
-		if k == subqueryContextRowKey {
-			continue
-		}
 		out = append(out, k)
 	}
 	// Sort for deterministic seed-row layout. The compiled schema map mirrors
@@ -366,13 +418,6 @@ func outerVarsFromRow(row expr.RowContext) []string {
 	sortStrings(out)
 	return out
 }
-
-// subqueryContextRowKey mirrors expr.subqueryContextKey for filtering during
-// outer-variable enumeration. The constant is duplicated here because the
-// expr-side key is unexported; both definitions use the same NUL-bracketed
-// string and any drift would surface as the subquery seeing a synthetic
-// variable named "subquery-context".
-const subqueryContextRowKey = "\x00subquery-context\x00"
 
 // downgradeForRow converts a NodeValue or RelValue back to the IntegerValue
 // representation expected by inner scans and expands. Other values pass
@@ -423,6 +468,53 @@ func countToSingleQuery(sub *ast.CountSubquery) *ast.SingleQuery {
 			&ast.Match{Pattern: sub.Pattern, Where: sub.Where},
 		},
 	}
+}
+
+// subqueryRecogniserBody returns the (pattern, where) pair the two
+// adjacency-answered recognisers should see for one subquery occurrence,
+// whichever of the two spellings the user wrote (rmp #2648).
+//
+// It is the INVERSE of [existsToSingleQuery] / [countToSingleQuery] above, and
+// deliberately lives beside them: those two turn a pattern form into the
+// synthetic `MATCH <pattern> [WHERE …]` body the translator compiles, and this
+// turns exactly that body back into the pair the recognisers take. Keeping the
+// two adjacent is what makes the round trip checkable — see
+// TestPatternFormOf_IsInverseOfDesugaring — rather than a claim.
+//
+// It exists because [ast.CountSubquery] and [ast.ExistsSubquery] carry the same
+// question in two shapes, and every fast path takes an [ast.Pattern]. Neo4j has
+// no equivalent function because it has no equivalent problem: its parser emits
+// one shape (see [ir.PatternFormOf] for the source citations and for the
+// boundary this adopts).
+//
+// A nil pattern is the "not recognisable" answer, which is already what both
+// recognisers do with one, so no caller needs a second code path.
+//
+// It is called from inside the per-occurrence memos in [degreeShapeFor] and
+// [labelledHopShapeFor], NOT from the per-row dispatch sites, so the block-form
+// walk is paid once per subquery occurrence rather than once per outer row.
+func subqueryRecogniserBody(sub ast.Expression) (*ast.Pattern, *ast.Where) {
+	var (
+		pat   *ast.Pattern
+		where *ast.Where
+		body  *ast.SingleQuery
+	)
+	switch s := sub.(type) {
+	case *ast.ExistsSubquery:
+		pat, where, body = s.Pattern, s.Where, s.Query
+	case *ast.CountSubquery:
+		pat, where, body = s.Pattern, s.Where, s.Query
+	default:
+		return nil, nil
+	}
+	// The pattern form needs no normalisation: it IS the canonical shape.
+	if pat != nil {
+		return pat, where
+	}
+	if p, w, ok := ir.PatternFormOf(body); ok {
+		return p, w
+	}
+	return nil, nil
 }
 
 // sortStrings is a tiny in-place ascending sort used by outerVarsFromRow.

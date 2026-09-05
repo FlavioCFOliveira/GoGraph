@@ -38,7 +38,7 @@ import (
 // run in parallel, as the last writer wins. The engine itself never calls
 // SetStatementNow.
 
-//nolint:gochecknoglobals // process-global statement-now; replaceable via Set/Clear
+// Process-global statement-now; replaceable via SetStatementNow/ClearStatementNow.
 var statementNow atomic.Pointer[time.Time]
 
 // SetStatementNow installs t as the statement-frozen "now" for every

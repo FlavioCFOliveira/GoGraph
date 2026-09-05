@@ -188,7 +188,7 @@ func TestStatsRegime_RecoveredContract(t *testing.T) {
 	if err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
-	for res.Next() { //nolint:revive // drain
+	for res.Next() { // drain
 	}
 	if err := res.Err(); err != nil {
 		t.Fatalf("refresh drain: %v", err)

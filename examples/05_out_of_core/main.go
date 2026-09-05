@@ -231,7 +231,7 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 	// allocation, so its size is the in-RAM working set we contrast with the
 	// on-disk adjacency.
 	mem := readMem()
-	rankVecBytes := uint64(len(ranks)) * 8 //nolint:gosec // G115: len is non-negative
+	rankVecBytes := uint64(len(ranks)) * 8 // G115: len is non-negative
 
 	// Rank the live nodes and emit the top-k node ids as deterministic
 	// facts. The ids separate the authorities from the bulk by a wide
@@ -291,10 +291,10 @@ func generate(ctx context.Context, cfg config) (*adjlist.AdjList[uint32, struct{
 	// draws below always have a non-empty in-degree pool to sample.
 	for v := 1; v < m; v++ {
 		for u := 0; u < v; u++ {
-			if err := a.AddEdge(uint32(v), uint32(u), struct{}{}); err != nil { //nolint:gosec // G115: bounded by cfg.nodes
+			if err := a.AddEdge(uint32(v), uint32(u), struct{}{}); err != nil { // G115: bounded by cfg.nodes
 				return nil, fmt.Errorf("AddEdge %d->%d: %w", v, u, err)
 			}
-			copyTargets = append(copyTargets, uint32(u)) //nolint:gosec // G115: u < v <= nodes
+			copyTargets = append(copyTargets, uint32(u)) // G115: u < v <= nodes
 		}
 	}
 
@@ -364,7 +364,7 @@ func topPageRank(ranks []float64, k int) []graph.NodeID {
 		if x == 0 {
 			continue
 		}
-		live = append(live, nodeRank{id: graph.NodeID(i), rank: x}) //nolint:gosec // G115: index is non-negative
+		live = append(live, nodeRank{id: graph.NodeID(i), rank: x}) // G115: index is non-negative
 	}
 	sort.Slice(live, func(i, j int) bool {
 		if live[i].rank != live[j].rank {

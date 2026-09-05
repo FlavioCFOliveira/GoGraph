@@ -147,37 +147,25 @@ func FormatReport(r ProfileReport) string {
 		elapsed: fmt.Sprintf("%.3f", r.ElapsedMs),
 	}
 
-	wName := len(hdrName)
-	wRows := len(hdrRows)
-	wDbHits := len(hdrDbHits)
-	wElapsed := len(hdrElapsed)
+	// Widths are measured in RUNES, not bytes: an Operator cell may carry the
+	// multi-byte tree connectors (└─, ├─, │) when the caller renders a plan tree
+	// into the column, and a byte measurement pads those rows short so the
+	// right-hand border walks left with the tree depth.
+	wName := maxWidth(0, hdrName)
+	wRows := maxWidth(0, hdrRows)
+	wDbHits := maxWidth(0, hdrDbHits)
+	wElapsed := maxWidth(0, hdrElapsed)
 	for _, rr := range rows {
-		if n := len(rr.name); n > wName {
-			wName = n
-		}
-		if n := len(rr.rows); n > wRows {
-			wRows = n
-		}
-		if n := len(rr.dbhits); n > wDbHits {
-			wDbHits = n
-		}
-		if n := len(rr.elapsed); n > wElapsed {
-			wElapsed = n
-		}
+		wName = maxWidth(wName, rr.name)
+		wRows = maxWidth(wRows, rr.rows)
+		wDbHits = maxWidth(wDbHits, rr.dbhits)
+		wElapsed = maxWidth(wElapsed, rr.elapsed)
 	}
 	// Also account for the total row.
-	if n := len(totalRow.name); n > wName {
-		wName = n
-	}
-	if n := len(totalRow.rows); n > wRows {
-		wRows = n
-	}
-	if n := len(totalRow.dbhits); n > wDbHits {
-		wDbHits = n
-	}
-	if n := len(totalRow.elapsed); n > wElapsed {
-		wElapsed = n
-	}
+	wName = maxWidth(wName, totalRow.name)
+	wRows = maxWidth(wRows, totalRow.rows)
+	wDbHits = maxWidth(wDbHits, totalRow.dbhits)
+	wElapsed = maxWidth(wElapsed, totalRow.elapsed)
 
 	sep := fmt.Sprintf("+-%s-+-%s-+-%s-+-%s-+",
 		strings.Repeat("-", wName),

@@ -23,8 +23,8 @@ package expr
 import "github.com/FlavioCFOliveira/GoGraph/cypher/ast"
 
 // evalMapProjection evaluates a [ast.MapProjection] node.
-func evalMapProjection(n *ast.MapProjection, row RowContext, params map[string]Value, reg FunctionRegistry) (Value, error) {
-	subject, err := evalExpr(n.Subject, row, params, reg)
+func evalMapProjection(n *ast.MapProjection, row RowContext, st *evalCallState, params map[string]Value, reg FunctionRegistry) (Value, error) {
+	subject, err := evalExpr(n.Subject, row, st, params, reg)
 	if err != nil {
 		return nil, err
 	}
@@ -71,7 +71,7 @@ func evalMapProjection(n *ast.MapProjection, row RowContext, params map[string]V
 		}
 
 		// key: expr  or  variable reference (key == "").
-		v, err := evalExpr(item.Value, row, params, reg)
+		v, err := evalExpr(item.Value, row, st, params, reg)
 		if err != nil {
 			return nil, err
 		}

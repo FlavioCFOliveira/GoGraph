@@ -1164,7 +1164,7 @@ func TestCrashInjection_IdempotentReplayWithTorn(t *testing.T) {
 // recovery.Open: "loads any snapshot under dir/snapshot, then replays
 // the WAL at dir/wal applying each op into the live graph".
 //
-//nolint:gocyclo // crash-injection harness: snapshot write + per-boundary truncation + per-iteration recovery
+// crash-injection harness: snapshot write + per-boundary truncation + per-iteration recovery
 func TestCrashInjection_SnapshotThenCrashInWAL(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -1403,7 +1403,7 @@ func TestCrashInjection_DecodePropertyValue_ShortBuffers(t *testing.T) {
 // the success paths. The encoded form matches the txn write path; if
 // either side drifts the round-trip breaks.
 //
-//nolint:gocyclo // table-driven: one branch per PropertyKind
+// table-driven: one branch per PropertyKind
 func TestCrashInjection_DecodePropertyValue_RoundTripAllKinds(t *testing.T) {
 	t.Parallel()
 	knownTime := time.Date(2026, 5, 22, 13, 30, 0, 123, time.UTC)
@@ -1491,7 +1491,7 @@ func encodePropertyValueLike(v lpg.PropertyValue) []byte {
 // trailing key length or value body is short. applyOpCodec must
 // return false and the graph must not carry the partial mutation.
 //
-//nolint:gocyclo // table-driven: one branch per OpKind that carries property data
+// table-driven: one branch per OpKind that carries property data
 func TestCrashInjection_ApplyOpCodec_PropertyShortBuffers(t *testing.T) {
 	t.Parallel()
 	codec := txn.NewStringCodec()

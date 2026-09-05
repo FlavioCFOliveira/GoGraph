@@ -23,13 +23,28 @@ package sim
 //     refused by the post-insert endpoint cross-check left the arc physically
 //     in the slot, and the next committed append on the node published it
 //     (rmp #2446 family; fix in graph/lpg addEdgeInfo/addEdgeHInfo).
+//   - TestMVCCRegression_DetachDeleteDoesNotWipeAConcurrentAppend — seed 29:
+//     the BULK edge removal `DETACH DELETE` uses took no adjacency claim, so it
+//     wiped a concurrent transaction's in-flight arc and then restored it from
+//     its own undo journal — a rolled-back edge surviving both rollbacks
+//     (rmp #2694; fix in graph/lpg removeAllEdgesFromInfo and the cypher
+//     mutator adapters).
+//   - TestMVCCRegression_RefusedRetirementPhasesStrandNothing — the SYMMETRY
+//     question rmp #2725 was asked to answer: a DETACH DELETE retires an arc, a
+//     label, a property and the node record in four separate phases, each of
+//     which can be REFUSED, so the arc leak could have a twin on any of the
+//     other three (rmp #2725).
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"sort"
 	"testing"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 )
 
@@ -364,4 +379,336 @@ func TestMVCCRegression_RefusedEdgeCreateLeavesNoArc(t *testing.T) {
 	if total != 1 || ab != 0 || ac != 1 {
 		t.Fatalf("refused edge create leaked an arc: total=%d a->b=%d a->c=%d, want 1,0,1", total, ab, ac)
 	}
+}
+
+// TestMVCCRegression_DetachDeleteDoesNotWipeAConcurrentAppend is seed 29 of the
+// multi-session mode, at the two tick counts whose terminal drain exposed it
+// (rmp #2694).
+//
+// The drain rolls back every still-open transaction in session order, and this
+// seed leaves two of them interleaved on the same node: session 0 holds an
+// uncommitted `CREATE (a)-[:KNOWS]->(b)` out of `mv-s0-m2`, session 2 an
+// uncommitted `DETACH DELETE` of that same node. Rolling them back in that
+// order left the created edge in the graph:
+//
+//	[ACID_CONSISTENCY] tick=60 op="edge count": edge-count mismatch: oracle=3 engine=4
+//
+// The mechanism, and the four-way outcome matrix that shows it is not confined
+// to rollback, are pinned at the layers that own it —
+// graph/lpg TestConflict_AdjacencyBulkRemovalRefusedByConcurrentAppend and
+// cypher TestMVCCDetachDeleteRollback_DoesNotResurrectPeerArc. This test is the
+// end-to-end witness: it is the schedule the DST actually found, and it is what
+// makes the two synthetic reproductions above answerable to a real workload.
+//
+// Both ticks are run because the divergence heals: the seed is clean at 55-59
+// and again at 62-72, so a sweep that sampled only round numbers would miss it.
+func TestMVCCRegression_DetachDeleteDoesNotWipeAConcurrentAppend(t *testing.T) {
+	for _, ticks := range []int{60, 61} {
+		res, err := RunMVCCSessions(context.Background(),
+			MVCCSessionsConfig{Seed: 29, Ticks: ticks, Sessions: 4})
+		if err != nil {
+			t.Fatalf("ticks=%d: %v", ticks, err)
+		}
+		if !res.Clean() {
+			t.Errorf("ticks=%d: violations=%v foldErrors=%v",
+				ticks, res.Violations, res.FoldErrors)
+		}
+		// Non-vacuity: the schedule must actually have rolled transactions back
+		// and committed others, or "clean" would mean "nothing happened". These
+		// are the counters the defect was recorded with.
+		if res.TxCommitted != 11 || res.TxRolledBack != 3 {
+			t.Errorf("ticks=%d: committed=%d rolledBack=%d, want 11 and 3 — the "+
+				"schedule this regression pins has changed and the test no "+
+				"longer exercises the interleaving it was written for",
+				ticks, res.TxCommitted, res.TxRolledBack)
+		}
+	}
+}
+
+// TestMVCCRegression_SplitLifePairKeepsNodeVisibleToOldReaders is the
+// SPLIT-PAIR case #2445 left uncovered (rmp #2724, diagnosed in #2723).
+//
+// #2445's own regression above stops at the rollback, and that is exactly the
+// blind spot: the life store is one record deep per direction, a published
+// rollback of a DETACH DELETE leaves a died+born pair over the node's committed
+// birth, and `aliveBefore(born, died) = died.seq < born.seq` reads that pair
+// correctly only while BOTH halves still belong to the rolled-back transaction.
+// A later, unrelated delete replaces the died half; the surviving pair then
+// reads born-then-died, and every reader older than the rollback loses a node
+// whose birth committed before it began.
+//
+// The two arms differ in ONE factor — whether the doomed delete rolls back
+// before or after the reader pins its snapshot — because that factor is what
+// decides whether the reader's snapshot predates the overwritten birth. The
+// second delete never commits: a reader that loses the node while it is merely
+// PENDING has taken a dirty read as well as a moved snapshot.
+func TestMVCCRegression_SplitLifePairKeepsNodeVisibleToOldReaders(t *testing.T) {
+	for _, arm := range []struct {
+		name         string
+		rollbackable bool // roll the doomed delete back BEFORE the reader pins
+	}{
+		{"doomed rollback before the reader pins", true},
+		{"doomed rollback after the reader pins", false},
+	} {
+		t.Run(arm.name, func(t *testing.T) {
+			store := regressionStore(t)
+			eng := store.Engine()
+			seeder := eng.NewSession()
+			mustExecCommit(t, seeder, "CREATE (n:Person {name:'x', age:1})", nil)
+			mustExecCommit(t, seeder, "CREATE (n:Person {name:'y', age:2})", nil)
+
+			doomed, err := eng.NewSession().BeginTx(t.Context())
+			if err != nil {
+				t.Fatalf("begin doomed: %v", err)
+			}
+			if _, err := doomed.ExecAny("MATCH (n:Person {name:'x'}) DETACH DELETE n", nil); err != nil {
+				t.Fatalf("doomed delete: %v", err)
+			}
+			if arm.rollbackable {
+				if err := doomed.Rollback(); err != nil {
+					t.Fatalf("doomed rollback: %v", err)
+				}
+			}
+
+			reader, err := eng.NewSession().BeginReadTx(t.Context())
+			if err != nil {
+				t.Fatalf("begin reader: %v", err)
+			}
+			defer func() { _ = reader.Rollback() }()
+			if got := txCountScalar(t, reader, "MATCH (n:Person) RETURN count(n)"); got != 2 {
+				t.Fatalf("reader at BEGIN: count=%d, want 2", got)
+			}
+			if !arm.rollbackable {
+				if err := doomed.Rollback(); err != nil {
+					t.Fatalf("doomed rollback: %v", err)
+				}
+			}
+			if got := txCountScalar(t, reader, "MATCH (n:Person) RETURN count(n)"); got != 2 {
+				t.Fatalf("reader after the doomed rollback: count=%d, want 2", got)
+			}
+
+			// The unrelated later delete. It replaces the died half of the pair
+			// the rollback left behind; the reader must not notice, whether it
+			// is pending or committed.
+			second, err := eng.NewSession().BeginTx(t.Context())
+			if err != nil {
+				t.Fatalf("begin second delete: %v", err)
+			}
+			defer func() { _ = second.Rollback() }()
+			if _, err := second.ExecAny("MATCH (n:Person {name:'x'}) DETACH DELETE n", nil); err != nil {
+				t.Fatalf("second delete: %v", err)
+			}
+			if got := txCountScalar(t, reader, "MATCH (n:Person) RETURN count(n)"); got != 2 {
+				t.Fatalf("reader lost a committed node to a PENDING unrelated delete "+
+					"(dirty read): count=%d, want 2", got)
+			}
+			if err := second.Commit(); err != nil {
+				t.Fatalf("commit second delete: %v", err)
+			}
+			if got := txCountScalar(t, reader, "MATCH (n:Person) RETURN count(n)"); got != 2 {
+				t.Fatalf("reader lost a committed node to a COMMITTED unrelated delete "+
+					"(snapshot moved): count=%d, want 2", got)
+			}
+		})
+	}
+}
+
+// TestMVCCRegression_RefusedRetirementPhasesStrandNothing answers the symmetry
+// question rmp #2725 was asked alongside the arc leak: the phases of a
+// `DETACH DELETE` are structurally alike, so can the ordering that stranded an
+// ARC also strand a node's PROPERTY, its LABEL, or the node record itself?
+//
+// It can not, and the arms below are what establishes that rather than
+// inspection. Each puts a peer's PENDING write on the store the retiring phase
+// must claim, so the phase is refused; then the two transactions are rolled
+// back in the order that stranded the arc — peer FIRST, refused deleter SECOND
+// — which is the order in which a wrongly-journalled inverse has nothing left
+// in front of it.
+//
+// # Why the shape is present but the defect is not
+//
+// The journalling shape IS the same: every one of these adapters gates its
+// inverse on a PRESENT-STATE probe rather than on the write having applied
+// ([lpgMutatorAdapter.RemoveNodeLabel] on hadLabel, DelNodeProperty on had,
+// RemoveNode on wasLive). What differs is the REPRESENTATION the inverse writes
+// into. The node property, node label and node life stores all keep a per-object
+// version chain, so an inverse replayed by a doomed transaction stays
+// attributable to it, resolves as aborted for every reader, and is withdrawn by
+// the abort machinery. The adjacency does not: an entry is an immutable snapshot
+// built from the node's current slot, so a LATER transaction's entry physically
+// EMBEDS whatever the slot held — including an aborted transaction's arc — and
+// publishes it under its own visible instant. That asymmetry is the same one
+// rmp #2445 recorded in graph/lpg/mvcc_adjversion.go, and it is why the arc
+// could be laundered into a committed version and the other three cannot.
+//
+// So this test is a GUARD, not a reproduction: nothing here failed at
+// `cd91a8bc`. It fails the day a retirement store gains a representation that
+// can launder an aborted write, or an inverse starts creating an object rather
+// than restoring a value.
+//
+// The PHYSICAL store is read as well as the engine, because that is precisely
+// where the arc leak was real while every Cypher read still looked clean.
+func TestMVCCRegression_RefusedRetirementPhasesStrandNothing(t *testing.T) {
+	for _, arm := range []struct {
+		name     string
+		peer     string // A's pending statement, which claims the store
+		retire   string // B's retiring statement, refused by that claim
+		query    string // what the engine must report afterwards
+		want     string
+		wantAge  int64  // the physical property value that must survive
+		wantLbls string // the physical label set that must survive
+	}{
+		{
+			name:     "property/REMOVE",
+			peer:     "MATCH (n:Person {name:'x'}) SET n.age = 99",
+			retire:   "MATCH (n:Person {name:'x'}) REMOVE n.age",
+			query:    "MATCH (n:Person {name:'x'}) RETURN n.age",
+			want:     "[1]",
+			wantAge:  1,
+			wantLbls: "[Person]",
+		},
+		{
+			name:     "label/REMOVE",
+			peer:     "MATCH (n:Person {name:'x'}) SET n:Marked",
+			retire:   "MATCH (n:Person {name:'x'}) REMOVE n:Person",
+			query:    "MATCH (n {name:'x'}) RETURN labels(n)",
+			want:     `[["Person"]]`,
+			wantAge:  1,
+			wantLbls: "[Person]",
+		},
+		{
+			name:     "property/DETACH DELETE",
+			peer:     "MATCH (n:Person {name:'x'}) SET n.age = 99",
+			retire:   "MATCH (n:Person {name:'x'}) DETACH DELETE n",
+			query:    "MATCH (n:Person {name:'x'}) RETURN n.age",
+			want:     "[1]",
+			wantAge:  1,
+			wantLbls: "[Person]",
+		},
+		{
+			name:     "label/DETACH DELETE",
+			peer:     "MATCH (n:Person {name:'x'}) SET n:Marked",
+			retire:   "MATCH (n:Person {name:'x'}) DETACH DELETE n",
+			query:    "MATCH (n {name:'x'}) RETURN labels(n)",
+			want:     `[["Person"]]`,
+			wantAge:  1,
+			wantLbls: "[Person]",
+		},
+		{
+			name:     "node/DETACH DELETE",
+			peer:     "MATCH (n:Person {name:'x'}) SET n.age = 99",
+			retire:   "MATCH (n:Person {name:'x'}) DETACH DELETE n",
+			query:    "MATCH (n:Person) RETURN n.name",
+			want:     `["x" "y"]`,
+			wantAge:  1,
+			wantLbls: "[Person]",
+		},
+	} {
+		t.Run(arm.name, func(t *testing.T) {
+			store := regressionStore(t)
+			eng := store.Engine()
+			seeder := eng.NewSession()
+			mustExecCommit(t, seeder, "CREATE (n:Person {name:'x', age:1})", nil)
+			mustExecCommit(t, seeder, "CREATE (n:Person {name:'y', age:2})", nil)
+
+			peer, err := eng.NewSession().BeginTx(t.Context())
+			if err != nil {
+				t.Fatalf("begin peer: %v", err)
+			}
+			if _, err := peer.ExecAny(arm.peer, nil); err != nil {
+				t.Fatalf("peer write: %v", err)
+			}
+			deleter, err := eng.NewSession().BeginTx(t.Context())
+			if err != nil {
+				t.Fatalf("begin deleter: %v", err)
+			}
+			if res, err := deleter.ExecAny(arm.retire, nil); err == nil {
+				for res.Next() {
+				}
+				_ = res.Close()
+			}
+			// Peer FIRST, refused deleter SECOND.
+			if err := peer.Rollback(); err != nil {
+				t.Fatalf("peer rollback: %v", err)
+			}
+			// NON-VACUITY: the deleter must actually have been REFUSED. One that
+			// simply applied its retirement and undid it would exercise nothing.
+			if err := deleter.Commit(); err == nil {
+				t.Fatal("the retiring transaction COMMITTED; this arm does not " +
+					"exercise a refused retirement phase and proves nothing")
+			}
+
+			if got := regressionRows(t, eng, arm.query); got != arm.want {
+				t.Errorf("engine reports %s, want %s", got, arm.want)
+			}
+			key := regressionKeyOfNamed(t, store, "x")
+			if v, ok := store.Graph().GetNodeProperty(key, "age"); !ok {
+				t.Errorf("physical store lost x.age entirely")
+			} else if n, isInt := v.Int64(); !isInt || n != arm.wantAge {
+				t.Errorf("physical x.age = %v, want %d — a refused retirement "+
+					"stranded a value in the store it never wrote to", v, arm.wantAge)
+			}
+			if got := fmt.Sprint(store.Graph().NodeLabels(key)); got != arm.wantLbls {
+				t.Errorf("physical labels(x) = %s, want %s", got, arm.wantLbls)
+			}
+		})
+	}
+}
+
+// regressionRows renders one projected column of an engine query, as a string,
+// so an arm can compare against a literal.
+// regressionRows renders a query's rows in a SORTED, order-independent form.
+//
+// # Why sorted (rmp #2751)
+//
+// None of these queries carries an ORDER BY, and openCypher does not specify row
+// order without one, so comparing the emission order against a literal tests
+// something the specification does not guarantee. It bites in both directions:
+// the multi-row arm read ["y" "x"] under `make ci`'s cover gate while passing 30
+// times out of 30 in isolation, and — the worse half — an assertion that happens
+// to match one ordering says nothing about the SET that came back.
+//
+// Sorting is deliberately not the same as dropping the check. These arms exist
+// to prove a refused retirement strands nothing, so the property is the
+// multiset: a MISSING row still shortens the result and a DUPLICATE still
+// lengthens it, and both still fail. Only the permutation is forgiven.
+func regressionRows(t *testing.T, eng *cypher.Engine, q string) string {
+	t.Helper()
+	res, err := eng.Run(context.Background(), q, nil)
+	if err != nil {
+		t.Fatalf("query %q: %v", q, err)
+	}
+	var out []string
+	for res.Next() {
+		out = append(out, res.ValueAt(0).String())
+	}
+	if err := res.Err(); err != nil {
+		t.Fatalf("query %q drain: %v", q, err)
+	}
+	_ = res.Close()
+	sort.Strings(out)
+	return fmt.Sprint(out)
+}
+
+// regressionKeyOfNamed resolves the lpg node key carrying name, so a test can
+// read the PHYSICAL stores. The Cypher layer mints its own opaque node keys, so
+// the graph cannot be addressed by the workload's own names.
+func regressionKeyOfNamed(t *testing.T, store *SimStore, name string) string {
+	t.Helper()
+	key := ""
+	store.Graph().AdjList().Mapper().Walk(func(_ graph.NodeID, k string) bool {
+		v, ok := store.Graph().GetNodeProperty(k, "name")
+		if !ok {
+			return true
+		}
+		if s, isStr := v.String(); isStr && s == name {
+			key = k
+			return false
+		}
+		return true
+	})
+	if key == "" {
+		t.Fatalf("no lpg node carries name=%q", name)
+	}
+	return key
 }

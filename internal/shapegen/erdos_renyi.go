@@ -129,7 +129,7 @@ func (s erdosRenyiBase) Build(cfg adjlist.Config) (*lpg.Graph[int, int64], error
 // seed-to-output map is a pure function of the (n, pPercent, seed)
 // tuple.
 //
-//nolint:gosec,gocritic // G404: math/rand/v2 is the pinned PRNG for catalogue determinism; paramTypeCombine: signature is pinned by the brief (n int, pPercent int, seed uint64).
+//nolint:gocritic // G404: math/rand/v2 is the pinned PRNG for catalogue determinism; paramTypeCombine: signature is pinned by the brief (n int, pPercent int, seed uint64).
 func ErdosRenyiNP(n int, pPercent int, seed uint64) Shape[int, int64] {
 	if n < 0 || n > 1000 {
 		panic(fmt.Sprintf("shapegen: ErdosRenyiNP requires 0 <= n <= 1000, got %d", n))
@@ -226,7 +226,7 @@ func buildErdosRenyiNP(g *lpg.Graph[int, int64], n, pPercent int, seed uint64) e
 // without sacrificing uniformity (every m-subset is equally likely
 // by induction on m).
 //
-//nolint:gosec // G404: math/rand/v2 is the pinned PRNG for catalogue determinism; see ErdosRenyiNM godoc.
+// G404: math/rand/v2 is the pinned PRNG for catalogue determinism; see ErdosRenyiNM godoc.
 func ErdosRenyiNM(n, m int, seed uint64) Shape[int, int64] {
 	if n < 0 || n > 1000 {
 		panic(fmt.Sprintf("shapegen: ErdosRenyiNM requires 0 <= n <= 1000, got %d", n))

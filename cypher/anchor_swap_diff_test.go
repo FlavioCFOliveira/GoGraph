@@ -33,7 +33,7 @@ func runWrite(t *testing.T, e *Engine, q string) {
 	if err != nil {
 		t.Fatalf("RunInTx(%q): %v", q, err)
 	}
-	for res.Next() { //nolint:revive // intentional full drain
+	for res.Next() { // intentional full drain
 	}
 	if err := res.Err(); err != nil {
 		t.Fatalf("Err(%q): %v", q, err)

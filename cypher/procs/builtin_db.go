@@ -74,7 +74,7 @@ type BuiltinSources struct {
 // db.relationshipTypes() and db.propertyKeys(); see [BuiltinSources]. Each
 // closure may be nil, in which case its procedure returns an empty set.
 //
-//nolint:gocritic // hugeParam: BuiltinSources is small and passed by value intentionally
+// hugeParam: BuiltinSources is small and passed by value intentionally
 func RegisterBuiltins(reg *Registry, mgr *index.Manager, src BuiltinSources) {
 	mustRegister(reg, dbIndexes(mgr))
 	mustRegister(reg, dbConstraints(src.ListConstraints))

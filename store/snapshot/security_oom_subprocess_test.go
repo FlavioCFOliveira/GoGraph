@@ -172,7 +172,7 @@ func secStoreWriteManifest(dir string, csr, labels []byte) error {
 			{Name: LabelsFile, Size: int64(len(labels)), CRC32C: secStoreCRC(labels)},
 		},
 	}
-	f, err := os.OpenFile(filepath.Join(dir, "manifest.json"), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	f, err := os.OpenFile(filepath.Join(dir, "manifest.json"), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600) //nolint:gosec // G304: dir is this test's temp dir and the filename is a literal.
 	if err != nil {
 		return err
 	}

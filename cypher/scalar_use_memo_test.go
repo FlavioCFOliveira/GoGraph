@@ -294,7 +294,7 @@ func TestNodeScalarUseMemoConcurrentExecutions(t *testing.T) {
 					t.Errorf("Run: %v", err)
 					return
 				}
-				for res.Next() { //nolint:revive // intentional full drain
+				for res.Next() { // intentional full drain
 				}
 				if err := res.Err(); err != nil {
 					t.Errorf("Err: %v", err)

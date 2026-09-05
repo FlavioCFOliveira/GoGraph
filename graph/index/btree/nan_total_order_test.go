@@ -31,24 +31,23 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/index"
 )
 
-// sortedInvariantHolds reports whether the B+ tree's leaf chain is
-// strictly ascending under the [cmp.Compare] total order — the
-// precondition every lower-bound search in this package depends on. It
-// walks the leaves low→high (the same order Serialize and Range use) and
-// checks each key against the previous one across leaf boundaries.
+// sortedInvariantHolds reports whether the B+ tree's in-order key
+// sequence is strictly ascending under the [cmp.Compare] total order —
+// the precondition every lower-bound search in this package depends on.
+// It walks the published snapshot low→high with the descent cursor (the
+// same order Serialize and Range use, and the replacement for the leaf
+// chain the pre-COW tree maintained) and checks each key against the
+// previous one across leaf boundaries.
 func sortedInvariantHolds[V cmp.Ordered](i *Index[V]) bool {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
 	var prev V
 	hasPrev := false
-	for l := i.tree.first; l != nil; l = l.next {
-		for k := range l.keys {
-			if hasPrev && cmp.Compare(prev, l.keys[k]) >= 0 {
-				return false
-			}
-			prev = l.keys[k]
-			hasPrev = true
+	var c cursor[V]
+	for c.seekFirst(i.tree.Load()); c.valid(); c.next() {
+		if hasPrev && cmp.Compare(prev, c.key()) >= 0 {
+			return false
 		}
+		prev = c.key()
+		hasPrev = true
 	}
 	return true
 }
@@ -219,7 +218,7 @@ func TestInsert_SortedInvariant_Rapid(t *testing.T) {
 			} else {
 				v = rapid.Float64().Draw(rt, "v")
 			}
-			node := graph.NodeID(uint64(op)) //nolint:gosec // op ∈ [0, 64)
+			node := graph.NodeID(uint64(op)) // op ∈ [0, 64)
 			idx.Insert(v, node)
 			if !sortedInvariantHolds(idx) {
 				rt.Fatalf("sorted invariant broken after Insert(%v, %d)", v, node)
@@ -250,7 +249,7 @@ func craftFloat64Payload(t *testing.T, keys []float64) []byte {
 		_ = binary.Write(&body, binary.LittleEndian, uint32(8))
 		_ = binary.Write(&body, binary.LittleEndian, math.Float64bits(k))
 		_ = binary.Write(&body, binary.LittleEndian, uint64(1))
-		_ = binary.Write(&body, binary.LittleEndian, uint64(i+1)) //nolint:gosec // tiny test corpus
+		_ = binary.Write(&body, binary.LittleEndian, uint64(i+1)) // tiny test corpus
 	}
 	checksum := crc32.Checksum(body.Bytes(), castagnoli)
 	var payload bytes.Buffer
@@ -337,7 +336,7 @@ func BenchmarkIndex_CardinalityFloat64(b *testing.B) {
 	nodes := make([]graph.NodeID, n)
 	for i := range values {
 		values[i] = float64(i)
-		nodes[i] = graph.NodeID(uint64(i)) //nolint:gosec // i < 1e6
+		nodes[i] = graph.NodeID(uint64(i)) // i < 1e6
 	}
 	idx := New[float64]()
 	if err := idx.BulkLoad(values, nodes); err != nil {
@@ -358,7 +357,7 @@ func BenchmarkIndex_CardinalityString(b *testing.B) {
 	nodes := make([]graph.NodeID, n)
 	for i := range values {
 		values[i] = "user-" + string(rune('a'+i%26)) + "-" + itoaPad(i)
-		nodes[i] = graph.NodeID(uint64(i)) //nolint:gosec // i < 1e5
+		nodes[i] = graph.NodeID(uint64(i)) // i < 1e5
 	}
 	idx := New[string]()
 	if err := idx.BulkLoad(values, nodes); err != nil {

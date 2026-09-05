@@ -709,7 +709,7 @@ func TestEval_FunctionInvocation(t *testing.T) {
 	reg := &singleFnReg{
 		name: "double",
 		fn: func(args []expr.Value) (expr.Value, error) {
-			n := args[0].(expr.IntegerValue) //nolint:forcetypeassert // test only
+			n := args[0].(expr.IntegerValue) // test only
 			return expr.IntegerValue(int64(n) * 2), nil
 		},
 	}

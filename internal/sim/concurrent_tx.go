@@ -46,15 +46,30 @@ const (
 	tmplWireCounterSet  = "MATCH (n:Person {name:$name}) SET n.val=$v"
 )
 
-// wireCounterName names one shared contended counter.
-func wireCounterName(k int) string { return fmt.Sprintf("mv-wire-counter-%d", k) }
-
 // seedContendedCounter ensures one shared counter node exists, over a fresh
 // setup connection, committed before the contended connections spawn. It is
 // IDEMPOTENT — a counter that already exists (a multi-cycle scenario reusing
 // one durable store) is left untouched — and reports whether it created the
 // node, so the caller's eventual-consistency accounting stays exact.
-func seedContendedCounter(srv *SimServer, k int) (created bool, err error) {
+//
+// # Why the check-then-CREATE is safe here, and only here
+//
+// The MATCH and the CREATE are two separate autocommit statements with no
+// atomicity between them, so two callers seeding the SAME name at the same time
+// both see count 0 and both create. That is not a hypothetical: measured on the
+// pre-#2729 fixed name, eight concurrent runs left three nodes answering counter
+// 0 and two answering counter 1, after which the read half of every
+// read-modify-write failed its single-row contract and all 192 contended
+// transactions failed with none committed — silently, because a counter no
+// statement can read also reports no lost update.
+//
+// The seeding stays a check-then-CREATE, and is sound, because a [counterSpace]
+// is leased to exactly one run at a time (see contended_counter_space.go): no
+// second seeder for the same name exists to race with. Widening the name back to
+// something two runs can share reinstates the race, which is why
+// [TestSeedContendedCounter_ConcurrentSeedingLeavesOneNode] counts the nodes
+// each counter name answers.
+func seedContendedCounter(srv *SimServer, space counterSpace, k int) (created bool, err error) {
 	c, err := srv.Dial()
 	if err != nil {
 		return false, err
@@ -77,7 +92,7 @@ func seedContendedCounter(srv *SimServer, k int) (created bool, err error) {
 		return records, nil
 	}
 	records, err := run("MATCH (n:Person {name:$name}) RETURN count(n)",
-		map[string]any{"name": wireCounterName(k)})
+		map[string]any{"name": space.name(k)})
 	if err != nil {
 		return false, err
 	}
@@ -87,7 +102,7 @@ func seedContendedCounter(srv *SimServer, k int) (created bool, err error) {
 		}
 	}
 	if _, err := run("CREATE (n:Person {name:$name, val:$v})",
-		map[string]any{"name": wireCounterName(k), "v": int64(0)}); err != nil {
+		map[string]any{"name": space.name(k), "v": int64(0)}); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -116,12 +131,12 @@ const (
 // Returns true when the connection must stop (transport error): the open
 // transaction's outcome is then AMBIGUOUS — the server may or may not have
 // processed what was in flight — and is deliberately never asserted.
-func txWriterOp(client *WireClient, seed *Seed, uniq uint64, op int, contended bool, contendedCounters int, c *counters, wl *writerLog) (stop bool) {
+func txWriterOp(client *WireClient, seed *Seed, uniq uint64, op int, contended bool, space counterSpace, c *counters, wl *writerLog) (stop bool) {
 	wl.txIssued++
 	rollback := seed.Float64() < 0.10
 	counter := 0
-	if contended && contendedCounters > 0 {
-		counter = seed.IntN(contendedCounters)
+	if contended && space.n > 0 {
+		counter = seed.IntN(space.n)
 	}
 	nMarkers := 1 + seed.IntN(3)
 	markers := make([]string, 0, nMarkers)
@@ -159,7 +174,7 @@ func txWriterOp(client *WireClient, seed *Seed, uniq uint64, op int, contended b
 		// The read half of the read-modify-write: the value this transaction's
 		// snapshot serves. A concurrent increment committed after BEGIN makes
 		// the write-back below a lost update, which the engine must refuse.
-		v, outcome, stop := txReadCounter(client, counter)
+		v, outcome, stop := txReadCounter(client, space, counter)
 		if outcome != txOutcomeCommitted {
 			refuse(outcome)
 			if outcome == txOutcomeConflicted || outcome == txOutcomeFailed {
@@ -168,7 +183,7 @@ func txWriterOp(client *WireClient, seed *Seed, uniq uint64, op int, contended b
 			return stop
 		}
 		if outcome, stop := txStatement(client, tmplWireCounterSet,
-			map[string]any{"name": wireCounterName(counter), "v": v + 1}); outcome != txOutcomeCommitted {
+			map[string]any{"name": space.name(counter), "v": v + 1}); outcome != txOutcomeCommitted {
 			refuse(outcome)
 			if outcome == txOutcomeConflicted || outcome == txOutcomeFailed {
 				return txReset(client, c)
@@ -241,8 +256,8 @@ func txStatement(client *WireClient, query string, params map[string]any) (txOut
 
 // txReadCounter reads the contended counter inside the open transaction and
 // returns its value.
-func txReadCounter(client *WireClient, k int) (int64, txOutcome, bool) {
-	resp, err := client.Run(tmplWireCounterRead, map[string]any{"name": wireCounterName(k)})
+func txReadCounter(client *WireClient, space counterSpace, k int) (int64, txOutcome, bool) {
+	resp, err := client.Run(tmplWireCounterRead, map[string]any{"name": space.name(k)})
 	if err != nil {
 		return 0, txOutcomeAmbiguous, true
 	}
@@ -314,7 +329,7 @@ func txReset(client *WireClient, c *counters) (stop bool) {
 // committed transaction), every refused marker absent (a hit is a phantom —
 // a refused transaction that left a trace), and each contended counter's
 // final value (compared by the caller against the acknowledged increments).
-func verifyTxQuiescence(srv *SimServer, acked, refused []string, contendedCounters int) (missing, phantom int64, finals []int64, err error) {
+func verifyTxQuiescence(srv *SimServer, acked, refused []string, space counterSpace) (missing, phantom int64, finals []int64, err error) {
 	c, err := srv.Dial()
 	if err != nil {
 		return 0, 0, nil, err
@@ -358,9 +373,9 @@ func verifyTxQuiescence(srv *SimServer, acked, refused []string, contendedCounte
 			phantom++
 		}
 	}
-	finals = make([]int64, contendedCounters)
-	for k := 0; k < contendedCounters; k++ {
-		if _, err := c.Run(tmplWireCounterRead, map[string]any{"name": wireCounterName(k)}); err != nil {
+	finals = make([]int64, space.n)
+	for k := 0; k < space.n; k++ {
+		if _, err := c.Run(tmplWireCounterRead, map[string]any{"name": space.name(k)}); err != nil {
 			return 0, 0, nil, err
 		}
 		records, _, err := c.PullAll()

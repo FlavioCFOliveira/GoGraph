@@ -46,7 +46,7 @@ func runShellGate(t *testing.T, relPath string) (string, error) {
 	if _, err := os.Stat(script); err != nil {
 		t.Fatalf("gate script %s not found: %v", relPath, err)
 	}
-	cmd := exec.Command("bash", script)
+	cmd := exec.Command("bash", script) //nolint:gosec // G204: bash against a script path this test resolved under the repo root.
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }

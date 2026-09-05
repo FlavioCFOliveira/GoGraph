@@ -93,7 +93,7 @@ func BiBFSOn[W any](c, rev *csr.CSR[W], src, dst graph.NodeID) ([]graph.NodeID, 
 // then commits to the global-minimum (forwardDepth + backwardDepth)
 // meet recorded across both expansions.
 //
-//nolint:gocyclo // canonical bidirectional BFS with separate forward/reverse adjacencies
+// canonical bidirectional BFS with separate forward/reverse adjacencies
 func BiBFSOnCtx[W any](ctx context.Context, c, rev *csr.CSR[W], src, dst graph.NodeID) ([]graph.NodeID, error) {
 	defer metrics.Time("search.BiBFSOnCtx").Stop()
 	if uint64(src)+1 >= uint64(len(c.VerticesSlice())) ||

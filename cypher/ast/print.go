@@ -382,7 +382,7 @@ func (p printer) nodePattern(n *NodePattern) string {
 // the node's own String() method is StringLiteral, which is emitted as a
 // double-quoted STRING_LITERAL so that it re-parses correctly.
 //
-//nolint:gocyclo // One branch per concrete Expression type; complexity is structural, not logical.
+// One branch per concrete Expression type; complexity is structural, not logical.
 func (p printer) expr(e Expression) string {
 	if e == nil {
 		return ""

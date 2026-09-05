@@ -58,7 +58,7 @@ func TestLabelBitmapAsOf_CorrectsWhenTheSweepLandsDuringTheClone(t *testing.T) {
 	}
 
 	// The sweep lands between the clone and the post-clone sample.
-	bm := g.labelBitmapAsOfFiltered(nil,
+	bm := g.labelBitmapAsOfFiltered(nil, oneLabel(lid),
 		func() *roaring64.Bitmap {
 			c := g.nodeIdx.Intersect(uint32(lid))
 			g.labelDeltaActive.Store(0)

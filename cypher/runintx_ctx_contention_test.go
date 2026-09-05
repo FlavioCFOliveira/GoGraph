@@ -169,7 +169,7 @@ func TestRunInTx_AcquiresAfterQuiesceEnds(t *testing.T) {
 		if r.err != nil {
 			t.Fatalf("RunInTx err = %v after the quiesce ended, want nil", r.err)
 		}
-		for r.res.Next() { //nolint:revive // drain the (empty) result set
+		for r.res.Next() { // drain the (empty) result set
 		}
 		if err := r.res.Err(); err != nil {
 			t.Fatalf("Result.Err: %v", err)
@@ -212,7 +212,7 @@ func TestRunInTx_CommitsWhileAnotherTransactionIsOpen(t *testing.T) {
 			done <- err
 			return
 		}
-		for res.Next() { //nolint:revive // drain the (empty) result set
+		for res.Next() { // drain the (empty) result set
 		}
 		if rerr := res.Err(); rerr != nil {
 			done <- rerr

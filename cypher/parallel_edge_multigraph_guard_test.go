@@ -41,7 +41,7 @@ func drainQuery(t *testing.T, eng *cypher.Engine, query string) error {
 	if err != nil {
 		return err
 	}
-	for res.Next() { //nolint:revive // intentional drain
+	for res.Next() { // intentional drain
 	}
 	rerr := res.Err()
 	_ = res.Close()

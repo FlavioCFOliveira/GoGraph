@@ -128,6 +128,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/ir"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/parser"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 	cmetrics "github.com/FlavioCFOliveira/GoGraph/internal/metrics"
@@ -222,7 +223,7 @@ type ExplicitTx struct {
 	// context (optionally with a transaction timeout) supplied to BeginTx, so a
 	// cancelled connection or an elapsed tx_timeout interrupts an in-flight Exec
 	// and the writer mutex can never be held indefinitely.
-	ctx context.Context
+	ctx context.Context //nolint:containedctx // the connection context bounding every statement on this handle, as the four lines of comment above specify; it is supplied to BeginTx and never outlives the handle
 
 	// buf accumulates the secondary-index changes of every statement; committed
 	// once on Commit, discarded on Rollback. Shared by all statement mutators.
@@ -611,6 +612,20 @@ func (tx *ExplicitTx) Exec(query string, params map[string]expr.Value) (res *Res
 	if entry.semaErr != nil {
 		return nil, entry.semaErr
 	}
+
+	// EXPLAIN / PROFILE prefix (rmp #2721). Diverted before the mutator is built
+	// and before the statement takes the schema barrier, so an EXPLAIN inside an
+	// open write transaction still executes nothing.
+	//
+	// The plan is built — and, for PROFILE, executed — against its OWN read
+	// snapshot rather than this transaction's uncommitted state, exactly as
+	// [Engine.Explain] and [Engine.Profile] do when called on the same engine. A
+	// prefixed statement therefore does not observe writes this transaction has
+	// not committed. That is a diagnostic reading the committed graph, not a
+	// statement of the transaction.
+	if entry.planMode != parser.PlanModeNone {
+		return tx.eng.runPlanPrefixed(tx.ctx, entry, params, nil)
+	}
 	plan := entry.plan
 	if err := checkParamPresence(entry.paramRefs, params); err != nil {
 		return nil, err
@@ -975,7 +990,7 @@ func (tx *ExplicitTx) release() {
 func (tx *ExplicitTx) recoverExecPanic(errp *error) {
 	if r := recover(); r != nil {
 		if tx.walTx != nil {
-			_ = tx.walTx.Rollback() //nolint:errcheck // rollback error is not actionable while converting a panic
+			_ = tx.walTx.Rollback() // rollback error is not actionable while converting a panic
 		}
 		tx.release()
 		convertQueryPanic(r, errp, "cypher.ExplicitTx.Exec", "cypher.ExplicitTx.Exec.panics")
@@ -983,16 +998,47 @@ func (tx *ExplicitTx) recoverExecPanic(errp *error) {
 }
 
 // recoverFinishPanic is the deferred recover boundary for [ExplicitTx.Commit] and
-// [ExplicitTx.Rollback]. release runs via its own defer (registered after this
-// one, so it executes first on unwind and the writer serialisation is freed
-// regardless); this handler only converts a panic raised during the in-barrier
-// finalisation to an error wrapping [ErrInternalPanic].
+// [ExplicitTx.Rollback]. It rolls the WAL transaction back — exactly as its
+// sibling [ExplicitTx.recoverExecPanic] does — and converts a panic raised
+// during the in-barrier finalisation to an error wrapping [ErrInternalPanic].
+//
+// The WAL rollback is what CLEARS THE STORE'S WRITER REGISTRATION, and nothing
+// else on this path does (rmp #2707). release() does not: its own doc records
+// why — "on a WAL-backed engine the store's writer registration is cleared by
+// walTx's own Commit/Rollback" — and on the panic path neither Commit nor
+// Rollback has run. Without this line [txn.Store]'s in-flight count leaks by
+// one, and [txn.Store.drainInflight] is an UNCANCELLABLE wait for that count to
+// reach zero, so the next [txn.Store.RunUnderCommitLock] — the seam the
+// checkpointer and store.DB.Close both take — never returns: shutdown hangs for
+// ever and the WAL grows unbounded. A leaked containment boundary is worse than
+// the panic it contains.
+//
+// It is safe on EVERY panic instant, which is the property that lets one
+// unconditional call cover the whole finalisation:
+//
+//   - Panic BEFORE the WAL fsync (the reachable window): the transaction is
+//     unfinished, so Rollback discards the buffered ops and calls exitWriter
+//     exactly once. Nothing durable is discarded — no OpCommit marker was ever
+//     fsynced, so recovery would drop those frames anyway.
+//   - Panic AFTER the WAL fsync: [txn.Tx.CommitWALOnly] has already marked the
+//     transaction finished and already called exitWriter through its own defer,
+//     so Rollback short-circuits on the finished flag, returns ErrTxFinished,
+//     and does NOT decrement the count a second time. A durable commit is never
+//     undone here: Rollback "discards buffered ops without touching the WAL".
+//
+// release is NOT called here, and must not be: it runs via its own defer,
+// registered AFTER this one at both call sites, so on unwind it executes FIRST
+// (defers are LIFO) and the transaction is already finished by the time this
+// handler runs.
 //
 // errp must be a pointer for the same named-return reason as [recoverExecPanic].
 //
 //nolint:gocritic // ptrToRefParam: errp must be the caller's named-return pointer
 func (tx *ExplicitTx) recoverFinishPanic(errp *error) {
 	if r := recover(); r != nil {
+		if tx.walTx != nil {
+			_ = tx.walTx.Rollback() // rollback error is not actionable while converting a panic
+		}
 		convertQueryPanic(r, errp, "cypher.ExplicitTx.finish", "cypher.ExplicitTx.finish.panics")
 	}
 }

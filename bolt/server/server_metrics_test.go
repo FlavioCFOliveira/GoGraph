@@ -123,7 +123,7 @@ func TestServerMetrics_RejectedConnection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial conn1: %v", err)
 	}
-	defer conn1.Close() //nolint:errcheck
+	defer conn1.Close()
 	_ = conn1.SetDeadline(time.Now().Add(3 * time.Second))
 	boltHandshake(t, conn1)
 
@@ -138,10 +138,10 @@ func TestServerMetrics_RejectedConnection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial conn2: %v", err)
 	}
-	defer conn2.Close() //nolint:errcheck
+	defer conn2.Close()
 	_ = conn2.SetDeadline(time.Now().Add(2 * time.Second))
 	var buf [4]byte
-	_, _ = io.ReadFull(conn2, buf[:]) //nolint:errcheck // expect EOF/typed close on the rejected connection
+	_, _ = io.ReadFull(conn2, buf[:]) // expect EOF/typed close on the rejected connection
 
 	if !waitFor(func() bool { return probe.get("bolt.server.conn.rejected") >= 1 }, 2*time.Second) {
 		t.Fatalf("bolt.server.conn.rejected = %d, want >= 1 after a connection was refused", probe.get("bolt.server.conn.rejected"))
@@ -149,8 +149,8 @@ func TestServerMetrics_RejectedConnection(t *testing.T) {
 
 	// Close both connections and verify the live-connection gauge drains to zero
 	// (every accepted connection's goroutine exited and incremented closed).
-	_ = conn1.Close() //nolint:errcheck
-	_ = conn2.Close() //nolint:errcheck
+	_ = conn1.Close()
+	_ = conn2.Close()
 	if !waitFor(func() bool { return probe.connActive() == 0 }, 3*time.Second) {
 		t.Fatalf("live-connection gauge (accepted − closed) = %d, want 0 after all connections closed; accepted=%d closed=%d",
 			probe.connActive(), probe.get("bolt.server.conn.accepted"), probe.get("bolt.server.conn.closed"))

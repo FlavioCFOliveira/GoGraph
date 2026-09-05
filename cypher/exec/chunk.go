@@ -2,10 +2,8 @@ package exec
 
 import (
 	"fmt"
-	"sync"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
-	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
 // Chunk is a column-major (struct-of-arrays) execution batch, the foundation
@@ -16,10 +14,24 @@ import (
 // []bool) so that later phases can scan them without interface dispatch and box
 // only at the sink ([Chunk.BoxCell]/[Chunk.BoxRow]).
 //
-// This type is purely additive: as of its introduction NO operator is wired to
-// it. It lands the layout, its API, and its allocation discipline behind the
-// existing [Operator] interface so later phases can migrate operators onto it
-// without changing observable behaviour.
+// The layout sits behind the existing [Operator] interface as the optional
+// [ChunkProducer] capability, so it is additive at the interface: a consumer that
+// does not ask a producer for a Chunk still drains it row-at-a-time via
+// [Operator.Next], with identical observable behaviour.
+//
+// # Operators wired to a Chunk
+//
+// Producing one (they implement [ChunkProducer]): [AllNodesScan] (scan_all.go),
+// [NodeByLabelScan] (scan_label.go), the columnar Expand (expand.go),
+// [ColumnarFilter], [ColumnarProject], [ColumnarLimit] and [ColumnarHashJoin].
+// The profiling wrapper (profile.go) re-exposes a wrapped child's ChunkProducer
+// rather than hiding it, so profiling does not demote a plan to the row path.
+//
+// Consuming one: [EagerAggregation]'s chunk-input path, whose kernels
+// (agg_column_kernel.go) scatter-accumulate a whole column unboxed;
+// [CountRows], which counts a batch's rows without boxing any of them; and the
+// result sink, which reaches a plan's producer through
+// [ResultSet.ColumnarProducer] and boxes only the cells it hands out.
 //
 // # Design (validated with the columnar-db-expert against DuckDB / Apache Arrow)
 //
@@ -68,7 +80,8 @@ import (
 // # Concurrency
 //
 // A Chunk is NOT safe for concurrent use. Each pipeline stage owns its own
-// instance, typically obtained from a [ChunkPool].
+// instance, obtained from that stage's NewOutputChunk (see [ChunkProducer]) and
+// reused across batches via [Chunk.Reset].
 type Chunk struct {
 	cols     []column
 	capacity int
@@ -109,10 +122,19 @@ type column struct {
 	allValid bool       // true while no NULL has been recorded; valid may be unallocated
 }
 
-// DefaultChunkCapacity is the default per-column row capacity of a [Chunk]. It
-// matches [DefaultSlabCapacity] so a Chunk aligns with the pipeline's row-batch
-// boundary; the capacity is a pre-sizing hint (appends beyond it grow the
-// backing), not a hard bound.
+// DefaultChunkCapacity is the default per-column row capacity of a [Chunk].
+//
+// 4096 is this executor's canonical batch stride: it is the same 4096 the
+// [Operator] cancellation contract names — "check ctx.Done() every 4096
+// iterations" — and that every long-running operator loop in this package polls
+// on. Sizing a batch to it makes one full chunk exactly one cancellation-check
+// interval, so a columnar pipeline reaches a cancellation point on the same
+// boundary a row-at-a-time one does.
+//
+// The capacity is a pre-sizing hint, not a hard bound: appends past it grow the
+// backing (see [growTo]), and a producer whose child exposes a sound row-count
+// hint pre-sizes to that hint instead (see [buildBufCap]) rather than reserving
+// 4096 rows it will not use.
 const DefaultChunkCapacity = 4096
 
 // kindToStorage maps a logical [expr.Kind] to the backing that stores it
@@ -1115,44 +1137,4 @@ func BitSet(bitmap []uint64, i int) bool {
 		return false
 	}
 	return bitmap[w]&(uint64(1)<<(uint(i)&63)) != 0
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// ChunkPool
-// ─────────────────────────────────────────────────────────────────────────────
-
-// ChunkPool is a [sync.Pool]-backed pool of [Chunk] instances with a fixed
-// schema (column kinds) and capacity. Operators that process a high volume of
-// batches should obtain chunks from a shared pool to reduce GC pressure.
-//
-// ChunkPool is safe for concurrent use; the [Chunk] instances it vends are not.
-type ChunkPool struct {
-	p sync.Pool
-}
-
-// NewChunkPool creates a ChunkPool that vends Chunks with the given capacity and
-// column kinds. The kinds slice is copied, so the caller may reuse it.
-func NewChunkPool(capacity int, kinds ...expr.Kind) *ChunkPool {
-	kindsCopy := append([]expr.Kind(nil), kinds...)
-	cp := &ChunkPool{}
-	cp.p = sync.Pool{
-		New: func() any {
-			return NewChunk(capacity, kindsCopy...)
-		},
-	}
-	return cp
-}
-
-// Get retrieves a Chunk from the pool, or allocates a new one. A pooled Chunk was
-// [Chunk.Reset] before being returned, so it is empty.
-func (cp *ChunkPool) Get() *Chunk {
-	metrics.IncCounter("cypher.pool.chunk.get", 1)
-	return cp.p.Get().(*Chunk) //nolint:forcetypeassert // pool invariant: New always returns *Chunk
-}
-
-// Put resets c and returns it to the pool.
-func (cp *ChunkPool) Put(c *Chunk) {
-	metrics.IncCounter("cypher.pool.chunk.put", 1)
-	c.Reset()
-	cp.p.Put(c)
 }

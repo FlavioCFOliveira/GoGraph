@@ -24,7 +24,7 @@ func EppsteinKShortest[W Weight](c *csr.CSR[W], src, dst graph.NodeID, k int) []
 	defer metrics.Time("search.EppsteinKShortest").Stop()
 	// This deprecated backwards-compatibility alias intentionally forwards
 	// verbatim to the (now also deprecated) bare entry it renamed.
-	return KShortestPathsLoopless(c, src, dst, k) //nolint:staticcheck // deliberate forward to the deprecated bare entry this alias preserves
+	return KShortestPathsLoopless(c, src, dst, k) // deliberate forward to the deprecated bare entry this alias preserves
 }
 
 // EppsteinKShortestCtx is the deprecated former name of

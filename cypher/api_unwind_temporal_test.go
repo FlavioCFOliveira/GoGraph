@@ -74,10 +74,10 @@ func TestEngine_Unwind_NullList(t *testing.T) {
 
 	res, err := eng.Run(context.Background(), `UNWIND null AS x RETURN x`, nil)
 	if err != nil {
-		// A parser or translator rejection is also a legitimate behaviour for
-		// some dialects; bail early so we don't false-positive.
-		t.Skipf("engine does not accept UNWIND null in this build: %v", err)
-		return
+		// Not a dialect choice to be skipped past: the openCypher TCK covers
+		// UNWIND over null, and GoGraph is held to the full TCK baseline, so a
+		// parser or translator rejection here is a conformance defect (rmp #2709).
+		t.Fatalf("engine rejected `UNWIND null AS x RETURN x`: %v", err)
 	}
 	defer res.Close()
 

@@ -1,4 +1,21 @@
-SHELL := /usr/bin/env bash
+# The recipe shell, and WHY the flags are on SHELL itself and not only on
+# .SHELLFLAGS (rmp #2672). `.SHELLFLAGS` was introduced in GNU Make 3.82, and
+# macOS still ships GNU Make 3.81, where it is silently IGNORED — not warned
+# about, ignored. Under 3.81 that left EVERY recipe line in this file without
+# -e, -u and -o pipefail, and the consequence was measured, not theorised:
+# `test-short` runs `go test ... | pkg_time_budget.sh`, so without pipefail the
+# line reported only the budget script's status, and a run with a genuinely
+# FAILING package (bench/audit352) came back as `MAKE_CI_EXIT=0` with make going
+# on to run test-timing, lint and cover-gate. The gate could not fail on a test
+# failure at all; every red it had ever produced was a cost red.
+#
+# Carrying the flags on SHELL works on BOTH 3.81 and 3.82+, so there is ONE
+# regime instead of two, and it fixes all recipe lines at once rather than
+# leaving each future pipeline to remember `set -o pipefail` for itself.
+# .SHELLFLAGS is kept so a 3.82+ make is still configured the way it documents;
+# the duplicated flags are idempotent in bash. `shell-guard` below PROVES the
+# regime is active rather than trusting it.
+SHELL := /usr/bin/env bash -o pipefail -e -u
 .SHELLFLAGS := -eu -o pipefail -c
 .DEFAULT_GOAL := help
 
@@ -22,6 +39,31 @@ GOLANGCI_LINT_VERSION ?= v2.13.1
 help: ## Show this help
 	@awk 'BEGIN { FS = ":.*##"; printf "Available targets:\n" } /^[a-zA-Z_-]+:.*##/ { printf "  \033[1m%-16s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
+# shell-guard turns the assumption above into an assertion. It is a prerequisite
+# of `ci` and of `test-short`, so the gate cannot run in a regime where a test
+# failure would be invisible. It probes the ACTUAL recipe shell -- `$$-` carries
+# the current option letters and `[[ -o pipefail ]]` reads the option directly --
+# rather than comparing version strings, because the thing that matters is
+# whether the flags are in force, not which make is installed.
+.PHONY: shell-guard
+shell-guard: ## Assert the recipe shell really has -e, -u and -o pipefail (rmp #2672)
+	@missing=""; \
+	 case "$$-" in *e*) ;; *) missing="$$missing -e";; esac; \
+	 case "$$-" in *u*) ;; *) missing="$$missing -u";; esac; \
+	 if [[ -o pipefail ]]; then :; else missing="$$missing -o=pipefail"; fi; \
+	 if [ -n "$$missing" ]; then \
+	   echo "shell-guard: FATAL - the recipe shell is missing:$$missing"; \
+	   echo "  running make: $(MAKE_VERSION)"; \
+	   echo "  .SHELLFLAGS requires GNU Make 3.82+; this Makefile therefore also"; \
+	   echo "  carries the flags on SHELL itself so that 3.81 is covered too."; \
+	   echo "  If you are seeing this, SHELL was changed or overridden. Restore it:"; \
+	   echo "  without -o pipefail, a FAILING 'go test' inside test-short's pipeline"; \
+	   echo "  reports exit 0 and the whole gate silently stops detecting failures"; \
+	   echo "  (rmp #2672)."; \
+	   exit 1; \
+	 fi; \
+	 echo "shell-guard: OK (-e -u -o pipefail active; make $(MAKE_VERSION))"
+
 .PHONY: tidy
 tidy: ## Run go mod tidy
 	$(GO) mod tidy
@@ -29,7 +71,14 @@ tidy: ## Run go mod tidy
 .PHONY: fmt
 fmt: ## Format all Go sources
 	$(GO) fmt $(PACKAGES)
-	@command -v goimports >/dev/null 2>&1 && goimports -w . || echo "goimports not installed; skipping (install: go install golang.org/x/tools/cmd/goimports@latest)"
+# `&& goimports -w . || echo ...` used to report "not installed" when goimports
+# was installed and FAILED, and exit 0 either way. The if/else distinguishes the
+# two: a missing tool is skipped, a failing tool fails the target.
+	@if command -v goimports >/dev/null 2>&1; then \
+	   goimports -w .; \
+	 else \
+	   echo "goimports not installed; skipping (install: go install golang.org/x/tools/cmd/goimports@latest)"; \
+	 fi
 
 .PHONY: vet
 vet: ## Run go vet
@@ -103,9 +152,9 @@ SHORT_TIMEOUT ?= 30m
 # absent from `ci`. A ceiling nothing reads is decoration.
 #
 # SOFT_BUDGET warns; HARD_BUDGET fails the gate. The global ceiling stays at the
-# documented 240 s: it is NOT relaxed to accommodate the two packages above it.
-# Those two get a NAMED, measured override instead, so the accommodation is
-# visible per package and cannot silently cover a third.
+# documented 240 s: it is NOT relaxed to accommodate the three packages above it.
+# Those three get a NAMED, measured override instead, so the accommodation is
+# visible per package and cannot silently cover a fourth.
 SOFT_BUDGET ?= 60
 HARD_BUDGET ?= 240
 
@@ -113,8 +162,9 @@ HARD_BUDGET ?= 240
 # number fitted per package: the WORST in-suite figure ever recorded for that
 # package in docs/test-layers.md, times 1.25, rounded up to the whole minute.
 #
-#   internal/sim  602.9s x 1.25 = 753.6 -> 780
-#   cypher        321.7s x 1.25 = 402.1 -> 420
+#   internal/sim    602.9s x 1.25 = 753.6 -> 780
+#   cypher          321.7s x 1.25 = 402.1 -> 420
+#   bench/audit352  328.7s x 1.25 = 410.9 -> 420
 #
 # Worst-observed, not last-measured: internal/sim has been recorded in-suite at
 # 545.8s, 557.4s, 564.0s and 602.9s on this hardware — a 10.5% spread — so a
@@ -128,7 +178,16 @@ HARD_BUDGET ?= 240
 # with load recorded, gave 276.4s and 321.7s — a 16% swing, against internal/sim
 # 0.3% across the same pair. Mid-sized packages vary far more run to run than the
 # big one does, because their co-tenancy changes with scheduling order.
-PKG_HARD_BUDGET_OVERRIDES ?= /internal/sim=780 /cypher=420
+#
+# bench/audit352 is NOT a regression: it is a ceiling that had never been
+# exercised. The package carried no entry here, so its cost was only ever inferred
+# from a STANDALONE figure (180.6s), which docs/test-layers.md marks as a lower
+# bound precisely because it carries none of the co-tenancy the parallel suite
+# adds. The first three in-suite measurements ever taken — 2026-08-29, all three
+# with load recorded in docs/test-layers.md — gave 321.5s, 328.7s and 318.1s, a
+# 3.3% spread and 1.76x the standalone lower bound. The rule then reads the worst
+# of them, 328.7s, exactly as it reads the worst for the two packages above.
+PKG_HARD_BUDGET_OVERRIDES ?= /internal/sim=780 /cypher=420 /bench/audit352=420
 export SOFT_BUDGET HARD_BUDGET PKG_HARD_BUDGET_OVERRIDES
 
 # GOGRAPH_PARALLEL_SUITE declares to the test binaries that packages are being
@@ -144,9 +203,13 @@ export SOFT_BUDGET HARD_BUDGET PKG_HARD_BUDGET_OVERRIDES
 # output through VERBATIM, so what the developer sees is unchanged, and it reads
 # the plain "ok<TAB>pkg<TAB>0.330s" summary lines rather than -json, because
 # -json implies -v and would bury the run in per-test noise for the identical
-# numbers. pipefail (.SHELLFLAGS, line 2) keeps a test failure failing: the
-# budget check cannot mask it.
-test-short: ## [layer: short]   local default — race detector, no build tags, per-package cost budget (SHORT_TIMEOUT/SOFT_BUDGET/HARD_BUDGET overridable)
+# numbers. pipefail keeps a test failure failing, so the budget check cannot mask
+# it -- but ONLY because the flags are carried on SHELL itself (see the header).
+# This comment previously credited `.SHELLFLAGS`, which needs GNU Make 3.82+; on
+# the 3.81 macOS ships it was inert, this pipeline reported the budget script's
+# status alone, and a real `FAIL` read as exit 0 (rmp #2672). `shell-guard` is a
+# prerequisite of this target so that regime cannot return unnoticed.
+test-short: shell-guard ## [layer: short]   local default — race detector, no build tags, per-package cost budget (SHORT_TIMEOUT/SOFT_BUDGET/HARD_BUDGET overridable)
 	GOGRAPH_PARALLEL_SUITE=1 $(GO) test $(RACE_FLAGS) -count=1 -timeout=$(SHORT_TIMEOUT) $(PACKAGES) | bash scripts/pkg_time_budget.sh
 
 # TIMING_PKGS are the packages holding short-layer assertions whose subject is a
@@ -161,9 +224,17 @@ test-short: ## [layer: short]   local default — race detector, no build tags, 
 # found 39 instances across 12 packages; the three filed as #2499, #2506 and #2517
 # are guarded here, and each remaining instance extends this list and TIMING_RUN
 # as its own task lands (#2568, #2569, #2572, #2573, #2574, #2588 are filed).
+# An instance found AFTER that population audit extends the list the same way:
+# bench/audit352's TestLabelCountPushdownIsConstantTime (#2673) is here because its
+# ns/op ratio failed twice in one day in OPPOSITE directions -- 1.632 with the small
+# graph slower under `test-short -race`, 1.629 the right way round under
+# `cover-gate` -- while its allocation arms read flat and identical at all five
+# sizes in both runs. Only the wall-clock half is guarded; the allocation half still
+# asserts in the short layer.
 # Listing a package before its gates are guarded only buys `[no tests to run]` and
 # the build time to discover it.
 TIMING_PKGS = \
+	./bench/audit352 \
 	./bench/cyclicjoin \
 	./bench/mvccwrite \
 	./bolt/server
@@ -171,7 +242,7 @@ TIMING_PKGS = \
 # TIMING_RUN selects only the guarded gates. Running the whole package serially
 # would reintroduce exactly the co-tenancy the phase exists to remove — the
 # gate's neighbours are as capable of loading the machine as another package is.
-TIMING_RUN ?= TestE2E_ConcurrentAutocommitReadsRunInParallel|TestCyclicJoin_FittedExponents|TestWriteScalingGate|TestWALWriteScalingGate|TestWriteConcurrencyGate|TestWriteScalingInstrument_SeesConcurrency|TestWriteScalingInstrument_SeesSerialisation
+TIMING_RUN ?= TestE2E_ConcurrentAutocommitReadsRunInParallel|TestCyclicJoin_FittedExponents|TestLabelCountPushdownIsConstantTime|TestWriteScalingGate|TestWALWriteScalingGate|TestWriteConcurrencyGate|TestWriteScalingInstrument_SeesConcurrency|TestWriteScalingInstrument_SeesSerialisation
 
 TIMING_TIMEOUT ?= 20m
 
@@ -193,6 +264,48 @@ test-timing: ## [layer: short] Serially re-run the wall-clock/throughput gates o
 .PHONY: test-short-timings
 test-short-timings: ## [layer: short] Alias for test-short, kept as the named entry point for ad-hoc budget exploration (SOFT_BUDGET/HARD_BUDGET/SHORT_TIMEOUT overridable)
 	$(MAKE) test-short
+
+# ── The uninstrumented phase ──────────────────────────────────────
+# UNINSTR_PKGS are the packages holding short-layer assertions whose SUBJECT is
+# the Go runtime's own allocation behaviour, and which therefore cannot run
+# under either instrumentation the rest of `ci` applies.
+#
+# bolt/packstream is here because rmp #2709 found that its
+# TestDecoder_ChargeUpperBoundsGoAllocation — the self-guarding half of security
+# finding #1849, the proof that the decoded-memory charge UPPER-BOUNDS real Go
+# allocation — ran in NO phase of `make ci` at all:
+#
+#   test-short   -race                → the file is //go:build !race: compiled out
+#   test-timing  -race                → same, and the package is not in TIMING_PKGS
+#   cover-gate   -covermode=atomic    → compiled in, then skipped by the test's own
+#                                       testing.CoverMode() guard
+#
+# Each of those three guards is individually correct, and each is documented at
+# its site. Their INTERSECTION was the defect: two locally-sound decisions that
+# between them left a security invariant asserting nowhere. Neither guard can be
+# relaxed — the race detector disables the tiny allocator and adds shadow memory,
+# the coverage counters allocate on their own account, and the charge bounds
+# PRODUCTION memory — so the only correct fix is a phase that applies neither.
+#
+# The list holds PACKAGES, not -run patterns, so a future allocation assertion
+# added to one of them is picked up without editing this file. Adding a package
+# here costs a full uninstrumented run of it: bolt/packstream measures 0.39-0.53 s
+# (Apple M4, darwin/arm64, go1.26.6, 2026-09-03, host at loadavg 6.45), which is
+# why the whole package runs rather than a single -run filter.
+#
+# -p 1 serialises the package test binaries. runtime.MemStats is per-PROCESS, so
+# a second package cannot pollute the subject's counters directly; what -p 1
+# removes is CPU and memory CONTENTION between concurrently running binaries
+# while one of them is measuring. With a single package in the list today it is
+# a no-op that costs nothing and stops the list growing into a measurement
+# hazard.
+UNINSTR_PKGS = ./bolt/packstream
+
+UNINSTR_TIMEOUT ?= 5m
+
+.PHONY: test-uninstrumented
+test-uninstrumented: ## [layer: short] Run the allocation-measuring packages with NEITHER the race detector NOR coverage instrumentation — the only phase in which they assert (rmp #2709)
+	$(GO) test -count=1 -p 1 -timeout=$(UNINSTR_TIMEOUT) $(UNINSTR_PKGS)
 
 # SOAK_TIMEOUT / NIGHTLY_TIMEOUT — the deferred layers need an EXPLICIT
 # per-package timeout (rmp #2259).
@@ -298,6 +411,37 @@ cover-gate: ## Enforce aggregate (>=85%) and per-package (>=75%) coverage gates
 bench: ## Run benchmarks ($(BENCH_PATTERN), count=$(BENCH_COUNT))
 	$(GO) test -bench=$(BENCH_PATTERN) -benchmem -count=$(BENCH_COUNT) -run=^$$ $(PACKAGES)
 
+# ── Vulnerability gate ─────────────────────────────────────────────
+# Until rmp #2722 there was NO gate. `govulncheck` appeared in no Makefile
+# target, no `make ci` path and no `.sh`/`.yml`/`.yaml` file in the repository —
+# only as prose in CONTRIBUTING.md §4 and SECURITY.md describing a command a
+# human was expected to remember to type. That is why it could stop working for
+# an entire toolchain bump without anyone noticing: a gate nobody invokes cannot
+# fail loudly, it simply never runs.
+#
+# The gate asserts that ANALYSIS HAPPENED — a non-empty set of loaded root
+# packages covering every package `go list ./...` reports — and evaluates that
+# assertion BEFORE it looks at the exit status, because the failure mode
+# recorded against v0.12.0 was a scanner that "exits 0 while performing no
+# analysis at all" (CONTRIBUTING.md §4). scripts/vulncheck_gate.sh carries the
+# full reasoning; scripts/test_vulncheck_gate.sh proves the assertion can fail
+# by feeding the gate deliberately broken scanners, including a real
+# govulncheck built against another Go minor.
+#
+# It needs the network: govulncheck consults https://vuln.go.dev. An
+# unreachable database FAILS the gate rather than skipping it — a scan that
+# could not consult the vulnerability database is not a clean scan. Point
+# VULNCHECK_DB at a mirror on an air-gapped host.
+GOVULNCHECK_VERSION ?= v1.7.0
+
+.PHONY: vulncheck
+vulncheck: ## Vulnerability gate: govulncheck over the module, asserting analysis really happened rather than trusting the exit code (rmp #2722)
+	GO=$(GO) GOVULNCHECK_VERSION=$(GOVULNCHECK_VERSION) bash scripts/vulncheck_gate.sh
+
+.PHONY: test-vulncheck-gate
+test-vulncheck-gate: ## Prove `vulncheck` can FAIL: feed it deliberately broken scanners and require it to reject each one (rmp #2722)
+	GO=$(GO) bash scripts/test_vulncheck_gate.sh
+
 .PHONY: lint
 lint: ## Run golangci-lint (auto-install if missing)
 	@if ! command -v golangci-lint >/dev/null 2>&1; then \
@@ -307,13 +451,13 @@ lint: ## Run golangci-lint (auto-install if missing)
 	golangci-lint run $(PACKAGES)
 
 .PHONY: ci
-ci: tidy fmt vet build test-short test-timing lint cover-gate ## Full CI pipeline: tidy + fmt + vet + build + test-short + test-timing + lint + cover-gate
+ci: shell-guard tidy fmt vet build vulncheck test-short test-timing test-uninstrumented lint cover-gate ## Full CI pipeline: tidy + fmt + vet + build + vulncheck + test-short + test-timing + test-uninstrumented + lint + cover-gate
 
 .PHONY: ci-soak
-ci-soak: tidy fmt vet build test-soak test-timing lint cover-gate ## CI pipeline with soak layer: like ci but runs test-soak
+ci-soak: shell-guard tidy fmt vet build vulncheck test-soak test-timing test-uninstrumented lint cover-gate ## CI pipeline with soak layer: like ci but runs test-soak
 
 .PHONY: ci-nightly
-ci-nightly: tidy fmt vet build test-nightly test-timing lint cover-gate ## CI pipeline with nightly layer: like ci but runs test-nightly
+ci-nightly: shell-guard tidy fmt vet build vulncheck test-nightly test-timing test-uninstrumented lint cover-gate ## CI pipeline with nightly layer: like ci but runs test-nightly
 
 .PHONY: smoke
 smoke: ## Quick PR pre-flight: tidy + fmt + vet + build + short unit tests (no race, no lint, no cover-gate)
@@ -355,14 +499,14 @@ release-check: ## Dry-run goreleaser against the local checkout (snapshot mode, 
 
 .PHONY: release-accuracy
 release-accuracy: ## Release-accuracy checks only (Phase A): CHANGELOG/release-notes/README/SECURITY/benchmark-doc consistency for VERSION. This is the only gate the release.yml CI job runs; correctness (vet/build/-race/lint/TCK), coverage and the crash battery are enforced LOCALLY by `make release-preflight` before the tag is pushed.
-	@test -n "$$VERSION" || { echo "set VERSION=vX.Y.Z"; exit 1; }
+	@test -n "$${VERSION:-}" || { echo "set VERSION=vX.Y.Z"; exit 1; }
 	@echo "release-accuracy: VERSION=$$VERSION"
 	@v_no_prefix=$$(echo "$$VERSION" | sed 's/^v//'); \
 	  grep -q "## \[$$v_no_prefix\]" CHANGELOG.md \
 	  || { echo "release-accuracy: CHANGELOG.md is missing a '## [$$v_no_prefix]' entry — promote the Unreleased section first"; exit 1; }
 	@test -f "release-notes/$$VERSION.md" \
 	  || { echo "release-accuracy: release-notes/$$VERSION.md does not exist — draft the long-form notes first"; exit 1; }
-	@echo "release-accuracy: checking README 'Current release' names $$VERSION…"
+	@echo "release-accuracy: checking README 'Current release' names $${VERSION}…"
 	@pat="Current release: \`$$VERSION\`"; grep -qF "$$pat" README.md \
 	  || { echo "release-accuracy: README.md 'Current release' does not name $$VERSION — update the Status block"; exit 1; }
 	@echo "release-accuracy: checking SECURITY.md supported-versions table names $$VERSION's release line…"
@@ -375,9 +519,9 @@ release-accuracy: ## Release-accuracy checks only (Phase A): CHANGELOG/release-n
 	@echo "release-accuracy: all accuracy checks passed"
 
 .PHONY: release-preflight
-release-preflight: ## Canonical LOCAL release gate (`make release` calls this) — release-accuracy + the full `make ci` correctness+coverage gate + headline bench. `make ci` runs the suite ONCE (tidy/fmt/vet/build/test-short[-race,./...]/lint/cover-gate; the TCK =100% baseline in TestTCKExecution runs inside the -race and coverage passes), so release-preflight SUBSUMES `make ci` — do not run both. The release.yml CI job runs only `release-accuracy`.
+release-preflight: ## Canonical LOCAL release gate (`make release` calls this) — release-accuracy + the full `make ci` correctness+coverage gate + headline bench. `make ci` runs the suite ONCE (tidy/fmt/vet/build/vulncheck/test-short[-race,./...]/lint/cover-gate; the TCK =100% baseline in TestTCKExecution runs inside the -race and coverage passes), so release-preflight SUBSUMES `make ci` — do not run both. The release.yml CI job runs only `release-accuracy`.
 	@$(MAKE) release-accuracy
-	@echo "release-preflight: running the full correctness + coverage gate (make ci: tidy/fmt/vet/build/test-short[-race]/lint/cover-gate; TCK =100% baseline enforced inside)…"
+	@echo "release-preflight: running the full correctness + coverage gate (make ci: tidy/fmt/vet/build/vulncheck/test-short[-race]/lint/cover-gate; TCK =100% baseline enforced inside)…"
 	@$(MAKE) ci
 	@if [ -x scripts/run_headline_bench.sh ]; then \
 	  echo "release-preflight: running headline bench regression gate (informational on a release tag — see docs/release.md for the canonical PR-time gate)…"; \
@@ -390,6 +534,7 @@ release-preflight: ## Canonical LOCAL release gate (`make release` calls this) �
 .PHONY: release
 release: release-preflight ## Run goreleaser to publish a release for the current tag — requires VERSION and a clean tree
 	@test -z "$$(git status --porcelain)" || { echo "working tree dirty"; exit 1; }
+	@test -n "$${VERSION:-}" || { echo "set VERSION=vX.Y.Z"; exit 1; }
 	@git rev-parse "$$VERSION" >/dev/null 2>&1 || { echo "tag $$VERSION does not exist; create it first"; exit 1; }
 	@command -v goreleaser >/dev/null 2>&1 || { echo "goreleaser not installed"; exit 1; }
 	GOVERSION=$$($(GO) version | awk '{print $$3}') goreleaser release --clean

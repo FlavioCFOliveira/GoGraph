@@ -64,7 +64,7 @@ func patchAndRecomputeCRC(t *testing.T, data []byte, h Header, off, val uint64) 
 func writePatched(t *testing.T, patched []byte) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "patched.csr")
-	if err := os.WriteFile(p, patched, 0o600); err != nil { //nolint:gosec // test fixture
+	if err := os.WriteFile(p, patched, 0o600); err != nil { // test fixture
 		t.Fatal(err)
 	}
 	return p

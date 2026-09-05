@@ -354,7 +354,7 @@ func (op *MergeRelationship) Next(out *Row) (bool, error) {
 		if err := op.applyRelActions(row, srcKey, dstKey, matchedHandle, op.onMatchActions, op.onMatchEvals); err != nil {
 			return false, err
 		}
-		emitted := op.emitRow(row, srcID, dstID, srcKey, dstKey)
+		emitted := op.emitRow(row, srcID, dstID, srcKey, dstKey, matchedHandle)
 		// Multi-CREATE multiplicity emit (Merge5 [3]). Skip when the
 		// pattern carries an inline property predicate — the
 		// counter records every CREATE call regardless of property,
@@ -382,7 +382,7 @@ func (op *MergeRelationship) Next(out *Row) (bool, error) {
 		if err := op.applyRelActions(row, dstKey, srcKey, matchedHandle, op.onMatchActions, op.onMatchEvals); err != nil {
 			return false, err
 		}
-		emitted := op.emitRow(row, dstID, srcID, dstKey, srcKey)
+		emitted := op.emitRow(row, dstID, srcID, dstKey, srcKey, matchedHandle)
 		if len(effectiveProps) == 0 {
 			if mult := op.mutator.EdgeCreateCount(dstKey, srcKey); mult > 1 {
 				op.pendingRow = emitted
@@ -425,7 +425,7 @@ func (op *MergeRelationship) Next(out *Row) (bool, error) {
 	if err := op.applyRelActions(row, srcKey, dstKey, handle, op.onCreateActions, op.onCreateEvals); err != nil {
 		return false, err
 	}
-	*out = op.emitRow(row, srcID, dstID, srcKey, dstKey)
+	*out = op.emitRow(row, srcID, dstID, srcKey, dstKey, handle)
 	return true, nil
 }
 
@@ -480,7 +480,23 @@ func (op *MergeRelationship) edgeHasRequestedType(srcKey, dstKey string) bool {
 // (relCol >= 0) the row is extended with a RelationshipValue carrying
 // the declared type and the live property map; otherwise the input row
 // is passed through unchanged.
-func (op *MergeRelationship) emitRow(row Row, srcID, dstID graph.NodeID, srcKey, dstKey string) Row {
+//
+// handle is the STABLE PER-EDGE HANDLE of the edge this row binds — the
+// just-allocated handle on the create branch, the matched edge's by-pair
+// [GraphMutator.FirstEdgeHandle] on either match branch. It is the SAME
+// identity applyRelActions writes its ON CREATE / ON MATCH mirrors under, so
+// the row names exactly the instance this operator's own writes landed on.
+//
+// It is published as the value's ID because every consumer of a
+// post-projection relationship binding reads that field AS the handle
+// (set.go, set_all.go, remove.go, merge_outer_target.go) and `id(r)` returns
+// it verbatim. Emitting a synthetic `src<<32|dst` packing instead sent a
+// standalone `SET r.k` into an orphan by-handle bag that no read ever
+// consults — a silent lost write (rmp #2705) — and made `id(r)` disagree
+// with the id the same relationship reports through MATCH. A zero handle
+// (an edge stamped by the Go API without one) keeps the pre-existing
+// per-pair-only behaviour on both the write and the read side.
+func (op *MergeRelationship) emitRow(row Row, srcID, dstID graph.NodeID, srcKey, dstKey string, handle uint64) Row {
 	if op.relCol < 0 {
 		return row
 	}
@@ -494,7 +510,7 @@ func (op *MergeRelationship) emitRow(row Row, srcID, dstID graph.NodeID, srcKey,
 		}
 	}
 	rel := expr.RelationshipValue{
-		ID:         uint64(srcID)<<32 | uint64(dstID),
+		ID:         handle,
 		StartID:    uint64(srcID),
 		EndID:      uint64(dstID),
 		Type:       op.relType,

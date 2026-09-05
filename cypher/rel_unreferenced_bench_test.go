@@ -24,7 +24,7 @@ func BenchmarkRelBoundUnreferenced(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		for res.Next() { //nolint:revive // intentional full drain
+		for res.Next() { // intentional full drain
 		}
 		if err := res.Err(); err != nil {
 			b.Fatal(err)

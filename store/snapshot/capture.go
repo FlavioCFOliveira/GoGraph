@@ -323,7 +323,7 @@ func CaptureGraphWithWeightCodec[N comparable, W any](
 	return c, nil
 }
 
-//nolint:gocyclo // one capture per component: labels + properties + mapper + tombstones + edgehandles + indexes
+// one capture per component: labels + properties + mapper + tombstones + edgehandles + indexes
 func captureGraph[N comparable, W any](
 	g *lpg.Graph[N, W],
 	cs *csr.CSR[W],

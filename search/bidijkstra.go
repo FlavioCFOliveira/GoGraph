@@ -57,7 +57,7 @@ func BidirectionalDijkstraOn[W Weight](c, rev *csr.CSR[W], src, dst graph.NodeID
 // [BidirectionalDijkstraOn]. ctx.Err() is checked every 4096 heap
 // pops; on cancellation returns (nil, zero, wrapped ctx.Err()).
 //
-//nolint:gocyclo // canonical bidirectional Dijkstra: NaN/Inf gate + negative-weight scan + dual heap loop + meet bookkeeping + path stitching
+// canonical bidirectional Dijkstra: NaN/Inf gate + negative-weight scan + dual heap loop + meet bookkeeping + path stitching
 func BidirectionalDijkstraOnCtx[W Weight](ctx context.Context, c, rev *csr.CSR[W], src, dst graph.NodeID) ([]graph.NodeID, W, error) {
 	defer metrics.Time("search.BidirectionalDijkstraOnCtx").Stop()
 	var zero W

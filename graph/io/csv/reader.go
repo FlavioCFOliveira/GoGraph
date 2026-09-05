@@ -140,7 +140,7 @@ func ReadInto(r io.Reader, opts Options) (*adjlist.AdjList[string, int64], int, 
 // [ErrInputTooLarge]) is returned unchanged; only the graph value is
 // discarded.
 //
-//nolint:gocyclo // csv decode + opt defaults + per-row parse + ctx tick
+// csv decode + opt defaults + per-row parse + ctx tick
 func ReadIntoCtx(ctx context.Context, r io.Reader, opts Options) (*adjlist.AdjList[string, int64], int, error) {
 	defer metrics.Time("graph.io.csv.ReadInto").Stop()
 	if opts.Delimiter == 0 {

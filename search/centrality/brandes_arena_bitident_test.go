@@ -180,7 +180,7 @@ func TestBrandesArena_BitIdentical_Random(t *testing.T) {
 			t.Run(name, func(t *testing.T) {
 				t.Parallel()
 				const n = 64
-				r := rand.New(rand.NewPCG(seed, seed*2654435761))
+				r := rand.New(rand.NewPCG(seed, seed*2654435761)) //nolint:gosec // G404: math/rand/v2 PCG seeded from the test's own parameter — this test asserts a reproducible sequence, which a CSPRNG would destroy.
 				a := adjlist.New[int, struct{}](adjlist.Config{Directed: directed})
 				for i := 0; i < 4*n; i++ {
 					_ = a.AddEdge(r.IntN(n), r.IntN(n), struct{}{})

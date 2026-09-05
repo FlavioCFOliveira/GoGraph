@@ -49,7 +49,7 @@ func LabelPropagation[W any](c *csr.CSR[W], opts LabelPropagationOptions) Partit
 // ctx.Err() is checked at every iteration boundary; on cancellation
 // returns (zero Partition, wrapped ctx.Err()).
 //
-//nolint:gocyclo // textbook label propagation: defaults + live mask + iteration loop + tie-break
+// textbook label propagation: defaults + live mask + iteration loop + tie-break
 func LabelPropagationCtx[W any](ctx context.Context, c *csr.CSR[W], opts LabelPropagationOptions) (Partition, error) {
 	defer metrics.Time("search.community.LabelPropagationCtx").Stop()
 	if opts.MaxIterations <= 0 {

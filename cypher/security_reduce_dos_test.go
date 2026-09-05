@@ -178,7 +178,7 @@ func secCypherAssertListBudgetError(t *testing.T, eng *cypher.Engine, q string) 
 		secCypherRequireEvalError(t, q, err)
 		return
 	}
-	for res.Next() { //nolint:revive // drain to reach the materialisation error
+	for res.Next() { // drain to reach the materialisation error
 	}
 	iterErr := res.Err()
 	_ = res.Close()

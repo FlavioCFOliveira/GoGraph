@@ -40,7 +40,6 @@ import (
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
-	"github.com/FlavioCFOliveira/GoGraph/cypher/ir"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
@@ -218,7 +217,12 @@ func (e *Engine) runReadPrefix(ctx context.Context, phase readPhase, query strin
 		return entry.semaErr
 	}
 	plan := entry.plan
-	if ir.ContainsWrite(plan) {
+	// entry.containsWrite, not ir.ContainsWrite(plan): runRead reads the memo
+	// since rmp #2693, and the whole value of this transcription is that it
+	// executes what runRead executes. Walking the plan here would leave three
+	// per-node Children allocations in the 1parse arm that the production path no
+	// longer makes, and the attribution would describe a read nobody performs.
+	if entry.containsWrite {
 		return ErrWriteInReadOnlyTx
 	}
 	if err := checkParamPresence(entry.paramRefs, params); err != nil {

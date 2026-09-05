@@ -448,7 +448,7 @@ func checkShowReturn(p *ast.Projection, inScope map[string]bool) error {
 // not meaningful over SHOW rows (a subquery or graph pattern). List
 // comprehensions and reduce introduce their own bound variable, which is added to
 // the scope for the descent into their sub-expressions.
-func checkShowScope(e ast.Expression, inScope map[string]bool) error { //nolint:gocyclo // per-AST-node dispatch; each branch is a simple recursion
+func checkShowScope(e ast.Expression, inScope map[string]bool) error { // per-AST-node dispatch; each branch is a simple recursion
 	switch n := e.(type) {
 	case nil:
 		return nil
@@ -968,7 +968,7 @@ func parseDropIndex(query string) (*DropIndex, error) {
 // key, and property type constraints (IS :: <TYPE>) — are rejected with a
 // specific error.
 //
-//nolint:gocyclo // parser function: complexity reflects DDL grammar, not hidden branching
+// parser function: complexity reflects DDL grammar, not hidden branching
 func parseCreateConstraint(query string) (*CreateConstraint, error) {
 	tokens := tokenise(query)
 	pos := 0

@@ -17,7 +17,12 @@ package exec
 // bindings, so no null semantics are lost.
 //
 // This is deliberately NOT extended to count(<var>), which counts non-null
-// bindings and therefore must keep evaluating its argument per row.
+// bindings and therefore must keep evaluating its argument per row. What DOES
+// reach this operator, since rmp #2657, is a count(<var>) the PLANNER has already
+// normalised to count(*) — which it does only where the variable is bound by a
+// pattern that cannot produce a null binding. The normalisation happens above this
+// operator and leaves its own contract untouched: an empty argument still means
+// "count rows", and a non-empty one is still refused.
 //
 // # Why it is worth an operator
 //
@@ -54,7 +59,9 @@ package exec
 // # Bounded resources
 //
 // No goroutines, no channels, no per-row allocation: the child's row is read and
-// discarded, and the single output row comes from a fixed backing buffer.
+// discarded, and the single output row comes from a fixed backing buffer. The
+// column-major drain ([CountRows.drainChunk]) allocates ONE [Chunk] per execution,
+// sized to [DefaultChunkCapacity], and reuses it across every batch.
 //
 // # Concurrency contract
 //
@@ -125,6 +132,13 @@ func (op *CountRows) Next(out *Row) (bool, error) {
 // the child to do it, so a cancelled count over a very large stream aborts
 // promptly whatever the child pipeline happens to be.
 func (op *CountRows) drain() error {
+	// A [ChunkProducer] child is drained column-major (#2655 F3): FillChunk reports
+	// how many rows it produced, which is the whole answer, so no row is ever formed
+	// at the operator boundary at all — not even the single reused header the row
+	// loop below pulls into.
+	if cp, isChunk := op.child.(ChunkProducer); isChunk {
+		return op.drainChunk(cp)
+	}
 	var row Row
 	for {
 		if op.count%countRowsCancelCheck == 0 {
@@ -140,6 +154,48 @@ func (op *CountRows) drain() error {
 			return nil
 		}
 		op.count++
+	}
+}
+
+// drainChunk is the column-major counterpart of [CountRows.drain] for a
+// [ChunkProducer] child: it pulls full batches and adds each batch's row count,
+// forming no rows. The chunk is Reset before every pull, so a batch's cells are
+// never retained past the count they contributed and the backing allocations are
+// reused across the whole drain.
+//
+// End-of-stream is a SHORT fill (n < want), the convention every other chunk
+// consumer in the engine uses — [ColumnarProject.fillChunkFromChunk],
+// EagerAggregation's chunk consume, and the result drain's materializeColumnar —
+// so a producer that stops early (a columnar LIMIT reaching its bound) ends the
+// count at the same row the row-at-a-time loop would.
+//
+// A partial batch that accompanies an error is still counted before the error is
+// returned, mirroring the row loop, which counts every row it received before the
+// child failed. The count is discarded either way: Next propagates the error and
+// emits nothing.
+//
+// MEASURED (rmp #2655), `MATCH (n:Person) WHERE n.bucket < 50 RETURN count(*)`,
+// 50 000 nodes, GOMAXPROCS=1, IDENTICAL plan on both arms (CountRows over a
+// ColumnarFilter), interleaved A/B of two binaries, medians of three rounds:
+// 175.42 ns/node with this path disabled, 62.16 with it — -64.6%. That is the whole
+// gap, because a ColumnarFilter pulled through Next IS the boxed row Filter: the
+// columnar plan under an aggregate is worth nothing until its consumer pulls it
+// column-major.
+func (op *CountRows) drainChunk(cp ChunkProducer) error {
+	dst := cp.NewOutputChunk(DefaultChunkCapacity)
+	for {
+		if err := op.ctx.Err(); err != nil {
+			return err
+		}
+		dst.Reset()
+		n, err := cp.FillChunk(dst, DefaultChunkCapacity)
+		op.count += int64(n)
+		if err != nil {
+			return err
+		}
+		if n < DefaultChunkCapacity {
+			return nil // child exhausted (short fill)
+		}
 	}
 }
 

@@ -38,7 +38,7 @@ func TestEngine_SortByteBudget_TripsBeforeDrain(t *testing.T) {
 	}
 	defer res.Close()
 
-	for res.Next() { //nolint:revive // draining to reach the terminal error
+	for res.Next() { // draining to reach the terminal error
 	}
 	if got := res.Err(); !errors.Is(got, exec.ErrSortMemoryExceeded) {
 		t.Fatalf("Result.Err() = %v, want exec.ErrSortMemoryExceeded — MaxResultBytes was not threaded into the Sort breaker", got)

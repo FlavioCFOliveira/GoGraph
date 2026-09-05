@@ -338,5 +338,5 @@ func walOffsetBytes(off int64) uint64 {
 	if off < 0 {
 		return 0
 	}
-	return uint64(off) //nolint:gosec // G115: off is a guarded non-negative file offset
+	return uint64(off) // G115: off is a guarded non-negative file offset
 }

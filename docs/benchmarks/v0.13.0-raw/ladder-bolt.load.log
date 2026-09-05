@@ -1,0 +1,13 @@
+LOAD-GATE ladder-bolt block-open started_at=2.40 waited=150s
+round=1 load1_at_round_start=2.40
+round=1 base_lines=10 head_lines=10
+round=2 load1_at_round_start=29.29
+round=2 base_lines=20 head_lines=20
+round=3 load1_at_round_start=64.99
+round=3 base_lines=30 head_lines=30
+round=4 load1_at_round_start=78.87
+round=4 base_lines=40 head_lines=40
+round=5 load1_at_round_start=104.33
+round=5 base_lines=50 head_lines=50
+round=6 load1_at_round_start=88.47
+round=6 base_lines=60 head_lines=60

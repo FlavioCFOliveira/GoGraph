@@ -172,10 +172,12 @@ func (g *Graph[N, W]) withdrawAbortedIndexRemovals() int {
 	}
 	g.idxDeferred.mu.Lock()
 	cancelled := 0
+	var released []LabelID
 	for k, st := range g.idxDeferred.pending {
 		if st.at() == mvcc.AbortedTS {
 			delete(g.idxDeferred.pending, k)
 			cancelled++
+			released = append(released, LabelID(k.lid))
 		}
 	}
 	if len(g.idxDeferred.pending) == 0 {
@@ -184,6 +186,11 @@ func (g *Graph[N, W]) withdrawAbortedIndexRemovals() int {
 	g.idxDeferred.mu.Unlock()
 	if cancelled > 0 {
 		g.idxPendingActive.Add(-int64(cancelled))
+		// The per-label holds these entries owned (rmp #2686). A cancelled
+		// removal leaves the bitmap entry in place beside a bag that still
+		// carries the label — the two agree again — so the suspect has stopped
+		// being one and the hold goes with it.
+		g.labelChurn.releaseAll(released)
 	}
 	return cancelled
 }
@@ -332,6 +339,7 @@ func (g *Graph[N, W]) reclaimAbortedLabelsLocked(sh *nodeLabelShard, id graph.No
 	clean := cloneLabelBag(sh.m[id])
 	before := cloneLabelBag(sh.m[id])
 	freed := 0
+	var held []LabelID
 	for d := sh.d[id]; d != nil && abortedHead(d.stampTS()); d = sh.d[id] {
 		switch d.action {
 		case undoAddLabel:
@@ -340,6 +348,10 @@ func (g *Graph[N, W]) reclaimAbortedLabelsLocked(sh *nodeLabelShard, id graph.No
 			clean.del(d.lid)
 		}
 		sh.d[id] = d.next
+		// The per-label hold this delta owned is released at the END of this
+		// function, after the bag AND the bitmap have both been corrected — see
+		// there for the window that releasing here would open.
+		held = append(held, d.lid)
 		freed++
 	}
 	if sh.d[id] == nil {
@@ -368,6 +380,13 @@ func (g *Graph[N, W]) reclaimAbortedLabelsLocked(sh *nodeLabelShard, id graph.No
 			g.nodeIdx.Remove(uint32(lid), id)
 		}
 	})
+	// THE PER-LABEL HOLDS GO LAST (rmp #2686). Each withdrawn delta owned one,
+	// taken by [nodeLabelShard.pushLabelDelta], and it may only be dropped once
+	// the bag and the bitmap agree again. Dropping it inside the unlink loop
+	// above left a window in which the bag had already lost the label, the
+	// bitmap still carried it, and the gate said the label was quiet — which is
+	// the under-count the whole mechanism exists to prevent.
+	g.labelChurn.releaseAll(held)
 	return freed
 }
 

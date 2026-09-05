@@ -34,12 +34,12 @@ func startCoverGate(t *testing.T, dir string) (*exec.Cmd, string) {
 	root := repoRoot(t)
 
 	stub := filepath.Join(dir, "gostub")
-	if err := os.WriteFile(stub, []byte(stubGo), 0o755); err != nil {
+	if err := os.WriteFile(stub, []byte(stubGo), 0o755); err != nil { //nolint:gosec // G306: 0o755 because the stub stands in for the go binary and the gate script under test executes it.
 		t.Fatalf("write stub: %v", err)
 	}
 	profile := filepath.Join(dir, "cover.out")
 
-	cmd := exec.Command("bash", filepath.Join(root, "scripts", "cover_gate.sh"))
+	cmd := exec.Command("bash", filepath.Join(root, "scripts", "cover_gate.sh")) //nolint:gosec // G204: bash against scripts/cover_gate.sh under the repo root located by walking up to go.mod.
 	cmd.Dir = root
 	cmd.Env = append(os.Environ(),
 		"GO="+stub,

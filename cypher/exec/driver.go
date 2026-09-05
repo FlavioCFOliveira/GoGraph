@@ -51,8 +51,12 @@ func Drain(ctx context.Context, op Operator) ([]Row, error) {
 			break
 		}
 
-		// Copy the row so the caller owns immutable data even if the operator
-		// reuses the underlying buffer.
+		// The copy is REQUIRED and cannot be elided (rmp #2702). Every copy is
+		// appended to result and handed to the caller, who owns it after Drain
+		// returns; row itself is a single reused slot that the producer is free
+		// to overwrite on the next Next ([Row]'s contract). Without the copy
+		// every element of the returned slice would alias one backing array and
+		// the whole result would read as N repetitions of the last row.
 		cp := make(Row, len(row))
 		copy(cp, row)
 		result = append(result, cp)

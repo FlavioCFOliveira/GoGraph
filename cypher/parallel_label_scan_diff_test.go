@@ -298,7 +298,7 @@ func TestParallelLabelScan_NoGoroutineLeak(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Run(%q): %v", q, err)
 		}
-		for res.Next() { //nolint:revive // intentional full drain
+		for res.Next() { // intentional full drain
 		}
 		if err := res.Err(); err != nil {
 			t.Fatalf("Err(%q): %v", q, err)

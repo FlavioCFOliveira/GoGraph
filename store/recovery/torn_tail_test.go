@@ -28,7 +28,7 @@ import (
 // path covered by [TestRecovery_TornTailDropsLastOp] and
 // [TestCrashInjection_TruncateEveryFrameBoundary].
 //
-//nolint:gocyclo // test: write K frames + snapshot + truncate + assert K-1 state
+// test: write K frames + snapshot + truncate + assert K-1 state
 func TestRecovery_TornTailDropsLastOp_WithSnapshot(t *testing.T) {
 	t.Parallel()
 

@@ -463,6 +463,7 @@ func (l *Loader) buildCSRDirect() *csr.CSR[int64] {
 	// BuildFromAdjList's result exactly.
 	csr.OrderRuns(vertices, flat, weights, nil)
 
+	//nolint:gosec // G115: Mapper.Len (graph/mapper.go:426) sums len(s.reverse) over 256 shards; len is non-negative by the Go spec, so the int is in [0,MaxInt] and the conversion is exact
 	return csr.FromArrays(vertices, flat, weights, uint64(mapper.Len()), total)
 }
 
@@ -525,6 +526,7 @@ func (l *Loader) buildParallel() error {
 	for k := range edges {
 		srcID := mapper.Intern(edges[k].Src)
 		mapper.Intern(edges[k].Dst)
+		//nolint:gosec // G115: MapperShardOf masks with mapperShardMask=255 (graph/mapper.go:59,74), so the result is in [0,255] by construction and always fits uint8
 		srcShard[k] = uint8(graph.MapperShardOf(srcID))
 	}
 

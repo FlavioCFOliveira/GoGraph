@@ -105,10 +105,12 @@ type Expand struct {
 
 	ctx context.Context //nolint:containedctx // stored for per-Next ctx check
 
-	// edgeTypeFilter maps absolute edge positions (in fwd.EdgesSlice) to type
-	// labels.  nil = no type filtering.
-	edgeTypeFilter map[uint64]string
-	multiplicity   func(srcID, dstID uint64) int64 // per-edge CREATE multiplicity; nil = single-row emit
+	// admit is the slot-aligned relationship-type admission view for THIS Init,
+	// resolved from src together with the adjacency it is keyed to. nil = no type
+	// filtering was resolved. See [RelTypeAdmit] (rmp #2251); it replaced a
+	// map[uint64]string probed once per CSR slot in each direction.
+	admit        RelTypeAdmit
+	multiplicity func(srcID, dstID uint64) int64 // per-edge CREATE multiplicity; nil = single-row emit
 
 	edgeType string // optional edge-type filter; empty = no filter
 
@@ -257,18 +259,20 @@ type ExpandConfig struct {
 //
 // It is called from [Expand.Init], which runs once per outer row under Apply, so
 // the traversal follows the writes its own statement has made.
-type AdjacencySource func() (fwd, rev CSRAdjacency, edgeTypeFilter map[uint64]string)
+type AdjacencySource func() (fwd, rev CSRAdjacency, admit RelTypeAdmit)
 
 // IntersectAdjacencySource is [AdjacencySource] for the fused cyclic expand, which
 // filters TWO legs and therefore needs two type filters keyed to the one adjacency
 // it resolves.
-type IntersectAdjacencySource func() (fwd, rev CSRAdjacency, midFilter, endFilter map[uint64]string)
+type IntersectAdjacencySource func() (fwd, rev CSRAdjacency, midAdmit, endAdmit RelTypeAdmit)
 
 // StaticIntersectAdjacency is [StaticAdjacency] for an [IntersectAdjacencySource],
 // and carries the same warning: a production plan must not use it.
 func StaticIntersectAdjacency(fwd, rev CSRAdjacency, midFilter, endFilter map[uint64]string) IntersectAdjacencySource {
-	return func() (CSRAdjacency, CSRAdjacency, map[uint64]string, map[uint64]string) {
-		return fwd, rev, midFilter, endFilter
+	return func() (CSRAdjacency, CSRAdjacency, RelTypeAdmit, RelTypeAdmit) {
+		return fwd, rev,
+			relTypeAdmitFromPositions(fwd, rev, midFilter),
+			relTypeAdmitFromPositions(fwd, rev, endFilter)
 	}
 }
 
@@ -277,7 +281,9 @@ func StaticIntersectAdjacency(fwd, rev CSRAdjacency, midFilter, endFilter map[ui
 // A production query plan must NOT use it: the pair it closes over is exactly the
 // plan-build materialisation this type exists to remove.
 func StaticAdjacency(fwd, rev CSRAdjacency, edgeTypeFilter map[uint64]string) AdjacencySource {
-	return func() (CSRAdjacency, CSRAdjacency, map[uint64]string) { return fwd, rev, edgeTypeFilter }
+	return func() (CSRAdjacency, CSRAdjacency, RelTypeAdmit) {
+		return fwd, rev, relTypeAdmitFromPositions(fwd, rev, edgeTypeFilter)
+	}
 }
 
 // NewExpand creates an Expand operator.
@@ -312,7 +318,7 @@ func (op *Expand) Init(ctx context.Context) error {
 	// RESOLVE THE ADJACENCY NOW, not when the plan was built (rmp #2317). Init runs
 	// once per outer row under Apply, so a traversal in a later clause of a
 	// statement sees the edges its own earlier clauses created or deleted.
-	op.fwd, op.rev, op.edgeTypeFilter = op.src()
+	op.fwd, op.rev, op.admit = op.src()
 	op.fwdVerts = op.fwd.VerticesSlice()
 	op.fwdEdges = op.fwd.EdgesSlice()
 	op.fwdHandles = op.fwd.HandlesSlice()
@@ -323,6 +329,36 @@ func (op *Expand) Init(ctx context.Context) error {
 	}
 	op.srcID = -1
 	op.fwdDone = true
+	// RESET THE REVERSE CURSOR AND THE PENDING QUEUE TOO — Init means START OVER,
+	// and Init runs once per OUTER ROW under a correlated Apply, so anything a
+	// previous run left behind is republished into the next one.
+	//
+	// The forward cursor is neutralised by fwdDone above. Neither of these two was
+	// neutralised by anything: [Expand.advanceRevEdge] gates on revStart < revEnd
+	// alone, and [Expand.Next] emits from the pending queue and consults the reverse
+	// cursor BEFORE it pulls its first input row. A run that inherited either one
+	// emitted the PREVIOUS source's rows and attributed them to the next source,
+	// with op.srcID still -1 and op.inputRow still the previous run's.
+	//
+	// A residue is the NORMAL case, not an exotic one: an EXISTS / SemiApply stops
+	// at the first match and a LIMIT at the n-th, so any run not drained to
+	// exhaustion leaves one. Measured at commit 35990293 on four nodes and two arcs
+	// both into b: `MATCH (a:P) WHERE EXISTS { MATCH (a)<-[r]-(x) RETURN x }
+	// RETURN a.id` returned b AND c, where c has no incoming arc at all.
+	//
+	// The TYPED form of that query was accidentally CORRECT, which is why this
+	// survived: the reverse type test recovered each slot's forward position from
+	// (dst, src), was handed uint64(op.srcID) — 2^64-1 — as src, could never find a
+	// counterpart for it, and rejected the slot. Answering the reverse slot from the
+	// type column instead (rmp #2251) removed the accident along with the cost.
+	//
+	// Pinned by TestExpand_ReInitResetsReverseCursor and
+	// TestExpand_ReInitResetsMultiplicityQueue here, and at engine level by
+	// TestExpandReInit_ExistsReverseDoesNotLeakPriorSource; all three fail against
+	// the operator as it stood at 35990293.
+	op.revStart, op.revEnd = 0, 0
+	op.pendingRemaining, op.pendingRow = 0, nil
+	op.inputRow = nil
 	// Reset the columnar fan-out cursor so a re-Init (pooled/re-run operator)
 	// re-pulls from the start. cRow = -1 makes the first advanceInputChunk step
 	// to row 0 (or trigger the first child batch pull). These are inert on the
@@ -341,7 +377,7 @@ func (op *Expand) Init(ctx context.Context) error {
 // input row.  It pulls a new input row whenever the current source's
 // adjacency is exhausted.
 //
-//nolint:gocyclo // complexity driven by direction×filter state machine; see helpers below
+// complexity driven by direction×filter state machine; see helpers below
 func (op *Expand) Next(out *Row) (bool, error) {
 	for {
 		if err := op.ctx.Err(); err != nil {
@@ -765,21 +801,26 @@ func (op *Expand) advanceRevEdge() (src, edge, dst int64, st edgeStatus) {
 // non-multigraph or a legacy snapshot). There a pair occupies a single slot, so
 // the first match IS the instance and the two agree.
 func (op *Expand) reverseEdgePassesFilter(dst, src, revPos uint64) bool {
-	if op.edgeTypeFilter == nil {
+	if !op.admit.Active() {
 		return true // no filter declared → accept all
+	}
+	// The column answers the reverse slot DIRECTLY when the pair's transpose was
+	// established, which is the whole point of rmp #2251: one indexed load and one
+	// bit test, with no forward-position recovery at all. `known` false is an
+	// ABSENCE of information, never an admission — the recovery below then runs
+	// exactly as it did before the column existed.
+	if admitted, known := op.admit.Rev(revPos); known {
+		return admitted
 	}
 	if dst+1 >= uint64(len(op.fwdVerts)) {
 		return false
 	}
 	fStart, fEnd := op.fwdVerts[dst], op.fwdVerts[dst+1]
-	// Membership in the filter map is sufficient — the map only
-	// contains edges of accepted types (multi-type [r:A|B] support).
 	if op.handlesUsable() && revPos < uint64(len(op.revHandles)) {
 		if fp := matchFwdByHandle(
 			op.fwdEdges, op.fwdHandles, fStart, fEnd, src, op.revHandles[revPos],
 		); fp != unresolvedFwdPos {
-			_, admitted := op.edgeTypeFilter[fp]
-			return admitted
+			return op.admit.Fwd(fp)
 		}
 		// Unresolved: this slot carries a handle no forward sibling of the pair
 		// has, which a consistent CSR pair cannot produce. Fall through to the
@@ -789,8 +830,7 @@ func (op *Expand) reverseEdgePassesFilter(dst, src, revPos uint64) bool {
 	if !ok {
 		return false
 	}
-	_, admitted := op.edgeTypeFilter[fwdPos]
-	return admitted
+	return op.admit.Fwd(fwdPos)
 }
 
 // handlesUsable reports whether both handle columns are present and long enough
@@ -888,10 +928,11 @@ func (op *Expand) passesRelMorphism(edgeID int64) bool {
 // passesFilter reports whether the edge at absolute position pos (in the
 // forward edges array) satisfies the optional edge-type filter.
 //
-// The filter map is built by api.go::buildEdgeTypeFilter to contain only
-// edge positions whose type is in the accepted set, so membership in the
-// map is sufficient: when EdgeType is non-empty (any filter was requested),
-// pos must appear in the filter; otherwise everything passes.
+// The admission view is the slot-aligned type column keyed to THIS Init's
+// adjacency, masked by the pattern's accepted types (rmp #2251), so the test is
+// one indexed load and one bit test. A nil view — no filter resolved while a type
+// WAS requested — rejects, exactly as an absent key in the position-keyed map it
+// replaced did.
 //
 // This is correct for both single-type (`[r:KNOWS]`) and multi-type
 // (`[r:KNOWS|HATES]`) patterns. Pre-fix the predicate compared the
@@ -901,11 +942,7 @@ func (op *Expand) passesFilter(pos uint64) bool {
 	if op.edgeType == "" {
 		return true
 	}
-	if op.edgeTypeFilter == nil {
-		return false
-	}
-	_, ok := op.edgeTypeFilter[pos]
-	return ok
+	return op.admit.Fwd(pos)
 }
 
 // lookupFwdEdgePos returns the forward-CSR position of the edge
@@ -1014,8 +1051,16 @@ func (c columnarExpand) nodeIDColumnProducer() {}
 // (the passthrough), then three int64 columns for srcID, edgeID, dstID. The
 // passthrough kinds are read from a fresh child template so a scalar column stays
 // unboxed; a non-scalar (boxed) child column stays boxed, byte-identically.
+//
+// The template is built at capacity 1 — not at capacity — because only its SCHEMA
+// is read ([Chunk.NumCols] and [Chunk.ColKind], both fixed at construction) before
+// it is discarded; capacity 1 gives it the minimal backing, matching
+// [NewColumnarHashJoin]'s templates. It must not be 0: [NewChunk] and
+// [NewDynamicChunk] map a capacity < 1 to [DefaultChunkCapacity], which would
+// silently restore the full allocation. The returned chunk — the one that actually
+// carries rows — keeps the caller's capacity.
 func (op *Expand) columnarOutputChunk(capacity int) *Chunk {
-	template := op.chunkChild.NewOutputChunk(capacity)
+	template := op.chunkChild.NewOutputChunk(1)
 	p := template.NumCols()
 	kinds := make([]expr.Kind, p+3)
 	for j := 0; j < p; j++ {

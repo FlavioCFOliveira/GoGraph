@@ -142,6 +142,21 @@ DROP       : 'DROP';
 // keyword rather than a generic identifier.
 FOREACH: 'FOREACH';
 
+// EXPLAIN and PROFILE are defined here for the SAME reason FOREACH is, and must
+// stay in this position: immediately before ID and after every other keyword, so
+// they take the last keyword token ids and shift no keyword token id above them.
+// They must precede ID so that "EXPLAIN"/"PROFILE" lex as their own keyword
+// rather than as a generic identifier.
+//
+// They are also listed in the parser's `symbol` rule, alongside COUNT/FILTER/
+// EXTRACT/ANY/NONE/SINGLE. Without that, promoting these two words to tokens
+// would have DELETED them from the accepted language wherever an identifier is
+// legal: `MATCH (explain) RETURN explain` parses at every earlier revision,
+// because `explain` lexed as ID, and must keep parsing. Neo4j treats both as
+// non-reserved for the same reason.
+EXPLAIN: 'EXPLAIN';
+PROFILE: 'PROFILE';
+
 ID: LetterOrDigit+;
 
 ESC_LITERAL    : '`' .*? '`';

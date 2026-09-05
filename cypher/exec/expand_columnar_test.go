@@ -408,3 +408,152 @@ func TestExpandColumnar_MultiSource_BatchBoundary(t *testing.T) {
 	}
 	assertColumnarMatchesRow(t, ids, fwd, rev, nil, exec.ExpandConfig{Direction: exec.DirOut, InputCol: 0})
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Output-chunk schema and capacity (rmp #2656)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// capRecorder is a [nodeIDChunkSource] that records every capacity its
+// NewOutputChunk is asked for, so a test can assert what its PARENT requested.
+type capRecorder struct {
+	*nodeIDChunkSource
+	asked []int
+}
+
+func (r *capRecorder) NewOutputChunk(capacity int) *exec.Chunk {
+	r.asked = append(r.asked, capacity)
+	return r.nodeIDChunkSource.NewOutputChunk(capacity)
+}
+
+// The child template columnarExpand builds to read the passthrough kinds is
+// DISCARDED, so its size is invisible to every assertion about the chunk that is
+// returned. This pins it at the child seam instead: the template must be requested
+// at capacity 1 — minimal backing — and never at 0, which [exec.NewChunk] and
+// [exec.NewDynamicChunk] map to [exec.DefaultChunkCapacity], silently restoring the
+// full allocation the capacity-1 template exists to avoid.
+func TestExpandColumnar_TemplateRequestedAtCapacityOne(t *testing.T) {
+	fwd := buildCSR(3, [][2]int{{0, 1}, {1, 2}})
+	rev := buildCSR(3, [][2]int{{1, 0}, {2, 1}})
+
+	rec := &capRecorder{nodeIDChunkSource: &nodeIDChunkSource{ids: []int64{0, 1, 2}}}
+	base := exec.NewExpand(rec, exec.StaticAdjacency(fwd, rev, nil),
+		exec.ExpandConfig{Direction: exec.DirOut, InputCol: 0})
+	cp, ok := exec.NewColumnarExpand(base)
+	if !ok {
+		t.Fatalf("NewColumnarExpand: child was not recognised as a ChunkProducer")
+	}
+
+	if got := cp.NewOutputChunk(exec.DefaultChunkCapacity).Cap(); got != exec.DefaultChunkCapacity {
+		t.Fatalf("returned chunk Cap=%d, want %d", got, exec.DefaultChunkCapacity)
+	}
+	if len(rec.asked) != 1 {
+		t.Fatalf("child NewOutputChunk called %d times, want exactly 1 (the template)", len(rec.asked))
+	}
+	if rec.asked[0] != 1 {
+		t.Errorf("template requested at capacity %d, want 1 (0 or a negative would fall back to %d)",
+			rec.asked[0], exec.DefaultChunkCapacity)
+	}
+}
+
+// columnarExpand.NewOutputChunk builds a THROWAWAY child template purely to read
+// the passthrough column kinds, at capacity 1 so it carries minimal backing, and
+// then returns the real chunk at the CALLER's capacity. Nothing else asserted that
+// separation, so a future edit could size the real, row-carrying chunk from the
+// template's capacity and no test would notice: a Chunk's capacity is a pre-sizing
+// hint, not a bound, so an under-sized chunk still produces correct rows — it just
+// reallocates its backings as it fills.
+//
+// It also pins the constructor fallback the capacity-1 choice depends on:
+// [exec.NewChunk] maps a capacity < 1 to [exec.DefaultChunkCapacity], which is why
+// the template is built at 1 and not at 0.
+func TestExpandColumnar_OutputChunkCapacityAndSchema(t *testing.T) {
+	fwd := buildCSR(5, [][2]int{{0, 1}, {0, 2}, {1, 3}, {2, 3}, {3, 4}})
+	rev := buildCSR(5, [][2]int{{1, 0}, {2, 0}, {3, 1}, {3, 2}, {4, 3}})
+	cfg := exec.ExpandConfig{Direction: exec.DirOut, InputCol: 0}
+
+	newCP := func() exec.ChunkProducer {
+		base := exec.NewExpand(&nodeIDChunkSource{ids: []int64{0, 1, 2, 3, 4}},
+			exec.StaticAdjacency(fwd, rev, nil), cfg)
+		cp, ok := exec.NewColumnarExpand(base)
+		if !ok {
+			t.Fatalf("NewColumnarExpand: child was not recognised as a ChunkProducer")
+		}
+		return cp
+	}
+
+	// The schema is available BEFORE Init — NewColumnarHashJoin relies on exactly
+	// that when it takes capacity-1 templates of its children.
+	pre := newCP().NewOutputChunk(7)
+	if got := pre.NumCols(); got != 4 {
+		t.Errorf("pre-Init NewOutputChunk: NumCols=%d, want 4 (1 passthrough + srcID/edgeID/dstID)", got)
+	}
+	if got := pre.Cap(); got != 7 {
+		t.Errorf("pre-Init NewOutputChunk(7): Cap=%d, want 7", got)
+	}
+
+	// The caller's capacity reaches the real chunk, for a small value, for the
+	// pipeline default, and through the < 1 → DefaultChunkCapacity fallback.
+	for _, tc := range []struct{ ask, want int }{
+		{1, 1},
+		{7, 7},
+		{exec.DefaultChunkCapacity, exec.DefaultChunkCapacity},
+		{0, exec.DefaultChunkCapacity},
+		{-3, exec.DefaultChunkCapacity},
+	} {
+		if got := newCP().NewOutputChunk(tc.ask).Cap(); got != tc.want {
+			t.Errorf("NewOutputChunk(%d): Cap=%d, want %d", tc.ask, got, tc.want)
+		}
+	}
+
+	// Every column is a typed integer column (the passthrough kind is read through
+	// the capacity-1 template, so a wrong template must not box it), and the chunk
+	// really carries the traversal's rows.
+	cp := newCP()
+	if err := cp.Init(context.Background()); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	dst := cp.NewOutputChunk(exec.DefaultChunkCapacity)
+	for j := 0; j < dst.NumCols(); j++ {
+		if got := dst.ColKind(j); got != expr.KindInteger {
+			t.Errorf("output col %d: ColKind=%s, want Integer", j, got)
+		}
+	}
+	n, err := cp.FillChunk(dst, exec.DefaultChunkCapacity)
+	if err != nil {
+		t.Fatalf("FillChunk: %v", err)
+	}
+	if err := cp.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if n != 5 || dst.Len() != 5 {
+		t.Fatalf("FillChunk: n=%d Len=%d, want 5,5 (one row per fwd edge)", n, dst.Len())
+	}
+
+	// Stacked columnar expands: the OUTER template is a capacity-1 template of a
+	// 4-column producer that itself builds a capacity-1 template. The nested
+	// schema must still widen to 4 + 3 columns.
+	inner := exec.NewExpand(&nodeIDChunkSource{ids: []int64{0, 1, 2, 3, 4}},
+		exec.StaticAdjacency(fwd, rev, nil), cfg)
+	innerCP, ok := exec.NewColumnarExpand(inner)
+	if !ok {
+		t.Fatalf("inner NewColumnarExpand: not a ChunkProducer")
+	}
+	outer := exec.NewExpand(innerCP, exec.StaticAdjacency(fwd, rev, nil),
+		exec.ExpandConfig{Direction: exec.DirOut, InputCol: 3}) // 3 = inner dstID
+	outerCP, ok := exec.NewColumnarExpand(outer)
+	if !ok {
+		t.Fatalf("outer NewColumnarExpand: not a ChunkProducer")
+	}
+	stacked := outerCP.NewOutputChunk(9)
+	if got := stacked.NumCols(); got != 7 {
+		t.Errorf("stacked NewOutputChunk: NumCols=%d, want 7 (4 passthrough + 3)", got)
+	}
+	if got := stacked.Cap(); got != 9 {
+		t.Errorf("stacked NewOutputChunk(9): Cap=%d, want 9", got)
+	}
+	for j := 0; j < stacked.NumCols(); j++ {
+		if got := stacked.ColKind(j); got != expr.KindInteger {
+			t.Errorf("stacked col %d: ColKind=%s, want Integer", j, got)
+		}
+	}
+}

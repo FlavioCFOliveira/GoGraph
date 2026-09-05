@@ -1,0 +1,13 @@
+LOAD-GATE ladder-prom block-open started_at=2.39 waited=0s
+round=1 load1_at_round_start=2.39
+round=1 base_lines=5 head_lines=5
+round=2 load1_at_round_start=22.59
+round=2 base_lines=10 head_lines=10
+round=3 load1_at_round_start=74.75
+round=3 base_lines=15 head_lines=15
+round=4 load1_at_round_start=109.32
+round=4 base_lines=20 head_lines=20
+round=5 load1_at_round_start=99.09
+round=5 base_lines=25 head_lines=25
+round=6 load1_at_round_start=94.32
+round=6 base_lines=30 head_lines=30

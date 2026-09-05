@@ -171,13 +171,13 @@ func (op *ShortestPath) canBidirectional() bool {
 		len(op.revEdges) != len(op.fwdEdges) {
 		return false
 	}
-	// A type filter is admitted only with the exact reverse-position bitset. The
-	// revToFwd table would also answer, but it answers permissively where a
-	// mapping is unknown, and the two searches scan different slots — so the
+	// A type filter is admitted only when the type COLUMN resolves EVERY reverse
+	// slot. The revToFwd table would also answer, but it answers permissively where
+	// a mapping is unknown, and the two searches scan different slots — so the
 	// two-sided half could admit an edge the forward-only walk never reaches and
 	// return a path the filter excludes. That is the #2220 symptom; do not
 	// reintroduce it for a fallback that is no faster.
-	return op.edgeType == "" || op.revAdmit != nil
+	return op.edgeType == "" || op.admit.RevExact()
 }
 
 // biBFSShortestPath finds a shortest src→dst path with two-sided BFS. It

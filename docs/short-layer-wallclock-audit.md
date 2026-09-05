@@ -59,6 +59,12 @@ are excluded, as are allocation counts, operation counts, fitted exponents,
 
 ## Instances — 39 across 12 packages
 
+The count is the population of the tree the audit swept (`1faafff5`, 2026-08-25).
+Assertions written **after** that sweep are recorded in
+[Post-audit instances](#post-audit-instances-written-after-the-2026-08-25-sweep)
+rather than folded into this number, so that "39 across 12 packages" stays a true
+statement about the audit and does not silently drift as the tree grows.
+
 > **Correction applied 2026-08-25, after the audit was first written.** The audit
 > originally reported 40 instances across 13 packages, including
 > `bench/r4audit/w1partb_test.go:156` as the single strictest gate in the repo
@@ -126,6 +132,61 @@ total stall.
 
 The zero-tolerance gate that originally headed this list was the `bench/r4audit`
 one now known to be outside the short layer — see the correction above.
+
+## Post-audit instances (written after the 2026-08-25 sweep)
+
+An assertion added after the population sweep is an instance of the same defect
+class and is recorded here, with the measurement that motivated its guard.
+
+| package | file:line | test | asserted | threshold | load-sensitive because |
+|---|---|---|---|---|---|
+| bench/audit352 | labelcount_gate_ab_test.go:509 | TestLabelCountPushdownIsConstantTime | max(ns/op) ÷ min(ns/op) over n = 1 000 … 100 000 | `ratio > 1.50` | **#2673**; two `testing.Benchmark` windows measured seconds apart, one per graph size |
+
+**Status:** guarded with `testlayers.RequireQuietMachine` at :502, ahead of the
+assertion at :509, and listed in `TIMING_PKGS` / `TIMING_RUN`. The wall-clock ratio
+is measured and logged unconditionally, then asserted only on a quiet machine; the
+test's **allocation** and **byte** arms are unguarded and keep asserting in the
+short layer.
+
+### The measurement — it failed twice in one day, in OPPOSITE directions
+
+Both failures are on the same tree (`a64660c5`, sprint 352), whose functional
+tests were green. The test was the sole thing keeping `make ci` red: `test-short`
+and `lint` passed and `make ci` died at `cover-gate` with
+`make: *** [cover-gate] Error 1`.
+
+| run | phase | flags | n = 1 000 | n = 100 000 | ratio |
+|---|---|---|---|---|---|
+| A | `test-short` | `-race` | 25 354 ns | 15 532 ns | **1.632** |
+| B | `cover-gate` | coverage, no `-race` | 2 214 ns | 3 607 ns | 1.629 |
+
+Run A is the decisive one: the **1 000-node** graph timed **1.63× slower** than the
+100 000-node one. The tolerance is a two-sided `max/min` ratio, so it tripped
+either way — but an *inverted* ratio cannot be produced by any property of the
+code under test. There is no size gate, reintroduced or imagined, that makes
+1 000 nodes cost more than 100 000; the compared quantity was scheduling noise.
+
+In **both** runs the load-independent arms were flat and identical at all five
+sizes — 29.0 allocs/op and 2 176 B/op in run A, 31.0 and 2 408 in run B. (The
+29 → 31 shift is the two allocations per query *build* that rmp #2657 disclosed:
+fixed in `n`, so the gate's shape is untouched.) Re-measured under `-race` after
+the guard landed: 31.0 allocs/op and 2 416 B/op at every one of the five sizes,
+zero variance. **The constant-time property the test exists to defend therefore
+held in both failing runs. Only its wall-clock half was broken.**
+
+This is the third distinct way the same class has now been observed to fail, after
+the CPU-ratio inflation and the power-control compression recorded above: a
+straight wall-clock ratio can inflate, compress, **or invert**.
+
+### Why the tolerance was not widened
+
+The 1.5× tolerance is unchanged, for the reason `internal/testlayers/quiesce.go`
+gives under *Why SKIP rather than a wider tolerance*: the smallest regression it
+must catch drives the ratio to at least 87× (the two endpoints under the
+historical 26.56 ns/node slope), so 1.5 sits roughly 58× below the defect and two
+orders of magnitude above the harness noise floor of ~2%. Raising it far enough to
+survive an inverted 1.63 under `make ci` load would concede the measurement
+without gaining a valid one.
 
 ## Already gated correctly (assert on time, behind soak/nightly)
 

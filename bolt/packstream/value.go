@@ -64,7 +64,7 @@ func (e *Encoder) WriteValue(v Value) error {
 // bound is enforced at entry, so every recursive entry point (List items, Map
 // values, Struct fields) is covered by a single check — mirroring readValue.
 //
-//nolint:gocyclo // switch over PackStream's nine value kinds; complexity is irreducible.
+// switch over PackStream's nine value kinds; complexity is irreducible.
 func (e *Encoder) writeValue(v Value, depth int) error {
 	if depth > maxValueDepth {
 		return ErrNestingTooDeep
@@ -147,7 +147,7 @@ func (d *Decoder) ReadValue() (Value, error) {
 // returns ErrNestingTooDeep instead of recursing, preventing a fatal stack
 // overflow on adversarial input.
 //
-//nolint:gocyclo // switch over PackStream's nine value kinds; complexity is irreducible.
+// switch over PackStream's nine value kinds; complexity is irreducible.
 func (d *Decoder) readValue(depth int) (Value, error) {
 	if depth > maxValueDepth {
 		return nil, ErrNestingTooDeep

@@ -79,7 +79,7 @@ func TestAStar_Grid_ManhattanHeuristic(t *testing.T) {
 // buildUnitGrid builds an m×n undirected 4-connected grid with
 // float64 edge weights of 1.0. Nodes are keyed by row*ncols+col.
 //
-//nolint:gocritic // unnamedResult: four-element return is clearer than named vars that shadow loop counters
+// unnamedResult: four-element return is clearer than named vars that shadow loop counters
 func buildUnitGrid(tb testing.TB, m, n int) (*csr.CSR[float64], *adjlist.AdjList[int, float64], graph.NodeID, graph.NodeID) {
 	tb.Helper()
 	adj := adjlist.New[int, float64](adjlist.Config{Directed: false})

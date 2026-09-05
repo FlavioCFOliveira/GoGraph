@@ -392,7 +392,7 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 	// allocation, so its size is the in-RAM working set we contrast with the
 	// on-disk adjacency.
 	mem := readMem()
-	rankVecBytes := uint64(len(ranks)) * 8 //nolint:gosec // G115: len is non-negative
+	rankVecBytes := uint64(len(ranks)) * 8 // G115: len is non-negative
 
 	// Deterministic results. The BFS reachable count and the PageRank top-k
 	// node ids are stable for a fixed seed; the top-k ids separate the
@@ -693,7 +693,7 @@ func topPageRank(ranks []float64, k int) []graph.NodeID {
 		if x == 0 {
 			continue
 		}
-		live = append(live, nodeRank{id: graph.NodeID(i), rank: x}) //nolint:gosec // G115: index is non-negative
+		live = append(live, nodeRank{id: graph.NodeID(i), rank: x}) // G115: index is non-negative
 	}
 	sort.Slice(live, func(i, j int) bool {
 		if live[i].rank != live[j].rank {

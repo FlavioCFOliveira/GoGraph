@@ -167,7 +167,7 @@ func ApplyCSRToGraph[N comparable, W any](g *lpg.Graph[N, W], rb *CSRReadback) e
 // on disk, and applying zero weights instead would discard committed data
 // (rmp #2526).
 //
-//nolint:gocyclo // CSR apply walks every src slot, resolves endpoints, decodes weight by W type
+// CSR apply walks every src slot, resolves endpoints, decodes weight by W type
 func ApplyCSRToGraphWithWeightCodec[N comparable, W any](g *lpg.Graph[N, W], rb *CSRReadback, wdec weightDecoder[W]) error {
 	defer metrics.Time("store.snapshot.ApplyCSRToGraph").Stop()
 	if len(rb.Vertices) == 0 {
@@ -221,6 +221,7 @@ func ApplyCSRToGraphWithWeightCodec[N comparable, W any](g *lpg.Graph[N, W], rb 
 	// silently skipped (they exist only because the mapper packs
 	// NodeIDs into 256 shards, so the addressable range typically
 	// overshoots Order()).
+	//nolint:gosec // G115: len(rb.Vertices) >= 1: the empty readback returns early at apply.go:173, so len-1 is never negative
 	maxSrc := uint64(len(rb.Vertices) - 1)
 	weightSize := uint64(rb.WeightSize)
 	codecWeights := rb.CodecWeights()
@@ -322,6 +323,7 @@ func ApplyCSRToGraphWithWeightCodec[N comparable, W any](g *lpg.Graph[N, W], rb 
 			// post-recovery edge creation never re-mints a live handle. A
 			// snapshot without a handle column (legacy, or a graph that never
 			// used AddEdgeH) falls back to the plain handle-less AddEdge.
+			//nolint:gosec // G115: k < len(rb.Edges) <= MaxInt: the offset array is proven monotonic at apply.go:240 and last-offset <= edgeCount at apply.go:247, so int(k) is exact and non-negative
 			if len(rb.Handles) > int(k) && rb.Handles[k] != 0 {
 				h := rb.Handles[k]
 				if _, err := g.AddEdgeHIfAbsent(srcN, dstN, weight, h); err != nil {
@@ -359,7 +361,7 @@ func ApplyCSRToGraphWithWeightCodec[N comparable, W any](g *lpg.Graph[N, W], rb 
 // and bump the `store.snapshot.ApplyCSR.weightFallback` counter so
 // observability surfaces the loss.
 //
-//nolint:gocyclo // CSR weight decode: one branch per supported W type
+// CSR weight decode: one branch per supported W type
 func decodeCSRWeight[W any](buf []byte) W {
 	var zero W
 	if _, ok := any(zero).(struct{}); ok {
@@ -378,16 +380,19 @@ func decodeCSRWeight[W any](buf []byte) W {
 	var out W
 	switch v := any(&out).(type) {
 	case *int8:
+		//nolint:gosec // G115: byte->int8 is a same-width bit reinterpretation of the native byte weightsAsBytes wrote (csr_codec_bytes.go:56); the width is pinned fail-stop at apply.go:212
 		*v = int8(buf[0])
 	case *uint8:
 		*v = buf[0]
 	case *bool:
 		*v = buf[0] != 0
 	case *int16:
+		//nolint:gosec // G115: same-width uint16->int16 reinterpretation of the 2 native LE bytes weightsAsBytes wrote; width == csrWeightSize[W]() is enforced at apply.go:212
 		*v = int16(binary.LittleEndian.Uint16(buf))
 	case *uint16:
 		*v = binary.LittleEndian.Uint16(buf)
 	case *int32:
+		//nolint:gosec // G115: same-width uint32->int32 reinterpretation of the 4 native LE bytes weightsAsBytes wrote; width == csrWeightSize[W]() is enforced at apply.go:212
 		*v = int32(binary.LittleEndian.Uint32(buf))
 	case *uint32:
 		*v = binary.LittleEndian.Uint32(buf)
@@ -398,6 +403,7 @@ func decodeCSRWeight[W any](buf []byte) W {
 	case *uint:
 		*v = uint(binary.LittleEndian.Uint64(buf))
 	case *int64:
+		//nolint:gosec // G115: same-width uint64->int64 reinterpretation of the 8 native LE bytes weightsAsBytes wrote; width == csrWeightSize[W]() is enforced at apply.go:212
 		*v = int64(binary.LittleEndian.Uint64(buf))
 	case *uint64:
 		*v = binary.LittleEndian.Uint64(buf)

@@ -313,7 +313,7 @@ func TestRangeSeekNumeric_DropRemovesCompanion(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Run %q: %v", q, err)
 		}
-		for r.Next() { //nolint:revive // drain
+		for r.Next() { // drain
 		}
 		if err := r.Err(); err != nil {
 			t.Fatalf("iter %q: %v", q, err)
@@ -362,7 +362,7 @@ func TestRangeSeekNumeric_SharedCompanionSurvivesPartialDrop(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Run %q: %v", q, err)
 		}
-		for r.Next() { //nolint:revive // drain
+		for r.Next() { // drain
 		}
 		if err := r.Err(); err != nil {
 			t.Fatalf("iter %q: %v", q, err)

@@ -12,7 +12,7 @@ import (
 // that it decides identically, and the only way to hold it to that is to keep
 // asking the thing it replaced.
 //
-//nolint:gochecknoglobals // test-only oracle, compiled once
+// Test-only oracle, compiled once.
 var legacyWritingKeywordRE = regexp.MustCompile(`(?i)\b(CREATE|MERGE|SET|REMOVE|DELETE|DETACH)\b`)
 
 // TestContainsWritingKeyword_AgreesWithTheRegexpItReplaced is the differential

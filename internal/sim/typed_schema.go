@@ -1410,7 +1410,7 @@ func (p *TypedSchemaProbes) nextSpec() tsOpSpec {
 // pre/post snapshot inline; splitting it would hide the ordering the clauses
 // depend on.
 //
-//nolint:gocyclo // one linear pass over five paths and three verdicts, with the
+// one linear pass over five paths and three verdicts, with the
 func (p *TypedSchemaProbes) SideWrite(
 	tick int64, side *typedSchemaSide, spec tsOpSpec, perturb tsPerturb,
 ) []Violation {
@@ -1543,7 +1543,7 @@ func (p *TypedSchemaProbes) checkNoMutation(
 	switch perturb {
 	case tsPerturbApplyRejected:
 		side.g.SetValidator(nil)
-		_ = side.write(t, spec) //nolint:errcheck // the perturbation WANTS the write to land
+		_ = side.write(t, spec) // the perturbation WANTS the write to land
 		side.g.SetValidator(side.sc)
 	case tsPerturbInternGhostKey:
 		// Reproduces a hook that ran AFTER the intern. It permanently taints the
@@ -1619,7 +1619,7 @@ func (p *TypedSchemaProbes) checkNoMutation(
 //
 // and splitting them would obscure the build sequence they depend on.
 //
-//nolint:gocyclo // five fixture clauses in a fixed order; each is three lines
+// five fixture clauses in a fixed order; each is three lines
 func (p *TypedSchemaProbes) NodeBattery(
 	tick int64, side *typedSchemaSide, perturb tsPerturb,
 ) []Violation {
@@ -1639,7 +1639,7 @@ func (p *TypedSchemaProbes) NodeBattery(
 	if perturb == tsPerturbNodePrefill {
 		// Reproduces a fixture that was already complete: the mid-build clause's
 		// precondition is gone, so the clause must fire.
-		_ = side.g.SetNodeProperty(name, tsKeyStr, lpg.StringValue("prefilled")) //nolint:errcheck // perturbation
+		_ = side.g.SetNodeProperty(name, tsKeyStr, lpg.StringValue("prefilled")) // perturbation
 	}
 	vs = append(vs, p.validateClause(tick, side, name, "validate:mid-build", tsNodeMissingRequired)...)
 	p.ev.ValidateMidBuild++
@@ -1671,7 +1671,7 @@ func (p *TypedSchemaProbes) NodeBattery(
 	if perturb == tsPerturbRepairPreInstall {
 		// Reproduces a fixture whose forbidden value is gone: the kind-re-check
 		// clause's precondition is gone with it, so the clause must fire.
-		_ = side.g.SetNodeProperty(tsPreInstallNode, tsKeyInt, lpg.Int64Value(1)) //nolint:errcheck // perturbation
+		_ = side.g.SetNodeProperty(tsPreInstallNode, tsKeyInt, lpg.Int64Value(1)) // perturbation
 	}
 	vs = append(vs, p.validateClause(tick, side, tsPreInstallNode, "validate:pre-install", tsNodeTypeMismatch)...)
 	p.ev.ValidatePreInstall++
@@ -2064,7 +2064,7 @@ func (p *TypedSchemaProbes) VerifyWitnesses(
 		w := p.witnesses[0]
 		if key, ok := sub.keyOf[w.name]; ok {
 			g.SetValidator(nil)
-			_ = g.SetNodeProperty(key, tsEngineKeyAge, lpg.StringValue(w.rejected)) //nolint:errcheck // perturbation
+			_ = g.SetNodeProperty(key, tsEngineKeyAge, lpg.StringValue(w.rejected)) // perturbation
 			g.SetValidator(p.engineSchema)
 		}
 	}
@@ -2678,7 +2678,7 @@ func typedSchemaPrologue(
 // branch is a distinct, documented phase and inlining them is what makes the
 // ordering auditable against Simulator.Run.
 //
-//nolint:gocyclo // the standard tick loop plus four inserted phases; every
+// the standard tick loop plus four inserted phases; every
 func typedSchemaLoop(
 	ctx context.Context, sm *Simulator, side *typedSchemaSide,
 	cfg TypedSchemaConfig, probes *TypedSchemaProbes,

@@ -240,7 +240,7 @@ func TestEdgePropCols_CompactPreservesBinding(t *testing.T) {
 // an unpacked []bool oracle, and asserts no stale high bit survives.
 func TestSpliceBits(t *testing.T) {
 	t.Parallel()
-	rng := rand.New(rand.NewSource(0xB17B17))
+	rng := rand.New(rand.NewSource(0xB17B17)) //nolint:gosec // G404: math/rand seeded from a fixed constant — this test asserts a reproducible sequence, which a CSPRNG would destroy.
 	ns := []int{1, 2, 63, 64, 65, 127, 128, 129, 200}
 	for _, n := range ns {
 		// Random bit pattern of n bits.
@@ -332,8 +332,8 @@ func TestEdgePropCols_PropertyBasedOracle(t *testing.T) {
 
 func runOracle(t *testing.T, seed int64) {
 	t.Helper()
-	rng := rand.New(rand.NewSource(seed))
-	keys := []PropertyKeyID{1, 2, 3} // few keys → high reuse pressure
+	rng := rand.New(rand.NewSource(seed)) //nolint:gosec // G404: math/rand seeded from the test's own parameter — this test asserts a reproducible sequence, which a CSPRNG would destroy.
+	keys := []PropertyKeyID{1, 2, 3}      // few keys → high reuse pressure
 	values := func() PropertyValue {
 		switch rng.Intn(5) {
 		case 0:

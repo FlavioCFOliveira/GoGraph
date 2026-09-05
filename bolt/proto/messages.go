@@ -487,7 +487,15 @@ func decodePullDiscard[T pullDiscardResult](dec *packstream.Decoder, n int) (*T,
 	case Discard:
 		result = &Discard{N: nVal, QID: qidVal}
 	}
-	return result.(*T), nil
+	// Go does not require a type switch to be exhaustive over a union
+	// constraint, so adding a third member to pullDiscardResult would compile
+	// cleanly, leave result nil, and panic here on the wire-facing decode path.
+	// Fail with a typed error instead of crashing the connection (#2708).
+	typed, ok := result.(*T)
+	if !ok {
+		return nil, fmt.Errorf("proto: decodePullDiscard instantiated with unsupported type %T", *new(T))
+	}
+	return typed, nil
 }
 
 func decodeBegin(dec *packstream.Decoder, n int) (*Begin, error) {

@@ -104,9 +104,14 @@ type Config struct {
 	//
 	// Weightless is the right choice for a property graph queried only by
 	// relationships and properties — for example the Cypher engine, which is
-	// hardwired to W=float64 yet never reads edge weights. It is left
-	// caller-opt-in (the engine is not auto-defaulted to it) because the weight
-	// column is load-bearing for weighted algorithms.
+	// hardwired to W=float64 yet has no edge-weight concept: it writes the zero
+	// weight for every relationship and never reads a weight to compute a
+	// result. Its one read is the DELETE undo preimage, which snapshots the
+	// pair's weight so the inverse can restore it; on a weightless graph that
+	// read yields the same zero the engine itself wrote, so the column carries
+	// no information for it either way. Weightless is left caller-opt-in (the
+	// engine is not auto-defaulted to it) because the weight column is
+	// load-bearing for weighted algorithms.
 	//
 	// Contract for weighted algorithms: a weightless graph models the weight≡0
 	// special case. Structure-only algorithms (BFS, DFS, connectivity,
@@ -3087,18 +3092,44 @@ func growShardLocked[W any](minLen uint64, maxCap int, cur *shardSlots) (*shardS
 // ([Snapshot.LoadEntry], [Snapshot.LoadEntryH], [Snapshot.LoadEntryLabels],
 // [Snapshot.LoadEntryAux], [Snapshot.HasEdge]) but resolves every slot through
 // its pinned per-shard versions instead of re-loading slotsRef per call, so all
-// reads of one query observe a single, transaction-atomic adjacency state.
+// reads of one query observe one published topology rather than a moving one.
 //
 // # Concurrency and the current isolation contract
 //
-// Snapshot is the in-memory groundwork for a future lock-free adjacency read
-// path (task #1671). In the current stage adjacency reads still run under the
-// higher layer's visibility barrier (lpg.Graph.View / ApplyAtomically), which
-// already gives a barriered reader a stable cross-substructure instant; the
-// pin's per-query stability is therefore redundant with — never weaker than —
-// the barrier today. The Snapshot becomes load-bearing only when reads move out
-// from under the barrier, at which point its pinned immutable versions are what
-// keep an unbarriered reader from observing a partial transaction's adjacency.
+// Snapshot was built as groundwork for moving adjacency reads out from under a
+// visibility barrier (task #1671). THAT MOVE ALREADY HAPPENED, and it happened
+// differently — so the paragraph that stood here, which said reads "still run
+// under the higher layer's visibility barrier (lpg.Graph.View /
+// ApplyAtomically)", described a world that no longer exists. Corrected under
+// rmp #2704; what follows is what is true at HEAD.
+//
+// Adjacency reads take NO visibility barrier. lpg.Graph.View was removed by
+// rmp #2344, and internal/scriptgate/no_read_barrier_gate_test.go fails the
+// build if a read barrier returns. Every visGate acquisition in the module is on
+// a write or DDL path. The read itself is two atomic loads in [loadEntry] and
+// never blocks.
+//
+// ISOLATION IS DELIVERED BY THE PER-ENTRY VERSION CHAIN (the as-of accessors),
+// WHICH THIS SNAPSHOT DOES NOT CONSULT. [Snapshot.loadEntryPinned] resolves a
+// slot without reading e.ver, and Snapshot exposes no as-of accessor at all, so
+// it cannot answer "as of version V". It pins a topology, not a transaction.
+// Note also the single-writer contract on [AdjList.BeginCommit]: a pin must not
+// be taken during a commit window, because the window mutates its published
+// builder in place.
+//
+// Measured under rmp #2704 (go1.27.1 darwin/arm64, no -race): pinning saves
+// 0.080 ns per adjacency read (2.125n to 2.045n, -3.79%, p=0.000, interleaved,
+// n=10) against a pin costing 353.2 ns and 2304 B — shardCount is 256, so the
+// pin is 256 atomic loads and a 2 KB allocation, not one load. Break-even is
+// between 1024 and 4096 adjacency reads per pin; at a realistic per-query pin
+// the throughput ladder reads 0.462x-0.538x, i.e. two to five times SLOWER.
+// The adjacency read is 0.62% of read-path CPU and holds 0% of mutex delay at
+// every concurrency level, so there is no contention here to relieve.
+//
+// The type is retained deliberately, not as dead code: it is a correct
+// lock-free topology pin. It is simply not the instrument for an isolation job
+// the version chain already does, and wiring reads onto it as it stands would
+// regress Isolation rather than improve throughput.
 //
 // The mapper is shared (not copied): NodeIDs are stable for the AdjList's
 // lifetime, so resolving a captured NodeID through the live mapper is sound.
@@ -3115,8 +3146,9 @@ type Snapshot[N comparable, W any] struct {
 
 // PinSnapshot captures the current per-shard adjacency versions and returns an
 // immutable [Snapshot] over them. It performs one atomic load per shard
-// (shardCount loads total) and allocates a single Snapshot; it takes no lock
-// and never blocks a writer. A nil shard version (a shard that has never been
+// (shardCount loads total — 256, measured at 353.2 ns and 2304 B per pin under
+// rmp #2704) and allocates a single Snapshot; it takes no lock and never blocks
+// a writer. A nil shard version (a shard that has never been
 // written) is captured as nil and read back as an empty adjacency, so an empty
 // or partially-populated graph is handled without special-casing.
 //

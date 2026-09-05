@@ -10,7 +10,7 @@ import (
 // ([Reader.SetHint]) holds the read lock and has already verified the
 // mapping is live, so this method neither locks nor re-checks.
 func (r *Reader) setHint(pattern AccessPattern) error {
-	advice := 0
+	var advice int
 	switch pattern {
 	case AccessSequential:
 		advice = unix.MADV_SEQUENTIAL

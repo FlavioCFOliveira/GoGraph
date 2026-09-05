@@ -37,7 +37,7 @@ func runTxErr(ctx context.Context, t *testing.T, eng *cypher.Engine, q string, p
 	if res == nil {
 		return nil
 	}
-	for res.Next() { //nolint:revive // drain to surface the lazy error
+	for res.Next() { // drain to surface the lazy error
 	}
 	e := res.Err()
 	res.Close()

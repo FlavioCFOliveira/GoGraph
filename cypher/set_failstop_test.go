@@ -42,7 +42,7 @@ func TestSet_CountSubqueryRHS_FailStop(t *testing.T) {
 	// The eval error may surface from RunInTx or from the lazy result stream.
 	gotErr := err
 	if gotErr == nil && res != nil {
-		for res.Next() { //nolint:revive // drain to surface the lazy error
+		for res.Next() { // drain to surface the lazy error
 		}
 		gotErr = res.Err()
 		res.Close()

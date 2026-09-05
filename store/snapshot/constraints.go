@@ -117,6 +117,7 @@ func WriteConstraints(w io.Writer, specs []ConstraintSpec) (size int64, crc uint
 		metrics.IncCounter("store.snapshot.WriteConstraints.errors", 1)
 		return 0, 0, err
 	}
+	//nolint:gosec // G115: NO writer guard; overflow needs 2^32 constraints. ReadConstraints rejects count > 1<<20 at constraints.go:212, so the reader's cap binds 4096x earlier
 	if err := binary.Write(tee, binary.LittleEndian, uint32(len(ordered))); err != nil {
 		metrics.IncCounter("store.snapshot.WriteConstraints.errors", 1)
 		return 0, 0, err
@@ -158,6 +159,7 @@ func writeConstraintRecord(w io.Writer, c ConstraintSpec) (int64, error) {
 			return 0, fmt.Errorf("%w: field too long to encode (%d bytes; maximum %d)",
 				ErrConstraintsCorrupted, len(s), constraintsMaxStringLen)
 		}
+		//nolint:gosec // G115: bounded by the constraintsMaxStringLen fail-stop at constraints.go:158, the same cap readConstraintString enforces (#1903)
 		if err := binary.Write(w, binary.LittleEndian, uint32(len(s))); err != nil {
 			return 0, err
 		}

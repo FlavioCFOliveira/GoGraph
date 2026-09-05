@@ -74,7 +74,7 @@ func YenKShortest[W Weight](c *csr.CSR[W], src, dst graph.NodeID, k int) []YenPa
 // at entry, then reuses them across all internal Dijkstra calls.
 // The v1.0 implementation reallocated all of these per spur step.
 //
-//nolint:gocyclo // canonical Yen: NaN/Inf gate + initial Dijkstra + k-1 spur rounds + candidate sort
+// canonical Yen: NaN/Inf gate + initial Dijkstra + k-1 spur rounds + candidate sort
 func YenKShortestCtx[W Weight](ctx context.Context, c *csr.CSR[W], src, dst graph.NodeID, k int) ([]YenPath[W], error) {
 	defer metrics.Time("search.YenKShortestCtx").Stop()
 	if k <= 0 {
@@ -328,7 +328,7 @@ func fillBannedEdges[W Weight](banned map[edgeKey]struct{}, paths []YenPath[W], 
 // the caller must copy if the result needs to outlive the next spur
 // iteration.
 //
-//nolint:gocyclo // canonical point-to-point Dijkstra with ban/exclude filters
+// canonical point-to-point Dijkstra with ban/exclude filters
 func dijkstraAvoidingInto[W Weight](
 	ctx context.Context,
 	c *csr.CSR[W],

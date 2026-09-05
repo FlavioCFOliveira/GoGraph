@@ -61,7 +61,7 @@ func Run(ctx context.Context, spec Spec) Report {
 		for q := 0; q < spec.Queries; q++ {
 			src := graph.NodeID(uint64(q) % spec.Vertices)
 			t2 := time.Now()
-			// nolint:errcheck // benchmark intentionally times the
+			// The benchmark intentionally times the
 			// Dijkstra call regardless of its error result; errors on
 			// synthetic inputs are not expected and would corrupt the
 			// latency distribution if individually logged.
@@ -102,7 +102,7 @@ func Synthetic(ctx context.Context, v, e uint64) (*adjlist.AdjList[uint32, int64
 		for d := uint64(0); d < avgDeg; d++ {
 			dst := (src + 1 + d*7) % v
 			w := int64((src*19+d*37)%97 + 1)
-			if err := a.AddEdge(uint32(src), uint32(dst), w); err != nil {
+			if err := a.AddEdge(uint32(src), uint32(dst), w); err != nil { //nolint:gosec // G115: src < v and dst = (...)%v, and the adjacency list is instantiated with a uint32 node type, so v above 2^32 is already outside the graph's own key domain.
 				return a, fmt.Errorf("dimacs9.Synthetic: AddEdge(%d->%d): %w", src, dst, err)
 			}
 		}

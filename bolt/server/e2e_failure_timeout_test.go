@@ -87,7 +87,7 @@ func TestE2E_FailureTimeout(t *testing.T) {
 	}
 
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer session.Close(ctx) //nolint:errcheck
+	defer session.Close(ctx)
 
 	// Short deadline applied to the streaming read to trigger cancellation.
 	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Millisecond)
@@ -135,7 +135,7 @@ func TestE2E_FailureTimeout(t *testing.T) {
 
 	// AC#3: fresh session on same driver must succeed.
 	session2 := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer session2.Close(ctx) //nolint:errcheck
+	defer session2.Close(ctx)
 
 	result2, err := session2.Run(ctx, "RETURN 1 AS n", nil)
 	if err != nil {

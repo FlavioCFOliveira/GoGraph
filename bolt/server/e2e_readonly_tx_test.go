@@ -25,12 +25,12 @@ func TestE2E_ReadOnlyTx_ReadsAndRefusesWrites(t *testing.T) {
 
 	// Seed one node through an ordinary (write) session.
 	seedSession := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer seedSession.Close(ctx) //nolint:errcheck
+	defer seedSession.Close(ctx)
 	runWrite(ctx, t, seedSession, `CREATE (:RO {v: $v})`, map[string]any{"v": int64(42)})
 
 	// A read-mode session: the driver tags BEGIN with mode="r".
 	readSession := driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
-	defer readSession.Close(ctx) //nolint:errcheck
+	defer readSession.Close(ctx)
 
 	tx, err := readSession.BeginTransaction(ctx)
 	if err != nil {
@@ -88,7 +88,7 @@ func TestE2E_ReadOnlyTx_ReadsAndRefusesWrites(t *testing.T) {
 	// read-mode connection that was just driven into a failed/reset state.
 	verifyDriver := newDriverForAddr(t, addr)
 	verifySession := verifyDriver.NewSession(ctx, neo4j.SessionConfig{})
-	defer verifySession.Close(ctx) //nolint:errcheck
+	defer verifySession.Close(ctx)
 	check := runRead(ctx, t, verifySession, `MATCH (n:Forbidden) RETURN count(n) AS c`, nil)
 	if len(check) != 1 {
 		t.Fatalf("verify returned %d rows, want 1", len(check))

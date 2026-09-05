@@ -210,7 +210,7 @@ func TestRegistry_Handler(t *testing.T) {
 	srv := httptest.NewServer(r.Handler())
 	defer srv.Close()
 
-	resp, err := http.Get(srv.URL + "/metrics") //nolint:gosec // test-only URL
+	resp, err := http.Get(srv.URL + "/metrics") // test-only URL
 	if err != nil {
 		t.Fatalf("GET /metrics: %v", err)
 	}

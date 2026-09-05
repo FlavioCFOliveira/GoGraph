@@ -49,7 +49,7 @@ func TestMapper_ShardDistribution_Uniform(t *testing.T) {
 	t.Parallel()
 	m := NewMapper[string]()
 	const n = 100_000
-	rng := rand.New(rand.NewPCG(0xDEAD, 0xBEEF))
+	rng := rand.New(rand.NewPCG(0xDEAD, 0xBEEF)) //nolint:gosec // G404: math/rand/v2 PCG seeded from a fixed constant — this test asserts a reproducible sequence, which a CSPRNG would destroy.
 	const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	for i := 0; i < n; i++ {
 		length := 8 + rng.IntN(8)

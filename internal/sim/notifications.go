@@ -158,7 +158,7 @@ func queryNotifications(ctx context.Context, engine *EngineAdapter, query string
 	if err != nil {
 		return nil, fmt.Errorf("query error: %w", err)
 	}
-	for res.Next() { //nolint:revive // draining is the point
+	for res.Next() { // draining is the point
 	}
 	drainErr := res.Err()
 	notes, facetErr := notificationsOf(res)

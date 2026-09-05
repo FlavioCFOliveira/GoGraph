@@ -123,7 +123,7 @@ func BellmanFordInto[W Weight](
 //
 // Postconditions identical to [DijkstraInto].
 //
-//nolint:gocyclo // SPFA with SLF + negative-cycle counter and ctx-yield path
+// SPFA with SLF + negative-cycle counter and ctx-yield path
 func bellmanFordCore[W Weight](
 	ctx context.Context,
 	c *csr.CSR[W],

@@ -26,6 +26,13 @@
 // path is a single sync.Map load keyed by the raw name. Only the first call for
 // a given name sanitizes it and inserts into the canonical map (a sync.Map
 // LoadOrStore); no mutex is held on any path.
+//
+// Lock-free is not the same as contention-free. A counter or histogram that
+// several goroutines emit to concurrently would serialise them all on ONE cache
+// line, which is a scaling defect rather than a correctness one; a series grows
+// per-core accumulators the first time that contention is observed. See
+// striped.go. Nothing about the exposed metric changes: the shards are summed
+// on read, so names, labels, types and values are exactly what they were.
 package prometheus
 
 import (
@@ -55,9 +62,59 @@ var latencyBuckets = [10]time.Duration{
 	5 * time.Second,
 }
 
-// counter is a named monotonic counter backed by a single atomic.
+// counter is a named monotonic counter.
+//
+// It starts as a single atomic and grows per-core shards the first time two
+// goroutines are observed incrementing it concurrently. See striped.go for why
+// the shards exist, how a shard is chosen, and why they are not allocated up
+// front. The total is value plus every shard, so an increment is never lost
+// whichever side of the promotion it lands on.
 type counter struct {
+	// value carries every increment applied before this counter was promoted,
+	// plus any that raced the promotion. After promotion it stops growing but
+	// remains part of the total.
 	value atomic.Uint64
+	// shards is nil until contention is observed; installed at most once.
+	shards atomic.Pointer[counterShards]
+}
+
+// probe tests whether another goroutine is writing this counter concurrently
+// and promotes it if so. It is the COLD half of the increment path: the hot
+// half is written out in [Registry.IncCounter], because a method call there
+// would not be inlined and would cost a real call on every increment. That is
+// not a guess — it was measured. See the note on [counter].
+//
+// The swap is deliberately a NO-OP one, w for w: it changes nothing and cannot
+// corrupt the count. Its only purpose is to FAIL, because CompareAndSwap fails
+// exactly when another goroutine wrote between the load and the swap — which is
+// the contention itself, observed rather than predicted. The technique is Doug
+// Lea's, from java.util.concurrent.atomic.Striped64 (JSR-166), which promotes
+// its per-thread cells on the same signal.
+func (c *counter) probe() {
+	w := c.value.Load()
+	if !c.value.CompareAndSwap(w, w) {
+		c.promote()
+	}
+}
+
+// promote installs the shard array. It is idempotent and safe to call from any
+// goroutine: the loser of the race drops its allocation.
+func (c *counter) promote() {
+	if c.shards.Load() != nil {
+		return
+	}
+	c.shards.CompareAndSwap(nil, &counterShards{})
+}
+
+// load returns the counter's total.
+func (c *counter) load() uint64 {
+	total := c.value.Load()
+	if s := c.shards.Load(); s != nil {
+		for i := range s.slots {
+			total += s.slots[i].n.Load()
+		}
+	}
+	return total
 }
 
 // gauge holds the CURRENT value of a quantity that can fall as well as rise.
@@ -74,6 +131,11 @@ func (g *gauge) load() float64 { return math.Float64frombits(g.value.Load()) }
 
 // histogram holds per-bucket counts plus a running sum (in nanoseconds)
 // for Prometheus _sum exposition.
+//
+// An observation is THREE read-modify-writes — the sum, the total count and one
+// bucket — and they sit in the same object, so a shared histogram costs three
+// times a counter's cache-line traffic per observation. It is promoted to
+// per-core shards on the same signal and by the same rule; see striped.go.
 type histogram struct {
 	// buckets[i] counts observations <= latencyBuckets[i].
 	// Each is independent; the Prometheus _bucket{le=x} value is
@@ -86,20 +148,79 @@ type histogram struct {
 	// durations up to 5 s × 2^63 operations will not overflow in
 	// practice, and time.Duration is int64-backed.
 	sumNs atomic.Int64
+	// shards is nil until contention is observed; installed at most once.
+	shards atomic.Pointer[histShards]
+}
+
+// bucketOf returns the index of the bucket d falls in, or -1 when d exceeds
+// every upper bound and belongs only to +Inf.
+func bucketOf(d time.Duration) int {
+	for i, upper := range latencyBuckets {
+		if d <= upper {
+			return i
+		}
+	}
+	return -1
 }
 
 // observe records one latency sample.
 func (h *histogram) observe(d time.Duration) {
-	ns := int64(d)
-	h.sumNs.Add(ns)
-	h.inf.Add(1)
-	for i, upper := range latencyBuckets {
-		if d <= upper {
-			h.buckets[i].Add(1)
-			return
+	idx := bucketOf(d)
+	if s := h.shards.Load(); s != nil {
+		sh := &s.slots[shardIndex()]
+		sh.sumNs.Add(int64(d))
+		sh.inf.Add(1)
+		if idx >= 0 {
+			sh.buckets[idx].Add(1)
+		}
+		return
+	}
+	// Unpromoted: the three plain adds, plus the same sampled contention probe
+	// the counter uses. inf is the field every observation touches, so it is the
+	// one that carries the probe.
+	h.sumNs.Add(int64(d))
+	v := h.inf.Add(1)
+	if idx >= 0 {
+		h.buckets[idx].Add(1)
+	}
+	if v&probeMask == 0 {
+		w := h.inf.Load()
+		if !h.inf.CompareAndSwap(w, w) {
+			h.promote()
 		}
 	}
-	// d > 5 s: only the +Inf bucket (already incremented above).
+}
+
+// promote installs the shard array. Idempotent; the loser of a race drops its
+// allocation.
+func (h *histogram) promote() {
+	if h.shards.Load() != nil {
+		return
+	}
+	h.shards.CompareAndSwap(nil, &histShards{})
+}
+
+// snapshot returns the histogram's totals, summing the unpromoted state and
+// every shard.
+func (h *histogram) snapshot() (buckets [len(latencyBuckets)]uint64, inf uint64, sumNs int64) {
+	for i := range latencyBuckets {
+		buckets[i] = h.buckets[i].Load()
+	}
+	inf = h.inf.Load()
+	sumNs = h.sumNs.Load()
+	s := h.shards.Load()
+	if s == nil {
+		return buckets, inf, sumNs
+	}
+	for j := range s.slots {
+		sh := &s.slots[j]
+		for i := range latencyBuckets {
+			buckets[i] += sh.buckets[i].Load()
+		}
+		inf += sh.inf.Load()
+		sumNs += sh.sumNs.Load()
+	}
+	return buckets, inf, sumNs
 }
 
 // Registry is a metrics.Backend that formats observations as Prometheus
@@ -177,9 +298,11 @@ func sanitize(name string) string {
 // WriteText still emits one line per metric.
 func (r *Registry) getOrCreateCounter(rawName string) *counter {
 	if v, ok := r.counterByRaw.Load(rawName); ok {
+		//nolint:forcetypeassert // counterByRaw is unexported and written only at prometheus.go:307, which stores the *counter obtained just above; counters, gauges and histograms occupy three separate map pairs (prometheus.go:237-244), so a name cannot collide across kinds
 		return v.(*counter)
 	}
 	actual, _ := r.counters.LoadOrStore(sanitize(rawName), &counter{})
+	//nolint:forcetypeassert // r.counters is written only by the LoadOrStore at prometheus.go:304, whose zero value is a &counter{}, so the map holds nothing but *counter
 	c := actual.(*counter)
 	r.counterByRaw.Store(rawName, c)
 	return c
@@ -189,9 +312,11 @@ func (r *Registry) getOrCreateCounter(rawName string) *counter {
 // it on first sight; mirrors getOrCreateCounter.
 func (r *Registry) getOrCreateGauge(rawName string) *gauge {
 	if v, ok := r.gaugeByRaw.Load(rawName); ok {
+		//nolint:forcetypeassert // gaugeByRaw is unexported and written only at prometheus.go:321, which stores the *gauge obtained just above; the three metric kinds occupy separate map pairs (prometheus.go:237-244)
 		return v.(*gauge)
 	}
 	actual, _ := r.gauges.LoadOrStore(sanitize(rawName), &gauge{})
+	//nolint:forcetypeassert // r.gauges is written only by the LoadOrStore at prometheus.go:318, whose zero value is a &gauge{}, so the map holds nothing but *gauge
 	g := actual.(*gauge)
 	r.gaugeByRaw.Store(rawName, g)
 	return g
@@ -201,9 +326,11 @@ func (r *Registry) getOrCreateGauge(rawName string) *gauge {
 // creating it on first sight; mirrors getOrCreateCounter.
 func (r *Registry) getOrCreateHistogram(rawName string) *histogram {
 	if v, ok := r.histByRaw.Load(rawName); ok {
+		//nolint:forcetypeassert // histByRaw is unexported and written only at prometheus.go:335, which stores the *histogram obtained just above; the three metric kinds occupy separate map pairs (prometheus.go:237-244)
 		return v.(*histogram)
 	}
 	actual, _ := r.hists.LoadOrStore(sanitize(rawName), &histogram{})
+	//nolint:forcetypeassert // r.hists is written only by the LoadOrStore at prometheus.go:332, whose zero value is a &histogram{}, so the map holds nothing but *histogram
 	h := actual.(*histogram)
 	r.histByRaw.Store(rawName, h)
 	return h
@@ -211,8 +338,25 @@ func (r *Registry) getOrCreateHistogram(rawName string) *histogram {
 
 // IncCounter implements metrics.Backend. It increments the named counter by
 // delta. The name is sanitized before storage.
+//
+// The increment is written out here rather than delegated to a method on
+// [counter] because the Go inliner will not inline a function this shape — it
+// costs 144 against a budget of 80 — so a method would add a real call to every
+// increment. It did: an earlier revision that delegated measured +21.2% on
+// BenchmarkIncCounter (8.257ns -> 10.003ns, p=0.000, n=8) with no other change.
+// IncCounter is itself never inlined either way, so putting the work here
+// leaves the call count exactly what it was before the shards existed.
 func (r *Registry) IncCounter(name string, delta uint64) {
-	r.getOrCreateCounter(name).value.Add(delta)
+	c := r.getOrCreateCounter(name)
+	if s := c.shards.Load(); s != nil {
+		s.slots[shardIndex()].n.Add(delta)
+		return
+	}
+	// Unpromoted: the plain atomic add this counter has always done, plus a
+	// contention probe on one increment in probeMask+1. See [counter.probe].
+	if v := c.value.Add(delta); v&probeMask == 0 {
+		c.probe()
+	}
 }
 
 // SetGauge implements metrics.Backend. It records the current value of the
@@ -265,9 +409,11 @@ func (r *Registry) WriteText(w io.Writer) error {
 	var cNames []string
 	cSnap := make(map[string]uint64)
 	r.counters.Range(func(k, v any) bool {
+		//nolint:forcetypeassert // the only write to r.counters is the LoadOrStore at prometheus.go:304, whose key is the sanitize(rawName) string
 		name := k.(string)
 		cNames = append(cNames, name)
-		cSnap[name] = v.(*counter).value.Load()
+		//nolint:forcetypeassert // the only write to r.counters is the LoadOrStore at prometheus.go:304, whose value is a &counter{}
+		cSnap[name] = v.(*counter).load()
 		return true
 	})
 	sort.Strings(cNames)
@@ -282,8 +428,10 @@ func (r *Registry) WriteText(w io.Writer) error {
 	var gNames []string
 	gSnap := make(map[string]float64)
 	r.gauges.Range(func(k, v any) bool {
+		//nolint:forcetypeassert // the only write to r.gauges is the LoadOrStore at prometheus.go:318, whose key is the sanitize(rawName) string
 		name := k.(string)
 		gNames = append(gNames, name)
+		//nolint:forcetypeassert // the only write to r.gauges is the LoadOrStore at prometheus.go:318, whose value is a &gauge{}
 		gSnap[name] = v.(*gauge).load()
 		return true
 	})
@@ -302,15 +450,13 @@ func (r *Registry) WriteText(w io.Writer) error {
 	}
 	hSnap := make(map[string]histSnap)
 	r.hists.Range(func(k, v any) bool {
+		//nolint:forcetypeassert // the only write to r.hists is the LoadOrStore at prometheus.go:332, whose key is the sanitize(rawName) string
 		name := k.(string)
+		//nolint:forcetypeassert // the only write to r.hists is the LoadOrStore at prometheus.go:332, whose value is a &histogram{}
 		h := v.(*histogram)
 		hNames = append(hNames, name)
 		var snap histSnap
-		for i := range latencyBuckets {
-			snap.buckets[i] = h.buckets[i].Load()
-		}
-		snap.inf = h.inf.Load()
-		snap.sumNs = h.sumNs.Load()
+		snap.buckets, snap.inf, snap.sumNs = h.snapshot()
 		hSnap[name] = snap
 		return true
 	})

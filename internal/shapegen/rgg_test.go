@@ -161,7 +161,7 @@ func TestRandom_RGG_EmptyAtRadius0(t *testing.T) {
 // the 0.85 floor in expectation (0.6979 < 0.85), so AC #1 is
 // only verified at dim=2.
 //
-//nolint:gocritic // brief pins the test to dim=2.
+// brief pins the test to dim=2.
 func TestRandom_RGG_NearCompleteAtFullRadius(t *testing.T) {
 	t.Parallel()
 	const (

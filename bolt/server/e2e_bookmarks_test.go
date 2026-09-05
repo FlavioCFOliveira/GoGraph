@@ -37,7 +37,7 @@ func TestE2E_Bookmarks(t *testing.T) {
 
 	// ── Session A: first write ──────────────────────────────────────────────
 	sessionA := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer sessionA.Close(ctx) //nolint:errcheck
+	defer sessionA.Close(ctx)
 
 	_, err := sessionA.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
 		result, err := tx.Run(ctx,
@@ -96,7 +96,7 @@ func TestE2E_Bookmarks(t *testing.T) {
 	sessionB := driver.NewSession(ctx, neo4j.SessionConfig{
 		Bookmarks: bookmark1,
 	})
-	defer sessionB.Close(ctx) //nolint:errcheck
+	defer sessionB.Close(ctx)
 
 	rowsB := runRead(ctx, t, sessionB,
 		"MATCH (n:BMark {key: $key}) RETURN n.seq AS seq ORDER BY seq",

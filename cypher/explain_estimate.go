@@ -94,38 +94,42 @@ func estRows(rows float64) int64 {
 	return int64(math.Round(rows))
 }
 
-// scanEstimateAnnotation returns the estimate suffix for a leaf scan operator:
+// scanEstimate returns the estimate for a leaf scan operator, together with the
+// suffix the tree renderer appends for it:
 // AllNodesScan renders the exact total live-node count ([lpg.Graph.LiveOrder]),
 // and NodeByLabelScan the exact live count for its label (labelCardinalityEstimate).
 // Both are estExact. A nil resolver or graph yields no annotation.
-func scanEstimateAnnotation(plan ir.LogicalPlan, labelSrc *lpgLabelResolver, g *lpg.ReadView[string, float64]) string {
+func scanEstimate(plan ir.LogicalPlan, labelSrc *lpgLabelResolver, g *lpg.ReadView[string, float64]) (est estimate, annot string, ok bool) {
 	switch p := plan.(type) {
 	case *ir.AllNodesScan:
 		if g == nil {
-			return ""
+			return estimate{}, "", false
 		}
-		return estimateAnnotation(estimate{rows: float64(g.LiveOrder()), source: estExact})
+		e := estimate{rows: float64(g.LiveOrder()), source: estExact}
+		return e, estimateAnnotation(e), true
 	case *ir.NodeByLabelScan:
 		if labelSrc == nil {
-			return ""
+			return estimate{}, "", false
 		}
-		return estimateAnnotation(labelCardinalityEstimate(labelSrc, p.Label))
+		e := labelCardinalityEstimate(labelSrc, p.Label)
+		return e, estimateAnnotation(e), true
 	default:
-		return ""
+		return estimate{}, "", false
 	}
 }
 
-// labelScanAnnotation returns the exact live-count suffix for a NodeByLabelScan
+// labelScanEstimate returns the exact live count for a NodeByLabelScan
 // on a specific label. It is used both for the general scan leaf and for the
 // min-label-rewritten leaf (which scans the chosen smaller label).
-func labelScanAnnotation(labelSrc *lpgLabelResolver, label string) string {
+func labelScanEstimate(labelSrc *lpgLabelResolver, label string) (est estimate, annot string, ok bool) {
 	if labelSrc == nil {
-		return ""
+		return estimate{}, "", false
 	}
-	return estimateAnnotation(labelCardinalityEstimate(labelSrc, label))
+	e := labelCardinalityEstimate(labelSrc, label)
+	return e, estimateAnnotation(e), true
 }
 
-// selectionEstimateAnnotation returns the estimate suffix for a Selection whose
+// selectionEstimate returns the estimate for a Selection whose
 // child is a scan leaf, derived from the predicate shape:
 //
 //   - An equality n.prop = literal → the exact per-value MCV count when the
@@ -138,24 +142,25 @@ func labelScanAnnotation(labelSrc *lpgLabelResolver, label string) string {
 // It returns the empty string for any other predicate shape (a bare label
 // predicate, a compound AND/OR, an IS NULL, …) or a child that is not a scan
 // leaf — the honest "no derivable estimate" case.
-func selectionEstimateAnnotation(sel *ir.Selection, labelSrc *lpgLabelResolver, params map[string]expr.Value) string {
+func selectionEstimate(sel *ir.Selection, labelSrc *lpgLabelResolver, params map[string]expr.Value) (est estimate, annot string, ok bool) {
 	if sel.PredicateExpr == nil || labelSrc == nil {
-		return ""
+		return estimate{}, "", false
 	}
 	nodeVar, label, isScan := scanLeafNodeVar(sel.Child)
 	if !isScan {
-		return ""
+		return estimate{}, "", false
 	}
 	// Equality predicate: MCV-exact or 1/NDV heuristic.
-	if prop, lit, ok := extractEqFromAST(sel.PredicateExpr, nodeVar, params); ok && lit != nil {
-		return estimateAnnotation(statsEqualityEstimate(labelSrc, label, prop, lit))
+	if prop, lit, okEq := extractEqFromAST(sel.PredicateExpr, nodeVar, params); okEq && lit != nil {
+		e := statsEqualityEstimate(labelSrc, label, prop, lit)
+		return e, estimateAnnotation(e), true
 	}
 	// Single range comparison: equi-depth histogram estimate + certified error.
-	if prop, op, bound, ok := extractRangeComparison(sel.PredicateExpr, nodeVar, params); ok {
+	if prop, op, bound, okRange := extractRangeComparison(sel.PredicateExpr, nodeVar, params); okRange {
 		e, absErr := statsRangeEstimate(labelSrc, label, prop, op, bound)
-		return estimateAnnotationWithError(e, absErr)
+		return e, estimateAnnotationWithError(e, absErr), true
 	}
-	return ""
+	return estimate{}, "", false
 }
 
 // extractRangeComparison decomposes a single comparison predicate
@@ -216,16 +221,16 @@ func mirrorStatsOp(op stats.Op) stats.Op {
 	}
 }
 
-// expandEstimateAnnotation returns the estimate suffix for an Expand: the exact
+// expandEstimate returns the estimate for an Expand: the exact
 // count-store degree D(label, relType, dir) — the expected total number of rows
 // the expansion emits when driven by every node of the source label — when the
 // expand has exactly one relationship type, a directed traversal (outgoing or
 // incoming), and a resolvable source label. A dirty D cell yields estFallback
 // (omitted), and any unresolvable shape (multi-type, undirected, unknown source
 // label) yields no annotation.
-func expandEstimateAnnotation(exp *ir.Expand, labelSrc *lpgLabelResolver) string {
+func expandEstimate(exp *ir.Expand, labelSrc *lpgLabelResolver) (est estimate, annot string, ok bool) {
 	if labelSrc == nil || len(exp.RelTypes) != 1 {
-		return ""
+		return estimate{}, "", false
 	}
 	var dir count.Direction
 	switch exp.Direction {
@@ -235,13 +240,14 @@ func expandEstimateAnnotation(exp *ir.Expand, labelSrc *lpgLabelResolver) string
 		dir = count.In
 	default:
 		// Undirected (DirectionBoth) has no single D cell; omit.
-		return ""
+		return estimate{}, "", false
 	}
-	label, ok := expandFromLabel(exp)
-	if !ok {
-		return ""
+	label, okLabel := expandFromLabel(exp)
+	if !okLabel {
+		return estimate{}, "", false
 	}
-	return estimateAnnotation(degreeCardinalityEstimate(labelSrc, label, exp.RelTypes[0], dir))
+	e := degreeCardinalityEstimate(labelSrc, label, exp.RelTypes[0], dir)
+	return e, estimateAnnotation(e), true
 }
 
 // expandFromLabel finds the label of the Expand's source node by descending the
@@ -322,12 +328,13 @@ func rangeSeekInRangeCount(sel *ir.Selection, idxMgr *index.Manager, g *lpg.Read
 	return 0, false
 }
 
-// rangeSeekLeafAnnotation renders the exact in-range count for a rewritten
+// rangeSeekLeafEstimate returns the exact in-range count for a rewritten
 // NodeByIndexRangeScan leaf as an estExact estimate, or the empty string when the
 // count cannot be recovered.
-func rangeSeekLeafAnnotation(sel *ir.Selection, idxMgr *index.Manager, g *lpg.ReadView[string, float64], params map[string]expr.Value, prefixSeek bool) string {
-	if cnt, ok := rangeSeekInRangeCount(sel, idxMgr, g, params, prefixSeek); ok {
-		return estimateAnnotation(estimate{rows: float64(cnt), source: estExact})
+func rangeSeekLeafEstimate(sel *ir.Selection, idxMgr *index.Manager, g *lpg.ReadView[string, float64], params map[string]expr.Value, prefixSeek bool) (est estimate, annot string, ok bool) {
+	if cnt, okCnt := rangeSeekInRangeCount(sel, idxMgr, g, params, prefixSeek); okCnt {
+		e := estimate{rows: float64(cnt), source: estExact}
+		return e, estimateAnnotation(e), true
 	}
-	return ""
+	return estimate{}, "", false
 }

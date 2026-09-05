@@ -29,7 +29,7 @@ func KCore[W any](c *csr.CSR[W]) []int {
 // checked on entry to the peel loop and every 4096 peeled vertices
 // thereafter; on cancellation returns (nil, the raw ctx.Err()).
 //
-//nolint:gocyclo // canonical Batagelj-Zaversnik bucket-peel
+// canonical Batagelj-Zaversnik bucket-peel
 func KCoreCtx[W any](ctx context.Context, c *csr.CSR[W]) ([]int, error) {
 	defer metrics.Time("search.KCoreCtx").Stop()
 	n := int(c.MaxNodeID())

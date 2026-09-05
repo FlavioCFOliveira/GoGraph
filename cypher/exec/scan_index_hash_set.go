@@ -192,7 +192,7 @@ func (op *NodeByIndexSeekSet) Next(out *Row) (bool, error) {
 	if op.pos >= len(op.ids) {
 		return false, nil
 	}
-	op.buf[0] = expr.IntegerValue(int64(op.ids[op.pos])) //nolint:gosec // NodeID fits int64
+	op.buf[0] = expr.IntegerValue(int64(op.ids[op.pos])) // NodeID fits int64
 	op.pos++
 	*out = op.buf[:]
 	return true, nil

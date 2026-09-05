@@ -212,7 +212,7 @@ func (s *Swarm) resolveClock() clock.Clock {
 // run indices produce well-separated seeds rather than a trivial +1 sequence.
 // i is a run index and is always non-negative (the dispatcher counts up from 0).
 func (s *Swarm) derivedSeed(i int) uint64 {
-	//nolint:gosec // G115: i is a run index, always >= 0; the uint64 conversion
+	// G115: i is a run index, always >= 0; the uint64 conversion
 	// cannot wrap. The conversion only mixes the index into the seed.
 	idx := uint64(i)
 	return NewSeed(s.cfg.MasterSeed^(idx*swarmSeedMix)).Uint64N(1<<62) ^ ((idx + 1) * swarmSeedMix)

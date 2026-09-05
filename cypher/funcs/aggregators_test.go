@@ -367,7 +367,7 @@ func TestCollectAgg(t *testing.T) {
 			expr.StringValue("c"), expr.StringValue("a"), expr.StringValue("b"),
 		}
 		result := feedAll(newAgg(funcs.NewCollectAgg()), vals...)
-		lv := result.(expr.ListValue) //nolint:forcetypeassert // test; type asserted above
+		lv := result.(expr.ListValue) // test - the dynamic type is asserted above
 		for i, want := range vals {
 			if lv[i] != want {
 				t.Errorf("lv[%d] = %v, want %v", i, lv[i], want)

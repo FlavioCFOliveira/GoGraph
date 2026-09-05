@@ -71,7 +71,7 @@ func writeValidityPair(t testing.TB, dir, cn string, notBefore, notAfter time.Ti
 // change" on a coarse-grained filesystem.
 func writeFileOrFail(t testing.TB, path string, content []byte) {
 	t.Helper()
-	if err := os.WriteFile(path, content, 0o600); err != nil {
+	if err := os.WriteFile(path, content, 0o600); err != nil { //nolint:gosec // G703: the directory component is a path this test created and the leaf name is a literal, so no traversal segment can enter.
 		t.Fatalf("write %s: %v", path, err)
 	}
 	stamp := time.Now().Add(time.Second)
@@ -397,7 +397,7 @@ func TestCertReloader_ReloadStillSkipsAnIdenticalPair(t *testing.T) {
 	before, _ := r.GetCertificate(nil)
 
 	// Same bytes, later mtime: writeFileOrFail stamps mtime one second ahead.
-	certPEM, err := os.ReadFile(certPath)
+	certPEM, err := os.ReadFile(certPath) //nolint:gosec // G304: certPath was written by this test under its own temp dir.
 	if err != nil {
 		t.Fatalf("read cert: %v", err)
 	}

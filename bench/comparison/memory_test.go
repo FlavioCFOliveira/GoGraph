@@ -255,7 +255,7 @@ func memQuiesceGoGraph(_ context.Context, t *testing.T, _ *memTarget, _ neo4j.Dr
 func memGoGraphGet(t *testing.T, path string) []byte {
 	t.Helper()
 	url := memEnv("MEM_GOGRAPH_DEBUG", "http://127.0.0.1:6060") + path
-	resp, err := http.Get(url) //nolint:noctx,gosec // bench helper; url is this harness's own MEM_GOGRAPH_DEBUG, bounded by the test timeout
+	resp, err := http.Get(url) //nolint:gosec // bench helper; url is this harness's own MEM_GOGRAPH_DEBUG, bounded by the test timeout
 	if err != nil {
 		t.Fatalf("gograph %s: %v", path, err)
 	}

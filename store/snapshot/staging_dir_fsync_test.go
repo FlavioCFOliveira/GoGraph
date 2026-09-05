@@ -179,7 +179,7 @@ func TestWriteSnapshotFull_StagingFsyncErrorSurfaces(t *testing.T) {
 	if err := os.MkdirAll(staging, 0o750); err != nil {
 		t.Fatalf("MkdirAll staging: %v", err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(root, 0o750) })
+	t.Cleanup(func() { _ = os.Chmod(root, 0o750) }) //nolint:gosec // G302: 0o750 restores the traversal bit this test stripped to probe EACCES; without +x the temp dir cannot be removed at cleanup.
 	if err := os.Chmod(root, 0o000); err != nil {
 		t.Fatalf("chmod 0: %v", err)
 	}

@@ -274,7 +274,7 @@ func readdirCount(path string) (int, bool) {
 	if err != nil {
 		return 0, false
 	}
-	defer func() { _ = dir.Close() }() //nolint:errcheck // close on read-only handle
+	defer func() { _ = dir.Close() }() // close on read-only handle
 	names, err := dir.Readdirnames(-1)
 	if err != nil {
 		return 0, false

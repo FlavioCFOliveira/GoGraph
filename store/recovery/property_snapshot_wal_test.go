@@ -33,7 +33,7 @@ import (
 // on the coarser "correct size, no crash" invariant across a wide
 // variety of randomly generated workloads.
 //
-//nolint:gocyclo // rapid property test: generate + write + snapshot + wal + truncate + recover + assert
+// rapid property test: generate + write + snapshot + wal + truncate + recover + assert
 func TestRecovery_PropertyBased_SnapshotWAL(t *testing.T) {
 	rapid.Check(t, func(rt *rapid.T) {
 		n := rapid.IntRange(5, 20).Draw(rt, "n") // pre-snapshot nodes

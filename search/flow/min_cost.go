@@ -84,7 +84,7 @@ func MinCostMaxFlow(g *CostNetwork, src, sink int) (flow, cost int) {
 // (source-cut capacity times the largest absolute per-unit cost) fits
 // int64, returning (0, 0, [ErrCapacityOverflow]) otherwise.
 //
-//nolint:gocyclo // canonical SSP with potentials: BF bootstrap + per-iteration Dijkstra + augmentation
+// canonical SSP with potentials: BF bootstrap + per-iteration Dijkstra + augmentation
 func MinCostMaxFlowCtx(ctx context.Context, g *CostNetwork, src, sink int) (totalFlow, totalCost int, err error) {
 	defer metrics.Time("search.flow.MinCostMaxFlowCtx").Stop()
 	n := g.N()
@@ -212,7 +212,7 @@ func hasNegativeCost(g *CostNetwork) bool {
 // Returns [ErrNegativeCycle] if a negative-cost cycle reachable from
 // src is detected.
 //
-//nolint:gocyclo // canonical Bellman-Ford: V-1 relaxation passes + one cycle-detection pass + cleanup
+// canonical Bellman-Ford: V-1 relaxation passes + one cycle-detection pass + cleanup
 func bellmanFordBootstrap(ctx context.Context, g *CostNetwork, src int) ([]int, error) {
 	n := g.N()
 	const inf = capInf

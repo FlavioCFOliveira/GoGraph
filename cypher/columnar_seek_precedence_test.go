@@ -59,7 +59,7 @@ func seedIndexedPeople(t *testing.T, n int) *Engine {
 	if err != nil {
 		t.Fatalf("CREATE INDEX: %v", err)
 	}
-	for res.Next() { //nolint:revive // drain
+	for res.Next() { // drain
 	}
 	if err := res.Err(); err != nil {
 		t.Fatalf("CREATE INDEX drain: %v", err)
@@ -82,7 +82,7 @@ func countColumnarBatches(t *testing.T, eng *Engine, query string) uint64 {
 	if err != nil {
 		t.Fatalf("Run(%q): %v", query, err)
 	}
-	for res.Next() { //nolint:revive // drain
+	for res.Next() { // drain
 	}
 	if err := res.Err(); err != nil {
 		t.Fatalf("Err(%q): %v", query, err)

@@ -238,8 +238,8 @@ func TestSnapshot_TombstonesCRCRejected(t *testing.T) {
 	if len(raw) == 0 {
 		t.Fatal("tombstones.bin unexpectedly empty")
 	}
-	raw[len(raw)-1] ^= 0xFF // flip a byte in the last id
-	if err := os.WriteFile(path, raw, 0o600); err != nil {
+	raw[len(raw)-1] ^= 0xFF                                // flip a byte in the last id
+	if err := os.WriteFile(path, raw, 0o600); err != nil { //nolint:gosec // G703: the directory component is a path this test created and the leaf name is a literal, so no traversal segment can enter.
 		t.Fatalf("WriteFile: %v", err)
 	}
 

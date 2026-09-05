@@ -1,0 +1,10 @@
+=== ladder-mapper START 05:06:06 ===
+OK label=ladder-mapper base_lines=30 head_lines=30
+=== ladder-mapper END rc=0 wall=226s 05:09:52 ===
+=== ladder-mvcc START 05:09:52 ===
+OK label=ladder-mvcc base_lines=120 head_lines=120
+=== ladder-mvcc END rc=0 wall=619s 05:20:11 ===
+=== ladder-cypher-readtx START 05:20:11 ===
+OK label=ladder-cypher-readtx base_lines=60 head_lines=60
+=== ladder-cypher-readtx END rc=0 wall=457s 05:27:48 ===
+=== ladder-lpg-readscale START 05:27:48 ===

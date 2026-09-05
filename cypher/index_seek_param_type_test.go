@@ -65,7 +65,7 @@ func TestIndexSeekParam_IntegerPropertyAcceptsIntegerParam(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run with integer param over integer index seek: %v", err)
 	}
-	defer res.Close() //nolint:errcheck // test cleanup
+	defer res.Close() // test cleanup
 
 	rows := collectRecords(t, res)
 	if len(rows) != 2 {
@@ -106,7 +106,7 @@ func TestIndexSeekParam_StringPropertyStillAcceptsStringParam(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run with string param over string index seek: %v", err)
 	}
-	defer res.Close() //nolint:errcheck // test cleanup
+	defer res.Close() // test cleanup
 
 	rows := collectRecords(t, res)
 	if len(rows) != 1 {
@@ -162,7 +162,7 @@ func TestIndexSeekParam_LiteralTypeMismatchFallsBackToZeroRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("literal string vs integer index: unexpected error: %v", err)
 	}
-	defer res.Close() //nolint:errcheck // test cleanup
+	defer res.Close() // test cleanup
 
 	rows := collectRecords(t, res)
 	if len(rows) != 0 {

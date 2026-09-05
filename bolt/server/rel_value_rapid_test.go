@@ -88,7 +88,7 @@ func TestRelValueRapid_RoundTrip(t *testing.T) {
 			if !exists {
 				rt.Fatalf("properties: key %q missing", k)
 			}
-			wantStr := string(wantVal.(expr.StringValue)) //nolint:forcetypeassert // generator always produces StringValue
+			wantStr := string(wantVal.(expr.StringValue)) // generator always produces StringValue
 			if gotVal != wantStr {
 				rt.Fatalf("properties[%q]: want %q, got %v", k, wantStr, gotVal)
 			}

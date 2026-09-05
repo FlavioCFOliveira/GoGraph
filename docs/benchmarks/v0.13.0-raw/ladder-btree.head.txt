@@ -1,0 +1,33 @@
+goos: darwin
+goarch: arm64
+pkg: ./graph/index/btree
+BenchmarkIndex_LookupHot           	 2884371	       409.0 ns/op	     248 B/op	      10 allocs/op
+BenchmarkIndex_LookupHot-8         	 3346724	       359.2 ns/op	     248 B/op	      10 allocs/op
+BenchmarkIndex_LookupHot-64        	 3282525	       368.6 ns/op	     248 B/op	      10 allocs/op
+BenchmarkIndex_LookupHot-256       	 2811483	       363.3 ns/op	     248 B/op	      10 allocs/op
+BenchmarkIndex_LookupHot-1024      	 3234214	       371.1 ns/op	     248 B/op	      10 allocs/op
+BenchmarkIndex_LookupHot           	 2972995	       407.0 ns/op	     248 B/op	      10 allocs/op
+BenchmarkIndex_LookupHot-8         	 3197590	       367.5 ns/op	     248 B/op	      10 allocs/op
+BenchmarkIndex_LookupHot-64        	 3170618	       357.0 ns/op	     248 B/op	      10 allocs/op
+BenchmarkIndex_LookupHot-256       	 3281064	       360.4 ns/op	     248 B/op	      10 allocs/op
+BenchmarkIndex_LookupHot-1024      	 3191832	       374.8 ns/op	     248 B/op	      10 allocs/op
+BenchmarkIndex_LookupHot           	 2947836	       417.5 ns/op	     248 B/op	      10 allocs/op
+BenchmarkIndex_LookupHot-8         	 3287756	       366.5 ns/op	     248 B/op	      10 allocs/op
+BenchmarkIndex_LookupHot-64        	 3362005	       357.3 ns/op	     248 B/op	      10 allocs/op
+BenchmarkIndex_LookupHot-256       	 3308467	       361.9 ns/op	     248 B/op	      10 allocs/op
+BenchmarkIndex_LookupHot-1024      	 3216576	       375.4 ns/op	     248 B/op	      10 allocs/op
+BenchmarkIndex_LookupHot           	 2910813	       421.9 ns/op	     248 B/op	      10 allocs/op
+BenchmarkIndex_LookupHot-8         	 3296433	       357.7 ns/op	     248 B/op	      10 allocs/op
+BenchmarkIndex_LookupHot-64        	 3320022	       358.8 ns/op	     248 B/op	      10 allocs/op
+BenchmarkIndex_LookupHot-256       	 3277266	       368.4 ns/op	     248 B/op	      10 allocs/op
+BenchmarkIndex_LookupHot-1024      	 3235948	       367.0 ns/op	     248 B/op	      10 allocs/op
+BenchmarkIndex_LookupHot           	 2811722	       416.6 ns/op	     248 B/op	      10 allocs/op
+BenchmarkIndex_LookupHot-8         	 3299246	       367.1 ns/op	     248 B/op	      10 allocs/op
+BenchmarkIndex_LookupHot-64        	 3301736	       362.4 ns/op	     248 B/op	      10 allocs/op
+BenchmarkIndex_LookupHot-256       	 3221137	       367.3 ns/op	     248 B/op	      10 allocs/op
+BenchmarkIndex_LookupHot-1024      	 3245853	       366.1 ns/op	     248 B/op	      10 allocs/op
+BenchmarkIndex_LookupHot           	 2817910	       406.6 ns/op	     248 B/op	      10 allocs/op
+BenchmarkIndex_LookupHot-8         	 3324831	       360.2 ns/op	     248 B/op	      10 allocs/op
+BenchmarkIndex_LookupHot-64        	 3222964	       364.5 ns/op	     248 B/op	      10 allocs/op
+BenchmarkIndex_LookupHot-256       	 3252068	       361.8 ns/op	     248 B/op	      10 allocs/op
+BenchmarkIndex_LookupHot-1024      	 3077853	       369.2 ns/op	     248 B/op	      10 allocs/op

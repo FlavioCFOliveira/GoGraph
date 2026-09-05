@@ -33,7 +33,7 @@ func (op *emptyChildOp) Close() error                 { op.closeCalls++; return 
 type fixedRowOp struct {
 	rows     []Row
 	cursor   int
-	ctxCheck context.Context
+	ctxCheck context.Context //nolint:containedctx // the test fake records the context it was handed so the test can assert the adapter threaded it through
 }
 
 func (op *fixedRowOp) Init(ctx context.Context) error { op.ctxCheck = ctx; op.cursor = 0; return nil }
@@ -69,7 +69,7 @@ func TestGlobalAggregateAdapter_EmptyInputEmitsNeutralRow(t *testing.T) {
 	if err := adapter.Init(context.Background()); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
-	defer adapter.Close() //nolint:errcheck // best effort
+	defer adapter.Close() // best effort
 
 	// First Next: empty child → synthetic neutral row.
 	var row Row
@@ -121,7 +121,7 @@ func TestGlobalAggregateAdapter_NonEmptyPassThrough(t *testing.T) {
 	if err := adapter.Init(context.Background()); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
-	defer adapter.Close() //nolint:errcheck // best effort
+	defer adapter.Close() // best effort
 
 	var row Row
 	ok, err := adapter.Next(&row)

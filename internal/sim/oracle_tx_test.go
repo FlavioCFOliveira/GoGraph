@@ -330,3 +330,147 @@ func TestOracleTx_SnapshotIsolationAtBegin(t *testing.T) {
 		t.Fatalf("fold disturbed the concurrent SET: age=%v; want 77", age)
 	}
 }
+
+// TestOracleTx_ValuePreservingSetIsNotAWrite is the rmp #2717 regression at
+// model scope. A SET that stores the value the transaction already observes
+// records NO version in the engine (graph/lpg/property.go, the
+// propValuesDefinitelyEqual guard in setNodePropertyInfo), so it neither
+// conflicts with a concurrent DETACH DELETE nor makes the transaction one —
+// and the workspace must fold cleanly over the delete. A value-CHANGING SET is
+// a real write and must still be refused, because there the engine does refuse
+// one of the two transactions.
+//
+// Before the fix the value-preserving arm refused the fold, and the
+// multi-session mode reported it as an isolation finding on seeds 22 (crash
+// arm), 500 and 572 (no-crash arm).
+func TestOracleTx_ValuePreservingSetIsNotAWrite(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		setAge    int64
+		wantRefus bool
+	}{
+		{"value preserving", 95, false},
+		{"value changing", 7, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o := NewGraphOracle()
+			seedPerson(t, o, "X", 95)
+
+			setter := o.BeginTx()
+			if res := setter.ApplyMatch(tmplSetAge, map[string]any{"name": "X", "age": tc.setAge}); !res.Committed {
+				t.Fatalf("tx set: %+v", res)
+			}
+
+			// A concurrent transaction deletes X and commits FIRST.
+			deleter := o.BeginTx()
+			if res := deleter.ApplyDelete(tmplDetachDelete, map[string]any{"name": "X"}); !res.Committed {
+				t.Fatalf("tx delete: %+v", res)
+			}
+			if err := deleter.Commit(); err != nil {
+				t.Fatalf("deleter commit: %v", err)
+			}
+			if o.HasPersonName("X") {
+				t.Fatal("committed model still holds X after the delete folded")
+			}
+
+			err := setter.Commit()
+			switch {
+			case tc.wantRefus && err == nil:
+				t.Fatal("a value-CHANGING SET over a concurrently deleted node folded cleanly; " +
+					"the engine refuses one of those two transactions, so the model must refuse too")
+			case !tc.wantRefus && err != nil:
+				t.Fatalf("a value-PRESERVING SET must not be modelled as a write: %v", err)
+			}
+			// Either way the committed model must not have resurrected X.
+			if o.HasPersonName("X") {
+				t.Fatal("fold resurrected a deleted node")
+			}
+		})
+	}
+}
+
+// TestOracleTx_ValuePreservingSetStillFoldsARealChange guards the fix against
+// over-reach: the value-equality short-circuit must not swallow a SET whose
+// value differs, nor a SET on a node carrying no age at all (the engine's
+// `!had` arm, which always records a version).
+func TestOracleTx_ValuePreservingSetStillFoldsARealChange(t *testing.T) {
+	o := NewGraphOracle()
+	seedPerson(t, o, "X", 95)
+	// A MERGE-created node carries no age, so a later SET on it is a real write.
+	merge := o.BeginTx()
+	if res := merge.ApplyMerge(tmplMergePerson, map[string]any{"name": "Y"}); !res.Committed {
+		t.Fatalf("merge: %+v", res)
+	}
+	if err := merge.Commit(); err != nil {
+		t.Fatalf("merge commit: %v", err)
+	}
+
+	tx := o.BeginTx()
+	if res := tx.ApplyMatch(tmplSetAge, map[string]any{"name": "X", "age": int64(96)}); !res.Committed {
+		t.Fatalf("set X: %+v", res)
+	}
+	if res := tx.ApplyMatch(tmplSetAge, map[string]any{"name": "Y", "age": int64(1)}); !res.Committed {
+		t.Fatalf("set Y: %+v", res)
+	}
+	// A second SET back to the ORIGINAL committed value is still a pending
+	// write, because the value the transaction now observes is 96, not 95.
+	if res := tx.ApplyMatch(tmplSetAge, map[string]any{"name": "X", "age": int64(95)}); !res.Committed {
+		t.Fatalf("set X back: %+v", res)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	committedAge := func(name string) any {
+		t.Helper()
+		id, ok := o.byName[name]
+		if !ok {
+			t.Fatalf("committed model lost %q", name)
+		}
+		return o.nodes[id].Properties["age"]
+	}
+	if got := committedAge("X"); got != int64(95) {
+		t.Fatalf("committed X age=%v; want 95", got)
+	}
+	if got := committedAge("Y"); got != int64(1) {
+		t.Fatalf("committed Y age=%v; want 1", got)
+	}
+}
+
+// TestOracleTx_ValuePreservingSetDoesNotClobberANewerCommit is the apply-side
+// half of the rmp #2717 fix. Recording a value-preserving SET as a pending
+// update made the fold WRITE that stale value over a newer one a concurrent
+// transaction had committed in the meantime — silently corrupting the
+// committed model, because the engine records no version for the
+// value-preserving write and therefore lets the other writer through
+// unconflicted and keeps ITS value.
+//
+// The workspace must end with the other transaction's value, not its own.
+func TestOracleTx_ValuePreservingSetDoesNotClobberANewerCommit(t *testing.T) {
+	o := NewGraphOracle()
+	seedPerson(t, o, "X", 95)
+
+	// A transaction re-asserts the age X already carries: not a write.
+	stale := o.BeginTx()
+	if res := stale.ApplyMatch(tmplSetAge, map[string]any{"name": "X", "age": int64(95)}); !res.Committed {
+		t.Fatalf("stale set: %+v", res)
+	}
+	// A concurrent transaction changes it for real and commits first.
+	fresh := o.BeginTx()
+	if res := fresh.ApplyMatch(tmplSetAge, map[string]any{"name": "X", "age": int64(50)}); !res.Committed {
+		t.Fatalf("fresh set: %+v", res)
+	}
+	if err := fresh.Commit(); err != nil {
+		t.Fatalf("fresh commit: %v", err)
+	}
+	if err := stale.Commit(); err != nil {
+		t.Fatalf("stale commit: %v", err)
+	}
+
+	id, ok := o.byName["X"]
+	if !ok {
+		t.Fatal("committed model lost X")
+	}
+	if got := o.nodes[id].Properties["age"]; got != int64(50) {
+		t.Fatalf("committed X age=%v; want 50 — a value-preserving SET clobbered a newer committed value", got)
+	}
+}

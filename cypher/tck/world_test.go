@@ -428,7 +428,7 @@ func (w *world) runSetup(ctx context.Context, query string) (retErr error) {
 		// drain
 	}
 	if err := res.Err(); err != nil {
-		_ = res.Close() //nolint:errcheck // best-effort cleanup after drain error
+		_ = res.Close() // best-effort cleanup after drain error
 		return fmt.Errorf("setup query iteration: %w", err)
 	}
 	return res.Close()

@@ -368,7 +368,7 @@ func removeHelperDir(dir string) error {
 	// dir originates from os.MkdirTemp inside this package; it is never
 	// caller-supplied, so gosec's G703 warning about os.RemoveAll on a
 	// variable path does not apply.
-	if err := os.RemoveAll(dir); err != nil { //nolint:gosec // G703: dir is this package's own os.MkdirTemp result, not user input
+	if err := os.RemoveAll(dir); err != nil { // G703: dir is this package's own os.MkdirTemp result, not user input
 		return fmt.Errorf("remove crashinject helper dir %q: %w", dir, err)
 	}
 	return nil

@@ -87,7 +87,7 @@ func TestE2E_ResultRowCap_MappedFailure(t *testing.T) {
 	driver := newDriverForAddr(t, addr)
 
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer session.Close(ctx) //nolint:errcheck
+	defer session.Close(ctx)
 
 	// ── AC#1: a query that produces more than `cap` rows must fail cleanly. ──
 	// UNWIND range(...) needs no seeded data and deterministically produces
@@ -183,7 +183,7 @@ func TestE2E_ResultByteBudget_MappedFailure(t *testing.T) {
 	driver := newDriverForAddr(t, addr)
 
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer session.Close(ctx) //nolint:errcheck
+	defer session.Close(ctx)
 
 	// 50 rows, each a 200-element list (~160 KiB aggregate estimate) — needs no
 	// seeded data and stays far under the default row cap, so only the byte budget
@@ -250,7 +250,7 @@ func TestE2E_ResultRowCap_UnderCapSucceeds(t *testing.T) {
 	driver := newDriverForAddr(t, addr)
 
 	session := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer session.Close(ctx) //nolint:errcheck
+	defer session.Close(ctx)
 
 	result, err := session.Run(ctx,
 		"UNWIND range(1, $n) AS x RETURN x",

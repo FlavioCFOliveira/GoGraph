@@ -54,7 +54,7 @@ import (
 // on it so an eligibility change cannot silently stop firing — the runtime
 // counter, never another rendering.
 //
-//nolint:gochecknoglobals // process-wide diagnostic counter, matching degreeRewriteCount
+// Process-wide diagnostic counter, matching degreeRewriteCount.
 var labelledHopRewriteCount atomic.Uint64
 
 // labelledHopShape describes a recognised `(anchor)-[:T]->(:L…)` pattern: a
@@ -84,6 +84,11 @@ type labelledHopShape struct {
 
 // recogniseLabelledHopPattern reports whether pat is a single labelled hop that
 // can be counted from the adjacency for an outer row shaped like row.
+//
+// pat is spelling-independent since rmp #2648: it is the pattern of a pattern-form
+// subquery, or the pattern of the single MATCH of a block form that is exactly the
+// same query ([ir.PatternFormOf]). The clauses below were not widened for that —
+// the block form simply started arriving with a pattern instead of nil.
 //
 // The eligibility rules are [recogniseDegreePattern]'s, with exactly one
 // difference: the far node MUST carry at least one label, where the degree
@@ -260,24 +265,41 @@ func (s *labelledHopShape) resolveFarLabels(g *lpg.ReadView[string, float64]) bo
 
 // labelledHopShapeFor memoises the recogniser's verdict per subquery occurrence,
 // so it runs once rather than once per outer row. A cached nil is a pattern
-// already examined and rejected.
-func (e *subqueryEvaluator) labelledHopShapeFor(key ast.Expression, pat *ast.Pattern, where *ast.Where, row expr.RowContext) *labelledHopShape {
-	if sh, seen := e.labelledHop[key]; seen {
+// already examined and rejected, and so is the nil
+// [EngineOptions.DisableAdjacencyCountRewrites] returns — the caller's response
+// to either is to drive the inner plan.
+//
+// sub is the subquery expression in EITHER spelling; the (pattern, where) pair is
+// derived from it by [subqueryRecogniserBody] INSIDE the memo, so a block-form
+// body costs one walk per occurrence rather than one per outer row (rmp #2648).
+// The recogniser below is unchanged: it stopped being handed a nil pattern for
+// the block form, it did not learn a second shape.
+func (e *subqueryEvaluator) labelledHopShapeFor(sub ast.Expression, row expr.RowContext) *labelledHopShape {
+	if e.adjacencyCountsDisabled {
+		return nil
+	}
+	if sh, seen := e.labelledHop[sub]; seen {
 		return sh
 	}
+	pat, where := subqueryRecogniserBody(sub)
 	sh, ok := recogniseLabelledHopPattern(pat, where, row)
 	if !ok {
 		sh = nil
 	}
-	e.labelledHop[key] = sh
+	// Created on first write, for the same reason as the sibling memos and in the
+	// same shape [patternEvaluator.labelledHop] below already uses (rmp #2693).
+	if e.labelledHop == nil {
+		e.labelledHop = make(map[ast.Expression]*labelledHopShape)
+	}
+	e.labelledHop[sub] = sh
 	return sh
 }
 
 // countLabelledHop answers a COUNT/EXISTS over a labelled single hop from the
 // adjacency, reporting ok=false when the shape does not apply and the caller must
 // drive the inner plan.
-func (e *subqueryEvaluator) countLabelledHop(key ast.Expression, pat *ast.Pattern, where *ast.Where, row expr.RowContext, limit int64) (int64, bool) {
-	sh := e.labelledHopShapeFor(key, pat, where, row)
+func (e *subqueryEvaluator) countLabelledHop(sub ast.Expression, row expr.RowContext, limit int64) (int64, bool) {
+	sh := e.labelledHopShapeFor(sub, row)
 	if sh == nil {
 		return 0, false
 	}
@@ -314,7 +336,13 @@ func (pe *patternEvaluator) matchLabelledHop(pp *ast.PathPattern, row expr.RowCo
 // The pattern evaluator sees the same *ast.PathPattern pointer on every outer
 // row, so without this the recogniser — and the shape allocation — would repeat
 // per row on the very path this optimisation exists to make cheap.
+//
+// It returns nil when [EngineOptions.DisableAdjacencyCountRewrites] is set, which
+// sends [patternEvaluator.matchLabelledHop]'s caller to the general enumeration.
 func (pe *patternEvaluator) labelledHopShapeFor(pp *ast.PathPattern, row expr.RowContext) *labelledHopShape {
+	if pe.adjacencyCountsDisabled {
+		return nil
+	}
 	if sh, seen := pe.labelledHop[pp]; seen {
 		return sh
 	}

@@ -101,7 +101,7 @@ func BenchmarkReaderLatencyUnderHeldWriteTx(b *testing.B) {
 			if err != nil {
 				b.Fatal(err)
 			}
-			for res.Next() { //nolint:revive // drain
+			for res.Next() { // drain
 			}
 			if err := res.Err(); err != nil {
 				b.Fatal(err)

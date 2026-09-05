@@ -989,9 +989,113 @@ type Op[N comparable, W any] struct {
 // alone, so two transactions overlap freely and a write-write conflict between
 // them is detected and reported rather than prevented by exclusion.
 type Tx[N comparable, W any] struct {
-	store    *Store[N, W]
-	ops      []Op[N, W]
-	finished bool
+	store *Store[N, W]
+	ops   []Op[N, W]
+	// applyGateSeq is the dense store sequence [Tx.appendOnly] minted for this
+	// transaction. It is valid only while applyGateMinted is true.
+	//
+	// The sequence lives on the Tx rather than only in appendOnly's return
+	// values because the OBLIGATION it creates outlives the call that mints it:
+	// once minted, the sequence must take its turn in the apply gate and advance
+	// it, on every exit from the commit — return, error, and PANIC. The commit
+	// entry points therefore register [Tx.finishCommit] BEFORE calling
+	// appendOnly, and that deferred call can only find the sequence here (rmp
+	// #2727). Every field below is written and read by the single goroutine that
+	// owns the Tx, exactly like finished, so none needs synchronisation.
+	applyGateSeq uint64
+	// applyGateMinted records that a sequence was minted, so the apply-gate
+	// obligation exists. False for an empty commit and for the cap rejection,
+	// which mint nothing.
+	applyGateMinted bool
+	// applyGateTaken records that [Tx.waitApplyTurn] has returned for
+	// applyGateSeq, so the turn is held and must not be waited for twice.
+	applyGateTaken bool
+	// applyGateDone records that [Tx.advanceApply] has run for applyGateSeq, so
+	// the gate is discharged and must not be advanced twice.
+	applyGateDone bool
+	// writerReleased records that this transaction's admitted-writer
+	// registration has been handed back, so [Store.exitWriter] runs exactly once
+	// per Tx no matter which of the three terminal paths gets there first.
+	writerReleased bool
+	finished       bool
+}
+
+// takeApplyTurn blocks until this transaction's minted sequence is next in the
+// apply chain, at most once per transaction. It is a no-op when no sequence was
+// minted (an empty commit or the cap rejection) or when the turn is already
+// held.
+//
+// The turn is ALWAYS taken before the gate is advanced — that is what
+// [Tx.closeApplyGate] guarantees on the paths that never reach here — so the
+// gate can never publish a sequence out of order.
+func (t *Tx[N, W]) takeApplyTurn() {
+	if !t.applyGateMinted || t.applyGateTaken {
+		return
+	}
+	t.applyGateTaken = true
+	t.waitApplyTurn(t.applyGateSeq)
+}
+
+// closeApplyGate discharges the apply-gate obligation a minted sequence creates,
+// exactly once, and is safe to call from a defer on every exit path — including
+// a panic unwinding out of [Tx.appendOnly] itself.
+//
+// # Why the wait is inside it, and why a bare advance would be a correctness bug
+//
+// Sequences are dense and the gate's whole job is to order the in-memory apply
+// by them. Advancing without first taking the turn would set appliedSeq = seq
+// while a LOWER sequence had not applied, which both lets seq+1 apply out of
+// order and drives appliedSeq BACKWARDS when the true predecessor advances
+// afterwards — a wedge on top of an ordering violation. So the repair does
+// exactly what the success path does, in the same order: wait, then advance.
+// The only difference is that nothing is applied in between, which is correct
+// because a transaction that panicked out of its commit must not apply — the
+// same decision the append-error and fsync-error branches already make.
+//
+// The wait cannot deadlock. Every minted sequence now advances from this defer,
+// so the predecessor a repair waits on is itself guaranteed to advance; before
+// rmp #2727 that was exactly what did not hold, and a single panicking committer
+// parked every later committer on the store for ever.
+func (t *Tx[N, W]) closeApplyGate() {
+	if !t.applyGateMinted || t.applyGateDone {
+		return
+	}
+	t.takeApplyTurn()
+	t.applyGateDone = true
+	t.advanceApply(t.applyGateSeq)
+}
+
+// releaseWriter hands this transaction's admitted-writer registration back to
+// the store, exactly once per Tx.
+//
+// The registration is taken once, in [Store.BeginCtx], and three terminal paths
+// can reach its release: [Tx.Commit], [Tx.CommitWALOnly], and [Tx.Rollback] —
+// and, on a panic, a containment boundary that calls Rollback after the commit's
+// own deferred release has already run (cypher's recoverFinishPanic, rmp #2707).
+// The guard is what lets the commit paths defer the release from BEFORE the
+// sequence is minted without any risk of a second decrement: an unpaired
+// exitWriter would drive [Store.inflight] negative, and drainInflight waits for
+// exactly zero, so it would never return.
+func (t *Tx[N, W]) releaseWriter() {
+	if t.writerReleased {
+		return
+	}
+	t.writerReleased = true
+	t.store.exitWriter()
+}
+
+// finishCommit is the single deferred finaliser both durable commit entry points
+// register BEFORE minting a sequence, so no exit from the commit — return,
+// error, or panic — can leave either obligation outstanding (rmp #2707, #2727).
+//
+// The order is the historical one and is load-bearing in one direction only: the
+// apply gate is advanced FIRST, then the writer registration is released, so a
+// quiesce ([Store.RunUnderCommitLock], the seam the checkpointer and
+// store.DB.Close take) that observes inflight reach zero can never be observing
+// a store that still owes an apply-gate advance.
+func (t *Tx[N, W]) finishCommit() {
+	t.closeApplyGate()
+	t.releaseWriter()
 }
 
 // AddEdge buffers an AddEdge(src, dst, w) operation on the graph.
@@ -1381,12 +1485,31 @@ func (t *Tx[N, W]) DropIndex(name string) error {
 // transaction only on reading the durable marker, so a crash that tears
 // the batch at any point recovers all of the transaction or none of it
 // (audit gap F1, see docs/acid-audit.md).
+//
+// # Refusals
+//
+// Commit returns [ErrFieldTooLong], having made nothing durable and applied
+// nothing, when any buffered op carries a string too long for the length prefix
+// its WAL frame reserves: 65535 bytes for a label, a property key, or a schema
+// identifier; 4 GiB for a property value. The check lives at the encoder rather
+// than at the buffering mutators because the encoder is the one point every
+// writer passes, and the only one whose error no caller can discard — the
+// Cypher engine's adapter deliberately ignores the mutators' return value
+// (rmp #2742). The transaction consumes a sequence, applies nothing, and leaves
+// the store usable for the next one.
 func (t *Tx[N, W]) Commit() error {
 	defer metrics.Time("store.txn.Commit").Stop()
 	if t.finished {
 		metrics.IncCounter("store.txn.Commit.errors", 1)
 		return ErrTxFinished
 	}
+	// Registered BEFORE the sequence is minted, so NO exit from this function —
+	// return, error, or panic — can leave a hole in the dense sequence chain or
+	// the store's writer registration leaked (rmp #2727). It advances the apply
+	// gate and then pairs the in-flight registration [Store.BeginCtx] made, in
+	// that order, so a draining RunUnderCommitLock never observes a zero
+	// in-flight count while a commit still owes the gate an advance.
+	defer t.finishCommit()
 
 	// Group-commit phase 1 — APPEND: cap check, mint the transaction sequence,
 	// encode and append every op frame plus the OpCommit marker. Contiguity of a
@@ -1403,11 +1526,7 @@ func (t *Tx[N, W]) Commit() error {
 	// — a store-only writer has no instant to restore. The MVCC path is
 	// [Tx.CommitWALOnly], which is handed the timestamp its caller allocated before
 	// the fsync.
-	seq, hasSeq, mark, appendErr := t.appendOnly(0)
-	// Pair the in-flight registration appendOnly made: cleared only after the
-	// entire commit (SyncGroup + apply gate) below has finished, so a draining
-	// RunUnderCommitLock never closes the WAL mid-fsync.
-	defer t.store.exitWriter()
+	hasSeq, mark, appendErr := t.appendOnly(0)
 
 	if !hasSeq {
 		// No sequence was minted (empty commit, or the cap-check rejection
@@ -1430,7 +1549,8 @@ func (t *Tx[N, W]) Commit() error {
 
 	// A sequence was minted (hasSeq). It MUST advance the apply gate exactly
 	// once, in every outcome below (append error, fsync failure, apply error,
-	// or success), or a gap would wedge every higher-sequence committer.
+	// or success) AND on a panic, or a gap would wedge every higher-sequence
+	// committer. That is what the deferred [Tx.finishCommit] above guarantees.
 
 	// Group-commit phase 2 — DURABILITY with the semaphore free: a single
 	// coalesced fsync covers this transaction's marker and every other
@@ -1445,8 +1565,10 @@ func (t *Tx[N, W]) Commit() error {
 	// lower-sequence transaction has applied (or been skipped), so the
 	// in-memory view is mutated in WAL order and no Graph.View reader observes
 	// an out-of-order or pre-durable state.
-	t.waitApplyTurn(seq)
-	defer t.advanceApply(seq)
+	//
+	// The matching advance is the deferred [Tx.finishCommit]'s. It runs after the
+	// apply below, exactly as the `defer t.advanceApply(seq)` it replaced did.
+	t.takeApplyTurn()
 
 	if appendErr != nil {
 		// The append did not complete (encode/append failure). No durable,
@@ -1513,11 +1635,20 @@ func (t *Tx[N, W]) Commit() error {
 // dense per-store transaction sequence shared by [Tx.Commit] and CommitWALOnly;
 // if CommitWALOnly minted a sequence without advancing the gate, a later
 // [Tx.Commit] on the same store would wait on appliedSeq forever. Taking the
-// turn and immediately advancing (applying nothing) keeps the chain dense
-// whether or not the two commit paths are mixed on one store. The caller (the
+// turn and advancing it (applying nothing) keeps the chain dense whether or not
+// the two commit paths are mixed on one store — and both halves happen on EVERY
+// exit, panic included, because the advance is deferred through
+// [Tx.finishCommit] before the sequence is minted (rmp #2727). The caller (the
 // Cypher engine's commitUnderBarrier, #1281) has already applied the mutations
 // eagerly inside the visibility barrier, and CommitWALOnly returning only after
 // the covering fsync preserves durable-before-visible.
+//
+// It refuses an unencodable field exactly as [Tx.Commit] does, with
+// [ErrFieldTooLong]. An eager caller must undo its in-memory writes on that
+// error; the Cypher engine's commitUnderBarrier already does, through
+// rollbackUnderBarrier, so an over-long label rejects the whole statement
+// atomically rather than leaving visible a label the WAL never recorded
+// (rmp #2742).
 func (t *Tx[N, W]) CommitWALOnly(commitTS uint64) error {
 	defer metrics.Time("store.txn.CommitWALOnly").Stop()
 	if t.finished {
@@ -1525,8 +1656,10 @@ func (t *Tx[N, W]) CommitWALOnly(commitTS uint64) error {
 		return ErrTxFinished
 	}
 
-	seq, hasSeq, mark, appendErr := t.appendOnly(commitTS)
-	defer t.store.exitWriter()
+	// See [Tx.Commit] for why this is registered before the mint.
+	defer t.finishCommit()
+
+	hasSeq, mark, appendErr := t.appendOnly(commitTS)
 	if !hasSeq {
 		if appendErr != nil {
 			metrics.IncCounter("store.txn.CommitWALOnly.errors", 1)
@@ -1540,10 +1673,10 @@ func (t *Tx[N, W]) CommitWALOnly(commitTS uint64) error {
 		return nil
 	}
 	syncErr := t.store.wal.SyncGroup(mark)
-	// A sequence was minted: take its apply-gate turn and advance it, applying
-	// nothing, so the dense chain stays intact for any Commit on this store.
-	t.waitApplyTurn(seq)
-	t.advanceApply(seq)
+	// A sequence was minted: take its apply-gate turn, applying nothing, so the
+	// dense chain stays intact for any Commit on this store. The advance is
+	// [Tx.finishCommit]'s, deferred above.
+	t.takeApplyTurn()
 	if appendErr != nil {
 		metrics.IncCounter("store.txn.CommitWALOnly.errors", 1)
 		return appendErr
@@ -1618,6 +1751,7 @@ var applySlotPool = sync.Pool{
 	New: func() any { return make(chan struct{}, 1) },
 }
 
+//nolint:forcetypeassert // applySlotPool is an unexported package-level sync.Pool whose New returns chan struct{}, and every Put in this package passes chan struct{}
 func acquireApplySlot() chan struct{} { return applySlotPool.Get().(chan struct{}) }
 
 func releaseApplySlot(ch chan struct{}) { applySlotPool.Put(ch) }
@@ -1642,8 +1776,14 @@ func releaseApplySlot(ch chan struct{}) { applySlotPool.Put(ch) }
 // contiguous in sequence order, followed by its marker — so recovery's
 // all-or-nothing replay is unaffected.
 //
+// The minted sequence is NOT returned. It is recorded on the Tx
+// ([Tx.applyGateSeq]) at the instant of the mint, because the obligation it
+// creates outlives this call: the caller's deferred [Tx.finishCommit], which is
+// registered before this function is entered, is what discharges it, and on a
+// panic unwinding out of here there are no return values for it to read (rmp
+// #2727).
+//
 // The return values:
-//   - seq is the assigned transaction sequence (valid only when hasSeq is true);
 //   - hasSeq is true once a sequence has been MINTED (txnSeq.Add) — true for any
 //     non-empty transaction, even one whose subsequent encode/append failed. A
 //     minted sequence MUST take its turn in the apply gate and advance it, or a
@@ -1652,23 +1792,27 @@ func releaseApplySlot(ch chan struct{}) { applySlotPool.Put(ch) }
 //     and decides whether to apply based on err and the SyncGroup result.
 //     hasSeq is false only for an empty commit and for the cap-check rejection,
 //     both of which mint no sequence.
+//   - watermark is the run's own durability watermark, to be handed to
+//     [wal.Writer.SyncGroup]; it is returned even on error, for the reason that
+//     function documents.
 //   - err is non-nil when the cap check, encoding, or append failed.
 //
-// The semaphore is released exactly once, on every path, via
-// releaseAfterAppend; the Tx is marked finished at the same time.
+// The Tx is marked finished on every path out of this function, so a second
+// Commit / CommitWALOnly / Rollback is rejected with [ErrTxFinished].
 //
-// markInflight is called here, while the semaphore is still held, so the commit
-// is registered as in-flight BEFORE the semaphore is released — the happens-
-// before that lets [Store.RunUnderCommitLock] observe it (#1507 quiesce
-// boundary). The caller MUST pair it with exactly one [Store.doneInflight] once
-// the whole commit (SyncGroup + apply gate) finishes.
-func (t *Tx[N, W]) appendOnly(commitTS uint64) (seq uint64, hasSeq bool, watermark int64, err error) {
+// The store's admitted-writer registration is NOT touched here. It is taken in
+// [Store.BeginCtx] and released by [Tx.releaseWriter], which the caller's
+// deferred [Tx.finishCommit] runs after the apply gate has been advanced — so a
+// draining [Store.RunUnderCommitLock] (#1507 quiesce boundary) observes the
+// count reach zero only once every commit it was waiting for has finished both
+// its fsync and its gate turn.
+func (t *Tx[N, W]) appendOnly(commitTS uint64) (hasSeq bool, watermark int64, err error) {
 	if len(t.ops) == 0 {
 		// Empty commit: mint no sequence and write no marker. The caller still
 		// runs SyncGroup to flush any prior buffered tail (the historical
 		// no-op-with-Sync behaviour), then applies nothing.
 		t.markFinished()
-		return 0, false, 0, nil
+		return false, 0, nil
 	}
 	// Bounded resources / Durability: reject an over-cap transaction BEFORE
 	// minting a sequence or writing any frame, so a transaction recovery could
@@ -1679,15 +1823,23 @@ func (t *Tx[N, W]) appendOnly(commitTS uint64) (seq uint64, hasSeq bool, waterma
 	if t.store.maxTxnOps > 0 && len(t.ops) > t.store.maxTxnOps {
 		metrics.IncCounter("store.txn.appendOnly.txnTooLarge", 1)
 		t.markFinished()
-		return 0, false, 0, fmt.Errorf("%w: %d ops > cap %d", ErrTransactionTooLarge, len(t.ops), t.store.maxTxnOps)
+		return false, 0, fmt.Errorf("%w: %d ops > cap %d", ErrTransactionTooLarge, len(t.ops), t.store.maxTxnOps)
 	}
-	// Mint the sequence. From here hasSeq is true on every return: the sequence
-	// is consumed, so the caller must advance the apply gate past it even if the
-	// append below fails (a gap would deadlock the dense sequence chain). A
-	// partial append is harmless on disk — recovery discards any frames not
-	// followed by a durable matching OpCommit marker — and the err makes the
-	// caller skip the in-memory apply.
-	seq = t.store.txnSeq.Add(1)
+	// Mint the sequence, and RECORD IT ON THE Tx in the same step. From here
+	// hasSeq is true on every return: the sequence is consumed, so the apply gate
+	// must be advanced past it even if the append below fails (a gap would
+	// deadlock the dense sequence chain). A partial append is harmless on disk —
+	// recovery discards any frames not followed by a durable matching OpCommit
+	// marker — and the err makes the caller skip the in-memory apply.
+	//
+	// The two statements are adjacent and in this order on purpose: the
+	// obligation begins at the Add, and the caller's deferred [Tx.finishCommit]
+	// can only discharge an obligation it can SEE. Recording the sequence on the
+	// Tx is what makes the window between the mint and the caller's apply-gate
+	// turn survivable by a panic (rmp #2727) — the caller's return values do not
+	// exist yet while that window is open.
+	seq := t.store.txnSeq.Add(1)
+	t.applyGateSeq, t.applyGateMinted = seq, true
 	// One scratch buffer, borrowed from the pool, is reused for every op frame
 	// and the trailing OpCommit marker. wal.Append copies each encoded payload
 	// into its bufio buffer synchronously, so the scratch is safe to reset and
@@ -1722,12 +1874,12 @@ func (t *Tx[N, W]) appendOnly(commitTS uint64) (seq uint64, hasSeq bool, waterma
 	})
 	if aerr != nil {
 		t.markFinished()
-		return seq, true, mark, aerr
+		return true, mark, aerr
 	}
 	// Frames + marker are buffered. Release the semaphore so the next
 	// transaction can append while this one fsyncs (group-commit coalescing).
 	t.markFinished()
-	return seq, true, mark, nil
+	return true, mark, nil
 }
 
 // Rollback discards buffered ops without touching the WAL or graph.
@@ -1738,7 +1890,7 @@ func (t *Tx[N, W]) Rollback() error {
 		return ErrTxFinished
 	}
 	t.markFinished()
-	t.store.exitWriter()
+	t.releaseWriter()
 	return nil
 }
 
@@ -1845,6 +1997,7 @@ var encodeScratchPool = sync.Pool{
 
 // getEncodeScratch borrows a zero-length, capacity-retaining scratch buffer.
 func getEncodeScratch() *[]byte {
+	//nolint:forcetypeassert // encodeScratchPool is an unexported package-level sync.Pool whose New returns *[]byte, and every Put in this package passes *[]byte
 	return encodeScratchPool.Get().(*[]byte)
 }
 
@@ -2018,30 +2171,89 @@ func appendOpConstraintBody[N comparable, W any](buf []byte, op Op[N, W]) ([]byt
 		return nil, err
 	}
 	buf = append(buf, byte(op.ConstraintKind))
+	//nolint:gosec // G115: bounded by checkWALSchemaString("constraint label") at txn.go:2164, which fail-stops any identifier over maxWALSchemaStringLen (65535) before this prefix is written
 	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Label)))
 	buf = append(buf, op.Label...)
+	//nolint:gosec // G115: bounded by checkWALSchemaString("constraint property") at txn.go:2167, which fail-stops any identifier over maxWALSchemaStringLen (65535)
 	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Key)))
 	buf = append(buf, op.Key...)
+	//nolint:gosec // G115: bounded by checkWALSchemaString("constraint name") at txn.go:2170, which fail-stops any identifier over maxWALSchemaStringLen (65535)
 	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.ConstraintName)))
 	buf = append(buf, op.ConstraintName...)
 	return buf, nil
 }
 
-// maxWALSchemaStringLen is the largest byte length the uint16 length prefix in
-// the schema op-body encoders can represent without truncation. Schema
-// identifiers are capped far below this at the DDL boundary (#1903); this bound
-// is the encoder's own fail-stop guard.
+// maxWALSchemaStringLen is the largest byte length a uint16 length prefix in
+// the op-body encoders can represent without truncation. It bounds every
+// uint16-prefixed string on the wire: the schema identifiers (constraint and
+// index label, property and name) and the graph vocabulary the mutation frames
+// carry (node and edge labels, property keys). Schema identifiers are capped far
+// below this at the DDL boundary (cypher/ir maxSchemaIdentifierLen, #1903);
+// labels and property keys reaching the embedded Go API are bounded HERE and
+// nowhere else.
 const maxWALSchemaStringLen = 1<<16 - 1
 
-// checkWALSchemaString rejects a schema identifier whose byte length would
-// overflow the uint16 length prefix, converting silent truncation into a
-// fail-stop commit error (#1903).
+// maxWALValueLen is the largest byte length a uint32 length prefix in the
+// property-value encoders can represent without truncation. It bounds a
+// property string, a property byte value, a list element payload, and a list
+// element count. Nothing upstream bounds a property value, so — like
+// [maxWALSchemaStringLen] for the uint16 fields — this is the only bound there
+// is.
+const maxWALValueLen = math.MaxUint32
+
+// maxWALValueLenInt is [maxWALValueLen] as an int, clamped to what the
+// platform's int can hold, so [checkWALValueLen] can compare a len() against it
+// with NO conversion. The conversion is what has to go: gosec reports
+// `uint64(n)` on an int parameter as a G115 overflow even though every caller
+// passes a len(), which the language guarantees non-negative — and suppressing
+// a report on a bounds check is precisely the pattern that hid rmp #2742.
+//
+// On a 64-bit platform the clamp is a no-op. On a 32-bit one an int cannot
+// reach MaxUint32 at all, so the clamped bound is unreachable — which is the
+// correct behaviour there, because no slice can be long enough to truncate the
+// uint32 prefix in the first place.
+const maxWALValueLenInt = maxWALValueLen & math.MaxInt
+
+// ErrFieldTooLong is the sentinel every WAL length-prefix refusal wraps. A
+// commit that would have to truncate a field's length prefix fails with it
+// instead, so the caller sees a typed, testable error rather than an
+// acknowledgement of a write recovery will read back wrong.
+//
+// It reaches the caller from [Tx.Commit] and [Tx.CommitWALOnly] (through
+// [Tx.appendOnly]); the offending transaction consumes a sequence and applies
+// nothing, and the store stays usable for the next one.
+var ErrFieldTooLong = errors.New("txn: field too long for its WAL length prefix")
+
+// checkWALSchemaString rejects a string whose byte length would overflow the
+// uint16 length prefix its frame reserves, converting silent truncation into a
+// fail-stop commit error (#1903 for the schema encoders, rmp #2742 for the five
+// mutation encoders the guard originally missed).
 func checkWALSchemaString(what, s string) error {
 	if len(s) > maxWALSchemaStringLen {
-		return fmt.Errorf("txn: %s is too long to encode (%d bytes; maximum %d)",
-			what, len(s), maxWALSchemaStringLen)
+		return errFieldTooLong(what, len(s), maxWALSchemaStringLen)
 	}
 	return nil
+}
+
+// checkWALValueLen is [checkWALSchemaString] for a uint32-prefixed payload: a
+// property value, a list element, or a list element count (rmp #2742).
+func checkWALValueLen(what string, n int) error {
+	if n > maxWALValueLenInt {
+		return errFieldTooLong(what, n, maxWALValueLen)
+	}
+	return nil
+}
+
+// errFieldTooLong builds the refusal.
+//
+// It is a separate function, and not the body of the two checks above, so that
+// those stay under the inliner's budget: they sit on the commit hot path (every
+// label, key and value of every op) and must cost a compare and a
+// well-predicted branch, not a call. Verified with
+// `go build -gcflags='-m' ./store/txn/`, which reports both checks
+// "can inline" and this one not.
+func errFieldTooLong(what string, n int, maxLen uint64) error {
+	return fmt.Errorf("%w: %s is %d bytes, maximum %d", ErrFieldTooLong, what, n, maxLen)
 }
 
 // appendOpIndexBody appends the body of an [OpCreateIndex] / [OpDropIndex]
@@ -2066,10 +2278,13 @@ func appendOpIndexBody[N comparable, W any](buf []byte, op Op[N, W]) ([]byte, er
 		return nil, err
 	}
 	buf = append(buf, byte(op.IndexKind))
+	//nolint:gosec // G115: bounded by checkWALSchemaString("index name") at txn.go:2271, which fail-stops any identifier over maxWALSchemaStringLen (65535)
 	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.ConstraintName)))
 	buf = append(buf, op.ConstraintName...)
+	//nolint:gosec // G115: bounded by checkWALSchemaString("index label") at txn.go:2274, which fail-stops any identifier over maxWALSchemaStringLen (65535)
 	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Label)))
 	buf = append(buf, op.Label...)
+	//nolint:gosec // G115: bounded by checkWALSchemaString("index property") at txn.go:2277, which fail-stops any identifier over maxWALSchemaStringLen (65535)
 	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Key)))
 	buf = append(buf, op.Key...)
 	return buf, nil
@@ -2077,7 +2292,15 @@ func appendOpIndexBody[N comparable, W any](buf []byte, op Op[N, W]) ([]byte, er
 
 // encodeOpNodeOnly writes the [Src, zero, label] tail for OpKinds that
 // operate on a single node (OpAddNode, OpRemoveNode, OpRemoveNodeLabel).
+//
+// The label is bounded first, before any byte is emitted, exactly as
+// [appendOpConstraintBody] bounds a schema identifier. Until rmp #2742 it was
+// not: a 65536-byte label recovered as 0 bytes and a 70000-byte one as a WRONG
+// 4464 bytes, with every call — SetNodeLabel, Commit, wal.Close — returning nil.
 func encodeOpNodeOnly[N comparable, W any](buf []byte, op Op[N, W], codec Codec[N]) ([]byte, error) {
+	if err := checkWALSchemaString("node label", op.Label); err != nil {
+		return nil, err
+	}
 	var zero N
 	var err error
 	if buf, err = codec.Encode(buf, op.Src); err != nil {
@@ -2086,6 +2309,7 @@ func encodeOpNodeOnly[N comparable, W any](buf []byte, op Op[N, W], codec Codec[
 	if buf, err = codec.Encode(buf, zero); err != nil {
 		return nil, err
 	}
+	//nolint:gosec // G115: bounded by checkWALSchemaString("node label") at txn.go:2301, which fail-stops any label over maxWALSchemaStringLen (65535) before this prefix is written (rmp #2742)
 	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Label)))
 	buf = append(buf, op.Label...)
 	return buf, nil
@@ -2093,7 +2317,15 @@ func encodeOpNodeOnly[N comparable, W any](buf []byte, op Op[N, W], codec Codec[
 
 // encodeOpNodeProperty writes the [Src, zero, keyLen, key, (value)] tail
 // for OpSetNodeProperty / OpDelNodeProperty.
+//
+// The key is uint16-prefixed and bounded here; the VALUE is uint32-prefixed and
+// bounded inside [encodePropertyValue]. The two limits differ by design — a
+// 70000-byte property value is legitimate and must keep working, a 70000-byte
+// property key cannot be represented (rmp #2742).
 func encodeOpNodeProperty[N comparable, W any](buf []byte, op Op[N, W], codec Codec[N]) ([]byte, error) {
+	if err := checkWALSchemaString("node property key", op.Key); err != nil {
+		return nil, err
+	}
 	var zero N
 	var err error
 	if buf, err = codec.Encode(buf, op.Src); err != nil {
@@ -2102,10 +2334,13 @@ func encodeOpNodeProperty[N comparable, W any](buf []byte, op Op[N, W], codec Co
 	if buf, err = codec.Encode(buf, zero); err != nil {
 		return nil, err
 	}
+	//nolint:gosec // G115: bounded by checkWALSchemaString("node property key") at txn.go:2326, which fail-stops any key over maxWALSchemaStringLen (65535) before this prefix is written (rmp #2742)
 	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Key)))
 	buf = append(buf, op.Key...)
 	if op.Kind == OpSetNodeProperty {
-		buf = encodePropertyValue(buf, op.Value)
+		if buf, err = encodePropertyValue(buf, op.Value); err != nil {
+			return nil, err
+		}
 	}
 	return buf, nil
 }
@@ -2126,7 +2361,12 @@ func encodeOpEdgeNoTail[N comparable, W any](buf []byte, op Op[N, W], codec Code
 
 // encodeOpEdgeProperty writes [Src, Dst, keyLen, key, (value)] for
 // OpSetEdgeProperty / OpDelEdgeProperty.
+//
+// Key and value are bounded exactly as in [encodeOpNodeProperty] (rmp #2742).
 func encodeOpEdgeProperty[N comparable, W any](buf []byte, op Op[N, W], codec Codec[N]) ([]byte, error) {
+	if err := checkWALSchemaString("edge property key", op.Key); err != nil {
+		return nil, err
+	}
 	var err error
 	if buf, err = codec.Encode(buf, op.Src); err != nil {
 		return nil, err
@@ -2134,17 +2374,29 @@ func encodeOpEdgeProperty[N comparable, W any](buf []byte, op Op[N, W], codec Co
 	if buf, err = codec.Encode(buf, op.Dst); err != nil {
 		return nil, err
 	}
+	//nolint:gosec // G115: bounded by checkWALSchemaString("edge property key") at txn.go:2367, which fail-stops any key over maxWALSchemaStringLen (65535) before this prefix is written (rmp #2742)
 	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Key)))
 	buf = append(buf, op.Key...)
 	if op.Kind == OpSetEdgeProperty || op.Kind == OpSetEdgePropertyByHandle {
-		buf = encodePropertyValue(buf, op.Value)
+		if buf, err = encodePropertyValue(buf, op.Value); err != nil {
+			return nil, err
+		}
 	}
 	return buf, nil
 }
 
 // encodeOpEdgeWeighted writes [Src, Dst, weight, labelLen, label] for
 // OpAddEdgeWeighted. The weight bytes are omitted when wcodec is nil.
+//
+// The label is bounded as in [encodeOpNodeOnly] (rmp #2742). No current [Tx]
+// method sets Op.Label on a kind routed here — [Tx.AddEdge] and
+// [Tx.AddEdgeWithHandle] emit OpAddEdgeH with an empty label — so the guard is
+// unreachable through today's public API; it bounds the wire kind, not the
+// caller, and the wire kind is still decoded by recovery.
 func encodeOpEdgeWeighted[N comparable, W any](buf []byte, op Op[N, W], codec Codec[N], wcodec WeightCodec[W]) ([]byte, error) {
+	if err := checkWALSchemaString("edge label", op.Label); err != nil {
+		return nil, err
+	}
 	var err error
 	if buf, err = codec.Encode(buf, op.Src); err != nil {
 		return nil, err
@@ -2157,6 +2409,7 @@ func encodeOpEdgeWeighted[N comparable, W any](buf []byte, op Op[N, W], codec Co
 			return nil, err
 		}
 	}
+	//nolint:gosec // G115: bounded by checkWALSchemaString("edge label") at txn.go:2397, which fail-stops any label over maxWALSchemaStringLen (65535) before this prefix is written (rmp #2742)
 	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Label)))
 	buf = append(buf, op.Label...)
 	return buf, nil
@@ -2164,7 +2417,15 @@ func encodeOpEdgeWeighted[N comparable, W any](buf []byte, op Op[N, W], codec Co
 
 // encodeOpEdgeWithLabel writes [Src, Dst, labelLen, label] for the
 // default group (OpAddEdge, OpSetNodeLabel, OpSetEdgeLabel).
+//
+// The label is bounded as in [encodeOpNodeOnly] (rmp #2742). This encoder
+// serves both a node label (OpSetNodeLabel) and an edge label
+// (OpAddEdge, OpSetEdgeLabel, and OpSetEdgeLabelByHandle through its caller),
+// so the refusal names the field generically.
 func encodeOpEdgeWithLabel[N comparable, W any](buf []byte, op Op[N, W], codec Codec[N]) ([]byte, error) {
+	if err := checkWALSchemaString("label", op.Label); err != nil {
+		return nil, err
+	}
 	var err error
 	if buf, err = codec.Encode(buf, op.Src); err != nil {
 		return nil, err
@@ -2172,12 +2433,15 @@ func encodeOpEdgeWithLabel[N comparable, W any](buf []byte, op Op[N, W], codec C
 	if buf, err = codec.Encode(buf, op.Dst); err != nil {
 		return nil, err
 	}
+	//nolint:gosec // G115: bounded by checkWALSchemaString("label") at txn.go:2426, which fail-stops any label over maxWALSchemaStringLen (65535) before this prefix is written (rmp #2742)
 	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(op.Label)))
 	buf = append(buf, op.Label...)
 	return buf, nil
 }
 
 // encodePropertyValue appends the wire encoding of a [lpg.PropertyValue] to buf.
+// It fails stop, before writing a length prefix, on any payload too long for
+// the uint32 prefix that describes it (rmp #2742) — see [checkWALValueLen].
 //
 // Format:
 //
@@ -2198,11 +2462,15 @@ func encodeOpEdgeWithLabel[N comparable, W any](buf []byte, op Op[N, W], codec C
 //	[elem-payload-len]byte elem-payload
 //
 // Nested PropList elements are not permitted.
-func encodePropertyValue(buf []byte, v lpg.PropertyValue) []byte {
+func encodePropertyValue(buf []byte, v lpg.PropertyValue) ([]byte, error) {
 	buf = append(buf, byte(v.Kind()))
 	switch v.Kind() {
 	case lpg.PropString:
 		s, _ := v.String()
+		if err := checkWALValueLen("property string value", len(s)); err != nil {
+			return nil, err
+		}
+		//nolint:gosec // G115: bounded by checkWALValueLen("property string value") at txn.go:2470, which fail-stops any value over maxWALValueLen (MaxUint32) before this prefix is written (rmp #2742)
 		buf = binary.LittleEndian.AppendUint32(buf, uint32(len(s)))
 		buf = append(buf, s...)
 	case lpg.PropInt64:
@@ -2223,12 +2491,16 @@ func encodePropertyValue(buf []byte, v lpg.PropertyValue) []byte {
 		buf = binary.AppendVarint(buf, t.UnixNano())
 	case lpg.PropBytes:
 		bs, _ := v.Bytes()
+		if err := checkWALValueLen("property bytes value", len(bs)); err != nil {
+			return nil, err
+		}
+		//nolint:gosec // G115: bounded by checkWALValueLen("property bytes value") at txn.go:2494, which fail-stops any value over maxWALValueLen (MaxUint32) before this prefix is written (rmp #2742)
 		buf = binary.LittleEndian.AppendUint32(buf, uint32(len(bs)))
 		buf = append(buf, bs...)
 	case lpg.PropList:
-		buf = encodeTxnListProp(buf, v)
+		return encodeTxnListProp(buf, v)
 	}
-	return buf
+	return buf, nil
 }
 
 // encodeTxnListProp appends the list wire encoding to buf (without the leading
@@ -2236,8 +2508,12 @@ func encodePropertyValue(buf []byte, v lpg.PropertyValue) []byte {
 //
 //	uint32 LE element-count
 //	element-count × ( uint8 elem-kind | uint32 elem-payload-len | [elem-payload-len]byte elem-payload )
-func encodeTxnListProp(buf []byte, v lpg.PropertyValue) []byte {
+func encodeTxnListProp(buf []byte, v lpg.PropertyValue) ([]byte, error) {
 	elems, _ := v.List()
+	if err := checkWALValueLen("property list element count", len(elems)); err != nil {
+		return nil, err
+	}
+	//nolint:gosec // G115: bounded by checkWALValueLen("property list element count") at txn.go:2513, which fail-stops any count over maxWALValueLen (MaxUint32) before this prefix is written (rmp #2742)
 	buf = binary.LittleEndian.AppendUint32(buf, uint32(len(elems)))
 	for _, elem := range elems {
 		// Encode the element into a temporary buffer to measure its length.
@@ -2267,11 +2543,15 @@ func encodeTxnListProp(buf []byte, v lpg.PropertyValue) []byte {
 			bs, _ := elem.Bytes()
 			payload = append(payload, bs...)
 		}
+		if err := checkWALValueLen("property list element payload", len(payload)); err != nil {
+			return nil, err
+		}
 		buf = append(buf, byte(elem.Kind()))
+		//nolint:gosec // G115: bounded by checkWALValueLen("property list element payload") at txn.go:2546, which fail-stops any element over maxWALValueLen (MaxUint32) before this prefix is written (rmp #2742)
 		buf = binary.LittleEndian.AppendUint32(buf, uint32(len(payload)))
 		buf = append(buf, payload...)
 	}
-	return buf
+	return buf, nil
 }
 
 // decodePropertyValue parses a [lpg.PropertyValue] from the head of buf.

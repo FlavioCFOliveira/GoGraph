@@ -427,7 +427,7 @@ func (a BoltAbuser) abuseDuplicateHello(conn *SimConn, out *AbuseOutcome) {
 const (
 	simAuthPrincipal     = "sim-operator"
 	simAuthPassword      = "correct-horse-battery-staple"
-	simAuthWrongPassword = "correct-horse-battery-stapl" //nolint:gosec // G101: a deliberately WRONG credential for a refusal probe.
+	simAuthWrongPassword = "correct-horse-battery-stapl" // G101: a deliberately WRONG credential for a refusal probe.
 )
 
 // abuseGhostLabel is the label the post-LOGOFF write families try to create. A

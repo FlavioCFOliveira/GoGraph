@@ -35,7 +35,7 @@ func TestReadTx_NeverObservesPartialPair(t *testing.T) {
 				t.Errorf("writer RunInTx: %v", err)
 				return
 			}
-			for res.Next() { //nolint:revive // drain
+			for res.Next() { // drain
 			}
 			if err := res.Err(); err != nil {
 				t.Errorf("writer drain: %v", err)

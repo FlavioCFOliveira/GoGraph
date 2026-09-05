@@ -2092,7 +2092,7 @@ func countStoreArmNegativeCell(ctx context.Context, sm *Simulator, probes *Count
 // Every branch is a distinct, documented phase; inlining them is what makes the
 // ordering auditable against Simulator.Run.
 //
-//nolint:gocyclo // the standard tick loop plus three inserted phases, each documented above.
+// the standard tick loop plus three inserted phases, each documented above.
 func countStoreLoop(
 	ctx context.Context, sm *Simulator, cfg CountStoreConfig, probes *CountStoreProbes,
 ) (*SimReport, error) {

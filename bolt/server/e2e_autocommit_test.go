@@ -33,7 +33,7 @@ func TestE2E_AutocommitTransaction(t *testing.T) {
 
 	// Session 1: autocommit write via session.Run.
 	session1 := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer session1.Close(ctx) //nolint:errcheck
+	defer session1.Close(ctx)
 
 	result, err := session1.Run(ctx,
 		`CREATE (n:AutoNode {key: $key})`,
@@ -56,7 +56,7 @@ func TestE2E_AutocommitTransaction(t *testing.T) {
 
 	// AC#1 + AC#2: second independent session must see the write.
 	session2 := driver.NewSession(ctx, neo4j.SessionConfig{})
-	defer session2.Close(ctx) //nolint:errcheck
+	defer session2.Close(ctx)
 
 	rows := runRead(ctx, t, session2,
 		`MATCH (n:AutoNode {key: $key}) RETURN count(n) AS cnt`,

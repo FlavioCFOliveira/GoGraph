@@ -54,7 +54,7 @@ func runCypherCheckpointClose(t *testing.T, dir string, g *lpg.Graph[string, flo
 		if err != nil {
 			t.Fatalf("RunAny(%q): %v", q, err)
 		}
-		for res.Next() { //nolint:revive // intentional drain to run the write to completion
+		for res.Next() { // intentional drain to run the write to completion
 		}
 		if rerr := res.Err(); rerr != nil {
 			_ = res.Close()

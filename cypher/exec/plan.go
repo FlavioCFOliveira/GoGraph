@@ -64,12 +64,22 @@ type PlanNode struct {
 	// filtered afterwards, since both can emit the same few rows while touching
 	// wildly different amounts of storage (rmp #2238).
 	//
-	// It is counted only where it can be counted EXACTLY: at the operators that
-	// read records from storage, one hit per record read (see [StorageRecordScan]).
-	// An operator that only transforms rows its children produced reports 0,
-	// because it accessed no storage. That convention is the one the in-tree
-	// db-hits work established (T910/T913) and it is a documented DIVERGENCE from
-	// Neo4j, which additionally charges a hit per property read; see docs/cypher.md.
+	// Unlike Rows and Time it is NOT uniformly a measurement. It comes from one of
+	// three places, and the rendered figure does not say which (rmp #2720):
+	//
+	//   - MEASURED, for an operator implementing exec's storageAccessCounter —
+	//     today [VarLengthExpand], which reports the relationship slots its BFS
+	//     actually read;
+	//   - DERIVED from the emitted row count, for an operator marked
+	//     [StorageRecordScan], whose contract asserts one record read per row;
+	//   - 0, for every other operator — the honest answer for a pure row
+	//     transformer, and an UNDER-REPORT for [ShortestPath], [AllShortestPaths]
+	//     and the morsel-parallel leaves, which read storage and claim neither
+	//     interface. [StorageRecordScan] enumerates the gaps.
+	//
+	// It is in every case a count of ACCESS-PATH record reads and never of property
+	// reads, which is a documented DIVERGENCE from Neo4j, which additionally charges
+	// a hit per property read; see docs/cypher.md.
 	DbHits int64
 }
 

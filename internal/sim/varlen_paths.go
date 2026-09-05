@@ -540,7 +540,7 @@ func checkVLEPathFunctions(ctx context.Context, tick int64, engine *EngineAdapte
 			got[i], ok[i] = res.IntAt(i)
 		}
 	}
-	for res.Next() { //nolint:revive // draining is the point
+	for res.Next() { // draining is the point
 	}
 	derr := res.Err()
 	_ = res.Close()
