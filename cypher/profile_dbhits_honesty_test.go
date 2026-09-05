@@ -5,8 +5,10 @@ package cypher_test
 // PROFILE's `dbhits=` column is not one kind of figure. For a scan or seek it is
 // DERIVED from the emitted row count on the contract that such an operator reads
 // one record per row; for a variable-length expansion it is MEASURED; for several
-// operators that read storage it is 0. Nothing in the rendered output says which
-// of the three a reader is looking at.
+// operators that read storage it was 0, indistinguishable from a genuine zero —
+// until rmp #2760 gave the figure an explicit UNKNOWN state, rendered "?". The
+// output still does not say whether a NUMBER is measured or derived; it does now
+// say when there is no number at all.
 //
 // This file is the gate on the parts of that which are claims about behaviour
 // rather than about presentation. Each test is written so it FAILS on the
@@ -24,10 +26,11 @@ package cypher_test
 //     run would pay for, so the divergence stands as a known property. Pinning it
 //     is what stops it being re-described as an exact count in a future doc: the
 //     test fails if the number silently changes, in EITHER direction.
-//  3. The morsel-parallel leaves report 0 db-hits for a full scan, and their plan
-//     line must say so. Without the marker the identical query reports N db-hits
-//     below the parallel threshold and 0 above it, with nothing to tell a reader
-//     that the second zero means "not counted".
+//  3. The morsel-parallel leaves count no db-hits for a full scan, so their cell
+//     must render as "?" and their plan line must name the gap. Without both, the
+//     identical query reports N db-hits below the parallel threshold and 0 above
+//     it, with nothing to tell a reader that the second zero means "not counted"
+//     (rmp #2760 made the state itself renderable; #2720 added the words).
 //
 // Peer behaviour these gates were calibrated against, read in source: Neo4j
 // 5.26.16 counts REAL kernel cursor accesses (OperatorProfileEvent implements
@@ -42,10 +45,12 @@ package cypher_test
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
@@ -69,29 +74,45 @@ func runHonestyWrite(t *testing.T, eng *cypher.Engine, q string) {
 }
 
 // profiledCells returns the (rows, dbhits) an operator reported, located by the
-// prefix of its rendered line. It reads Engine.Profile's indented tree rather
-// than the table so a change to either renderer cannot make the gate vacuous by
-// simply not finding the operator — found is returned and every caller asserts
-// it.
-func profiledCells(plan, operator string) (rows, dbhits int64, found bool) {
+// prefix of its rendered line, plus whether the db-hits cell was a FIGURE at all.
+// It reads Engine.Profile's indented tree rather than the table so a change to
+// either renderer cannot make the gate vacuous by simply not finding the
+// operator — found is returned and every caller asserts it.
+//
+// dbhitsKnown is false when the cell rendered as exec.DbHitsUnknown ("?"), in
+// which case dbhits is 0 and means nothing. Parsing the "?" explicitly rather
+// than letting a numeric scan fail is deliberate: since rmp #2760 a "?" is a
+// legitimate rendering, and a parser that returned found=false for it would turn
+// every gate below into a t.Fatalf about the harness instead of a statement
+// about the engine.
+func profiledCells(plan, operator string) (rows, dbhits int64, dbhitsKnown, found bool) {
 	for _, line := range strings.Split(plan, "\n") {
 		trimmed := strings.TrimLeft(line, "│└├─ ")
 		if !strings.HasPrefix(trimmed, operator) {
 			continue
 		}
-		var r, d int64
-		var ms string
-		// The suffix is " (rows=%d, dbhits=%d, time=%s)".
+		// The suffix is " (rows=%d, dbhits=%s, time=%s)", where the db-hits cell is
+		// either a decimal count or "?".
 		i := strings.Index(trimmed, "(rows=")
 		if i < 0 {
-			return 0, 0, false
+			return 0, 0, false, false
 		}
-		if _, err := fmt.Sscanf(trimmed[i:], "(rows=%d, dbhits=%d, time=%s", &r, &d, &ms); err != nil {
-			return 0, 0, false
+		var r int64
+		var cell, ms string
+		if _, err := fmt.Sscanf(trimmed[i:], "(rows=%d, dbhits=%s time=%s", &r, &cell, &ms); err != nil {
+			return 0, 0, false, false
 		}
-		return r, d, true
+		cell = strings.TrimSuffix(cell, ",")
+		if cell == "?" {
+			return r, 0, false, true
+		}
+		d, err := strconv.ParseInt(cell, 10, 64)
+		if err != nil {
+			return 0, 0, false, false
+		}
+		return r, d, true, true
 	}
-	return 0, 0, false
+	return 0, 0, false, false
 }
 
 // broomGraph builds a Root with `fan` out-edges, of which exactly one continues
@@ -135,11 +156,11 @@ func TestProfileDbHits_VarLengthExpandCountsTraversalsNotRows(t *testing.T) {
 		t.Fatalf("Profile(narrow): %v", err)
 	}
 
-	wideRows, wideHits, ok := profiledCells(wide, "VarLengthExpand")
+	wideRows, wideHits, wideKnown, ok := profiledCells(wide, "VarLengthExpand")
 	if !ok {
 		t.Fatalf("no VarLengthExpand in the wide plan, so this gate covers nothing:\n%s", wide)
 	}
-	narrowRows, narrowHits, ok := profiledCells(narrow, "VarLengthExpand")
+	narrowRows, narrowHits, narrowKnown, ok := profiledCells(narrow, "VarLengthExpand")
 	if !ok {
 		t.Fatalf("no VarLengthExpand in the narrow plan, so this gate covers nothing:\n%s", narrow)
 	}
@@ -156,6 +177,16 @@ func TestProfileDbHits_VarLengthExpandCountsTraversalsNotRows(t *testing.T) {
 			"one 3-hop path:\n%s", narrowRows, narrow)
 	}
 	// The traversal count the control measured.
+	// Both arms must report a FIGURE. Since rmp #2760 an operator that claims none
+	// of the three db-hits markers renders "?", so an accidental removal of
+	// VarLengthExpand's storageAccessCounter would make every comparison below
+	// compare 0 with 0 and pass. This is the guard against that.
+	if !wideKnown || !narrowKnown {
+		t.Fatalf("VarLengthExpand rendered its db-hits as unknown (wide known=%v, "+
+			"narrow known=%v). It implements exec's storageAccessCounter, so its "+
+			"figure is MEASURED and must render as a number:\nwide:\n%s\nnarrow:\n%s",
+			wideKnown, narrowKnown, wide, narrow)
+	}
 	if wideHits != wideRows {
 		t.Errorf("wide arm: dbhits=%d but rows=%d; on `[*1..3]` every enqueued slot "+
 			"becomes a row, so the two must agree:\n%s", wideHits, wideRows, wide)
@@ -208,15 +239,24 @@ func TestProfileDbHits_TypeFilteredExpandUnderReports(t *testing.T) {
 		t.Fatalf("Profile(filtered): %v", err)
 	}
 
-	_, allHits, ok := profiledCells(all, "Expand")
+	_, allHits, allKnown, ok := profiledCells(all, "Expand")
 	if !ok {
 		t.Fatalf("no Expand in the unfiltered plan:\n%s", all)
 	}
-	filteredRows, filteredHits, ok := profiledCells(filtered, "Expand")
+	filteredRows, filteredHits, filteredKnown, ok := profiledCells(filtered, "Expand")
 	if !ok {
 		t.Fatalf("no Expand in the filtered plan:\n%s", filtered)
 	}
 
+	// Expand is marked exec.StorageRecordScan, so both cells are DERIVED figures
+	// and must render as numbers. A "?" here would mean the marker was dropped,
+	// which would silently make the pinned under-report below unobservable.
+	if !allKnown || !filteredKnown {
+		t.Fatalf("Expand rendered its db-hits as unknown (unfiltered known=%v, "+
+			"filtered known=%v); it carries exec.StorageRecordScan, so the cell is a "+
+			"derived figure:\nunfiltered:\n%s\nfiltered:\n%s",
+			allKnown, filteredKnown, all, filtered)
+	}
 	if allHits != others+1 {
 		t.Fatalf("the unfiltered expand reported dbhits=%d, want %d — the graph no "+
 			"longer has the shape this gate needs:\n%s", allHits, others+1, all)
@@ -237,12 +277,15 @@ func TestProfileDbHits_TypeFilteredExpandUnderReports(t *testing.T) {
 
 // TestProfileDbHits_ParallelLeafDeclaresItsGap is gate 3.
 //
-// A morsel-parallel leaf reports 0 db-hits while scanning the whole label, and 0
-// is also what a pure row transformer reports. The rendered line must therefore
-// say which zero it is. The control arm is the SAME query below the parallel
-// threshold, which plans a NodeByLabelScan and reports one db-hit per node: the
-// two arms together are what make the zero a reporting gap rather than a fact
-// about the workload.
+// A morsel-parallel leaf counts no db-hits while scanning the whole label, and
+// until rmp #2760 it printed the same `dbhits=0` a pure row transformer prints.
+// The control arm is the SAME query below the parallel threshold, which plans a
+// NodeByLabelScan and reports one db-hit per node: the two arms together are what
+// make the leaf's figure a reporting gap rather than a fact about the workload.
+//
+// Since rmp #2760 the gate asserts the STATE, not the words: the leaf's cell must
+// render as unknown ("?") and the control's as the number. The PlanDetail marker
+// #2720 added is still asserted, because it says in words which gap the "?" is.
 func TestProfileDbHits_ParallelLeafDeclaresItsGap(t *testing.T) {
 	t.Parallel()
 	const nodes = 2000
@@ -265,10 +308,16 @@ func TestProfileDbHits_ParallelLeafDeclaresItsGap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Profile(serial): %v", err)
 	}
-	serialRows, serialHits, ok := profiledCells(serial, "NodeByLabelScan")
+	serialRows, serialHits, serialKnown, ok := profiledCells(serial, "NodeByLabelScan")
 	if !ok {
 		t.Fatalf("the control arm did not plan a NodeByLabelScan, so this gate has no "+
 			"baseline:\n%s", serial)
+	}
+	if !serialKnown {
+		t.Fatalf("control arm: the serial NodeByLabelScan rendered its db-hits as "+
+			"unknown. It carries exec.StorageRecordScan, so its cell is a derived "+
+			"figure and must be a number — otherwise the subject arm below has "+
+			"nothing to be compared against:\n%s", serial)
 	}
 	if serialHits != serialRows || serialHits != nodes {
 		t.Fatalf("control arm: rows=%d dbhits=%d, want %d for both:\n%s",
@@ -280,7 +329,7 @@ func TestProfileDbHits_ParallelLeafDeclaresItsGap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Profile(parallel): %v", err)
 	}
-	parRows, parHits, ok := profiledCells(parallel, "ParallelScanProject")
+	parRows, _, parKnown, ok := profiledCells(parallel, "ParallelScanProject")
 	if !ok {
 		t.Fatalf("the subject arm did not plan a ParallelScanProject, so this gate "+
 			"covers nothing:\n%s", parallel)
@@ -288,18 +337,28 @@ func TestProfileDbHits_ParallelLeafDeclaresItsGap(t *testing.T) {
 	if parRows != nodes {
 		t.Fatalf("the parallel leaf emitted %d rows, want %d:\n%s", parRows, nodes, parallel)
 	}
-	if parHits != 0 {
-		t.Logf("the parallel leaf now reports dbhits=%d; if it counts its node walk, "+
-			"the marker below is no longer needed:\n%s", parHits, parallel)
+	if parKnown {
+		t.Errorf("the parallel leaf rendered a db-hits FIGURE for a scan of all %d "+
+			"nodes, but nothing counts its workers' node walk. The identical query "+
+			"reports dbhits=%d below the parallel threshold, so a number here would "+
+			"be a measurement claim the engine cannot stand behind — the cell must "+
+			"render %q (rmp #2760). If a later task (#2762) taught the leaf to count, "+
+			"this gate is what forces its documentation and its markers to be updated "+
+			"together.\nparallel:\n%s\nserial control:\n%s",
+			nodes, serialHits, exec.DbHitsUnknown, parallel, serial)
 	}
-	if parHits == 0 && !strings.Contains(parallel, "db-hits not counted") {
-		t.Errorf("the parallel leaf reports dbhits=0 for a scan of all %d nodes and its "+
-			"plan line does not say the figure is uncounted. The identical query "+
-			"reports dbhits=%d below the parallel threshold, so the zero is a "+
-			"reporting gap, not a property of the query — and nothing in the column "+
-			"tells the two zeros apart (rmp #2720). Neo4j leaves such a cell blank "+
-			"and prints \"x + ?\" for the total; PostgreSQL suppresses the figure "+
-			"entirely.\nparallel:\n%s\nserial control:\n%s",
-			nodes, serialHits, parallel, serial)
+	if !strings.Contains(parallel, "db-hits not counted") {
+		t.Errorf("the parallel leaf's plan line no longer says its db-hits are "+
+			"uncounted. The \"?\" says a figure is missing; this detail says WHICH "+
+			"gap it is, and rmp #2720 added it for that reason:\n%s", parallel)
+	}
+	// The "?" must actually reach the rendered line: asserting the parsed state
+	// alone would pass even if the renderer printed a zero, because the parser
+	// would then report known=true — but only this pins the exact glyph a reader
+	// sees, and the mutation that reverts the renderer to "%d" is caught here.
+	if !strings.Contains(parallel, "dbhits="+exec.DbHitsUnknown) {
+		t.Errorf("the parallel leaf's line does not render dbhits=%s; a reader is "+
+			"shown a number for storage nobody counted:\n%s",
+			exec.DbHitsUnknown, parallel)
 	}
 }

@@ -214,11 +214,16 @@ func (e *Engine) ExplainTable(query string, params map[string]expr.Value) (s str
 //	+-----------------------------+------+--------+-----------+
 //	| Operator                    | Rows | DbHits | Time (ms) |
 //	+-----------------------------+------+--------+-----------+
-//	| Project                     |   40 |      0 |     0.032 |
+//	| Project                     |   40 |      ? |     0.032 |
 //	| └─ NodeByLabelScan [Person] |   40 |     40 |     0.003 |
 //	+-----------------------------+------+--------+-----------+
-//	| Total                       |   80 |     40 |     0.032 |
+//	| Total                       |   80 | 40 + ? |     0.032 |
 //	+-----------------------------+------+--------+-----------+
+//
+// The "?" is not a defect in the projection: a Project evaluates a
+// caller-supplied expression, and a GoGraph expression can walk the graph (a
+// pattern predicate or a pattern comprehension does), so nothing counted what
+// this operator may have read. See [exec.PlanNode.DbHitsKnown].
 //
 // It is [Engine.Profile] in a table rather than a tree, over the SAME measured
 // plan: ProfileTable and Profile run the identical build-and-drain and render
@@ -235,8 +240,10 @@ func (e *Engine) ExplainTable(query string, params map[string]expr.Value) (s str
 //     measure, NOT the result's row count. The result's row count is the ROOT
 //     operator's Rows, on the table's first data line.
 //   - Total DbHits is the query's total storage-record reads, which is the figure
-//     that separates a selective seek from a scan that filtered afterwards. It is
-//     derived rather than counted; see below.
+//     that separates a selective seek from a scan that filtered afterwards. It
+//     sums only the cells that are figures, and renders as "x + ?" when any
+//     operator's accesses were never counted — so it is a FLOOR in that case, not
+//     the whole cost. It is mostly derived rather than counted; see below.
 //   - Total Time (ms) is the whole query's elapsed time, because the root's time
 //     already includes every child's.
 //
@@ -248,8 +255,9 @@ func (e *Engine) ExplainTable(query string, params map[string]expr.Value) (s str
 // Rows and Time (ms) are MEASURED: the profiling wrapper counts the rows an
 // operator returned and times its own Next calls.
 //
-// DbHits is MIXED, and the column does not say which cell is which. Read it
-// together with the operator's name:
+// DbHits is MIXED, and the column says only whether a cell is a figure at all —
+// which it does say, since rmp #2760, by printing "?" when it is not. Read a
+// number together with the operator's name:
 //
 //   - For an operator marked [exec.StorageRecordScan] — the scan, seek and
 //     single-hop-expand leaves — the cell is DERIVED: it IS the Rows cell, on the
@@ -258,10 +266,14 @@ func (e *Engine) ExplainTable(query string, params map[string]expr.Value) (s str
 //     on every such line.
 //   - For [exec.VarLengthExpand] the cell is MEASURED: the operator reports the
 //     relationship slots its BFS actually read, which is not its row count.
-//   - For every other operator the cell is 0. That is the honest answer for a pure
-//     row transformer, and an UNDER-REPORT for [exec.ShortestPath],
-//     [exec.AllShortestPaths] and the morsel-parallel leaves, which read storage
-//     and report none. The parallel leaves say so in their Operator cell.
+//   - For an operator that opens no access path — Limit, Skip, Distinct, Eager,
+//     the aggregations, the Apply family — the cell is a KNOWN 0.
+//   - For every other operator the cell is "?": nothing counted its accesses.
+//     That covers [exec.ShortestPath], [exec.AllShortestPaths], the
+//     morsel-parallel leaves, the count-store leaves, and every operator holding
+//     a caller-supplied expression closure that can reach the graph (Filter,
+//     Project, Sort, Top, Unwind, the hash joins, RollUpApply, ProcedureCallOp).
+//     The parallel leaves additionally say so in their Operator cell.
 //
 // In every case the column counts ACCESS-PATH record reads and never property
 // reads, which is a documented divergence from Neo4j (see docs/cypher.md). Neo4j
@@ -276,9 +288,9 @@ func (e *Engine) ExplainTable(query string, params map[string]expr.Value) (s str
 // a worker goroutine, the builder clears the profiler from the per-worker build
 // options so no worker times anything, and the leaf implements no PlanChildren so
 // the tree stops there. Its ROW and TIME figures are the whole parallel phase
-// attributed to the driving goroutine; its DB-HITS figure is 0 because nothing
-// counted them, which its Operator cell states. See the "parallel tier" section of
-// the [exec.Profiler] documentation.
+// attributed to the driving goroutine; its DB-HITS cell is "?" because nothing
+// counted them, which its Operator cell also states in words. See the "parallel
+// tier" section of the [exec.Profiler] documentation.
 func (e *Engine) ProfileTable(ctx context.Context, query string, params map[string]expr.Value) (s string, err error) {
 	defer recoverQueryPanic(&err, "cypher.ProfileTable", "cypher.ProfileTable.panics")
 	tree, err := e.profilePlanTree(ctx, query, params)
@@ -308,13 +320,23 @@ func profileReportFromPlan(root *exec.PlanNode) explain.ProfileReport {
 			name += " (not measured)"
 		}
 		rep.Operators = append(rep.Operators, explain.OperatorStats{
-			Name:      name,
-			Rows:      nonNegative(n.Rows),
-			DbHits:    nonNegative(n.DbHits),
-			ElapsedNs: n.Time.Nanoseconds(),
+			Name:        name,
+			Rows:        nonNegative(n.Rows),
+			DbHits:      nonNegative(n.DbHits),
+			DbHitsKnown: n.DbHitsKnown,
+			ElapsedNs:   n.Time.Nanoseconds(),
 		})
 		rep.TotalRows += nonNegative(n.Rows)
-		rep.TotalDbHits += nonNegative(n.DbHits)
+		// The total sums the KNOWN cells only and records that it did. Adding an
+		// unknown operator's placeholder zero would silently understate the query's
+		// cost as a complete figure; skipping it without saying so would do the
+		// same. Neo4j resolves it the same way — TotalHits ORs an `uncertain` flag
+		// across the plan and renders "x + ?" (renderSummary.scala, 5.26.16).
+		if n.DbHitsKnown {
+			rep.TotalDbHits += nonNegative(n.DbHits)
+		} else {
+			rep.TotalDbHitsUncertain = true
+		}
 		for i := range n.Children {
 			branch, cont := "├─ ", "│  "
 			if i == len(n.Children)-1 {

@@ -332,8 +332,10 @@ func (r *Result) Plan() *exec.PlanNode {
 // this tree in the SUCCESS that terminates the stream.
 //
 // Each node's Rows and Time are measured; Time is INCLUSIVE of the node's
-// children. DbHits is derived at the access-path boundary. See [Engine.Profile]
-// for the full contract, which this shares exactly.
+// children. DbHits is mostly derived at the access-path boundary, and is a
+// figure only when [exec.PlanNode.DbHitsKnown] is true — [exec.RenderPlanNode]
+// prints "?" for the rest rather than a zero it did not measure. See
+// [Engine.Profile] for the full contract, which this shares exactly.
 //
 // The returned tree is owned by the Result and must not be mutated.
 func (r *Result) Profile() *exec.PlanNode {

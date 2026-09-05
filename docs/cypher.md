@@ -1338,11 +1338,11 @@ emitted rows, its logical storage accesses (`dbhits`), and the time attributed t
 it:
 
 ```
-ColumnarProject (rows=1, dbhits=0, time=17µs)
+ColumnarProject (rows=1, dbhits=?, time=17µs)
 └─ NodeByIndexSeek [seek="n7"] (rows=1, dbhits=1, time=0s)
 
-ColumnarProject (rows=8, dbhits=0, time=25µs)
-└─ ColumnarFilter (rows=8, dbhits=0, time=24µs)
+ColumnarProject (rows=8, dbhits=?, time=25µs)
+└─ ColumnarFilter (rows=8, dbhits=?, time=24µs)
    └─ NodeByLabelScan [P] (rows=300, dbhits=300, time=2µs)
 ```
 
@@ -1367,8 +1367,9 @@ builder installs only when asked, so an ordinary `Run` executes the same code as
 build in which profiling does not exist.
 
 > **What `dbhits` is, exactly.** Unlike `rows` and `time`, which are measured for
-> every operator, `dbhits` comes from one of three places, and the rendered figure
-> does not say which:
+> every operator, `dbhits` is one of four things. The cell says when it is not a
+> figure at all — it prints `?` — but a number does not say whether it was measured
+> or derived:
 >
 > - **Derived** — for a scan, an index seek or a single-hop expand, the figure IS
 >   the `rows` figure. Those operators are marked internally as reading one record
@@ -1378,11 +1379,26 @@ build in which profiling does not exist.
 > - **Measured** — a variable-length expansion (`-[*m..n]->`) reports the
 >   relationship slots its BFS actually read, from the counter its traversal budget
 >   already maintains. That number is not its row count and is usually far larger.
-> - **Zero** — every other operator. For a pure row transformer that is the honest
->   answer: it read no storage. For `shortestPath`, `allShortestPaths` and the
->   morsel-parallel leaves it is an **under-report** — they read storage and count
->   none of it. The parallel leaves say so in their own plan line
->   (`[parallel tier; db-hits not counted]`).
+> - **A known `0`** — an operator that opens no access path at all: `Limit`, `Skip`,
+>   `Distinct`, `Eager`, `Union`, the aggregations, and the `Apply` family, whose
+>   own cost is entirely in the children the plan already shows. Each of these
+>   claims the zero explicitly in the engine, so the cell is a measurement.
+> - **`?` — not counted.** Nothing observed this operator's storage accesses, so
+>   the engine reports no figure rather than a `0` that would read as "touched
+>   nothing". It covers `shortestPath` and `allShortestPaths`, the morsel-parallel
+>   leaves (which also say so in their plan line,
+>   `[parallel tier; db-hits not counted]`), the count-store leaves, and **every
+>   operator that evaluates one of your expressions** — `Filter`, `Project`, `Sort`,
+>   `Top`, `UNWIND`, the hash joins and procedure calls. The last group is the
+>   surprising one, and it is real: a GoGraph expression can walk the graph, so
+>   `WHERE (a)-[:T]->()` and `RETURN size([(a)-->(x) | 1])` read relationship
+>   records *inside* a `Filter` or a `Project`, with no operator in the plan for
+>   them. On a 100-way fan, the pattern-predicate form reports one db-hit for the
+>   whole plan where the equivalent `MATCH (a)-[:T]->(b)` reports 101.
+>
+> **Reading a total.** `PROFILE`'s `Total DbHits` sums only the cells that are
+> figures. When any cell is `?` the total renders as `N + ?` — a **floor**, not the
+> query's whole storage cost. A plain number means every operator reported.
 >
 > Two further gaps are worth knowing before you compare two plans:
 >
@@ -1427,10 +1443,10 @@ not.
 +--------------------------------+------+--------+-----------+
 | Operator                       | Rows | DbHits | Time (ms) |
 +--------------------------------+------+--------+-----------+
-| Project                        |    1 |      0 |     0.000 |
+| Project                        |    1 |      ? |     0.000 |
 | └─ NodeByIndexSeek [seek="p3"] |    1 |      1 |     0.000 |
 +--------------------------------+------+--------+-----------+
-| Total                          |    2 |      1 |     0.000 |
+| Total                          |    2 |  1 + ? |     0.000 |
 +--------------------------------+------+--------+-----------+
 ```
 
@@ -1461,10 +1477,11 @@ cells are easy to mistake:
 - **`Rows`** is every operator's emitted rows added together — a cost measure, not
   the result's row count. The result's row count is the **root** operator's
   `Rows`, on the table's first data line.
-- **`DbHits`** is the sum of every operator's `DbHits` cell, so it inherits every
-  qualification above: it is a **lower bound** on the query's storage-record reads,
-  not a total, whenever the plan contains a type-filtered expand, a
-  `shortestPath`, or a morsel-parallel leaf.
+- **`DbHits`** is the sum of the operator cells that are FIGURES. A cell reading
+  `?` was never counted and contributes nothing, and the Total then renders as
+  `N + ?` to say so. Read `N + ?` as a **lower bound** on the query's
+  storage-record reads. Even a plain `N` remains a lower bound when the plan
+  contains a type-filtered expand, whose known under-report is described above.
 - **`Time (ms)`** is the whole query's elapsed time, because the root operator's
   time already includes every child's.
 

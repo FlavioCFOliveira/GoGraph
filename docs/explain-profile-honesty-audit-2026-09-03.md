@@ -395,3 +395,74 @@ Environment: darwin 25.5.0 (arm64), Go toolchain as pinned by `go.mod`. The host
 quiet — the sprint's other specialist was running concurrently — which is why this document
 contains no timing comparison. Every figure quoted here is a count or a structural equality,
 and neither is affected by load.
+
+---
+
+## Addendum — 2026-09-05, rmp #2760 (sprint 355)
+
+This section records what changed after the audit, and one claim above that later
+measurement **refuted**. Nothing earlier in the document has been edited: it is the
+report of an investigation on a dated tree, and correcting it in place would hide
+that the correction happened.
+
+### The top recommendation was implemented
+
+§6 "Left unfixed, deliberately" listed *"Rendering `-` instead of `0` for an
+uncounted `DbHits`"* as the audit's top recommendation, deferred because it changes
+what `Engine.Profile`, `Engine.ProfileTable` and `Result.Profile()` return. rmp
+#2760 made that change, using `?` rather than `-`:
+
+* `exec.PlanNode` gained `DbHitsKnown bool`. `DbHits` is meaningful only when it is
+  true; every renderer prints `exec.DbHitsUnknown` (`?`) otherwise.
+* An operator's class is decided by which of three marker interfaces it implements:
+  `storageAccessCounter` (MEASURED), `StorageRecordScan` (DERIVED), and the new
+  `noStorageAccess` (a KNOWN zero). Claiming none is UNKNOWN — the honest default.
+* `Total DbHits` sums only the known cells and renders `N + ?` when it summed over a
+  gap, which is Neo4j's `TotalHits` form verbatim (`renderSummary.scala`, 5.26.16).
+* The Bolt `profile` metadata OMITS `dbHits` for an unknown operator, which is the
+  rule §5 identified as already correct for the page-cache fields.
+* `cypher/exec/dbhits_classification_test.go` carries the classification of every
+  operator in the package, with the reason for each, and fails when the source and
+  that census disagree.
+
+### Refuted: `Project` is not a pure row transformer
+
+§1 states: *"`Project`, a pure row transformer, also reports `dbhits=0`, honestly."*
+That is **false**, and so is the same assumption about `Filter`.
+
+A GoGraph expression can walk the graph. `cypher/pattern_eval.go`'s
+`patternEvaluator` is passed into every per-row evaluation through cypher's
+`evalRow` bridge, and its `EvalPattern` / `EvalPatternComp` traverse adjacency
+directly. Measured on one `:Root` with 100 `:LIKES` out-edges
+(`TestProfileDbHits_ExpressionEvaluationIsUncountedStorage`):
+
+```
+MATCH (r:Root) WHERE (r)-[:LIKES]->() RETURN r.k        total db-hits reported: 1
+  ColumnarProject / Filter / NodeByLabelScan
+
+MATCH (r:Root)-[:LIKES]->(l) RETURN DISTINCT r.k        total db-hits reported: 101
+  Distinct / ColumnarProject / Expand / NodeByLabelScan
+```
+
+Both arms return the same one row and both must read the `:Root`'s relationship
+slots to do so. The first reports the label scan alone. A pattern comprehension
+inside a projection behaves identically —
+`RETURN size([(r)-[:LIKES]->(x) | 1])` is evaluated **inside** `Project` (it is not
+lowered to a `RollUpApply`) and the plan reports 1 db-hit for 100 slots read.
+
+This is the same class of defect as refutation 3 in §3, in a place the audit did not
+look, and it is why `Filter`, `Project`, `Sort`, `Top`, `Unwind`, the hash joins,
+`RollUpApply` and `ProcedureCallOp` are all UNKNOWN rather than a known zero: each
+holds a caller-supplied expression closure, and none can prove what that closure
+reached.
+
+### Still open
+
+* Deciding the expression-closure operators **per instance** — a `Sort` whose every
+  `SortKey.Eval` is nil provably reads nothing, and the planner knows that when it
+  builds the operator. rmp #2760 classifies by TYPE, so those instances report `?`.
+* `Expand`'s type-filter under-report (§6), the parallel leaves' count and
+  `shortestPath`'s count remain uncounted; rmp #2761, #2762 and #2763 exist to
+  convert them from UNKNOWN to MEASURED.
+* §7's limit stands: `ParallelAggregateScan` and `ParallelCountScan` are still
+  classified from the interface set rather than from an observed run.

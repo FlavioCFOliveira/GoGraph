@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
 )
 
 // Access-path parity oracle (rmp #2447).
@@ -144,7 +146,11 @@ func hasSeekLeaf(leaves []string) bool {
 //     hold vacuously on two scans;
 //   - one Profile probe (the first MustSeek probe's literal arm) must report a
 //     non-zero db-hit total, so a silently un-instrumented or data-blind
-//     profile surfaces instead of passing.
+//     profile surfaces instead of passing. A total of zero is a
+//     [ViolationOracleDeviation] when every cell was a figure, and a
+//     [ViolationVacuousRun] when no cell was: since rmp #2760 an operator whose
+//     accesses nobody counted renders "?" rather than 0, and a probe that saw
+//     only "?" has no oracle rather than a refuted one.
 //
 // Violation messages name the shape, both plans, and both result summaries;
 // result ids are sorted before rendering so messages are deterministic. The
@@ -225,6 +231,17 @@ func (c *InvariantChecker) checkOneParityProbe(tick int64, engine PlanEngine, p 
 
 // checkProfileDbHits profiles the probe's literal arm and appends a violation
 // when the plan reports a zero db-hit total for a query that must touch data.
+//
+// Since rmp #2760 a zero total has two causes and they are NOT the same defect:
+//
+//   - every cell was a figure and they summed to zero — the engine is claiming it
+//     touched no storage for a query that must, which is an oracle deviation; or
+//   - no cell carried a figure at all — the engine counted nothing, so the probe
+//     has no oracle to deviate from and the RUN is vacuous.
+//
+// Both still fire. Reporting the second as an oracle deviation, which is what the
+// old parser did by scanning "?" as a silent zero, would blame the engine for a
+// gap in the instrument.
 func (c *InvariantChecker) checkProfileDbHits(tick int64, engine PlanEngine, p ParityProbe) {
 	prof, err := engine.Profile(context.Background(), p.Literal, nil)
 	if err != nil {
@@ -232,23 +249,39 @@ func (c *InvariantChecker) checkProfileDbHits(tick int64, engine PlanEngine, p P
 			fmt.Sprintf("shape %q: Profile %q failed: %v", p.Shape, p.Literal, err))
 		return
 	}
-	if totalDbHits(prof) == 0 {
-		c.add(ViolationOracleDeviation, tick, "access-path profile",
-			fmt.Sprintf("shape %q: Profile reports ZERO db-hits for a query that must touch data\nquery: %s\nprofile:\n%s",
-				p.Shape, p.Literal, prof))
+	total, unknown := totalDbHits(prof)
+	if total != 0 {
+		return
 	}
+	if unknown > 0 {
+		c.add(ViolationVacuousRun, tick, "access-path profile",
+			fmt.Sprintf("shape %q: Profile counted NO db-hits at all (%d operator(s) reported %q), "+
+				"so this probe's db-hit oracle proves nothing about the access path\nquery: %s\nprofile:\n%s",
+				p.Shape, unknown, exec.DbHitsUnknown, p.Literal, prof))
+		return
+	}
+	c.add(ViolationOracleDeviation, tick, "access-path profile",
+		fmt.Sprintf("shape %q: Profile reports ZERO db-hits for a query that must touch data\nquery: %s\nprofile:\n%s",
+			p.Shape, p.Literal, prof))
 }
 
-// totalDbHits sums every "dbhits=N" annotation in a profiled plan rendering.
-func totalDbHits(prof string) int64 {
-	var total int64
+// totalDbHits sums every "dbhits=N" annotation in a profiled plan rendering, and
+// counts separately the cells rendered as exec.DbHitsUnknown ("?") — an operator
+// whose storage accesses nobody counted (rmp #2760). Those contribute nothing to
+// the total, so the total is a FLOOR whenever unknown is non-zero.
+func totalDbHits(prof string) (total int64, unknown int) {
 	rest := prof
 	for {
 		i := strings.Index(rest, "dbhits=")
 		if i < 0 {
-			return total
+			return total, unknown
 		}
 		rest = rest[i+len("dbhits="):]
+		if strings.HasPrefix(rest, exec.DbHitsUnknown) {
+			unknown++
+			rest = rest[len(exec.DbHitsUnknown):]
+			continue
+		}
 		var n int64
 		for rest != "" && rest[0] >= '0' && rest[0] <= '9' {
 			n = n*10 + int64(rest[0]-'0')

@@ -21,8 +21,11 @@ package server
 //     Each child is parsed by the same function, so the structure is uniform all
 //     the way down.
 //   - parseProfile additionally reads `dbHits` and `rows`, both asserted to
-//     int64. The hydrator decodes every packed integer with unp.Int(), which
-//     returns int64, so an int64 here arrives as an int64 there.
+//     int64 with a comma-ok assertion, so an ABSENT key yields 0 rather than a
+//     panic. The hydrator decodes every packed integer with unp.Int(), which
+//     returns int64, so an int64 here arrives as an int64 there. `dbHits` is
+//     omitted for an operator whose accesses nobody counted (rmp #2760), on the
+//     same reasoning as the page-cache keys below.
 //   - parseProfile reads `time` with an UNCHECKED type assertion to int64
 //     (`childPlan.Time = planTime.(int64)`). It is emitted as an int64 for that
 //     reason and for no other; a float would panic the driver.
@@ -93,12 +96,29 @@ func planNodeMetadata(n *exec.PlanNode, profiled bool) map[string]packstream.Val
 		m[planKeyArgs] = map[string]packstream.Value{planArgDetails: n.Detail}
 	}
 	if profiled {
-		// Emitted for every node, including one the instrumentation did not reach:
-		// its counters are genuinely zero and the honest report of that is a zero,
-		// not an absent key that a driver would render as "no data".
+		// rows and time are emitted for every node, including one the
+		// instrumentation did not reach: its counters are genuinely zero and the
+		// honest report of that is a zero, not an absent key that a driver would
+		// render as "no data".
 		m[planKeyRows] = n.Rows
-		m[planKeyDbHits] = n.DbHits
 		m[planKeyTime] = n.Time.Nanoseconds()
+		// dbHits is NOT, and that is the whole of rmp #2760 on the wire. An
+		// operator whose storage accesses nobody counted has no figure to send, and
+		// a 0 on this key is a measurement claim — the same reasoning that already
+		// omits the page-cache keys above. The omission is safe for the driver this
+		// file transcribes: parseProfile reads it as
+		// `plan.DbHits, _ = profilex["dbHits"].(int64)` (neo4j-go-driver v5.28.4,
+		// neo4j/internal/bolt/hydrator.go), a comma-ok assertion that yields 0 for
+		// an absent key and cannot panic.
+		//
+		// A driver therefore still surfaces 0 for such an operator, because Bolt's
+		// ProfiledPlan has no tri-state to carry. What the omission buys is that
+		// GoGraph does not ASSERT the zero: the Go surfaces
+		// ([cypher.Result.Profile], [cypher.Engine.Profile] and
+		// [cypher.Engine.ProfileTable]) render "?" and remain the accurate report.
+		if n.DbHitsKnown {
+			m[planKeyDbHits] = n.DbHits
+		}
 	}
 	if len(n.Children) > 0 {
 		kids := make([]packstream.Value, len(n.Children))

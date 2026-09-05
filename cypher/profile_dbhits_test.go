@@ -144,10 +144,14 @@ func TestProfile_DbHits(t *testing.T) {
 	t.Run("format_report_headers", func(t *testing.T) {
 		t.Parallel()
 
+		// DbHitsKnown is set on both rows because this fabricated report DOES know
+		// its figures. Since rmp #2760 the field's zero value means "not counted"
+		// and renders "?", so leaving it unset here would make a formatting
+		// fixture assert an uncertainty it does not have.
 		r := explain.ProfileReport{
 			Operators: []explain.OperatorStats{
-				{Name: "AllNodesScan", Rows: 50, DbHits: 50, ElapsedNs: 5000},
-				{Name: "ProduceResults", Rows: 50, DbHits: 0, ElapsedNs: 500},
+				{Name: "AllNodesScan", Rows: 50, DbHits: 50, DbHitsKnown: true, ElapsedNs: 5000},
+				{Name: "ProduceResults", Rows: 50, DbHits: 0, DbHitsKnown: true, ElapsedNs: 500},
 			},
 			TotalRows:   100,
 			TotalDbHits: 50,
@@ -158,6 +162,12 @@ func TestProfile_DbHits(t *testing.T) {
 			if !strings.Contains(out, want) {
 				t.Errorf("FormatReport output missing %q\n%s", want, out)
 			}
+		}
+		// Known figures must render as numbers, and the complete total as a plain
+		// number: a report that knows everything must carry no "?" anywhere.
+		if strings.Contains(out, "?") {
+			t.Errorf("FormatReport rendered an unknown marker for a report whose every "+
+				"db-hits cell is known:\n%s", out)
 		}
 	})
 

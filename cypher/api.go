@@ -2788,6 +2788,12 @@ func (e *Engine) explainPhysical(entry *planCacheEntry, params map[string]expr.V
 // Next pulls from them. Subtract a node's children to obtain its exclusive cost —
 // the same arithmetic a reader of Neo4j's PROFILE performs.
 //
+// A `dbhits=?` in the rendered line is not a zero and not an error: it means
+// nothing counted that operator's storage accesses. Rows and time are measured
+// for every operator; db-hits are measured, derived, or absent, and the "?" is
+// how the absence is said. [exec.PlanNode.DbHitsKnown] carries the state and
+// names which operators fall in which class.
+//
 // Profiling is off unless this method is called: the instrumentation is a wrapper
 // installed by the builder, so an ordinary [Engine.Run] executes code identical to
 // a build in which profiling does not exist (rmp #2222 AC 3).

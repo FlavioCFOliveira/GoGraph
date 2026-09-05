@@ -95,13 +95,15 @@ import (
 // reports, so neither is done here.
 //
 // Its ROWS and TIME are therefore real measurements of the whole phase, and its
-// DB-HITS are not measured at all: the leaf claims neither [StorageRecordScan] nor
-// [storageAccessCounter], so the cell reads 0 for a full scan of the graph. The
-// same query below the parallel threshold plans a [NodeByLabelScan] and reports
-// one db-hit per node, so the identical work reports 0 or N according to a
-// threshold the reader did not set. The leaves' [PlanDetail] states this next to
-// the number, which is the only place the current column shape allows it to be
-// said (rmp #2720).
+// DB-HITS are not measured at all: the leaf claims none of [StorageRecordScan],
+// [storageAccessCounter] and [noStorageAccess], so its cell renders as UNKNOWN
+// for a full scan of the graph. The same query below the parallel threshold plans
+// a [NodeByLabelScan] and reports one db-hit per node, so the identical work
+// reports N or "not counted" according to a threshold the reader did not set —
+// which is at least now VISIBLE in the column. Until rmp #2760 the cell read 0,
+// indistinguishable from an operator that read nothing; the leaves' [PlanDetail]
+// said so in words beside the number, which was the only place the column shape
+// then allowed it to be said (rmp #2720).
 //
 // Sharing one Profiler between two concurrently executing queries is meaningless
 // rather than unsafe — the measurements would belong to two unrelated trees — so
@@ -207,9 +209,12 @@ type profiledNode interface {
 	// planUnwrap returns the measured operator, so a node is named after the
 	// operator that ran rather than after the wrapper.
 	planUnwrap() Operator
-	// planStats returns the rows emitted, the time attributed to the operator, and
-	// the logical storage accesses attributed to it.
-	planStats() (int64, time.Duration, int64)
+	// planStats returns the rows emitted, the time attributed to the operator, the
+	// logical storage accesses attributed to it, and whether that last figure is
+	// KNOWN. A false there means nothing counted this operator's accesses; the
+	// accompanying int64 is then meaningless and must not be rendered as a zero
+	// (rmp #2760).
+	planStats() (int64, time.Duration, int64, bool)
 }
 
 // profiledOp measures one operator: the rows it emits and the wall-clock time
@@ -269,43 +274,54 @@ func (p *profiledOp) rowCountHint() (int, bool) {
 
 func (p *profiledOp) planUnwrap() Operator { return p.inner }
 
-// planStats reports the measured rows and time, plus the db-hits.
+// planStats reports the measured rows and time, plus the db-hits and whether
+// that last figure is a figure AT ALL.
 //
-// Db-hits come from one of two places, in this order:
+// Db-hits come from one of three places, in this order:
 //
 //   - a MEASURED count, when the operator implements [storageAccessCounter] and
-//     can report the records it actually read at no cost to a non-PROFILE run; or
+//     can report the records it actually read at no cost to a non-PROFILE run;
 //   - a count DERIVED from the emitted rows, when the operator implements
-//     [StorageRecordScan] — a marker that asserts one record read per row emitted.
+//     [StorageRecordScan] — a marker that asserts one record read per row emitted;
+//   - a KNOWN ZERO, when the operator implements [noStorageAccess] — a marker that
+//     asserts the operator opens no access path at all.
 //
-// Every other operator reports zero, which is the honest answer for a pure row
-// transformer and an UNDER-REPORT for an operator that reads storage without
-// claiming either interface. [StorageRecordScan] enumerates which is which, and
-// names the operators whose true count this file cannot reach.
+// Every other operator reports known=false, which is the honest report of a
+// figure nobody counted. It is NOT rendered as 0: rmp #2760 separated the two
+// because a column that prints 0 for both cannot be read, and every renderer
+// carries the flag through (see [PlanNode.DbHits]).
 //
 // Deriving rather than threading is what keeps the cost-when-off property absolute
 // for the derived set: no counter is passed through any storage accessor, so a
 // non-PROFILE Run executes not just no counting but no counting CODE — there is no
 // branch to skip. [storageAccessCounter] is admitted only where the operator
 // ALREADY maintains the counter for its own reasons, so it costs a non-PROFILE run
-// nothing either.
-func (p *profiledOp) planStats() (int64, time.Duration, int64) {
-	return p.rows, p.elapsed, p.dbHits()
+// nothing either. [noStorageAccess] is a marker method with an empty body, so it
+// costs nothing anywhere; and all three are consulted HERE, in the wrapper, which
+// only a PROFILE run allocates.
+func (p *profiledOp) planStats() (int64, time.Duration, int64, bool) {
+	hits, known := p.dbHits()
+	return p.rows, p.elapsed, hits, known
 }
 
-// dbHits returns the storage accesses attributable to the wrapped operator.
+// dbHits returns the storage accesses attributable to the wrapped operator, and
+// whether that number was established at all.
 //
 // The measured counter wins over the derived one wherever both are available: a
 // figure the operator counted is never worse than a figure inferred from its
-// boundary.
-func (p *profiledOp) dbHits() int64 {
+// boundary. known=false is returned for an operator claiming none of the three
+// markers, which is the honest answer and never a zero.
+func (p *profiledOp) dbHits() (int64, bool) {
 	if c, ok := p.inner.(storageAccessCounter); ok {
-		return c.storageAccesses()
+		return c.storageAccesses(), true
 	}
 	if _, ok := p.inner.(StorageRecordScan); ok {
-		return p.rows
+		return p.rows, true
 	}
-	return 0
+	if _, ok := p.inner.(noStorageAccess); ok {
+		return 0, true
+	}
+	return 0, false
 }
 
 // profiledChunkOp is the wrapper for an operator that also produces chunks. It
@@ -397,10 +413,11 @@ var (
 //     fan with one 3-hop chain, `-[*3..3]->` emitted one row for 202 relationship
 //     slots read — a 202x under-report before the counter was wired.
 //   - [ShortestPath] and [AllShortestPaths] read relationship records and carry
-//     NEITHER interface, so they report 0. Their own totalEdgesTraversed counter
-//     covers only the exhaustive path-predicate search and not the bidirectional
-//     BFS, so wiring it would report an authoritative-looking zero for the common
-//     path; reporting 0 with this note is the lesser misstatement of the two.
+//     NONE of the three markers, so their cell renders UNKNOWN. Their own
+//     totalEdgesTraversed counter covers only the exhaustive path-predicate search
+//     and not the bidirectional BFS, so wiring it would report an
+//     authoritative-looking figure for the common path; declaring the gap is the
+//     lesser misstatement of the two.
 //   - A single-hop [Expand] with a relationship-type filter reads every slot of
 //     the source's adjacency run and emits only the admitted ones (the edgeSkip
 //     branch), so its figure counts EMITTED edges, not slots read. Measured: an
@@ -409,8 +426,8 @@ var (
 //     the operator does not have, whose per-slot increment a non-PROFILE run would
 //     pay — the trade this marker exists to avoid — so it is recorded, not fixed.
 //   - The morsel-parallel leaves ([ParallelScanProject], [ParallelAggregateScan],
-//     [ParallelCountScan]) carry neither interface and report 0 for a full scan.
-//     Their [PlanDetail] says so in the rendered plan.
+//     [ParallelCountScan]) carry none of the three markers and render UNKNOWN for
+//     a full scan. Their [PlanDetail] says so in the rendered plan as well.
 //
 // # What this deliberately does not count
 //
@@ -423,9 +440,11 @@ var (
 // leaf reads with guessed property reads would be less useful than one whose
 // meaning is exact.
 //
-// An operator that implements neither this interface nor [storageAccessCounter]
-// reports 0 db-hits, which is the honest answer for a pure row transformer and an
-// under-report for the operators named above.
+// An operator that implements none of this interface, [storageAccessCounter] and
+// [noStorageAccess] reports db-hits UNKNOWN. That is the honest default and the
+// one rmp #2760 chose deliberately: a pure row transformer opts IN to a known
+// zero by claiming [noStorageAccess], rather than every uncounted operator being
+// silently defaulted to a zero it never earned.
 type StorageRecordScan interface {
 	// storageRecordPerRow is a marker. It is unexported so only operators in this
 	// package can claim to read storage, which keeps the guarantee auditable: the
@@ -467,3 +486,171 @@ type storageAccessCounter interface {
 	// whole lifetime, including any Init it has been restarted by.
 	storageAccesses() int64
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// noStorageAccess — operators whose db-hits are a KNOWN zero
+// ─────────────────────────────────────────────────────────────────────────────
+
+// noStorageAccess marks an operator that opens NO access path: it reads no node
+// or relationship record, seeks no index, and consults no maintained counter, so
+// its db-hits figure is a measured, meaningful ZERO rather than a figure nobody
+// counted (rmp #2760).
+//
+// # Why the claim has to be explicit
+//
+// Before rmp #2760 the zero was a DEFAULT: an operator implementing neither
+// [StorageRecordScan] nor [storageAccessCounter] rendered `dbhits=0`, and the
+// column could not tell "counted, and it is zero" from "not counted at all".
+// [ParallelScanProject] printed the same 0 for a full scan of 2000 nodes that a
+// pure projection prints for reading nothing. Making the zero an explicit claim
+// inverts that: the honest default became UNKNOWN, and only an operator that can
+// stand behind a zero says so here.
+//
+// The method is unexported for the same reason [StorageRecordScan]'s is: the set
+// of operators claiming to read nothing is the set of implementations in this
+// file, so the classification is auditable in one place and at compile time.
+// TestDbHitsClassification_EveryOperatorIsClassified is the drift gate on it —
+// it derives the operator set from the package source and fails when an operator
+// is added, renamed, or reclassified without the census below being updated.
+//
+// # The bar for claiming it
+//
+// An operator may claim noStorageAccess only when NEITHER its Next/FillChunk nor
+// anything it calls from them can reach the graph. In practice that rules out
+// every operator holding a caller-supplied expression closure, because such a
+// closure is evaluated through cypher's evalRow bridge, which passes the
+// [github.com/FlavioCFOliveira/GoGraph/cypher/expr.PatternEvaluator] — and that
+// evaluator WALKS ADJACENCY. Measured on a 100-way fan (rmp #2760):
+//
+//	MATCH (r:Root) WHERE (r)-[:LIKES]->() RETURN r.k
+//	  ColumnarProject → Filter → NodeByLabelScan     total db-hits reported: 1
+//	MATCH (r:Root)-[:LIKES]->(m) RETURN DISTINCT r.k
+//	  Distinct → ColumnarProject → Expand → scan     Expand alone: 100
+//
+// Both arms must read the Root's relationship slots to answer; the Filter arm
+// reports none of them. A pattern comprehension inside a projection behaves the
+// same way — `RETURN size([(r)-[:LIKES]->(x) | 1])` is evaluated INSIDE Project
+// (it is not lowered to a RollUpApply) and walks all 100 slots while the plan
+// reports 1 db-hit in total. So [Filter], [Project] and their columnar forms,
+// [Sort], [Top], [Unwind], [HashJoin], [ColumnarHashJoin], [RollUpApply] and
+// [ProcedureCallOp] are all UNKNOWN, not zero: each holds such a closure.
+//
+// This corrects docs/explain-profile-honesty-audit-2026-09-03.md, which recorded
+// Project as "a pure row transformer [that] reports dbhits=0, honestly". It is a
+// row transformer, but its projection can reach the graph, so its zero was an
+// under-report of exactly the kind the audit set out to expose.
+//
+// # What claiming it does NOT assert
+//
+// It says nothing about PROPERTY reads, which this column does not count at all
+// for any operator — a documented divergence from Neo4j, stated on
+// [StorageRecordScan] and in docs/cypher.md. An operator that reads a property
+// off a node already bound in its input row therefore still qualifies.
+type noStorageAccess interface {
+	// readsNoStorage is a marker. Like [StorageRecordScan]'s it is unexported, so
+	// only operators declared in this package can make the claim.
+	readsNoStorage()
+}
+
+// The census. Each entry is a claim that the named operator opens no access path,
+// with the reason it can be made. An operator absent from this list reports
+// UNKNOWN db-hits, which is the honest default.
+
+// --- row sources that produce rows without reading the graph ---------------
+
+// Argument re-emits the outer row its Apply driver set on it.
+func (*Argument) readsNoStorage() {}
+
+// SingleRow emits one empty row and nothing else.
+func (*SingleRow) readsNoStorage() {}
+
+// singleRow emits one caller-supplied row, already materialised.
+func (*singleRow) readsNoStorage() {}
+
+// StaticRows emits rows built before execution began.
+func (*StaticRows) readsNoStorage() {}
+
+// --- row transformers that hold no caller-supplied expression --------------
+
+// Limit forwards its child's rows and stops at a count fixed when it was built.
+// ColumnarLimit embeds Limit and inherits this claim, correctly: its columnar
+// path likewise only counts and forwards.
+func (*Limit) readsNoStorage() {}
+
+// Skip forwards its child's rows after discarding a count fixed at build time.
+func (*Skip) readsNoStorage() {}
+
+// Eager buffers its child's rows and re-emits them.
+func (*Eager) readsNoStorage() {}
+
+// Distinct hashes and compares values already bound in the row.
+func (*Distinct) readsNoStorage() {}
+
+// CountRows counts its child's rows and emits the count.
+func (*CountRows) readsNoStorage() {}
+
+// UnionAll concatenates two inputs' rows.
+func (*UnionAll) readsNoStorage() {}
+
+// Union deduplicates a UnionAll through an embedded Distinct.
+func (*Union) readsNoStorage() {}
+
+// EagerAggregation groups on COLUMN INDICES (keyCols) and feeds each aggregate
+// from a column of the input row; it evaluates no expression of its own, so the
+// projection that produced those columns is where any graph access is attributed.
+func (*EagerAggregation) readsNoStorage() {}
+
+// GlobalAggregateAdapter forwards its child's rows, and on an empty child emits
+// one row of aggregator neutral values — constants, computed from nothing.
+func (*GlobalAggregateAdapter) readsNoStorage() {}
+
+// --- drivers whose work is entirely in their children ----------------------
+//
+// Each of these re-drives an inner sub-plan per outer row. The inner operators
+// are wrapped and measured in their own right, and appear as this operator's
+// children in the rendered tree, so attributing anything to the driver itself
+// would double-count what its children already report.
+
+// Apply drives its inner plan once per outer row.
+func (*Apply) readsNoStorage() {}
+
+// CorrelatedApply drives its inner plan once per outer row.
+func (*CorrelatedApply) readsNoStorage() {}
+
+// OptionalApply drives its inner plan once per outer row, padding when it is empty.
+func (*OptionalApply) readsNoStorage() {}
+
+// SemiApply forwards an outer row when its inner plan yields at least one.
+func (*SemiApply) readsNoStorage() {}
+
+// AntiSemiApply forwards an outer row when its inner plan yields none.
+func (*AntiSemiApply) readsNoStorage() {}
+
+// Foreach drives its inner plan once per outer row and emits the outer row.
+func (*Foreach) readsNoStorage() {}
+
+// Every marker method above must be reachable through the interface, or the claim
+// would be silently inert: the wrapper's type assertion would simply not match and
+// the operator would report UNKNOWN while its documentation said otherwise.
+var (
+	_ noStorageAccess = (*Argument)(nil)
+	_ noStorageAccess = (*SingleRow)(nil)
+	_ noStorageAccess = (*singleRow)(nil)
+	_ noStorageAccess = (*StaticRows)(nil)
+	_ noStorageAccess = (*Limit)(nil)
+	_ noStorageAccess = (*ColumnarLimit)(nil) // promoted from the embedded Limit
+	_ noStorageAccess = (*Skip)(nil)
+	_ noStorageAccess = (*Eager)(nil)
+	_ noStorageAccess = (*Distinct)(nil)
+	_ noStorageAccess = (*CountRows)(nil)
+	_ noStorageAccess = (*UnionAll)(nil)
+	_ noStorageAccess = (*Union)(nil)
+	_ noStorageAccess = (*EagerAggregation)(nil)
+	_ noStorageAccess = (*GlobalAggregateAdapter)(nil)
+	_ noStorageAccess = (*Apply)(nil)
+	_ noStorageAccess = (*CorrelatedApply)(nil)
+	_ noStorageAccess = (*OptionalApply)(nil)
+	_ noStorageAccess = (*SemiApply)(nil)
+	_ noStorageAccess = (*AntiSemiApply)(nil)
+	_ noStorageAccess = (*Foreach)(nil)
+)

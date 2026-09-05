@@ -28,9 +28,23 @@ type OperatorStats struct {
 	// Rows is the number of rows produced by successful Next calls.
 	Rows uint64
 	// DbHits is the number of logical storage accesses (see [DbHitsCounter]).
+	// It is meaningful only when DbHitsKnown is true.
 	DbHits uint64
 	// ElapsedNs is the total nanoseconds spent inside Next across all calls.
 	ElapsedNs int64
+	// DbHitsKnown reports whether DbHits is a figure at all, mirroring
+	// [exec.PlanNode.DbHitsKnown] on the node this row was flattened from.
+	//
+	// When it is false [FormatReport] prints [exec.DbHitsUnknown] in the cell
+	// instead of a number, because an operator whose accesses nobody counted and
+	// an operator that genuinely read nothing must not print the same 0
+	// (rmp #2760).
+	//
+	// The zero value is therefore "unknown", which is deliberate: a report
+	// assembled without considering the question should not silently assert that
+	// every operator's storage cost was measured. A caller building a report by
+	// hand from figures it does count sets this true.
+	DbHitsKnown bool
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -100,8 +114,25 @@ type ProfileReport struct {
 	Operators []OperatorStats
 	// TotalRows is the sum of all operator row counts.
 	TotalRows uint64
-	// TotalDbHits is the sum of all operator dbHits.
+	// TotalDbHits is the sum of the operator dbHits that were KNOWN. Operators
+	// whose accesses nobody counted contribute nothing to it and set
+	// TotalDbHitsUncertain instead.
 	TotalDbHits uint64
+	// TotalDbHitsUncertain reports whether the sum in TotalDbHits omitted at least
+	// one operator, so the query's real cost is TotalDbHits plus an unknown
+	// amount. [FormatReport] then renders the Total cell as "x + ?" rather than as
+	// a plain number that would read as complete.
+	//
+	// The name and the four rendered cases are Neo4j's, transcribed from
+	// InternalPlanDescription.TotalHits and renderSummary.scala (5.26.16), where
+	// an operator carrying no DbHits argument contributes TotalHits(0,
+	// uncertain = true) and the flag is OR-ed across the plan.
+	//
+	// Unlike [OperatorStats.DbHitsKnown] this field's zero value means CERTAIN,
+	// because it describes a sum rather than a cell: a report that summed nothing
+	// unknown has omitted nothing, and a hand-built report of known figures needs
+	// no extra field set to render its total honestly.
+	TotalDbHitsUncertain bool
 	// ElapsedMs is the total wall-clock time in milliseconds.
 	ElapsedMs float64
 }
@@ -116,6 +147,22 @@ type ProfileReport struct {
 //	+--------------------------+--------+---------+-----------+
 //	| Total                    |    200 |     100 |     0.013 |
 //	+--------------------------+--------+---------+-----------+
+//
+// A DbHits cell whose figure was never counted
+// ([OperatorStats.DbHitsKnown] false) renders as [exec.DbHitsUnknown] — "?" —
+// and the Total then renders as "x + ?", so a reader can see that the sum is a
+// floor and not the whole cost (rmp #2760):
+//
+//	+--------------------------+--------+---------+-----------+
+//	| NodeByLabelScan          |    100 |     100 |     0.012 |
+//	| └─ Filter                |     42 |       ? |     0.004 |
+//	+--------------------------+--------+---------+-----------+
+//	| Total                    |    142 | 100 + ? |     0.016 |
+//	+--------------------------+--------+---------+-----------+
+//
+// Both forms come from [exec.DbHitsCell] and [exec.DbHitsTotalCell], which the
+// indented tree renderer uses too, so the two renderings of one run cannot
+// disagree about which figures exist.
 func FormatReport(r ProfileReport) string {
 	type row struct {
 		name    string
@@ -136,14 +183,14 @@ func FormatReport(r ProfileReport) string {
 		rows[i] = row{
 			name:    op.Name,
 			rows:    fmt.Sprintf("%d", op.Rows),
-			dbhits:  fmt.Sprintf("%d", op.DbHits),
+			dbhits:  exec.DbHitsCell(int64(op.DbHits), op.DbHitsKnown),
 			elapsed: fmt.Sprintf("%.3f", float64(op.ElapsedNs)/1e6),
 		}
 	}
 	totalRow := row{
 		name:    "Total",
 		rows:    fmt.Sprintf("%d", r.TotalRows),
-		dbhits:  fmt.Sprintf("%d", r.TotalDbHits),
+		dbhits:  exec.DbHitsTotalCell(int64(r.TotalDbHits), r.TotalDbHitsUncertain),
 		elapsed: fmt.Sprintf("%.3f", r.ElapsedMs),
 	}
 

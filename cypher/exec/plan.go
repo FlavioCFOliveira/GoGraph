@@ -3,6 +3,7 @@ package exec
 import (
 	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -64,23 +65,50 @@ type PlanNode struct {
 	// filtered afterwards, since both can emit the same few rows while touching
 	// wildly different amounts of storage (rmp #2238).
 	//
-	// Unlike Rows and Time it is NOT uniformly a measurement. It comes from one of
-	// three places, and the rendered figure does not say which (rmp #2720):
+	// Unlike Rows and Time it is NOT uniformly a measurement. It is meaningful only
+	// when DbHitsKnown is true, and then it comes from one of three places:
 	//
 	//   - MEASURED, for an operator implementing exec's storageAccessCounter —
 	//     today [VarLengthExpand], which reports the relationship slots its BFS
 	//     actually read;
 	//   - DERIVED from the emitted row count, for an operator marked
 	//     [StorageRecordScan], whose contract asserts one record read per row;
-	//   - 0, for every other operator — the honest answer for a pure row
-	//     transformer, and an UNDER-REPORT for [ShortestPath], [AllShortestPaths]
-	//     and the morsel-parallel leaves, which read storage and claim neither
-	//     interface. [StorageRecordScan] enumerates the gaps.
+	//   - a KNOWN ZERO, for an operator marked exec's noStorageAccess, which opens
+	//     no access path at all.
 	//
 	// It is in every case a count of ACCESS-PATH record reads and never of property
 	// reads, which is a documented DIVERGENCE from Neo4j, which additionally charges
 	// a hit per property read; see docs/cypher.md.
 	DbHits int64
+
+	// DbHitsKnown reports whether DbHits is a figure at all.
+	//
+	// It is false for an operator that reads storage and claims none of the three
+	// markers — [ShortestPath], [AllShortestPaths], the morsel-parallel leaves,
+	// the count-store leaves, and every operator holding a caller-supplied
+	// expression closure that can reach the graph ([Filter], [Project], [Sort],
+	// [Top], [Unwind], the hash joins, [RollUpApply], [ProcedureCallOp]). DbHits
+	// is then 0 only because an int64 has to hold something, and NO renderer may
+	// print it as a count.
+	//
+	// The distinction exists because it could not previously be drawn: both a pure
+	// projection and a parallel scan of 2000 nodes printed `dbhits=0`, so the
+	// column could not be read (rmp #2720 §1, rmp #2760). It is the same rule this
+	// codebase already applies to the Bolt page-cache fields, which are OMITTED
+	// rather than sent as 0 because GoGraph has no page cache and a 0 would be a
+	// measurement claim (bolt/server/plan_meta.go).
+	//
+	// Both incumbents draw it too, read in source: Neo4j carries the sentinel
+	// OperatorProfile.NO_DATA = -1 (OperatorProfile.java:59, 5.26.16), drops the
+	// argument entirely when it holds that value (PlanDescriptionBuilder.scala,
+	// BuildPlanDescription.addArgument), leaves the cell blank, and renders an
+	// incomplete total as "x + ?" (renderSummary.scala, TotalHits); PostgreSQL
+	// suppresses each zero-valued counter individually under the comment
+	// "Show only positive counter values." (explain.c:3764, REL_17_STABLE).
+	//
+	// A node that was never instrumented at all (Profiled false) also has this
+	// false: nothing counted it either.
+	DbHitsKnown bool
 }
 
 // PlanTree builds the physical plan tree rooted at op.
@@ -99,7 +127,7 @@ func PlanTree(op Operator) PlanNode {
 		// Attribute the measurements to the operator that did the work, and name
 		// the node after it rather than after the wrapper.
 		inner = p.planUnwrap()
-		n.Rows, n.Time, n.DbHits = p.planStats()
+		n.Rows, n.Time, n.DbHits, n.DbHitsKnown = p.planStats()
 		n.Profiled = true
 	}
 
@@ -155,6 +183,11 @@ func RenderPlan(op Operator) string {
 // bearing: a bare node in a profiled plan would read as an operator that cost
 // nothing, when in fact it was never instrumented.
 //
+// The same instinct now governs the db-hits figure inside the parenthesis: a
+// measured node whose accesses nobody counted renders `dbhits=?`
+// ([DbHitsUnknown]) rather than `dbhits=0`, which would read as an operator that
+// touched no storage (rmp #2760). [PlanNode.DbHitsKnown] carries the state.
+//
 // Such nodes USED to exist: instrumentation is applied at one point, the value the
 // recursive builder returns, and a composite lowering emits several operators for a
 // single logical node, of which only the outermost passed through it. rmp #2237
@@ -193,7 +226,8 @@ func writePlanNode(b *strings.Builder, n *PlanNode, prefix, childPrefix string, 
 	}
 	switch {
 	case n.Profiled:
-		fmt.Fprintf(b, " (rows=%d, dbhits=%d, time=%s)", n.Rows, n.DbHits, n.Time.Round(time.Microsecond))
+		fmt.Fprintf(b, " (rows=%d, dbhits=%s, time=%s)",
+			n.Rows, DbHitsCell(n.DbHits, n.DbHitsKnown), n.Time.Round(time.Microsecond))
 	case anyMeasured:
 		b.WriteString(" (not measured)")
 	}
@@ -206,5 +240,61 @@ func writePlanNode(b *strings.Builder, n *PlanNode, prefix, childPrefix string, 
 			branch, cont = "└─ ", "   "
 		}
 		writePlanNode(b, &n.Children[i], childPrefix+branch, childPrefix+cont, anyMeasured)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Rendering a db-hits figure that may not exist
+// ─────────────────────────────────────────────────────────────────────────────
+
+// DbHitsUnknown is what every renderer prints in place of a db-hits figure
+// nobody counted ([PlanNode.DbHitsKnown] false).
+//
+// It is Neo4j's glyph for the same state, read in source at 5.26.16:
+// renderSummary.scala prints "?" for a total whose contributing operators did not
+// all report, and renderAsTreeTable.scala simply omits the cell for a plan that
+// carries no DbHits argument. Printing "0" instead — which is what GoGraph did
+// until rmp #2760 — makes an uncounted operator indistinguishable from one that
+// genuinely read nothing.
+const DbHitsUnknown = "?"
+
+// DbHitsCell renders one operator's db-hits cell: the number when it is a figure,
+// [DbHitsUnknown] when it is not.
+//
+// Every surface goes through this one function — the indented tree here,
+// cypher/explain's columnar table, and the cypher package's two Engine methods —
+// so no renderer can print a zero for an uncounted operator by forgetting the
+// flag.
+func DbHitsCell(hits int64, known bool) string {
+	if !known {
+		return DbHitsUnknown
+	}
+	return strconv.FormatInt(hits, 10)
+}
+
+// DbHitsTotalCell renders a plan-wide db-hits total that may have summed over
+// operators which reported nothing.
+//
+// total is the sum of the KNOWN cells only; uncertain reports whether any cell
+// was excluded from it. The four cases are Neo4j's, transcribed from
+// renderSummary.scala's `dbhits` (5.26.16) rather than invented here, because the
+// question and the answer are the same:
+//
+//	TotalHits(0, false) -> "0"        nothing was read, and that is known
+//	TotalHits(0, true)  -> "?"        nothing countable was read, and something was not counted
+//	TotalHits(x, false) -> "x"        a complete total
+//	TotalHits(x, true)  -> "x + ?"    at least x, plus an unknown amount
+//
+// The "x + ?" form is the load-bearing one: it neither hides the figure the
+// engine does have nor lets it be mistaken for the whole query's cost.
+func DbHitsTotalCell(total int64, uncertain bool) string {
+	n := strconv.FormatInt(total, 10)
+	switch {
+	case !uncertain:
+		return n
+	case total == 0:
+		return DbHitsUnknown
+	default:
+		return n + " + " + DbHitsUnknown
 	}
 }
