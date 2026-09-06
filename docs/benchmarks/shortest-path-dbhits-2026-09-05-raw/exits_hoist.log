@@ -1,0 +1,12 @@
+round=1 arm=base exit=0
+round=1 arm=hoist exit=0
+round=2 arm=base exit=0
+round=2 arm=hoist exit=0
+round=3 arm=base exit=0
+round=3 arm=hoist exit=0
+round=4 arm=base exit=0
+round=4 arm=hoist exit=0
+round=5 arm=base exit=0
+round=5 arm=hoist exit=0
+round=6 arm=base exit=0
+round=6 arm=hoist exit=0

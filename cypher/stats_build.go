@@ -47,6 +47,10 @@ func (e *Engine) RefreshStatisticsLocked(ctx context.Context) error {
 		return scanErr
 	}
 	e.statsCollectorOrInit().Publish(finishStatsSnapshot(byKey, labelN, generation))
+	// Every misestimate recorded so far was observed against the snapshot this line
+	// just replaced (rmp #2767), so the set is emptied here rather than accumulated
+	// for the engine's lifetime. See [Engine.StatsMisestimatedPairs].
+	e.misestimated.reset()
 	cmetrics.IncCounter(statsMetricRefresh, 1)
 	cmetrics.ObserveLatency(statsMetricRefreshLatency, time.Since(start))
 	return nil
@@ -63,10 +67,14 @@ func (e *Engine) RefreshStatisticsLocked(ctx context.Context) error {
 // takes no barrier — see the note on the internal builder below for why wrapping
 // it in the old lpg.Graph.View would not have given the property it claimed.
 //
-// Statistics built
-// here ship INERT: no query-path consumer reads them yet (#2099 is the intended
-// consumer), so a rebuild changes no plan. It honours context cancellation,
-// returning ctx.Err() without publishing a partial snapshot.
+// Statistics built here DO change plans, as of rmp #2766. The disjoint-component
+// reorder ([computeReorderSwaps]) reads them to estimate how many rows a filtered
+// component emits — `(a:A {x: 1})` as an arm of a Cartesian — and drives the join
+// with the cheaper side accordingly. That is the only consumer today; every other
+// planner decision still ignores them, and the EXPLAIN / PROFILE renderers read
+// them for display only. A refresh can therefore change the drive order of a
+// disjoint join, never a result. It honours context cancellation, returning
+// ctx.Err() without publishing a partial snapshot.
 func (e *Engine) RefreshStatistics(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -81,6 +89,11 @@ func (e *Engine) RefreshStatistics(ctx context.Context) error {
 	// A cancelled or failed build returns above without publishing, leaving the
 	// collector nil.
 	e.statsCollectorOrInit().Publish(snap)
+	// The misestimates observed against the OLD snapshot no longer describe
+	// anything (rmp #2767): clearing here is what makes a second non-zero reading of
+	// [Engine.StatsMisestimatedPairs] mean "the fresh statistics are still wrong"
+	// rather than "the old ones once were".
+	e.misestimated.reset()
 	// Observability (#2102): count the successful rebuild and observe its latency.
 	// A cancelled or failed build returned above without publishing and is not
 	// counted. RefreshStatistics is caller-driven and off the write path, so this

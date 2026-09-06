@@ -1,0 +1,72 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkExpandInto_TriangleClose-10    	       7	 146793691 ns/op	25729932 B/op	 2038331 allocs/op
+BenchmarkExpandInto_TwoCycleClose-10    	     171	   7054292 ns/op	 1569128 B/op	  123445 allocs/op
+BenchmarkExpandInto_TriangleOpen-10     	       1	2689361250 ns/op	209202680 B/op	24464602 allocs/op
+BenchmarkExpandInto_TwoHopOpen-10       	       8	 132027755 ns/op	13349912 B/op	 1526031 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkExpandInto_TriangleClose-10    	       7	 144972446 ns/op	25730570 B/op	 2038331 allocs/op
+BenchmarkExpandInto_TwoCycleClose-10    	     172	   6907422 ns/op	 1568980 B/op	  123445 allocs/op
+BenchmarkExpandInto_TriangleOpen-10     	       1	2713462791 ns/op	209204072 B/op	24464615 allocs/op
+BenchmarkExpandInto_TwoHopOpen-10       	       8	 134992588 ns/op	13349867 B/op	 1526031 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkExpandInto_TriangleClose-10    	       7	 147993792 ns/op	25729923 B/op	 2038331 allocs/op
+BenchmarkExpandInto_TwoCycleClose-10    	     169	   6921004 ns/op	 1569476 B/op	  123446 allocs/op
+BenchmarkExpandInto_TriangleOpen-10     	       1	2674016708 ns/op	209205336 B/op	24464627 allocs/op
+BenchmarkExpandInto_TwoHopOpen-10       	       8	 134355771 ns/op	13350259 B/op	 1526033 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkExpandInto_TriangleClose-10    	       7	 147010964 ns/op	25730062 B/op	 2038331 allocs/op
+BenchmarkExpandInto_TwoCycleClose-10    	     169	   7017209 ns/op	 1569461 B/op	  123446 allocs/op
+BenchmarkExpandInto_TriangleOpen-10     	       1	2697892125 ns/op	209207336 B/op	24464635 allocs/op
+BenchmarkExpandInto_TwoHopOpen-10       	       8	 132708109 ns/op	13349639 B/op	 1526030 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkExpandInto_TriangleClose-10    	       7	 147012071 ns/op	25731080 B/op	 2038334 allocs/op
+BenchmarkExpandInto_TwoCycleClose-10    	     172	   6931670 ns/op	 1568953 B/op	  123445 allocs/op
+BenchmarkExpandInto_TriangleOpen-10     	       1	2705401625 ns/op	209203776 B/op	24464603 allocs/op
+BenchmarkExpandInto_TwoHopOpen-10       	       8	 131075646 ns/op	13349991 B/op	 1526032 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkExpandInto_TriangleClose-10    	       7	 146568696 ns/op	25730915 B/op	 2038334 allocs/op
+BenchmarkExpandInto_TwoCycleClose-10    	     172	   6943810 ns/op	 1568961 B/op	  123445 allocs/op
+BenchmarkExpandInto_TriangleOpen-10     	       1	2688467084 ns/op	209205720 B/op	24464631 allocs/op
+BenchmarkExpandInto_TwoHopOpen-10       	       8	 131625391 ns/op	13349751 B/op	 1526029 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkExpandInto_TriangleClose-10    	       7	 146763702 ns/op	25729987 B/op	 2038332 allocs/op
+BenchmarkExpandInto_TwoCycleClose-10    	     170	   6979111 ns/op	 1569351 B/op	  123446 allocs/op
+BenchmarkExpandInto_TriangleOpen-10     	       1	2670195375 ns/op	209204192 B/op	24464616 allocs/op
+BenchmarkExpandInto_TwoHopOpen-10       	       8	 134917188 ns/op	13350042 B/op	 1526032 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkExpandInto_TriangleClose-10    	       7	 145415643 ns/op	25731185 B/op	 2038337 allocs/op
+BenchmarkExpandInto_TwoCycleClose-10    	     174	   6954602 ns/op	 1568687 B/op	  123444 allocs/op
+BenchmarkExpandInto_TriangleOpen-10     	       1	2698416792 ns/op	209202720 B/op	24464603 allocs/op
+BenchmarkExpandInto_TwoHopOpen-10       	       8	 131584901 ns/op	13349629 B/op	 1526030 allocs/op
+PASS

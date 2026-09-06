@@ -33,6 +33,19 @@ type Filter struct {
 	child  Operator
 	predFn FilterFn
 	ctx    context.Context //nolint:containedctx // stored for per-Next ctx check
+
+	// removed accumulates the rows this filter pulled from its child and then
+	// dropped, over its whole lifetime including every Init it has been restarted
+	// by (rmp #2764). It is bumped ONLY on the reject branch, which the operator
+	// has already decided to take and on which it does nothing else, so the
+	// accepted path — the one every ordinary query runs — gains neither an
+	// increment nor a branch. That is PostgreSQL's own placement of the same
+	// counter (execScan.c:255, REL_17_STABLE); see rows_removed.go.
+	//
+	// It is deliberately NOT reset by Init: a Filter driven once per outer row
+	// under an Apply reports its WHOLE lifetime, the convention Expand.slotsRead
+	// and VarLengthExpand's traversal counter already follow.
+	removed int64
 }
 
 // NewFilter creates a Filter operator that wraps child and applies predFn to
@@ -72,8 +85,31 @@ func (op *Filter) Next(out *Row) (bool, error) {
 		if expr.IsTruthy(result) {
 			return true, nil
 		}
+		op.removed++
 	}
 }
+
+// rowsRemovedByFilter reports the rows this operator pulled from its child and
+// discarded because the predicate did not return true. It implements the
+// rowsRemovedCounter marker in rows_removed.go, so PROFILE renders this
+// operator's cell as a figure rather than omitting it (rmp #2764).
+//
+// The figure is EXACT by construction rather than by inference: every row the
+// child yields leaves the loop through exactly one of two exits — a `return true`
+// that the profiling wrapper counts as a Row, or the increment above — so
+// `rowsRemovedByFilter() + Rows == rows pulled from the child`, with no third
+// outcome. A row lost to a predicate ERROR is neither: the pipeline halts and the
+// PROFILE is never rendered.
+//
+// It counts rows the PREDICATE rejected, and nothing else. NULL and false are both
+// rejections here (openCypher 9 §4.1.3 three-valued logic), which is the same
+// decision the operator already takes to drop the row.
+//
+// [ColumnarFilter] inherits this method through its embedded Filter and shares the
+// same counter, so the columnar and boxed paths of one operator report into one
+// figure — as they must, since a ColumnarFilter driven row-at-a-time by a
+// non-columnar parent runs exactly the loop above.
+func (op *Filter) rowsRemovedByFilter() int64 { return op.removed }
 
 // Close releases resources and closes the child operator.
 func (op *Filter) Close() error {

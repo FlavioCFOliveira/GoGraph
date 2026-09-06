@@ -109,7 +109,7 @@ func collectPrefixRows(t *testing.T, eng *Engine, query string, params map[strin
 	queryReg := newNowAwareRegistry(eng.reg, time.Now())
 	snap := eng.g.BeginRead()
 	defer eng.g.EndRead(snap)
-	op, cols, err := eng.buildReadPhysical(ctx, entry, entry.plan, params, queryReg, nil, snap)
+	op, cols, err := eng.buildReadPhysical(ctx, entry, entry.plan, params, queryReg, nil, snap, nil)
 	if err != nil {
 		t.Fatalf("buildReadPhysical: %v", err)
 	}

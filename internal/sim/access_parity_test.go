@@ -274,15 +274,54 @@ func TestCheckAccessPathParity_FiresOnZeroDbHits(t *testing.T) {
 }
 
 // TestTotalDbHits pins the profile-annotation parser on the exact rendering
-// shape RenderPlanNode emits.
+// shape RenderPlanNode emits — including the "?" cell rmp #2760 introduced for an
+// operator whose storage accesses nobody counted.
 func TestTotalDbHits(t *testing.T) {
 	t.Parallel()
 	prof := "Project (rows=1, dbhits=0, time=23µs)\n└─ NodeByIndexSeek [seek=\"p250\"] (rows=1, dbhits=17, time=0s)"
-	if got := totalDbHits(prof); got != 17 {
-		t.Fatalf("totalDbHits = %d, want 17", got)
+	if got, unknown := totalDbHits(prof); got != 17 || unknown != 0 {
+		t.Fatalf("totalDbHits = (%d, %d), want (17, 0)", got, unknown)
 	}
-	if got := totalDbHits("no annotations at all"); got != 0 {
-		t.Fatalf("totalDbHits on plain text = %d, want 0", got)
+	if got, unknown := totalDbHits("no annotations at all"); got != 0 || unknown != 0 {
+		t.Fatalf("totalDbHits on plain text = (%d, %d), want (0, 0)", got, unknown)
+	}
+	// A "?" must NOT be scanned as a zero. Before this parser knew the glyph, the
+	// digit loop consumed nothing and silently added 0, so an entirely uncounted
+	// plan looked like an engine claiming it read nothing — the exact conflation
+	// rmp #2760 removed from the renderer.
+	mixed := "Project (rows=1, dbhits=?, time=23µs)\n└─ NodeByIndexSeek [seek=\"p250\"] (rows=1, dbhits=17, time=0s)"
+	if got, unknown := totalDbHits(mixed); got != 17 || unknown != 1 {
+		t.Fatalf("totalDbHits on a mixed plan = (%d, %d), want (17, 1)", got, unknown)
+	}
+	allUnknown := "Project (rows=1, dbhits=?, time=23µs)\n└─ ParallelScanProject (rows=1, dbhits=?, time=0s)"
+	if got, unknown := totalDbHits(allUnknown); got != 0 || unknown != 2 {
+		t.Fatalf("totalDbHits on an all-unknown plan = (%d, %d), want (0, 2)", got, unknown)
+	}
+}
+
+// TestCheckAccessPathParity_UncountedProfileIsVacuousNotDeviant pins the
+// classification split rmp #2760 forced: a plan whose db-hits were never counted
+// leaves the probe with NO oracle, which is a vacuous run, not the engine
+// claiming it touched nothing.
+func TestCheckAccessPathParity_UncountedProfileIsVacuousNotDeviant(t *testing.T) {
+	t.Parallel()
+	f := &fakePlanEngine{
+		EngineAdapter: newParityEngine(t, &cypher.EngineOptions{}),
+		profile: "Project (rows=1, dbhits=?, time=23µs)\n" +
+			"└─ ParallelScanProject (rows=1, dbhits=?, time=0s)",
+	}
+	v := CheckAccessPathParity(5, nil, f, parityFixtureProbes()[0])
+	if len(v) == 0 {
+		t.Fatalf("checker did not fire on an entirely uncounted profile")
+	}
+	if v[0].Kind != ViolationVacuousRun {
+		t.Errorf("violation kind = %v, want ViolationVacuousRun: an uncounted profile "+
+			"gives the probe nothing to compare, and blaming the engine for the "+
+			"instrument's gap is the misdiagnosis this split exists to prevent\n%s",
+			v[0].Kind, v[0].Message)
+	}
+	if !strings.Contains(v[0].Message, "counted NO db-hits") {
+		t.Errorf("violation message misses the uncounted diagnosis:\n%s", v[0].Message)
 	}
 }
 

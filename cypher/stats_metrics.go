@@ -8,11 +8,15 @@ package cypher
 // observation adds a single time.Now pair — negligible.
 //
 // None of it touches the write path. The statistics are maintained OFF the write
-// path — [Engine.RefreshStatistics] is the sole, caller-driven rebuild — and the
-// estimate providers are display-only (consulted by EXPLAIN, never by the
-// executed plan), so a write on an engine that never refreshed statistics (the
-// lazy collector stays unallocated) emits nothing; verified by
-// BenchmarkEngWriteAutocommit staying flat at 34 allocs/op.
+// path — [Engine.RefreshStatistics] is the sole, caller-driven rebuild — so a
+// write on an engine that never refreshed statistics (the lazy collector stays
+// unallocated) emits nothing; verified by BenchmarkEngWriteAutocommit staying
+// flat.
+//
+// The providers are no longer display-only. Until rmp #2766 they were consulted
+// by EXPLAIN and by nothing else; that task wired them to the disjoint-component
+// join reorder, so a property statistic can now change a plan. What has not
+// changed is that the READ path consults them and the WRITE path does not.
 //
 // The names share the cypher.stats.* namespace and render in the Prometheus
 // exposition with dots mapped to underscores (see examples/31_metrics_observability).
@@ -36,11 +40,81 @@ const (
 	statsMetricLookup = "cypher.stats.lookup"
 
 	// statsMetricLookupFallback counts the subset of provider lookups that yield
-	// estFallback (a counter): an absent statistic for the (label, property), or a
-	// range estimate demoted by staleness — the cases where the trustworthiness
-	// veto keeps the planner on its default plan rather than acting on a missing
-	// or non-fresh statistic.
+	// estFallback (a counter): the cases where the trustworthiness veto keeps the
+	// planner on its default plan rather than acting on a missing, unusable or
+	// non-fresh statistic.
+	//
+	// It is the TOTAL. Every increment of it is accompanied by exactly one
+	// increment of the sibling that names the REASON, so the four reason counters
+	// below sum to this one — an invariant a scrape can check and
+	// TestStatsFallbackReasons_SumToTheTotal asserts (rmp #2771).
 	statsMetricLookupFallback = "cypher.stats.lookup.fallback"
+
+	// statsMetricLookupFallbackNoStatistic counts the demotions caused by the
+	// absence of a usable statistic: no bundle for the (label, property) pair, a
+	// bound in no histogram domain, a NaN bound, or no histogram for the bound's
+	// domain. This is the "nothing was ever measured for this" cause.
+	statsMetricLookupFallbackNoStatistic = "cypher.stats.lookup.fallback.no_statistic"
+
+	// statsMetricLookupFallbackEmptyLabel counts the demotions caused by a label
+	// that is KNOWN to hold zero live nodes. There is no population to be selective
+	// over, so no range estimate is derivable — a different fact from the statistic
+	// being absent, and a different fact again from the count being unavailable.
+	statsMetricLookupFallbackEmptyLabel = "cypher.stats.lookup.fallback.empty_label"
+
+	// statsMetricLookupFallbackNoCount counts the demotions caused by the live
+	// label count N — the denominator of every selectivity and of the staleness
+	// fraction — being UNKNOWABLE for the resolver in hand.
+	//
+	// It exists because a declined count used to be indistinguishable from a label
+	// holding zero live nodes: [lpgLabelResolver.ResolveLabelCount] is
+	// exact-or-nothing and declines whenever any MVCC history is live, the
+	// estimator took it as `n, _ :=`, and its `n <= 0` guard then demoted the whole
+	// estimate. The planner therefore reordered or did not according to unrelated
+	// concurrent activity, and EXPLAIN — which resolves through a present-time
+	// resolver that does not decline — rendered the swap either way (rmp #2771).
+	// The estimator now resolves N through a route that does not decline, so this
+	// counter fires only for a resolver that can supply neither an exact count nor
+	// a label bitmap.
+	statsMetricLookupFallbackNoCount = "cypher.stats.lookup.fallback.no_count"
+
+	// statsMetricLookupFallbackStale counts the demotions caused by staleness: the
+	// accumulated-write term has closed the firing region (design §3), or the
+	// accumulated deletes have exceeded the rebuild tolerance. The statistic exists
+	// and the population is known; it has simply stopped being true.
+	statsMetricLookupFallbackStale = "cypher.stats.lookup.fallback.stale"
+
+	// statsMetricLabelCountDeclined counts each time the zero-allocation exact live
+	// label count DECLINED and the estimator had to resolve N by another route (a
+	// counter). It is not a demotion — the estimate survives — but it is the signal
+	// that the cheap path is unavailable, which under a concurrent writer is the
+	// normal state (rmp #2392). An operator watching the estimator's cost watches
+	// this one; an operator watching why the planner will not use its statistics
+	// watches the fallback reasons above.
+	statsMetricLabelCountDeclined = "cypher.stats.label_count.declined"
+
+	// statsMetricQError observes the Q-ERROR of one operator's cardinality
+	// estimate — max(est, act) / min(est, act), both clamped at 1 — for every
+	// operator of a PROFILEd plan that carries BOTH a trustworthy estimate and a
+	// comparable measurement (rmp #2767, plan_qerror.go). One sample per such
+	// operator per profiled query; a perfect estimate samples 1.
+	//
+	// It is a distribution of a dimensionless ratio carried through the latency
+	// primitive, because the shared Backend has no float-distribution one. The
+	// carrier is [statsQErrorUnit] — one millisecond per unit of q-error — so a
+	// scrape reads the mean q-error as 1000 x (`_sum` / `_count`). See
+	// [statsQErrorUnit] for why that unit and not another.
+	//
+	// It is emitted from the PROFILE path only, and structurally so: nothing on the
+	// [Engine.Run] path can reach the emission. See plan_qerror.go's header.
+	statsMetricQError = "cypher.stats.qerror"
+
+	// statsMetricQErrorHigh counts the subset of q-error samples at or above
+	// [statsQErrorHighFactor] (a counter) — the misestimates large enough that the
+	// planner's own margin for acting on a statistic would have been exceeded. It
+	// is the actionable half of the distribution, and the event behind
+	// [Engine.StatsMisestimatedPairs].
+	statsMetricQErrorHigh = "cypher.stats.qerror.high"
 )
 
 // StatsTrackedPairs reports the number of distinct (label, property) pairs the

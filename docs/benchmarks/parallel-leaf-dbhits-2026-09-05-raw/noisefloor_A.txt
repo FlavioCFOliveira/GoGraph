@@ -1,0 +1,128 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+                                              │  noisefloor  │            noisefloor2             │
+                                              │    sec/op    │    sec/op     vs base              │
+ParallelAggregate_MinBig_Parallel               59.93m ± ∞ ¹   60.54m ± ∞ ¹       ~ (p=0.548 n=5)
+ParallelAggregate_MinBig_Parallel-4             20.78m ± ∞ ¹   20.63m ± ∞ ¹       ~ (p=0.310 n=5)
+ParallelAggregate_MinBig_Parallel-10            17.72m ± ∞ ¹   17.35m ± ∞ ¹       ~ (p=0.056 n=5)
+ParallelAggregate_MinBig_Serial                 19.42m ± ∞ ¹   19.15m ± ∞ ¹       ~ (p=0.548 n=5)
+ParallelAggregate_MinBig_Serial-4               16.40m ± ∞ ¹   16.54m ± ∞ ¹       ~ (p=0.548 n=5)
+ParallelAggregate_MinBig_Serial-10              16.99m ± ∞ ¹   16.92m ± ∞ ¹       ~ (p=0.690 n=5)
+ParallelAggregate_GroupMinBig_Parallel          117.5m ± ∞ ¹   118.2m ± ∞ ¹       ~ (p=0.222 n=5)
+ParallelAggregate_GroupMinBig_Parallel-4        38.78m ± ∞ ¹   38.83m ± ∞ ¹       ~ (p=1.000 n=5)
+ParallelAggregate_GroupMinBig_Parallel-10       32.65m ± ∞ ¹   33.23m ± ∞ ¹  +1.76% (p=0.008 n=5)
+ParallelAggregate_GroupMinBig_Serial            121.2m ± ∞ ¹   117.6m ± ∞ ¹       ~ (p=0.841 n=5)
+ParallelAggregate_GroupMinBig_Serial-4          92.78m ± ∞ ¹   91.83m ± ∞ ¹       ~ (p=0.222 n=5)
+ParallelAggregate_GroupMinBig_Serial-10         95.71m ± ∞ ¹   96.00m ± ∞ ¹       ~ (p=0.310 n=5)
+ParallelLabelScan_LabelledProject_Parallel      71.03m ± ∞ ¹   71.06m ± ∞ ¹       ~ (p=1.000 n=5)
+ParallelLabelScan_LabelledProject_Parallel-4    22.94m ± ∞ ¹   22.86m ± ∞ ¹       ~ (p=0.151 n=5)
+ParallelLabelScan_LabelledProject_Parallel-10   18.36m ± ∞ ¹   18.24m ± ∞ ¹  -0.68% (p=0.032 n=5)
+ParallelLabelScan_LabelledProject_Serial        40.21m ± ∞ ¹   39.38m ± ∞ ¹       ~ (p=0.151 n=5)
+ParallelLabelScan_LabelledProject_Serial-4      36.09m ± ∞ ¹   35.79m ± ∞ ¹       ~ (p=1.000 n=5)
+ParallelLabelScan_LabelledProject_Serial-10     36.58m ± ∞ ¹   35.86m ± ∞ ¹  -1.98% (p=0.032 n=5)
+ParallelScan_CountBig_Parallel                  2.293m ± ∞ ¹   2.373m ± ∞ ¹       ~ (p=1.000 n=5)
+ParallelScan_CountBig_Parallel-4                1.537m ± ∞ ¹   1.547m ± ∞ ¹       ~ (p=0.690 n=5)
+ParallelScan_CountBig_Parallel-10               1.606m ± ∞ ¹   1.605m ± ∞ ¹       ~ (p=0.548 n=5)
+ParallelScan_CountBig_Serial                    1.706µ ± ∞ ¹   1.687µ ± ∞ ¹       ~ (p=0.651 n=5)
+ParallelScan_CountBig_Serial-4                  1.276µ ± ∞ ¹   1.283µ ± ∞ ¹       ~ (p=0.651 n=5)
+ParallelScan_CountBig_Serial-10                 1.296µ ± ∞ ¹   1.292µ ± ∞ ¹       ~ (p=0.421 n=5)
+ParallelScanProject_ScanBig_Parallel            64.88m ± ∞ ¹   64.88m ± ∞ ¹       ~ (p=1.000 n=5)
+ParallelScanProject_ScanBig_Parallel-4          23.02m ± ∞ ¹   22.94m ± ∞ ¹       ~ (p=0.421 n=5)
+ParallelScanProject_ScanBig_Parallel-10         18.52m ± ∞ ¹   18.33m ± ∞ ¹       ~ (p=0.151 n=5)
+ParallelScanProject_ScanBig_Serial              17.81m ± ∞ ¹   17.99m ± ∞ ¹       ~ (p=1.000 n=5)
+ParallelScanProject_ScanBig_Serial-4            15.38m ± ∞ ¹   15.08m ± ∞ ¹       ~ (p=0.310 n=5)
+ParallelScanProject_ScanBig_Serial-10           15.36m ± ∞ ¹   15.49m ± ∞ ¹       ~ (p=0.841 n=5)
+ParallelScanProject_ScanFilterBig_Parallel      23.63m ± ∞ ¹   24.30m ± ∞ ¹       ~ (p=1.000 n=5)
+ParallelScanProject_ScanFilterBig_Parallel-4    21.12m ± ∞ ¹   20.94m ± ∞ ¹       ~ (p=0.310 n=5)
+ParallelScanProject_ScanFilterBig_Parallel-10   21.45m ± ∞ ¹   21.03m ± ∞ ¹       ~ (p=0.222 n=5)
+ParallelScanProject_ScanFilterBig_Serial        23.27m ± ∞ ¹   24.26m ± ∞ ¹       ~ (p=0.222 n=5)
+ParallelScanProject_ScanFilterBig_Serial-4      21.01m ± ∞ ¹   21.17m ± ∞ ¹       ~ (p=1.000 n=5)
+ParallelScanProject_ScanFilterBig_Serial-10     21.32m ± ∞ ¹   21.09m ± ∞ ¹       ~ (p=1.000 n=5)
+geomean                                         10.52m         10.51m        -0.12%
+¹ need >= 6 samples for confidence interval at level 0.95
+
+                                              │  noisefloor   │              noisefloor2              │
+                                              │     B/op      │     B/op       vs base                │
+ParallelAggregate_MinBig_Parallel               79.64Mi ± ∞ ¹   79.64Mi ± ∞ ¹       ~ (p=1.000 n=5)
+ParallelAggregate_MinBig_Parallel-4             79.65Mi ± ∞ ¹   79.65Mi ± ∞ ¹       ~ (p=0.381 n=5)
+ParallelAggregate_MinBig_Parallel-10            79.65Mi ± ∞ ¹   79.65Mi ± ∞ ¹       ~ (p=0.151 n=5)
+ParallelAggregate_MinBig_Serial                 9.606Mi ± ∞ ¹   9.606Mi ± ∞ ¹       ~ (p=0.516 n=5)
+ParallelAggregate_MinBig_Serial-4               9.606Mi ± ∞ ¹   9.606Mi ± ∞ ¹       ~ (p=0.111 n=5)
+ParallelAggregate_MinBig_Serial-10              9.606Mi ± ∞ ¹   9.606Mi ± ∞ ¹       ~ (p=0.738 n=5)
+ParallelAggregate_GroupMinBig_Parallel          154.5Mi ± ∞ ¹   154.5Mi ± ∞ ¹       ~ (p=0.952 n=5)
+ParallelAggregate_GroupMinBig_Parallel-4        154.6Mi ± ∞ ¹   154.6Mi ± ∞ ¹       ~ (p=1.000 n=5)
+ParallelAggregate_GroupMinBig_Parallel-10       154.7Mi ± ∞ ¹   154.7Mi ± ∞ ¹       ~ (p=0.548 n=5)
+ParallelAggregate_GroupMinBig_Serial            156.0Mi ± ∞ ¹   156.0Mi ± ∞ ¹       ~ (p=0.579 n=5)
+ParallelAggregate_GroupMinBig_Serial-4          156.0Mi ± ∞ ¹   156.0Mi ± ∞ ¹       ~ (p=0.341 n=5)
+ParallelAggregate_GroupMinBig_Serial-10         156.0Mi ± ∞ ¹   156.0Mi ± ∞ ¹       ~ (p=0.175 n=5)
+ParallelLabelScan_LabelledProject_Parallel      63.16Mi ± ∞ ¹   63.16Mi ± ∞ ¹       ~ (p=1.000 n=5)
+ParallelLabelScan_LabelledProject_Parallel-4    65.83Mi ± ∞ ¹   65.81Mi ± ∞ ¹       ~ (p=0.222 n=5)
+ParallelLabelScan_LabelledProject_Parallel-10   63.71Mi ± ∞ ¹   63.72Mi ± ∞ ¹       ~ (p=0.841 n=5)
+ParallelLabelScan_LabelledProject_Serial        9.226Mi ± ∞ ¹   9.216Mi ± ∞ ¹       ~ (p=0.690 n=5)
+ParallelLabelScan_LabelledProject_Serial-4      9.170Mi ± ∞ ¹   9.170Mi ± ∞ ¹       ~ (p=0.841 n=5)
+ParallelLabelScan_LabelledProject_Serial-10     9.170Mi ± ∞ ¹   9.170Mi ± ∞ ¹       ~ (p=0.333 n=5)
+ParallelScan_CountBig_Parallel                  7.993Mi ± ∞ ¹   7.994Mi ± ∞ ¹       ~ (p=0.175 n=5)
+ParallelScan_CountBig_Parallel-4                7.994Mi ± ∞ ¹   7.994Mi ± ∞ ¹       ~ (p=0.333 n=5)
+ParallelScan_CountBig_Parallel-10               7.996Mi ± ∞ ¹   7.996Mi ± ∞ ¹       ~ (p=1.000 n=5)
+ParallelScan_CountBig_Serial                    1.977Ki ± ∞ ¹   1.977Ki ± ∞ ¹       ~ (p=1.000 n=5) ²
+ParallelScan_CountBig_Serial-4                  1.977Ki ± ∞ ¹   1.977Ki ± ∞ ¹       ~ (p=1.000 n=5) ²
+ParallelScan_CountBig_Serial-10                 1.977Ki ± ∞ ¹   1.977Ki ± ∞ ¹       ~ (p=1.000 n=5) ²
+ParallelScanProject_ScanBig_Parallel            61.66Mi ± ∞ ¹   61.66Mi ± ∞ ¹       ~ (p=0.802 n=5)
+ParallelScanProject_ScanBig_Parallel-4          64.20Mi ± ∞ ¹   64.17Mi ± ∞ ¹       ~ (p=1.000 n=5)
+ParallelScanProject_ScanBig_Parallel-10         62.33Mi ± ∞ ¹   62.24Mi ± ∞ ¹       ~ (p=0.222 n=5)
+ParallelScanProject_ScanBig_Serial              11.07Mi ± ∞ ¹   11.07Mi ± ∞ ¹       ~ (p=0.079 n=5)
+ParallelScanProject_ScanBig_Serial-4            11.07Mi ± ∞ ¹   11.07Mi ± ∞ ¹       ~ (p=0.738 n=5)
+ParallelScanProject_ScanBig_Serial-10           11.07Mi ± ∞ ¹   11.07Mi ± ∞ ¹  -0.00% (p=0.040 n=5)
+ParallelScanProject_ScanFilterBig_Parallel      14.55Mi ± ∞ ¹   14.55Mi ± ∞ ¹       ~ (p=0.643 n=5)
+ParallelScanProject_ScanFilterBig_Parallel-4    14.55Mi ± ∞ ¹   14.55Mi ± ∞ ¹       ~ (p=0.651 n=5)
+ParallelScanProject_ScanFilterBig_Parallel-10   14.55Mi ± ∞ ¹   14.55Mi ± ∞ ¹       ~ (p=0.151 n=5)
+ParallelScanProject_ScanFilterBig_Serial        14.55Mi ± ∞ ¹   14.55Mi ± ∞ ¹       ~ (p=0.333 n=5)
+ParallelScanProject_ScanFilterBig_Serial-4      14.55Mi ± ∞ ¹   14.55Mi ± ∞ ¹       ~ (p=1.000 n=5)
+ParallelScanProject_ScanFilterBig_Serial-10     14.55Mi ± ∞ ¹   14.55Mi ± ∞ ¹       ~ (p=0.897 n=5)
+geomean                                         13.06Mi         13.06Mi        -0.01%
+¹ need >= 6 samples for confidence interval at level 0.95
+² all samples are equal
+
+                                              │  noisefloor  │             noisefloor2              │
+                                              │  allocs/op   │  allocs/op    vs base                │
+ParallelAggregate_MinBig_Parallel               1.204M ± ∞ ¹   1.204M ± ∞ ¹       ~ (p=1.000 n=5)
+ParallelAggregate_MinBig_Parallel-4             1.204M ± ∞ ¹   1.204M ± ∞ ¹       ~ (p=1.000 n=5)
+ParallelAggregate_MinBig_Parallel-10            1.204M ± ∞ ¹   1.204M ± ∞ ¹       ~ (p=0.278 n=5)
+ParallelAggregate_MinBig_Serial                 199.8k ± ∞ ¹   199.8k ± ∞ ¹       ~ (p=1.000 n=5)
+ParallelAggregate_MinBig_Serial-4               199.8k ± ∞ ¹   199.8k ± ∞ ¹       ~ (p=1.000 n=5) ²
+ParallelAggregate_MinBig_Serial-10              199.8k ± ∞ ¹   199.8k ± ∞ ¹       ~ (p=1.000 n=5) ²
+ParallelAggregate_GroupMinBig_Parallel          2.405M ± ∞ ¹   2.405M ± ∞ ¹       ~ (p=1.000 n=5)
+ParallelAggregate_GroupMinBig_Parallel-4        2.406M ± ∞ ¹   2.406M ± ∞ ¹       ~ (p=1.000 n=5)
+ParallelAggregate_GroupMinBig_Parallel-10       2.407M ± ∞ ¹   2.407M ± ∞ ¹       ~ (p=0.167 n=5)
+ParallelAggregate_GroupMinBig_Serial            2.399M ± ∞ ¹   2.399M ± ∞ ¹       ~ (p=1.000 n=5)
+ParallelAggregate_GroupMinBig_Serial-4          2.399M ± ∞ ¹   2.399M ± ∞ ¹       ~ (p=1.000 n=5) ²
+ParallelAggregate_GroupMinBig_Serial-10         2.399M ± ∞ ¹   2.399M ± ∞ ¹       ~ (p=1.000 n=5) ²
+ParallelLabelScan_LabelledProject_Parallel      806.4k ± ∞ ¹   806.4k ± ∞ ¹       ~ (p=1.000 n=5)
+ParallelLabelScan_LabelledProject_Parallel-4    806.4k ± ∞ ¹   806.4k ± ∞ ¹       ~ (p=1.000 n=5)
+ParallelLabelScan_LabelledProject_Parallel-10   806.5k ± ∞ ¹   806.5k ± ∞ ¹       ~ (p=0.690 n=5)
+ParallelLabelScan_LabelledProject_Serial        799.0k ± ∞ ¹   799.0k ± ∞ ¹       ~ (p=1.000 n=5)
+ParallelLabelScan_LabelledProject_Serial-4      799.0k ± ∞ ¹   799.0k ± ∞ ¹       ~ (p=1.000 n=5)
+ParallelLabelScan_LabelledProject_Serial-10     799.0k ± ∞ ¹   799.0k ± ∞ ¹       ~ (p=0.556 n=5)
+ParallelScan_CountBig_Parallel                   64.00 ± ∞ ¹    64.00 ± ∞ ¹       ~ (p=1.000 n=5) ²
+ParallelScan_CountBig_Parallel-4                 77.00 ± ∞ ¹    77.00 ± ∞ ¹       ~ (p=1.000 n=5)
+ParallelScan_CountBig_Parallel-10                103.0 ± ∞ ¹    103.0 ± ∞ ¹       ~ (p=1.000 n=5)
+ParallelScan_CountBig_Serial                     18.00 ± ∞ ¹    18.00 ± ∞ ¹       ~ (p=1.000 n=5) ²
+ParallelScan_CountBig_Serial-4                   18.00 ± ∞ ¹    18.00 ± ∞ ¹       ~ (p=1.000 n=5) ²
+ParallelScan_CountBig_Serial-10                  18.00 ± ∞ ¹    18.00 ± ∞ ¹       ~ (p=1.000 n=5) ²
+ParallelScanProject_ScanBig_Parallel            607.4k ± ∞ ¹   607.4k ± ∞ ¹       ~ (p=0.444 n=5)
+ParallelScanProject_ScanBig_Parallel-4          607.4k ± ∞ ¹   607.4k ± ∞ ¹       ~ (p=1.000 n=5)
+ParallelScanProject_ScanBig_Parallel-10         607.5k ± ∞ ¹   607.5k ± ∞ ¹       ~ (p=0.365 n=5)
+ParallelScanProject_ScanBig_Serial              199.8k ± ∞ ¹   199.8k ± ∞ ¹       ~ (p=1.000 n=5) ²
+ParallelScanProject_ScanBig_Serial-4            199.8k ± ∞ ¹   199.8k ± ∞ ¹       ~ (p=1.000 n=5) ²
+ParallelScanProject_ScanBig_Serial-10           199.8k ± ∞ ¹   199.8k ± ∞ ¹       ~ (p=1.000 n=5) ²
+ParallelScanProject_ScanFilterBig_Parallel      299.8k ± ∞ ¹   299.8k ± ∞ ¹       ~ (p=1.000 n=5) ²
+ParallelScanProject_ScanFilterBig_Parallel-4    299.8k ± ∞ ¹   299.8k ± ∞ ¹       ~ (p=1.000 n=5)
+ParallelScanProject_ScanFilterBig_Parallel-10   299.8k ± ∞ ¹   299.8k ± ∞ ¹       ~ (p=0.524 n=5)
+ParallelScanProject_ScanFilterBig_Serial        299.8k ± ∞ ¹   299.8k ± ∞ ¹       ~ (p=1.000 n=5)
+ParallelScanProject_ScanFilterBig_Serial-4      299.8k ± ∞ ¹   299.8k ± ∞ ¹       ~ (p=1.000 n=5)
+ParallelScanProject_ScanFilterBig_Serial-10     299.8k ± ∞ ¹   299.8k ± ∞ ¹       ~ (p=1.000 n=5)
+geomean                                         124.6k         124.6k        -0.00%
+¹ need >= 6 samples for confidence interval at level 0.95
+² all samples are equal

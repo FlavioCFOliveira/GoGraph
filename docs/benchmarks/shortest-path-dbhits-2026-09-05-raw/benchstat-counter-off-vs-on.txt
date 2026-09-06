@@ -1,0 +1,37 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/exec
+cpu: Apple M4
+                                    │ counter_off.txt │ counter_on.txt │
+                                    │                                                 sec/op                                                  │                                     sec/op                                       vs base               │
+ShortestPath_UnitDegreeChain-10                                                                                                   636.0µ ± 1%                                                                       633.3µ ± 1%       ~ (p=0.443 n=12)
+ShortestPath_Layered-10                                                                                                           90.32µ ± 1%                                                                       90.04µ ± 1%       ~ (p=0.378 n=12)
+ShortestPath_LayeredTyped-10                                                                                                      90.56µ ± 0%                                                                       90.12µ ± 1%       ~ (p=0.378 n=12)
+ShortestPath_HighDegreeFan-10                                                                                                     1.560m ± 1%                                                                       1.562m ± 1%       ~ (p=0.551 n=12)
+AllShortestPaths_UnitDegreeChain-10                                                                                               1.113m ± 2%                                                                       1.122m ± 2%       ~ (p=0.630 n=12)
+AllShortestPaths_Layered-10                                                                                                       191.5µ ± 1%                                                                       191.6µ ± 1%       ~ (p=0.755 n=12)
+AllShortestPaths_HighDegreeFan-10                                                                                                 1.842m ± 1%                                                                       1.855m ± 1%       ~ (p=0.128 n=12)
+geomean                                                                                                                           439.9µ                                                                            440.2µ       +0.07%
+
+                                    │ counter_off.txt │ counter_on.txt │
+                                    │                                                  B/op                                                   │                                      B/op                                        vs base               │
+ShortestPath_UnitDegreeChain-10                                                                                                  1.607Mi ± 0%                                                                      1.607Mi ± 0%       ~ (p=0.349 n=12)
+ShortestPath_Layered-10                                                                                                          251.8Ki ± 0%                                                                      251.8Ki ± 0%       ~ (p=1.000 n=12)
+ShortestPath_LayeredTyped-10                                                                                                     251.8Ki ± 0%                                                                      251.8Ki ± 0%       ~ (p=0.354 n=12)
+ShortestPath_HighDegreeFan-10                                                                                                    4.257Mi ± 0%                                                                      4.257Mi ± 0%       ~ (p=0.281 n=12)
+AllShortestPaths_UnitDegreeChain-10                                                                                              12.95Mi ± 0%                                                                      12.95Mi ± 0%       ~ (p=0.109 n=12)
+AllShortestPaths_Layered-10                                                                                                      453.4Ki ± 0%                                                                      453.4Ki ± 0%       ~ (p=1.000 n=12)
+AllShortestPaths_HighDegreeFan-10                                                                                                4.871Mi ± 0%                                                                      4.871Mi ± 0%       ~ (p=0.744 n=12)
+geomean                                                                                                                          1.419Mi                                                                           1.419Mi       -0.00%
+
+                                    │ counter_off.txt │ counter_on.txt │
+                                    │                                                allocs/op                                                │                                   allocs/op                                    vs base                 │
+ShortestPath_UnitDegreeChain-10                                                                                                   11.90k ± 0%                                                                     11.90k ± 0%       ~ (p=1.000 n=12) ¹
+ShortestPath_Layered-10                                                                                                            108.0 ± 0%                                                                      108.0 ± 0%       ~ (p=1.000 n=12) ¹
+ShortestPath_LayeredTyped-10                                                                                                       108.0 ± 0%                                                                      108.0 ± 0%       ~ (p=1.000 n=12) ¹
+ShortestPath_HighDegreeFan-10                                                                                                      314.0 ± 0%                                                                      314.0 ± 0%       ~ (p=1.000 n=12) ¹
+AllShortestPaths_UnitDegreeChain-10                                                                                               5.670k ± 0%                                                                     5.670k ± 0%       ~ (p=1.000 n=12) ¹
+AllShortestPaths_Layered-10                                                                                                       2.938k ± 0%                                                                     2.938k ± 0%       ~ (p=1.000 n=12) ¹
+AllShortestPaths_HighDegreeFan-10                                                                                                 20.32k ± 0%                                                                     20.32k ± 0%       ~ (p=1.000 n=12) ¹
+geomean                                                                                                                           1.469k                                                                          1.469k       +0.00%
+¹ all samples are equal

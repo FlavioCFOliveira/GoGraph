@@ -1,0 +1,37 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/exec
+cpu: Apple M4
+                                    │ noise2_A.txt │ noise2_B.txt │
+                                    │                                                sec/op                                                │                                    sec/op                                      vs base               │
+ShortestPath_UnitDegreeChain-10                                                                                                639.7µ ± 1%                                                                     637.4µ ± 1%       ~ (p=0.378 n=12)
+ShortestPath_Layered-10                                                                                                        91.01µ ± 1%                                                                     91.15µ ± 1%       ~ (p=0.713 n=12)
+ShortestPath_LayeredTyped-10                                                                                                   91.59µ ± 1%                                                                     91.05µ ± 1%       ~ (p=0.291 n=12)
+ShortestPath_HighDegreeFan-10                                                                                                  1.557m ± 1%                                                                     1.564m ± 1%       ~ (p=0.319 n=12)
+AllShortestPaths_UnitDegreeChain-10                                                                                            1.127m ± 2%                                                                     1.109m ± 1%  -1.57% (p=0.045 n=12)
+AllShortestPaths_Layered-10                                                                                                    193.1µ ± 1%                                                                     192.1µ ± 1%       ~ (p=0.242 n=12)
+AllShortestPaths_HighDegreeFan-10                                                                                              1.854m ± 1%                                                                     1.848m ± 0%       ~ (p=0.219 n=12)
+geomean                                                                                                                        443.0µ                                                                          441.3µ       -0.39%
+
+                                    │ noise2_A.txt │ noise2_B.txt │
+                                    │                                                 B/op                                                 │                                     B/op                                       vs base               │
+ShortestPath_UnitDegreeChain-10                                                                                               1.607Mi ± 0%                                                                    1.607Mi ± 0%       ~ (p=0.115 n=12)
+ShortestPath_Layered-10                                                                                                       252.1Ki ± 0%                                                                    252.1Ki ± 0%       ~ (p=0.680 n=12)
+ShortestPath_LayeredTyped-10                                                                                                  252.1Ki ± 0%                                                                    252.1Ki ± 0%       ~ (p=0.561 n=12)
+ShortestPath_HighDegreeFan-10                                                                                                 4.257Mi ± 0%                                                                    4.257Mi ± 0%       ~ (p=0.265 n=12)
+AllShortestPaths_UnitDegreeChain-10                                                                                           12.95Mi ± 0%                                                                    12.95Mi ± 0%       ~ (p=0.921 n=12)
+AllShortestPaths_Layered-10                                                                                                   453.4Ki ± 0%                                                                    453.4Ki ± 0%       ~ (p=0.695 n=12)
+AllShortestPaths_HighDegreeFan-10                                                                                             4.871Mi ± 0%                                                                    4.871Mi ± 0%       ~ (p=0.722 n=12)
+geomean                                                                                                                       1.419Mi                                                                         1.419Mi       -0.00%
+
+                                    │ noise2_A.txt │ noise2_B.txt │
+                                    │                                              allocs/op                                               │                                  allocs/op                                   vs base                 │
+ShortestPath_UnitDegreeChain-10                                                                                                11.90k ± 0%                                                                   11.90k ± 0%       ~ (p=1.000 n=12) ¹
+ShortestPath_Layered-10                                                                                                         126.0 ± 0%                                                                    126.0 ± 0%       ~ (p=1.000 n=12) ¹
+ShortestPath_LayeredTyped-10                                                                                                    126.0 ± 0%                                                                    126.0 ± 0%       ~ (p=1.000 n=12) ¹
+ShortestPath_HighDegreeFan-10                                                                                                   317.0 ± 0%                                                                    317.0 ± 0%       ~ (p=1.000 n=12) ¹
+AllShortestPaths_UnitDegreeChain-10                                                                                            5.670k ± 0%                                                                   5.670k ± 0%       ~ (p=1.000 n=12) ¹
+AllShortestPaths_Layered-10                                                                                                    2.938k ± 0%                                                                   2.938k ± 0%       ~ (p=1.000 n=12) ¹
+AllShortestPaths_HighDegreeFan-10                                                                                              20.32k ± 0%                                                                   20.32k ± 0%       ~ (p=1.000 n=12) ¹
+geomean                                                                                                                        1.537k                                                                        1.537k       +0.00%
+¹ all samples are equal

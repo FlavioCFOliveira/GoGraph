@@ -42,7 +42,7 @@ import (
 //
 // OptionalExpand is NOT safe for concurrent use.
 type OptionalExpand struct {
-	child     Operator        // the wrapped Expand operator
+	child     *Expand         // the wrapped Expand operator; concrete so its slot counter can be read
 	input     Operator        // original input operator (upstream of OptionalExpand)
 	ctx       context.Context //nolint:containedctx // stored for per-Next ctx check
 	singleArg *singleRow      // injects one row at a time into child
@@ -201,6 +201,44 @@ func (op *OptionalExpand) buildNullRow(inputRow Row) Row {
 	buf[len(inputRow)+2] = expr.Null
 	return buf
 }
+
+// storageAccesses forwards the inner [Expand]'s measured slot count, so this
+// operator's db-hits cell is MEASURED rather than derived from its rows
+// (rmp #2761).
+//
+// It has to forward, because the inner Expand is not a node of the rendered plan:
+// [NewOptionalExpand] builds it privately and drives it through a one-row
+// [singleRow] feeder, so the profiling wrapper never sees it and its own cell is
+// never printed. Only this operator can report what it read.
+//
+// The derived figure it replaces was wrong twice over. It counted the ADMITTED
+// slots rather than the walked ones, exactly as [Expand.storageAccesses]
+// describes, and it also counted the NULL-EXTENSION rows this operator emits for a
+// source with no matching edge — rows produced by [OptionalExpand.buildNullRow]
+// after reading nothing at all. A source with no out-edges therefore charged one
+// db-hit for zero slots read.
+//
+// [Expand.Init] accumulates across re-Inits, which this operator depends on: it
+// re-Inits the child ONCE PER INPUT ROW, so a counter reset there would report the
+// last row's walk as the whole operator's.
+func (op *OptionalExpand) storageAccesses() int64 { return op.child.storageAccesses() }
+
+// rowsRemovedByFilter forwards the inner [Expand]'s rejection count, for exactly
+// the reason storageAccesses above forwards its slot count: the inner operator is
+// private to this one and is never a node of the rendered plan, so if this operator
+// stayed silent the rejections it caused would be reported by nobody (rmp #2764).
+//
+// The figure describes the inner expansion's discarded slots and NOT this
+// operator's own row flow — an OPTIONAL expansion removes no rows at all, since a
+// source with no admitted edge is padded with NULLs rather than dropped
+// ([OptionalExpand.buildNullRow]). That is the honest reading: the work was done
+// and the candidates were discarded; what changed is only that the outer row
+// survived anyway.
+//
+// [Expand] accumulates across re-Inits, which this operator depends on: it re-Inits
+// the child ONCE PER INPUT ROW, so a counter reset there would report the last
+// row's rejections as the whole operator's.
+func (op *OptionalExpand) rowsRemovedByFilter() int64 { return op.child.rowsRemovedByFilter() }
 
 // Close closes the input and child operators.
 func (op *OptionalExpand) Close() error {

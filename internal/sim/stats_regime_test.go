@@ -24,9 +24,14 @@ import (
 // rebuilt detail and publishes exactly the fixture's three (Person,
 // name/age/city) pairs; a back-to-back second call is refused in-band; every
 // probe answer is identical across both calls; and the terminal Finish is
-// satisfied. At HEAD the sim's Explain surface renders no statistics-derived
-// annotation for the probe shapes, so the legal-plan-change report channel
-// stays at zero (measured for rmp #2456).
+// satisfied. At HEAD a statistics rebuild does not change which plan any probe
+// shape is given, so the legal-plan-change report channel stays at zero (measured
+// for rmp #2456).
+//
+// That zero is a statement about the PLAN, not about the rendering. rmp #2765 put
+// the planner's cardinality estimate into the physical rendering, where a rebuild
+// moves it for every probe; the channel compares plan SHAPE (sim.planShape) so it
+// still reports a planner decision rather than its own annotation.
 func TestStatsRegime_RefreshAndThrottleContract(t *testing.T) {
 	t.Parallel()
 	a := newParityEngine(t, &cypher.EngineOptions{})
@@ -51,7 +56,9 @@ func TestStatsRegime_RefreshAndThrottleContract(t *testing.T) {
 		t.Fatalf("refreshes=%d refusals=%d, want 1 and 1", k.Refreshes(), k.Refusals())
 	}
 	if k.PlanChanges() != 0 {
-		t.Fatalf("PlanChanges = %d, want 0 at HEAD (no stats annotation on the sim Explain surface)", k.PlanChanges())
+		t.Fatalf("PlanChanges = %d, want 0 at HEAD: a statistics rebuild changes no probe's "+
+			"plan SHAPE, and the estimate annotation rmp #2765 added is normalised out of the "+
+			"comparison so it cannot be mistaken for one", k.PlanChanges())
 	}
 	if v := k.Finish(3); len(v) != 0 {
 		t.Fatalf("non-vacuity must be satisfied after a rebuild and a refusal, got:\n%v", v)

@@ -97,6 +97,7 @@ import (
 	"runtime/pprof"
 	"sort"
 	"sync"
+	"sync/atomic"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/graph"
@@ -181,6 +182,12 @@ type ParallelAggregateScan struct {
 	reducers []AggReducerKind
 	states   []*workerState // one per worker; read only after wg.Wait
 	out      []Row          // combined result rows, streamed by Next
+
+	// storageReads accumulates the node references the workers consumed, for
+	// [ParallelAggregateScan.storageAccesses] (rmp #2762). It is the ONE piece of
+	// shared mutable state a worker touches, folded once per MORSEL in
+	// [ParallelAggregateScan.runMorsel] and never once per row.
+	storageReads atomic.Int64
 
 	wg         sync.WaitGroup
 	nKeys      int
@@ -435,6 +442,17 @@ func (op *ParallelAggregateScan) runMorsel(ctx context.Context, st *workerState,
 	if err := sub.Init(ctx); err != nil {
 		return err
 	}
+	// The morsel's node references have now been read: the sub-plan's scan leaf
+	// collects every id it will emit inside its own Init (AllNodesScan.Init), in
+	// one pass over the morsel walker, so the count is known here in O(1) and the
+	// row loop below needs no per-record increment. One atomic add per MORSEL —
+	// with [DefaultMorselSize] at 1024, one per 1024 node references — is what
+	// keeps this off the row path; a per-row atomic on a morsel-parallel scan is a
+	// contention defect against CLAUDE.md's mandate 3, measured on the sibling leaf
+	// at 18.9% of flat CPU and a hard stop in scaling past four workers (rmp #2649).
+	// Charging here rather than after the drain is also what makes the figure exact
+	// for a morsel whose loop exits early: the records were read either way.
+	op.storageReads.Add(int64(len(m.ids)))
 
 	var row Row
 	var j int64
@@ -710,6 +728,42 @@ func findGroup(bucket []*aggGroup, keyVals []expr.Value) *aggGroup {
 	}
 	return nil
 }
+
+// storageAccesses reports the node references this leaf's workers consumed. It
+// implements the storageAccessCounter marker in profile.go, so PROFILE renders
+// this operator's cell as MEASURED rather than as the UNKNOWN "?" it printed
+// between rmp #2760 and #2762 — and the bare 0 it printed before #2760.
+//
+// # Why the emitted row count could never have been this number
+//
+// This leaf emits one row per GROUP (or exactly one for a global aggregate) while
+// walking the whole node source, so [StorageRecordScan]'s derivation — one record
+// read per row emitted — is not merely imprecise here but unrelated: on 2000 nodes
+// grouped into 100 buckets it would report 100. That is why the leaf never carried
+// that marker and why the figure had to be counted.
+//
+// # What it counts, exactly
+//
+// One access per node reference the operator's access path yielded and a worker
+// consumed. Init walks the node source once, on the calling goroutine, and splits
+// that walk into disjoint contiguous morsels covering it exactly;
+// [ParallelAggregateScan.runMorsel] charges each morsel's length once, after the
+// sub-plan's scan leaf has read it. So a completed scan reports the same figure
+// the serial pipeline's own scan reports over the same graph, which is the parity
+// rmp #2762 restored.
+//
+// The budget==1 inline path is counted identically: it shares runMorsel, so the
+// figure does not depend on whether the governor spawned goroutines.
+//
+// A node reference is counted ONCE even though two phases touch it — Init's walk
+// of the access path, and the morsel scan's re-read of the slice Init already owns.
+// Charging both would put the parallel plan at 2N against the serial plan's N for
+// identical work, a threshold-dependent figure of exactly the kind this task removed.
+//
+// Init does NOT reset the counter, which is [storageAccessCounter]'s documented
+// contract: the figure covers the operator's whole lifetime, including any Init it
+// has been restarted by.
+func (op *ParallelAggregateScan) storageAccesses() int64 { return op.storageReads.Load() }
 
 // Close cancels any still-running workers and joins them. It is idempotent and safe
 // whether or not Next was ever called.

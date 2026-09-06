@@ -669,10 +669,89 @@ func (g *Graph[N, W]) LabelCountExact(lid LabelID, s *Snapshot) (int64, bool) {
 	return n, true
 }
 
+// LabelCountAsOf returns the number of nodes carrying lid as of s, ALWAYS
+// exactly. Unlike [Graph.LabelCountExact] it never declines, and unlike the
+// bitmap route its caller used to take when that decline arrived, it materialises
+// nothing when nothing needs correcting.
+//
+// # Why it exists (rmp #2773)
+//
+// [Graph.LabelCountExact] gates on [Graph.labelBitmapNeedsFilter], which is
+// GLOBAL: any unreclaimed node-life or node-label record anywhere in the graph
+// makes it decline, whatever label that record concerns.
+// [exec.LabelCountScan] answered the decline the only way it could — by resolving
+// the label BITMAP and reading its cardinality — and that route runs
+// [Graph.labelBitmapAsOfFiltered], which gates on [Graph.churnLive], which is
+// PER-LABEL (rmp #2686). So in the state where the global gate is up and the
+// per-label gate is not, the bitmap was cloned and then returned UNCORRECTED:
+// [Graph.correctBitmapOver] never ran on it, and the clone existed only to have
+// GetCardinality called on it.
+//
+// That state is not exotic. A birth record written by AddNode raises
+// nodeLifeActive but holds NO label (see lifeStamp.churn — the record names the
+// labels the node carried when it was written, and a node born unlabelled carries
+// none), so an unreclaimed birth raises the global gate and no per-label one at
+// all. MEASURED on the read-path gate's own fixture (plain build, no -race,
+// benchstat n=6 on an idle host): one live record made
+// `MATCH (n:N) RETURN count(n) AS c` cost 32.00 allocs/op against 20.00,
+// 2.820 KiB against 2.328 KiB, and 1.216 us against 1.046 us — +60.00% / +21.14%
+// / +16.26%, p=0.002. The allocation figure was FLAT at 32.00 from 1 live record
+// to 1 000, and flat is the proof the clone was vacuous: gathering suspects to
+// correct it would have grown with their number.
+//
+// # Why the raw count is exact when the per-label gate is clear
+//
+// This is [Graph.labelBitmapAsOfFiltered]'s own argument, applied to a number
+// instead of a bitmap. That function returns the raw clone UNTOUCHED when
+// churnLive is false on both sides of it, which is precisely the claim that the
+// raw index is authoritative for s. The cardinality of that untouched clone is
+// the raw index's cardinality, so reading the count directly yields the same
+// answer for the same reason.
+//
+// The gate is sampled AFTER the cardinality, which is the sound order, the one
+// [Graph.LabelCountBound] already relies on, and — since rmp #2773 — one this
+// package can actually FAIL on: invert the two reads and
+// [TestLabelCountAsOf_TheInvertedOrderReportsAWriteFromInsideTheWindow] returns
+// 11 where 10 is the snapshot's answer. The claim is: a write that could make the raw
+// count disagree with s raises its hold BEFORE it touches the index and keeps it
+// raised until its record is reclaimed, and reclamation cannot pass a live reader
+// ([mvcc.Horizon.Oldest]). So a gate reading zero after the count cannot be
+// hiding a write that landed before it. This inherits the SAME cross-component
+// dependency on the reclamation horizon that [Graph.LabelCountExact] documents:
+// a watermark that could pass a live reader breaks this function too.
+//
+// The disjunction keeps this never more pessimistic than [Graph.LabelCountExact]:
+// the first arm is that function's own post-sample, so any state it would answer
+// is answered here without a clone as well.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) LabelCountAsOf(lid LabelID, s *Snapshot) int64 {
+	n := int64(g.nodeIdx.Count(uint32(lid)))
+	// The seam sits HERE, between the two reads, because that is the only place
+	// from which the order above can be tested at all. See
+	// [Graph.labelCountAsOfWindowProbe].
+	g.fireLabelCountAsOfWindowProbe()
+	if !g.labelBitmapNeedsFilter(s) || !g.churnLive(oneLabel(lid)) {
+		return n
+	}
+	// A correction is genuinely owed, so the filtered bitmap is the only source
+	// of the number and its clone is not waste. This is the same cost the scan on
+	// this label pays anyway.
+	return int64(g.LabelBitmapAsOf(lid, s).GetCardinality())
+}
+
 // fireLabelCountGateProbe runs the test-only seam described on
 // [Graph.labelCountGateProbe]. It is a nil check in production.
 func (g *Graph[N, W]) fireLabelCountGateProbe() {
 	if p := g.labelCountGateProbe; p != nil {
+		p()
+	}
+}
+
+// fireLabelCountAsOfWindowProbe runs the test-only seam described on
+// [Graph.labelCountAsOfWindowProbe]. It is a nil check in production.
+func (g *Graph[N, W]) fireLabelCountAsOfWindowProbe() {
+	if p := g.labelCountAsOfWindowProbe; p != nil {
 		p()
 	}
 }

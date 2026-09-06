@@ -1,0 +1,210 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkParallelAggregate_MinBig_Parallel                	      52	  60738540 ns/op	83504378 B/op	 1203780 allocs/op
+BenchmarkParallelAggregate_MinBig_Parallel-4              	      52	  20637488 ns/op	83514042 B/op	 1203820 allocs/op
+BenchmarkParallelAggregate_MinBig_Parallel-10             	      63	  17441508 ns/op	83518603 B/op	 1203869 allocs/op
+BenchmarkParallelAggregate_MinBig_Serial                  	      52	  20184919 ns/op	10072198 B/op	  199838 allocs/op
+BenchmarkParallelAggregate_MinBig_Serial-4                	      72	  16331061 ns/op	10072103 B/op	  199837 allocs/op
+BenchmarkParallelAggregate_MinBig_Serial-10               	      70	  17123943 ns/op	10072110 B/op	  199837 allocs/op
+BenchmarkParallelAggregate_GroupMinBig_Parallel           	      33	 116794667 ns/op	161993976 B/op	 2404606 allocs/op
+BenchmarkParallelAggregate_GroupMinBig_Parallel-4         	      28	  38913006 ns/op	162062532 B/op	 2405576 allocs/op
+BenchmarkParallelAggregate_GroupMinBig_Parallel-10        	      36	  32957994 ns/op	162185490 B/op	 2407483 allocs/op
+BenchmarkParallelAggregate_GroupMinBig_Serial             	      12	 119750594 ns/op	163597358 B/op	 2399347 allocs/op
+BenchmarkParallelAggregate_GroupMinBig_Serial-4           	      12	  92287087 ns/op	163597401 B/op	 2399347 allocs/op
+BenchmarkParallelAggregate_GroupMinBig_Serial-10          	      12	  94702729 ns/op	163597424 B/op	 2399347 allocs/op
+BenchmarkParallelLabelScan_LabelledProject_Parallel       	      64	  70981113 ns/op	66233165 B/op	  806353 allocs/op
+BenchmarkParallelLabelScan_LabelledProject_Parallel-4     	      51	  22869939 ns/op	69094158 B/op	  806410 allocs/op
+BenchmarkParallelLabelScan_LabelledProject_Parallel-10    	      55	  18436917 ns/op	66716482 B/op	  806488 allocs/op
+BenchmarkParallelLabelScan_LabelledProject_Serial         	      28	  39158632 ns/op	 9646568 B/op	  799028 allocs/op
+BenchmarkParallelLabelScan_LabelledProject_Serial-4       	      33	  36289636 ns/op	 9615105 B/op	  799026 allocs/op
+BenchmarkParallelLabelScan_LabelledProject_Serial-10      	      27	  37827562 ns/op	 9615411 B/op	  799028 allocs/op
+BenchmarkParallelScan_CountBig_Parallel                   	     471	   2511071 ns/op	 8381810 B/op	      64 allocs/op
+BenchmarkParallelScan_CountBig_Parallel-4                 	     766	   1544168 ns/op	 8382648 B/op	      77 allocs/op
+BenchmarkParallelScan_CountBig_Parallel-10                	     750	   1602097 ns/op	 8384583 B/op	     103 allocs/op
+BenchmarkParallelScan_CountBig_Serial                     	  677650	      1676 ns/op	    2024 B/op	      18 allocs/op
+BenchmarkParallelScan_CountBig_Serial-4                   	  914540	      1258 ns/op	    2024 B/op	      18 allocs/op
+BenchmarkParallelScan_CountBig_Serial-10                  	  900795	      1284 ns/op	    2024 B/op	      18 allocs/op
+BenchmarkParallelScanProject_ScanBig_Parallel             	      68	  65224343 ns/op	64653251 B/op	  607377 allocs/op
+BenchmarkParallelScanProject_ScanBig_Parallel-4           	      48	  22957985 ns/op	67100006 B/op	  607439 allocs/op
+BenchmarkParallelScanProject_ScanBig_Parallel-10          	      58	  18481534 ns/op	65226680 B/op	  607525 allocs/op
+BenchmarkParallelScanProject_ScanBig_Serial               	      61	  17703206 ns/op	11609178 B/op	  199811 allocs/op
+BenchmarkParallelScanProject_ScanBig_Serial-4             	      79	  15395288 ns/op	11609134 B/op	  199810 allocs/op
+BenchmarkParallelScanProject_ScanBig_Serial-10            	      75	  15279161 ns/op	11609144 B/op	  199810 allocs/op
+BenchmarkParallelScanProject_ScanFilterBig_Parallel       	      46	  23840366 ns/op	15261213 B/op	  299842 allocs/op
+BenchmarkParallelScanProject_ScanFilterBig_Parallel-4     	      50	  21038622 ns/op	15261178 B/op	  299841 allocs/op
+BenchmarkParallelScanProject_ScanFilterBig_Parallel-10    	      54	  21318748 ns/op	15261151 B/op	  299841 allocs/op
+BenchmarkParallelScanProject_ScanFilterBig_Serial         	      46	  23628773 ns/op	15261213 B/op	  299842 allocs/op
+BenchmarkParallelScanProject_ScanFilterBig_Serial-4       	      56	  21271446 ns/op	15261138 B/op	  299841 allocs/op
+BenchmarkParallelScanProject_ScanFilterBig_Serial-10      	      48	  21746422 ns/op	15261198 B/op	  299842 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/cypher	71.832s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkParallelAggregate_MinBig_Parallel                	      56	  60606688 ns/op	83504358 B/op	 1203780 allocs/op
+BenchmarkParallelAggregate_MinBig_Parallel-4              	      52	  20829900 ns/op	83513840 B/op	 1203819 allocs/op
+BenchmarkParallelAggregate_MinBig_Parallel-10             	      64	  17501267 ns/op	83518606 B/op	 1203869 allocs/op
+BenchmarkParallelAggregate_MinBig_Serial                  	      54	  19472515 ns/op	10072182 B/op	  199838 allocs/op
+BenchmarkParallelAggregate_MinBig_Serial-4                	      73	  16330293 ns/op	10072103 B/op	  199837 allocs/op
+BenchmarkParallelAggregate_MinBig_Serial-10               	      70	  17074392 ns/op	10072109 B/op	  199837 allocs/op
+BenchmarkParallelAggregate_GroupMinBig_Parallel           	      31	 116112802 ns/op	161994028 B/op	 2404607 allocs/op
+BenchmarkParallelAggregate_GroupMinBig_Parallel-4         	      28	  38355862 ns/op	162062630 B/op	 2405577 allocs/op
+BenchmarkParallelAggregate_GroupMinBig_Parallel-10        	      37	  32667086 ns/op	162185909 B/op	 2407484 allocs/op
+BenchmarkParallelAggregate_GroupMinBig_Serial             	      12	 117602052 ns/op	163597358 B/op	 2399347 allocs/op
+BenchmarkParallelAggregate_GroupMinBig_Serial-4           	      12	  92545490 ns/op	163597402 B/op	 2399347 allocs/op
+BenchmarkParallelAggregate_GroupMinBig_Serial-10          	      12	  95168125 ns/op	163597417 B/op	 2399347 allocs/op
+BenchmarkParallelLabelScan_LabelledProject_Parallel       	      55	  70655825 ns/op	66235462 B/op	  806353 allocs/op
+BenchmarkParallelLabelScan_LabelledProject_Parallel-4     	      52	  22658871 ns/op	68951568 B/op	  806409 allocs/op
+BenchmarkParallelLabelScan_LabelledProject_Parallel-10    	      66	  18130157 ns/op	66907590 B/op	  806488 allocs/op
+BenchmarkParallelLabelScan_LabelledProject_Serial         	      30	  40027318 ns/op	 9660724 B/op	  799028 allocs/op
+BenchmarkParallelLabelScan_LabelledProject_Serial-4       	      30	  35570612 ns/op	 9615194 B/op	  799027 allocs/op
+BenchmarkParallelLabelScan_LabelledProject_Serial-10      	      30	  35499681 ns/op	 9615399 B/op	  799027 allocs/op
+BenchmarkParallelScan_CountBig_Parallel                   	     477	   2422436 ns/op	 8381809 B/op	      64 allocs/op
+BenchmarkParallelScan_CountBig_Parallel-4                 	     764	   1545428 ns/op	 8382635 B/op	      76 allocs/op
+BenchmarkParallelScan_CountBig_Parallel-10                	     730	   1597404 ns/op	 8384537 B/op	     103 allocs/op
+BenchmarkParallelScan_CountBig_Serial                     	  690145	      1715 ns/op	    2024 B/op	      18 allocs/op
+BenchmarkParallelScan_CountBig_Serial-4                   	  893263	      1264 ns/op	    2024 B/op	      18 allocs/op
+BenchmarkParallelScan_CountBig_Serial-10                  	  877903	      1281 ns/op	    2024 B/op	      18 allocs/op
+BenchmarkParallelScanProject_ScanBig_Parallel             	      60	  64785573 ns/op	64653273 B/op	  607377 allocs/op
+BenchmarkParallelScanProject_ScanBig_Parallel-4           	      48	  22679377 ns/op	67191493 B/op	  607439 allocs/op
+BenchmarkParallelScanProject_ScanBig_Parallel-10          	      58	  18284053 ns/op	65281648 B/op	  607526 allocs/op
+BenchmarkParallelScanProject_ScanBig_Serial               	      62	  18283960 ns/op	11609176 B/op	  199811 allocs/op
+BenchmarkParallelScanProject_ScanBig_Serial-4             	      79	  15104072 ns/op	11609134 B/op	  199810 allocs/op
+BenchmarkParallelScanProject_ScanBig_Serial-10            	      78	  15669793 ns/op	11609137 B/op	  199810 allocs/op
+BenchmarkParallelScanProject_ScanFilterBig_Parallel       	      46	  24750346 ns/op	15261214 B/op	  299842 allocs/op
+BenchmarkParallelScanProject_ScanFilterBig_Parallel-4     	      49	  20822581 ns/op	15261189 B/op	  299842 allocs/op
+BenchmarkParallelScanProject_ScanFilterBig_Parallel-10    	      50	  21194344 ns/op	15261182 B/op	  299841 allocs/op
+BenchmarkParallelScanProject_ScanFilterBig_Serial         	      45	  25418542 ns/op	15261221 B/op	  299842 allocs/op
+BenchmarkParallelScanProject_ScanFilterBig_Serial-4       	      55	  20577520 ns/op	15261144 B/op	  299841 allocs/op
+BenchmarkParallelScanProject_ScanFilterBig_Serial-10      	      48	  21082274 ns/op	15261197 B/op	  299842 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/cypher	68.581s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkParallelAggregate_MinBig_Parallel                	      57	  58770140 ns/op	83504349 B/op	 1203780 allocs/op
+BenchmarkParallelAggregate_MinBig_Parallel-4              	      54	  20815336 ns/op	83513818 B/op	 1203819 allocs/op
+BenchmarkParallelAggregate_MinBig_Parallel-10             	      64	  17433786 ns/op	83518739 B/op	 1203870 allocs/op
+BenchmarkParallelAggregate_MinBig_Serial                  	      61	  18730972 ns/op	10072145 B/op	  199837 allocs/op
+BenchmarkParallelAggregate_MinBig_Serial-4                	      72	  16611454 ns/op	10072102 B/op	  199837 allocs/op
+BenchmarkParallelAggregate_MinBig_Serial-10               	      70	  16591051 ns/op	10072110 B/op	  199837 allocs/op
+BenchmarkParallelAggregate_GroupMinBig_Parallel           	      33	 118208673 ns/op	161993980 B/op	 2404606 allocs/op
+BenchmarkParallelAggregate_GroupMinBig_Parallel-4         	      28	  38085305 ns/op	162062483 B/op	 2405575 allocs/op
+BenchmarkParallelAggregate_GroupMinBig_Parallel-10        	      33	  33221499 ns/op	162185387 B/op	 2407485 allocs/op
+BenchmarkParallelAggregate_GroupMinBig_Serial             	      12	 121038361 ns/op	163597368 B/op	 2399347 allocs/op
+BenchmarkParallelAggregate_GroupMinBig_Serial-4           	      12	  91564135 ns/op	163597408 B/op	 2399347 allocs/op
+BenchmarkParallelAggregate_GroupMinBig_Serial-10          	      12	  94197035 ns/op	163597417 B/op	 2399347 allocs/op
+BenchmarkParallelLabelScan_LabelledProject_Parallel       	      63	  70662943 ns/op	66233384 B/op	  806353 allocs/op
+BenchmarkParallelLabelScan_LabelledProject_Parallel-4     	      45	  22933630 ns/op	68755610 B/op	  806411 allocs/op
+BenchmarkParallelLabelScan_LabelledProject_Parallel-10    	      62	  18328275 ns/op	66792050 B/op	  806491 allocs/op
+BenchmarkParallelLabelScan_LabelledProject_Serial         	      30	  40102160 ns/op	 9660719 B/op	  799028 allocs/op
+BenchmarkParallelLabelScan_LabelledProject_Serial-4       	      30	  35836803 ns/op	 9615155 B/op	  799027 allocs/op
+BenchmarkParallelLabelScan_LabelledProject_Serial-10      	      28	  36286824 ns/op	 9615438 B/op	  799028 allocs/op
+BenchmarkParallelScan_CountBig_Parallel                   	     457	   2484873 ns/op	 8381818 B/op	      64 allocs/op
+BenchmarkParallelScan_CountBig_Parallel-4                 	     801	   1578780 ns/op	 8382647 B/op	      76 allocs/op
+BenchmarkParallelScan_CountBig_Parallel-10                	     742	   1607765 ns/op	 8384577 B/op	     103 allocs/op
+BenchmarkParallelScan_CountBig_Serial                     	  679282	      1672 ns/op	    2024 B/op	      18 allocs/op
+BenchmarkParallelScan_CountBig_Serial-4                   	  857193	      1250 ns/op	    2024 B/op	      18 allocs/op
+BenchmarkParallelScan_CountBig_Serial-10                  	  885535	      1279 ns/op	    2024 B/op	      18 allocs/op
+BenchmarkParallelScanProject_ScanBig_Parallel             	      62	  64473795 ns/op	64653263 B/op	  607377 allocs/op
+BenchmarkParallelScanProject_ScanBig_Parallel-4           	      54	  22985026 ns/op	67108735 B/op	  607438 allocs/op
+BenchmarkParallelScanProject_ScanBig_Parallel-10          	      60	  18389496 ns/op	65337255 B/op	  607526 allocs/op
+BenchmarkParallelScanProject_ScanBig_Serial               	      62	  17417745 ns/op	11609174 B/op	  199811 allocs/op
+BenchmarkParallelScanProject_ScanBig_Serial-4             	      78	  15592128 ns/op	11609136 B/op	  199810 allocs/op
+BenchmarkParallelScanProject_ScanBig_Serial-10            	      76	  15265360 ns/op	11609140 B/op	  199810 allocs/op
+BenchmarkParallelScanProject_ScanFilterBig_Parallel       	      48	  23655781 ns/op	15261193 B/op	  299842 allocs/op
+BenchmarkParallelScanProject_ScanFilterBig_Parallel-4     	      55	  21408756 ns/op	15261146 B/op	  299841 allocs/op
+BenchmarkParallelScanProject_ScanFilterBig_Parallel-10    	      56	  21035109 ns/op	15261139 B/op	  299841 allocs/op
+BenchmarkParallelScanProject_ScanFilterBig_Serial         	      49	  24232835 ns/op	15261187 B/op	  299842 allocs/op
+BenchmarkParallelScanProject_ScanFilterBig_Serial-4       	      55	  20730540 ns/op	15261143 B/op	  299841 allocs/op
+BenchmarkParallelScanProject_ScanFilterBig_Serial-10      	      49	  21041389 ns/op	15261191 B/op	  299842 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/cypher	70.711s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkParallelAggregate_MinBig_Parallel                	      61	  60682641 ns/op	83504326 B/op	 1203779 allocs/op
+BenchmarkParallelAggregate_MinBig_Parallel-4              	      54	  20671529 ns/op	83513715 B/op	 1203818 allocs/op
+BenchmarkParallelAggregate_MinBig_Parallel-10             	      67	  17272176 ns/op	83518570 B/op	 1203869 allocs/op
+BenchmarkParallelAggregate_MinBig_Serial                  	      52	  19413622 ns/op	10072195 B/op	  199838 allocs/op
+BenchmarkParallelAggregate_MinBig_Serial-4                	      61	  16879581 ns/op	10072147 B/op	  199837 allocs/op
+BenchmarkParallelAggregate_MinBig_Serial-10               	      72	  17042611 ns/op	10072103 B/op	  199837 allocs/op
+BenchmarkParallelAggregate_GroupMinBig_Parallel           	      34	 117774202 ns/op	161993960 B/op	 2404605 allocs/op
+BenchmarkParallelAggregate_GroupMinBig_Parallel-4         	      28	  38561676 ns/op	162062520 B/op	 2405576 allocs/op
+BenchmarkParallelAggregate_GroupMinBig_Parallel-10        	      34	  33484162 ns/op	162185323 B/op	 2407484 allocs/op
+BenchmarkParallelAggregate_GroupMinBig_Serial             	      12	 121531444 ns/op	163597350 B/op	 2399347 allocs/op
+BenchmarkParallelAggregate_GroupMinBig_Serial-4           	      12	  92547413 ns/op	163597409 B/op	 2399347 allocs/op
+BenchmarkParallelAggregate_GroupMinBig_Serial-10          	      12	  95682045 ns/op	163597414 B/op	 2399347 allocs/op
+BenchmarkParallelLabelScan_LabelledProject_Parallel       	      56	  70742507 ns/op	66235172 B/op	  806353 allocs/op
+BenchmarkParallelLabelScan_LabelledProject_Parallel-4     	      51	  22917059 ns/op	69263823 B/op	  806409 allocs/op
+BenchmarkParallelLabelScan_LabelledProject_Parallel-10    	      56	  18422440 ns/op	66750611 B/op	  806489 allocs/op
+BenchmarkParallelLabelScan_LabelledProject_Serial         	      30	  39139838 ns/op	 9660719 B/op	  799028 allocs/op
+BenchmarkParallelLabelScan_LabelledProject_Serial-4       	      30	  36692992 ns/op	 9615163 B/op	  799027 allocs/op
+BenchmarkParallelLabelScan_LabelledProject_Serial-10      	      28	  36332619 ns/op	 9615443 B/op	  799028 allocs/op
+BenchmarkParallelScan_CountBig_Parallel                   	     486	   2416659 ns/op	 8381817 B/op	      64 allocs/op
+BenchmarkParallelScan_CountBig_Parallel-4                 	     783	   1521212 ns/op	 8382652 B/op	      77 allocs/op
+BenchmarkParallelScan_CountBig_Parallel-10                	     746	   1582908 ns/op	 8384536 B/op	     103 allocs/op
+BenchmarkParallelScan_CountBig_Serial                     	  688008	      1671 ns/op	    2024 B/op	      18 allocs/op
+BenchmarkParallelScan_CountBig_Serial-4                   	  947504	      1253 ns/op	    2024 B/op	      18 allocs/op
+BenchmarkParallelScan_CountBig_Serial-10                  	  901351	      1277 ns/op	    2024 B/op	      18 allocs/op
+BenchmarkParallelScanProject_ScanBig_Parallel             	      57	  64581878 ns/op	64653291 B/op	  607377 allocs/op
+BenchmarkParallelScanProject_ScanBig_Parallel-4           	      46	  22898247 ns/op	67280695 B/op	  607439 allocs/op
+BenchmarkParallelScanProject_ScanBig_Parallel-10          	      60	  18328734 ns/op	65290167 B/op	  607525 allocs/op
+BenchmarkParallelScanProject_ScanBig_Serial               	      62	  17708162 ns/op	11609176 B/op	  199811 allocs/op
+BenchmarkParallelScanProject_ScanBig_Serial-4             	      79	  15140790 ns/op	11609134 B/op	  199810 allocs/op
+BenchmarkParallelScanProject_ScanBig_Serial-10            	      75	  15695853 ns/op	11609143 B/op	  199810 allocs/op
+BenchmarkParallelScanProject_ScanFilterBig_Parallel       	      48	  23360182 ns/op	15261193 B/op	  299842 allocs/op
+BenchmarkParallelScanProject_ScanFilterBig_Parallel-4     	      57	  21268140 ns/op	15261131 B/op	  299841 allocs/op
+BenchmarkParallelScanProject_ScanFilterBig_Parallel-10    	      55	  21790373 ns/op	15261147 B/op	  299841 allocs/op
+BenchmarkParallelScanProject_ScanFilterBig_Serial         	      48	  24559340 ns/op	15261193 B/op	  299842 allocs/op
+BenchmarkParallelScanProject_ScanFilterBig_Serial-4       	      48	  21247424 ns/op	15261197 B/op	  299842 allocs/op
+BenchmarkParallelScanProject_ScanFilterBig_Serial-10      	      55	  21065270 ns/op	15261144 B/op	  299841 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/cypher	69.102s
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkParallelAggregate_MinBig_Parallel                	      58	  60436309 ns/op	83504347 B/op	 1203780 allocs/op
+BenchmarkParallelAggregate_MinBig_Parallel-4              	      52	  20596155 ns/op	83513892 B/op	 1203819 allocs/op
+BenchmarkParallelAggregate_MinBig_Parallel-10             	      62	  17626418 ns/op	83518741 B/op	 1203869 allocs/op
+BenchmarkParallelAggregate_MinBig_Serial                  	      54	  19458694 ns/op	10072181 B/op	  199838 allocs/op
+BenchmarkParallelAggregate_MinBig_Serial-4                	      73	  16375525 ns/op	10072099 B/op	  199837 allocs/op
+BenchmarkParallelAggregate_MinBig_Serial-10               	      69	  17085581 ns/op	10072114 B/op	  199837 allocs/op
+BenchmarkParallelAggregate_GroupMinBig_Parallel           	      33	 117448299 ns/op	161993982 B/op	 2404606 allocs/op
+BenchmarkParallelAggregate_GroupMinBig_Parallel-4         	      28	  38629402 ns/op	162062527 B/op	 2405576 allocs/op
+BenchmarkParallelAggregate_GroupMinBig_Parallel-10        	      32	  33010882 ns/op	162185235 B/op	 2407485 allocs/op
+BenchmarkParallelAggregate_GroupMinBig_Serial             	      12	 119047122 ns/op	163597354 B/op	 2399347 allocs/op
+BenchmarkParallelAggregate_GroupMinBig_Serial-4           	      12	  91885764 ns/op	163597400 B/op	 2399347 allocs/op
+BenchmarkParallelAggregate_GroupMinBig_Serial-10          	      12	  93757875 ns/op	163597420 B/op	 2399347 allocs/op
+BenchmarkParallelLabelScan_LabelledProject_Parallel       	      58	  70924034 ns/op	66234618 B/op	  806353 allocs/op
+BenchmarkParallelLabelScan_LabelledProject_Parallel-4     	      51	  22901094 ns/op	69229907 B/op	  806411 allocs/op
+BenchmarkParallelLabelScan_LabelledProject_Parallel-10    	      57	  18389082 ns/op	66696729 B/op	  806490 allocs/op
+BenchmarkParallelLabelScan_LabelledProject_Serial         	      28	  39446275 ns/op	 9664020 B/op	  799029 allocs/op
+BenchmarkParallelLabelScan_LabelledProject_Serial-4       	      33	  36038985 ns/op	 9615125 B/op	  799026 allocs/op
+BenchmarkParallelLabelScan_LabelledProject_Serial-10      	      28	  37145696 ns/op	 9615443 B/op	  799028 allocs/op
+BenchmarkParallelScan_CountBig_Parallel                   	     462	   2479996 ns/op	 8381818 B/op	      64 allocs/op
+BenchmarkParallelScan_CountBig_Parallel-4                 	     746	   1556889 ns/op	 8382631 B/op	      76 allocs/op
+BenchmarkParallelScan_CountBig_Parallel-10                	     738	   1609288 ns/op	 8384553 B/op	     103 allocs/op
+BenchmarkParallelScan_CountBig_Serial                     	  683918	      1698 ns/op	    2024 B/op	      18 allocs/op
+BenchmarkParallelScan_CountBig_Serial-4                   	  924741	      1258 ns/op	    2024 B/op	      18 allocs/op
+BenchmarkParallelScan_CountBig_Serial-10                  	  873536	      1281 ns/op	    2024 B/op	      18 allocs/op
+BenchmarkParallelScanProject_ScanBig_Parallel             	      58	  65647482 ns/op	64653286 B/op	  607377 allocs/op
+BenchmarkParallelScanProject_ScanBig_Parallel-4           	      54	  22965366 ns/op	67296260 B/op	  607438 allocs/op
+BenchmarkParallelScanProject_ScanBig_Parallel-10          	      56	  18496304 ns/op	65231225 B/op	  607523 allocs/op
+BenchmarkParallelScanProject_ScanBig_Serial               	      62	  18316195 ns/op	11609175 B/op	  199811 allocs/op
+BenchmarkParallelScanProject_ScanBig_Serial-4             	      78	  15060879 ns/op	11609137 B/op	  199810 allocs/op
+BenchmarkParallelScanProject_ScanBig_Serial-10            	      75	  15746569 ns/op	11609142 B/op	  199810 allocs/op
+BenchmarkParallelScanProject_ScanFilterBig_Parallel       	      46	  22871782 ns/op	15261213 B/op	  299842 allocs/op
+BenchmarkParallelScanProject_ScanFilterBig_Parallel-4     	      50	  20827731 ns/op	15261183 B/op	  299841 allocs/op
+BenchmarkParallelScanProject_ScanFilterBig_Parallel-10    	      46	  21797735 ns/op	15261215 B/op	  299842 allocs/op
+BenchmarkParallelScanProject_ScanFilterBig_Serial         	      44	  23956114 ns/op	15261233 B/op	  299842 allocs/op
+BenchmarkParallelScanProject_ScanFilterBig_Serial-4       	      57	  20604613 ns/op	15261137 B/op	  299841 allocs/op
+BenchmarkParallelScanProject_ScanFilterBig_Serial-10      	      48	  21927800 ns/op	15261196 B/op	  299842 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/cypher	68.884s

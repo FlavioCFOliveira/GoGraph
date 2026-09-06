@@ -1,0 +1,59 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/exec
+cpu: Apple M4
+                                                                      │ before.txt  │             after.txt             │
+                                                                      │   sec/op    │   sec/op     vs base              │
+ExpandFilter_Columnar-10                                                2.190m ± 1%   2.146m ± 1%  -2.00% (p=0.010 n=8)
+ExpandFilter_RowMode-10                                                 1.828m ± 2%   1.827m ± 2%       ~ (p=0.645 n=8)
+ExpandDir_InVsOut_Baseline/OUT_deg1_sources-10                          141.1µ ± 3%   141.1µ ± 1%       ~ (p=0.981 n=8)
+ExpandDir_InVsOut_Baseline/IN_deg1_sources-10                           92.57µ ± 1%   92.06µ ± 2%       ~ (p=0.279 n=8)
+ExpandIn_PerEdge_vs_SourceOutdegree/K=16/one_in_edge-10                 184.8n ± 1%   185.7n ± 1%       ~ (p=0.110 n=8)
+ExpandIn_PerEdge_vs_SourceOutdegree/K=256/one_in_edge-10                197.7n ± 2%   196.8n ± 1%       ~ (p=0.699 n=8)
+ExpandIn_PerEdge_vs_SourceOutdegree/K=4096/one_in_edge-10               200.7n ± 1%   200.7n ± 1%       ~ (p=0.820 n=8)
+ExpandIn_PerEdge_vs_SourceOutdegree/K=65536/one_in_edge-10              205.0n ± 2%   202.9n ± 2%       ~ (p=0.398 n=8)
+ExpandIn_TypeFiltered_vs_SourceOutdegree/K=16/one_in_edge_typed-10      648.4n ± 2%   652.2n ± 2%       ~ (p=0.523 n=8)
+ExpandIn_TypeFiltered_vs_SourceOutdegree/K=256/one_in_edge_typed-10     5.360µ ± 2%   5.322µ ± 2%       ~ (p=0.427 n=8)
+ExpandIn_TypeFiltered_vs_SourceOutdegree/K=4096/one_in_edge_typed-10    80.49µ ± 1%   80.20µ ± 1%       ~ (p=0.130 n=8)
+ExpandIn_TypeFiltered_vs_SourceOutdegree/K=65536/one_in_edge_typed-10   1.203m ± 1%   1.205m ± 0%       ~ (p=0.328 n=8)
+ExpandOut_PerEdge_SingleSource/K=4096-10                                79.13µ ± 3%   77.28µ ± 1%  -2.33% (p=0.050 n=8)
+ExpandOut_PerEdge_SingleSource/K=65536-10                               1.268m ± 1%   1.248m ± 2%       ~ (p=0.105 n=8)
+geomean                                                                 20.70µ        20.59µ       -0.56%
+
+                                                                      │  before.txt   │               after.txt               │
+                                                                      │     B/op      │     B/op       vs base                │
+ExpandFilter_Columnar-10                                                 290.8Ki ± 0%    290.8Ki ± 0%       ~ (p=0.988 n=8)
+ExpandFilter_RowMode-10                                                  1.428Mi ± 0%    1.428Mi ± 0%       ~ (p=0.629 n=8)
+ExpandDir_InVsOut_Baseline/OUT_deg1_sources-10                           156.2Ki ± 0%    156.2Ki ± 0%       ~ (p=0.636 n=8)
+ExpandDir_InVsOut_Baseline/IN_deg1_sources-10                            60.21Ki ± 0%    60.21Ki ± 0%       ~ (p=1.000 n=8) ¹
+ExpandIn_PerEdge_vs_SourceOutdegree/K=16/one_in_edge-10                    208.0 ± 0%      208.0 ± 0%       ~ (p=1.000 n=8) ¹
+ExpandIn_PerEdge_vs_SourceOutdegree/K=256/one_in_edge-10                   216.0 ± 0%      216.0 ± 0%       ~ (p=1.000 n=8) ¹
+ExpandIn_PerEdge_vs_SourceOutdegree/K=4096/one_in_edge-10                  224.0 ± 0%      224.0 ± 0%       ~ (p=1.000 n=8) ¹
+ExpandIn_PerEdge_vs_SourceOutdegree/K=65536/one_in_edge-10                 224.0 ± 0%      224.0 ± 0%       ~ (p=1.000 n=8) ¹
+ExpandIn_TypeFiltered_vs_SourceOutdegree/K=16/one_in_edge_typed-10       1.461Ki ± 0%    1.461Ki ± 0%       ~ (p=1.000 n=8) ¹
+ExpandIn_TypeFiltered_vs_SourceOutdegree/K=256/one_in_edge_typed-10      17.83Ki ± 0%    17.83Ki ± 0%       ~ (p=1.000 n=8) ¹
+ExpandIn_TypeFiltered_vs_SourceOutdegree/K=4096/one_in_edge_typed-10     285.6Ki ± 0%    285.6Ki ± 0%       ~ (p=0.467 n=8)
+ExpandIn_TypeFiltered_vs_SourceOutdegree/K=65536/one_in_edge_typed-10    4.341Mi ± 0%    4.341Mi ± 0%       ~ (p=0.088 n=8)
+ExpandOut_PerEdge_SingleSource/K=4096-10                                 60.21Ki ± 0%    60.21Ki ± 0%       ~ (p=1.000 n=8) ¹
+ExpandOut_PerEdge_SingleSource/K=65536-10                               1020.2Ki ± 0%   1020.2Ki ± 0%       ~ (p=0.991 n=8)
+geomean                                                                  23.60Ki         23.60Ki       -0.00%
+¹ all samples are equal
+
+                                                                      │ before.txt  │              after.txt              │
+                                                                      │  allocs/op  │  allocs/op   vs base                │
+ExpandFilter_Columnar-10                                                 26.00 ± 0%    26.00 ± 0%       ~ (p=1.000 n=8) ¹
+ExpandFilter_RowMode-10                                                 181.1k ± 0%   181.1k ± 0%       ~ (p=1.000 n=8) ¹
+ExpandDir_InVsOut_Baseline/OUT_deg1_sources-10                          11.78k ± 0%   11.78k ± 0%       ~ (p=1.000 n=8) ¹
+ExpandDir_InVsOut_Baseline/IN_deg1_sources-10                           7.686k ± 0%   7.686k ± 0%       ~ (p=1.000 n=8) ¹
+ExpandIn_PerEdge_vs_SourceOutdegree/K=16/one_in_edge-10                  5.000 ± 0%    5.000 ± 0%       ~ (p=1.000 n=8) ¹
+ExpandIn_PerEdge_vs_SourceOutdegree/K=256/one_in_edge-10                 6.000 ± 0%    6.000 ± 0%       ~ (p=1.000 n=8) ¹
+ExpandIn_PerEdge_vs_SourceOutdegree/K=4096/one_in_edge-10                7.000 ± 0%    7.000 ± 0%       ~ (p=1.000 n=8) ¹
+ExpandIn_PerEdge_vs_SourceOutdegree/K=65536/one_in_edge-10               7.000 ± 0%    7.000 ± 0%       ~ (p=1.000 n=8) ¹
+ExpandIn_TypeFiltered_vs_SourceOutdegree/K=16/one_in_edge_typed-10       12.00 ± 0%    12.00 ± 0%       ~ (p=1.000 n=8) ¹
+ExpandIn_TypeFiltered_vs_SourceOutdegree/K=256/one_in_edge_typed-10      13.00 ± 0%    13.00 ± 0%       ~ (p=1.000 n=8) ¹
+ExpandIn_TypeFiltered_vs_SourceOutdegree/K=4096/one_in_edge_typed-10     28.00 ± 0%    28.00 ± 0%       ~ (p=1.000 n=8) ¹
+ExpandIn_TypeFiltered_vs_SourceOutdegree/K=65536/one_in_edge_typed-10    268.0 ± 0%    268.0 ± 0%       ~ (p=1.000 n=8) ¹
+ExpandOut_PerEdge_SingleSource/K=4096-10                                7.686k ± 0%   7.686k ± 0%       ~ (p=1.000 n=8) ¹
+ExpandOut_PerEdge_SingleSource/K=65536-10                               130.6k ± 0%   130.6k ± 0%       ~ (p=1.000 n=8) ¹
+geomean                                                                  222.7         222.7       +0.00%
+¹ all samples are equal

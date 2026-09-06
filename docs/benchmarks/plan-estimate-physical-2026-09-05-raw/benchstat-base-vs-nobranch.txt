@@ -1,0 +1,23 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+                          │ docs/benchmarks/plan-estimate-physical-2026-09-05-raw/r2_A_base.txt │ docs/benchmarks/plan-estimate-physical-2026-09-05-raw/r2_C_nobranch.txt │
+                          │                               sec/op                                │                      sec/op                       vs base               │
+PlanReusePhases/3build-10                                                           582.2n ± 1%                                        585.8n ± 1%  +0.60% (p=0.003 n=10)
+PlanReusePhases/4full-10                                                            975.2n ± 1%                                        988.9n ± 0%  +1.40% (p=0.000 n=10)
+geomean                                                                             753.5n                                             761.1n       +1.00%
+
+                          │ docs/benchmarks/plan-estimate-physical-2026-09-05-raw/r2_A_base.txt │ docs/benchmarks/plan-estimate-physical-2026-09-05-raw/r2_C_nobranch.txt │
+                          │                                B/op                                 │                      B/op                       vs base                 │
+PlanReusePhases/3build-10                                                          1.469Ki ± 0%                                     1.469Ki ± 0%       ~ (p=1.000 n=10) ¹
+PlanReusePhases/4full-10                                                           2.336Ki ± 0%                                     2.336Ki ± 0%       ~ (p=1.000 n=10) ¹
+geomean                                                                            1.852Ki                                          1.852Ki       +0.00%
+¹ all samples are equal
+
+                          │ docs/benchmarks/plan-estimate-physical-2026-09-05-raw/r2_A_base.txt │ docs/benchmarks/plan-estimate-physical-2026-09-05-raw/r2_C_nobranch.txt │
+                          │                              allocs/op                              │                   allocs/op                     vs base                 │
+PlanReusePhases/3build-10                                                            15.00 ± 0%                                       15.00 ± 0%       ~ (p=1.000 n=10) ¹
+PlanReusePhases/4full-10                                                             21.00 ± 0%                                       21.00 ± 0%       ~ (p=1.000 n=10) ¹
+geomean                                                                              17.75                                            17.75       +0.00%
+¹ all samples are equal

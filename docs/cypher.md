@@ -1312,6 +1312,20 @@ types (`ColumnarHashJoin`, `ParallelScanProject`, …) rather than being hidden
 behind their row-mode equivalents. This is the surface to reach for when a query
 is slow.
 
+Each operator the planner estimated also carries **that estimate and its
+provenance**, in the same vocabulary `ExplainLogical` uses:
+
+```
+Project
+└─ Filter (est. rows=3 exact)
+   └─ NodeByLabelScan [Person] (est. rows=1000 exact)
+```
+
+The `est.` prefix is what stops the figure being read as a measurement — `Explain`
+executes nothing, so there is none. An operator the planner had no estimate for
+prints **nothing**, never a fabricated number: `Project` above is not estimated
+because no logical node the planner estimates lowers to it.
+
 A **writing** statement renders the logical plan and says so on its first line: a
 write's operators bind to an open transaction, so there is no physical tree to
 walk outside one.
@@ -1327,28 +1341,53 @@ ProduceResults
    └─ NodeByLabelScan [n:Person] (est. rows=0, exact)
 ```
 
-Estimates belong to logical nodes and have no counterpart on a built operator, so
-they are visible only here. Reach for this when a plan looks wrong and you suspect
-the estimate that drove it.
+Estimates are DERIVED for logical nodes, and this is the surface that shows them
+all — with the full provenance tag and, for a histogram range estimate, the
+certified error term. The physical surfaces carry the same estimate for every
+operator a logical node's lowering produced (see `Engine.Explain` above and
+`Engine.Profile` below); what they cannot show is an estimate for a node that has
+no operator of its own, and what they do not print is the provenance in words.
+
+Two shapes have an estimate here and none on the physical plan, because the
+operator they describe is **synthesised during the build and has no logical node
+at all**: the `NodeByIndexRangeScan` a range seek substitutes for a scan child, and
+the re-anchored scan the minimum-cardinality multi-label rewrite chooses. This
+surface synthesises a line for both; a physical plan has nothing to attach an
+estimate to, and renders `-`.
+
+Reach for this when a plan looks wrong and you suspect the estimate that drove it,
+or when the provenance or the error term is what you need.
 
 ### `Engine.Profile` — what it cost
 
 Executes the query and returns the physical plan annotated with each operator's
-emitted rows, its logical storage accesses (`dbhits`), and the time attributed to
-it:
+emitted rows, its logical storage accesses (`dbhits`), the rows it read and then
+discarded (`removed`), and the time attributed to it:
 
 ```
-ColumnarProject (rows=1, dbhits=0, time=17µs)
+ColumnarProject (rows=1, dbhits=?, time=17µs)
 └─ NodeByIndexSeek [seek="n7"] (rows=1, dbhits=1, time=0s)
 
-ColumnarProject (rows=8, dbhits=0, time=25µs)
-└─ ColumnarFilter (rows=8, dbhits=0, time=24µs)
-   └─ NodeByLabelScan [P] (rows=300, dbhits=300, time=2µs)
+ColumnarProject (rows=8, dbhits=?, time=25µs)
+└─ ColumnarFilter (rows=8, dbhits=?, removed=292, time=24µs)
+   └─ NodeByLabelScan [P] (est. rows=300 exact, rows=300, dbhits=300, time=2µs)
 ```
 
-Those two plans are the reason `dbhits` is reported. They return a comparable
-handful of rows over the same 300-node graph, and only the access counts show that
-the second read every record in the label.
+The planner's **estimate leads the parenthesis**, immediately before the row count
+it is meant to be read against — so a prediction and its outcome sit side by side
+on one line, which is what tells you whether the plan was chosen on a good guess.
+It is qualified with `est.` and tagged with its provenance so it cannot be mistaken
+for one of the measurements that follow it, and it is **omitted entirely** for an
+operator the planner did not estimate. PostgreSQL does the same thing with the
+opposite marker, printing its estimate unqualified and prefixing the measured group
+with the word `actual`.
+
+Those two plans are the reason `dbhits` and `removed` are reported. They return a
+comparable handful of rows over the same 300-node graph, and only those two figures
+show that the second read every record in the label and threw almost all of them
+away. `dbhits` says it from the storage side, on the operator that did the reading;
+`removed` says it from the reader's side, on the operator that did the discarding.
+Neither alone finishes the sentence.
 
 Times are **inclusive** of an operator's children, because a pipelined operator's
 `Next` pulls from them — subtract a node's children for its exclusive cost, as
@@ -1367,29 +1406,79 @@ builder installs only when asked, so an ordinary `Run` executes the same code as
 build in which profiling does not exist.
 
 > **What `dbhits` is, exactly.** Unlike `rows` and `time`, which are measured for
-> every operator, `dbhits` comes from one of three places, and the rendered figure
-> does not say which:
+> every operator, `dbhits` is one of four things. The cell says when it is not a
+> figure at all — it prints `?` — but a number does not say whether it was measured
+> or derived:
 >
-> - **Derived** — for a scan, an index seek or a single-hop expand, the figure IS
->   the `rows` figure. Those operators are marked internally as reading one record
->   per row they emit, so the count is taken at the operator boundary and needs no
->   counter threaded through any accessor. That is why `rows` and `dbhits` are
->   equal on every such line.
+> - **Derived** — for a scan or an index seek, the figure IS the `rows` figure.
+>   Those operators are marked internally as reading one record per row they emit —
+>   nothing inside them filters — so the count is taken at the operator boundary
+>   and needs no counter threaded through any accessor. That is why `rows` and
+>   `dbhits` are equal on every such line.
 > - **Measured** — a variable-length expansion (`-[*m..n]->`) reports the
 >   relationship slots its BFS actually read, from the counter its traversal budget
 >   already maintains. That number is not its row count and is usually far larger.
-> - **Zero** — every other operator. For a pure row transformer that is the honest
->   answer: it read no storage. For `shortestPath`, `allShortestPaths` and the
->   morsel-parallel leaves it is an **under-report** — they read storage and count
->   none of it. The parallel leaves say so in their own plan line
->   (`[parallel tier; db-hits not counted]`).
+>   A **single-hop expand** reports the same kind of figure: the adjacency slots it
+>   walked, whatever became of each one. So `-->` and `-[:KNOWS]->` over a node
+>   with 100 out-edges both report 100 db-hits, while emitting 100 rows and 1 row.
+>   Its counter is not a per-slot increment — the expansion cursors already advance
+>   one position per slot, so the count is recovered from them in O(1) per input
+>   row, never per slot.
 >
-> Two further gaps are worth knowing before you compare two plans:
+>   The **morsel-parallel leaves** measure too: each reports the node references its
+>   workers consumed, so the same query reports the same figure whether the planner
+>   put it above or below the parallel threshold. Their rows say nothing about it —
+>   a parallel aggregate emits one row per group, and a parallel count exactly one
+>   row, for a walk of every node. Their counter costs the scan nothing per record:
+>   a worker charges a whole morsel in one atomic add, never one per node.
 >
-> - A single-hop expand with a **relationship-type filter** walks every slot of the
->   source node's adjacency and counts only the slots it emitted. On a node with
->   100 out-edges of which one is `:KNOWS`, `-->` reports 100 db-hits and
->   `-[:KNOWS]->` reports 1, for the same 100-slot walk.
+>   **`shortestPath` and `allShortestPaths`** measure too, and their rows say even
+>   less about the walk: on a node with a 100-way fan of which one edge continues to
+>   the destination, `shortestPath` reports 101 db-hits for **one** row. Both count
+>   the adjacency slots every one of their searches read — the two-sided BFS, the
+>   forward-only search it falls back to, the two cycle searches, and the exhaustive
+>   search a `WHERE` over the path variable triggers — so the figure does not move on
+>   an internal choice you cannot see in the output. As for a single-hop expand, a
+>   slot the relationship-type filter rejects is counted: it had to be read before it
+>   could be judged. The charge is one add per adjacency **run**, never per slot;
+>   the loop's own bound is the charge.
+> - **A known `0`** — an operator that opens no access path at all: `Limit`, `Skip`,
+>   `Distinct`, `Eager`, `Union`, the aggregations, and the `Apply` family, whose
+>   own cost is entirely in the children the plan already shows. Each of these
+>   claims the zero explicitly in the engine, so the cell is a measurement.
+> - **`?` — not counted.** Nothing observed this operator's storage accesses, so
+>   the engine reports no figure rather than a `0` that would read as "touched
+>   nothing". It covers the count-store leaves, the two row-at-a-time operators that
+>   seek or intersect per outer row, and **every
+>   operator that evaluates one of your expressions** — `Filter`, `Project`, `Sort`,
+>   `Top`, `UNWIND`, the hash joins and procedure calls. The last group is the
+>   surprising one, and it is real: a GoGraph expression can walk the graph, so
+>   `WHERE (a)-[:T]->()` and `RETURN size([(a)-->(x) | 1])` read relationship
+>   records *inside* a `Filter` or a `Project`, with no operator in the plan for
+>   them. On a 100-way fan, the pattern-predicate form reports one db-hit for the
+>   whole plan where the equivalent `MATCH (a)-[:T]->(b)` reports 101.
+>
+> **Reading a total.** `PROFILE`'s `Total DbHits` sums only the cells that are
+> figures. When any cell is `?` the total renders as `N + ?` — a **floor**, not the
+> query's whole storage cost. A plain number means every operator reported.
+>
+> Three further properties are worth knowing before you compare two plans:
+>
+> - **A morsel-parallel leaf is one line for a whole phase.** `ParallelScanProject`,
+>   `ParallelAggregateScan` and `ParallelCountScan` fuse the scan with the filter and
+>   the projection (or the aggregate) and run them on worker goroutines. Nothing is
+>   rendered below the line — its plan detail says so — and its rows, time and
+>   db-hits are all totals for the whole phase. There is no per-worker breakdown:
+>   PostgreSQL prints one (`Worker N:` sub-entries under `ANALYZE, VERBOSE`) and
+>   divides its headline `actual rows` by the participant count, so its parallel node
+>   reports a per-worker average; GoGraph sums, as Neo4j does, because the figure
+>   exists so you can compare the parallel plan against the serial one and an average
+>   is not comparable with anything.
+> - An **expand into an already-bound destination** — the hop that closes a cycle,
+>   as in `MATCH (a)-[:K]->(b)-[:K]->(a)` — narrows its cursor to that
+>   destination's block by binary search instead of walking the run. It reports the
+>   block, not the run, because the slots it stepped over were never read. That is
+>   deliberate: charging them would hide the optimisation the seek exists to make.
 > - **Property reads are never counted.** Neo4j charges a db-hit per property
 >   access, so its figures for a filter-heavy or projection-heavy plan are larger
 >   than GoGraph's, and the two are not comparable in absolute terms. The ratio
@@ -1404,6 +1493,59 @@ build in which profiling does not exist.
 > The full classification of every figure `EXPLAIN` and `PROFILE` print, with the
 > measurements behind each claim above, is in
 > [`explain-profile-honesty-audit-2026-09-03.md`](explain-profile-honesty-audit-2026-09-03.md).
+
+> **What `removed` is, exactly.** It is the number of candidate rows an operator
+> read and then **discarded because a predicate said no** — PostgreSQL's
+> `Rows Removed by Filter`, whose mechanism was read at `REL_17_STABLE` and whose
+> concept name GoGraph publishes verbatim on the Bolt wire as
+> `args.RowsRemovedByFilter`.
+>
+> Unlike `dbhits` it is never derived and never estimated: it is always a count of
+> decisions the operator took. Three families report it, and **every other operator
+> omits the cell entirely** rather than printing `0`:
+>
+> - `Filter` and `ColumnarFilter` count the rows their predicate rejected. NULL and
+>   FALSE both count, because both drop the row (openCypher 9 §4.1.3).
+> - `Expand`, `OptionalExpand` and the columnar expand count the adjacency slots
+>   they consumed and discarded — by the relationship-type filter, by
+>   cyphermorphism, by the undirected self-loop deduplication, or by the
+>   expand-into destination comparison. Two of those four are not "filters" in
+>   PostgreSQL's sense; the figure's contract here is "candidate rows read and
+>   discarded", which is the question a reader of an expensive expansion is asking.
+>
+> **A blank cell and a `?` cell mean different things.** A `?` under `DbHits` is an
+> admission — the operator reads storage and nobody counted it. An absent `removed=`
+> (or a blank `Removed` cell in the table) is a *property* of the operator: it
+> removes no rows, so there is no figure. A scan and an index seek are always in the
+> second category.
+>
+> **A `removed=0` is a measurement, and a useful one.** GoGraph prints it where
+> PostgreSQL suppresses it (`explain.c:3637`, "they're not interesting enough"),
+> because a filter that rejected nothing is exactly what you want to see above an
+> index that answered the predicate on its own:
+>
+> ```
+> Filter (rows=3, dbhits=?, removed=997, time=239µs)
+> └─ NodeByLabelScan [P] (est. rows=1000 exact, rows=1000, dbhits=1000, time=22µs)
+>
+> Filter (rows=3, dbhits=?, removed=0, time=1µs)
+> └─ NodeByIndexRangeScan [range=7..7] (rows=3, dbhits=3, time=0s)
+> ```
+>
+> Both plans answer with the same three rows. The first read 1000 records to do it.
+>
+> **The figure is a lifetime total**, summed across every re-`Init` an operator sees
+> under an `Apply` — the same convention `rows` and `dbhits` follow. PostgreSQL
+> divides its figure by `nloops` and reports a per-loop average; GoGraph prints no
+> `loops` column, so dividing would produce a number incomparable with the `rows`
+> beside it.
+>
+> **There is no plan-wide total.** `PROFILE`'s table leaves the `Removed` column's
+> `Total` cell blank. `DbHits` can be totalled because every operator is classified,
+> so the sum is either complete or explicitly `N + ?`; rejection is reported by three
+> families only, and other operators discard rows for reasons this figure would
+> misdescribe — `LIMIT` on a count, `DISTINCT` by merging, `SemiApply` on an inner
+> plan's emptiness. A summed cell would be a floor presented as a total.
 
 ### `Engine.ExplainTable` and `Engine.ProfileTable` — the same, as a table
 
@@ -1424,21 +1566,63 @@ not.
 ```
 
 ```
-+--------------------------------+------+--------+-----------+
-| Operator                       | Rows | DbHits | Time (ms) |
-+--------------------------------+------+--------+-----------+
-| Project                        |    1 |      0 |     0.000 |
-| └─ NodeByIndexSeek [seek="p3"] |    1 |      1 |     0.000 |
-+--------------------------------+------+--------+-----------+
-| Total                          |    2 |      1 |     0.000 |
-+--------------------------------+------+--------+-----------+
++--------------------------------+----------+------+--------+-----------+
+| Operator                       | Est.Rows | Rows | DbHits | Time (ms) |
++--------------------------------+----------+------+--------+-----------+
+| Project                        |        - |    1 |      ? |     0.000 |
+| └─ NodeByIndexSeek [seek="p3"] |        1 |    1 |      1 |     0.000 |
++--------------------------------+----------+------+--------+-----------+
+| Total                          |          |    2 |  1 + ? |     0.000 |
++--------------------------------+----------+------+--------+-----------+
 ```
+
+`ProfileTable`'s **`Est.Rows` column sits immediately left of `Rows`**, so the
+planner's prediction and the measured outcome are read as a pair on one line. That
+is the point of the column and the reason for its position: a plan chosen on a bad
+guess is otherwise indistinguishable from one chosen on a good guess. Both
+incumbents arrange it the same way — Neo4j puts `Estimated Rows` immediately before
+`Rows` in one `PROFILE` table, and PostgreSQL prints `(cost=… rows=…)` and
+`(actual … rows=…)` on one line.
+
+Here is the same pairing when the estimate is **wrong**, which is the case the
+column exists for. The value queried falls outside the exact 32-entry
+most-common-value list, so the planner falls back to the 1/NDV average and
+under-predicts by an order of magnitude:
+
+```
++--------------------------------+----------+------+----------+---------+-----------+
+| Operator                       | Est.Rows | Rows |   DbHits | Removed | Time (ms) |
++--------------------------------+----------+------+----------+---------+-----------+
+| Project                        |        - |   90 |        ? |         |     0.834 |
+| └─ Filter                      |       ~9 |   90 |        ? |    3600 |     0.812 |
+|    └─ NodeByLabelScan [Person] |     3690 | 3690 |     3690 |         |     0.080 |
++--------------------------------+----------+------+----------+---------+-----------+
+| Total                          |          | 3870 | 3690 + ? |         |     0.834 |
++--------------------------------+----------+------+----------+---------+-----------+
+```
+
+Two columns **appear only when some operator in the plan carries their figure**, so
+a plan with no filter, no expansion and nothing estimated renders exactly the four
+columns `Operator`/`Rows`/`DbHits`/`Time (ms)`:
+
+- **`Est.Rows`** — present when at least one operator carries an estimate. An
+  operator with none renders `-`, and the `Total` cell is blank: estimates are
+  per-operator predictions, and a sum over the few operators that have one would be
+  a floor presented as a total.
+- **`Removed`** — present when at least one operator removes rows. An operator that
+  removes none leaves its cell **blank**, and the `Total` cell is blank too — no
+  plan-wide total is claimed.
+
+Note that a blank `Est.Rows` cell and a `-` are different: only the `Total` row is
+blank, because it claims nothing; a data row always carries either a figure or the
+`-` that says there is none.
 
 Each is the **same walk** as its tree counterpart, not a second derivation of the
 plan: `ExplainTable` and `ExplainLogical` share one traversal that performs the
-index-seek substitutions, applies the count-store-gated reorderings and computes
-the estimates, and `ProfileTable` and `Profile` render one captured measurement
-tree from one execution. Neither pair can disagree about which access path runs.
+index-seek substitutions, applies the reorderings — gated by the count store and,
+since #2766, by the property statistics — and computes the estimates, and
+`ProfileTable` and `Profile` render one captured measurement tree from one
+execution. Neither pair can disagree about which access path runs.
 
 Two things the table shows that the tree does not, and two it does not show:
 
@@ -1449,11 +1633,19 @@ Two things the table shows that the tree does not, and two it does not show:
   error term. `Est.Rows` carries the number and one marker: a bare `40` is an
   exact maintained count, `~40` is a derived (statistics or heuristic) figure, and
   `-` means no estimate is available — either none is derivable for that operator
-  shape, or the statistic behind it is absent or stale. Reach for
-  `ExplainLogical` when the provenance is what you need.
-- `Est.Rows` is an **estimate throughout**: `ExplainTable` executes nothing, so
-  even an "exact" cell states what the operator *would* read, never what it did.
-  `ProfileTable`'s `Rows` is the measured figure.
+  shape, or the statistic behind it is absent or stale. A genuine estimate of
+  **zero renders `0`**, never `-`: an operator the planner expects to emit no rows
+  has a real estimate, and usually the interesting one. Reach for `ExplainLogical`
+  when the provenance is what you need.
+- `Est.Rows` is an **estimate in both tables**: even an "exact" cell states what
+  the operator *would* read, never what it did. In `ExplainTable` nothing is
+  executed at all; in `ProfileTable` the measured figure is `Rows`, in the column
+  immediately to its right.
+- The two tables' `Est.Rows` columns describe **different plans** — `ExplainTable`
+  the logical one, `ProfileTable` the physical one — and agree, node for node,
+  wherever a logical node has an operator of its own. They diverge in one
+  direction only: the two build-synthesised leaves named under `ExplainLogical`
+  above have an estimate in the logical table and `-` in the physical one.
 
 `ProfileTable`'s `Total` line needs reading with care, because two of its three
 cells are easy to mistake:
@@ -1461,10 +1653,13 @@ cells are easy to mistake:
 - **`Rows`** is every operator's emitted rows added together — a cost measure, not
   the result's row count. The result's row count is the **root** operator's
   `Rows`, on the table's first data line.
-- **`DbHits`** is the sum of every operator's `DbHits` cell, so it inherits every
-  qualification above: it is a **lower bound** on the query's storage-record reads,
-  not a total, whenever the plan contains a type-filtered expand, a
-  `shortestPath`, or a morsel-parallel leaf.
+- **`DbHits`** is the sum of the operator cells that are FIGURES. A cell reading
+  `?` was never counted and contributes nothing, and the Total then renders as
+  `N + ?` to say so. Read `N + ?` as a **lower bound** on the query's
+  storage-record reads. Even a plain `N` remains a lower bound, because property
+  reads are not counted for any operator — see the note above.
+- **`Removed`** has no `Total` cell at all — see the note above. Read the column
+  operator by operator.
 - **`Time (ms)`** is the whole query's elapsed time, because the root operator's
   time already includes every child's.
 
@@ -1493,7 +1688,7 @@ The two are syntactically identical and differ in **execution**:
   prefixed with `EXPLAIN` — `EXPLAIN MATCH (n) DETACH DELETE n` — leaves the
   graph untouched; the prefix diverts before any transaction is opened.
 - **`PROFILE` executes the statement.** It returns the query's real rows, plus
-  each operator's measured rows, db-hits and time.
+  each operator's measured rows, db-hits, rows removed by its filter, and time.
 
 #### Where the plan comes back
 
@@ -1510,6 +1705,22 @@ the shape Neo4j returns, and it is the reason for it: a driver consuming
 `EXPLAIN MATCH (n) RETURN n` expects the query's own column signature, and the
 plan where its `ResultSummary` looks for one. Returning the rendered plan as a
 one-column result set would have made it invisible to every driver.
+
+On Bolt, each plan node's `args` map carries what the node has to say beyond its
+name:
+
+| `args` key | Present when | Meaning |
+|---|---|---|
+| `Details` | the operator has an inline detail | the scanned label, the expanded pattern |
+| `EstimatedRows` | the planner estimated this operator | the predicted row count, on `plan` and on `profile` alike — an `EXPLAIN` ran nothing, so this is the only number it has |
+| `EstimatedRowsSource` | `EstimatedRows` is present | `exact`, `stats` or `heuristic` — the provenance, which no reference implementation publishes |
+| `RowsRemovedByFilter` | the operator reports rejections | the candidate rows it read and discarded |
+
+Every one of them is **omitted rather than zeroed** when the figure does not exist,
+which is the same rule that omits `dbHits` for an operator whose accesses nobody
+counted and omits the page-cache keys GoGraph does not measure. `EstimatedRows` is
+`EstimatedRows` because that is Neo4j's own argument name, so a driver written
+against Neo4j finds it where it already looks.
 
 Render a captured tree with `exec.RenderPlanNode`, which prints exactly what
 `Engine.Explain` prints for the same statement — the prefix and the Go APIs share

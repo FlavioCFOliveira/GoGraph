@@ -78,6 +78,7 @@ import (
 	"fmt"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -150,16 +151,32 @@ const planPushdown = "Project\n└─ LabelCountScan"
 // n = 2 000). A control that had stopped visiting every node WOULD be a lost gate,
 // and both the constant-time ratchet and the boxing differential would catch it; a
 // control that visits every node for fewer allocations is just a cheaper control.
-func scanPlanFor(label string) string {
+// The `(est. rows=N exact)` suffix on the scan leaf arrived with rmp #2765, which
+// attached the planner's cardinality estimate to the PHYSICAL plan so PROFILE can
+// print it beside the measured row count. Engine.Explain renders the same tree, so
+// the annotation shows here too. It is not a measurement and cannot be read as one:
+// `est.` marks it, and `exact` is its provenance — a maintained live label count,
+// which for these fixtures is n by construction. The plan SHAPE is unchanged, which
+// is what this gate is for; only the annotation is new (rmp #2768).
+func scanPlanFor(label string, n int) string {
 	return "Project\n" +
 		"└─ CountRows\n" +
 		"   └─ Filter\n" +
-		"      └─ NodeByLabelScan [" + label + "]"
+		"      └─ NodeByLabelScan [" + label + "] " + estRowsExact(n)
 }
 
-// planScan is scanPlanFor(pushdownLabel), kept in step with the same constants
-// in cypher/label_count_pushdown_gate_test.go.
-var planScan = scanPlanFor(pushdownLabel)
+// estRowsExact renders the estimate annotation rmp #2765 attaches to a scan leaf
+// whose cardinality is a maintained exact count. It is spelled once so a change to
+// the annotation's format fails every arm of this file together rather than one.
+func estRowsExact(n int) string {
+	return "(est. rows=" + strconv.Itoa(n) + " exact)"
+}
+
+// planScanFor is scanPlanFor(pushdownLabel, n), kept in step with the same
+// constants in cypher/label_count_pushdown_gate_test.go. It became a function of n
+// when the estimate annotation arrived: the plan text now depends on the fixture
+// size, so a package-level constant could no longer express it.
+func planScanFor(n int) string { return scanPlanFor(pushdownLabel, n) }
 
 // columnarScanPlanFor renders the COLUMNAR plan a recognised comparison predicate
 // compiles to since rmp #2655 — the chain that reads the node id as a raw int64 and
@@ -178,11 +195,11 @@ var planScan = scanPlanFor(pushdownLabel)
 // read off the plan text: allocs/op is 90 at n = 1 000 and 66 at n = 2 000 — flat,
 // slope -0.02 per row — against the row arm's +1.0000 per row. ColumnarFilter is
 // where the raw int64 read happens, and it is still here.
-func columnarScanPlanFor(label string) string {
+func columnarScanPlanFor(label string, n int) string {
 	return "Project\n" +
 		"└─ CountRows\n" +
 		"   └─ ColumnarFilter\n" +
-		"      └─ NodeByLabelScan [" + label + "]"
+		"      └─ NodeByLabelScan [" + label + "] " + estRowsExact(n)
 }
 
 // TestLabelCountScanPredicateModes pins the fact that made this file change its
@@ -207,8 +224,8 @@ func columnarScanPlanFor(label string) string {
 func TestLabelCountScanPredicateModes(t *testing.T) {
 	const n = 1_000
 	e := pushdownEngine(t, n)
-	assertPlan(t, e, scanQuery, scanPlanFor(pushdownLabel), n)
-	assertPlan(t, e, columnarScanQuery, columnarScanPlanFor(pushdownLabel), n)
+	assertPlan(t, e, scanQuery, scanPlanFor(pushdownLabel, n), n)
+	assertPlan(t, e, columnarScanQuery, columnarScanPlanFor(pushdownLabel, n), n)
 	if got := runPushdownOnce(t, e, columnarScanQuery); got != int64(n) {
 		t.Fatalf("%s returned %d, want %d — the two predicates must select the same rows",
 			columnarScanQuery, got, n)
@@ -268,7 +285,7 @@ func pushdownEngine(tb testing.TB, n int) *cypher.Engine {
 	}
 	e := cypher.NewEngineWithOptions(buildPushdownGraph(tb, n), cypher.EngineOptions{})
 	assertPlan(tb, e, pushdownQuery, planPushdown, n)
-	assertPlan(tb, e, scanQuery, planScan, n)
+	assertPlan(tb, e, scanQuery, planScanFor(n), n)
 	if got := runPushdownOnce(tb, e, pushdownQuery); got != int64(n) {
 		tb.Fatalf("n=%d: %s returned %d", n, pushdownQuery, got)
 	}
@@ -549,7 +566,7 @@ func BenchmarkLabelCountScanBoxing(b *testing.B) {
 	for _, n := range []int{200, 256, 300, 1_000, 2_000} {
 		b.Run(fmt.Sprintf("n=%06d", n), func(b *testing.B) {
 			e := pushdownEngine(b, n)
-			assertPlan(b, e, scanQuery, planScan, n)
+			assertPlan(b, e, scanQuery, planScanFor(n), n)
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
@@ -655,8 +672,8 @@ func TestLabelCountBoxingAttribution(t *testing.T) {
 		// A measurement on an unasserted plan is void, and a differential on two
 		// DIFFERENT plans is worse than void: it would attribute the plan
 		// difference to boxing.
-		assertPlan(t, fx, loQ, scanPlanFor(loLbl), rows)
-		assertPlan(t, fx, hiQ, scanPlanFor(hiLbl), rows)
+		assertPlan(t, fx, loQ, scanPlanFor(loLbl, rows), rows)
+		assertPlan(t, fx, hiQ, scanPlanFor(hiLbl, rows), rows)
 		if got := runPushdownOnce(t, fx, loQ); got != int64(rows) {
 			t.Fatalf("%s counted %d rows, want %d", loQ, got, rows)
 		}

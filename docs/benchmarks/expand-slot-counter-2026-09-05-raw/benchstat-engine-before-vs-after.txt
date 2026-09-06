@@ -1,0 +1,27 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+                            │ eng_before.txt │           eng_after.txt           │
+                            │     sec/op     │   sec/op     vs base              │
+ExpandInto_TriangleClose-10      146.9m ± 1%   146.8m ± 1%       ~ (p=0.505 n=8)
+ExpandInto_TwoCycleClose-10      6.949m ± 1%   6.949m ± 1%       ~ (p=0.878 n=8)
+ExpandInto_TriangleOpen-10        2.704 ± 1%    2.694 ± 1%       ~ (p=0.279 n=8)
+ExpandInto_TwoHopOpen-10         132.2m ± 2%   132.4m ± 2%       ~ (p=0.382 n=8)
+geomean                          138.2m        138.1m       -0.08%
+
+                            │ eng_before.txt │           eng_after.txt            │
+                            │      B/op      │     B/op      vs base              │
+ExpandInto_TriangleClose-10     24.54Mi ± 0%   24.54Mi ± 0%       ~ (p=0.645 n=8)
+ExpandInto_TwoCycleClose-10     1.496Mi ± 0%   1.496Mi ± 0%       ~ (p=0.665 n=8)
+ExpandInto_TriangleOpen-10      199.5Mi ± 0%   199.5Mi ± 0%       ~ (p=0.130 n=8)
+ExpandInto_TwoHopOpen-10        12.73Mi ± 0%   12.73Mi ± 0%       ~ (p=0.505 n=8)
+geomean                         17.48Mi        17.48Mi       -0.00%
+
+                            │ eng_before.txt │           eng_after.txt           │
+                            │   allocs/op    │  allocs/op   vs base              │
+ExpandInto_TriangleClose-10      2.038M ± 0%   2.038M ± 0%       ~ (p=0.239 n=8)
+ExpandInto_TwoCycleClose-10      123.4k ± 0%   123.4k ± 0%       ~ (p=1.000 n=8)
+ExpandInto_TriangleOpen-10       24.46M ± 0%   24.46M ± 0%       ~ (p=0.089 n=8)
+ExpandInto_TwoHopOpen-10         1.526M ± 0%   1.526M ± 0%       ~ (p=0.442 n=8)
+geomean                          1.751M        1.751M       +0.00%

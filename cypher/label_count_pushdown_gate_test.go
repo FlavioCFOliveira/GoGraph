@@ -124,14 +124,20 @@ func TestLabelCount_EngagesBelowAndAtThreshold(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Explain: %v", err)
 			}
-			if got := strings.TrimSpace(plan); got != lcPlanPushdown {
+			// Compared with the cardinality annotations stripped. This gate is about the
+			// SHAPE the label-count pushdown builds, and since rmp #2765 the physical
+			// rendering also carries the planner's estimate — which is the live label
+			// count and therefore differs at each of the three sizes this test runs.
+			// Baking n into the expected string would make the constants assert the
+			// estimate rather than the plan.
+			if got := stripEstimates(strings.TrimSpace(plan)); got != lcPlanPushdown {
 				t.Fatalf("plan at n=%d is\n%s\nwant\n%s", n, got, lcPlanPushdown)
 			}
 			ctlPlan, err := off.Explain(`MATCH (p:Item) RETURN count(p) AS c`, nil)
 			if err != nil {
 				t.Fatalf("Explain (control): %v", err)
 			}
-			if got := strings.TrimSpace(ctlPlan); got != lcPlanSerial {
+			if got := stripEstimates(strings.TrimSpace(ctlPlan)); got != lcPlanSerial {
 				t.Fatalf("control plan at n=%d is\n%s\nwant\n%s", n, got, lcPlanSerial)
 			}
 		})
