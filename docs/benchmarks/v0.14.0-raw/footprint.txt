@@ -1,0 +1,37 @@
+STORAGE / MEMORY FOOTPRINT — graph/index/count BenchmarkStoreFootprint
+================================================================================================================
+v0.13.0's report (§5.6) recorded footprint as UNMEASURED: the benchmark was NEW in
+v0.13.0 and had no v0.12.0 counterpart. It exists in BOTH trees now, so that named gap
+is closed here.
+
+The strongest evidence is the BUILD, not a number. The graph/index/count test binary is
+byte-identical across all three arms:
+  b4ad4b3357f20fb24cade83bbf8a0fe18f46ff5e54806503d95530e6ee8ac5df   (A == B == B2)
+The code under this benchmark did not change between v0.13.0 and v0.14.0, so its
+footprint cannot have changed. The interleaved run below is a consistency check on
+that, and doubles as a third same-code floor.
+
+CAVEAT ON THE METRIC. `B/store` is computed from runtime.MemStats, which is
+PROCESS-GLOBAL, divided by b.N. Under -test.cpu=1,8,64,256,1024 b.N changes, so the
+same binary reports 49984 / 107328 / 566080 / 2138945 / 8430413 B/store across the five
+levels. Those are one footprint over five different denominators, NOT five footprints.
+The figures below are therefore taken at the DEFAULT GOMAXPROCS only.
+
+benchmark: BenchmarkStoreFootprint-10   (n=6 interleaved rounds per arm, arm order rotated)
+
+metric            v0.13.0 (A)      v0.14.0 (B)               B2     A vs B    B vs B2   p(A,B)
+ns/op                   13709          13576.5          13578.5     -0.97%     +0.01%   0.6889
+B/store                123712           123712           123712     +0.00%     +0.00%   1.0000
+B/op                   123720           123720           123720     +0.00%     +0.00%   1.0000
+allocs/op                 581              581              581     +0.00%     +0.00%   1.0000
+
+Per-round samples, so the spread is visible rather than averaged away:
+  B/store    A   n=6  spread=±  0.00%  [123712.0, 123712.0, 123712.0, 123712.0, 123712.0, 123712.0]
+  B/store    B   n=6  spread=±  0.00%  [123712.0, 123712.0, 123712.0, 123712.0, 123712.0, 123712.0]
+  B/store    B2  n=6  spread=±  0.00%  [123712.0, 123712.0, 123712.0, 123712.0, 123712.0, 123712.0]
+  allocs/op  A   n=6  spread=±  0.00%  [581.0, 581.0, 581.0, 581.0, 581.0, 581.0]
+  allocs/op  B   n=6  spread=±  0.00%  [581.0, 581.0, 581.0, 581.0, 581.0, 581.0]
+  allocs/op  B2  n=6  spread=±  0.00%  [581.0, 581.0, 581.0, 581.0, 581.0, 581.0]
+  ns/op      A   n=6  spread=±  9.10%  [13690.0, 13728.0, 13427.0, 13527.0, 14115.0, 14956.0]
+  ns/op      B   n=6  spread=±  4.55%  [13567.0, 14194.0, 13368.0, 14062.0, 13577.0, 13576.0]
+  ns/op      B2  n=6  spread=±  4.44%  [14182.0, 13328.0, 13854.0, 13443.0, 13633.0, 13524.0]

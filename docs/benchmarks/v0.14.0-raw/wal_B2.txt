@@ -1,0 +1,180 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/store/wal
+cpu: Apple M4
+BenchmarkAppend/encode-only/size=64-10 	 6858973	       174.9 ns/op	 445.99 MB/s	      16 B/op	       1 allocs/op
+BenchmarkAppend/fsync/size=64-10       	     332	   3677878 ns/op	   0.02 MB/s	      16 B/op	       1 allocs/op
+BenchmarkAppend/encode-only/size=256-10         	 6385200	       186.2 ns/op	1450.12 MB/s	      16 B/op	       1 allocs/op
+BenchmarkAppend/fsync/size=256-10               	     325	   3763618 ns/op	   0.07 MB/s	      16 B/op	       1 allocs/op
+BenchmarkAppend/encode-only/size=4096-10        	 1970602	       613.3 ns/op	6701.10 MB/s	      16 B/op	       1 allocs/op
+BenchmarkAppend/fsync/size=4096-10              	     320	   3781358 ns/op	   1.09 MB/s	      16 B/op	       1 allocs/op
+BenchmarkCRCIncremental/payload16-10            	198540429	         6.085 ns/op	4272.96 MB/s	       0 B/op	       0 allocs/op
+BenchmarkCRCIncremental/payload64-10            	175157997	         6.932 ns/op	10674.75 MB/s	       0 B/op	       0 allocs/op
+BenchmarkCRCIncremental/payload256-10           	64449280	        17.95 ns/op	14822.14 MB/s	       0 B/op	       0 allocs/op
+BenchmarkCRCIncremental/payload4096-10          	 3022138	       397.0 ns/op	10341.68 MB/s	       0 B/op	       0 allocs/op
+BenchmarkCRCSinglePassRealloc/payload16-10      	100000000	        10.82 ns/op	2402.98 MB/s	      32 B/op	       1 allocs/op
+BenchmarkCRCSinglePassRealloc/payload64-10      	81946921	        14.53 ns/op	5092.65 MB/s	      80 B/op	       1 allocs/op
+BenchmarkCRCSinglePassRealloc/payload256-10     	23978239	        51.98 ns/op	5116.93 MB/s	     288 B/op	       1 allocs/op
+BenchmarkCRCSinglePassRealloc/payload4096-10    	 1611075	       748.7 ns/op	5484.43 MB/s	    4864 B/op	       1 allocs/op
+BenchmarkCRCSinglePassScratch/payload16-10      	278497228	         4.413 ns/op	5891.90 MB/s	       0 B/op	       0 allocs/op
+BenchmarkCRCSinglePassScratch/payload64-10      	221764353	         5.365 ns/op	13794.21 MB/s	       0 B/op	       0 allocs/op
+BenchmarkCRCSinglePassScratch/payload256-10     	61008804	        19.61 ns/op	13566.92 MB/s	       0 B/op	       0 allocs/op
+BenchmarkCRCSinglePassScratch/payload4096-10    	 2683378	       449.3 ns/op	9137.80 MB/s	       0 B/op	       0 allocs/op
+BenchmarkEncode-10                              	 2391488	       497.9 ns/op	8254.00 MB/s	      16 B/op	       1 allocs/op
+BenchmarkDecode-10                              	 1000000	      1019 ns/op	4032.20 MB/s	    4160 B/op	       3 allocs/op
+BenchmarkReader_Replay-10                       	   13999	     82036 ns/op	3206.40 MB/s	  329084 B/op	     134 allocs/op
+BenchmarkWriter_AppendSync_Batch/batch=1-10     	     319	   3761814 ns/op	      16 B/op	       1 allocs/op
+BenchmarkWriter_AppendSync_Batch/batch=10-10    	     319	   3811543 ns/op	     160 B/op	      10 allocs/op
+BenchmarkWriter_AppendSync_Batch/batch=100-10   	     318	   3826981 ns/op	    1600 B/op	     100 allocs/op
+BenchmarkWriter_AppendSync_Batch/batch=1000-10  	     262	   4305815 ns/op	   16000 B/op	    1000 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/store/wal
+cpu: Apple M4
+BenchmarkAppend/encode-only/size=64-10 	 6847504	       175.6 ns/op	 444.19 MB/s	      16 B/op	       1 allocs/op
+BenchmarkAppend/fsync/size=64-10       	     338	   3684040 ns/op	   0.02 MB/s	      16 B/op	       1 allocs/op
+BenchmarkAppend/encode-only/size=256-10         	 6288087	       185.5 ns/op	1455.48 MB/s	      16 B/op	       1 allocs/op
+BenchmarkAppend/fsync/size=256-10               	     316	   3753120 ns/op	   0.07 MB/s	      16 B/op	       1 allocs/op
+BenchmarkAppend/encode-only/size=4096-10        	 1963375	       605.0 ns/op	6793.92 MB/s	      16 B/op	       1 allocs/op
+BenchmarkAppend/fsync/size=4096-10              	     318	   3820526 ns/op	   1.08 MB/s	      16 B/op	       1 allocs/op
+BenchmarkCRCIncremental/payload16-10            	210470253	         5.880 ns/op	4421.46 MB/s	       0 B/op	       0 allocs/op
+BenchmarkCRCIncremental/payload64-10            	180422842	         6.511 ns/op	11366.21 MB/s	       0 B/op	       0 allocs/op
+BenchmarkCRCIncremental/payload256-10           	64563568	        18.44 ns/op	14428.68 MB/s	       0 B/op	       0 allocs/op
+BenchmarkCRCIncremental/payload4096-10          	 3049306	       394.8 ns/op	10401.07 MB/s	       0 B/op	       0 allocs/op
+BenchmarkCRCSinglePassRealloc/payload16-10      	100000000	        10.74 ns/op	2421.03 MB/s	      32 B/op	       1 allocs/op
+BenchmarkCRCSinglePassRealloc/payload64-10      	81166540	        14.41 ns/op	5135.15 MB/s	      80 B/op	       1 allocs/op
+BenchmarkCRCSinglePassRealloc/payload256-10     	23536660	        51.69 ns/op	5145.78 MB/s	     288 B/op	       1 allocs/op
+BenchmarkCRCSinglePassRealloc/payload4096-10    	 1602130	       750.9 ns/op	5468.08 MB/s	    4864 B/op	       1 allocs/op
+BenchmarkCRCSinglePassScratch/payload16-10      	281976142	         4.253 ns/op	6113.36 MB/s	       0 B/op	       0 allocs/op
+BenchmarkCRCSinglePassScratch/payload64-10      	228155352	         5.261 ns/op	14065.22 MB/s	       0 B/op	       0 allocs/op
+BenchmarkCRCSinglePassScratch/payload256-10     	61405548	        19.63 ns/op	13552.40 MB/s	       0 B/op	       0 allocs/op
+BenchmarkCRCSinglePassScratch/payload4096-10    	 2687781	       445.8 ns/op	9209.98 MB/s	       0 B/op	       0 allocs/op
+BenchmarkEncode-10                              	 2419060	       495.5 ns/op	8294.41 MB/s	      16 B/op	       1 allocs/op
+BenchmarkDecode-10                              	 1000000	      1015 ns/op	4051.04 MB/s	    4160 B/op	       3 allocs/op
+BenchmarkReader_Replay-10                       	   14451	     82445 ns/op	3190.48 MB/s	  329084 B/op	     134 allocs/op
+BenchmarkWriter_AppendSync_Batch/batch=1-10     	     322	   3748381 ns/op	      16 B/op	       1 allocs/op
+BenchmarkWriter_AppendSync_Batch/batch=10-10    	     313	   3763412 ns/op	     160 B/op	      10 allocs/op
+BenchmarkWriter_AppendSync_Batch/batch=100-10   	     315	   3824826 ns/op	    1600 B/op	     100 allocs/op
+BenchmarkWriter_AppendSync_Batch/batch=1000-10  	     326	   4288392 ns/op	   16000 B/op	    1000 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/store/wal
+cpu: Apple M4
+BenchmarkAppend/encode-only/size=64-10 	 6944427	       173.2 ns/op	 450.42 MB/s	      16 B/op	       1 allocs/op
+BenchmarkAppend/fsync/size=64-10       	     339	   3692455 ns/op	   0.02 MB/s	      16 B/op	       1 allocs/op
+BenchmarkAppend/encode-only/size=256-10         	 6192116	       185.9 ns/op	1452.50 MB/s	      16 B/op	       1 allocs/op
+BenchmarkAppend/fsync/size=256-10               	     304	   3716598 ns/op	   0.07 MB/s	      16 B/op	       1 allocs/op
+BenchmarkAppend/encode-only/size=4096-10        	 1988598	       608.0 ns/op	6759.54 MB/s	      16 B/op	       1 allocs/op
+BenchmarkAppend/fsync/size=4096-10              	     319	   3808571 ns/op	   1.08 MB/s	      16 B/op	       1 allocs/op
+BenchmarkCRCIncremental/payload16-10            	209546151	         5.734 ns/op	4533.99 MB/s	       0 B/op	       0 allocs/op
+BenchmarkCRCIncremental/payload64-10            	183303624	         6.540 ns/op	11315.22 MB/s	       0 B/op	       0 allocs/op
+BenchmarkCRCIncremental/payload256-10           	63712724	        18.57 ns/op	14324.36 MB/s	       0 B/op	       0 allocs/op
+BenchmarkCRCIncremental/payload4096-10          	 3043808	       394.8 ns/op	10401.39 MB/s	       0 B/op	       0 allocs/op
+BenchmarkCRCSinglePassRealloc/payload16-10      	100000000	        10.66 ns/op	2438.13 MB/s	      32 B/op	       1 allocs/op
+BenchmarkCRCSinglePassRealloc/payload64-10      	83724582	        14.54 ns/op	5091.15 MB/s	      80 B/op	       1 allocs/op
+BenchmarkCRCSinglePassRealloc/payload256-10     	23375464	        50.80 ns/op	5236.24 MB/s	     288 B/op	       1 allocs/op
+BenchmarkCRCSinglePassRealloc/payload4096-10    	 1616389	       740.7 ns/op	5543.22 MB/s	    4864 B/op	       1 allocs/op
+BenchmarkCRCSinglePassScratch/payload16-10      	285844021	         4.204 ns/op	6184.89 MB/s	       0 B/op	       0 allocs/op
+BenchmarkCRCSinglePassScratch/payload64-10      	224417268	         5.291 ns/op	13985.89 MB/s	       0 B/op	       0 allocs/op
+BenchmarkCRCSinglePassScratch/payload256-10     	60610780	        19.59 ns/op	13579.39 MB/s	       0 B/op	       0 allocs/op
+BenchmarkCRCSinglePassScratch/payload4096-10    	 2701870	       443.8 ns/op	9250.94 MB/s	       0 B/op	       0 allocs/op
+BenchmarkEncode-10                              	 2396610	       505.1 ns/op	8137.72 MB/s	      16 B/op	       1 allocs/op
+BenchmarkDecode-10                              	 1273650	       950.8 ns/op	4322.57 MB/s	    4160 B/op	       3 allocs/op
+BenchmarkReader_Replay-10                       	   14306	     81465 ns/op	3228.87 MB/s	  329084 B/op	     134 allocs/op
+BenchmarkWriter_AppendSync_Batch/batch=1-10     	     322	   3735947 ns/op	      16 B/op	       1 allocs/op
+BenchmarkWriter_AppendSync_Batch/batch=10-10    	     315	   3789946 ns/op	     160 B/op	      10 allocs/op
+BenchmarkWriter_AppendSync_Batch/batch=100-10   	     314	   3825207 ns/op	    1600 B/op	     100 allocs/op
+BenchmarkWriter_AppendSync_Batch/batch=1000-10  	     294	   4309366 ns/op	   16000 B/op	    1000 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/store/wal
+cpu: Apple M4
+BenchmarkAppend/encode-only/size=64-10 	 6863078	       175.6 ns/op	 444.29 MB/s	      16 B/op	       1 allocs/op
+BenchmarkAppend/fsync/size=64-10       	     342	   3724802 ns/op	   0.02 MB/s	      16 B/op	       1 allocs/op
+BenchmarkAppend/encode-only/size=256-10         	 6382540	       185.7 ns/op	1454.02 MB/s	      16 B/op	       1 allocs/op
+BenchmarkAppend/fsync/size=256-10               	     322	   3772839 ns/op	   0.07 MB/s	      16 B/op	       1 allocs/op
+BenchmarkAppend/encode-only/size=4096-10        	 1972914	       602.4 ns/op	6822.28 MB/s	      16 B/op	       1 allocs/op
+BenchmarkAppend/fsync/size=4096-10              	     318	   3817311 ns/op	   1.08 MB/s	      16 B/op	       1 allocs/op
+BenchmarkCRCIncremental/payload16-10            	204988202	         5.984 ns/op	4345.26 MB/s	       0 B/op	       0 allocs/op
+BenchmarkCRCIncremental/payload64-10            	178128547	         6.564 ns/op	11273.61 MB/s	       0 B/op	       0 allocs/op
+BenchmarkCRCIncremental/payload256-10           	65002335	        18.39 ns/op	14468.01 MB/s	       0 B/op	       0 allocs/op
+BenchmarkCRCIncremental/payload4096-10          	 3041992	       397.8 ns/op	10321.40 MB/s	       0 B/op	       0 allocs/op
+BenchmarkCRCSinglePassRealloc/payload16-10      	100000000	        10.96 ns/op	2372.03 MB/s	      32 B/op	       1 allocs/op
+BenchmarkCRCSinglePassRealloc/payload64-10      	82649136	        14.55 ns/op	5085.75 MB/s	      80 B/op	       1 allocs/op
+BenchmarkCRCSinglePassRealloc/payload256-10     	23264774	        51.43 ns/op	5172.45 MB/s	     288 B/op	       1 allocs/op
+BenchmarkCRCSinglePassRealloc/payload4096-10    	 1627737	       742.6 ns/op	5528.96 MB/s	    4864 B/op	       1 allocs/op
+BenchmarkCRCSinglePassScratch/payload16-10      	282311175	         4.247 ns/op	6122.60 MB/s	       0 B/op	       0 allocs/op
+BenchmarkCRCSinglePassScratch/payload64-10      	226489255	         5.260 ns/op	14068.23 MB/s	       0 B/op	       0 allocs/op
+BenchmarkCRCSinglePassScratch/payload256-10     	61173508	        19.67 ns/op	13523.74 MB/s	       0 B/op	       0 allocs/op
+BenchmarkCRCSinglePassScratch/payload4096-10    	 2666625	       446.4 ns/op	9197.53 MB/s	       0 B/op	       0 allocs/op
+BenchmarkEncode-10                              	 2412699	       498.1 ns/op	8251.50 MB/s	      16 B/op	       1 allocs/op
+BenchmarkDecode-10                              	 1302235	       916.6 ns/op	4484.08 MB/s	    4160 B/op	       3 allocs/op
+BenchmarkReader_Replay-10                       	   14371	     83028 ns/op	3168.10 MB/s	  329084 B/op	     134 allocs/op
+BenchmarkWriter_AppendSync_Batch/batch=1-10     	     322	   3791818 ns/op	      16 B/op	       1 allocs/op
+BenchmarkWriter_AppendSync_Batch/batch=10-10    	     310	   3800306 ns/op	     160 B/op	      10 allocs/op
+BenchmarkWriter_AppendSync_Batch/batch=100-10   	     319	   3843455 ns/op	    1600 B/op	     100 allocs/op
+BenchmarkWriter_AppendSync_Batch/batch=1000-10  	     279	   4151100 ns/op	   16000 B/op	    1000 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/store/wal
+cpu: Apple M4
+BenchmarkAppend/encode-only/size=64-10 	 6794806	       175.8 ns/op	 443.65 MB/s	      16 B/op	       1 allocs/op
+BenchmarkAppend/fsync/size=64-10       	     336	   3258000 ns/op	   0.02 MB/s	      16 B/op	       1 allocs/op
+BenchmarkAppend/encode-only/size=256-10         	 6120368	       190.6 ns/op	1416.92 MB/s	      16 B/op	       1 allocs/op
+BenchmarkAppend/fsync/size=256-10               	     376	   3813669 ns/op	   0.07 MB/s	      16 B/op	       1 allocs/op
+BenchmarkAppend/encode-only/size=4096-10        	 1961714	       610.4 ns/op	6733.82 MB/s	      16 B/op	       1 allocs/op
+BenchmarkAppend/fsync/size=4096-10              	     319	   3658058 ns/op	   1.12 MB/s	      16 B/op	       1 allocs/op
+BenchmarkCRCIncremental/payload16-10            	201552020	         5.901 ns/op	4406.25 MB/s	       0 B/op	       0 allocs/op
+BenchmarkCRCIncremental/payload64-10            	173348300	         6.708 ns/op	11031.75 MB/s	       0 B/op	       0 allocs/op
+BenchmarkCRCIncremental/payload256-10           	63748544	        18.92 ns/op	14059.04 MB/s	       0 B/op	       0 allocs/op
+BenchmarkCRCIncremental/payload4096-10          	 2984886	       396.2 ns/op	10363.89 MB/s	       0 B/op	       0 allocs/op
+BenchmarkCRCSinglePassRealloc/payload16-10      	100000000	        10.66 ns/op	2439.36 MB/s	      32 B/op	       1 allocs/op
+BenchmarkCRCSinglePassRealloc/payload64-10      	81498667	        14.48 ns/op	5110.27 MB/s	      80 B/op	       1 allocs/op
+BenchmarkCRCSinglePassRealloc/payload256-10     	23081398	        51.74 ns/op	5140.81 MB/s	     288 B/op	       1 allocs/op
+BenchmarkCRCSinglePassRealloc/payload4096-10    	 1637768	       733.8 ns/op	5595.81 MB/s	    4864 B/op	       1 allocs/op
+BenchmarkCRCSinglePassScratch/payload16-10      	273013600	         4.403 ns/op	5905.60 MB/s	       0 B/op	       0 allocs/op
+BenchmarkCRCSinglePassScratch/payload64-10      	208366554	         5.642 ns/op	13115.89 MB/s	       0 B/op	       0 allocs/op
+BenchmarkCRCSinglePassScratch/payload256-10     	59606966	        19.81 ns/op	13428.70 MB/s	       0 B/op	       0 allocs/op
+BenchmarkCRCSinglePassScratch/payload4096-10    	 2681056	       447.9 ns/op	9166.81 MB/s	       0 B/op	       0 allocs/op
+BenchmarkEncode-10                              	 2393037	       510.0 ns/op	8058.11 MB/s	      16 B/op	       1 allocs/op
+BenchmarkDecode-10                              	 1247004	       980.9 ns/op	4189.90 MB/s	    4160 B/op	       3 allocs/op
+BenchmarkReader_Replay-10                       	   14131	     82470 ns/op	3189.53 MB/s	  329084 B/op	     134 allocs/op
+BenchmarkWriter_AppendSync_Batch/batch=1-10     	     343	   3790589 ns/op	      16 B/op	       1 allocs/op
+BenchmarkWriter_AppendSync_Batch/batch=10-10    	     319	   3837221 ns/op	     160 B/op	      10 allocs/op
+BenchmarkWriter_AppendSync_Batch/batch=100-10   	     309	   3924787 ns/op	    1600 B/op	     100 allocs/op
+BenchmarkWriter_AppendSync_Batch/batch=1000-10  	     260	   4434000 ns/op	   16000 B/op	    1000 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/store/wal
+cpu: Apple M4
+BenchmarkAppend/encode-only/size=64-10 	 6902246	       173.3 ns/op	 450.01 MB/s	      16 B/op	       1 allocs/op
+BenchmarkAppend/fsync/size=64-10       	     343	   3276321 ns/op	   0.02 MB/s	      16 B/op	       1 allocs/op
+BenchmarkAppend/encode-only/size=256-10         	 6164395	       188.5 ns/op	1432.00 MB/s	      16 B/op	       1 allocs/op
+BenchmarkAppend/fsync/size=256-10               	     324	   3687738 ns/op	   0.07 MB/s	      16 B/op	       1 allocs/op
+BenchmarkAppend/encode-only/size=4096-10        	 1975105	       611.5 ns/op	6720.95 MB/s	      16 B/op	       1 allocs/op
+BenchmarkAppend/fsync/size=4096-10              	     339	   3825937 ns/op	   1.07 MB/s	      16 B/op	       1 allocs/op
+BenchmarkCRCIncremental/payload16-10            	205028509	         5.851 ns/op	4443.69 MB/s	       0 B/op	       0 allocs/op
+BenchmarkCRCIncremental/payload64-10            	180266692	         6.800 ns/op	10881.65 MB/s	       0 B/op	       0 allocs/op
+BenchmarkCRCIncremental/payload256-10           	63296703	        18.81 ns/op	14141.69 MB/s	       0 B/op	       0 allocs/op
+BenchmarkCRCIncremental/payload4096-10          	 2994127	       397.0 ns/op	10342.87 MB/s	       0 B/op	       0 allocs/op
+BenchmarkCRCSinglePassRealloc/payload16-10      	100000000	        10.61 ns/op	2450.84 MB/s	      32 B/op	       1 allocs/op
+BenchmarkCRCSinglePassRealloc/payload64-10      	82328293	        14.48 ns/op	5109.53 MB/s	      80 B/op	       1 allocs/op
+BenchmarkCRCSinglePassRealloc/payload256-10     	23766532	        51.50 ns/op	5165.00 MB/s	     288 B/op	       1 allocs/op
+BenchmarkCRCSinglePassRealloc/payload4096-10    	 1648818	       736.8 ns/op	5572.57 MB/s	    4864 B/op	       1 allocs/op
+BenchmarkCRCSinglePassScratch/payload16-10      	284713071	         4.224 ns/op	6155.82 MB/s	       0 B/op	       0 allocs/op
+BenchmarkCRCSinglePassScratch/payload64-10      	222475957	         5.396 ns/op	13714.69 MB/s	       0 B/op	       0 allocs/op
+BenchmarkCRCSinglePassScratch/payload256-10     	59890946	        19.83 ns/op	13414.33 MB/s	       0 B/op	       0 allocs/op
+BenchmarkCRCSinglePassScratch/payload4096-10    	 2679338	       446.8 ns/op	9189.51 MB/s	       0 B/op	       0 allocs/op
+BenchmarkEncode-10                              	 2373308	       503.5 ns/op	8163.29 MB/s	      16 B/op	       1 allocs/op
+BenchmarkDecode-10                              	 1289842	       935.9 ns/op	4391.35 MB/s	    4160 B/op	       3 allocs/op
+BenchmarkReader_Replay-10                       	   14746	     82062 ns/op	3205.40 MB/s	  329084 B/op	     134 allocs/op
+BenchmarkWriter_AppendSync_Batch/batch=1-10     	     364	   3812694 ns/op	      16 B/op	       1 allocs/op
+BenchmarkWriter_AppendSync_Batch/batch=10-10    	     321	   3794679 ns/op	     160 B/op	      10 allocs/op
+BenchmarkWriter_AppendSync_Batch/batch=100-10   	     314	   3853979 ns/op	    1600 B/op	     100 allocs/op
+BenchmarkWriter_AppendSync_Batch/batch=1000-10  	     273	   4388789 ns/op	   16000 B/op	    1000 allocs/op
+PASS

@@ -1,0 +1,45 @@
+EVERY 'CHANGE' VERDICT, ALL 14 BLOCKS, ns/op — checked a SECOND time against the
+worst SIGNIFICANT same-code drift measured in that benchmark's own magnitude band.
+A row that does not clear that bar is NOT a finding, however good its p-value.
+==================================================================================================================================================
+block    benchmark                                             v0.13.0    v0.14.0    effect       p  ownfloor        band    bar  survives?
+exec     BenchmarkRelTypeProbe_ReverseRecovery/map+recovery-10    7.046ns    5.223ns   -25.87%  0.0051    ±0.24%      <100ns  6.21%  YES
+exec     BenchmarkExpandFilter_RowMode-10                      1.883ms    1.846ms    -1.98%  0.0453    ±0.55%        >1ms  0.87%  YES
+exec     BenchmarkShortestPath_Layered-10                      92.13µs    91.14µs    -1.07%  0.0082    ±0.27%    10us-1ms  2.40%  NO -- inside band noise
+exec     BenchmarkExpandDir_InVsOut_Baseline/OUT_deg1_sources-10    142.2µs    147.1µs    +3.46%  0.0131    ±1.33%    10us-1ms  2.40%  YES
+exec     BenchmarkAllNodesScan_PerNodeAllocCost-10             10.97µs    11.75µs    +7.11%  0.0051    ±1.53%    10us-1ms  2.40%  YES
+exec     BenchmarkRelTypeProbe_Column-10                        1.49ns    1.763ns   +18.32%  0.0051    ±0.60%      <100ns  6.21%  YES
+cy       BenchmarkZZReorderSkewed/reorder=on-10                267.2ms    2.723ms   -98.98%  0.0051    ±0.08%        >1ms  0.87%  YES
+cy       BenchmarkZZReorderLiveHistory/history=quiet-10        27.69ms    976.6µs   -96.47%  0.0051    ±1.12%        >1ms  0.87%  YES
+cy       BenchmarkZZReorderLiveHistory/history=live-10          27.7ms    987.3µs   -96.43%  0.0051    ±0.19%        >1ms  0.87%  YES
+cy       BenchmarkCountRelVar-10                               222.4µs    226.6µs    +1.88%  0.0453    ±0.18%    10us-1ms  2.40%  NO -- inside band noise
+wal      BenchmarkCRCSinglePassScratch/payload64-10            5.638ns    5.288ns    -6.21%  0.0082    ±0.76%      <100ns  6.21%  NO -- inside band noise
+wal      BenchmarkCRCIncremental/payload16-10                  6.271ns    5.979ns    -4.66%  0.0202    ±1.48%      <100ns  6.21%  NO -- inside band noise
+wal      BenchmarkCRCSinglePassScratch/payload16-10             4.37ns    4.213ns    -3.57%  0.0131    ±0.87%      <100ns  6.21%  NO -- inside band noise
+wal      BenchmarkCRCIncremental/payload256-10                 18.09ns    18.46ns    +2.07%  0.0450    ±0.24%      <100ns  6.21%  NO -- inside band noise
+Lcypar   BenchmarkPlanReusePhasesParallel/4full-64             1.112µs    1.018µs    -8.50%  0.0082    ±1.52%  100ns-10us  1.58%  YES
+Lcypar   BenchmarkPlanReusePhasesParallel/4full-8              895.2ns    851.4ns    -4.90%  0.0131    ±1.44%  100ns-10us  1.58%  YES
+Lcypar   BenchmarkAdjacencyCacheLookup/serial                   28.2ns    27.46ns    -2.61%  0.0051    ±0.60%      <100ns  6.21%  NO -- inside band noise
+Lcypar   BenchmarkAdjacencyCacheLookup/serial-8                27.27ns    26.59ns    -2.51%  0.0202    ±0.51%      <100ns  6.21%  NO -- inside band noise
+Lcypar   BenchmarkAdjacencyCacheLookup/serial-1024              27.3ns    26.76ns    -2.00%  0.0051    ±0.52%      <100ns  6.21%  NO -- inside band noise
+Lcypar   BenchmarkAdjacencyCacheLookup/serial-64               27.09ns    26.55ns    -1.97%  0.0306    ±0.26%      <100ns  6.21%  NO -- inside band noise
+Lcypar   BenchmarkAdjacencyCacheLookup/serial-256              27.06ns    26.56ns    -1.85%  0.0103    ±0.17%      <100ns  6.21%  NO -- inside band noise
+
+CHANGE verdicts: 21   surviving the band bar: 10
+
+ALLOCATIONS — cross-arm floor is EXACTLY 0.00%, so any non-zero delta is real.
+==================================================================================================================================================
+exec     BenchmarkShortestPath_Layered-10                          126        108   -14.29%  p=0.0013  ownfloor=±0.00%
+exec     BenchmarkShortestPath_LayeredTyped-10                     126        108   -14.29%  p=0.0013  ownfloor=±0.00%
+exec     BenchmarkShortestPath_HighDegreeFan-10                    317        314    -0.95%  p=0.0013  ownfloor=±0.00%
+cy       BenchmarkZZReorderSkewed/reorder=on-10                5925706      59968   -98.99%  p=0.0028  ownfloor=±0.00%
+cy       BenchmarkZZReorderLiveHistory/history=quiet-10         564428      25031   -95.57%  p=0.0018  ownfloor=±0.00%
+cy       BenchmarkZZReorderLiveHistory/history=live-10          564428      25055   -95.56%  p=0.0018  ownfloor=±0.00%
+cy       BenchmarkPlanCacheMiss_InlinedLiteralNoComment-10          92         90    -2.72%  p=0.6177  ownfloor=±1.12%
+cy       BenchmarkPlanCacheMiss_InlinedLiteral-10                  402        398    -1.12%  p=0.3656  ownfloor=±1.01%
+cy       BenchmarkDeleteAccumulated/accumulated=60000-10        210712     210305    -0.19%  p=0.9362  ownfloor=±0.21%
+cy       BenchmarkCreateRelationships-10                         18075      18084    +0.05%  p=0.4712  ownfloor=±0.01%
+cy       BenchmarkPlanCacheHit_Parameterised-10                     86         88    +1.73%  p=0.4907  ownfloor=±7.95%
+Lreadtx  BenchmarkReadTx_LockFree-1024                              38         37    -1.33%  p=0.0731  ownfloor=±0.00%
+
+benchmarks with any allocs/op movement: 12

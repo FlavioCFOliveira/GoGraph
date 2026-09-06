@@ -1,0 +1,31 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/search
+cpu: Apple M4
+                            │   v0.13.0   │              v0.14.0              │
+                            │   sec/op    │   sec/op     vs base              │
+BFSDirectionOpt_PowerLaw-10   28.77m ± 2%   28.90m ± 2%       ~ (p=0.485 n=6)
+Dijkstra_Large-10             8.230m ± 1%   8.210m ± 2%       ~ (p=0.818 n=6)
+Dijkstra_PostWarmup-10        8.151m ± 1%   8.193m ± 2%       ~ (p=0.485 n=6)
+Yen_K100-10                   14.84m ± 1%   14.71m ± 1%       ~ (p=0.093 n=6)
+geomean                       13.01m        13.00m       -0.03%
+
+                            │    v0.13.0     │               v0.14.0                │
+                            │      B/op      │     B/op      vs base                │
+BFSDirectionOpt_PowerLaw-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=6) ¹
+Dijkstra_Large-10             1.077Mi ± 7%     1.077Mi ± 3%       ~ (p=0.558 n=6)
+Dijkstra_PostWarmup-10          0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=6) ¹
+Yen_K100-10                   448.8Ki ± 0%     448.7Ki ± 0%       ~ (p=0.937 n=6)
+geomean                                    ²                 -0.00%               ²
+¹ all samples are equal
+² summaries must be >0 to compute geomean
+
+                            │    v0.13.0    │               v0.14.0               │
+                            │   allocs/op   │  allocs/op   vs base                │
+BFSDirectionOpt_PowerLaw-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=6) ¹
+Dijkstra_Large-10              4.000 ± 0%      4.000 ± 0%       ~ (p=1.000 n=6) ¹
+Dijkstra_PostWarmup-10         0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=6) ¹
+Yen_K100-10                   1.280k ± 0%     1.280k ± 0%       ~ (p=1.000 n=6)
+geomean                                   ²                +0.00%               ²
+¹ all samples are equal
+² summaries must be >0 to compute geomean

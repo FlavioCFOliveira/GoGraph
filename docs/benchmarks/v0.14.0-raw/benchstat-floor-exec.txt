@@ -1,0 +1,205 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/exec
+cpu: Apple M4
+                                                                      │       B       │                 B2                 │
+                                                                      │    sec/op     │    sec/op     vs base              │
+DynamicChunkSingleRow-10                                                 57.04n ±  4%   56.88n ±  3%       ~ (p=0.563 n=6)
+DynamicChunkFullBatch-10                                                 14.14µ ±  2%   14.17µ ±  3%       ~ (p=0.485 n=6)
+NotNullProperties-10                                                     6.636n ±  4%   6.644n ± 30%       ~ (p=0.818 n=6)
+IndexNestedLoopJoin_SeekDrain-10                                         17.48µ ±  1%   17.45µ ±  3%       ~ (p=0.937 n=6)
+RevToFwd/n5000/transpose-10                                              195.4µ ±  2%   195.3µ ±  2%       ~ (p=1.000 n=6)
+RevToFwd/n5000/scan-10                                                   274.8µ ±  6%   285.4µ ±  3%       ~ (p=0.132 n=6)
+RevToFwd/n20000/transpose-10                                             774.7µ ±  1%   771.0µ ±  1%       ~ (p=0.065 n=6)
+RevToFwd/n20000/scan-10                                                  1.126m ±  4%   1.151m ±  3%       ~ (p=0.240 n=6)
+ShortestPath_UnitDegreeChain-10                                          634.6µ ±  3%   639.7µ ±  3%       ~ (p=0.589 n=6)
+ShortestPath_Layered-10                                                  91.14µ ±  2%   90.90µ ±  3%       ~ (p=0.589 n=6)
+ShortestPath_LayeredTyped-10                                             91.26µ ±  2%   91.07µ ±  3%       ~ (p=0.394 n=6)
+ShortestPath_HighDegreeFan-10                                            1.571m ±  3%   1.591m ±  2%       ~ (p=0.180 n=6)
+AllShortestPaths_UnitDegreeChain-10                                      1.090m ±  3%   1.109m ±  3%       ~ (p=0.240 n=6)
+AllShortestPaths_Layered-10                                              192.7µ ±  4%   192.4µ ±  2%       ~ (p=0.485 n=6)
+AllShortestPaths_HighDegreeFan-10                                        1.869m ±  3%   1.867m ±  3%       ~ (p=0.699 n=6)
+PermuteRowsInPlace-10                                                    141.4µ ±  6%   143.6µ ±  4%       ~ (p=0.310 n=6)
+PermuteRowsBuffered-10                                                   365.5µ ±  5%   373.3µ ± 13%       ~ (p=0.180 n=6)
+BoundedOrder/n=000010/Sort-10                                            8.877m ±  4%   8.592m ±  2%       ~ (p=0.093 n=6)
+BoundedOrder/n=000010/Top-10                                             1.408m ±  1%   1.426m ±  2%       ~ (p=0.180 n=6)
+BoundedOrder/n=000110/Sort-10                                            8.595m ±  3%   8.642m ±  2%       ~ (p=0.485 n=6)
+BoundedOrder/n=000110/Top-10                                             1.442m ±  2%   1.433m ±  2%       ~ (p=0.240 n=6)
+BoundedOrder/n=010010/Sort-10                                            8.628m ±  3%   8.858m ±  6%       ~ (p=0.485 n=6)
+BoundedOrder/n=010010/Top-10                                             4.913m ±  2%   4.906m ±  2%       ~ (p=0.818 n=6)
+BoundedOrder/n=060000/Sort-10                                            8.919m ±  3%   8.804m ±  4%       ~ (p=0.310 n=6)
+BoundedOrder/n=060000/Top-10                                             9.296m ±  7%   9.539m ± 12%       ~ (p=0.310 n=6)
+BoundedOrder/n=120000/Sort-10                                            9.001m ±  3%   8.901m ±  2%       ~ (p=0.093 n=6)
+BoundedOrder/n=120000/Top-10                                             9.051m ±  1%   9.218m ±  5%       ~ (p=0.310 n=6)
+ColumnarAgg_SumCountGroupBy/columnar_on-10                               34.83m ±  1%   35.01m ±  4%       ~ (p=0.240 n=6)
+ColumnarAgg_SumCountGroupBy/row_off-10                                   49.99m ±  2%   50.05m ±  1%       ~ (p=0.937 n=6)
+ColumnarAgg_MinMaxGroupBy/columnar_on-10                                 34.68m ±  2%   34.59m ±  2%       ~ (p=0.937 n=6)
+ColumnarAgg_MinMaxGroupBy/row_off-10                                     55.21m ±  3%   55.77m ±  3%       ~ (p=0.240 n=6)
+Drain_Throughput-10                                                      16.70µ ±  3%   16.73µ ±  3%       ~ (p=0.485 n=6)
+ExpandFilter_Columnar-10                                                 2.191m ±  1%   2.184m ±  2%       ~ (p=0.132 n=6)
+ExpandFilter_RowMode-10                                                  1.846m ±  2%   1.856m ±  3%       ~ (p=0.310 n=6)
+ExpandDir_InVsOut_Baseline/OUT_deg1_sources-10                           147.1µ ±  1%   149.1µ ±  3%       ~ (p=0.394 n=6)
+ExpandDir_InVsOut_Baseline/IN_deg1_sources-10                            93.42µ ±  2%   94.44µ ±  3%       ~ (p=0.180 n=6)
+ExpandIn_PerEdge_vs_SourceOutdegree/K=16/one_in_edge-10                  188.8n ±  2%   186.8n ±  2%       ~ (p=0.167 n=6)
+ExpandIn_PerEdge_vs_SourceOutdegree/K=256/one_in_edge-10                 196.9n ±  3%   199.0n ±  2%       ~ (p=0.457 n=6)
+ExpandIn_PerEdge_vs_SourceOutdegree/K=4096/one_in_edge-10                202.3n ±  2%   202.3n ±  3%       ~ (p=0.589 n=6)
+ExpandIn_PerEdge_vs_SourceOutdegree/K=65536/one_in_edge-10               206.8n ±  1%   205.6n ±  3%       ~ (p=0.563 n=6)
+ExpandIn_TypeFiltered_vs_SourceOutdegree/K=16/one_in_edge_typed-10       657.8n ±  3%   661.7n ±  3%       ~ (p=0.589 n=6)
+ExpandIn_TypeFiltered_vs_SourceOutdegree/K=256/one_in_edge_typed-10      5.412µ ±  1%   5.444µ ±  3%       ~ (p=0.509 n=6)
+ExpandIn_TypeFiltered_vs_SourceOutdegree/K=4096/one_in_edge_typed-10     81.61µ ±  1%   81.18µ ±  2%       ~ (p=0.818 n=6)
+ExpandIn_TypeFiltered_vs_SourceOutdegree/K=65536/one_in_edge_typed-10    1.224m ±  2%   1.219m ±  1%       ~ (p=0.310 n=6)
+BuildReverse_vs_E/E=10000-10                                             64.98µ ±  3%   65.15µ ±  3%       ~ (p=0.937 n=6)
+BuildReverse_vs_E/E=100000-10                                            551.1µ ±  3%   535.2µ ±  7%       ~ (p=0.310 n=6)
+BuildReverse_vs_E/E=1000000-10                                           5.087m ±  4%   5.193m ±  4%       ~ (p=0.699 n=6)
+ExpandOut_PerEdge_SingleSource/K=4096-10                                 79.24µ ±  2%   79.09µ ±  2%       ~ (p=0.589 n=6)
+ExpandOut_PerEdge_SingleSource/K=65536-10                                1.272m ±  4%   1.263m ±  1%       ~ (p=0.485 n=6)
+Scan_PerNode/N=4096-10                                                   7.126µ ± 38%   4.974µ ± 47%       ~ (p=0.065 n=6)
+Scan_PerNode/N=65536-10                                                 103.14µ ± 31%   72.59µ ± 61%       ~ (p=0.180 n=6)
+Filter_Throughput-10                                                     135.3µ ±  3%   136.0µ ±  2%       ~ (p=0.310 n=6)
+Project_Throughput-10                                                    291.9µ ±  2%   293.3µ ±  2%       ~ (p=0.937 n=6)
+Limit_Throughput-10                                                      107.2µ ±  2%   108.7µ ±  3%       ~ (p=0.394 n=6)
+Sort_10k-10                                                              1.350m ±  2%   1.339m ±  3%       ~ (p=0.310 n=6)
+Top_10kN100-10                                                           1.400m ±  1%   1.398m ±  1%       ~ (p=0.818 n=6)
+Distinct_10k-10                                                          289.8µ ±  1%   292.6µ ±  2%       ~ (p=0.310 n=6)
+RelTypeProbe_Map-10                                                      13.17n ± 13%   13.29n ± 20%       ~ (p=0.937 n=6)
+RelTypeProbe_Column-10                                                   1.763n ±  4%   1.752n ±  2%       ~ (p=0.485 n=6)
+RelTypeProbe_ReverseRecovery/map+recovery-10                             5.224n ±  2%   5.211n ±  3%       ~ (p=0.818 n=6)
+RelTypeProbe_ReverseRecovery/column-10                                   1.807n ±  2%   1.823n ±  2%       ~ (p=0.221 n=6)
+AllNodesScan_PerNodeAllocCost-10                                         11.75µ ±  2%   11.57µ ±  2%       ~ (p=0.180 n=6)
+geomean                                                                  110.4µ         109.4µ        -0.84%
+
+                                                                      │        B        │                  B2                   │
+                                                                      │      B/op       │     B/op       vs base                │
+DynamicChunkSingleRow-10                                                   320.0 ± 0%        320.0 ± 0%       ~ (p=1.000 n=6) ¹
+DynamicChunkFullBatch-10                                                 32.31Ki ± 0%      32.31Ki ± 0%       ~ (p=1.000 n=6) ¹
+NotNullProperties-10                                                       0.000 ± 0%        0.000 ± 0%       ~ (p=1.000 n=6) ¹
+IndexNestedLoopJoin_SeekDrain-10                                         6.039Ki ± 0%      6.039Ki ± 0%       ~ (p=1.000 n=6) ¹
+RevToFwd/n5000/transpose-10                                              432.0Ki ± 0%      432.0Ki ± 0%       ~ (p=1.000 n=6) ¹
+RevToFwd/n5000/scan-10                                                   392.0Ki ± 0%      392.0Ki ± 0%       ~ (p=1.000 n=6) ¹
+RevToFwd/n20000/transpose-10                                             1.688Mi ± 0%      1.688Mi ± 0%       ~ (p=1.000 n=6) ¹
+RevToFwd/n20000/scan-10                                                  1.531Mi ± 0%      1.531Mi ± 0%       ~ (p=1.000 n=6)
+ShortestPath_UnitDegreeChain-10                                          1.607Mi ± 0%      1.607Mi ± 0%       ~ (p=0.870 n=6)
+ShortestPath_Layered-10                                                  251.8Ki ± 0%      251.8Ki ± 0%       ~ (p=1.000 n=6)
+ShortestPath_LayeredTyped-10                                             251.8Ki ± 0%      251.8Ki ± 0%       ~ (p=1.000 n=6)
+ShortestPath_HighDegreeFan-10                                            4.257Mi ± 0%      4.257Mi ± 0%       ~ (p=0.959 n=6)
+AllShortestPaths_UnitDegreeChain-10                                      12.95Mi ± 0%      12.95Mi ± 0%       ~ (p=0.907 n=6)
+AllShortestPaths_Layered-10                                              453.4Ki ± 0%      453.4Ki ± 0%       ~ (p=1.000 n=6)
+AllShortestPaths_HighDegreeFan-10                                        4.871Mi ± 0%      4.871Mi ± 0%       ~ (p=0.136 n=6)
+PermuteRowsInPlace-10                                                      0.000 ± 0%        0.000 ± 0%       ~ (p=1.000 n=6) ¹
+PermuteRowsBuffered-10                                                   2.750Mi ± 0%      2.750Mi ± 0%       ~ (p=1.000 n=6)
+BoundedOrder/n=000010/Sort-10                                            22.06Mi ± 0%      22.06Mi ± 0%       ~ (p=0.413 n=6)
+BoundedOrder/n=000010/Top-10                                             3.953Ki ± 0%      3.953Ki ± 0%       ~ (p=1.000 n=6) ¹
+BoundedOrder/n=000110/Sort-10                                            22.06Mi ± 0%      22.06Mi ± 0%       ~ (p=0.329 n=6)
+BoundedOrder/n=000110/Top-10                                             38.11Ki ± 0%      38.11Ki ± 0%       ~ (p=1.000 n=6) ¹
+BoundedOrder/n=010010/Sort-10                                            22.06Mi ± 0%      22.06Mi ± 0%       ~ (p=0.840 n=6)
+BoundedOrder/n=010010/Top-10                                             4.024Mi ± 0%      4.024Mi ± 0%       ~ (p=0.576 n=6)
+BoundedOrder/n=060000/Sort-10                                            22.06Mi ± 0%      22.06Mi ± 0%       ~ (p=0.608 n=6)
+BoundedOrder/n=060000/Top-10                                             25.73Mi ± 0%      25.73Mi ± 0%       ~ (p=0.907 n=6)
+BoundedOrder/n=120000/Sort-10                                            22.06Mi ± 0%      22.06Mi ± 0%       ~ (p=0.171 n=6)
+BoundedOrder/n=120000/Top-10                                             22.06Mi ± 0%      22.06Mi ± 0%       ~ (p=0.080 n=6)
+ColumnarAgg_SumCountGroupBy/columnar_on-10                               137.4Ki ± 0%      137.4Ki ± 0%       ~ (p=1.000 n=6)
+ColumnarAgg_SumCountGroupBy/row_off-10                                   56.04Mi ± 0%      56.04Mi ± 0%       ~ (p=0.457 n=6)
+ColumnarAgg_MinMaxGroupBy/columnar_on-10                                 141.0Ki ± 0%      141.0Ki ± 0%       ~ (p=0.455 n=6)
+ColumnarAgg_MinMaxGroupBy/row_off-10                                     56.04Mi ± 0%      56.04Mi ± 0%       ~ (p=0.240 n=6)
+Drain_Throughput-10                                                      73.69Ki ± 0%      73.69Ki ± 0%       ~ (p=1.000 n=6) ¹
+ExpandFilter_Columnar-10                                                 290.8Ki ± 0%      290.8Ki ± 0%       ~ (p=0.494 n=6)
+ExpandFilter_RowMode-10                                                  1.428Mi ± 0%      1.428Mi ± 0%       ~ (p=0.260 n=6)
+ExpandDir_InVsOut_Baseline/OUT_deg1_sources-10                           156.2Ki ± 0%      156.2Ki ± 0%       ~ (p=1.000 n=6)
+ExpandDir_InVsOut_Baseline/IN_deg1_sources-10                            60.21Ki ± 0%      60.21Ki ± 0%       ~ (p=1.000 n=6) ¹
+ExpandIn_PerEdge_vs_SourceOutdegree/K=16/one_in_edge-10                    208.0 ± 0%        208.0 ± 0%       ~ (p=1.000 n=6) ¹
+ExpandIn_PerEdge_vs_SourceOutdegree/K=256/one_in_edge-10                   216.0 ± 0%        216.0 ± 0%       ~ (p=1.000 n=6) ¹
+ExpandIn_PerEdge_vs_SourceOutdegree/K=4096/one_in_edge-10                  224.0 ± 0%        224.0 ± 0%       ~ (p=1.000 n=6) ¹
+ExpandIn_PerEdge_vs_SourceOutdegree/K=65536/one_in_edge-10                 224.0 ± 0%        224.0 ± 0%       ~ (p=1.000 n=6) ¹
+ExpandIn_TypeFiltered_vs_SourceOutdegree/K=16/one_in_edge_typed-10       1.461Ki ± 0%      1.461Ki ± 0%       ~ (p=1.000 n=6) ¹
+ExpandIn_TypeFiltered_vs_SourceOutdegree/K=256/one_in_edge_typed-10      17.83Ki ± 0%      17.83Ki ± 0%       ~ (p=1.000 n=6) ¹
+ExpandIn_TypeFiltered_vs_SourceOutdegree/K=4096/one_in_edge_typed-10     285.6Ki ± 0%      285.6Ki ± 0%       ~ (p=1.000 n=6) ¹
+ExpandIn_TypeFiltered_vs_SourceOutdegree/K=65536/one_in_edge_typed-10    4.341Mi ± 0%      4.341Mi ± 0%       ~ (p=0.654 n=6)
+BuildReverse_vs_E/E=10000-10                                             496.1Ki ± 0%      496.1Ki ± 0%       ~ (p=1.000 n=6)
+BuildReverse_vs_E/E=100000-10                                            4.594Mi ± 0%      4.594Mi ± 0%       ~ (p=0.740 n=6)
+BuildReverse_vs_E/E=1000000-10                                           45.80Mi ± 0%      45.80Mi ± 0%       ~ (p=0.424 n=6)
+ExpandOut_PerEdge_SingleSource/K=4096-10                                 60.21Ki ± 0%      60.21Ki ± 0%       ~ (p=1.000 n=6) ¹
+ExpandOut_PerEdge_SingleSource/K=65536-10                               1020.2Ki ± 0%     1020.2Ki ± 0%       ~ (p=0.524 n=6)
+Scan_PerNode/N=4096-10                                                     0.000 ± 0%        0.000 ± 0%       ~ (p=1.000 n=6) ¹
+Scan_PerNode/N=65536-10                                                    0.000 ± 0%        0.000 ± 0%       ~ (p=1.000 n=6) ¹
+Filter_Throughput-10                                                     576.2Ki ± 0%      576.2Ki ± 0%       ~ (p=1.000 n=6)
+Project_Throughput-10                                                    1.237Mi ± 0%      1.237Mi ± 0%       ~ (p=1.000 n=6)
+Limit_Throughput-10                                                      576.2Ki ± 0%      576.2Ki ± 0%       ~ (p=1.000 n=6)
+Sort_10k-10                                                              2.403Mi ± 0%      2.403Mi ± 0%  -0.00% (p=0.050 n=6)
+Top_10kN100-10                                                           192.5Ki ± 0%      192.5Ki ± 0%       ~ (p=1.000 n=6)
+Distinct_10k-10                                                          269.4Ki ± 0%      269.4Ki ± 0%       ~ (p=1.000 n=6)
+RelTypeProbe_Map-10                                                        0.000 ± 0%        0.000 ± 0%       ~ (p=1.000 n=6) ¹
+RelTypeProbe_Column-10                                                     0.000 ± 0%        0.000 ± 0%       ~ (p=1.000 n=6) ¹
+RelTypeProbe_ReverseRecovery/map+recovery-10                               0.000 ± 0%        0.000 ± 0%       ~ (p=1.000 n=6) ¹
+RelTypeProbe_ReverseRecovery/column-10                                     0.000 ± 0%        0.000 ± 0%       ~ (p=1.000 n=6) ¹
+AllNodesScan_PerNodeAllocCost-10                                         30.57Ki ± 0%      30.57Ki ± 0%       ~ (p=1.000 n=6) ¹
+geomean                                                                               ²                  -0.00%               ²
+¹ all samples are equal
+² summaries must be >0 to compute geomean
+
+                                                                      │       B       │                 B2                  │
+                                                                      │   allocs/op   │  allocs/op   vs base                │
+DynamicChunkSingleRow-10                                                 3.000 ± 0%      3.000 ± 0%       ~ (p=1.000 n=6) ¹
+DynamicChunkFullBatch-10                                                 4.000 ± 0%      4.000 ± 0%       ~ (p=1.000 n=6) ¹
+NotNullProperties-10                                                     0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=6) ¹
+IndexNestedLoopJoin_SeekDrain-10                                         258.0 ± 0%      258.0 ± 0%       ~ (p=1.000 n=6) ¹
+RevToFwd/n5000/transpose-10                                              2.000 ± 0%      2.000 ± 0%       ~ (p=1.000 n=6) ¹
+RevToFwd/n5000/scan-10                                                   1.000 ± 0%      1.000 ± 0%       ~ (p=1.000 n=6) ¹
+RevToFwd/n20000/transpose-10                                             2.000 ± 0%      2.000 ± 0%       ~ (p=1.000 n=6) ¹
+RevToFwd/n20000/scan-10                                                  1.000 ± 0%      1.000 ± 0%       ~ (p=1.000 n=6) ¹
+ShortestPath_UnitDegreeChain-10                                         11.90k ± 0%     11.90k ± 0%       ~ (p=1.000 n=6) ¹
+ShortestPath_Layered-10                                                  108.0 ± 0%      108.0 ± 0%       ~ (p=1.000 n=6) ¹
+ShortestPath_LayeredTyped-10                                             108.0 ± 0%      108.0 ± 0%       ~ (p=1.000 n=6) ¹
+ShortestPath_HighDegreeFan-10                                            314.0 ± 0%      314.0 ± 0%       ~ (p=1.000 n=6) ¹
+AllShortestPaths_UnitDegreeChain-10                                     5.670k ± 0%     5.670k ± 0%       ~ (p=1.000 n=6) ¹
+AllShortestPaths_Layered-10                                             2.938k ± 0%     2.938k ± 0%       ~ (p=1.000 n=6) ¹
+AllShortestPaths_HighDegreeFan-10                                       20.32k ± 0%     20.32k ± 0%       ~ (p=1.000 n=6) ¹
+PermuteRowsInPlace-10                                                    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=6) ¹
+PermuteRowsBuffered-10                                                   1.000 ± 0%      1.000 ± 0%       ~ (p=1.000 n=6) ¹
+BoundedOrder/n=000010/Sort-10                                           120.0k ± 0%     120.0k ± 0%       ~ (p=1.000 n=6) ¹
+BoundedOrder/n=000010/Top-10                                             42.00 ± 0%      42.00 ± 0%       ~ (p=1.000 n=6) ¹
+BoundedOrder/n=000110/Sort-10                                           120.0k ± 0%     120.0k ± 0%       ~ (p=1.000 n=6) ¹
+BoundedOrder/n=000110/Top-10                                             295.0 ± 0%      295.0 ± 0%       ~ (p=1.000 n=6) ¹
+BoundedOrder/n=010010/Sort-10                                           120.0k ± 0%     120.0k ± 0%       ~ (p=1.000 n=6) ¹
+BoundedOrder/n=010010/Top-10                                            25.06k ± 0%     25.06k ± 0%       ~ (p=1.000 n=6) ¹
+BoundedOrder/n=060000/Sort-10                                           120.0k ± 0%     120.0k ± 0%       ~ (p=1.000 n=6) ¹
+BoundedOrder/n=060000/Top-10                                            120.0k ± 0%     120.0k ± 0%       ~ (p=1.000 n=6) ¹
+BoundedOrder/n=120000/Sort-10                                           120.0k ± 0%     120.0k ± 0%       ~ (p=1.000 n=6) ¹
+BoundedOrder/n=120000/Top-10                                            120.0k ± 0%     120.0k ± 0%       ~ (p=1.000 n=6) ¹
+ColumnarAgg_SumCountGroupBy/columnar_on-10                               803.0 ± 0%      803.0 ± 0%       ~ (p=1.000 n=6) ¹
+ColumnarAgg_SumCountGroupBy/row_off-10                                  3.147M ± 0%     3.147M ± 0%       ~ (p=0.870 n=6)
+ColumnarAgg_MinMaxGroupBy/columnar_on-10                                 550.0 ± 0%      550.0 ± 0%       ~ (p=1.000 n=6) ¹
+ColumnarAgg_MinMaxGroupBy/row_off-10                                    3.146M ± 0%     3.146M ± 0%       ~ (p=1.000 n=6)
+Drain_Throughput-10                                                     1.013k ± 0%     1.013k ± 0%       ~ (p=1.000 n=6) ¹
+ExpandFilter_Columnar-10                                                 26.00 ± 0%      26.00 ± 0%       ~ (p=1.000 n=6) ¹
+ExpandFilter_RowMode-10                                                 181.1k ± 0%     181.1k ± 0%       ~ (p=1.000 n=6) ¹
+ExpandDir_InVsOut_Baseline/OUT_deg1_sources-10                          11.78k ± 0%     11.78k ± 0%       ~ (p=1.000 n=6) ¹
+ExpandDir_InVsOut_Baseline/IN_deg1_sources-10                           7.686k ± 0%     7.686k ± 0%       ~ (p=1.000 n=6) ¹
+ExpandIn_PerEdge_vs_SourceOutdegree/K=16/one_in_edge-10                  5.000 ± 0%      5.000 ± 0%       ~ (p=1.000 n=6) ¹
+ExpandIn_PerEdge_vs_SourceOutdegree/K=256/one_in_edge-10                 6.000 ± 0%      6.000 ± 0%       ~ (p=1.000 n=6) ¹
+ExpandIn_PerEdge_vs_SourceOutdegree/K=4096/one_in_edge-10                7.000 ± 0%      7.000 ± 0%       ~ (p=1.000 n=6) ¹
+ExpandIn_PerEdge_vs_SourceOutdegree/K=65536/one_in_edge-10               7.000 ± 0%      7.000 ± 0%       ~ (p=1.000 n=6) ¹
+ExpandIn_TypeFiltered_vs_SourceOutdegree/K=16/one_in_edge_typed-10       12.00 ± 0%      12.00 ± 0%       ~ (p=1.000 n=6) ¹
+ExpandIn_TypeFiltered_vs_SourceOutdegree/K=256/one_in_edge_typed-10      13.00 ± 0%      13.00 ± 0%       ~ (p=1.000 n=6) ¹
+ExpandIn_TypeFiltered_vs_SourceOutdegree/K=4096/one_in_edge_typed-10     28.00 ± 0%      28.00 ± 0%       ~ (p=1.000 n=6) ¹
+ExpandIn_TypeFiltered_vs_SourceOutdegree/K=65536/one_in_edge_typed-10    268.0 ± 0%      268.0 ± 0%       ~ (p=1.000 n=6) ¹
+BuildReverse_vs_E/E=10000-10                                             7.000 ± 0%      7.000 ± 0%       ~ (p=1.000 n=6) ¹
+BuildReverse_vs_E/E=100000-10                                            7.000 ± 0%      7.000 ± 0%       ~ (p=1.000 n=6) ¹
+BuildReverse_vs_E/E=1000000-10                                           7.000 ± 0%      7.000 ± 0%       ~ (p=1.000 n=6) ¹
+ExpandOut_PerEdge_SingleSource/K=4096-10                                7.686k ± 0%     7.686k ± 0%       ~ (p=1.000 n=6) ¹
+ExpandOut_PerEdge_SingleSource/K=65536-10                               130.6k ± 0%     130.6k ± 0%       ~ (p=1.000 n=6) ¹
+Scan_PerNode/N=4096-10                                                   0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=6) ¹
+Scan_PerNode/N=65536-10                                                  0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=6) ¹
+Filter_Throughput-10                                                    5.019k ± 0%     5.019k ± 0%       ~ (p=1.000 n=6) ¹
+Project_Throughput-10                                                   10.02k ± 0%     10.02k ± 0%       ~ (p=1.000 n=6) ¹
+Limit_Throughput-10                                                     5.019k ± 0%     5.019k ± 0%       ~ (p=1.000 n=6) ¹
+Sort_10k-10                                                             20.04k ± 0%     20.04k ± 0%       ~ (p=1.000 n=6) ¹
+Top_10kN100-10                                                          10.13k ± 0%     10.13k ± 0%       ~ (p=1.000 n=6) ¹
+Distinct_10k-10                                                         3.036k ± 0%     3.036k ± 0%       ~ (p=1.000 n=6) ¹
+RelTypeProbe_Map-10                                                      0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=6) ¹
+RelTypeProbe_Column-10                                                   0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=6) ¹
+RelTypeProbe_ReverseRecovery/map+recovery-10                             0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=6) ¹
+RelTypeProbe_ReverseRecovery/column-10                                   0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=6) ¹
+AllNodesScan_PerNodeAllocCost-10                                         759.0 ± 0%      759.0 ± 0%       ~ (p=1.000 n=6) ¹
+geomean                                                                             ²                +0.00%               ²
+¹ all samples are equal
+² summaries must be >0 to compute geomean

@@ -1,0 +1,36 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/graph/index/count
+cpu: Apple M4
+BenchmarkStoreFootprint-10    	   83935	     14182 ns/op	    123712 B/store	  123720 B/op	     581 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/graph/index/count
+cpu: Apple M4
+BenchmarkStoreFootprint-10    	   86186	     13328 ns/op	    123712 B/store	  123720 B/op	     581 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/graph/index/count
+cpu: Apple M4
+BenchmarkStoreFootprint-10    	   86336	     13854 ns/op	    123712 B/store	  123720 B/op	     581 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/graph/index/count
+cpu: Apple M4
+BenchmarkStoreFootprint-10    	   85231	     13443 ns/op	    123712 B/store	  123720 B/op	     581 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/graph/index/count
+cpu: Apple M4
+BenchmarkStoreFootprint-10    	   84163	     13633 ns/op	    123712 B/store	  123720 B/op	     581 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/graph/index/count
+cpu: Apple M4
+BenchmarkStoreFootprint-10    	   84619	     13524 ns/op	    123712 B/store	  123720 B/op	     581 allocs/op
+PASS

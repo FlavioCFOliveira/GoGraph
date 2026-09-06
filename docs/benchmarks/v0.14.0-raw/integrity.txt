@@ -1,0 +1,20 @@
+====================================================================================================
+INTEGRITY — every kept line must match ^Benchmark\S*\s+\d+\s+ ; arms must match
+====================================================================================================
+block       A lines  B lines  B2 lines  A bad  B bad  B2 bad  benches   n/arm  verdict
+exec            372      372       372      0      0       0       62     [6]  OK
+cy              474      474       474      0      0       0       79     [6]  OK
+wal             150      150       150      0      0       0       25     [6]  OK
+txn              12       12        12      0      0       0        2     [6]  OK
+search           24       24        24      0      0       0        4     [6]  OK
+centrality        6        6         6      0      0       0        1     [6]  OK
+Lreadtx          60       60        60      0      0       0       10     [6]  OK
+Lcypar          210      210       210      0      0       0       35     [6]  OK
+Llpg             60       60        60      0      0       0       10     [6]  OK
+Lmvcc           120      120       120      0      0       0       20     [6]  OK
+Lprom            30       30        30      0      0       0        5     [6]  OK
+Lmapper          30       30        30      0      0       0        5     [6]  OK
+Ltxn             24       24        24      0      0       0        4     [6]  OK
+Lbolt            60       60        60      0      0       0       10     [6]  OK
+
+ALL BLOCKS CLEAN: True

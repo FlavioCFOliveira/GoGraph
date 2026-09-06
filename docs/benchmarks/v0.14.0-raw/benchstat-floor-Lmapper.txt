@@ -1,0 +1,34 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/graph
+cpu: Apple M4
+                                   │      B      │                B2                 │
+                                   │   sec/op    │   sec/op     vs base              │
+Mapper_Intern_HotKey_Parallel        8.550n ± 3%   8.487n ± 5%       ~ (p=1.000 n=6)
+Mapper_Intern_HotKey_Parallel-8      76.89n ± 3%   77.26n ± 4%       ~ (p=0.394 n=6)
+Mapper_Intern_HotKey_Parallel-64     88.63n ± 2%   88.70n ± 1%       ~ (p=0.937 n=6)
+Mapper_Intern_HotKey_Parallel-256    88.59n ± 1%   88.47n ± 1%       ~ (p=0.937 n=6)
+Mapper_Intern_HotKey_Parallel-1024   88.13n ± 1%   88.19n ± 1%       ~ (p=0.370 n=6)
+geomean                              53.90n        53.87n       -0.05%
+
+                                   │      B       │                 B2                 │
+                                   │     B/op     │    B/op     vs base                │
+Mapper_Intern_HotKey_Parallel        0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=6) ¹
+Mapper_Intern_HotKey_Parallel-8      0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=6) ¹
+Mapper_Intern_HotKey_Parallel-64     0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=6) ¹
+Mapper_Intern_HotKey_Parallel-256    0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=6) ¹
+Mapper_Intern_HotKey_Parallel-1024   0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=6) ¹
+geomean                                         ²               +0.00%               ²
+¹ all samples are equal
+² summaries must be >0 to compute geomean
+
+                                   │      B       │                 B2                 │
+                                   │  allocs/op   │ allocs/op   vs base                │
+Mapper_Intern_HotKey_Parallel        0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=6) ¹
+Mapper_Intern_HotKey_Parallel-8      0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=6) ¹
+Mapper_Intern_HotKey_Parallel-64     0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=6) ¹
+Mapper_Intern_HotKey_Parallel-256    0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=6) ¹
+Mapper_Intern_HotKey_Parallel-1024   0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=6) ¹
+geomean                                         ²               +0.00%               ²
+¹ all samples are equal
+² summaries must be >0 to compute geomean
