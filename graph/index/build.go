@@ -187,6 +187,15 @@ func (b *BuildLog) Overflowed() bool {
 //
 // It returns the same errors [Manager.CreateIndex] does, so a caller can absorb
 // [ErrIndexExists] for an IF NOT EXISTS statement exactly as before.
+//
+// Concurrency: NOT safe for concurrent use, and valid only for the dynamic
+// extent of the [Manager.FinishBuild] call that supplied it. It closes over the
+// manager's exclusive lock hold and over the captured replay slice, so it
+// carries no synchronisation of its own — that is deliberate, and is what makes
+// several registrations through one instance indivisible with respect to the
+// change fan-out. Calling it from another goroutine, or retaining it beyond the
+// closure it was handed to, escapes the lock hold it assumes and races the
+// manager's index map.
 type RegisterFunc func(name string, sub Subscriber) error
 
 // BeginBuild starts recording every change the manager fans out, and returns the

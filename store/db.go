@@ -181,7 +181,10 @@ func WithFinalCheckpoint() Option {
 // Typical wiring (string-keyed, WAL + engine + checkpointer):
 //
 //	wlog, _ := wal.Open(walPath)
-//	st := txn.NewStoreWithCodec(g, wlog, txn.NewStringCodec())
+//	st := txn.NewStoreWithOptions[string, float64](g, wlog, txn.Options[string, float64]{
+//		Codec:       txn.NewStringCodec(),
+//		WeightCodec: txn.NewFloat64WeightCodec(),
+//	})
 //	eng := cypher.NewEngineWithStore(st)
 //	cp := checkpoint.New(cfg, g, wlog, &unusedMu,
 //		checkpoint.WithCommitSerialiser[string, float64](st.RunUnderCommitLock),
@@ -195,6 +198,13 @@ func WithFinalCheckpoint() Option {
 //		store.WithFinalCheckpoint(),
 //		store.WithQuiesce(st.RunUnderCommitLock))
 //	defer db.Close() // or db.CloseCtx(ctx) to bound the final checkpoint
+//
+// The WeightCodec is NOT optional in this wiring, and this recipe used to omit
+// it by calling [txn.NewStoreWithCodec] (rmp #2747). A store without one makes
+// [txn.Tx.AddEdgeWithHandle] refuse EVERY edge, whatever its weight, and that
+// is the call the Cypher engine's relationship path uses — so every CREATE of a
+// relationship was durably lost while the commit was acknowledged.
+// [checkpoint.WithWeightCodec] would also have been handed a nil codec here.
 func New(w *wal.Writer, opts ...Option) *DB {
 	d := &DB{wal: w}
 	for _, opt := range opts {

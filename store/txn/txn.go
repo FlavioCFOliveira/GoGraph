@@ -1164,9 +1164,47 @@ func (t *Tx[N, W]) AddEdge(src, dst N, w W) error {
 }
 
 // SetNodeLabel buffers a SetNodeLabel(node, label) operation.
+//
+// It returns an error wrapping [ErrFieldTooLong] when label does not fit the
+// uint16 length prefix its WAL frame reserves, and buffers nothing in that
+// case. This is the anchor for the shape every uint16-prefixed mutator on [Tx]
+// follows — REJECT AT THE API, BACKSTOP AT THE ENCODER (rmp #2747):
+//
+//   - the mutator that stages the field refuses it as it is staged, so the
+//     error names the call that carried the offending string and the caller can
+//     abandon the work before doing any of it;
+//   - the encoder ([checkWALSchemaString], reached from [Tx.Commit] and
+//     [Tx.CommitWALOnly]) checks again, because it is the one point every
+//     writer passes and it must hold for any future op kind whose mutator
+//     forgets. Nothing rmp #2742 added is removed.
+//
+// Two engines that face the same problem both put the refusal at the staging
+// API rather than at serialisation, and both were read at a pinned version
+// before this was adopted:
+//
+//   - PostgreSQL REL_17_2, src/backend/access/transam/xloginsert.c,
+//     XLogRegisterBufData: it rejects at registration when the data would
+//     overflow the uint16 XLogRecordBlockHeader.data_length
+//     ("regbuf->rdata_len + len > UINT16_MAX || len > UINT16_MAX" →
+//     ereport(ERROR)). Its assembler, XLogRecordAssemble, keeps only an
+//     Assert before narrowing to uint16 — a backstop compiled out of a
+//     production build.
+//   - RocksDB v9.7.3, db/write_batch.cc, WriteBatchInternal::Put: it calls
+//     CheckSlicePartsLength first thing and returns Status::InvalidArgument
+//     before a byte is appended to the batch.
+//
+// GoGraph departs from PostgreSQL on ONE point, deliberately. ereport(ERROR)
+// longjmps, so a PostgreSQL caller structurally cannot discard the refusal,
+// which is what lets that assembler settle for an assertion. A Go caller can
+// discard an error — the Cypher adapter discarded these at eighteen sites, and
+// that is precisely why rmp #2742 could not put the check here in the first
+// place. So the encoder guard stays a real runtime refusal, not an assertion.
 func (t *Tx[N, W]) SetNodeLabel(node N, label string) error {
 	if t.finished {
 		return ErrTxFinished
+	}
+	if err := checkWALSchemaString("node label", label); err != nil {
+		return err
 	}
 	t.ops = append(t.ops, Op[N, W]{Kind: OpSetNodeLabel, Src: node, Label: label})
 	return nil
@@ -1175,9 +1213,16 @@ func (t *Tx[N, W]) SetNodeLabel(node N, label string) error {
 // SetEdgeLabel buffers a SetEdgeLabel(src, dst, label) operation.
 // The underlying edge must exist at apply time; otherwise the
 // underlying SetEdgeLabel call is a documented no-op.
+//
+// It returns an error wrapping [ErrFieldTooLong], buffering nothing, when label
+// does not fit its uint16 WAL length prefix — reject at the API, backstop at
+// the encoder; see [Tx.SetNodeLabel] (rmp #2747).
 func (t *Tx[N, W]) SetEdgeLabel(src, dst N, label string) error {
 	if t.finished {
 		return ErrTxFinished
+	}
+	if err := checkWALSchemaString("edge label", label); err != nil {
+		return err
 	}
 	t.ops = append(t.ops, Op[N, W]{Kind: OpSetEdgeLabel, Src: src, Dst: dst, Label: label})
 	return nil
@@ -1204,9 +1249,16 @@ func (t *Tx[N, W]) RemoveNode(key N) error {
 }
 
 // RemoveNodeLabel buffers a RemoveNodeLabel(node, label) operation.
+//
+// It returns an error wrapping [ErrFieldTooLong], buffering nothing, when label
+// does not fit its uint16 WAL length prefix — reject at the API, backstop at
+// the encoder; see [Tx.SetNodeLabel] (rmp #2747).
 func (t *Tx[N, W]) RemoveNodeLabel(node N, label string) error {
 	if t.finished {
 		return ErrTxFinished
+	}
+	if err := checkWALSchemaString("node label", label); err != nil {
+		return err
 	}
 	t.ops = append(t.ops, Op[N, W]{Kind: OpRemoveNodeLabel, Src: node, Label: label})
 	return nil
@@ -1254,9 +1306,16 @@ func (t *Tx[N, W]) validateProperty(propKey string, value lpg.PropertyValue) err
 // USE ONLY when the value has already been validated. A caller that has not
 // validated must use [Tx.SetNodeProperty], or a refused value reaches the WAL —
 // which is the whole defect rmp #2602 closed.
+//
+// It returns an error wrapping [ErrFieldTooLong], buffering nothing, when propKey
+// does not fit its uint16 WAL length prefix — reject at the API, backstop at
+// the encoder; see [Tx.SetNodeLabel] (rmp #2747).
 func (t *Tx[N, W]) SetNodePropertyPreValidated(node N, propKey string, value lpg.PropertyValue) error {
 	if t.finished {
 		return ErrTxFinished
+	}
+	if err := checkWALSchemaString("node property key", propKey); err != nil {
+		return err
 	}
 	t.ops = append(t.ops, Op[N, W]{Kind: OpSetNodeProperty, Src: node, Key: propKey, Value: value})
 	return nil
@@ -1264,9 +1323,16 @@ func (t *Tx[N, W]) SetNodePropertyPreValidated(node N, propKey string, value lpg
 
 // SetEdgePropertyPreValidated is [Tx.SetNodePropertyPreValidated] for an edge
 // property. The same contract and the same warning apply.
+//
+// It returns an error wrapping [ErrFieldTooLong], buffering nothing, when propKey
+// does not fit its uint16 WAL length prefix — reject at the API, backstop at
+// the encoder; see [Tx.SetNodeLabel] (rmp #2747).
 func (t *Tx[N, W]) SetEdgePropertyPreValidated(src, dst N, propKey string, value lpg.PropertyValue) error {
 	if t.finished {
 		return ErrTxFinished
+	}
+	if err := checkWALSchemaString("edge property key", propKey); err != nil {
+		return err
 	}
 	t.ops = append(t.ops, Op[N, W]{Kind: OpSetEdgeProperty, Src: src, Dst: dst, Key: propKey, Value: value})
 	return nil
@@ -1274,18 +1340,32 @@ func (t *Tx[N, W]) SetEdgePropertyPreValidated(src, dst N, propKey string, value
 
 // SetEdgePropertyByHandlePreValidated is [Tx.SetNodePropertyPreValidated] for a
 // per-instance edge property. The same contract and the same warning apply.
+//
+// It returns an error wrapping [ErrFieldTooLong], buffering nothing, when propKey
+// does not fit its uint16 WAL length prefix — reject at the API, backstop at
+// the encoder; see [Tx.SetNodeLabel] (rmp #2747).
 func (t *Tx[N, W]) SetEdgePropertyByHandlePreValidated(src, dst N, handle uint64, propKey string, value lpg.PropertyValue) error {
 	if t.finished {
 		return ErrTxFinished
+	}
+	if err := checkWALSchemaString("edge property key", propKey); err != nil {
+		return err
 	}
 	t.ops = append(t.ops, Op[N, W]{Kind: OpSetEdgePropertyByHandle, Src: src, Dst: dst, Handle: handle, Key: propKey, Value: value})
 	return nil
 }
 
 // SetNodeProperty buffers a SetNodeProperty(node, propKey, value) operation.
+//
+// It returns an error wrapping [ErrFieldTooLong], buffering nothing, when propKey
+// does not fit its uint16 WAL length prefix — reject at the API, backstop at
+// the encoder; see [Tx.SetNodeLabel] (rmp #2747).
 func (t *Tx[N, W]) SetNodeProperty(node N, propKey string, value lpg.PropertyValue) error {
 	if t.finished {
 		return ErrTxFinished
+	}
+	if err := checkWALSchemaString("node property key", propKey); err != nil {
+		return err
 	}
 	if err := t.validateProperty(propKey, value); err != nil {
 		return err
@@ -1295,9 +1375,16 @@ func (t *Tx[N, W]) SetNodeProperty(node N, propKey string, value lpg.PropertyVal
 }
 
 // DelNodeProperty buffers a DelNodeProperty(node, propKey) operation.
+//
+// It returns an error wrapping [ErrFieldTooLong], buffering nothing, when propKey
+// does not fit its uint16 WAL length prefix — reject at the API, backstop at
+// the encoder; see [Tx.SetNodeLabel] (rmp #2747).
 func (t *Tx[N, W]) DelNodeProperty(node N, propKey string) error {
 	if t.finished {
 		return ErrTxFinished
+	}
+	if err := checkWALSchemaString("node property key", propKey); err != nil {
+		return err
 	}
 	t.ops = append(t.ops, Op[N, W]{Kind: OpDelNodeProperty, Src: node, Key: propKey})
 	return nil
@@ -1313,9 +1400,16 @@ func (t *Tx[N, W]) RemoveEdge(src, dst N) error {
 }
 
 // SetEdgeProperty buffers a SetEdgeProperty(src, dst, propKey, value) operation.
+//
+// It returns an error wrapping [ErrFieldTooLong], buffering nothing, when propKey
+// does not fit its uint16 WAL length prefix — reject at the API, backstop at
+// the encoder; see [Tx.SetNodeLabel] (rmp #2747).
 func (t *Tx[N, W]) SetEdgeProperty(src, dst N, propKey string, value lpg.PropertyValue) error {
 	if t.finished {
 		return ErrTxFinished
+	}
+	if err := checkWALSchemaString("edge property key", propKey); err != nil {
+		return err
 	}
 	if err := t.validateProperty(propKey, value); err != nil {
 		return err
@@ -1325,9 +1419,16 @@ func (t *Tx[N, W]) SetEdgeProperty(src, dst N, propKey string, value lpg.Propert
 }
 
 // DelEdgeProperty buffers a DelEdgeProperty(src, dst, propKey) operation.
+//
+// It returns an error wrapping [ErrFieldTooLong], buffering nothing, when propKey
+// does not fit its uint16 WAL length prefix — reject at the API, backstop at
+// the encoder; see [Tx.SetNodeLabel] (rmp #2747).
 func (t *Tx[N, W]) DelEdgeProperty(src, dst N, propKey string) error {
 	if t.finished {
 		return ErrTxFinished
+	}
+	if err := checkWALSchemaString("edge property key", propKey); err != nil {
+		return err
 	}
 	t.ops = append(t.ops, Op[N, W]{Kind: OpDelEdgeProperty, Src: src, Dst: dst, Key: propKey})
 	return nil
@@ -1355,9 +1456,16 @@ func (t *Tx[N, W]) AddEdgeWithHandle(src, dst N, w W, handle uint64) error {
 // SetEdgeLabelByHandle buffers an [OpSetEdgeLabelByHandle] operation,
 // persisting `label` against one parallel edge's stable `handle` on the
 // (src, dst) pair so the per-CREATE type survives recovery.
+//
+// It returns an error wrapping [ErrFieldTooLong], buffering nothing, when label
+// does not fit its uint16 WAL length prefix — reject at the API, backstop at
+// the encoder; see [Tx.SetNodeLabel] (rmp #2747).
 func (t *Tx[N, W]) SetEdgeLabelByHandle(src, dst N, handle uint64, label string) error {
 	if t.finished {
 		return ErrTxFinished
+	}
+	if err := checkWALSchemaString("edge label", label); err != nil {
+		return err
 	}
 	t.ops = append(t.ops, Op[N, W]{Kind: OpSetEdgeLabelByHandle, Src: src, Dst: dst, Handle: handle, Label: label})
 	return nil
@@ -1366,9 +1474,16 @@ func (t *Tx[N, W]) SetEdgeLabelByHandle(src, dst N, handle uint64, label string)
 // SetEdgePropertyByHandle buffers an [OpSetEdgePropertyByHandle] operation,
 // persisting key=value against one parallel edge's stable `handle` on the
 // (src, dst) pair.
+//
+// It returns an error wrapping [ErrFieldTooLong], buffering nothing, when propKey
+// does not fit its uint16 WAL length prefix — reject at the API, backstop at
+// the encoder; see [Tx.SetNodeLabel] (rmp #2747).
 func (t *Tx[N, W]) SetEdgePropertyByHandle(src, dst N, handle uint64, propKey string, value lpg.PropertyValue) error {
 	if t.finished {
 		return ErrTxFinished
+	}
+	if err := checkWALSchemaString("edge property key", propKey); err != nil {
+		return err
 	}
 	if err := t.validateProperty(propKey, value); err != nil {
 		return err
@@ -1383,9 +1498,16 @@ func (t *Tx[N, W]) SetEdgePropertyByHandle(src, dst N, handle uint64, propKey st
 // untouched. The single-key removal analogue of
 // [Tx.SetEdgePropertyByHandle]; emitted for REMOVE r.x / SET r.x = null on a
 // bound parallel relationship.
+//
+// It returns an error wrapping [ErrFieldTooLong], buffering nothing, when propKey
+// does not fit its uint16 WAL length prefix — reject at the API, backstop at
+// the encoder; see [Tx.SetNodeLabel] (rmp #2747).
 func (t *Tx[N, W]) DelEdgePropertyByHandle(src, dst N, handle uint64, propKey string) error {
 	if t.finished {
 		return ErrTxFinished
+	}
+	if err := checkWALSchemaString("edge property key", propKey); err != nil {
+		return err
 	}
 	t.ops = append(t.ops, Op[N, W]{Kind: OpDelEdgePropertyByHandle, Src: src, Dst: dst, Handle: handle, Key: propKey})
 	return nil
@@ -1491,12 +1613,18 @@ func (t *Tx[N, W]) DropIndex(name string) error {
 // Commit returns [ErrFieldTooLong], having made nothing durable and applied
 // nothing, when any buffered op carries a string too long for the length prefix
 // its WAL frame reserves: 65535 bytes for a label, a property key, or a schema
-// identifier; 4 GiB for a property value. The check lives at the encoder rather
-// than at the buffering mutators because the encoder is the one point every
-// writer passes, and the only one whose error no caller can discard — the
-// Cypher engine's adapter deliberately ignores the mutators' return value
-// (rmp #2742). The transaction consumes a sequence, applies nothing, and leaves
-// the store usable for the next one.
+// identifier; 4 GiB for a property value. The transaction consumes a sequence,
+// applies nothing, and leaves the store usable for the next one.
+//
+// Reaching Commit is now the BACKSTOP, not the primary refusal. Every mutator
+// that stages a uint16-prefixed field checks it as it is staged, so the caller
+// normally learns at the call that carried the offending string (rmp #2747);
+// this guard still stands behind them because the encoder is the one point
+// every writer passes, including a future op kind whose mutator forgets to
+// check. Until rmp #2747 the encoder was the ONLY guard, because the Cypher
+// engine's adapter discarded the mutators' return value at eighteen sites and a
+// refusal raised there would have been swallowed (rmp #2742); those sites either
+// propagate now or carry a verified statement of what their callee can return.
 func (t *Tx[N, W]) Commit() error {
 	defer metrics.Time("store.txn.Commit").Stop()
 	if t.finished {
@@ -1644,11 +1772,14 @@ func (t *Tx[N, W]) Commit() error {
 // the covering fsync preserves durable-before-visible.
 //
 // It refuses an unencodable field exactly as [Tx.Commit] does, with
-// [ErrFieldTooLong]. An eager caller must undo its in-memory writes on that
-// error; the Cypher engine's commitUnderBarrier already does, through
+// [ErrFieldTooLong], and for the same reason is now the backstop rather than
+// the primary refusal. An eager caller must still undo its in-memory writes on
+// that error; the Cypher engine's commitUnderBarrier already does, through
 // rollbackUnderBarrier, so an over-long label rejects the whole statement
 // atomically rather than leaving visible a label the WAL never recorded
-// (rmp #2742).
+// (rmp #2742). Since rmp #2747 that adapter also refuses the field BEFORE the
+// in-memory write, so the undo path is no longer the first line of defence for
+// a field the caller supplied.
 func (t *Tx[N, W]) CommitWALOnly(commitTS uint64) error {
 	defer metrics.Time("store.txn.CommitWALOnly").Stop()
 	if t.finished {
@@ -2219,15 +2350,39 @@ const maxWALValueLenInt = maxWALValueLen & math.MaxInt
 // instead, so the caller sees a typed, testable error rather than an
 // acknowledgement of a write recovery will read back wrong.
 //
-// It reaches the caller from [Tx.Commit] and [Tx.CommitWALOnly] (through
-// [Tx.appendOnly]); the offending transaction consumes a sequence and applies
-// nothing, and the store stays usable for the next one.
+// It reaches the caller from every [Tx] mutator that stages a uint16-prefixed
+// field, which refuses the string as it is staged and buffers nothing (rmp
+// #2747), and — as the backstop for anything those checks do not cover — from
+// [Tx.Commit] and [Tx.CommitWALOnly] (through [Tx.appendOnly]), where the
+// offending transaction consumes a sequence and applies nothing. The store
+// stays usable for the next transaction either way.
 var ErrFieldTooLong = errors.New("txn: field too long for its WAL length prefix")
+
+// CheckSchemaField reports whether s fits the uint16 length prefix every WAL
+// frame reserves for a schema string — a label, a property key, or a schema
+// identifier — returning an error wrapping [ErrFieldTooLong] when it does not.
+// what names the field in that error ("node label", "edge property key", ...).
+//
+// It exists so a caller that stages work of its own BEFORE it reaches a [Tx]
+// mutator can refuse an unencodable field at its own API boundary, against the
+// ONE definition of the bound rather than a second copy of the number. The
+// Cypher engine's WAL-backed adapter uses it exactly that way (rmp #2747): it
+// refuses an over-long label before the in-memory write lands, so the refusal
+// costs no mutation to undo and, in particular, leaves no entry in the
+// process-lifetime [lpg.LabelRegistry], which a rollback does not reverse.
+//
+// A caller that has nothing to do before the mutator does not need it: every
+// [Tx] mutator that stages a uint16-prefixed field checks its own argument.
+func CheckSchemaField(what, s string) error { return checkWALSchemaString(what, s) }
 
 // checkWALSchemaString rejects a string whose byte length would overflow the
 // uint16 length prefix its frame reserves, converting silent truncation into a
 // fail-stop commit error (#1903 for the schema encoders, rmp #2742 for the five
 // mutation encoders the guard originally missed).
+//
+// It is called TWICE on a staged field, and deliberately: once by the mutator
+// that stages it (reject at the API) and once by the encoder that writes it
+// (backstop). See [Tx.SetNodeLabel] for why both.
 func checkWALSchemaString(what, s string) error {
 	if len(s) > maxWALSchemaStringLen {
 		return errFieldTooLong(what, len(s), maxWALSchemaStringLen)

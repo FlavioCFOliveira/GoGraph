@@ -20124,6 +20124,32 @@ func (a *lpgMutatorAdapter) WalkNodeIDs(fn func(graph.NodeID) bool) {
 // visibility barrier (#1282). It is independent of the WAL transaction and the
 // index buffer, which roll back through their own mechanisms; the undo log
 // closes only the in-memory-vs-durable divergence.
+//
+// # The discard note (rmp #2747)
+//
+// Every method below buffers its op with a call on a.tx whose error must be
+// accounted for. Eighteen of those calls used to discard it under a comment
+// asserting "ErrTxFinished impossible here". Seven sit in methods that return
+// an error and now PROPAGATE it. Eleven sit in [exec.GraphMutator] methods that
+// return NOTHING, so there is no return path to propagate along; each of those
+// carries, on its own line, the set its callee can actually return, read from
+// store/txn/txn.go rather than inherited.
+//
+// Six of the eleven CAN now raise [txn.ErrFieldTooLong] — RemoveNodeLabel,
+// DelNodeProperty, SetEdgeLabel, DelEdgeProperty, SetEdgeLabelByHandle and
+// DelEdgePropertyByHandle all stage a uint16-prefixed label or property key.
+// For those the encoder backstop at Commit remains the refusal, exactly as it
+// was before rmp #2747: the statement succeeds, the commit is refused, and
+// [Result.commitUnderBarrier] rolls the whole transaction back. Nothing is
+// silently lost. What they do NOT get is the early refusal the seven with a
+// return path now have, and closing that gap means widening
+// [exec.GraphMutator] — an interface change across every implementation and
+// call site in cypher/exec, which is a decision for the user, not for this
+// fix.
+//
+// A discard here is never to be "fixed" with a panic: CLAUDE.md forbids a panic
+// on a recoverable condition, and a refused buffering is recoverable by
+// construction — the encoder refuses the same field at Commit.
 type walMutatorAdapter struct {
 	// counters accumulates this statement's openCypher write effects (#2212), exactly
 	// as on [lpgMutatorAdapter]. Both adapters carry it because both are reachable
@@ -20373,13 +20399,23 @@ func (a *walMutatorAdapter) AddNode(n string) (graph.NodeID, error) {
 	if err := a.w().AddNode(n); err != nil {
 		return 0, err
 	}
-	_ = a.tx.AddNode(n) // tx is non-nil; only ErrTxFinished possible, which cannot occur here
+	// rmp #2747: propagated, never discarded. The error is captured and returned
+	// only AFTER the bookkeeping below, because the in-memory AddNode has already
+	// happened: returning here would leave a write the undo log had not yet
+	// recorded, which no rollback could reverse. Today the only reachable value
+	// is nil — [txn.Tx.AddNode] returns ErrTxFinished alone, and this adapter is
+	// never reached on a finished transaction — so nothing that runs today
+	// changes; what goes is the trap that made a NEW error class disappear.
+	txErr := a.tx.AddNode(n)
 	id, _ := a.g.AdjList().Mapper().Lookup(n)
 	if !existed {
 		a.countNodeCreated()
 	}
 	a.rec().recordAddNode(n, !existed)
 	a.countMarkFresh(n, existed) // count-store (#2082): initial-label vs relabel
+	if txErr != nil {
+		return 0, txErr
+	}
 	return id, nil
 }
 
@@ -20394,7 +20430,16 @@ func (a *walMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 	if err := a.w().AddEdge(src, dst, w); err != nil {
 		return 0, 0, err
 	}
-	_ = a.tx.AddEdge(src, dst, w) // ErrNoWeightCodec cannot occur — store has wcodec via NewEngineWithStore
+	// rmp #2747: propagated, never discarded — see [walMutatorAdapter.AddNode]
+	// for why the error is held until the bookkeeping below has run.
+	//
+	// [txn.Tx.AddEdge] returns ErrTxFinished (unreachable here) or
+	// ErrNoWeightCodec, and the comment that stood here claimed the latter
+	// "cannot occur — store has wcodec via NewEngineWithStore". It can:
+	// [NewEngineWithStore] accepts ANY [txn.Store], including one built by
+	// [txn.NewStoreWithCodec], which has no weight codec. On such a store this
+	// call refuses every non-zero weight.
+	txErr := a.tx.AddEdge(src, dst, w)
 	srcID, _ := a.g.AdjList().Mapper().Lookup(src)
 	dstID, _ := a.g.AdjList().Mapper().Lookup(dst)
 	if !srcExisted {
@@ -20416,6 +20461,9 @@ func (a *walMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 		a.rec().recordAddEdge(src, dst, !srcExisted, !dstExisted)
 	}
 	a.countClearFresh(src, dst) // count-store (#2082): endpoints now carry an edge
+	if txErr != nil {
+		return 0, 0, txErr
+	}
 	return srcID, dstID, nil
 }
 
@@ -20438,7 +20486,19 @@ func (a *walMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 	if err != nil {
 		return 0, 0, 0, err
 	}
-	_ = a.tx.AddEdgeWithHandle(src, dst, w, handle) // ErrNoWeightCodec cannot occur — store has wcodec via NewEngineWithStore
+	// rmp #2747: propagated, never discarded — and here the discard was not a
+	// latent trap but a live ACID Durability breach.
+	//
+	// [txn.Tx.AddEdgeWithHandle] returns ErrNoWeightCodec whenever the store has
+	// no weight codec, for ANY weight — unlike [txn.Tx.AddEdge], which refuses
+	// only a non-zero one. An engine built by [NewEngineWithStore] over a
+	// [txn.NewStoreWithCodec] store therefore had EVERY relationship this path
+	// staged refused, the refusal discarded here, and the commit acknowledged:
+	// the edge lived in memory and in no WAL frame, so recovery returned the two
+	// endpoints, their labels and their properties, and no relationship between
+	// them. Measured on this tree before the fix — see
+	// TestRelationshipDurability_NoWeightCodec_2747.
+	txErr := a.tx.AddEdgeWithHandle(src, dst, w, handle)
 	srcID, _ := a.g.AdjList().Mapper().Lookup(src)
 	dstID, _ := a.g.AdjList().Mapper().Lookup(dst)
 	if !srcExisted {
@@ -20456,6 +20516,9 @@ func (a *walMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 		a.rec().recordAddEdge(src, dst, !srcExisted, !dstExisted)
 	}
 	a.countClearFresh(src, dst) // count-store (#2082): endpoints now carry an edge
+	if txErr != nil {
+		return 0, 0, 0, txErr
+	}
 	return srcID, dstID, handle, nil
 }
 
@@ -20503,7 +20566,7 @@ func (a *walMutatorAdapter) RemoveEdge(src, dst string) {
 	if present {
 		a.countRelDeleted()
 	}
-	_ = a.tx.RemoveEdge(src, dst) // ErrTxFinished impossible here
+	_ = a.tx.RemoveEdge(src, dst) // rmp #2747: [txn.Tx.RemoveEdge] returns ErrTxFinished and nothing else, and this adapter is never reached on a finished transaction. Discarded because [exec.GraphMutator.RemoveEdge] returns nothing — see the discard note on [walMutatorAdapter].
 	r.recordRemoveEdge(&pre, present)
 }
 
@@ -20535,12 +20598,32 @@ func (a *walMutatorAdapter) RemoveEdgeByHandle(src, dst string, handle uint64) {
 	if removed {
 		a.countRelDeleted()
 	}
-	_ = a.tx.RemoveEdgeByHandle(src, dst, handle) // ErrTxFinished impossible here
+	_ = a.tx.RemoveEdgeByHandle(src, dst, handle) // rmp #2747: [txn.Tx.RemoveEdgeByHandle] returns ErrTxFinished and nothing else, unreachable here. Discarded: [exec.GraphMutator.RemoveEdgeByHandle] returns nothing.
 	r.recordRemoveEdge(&pre, removed)
 }
 
 // SetNodeLabel attaches label to n.
 func (a *walMutatorAdapter) SetNodeLabel(n, label string) error {
+	// REJECT AT THE API, BACKSTOP AT THE ENCODER (rmp #2747). A label too long
+	// for the uint16 length prefix its WAL frame reserves is refused HERE, before
+	// the in-memory write, against [txn]'s single definition of the bound.
+	//
+	// It used to be refused only at the encoder, which [Result.commitUnderBarrier]
+	// reaches at Commit and routes to rollbackUnderBarrier (rmp #2742). That is
+	// still correct and still in place, but it is late in two ways this is not.
+	// The statement had already succeeded, so inside an explicit transaction a
+	// later statement could read back a label the WAL would never accept. And the
+	// lpg write interns the label into the process-lifetime [lpg.LabelRegistry],
+	// which rollback does NOT reverse — a refused 70000-byte label stayed
+	// interned for the life of the process. Both measured on this tree; see
+	// TestOverlongLabelRefusedBeforeInMemoryWrite_2747.
+	//
+	// This gate is on the WAL-backed adapter only. The in-memory engine has no
+	// WAL frame to overflow, so bounding a label there would be a new policy,
+	// not this defect (rmp #2747 scope note).
+	if err := txn.CheckSchemaField("node label", label); err != nil {
+		return err
+	}
 	// See the lpgMutatorAdapter twin: UNIQUE is enforced at this surface, before the
 	// write (rmp #2358).
 	if err := exec.EnforceUniqueOnLabelSet(a.constraintReg(), a, a.g.IndexManager(), n, label); err != nil {
@@ -20562,7 +20645,12 @@ func (a *walMutatorAdapter) SetNodeLabel(n, label string) error {
 		a.countLabelAdded()
 	}
 	r.recordSetNodeLabel(n, label, hadLabel)
-	_ = a.tx.SetNodeLabel(n, label) // ErrTxFinished impossible here
+	// rmp #2747: propagated, never discarded — held until the bookkeeping below
+	// has run, as in [walMutatorAdapter.AddNode]. [txn.Tx.SetNodeLabel] returns
+	// ErrTxFinished (unreachable here) or ErrFieldTooLong, and the gate at the
+	// top of this method has already refused every label that could raise the
+	// second, so nil is the only value reachable today.
+	txErr := a.tx.SetNodeLabel(n, label)
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
 			Op:    index.OpAddNodeLabel,
@@ -20573,7 +20661,7 @@ func (a *walMutatorAdapter) SetNodeLabel(n, label string) error {
 	if countNew {
 		countRelabel(a.g, a.cs(), a.countBuf(), n, label, +1)
 	}
-	return nil
+	return txErr
 }
 
 // RemoveNodeLabel detaches label from n.
@@ -20594,7 +20682,7 @@ func (a *walMutatorAdapter) RemoveNodeLabel(n, label string) {
 		a.countLabelRemoved()
 	}
 	r.recordRemoveNodeLabel(n, label, hadLabel)
-	_ = a.tx.RemoveNodeLabel(n, label) // ErrTxFinished impossible here
+	_ = a.tx.RemoveNodeLabel(n, label) // rmp #2747: [txn.Tx.RemoveNodeLabel] returns ErrTxFinished (unreachable here) or ErrFieldTooLong on a label over 65535 bytes. The SECOND is reachable and is DISCARDED: [exec.GraphMutator.RemoveNodeLabel] returns nothing, so the encoder backstop at Commit is what refuses it — see the discard note on [walMutatorAdapter].
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
 			Op:    index.OpRemoveNodeLabel,
@@ -20634,7 +20722,7 @@ func (a *walMutatorAdapter) RemoveNode(n string) {
 		a.countNodeDeleted()
 		a.rec().recordRemoveNode(n, true)
 	}
-	_ = a.tx.RemoveNode(n) // ErrTxFinished impossible here; not-found is safe to ignore
+	_ = a.tx.RemoveNode(n) // rmp #2747: [txn.Tx.RemoveNode] returns ErrTxFinished and nothing else, unreachable here; it stages no schema string, so no field bound applies. Discarded: [exec.GraphMutator.RemoveNode] returns nothing.
 }
 
 // IsTombstoned reports whether the NodeID has been tombstoned.
@@ -20644,6 +20732,14 @@ func (a *walMutatorAdapter) IsTombstoned(id graph.NodeID) bool {
 
 // SetNodeProperty sets the named property on n.
 func (a *walMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyValue) error {
+	// Reject at the API, backstop at the encoder — see
+	// [walMutatorAdapter.SetNodeLabel] (rmp #2747). The uint16-prefixed field
+	// here is the property KEY; the value is uint32-prefixed and bounded at the
+	// encoder alone, where the 4 GiB cap it would have to breach makes an early
+	// refusal worth nothing.
+	if err := txn.CheckSchemaField("node property key", key); err != nil {
+		return err
+	}
 	// See the lpgMutatorAdapter twin (rmp #2358).
 	if err := exec.EnforceUniqueOnPropertySet(a.constraintReg(), a, a.g.IndexManager(), n, key, value); err != nil {
 		return err
@@ -20664,7 +20760,10 @@ func (a *walMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 	r.recordSetNodeProperty(n, key, prev, had)
 	// PreValidated: a.w().SetNodeProperty above already ran the schema validator
 	// on this value, and a stateful validator must not see it twice (rmp #2602).
-	_ = a.tx.SetNodePropertyPreValidated(n, key, value) // ErrTxFinished impossible here
+	// rmp #2747: propagated, never discarded.
+	// [txn.Tx.SetNodePropertyPreValidated] returns ErrTxFinished (unreachable
+	// here) or ErrFieldTooLong, which the gate at the top has already refused.
+	txErr := a.tx.SetNodePropertyPreValidated(n, key, value)
 	if a.buf != nil {
 		ch := index.Change{
 			Op:       index.OpSetNodeProperty,
@@ -20681,7 +20780,7 @@ func (a *walMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 		recordStatsNodePropertyWrite(sc, a.g.NodeIndex(), a.resolveID(n),
 			uint32(a.g.PropertyKeys().Intern(key)), had)
 	}
-	return nil
+	return txErr
 }
 
 // DelNodeProperty removes the named property from n.
@@ -20705,7 +20804,7 @@ func (a *walMutatorAdapter) DelNodeProperty(n, key string) {
 	}
 	a.w().DelNodeProperty(n, key)
 	r.recordDelNodeProperty(n, key, prev, had)
-	_ = a.tx.DelNodeProperty(n, key) // ErrTxFinished impossible here
+	_ = a.tx.DelNodeProperty(n, key) // rmp #2747: [txn.Tx.DelNodeProperty] returns ErrTxFinished (unreachable here) or ErrFieldTooLong on a key over 65535 bytes. The SECOND is reachable and is DISCARDED: [exec.GraphMutator.DelNodeProperty] returns nothing; the encoder backstop refuses it at Commit.
 	if a.buf != nil {
 		ch := index.Change{
 			Op:       index.OpDelNodeProperty,
@@ -20763,7 +20862,7 @@ func (a *walMutatorAdapter) SetEdgeLabel(src, dst, label string) {
 	hadLabel := r.active() && a.g.HasEdgeLabel(src, dst, label)
 	a.w().SetEdgeLabel(src, dst, label)
 	r.recordSetEdgeLabel(src, dst, label, hadLabel)
-	_ = a.tx.SetEdgeLabel(src, dst, label) // ErrTxFinished impossible here
+	_ = a.tx.SetEdgeLabel(src, dst, label) // rmp #2747: [txn.Tx.SetEdgeLabel] returns ErrTxFinished (unreachable here) or ErrFieldTooLong on a label over 65535 bytes. The SECOND is reachable and is DISCARDED: [exec.GraphMutator.SetEdgeLabel] returns nothing; the encoder backstop refuses it at Commit.
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
 			Op:    index.OpAddEdgeLabel,
@@ -20776,6 +20875,11 @@ func (a *walMutatorAdapter) SetEdgeLabel(src, dst, label string) {
 
 // SetEdgeProperty sets the named property on the directed edge (src, dst).
 func (a *walMutatorAdapter) SetEdgeProperty(src, dst, key string, value lpg.PropertyValue) error {
+	// Reject at the API, backstop at the encoder — see
+	// [walMutatorAdapter.SetNodeLabel] (rmp #2747).
+	if err := txn.CheckSchemaField("edge property key", key); err != nil {
+		return err
+	}
 	r := a.rec()
 	var prev lpg.PropertyValue
 	var had bool
@@ -20788,7 +20892,10 @@ func (a *walMutatorAdapter) SetEdgeProperty(src, dst, key string, value lpg.Prop
 	a.countPropertySet()
 	r.recordSetEdgeProperty(src, dst, key, prev, had)
 	// PreValidated: see the SetNodeProperty twin (rmp #2602).
-	_ = a.tx.SetEdgePropertyPreValidated(src, dst, key, value) // ErrTxFinished impossible here
+	// rmp #2747: propagated, never discarded.
+	// [txn.Tx.SetEdgePropertyPreValidated] returns ErrTxFinished (unreachable
+	// here) or ErrFieldTooLong, which the gate at the top has already refused.
+	txErr := a.tx.SetEdgePropertyPreValidated(src, dst, key, value)
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
 			Op:       index.OpSetEdgeProperty,
@@ -20798,7 +20905,7 @@ func (a *walMutatorAdapter) SetEdgeProperty(src, dst, key string, value lpg.Prop
 			NewValue: value,
 		})
 	}
-	return nil
+	return txErr
 }
 
 // DelEdgeProperty removes the named property from the directed edge (src, dst).
@@ -20824,7 +20931,7 @@ func (a *walMutatorAdapter) delEdgePropertyUncounted(src, dst, key string) {
 	}
 	a.w().DelEdgeProperty(src, dst, key)
 	r.recordDelEdgeProperty(src, dst, key, prev, had)
-	_ = a.tx.DelEdgeProperty(src, dst, key) // ErrTxFinished impossible here
+	_ = a.tx.DelEdgeProperty(src, dst, key) // rmp #2747: [txn.Tx.DelEdgeProperty] returns ErrTxFinished (unreachable here) or ErrFieldTooLong on a key over 65535 bytes. The SECOND is reachable and is DISCARDED: this helper and both its callers ([walMutatorAdapter.DelEdgeProperty], [walMutatorAdapter.DelEdgePropertyOnInstance]) return nothing; the encoder backstop refuses it at Commit.
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
 			Op:       index.OpDelEdgeProperty,
@@ -20927,7 +21034,7 @@ func (a *walMutatorAdapter) RemoveEdgeInstance(src, dst string, idx int64) {
 // uses, so the per-pair and per-handle stores stay atomic together.
 func (a *walMutatorAdapter) SetEdgeLabelByHandle(src, dst string, handle uint64, label string) {
 	a.w().SetEdgeLabelByHandle(src, dst, handle, label)
-	_ = a.tx.SetEdgeLabelByHandle(src, dst, handle, label) // ErrTxFinished impossible here
+	_ = a.tx.SetEdgeLabelByHandle(src, dst, handle, label) // rmp #2747: [txn.Tx.SetEdgeLabelByHandle] returns ErrTxFinished (unreachable here) or ErrFieldTooLong on a label over 65535 bytes. The SECOND is reachable and is DISCARDED: [exec.GraphMutator.SetEdgeLabelByHandle] returns nothing; the encoder backstop refuses it at Commit.
 	// Count-store (#2082): the single authoritative once-per-edge typing hook.
 	if a.cs() != nil {
 		countEdgeTyped(a.g, a.cs(), a.countBuf(), src, dst, label)
@@ -20937,6 +21044,11 @@ func (a *walMutatorAdapter) EdgeLabelsByHandle(src, dst string, handle uint64) [
 	return a.g.EdgeLabelsByHandle(src, dst, handle)
 }
 func (a *walMutatorAdapter) SetEdgePropertyByHandle(src, dst string, handle uint64, key string, value lpg.PropertyValue) error {
+	// Reject at the API, backstop at the encoder — see
+	// [walMutatorAdapter.SetNodeLabel] (rmp #2747).
+	if err := txn.CheckSchemaField("edge property key", key); err != nil {
+		return err
+	}
 	r := a.rec()
 	var prev lpg.PropertyValue
 	var had bool
@@ -20948,8 +21060,11 @@ func (a *walMutatorAdapter) SetEdgePropertyByHandle(src, dst string, handle uint
 	}
 	r.recordSetEdgePropertyByHandle(src, dst, handle, key, prev, had)
 	// PreValidated: see the SetNodeProperty twin (rmp #2602).
-	_ = a.tx.SetEdgePropertyByHandlePreValidated(src, dst, handle, key, value) // ErrTxFinished impossible here
-	return nil
+	// rmp #2747: propagated, never discarded.
+	// [txn.Tx.SetEdgePropertyByHandlePreValidated] returns ErrTxFinished
+	// (unreachable here) or ErrFieldTooLong, which the gate at the top has
+	// already refused.
+	return a.tx.SetEdgePropertyByHandlePreValidated(src, dst, handle, key, value)
 }
 func (a *walMutatorAdapter) DelEdgePropertyByHandle(src, dst string, handle uint64, key string) {
 	r := a.rec()
@@ -20960,14 +21075,14 @@ func (a *walMutatorAdapter) DelEdgePropertyByHandle(src, dst string, handle uint
 	}
 	a.w().DelEdgePropertyByHandle(src, dst, handle, key)
 	r.recordDelEdgePropertyByHandle(src, dst, handle, key, prev, had)
-	_ = a.tx.DelEdgePropertyByHandle(src, dst, handle, key) // ErrTxFinished impossible here
+	_ = a.tx.DelEdgePropertyByHandle(src, dst, handle, key) // rmp #2747: [txn.Tx.DelEdgePropertyByHandle] returns ErrTxFinished (unreachable here) or ErrFieldTooLong on a key over 65535 bytes. The SECOND is reachable and is DISCARDED: [exec.GraphMutator.DelEdgePropertyByHandle] returns nothing; the encoder backstop refuses it at Commit.
 }
 func (a *walMutatorAdapter) EdgePropertiesByHandle(src, dst string, handle uint64) map[string]lpg.PropertyValue {
 	return a.g.EdgePropertiesByHandle(src, dst, handle)
 }
 func (a *walMutatorAdapter) RemoveEdgeInstanceByHandle(src, dst string, handle uint64) {
 	a.w().RemoveEdgeInstanceByHandle(src, dst, handle)
-	_ = a.tx.RemoveEdgeInstanceByHandle(src, dst, handle) // ErrTxFinished impossible here
+	_ = a.tx.RemoveEdgeInstanceByHandle(src, dst, handle) // rmp #2747: [txn.Tx.RemoveEdgeInstanceByHandle] returns ErrTxFinished and nothing else, unreachable here; it stages no schema string. Discarded: [exec.GraphMutator.RemoveEdgeInstanceByHandle] returns nothing.
 }
 
 // RecordConstraintInverse is [lpgMutatorAdapter.RecordConstraintInverse] for the
@@ -21030,7 +21145,7 @@ func (a *walMutatorAdapter) RemoveAllEdgesFrom(n string) {
 	// cannot commit, but the frames must not be written on the strength of that
 	// alone — the WAL is the durable truth and it may only describe work done.
 	for _, dst := range outgoing {
-		_ = a.tx.RemoveEdge(n, dst) // ErrTxFinished impossible here
+		_ = a.tx.RemoveEdge(n, dst) // rmp #2747: [txn.Tx.RemoveEdge] returns ErrTxFinished and nothing else, unreachable here. Discarded: [exec.GraphMutator.RemoveAllEdgesFrom] returns nothing.
 	}
 	journalAllOutEdgesRemoved(r, a, pre)
 }
