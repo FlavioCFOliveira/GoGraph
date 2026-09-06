@@ -155,3 +155,14 @@ func (s simCheckpointBackend[N, W]) WriteCapture(snapDir string, capt *snapshot.
 func (s simCheckpointBackend[N, W]) ReadManifest(path string) (snapshot.Manifest, error) {
 	return snapshot.ReadManifestFileFS(simSnapshotFS(s), path)
 }
+
+// VerifySnapshotReadable parses the published snapshot back off the in-memory
+// disk with the SAME full reader the simulated recovery uses
+// ([simRecoveryFS.LoadSnapshot] -> snapshot.LoadSnapshotFullFS), so the
+// checkpointer's pre-truncation readback (rmp #2749) is exercised inside DST
+// with the simulator's fault injection applied to it, exactly as it is in
+// production.
+func (s simCheckpointBackend[N, W]) VerifySnapshotReadable(snapDir string) error {
+	_, err := snapshot.LoadSnapshotFullFS(simSnapshotFS(s), snapDir)
+	return err
+}

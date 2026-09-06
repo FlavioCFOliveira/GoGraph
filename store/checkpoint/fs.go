@@ -15,11 +15,12 @@ import (
 // verify self-sufficiency, and the WAL fsync/truncate it does go through the
 // injected [github.com/FlavioCFOliveira/GoGraph/store/wal.Writer] (which is
 // already backed by the simulator's in-memory disk in DST). This interface
-// abstracts only the two snapshot-package calls so the simulator can route
-// them through its in-memory filesystem.
+// abstracts only the snapshot-package calls so the simulator can route them
+// through its in-memory filesystem.
 //
 // The default backend ([osSnapshotBackend]) calls
-// snapshot.WriteSnapshotFullWith* / snapshot.ReadManifestFile verbatim, so the
+// snapshot.WriteSnapshotFullWith* / snapshot.ReadManifestFile /
+// snapshot.LoadSnapshotFull verbatim, so the
 // production checkpoint path is byte-identical to the pre-seam code. The
 // deterministic-simulation harness supplies an in-memory backend via
 // [WithSnapshotFS].
@@ -49,6 +50,18 @@ type snapshotBackend[N comparable, W any] interface {
 	// ReadManifest reads the manifest at path (used to verify snapshot
 	// self-sufficiency before truncating the WAL).
 	ReadManifest(path string) (snapshot.Manifest, error)
+	// VerifySnapshotReadable establishes that the snapshot published at snapDir
+	// can actually be READ BACK by the reader recovery uses, returning nil only
+	// when every component the manifest declares was opened and parsed.
+	//
+	// An implementation MUST perform the full parse — the same call recovery
+	// makes (see store/recovery.osBackend.LoadSnapshot) — and MUST NOT
+	// substitute a cheaper proxy such as stat-ing the files, re-reading the
+	// manifest, or checking a CRC alone. The checkpointer calls this before it
+	// truncates the WAL prefix, so a weaker check here is a Durability defect:
+	// it would discard the only other copy of the data behind an image nothing
+	// can read (rmp #2749).
+	VerifySnapshotReadable(snapDir string) error
 }
 
 // osSnapshotBackend is the production backend: it delegates to the snapshot
@@ -80,6 +93,19 @@ func (osSnapshotBackend[N, W]) WriteCapture(snapDir string, capt *snapshot.Captu
 
 func (osSnapshotBackend[N, W]) ReadManifest(path string) (snapshot.Manifest, error) {
 	return snapshot.ReadManifestFile(path)
+}
+
+// VerifySnapshotReadable performs the production readback: it is the SAME call
+// store/recovery makes to load a snapshot at startup
+// (recovery.osBackend.LoadSnapshot -> snapshot.LoadSnapshotFull), so a snapshot
+// this accepts is one recovery's reader can parse, and a snapshot this rejects
+// is one recovery would have failed to open.
+//
+// The parsed image is discarded: only the error is load-bearing, and holding
+// the readback alive would double the checkpoint's peak footprint for no gain.
+func (osSnapshotBackend[N, W]) VerifySnapshotReadable(snapDir string) error {
+	_, err := snapshot.LoadSnapshotFull(snapDir)
+	return err
 }
 
 // manifestPath returns the manifest.json path inside a snapshot directory.
