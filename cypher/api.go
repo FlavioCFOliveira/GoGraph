@@ -1167,6 +1167,11 @@ type Engine struct {
 	indexDefReg *indexDefRegistry
 	procReg     *procs.Registry
 	cache       *planCache
+	// planBuilds collapses the concurrent compilations of one cache key into
+	// one, so that N goroutines racing the first execution of a query perform
+	// one parse between them rather than N. See [planBuildGroup]; it holds no
+	// state between builds and is not a second cache.
+	planBuilds *planBuildGroup
 	// csrPairCache amortises csrPairFromGraph's O(V+E) forward+reverse build
 	// across queries against an unchanged graph, invalidated by
 	// lpg.Graph.TopoGeneration exactly as edgeTypeFilterCache is (rmp #2143).
@@ -1714,6 +1719,7 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 		indexDefReg:            newIndexDefRegistry(),
 		procReg:                procs.NewRegistry(),
 		cache:                  newPlanCache(opts.PlanCacheCapacity),
+		planBuilds:             newPlanBuildGroup(),
 		csrPairCache:           newCSRPairCacheIfEnabled(opts.DisableCSRPairCache),
 		maxResultRows:          resolveMaxResultRows(opts.MaxResultRows),
 		maxResultBytes:         resolveMaxResultBytes(opts.MaxResultBytes),
@@ -5162,7 +5168,26 @@ func (e *Engine) parseAndAnalyse(query string) (*planCacheEntry, map[string]stri
 // [Engine.parseAndAnalyse], split out so the literal-hoisting path can build an
 // entry for the rewritten text and fall back to the original when the rewrite
 // does not parse.
+//
+// Concurrent misses on the SAME text are collapsed into one compilation by
+// [planBuildGroup]: the first caller compiles, the rest wait and share its
+// result. This is a change of who runs the parser, never of what it produces —
+// the entry is a pure function of the query text and the index schema, and is
+// immutable once published, which is already why the LRU hands one pointer to
+// every later caller.
+//
+// Without it, N goroutines starting together each miss and each parse, and
+// those parses are not independent: they contend on the ONE ATN the generated
+// ANTLR lexer and parser share process-wide. Measured at rmp #2740, that was a
+// median 762.68 s of mutex delay at concurrency 1024 on cypher-read-scan-large,
+// out of 762.90 s process-wide; with this collapse it is 0.
 func (e *Engine) buildPlanCacheEntry(query string) (*planCacheEntry, error) {
+	return e.planBuilds.do(query, e.compilePlanCacheEntry)
+}
+
+// compilePlanCacheEntry is the body of [Engine.buildPlanCacheEntry], run by
+// exactly one goroutine per query text at a time.
+func (e *Engine) compilePlanCacheEntry(query string) (*planCacheEntry, error) {
 	astNode, planMode, err := parser.ParseStatement(query)
 	if err != nil {
 		return nil, fmt.Errorf("cypher: parse: %w", err)
