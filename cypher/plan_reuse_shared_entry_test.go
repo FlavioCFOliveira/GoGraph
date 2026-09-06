@@ -609,10 +609,22 @@ const readPathAllocQuery = "MATCH (n:N) RETURN count(n) AS c"
 // child printed.
 const readPathAllocChildEnv = "GOGRAPH_READPATH_ALLOC_CHILD"
 
-// readPathAllocMarker is how the child reports its measurement to the parent.
+// readPathAllocMarker is how the child reports its QUIET measurement to the
+// parent — the arm taken on a graph whose MVCC history has all been reclaimed.
 const readPathAllocMarker = "READPATH_ALLOCS="
 
-var readPathAllocRE = regexp.MustCompile(readPathAllocMarker + `([0-9.]+)`)
+// readPathAllocLiveMarker is how the child reports its SECOND measurement: the
+// same query on the same engine with MVCC history deliberately live (rmp #2773).
+//
+// The two arms are separate markers rather than one number because they are
+// different states of the substrate and a regression can land in either. The
+// live arm is the one that used to differ: see the test's godoc.
+const readPathAllocLiveMarker = "READPATH_LIVE_ALLOCS="
+
+var (
+	readPathAllocRE     = regexp.MustCompile(readPathAllocMarker + `([0-9.]+)`)
+	readPathAllocLiveRE = regexp.MustCompile(readPathAllocLiveMarker + `([0-9.]+)`)
+)
 
 // TestReadPathAllocationCeiling is the regression gate for rmp #2693.
 //
@@ -654,6 +666,31 @@ var readPathAllocRE = regexp.MustCompile(readPathAllocMarker + `([0-9.]+)`)
 // else, so no sibling test goroutine exists. Raising the ceiling to 32 was
 // rejected outright: the isolated reading is exactly 20, so a raised ceiling
 // would blind the gate to a genuine 12-allocation regression.
+//
+// # That attribution was WRONG, and the isolation did not fix it (rmp #2773)
+//
+// The child above was already in the tree when this gate failed the full gate
+// twice more, with the same 32.00 against 20. A measurement isolated in its own
+// process cannot be explained by sibling goroutines, so the 2x2 above measured a
+// real effect and pinned it on the wrong cause: external load is not an amplifier
+// of contamination, it is what makes the ASYNCHRONOUS VACUUM lag.
+//
+// The 12 were real work, and they are attributed: with MVCC history live,
+// [lpg.Graph.LabelCountExact] declines, and [exec.LabelCountScan] answered the
+// decline by resolving the label BITMAP and reading its cardinality — twelve
+// objects of roaring clone, measured in isolation at exactly 12.00 on
+// [lpgLabelResolver.ResolveLabelBitmap] alone. The clone was VACUOUS whenever the
+// live history concerned some other label: the count gate is global, the bitmap
+// gate is per-label, so the bitmap was cloned and returned with no correction
+// applied to it at all. Proof that no correction ran: the figure is FLAT at 32.00
+// from 1 live record to 1 000, where gathering suspects would have made it grow.
+//
+// A node born unlabelled raises the global flag and no per-label one, which is
+// how a graph that nothing writes to reaches this state by itself.
+//
+// Fixed in [lpg.Graph.LabelCountAsOf]. The second arm below enters that state ON
+// PURPOSE, so the gate now measures the loaded condition on a quiet host instead
+// of waiting for the full parallel run to produce it by accident.
 func TestReadPathAllocationCeiling(t *testing.T) {
 	if os.Getenv(readPathAllocChildEnv) == "1" {
 		runReadPathAllocChild(t)
@@ -667,39 +704,63 @@ func TestReadPathAllocationCeiling(t *testing.T) {
 	if err != nil {
 		t.Fatalf("measurement child failed: %v\n%s", err, out)
 	}
-	m := readPathAllocRE.FindSubmatch(out)
-	if m == nil {
-		// An absent marker is a HARD failure, never a pass. A gate that cannot
-		// find its own measurement has stopped measuring, and silence must not
-		// read as success.
-		t.Fatalf("measurement child printed no %s marker; the gate did not measure anything\n%s",
-			readPathAllocMarker, out)
+	parse := func(re *regexp.Regexp, marker string) float64 {
+		t.Helper()
+		m := re.FindSubmatch(out)
+		if m == nil {
+			// An absent marker is a HARD failure, never a pass. A gate that cannot
+			// find its own measurement has stopped measuring, and silence must not
+			// read as success.
+			t.Fatalf("measurement child printed no %s marker; the gate did not measure "+
+				"anything\n%s", marker, out)
+		}
+		v, err := strconv.ParseFloat(string(m[1]), 64)
+		if err != nil {
+			t.Fatalf("unparseable marker %q: %v", m[1], err)
+		}
+		return v
 	}
-	allocs, err := strconv.ParseFloat(string(m[1]), 64)
-	if err != nil {
-		t.Fatalf("unparseable marker %q: %v", m[1], err)
-	}
+	allocs := parse(readPathAllocRE, readPathAllocMarker)
+	live := parse(readPathAllocLiveRE, readPathAllocLiveMarker)
 
-	if allocs > float64(readPathAllocCeiling) {
-		t.Errorf("one cache-hit execution of %q allocated %.1f objects, ceiling %d "+
-			"(rmp #2693). An allocation was added to the read path; either remove it or "+
-			"raise readPathAllocCeiling in the same change and record why.",
-			readPathAllocQuery, allocs, readPathAllocCeiling)
+	for _, arm := range []struct {
+		name   string
+		allocs float64
+	}{
+		{"drained substrate", allocs},
+		{"MVCC history deliberately live", live},
+	} {
+		if arm.allocs > float64(readPathAllocCeiling) {
+			t.Errorf("one cache-hit execution of %q on a %s allocated %.1f objects, ceiling %d "+
+				"(rmp #2693, #2773). An allocation was added to the read path; either remove it "+
+				"or raise readPathAllocCeiling in the same change and record why.",
+				readPathAllocQuery, arm.name, arm.allocs, readPathAllocCeiling)
+		}
+		// The lower bound is not belt-and-braces: if the count falls well below the
+		// ceiling, the gate has silently stopped measuring the path it was written for
+		// — a query rewritten to a cheaper plan, or a drain that stopped draining —
+		// and a ceiling nobody can reach cannot fail. Raise the constant deliberately
+		// instead of leaving a gate that passes for the wrong reason.
+		if arm.allocs < float64(readPathAllocCeiling)-3 {
+			t.Errorf("one cache-hit execution of %q on a %s allocated only %.1f objects against "+
+				"a ceiling of %d. That is a win, but it means this gate is no longer measuring "+
+				"the read path it was calibrated on: lower readPathAllocCeiling to the new "+
+				"measured value so it keeps its teeth.",
+				readPathAllocQuery, arm.name, arm.allocs, readPathAllocCeiling)
+		}
 	}
-	// The lower bound is not belt-and-braces: if the count falls well below the
-	// ceiling, the gate has silently stopped measuring the path it was written for
-	// — a query rewritten to a cheaper plan, or a drain that stopped draining —
-	// and a ceiling nobody can reach cannot fail. Raise the constant deliberately
-	// instead of leaving a gate that passes for the wrong reason.
-	if allocs < float64(readPathAllocCeiling)-3 {
-		t.Errorf("one cache-hit execution of %q allocated only %.1f objects against a "+
-			"ceiling of %d. That is a win, but it means this gate is no longer measuring "+
-			"the read path it was calibrated on: lower readPathAllocCeiling to the new "+
-			"measured value so it keeps its teeth.",
-			readPathAllocQuery, allocs, readPathAllocCeiling)
+	// The two arms must agree, and that is a STRONGER statement than each of them
+	// clearing the ceiling: rmp #2773 was exactly a divergence between them, and a
+	// future one that stayed under 20 would slip past the bound above.
+	if allocs != live {
+		t.Errorf("the same cache-hit read of %q allocated %.2f objects on a drained substrate "+
+			"and %.2f with MVCC history live. The count is a STRUCTURAL number and must not "+
+			"depend on whether the vacuum happens to have caught up (rmp #2773).",
+			readPathAllocQuery, allocs, live)
 	}
-	t.Logf("cache-hit read of %q: %.2f allocs/op (ceiling %d), measured in an isolated child",
-		readPathAllocQuery, allocs, readPathAllocCeiling)
+	t.Logf("cache-hit read of %q: %.2f allocs/op drained, %.2f with MVCC history live "+
+		"(ceiling %d), both measured in an isolated child",
+		readPathAllocQuery, allocs, live, readPathAllocCeiling)
 }
 
 // runReadPathAllocChild performs the measurement and prints it. It deliberately
@@ -724,16 +785,46 @@ func runReadPathAllocChild(t *testing.T) {
 			t.Fatalf("warm %d: count = %d, want %d", i, got, sharedEntryNodes)
 		}
 	}
+	fmt.Printf("%s%.2f\n", readPathAllocMarker, measureReadPathAllocs(ctx, t, eng))
 
+	// The SECOND arm. Everything above ran on a substrate the vacuum has drained,
+	// which on a quiet host it always has. Under `make ci` it frequently has not,
+	// and that difference used to be worth 12 allocations — so the state is now
+	// entered ON PURPOSE rather than left to a race the gate cannot control.
+	//
+	// liveHistory registers a reader BEFORE it writes, which caps the reclamation
+	// watermark at that reader's start instant and so makes the record it pushes
+	// unreclaimable for the rest of this process. The write is under a label these
+	// queries never name, which is the important half: that is the exact state the
+	// loaded gate reached, and the one in which the count used to be refused while
+	// the bitmap that answered it needed no correction at all.
+	records := liveHistory(t, eng.g, "readpath-alloc-ceiling")
+
+	// The precondition, asserted rather than assumed. If the exact-or-nothing
+	// count stops declining here, this arm silently becomes a second copy of the
+	// first and the divergence it exists to catch is untested.
+	if _, ok := pinnedStatsSource(t, eng).ResolveLabelCount("N"); ok {
+		t.Fatalf("the snapshot-pinned exact count still answers with %d live node-life "+
+			"record(s), so this arm no longer measures the read path's behaviour under "+
+			"live MVCC history", records)
+	}
+	fmt.Printf("%s%.2f\n", readPathAllocLiveMarker, measureReadPathAllocs(ctx, t, eng))
+}
+
+// measureReadPathAllocs is the child's instrument: the minimum of several
+// [testing.AllocsPerRun] samples of one full cache-hit execution and drain.
+//
+// MINIMUM of several samples. Contamination can only ADD allocations, never
+// remove them, so the minimum is the robust estimator. In this child there
+// should be nothing left to contaminate it — the minimum is kept as defence in
+// depth, not as the fix, because on its own it was measured NOT to be enough
+// (rmp #2753).
+func measureReadPathAllocs(ctx context.Context, t *testing.T, eng *Engine) float64 {
+	t.Helper()
 	var (
 		observed int64
 		failures int
 	)
-	// MINIMUM of several samples. Contamination can only ADD allocations, never
-	// remove them, so the minimum is the robust estimator. In this child there
-	// should be nothing left to contaminate it — the minimum is kept as defence
-	// in depth, not as the fix, because on its own it was measured NOT to be
-	// enough (rmp #2753).
 	const allocSamples = 5
 	allocs := math.Inf(1)
 	for i := 0; i < allocSamples; i++ {
@@ -758,5 +849,5 @@ func runReadPathAllocChild(t *testing.T) {
 		t.Fatalf("the measured runs returned count = %d, want %d — the allocation count "+
 			"describes the wrong query", observed, sharedEntryNodes)
 	}
-	fmt.Printf("%s%.2f\n", readPathAllocMarker, allocs)
+	return allocs
 }

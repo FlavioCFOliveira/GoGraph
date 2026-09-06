@@ -80,6 +80,25 @@ type labelCounter interface {
 	ResolveLabelCount(name string) (int64, bool)
 }
 
+// labelCounterAsOf is the second optional fast path a [labelResolver] may
+// implement: the label's live node count AS OF the resolver's snapshot, always
+// exactly and without materialising a bitmap.
+//
+// It is consulted only when [labelCounter] DECLINES, and it exists because that
+// decline used to cost a whole bitmap clone (rmp #2773). The live LPG resolver's
+// exact-or-nothing count gates on a GLOBAL "is any MVCC history live" flag, while
+// the bitmap it fell back to gates on a PER-LABEL one — so in the state where
+// history is live on some other label, the fallback cloned the bitmap and then
+// returned it uncorrected, purely to read its cardinality. Measured on the
+// read-path gate's fixture: 32 allocations against 20 for one cache-hit execution
+// of `MATCH (n:N) RETURN count(n) AS c`, flat from 1 to 1000 live records.
+//
+// ok is false only for a resolver that cannot answer at all; the caller then
+// falls back to ResolveLabelBitmap as before.
+type labelCounterAsOf interface {
+	ResolveLabelCountAsOf(name string) (int64, bool)
+}
+
 // LabelCountScan is a Volcano leaf operator that computes a group-by-less count
 // over a bare single-label node scan by reading the label's live-node count
 // directly. It emits exactly one row with a single [expr.IntegerValue] column
@@ -106,9 +125,11 @@ func NewLabelCountScan(label string, src labelResolver) *LabelCountScan {
 	return &LabelCountScan{label: label, src: src}
 }
 
-// Init reads the label's live-node count once. It prefers the zero-alloc direct
-// count when src supports it and otherwise falls back to the cardinality of the
-// resolved bitmap — both yield the same value.
+// Init reads the label's live-node count once, preferring in order: the
+// zero-alloc exact-or-nothing direct count ([labelCounter]), the always-exact
+// snapshot count ([labelCounterAsOf]), and finally the cardinality of the
+// resolved bitmap. All three yield the same value; they differ only in what they
+// allocate to produce it.
 func (op *LabelCountScan) Init(ctx context.Context) error {
 	op.ctx = ctx
 	op.emitted = false
@@ -117,6 +138,15 @@ func (op *LabelCountScan) Init(ctx context.Context) error {
 	}
 	if lc, ok := op.src.(labelCounter); ok {
 		if n, ok := lc.ResolveLabelCount(op.label); ok {
+			op.count = n
+			return nil
+		}
+	}
+	// The exact-or-nothing count declined. Before reaching for a bitmap, ask for
+	// the snapshot-aware count, which answers the same number and allocates
+	// nothing unless a correction is genuinely owed (rmp #2773).
+	if lc, ok := op.src.(labelCounterAsOf); ok {
+		if n, ok := lc.ResolveLabelCountAsOf(op.label); ok {
 			op.count = n
 			return nil
 		}

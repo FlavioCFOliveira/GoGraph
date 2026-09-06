@@ -6878,6 +6878,30 @@ func (s *lpgLabelResolver) ResolveLabelCount(name string) (int64, bool) {
 	return s.g.Raw().LabelCountExact(lid, s.g.Snapshot())
 }
 
+// ResolveLabelCountAsOf reports the number of live nodes that carry name as of
+// this resolver's snapshot, ALWAYS exactly — it never declines.
+//
+// It backs [exec.LabelCountScan]'s second choice (rmp #2773). The first choice
+// stays [lpgLabelResolver.ResolveLabelCount], which is exact-or-nothing and
+// costs three atomic loads when it answers; this one exists for the decline,
+// which used to send the operator to [lpgLabelResolver.ResolveLabelBitmap] and
+// so made a bare labelled count CLONE the whole label bitmap purely to read its
+// cardinality. See [lpg.Graph.LabelCountAsOf] for why the clone was vacuous
+// whenever the churn that caused the decline concerned some other label, and for
+// the measurement.
+//
+// An unknown label yields (0, true), matching the empty bitmap
+// [lpgLabelResolver.ResolveLabelBitmap] would return. The bool is never false; it
+// is present so the optional interface has the same shape as the exact-or-nothing
+// one and so a resolver that cannot answer can say so.
+func (s *lpgLabelResolver) ResolveLabelCountAsOf(name string) (int64, bool) {
+	lid, ok := s.g.Registry().Lookup(name)
+	if !ok {
+		return 0, true
+	}
+	return s.g.Raw().LabelCountAsOf(lid, s.g.Snapshot()), true
+}
+
 // ResolveLabelCountBound reports an UPPER BOUND on the number of live nodes that
 // carry name, allocating nothing, together with whether that bound is exact.
 //
@@ -18307,6 +18331,19 @@ func (a *execLabelAdapter) ResolveLabelCount(name string) (int64, bool) {
 		ResolveLabelCount(string) (int64, bool)
 	}); ok {
 		return lc.ResolveLabelCount(name)
+	}
+	return 0, false
+}
+
+// ResolveLabelCountAsOf forwards the always-exact snapshot count to the underlying
+// resolver when it supports one (rmp #2773). A resolver that does not reports
+// ok == false, and [exec.LabelCountScan] then falls back to the bitmap
+// cardinality exactly as it did before.
+func (a *execLabelAdapter) ResolveLabelCountAsOf(name string) (int64, bool) {
+	if lc, ok := a.labelSrc.(interface {
+		ResolveLabelCountAsOf(string) (int64, bool)
+	}); ok {
+		return lc.ResolveLabelCountAsOf(name)
 	}
 	return 0, false
 }
