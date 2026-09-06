@@ -5,84 +5,75 @@ designed to scale from in-memory graphs to graphs that exceed RAM.
 
 ## Status
 
-**Current release: `v0.13.0`.** This is the project's **sixteenth
+**Current release: `v0.14.0`.** This is the project's **seventeenth
 release**, published at a pre-1.0 baseline: under Semantic Versioning a
 `0.y.z` version signals that the public API is **not yet stable** and may
 change without a major bump while the module matures toward `1.0.0`.
-`v0.13.0` is a pre-1.0 **MINOR** release of **100 commits** across **two
-sprints (352 and 353) and 86 closed tasks**. Where `v0.12.0` broke nothing,
-this one **carries seven breaking changes** — and every one of them turns a
-previously *silent* failure into a loud one. `go.mod` and
-`go.sum` are **byte-identical** to `v0.12.0` — same pinned toolchain, same
-dependency set — so nothing in the supply chain moved. It is a
-**performance and correctness-hardening release**.
+`v0.14.0` is a pre-1.0 **MINOR** release of **13 commits** from **one
+sprint (355, *GoGraph execution reporting*) and 11 closed tasks**. No
+change is marked breaking, and `go.mod` and `go.sum` are
+**byte-identical** to `v0.13.0` — same pinned toolchain, same dependency
+set — so nothing in the supply chain moved. It is an **execution-reporting
+release**: it changes what `EXPLAIN` and `PROFILE` tell you, and it makes
+the planner act on a measurement for the first time.
 
-Three things define it. **It is the module's two deep-profiling and
-optimisation cycles** — sprint 352 audited the module for bottlenecks and
-then worked the Cypher read path; sprint 353 built a committed contention
-observatory and worked the index, `graph/lpg`, `metrics` and Bolt surfaces
-under concurrency. **27 of the 100 commits are `perf`**, against 4 in the
-whole of `v0.12.0`.
+**A db-hits figure nobody counted no longer prints as `0`.** The column
+became tri-state — a counted figure, a counted zero, and `?` for a figure
+that was never counted — and an incomplete total renders `x + ?` instead
+of silently summing across the gaps. Four operator families that read
+storage and reported nothing now count it: `Expand` reports the adjacency
+slots it walked rather than the edges it emitted (a type-filtered hop had
+under-reported by 100×); the three morsel-parallel leaves report their
+workers' node walk (they reported `0` for a 2 000-node scan); and
+`ShortestPath` and `AllShortestPaths` report the relationship slots their
+searches read. A new `Removed` column reports how many rows a predicate
+rejected, omitted entirely for an operator that has no rejection
+mechanism.
 
-**Contention stopped being inferred and started being measured.** Before
-this release **nothing in the repository enabled Go's contention
-profilers**, so every prior contention claim rested on the shape of a
-throughput curve and never on lock-site attribution. `bench/contention` is
-the instrument that closes that gap, and it is committed. Four workloads
-that **anti-scaled** — throughput falling as goroutines rise while cores sit
-idle — no longer do: the btree index goes **34.6×** at 1024 goroutines with
-mutex delay falling from 1.99 hours to 120 s, a mixed read/write Cypher
-workload goes **41.1×**, the count store's write path **+468 %**, and
-contended metric emission **−96.4 %**. Every one of those figures is that
-change's own interleaved A/B against a noise floor measured first.
+**The planner consumes its own statistics for the first time.** The
+property statistics have been built since #2097 and, until this release,
+were read by nothing but the `EXPLAIN` renderer. They now drive the
+disjoint-component join reorder, under the pre-existing trustworthiness
+veto and over a certified error interval. `Est.Rows` renders beside the
+measured `Rows` with its provenance marked, so an estimate and the
+measurement that tested it can be read in one table; and how wrong the
+estimates turn out to be is itself observable, as a q-error metric with
+`Engine.StatsMisestimatedPairs` reporting how many `(label, property)`
+pairs are currently behind it.
 
-**A great many published claims were refuted by their own measurement, and
-are recorded as refuted.** The write barrier ranked at 72–99 % of write-path
-blocked time holds **zero** of it — a cumulative share is not a bottleneck.
-The Bolt transport suspected of throttling the wire is not the limiter, and
-the published ratios *understate* a real socket. A ceiling table published
-as "every arm is a lower bound" had been **filtered**, and three of the
-seven omitted arms sit above 1.00. Two silent wrong answers were each
-uncovered by removing the cost that hid them: `PROFILE` rendered a different
-plan from the one that ran and reported `rows=0` with no error, and reverse
-traversal under a correlated `Apply` returned rows for nodes with no
-matching edge — accidentally correct in its typed spelling only, because the
-per-slot type test was acting as an unintended validity filter.
+**Two defects were found by the sprint's own gate, and fixed.** A declined
+MVCC label count was read as an empty label, which made the planner
+benefit non-deterministic and let `EXPLAIN` render a plan the engine did
+not run; and a labelled count cloned a roaring bitmap and returned it
+uncorrected, purely to read its cardinality.
 
-Alongside them: **eight engine-side ACID fixes**, including three
-life-record families where a rolled-back `DELETE` hid a committed node from
-older readers and a *refused* removal resurrected a node or an arc on
-rollback; two durable formats that now refuse a field they would previously
-have truncated or written unreadably, one of which was discarding the WAL
-behind a snapshot no reader could parse; a panic in the commit window that
-wedged every later committer for ever; and **the vulnerability gate that
-never existed** — `govulncheck` appeared in no Makefile target, no `make ci`
-path and no script anywhere in the repository, so the check was never
-automated and could not fail loudly because it never ran.
-
-Cypher gains `EXPLAIN` and `PROFILE` as **statement prefixes**, so a Bolt
-driver can ask for a plan at all; driver-compat rises 28 → 30 of 37.
+**This release adds counting work to several hot paths** — slot bracketing
+in `Expand`, one atomic add per morsel in the parallel leaves, slot
+accumulation in the shortest-path searches, and reject counting in the
+filters. Each was measured at its own task, against its own baseline, and
+showed no significant regression there. **The aggregate cost at release
+level is not yet measured**, so this release makes no claim to be
+uniformly faster than `v0.13.0`; the head-to-head is reserved in
+[release-notes/v0.14.0.md](release-notes/v0.14.0.md).
 
 The two compliance invariants remain in force: the module is **100 %
-openCypher TCK-compliant at the execution level** (**3 897/3 897 scenarios**,
-16 006/16 006 steps, preserved rather than extended — no `.feature` file
-changed this cycle, and the count was re-verified across a grammar change)
-and **100 % ACID-compliant**. Every change is gated by the project's local
-validation pipeline, run via `make ci` / `make release-preflight` before it
-lands. **This release carries no production certification of its own** — the
-most recent one was taken at the `v0.11.0` commit, 291 commits behind this
-tag, and the whole-tree soak layer has now gone unrun for six consecutive
-cycles. One openCypher divergence also ships open and the TCK is
-structurally blind to it (rmp #2675: a subquery body's final projection is
-never translated, and zero of 220 feature files contain `COUNT {`). The
-module uses the conventional Go path
-`github.com/FlavioCFOliveira/GoGraph` and is fetchable with
-`go get github.com/FlavioCFOliveira/GoGraph@v0.13.0`. See
-[CHANGELOG.md](CHANGELOG.md),
-[release-notes/v0.13.0.md](release-notes/v0.13.0.md) and
-[docs/benchmarks/v0.13.0.md](docs/benchmarks/v0.13.0.md) for the full release
-narrative, the measured performance delta, and what the release does **not**
-establish.
+openCypher TCK-compliant at the execution level** (**3 897/3 897
+scenarios**, preserved rather than extended — no `.feature` file changed
+this cycle) and **100 % ACID-compliant**. `make ci` is green on the
+release tree: race-clean, `golangci-lint` 0 issues, aggregate library
+coverage 88.6 %. **The soak and nightly layers were not run for this
+release**, and it carries **no production certification of its own** — the
+most recent was taken at the `v0.11.0` commit, and the whole-tree soak
+layer has now gone unrun for a seventh consecutive cycle. One openCypher
+divergence also ships open and the TCK is structurally blind to it (rmp
+#2675: a subquery body's final projection is never translated, and zero of
+220 feature files contain `COUNT {`). The module uses the conventional Go
+path `github.com/FlavioCFOliveira/GoGraph` and is fetchable with
+`go get github.com/FlavioCFOliveira/GoGraph@v0.14.0`. See
+[CHANGELOG.md](CHANGELOG.md) and
+[release-notes/v0.14.0.md](release-notes/v0.14.0.md) for the full release
+narrative, the behaviour changes a caller must know about, and what the
+release does **not** establish.
 
 ### Core graph (`graph/`)
 
@@ -181,10 +172,11 @@ establish.
   `Engine.NewSession` returns a `Session` giving **read-your-own-writes** across
   transactions.
 - `github.com/FlavioCFOliveira/GoGraph/cypher/parser` · `cypher/ast` · `cypher/sema` ·
-  `cypher/ir` · `cypher/plan` · `cypher/exec` — parser-to-execution
+  `cypher/ir` · `cypher/exec` — parser-to-execution
   pipeline with plan-cache, `EXPLAIN` of the **physical** plan, `PROFILE` with
-  per-operator rows/time/dbhits, and per-statement write-effect counters
-  (`Result.Counters`).
+  per-operator rows, time, db-hits, rows-removed-by-filter and the planner's
+  estimate beside the measurement — an uncounted db-hits figure renders `?`,
+  never `0` — and per-statement write-effect counters (`Result.Counters`).
 - `github.com/FlavioCFOliveira/GoGraph/cypher/funcs` · `cypher/procs` — built-in functions and
   procedures.
 - `github.com/FlavioCFOliveira/GoGraph/cypher/tck` — openCypher TCK harness (parser 100 %,
@@ -521,9 +513,10 @@ store/bulkimport          — offline import: labelled property graph → publis
 
 cypher/                   — openCypher parser, planner and execution engine; snapshot-isolated
                             read transactions, lock-free write transactions, Session (RYOW)
-cypher/parser · ast · sema · ir · plan · exec
+cypher/parser · ast · sema · ir · exec
                           — parser-to-execution pipeline: plan cache, physical-plan EXPLAIN,
-                            PROFILE with per-operator rows/time/dbhits, write counters
+                            PROFILE with per-operator rows/time/db-hits/removed/estimate,
+                            write counters
 cypher/funcs · procs      — built-in functions and procedures
 cypher/tck                — openCypher TCK harness (execution 100 %, 3 897/3 897)
 

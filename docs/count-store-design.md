@@ -468,10 +468,17 @@ promotion rule:
    promote to `estExact`.
 
 Because a not-yet-populated or dirty statistic returns `estFallback`, the P3
-reorder that consumes these estimates is **provably inert** until real exact
+reorder is inert **with respect to these count-store estimates** until real exact
 counts are online — the same free no-regression guarantee #2076 established
 (`optimizer-activation-design.md` §2.1). P3 lights up one join-order decision at a
 time exactly as `estExact` relationship counts become available.
+
+> **No longer the only input (rmp #2766, `v0.14.0`).** The count-store estimates
+> are no longer the only thing that can light P3 up: the disjoint-component
+> reorder gained a second, statistics-derived input
+> (`cypher/join_reorder_plan.go`, `reorderFilteredRows`), so "provably inert
+> until exact counts are online" now describes this estimate source alone, not
+> the reorder as a whole.
 
 ---
 

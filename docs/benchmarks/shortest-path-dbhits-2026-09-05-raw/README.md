@@ -1,5 +1,12 @@
 # rmp #2763 — shortest-path db-hits counter, raw A/B data
 
+> **Note on the distribution archive.** The raw data files this document points at
+> live in the GoGraph repository and are deliberately **not** shipped in the release
+> tarball, which carries Markdown only (`.goreleaser.yaml`, rmp #2758). Read them at
+> the tag in git; this README travels with the archive so the method is recorded even
+> where the data is not.
+
+
 Interleaved A/B measurements for the storage-access counter added to
 `exec.ShortestPath` and `exec.AllShortestPaths`.
 

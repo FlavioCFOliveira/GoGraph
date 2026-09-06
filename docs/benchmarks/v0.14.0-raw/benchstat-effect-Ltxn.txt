@@ -1,0 +1,28 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/store/txn
+cpu: Apple M4
+                                   │   v0.13.0    │              v0.14.0               │
+                                   │    sec/op    │    sec/op     vs base              │
+CommitConcurrent/goroutines=1-10     3.687m ± 16%   3.672m ± 11%       ~ (p=0.818 n=6)
+CommitConcurrent/goroutines=8-10     885.4µ ±  8%   920.4µ ±  2%       ~ (p=0.180 n=6)
+CommitConcurrent/goroutines=64-10    120.2µ ±  1%   119.9µ ±  1%       ~ (p=0.937 n=6)
+CommitConcurrent/goroutines=256-10   30.64µ ±  3%   30.82µ ±  3%       ~ (p=0.699 n=6)
+geomean                              331.1µ         334.3µ        +0.95%
+
+                                   │  v0.13.0   │             v0.14.0              │
+                                   │    B/op    │    B/op     vs base              │
+CommitConcurrent/goroutines=1-10     593.5 ± 3%   596.0 ± 1%       ~ (p=0.788 n=6)
+CommitConcurrent/goroutines=8-10     593.0 ± 2%   594.0 ± 2%       ~ (p=0.937 n=6)
+CommitConcurrent/goroutines=64-10    685.0 ± 1%   704.5 ± 3%       ~ (p=0.067 n=6)
+CommitConcurrent/goroutines=256-10   714.5 ± 1%   715.0 ± 1%       ~ (p=0.647 n=6)
+geomean                              644.2        649.8       +0.87%
+
+                                   │  v0.13.0   │              v0.14.0               │
+                                   │ allocs/op  │ allocs/op   vs base                │
+CommitConcurrent/goroutines=1-10     11.00 ± 0%   11.00 ± 0%       ~ (p=1.000 n=6) ¹
+CommitConcurrent/goroutines=8-10     11.00 ± 0%   11.00 ± 0%       ~ (p=1.000 n=6) ¹
+CommitConcurrent/goroutines=64-10    10.00 ± 0%   10.00 ± 0%       ~ (p=1.000 n=6) ¹
+CommitConcurrent/goroutines=256-10   10.00 ± 0%   10.00 ± 0%       ~ (p=1.000 n=6) ¹
+geomean                              10.49        10.49       +0.00%
+¹ all samples are equal

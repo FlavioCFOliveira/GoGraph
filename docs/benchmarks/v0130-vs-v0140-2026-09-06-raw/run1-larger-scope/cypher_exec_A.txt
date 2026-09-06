@@ -1,0 +1,67 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/exec
+cpu: Apple M4
+BenchmarkDynamicChunkSingleRow-10                       	21237700	        57.72 ns/op	     320 B/op	       3 allocs/op
+BenchmarkDynamicChunkFullBatch-10                       	   81681	     14809 ns/op	   33088 B/op	       4 allocs/op
+BenchmarkNotNullProperties-10                           	183645008	         6.583 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIndexNestedLoopJoin_SeekDrain-10               	   69438	     17309 ns/op	    6184 B/op	     258 allocs/op
+BenchmarkRevToFwd/n5000/transpose-10                    	    6140	    195047 ns/op	  442369 B/op	       2 allocs/op
+BenchmarkRevToFwd/n5000/scan-10                         	    4261	    275863 ns/op	  401408 B/op	       1 allocs/op
+BenchmarkRevToFwd/n20000/transpose-10                   	    1543	    767160 ns/op	 1769472 B/op	       2 allocs/op
+BenchmarkRevToFwd/n20000/scan-10                        	    1063	   1122793 ns/op	 1605632 B/op	       1 allocs/op
+BenchmarkShortestPath_UnitDegreeChain-10                	    1848	    644884 ns/op	 1685532 B/op	   11901 allocs/op
+BenchmarkShortestPath_Layered-10                        	   12885	     92596 ns/op	  258185 B/op	     126 allocs/op
+BenchmarkShortestPath_LayeredTyped-10                   	   13053	     91743 ns/op	  258184 B/op	     126 allocs/op
+BenchmarkShortestPath_HighDegreeFan-10                  	     754	   1580993 ns/op	 4463557 B/op	     317 allocs/op
+BenchmarkAllShortestPaths_UnitDegreeChain-10            	    1052	   1165083 ns/op	13581829 B/op	    5670 allocs/op
+BenchmarkAllShortestPaths_Layered-10                    	    6006	    195464 ns/op	  464290 B/op	    2938 allocs/op
+BenchmarkAllShortestPaths_HighDegreeFan-10              	     630	   1872042 ns/op	 5107415 B/op	   20317 allocs/op
+BenchmarkPermuteRowsInPlace-10                          	    8253	    142163 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPermuteRowsBuffered-10                         	    3142	    378824 ns/op	 2883584 B/op	       1 allocs/op
+BenchmarkBoundedOrder/n=000010/Sort-10                  	     139	   8617522 ns/op	23134490 B/op	  120037 allocs/op
+BenchmarkBoundedOrder/n=000010/Top-10                   	     816	   1403383 ns/op	    4048 B/op	      42 allocs/op
+BenchmarkBoundedOrder/n=000110/Sort-10                  	     135	   8651943 ns/op	23134493 B/op	  120037 allocs/op
+BenchmarkBoundedOrder/n=000110/Top-10                   	     806	   1423690 ns/op	   39024 B/op	     295 allocs/op
+BenchmarkBoundedOrder/n=010010/Sort-10                  	     136	   8862020 ns/op	23134495 B/op	  120037 allocs/op
+BenchmarkBoundedOrder/n=010010/Top-10                   	     242	   4903423 ns/op	 4219316 B/op	   25057 allocs/op
+BenchmarkBoundedOrder/n=060000/Sort-10                  	     134	   8666489 ns/op	23134492 B/op	  120037 allocs/op
+BenchmarkBoundedOrder/n=060000/Top-10                   	     127	   9629484 ns/op	26976607 B/op	  120038 allocs/op
+BenchmarkBoundedOrder/n=120000/Sort-10                  	     132	   9056802 ns/op	23134492 B/op	  120037 allocs/op
+BenchmarkBoundedOrder/n=120000/Top-10                   	     132	   9104101 ns/op	23134557 B/op	  120037 allocs/op
+BenchmarkColumnarAgg_SumCountGroupBy/columnar_on-10     	      32	  35332829 ns/op	  140683 B/op	     803 allocs/op
+BenchmarkColumnarAgg_SumCountGroupBy/row_off-10         	      22	  49630650 ns/op	58766236 B/op	 3146647 allocs/op
+BenchmarkColumnarAgg_MinMaxGroupBy/columnar_on-10       	      33	  34412083 ns/op	  144368 B/op	     550 allocs/op
+BenchmarkColumnarAgg_MinMaxGroupBy/row_off-10           	      20	  55190567 ns/op	58764242 B/op	 3146391 allocs/op
+BenchmarkDrain_Throughput-10                            	   71964	     16747 ns/op	   75456 B/op	    1013 allocs/op
+BenchmarkExpandFilter_Columnar-10                       	     542	   2171854 ns/op	  297745 B/op	      26 allocs/op
+BenchmarkExpandFilter_RowMode-10                        	     640	   1893015 ns/op	 1497683 B/op	  181112 allocs/op
+BenchmarkExpandDir_InVsOut_Baseline/OUT_deg1_sources-10 	    8384	    142606 ns/op	  159937 B/op	   11781 allocs/op
+BenchmarkExpandDir_InVsOut_Baseline/IN_deg1_sources-10  	   12673	     93767 ns/op	   61656 B/op	    7686 allocs/op
+BenchmarkExpandIn_PerEdge_vs_SourceOutdegree/K=16/one_in_edge-10         	 6429273	       187.8 ns/op	     208 B/op	       5 allocs/op
+BenchmarkExpandIn_PerEdge_vs_SourceOutdegree/K=256/one_in_edge-10        	 6074131	       198.6 ns/op	     216 B/op	       6 allocs/op
+BenchmarkExpandIn_PerEdge_vs_SourceOutdegree/K=4096/one_in_edge-10       	 5873415	       206.1 ns/op	     224 B/op	       7 allocs/op
+BenchmarkExpandIn_PerEdge_vs_SourceOutdegree/K=65536/one_in_edge-10      	 5594628	       212.1 ns/op	     224 B/op	       7 allocs/op
+BenchmarkExpandIn_TypeFiltered_vs_SourceOutdegree/K=16/one_in_edge_typed-10         	 1796653	       665.0 ns/op	    1496 B/op	      12 allocs/op
+BenchmarkExpandIn_TypeFiltered_vs_SourceOutdegree/K=256/one_in_edge_typed-10        	  218637	      5547 ns/op	   18256 B/op	      13 allocs/op
+BenchmarkExpandIn_TypeFiltered_vs_SourceOutdegree/K=4096/one_in_edge_typed-10       	   14497	     81762 ns/op	  292465 B/op	      28 allocs/op
+BenchmarkExpandIn_TypeFiltered_vs_SourceOutdegree/K=65536/one_in_edge_typed-10      	     967	   1220596 ns/op	 4552117 B/op	     268 allocs/op
+BenchmarkBuildReverse_vs_E/E=10000-10                                               	   17924	     66935 ns/op	  508017 B/op	       7 allocs/op
+BenchmarkBuildReverse_vs_E/E=100000-10                                              	    2217	    536506 ns/op	 4817013 B/op	       7 allocs/op
+BenchmarkBuildReverse_vs_E/E=1000000-10                                             	     237	   5035658 ns/op	48021628 B/op	       7 allocs/op
+BenchmarkExpandOut_PerEdge_SingleSource/K=4096-10                                   	   15080	     78846 ns/op	   61656 B/op	    7686 allocs/op
+BenchmarkExpandOut_PerEdge_SingleSource/K=65536-10                                  	     967	   1238993 ns/op	 1044700 B/op	  130566 allocs/op
+BenchmarkScan_PerNode/N=4096-10                                                     	  237499	      7583 ns/op	       0 B/op	       0 allocs/op
+BenchmarkScan_PerNode/N=65536-10                                                    	   14083	    109289 ns/op	       0 B/op	       0 allocs/op
+BenchmarkFilter_Throughput-10                                                       	    8583	    136598 ns/op	  590067 B/op	    5019 allocs/op
+BenchmarkProject_Throughput-10                                                      	    4116	    294563 ns/op	 1297139 B/op	   10022 allocs/op
+BenchmarkLimit_Throughput-10                                                        	   10000	    111005 ns/op	  590066 B/op	    5019 allocs/op
+BenchmarkSort_10k-10                                                                	     890	   1361024 ns/op	 2519854 B/op	   20044 allocs/op
+BenchmarkTop_10kN100-10                                                             	     852	   1403707 ns/op	  197089 B/op	   10128 allocs/op
+BenchmarkDistinct_10k-10                                                            	    4089	    292192 ns/op	  275865 B/op	    3036 allocs/op
+BenchmarkRelTypeProbe_Map-10                                                        	97551061	        12.81 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRelTypeProbe_Column-10                                                     	804435792	         1.471 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRelTypeProbe_ReverseRecovery/map+recovery-10                               	171638491	         6.949 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRelTypeProbe_ReverseRecovery/column-10                                     	659146146	         1.824 ns/op	       0 B/op	       0 allocs/op
+BenchmarkAllNodesScan_PerNodeAllocCost-10                                           	  106399	     11035 ns/op	   31304 B/op	     759 allocs/op
+PASS

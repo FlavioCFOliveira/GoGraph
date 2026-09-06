@@ -1,0 +1,42 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/store/txn
+cpu: Apple M4
+BenchmarkCommit/ops=1-10         	     340	   3695989 ns/op	     594 B/op	      11 allocs/op
+BenchmarkCommit/ops=16-10        	     315	   3789253 ns/op	   11034 B/op	      75 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/store/txn
+cpu: Apple M4
+BenchmarkCommit/ops=1-10         	     338	   3700997 ns/op	     592 B/op	      11 allocs/op
+BenchmarkCommit/ops=16-10        	     320	   3812017 ns/op	   11005 B/op	      75 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/store/txn
+cpu: Apple M4
+BenchmarkCommit/ops=1-10         	     342	   3665819 ns/op	     598 B/op	      11 allocs/op
+BenchmarkCommit/ops=16-10        	     318	   3801372 ns/op	   11016 B/op	      75 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/store/txn
+cpu: Apple M4
+BenchmarkCommit/ops=1-10         	     340	   3702998 ns/op	     592 B/op	      11 allocs/op
+BenchmarkCommit/ops=16-10        	     319	   3832826 ns/op	   11014 B/op	      75 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/store/txn
+cpu: Apple M4
+BenchmarkCommit/ops=1-10         	     387	   3735614 ns/op	     602 B/op	      11 allocs/op
+BenchmarkCommit/ops=16-10        	     321	   3809607 ns/op	   11001 B/op	      76 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/store/txn
+cpu: Apple M4
+BenchmarkCommit/ops=1-10         	     426	   3721052 ns/op	     588 B/op	      11 allocs/op
+BenchmarkCommit/ops=16-10        	     319	   3827306 ns/op	   10998 B/op	      75 allocs/op
+PASS

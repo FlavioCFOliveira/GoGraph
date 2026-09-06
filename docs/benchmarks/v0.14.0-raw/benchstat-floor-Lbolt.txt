@@ -1,0 +1,49 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/bolt/server
+cpu: Apple M4
+                                       │      B      │                 B2                 │
+                                       │   sec/op    │    sec/op     vs base              │
+BoltRecordEncodeParallel/baseline        83.68n ± 3%   84.10n ±  3%       ~ (p=0.394 n=6)
+BoltRecordEncodeParallel/baseline-8      17.67n ± 6%   17.59n ±  6%       ~ (p=0.818 n=6)
+BoltRecordEncodeParallel/baseline-64     20.54n ± 1%   19.85n ±  7%       ~ (p=0.394 n=6)
+BoltRecordEncodeParallel/baseline-256    19.54n ± 6%   19.77n ±  8%       ~ (p=1.000 n=6)
+BoltRecordEncodeParallel/baseline-1024   29.38n ± 6%   29.68n ±  7%       ~ (p=0.818 n=6)
+BoltRecordEncodeParallel/fast            29.80n ± 3%   30.10n ±  4%       ~ (p=0.900 n=6)
+BoltRecordEncodeParallel/fast-8          5.917n ± 8%   5.902n ±  9%       ~ (p=0.937 n=6)
+BoltRecordEncodeParallel/fast-64         5.276n ± 6%   5.367n ±  9%       ~ (p=0.394 n=6)
+BoltRecordEncodeParallel/fast-256        5.293n ± 5%   5.351n ±  7%       ~ (p=0.699 n=6)
+BoltRecordEncodeParallel/fast-1024       5.232n ± 4%   5.368n ± 10%       ~ (p=0.589 n=6)
+geomean                                  14.63n        14.70n        +0.48%
+
+                                       │      B       │                 B2                 │
+                                       │     B/op     │    B/op     vs base                │
+BoltRecordEncodeParallel/baseline        48.00 ± 0%     48.00 ± 0%       ~ (p=1.000 n=6) ¹
+BoltRecordEncodeParallel/baseline-8      48.00 ± 0%     48.00 ± 0%       ~ (p=1.000 n=6) ¹
+BoltRecordEncodeParallel/baseline-64     48.00 ± 0%     48.00 ± 0%       ~ (p=1.000 n=6) ¹
+BoltRecordEncodeParallel/baseline-256    48.00 ± 0%     48.00 ± 0%       ~ (p=1.000 n=6) ¹
+BoltRecordEncodeParallel/baseline-1024   48.00 ± 0%     48.00 ± 0%       ~ (p=1.000 n=6) ¹
+BoltRecordEncodeParallel/fast            0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=6) ¹
+BoltRecordEncodeParallel/fast-8          0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=6) ¹
+BoltRecordEncodeParallel/fast-64         0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=6) ¹
+BoltRecordEncodeParallel/fast-256        0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=6) ¹
+BoltRecordEncodeParallel/fast-1024       0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=6) ¹
+geomean                                             ²               +0.00%               ²
+¹ all samples are equal
+² summaries must be >0 to compute geomean
+
+                                       │      B       │                 B2                 │
+                                       │  allocs/op   │ allocs/op   vs base                │
+BoltRecordEncodeParallel/baseline        4.000 ± 0%     4.000 ± 0%       ~ (p=1.000 n=6) ¹
+BoltRecordEncodeParallel/baseline-8      4.000 ± 0%     4.000 ± 0%       ~ (p=1.000 n=6) ¹
+BoltRecordEncodeParallel/baseline-64     4.000 ± 0%     4.000 ± 0%       ~ (p=1.000 n=6) ¹
+BoltRecordEncodeParallel/baseline-256    4.000 ± 0%     4.000 ± 0%       ~ (p=1.000 n=6) ¹
+BoltRecordEncodeParallel/baseline-1024   4.000 ± 0%     4.000 ± 0%       ~ (p=1.000 n=6) ¹
+BoltRecordEncodeParallel/fast            0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=6) ¹
+BoltRecordEncodeParallel/fast-8          0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=6) ¹
+BoltRecordEncodeParallel/fast-64         0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=6) ¹
+BoltRecordEncodeParallel/fast-256        0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=6) ¹
+BoltRecordEncodeParallel/fast-1024       0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=6) ¹
+geomean                                             ²               +0.00%               ²
+¹ all samples are equal
+² summaries must be >0 to compute geomean

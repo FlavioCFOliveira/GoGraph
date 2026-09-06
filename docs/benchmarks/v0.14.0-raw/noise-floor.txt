@@ -1,0 +1,55 @@
+
+====================================================================================================
+FLOOR 1 — B vs B2: the SAME BYTE-IDENTICAL BINARY against itself,
+          interleaved in the SAME rounds, under the SAME load, as the signal.
+====================================================================================================
+
+  [ns/op]
+  all blocks pooled                              n_comparisons= 272  median|Δ|=0.62%  p95|Δ|=3.40%  max|Δ|=30.19%  significant@p<0.05=4
+      largest drift: BenchmarkScan_PerNode/N=4096-10                       7.125µs -> 4.974µs      -30.19%  p=0.06555216116550255
+      SIGNIFICANT  BenchmarkReader_Replay-10                        -2.40%  p=0.0082  spreadA=±2.8% spreadB=±1.0%
+      SIGNIFICANT  BenchmarkCRCSinglePassRealloc/payload64-10       -0.62%  p=0.0050  spreadA=±0.3% spreadB=±0.7%
+      SIGNIFICANT  BenchmarkCRCIncremental/payload4096-10           -0.60%  p=0.0301  spreadA=±1.1% spreadB=±0.5%
+      SIGNIFICANT  BenchmarkWriter_AppendSync_Batch/batch=100-10    +0.59%  p=0.0131  spreadA=±0.9% spreadB=±2.3%
+
+  [allocs/op]
+  all blocks pooled                              n_comparisons= 272  median|Δ|=0.00%  p95|Δ|=0.00%  max|Δ|=7.95%  significant@p<0.05=0
+      largest drift: BenchmarkPlanCacheHit_Parameterised-10                   88.0 -> 95.0         +7.95%  p=0.6177401364029917
+
+====================================================================================================
+FLOOR 2 — A vs B on the four packages whose TEST BINARY is byte-identical
+          BETWEEN THE RELEASES. Measured ACROSS the arms, so it catches what
+          a within-arm floor structurally cannot.
+====================================================================================================
+
+  [ns/op]
+  identical-binary packages                      n_comparisons=  55  median|Δ|=0.40%  p95|Δ|=4.66%  max|Δ|=37.80%  significant@p<0.05=5
+      largest drift: BenchmarkIncCounterParallel-8                         1.787ns -> 2.463ns      +37.80%  p=0.12820527503039147
+      SIGNIFICANT  BenchmarkCRCSinglePassScratch/payload64-10       -6.21%  p=0.0082  spreadA=±4.3% spreadB=±2.4%
+      SIGNIFICANT  BenchmarkCRCIncremental/payload16-10             -4.66%  p=0.0202  spreadA=±4.2% spreadB=±3.0%
+      SIGNIFICANT  BenchmarkCRCSinglePassScratch/payload16-10       -3.57%  p=0.0131  spreadA=±2.6% spreadB=±1.7%
+      SIGNIFICANT  BenchmarkCRCIncremental/payload256-10            +2.07%  p=0.0450  spreadA=±3.1% spreadB=±1.5%
+      SIGNIFICANT  BenchmarkReader_Replay-10                        +1.75%  p=0.0306  spreadA=±1.3% spreadB=±2.8%
+
+  [allocs/op]
+  identical-binary packages                      n_comparisons=  55  median|Δ|=0.00%  p95|Δ|=0.00%  max|Δ|=0.00%  significant@p<0.05=0
+      largest drift: BenchmarkMapper_Intern_HotKey_Parallel                    0.0 -> 0.0          +0.00%  p=1.0
+
+====================================================================================================
+THE FLOOR IS SCALE-DEPENDENT — stratified by the magnitude of the benchmark itself.
+Both floors below are the SAME CODE measured twice. Every number is noise by construction.
+====================================================================================================
+
+FLOOR 1  same binary, within arm (B vs B2)   [n=272 comparisons, n=6 samples per arm]
+  magnitude band        n  median|d|   p95|d|   max|d|     worst significant (p<0.05)
+  < 100 ns             71      0.51%    2.59%   26.82%                          0.62%
+  100 ns - 10 us       62      0.72%    4.28%   30.19%                          0.60%
+  10 us - 1 ms         53      0.52%    2.89%   29.62%                          2.40%
+  > 1 ms               86      0.68%    2.62%    4.10%                          0.59%
+
+FLOOR 2  identical binary, ACROSS arms (A vs B)   [n=55 comparisons, n=6 samples per arm]
+  magnitude band        n  median|d|   p95|d|   max|d|     worst significant (p<0.05)
+  < 100 ns             36      0.42%    6.21%   37.80%                          6.21%
+  100 ns - 10 us       11      0.49%    1.58%    1.86%                           none
+  10 us - 1 ms          1      1.75%    1.75%    1.75%                          1.75%
+  > 1 ms                7      0.17%    0.42%    0.87%                           none

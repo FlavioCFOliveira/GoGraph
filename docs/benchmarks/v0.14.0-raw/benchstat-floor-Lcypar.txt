@@ -1,0 +1,122 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+                                       │      B       │                 B2                  │
+                                       │    sec/op    │    sec/op      vs base              │
+PlanReusePhasesParallel/1parse           60.18n ±  4%   60.73n ±   2%       ~ (p=0.589 n=6)
+PlanReusePhasesParallel/1parse-8         97.13n ± 23%   97.06n ±  13%       ~ (p=0.818 n=6)
+PlanReusePhasesParallel/1parse-64        146.4n ±  7%   147.1n ±   7%       ~ (p=0.818 n=6)
+PlanReusePhasesParallel/1parse-256       155.6n ±  4%   155.8n ±   6%       ~ (p=1.000 n=6)
+PlanReusePhasesParallel/1parse-1024      162.0n ±  7%   156.2n ±  10%       ~ (p=0.937 n=6)
+PlanReusePhasesParallel/2snapshot        88.86n ±  4%   89.02n ±   3%       ~ (p=0.937 n=6)
+PlanReusePhasesParallel/2snapshot-8      129.7n ± 19%   130.2n ±  28%       ~ (p=0.937 n=6)
+PlanReusePhasesParallel/2snapshot-64     163.1n ±  4%   162.4n ±   4%       ~ (p=0.974 n=6)
+PlanReusePhasesParallel/2snapshot-256    179.0n ±  7%   179.0n ±   5%       ~ (p=1.000 n=6)
+PlanReusePhasesParallel/2snapshot-1024   196.5n ±  5%   203.8n ±  33%       ~ (p=0.240 n=6)
+PlanReusePhasesParallel/3build           775.4n ±  4%   786.6n ±   6%       ~ (p=0.589 n=6)
+PlanReusePhasesParallel/3build-8         331.4n ±  5%   343.0n ±  10%       ~ (p=0.699 n=6)
+PlanReusePhasesParallel/3build-64        459.4n ± 12%   454.8n ±  11%       ~ (p=0.699 n=6)
+PlanReusePhasesParallel/3build-256       534.1n ± 17%   523.1n ±  27%       ~ (p=0.699 n=6)
+PlanReusePhasesParallel/3build-1024      1.524µ ± 71%   1.274µ ± 101%       ~ (p=0.699 n=6)
+PlanReusePhasesParallel/4full            1.554µ ±  6%   1.620µ ±   5%       ~ (p=0.394 n=6)
+PlanReusePhasesParallel/4full-8          851.4n ±  2%   839.0n ±   6%       ~ (p=0.699 n=6)
+PlanReusePhasesParallel/4full-64         1.018µ ±  5%   1.033µ ±  15%       ~ (p=0.589 n=6)
+PlanReusePhasesParallel/4full-256        1.078µ ±  8%   1.096µ ±   8%       ~ (p=0.589 n=6)
+PlanReusePhasesParallel/4full-1024       1.409µ ± 40%   1.522µ ±  15%       ~ (p=0.937 n=6)
+PrebuiltTreeCeilingParallel              573.0n ± 16%   560.0n ±   5%       ~ (p=0.818 n=6)
+PrebuiltTreeCeilingParallel-8            525.3n ±  4%   522.8n ±   7%       ~ (p=0.937 n=6)
+PrebuiltTreeCeilingParallel-64           656.9n ±  4%   655.4n ±   3%       ~ (p=0.818 n=6)
+PrebuiltTreeCeilingParallel-256          692.0n ±  6%   687.0n ±   4%       ~ (p=0.937 n=6)
+PrebuiltTreeCeilingParallel-1024         747.1n ± 22%   742.9n ±   7%       ~ (p=0.699 n=6)
+AdjacencyCacheLookup/serial              27.46n ±  2%   27.29n ±   2%       ~ (p=0.589 n=6)
+AdjacencyCacheLookup/serial-8            26.59n ±  2%   26.45n ±   4%       ~ (p=0.818 n=6)
+AdjacencyCacheLookup/serial-64           26.55n ±  2%   26.48n ±   1%       ~ (p=0.699 n=6)
+AdjacencyCacheLookup/serial-256          26.56n ±  1%   26.61n ±   2%       ~ (p=0.699 n=6)
+AdjacencyCacheLookup/serial-1024         26.76n ±  2%   26.62n ±   2%       ~ (p=0.221 n=6)
+AdjacencyCacheLookup/parallel            27.23n ±  2%   27.15n ±   1%       ~ (p=0.900 n=6)
+AdjacencyCacheLookup/parallel-8          83.36n ± 17%   84.71n ±  11%       ~ (p=0.589 n=6)
+AdjacencyCacheLookup/parallel-64         82.24n ±  2%   81.79n ±   3%       ~ (p=0.699 n=6)
+AdjacencyCacheLookup/parallel-256        84.83n ±  2%   83.90n ±   2%       ~ (p=0.699 n=6)
+AdjacencyCacheLookup/parallel-1024       95.75n ±  1%   95.56n ±   1%       ~ (p=0.394 n=6)
+geomean                                  203.2n         202.8n         -0.21%
+
+                                       │      B       │                  B2                   │
+                                       │     B/op     │     B/op       vs base                │
+PlanReusePhasesParallel/1parse             48.00 ± 0%     48.00 ±  0%       ~ (p=1.000 n=6) ¹
+PlanReusePhasesParallel/1parse-8           48.00 ± 0%     48.00 ±  0%       ~ (p=1.000 n=6) ¹
+PlanReusePhasesParallel/1parse-64          48.00 ± 0%     48.00 ±  0%       ~ (p=1.000 n=6) ¹
+PlanReusePhasesParallel/1parse-256         48.00 ± 0%     48.00 ±  0%       ~ (p=1.000 n=6) ¹
+PlanReusePhasesParallel/1parse-1024        48.00 ± 0%     48.00 ±  0%       ~ (p=1.000 n=6) ¹
+PlanReusePhasesParallel/2snapshot          96.00 ± 0%     96.00 ±  0%       ~ (p=1.000 n=6) ¹
+PlanReusePhasesParallel/2snapshot-8        96.00 ± 0%     96.00 ±  0%       ~ (p=1.000 n=6) ¹
+PlanReusePhasesParallel/2snapshot-64       96.00 ± 0%     96.00 ±  0%       ~ (p=1.000 n=6) ¹
+PlanReusePhasesParallel/2snapshot-256      96.00 ± 0%     96.00 ±  0%       ~ (p=1.000 n=6) ¹
+PlanReusePhasesParallel/2snapshot-1024     96.00 ± 0%     96.00 ±  0%       ~ (p=1.000 n=6) ¹
+PlanReusePhasesParallel/3build           1.469Ki ± 0%   1.469Ki ±  0%       ~ (p=1.000 n=6) ¹
+PlanReusePhasesParallel/3build-8         1.469Ki ± 0%   1.469Ki ±  0%       ~ (p=1.000 n=6) ¹
+PlanReusePhasesParallel/3build-64        1.469Ki ± 0%   1.469Ki ±  0%       ~ (p=1.000 n=6) ¹
+PlanReusePhasesParallel/3build-256       1.469Ki ± 0%   1.469Ki ±  0%       ~ (p=1.000 n=6) ¹
+PlanReusePhasesParallel/3build-1024      1.470Ki ± 0%   1.469Ki ±  0%       ~ (p=1.000 n=6)
+PlanReusePhasesParallel/4full            2.344Ki ± 0%   2.347Ki ±  0%       ~ (p=0.310 n=6)
+PlanReusePhasesParallel/4full-8          2.336Ki ± 0%   2.336Ki ±  0%       ~ (p=1.000 n=6) ¹
+PlanReusePhasesParallel/4full-64         2.336Ki ± 0%   2.336Ki ±  0%       ~ (p=1.000 n=6) ¹
+PlanReusePhasesParallel/4full-256        2.336Ki ± 0%   2.336Ki ±  0%       ~ (p=1.000 n=6) ¹
+PlanReusePhasesParallel/4full-1024       2.336Ki ± 0%   2.336Ki ±  0%       ~ (p=1.000 n=6) ¹
+PrebuiltTreeCeilingParallel                892.0 ± 0%     892.0 ±  0%       ~ (p=1.000 n=6)
+PrebuiltTreeCeilingParallel-8              888.0 ± 0%     888.0 ±  0%       ~ (p=1.000 n=6) ¹
+PrebuiltTreeCeilingParallel-64             888.0 ± 0%     888.0 ±  0%       ~ (p=1.000 n=6) ¹
+PrebuiltTreeCeilingParallel-256            888.0 ± 0%     888.0 ±  0%       ~ (p=1.000 n=6) ¹
+PrebuiltTreeCeilingParallel-1024           889.0 ± 0%     889.0 ± 14%       ~ (p=1.000 n=6)
+AdjacencyCacheLookup/serial                4.000 ± 0%     4.000 ±  0%       ~ (p=1.000 n=6) ¹
+AdjacencyCacheLookup/serial-8              4.000 ± 0%     4.000 ±  0%       ~ (p=1.000 n=6) ¹
+AdjacencyCacheLookup/serial-64             4.000 ± 0%     4.000 ±  0%       ~ (p=1.000 n=6) ¹
+AdjacencyCacheLookup/serial-256            4.000 ± 0%     4.000 ±  0%       ~ (p=1.000 n=6) ¹
+AdjacencyCacheLookup/serial-1024           4.000 ± 0%     4.000 ±  0%       ~ (p=1.000 n=6) ¹
+AdjacencyCacheLookup/parallel              4.000 ± 0%     4.000 ±  0%       ~ (p=1.000 n=6) ¹
+AdjacencyCacheLookup/parallel-8            4.000 ± 0%     4.000 ±  0%       ~ (p=1.000 n=6) ¹
+AdjacencyCacheLookup/parallel-64           4.000 ± 0%     4.000 ±  0%       ~ (p=1.000 n=6) ¹
+AdjacencyCacheLookup/parallel-256          4.000 ± 0%     4.000 ±  0%       ~ (p=1.000 n=6) ¹
+AdjacencyCacheLookup/parallel-1024         4.000 ± 0%     4.000 ±  0%       ~ (p=1.000 n=6) ¹
+geomean                                    113.0          113.1        +0.00%
+¹ all samples are equal
+
+                                       │     B      │                 B2                 │
+                                       │ allocs/op  │ allocs/op   vs base                │
+PlanReusePhasesParallel/1parse           1.000 ± 0%   1.000 ± 0%       ~ (p=1.000 n=6) ¹
+PlanReusePhasesParallel/1parse-8         1.000 ± 0%   1.000 ± 0%       ~ (p=1.000 n=6) ¹
+PlanReusePhasesParallel/1parse-64        1.000 ± 0%   1.000 ± 0%       ~ (p=1.000 n=6) ¹
+PlanReusePhasesParallel/1parse-256       1.000 ± 0%   1.000 ± 0%       ~ (p=1.000 n=6) ¹
+PlanReusePhasesParallel/1parse-1024      1.000 ± 0%   1.000 ± 0%       ~ (p=1.000 n=6) ¹
+PlanReusePhasesParallel/2snapshot        2.000 ± 0%   2.000 ± 0%       ~ (p=1.000 n=6) ¹
+PlanReusePhasesParallel/2snapshot-8      2.000 ± 0%   2.000 ± 0%       ~ (p=1.000 n=6) ¹
+PlanReusePhasesParallel/2snapshot-64     2.000 ± 0%   2.000 ± 0%       ~ (p=1.000 n=6) ¹
+PlanReusePhasesParallel/2snapshot-256    2.000 ± 0%   2.000 ± 0%       ~ (p=1.000 n=6) ¹
+PlanReusePhasesParallel/2snapshot-1024   2.000 ± 0%   2.000 ± 0%       ~ (p=1.000 n=6) ¹
+PlanReusePhasesParallel/3build           15.00 ± 0%   15.00 ± 0%       ~ (p=1.000 n=6) ¹
+PlanReusePhasesParallel/3build-8         15.00 ± 0%   15.00 ± 0%       ~ (p=1.000 n=6) ¹
+PlanReusePhasesParallel/3build-64        15.00 ± 0%   15.00 ± 0%       ~ (p=1.000 n=6) ¹
+PlanReusePhasesParallel/3build-256       15.00 ± 0%   15.00 ± 0%       ~ (p=1.000 n=6) ¹
+PlanReusePhasesParallel/3build-1024      15.00 ± 0%   15.00 ± 0%       ~ (p=1.000 n=6) ¹
+PlanReusePhasesParallel/4full            21.00 ± 0%   21.00 ± 0%       ~ (p=1.000 n=6) ¹
+PlanReusePhasesParallel/4full-8          21.00 ± 0%   21.00 ± 0%       ~ (p=1.000 n=6) ¹
+PlanReusePhasesParallel/4full-64         21.00 ± 0%   21.00 ± 0%       ~ (p=1.000 n=6) ¹
+PlanReusePhasesParallel/4full-256        21.00 ± 0%   21.00 ± 0%       ~ (p=1.000 n=6) ¹
+PlanReusePhasesParallel/4full-1024       21.00 ± 0%   21.00 ± 0%       ~ (p=1.000 n=6) ¹
+PrebuiltTreeCeilingParallel              6.000 ± 0%   6.000 ± 0%       ~ (p=1.000 n=6) ¹
+PrebuiltTreeCeilingParallel-8            6.000 ± 0%   6.000 ± 0%       ~ (p=1.000 n=6) ¹
+PrebuiltTreeCeilingParallel-64           6.000 ± 0%   6.000 ± 0%       ~ (p=1.000 n=6) ¹
+PrebuiltTreeCeilingParallel-256          6.000 ± 0%   6.000 ± 0%       ~ (p=1.000 n=6) ¹
+PrebuiltTreeCeilingParallel-1024         6.000 ± 0%   6.000 ± 0%       ~ (p=1.000 n=6) ¹
+AdjacencyCacheLookup/serial              1.000 ± 0%   1.000 ± 0%       ~ (p=1.000 n=6) ¹
+AdjacencyCacheLookup/serial-8            1.000 ± 0%   1.000 ± 0%       ~ (p=1.000 n=6) ¹
+AdjacencyCacheLookup/serial-64           1.000 ± 0%   1.000 ± 0%       ~ (p=1.000 n=6) ¹
+AdjacencyCacheLookup/serial-256          1.000 ± 0%   1.000 ± 0%       ~ (p=1.000 n=6) ¹
+AdjacencyCacheLookup/serial-1024         1.000 ± 0%   1.000 ± 0%       ~ (p=1.000 n=6) ¹
+AdjacencyCacheLookup/parallel            1.000 ± 0%   1.000 ± 0%       ~ (p=1.000 n=6) ¹
+AdjacencyCacheLookup/parallel-8          1.000 ± 0%   1.000 ± 0%       ~ (p=1.000 n=6) ¹
+AdjacencyCacheLookup/parallel-64         1.000 ± 0%   1.000 ± 0%       ~ (p=1.000 n=6) ¹
+AdjacencyCacheLookup/parallel-256        1.000 ± 0%   1.000 ± 0%       ~ (p=1.000 n=6) ¹
+AdjacencyCacheLookup/parallel-1024       1.000 ± 0%   1.000 ± 0%       ~ (p=1.000 n=6) ¹
+geomean                                  3.244        3.244       +0.00%
+¹ all samples are equal

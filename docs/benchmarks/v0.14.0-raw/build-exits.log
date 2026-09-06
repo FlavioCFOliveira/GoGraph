@@ -1,0 +1,37 @@
+GO=go version go1.27.1 darwin/arm64
+START 2026-09-06T09:45:17Z load=[1,31 2,36 5,87]
+build pkg=cypher arm=A EXIT=0
+build pkg=cypher arm=B EXIT=0
+build pkg=cypher arm=B2 EXIT=0
+build pkg=cypher/exec arm=A EXIT=0
+build pkg=cypher/exec arm=B EXIT=0
+build pkg=cypher/exec arm=B2 EXIT=0
+build pkg=search arm=A EXIT=0
+build pkg=search arm=B EXIT=0
+build pkg=search arm=B2 EXIT=0
+build pkg=search/centrality arm=A EXIT=0
+build pkg=search/centrality arm=B EXIT=0
+build pkg=search/centrality arm=B2 EXIT=0
+build pkg=graph arm=A EXIT=0
+build pkg=graph arm=B EXIT=0
+build pkg=graph arm=B2 EXIT=0
+build pkg=graph/lpg arm=A EXIT=0
+build pkg=graph/lpg arm=B EXIT=0
+build pkg=graph/lpg arm=B2 EXIT=0
+build pkg=graph/mvcc arm=A EXIT=0
+build pkg=graph/mvcc arm=B EXIT=0
+build pkg=graph/mvcc arm=B2 EXIT=0
+build pkg=internal/metrics/prometheus arm=A EXIT=0
+build pkg=internal/metrics/prometheus arm=B EXIT=0
+build pkg=internal/metrics/prometheus arm=B2 EXIT=0
+build pkg=store/txn arm=A EXIT=0
+build pkg=store/txn arm=B EXIT=0
+build pkg=store/txn arm=B2 EXIT=0
+build pkg=store/wal arm=A EXIT=0
+build pkg=store/wal arm=B EXIT=0
+build pkg=store/wal arm=B2 EXIT=0
+build pkg=bolt/server arm=A EXIT=0
+build pkg=bolt/server arm=B EXIT=0
+build pkg=bolt/server arm=B2 EXIT=0
+END 2026-09-06T09:45:38Z load=[2,91 2,66 5,90]
+BUILD_ALLDONE

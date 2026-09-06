@@ -1,0 +1,37 @@
+import re, os, collections, statistics
+SP="/private/tmp/claude-501/-Users-flaviocfo-dev-xumiga-GoGraph/30c8f7b2-7300-4908-9f28-8fc3ea0e6d43/scratchpad"
+SRC=[os.path.join(SP,"raw","ab2"),os.path.join(SP,"raw","ab_run1_partial")]
+data=collections.defaultdict(lambda: collections.defaultdict(list))
+lre=re.compile(r'^(Benchmark\S*)\s+(\d+)\s+(.*)$')
+for d in SRC:
+    if not os.path.isdir(d): continue
+    for fn in sorted(os.listdir(d)):
+        m=re.match(r'^(.*)_(A|B2|B)\.txt$',fn)
+        if not m or not fn.endswith(".txt"): continue
+        for ln in open(os.path.join(d,fn),errors="replace"):
+            mm=lre.match(ln.strip())
+            if not mm: continue
+            a=re.search(r'([\d.]+)\s+allocs/op',mm.group(3))
+            if a: data[(m.group(1),mm.group(1))][m.group(2)].append(float(a.group(1)))
+TOL=0.5  # percent: below this, a difference is N-rounding, not a change
+unst=[];chg=[];same=[]
+for k in sorted(data):
+    ar=data[k]
+    if "A" not in ar or "B" not in ar: continue
+    A,B=ar["A"],ar["B"]
+    ma,mb=statistics.median(A),statistics.median(B)
+    sprA=(max(A)-min(A))/ma*100 if ma else 0
+    sprB=(max(B)-min(B))/mb*100 if mb else 0
+    if max(sprA,sprB)>TOL: unst.append((k,A,B,sprA,sprB)); continue
+    rel=(mb-ma)/ma*100 if ma else 0
+    (chg if abs(rel)>=TOL else same).append((k,ma,mb,rel,len(A),len(B),max(sprA,sprB)))
+print(f"CHANGED (|delta| >= {TOL}% and both arms stable within {TOL}%)   n={len(chg)}")
+print(f"{'pkg':12s} {'benchmark':58s} {'v0.13.0':>10s} {'v0.14.0':>10s} {'delta':>9s} {'nA':>3s} {'nB':>3s}")
+for k,ma,mb,rel,na,nb,s in sorted(chg,key=lambda r:r[3]):
+    print(f"{k[0]:12s} {k[1]:58s} {ma:10.0f} {mb:10.0f} {rel:8.2f}% {na:3d} {nb:3d}")
+print(f"\nUNCHANGED within {TOL}%   n={len(same)}")
+print(f"\nUNRELIABLE - same binary varied >{TOL}% between rounds   n={len(unst)}")
+print(f"{'pkg':12s} {'benchmark':58s} {'v13 spread':>11s} {'v14 spread':>11s}   observed")
+for k,A,B,sa,sb in unst:
+    print(f"{k[0]:12s} {k[1]:58s} {sa:10.2f}% {sb:10.2f}%   v13={sorted(set(A))} v14={sorted(set(B))}")
+print(f"\nTOTAL benchmarks compared: {len(chg)+len(same)+len(unst)}")

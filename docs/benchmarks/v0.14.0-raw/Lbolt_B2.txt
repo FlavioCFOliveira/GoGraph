@@ -1,0 +1,90 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/bolt/server
+cpu: Apple M4
+BenchmarkBoltRecordEncodeParallel/baseline              	15387204	        85.47 ns/op	      48 B/op	       4 allocs/op
+BenchmarkBoltRecordEncodeParallel/baseline-8            	63322309	        18.09 ns/op	      48 B/op	       4 allocs/op
+BenchmarkBoltRecordEncodeParallel/baseline-64           	62846144	        21.21 ns/op	      48 B/op	       4 allocs/op
+BenchmarkBoltRecordEncodeParallel/baseline-256          	68539770	        20.02 ns/op	      48 B/op	       4 allocs/op
+BenchmarkBoltRecordEncodeParallel/baseline-1024         	38119794	        30.72 ns/op	      48 B/op	       4 allocs/op
+BenchmarkBoltRecordEncodeParallel/fast                  	41317689	        31.34 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBoltRecordEncodeParallel/fast-8                	190485184	         6.257 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBoltRecordEncodeParallel/fast-64               	212042230	         5.607 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBoltRecordEncodeParallel/fast-256              	216763968	         5.577 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBoltRecordEncodeParallel/fast-1024             	224430261	         5.567 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/bolt/server
+cpu: Apple M4
+BenchmarkBoltRecordEncodeParallel/baseline              	15744285	        84.41 ns/op	      48 B/op	       4 allocs/op
+BenchmarkBoltRecordEncodeParallel/baseline-8            	75233736	        17.08 ns/op	      48 B/op	       4 allocs/op
+BenchmarkBoltRecordEncodeParallel/baseline-64           	66615931	        19.65 ns/op	      48 B/op	       4 allocs/op
+BenchmarkBoltRecordEncodeParallel/baseline-256          	62651462	        19.51 ns/op	      48 B/op	       4 allocs/op
+BenchmarkBoltRecordEncodeParallel/baseline-1024         	41490368	        29.28 ns/op	      48 B/op	       4 allocs/op
+BenchmarkBoltRecordEncodeParallel/fast                  	38155904	        30.05 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBoltRecordEncodeParallel/fast-8                	207178161	         5.914 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBoltRecordEncodeParallel/fast-64               	227051247	         5.404 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBoltRecordEncodeParallel/fast-256              	227686522	         5.356 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBoltRecordEncodeParallel/fast-1024             	219392866	         5.403 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/bolt/server
+cpu: Apple M4
+BenchmarkBoltRecordEncodeParallel/baseline              	15389942	        82.84 ns/op	      48 B/op	       4 allocs/op
+BenchmarkBoltRecordEncodeParallel/baseline-8            	69152144	        16.94 ns/op	      48 B/op	       4 allocs/op
+BenchmarkBoltRecordEncodeParallel/baseline-64           	69089930	        19.16 ns/op	      48 B/op	       4 allocs/op
+BenchmarkBoltRecordEncodeParallel/baseline-256          	63222084	        18.88 ns/op	      48 B/op	       4 allocs/op
+BenchmarkBoltRecordEncodeParallel/baseline-1024         	34714939	        30.09 ns/op	      48 B/op	       4 allocs/op
+BenchmarkBoltRecordEncodeParallel/fast                  	40859002	        29.69 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBoltRecordEncodeParallel/fast-8                	216337572	         5.478 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBoltRecordEncodeParallel/fast-64               	236710687	         4.958 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBoltRecordEncodeParallel/fast-256              	247257438	         5.035 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBoltRecordEncodeParallel/fast-1024             	246075375	         5.023 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/bolt/server
+cpu: Apple M4
+BenchmarkBoltRecordEncodeParallel/baseline              	15063273	        85.26 ns/op	      48 B/op	       4 allocs/op
+BenchmarkBoltRecordEncodeParallel/baseline-8            	79109360	        18.10 ns/op	      48 B/op	       4 allocs/op
+BenchmarkBoltRecordEncodeParallel/baseline-64           	62182473	        20.86 ns/op	      48 B/op	       4 allocs/op
+BenchmarkBoltRecordEncodeParallel/baseline-256          	66495963	        20.36 ns/op	      48 B/op	       4 allocs/op
+BenchmarkBoltRecordEncodeParallel/baseline-1024         	43640991	        28.62 ns/op	      48 B/op	       4 allocs/op
+BenchmarkBoltRecordEncodeParallel/fast                  	38629354	        30.68 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBoltRecordEncodeParallel/fast-8                	197543517	         6.101 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBoltRecordEncodeParallel/fast-64               	215733002	         5.549 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBoltRecordEncodeParallel/fast-256              	219696726	         5.451 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBoltRecordEncodeParallel/fast-1024             	220565174	         5.542 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/bolt/server
+cpu: Apple M4
+BenchmarkBoltRecordEncodeParallel/baseline              	15127560	        83.79 ns/op	      48 B/op	       4 allocs/op
+BenchmarkBoltRecordEncodeParallel/baseline-8            	64838431	        18.19 ns/op	      48 B/op	       4 allocs/op
+BenchmarkBoltRecordEncodeParallel/baseline-64           	71976068	        19.97 ns/op	      48 B/op	       4 allocs/op
+BenchmarkBoltRecordEncodeParallel/baseline-256          	70748458	        20.52 ns/op	      48 B/op	       4 allocs/op
+BenchmarkBoltRecordEncodeParallel/baseline-1024         	44817578	        31.06 ns/op	      48 B/op	       4 allocs/op
+BenchmarkBoltRecordEncodeParallel/fast                  	38052001	        30.14 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBoltRecordEncodeParallel/fast-8                	207222972	         5.890 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBoltRecordEncodeParallel/fast-64               	222340134	         5.329 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBoltRecordEncodeParallel/fast-256              	221547680	         5.345 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBoltRecordEncodeParallel/fast-1024             	227978629	         5.333 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/bolt/server
+cpu: Apple M4
+BenchmarkBoltRecordEncodeParallel/baseline              	15818786	        81.40 ns/op	      48 B/op	       4 allocs/op
+BenchmarkBoltRecordEncodeParallel/baseline-8            	74761696	        16.53 ns/op	      48 B/op	       4 allocs/op
+BenchmarkBoltRecordEncodeParallel/baseline-64           	65650900	        19.73 ns/op	      48 B/op	       4 allocs/op
+BenchmarkBoltRecordEncodeParallel/baseline-256          	62882643	        18.13 ns/op	      48 B/op	       4 allocs/op
+BenchmarkBoltRecordEncodeParallel/baseline-1024         	42269706	        27.48 ns/op	      48 B/op	       4 allocs/op
+BenchmarkBoltRecordEncodeParallel/fast                  	40865844	        29.48 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBoltRecordEncodeParallel/fast-8                	227035658	         5.377 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBoltRecordEncodeParallel/fast-64               	247431565	         4.881 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBoltRecordEncodeParallel/fast-256              	239689202	         5.001 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBoltRecordEncodeParallel/fast-1024             	250161214	         4.840 ns/op	       0 B/op	       0 allocs/op
+PASS

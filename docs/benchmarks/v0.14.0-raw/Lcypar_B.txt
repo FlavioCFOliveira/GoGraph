@@ -1,0 +1,240 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkPlanReusePhasesParallel/1parse        	20092144	        60.25 ns/op	      48 B/op	       1 allocs/op
+BenchmarkPlanReusePhasesParallel/1parse-8      	12550435	        96.41 ns/op	      48 B/op	       1 allocs/op
+BenchmarkPlanReusePhasesParallel/1parse-64     	 8237425	       141.5 ns/op	      48 B/op	       1 allocs/op
+BenchmarkPlanReusePhasesParallel/1parse-256    	 7860564	       155.3 ns/op	      48 B/op	       1 allocs/op
+BenchmarkPlanReusePhasesParallel/1parse-1024   	 6241000	       163.1 ns/op	      48 B/op	       1 allocs/op
+BenchmarkPlanReusePhasesParallel/2snapshot              	12350454	        90.14 ns/op	      96 B/op	       2 allocs/op
+BenchmarkPlanReusePhasesParallel/2snapshot-8            	 9160824	       130.5 ns/op	      96 B/op	       2 allocs/op
+BenchmarkPlanReusePhasesParallel/2snapshot-64           	 7573605	       165.9 ns/op	      96 B/op	       2 allocs/op
+BenchmarkPlanReusePhasesParallel/2snapshot-256          	 6178182	       187.7 ns/op	      96 B/op	       2 allocs/op
+BenchmarkPlanReusePhasesParallel/2snapshot-1024         	 6088008	       189.4 ns/op	      96 B/op	       2 allocs/op
+BenchmarkPlanReusePhasesParallel/3build                 	 1491992	       789.4 ns/op	    1504 B/op	      15 allocs/op
+BenchmarkPlanReusePhasesParallel/3build-8               	 3675859	       317.6 ns/op	    1504 B/op	      15 allocs/op
+BenchmarkPlanReusePhasesParallel/3build-64              	 2893492	       498.2 ns/op	    1504 B/op	      15 allocs/op
+BenchmarkPlanReusePhasesParallel/3build-256             	 2339762	       538.3 ns/op	    1504 B/op	      15 allocs/op
+BenchmarkPlanReusePhasesParallel/3build-1024            	 1000000	      1554 ns/op	    1505 B/op	      15 allocs/op
+BenchmarkPlanReusePhasesParallel/4full                  	  684469	      1587 ns/op	    2401 B/op	      21 allocs/op
+BenchmarkPlanReusePhasesParallel/4full-8                	 1470482	       847.6 ns/op	    2392 B/op	      21 allocs/op
+BenchmarkPlanReusePhasesParallel/4full-64               	 1000000	      1005 ns/op	    2392 B/op	      21 allocs/op
+BenchmarkPlanReusePhasesParallel/4full-256              	 1231696	       993.5 ns/op	    2392 B/op	      21 allocs/op
+BenchmarkPlanReusePhasesParallel/4full-1024             	  851898	      1336 ns/op	    2392 B/op	      21 allocs/op
+BenchmarkPrebuiltTreeCeilingParallel                    	 1850234	       619.8 ns/op	     892 B/op	       6 allocs/op
+BenchmarkPrebuiltTreeCeilingParallel-8                  	 2411662	       529.4 ns/op	     888 B/op	       6 allocs/op
+BenchmarkPrebuiltTreeCeilingParallel-64                 	 1864215	       668.0 ns/op	     888 B/op	       6 allocs/op
+BenchmarkPrebuiltTreeCeilingParallel-256                	 1594004	       731.2 ns/op	     888 B/op	       6 allocs/op
+BenchmarkPrebuiltTreeCeilingParallel-1024               	 1506358	       779.8 ns/op	     889 B/op	       6 allocs/op
+BenchmarkAdjacencyCacheLookup/serial                    	43060912	        27.51 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/serial-8                  	46768431	        26.04 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/serial-64                 	45668978	        26.04 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/serial-256                	45648782	        26.34 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/serial-1024               	45404811	        26.71 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/parallel                  	45704708	        26.80 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/parallel-8                	14046874	        83.41 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/parallel-64               	14506038	        83.07 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/parallel-256              	13677577	        84.87 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/parallel-1024             	12820940	        94.89 ns/op	       4 B/op	       1 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkPlanReusePhasesParallel/1parse        	20066553	        60.62 ns/op	      48 B/op	       1 allocs/op
+BenchmarkPlanReusePhasesParallel/1parse-8      	12184488	        97.63 ns/op	      48 B/op	       1 allocs/op
+BenchmarkPlanReusePhasesParallel/1parse-64     	 8300265	       145.5 ns/op	      48 B/op	       1 allocs/op
+BenchmarkPlanReusePhasesParallel/1parse-256    	 7828813	       155.9 ns/op	      48 B/op	       1 allocs/op
+BenchmarkPlanReusePhasesParallel/1parse-1024   	 6608916	       163.2 ns/op	      48 B/op	       1 allocs/op
+BenchmarkPlanReusePhasesParallel/2snapshot              	12282392	        87.58 ns/op	      96 B/op	       2 allocs/op
+BenchmarkPlanReusePhasesParallel/2snapshot-8            	 9154609	       127.4 ns/op	      96 B/op	       2 allocs/op
+BenchmarkPlanReusePhasesParallel/2snapshot-64           	 7571214	       156.9 ns/op	      96 B/op	       2 allocs/op
+BenchmarkPlanReusePhasesParallel/2snapshot-256          	 7199176	       180.3 ns/op	      96 B/op	       2 allocs/op
+BenchmarkPlanReusePhasesParallel/2snapshot-1024         	 5612698	       187.0 ns/op	      96 B/op	       2 allocs/op
+BenchmarkPlanReusePhasesParallel/3build                 	 1561458	       762.5 ns/op	    1504 B/op	      15 allocs/op
+BenchmarkPlanReusePhasesParallel/3build-8               	 3809282	       316.5 ns/op	    1504 B/op	      15 allocs/op
+BenchmarkPlanReusePhasesParallel/3build-64              	 2243083	       508.8 ns/op	    1504 B/op	      15 allocs/op
+BenchmarkPlanReusePhasesParallel/3build-256             	 2219666	       523.8 ns/op	    1504 B/op	      15 allocs/op
+BenchmarkPlanReusePhasesParallel/3build-1024            	  836515	      2611 ns/op	    1505 B/op	      15 allocs/op
+BenchmarkPlanReusePhasesParallel/4full                  	  764218	      1466 ns/op	    2400 B/op	      21 allocs/op
+BenchmarkPlanReusePhasesParallel/4full-8                	 1477724	       853.2 ns/op	    2392 B/op	      21 allocs/op
+BenchmarkPlanReusePhasesParallel/4full-64               	 1000000	      1050 ns/op	    2392 B/op	      21 allocs/op
+BenchmarkPlanReusePhasesParallel/4full-256              	 1248946	      1054 ns/op	    2392 B/op	      21 allocs/op
+BenchmarkPlanReusePhasesParallel/4full-1024             	  922012	      1383 ns/op	    2392 B/op	      21 allocs/op
+BenchmarkPrebuiltTreeCeilingParallel                    	 2299231	       576.7 ns/op	     889 B/op	       6 allocs/op
+BenchmarkPrebuiltTreeCeilingParallel-8                  	 2489655	       513.8 ns/op	     888 B/op	       6 allocs/op
+BenchmarkPrebuiltTreeCeilingParallel-64                 	 2067264	       636.7 ns/op	     888 B/op	       6 allocs/op
+BenchmarkPrebuiltTreeCeilingParallel-256                	 1778590	       658.7 ns/op	     888 B/op	       6 allocs/op
+BenchmarkPrebuiltTreeCeilingParallel-1024               	 1663873	       732.8 ns/op	     889 B/op	       6 allocs/op
+BenchmarkAdjacencyCacheLookup/serial                    	45191923	        27.49 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/serial-8                  	44884912	        26.73 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/serial-64                 	45524887	        26.55 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/serial-256                	45243678	        26.64 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/serial-1024               	45456697	        26.79 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/parallel                  	45020188	        27.39 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/parallel-8                	13598330	        81.76 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/parallel-64               	14734057	        81.28 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/parallel-256              	13902303	        85.03 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/parallel-1024             	12616316	        96.98 ns/op	       4 B/op	       1 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkPlanReusePhasesParallel/1parse        	19900057	        59.48 ns/op	      48 B/op	       1 allocs/op
+BenchmarkPlanReusePhasesParallel/1parse-8      	12438240	        94.25 ns/op	      48 B/op	       1 allocs/op
+BenchmarkPlanReusePhasesParallel/1parse-64     	 8061896	       142.5 ns/op	      48 B/op	       1 allocs/op
+BenchmarkPlanReusePhasesParallel/1parse-256    	 8000821	       152.0 ns/op	      48 B/op	       1 allocs/op
+BenchmarkPlanReusePhasesParallel/1parse-1024   	 6701550	       150.1 ns/op	      48 B/op	       1 allocs/op
+BenchmarkPlanReusePhasesParallel/2snapshot              	12013930	        87.49 ns/op	      96 B/op	       2 allocs/op
+BenchmarkPlanReusePhasesParallel/2snapshot-8            	 8942749	       128.9 ns/op	      96 B/op	       2 allocs/op
+BenchmarkPlanReusePhasesParallel/2snapshot-64           	 7474782	       163.3 ns/op	      96 B/op	       2 allocs/op
+BenchmarkPlanReusePhasesParallel/2snapshot-256          	 6761226	       177.8 ns/op	      96 B/op	       2 allocs/op
+BenchmarkPlanReusePhasesParallel/2snapshot-1024         	 5083434	       205.2 ns/op	      96 B/op	       2 allocs/op
+BenchmarkPlanReusePhasesParallel/3build                 	 1564944	       777.6 ns/op	    1504 B/op	      15 allocs/op
+BenchmarkPlanReusePhasesParallel/3build-8               	 3449661	       347.8 ns/op	    1504 B/op	      15 allocs/op
+BenchmarkPlanReusePhasesParallel/3build-64              	 2883789	       513.1 ns/op	    1504 B/op	      15 allocs/op
+BenchmarkPlanReusePhasesParallel/3build-256             	 2900233	       576.2 ns/op	    1504 B/op	      15 allocs/op
+BenchmarkPlanReusePhasesParallel/3build-1024            	  981627	      1130 ns/op	    1504 B/op	      15 allocs/op
+BenchmarkPlanReusePhasesParallel/4full                  	  776035	      1632 ns/op	    2399 B/op	      21 allocs/op
+BenchmarkPlanReusePhasesParallel/4full-8                	 1493557	       835.6 ns/op	    2392 B/op	      21 allocs/op
+BenchmarkPlanReusePhasesParallel/4full-64               	 1000000	      1037 ns/op	    2392 B/op	      21 allocs/op
+BenchmarkPlanReusePhasesParallel/4full-256              	 1122240	      1123 ns/op	    2392 B/op	      21 allocs/op
+BenchmarkPlanReusePhasesParallel/4full-1024             	  902421	      1311 ns/op	    2392 B/op	      21 allocs/op
+BenchmarkPrebuiltTreeCeilingParallel                    	 2156386	       534.4 ns/op	     892 B/op	       6 allocs/op
+BenchmarkPrebuiltTreeCeilingParallel-8                  	 2553091	       505.3 ns/op	     888 B/op	       6 allocs/op
+BenchmarkPrebuiltTreeCeilingParallel-64                 	 1887706	       645.9 ns/op	     888 B/op	       6 allocs/op
+BenchmarkPrebuiltTreeCeilingParallel-256                	 1764165	       665.7 ns/op	     888 B/op	       6 allocs/op
+BenchmarkPrebuiltTreeCeilingParallel-1024               	 1522352	       731.9 ns/op	     889 B/op	       6 allocs/op
+BenchmarkAdjacencyCacheLookup/serial                    	44724942	        27.23 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/serial-8                  	45392860	        26.44 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/serial-64                 	45355400	        26.31 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/serial-256                	46032714	        26.67 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/serial-1024               	45239698	        26.82 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/parallel                  	45945910	        27.08 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/parallel-8                	14850802	        83.31 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/parallel-64               	14697033	        81.41 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/parallel-256              	14076135	        84.80 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/parallel-1024             	12695048	        96.46 ns/op	       4 B/op	       1 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkPlanReusePhasesParallel/1parse        	19345880	        62.74 ns/op	      48 B/op	       1 allocs/op
+BenchmarkPlanReusePhasesParallel/1parse-8      	 9553081	       119.7 ns/op	      48 B/op	       1 allocs/op
+BenchmarkPlanReusePhasesParallel/1parse-64     	 7696558	       156.0 ns/op	      48 B/op	       1 allocs/op
+BenchmarkPlanReusePhasesParallel/1parse-256    	 7316536	       162.6 ns/op	      48 B/op	       1 allocs/op
+BenchmarkPlanReusePhasesParallel/1parse-1024   	 7880250	       154.3 ns/op	      48 B/op	       1 allocs/op
+BenchmarkPlanReusePhasesParallel/2snapshot              	11623566	        91.32 ns/op	      96 B/op	       2 allocs/op
+BenchmarkPlanReusePhasesParallel/2snapshot-8            	 8790405	       148.3 ns/op	      96 B/op	       2 allocs/op
+BenchmarkPlanReusePhasesParallel/2snapshot-64           	 6514238	       162.9 ns/op	      96 B/op	       2 allocs/op
+BenchmarkPlanReusePhasesParallel/2snapshot-256          	 6655161	       174.4 ns/op	      96 B/op	       2 allocs/op
+BenchmarkPlanReusePhasesParallel/2snapshot-1024         	 5373549	       187.1 ns/op	      96 B/op	       2 allocs/op
+BenchmarkPlanReusePhasesParallel/3build                 	 1520661	       791.4 ns/op	    1504 B/op	      15 allocs/op
+BenchmarkPlanReusePhasesParallel/3build-8               	 3686346	       349.2 ns/op	    1504 B/op	      15 allocs/op
+BenchmarkPlanReusePhasesParallel/3build-64              	 3099985	       404.3 ns/op	    1504 B/op	      15 allocs/op
+BenchmarkPlanReusePhasesParallel/3build-256             	 2302148	       529.9 ns/op	    1504 B/op	      15 allocs/op
+BenchmarkPlanReusePhasesParallel/3build-1024            	 1000000	      1494 ns/op	    1505 B/op	      15 allocs/op
+BenchmarkPlanReusePhasesParallel/4full                  	  712444	      1651 ns/op	    2401 B/op	      21 allocs/op
+BenchmarkPlanReusePhasesParallel/4full-8                	 1425344	       849.5 ns/op	    2392 B/op	      21 allocs/op
+BenchmarkPlanReusePhasesParallel/4full-64               	 1208977	       972.0 ns/op	    2392 B/op	      21 allocs/op
+BenchmarkPlanReusePhasesParallel/4full-256              	 1226745	      1074 ns/op	    2392 B/op	      21 allocs/op
+BenchmarkPlanReusePhasesParallel/4full-1024             	  800998	      1974 ns/op	    2392 B/op	      21 allocs/op
+BenchmarkPrebuiltTreeCeilingParallel                    	 2041882	       569.2 ns/op	     893 B/op	       6 allocs/op
+BenchmarkPrebuiltTreeCeilingParallel-8                  	 2456800	       531.6 ns/op	     888 B/op	       6 allocs/op
+BenchmarkPrebuiltTreeCeilingParallel-64                 	 1853193	       640.5 ns/op	     888 B/op	       6 allocs/op
+BenchmarkPrebuiltTreeCeilingParallel-256                	 1680489	       687.0 ns/op	     888 B/op	       6 allocs/op
+BenchmarkPrebuiltTreeCeilingParallel-1024               	 1583036	       910.8 ns/op	     889 B/op	       6 allocs/op
+BenchmarkAdjacencyCacheLookup/serial                    	43904379	        27.69 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/serial-8                  	44914591	        27.00 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/serial-64                 	44723760	        26.56 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/serial-256                	45254485	        26.66 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/serial-1024               	45223359	        26.90 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/parallel                  	44939682	        27.74 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/parallel-8                	12272113	        97.21 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/parallel-64               	14283134	        84.08 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/parallel-256              	14164507	        86.36 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/parallel-1024             	12938598	        94.87 ns/op	       4 B/op	       1 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkPlanReusePhasesParallel/1parse        	20019963	        60.11 ns/op	      48 B/op	       1 allocs/op
+BenchmarkPlanReusePhasesParallel/1parse-8      	12708885	       113.0 ns/op	      48 B/op	       1 allocs/op
+BenchmarkPlanReusePhasesParallel/1parse-64     	 7801201	       154.2 ns/op	      48 B/op	       1 allocs/op
+BenchmarkPlanReusePhasesParallel/1parse-256    	 7432947	       160.6 ns/op	      48 B/op	       1 allocs/op
+BenchmarkPlanReusePhasesParallel/1parse-1024   	 7532127	       161.8 ns/op	      48 B/op	       1 allocs/op
+BenchmarkPlanReusePhasesParallel/2snapshot              	11799418	        90.25 ns/op	      96 B/op	       2 allocs/op
+BenchmarkPlanReusePhasesParallel/2snapshot-8            	 7302943	       154.2 ns/op	      96 B/op	       2 allocs/op
+BenchmarkPlanReusePhasesParallel/2snapshot-64           	 7170787	       165.4 ns/op	      96 B/op	       2 allocs/op
+BenchmarkPlanReusePhasesParallel/2snapshot-256          	 6126772	       183.6 ns/op	      96 B/op	       2 allocs/op
+BenchmarkPlanReusePhasesParallel/2snapshot-1024         	 5087389	       205.7 ns/op	      96 B/op	       2 allocs/op
+BenchmarkPlanReusePhasesParallel/3build                 	 1552867	       773.3 ns/op	    1504 B/op	      15 allocs/op
+BenchmarkPlanReusePhasesParallel/3build-8               	 3827781	       327.0 ns/op	    1504 B/op	      15 allocs/op
+BenchmarkPlanReusePhasesParallel/3build-64              	 2983729	       420.5 ns/op	    1504 B/op	      15 allocs/op
+BenchmarkPlanReusePhasesParallel/3build-256             	 2794414	       443.6 ns/op	    1504 B/op	      15 allocs/op
+BenchmarkPlanReusePhasesParallel/3build-1024            	 2708470	      1060 ns/op	    1504 B/op	      15 allocs/op
+BenchmarkPlanReusePhasesParallel/4full                  	  795903	      1497 ns/op	    2400 B/op	      21 allocs/op
+BenchmarkPlanReusePhasesParallel/4full-8                	 1441275	       864.2 ns/op	    2392 B/op	      21 allocs/op
+BenchmarkPlanReusePhasesParallel/4full-64               	 1203520	       962.4 ns/op	    2392 B/op	      21 allocs/op
+BenchmarkPlanReusePhasesParallel/4full-256              	 1157018	      1112 ns/op	    2392 B/op	      21 allocs/op
+BenchmarkPlanReusePhasesParallel/4full-1024             	 1003240	      1786 ns/op	    2392 B/op	      21 allocs/op
+BenchmarkPrebuiltTreeCeilingParallel                    	 2180761	       581.7 ns/op	     893 B/op	       6 allocs/op
+BenchmarkPrebuiltTreeCeilingParallel-8                  	 2488486	       541.7 ns/op	     888 B/op	       6 allocs/op
+BenchmarkPrebuiltTreeCeilingParallel-64                 	 1874718	       676.6 ns/op	     888 B/op	       6 allocs/op
+BenchmarkPrebuiltTreeCeilingParallel-256                	 1629022	       699.6 ns/op	     888 B/op	       6 allocs/op
+BenchmarkPrebuiltTreeCeilingParallel-1024               	 1452991	       704.0 ns/op	     889 B/op	       6 allocs/op
+BenchmarkAdjacencyCacheLookup/serial                    	43961142	        27.43 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/serial-8                  	43697671	        26.78 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/serial-64                 	44960659	        26.72 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/serial-256                	45642921	        26.39 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/serial-1024               	45580438	        26.73 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/parallel                  	45499138	        27.57 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/parallel-8                	12527223	        94.53 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/parallel-64               	14160468	        83.29 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/parallel-256              	14250567	        84.15 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/parallel-1024             	12588490	        96.38 ns/op	       4 B/op	       1 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkPlanReusePhasesParallel/1parse        	20357040	        58.60 ns/op	      48 B/op	       1 allocs/op
+BenchmarkPlanReusePhasesParallel/1parse-8      	12276962	        96.62 ns/op	      48 B/op	       1 allocs/op
+BenchmarkPlanReusePhasesParallel/1parse-64     	 8355578	       147.4 ns/op	      48 B/op	       1 allocs/op
+BenchmarkPlanReusePhasesParallel/1parse-256    	 7621057	       152.3 ns/op	      48 B/op	       1 allocs/op
+BenchmarkPlanReusePhasesParallel/1parse-1024   	 6982382	       162.1 ns/op	      48 B/op	       1 allocs/op
+BenchmarkPlanReusePhasesParallel/2snapshot              	12272572	        85.22 ns/op	      96 B/op	       2 allocs/op
+BenchmarkPlanReusePhasesParallel/2snapshot-8            	 9540704	       128.7 ns/op	      96 B/op	       2 allocs/op
+BenchmarkPlanReusePhasesParallel/2snapshot-64           	 7200955	       161.1 ns/op	      96 B/op	       2 allocs/op
+BenchmarkPlanReusePhasesParallel/2snapshot-256          	 6662701	       165.9 ns/op	      96 B/op	       2 allocs/op
+BenchmarkPlanReusePhasesParallel/2snapshot-1024         	 5529572	       203.6 ns/op	      96 B/op	       2 allocs/op
+BenchmarkPlanReusePhasesParallel/3build                 	 1584168	       744.2 ns/op	    1504 B/op	      15 allocs/op
+BenchmarkPlanReusePhasesParallel/3build-8               	 3557251	       335.9 ns/op	    1504 B/op	      15 allocs/op
+BenchmarkPlanReusePhasesParallel/3build-64              	 2938418	       411.6 ns/op	    1504 B/op	      15 allocs/op
+BenchmarkPlanReusePhasesParallel/3build-256             	 2170396	       583.2 ns/op	    1504 B/op	      15 allocs/op
+BenchmarkPlanReusePhasesParallel/3build-1024            	  931660	      1692 ns/op	    1505 B/op	      15 allocs/op
+BenchmarkPlanReusePhasesParallel/4full                  	  794629	      1520 ns/op	    2398 B/op	      21 allocs/op
+BenchmarkPlanReusePhasesParallel/4full-8                	 1462808	       866.0 ns/op	    2392 B/op	      21 allocs/op
+BenchmarkPlanReusePhasesParallel/4full-64               	 1000000	      1030 ns/op	    2392 B/op	      21 allocs/op
+BenchmarkPlanReusePhasesParallel/4full-256              	  946592	      1081 ns/op	    2392 B/op	      21 allocs/op
+BenchmarkPlanReusePhasesParallel/4full-1024             	  768244	      1435 ns/op	    2392 B/op	      21 allocs/op
+BenchmarkPrebuiltTreeCeilingParallel                    	 2218808	       483.0 ns/op	     891 B/op	       6 allocs/op
+BenchmarkPrebuiltTreeCeilingParallel-8                  	 2546677	       521.3 ns/op	     888 B/op	       6 allocs/op
+BenchmarkPrebuiltTreeCeilingParallel-64                 	 1809730	       680.4 ns/op	     888 B/op	       6 allocs/op
+BenchmarkPrebuiltTreeCeilingParallel-256                	 1613888	       697.1 ns/op	     888 B/op	       6 allocs/op
+BenchmarkPrebuiltTreeCeilingParallel-1024               	 1631173	       761.4 ns/op	     889 B/op	       6 allocs/op
+BenchmarkAdjacencyCacheLookup/serial                    	45545982	        26.85 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/serial-8                  	45751177	        26.38 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/serial-64                 	45271772	        26.66 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/serial-256                	45218816	        26.48 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/serial-1024               	45834912	        26.35 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/parallel                  	45699777	        26.84 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/parallel-8                	14650627	        82.61 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/parallel-64               	14888583	        81.14 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/parallel-256              	14430108	        82.88 ns/op	       4 B/op	       1 allocs/op
+BenchmarkAdjacencyCacheLookup/parallel-1024             	12856556	        95.13 ns/op	       4 B/op	       1 allocs/op
+PASS

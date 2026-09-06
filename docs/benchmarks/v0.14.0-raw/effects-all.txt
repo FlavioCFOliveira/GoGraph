@@ -1,0 +1,317 @@
+EFFECTS — A (v0.13.0) -> B (v0.14.0), each row beside ITS OWN same-binary floor (B vs B2).
+n=6 per arm. Verdict requires BOTH p<0.05 AND |effect| > max(1%, 2x its own floor).
+============================================================================================================================================
+
+### exec [ns/op]  effect A(v0.13.0)->B(v0.14.0), beside each benchmark's OWN same-binary floor B->B2
+benchmark                                                  v0.13.0     v0.14.0   effect       p  own floor   sprA   sprB  verdict
+BenchmarkRelTypeProbe_ReverseRecovery/map+recovery-10      7.046ns     5.223ns  -25.87%  0.0051     ±0.24% ± 1.4% ± 1.8%  CHANGE
+BenchmarkExpandFilter_RowMode-10                           1.883ms     1.846ms   -1.98%  0.0453     ±0.55% ± 2.4% ± 2.4%  CHANGE
+BenchmarkShortestPath_Layered-10                           92.13µs     91.14µs   -1.07%  0.0082     ±0.27% ± 1.4% ± 1.7%  CHANGE
+BenchmarkExpandDir_InVsOut_Baseline/OUT_deg1_sources-10     142.2µs     147.1µs   +3.46%  0.0131     ±1.33% ± 3.4% ± 1.2%  CHANGE
+BenchmarkAllNodesScan_PerNodeAllocCost-10                  10.97µs     11.75µs   +7.11%  0.0051     ±1.53% ± 2.8% ± 2.1%  CHANGE
+BenchmarkRelTypeProbe_Column-10                             1.49ns     1.763ns  +18.32%  0.0051     ±0.60% ± 3.6% ± 4.4%  CHANGE
+BenchmarkPermuteRowsInPlace-10                             144.5µs     141.4µs   -2.16%  0.4712     ±1.54% ± 4.5% ± 5.8%  within own floor
+BenchmarkDynamicChunkFullBatch-10                          14.45µs     14.14µs   -2.13%  0.1735     ±0.18% ± 2.9% ± 2.0%  n.s.
+BenchmarkRevToFwd/n20000/scan-10                           1.149ms     1.126ms   -1.99%  0.4712     ±2.20% ± 6.2% ± 4.2%  within own floor
+BenchmarkAllShortestPaths_UnitDegreeChain-10               1.111ms      1.09ms   -1.89%  0.0927     ±1.71% ± 1.1% ± 3.1%  within own floor
+BenchmarkAllShortestPaths_Layered-10                       195.1µs     192.7µs   -1.21%  0.2298     ±0.18% ± 2.1% ± 3.7%  n.s.
+BenchmarkShortestPath_UnitDegreeChain-10                   642.2µs     634.6µs   -1.18%  0.2980     ±0.80% ± 2.7% ± 3.0%  within own floor
+BenchmarkExpandIn_PerEdge_vs_SourceOutdegree/K=256/one_in_edge-10     198.7ns     196.9ns   -0.88%  0.5752     ±1.09% ± 1.2% ± 3.4%  within own floor
+BenchmarkColumnarAgg_SumCountGroupBy/columnar_on-10        35.09ms     34.83ms   -0.72%  0.1735     ±0.49% ± 1.5% ± 1.4%  within own floor
+BenchmarkShortestPath_LayeredTyped-10                      91.92µs     91.26µs   -0.71%  0.3785     ±0.21% ± 1.9% ± 2.3%  within own floor
+BenchmarkNotNullProperties-10                              6.683ns     6.636ns   -0.69%  0.6889     ±0.11% ± 1.0% ± 3.8%  within own floor
+BenchmarkExpandIn_TypeFiltered_vs_SourceOutdegree/K=4096/one_in_edge_typed-10     82.07µs     81.61µs   -0.57%  0.3785     ±0.53% ± 2.9% ± 1.2%  within own floor
+BenchmarkDynamicChunkSingleRow-10                          57.36ns     57.04ns   -0.57%  0.6889     ±0.28% ± 2.3% ± 4.3%  within own floor
+BenchmarkPermuteRowsBuffered-10                            367.4µs     365.5µs   -0.50%  0.8102     ±2.13% ±11.6% ± 4.6%  within own floor
+BenchmarkDistinct_10k-10                                   290.8µs     289.8µs   -0.35%  0.4712     ±0.98% ± 0.5% ± 0.9%  within own floor
+BenchmarkRelTypeProbe_ReverseRecovery/column-10            1.813ns     1.807ns   -0.33%  0.2598     ±0.89% ± 0.8% ± 1.6%  within own floor
+BenchmarkBoundedOrder/n=000110/Sort-10                     8.622ms     8.595ms   -0.31%  0.8102     ±0.54% ± 4.1% ± 2.7%  within own floor
+BenchmarkBoundedOrder/n=000010/Top-10                      1.412ms     1.408ms   -0.30%  0.5752     ±1.30% ± 2.3% ± 1.4%  within own floor
+BenchmarkShortestPath_HighDegreeFan-10                     1.575ms     1.571ms   -0.29%  0.5752     ±1.29% ± 2.5% ± 3.0%  within own floor
+BenchmarkLimit_Throughput-10                               107.5µs     107.2µs   -0.26%  0.9362     ±1.39% ± 1.6% ± 1.7%  within own floor
+BenchmarkBoundedOrder/n=000110/Top-10                      1.445ms     1.442ms   -0.22%  0.6889     ±0.65% ± 4.9% ± 2.2%  within own floor
+BenchmarkBuildReverse_vs_E/E=1000000-10                    5.095ms     5.087ms   -0.15%  0.9362     ±2.08% ± 2.9% ± 3.8%  within own floor
+BenchmarkExpandDir_InVsOut_Baseline/IN_deg1_sources-10     93.53µs     93.42µs   -0.13%  0.8102     ±1.09% ± 2.5% ± 2.0%  within own floor
+BenchmarkColumnarAgg_MinMaxGroupBy/row_off-10               55.2ms     55.21ms   +0.01%  0.9362     ±1.03% ± 3.7% ± 2.6%  within own floor
+BenchmarkBoundedOrder/n=010010/Top-10                      4.911ms     4.913ms   +0.03%  0.6889     ±0.14% ± 2.4% ± 1.9%  within own floor
+BenchmarkExpandIn_TypeFiltered_vs_SourceOutdegree/K=65536/one_in_edge_typed-10     1.223ms     1.224ms   +0.03%  0.5752     ±0.37% ± 1.2% ± 2.3%  within own floor
+BenchmarkRevToFwd/n5000/scan-10                            274.7µs     274.8µs   +0.05%  0.6889     ±3.83% ± 7.4% ± 5.9%  within own floor
+BenchmarkExpandIn_TypeFiltered_vs_SourceOutdegree/K=16/one_in_edge_typed-10     657.5ns     657.8ns   +0.05%  0.9362     ±0.59% ± 1.4% ± 2.7%  within own floor
+BenchmarkProject_Throughput-10                             291.7µs     291.9µs   +0.09%  0.9362     ±0.45% ± 0.8% ± 2.3%  within own floor
+BenchmarkExpandIn_PerEdge_vs_SourceOutdegree/K=4096/one_in_edge-10     202.1ns     202.4ns   +0.12%  0.6304     ±0.00% ± 2.1% ± 1.7%  within own floor
+BenchmarkTop_10kN100-10                                    1.397ms       1.4ms   +0.22%  0.6889     ±0.09% ± 1.5% ± 1.4%  within own floor
+BenchmarkRelTypeProbe_Map-10                               13.14ns     13.18ns   +0.23%  0.9362     ±0.87% ±14.1% ±12.9%  within own floor
+BenchmarkBoundedOrder/n=060000/Top-10                      9.272ms     9.296ms   +0.26%  0.9362     ±2.62% ± 5.0% ± 6.6%  within own floor
+BenchmarkBuildReverse_vs_E/E=10000-10                      64.79µs     64.98µs   +0.30%  0.9362     ±0.25% ± 1.3% ± 2.7%  within own floor
+BenchmarkFilter_Throughput-10                              134.9µs     135.3µs   +0.31%  0.2980     ±0.51% ± 1.8% ± 2.9%  within own floor
+BenchmarkColumnarAgg_MinMaxGroupBy/columnar_on-10          34.57ms     34.68ms   +0.31%  0.9362     ±0.26% ± 1.9% ± 2.2%  within own floor
+BenchmarkExpandIn_PerEdge_vs_SourceOutdegree/K=65536/one_in_edge-10     206.1ns     206.8ns   +0.34%  0.9361     ±0.56% ± 5.6% ± 0.8%  within own floor
+BenchmarkColumnarAgg_SumCountGroupBy/row_off-10            49.82ms     49.99ms   +0.34%  0.4712     ±0.12% ± 1.6% ± 2.0%  within own floor
+BenchmarkRevToFwd/n5000/transpose-10                       194.7µs     195.4µs   +0.35%  0.2980     ±0.05% ± 1.3% ± 2.0%  within own floor
+BenchmarkDrain_Throughput-10                               16.64µs      16.7µs   +0.36%  0.8102     ±0.22% ± 2.7% ± 2.6%  within own floor
+BenchmarkBoundedOrder/n=120000/Top-10                       9.01ms     9.051ms   +0.46%  0.4712     ±1.85% ± 4.9% ± 1.5%  within own floor
+BenchmarkExpandIn_PerEdge_vs_SourceOutdegree/K=16/one_in_edge-10     187.8ns     188.8ns   +0.53%  0.8095     ±1.03% ± 1.1% ± 1.7%  within own floor
+BenchmarkRevToFwd/n20000/transpose-10                      770.3µs     774.7µs   +0.57%  0.1735     ±0.48% ± 1.5% ± 1.2%  within own floor
+BenchmarkExpandIn_TypeFiltered_vs_SourceOutdegree/K=256/one_in_edge_typed-10      5.38µs     5.412µs   +0.59%  0.2298     ±0.59% ± 3.4% ± 0.9%  within own floor
+BenchmarkExpandFilter_Columnar-10                          2.173ms     2.191ms   +0.81%  0.2298     ±0.32% ± 2.6% ± 1.2%  within own floor
+BenchmarkBoundedOrder/n=010010/Sort-10                     8.556ms     8.628ms   +0.84%  0.2298     ±2.67% ± 5.4% ± 2.8%  within own floor
+BenchmarkExpandOut_PerEdge_SingleSource/K=4096-10          78.48µs     79.24µs   +0.97%  0.3785     ±0.18% ± 3.1% ± 1.5%  within own floor
+BenchmarkExpandOut_PerEdge_SingleSource/K=65536-10         1.258ms     1.272ms   +1.09%  0.3785     ±0.69% ± 1.6% ± 3.8%  within own floor
+BenchmarkBoundedOrder/n=120000/Sort-10                     8.903ms     9.001ms   +1.10%  0.5752     ±1.11% ± 3.9% ± 3.1%  within own floor
+BenchmarkAllShortestPaths_HighDegreeFan-10                 1.844ms     1.869ms   +1.33%  0.2298     ±0.10% ± 2.8% ± 3.4%  n.s.
+BenchmarkSort_10k-10                                       1.332ms      1.35ms   +1.38%  0.0306     ±0.87% ± 1.9% ± 1.9%  within own floor
+BenchmarkIndexNestedLoopJoin_SeekDrain-10                  17.13µs     17.48µs   +2.08%  0.0927     ±0.21% ± 2.4% ± 1.2%  n.s.
+BenchmarkBoundedOrder/n=060000/Sort-10                     8.719ms     8.919ms   +2.30%  0.5752     ±1.29% ± 3.9% ± 3.4%  within own floor
+BenchmarkBuildReverse_vs_E/E=100000-10                     532.7µs     551.1µs   +3.46%  0.2298     ±2.89% ± 8.9% ± 3.4%  within own floor
+BenchmarkBoundedOrder/n=000010/Sort-10                      8.58ms     8.877ms   +3.46%  0.0656     ±3.21% ± 2.2% ± 4.4%  within own floor
+BenchmarkScan_PerNode/N=4096-10                            6.238µs     7.125µs  +14.23%  0.4712    ±30.19% ±44.8% ±37.6%  within own floor
+BenchmarkScan_PerNode/N=65536-10                            86.8µs     103.1µs  +18.83%  0.3785    ±29.62% ±37.3% ±31.1%  within own floor
+
+### cy [ns/op]  effect A(v0.13.0)->B(v0.14.0), beside each benchmark's OWN same-binary floor B->B2
+benchmark                                                  v0.13.0     v0.14.0   effect       p  own floor   sprA   sprB  verdict
+BenchmarkZZReorderSkewed/reorder=on-10                     267.2ms     2.723ms  -98.98%  0.0051     ±0.08% ± 1.7% ± 1.5%  CHANGE
+BenchmarkZZReorderLiveHistory/history=quiet-10             27.69ms     976.6µs  -96.47%  0.0051     ±1.12% ± 1.6% ± 1.5%  CHANGE
+BenchmarkZZReorderLiveHistory/history=live-10               27.7ms     987.3µs  -96.43%  0.0051     ±0.19% ± 1.9% ± 1.3%  CHANGE
+BenchmarkCountRelVar-10                                    222.4µs     226.6µs   +1.88%  0.0453     ±0.18% ± 2.0% ± 2.3%  CHANGE
+BenchmarkParallelScanProject_ScanFilterBig_Parallel-10     24.15ms      23.6ms   -2.27%  0.9362     ±0.39% ±17.4% ±14.8%  n.s.
+BenchmarkParallelLabelScan_LabelledMin_Serial-10           20.03ms     19.65ms   -1.86%  0.9362     ±0.77% ±15.3% ±16.8%  n.s.
+BenchmarkMergeMatch_LabelGrowth/hot=16384/cold=0-10        2.689ms     2.643ms   -1.73%  0.1735     ±0.27% ± 2.3% ± 2.5%  n.s.
+BenchmarkMergeMatch_DecoyGrowth/hot=64/cold=4096-10        10.27µs     10.09µs   -1.70%  0.2298     ±0.11% ± 2.6% ± 4.4%  n.s.
+BenchmarkMergeMatch_DecoyGrowth/hot=64/cold=16384-10       10.43µs     10.27µs   -1.53%  0.3785     ±0.10% ± 2.5% ± 2.2%  n.s.
+BenchmarkExpandInto_TwoHopOpen-10                          134.5ms     133.3ms   -0.87%  0.1735     ±0.80% ± 2.2% ± 2.1%  within own floor
+BenchmarkMergeMatch_LabelsOnly/hot=8/cold=16384-10         3.897µs     3.864µs   -0.86%  0.5745     ±0.31% ± 2.8% ± 0.9%  within own floor
+BenchmarkParallelScan_CountSmall_Disabled-10               1.341µs     1.331µs   -0.82%  0.4712     ±0.86% ± 2.6% ± 1.8%  within own floor
+BenchmarkColumnarShape_HopBaseline-10                       3.29ms     3.265ms   -0.79%  0.2298     ±0.77% ± 1.5% ± 1.1%  within own floor
+BenchmarkExpandInto_TriangleOpen-10                         2.718s        2.7s   -0.66%  0.6889     ±0.62% ± 1.5% ± 1.7%  within own floor
+BenchmarkZZReorderDrainCost/scan=bare-10                   1.445ms     1.436ms   -0.63%  0.1735     ±0.24% ± 1.7% ± 1.1%  within own floor
+BenchmarkParallelLabelScan_UnlabelledProject_Serial-10     37.99ms     37.75ms   -0.62%  0.9362     ±1.79% ± 4.8% ± 7.8%  within own floor
+BenchmarkPlanCacheMiss_InlinedLiteral-10                      47µs     46.74µs   -0.55%  0.3785     ±0.47% ± 3.1% ± 0.7%  within own floor
+BenchmarkParallelScanGate/seek-10                          1.078ms     1.072ms   -0.53%  0.5752     ±0.67% ± 1.2% ± 2.2%  within own floor
+BenchmarkParallelAggregate_Concurrent/conc=64/impl=parallel-10     917.4ms     912.9ms   -0.50%  0.9362     ±1.25% ± 5.3% ± 5.1%  within own floor
+BenchmarkParallelScanProject_ScanBig_Parallel-10           19.27ms     19.18ms   -0.48%  0.8102     ±1.44% ± 2.5% ± 3.1%  within own floor
+BenchmarkScalarFilterProjection-10                         839.7µs     835.8µs   -0.46%  0.5752     ±0.36% ± 1.7% ± 0.9%  within own floor
+BenchmarkCountPushdown_O1-10                               1.349µs     1.343µs   -0.44%  0.6298     ±0.41% ± 1.8% ± 1.0%  within own floor
+BenchmarkColumnarShape_HopLabelledFarEnd-10                3.699ms     3.686ms   -0.35%  0.4712     ±0.03% ± 1.4% ± 0.8%  within own floor
+BenchmarkParallelAggregate_GroupMinBig_Serial-10           99.81ms     99.48ms   -0.32%  0.9362     ±0.12% ± 4.7% ± 8.9%  within own floor
+BenchmarkExpandInto_TwoCycleClose-10                       6.997ms     6.976ms   -0.30%  0.9362     ±0.32% ± 1.7% ± 2.2%  within own floor
+BenchmarkMergeMatch_DecoyGrowth/hot=64/cold=1024-10        256.9µs     256.2µs   -0.29%  0.4712     ±1.14% ± 1.6% ± 2.1%  within own floor
+BenchmarkExpandInto_TriangleClose-10                       148.1ms     147.7ms   -0.29%  0.5752     ±0.13% ± 1.1% ± 1.3%  within own floor
+BenchmarkColumnarShape_HopAnchorFilterLabelledFarEnd-10     3.688ms     3.682ms   -0.15%  0.3785     ±0.91% ± 1.9% ± 1.2%  within own floor
+BenchmarkReadOnly_Sessionless-10                           988.2ns     987.8ns   -0.05%  0.9362     ±0.05% ± 3.1% ± 3.4%  within own floor
+BenchmarkDeleteAccumulated/accumulated=60000-10            16.66ms     16.66ms   +0.01%  0.9362     ±0.74% ± 7.3% ± 8.5%  within own floor
+BenchmarkMergeMatch_LabelsOnly/hot=8/cold=4096-10          3.865µs     3.866µs   +0.04%  0.7483     ±0.75% ± 2.1% ± 4.3%  within own floor
+BenchmarkZZReorderDrainCost/scan=filtered-10               1.095ms     1.095ms   +0.04%  0.6889     ±0.16% ± 2.5% ± 1.8%  within own floor
+BenchmarkReadOnly_Session-10                               997.8ns     998.9ns   +0.11%  0.6889     ±0.71% ± 3.3% ± 2.8%  within own floor
+BenchmarkCreateRelationships-10                            2.483ms     2.486ms   +0.16%  0.4712     ±1.41% ± 5.2% ± 8.8%  within own floor
+BenchmarkParallelScanProject_ScanBig_Serial-10             16.92ms     16.95ms   +0.17%  0.6889     ±0.82% ±12.9% ±14.7%  within own floor
+BenchmarkCount_LabelVarBig_Pushdown-10                     918.1ns     919.8ns   +0.17%  0.2290     ±1.07% ± 1.7% ± 8.8%  within own floor
+BenchmarkZZReorderSkewed/reorder=off-10                    267.4ms       268ms   +0.24%  0.5752     ±0.41% ± 1.2% ± 1.6%  within own floor
+BenchmarkParallelAggregate_MinSmall_DefaultEnabled-10      20.89µs     20.95µs   +0.24%  0.6889     ±1.86% ± 3.1% ± 4.5%  within own floor
+BenchmarkCountNodeVar-10                                   206.8µs     207.4µs   +0.28%  0.2980     ±0.38% ± 2.4% ± 1.0%  within own floor
+BenchmarkParallelAggregate_Concurrent/conc=64/impl=serial-10     306.7ms     307.6ms   +0.30%  0.4712     ±0.63% ± 1.3% ± 4.1%  within own floor
+BenchmarkParallelAggregate_MaxBig_Parallel-10              18.43ms     18.48ms   +0.31%  0.8102     ±0.00% ± 5.0% ± 4.4%  within own floor
+BenchmarkMergeMatch_LabelGrowth/hot=4096/cold=0-10         645.9µs     647.9µs   +0.31%  0.9362     ±0.54% ± 1.4% ± 2.0%  within own floor
+BenchmarkParallelLabelScan_LabelledProject_Parallel-10     18.99ms     19.05ms   +0.34%  0.5752     ±0.72% ± 1.2% ± 5.7%  within own floor
+BenchmarkColumnarShape_HopAnchorAndPostFilter-10           4.056ms     4.073ms   +0.41%  0.8102     ±0.03% ± 2.4% ± 1.8%  within own floor
+BenchmarkMergeMatch_LabelGrowth/hot=1024/cold=0-10         420.1µs     421.8µs   +0.41%  0.2980     ±0.34% ± 1.0% ± 1.5%  within own floor
+BenchmarkParallelScan_CountBig_Serial-10                   1.306µs     1.312µs   +0.42%  0.1249     ±0.88% ± 0.7% ± 0.4%  within own floor
+BenchmarkParallelAggregate_Concurrent/conc=1/impl=serial-10     18.29ms     18.36ms   +0.43%  0.8102     ±1.83% ±13.6% ±10.3%  within own floor
+BenchmarkParallelLabelScan_UnlabelledMin_Parallel-10       18.23ms     18.31ms   +0.47%  0.9362     ±0.08% ± 3.1% ± 3.2%  within own floor
+BenchmarkParallelScan_CountSmall_DefaultEnabled-10         2.146µs     2.159µs   +0.61%  0.1262     ±0.05% ± 1.6% ± 2.1%  within own floor
+BenchmarkParallelLabelScan_UnlabelledProject_Parallel-10     19.02ms     19.13ms   +0.61%  0.6889     ±1.42% ± 3.2% ± 4.2%  within own floor
+BenchmarkParallelAggregate_Concurrent/conc=1/impl=parallel-10     18.48ms     18.59ms   +0.63%  0.3785     ±1.58% ± 2.0% ± 6.0%  within own floor
+BenchmarkParallelAggregate_MinSmall_Disabled-10            20.31µs     20.46µs   +0.74%  0.6884     ±0.51% ± 2.4% ± 3.1%  within own floor
+BenchmarkDeleteAccumulated/accumulated=20000-10            16.33ms     16.46ms   +0.76%  0.3785     ±1.03% ± 2.6% ± 7.9%  within own floor
+BenchmarkParallelScanGate/scan-10                          1.294ms     1.304ms   +0.77%  0.1735     ±0.28% ± 1.3% ± 2.2%  within own floor
+BenchmarkParallelLabelScan_LabelledProject_Serial-10       40.29ms     40.61ms   +0.80%  0.9362     ±1.70% ± 8.6% ± 4.5%  within own floor
+BenchmarkCount_LabelVarBig_Serial-10                       907.9ns     915.1ns   +0.80%  0.9361     ±0.56% ± 2.1% ± 2.3%  within own floor
+BenchmarkColumnarShape_HopAnchorFilter-10                  3.291ms     3.319ms   +0.86%  0.5752     ±0.66% ± 1.7% ± 2.5%  within own floor
+BenchmarkParallelLabelScan_LabelledMin_Parallel-10         19.76ms     19.93ms   +0.88%  0.9362     ±0.46% ±12.9% ±15.2%  within own floor
+BenchmarkPlanCacheMiss_InlinedLiteralNoComment-10          27.09µs     27.33µs   +0.91%  0.8102     ±1.00% ± 2.5% ± 5.5%  within own floor
+BenchmarkCountAllNodes-10                                  17.74µs      17.9µs   +0.92%  0.3785     ±0.03% ± 1.7% ± 4.0%  within own floor
+BenchmarkCount_LabelStarBig_Pushdown-10                    910.5ns       919ns   +0.93%  0.2298     ±1.26% ± 1.6% ± 7.5%  within own floor
+BenchmarkCount_LabelStarBig_Serial-10                        908ns       917ns   +0.99%  0.4712     ±0.83% ± 2.6% ± 1.9%  within own floor
+BenchmarkMergeMatch_LabelsOnly/hot=8/cold=0-10             7.066µs     7.143µs   +1.08%  0.3785     ±0.27% ± 1.1% ± 2.9%  n.s.
+BenchmarkParallelScan_CountBig_Parallel-10                 1.634ms     1.655ms   +1.25%  0.1282     ±0.37% ± 5.7% ± 3.3%  n.s.
+BenchmarkMergeMatch_DecoyGrowth/hot=64/cold=0-10           21.51µs     21.79µs   +1.27%  0.4712     ±1.05% ± 1.7% ± 3.4%  within own floor
+BenchmarkParallelAggregate_MinBig_Parallel-10              18.44ms     18.68ms   +1.27%  0.3785     ±0.94% ± 5.2% ± 3.3%  within own floor
+BenchmarkParallelScanProject_ScanSmall_Disabled-10         15.69µs     15.89µs   +1.30%  0.1282     ±0.42% ± 1.5% ± 2.1%  n.s.
+BenchmarkParallelAggregate_Concurrent/conc=8/impl=parallel-10       145ms     146.8ms   +1.30%  0.9362     ±2.07% ± 4.8% ± 4.4%  within own floor
+BenchmarkDeleteAccumulated/accumulated=0-10                16.59ms     16.83ms   +1.44%  0.3785     ±1.83% ± 2.7% ± 3.1%  within own floor
+BenchmarkParallelAggregate_Concurrent/conc=8/impl=serial-10     50.94ms     51.69ms   +1.48%  0.8102     ±1.57% ± 6.3% ± 3.9%  within own floor
+BenchmarkParallelScanProject_ScanSmall_DefaultEnabled-10     16.16µs      16.4µs   +1.52%  0.1282     ±0.52% ± 2.7% ± 1.7%  n.s.
+BenchmarkParallelAggregate_MaxBig_Serial-10                18.34ms     18.65ms   +1.71%  0.9362     ±1.46% ±10.7% ± 8.9%  within own floor
+BenchmarkParallelLabelScan_UnlabelledMin_Serial-10         19.23ms     19.57ms   +1.76%  0.9362     ±1.99% ±20.8% ±13.4%  within own floor
+BenchmarkMergeMatch_LabelGrowth/hot=64/cold=0-10           21.44µs     21.84µs   +1.88%  0.2298     ±1.44% ± 1.6% ± 4.0%  within own floor
+BenchmarkParallelAggregate_GroupMinBig_Parallel-10         34.71ms     35.45ms   +2.12%  0.3785     ±1.51% ± 3.1% ± 4.7%  within own floor
+BenchmarkParallelAggregate_MinBig_Serial-10                18.47ms     18.88ms   +2.24%  0.9362     ±2.83% ±13.8% ± 8.9%  within own floor
+BenchmarkParallelScanProject_ScanFilterBig_Serial-10       23.74ms     24.31ms   +2.40%  0.8102     ±2.82% ±16.4% ± 5.5%  within own floor
+BenchmarkPlanCacheHit_Parameterised-10                     27.23µs        28µs   +2.80%  0.0656     ±0.72% ± 3.4% ± 5.3%  n.s.
+BenchmarkCountPushdown_FullScan-10                         16.68ms     17.36ms   +4.05%  0.4712     ±4.10% ±15.8% ±15.7%  within own floor
+
+### wal [ns/op]  effect A(v0.13.0)->B(v0.14.0), beside each benchmark's OWN same-binary floor B->B2
+benchmark                                                  v0.13.0     v0.14.0   effect       p  own floor   sprA   sprB  verdict
+BenchmarkCRCSinglePassScratch/payload64-10                 5.638ns     5.288ns   -6.21%  0.0082     ±0.76% ± 4.3% ± 2.4%  CHANGE
+BenchmarkCRCIncremental/payload16-10                       6.271ns     5.979ns   -4.66%  0.0202     ±1.48% ± 4.2% ± 3.0%  CHANGE
+BenchmarkCRCSinglePassScratch/payload16-10                  4.37ns     4.213ns   -3.57%  0.0131     ±0.87% ± 2.6% ± 1.7%  CHANGE
+BenchmarkCRCIncremental/payload256-10                      18.09ns     18.46ns   +2.07%  0.0450     ±0.24% ± 3.1% ± 1.5%  CHANGE
+BenchmarkCRCIncremental/payload64-10                       7.307ns     6.673ns   -8.68%  0.0927     ±0.55% ± 9.3% ± 8.6%  n.s.
+BenchmarkDecode-10                                           949ns     934.1ns   -1.58%  0.2980     ±3.40% ± 3.9% ± 9.8%  within own floor
+BenchmarkCRCSinglePassRealloc/payload16-10                 10.73ns     10.61ns   -1.16%  0.4704     ±0.85% ± 3.0% ± 1.0%  within own floor
+BenchmarkEncode-10                                         499.8ns     497.3ns   -0.49%  0.3785     ±0.70% ± 1.1% ± 2.1%  within own floor
+BenchmarkAppend/fsync/size=4096-10                         3.821ms     3.805ms   -0.42%  0.3785     ±0.21% ± 0.7% ± 2.7%  within own floor
+BenchmarkAppend/encode-only/size=256-10                    187.1ns     186.4ns   -0.32%  0.4225     ±0.21% ± 1.8% ± 1.1%  within own floor
+BenchmarkAppend/fsync/size=256-10                          3.771ms      3.76ms   -0.29%  0.6889     ±0.04% ± 2.0% ±16.2%  within own floor
+BenchmarkAppend/encode-only/size=4096-10                   605.6ns     604.5ns   -0.19%  0.9362     ±0.78% ± 1.2% ± 2.2%  within own floor
+BenchmarkWriter_AppendSync_Batch/batch=1-10                3.763ms     3.757ms   -0.17%  0.8102     ±0.52% ±18.6% ±10.3%  within own floor
+BenchmarkWriter_AppendSync_Batch/batch=100-10              3.819ms     3.813ms   -0.17%  0.6889     ±0.59% ± 1.3% ± 0.9%  within own floor
+BenchmarkCRCSinglePassRealloc/payload256-10                51.26ns      51.2ns   -0.12%  0.6304     ±0.78% ± 0.8% ± 1.2%  within own floor
+BenchmarkAppend/fsync/size=64-10                           3.703ms     3.701ms   -0.04%  0.6889     ±0.54% ± 0.8% ± 1.2%  within own floor
+BenchmarkCRCSinglePassRealloc/payload4096-10               735.8ns     736.4ns   +0.09%  0.6889     ±0.71% ± 2.2% ± 2.4%  within own floor
+BenchmarkCRCSinglePassRealloc/payload64-10                 14.58ns     14.59ns   +0.10%  0.7483     ±0.62% ± 0.8% ± 0.3%  within own floor
+BenchmarkWriter_AppendSync_Batch/batch=10-10               3.783ms     3.789ms   +0.16%  0.5752     ±0.22% ± 1.2% ± 3.7%  within own floor
+BenchmarkCRCSinglePassScratch/payload256-10                19.71ns     19.75ns   +0.20%  0.9360     ±0.51% ± 1.7% ± 2.3%  within own floor
+BenchmarkCRCSinglePassScratch/payload4096-10               445.5ns       447ns   +0.33%  0.5732     ±0.09% ± 1.2% ± 0.6%  within own floor
+BenchmarkAppend/encode-only/size=64-10                     173.4ns     174.1ns   +0.40%  0.5745     ±0.66% ± 1.7% ± 0.9%  within own floor
+BenchmarkCRCIncremental/payload4096-10                       397ns       399ns   +0.50%  0.2298     ±0.60% ± 1.2% ± 1.1%  within own floor
+BenchmarkWriter_AppendSync_Batch/batch=1000-10             4.295ms     4.332ms   +0.87%  0.9362     ±0.57% ± 3.0% ± 6.4%  within own floor
+BenchmarkReader_Replay-10                                  82.82µs     84.27µs   +1.75%  0.0306     ±2.40% ± 1.3% ± 2.8%  within own floor
+
+### txn [ns/op]  effect A(v0.13.0)->B(v0.14.0), beside each benchmark's OWN same-binary floor B->B2
+benchmark                                                  v0.13.0     v0.14.0   effect       p  own floor   sprA   sprB  verdict
+BenchmarkCommit/ops=1-10                                   3.712ms     3.702ms   -0.26%  0.8102     ±0.46% ± 0.8% ± 1.0%  within own floor
+BenchmarkCommit/ops=16-10                                  3.805ms     3.811ms   +0.15%  0.1282     ±0.41% ± 4.8% ± 0.6%  within own floor
+
+### search [ns/op]  effect A(v0.13.0)->B(v0.14.0), beside each benchmark's OWN same-binary floor B->B2
+benchmark                                                  v0.13.0     v0.14.0   effect       p  own floor   sprA   sprB  verdict
+BenchmarkYen_K100-10                                       14.84ms     14.71ms   -0.88%  0.0927     ±0.70% ± 0.7% ± 1.4%  within own floor
+BenchmarkDijkstra_Large-10                                  8.23ms      8.21ms   -0.24%  0.8102     ±0.04% ± 0.7% ± 2.2%  within own floor
+BenchmarkBFSDirectionOpt_PowerLaw-10                       28.77ms      28.9ms   +0.46%  0.4712     ±0.24% ± 1.6% ± 1.8%  within own floor
+BenchmarkDijkstra_PostWarmup-10                            8.151ms     8.193ms   +0.52%  0.4712     ±0.84% ± 0.6% ± 1.6%  within own floor
+
+### centrality [ns/op]  effect A(v0.13.0)->B(v0.14.0), beside each benchmark's OWN same-binary floor B->B2
+benchmark                                                  v0.13.0     v0.14.0   effect       p  own floor   sprA   sprB  verdict
+BenchmarkBrandes_RandomGraph-10                            7.888ms     7.897ms   +0.11%  0.5752     ±0.08% ± 2.2% ± 2.3%  within own floor
+
+### Lreadtx [ns/op]  effect A(v0.13.0)->B(v0.14.0), beside each benchmark's OWN same-binary floor B->B2
+benchmark                                                  v0.13.0     v0.14.0   effect       p  own floor   sprA   sprB  verdict
+BenchmarkReadTx_LockFree-1024                               5.25µs     4.529µs  -13.72%  0.4712     ±6.80% ±94.1% ±37.1%  n.s.
+BenchmarkReadTx_LockFree-256                                2.91µs     2.632µs   -9.55%  0.2980     ±0.72% ±53.0% ±18.9%  n.s.
+BenchmarkReadTx_LockFree-64                                2.252µs     2.152µs   -4.42%  0.1735     ±1.46% ± 9.1% ± 5.9%  n.s.
+BenchmarkReadTx_LockFree                                   3.102µs     3.058µs   -1.40%  0.2298     ±0.05% ± 2.7% ± 2.9%  n.s.
+BenchmarkReadTx_LockFree-8                                 1.696µs     1.677µs   -1.15%  0.8102     ±1.40% ± 5.0% ± 7.2%  within own floor
+BenchmarkReadTx_WriterLock                                 104.9µs     105.3µs   +0.31%  0.4712     ±0.45% ± 2.5% ± 2.3%  within own floor
+BenchmarkReadTx_WriterLock-8                               24.73µs     24.84µs   +0.45%  0.6889     ±0.50% ± 3.8% ± 7.3%  within own floor
+BenchmarkReadTx_WriterLock-64                                 24µs     24.22µs   +0.91%  0.3785     ±0.97% ± 2.5% ± 2.7%  within own floor
+BenchmarkReadTx_WriterLock-256                             25.32µs     25.89µs   +2.25%  0.3785     ±0.78% ± 9.5% ±18.4%  n.s.
+BenchmarkReadTx_WriterLock-1024                            29.91µs     30.94µs   +3.43%  0.8102     ±3.84% ± 5.4% ±10.6%  within own floor
+
+### Lcypar [ns/op]  effect A(v0.13.0)->B(v0.14.0), beside each benchmark's OWN same-binary floor B->B2
+benchmark                                                  v0.13.0     v0.14.0   effect       p  own floor   sprA   sprB  verdict
+BenchmarkPlanReusePhasesParallel/4full-64                  1.112µs     1.018µs   -8.50%  0.0082     ±1.52% ± 5.8% ± 5.4%  CHANGE
+BenchmarkPlanReusePhasesParallel/4full-8                   895.2ns     851.4ns   -4.90%  0.0131     ±1.44% ± 4.0% ± 1.9%  CHANGE
+BenchmarkAdjacencyCacheLookup/serial                        28.2ns     27.46ns   -2.61%  0.0051     ±0.60% ± 1.5% ± 2.2%  CHANGE
+BenchmarkAdjacencyCacheLookup/serial-8                     27.27ns     26.59ns   -2.51%  0.0202     ±0.51% ± 2.2% ± 2.1%  CHANGE
+BenchmarkAdjacencyCacheLookup/serial-1024                   27.3ns     26.76ns   -2.00%  0.0051     ±0.52% ± 1.4% ± 1.5%  CHANGE
+BenchmarkAdjacencyCacheLookup/serial-64                    27.09ns     26.55ns   -1.97%  0.0306     ±0.26% ± 2.4% ± 1.9%  CHANGE
+BenchmarkAdjacencyCacheLookup/serial-256                   27.06ns     26.56ns   -1.85%  0.0103     ±0.17% ± 1.5% ± 0.8%  CHANGE
+BenchmarkPlanReusePhasesParallel/4full-1024                1.599µs     1.409µs  -11.91%  0.6889     ±7.98% ±16.1% ±40.1%  within own floor
+BenchmarkPrebuiltTreeCeilingParallel-1024                  800.1ns     747.1ns   -6.62%  0.1735     ±0.56% ±22.9% ±21.9%  n.s.
+BenchmarkPlanReusePhasesParallel/4full                     1.643µs     1.554µs   -5.45%  0.0651     ±4.28% ± 8.6% ± 6.3%  within own floor
+BenchmarkPrebuiltTreeCeilingParallel                       601.2ns       573ns   -4.69%  0.0927     ±2.27% ± 6.3% ±15.7%  n.s.
+BenchmarkPlanReusePhasesParallel/3build-256                559.5ns     534.1ns   -4.54%  0.8102     ±2.05% ±33.0% ±16.9%  n.s.
+BenchmarkPlanReusePhasesParallel/4full-256                 1.129µs     1.077µs   -4.52%  0.0656     ±1.72% ±11.8% ± 7.8%  n.s.
+BenchmarkPlanReusePhasesParallel/2snapshot-1024              205ns     196.5ns   -4.15%  0.1735     ±3.74% ± 7.1% ± 4.8%  within own floor
+BenchmarkPlanReusePhasesParallel/1parse-8                  100.8ns     97.12ns   -3.69%  0.5752     ±0.06% ±13.1% ±23.2%  n.s.
+BenchmarkPrebuiltTreeCeilingParallel-64                    677.5ns       657ns   -3.04%  0.5752     ±0.23% ± 7.5% ± 3.6%  n.s.
+BenchmarkPrebuiltTreeCeilingParallel-8                     534.5ns     525.3ns   -1.70%  0.4712     ±0.49% ±10.4% ± 3.8%  n.s.
+BenchmarkAdjacencyCacheLookup/parallel                      27.7ns     27.23ns   -1.66%  0.0776     ±0.29% ± 1.9% ± 1.9%  n.s.
+BenchmarkPlanReusePhasesParallel/1parse-64                 148.4ns     146.4ns   -1.35%  0.9362     ±0.44% ± 6.0% ± 6.5%  n.s.
+BenchmarkAdjacencyCacheLookup/parallel-8                   83.98ns     83.36ns   -0.74%  0.9362     ±1.63% ±11.7% ±16.6%  within own floor
+BenchmarkPlanReusePhasesParallel/2snapshot-64              164.2ns     163.1ns   -0.64%  0.6889     ±0.43% ± 3.9% ± 3.8%  within own floor
+BenchmarkPlanReusePhasesParallel/1parse                    60.55ns     60.18ns   -0.62%  0.3785     ±0.92% ± 2.1% ± 4.3%  within own floor
+BenchmarkPlanReusePhasesParallel/2snapshot-8               130.1ns     129.7ns   -0.27%  0.6889     ±0.42% ±10.7% ±18.9%  within own floor
+BenchmarkAdjacencyCacheLookup/parallel-1024                95.97ns     95.75ns   -0.22%  0.9362     ±0.21% ± 2.3% ± 1.3%  within own floor
+BenchmarkAdjacencyCacheLookup/parallel-64                  82.31ns     82.24ns   -0.09%  0.4712     ±0.54% ± 2.6% ± 2.2%  within own floor
+BenchmarkPrebuiltTreeCeilingParallel-256                   690.7ns       692ns   +0.20%  0.9362     ±0.74% ± 7.4% ± 5.7%  within own floor
+BenchmarkAdjacencyCacheLookup/parallel-256                  84.6ns     84.84ns   +0.27%  0.8089     ±1.10% ± 0.9% ± 2.3%  within own floor
+BenchmarkPlanReusePhasesParallel/2snapshot                 88.34ns     88.86ns   +0.58%  0.7483     ±0.17% ± 1.6% ± 4.1%  within own floor
+BenchmarkPlanReusePhasesParallel/3build                    766.5ns     775.5ns   +1.17%  0.5752     ±1.43% ± 4.2% ± 4.0%  within own floor
+BenchmarkPlanReusePhasesParallel/1parse-256                153.8ns     155.6ns   +1.20%  0.8726     ±0.13% ± 6.7% ± 4.5%  n.s.
+BenchmarkPlanReusePhasesParallel/1parse-1024               159.4ns     161.9ns   +1.60%  0.9362     ±3.58% ±12.4% ± 7.3%  within own floor
+BenchmarkPlanReusePhasesParallel/2snapshot-256             175.1ns     179.1ns   +2.29%  0.8102     ±0.00% ±18.7% ± 7.3%  n.s.
+BenchmarkPlanReusePhasesParallel/3build-8                  321.1ns     331.4ns   +3.21%  0.6889     ±3.48% ±20.2% ± 5.4%  within own floor
+BenchmarkPlanReusePhasesParallel/3build-1024               1.433µs     1.524µs   +6.31%  0.9362    ±16.44% ±31.6% ±71.3%  within own floor
+BenchmarkPlanReusePhasesParallel/3build-64                 423.4ns     459.4ns   +8.49%  0.3785     ±1.00% ±14.1% ±12.0%  n.s.
+
+### Llpg [ns/op]  effect A(v0.13.0)->B(v0.14.0), beside each benchmark's OWN same-binary floor B->B2
+benchmark                                                  v0.13.0     v0.14.0   effect       p  own floor   sprA   sprB  verdict
+BenchmarkBarrier_BareRWMutexParallel-64                    75.19ns     73.33ns   -2.47%  0.2980     ±0.69% ± 3.9% ± 4.7%  n.s.
+BenchmarkNodeMetadataReadParallel-1024                     144.4ns     141.5ns   -2.01%  0.0450     ±2.33% ± 2.4% ± 1.8%  within own floor
+BenchmarkNodeMetadataReadParallel-8                        140.4ns     139.1ns   -0.96%  0.0050     ±0.11% ± 0.3% ± 0.3%  within own floor
+BenchmarkNodeMetadataReadParallel-256                      139.8ns     138.6ns   -0.89%  0.0247     ±0.32% ± 0.8% ± 0.6%  within own floor
+BenchmarkNodeMetadataReadParallel-64                       139.4ns     138.4ns   -0.72%  0.0048     ±0.29% ± 0.4% ± 0.6%  within own floor
+BenchmarkBarrier_BareRWMutexParallel                       3.712ns       3.7ns   -0.30%  0.8726     ±0.28% ± 1.1% ± 1.4%  within own floor
+BenchmarkNodeMetadataReadParallel                          90.91ns     90.75ns   -0.18%  0.8102     ±0.05% ± 1.5% ± 1.2%  within own floor
+BenchmarkBarrier_BareRWMutexParallel-1024                  73.12ns     73.56ns   +0.59%  0.6889     ±0.04% ± 4.3% ± 6.3%  within own floor
+BenchmarkBarrier_BareRWMutexParallel-256                   73.23ns     74.06ns   +1.14%  0.5211     ±0.07% ± 5.0% ± 3.8%  n.s.
+BenchmarkBarrier_BareRWMutexParallel-8                     42.38ns     43.39ns   +2.37%  0.5211     ±0.89% ± 4.6% ±11.2%  n.s.
+
+### Lmvcc [ns/op]  effect A(v0.13.0)->B(v0.14.0), beside each benchmark's OWN same-binary floor B->B2
+benchmark                                                  v0.13.0     v0.14.0   effect       p  own floor   sprA   sprB  verdict
+BenchmarkRWMutexShared_Parallel-8                          44.24ns     43.21ns   -2.33%  0.5752     ±3.77% ±10.8% ±11.2%  within own floor
+BenchmarkPublishConcurrent/frontier-256                    155.7ns     152.8ns   -1.86%  0.4225     ±0.13% ± 5.0% ± 3.6%  n.s.
+BenchmarkRWMutexShared_Parallel-64                         74.72ns        74ns   -0.96%  0.5752     ±0.48% ± 4.5% ± 3.0%  within own floor
+BenchmarkPublishConcurrent/legacy-8                        101.8ns     100.8ns   -0.95%  0.5752     ±0.38% ± 3.8% ± 8.1%  within own floor
+BenchmarkGate_WeakParallel-1024                           0.4681ns    0.4658ns   -0.48%  0.8721     ±3.06% ± 4.6% ± 4.0%  within own floor
+BenchmarkRWMutexShared_Parallel-1024                       72.64ns     72.49ns   -0.21%  0.9362     ±0.32% ± 3.2% ± 4.1%  within own floor
+BenchmarkRWMutexShared_Parallel-256                        74.19ns     74.06ns   -0.17%  0.9362     ±0.18% ± 3.8% ± 3.8%  within own floor
+BenchmarkRWMutexShared_Parallel                            3.695ns     3.691ns   -0.12%  0.6304     ±0.51% ± 2.1% ± 2.4%  within own floor
+BenchmarkPublishConcurrent/legacy                          5.235ns     5.229ns   -0.11%  0.9362     ±0.02% ± 0.9% ± 1.8%  within own floor
+BenchmarkGate_WeakParallel-8                              0.5213ns    0.5211ns   -0.06%  0.8102     ±0.01% ± 3.9% ± 1.1%  within own floor
+BenchmarkPublishConcurrent/legacy-64                       96.14ns     96.09ns   -0.05%  0.9362     ±0.66% ± 5.7% ± 0.8%  within own floor
+BenchmarkGate_WeakParallel                                 3.742ns     3.744ns   +0.05%  1.0000     ±0.09% ± 1.3% ± 2.9%  within own floor
+BenchmarkPublishConcurrent/frontier                        2.725ns     2.728ns   +0.09%  0.8726     ±0.05% ± 1.2% ± 3.1%  within own floor
+BenchmarkPublishConcurrent/frontier-64                      70.7ns     70.79ns   +0.12%  0.9362     ±0.30% ± 3.3% ± 5.1%  within own floor
+BenchmarkPublishConcurrent/legacy-1024                      95.2ns     95.53ns   +0.35%  0.9362     ±0.12% ± 4.8% ± 1.6%  within own floor
+BenchmarkGate_WeakParallel-64                              0.476ns    0.4792ns   +0.68%  0.9362     ±0.98% ± 3.2% ± 4.8%  within own floor
+BenchmarkPublishConcurrent/legacy-256                      95.59ns     96.28ns   +0.72%  0.4712     ±1.13% ± 6.3% ± 0.9%  within own floor
+BenchmarkGate_WeakParallel-256                            0.4892ns    0.4939ns   +0.95%  0.8102     ±1.21% ± 6.3% ± 4.7%  within own floor
+BenchmarkPublishConcurrent/frontier-1024                   378.9ns       384ns   +1.33%  0.6889     ±2.24% ±16.5% ±14.4%  within own floor
+BenchmarkPublishConcurrent/frontier-8                      69.91ns     71.09ns   +1.69%  0.3785     ±0.17% ± 7.1% ± 3.4%  n.s.
+
+### Lprom [ns/op]  effect A(v0.13.0)->B(v0.14.0), beside each benchmark's OWN same-binary floor B->B2
+benchmark                                                  v0.13.0     v0.14.0   effect       p  own floor   sprA   sprB  verdict
+BenchmarkIncCounterParallel-1024                           1.907ns     1.883ns   -1.23%  0.8099     ±0.37% ± 5.5% ± 2.7%  n.s.
+BenchmarkIncCounterParallel                                9.501ns     9.438ns   -0.66%  0.5752     ±0.65% ± 3.3% ± 1.2%  within own floor
+BenchmarkIncCounterParallel-64                             1.841ns      1.84ns   -0.11%  0.9362     ±1.14% ±11.9% ±13.9%  within own floor
+BenchmarkIncCounterParallel-256                            1.934ns      1.95ns   +0.83%  0.6884     ±0.51% ± 3.8% ± 4.8%  within own floor
+BenchmarkIncCounterParallel-8                              1.787ns     2.463ns  +37.80%  0.1282    ±26.82% ±26.0% ±28.0%  within own floor
+
+### Lmapper [ns/op]  effect A(v0.13.0)->B(v0.14.0), beside each benchmark's OWN same-binary floor B->B2
+benchmark                                                  v0.13.0     v0.14.0   effect       p  own floor   sprA   sprB  verdict
+BenchmarkMapper_Intern_HotKey_Parallel-1024                88.25ns     88.13ns   -0.13%  0.3350     ±0.07% ± 0.7% ± 0.7%  within own floor
+BenchmarkMapper_Intern_HotKey_Parallel-256                 88.56ns     88.59ns   +0.03%  0.6304     ±0.14% ± 0.8% ± 0.9%  within own floor
+BenchmarkMapper_Intern_HotKey_Parallel-64                  88.46ns     88.63ns   +0.19%  0.9362     ±0.07% ± 0.8% ± 1.7%  within own floor
+BenchmarkMapper_Intern_HotKey_Parallel-8                   76.62ns     76.88ns   +0.35%  0.8102     ±0.49% ± 1.7% ± 3.1%  within own floor
+BenchmarkMapper_Intern_HotKey_Parallel                     8.478ns      8.55ns   +0.85%  0.4712     ±0.74% ± 1.8% ± 3.0%  within own floor
+
+### Ltxn [ns/op]  effect A(v0.13.0)->B(v0.14.0), beside each benchmark's OWN same-binary floor B->B2
+benchmark                                                  v0.13.0     v0.14.0   effect       p  own floor   sprA   sprB  verdict
+BenchmarkCommitConcurrent/goroutines=1-10                  3.687ms     3.672ms   -0.42%  0.8102     ±0.92% ±16.0% ±10.9%  within own floor
+BenchmarkCommitConcurrent/goroutines=64-10                 120.2µs     119.9µs   -0.25%  0.9362     ±0.44% ± 0.9% ± 1.3%  within own floor
+BenchmarkCommitConcurrent/goroutines=256-10                30.64µs     30.82µs   +0.57%  0.6889     ±1.02% ± 2.9% ± 2.8%  within own floor
+BenchmarkCommitConcurrent/goroutines=8-10                  885.4µs     920.4µs   +3.96%  0.1735     ±0.64% ± 8.3% ± 2.4%  n.s.
+
+### Lbolt [ns/op]  effect A(v0.13.0)->B(v0.14.0), beside each benchmark's OWN same-binary floor B->B2
+benchmark                                                  v0.13.0     v0.14.0   effect       p  own floor   sprA   sprB  verdict
+BenchmarkBoltRecordEncodeParallel/baseline-1024            30.47ns     29.38ns   -3.55%  0.2980     ±1.02% ± 7.8% ± 5.5%  n.s.
+BenchmarkBoltRecordEncodeParallel/fast                     29.88ns      29.8ns   -0.28%  0.5204     ±0.99% ± 2.2% ± 3.5%  within own floor
+BenchmarkBoltRecordEncodeParallel/fast-1024                5.236ns     5.232ns   -0.07%  0.5752     ±2.59% ± 6.3% ± 3.7%  within own floor
+BenchmarkBoltRecordEncodeParallel/fast-256                 5.285ns     5.293ns   +0.13%  0.9362     ±1.10% ± 5.1% ± 5.5%  within own floor
+BenchmarkBoltRecordEncodeParallel/baseline-8               17.63ns     17.67ns   +0.23%  0.9362     ±0.51% ± 3.9% ± 5.9%  within own floor
+BenchmarkBoltRecordEncodeParallel/baseline-256             19.46ns     19.54ns   +0.39%  0.5211     ±1.15% ± 7.2% ± 5.8%  within own floor
+BenchmarkBoltRecordEncodeParallel/fast-8                   5.883ns     5.918ns   +0.59%  1.0000     ±0.26% ± 5.5% ± 8.1%  within own floor
+BenchmarkBoltRecordEncodeParallel/baseline                 82.62ns     83.69ns   +1.28%  0.2615     ±0.50% ± 1.5% ± 2.8%  n.s.
+BenchmarkBoltRecordEncodeParallel/baseline-64              20.26ns     20.54ns   +1.41%  0.1282     ±3.36% ± 2.4% ± 1.1%  within own floor
+BenchmarkBoltRecordEncodeParallel/fast-64                  5.186ns     5.276ns   +1.75%  0.9362     ±1.72% ± 5.0% ± 6.4%  within own floor

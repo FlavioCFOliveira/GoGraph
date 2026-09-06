@@ -1492,7 +1492,9 @@ build in which profiling does not exist.
 > why an ordinary `Run` executes no counting code rather than merely skipping it.
 > The full classification of every figure `EXPLAIN` and `PROFILE` print, with the
 > measurements behind each claim above, is in
-> [`explain-profile-honesty-audit-2026-09-03.md`](explain-profile-honesty-audit-2026-09-03.md).
+> [`explain-profile-honesty-audit-2026-09-05.md`](explain-profile-honesty-audit-2026-09-05.md),
+> which supersedes the 2026-09-03 document that classified the tree before
+> sprint 355 changed it.
 
 > **What `removed` is, exactly.** It is the number of candidate rows an operator
 > read and then **discarded because a predicate said no** — PostgreSQL's

@@ -1,5 +1,12 @@
 # rmp #2765 — cost of carrying the planner's estimate onto the physical plan
 
+> **Note on the distribution archive.** The raw data files this document points at
+> live in the GoGraph repository and are deliberately **not** shipped in the release
+> tarball, which carries Markdown only (`.goreleaser.yaml`, rmp #2758). Read them at
+> the tag in git; this README travels with the archive so the method is recorded even
+> where the data is not.
+
+
 Raw data for the "Cost on the ordinary query path" section of the rmp #2765 addendum
 in `docs/explain-profile-honesty-audit-2026-09-03.md`.
 

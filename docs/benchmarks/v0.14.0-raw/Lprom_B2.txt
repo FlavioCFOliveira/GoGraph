@@ -1,0 +1,60 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/internal/metrics/prometheus
+cpu: Apple M4
+BenchmarkIncCounterParallel           	126605888	         9.488 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-8         	624454551	         2.346 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-64        	580770915	         1.905 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-256       	605728803	         1.958 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-1024      	631107141	         1.987 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/internal/metrics/prometheus
+cpu: Apple M4
+BenchmarkIncCounterParallel           	125344752	         9.510 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-8         	685175768	         1.762 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-64        	642166814	         1.825 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-256       	639246684	         1.923 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-1024      	667910341	         1.888 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/internal/metrics/prometheus
+cpu: Apple M4
+BenchmarkIncCounterParallel           	128739231	         9.313 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-8         	571446598	         2.808 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-64        	667759038	         1.777 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-256       	649105506	         1.873 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-1024      	673433112	         1.840 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/internal/metrics/prometheus
+cpu: Apple M4
+BenchmarkIncCounterParallel           	126321218	         9.454 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-8         	664282934	         1.815 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-64        	644214304	         1.844 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-256       	630496182	         1.964 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-1024      	617097985	         1.911 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/internal/metrics/prometheus
+cpu: Apple M4
+BenchmarkIncCounterParallel           	125611942	         9.669 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-8         	620673199	         1.789 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-64        	594834724	         1.812 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-256       	612074703	         1.975 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-1024      	633613178	         1.893 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/internal/metrics/prometheus
+cpu: Apple M4
+BenchmarkIncCounterParallel           	125279802	         9.533 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-8         	706433823	         1.680 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-64        	701557624	         1.773 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-256       	637060743	         1.878 ns/op	       0 B/op	       0 allocs/op
+BenchmarkIncCounterParallel-1024      	668170204	         1.716 ns/op	       0 B/op	       0 allocs/op
+PASS

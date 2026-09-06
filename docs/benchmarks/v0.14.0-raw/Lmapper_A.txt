@@ -1,0 +1,60 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/graph
+cpu: Apple M4
+BenchmarkMapper_Intern_HotKey_Parallel           	141569833	         8.385 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-8         	15477496	        76.87 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-64        	13459302	        88.48 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-256       	13454202	        88.41 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-1024      	13683165	        88.11 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/graph
+cpu: Apple M4
+BenchmarkMapper_Intern_HotKey_Parallel           	140273371	         8.442 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-8         	16010664	        75.29 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-64        	13453096	        88.44 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-256       	13543508	        88.69 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-1024      	13539363	        88.69 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/graph
+cpu: Apple M4
+BenchmarkMapper_Intern_HotKey_Parallel           	141931503	         8.514 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-8         	16771966	        77.44 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-64        	13535430	        88.99 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-256       	13411910	        88.92 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-1024      	14227716	        88.84 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/graph
+cpu: Apple M4
+BenchmarkMapper_Intern_HotKey_Parallel           	140668882	         8.520 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-8         	15999510	        76.31 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-64        	13496907	        88.36 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-256       	13686670	        88.44 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-1024      	13612496	        87.99 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/graph
+cpu: Apple M4
+BenchmarkMapper_Intern_HotKey_Parallel           	143570644	         8.516 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-8         	13814499	        76.51 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-64        	13553578	        88.14 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-256       	13614150	        87.98 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-1024      	13821799	        87.97 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/graph
+cpu: Apple M4
+BenchmarkMapper_Intern_HotKey_Parallel           	141774697	         8.323 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-8         	16115070	        76.72 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-64        	13360387	        89.15 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-256       	13412173	        89.23 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMapper_Intern_HotKey_Parallel-1024      	14113322	        88.38 ns/op	       0 B/op	       0 allocs/op
+PASS

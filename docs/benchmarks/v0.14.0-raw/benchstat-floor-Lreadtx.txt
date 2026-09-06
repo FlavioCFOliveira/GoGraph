@@ -1,0 +1,47 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+                       │      B       │                 B2                 │
+                       │    sec/op    │    sec/op     vs base              │
+ReadTx_WriterLock        105.3µ ±  2%   104.8µ ±  4%       ~ (p=0.699 n=6)
+ReadTx_WriterLock-8      24.84µ ±  7%   24.96µ ±  4%       ~ (p=0.818 n=6)
+ReadTx_WriterLock-64     24.22µ ±  3%   24.45µ ±  3%       ~ (p=0.485 n=6)
+ReadTx_WriterLock-256    25.89µ ± 18%   25.69µ ±  6%       ~ (p=0.485 n=6)
+ReadTx_WriterLock-1024   30.94µ ± 11%   29.75µ ±  5%       ~ (p=0.485 n=6)
+ReadTx_LockFree          3.058µ ±  3%   3.060µ ±  2%       ~ (p=0.818 n=6)
+ReadTx_LockFree-8        1.677µ ±  7%   1.701µ ± 14%       ~ (p=0.818 n=6)
+ReadTx_LockFree-64       2.153µ ±  6%   2.184µ ±  7%       ~ (p=0.485 n=6)
+ReadTx_LockFree-256      2.633µ ± 19%   2.651µ ± 10%       ~ (p=0.699 n=6)
+ReadTx_LockFree-1024     4.529µ ± 37%   4.222µ ± 88%       ~ (p=1.000 n=6)
+geomean                  9.604µ         9.536µ        -0.71%
+
+                       │       B       │                  B2                  │
+                       │     B/op      │     B/op      vs base                │
+ReadTx_WriterLock        47.15Ki ±  0%   47.15Ki ± 0%       ~ (p=1.000 n=6) ¹
+ReadTx_WriterLock-8      47.16Ki ±  0%   47.16Ki ± 0%       ~ (p=0.797 n=6)
+ReadTx_WriterLock-64     47.16Ki ±  0%   47.16Ki ± 0%       ~ (p=0.526 n=6)
+ReadTx_WriterLock-256    47.16Ki ±  0%   47.16Ki ± 0%       ~ (p=0.314 n=6)
+ReadTx_WriterLock-1024   47.20Ki ±  0%   47.20Ki ± 0%       ~ (p=0.981 n=6)
+ReadTx_LockFree          4.086Ki ±  0%   4.086Ki ± 0%       ~ (p=0.942 n=6)
+ReadTx_LockFree-8        4.074Ki ±  0%   4.074Ki ± 0%       ~ (p=0.833 n=6)
+ReadTx_LockFree-64       4.078Ki ±  3%   4.084Ki ± 1%       ~ (p=0.701 n=6)
+ReadTx_LockFree-256      4.072Ki ±  1%   4.075Ki ± 1%       ~ (p=0.368 n=6)
+ReadTx_LockFree-1024     4.083Ki ± 14%   4.084Ki ± 8%       ~ (p=0.738 n=6)
+geomean                  13.87Ki         13.87Ki       +0.02%
+¹ all samples are equal
+
+                       │     B      │                 B2                 │
+                       │ allocs/op  │ allocs/op   vs base                │
+ReadTx_WriterLock        114.0 ± 0%   114.0 ± 0%       ~ (p=1.000 n=6) ¹
+ReadTx_WriterLock-8      114.0 ± 0%   114.0 ± 0%       ~ (p=1.000 n=6) ¹
+ReadTx_WriterLock-64     114.0 ± 0%   114.0 ± 0%       ~ (p=1.000 n=6) ¹
+ReadTx_WriterLock-256    114.0 ± 0%   114.0 ± 0%       ~ (p=1.000 n=6) ¹
+ReadTx_WriterLock-1024   114.0 ± 0%   114.0 ± 0%       ~ (p=1.000 n=6) ¹
+ReadTx_LockFree          37.00 ± 0%   37.00 ± 0%       ~ (p=1.000 n=6) ¹
+ReadTx_LockFree-8        37.00 ± 0%   37.00 ± 0%       ~ (p=1.000 n=6) ¹
+ReadTx_LockFree-64       37.00 ± 0%   37.00 ± 0%       ~ (p=1.000 n=6) ¹
+ReadTx_LockFree-256      37.00 ± 0%   37.00 ± 0%       ~ (p=1.000 n=6) ¹
+ReadTx_LockFree-1024     37.00 ± 0%   37.00 ± 0%       ~ (p=1.000 n=6) ¹
+geomean                  64.95        64.95       +0.00%
+¹ all samples are equal

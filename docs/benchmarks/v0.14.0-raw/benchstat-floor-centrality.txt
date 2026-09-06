@@ -1,0 +1,16 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/search/centrality
+cpu: Apple M4
+                       │      B      │              B2              │
+                       │   sec/op    │   sec/op     vs base         │
+Brandes_RandomGraph-10   7.897m ± 2%   7.903m ± 2%  ~ (p=0.937 n=6)
+
+                       │      B       │              B2               │
+                       │     B/op     │     B/op      vs base         │
+Brandes_RandomGraph-10   60.78Ki ± 0%   60.78Ki ± 0%  ~ (p=0.714 n=6)
+
+                       │     B      │              B2               │
+                       │ allocs/op  │ allocs/op   vs base           │
+Brandes_RandomGraph-10   10.00 ± 0%   10.00 ± 0%  ~ (p=1.000 n=6) ¹
+¹ all samples are equal

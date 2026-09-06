@@ -1,0 +1,150 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/graph/mvcc
+cpu: Apple M4
+BenchmarkPublishConcurrent/frontier       	453588451	         2.644 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/frontier-8     	16777545	        73.49 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/frontier-64    	16118199	        71.98 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/frontier-256   	 7594563	       152.0 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/frontier-1024  	 3830784	       377.0 ns/op	       1 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/legacy         	234406704	         5.133 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/legacy-8       	11462361	       103.1 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/legacy-64      	12237488	        96.00 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/legacy-256     	12270716	        96.48 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/legacy-1024    	12257822	        96.79 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_WeakParallel                	330544401	         3.635 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_WeakParallel-8              	1000000000	         0.5199 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_WeakParallel-64             	1000000000	         0.4716 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_WeakParallel-256            	1000000000	         0.5169 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_WeakParallel-1024           	1000000000	         0.4607 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRWMutexShared_Parallel           	334601487	         3.603 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRWMutexShared_Parallel-8         	28831945	        39.98 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRWMutexShared_Parallel-64        	15884948	        73.67 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRWMutexShared_Parallel-256       	16001492	        73.62 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRWMutexShared_Parallel-1024      	16525416	        72.31 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/graph/mvcc
+cpu: Apple M4
+BenchmarkPublishConcurrent/frontier       	443661121	         2.707 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/frontier-8     	18848389	        68.90 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/frontier-64    	15640137	        67.18 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/frontier-256   	 7989872	       158.3 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/frontier-1024  	 3631262	       352.3 ns/op	       1 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/legacy         	229416409	         5.244 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/legacy-8       	12123247	        97.98 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/legacy-64      	12293964	        95.46 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/legacy-256     	12713047	        95.60 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/legacy-1024    	12501193	        95.12 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_WeakParallel                	324225120	         3.756 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_WeakParallel-8              	1000000000	         0.5166 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_WeakParallel-64             	1000000000	         0.4844 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_WeakParallel-256            	1000000000	         0.5105 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_WeakParallel-1024           	1000000000	         0.4844 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRWMutexShared_Parallel           	326342835	         3.702 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRWMutexShared_Parallel-8         	25068284	        44.66 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRWMutexShared_Parallel-64        	15992740	        74.75 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRWMutexShared_Parallel-256       	15603142	        75.07 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRWMutexShared_Parallel-1024      	15977284	        72.67 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/graph/mvcc
+cpu: Apple M4
+BenchmarkPublishConcurrent/frontier       	446335791	         2.728 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/frontier-8     	17097568	        72.50 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/frontier-64    	16277430	        70.88 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/frontier-256   	 7693432	       153.3 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/frontier-1024  	 4431979	       385.8 ns/op	       1 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/legacy         	229447809	         5.215 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/legacy-8       	10809118	       109.0 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/legacy-64      	12055752	        96.38 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/legacy-256     	12386766	        97.18 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/legacy-1024    	12692407	        96.24 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_WeakParallel                	322962498	         3.732 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_WeakParallel-8              	1000000000	         0.5220 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_WeakParallel-64             	1000000000	         0.4785 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_WeakParallel-256            	1000000000	         0.4780 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_WeakParallel-1024           	1000000000	         0.4607 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRWMutexShared_Parallel           	324661087	         3.672 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRWMutexShared_Parallel-8         	28365301	        42.06 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRWMutexShared_Parallel-64        	15611600	        74.32 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRWMutexShared_Parallel-256       	15850555	        74.51 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRWMutexShared_Parallel-1024      	15795058	        73.54 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/graph/mvcc
+cpu: Apple M4
+BenchmarkPublishConcurrent/frontier       	436952064	         2.748 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/frontier-8     	17487867	        70.11 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/frontier-64    	16289150	        74.21 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/frontier-256   	 7209780	       152.2 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/frontier-1024  	 3328762	       439.2 ns/op	       1 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/legacy         	224929182	         5.261 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/legacy-8       	12169952	        99.26 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/legacy-64      	12392245	        96.91 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/legacy-256     	12455184	        96.10 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/legacy-1024    	12389484	        95.35 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_WeakParallel                	320560124	         3.779 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_WeakParallel-8              	1000000000	         0.5266 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_WeakParallel-64             	1000000000	         0.4800 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_WeakParallel-256            	1000000000	         0.4898 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_WeakParallel-1024           	1000000000	         0.4844 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRWMutexShared_Parallel           	321566564	         3.695 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRWMutexShared_Parallel-8         	26926381	        45.29 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRWMutexShared_Parallel-64        	16154952	        72.17 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRWMutexShared_Parallel-256       	16311946	        73.15 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRWMutexShared_Parallel-1024      	16427235	        71.39 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/graph/mvcc
+cpu: Apple M4
+BenchmarkPublishConcurrent/frontier       	444629088	         2.749 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/frontier-8     	17390442	        69.75 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/frontier-64    	16079494	        70.70 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/frontier-256   	 7576731	       155.0 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/frontier-1024  	 4721386	       431.5 ns/op	       1 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/legacy         	228954290	         5.257 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/legacy-8       	12559876	        93.62 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/legacy-64      	12199698	        96.19 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/legacy-256     	12551643	        95.47 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/legacy-1024    	13291636	        94.03 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_WeakParallel                	321813777	         3.745 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_WeakParallel-8              	1000000000	         0.5219 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_WeakParallel-64             	1000000000	         0.4955 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_WeakParallel-256            	1000000000	         0.4979 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_WeakParallel-1024           	1000000000	         0.4689 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRWMutexShared_Parallel           	327890689	         3.700 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRWMutexShared_Parallel-8         	27173194	        44.36 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRWMutexShared_Parallel-64        	17027515	        72.21 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRWMutexShared_Parallel-256       	16651777	        71.22 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRWMutexShared_Parallel-1024      	17801193	        71.26 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/graph/mvcc
+cpu: Apple M4
+BenchmarkPublishConcurrent/frontier       	446792449	         2.727 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/frontier-8     	17010237	        72.08 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/frontier-64    	17064926	        68.66 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/frontier-256   	 7724776	       150.2 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/frontier-1024  	 4184010	       382.1 ns/op	       1 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/legacy         	229572381	         5.198 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/legacy-8       	12178526	       102.4 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/legacy-64      	12448003	        95.78 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/legacy-256     	12374763	        96.45 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPublishConcurrent/legacy-1024    	12640393	        95.72 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_WeakParallel                	321167907	         3.743 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_WeakParallel-8              	1000000000	         0.5202 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_WeakParallel-64             	1000000000	         0.4564 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_WeakParallel-256            	1000000000	         0.4891 ns/op	       0 B/op	       0 allocs/op
+BenchmarkGate_WeakParallel-1024           	1000000000	         0.4628 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRWMutexShared_Parallel           	322948809	         3.686 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRWMutexShared_Parallel-8         	27372132	        38.37 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRWMutexShared_Parallel-64        	15216703	        76.25 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRWMutexShared_Parallel-256       	15741704	        75.91 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRWMutexShared_Parallel-1024      	16808017	        75.49 ns/op	       0 B/op	       0 allocs/op
+PASS

@@ -1,0 +1,19 @@
+START 2026-09-06T09:15:37Z rounds=8
+round=1 pkg=cypher_exec arm=A EXIT=0
+round=1 pkg=cypher_exec arm=B EXIT=0
+round=1 pkg=cypher_exec arm=B2 EXIT=0
+round=1 pkg=cypher arm=A EXIT=0
+round=1 pkg=cypher arm=B EXIT=0
+round=1 pkg=cypher arm=B2 EXIT=0
+round=1 pkg=store_wal arm=A EXIT=0
+round=1 pkg=store_wal arm=B EXIT=0
+round=1 pkg=store_wal arm=B2 EXIT=0
+round=1 pkg=store_txn arm=A EXIT=0
+round=1 pkg=store_txn arm=B EXIT=0
+round=1 pkg=store_txn arm=B2 EXIT=0
+ROUND 1 COMPLETE 2026-09-06T09:23:53Z load=[14,98 15,11 12,77]
+round=2 pkg=cypher_exec arm=B EXIT=0
+round=2 pkg=cypher_exec arm=B2 EXIT=0
+round=2 pkg=cypher_exec arm=A EXIT=0
+round=2 pkg=cypher arm=B EXIT=0
+round=2 pkg=cypher arm=B2 EXIT=0
