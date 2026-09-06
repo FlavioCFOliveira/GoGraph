@@ -16368,6 +16368,34 @@ func buildIRProjection(
 		}
 		projBinder = binder
 	}
+	// ERROR-TO-NULL FOR HIDDEN ITEMS (rmp #2662). A Hidden item exists only so a
+	// downstream Sort can read an ORDER BY key it does not output (#1805), and
+	// since #2662 it may carry the KEY EXPRESSION rather than the entity. Reading
+	// the key through a projection column instead of through the sort operator
+	// must not change what a failing key does: [exec.sortKeyValue] maps an
+	// evaluator error to NULL, so `UNWIND ['a'] AS s RETURN 1 AS x ORDER BY s.foo`
+	// orders on NULL and returns its rows. A projection error, by contrast, fails
+	// the query. Give the hidden column sortKeyValue's contract so the two are the
+	// same program.
+	//
+	// It is installed AFTER the fusion above (which replaces Eval) and BEFORE the
+	// columnar builders below (which capture Eval by value as their per-row
+	// fallback), so every route to the value carries it. It cannot affect a
+	// VISIBLE column: only Hidden items are wrapped, and a Hidden item never
+	// reaches a result set.
+	for i, item := range items {
+		if !item.Hidden || projItems[i].Eval == nil {
+			continue
+		}
+		inner := projItems[i].Eval
+		projItems[i].Eval = func(row exec.Row) (expr.Value, error) {
+			v, err := inner(row)
+			if err != nil {
+				return expr.Null, nil
+			}
+			return v, nil
+		}
+	}
 	// Late-materialisation columnar projection (#1704 P2, #1823): when EVERY item
 	// is a plain scalar-property access on a bound node, build a [exec.ColumnarProject]
 	// that fills a typed Chunk and boxes only at the sink. Each filler carries the

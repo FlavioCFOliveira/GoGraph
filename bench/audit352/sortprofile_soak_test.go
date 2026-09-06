@@ -169,6 +169,15 @@ func ratio(a, b int64) float64 {
 // depends on. All of them run over the SHARED 120 000-node fixture with ~960 000
 // edges, which is the graph the audit's original profile was taken on, so the
 // shares reported here and the shares reported there describe the same workload.
+//
+// After #2662 the three ORDER BY shapes below have NO evaluator-backed sort key:
+// the key is projected into its own hidden column and resolved by schema lookup.
+// The two sortseam arms this test drives therefore COINCIDE on them — it is a
+// reporting test, asserting only that each window describes itself, so that costs
+// runtime rather than truth, but a reader must not take the two arms here as a
+// measured difference. The arm-separating A/B for the decoration seam lives in
+// TestSortDecorationArmFrames, whose queries were re-pointed at a shape #2662
+// declines to hoist; the A/B for the HOIST seam is keyhoist_soak_test.go.
 var profileShapes = []struct {
 	name     string
 	query    string

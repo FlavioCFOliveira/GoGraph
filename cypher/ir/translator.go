@@ -501,7 +501,7 @@ func (t *translator) returnClause(r *ast.Return, child LogicalPlan) (LogicalPlan
 	// in with.go).
 	if !hasAgg {
 		preVars := collectAllVars(planAfterComp)
-		items = appendOrderByPassthrough(items, proj, preVars)
+		items = appendOrderByPassthrough(items, proj, preVars, true)
 	}
 	if hasAgg {
 		plan = NewEagerAggregationWithExprs(groupBy, groupByExprs, aggs, planAfterComp)

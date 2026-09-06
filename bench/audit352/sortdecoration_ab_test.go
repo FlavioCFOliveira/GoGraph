@@ -365,7 +365,23 @@ func sortShapeEngine(tb testing.TB, n int) *cypher.Engine {
 			tb.Fatalf("SetNodeProperty salary: %v", err)
 		}
 	}
+	// HOLD THE #2662 HOIST OFF FOR THIS ENGINE'S PLANS.
+	//
+	// sortseam.KeyHoistDisabled is read at TRANSLATE time and a translated plan is
+	// cached per Engine, so warming the three shapes here — under the control —
+	// fixes the arm for every later caller, whatever the control says by then.
+	// Without it `ORDER BY p.salary` resolves by schema lookup and compiles NO key
+	// evaluator, and this whole sweep measures a seam that is no longer on the
+	// path. See [sortShapeQuery] for why the query is not re-spelled instead.
 	e := cypher.NewEngine(g)
+	restore := sortseam.SetKeyHoistDisabled(true)
+	for _, q := range []string{sortShapeQuery, topShapeQuery(10), topShapeQuery(n)} {
+		if _, err := e.Explain(q, nil); err != nil {
+			restore()
+			tb.Fatalf("warm Explain(%q): %v", q, err)
+		}
+	}
+	restore()
 	sortEngines[n] = e
 	return e
 }
@@ -374,6 +390,21 @@ func sortShapeEngine(tb testing.TB, n int) *cypher.Engine {
 // irSortKeys compiles an expression evaluator rather than resolving the key by
 // schema lookup — the shape whose evaluation count the defect amplified. The
 // `SKIP 0` blocks ORDER BY+LIMIT fusion (#2509) and forces the full Sort.
+//
+// It is spelled verbatim as it always was, and [sortShapeEngine] holds the #2662
+// key hoist OFF for the engines that run it. That is deliberate, and the
+// alternative was MEASURED and rejected: re-spelling the key as a shape #2662
+// declines to hoist (`coalesce(p.salary, 0)`, `p.salary + 0`) adds frames to the
+// evaluation stack, and this instrument reads runtime.MemProfileRecord.Stack0,
+// which is a FIXED [32]uintptr. The bare-property stack peaks at 31 frames; both
+// re-spellings peak at exactly 32, and the truncation drops the OPERATOR frames
+// off the bottom — measured, on the n=1000 cell: cypher/exec.(*Sort).sortDecorated
+// cum fell to 0 on BOTH arms while the arms' totals still differed 1.40x. Every
+// frame assertion in TestSortDecorationArmFrames would have failed for an
+// instrumentation reason that has nothing to do with the seam it gates.
+//
+// The #2662 shape is not left unmeasured by this: keyhoist_soak_test.go profiles
+// the production spelling directly, on both of ITS arms.
 const sortShapeQuery = `MATCH (p:Person) RETURN p.firstName ORDER BY p.salary SKIP 0 LIMIT 10`
 
 // topShapeQuery is the same reproduction WITHOUT the SKIP, so ORDER BY + LIMIT

@@ -4,6 +4,7 @@ import (
 	"math"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
+	"github.com/FlavioCFOliveira/GoGraph/internal/sortseam"
 )
 
 // with.go — WITH pipeline-boundary translation.
@@ -124,7 +125,7 @@ func (t *translator) translateWith(w *ast.With, child LogicalPlan) (LogicalPlan,
 		// Closes WithOrderBy4 [8] (`WITH a, sum; WITH a, mod ORDER BY
 		// sum LIMIT 3` no longer drops `sum`).
 		preVars := collectAllVars(planAfterComp)
-		items = appendOrderByPassthrough(items, w.Projection, preVars)
+		items = appendOrderByPassthrough(items, w.Projection, preVars, false)
 		plan = NewProjection(items, planAfterComp)
 	}
 
@@ -361,7 +362,7 @@ func substExprByString(e ast.Expression, subst map[string]string) ast.Expression
 // and the downstream Sort can resolve it. Aggregating WITHs and DISTINCT
 // projections skip this augmentation because their output schema is
 // strictly defined by the aggregation contract / DISTINCT contract.
-func appendOrderByPassthrough(items []ProjectionItem, proj *ast.Projection, preVars []string) []ProjectionItem {
+func appendOrderByPassthrough(items []ProjectionItem, proj *ast.Projection, preVars []string, hoistKeys bool) []ProjectionItem {
 	if proj == nil || len(proj.OrderBy) == 0 {
 		return items
 	}
@@ -382,9 +383,29 @@ func appendOrderByPassthrough(items []ProjectionItem, proj *ast.Projection, preV
 		}
 	}
 	// Collect variable names referenced by ORDER BY but not yet in items.
+	//
+	// HOIST THE KEY INSTEAD OF THE ENTITY (rmp #2662). A key of the shape
+	// `var.prop` is projected as its OWN hidden column, so the Sort reads the
+	// scalar from a row slot and the entity never has to survive the projection
+	// at all. Everything else keeps the entity passthrough below. See
+	// [hoistableSortKeyItem] for the conditions and for why they are what they
+	// are.
+	//
+	// hoisted is separate from itemNames on purpose: itemNames is what
+	// collectOrderByVars consults to decide whether a VARIABLE still needs a
+	// passthrough, and a hoisted key column is not a variable binding. Polluting
+	// it would let a hidden key column suppress a passthrough that is genuinely
+	// needed, because Cypher admits a backtick-quoted identifier whose spelling
+	// is exactly a property path.
+	hoisted := make(map[string]struct{}, len(proj.OrderBy))
 	var added []string
 	for _, s := range proj.OrderBy {
 		if s == nil {
+			continue
+		}
+		if it, ok := hoistableSortKeyItem(s.Expr, preSet, itemNames, hoisted, hoistKeys); ok {
+			items = append(items, it)
+			hoisted[it.Name] = struct{}{}
 			continue
 		}
 		collectOrderByVars(s.Expr, preSet, itemNames, &added)
@@ -399,6 +420,102 @@ func appendOrderByPassthrough(items []ProjectionItem, proj *ast.Projection, preV
 		itemNames[v] = struct{}{}
 	}
 	return items
+}
+
+// hoistableSortKeyItem returns the hidden [ProjectionItem] that carries the
+// VALUE of sort key e, and whether e may be hoisted into one at all.
+//
+// # Why (rmp #2662)
+//
+// The entity passthrough [appendOrderByPassthrough] adds is what forces the
+// projection to ship the whole node. `MATCH (p:Person) RETURN p.firstName ORDER
+// BY p.salary` projects a hidden `p`, and the projection's node-variable fast
+// path turns that column into a full [expr.NodeValue] — labels and the ENTIRE
+// property bag — once per row, purely so the sort-key evaluator above it can
+// read one integer back out. Measured on the 120 000-node audit fixture at
+// MemProfileRate=1, that path was 840 001 allocated objects, 7.00 per row, on a
+// query that ships ten.
+//
+// Projecting the key itself removes the reason to carry the entity: the Sort
+// resolves `p.salary` by direct schema lookup (case 1 of the physical builder's
+// irSortKeys), so there is no per-row key evaluation either. It is the shape
+// PostgreSQL has always planned — a non-output ORDER BY expression becomes a
+// resjunk target-list entry, computed once per row with the rest of the
+// projection and stripped before the rows reach the client — and the shape
+// Neo4j's slotted runtime depends on, its comparators reading an ordered slot
+// rather than evaluating an expression.
+//
+// # Why ONLY `var.prop`
+//
+// The hoist moves an evaluation from the sort operator into the projection, and
+// the two do not treat failure alike: [exec.sortKeyValue] maps an evaluator
+// error to NULL, whereas a projection item's error fails the query. Restricting
+// the hoist to a property read off a bare variable keeps the change to the shape
+// the defect is about, and every remaining shape keeps the entity passthrough
+// and the behaviour it had. The residual error difference this shape can still
+// produce — a property read on a non-entity, e.g. `UNWIND ['a'] AS s RETURN 1 AS
+// x ORDER BY s.foo` — is neutralised in the physical builder, which gives every
+// Hidden item the same error-to-NULL contract sortKeyValue applies.
+//
+// # The conditions
+//
+//   - e is `variable.key` with a BARE variable receiver. A receiver that is
+//     itself an expression may not be row-local in the pre-projection scope.
+//   - The receiver is in scope BEFORE this projection (preSet). Otherwise it is
+//     an alias, which the post-projection row already carries and which
+//     irSortKeys resolves by name today.
+//   - The receiver is NOT one of the projection's own output names. `RETURN
+//     p.firstName AS p ORDER BY p.salary` reads `p.salary` off the ALIAS, and
+//     hoisting would silently re-point it at the pre-projection node.
+//   - The rendered name collides with nothing: not with an item name or
+//     expression string (the post-projection schema reset would let the later
+//     entry win and re-point a real output column), and not with a
+//     pre-projection variable that a passthrough may still add.
+func hoistableSortKeyItem(e ast.Expression, preSet, itemNames, hoisted map[string]struct{}, hoistKeys bool) (ProjectionItem, bool) {
+	if !hoistKeys {
+		return ProjectionItem{}, false
+	}
+	if sortseam.KeyHoistDisabled() {
+		// The differential arm: keep the entity passthrough so a test can compare
+		// the two plans on ONE query in ONE binary. Read at translate time, so the
+		// arm is fixed when the plan is cached; see [sortseam.SetKeyHoistDisabled].
+		return ProjectionItem{}, false
+	}
+	prop, ok := e.(*ast.Property)
+	if !ok {
+		return ProjectionItem{}, false
+	}
+	recv, ok := prop.Receiver.(*ast.Variable)
+	if !ok {
+		return ProjectionItem{}, false
+	}
+	if _, inPre := preSet[recv.Name]; !inPre {
+		return ProjectionItem{}, false
+	}
+	if _, shadowed := itemNames[recv.Name]; shadowed {
+		return ProjectionItem{}, false
+	}
+	// The name is the SortItem.Expression the physical builder will look up:
+	// applyProjectionTail stores s.Expr.String() and the projection's schema
+	// reset registers ProjectionItem.Name, so the two must be the same string.
+	name := prop.String()
+	if _, taken := itemNames[name]; taken {
+		return ProjectionItem{}, false
+	}
+	if _, taken := preSet[name]; taken {
+		return ProjectionItem{}, false
+	}
+	if _, dup := hoisted[name]; dup {
+		// A second ORDER BY term on the same key (`ORDER BY p.x, p.x DESC`)
+		// reads the column the first one already projected.
+		return ProjectionItem{}, false
+	}
+	return ProjectionItem{
+		Expr:       prop,
+		Name:       name,
+		Expression: name,
+		Hidden:     true, // ORDER-BY key column; excluded from output cols (#1805)
+	}, true
 }
 
 // collectOrderByVars walks the expression and appends to *out every variable
