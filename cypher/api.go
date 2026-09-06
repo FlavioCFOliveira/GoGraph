@@ -16391,6 +16391,12 @@ func buildIRProjection(
 		projItems[i].Eval = func(row exec.Row) (expr.Value, error) {
 			v, err := inner(row)
 			if err != nil {
+				//nolint:nilerr // deliberate: this IS the error-to-NULL contract of
+				// exec.sortKeyValue (cypher/exec/sort.go), reproduced here so that
+				// reading an ORDER BY key through a hidden projection column is the
+				// same program as reading it through the sort operator. Propagating
+				// the error would fail queries that #1805 requires to return rows
+				// ordered on NULL.
 				return expr.Null, nil
 			}
 			return v, nil

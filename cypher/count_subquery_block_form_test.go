@@ -234,17 +234,22 @@ func TestBlockFormNormalisation_ReachesTheAdjacencyRewrites(t *testing.T) {
 // replacing the projection with count(*) inside a planner that owns the whole
 // query. See [ir.PatternFormOf] for why that is not reproduced here.
 //
-// # Read the hand-computed values with one caveat
+// # The hand-computed values, since rmp #2675
 //
-// A body's FINAL projection is never translated: [ir.TranslateSubquery] builds
-// the inner plan from q.ReadingClauses alone. So a RETURN's DISTINCT, ORDER BY,
-// SKIP, LIMIT or aggregation is discarded on the inner-plan path too, and two
-// cases below therefore assert no absolute value — the value GoGraph produces
-// for them is not the value openCypher requires. That is a PRE-EXISTING defect,
-// invisible to the openCypher TCK (which has no `COUNT { }` scenario at all),
-// untouched by this change, and out of its scope; each case carries the detail.
-// Where a value IS asserted it is the correct one, but for two of them only
-// because the discarded clause happens to be unobservable on this fixture.
+// When this file was written, a body's FINAL projection was never translated:
+// [ir.TranslateSubquery] built the inner plan from q.ReadingClauses alone, so a
+// RETURN's DISTINCT, ORDER BY, SKIP, LIMIT or aggregation was discarded on the
+// inner-plan path too. Two cases below therefore asserted NO absolute value,
+// rather than enshrining a wrong one, and two more were correct only because the
+// discarded clause happened to be unobservable on this fixture.
+//
+// rmp #2675 fixed that: [ir.TranslateSubquery] now translates q.Return, so a
+// refused body takes an inner plan that honours its own horizon. Every case
+// below therefore carries the correct absolute value, and the two that could not
+// be pinned before now can be. The suite proving the new answers, with its
+// authorities and its discriminating fixture, is
+// count_subquery_body_projection_test.go; what this file still owns is the
+// BOUNDARY — that none of these bodies reaches an adjacency-answered rewrite.
 func TestBlockFormNormalisation_RefusedShapes(t *testing.T) {
 	g := degreeFixture(t, 60)
 	on, off := adjacencyCountEngines(g)
@@ -271,30 +276,26 @@ func TestBlockFormNormalisation_RefusedShapes(t *testing.T) {
 			name: "RETURN that aggregates",
 			q:    "MATCH (a:P {id: 3}) RETURN COUNT { MATCH (a)-[:K]->(x) RETURN count(*) }",
 			why:  "count(*) collapses two matches into one row, so a degree of 2 is not the answer",
-			// NO hand-computed value here, deliberately, and this is a FINDING
-			// rather than a gap in the case.
+			// 1, and this value could not be asserted when the file was written.
 			//
 			// openCypher's COUNT { … } counts the rows the BODY returns, and
-			// `MATCH (a)-[:K]->(x) RETURN count(*)` returns exactly one row, so the
-			// answer is 1. GoGraph returns 2 — the two matches — because
-			// [ir.TranslateSubquery] builds the inner plan from q.ReadingClauses
-			// ALONE and never translates q.Return, so the body's final projection
-			// and everything attached to it (DISTINCT, ORDER BY, SKIP, LIMIT, an
-			// aggregation) is discarded. A WITH is unaffected: the parser embeds
-			// WITH clauses in ReadingClauses for a multi-part query, which is why
-			// the WITH case below answers correctly.
+			// `MATCH (a)-[:K]->(x) RETURN count(*)` returns exactly one row. GoGraph
+			// used to answer 2 — the two matches — because [ir.TranslateSubquery]
+			// built the inner plan from q.ReadingClauses ALONE and never translated
+			// q.Return, so the body's final projection and everything attached to it
+			// was discarded. rmp #2675 fixed that, and this case is now pinned to the
+			// answer openCypher requires. A WITH was never affected: the parser
+			// embeds WITH clauses in ReadingClauses for a multi-part query, which is
+			// why the WITH case below always answered correctly.
 			//
-			// That defect is PRE-EXISTING and untouched by rmp #2648: this body is
-			// refused by the normalisation, so it keeps taking exactly the inner
-			// plan it always took. Fixing it changes answers and belongs to its own
-			// task, so no value is asserted here rather than enshrining a wrong
-			// one. The openCypher TCK cannot catch it — it has ZERO `COUNT { }`
-			// scenarios; all 13 brace-subquery occurrences in
-			// cypher/tck/features are WHERE-position `exists { }`.
+			// The openCypher TCK cannot see any of this — it has ZERO `COUNT { }`
+			// scenarios; all 13 brace-subquery occurrences in cypher/tck/features
+			// are WHERE-position `exists { }`.
 			//
-			// It is also the strongest argument for the boundary [ir.PatternFormOf]
-			// draws: admitting Neo4j's wider RETURN-bearing set would have meant
-			// normalising away a horizon the engine ALSO ignores.
+			// The case still belongs here as a BOUNDARY case: an aggregating horizon
+			// must never reach an adjacency rewrite, which answers from the degree
+			// and cannot honour a horizon at all.
+			want: "1\x1f",
 		},
 		{
 			name: "OPTIONAL MATCH",
@@ -342,22 +343,22 @@ func TestBlockFormNormalisation_RefusedShapes(t *testing.T) {
 			name: "RETURN DISTINCT",
 			q:    "MATCH (a:P {id: 3}) RETURN COUNT { MATCH (a)-[:K]->(x) RETURN DISTINCT x }",
 			why:  "DISTINCT changes the row count; Neo4j refuses it because a DistinctQueryProjection makes CreateIrExpressions append a tail",
-			// 2 is correct here, but only COINCIDENTALLY: n3's two :K targets are
-			// already distinct, so dropping the DISTINCT — which
-			// [ir.TranslateSubquery] does, see the "RETURN that aggregates" case —
-			// cannot be observed on this fixture. The value is asserted because it
-			// IS the right answer; it is not evidence that DISTINCT is honoured.
+			// 2 is correct, but this fixture cannot show WHY: n3's two :K targets
+			// are already distinct, so the DISTINCT removes nothing here and the
+			// value would be the same with the clause honoured or dropped. It is
+			// therefore not evidence that DISTINCT is honoured — the case that IS
+			// evidence lives in count_subquery_body_projection_test.go, over a
+			// fixture with a genuine duplicate.
 			want: "2\x1f",
 		},
 		{
 			name: "RETURN with a LIMIT",
 			q:    "MATCH (a:P {id: 3}) RETURN COUNT { MATCH (a)-[:K]->(x) RETURN x LIMIT 1 }",
 			why:  "a LIMIT truncates the rows the count sees; Neo4j refuses it through QueryPagination.empty",
-			// No value, for the reason given on "RETURN that aggregates": the
-			// correct answer is 1 and GoGraph returns 2, because the body's final
-			// projection — and this LIMIT with it — is never translated. Refusing
-			// the body is what keeps rmp #2648 clear of that defect; the defect
-			// itself is out of scope.
+			// 1, and likewise unassertable when this file was written: the body's
+			// final projection — and this LIMIT with it — was never translated, so
+			// GoGraph answered 2. rmp #2675 fixed it.
+			want: "1\x1f",
 		},
 	}
 
