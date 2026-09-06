@@ -7118,7 +7118,12 @@ func BuildPlanWithMutator(
 	// It also passes the zero [planGates], so the public entry point keeps the
 	// unoptimised access paths it has always had. Only the Engine, which owns
 	// the EngineOptions that gate each substitution, enables them.
-	return buildPlanWithMutatorFull(plan, walker, labelSrc, reg, params, mutator, nil, nil, 0, nil, planGates{})
+	//
+	// It passes a nil [writeEvalScaffold] for the same reason: it has no Engine and
+	// no writer view to evaluate an EXISTS { … }, a COUNT { … } or a pattern
+	// predicate against, so this path keeps the bare [expr.Eval] behaviour
+	// documented on [buildOpts] (rmp #2660).
+	return buildPlanWithMutatorFull(plan, walker, labelSrc, reg, params, mutator, nil, nil, 0, nil, planGates{}, nil)
 }
 
 // planGates carries the ORDER-NEUTRAL planner substitutions the write-path build
@@ -7168,6 +7173,11 @@ type planGates struct {
 // maxCollectItems carries the Engine's per-group element budget for buffering
 // aggregators into the write-path build, using the EngineOptions.MaxCollectItems
 // encoding (0 → default, <0 → no cap, >0 → active).
+//
+// evals carries the statement's expression-level evaluators (rmp #2660) and is
+// nil on the public [BuildPlanWithMutator] path, which keeps the bare
+// [expr.Eval] behaviour it has always had. See [writeEvalScaffold] for what was
+// broken while this was unconditionally absent.
 func buildPlanWithMutatorFull(
 	plan ir.LogicalPlan,
 	walker nodeWalkerIface,
@@ -7180,6 +7190,7 @@ func buildPlanWithMutatorFull(
 	maxCollectItems int,
 	procReg *procs.Registry,
 	gates planGates,
+	evals *writeEvalScaffold,
 ) (op exec.Operator, cols []string, err error) {
 	schema := make(map[string]int)
 	argByTag := make(map[uint32]*exec.Argument)
@@ -7217,6 +7228,15 @@ func buildPlanWithMutatorFull(
 	// paths now gate on this one flag and neither runs a per-query order scan.
 	bopts.hashJoinEnabled = gates.hashJoin
 	bopts.indexNestedLoopEnabled = gates.hashJoin
+	// The expression-level evaluators (rmp #2660). Without them [evalRow] saw two
+	// nil fields and degraded to the bare [expr.Eval] path for every expression in
+	// a writing statement, so a pattern predicate, an EXISTS { … } outside WHERE
+	// position and a COUNT { … } anywhere all failed with a typed "not supported in
+	// this evaluation context" error that the identical read-only statement does
+	// not raise. Bound HERE, after the gates, because [subqueryEvaluator.bind]
+	// stores THIS bopts back on the evaluator; the remaining assignments below are
+	// nonetheless visible to it, since what it stores is the pointer.
+	evals.bindInto(bopts, params)
 	bopts.writeFallback = func(child ir.LogicalPlan) (exec.Operator, error) {
 		return buildOperatorWrite(child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)
 	}
@@ -7425,12 +7445,15 @@ func buildOperatorWrite(
 				v, evalErr := evalRow(capturedBopts, capturedExpr, rowCtx, capturedParams, capturedReg)
 				if evalErr != nil {
 					// Fail-stop: a runtime error evaluating the SET RHS (arithmetic,
-					// type, an unsupported subquery expression, …) must fail the
-					// statement so it rolls back atomically — never be swallowed
-					// into a silent no-op. Swallowing it caused, e.g.,
-					// `SET n.p = COUNT { (n)-->() }` under RunInTx to leave n.p
-					// unset with no diagnostic, while the same RHS raises loudly in
-					// RETURN/WHERE (audit 2026-07-13 cypher F1).
+					// type, an out-of-domain index, …) must fail the statement so it
+					// rolls back atomically — never be swallowed into a silent no-op.
+					// Swallowing it left the property unset with no diagnostic at all,
+					// while the same RHS raises loudly in RETURN/WHERE (audit
+					// 2026-07-13 cypher F1). The example this comment used to give —
+					// `SET n.p = COUNT { (n)-->() }` — stopped being one when rmp #2660
+					// wired the write path's evaluators: that RHS now evaluates and
+					// stores the count. TestSet_EvalErrorRHS_FailStop drives this
+					// branch with `n.name[0]` instead.
 					return lpg.PropertyValue{}, false, false, evalErr
 				}
 				if v == nil || expr.IsNull(v) {
@@ -18857,6 +18880,16 @@ func (e *Engine) execUnderBarrier(
 		} else {
 			walker, labelSrc = &lpgNodeWalker{g: wv}, &lpgLabelResolver{g: wv}
 		}
+		// The statement's expression-level evaluators (rmp #2660), against the
+		// SAME writer view every other read in this build resolves through, so an
+		// EXISTS { … }, a COUNT { … } or a pattern predicate written after a write
+		// clause observes the work this statement has already applied. One heap
+		// object for both, exactly as [readBuildScaffold] holds the read path's —
+		// and not reused across the statements of an explicit transaction, because
+		// the subquery evaluator memoises compiled inner operators bound to THIS
+		// statement's view.
+		var evals writeEvalScaffold
+		evals.init(ctx, e, wv, walker, labelSrc, queryReg)
 		op, cols, berr := buildPlanWithMutatorFull(plan, walker, labelSrc, queryReg, params, mutator, e.constraintReg, e.g.IndexManager(), e.maxCollectItems,
 			// #2229: the write path resolves `CALL db.*` from the same registry the
 			// read path uses. Shared, not snapshotted — procs.Registry is
@@ -18868,7 +18901,8 @@ func (e *Engine) execUnderBarrier(
 			// (part A) driving a nested-loop Cartesian product (part B).
 			planGates{rangeSeek: e.rangeSeekEnabled, prefixSeek: e.prefixSeekEnabled,
 				minLabelScan: e.minLabelScanEnabled, bitmapIntersect: e.bitmapIntersectEnabled,
-				hashJoin: e.hashJoinEnabled})
+				hashJoin: e.hashJoinEnabled},
+			&evals)
 		if berr != nil {
 			buildErr = berr
 			return nil
