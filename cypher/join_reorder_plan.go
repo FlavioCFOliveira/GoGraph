@@ -478,6 +478,13 @@ func reorderFilteredRows(
 	if !ok {
 		return estimate{source: estFallback}, 0
 	}
+	// N comes from the DRAIN, not from a second resolution (rmp #2771). The drain
+	// is this label's live-node count as [labelCardinalityEstimate] resolved it —
+	// through the zero-alloc exact count, or through the label bitmap when that
+	// count declined — so reusing it makes the estimator and the drain agree by
+	// construction AND keeps the query path free of the second bitmap the
+	// providers' own [resolveLabelPopulation] would otherwise build.
+	pop := populationFromDrain(labelRows)
 	if prop, lit, okEq := extractEqFromAST(sel.PredicateExpr, scan.NodeVar, params); okEq {
 		if lit == nil || expr.IsNull(lit) {
 			return estimate{source: estFallback}, 0
@@ -486,14 +493,14 @@ func reorderFilteredRows(
 		// built from, so its certified error is zero and the freshness screen below
 		// is the only thing standing between it and a plan decision.
 		e := reorderStatsFreshness(src, scan.Label, prop, labelRows,
-			statsEqualityEstimate(src, scan.Label, prop, lit))
+			statsEqualityEstimateWith(src, scan.Label, prop, lit, pop))
 		return e, 0
 	}
 	if prop, op, bound, okRange := extractRangeComparison(sel.PredicateExpr, scan.NodeVar, params); okRange {
 		if bound == nil || expr.IsNull(bound) {
 			return estimate{source: estFallback}, 0
 		}
-		e, absErr := statsRangeEstimate(src, scan.Label, prop, op, bound)
+		e, absErr := statsRangeEstimateWith(src, scan.Label, prop, op, bound, pop)
 		e = reorderStatsFreshness(src, scan.Label, prop, labelRows, e)
 		if !e.trustworthy() {
 			return e, 0
@@ -521,16 +528,19 @@ func reorderFilteredRows(
 // rest on a count that stopped being true, so the screen is applied to BOTH paths
 // here, at the one place that consumes them for a decision.
 //
-// # The denominator, and the ResolveLabelCount finding (rmp #2765, #2392)
+// # The denominator, and the ResolveLabelCount finding (rmp #2765, #2392, #2771)
 //
 // The staleness fraction needs a live-node count N for the label, and
 // [lpgLabelResolver.ResolveLabelCount] is exact-or-nothing: it declines whenever
 // any MVCC history is live, which under a concurrent writer is always.
-// [statsRangeEstimateInner] takes it as `n, _ :=`, cannot distinguish that decline
-// from a real zero, and its `n <= 0` guard then demotes the whole range estimate.
+// [statsRangeEstimateInner] used to take it as `n, _ :=`, could not distinguish
+// that decline from a real zero, and its `n <= 0` guard then demoted the whole
+// range estimate — the defect rmp #2771 fixed by giving the estimator an explicit
+// [labelPopulation] whose `known` flag carries the difference. THE ESTIMATOR NO
+// LONGER MAKES THAT MISTAKE, and this screen never did.
 //
-// This screen does not repeat that mistake. Its denominator is the SMALLER of two
-// numbers that are always available:
+// This screen's denominator is the SMALLER of two numbers that are always
+// available:
 //
 //   - the statistic's own build-time label count (stats.Stats.LabelCount), which is
 //     recorded in the snapshot and needs no resolver at all; and

@@ -385,14 +385,33 @@ planner acted on — but it means a non-zero `qerror.high` does not by itself im
 stale statistic, and `Engine.StatsMisestimatedPairs` (which names one) can stay at
 zero while the histogram fires.
 
-| Metric                          | Kind      | Description                                                                                                     |
-| ------------------------------- | --------- | ----------------------------------------------------------------------------------------------------------------- |
-| `cypher.stats.refresh`          | counter   | Successful `RefreshStatistics` runs that published a fresh snapshot. A cancelled or failed rebuild is not counted.  |
-| `cypher.stats.refresh.latency`  | histogram | Wall-clock duration of one successful `RefreshStatistics` run.                                                      |
-| `cypher.stats.lookup`           | counter   | Statistics-provider consultations that reached a present collector.                                                 |
-| `cypher.stats.lookup.fallback`  | counter   | The subset yielding `estFallback` — an absent statistic, or a range estimate demoted by staleness.                   |
-| `cypher.stats.qerror`           | histogram | Per-operator **q-error** of a PROFILEd plan: `max(est, act) / min(est, act)`, both clamped at 1. See the note below. |
-| `cypher.stats.qerror.high`      | counter   | The subset of q-error samples at or above 3.0 — the factor the planner itself demands before acting on a statistic. |
+| Metric                                      | Kind      | Description                                                                                                          |
+| ------------------------------------------- | --------- | -------------------------------------------------------------------------------------------------------------------- |
+| `cypher.stats.refresh`                      | counter   | Successful `RefreshStatistics` runs that published a fresh snapshot. A cancelled or failed rebuild is not counted.   |
+| `cypher.stats.refresh.latency`              | histogram | Wall-clock duration of one successful `RefreshStatistics` run.                                                       |
+| `cypher.stats.lookup`                       | counter   | Statistics-provider consultations that reached a present collector.                                                  |
+| `cypher.stats.lookup.fallback`              | counter   | The subset yielding `estFallback`. It is the TOTAL; the four reason counters below partition it exactly.             |
+| `cypher.stats.lookup.fallback.no_statistic` | counter   | Demoted because no usable statistic exists for the (label, property, value-domain) the predicate asks about.         |
+| `cypher.stats.lookup.fallback.empty_label`  | counter   | Demoted because the label is KNOWN to hold zero live nodes, so there is no population to be selective over.          |
+| `cypher.stats.lookup.fallback.no_count`     | counter   | Demoted because the live label count `N` was not obtainable at all. See the note below.                              |
+| `cypher.stats.lookup.fallback.stale`        | counter   | Demoted because the statistic has drifted past the firing region, or its deletes exceed the rebuild tolerance.       |
+| `cypher.stats.label_count.declined`         | counter   | The zero-allocation exact live label count declined and `N` had to be resolved another way. Not a demotion.          |
+| `cypher.stats.qerror`                       | histogram | Per-operator **q-error** of a PROFILEd plan: `max(est, act) / min(est, act)`, both clamped at 1. See the note below. |
+| `cypher.stats.qerror.high`                  | counter   | The subset of q-error samples at or above 3.0 — the factor the planner itself demands before acting on a statistic.  |
+
+**Why a declined label count is counted separately.** `N`, the live-node count for
+a label, is the denominator of every selectivity and of the staleness fraction.
+`lpg.Graph.LabelCountExact` answers *exact or nothing* and declines whenever any
+MVCC history is unreclaimed — which under a concurrent writer is the normal state
+— because a count has no object to be re-checked against. The estimator used to
+read that as `n, _ :=`, so a decline arrived as the number zero and its `n <= 0`
+guard demoted the estimate; a decline and an empty label were indistinguishable.
+They are now separate facts with separate counters (rmp #2771). A rising
+`cypher.stats.label_count.declined` with a flat `…fallback.no_count` is the healthy
+shape: the cheap count is unavailable, and the estimate survived by resolving `N`
+from the label bitmap instead. `…fallback.no_count` rising means `N` could not be
+obtained at all, which only a resolver supplying neither a count nor a bitmap can
+produce.
 
 **`cypher.stats.qerror` is not a latency.** It is a distribution of a
 dimensionless ratio, carried through the latency primitive because the `Backend`

@@ -1373,6 +1373,10 @@ different facts and only the second justifies demotion. It belongs to the
 planner-statistics work (#2766), because nothing #2765 does may change what the
 planner decides.
 
+> **FIXED in rmp #2771 — see the 2026-09-06 addendum at the end of this file.**
+> #2766 did not close it, and the sprint-close gate then caught it defeating
+> #2766's own acceptance test. The conflation is gone from both providers.
+
 ### Two shapes that CANNOT be mapped, and render `-` on purpose
 
 Both are leaves SYNTHESISED during the build, with no logical node at all:
@@ -1542,8 +1546,9 @@ reading is exactly the calibrated 20.00.
 
 * The two build-synthesised leaves and the two operator families named above carry
   no estimate; the physical `Est.Rows` cell reads `-` for them.
-* `statsRangeEstimateInner`'s `n, _ := src.ResolveLabelCount(label)` conflates
-  "cannot answer exactly" with "no live rows" (#2766).
+* ~~`statsRangeEstimateInner`'s `n, _ := src.ResolveLabelCount(label)` conflates
+  "cannot answer exactly" with "no live rows" (#2766).~~ **Closed by rmp #2771**
+  (2026-09-06 addendum); #2766 did not close it.
 * D11 stands: `EXPLAIN` on a WRITING statement still captures a LOGICAL tree, and
   that capture carries no estimates — the estimates on it belong to the logical
   walk, which renders them in words with a certified error term the physical
@@ -1897,3 +1902,141 @@ gofmt -l cypher examples
 The mutation sweep, the interleaved A/B benchmark script and their raw logs are
 session artefacts and are not committed; the table above and the `benchstat` output
 are the record.
+
+## Addendum — 2026-09-06, rmp #2771 (sprint 355)
+
+This closes the item this audit recorded as **"Found, not fixed"** in *Refuted:
+reading the estimate through the build's own snapshot LOSES it*, and the bullet
+under *Still open after #2765* that repeated it. Both are now history: the
+`n, _ := src.ResolveLabelCount(label)` conflation in `statsRangeEstimateInner` is
+gone, and the same conflation on the equality path — which the audit did not name —
+is gone with it.
+
+### What the sprint-close gate found
+
+`make ci` run 4 failed on rmp #2766's own acceptance test,
+`TestJoinReorderStats_HistogramRangeDrivesASwap`. `ExplainLogical` rendered the
+swap; the run did not take it. It passed in isolation and failed only inside
+`go test -race ./...`.
+
+### The mechanism, measured rather than argued
+
+The audit's chain was correct and its premise about *when* it fires was not. The
+chain:
+
+1. `lpgLabelResolver.ResolveLabelCount` delegates to `lpg.Graph.LabelCountExact`,
+   which is exact-or-nothing and declines whenever `labelBitmapNeedsFilter` is
+   true — for a snapshot-pinned reader, whenever any node-life or label-delta
+   record is unreclaimed.
+2. `statsRangeEstimateInner` read it as `n, _ :=`, so the decline arrived as `0`.
+3. Its `n <= 0` guard demoted the estimate to `estFallback`.
+4. `planStaysDefault` then kept the written order.
+5. `ExplainLogical` and `ExplainTable` resolve through a **present-time** resolver
+   (`Engine.explainInputsFor` builds `ReadAt(nil)`), where the count does **not**
+   decline — so they rendered the swap the run refused.
+
+Measured on the same 5 000-node fixture, one live node-life record held
+unreclaimable by an open reader:
+
+| resolver | `ResolveLabelCount("A")` | range estimate |
+| --- | --- | --- |
+| present-time (`ReadAt(nil)`) — what EXPLAIN reads | `(5000, true)` | `98 rows, estStats, err=0.0039` |
+| snapshot-pinned — what the build reads | `(0, false)` | `0 rows, estFallback` |
+
+**The premise that needed correcting: no concurrent writer is required.** The
+failing test writes nothing after its seed. Version records are reclaimed by an
+**asynchronous** vacuum (`Graph.wakeVacuum`), so under whole-module parallel load
+the vacuum simply lags and the seed's *own* birth records are still live at plan
+time. Measured with the host deliberately saturated: **303 unreclaimed life records
+at gate time, and the pinned count declining as a result** — with an idle graph and
+no writer at all. On an idle host the vacuum always won the race, which is why the
+defect was invisible outside `-race ./...`.
+
+### What a declined count now yields
+
+`cypher.labelPopulation` carries `{n, known}`, and `resolveLabelPopulation` is the
+only place the decline is handled: the zero-allocation exact count first, and on a
+decline the cardinality of the **corrected label bitmap** — the same number
+`labelCardinalityEstimate` gives the component drain, so the estimator and the
+drain cannot disagree. `known == false` is reserved for a resolver that can supply
+neither, and demotes with its own reason.
+
+An **upper** bound (`ResolveLabelCountBound`) was rejected, and not on taste: `N`
+is the denominator of the staleness fraction, so over-stating it under-states
+`Δ/N` and would keep the planner trusting a statistic it should demote. A cheap
+**lower** bound (`raw − |suspects|`) was rejected too — it collapses towards zero
+under exactly the concurrent activity that makes it necessary, which reinstates the
+non-determinism instead of removing it.
+
+The bitmap is not free, and the query path does not pay for it: `reorderFilteredRows`
+supplies `N` from the drain it already holds (`populationFromDrain`), so
+`resolveLabelPopulation` is reached only from the rendering paths.
+`TestQueryPath_ReusesTheDrainRatherThanReResolvingN` is the gate on that.
+
+### Observability
+
+`cypher.stats.lookup.fallback` is now a total partitioned by four reasons —
+`no_statistic`, `empty_label`, `no_count`, `stale` — so an operator can tell *why*
+the planner is not using its statistics, and a declined count is distinguishable
+from a label that genuinely holds no rows. `cypher.stats.label_count.declined`
+counts the decline itself, which is not a demotion: it is the signal that the cheap
+count is unavailable. The partition is asserted by
+`TestStatsFallbackReasons_PartitionTheTotal`.
+
+### Measurement
+
+`BenchmarkJoinReorderStatsLiveHistory`, added for this task, runs the same query on
+the same graph with MVCC history quiet and live. Arms interleaved A/B/A/B, eight
+rounds, `benchstat`, no `-race`, Apple M4 (10 cores), Go 1.27.1, darwin/arm64,
+loadavg 2.6-3.1 throughout. Noise floor measured first, HEAD against itself under
+comparable load: `~ (p=0.959)` and `~ (p=0.442)`, geomean **-0.04%**.
+
+| | HEAD bd9fc194 | rmp #2771 | delta |
+| --- | --- | --- | --- |
+| `history=quiet` sec/op | 977.3 µs ± 1% | 978.8 µs ± 1% | ~ (p=0.328) |
+| `history=live` sec/op | 27 667.7 µs ± 1% | 981.7 µs ± 1% | **-96.45%** (p=0.000) |
+| `history=live` B/op | 4 947.1 KiB | 293.0 KiB | **-94.08%** (p=0.000) |
+| `history=live` allocs/op | 564.46 k | 25.06 k | **-95.56%** (p=0.000) |
+
+Two readings matter more than the headline. First, the **quiet** arm is unchanged
+on all three metrics, with `allocs/op` identical sample for sample — the fix adds
+no work where nothing was broken. Second, the fix's own two arms are 981.7 µs and
+978.8 µs, a 0.3% spread **inside the noise floor**: the plan no longer depends on
+whether MVCC history happens to be live, which is the property the whole task
+exists to establish. HEAD's spread between the same two arms is 28x.
+
+`BenchmarkJoinReorderStatsSkewed` (the pre-existing benchmark, quiet graph) was run
+the same way and shows no significant difference on any metric: geomean +0.14% on
+sec/op against a -0.04% noise floor, `allocs/op` all samples equal.
+
+### Gates
+
+```bash
+go test -count=1 -race ./cypher/...                     # RACE_EXIT=0
+go test -count=1 -run TestTCKExecution ./cypher/tck/... # 3897/3897, TCK_EXIT=0
+golangci-lint run ./cypher/...                          # 0 issues
+gofmt -l cypher docs                                    # empty
+```
+
+A 22-site mutation sweep over every line this task added or changed was run twice:
+10 of 22 killed by the first round, and the 12 survivors — every one of them a
+reason-attribution, a defensive guard, an efficiency invariant, or a metric name —
+were killed by gates added for them. The sweep and its logs are session artefacts
+and are not committed; this addendum is the record.
+
+### Still open
+
+* The staleness counter `Δ` is bumped only by node-property writes
+  (`recordStatsNodePropertyWrite`, four call sites in `cypher/api.go`). **Deleting
+  nodes bumps neither `Δ` nor the delete counter**, so a label that has shrunk
+  since its statistic was built is not detected as stale by the estimator's own
+  screen. `reorderStatsFreshness` limits the damage on the decision path by taking
+  the smaller of the build-time count and the exact drain; the provider has no such
+  second opinion. Found while choosing the denominator, out of scope here.
+* `ExplainLogical` and `ExplainTable` still read present-time while the build reads
+  the query's pinned snapshot. After this task that difference can no longer change
+  an estimate's provenance, and
+  `TestExplainFidelity_StatisticsDrivenReorderMatchesTheTreeThatRuns` asserts the
+  two agree — but it remains a real difference, and a graph that changes between
+  the two calls will still be described by two different numbers. Making EXPLAIN
+  pin a snapshot is a change to its documented semantics and was not taken here.

@@ -112,3 +112,51 @@ func drainBenchQuery(b *testing.B, e *Engine, q string) {
 	}
 	_ = fmt.Sprint(n)
 }
+
+// BenchmarkJoinReorderStatsLiveHistory is the measurement rmp #2771 exists for: the
+// SAME query on the SAME graph, with MVCC version records deliberately LIVE at plan
+// time.
+//
+// That state is not exotic. [lpg.Graph.LabelCountExact] declines the moment any
+// node-life or label-delta record is unreclaimed, records are reclaimed by an
+// ASYNCHRONOUS vacuum, and under a concurrent writer they are essentially always
+// present. Before rmp #2771 the range estimator read that decline as the number
+// zero, demoted its estimate, and the reorder did not fire — so the query paid the
+// written order's repeated large scan. The estimator now distinguishes a declined
+// count from an empty label, and the same plan is chosen with or without history.
+//
+// The graph is rebuilt per arm rather than shared, because the open reader that
+// keeps history live is bound to the graph it was taken from.
+func BenchmarkJoinReorderStatsLiveHistory(b *testing.B) {
+	const q = "MATCH (a:A) WHERE a.x > 4900 MATCH (b:B {y: 7}) RETURN a.x AS ax, b.y AS bv"
+	for _, arm := range []struct {
+		name string
+		live bool
+	}{{"history=quiet", false}, {"history=live", true}} {
+		b.Run(arm.name, func(b *testing.B) {
+			g := buildRangeSkewGraph(b, 5000, 2000)
+			e := NewEngine(g)
+			if err := e.RefreshStatistics(context.Background()); err != nil {
+				b.Fatal(err)
+			}
+			if arm.live {
+				// A reader FIRST, so the reclamation watermark cannot pass the write
+				// that follows; the record it pushes then stays live for the whole
+				// measurement instead of being vacuumed away mid-run.
+				held := g.BeginRead()
+				defer g.EndRead(held)
+				mustNode(b, g, "zz-bench-live", "ZZUnrelated", "zz", 1)
+				if g.NodeLifeVersionCount() == 0 {
+					b.Fatal("no live node-life record survived; this arm is not measuring " +
+						"what it claims to")
+				}
+			}
+			drainBenchQuery(b, e, q)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				drainBenchQuery(b, e, q)
+			}
+		})
+	}
+}
