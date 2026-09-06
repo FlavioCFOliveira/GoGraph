@@ -164,6 +164,13 @@ type ShortestPath struct {
 	revToFwd   []uint64
 	outBuf     []expr.Value
 
+	// slotsRead is the operator's LIFETIME count of relationship slots read from
+	// the adjacency, across every search this operator runs and across every
+	// re-Init (see [ShortestPath.revPrepared] for why Init runs per outer row).
+	// It is what [ShortestPath.storageAccesses] reports, and it is charged one
+	// add per adjacency RUN by [ShortestPath.scanRun] — never one per slot.
+	slotsRead int64
+
 	srcCol int
 	dstCol int
 	// minHops / maxHops bound the accepted path length. maxHops ==
@@ -174,6 +181,10 @@ type ShortestPath struct {
 	// exhaustive path-predicate search, NOT reset per input row, so it bounds the
 	// M × (per-row cost) multiplication an attacker could drive by inflating
 	// source cardinality — the same defence VarLengthExpand applies (#1840).
+	//
+	// It counts ADMITTED ARCS, not slots read, and is a resource BUDGET rather
+	// than a measurement — see [ShortestPath.storageAccesses] for why the db-hits
+	// figure does not add it in.
 	totalEdgesTraversed int
 	// maxEdgesTraversed / maxTotalEdgesTraversed are the per-input-row and
 	// aggregate per-query edge-traversal caps for the exhaustive path-predicate
@@ -493,10 +504,8 @@ func (op *ShortestPath) exhArcs(node uint64) []exhParc {
 		if isFwd {
 			verts, edges = op.fwdVerts, op.fwdEdges
 		}
-		if node+1 >= uint64(len(verts)) {
-			return
-		}
-		for pos := verts[node]; pos < verts[node+1]; pos++ {
+		pos, end := op.scanRun(verts, node)
+		for ; pos < end; pos++ {
 			if !op.passesTypeFilter(pos, isFwd) {
 				continue
 			}
@@ -674,10 +683,8 @@ func (op *ShortestPath) bfsShortestCycleForward(src uint64) (expr.Value, bool, e
 			if isFwd {
 				verts, edges = op.fwdVerts, op.fwdEdges
 			}
-			if node+1 >= uint64(len(verts)) {
-				return
-			}
-			for pos := verts[node]; pos < verts[node+1]; pos++ {
+			pos, end := op.scanRun(verts, node)
+			for ; pos < end; pos++ {
 				if !op.passesTypeFilter(pos, isFwd) {
 					continue
 				}
@@ -848,10 +855,8 @@ func (op *ShortestPath) branchArcs(node uint64, seen map[uint64]struct{}) []scan
 		if isFwd {
 			verts, edges = op.fwdVerts, op.fwdEdges
 		}
-		if node+1 >= uint64(len(verts)) {
-			return
-		}
-		for pos := verts[node]; pos < verts[node+1]; pos++ {
+		pos, end := op.scanRun(verts, node)
+		for ; pos < end; pos++ {
 			if !op.passesTypeFilter(pos, isFwd) {
 				continue
 			}
@@ -1114,6 +1119,35 @@ func (op *ShortestPath) prefixReusesEdge(pred map[uint64]spPredEntry, src, node,
 	return false
 }
 
+// scanRun returns the half-open slot range [pos, end) of node's adjacency run in
+// verts, and charges its WHOLE length to the operator's storage-access counter.
+// An out-of-range node yields the empty range and is charged nothing.
+//
+// # Why one add per run is an exact count, not an approximation
+//
+// Every caller is a loop of the form `for ; pos < end; pos++` whose body only
+// ever `continue`s: no scan in either operator breaks out of an adjacency run
+// early, so the number of slots the loop touches is exactly `end - pos`. The
+// same expression therefore produces the loop bound and the charge, which is
+// what keeps them from drifting — a per-slot increment would count the same
+// number at one add per slot instead of one per run. That the two agree was not
+// argued but MEASURED: a temporary per-slot probe with a panic on disagreement
+// ran the cypher and exec suites with zero disagreements, and halving one charge
+// site made it fire (rmp #2763).
+//
+// Charging a slot the relationship-type filter then rejects is deliberate and is
+// the same definition [Expand.storageAccesses] uses: the slot was read before it
+// could be judged. Neo4j 5.26.16 charges it the same way, inside the loop whose
+// condition is the type selection.
+func (op *ShortestPath) scanRun(verts []uint64, node uint64) (pos, end uint64) {
+	if node+1 >= uint64(len(verts)) {
+		return 0, 0
+	}
+	pos, end = verts[node], verts[node+1]
+	op.slotsRead += int64(end - pos)
+	return pos, end
+}
+
 // spExpand explores edges of node, recording new discoveries in pred. isFwd
 // selects forward vs reverse adjacency. found reports whether dst was reached.
 func (op *ShortestPath) spExpand(node uint64, pred map[uint64]spPredEntry, dst uint64, isFwd bool) (newNodes []uint64, found bool) {
@@ -1121,10 +1155,8 @@ func (op *ShortestPath) spExpand(node uint64, pred map[uint64]spPredEntry, dst u
 	if isFwd {
 		verts, edges = op.fwdVerts, op.fwdEdges
 	}
-	if node+1 >= uint64(len(verts)) {
-		return nil, false
-	}
-	for pos := verts[node]; pos < verts[node+1]; pos++ {
+	pos, end := op.scanRun(verts, node)
+	for ; pos < end; pos++ {
 		if !op.passesTypeFilter(pos, isFwd) {
 			continue
 		}
@@ -1234,6 +1266,66 @@ func (op *ShortestPath) resolvedFwdPosOrSelf(revPos uint64) uint64 {
 	return pos
 }
 
+// storageAccesses reports the relationship slots this operator's searches
+// actually read. It implements the storageAccessCounter marker in profile.go, so
+// PROFILE renders this operator's cell as MEASURED rather than as the "?" it
+// showed from rmp #2760 until rmp #2763, and as the bare 0 it showed before that.
+//
+// # What it counts
+//
+// Every adjacency run every search walks, in whichever CSR it walked it, whatever
+// became of each slot — traversed, rejected by the relationship-type filter,
+// skipped as already discovered, or dropped as a duplicate handle. That is the
+// definition [Expand.storageAccesses] uses and the one Neo4j 5.26.16 uses, and it
+// covers all five scanning sites:
+//
+//   - [ShortestPath.biScan], the two-sided BFS — the COMMON path, and the one
+//     that made this figure necessary: it was the whole of a typical
+//     shortestPath's storage work and nothing counted it;
+//   - [ShortestPath.spExpand], the forward-only BFS the two-sided search falls
+//     back to;
+//   - the DirOut cycle search's scan ([ShortestPath.bfsShortestCycleForward]);
+//   - [ShortestPath.branchArcs], the DirBoth branch-collision cycle search;
+//   - [ShortestPath.exhArcs], the exhaustive path-predicate search.
+//
+// The figure survives re-Init, so an operator driven once per outer row under a
+// CorrelatedApply — which is how a shortestPath whose endpoints come from an
+// outer pattern is planned — reports its whole lifetime and not its last
+// invocation.
+//
+// # Why totalEdgesTraversed is NOT added to it
+//
+// [ShortestPath.totalEdgesTraversed] is the exhaustive search's resource BUDGET.
+// It counts the arcs [ShortestPath.exhArcs] RETURNED — post type filter, post
+// handle de-duplication — for the same runs this counter charges the slots of.
+// Adding the two would count one walk twice under two different definitions and
+// report up to 2x the storage work on the only path where both are live. So the
+// exhaustive search contributes here through its slot charge like every other
+// search, one definition throughout, and the budget stays a budget.
+//
+// # Why this costs a non-PROFILE run nothing measurable
+//
+// The charge is one add per adjacency RUN, not per slot: [ShortestPath.scanRun]
+// computes the loop's own bound and banks its length in the same expression. A
+// run of degree d therefore costs one subtraction and one add against d
+// iterations that each call the type filter and probe at least one map. There is
+// no per-slot increment and nothing is threaded through any accessor.
+//
+// # What is deliberately OUTSIDE the figure
+//
+// Three reads, all of them position RECOVERY rather than search, and all of the
+// same kind as the property reads no operator's db-hits count (see
+// [StorageRecordScan]):
+//
+//   - [ShortestPath.scanFwdPos] and [ShortestPath.hopForTraversal], which scan a
+//     node's forward run to recover ONE hop's forward position at reconstruction
+//     time. They run over the found path's ≤ d hops, never over the search.
+//   - buildRevToFwd, called from Init. It walks both CSRs whole to build a
+//     position table; it is index construction, not a search read, and charging
+//     it would make the figure a function of the graph's size rather than of the
+//     work the search did.
+func (op *ShortestPath) storageAccesses() int64 { return op.slotsRead }
+
 // Close closes the input operator.
 func (op *ShortestPath) Close() error {
 	op.outBuf = nil
@@ -1284,6 +1376,12 @@ type AllShortestPaths struct {
 	pending  []expr.ListValue // collected paths from last BFS
 	outBuf   []expr.Value
 
+	// slotsRead is the operator's LIFETIME count of relationship slots read from
+	// the adjacency, across every search and every re-Init. It is what
+	// [AllShortestPaths.storageAccesses] reports, and it is charged one add per
+	// adjacency RUN by [AllShortestPaths.scanRun] — never one per slot.
+	slotsRead int64
+
 	srcCol     int
 	dstCol     int
 	minHops    int
@@ -1291,7 +1389,9 @@ type AllShortestPaths struct {
 	pendingIdx int
 	// totalEdgesTraversed is the aggregate per-query edge-traversal count of the
 	// exhaustive path-predicate search, NOT reset per input row (see the same
-	// field on [ShortestPath]) (#1840).
+	// field on [ShortestPath]) (#1840). It counts ADMITTED ARCS rather than slots
+	// read and is a resource BUDGET, not a measurement; see
+	// [AllShortestPaths.storageAccesses].
 	totalEdgesTraversed int
 	// maxEdgesTraversed / maxTotalEdgesTraversed are the per-input-row and
 	// aggregate per-query edge-traversal caps (see [ShortestPath]); overridable
@@ -1545,10 +1645,8 @@ func (op *AllShortestPaths) exhArcs(node uint64) []exhParc {
 		if isFwd {
 			verts, edges = op.fwdVerts, op.fwdEdges
 		}
-		if node+1 >= uint64(len(verts)) {
-			return
-		}
-		for pos := verts[node]; pos < verts[node+1]; pos++ {
+		pos, end := op.scanRun(verts, node)
+		for ; pos < end; pos++ {
 			if !op.passesTypeFilter(pos, isFwd) {
 				continue
 			}
@@ -1673,15 +1771,26 @@ func (op *AllShortestPaths) testCandidate(inputRow Row, cand expr.ListValue) (bo
 
 // aspExpand expands edges of node at the given BFS level. isFwd selects forward
 // vs reverse adjacency.
+// scanRun is [ShortestPath.scanRun] for this operator: the half-open slot range
+// of node's adjacency run, with the run's whole length charged to this
+// operator's storage-access counter in one add. The exactness argument and the
+// treatment of type-filtered slots are identical and are documented there.
+func (op *AllShortestPaths) scanRun(verts []uint64, node uint64) (pos, end uint64) {
+	if node+1 >= uint64(len(verts)) {
+		return 0, 0
+	}
+	pos, end = verts[node], verts[node+1]
+	op.slotsRead += int64(end - pos)
+	return pos, end
+}
+
 func (op *AllShortestPaths) aspExpand(node uint64, dist map[uint64]int, preds map[uint64][]aspPredEntry, level int, dst uint64, isFwd bool) (newNodes []uint64, found bool) {
 	verts, edges := op.revVerts, op.revEdges
 	if isFwd {
 		verts, edges = op.fwdVerts, op.fwdEdges
 	}
-	if node+1 >= uint64(len(verts)) {
-		return nil, false
-	}
-	for pos := verts[node]; pos < verts[node+1]; pos++ {
+	pos, end := op.scanRun(verts, node)
+	for ; pos < end; pos++ {
 		if !op.passesTypeFilter(pos, isFwd) {
 			continue
 		}
@@ -1778,10 +1887,8 @@ func (op *AllShortestPaths) bfsAllShortestCycle(src uint64) ([]expr.ListValue, e
 			if isFwd {
 				verts, edges = op.fwdVerts, op.fwdEdges
 			}
-			if node+1 >= uint64(len(verts)) {
-				return
-			}
-			for pos := verts[node]; pos < verts[node+1]; pos++ {
+			pos, end := op.scanRun(verts, node)
+			for ; pos < end; pos++ {
 				if !op.passesTypeFilter(pos, isFwd) {
 					continue
 				}
@@ -1925,10 +2032,8 @@ func (op *AllShortestPaths) branchArcs(node uint64, seen map[uint64]struct{}) []
 		if isFwd {
 			verts, edges = op.fwdVerts, op.fwdEdges
 		}
-		if node+1 >= uint64(len(verts)) {
-			return
-		}
-		for pos := verts[node]; pos < verts[node+1]; pos++ {
+		pos, end := op.scanRun(verts, node)
+		for ; pos < end; pos++ {
 			if !op.passesTypeFilter(pos, isFwd) {
 				continue
 			}
@@ -2374,6 +2479,31 @@ func (op *AllShortestPaths) resolveFwdPosKnown(revPos uint64) (uint64, bool) {
 	}
 	return revPos, false
 }
+
+// storageAccesses reports the relationship slots this operator's searches
+// actually read, on the same definition and with the same one-add-per-run charge
+// as [ShortestPath.storageAccesses]; read that for the exactness argument, for
+// why a type-filtered slot is charged, and for why
+// [AllShortestPaths.totalEdgesTraversed] is not added in.
+//
+// This operator's search is NOT the two-sided one. Level-synchronous BFS with a
+// multi-predecessor map is what allShortestPaths needs and what
+// shortest_path_bidir.go's file comment says the two-sided search is deliberately
+// not applied to, so the four scanning sites here are
+// [AllShortestPaths.aspExpand], the DirOut/DirIn cycle search's scan
+// ([AllShortestPaths.bfsAllShortestCycle]), [AllShortestPaths.branchArcs] for the
+// DirBoth cycle search, and [AllShortestPaths.exhArcs] for the exhaustive
+// path-predicate search.
+//
+// Its rows are a particularly bad estimator of the number, in both directions: a
+// fan of N mids all reaching dst emits N rows for a walk of 2N slots, and a fan
+// of N mids of which one reaches dst emits ONE row for a walk of N+1. Neither is
+// the row count.
+//
+// Outside the figure, as for [ShortestPath.storageAccesses]:
+// [AllShortestPaths.hopForTraversal]'s reconstruction-time position recovery, and
+// buildRevToFwd's index build in Init.
+func (op *AllShortestPaths) storageAccesses() int64 { return op.slotsRead }
 
 // Close closes the input operator.
 func (op *AllShortestPaths) Close() error {

@@ -1,0 +1,12 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/store/wal
+cpu: Apple M4
+BenchmarkCRCIncremental/payload16-10         	201904123	         5.592 ns/op	4649.19 MB/s	       0 B/op	       0 allocs/op
+BenchmarkCRCIncremental/payload64-10         	186399285	         6.448 ns/op	11477.18 MB/s	       0 B/op	       0 allocs/op
+BenchmarkCRCIncremental/payload256-10        	66036720	        18.43 ns/op	14430.34 MB/s	       0 B/op	       0 allocs/op
+BenchmarkCRCIncremental/payload4096-10       	 3045153	       394.3 ns/op	10414.08 MB/s	       0 B/op	       0 allocs/op
+BenchmarkEncode-10                           	 2419128	       502.4 ns/op	8180.24 MB/s	      16 B/op	       1 allocs/op
+BenchmarkDecode-10                           	 1302760	       919.7 ns/op	4468.76 MB/s	    4160 B/op	       3 allocs/op
+BenchmarkReader_Replay-10                    	   14641	     81283 ns/op	3236.10 MB/s	  329083 B/op	     134 allocs/op
+PASS

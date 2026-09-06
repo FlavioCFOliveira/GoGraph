@@ -1,0 +1,54 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/search
+cpu: Apple M4
+BenchmarkBFSDirectionOpt_PowerLaw-10    	      39	  29378194 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDijkstra_Large-10              	     145	   8128907 ns/op	 1129264 B/op	       4 allocs/op
+BenchmarkDijkstra_PostWarmup-10         	     147	   8102378 ns/op	       0 B/op	       0 allocs/op
+BenchmarkYen_K100-10                    	      80	  14350413 ns/op	  459789 B/op	    1280 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/search
+cpu: Apple M4
+BenchmarkBFSDirectionOpt_PowerLaw-10    	      39	  28716346 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDijkstra_Large-10              	     142	   8285528 ns/op	 1205728 B/op	       4 allocs/op
+BenchmarkDijkstra_PostWarmup-10         	     147	   8146806 ns/op	       0 B/op	       0 allocs/op
+BenchmarkYen_K100-10                    	      79	  14788335 ns/op	  459942 B/op	    1280 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/search
+cpu: Apple M4
+BenchmarkBFSDirectionOpt_PowerLaw-10    	      39	  28632826 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDijkstra_Large-10              	     146	   8353429 ns/op	 1129160 B/op	       4 allocs/op
+BenchmarkDijkstra_PostWarmup-10         	     146	   8050645 ns/op	       0 B/op	       0 allocs/op
+BenchmarkYen_K100-10                    	      79	  14575028 ns/op	  459385 B/op	    1280 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/search
+cpu: Apple M4
+BenchmarkBFSDirectionOpt_PowerLaw-10    	      38	  28943514 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDijkstra_Large-10              	     142	   8263942 ns/op	 1236200 B/op	       4 allocs/op
+BenchmarkDijkstra_PostWarmup-10         	     146	   8159211 ns/op	       0 B/op	       0 allocs/op
+BenchmarkYen_K100-10                    	      80	  14694112 ns/op	  460320 B/op	    1281 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/search
+cpu: Apple M4
+BenchmarkBFSDirectionOpt_PowerLaw-10    	      39	  29436752 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDijkstra_Large-10              	     145	   8150027 ns/op	 1248591 B/op	       4 allocs/op
+BenchmarkDijkstra_PostWarmup-10         	     142	   8253453 ns/op	       0 B/op	       0 allocs/op
+BenchmarkYen_K100-10                    	      80	  14633576 ns/op	  459481 B/op	    1280 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/search
+cpu: Apple M4
+BenchmarkBFSDirectionOpt_PowerLaw-10    	      40	  28415598 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDijkstra_Large-10              	     146	   8082446 ns/op	 1129151 B/op	       4 allocs/op
+BenchmarkDijkstra_PostWarmup-10         	     146	   8097800 ns/op	       0 B/op	       0 allocs/op
+BenchmarkYen_K100-10                    	      81	  14544474 ns/op	  459361 B/op	    1280 allocs/op
+PASS

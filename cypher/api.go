@@ -261,6 +261,27 @@ type buildOpts struct {
 	// and cannot be wrapped twice.
 	profiler *exec.Profiler
 
+	// estimates, when non-nil, collects the planner's cardinality estimate for the
+	// logical node behind each operator the builder returns, so a rendered PHYSICAL
+	// plan can show the prediction beside the measurement (rmp #2765). It is nil for
+	// every ordinary query and non-nil only on the three plan-RENDERING build paths
+	// ([Engine.explainPhysical], [Engine.runExplainPrefixed],
+	// [Engine.profileMaterialised]).
+	//
+	// It is ONE pointer rather than the map and resolver it holds, because the query
+	// path pays for every word of this struct on every execution and this field is
+	// dead weight on all of them. Measured on cypher-read-label-small: carrying it as
+	// two fields cost +1.00% on the build phase against HEAD with the recording branch
+	// removed, which is the same +1.13% the whole change cost — i.e. the fields, not
+	// the work.
+	//
+	// Like profiler it is consulted in exactly one place — [buildOperator] — and like
+	// profiler it MUST be cleared by [buildOpts.forWorker]: it holds a map shared by a
+	// value copy, and a morsel-parallel build writes it from every worker goroutine,
+	// which is `fatal error: concurrent map writes` rather than a data race the
+	// detector would merely report (the shape of rmp #2664).
+	estimates *planEstimateCollector
+
 	// nodeResolver backs [expr.LazyNodeValue] for the lazy node-materialisation
 	// fast path. It is created once per build (it depends only on the graph) and
 	// shared across every row and every node column, so the lazy path costs no
@@ -1365,9 +1386,14 @@ type Engine struct {
 	// falls through to the min-label anchor scan and its residual label Filter.
 	bitmapIntersectEnabled bool
 
-	// joinReorderEnabled gates the count-store-gated disjoint-component ordering
-	// peephole (#2091). True by default; set false by EngineOptions.DisableJoinReorder.
-	// When false the planner always builds the written-order Cartesian.
+	// joinReorderEnabled gates the disjoint-component ordering peephole (#2091).
+	// True by default; set false by EngineOptions.DisableJoinReorder. When false the
+	// planner always builds the written-order Cartesian.
+	//
+	// It is no longer only count-store-gated, which is what this comment said until
+	// rmp #2766: a component carrying a property predicate is now estimated from the
+	// (label, property) statistics as well, so the gate reads two estimate sources.
+	// The trustworthiness veto over both is unchanged.
 	joinReorderEnabled bool
 
 	// anchorSwapEnabled gates the count-store-gated single-edge anchor-swap
@@ -1406,10 +1432,15 @@ type Engine struct {
 	// D(label,relType,dir) / T(labelA,relType,labelB) statistics from the write
 	// path (via the mutator adapters' CountBuffer, flushed in commitUnderBarrier
 	// after the WAL fsync) and feeds estExact estimates to the planner via the
-	// count-estimate provider (task #2083). It is always non-nil. As of P2 the
-	// provider is inert — nothing on the query path consumes its estimates yet
-	// (P3 wires the join-order reorder) — so the store is maintained but its
-	// reads change no plan.
+	// count-estimate provider (task #2083). It is always non-nil.
+	//
+	// The provider is NOT inert, and the three statistics differ. D is consumed on
+	// the query path by the anchor swap ([swapCandidate.gate]), so a count-store
+	// read can change a plan. E and T have no non-test consumer: their providers
+	// ([relCardinalityEstimate], [tripleCardinalityEstimate]) are proven correct in
+	// isolation and wired to nothing. The blanket "inert" this comment carried was
+	// already false when D reached the anchor swap, and is corrected here rather
+	// than left to be believed (rmp #2768).
 	countStore *count.Store
 
 	// statsCollector holds the best-effort approximate planner statistics (NDV /
@@ -1422,11 +1453,20 @@ type Engine struct {
 	// SetNodeProperty / DelNodeProperty guard before any [statsCollector.Tracking]
 	// atomic, task #2101). It is an [atomic.Pointer] because the install
 	// ([RefreshStatistics]) races the lock-free reads on the write path (adapter
-	// construction) and the read path (resolver construction). As of #2097/#2098
-	// the statistics ship INERT — #2099 renders them display-only in EXPLAIN, no
-	// plan consumes them — so absence is harmless (a consumer falls back to its
-	// exact-count plan).
+	// construction) and the read path (resolver construction). Absence stays
+	// harmless: a consumer falls back to its exact-count plan, and the
+	// trustworthiness veto ([planStaysDefault]) keeps the default plan rather than
+	// acting on a missing statistic. The statistics shipped INERT from #2097/#2098
+	// until rmp #2766, which wired them to the join reorder; they are no longer
+	// display-only.
 	statsCollector atomic.Pointer[statsCollector]
+
+	// misestimated is the set of tracked (label, property) pairs a PROFILE has
+	// caught predicting badly (rmp #2767, [Engine.StatsMisestimatedPairs]). It is
+	// written only from the PROFILE path and cleared by a successful
+	// [Engine.RefreshStatistics], so it is the answer to "is a refresh overdue,
+	// and for what?" rather than a lifetime tally. See [misestimatedPairs].
+	misestimated misestimatedPairs
 }
 
 // statsCollectorOrInit returns the engine's approximate-statistics collector,
@@ -2529,7 +2569,7 @@ func (e *Engine) runRead(ctx context.Context, query string, params map[string]ex
 	// wakes the vacuum when a departing reader lets the watermark advance. Same
 	// throttle, same convergence, none of it on the query.
 	func() {
-		op, cols, err := e.buildReadPhysical(ctx, entry, plan, params, queryReg, nil, snap)
+		op, cols, err := e.buildReadPhysical(ctx, entry, plan, params, queryReg, nil, snap, nil)
 		if err != nil {
 			buildErr = err
 			return
@@ -2573,6 +2613,14 @@ func (e *Engine) runRead(ctx context.Context, query string, params map[string]ex
 // it is threaded onto the build options so the single wrapping point in
 // [buildOperator] instruments every node. Passing nil is what makes profiling
 // free when it is off.
+//
+// estimates is nil for an ordinary execution and non-nil only for a build whose
+// plan will be RENDERED — the two EXPLAIN paths and the PROFILE one. It is threaded
+// onto the same build options and filled at the same single point, so the caller
+// gets back, in the sink it supplied, the planner's cardinality estimate for every
+// operator a logical node claimed (rmp #2765) and the (label, property) statistic
+// each estimate was read from where there is one (rmp #2767). Passing nil is what
+// keeps the estimate providers off the query path entirely.
 func (e *Engine) buildReadPhysical(
 	ctx context.Context,
 	entry *planCacheEntry,
@@ -2581,6 +2629,7 @@ func (e *Engine) buildReadPhysical(
 	queryReg expr.FunctionRegistry,
 	prof *exec.Profiler,
 	snap *lpg.Snapshot,
+	estimates *planEstimateSink,
 ) (exec.Operator, []string, error) {
 	// EVERY read this build binds goes through rv, so the whole query observes
 	// ONE instant (rmp #2289). A nil snapshot yields a view of the current
@@ -2622,6 +2671,17 @@ func (e *Engine) buildReadPhysical(
 	// comprehension is evaluated rather than answered false (rmp #2507).
 	patEval.bind(params, subEval)
 	bopts.profiler = prof
+	if estimates != nil {
+		// The collector, with the LIVE resolver built exactly as
+		// [Engine.explainInputsFor] builds the one the logical walk reads, so the
+		// estimate a physical operator carries is the same number the logical table
+		// prints for the node it came from. Two allocations on a rendering build; none
+		// at all on the query path, which passes no sink.
+		bopts.estimates = &planEstimateCollector{
+			into: estimates,
+			src:  &lpgLabelResolver{g: e.g.ReadAt(nil), eng: e},
+		}
+	}
 	// Point the build at this plan's cross-execution analysis memo (rmp #2383).
 	// entry is nil on no read path today, but the guard keeps the coupling
 	// one-directional: a future caller without an entry loses the memo, not the
@@ -2671,12 +2731,18 @@ func (e *Engine) buildReadPhysical(
 	// the plan has memoised order-safe candidates, apply the live cardinality
 	// gate against this query's snapshot. The live node total (for AllNodesScan
 	// components) and every label count are read under View's visibility
-	// barrier, so all cost inputs come from one consistent snapshot. The swap
+	// barrier, so all cost inputs come from one consistent snapshot.
+	//
+	// params is passed because a FILTERED component's row estimate depends on the
+	// bound operand (rmp #2766): `(a:A {x: $p})` and `(a:A {x: 1})` are the same
+	// memoised candidate but not the same selectivity. The structural candidate
+	// set stays parameter-independent and memoised; only this per-query gate reads
+	// a value, so a swap decided for one binding is never reused for another. The swap
 	// changes only emission order and internal column layout, never the
 	// multiset; SuppressReorder (baked into the candidate set) guarantees no
 	// downstream operator observes the change.
 	if e.joinReorderEnabled && len(entry.reorderCandidates) > 0 {
-		bopts.reorderSwap = computeReorderSwaps(entry.reorderCandidates, labelSrc, int64(e.g.LiveOrder()))
+		bopts.reorderSwap = computeReorderSwaps(entry.reorderCandidates, labelSrc, params, int64(e.g.LiveOrder()))
 	}
 	bopts.seekHint = entry.pushedSeekHints
 	// Single-edge anchor-swap gating (#2090): when the Engine permits it and
@@ -2768,11 +2834,16 @@ func (e *Engine) explainPhysical(entry *planCacheEntry, params map[string]expr.V
 	// #2304 made View exclusive.
 	snap := e.g.BeginRead()
 	defer e.g.EndRead(snap)
-	op, _, err := e.buildReadPhysical(context.Background(), entry, entry.plan, params, queryReg, nil, snap)
+	// The estimates the planner derived, collected during the build and rendered
+	// beside the operators they were derived for. EXPLAIN measures nothing, so they
+	// are the only figures this rendering has (rmp #2765).
+	est := planEstimatesFor(entry.plan)
+	op, _, err := e.buildReadPhysical(context.Background(), entry, entry.plan, params, queryReg, nil, snap, est)
 	if err != nil {
 		return "", fmt.Errorf("cypher: build plan: %w", err)
 	}
-	return exec.RenderPlan(op), nil
+	tree := exec.PlanTreeWithEstimates(op, est.est)
+	return exec.RenderPlanNode(&tree), nil
 }
 
 // Profile executes query with the given params and returns the PHYSICAL plan
@@ -2787,6 +2858,12 @@ func (e *Engine) explainPhysical(entry *planCacheEntry, params map[string]expr.V
 // Times are INCLUSIVE of an operator's children, because a pipelined operator's
 // Next pulls from them. Subtract a node's children to obtain its exclusive cost —
 // the same arithmetic a reader of Neo4j's PROFILE performs.
+//
+// A `dbhits=?` in the rendered line is not a zero and not an error: it means
+// nothing counted that operator's storage accesses. Rows and time are measured
+// for every operator; db-hits are measured, derived, or absent, and the "?" is
+// how the absence is said. [exec.PlanNode.DbHitsKnown] carries the state and
+// names which operators fall in which class.
 //
 // Profiling is off unless this method is called: the instrumentation is a wrapper
 // installed by the builder, so an ordinary [Engine.Run] executes code identical to
@@ -2893,7 +2970,8 @@ func (e *Engine) profileMaterialised(
 	}
 	func() {
 		prof := exec.NewProfiler()
-		op, cols, berr := e.buildReadPhysical(ctx, entry, entry.plan, params, queryReg, prof, snap)
+		est := planEstimatesFor(entry.plan)
+		op, cols, berr := e.buildReadPhysical(ctx, entry, entry.plan, params, queryReg, prof, snap, est)
 		if berr != nil {
 			buildErr = berr
 			return
@@ -2905,7 +2983,12 @@ func (e *Engine) profileMaterialised(
 		// Capture the tree BEFORE any Close, while the wrappers still hold their
 		// counters, so the rendering survives teardown. materialize has already
 		// driven every operator to exhaustion, so the counters are final here.
-		tree = exec.PlanTree(op)
+		tree = exec.PlanTreeWithEstimates(op, est.est)
+		// The estimate quality this run turned out to have (rmp #2767). It is the
+		// ONE call site: the comparison needs a measurement, and a measurement exists
+		// only where a Profiler was installed — which is here and nowhere else.
+		// TestQError_ObservationIsReachableOnlyFromTheProfilePath is the gate.
+		e.observeEstimateQuality(op, est)
 		res = r
 	}()
 	if buildErr != nil {
@@ -2950,7 +3033,7 @@ func (e *Engine) ExplainLogical(query string, params map[string]expr.Value) (s s
 // back to for a writing statement, whose physical tree is unreachable outside a
 // transaction.
 func (e *Engine) explainLogical(entry *planCacheEntry, params map[string]expr.Value) string {
-	in := e.explainInputsFor(entry)
+	in := e.explainInputsFor(entry, params)
 	return explainWithIndexes(in.plan, in.idxMgr, params, in.graph, in.labelSrc,
 		in.reorderSwaps, in.anchorSwaps, in.seekHints, in.prefixSeek)
 }
@@ -2963,7 +3046,11 @@ func (e *Engine) explainLogical(entry *planCacheEntry, params map[string]expr.Va
 // [Engine.ExplainTable] (which renders a table) so both read the same providers
 // under the same gates; before rmp #2701 this body was inline in explainLogical
 // and a second renderer would have had to assemble its own copy.
-func (e *Engine) explainInputsFor(entry *planCacheEntry) explainInputs {
+// params is this render's parameter binding. It reaches the reorder gate because a
+// FILTERED component's selectivity depends on the bound operand (rmp #2766); the
+// rendered plan must be the plan the read path would build for THESE parameters,
+// or EXPLAIN names a drive order the engine does not take.
+func (e *Engine) explainInputsFor(entry *planCacheEntry, params map[string]expr.Value) explainInputs {
 	plan := entry.plan
 	// Reflect the count-store-gated reordering peepholes in the rendered plan so
 	// EXPLAIN shows the physically-built shape, not just the written logical order:
@@ -2982,7 +3069,7 @@ func (e *Engine) explainInputsFor(entry *planCacheEntry) explainInputs {
 	var anchorSwaps map[*ir.Expand]bool
 	if e.joinReorderEnabled {
 		if cands := collectReorderCandidates(plan); len(cands) > 0 {
-			reorderSwaps = computeReorderSwaps(cands, labelSrc, int64(e.g.LiveOrder()))
+			reorderSwaps = computeReorderSwaps(cands, labelSrc, params, int64(e.g.LiveOrder()))
 		}
 	}
 	if e.anchorSwapEnabled {
@@ -6645,9 +6732,11 @@ type lpgLabelResolver struct {
 	// resolver at its pre-statistics two-word footprint (task #2101). It is nil
 	// for resolver instances built without an engine (the write-path build at
 	// execUnderBarrier, and some tests), in which case both Counts and Statistics
-	// report absence and every estimate provider falls back to estFallback. As of
-	// #2097/#2098/#2099 nothing on the query path GATES on these estimates (they
-	// are inert / display-only), so absence is harmless.
+	// report absence and every estimate provider falls back to estFallback.
+	// Absence is harmless because estFallback is untrustworthy by construction, so
+	// the veto ([planStaysDefault]) keeps today's default plan. Since rmp #2766 the
+	// query path DOES gate on these estimates — the join reorder consumes them —
+	// so the claim that they are inert or display-only no longer holds.
 	eng *Engine
 }
 
@@ -6792,6 +6881,30 @@ func (s *lpgLabelResolver) ResolveLabelCount(name string) (int64, bool) {
 	// against, so when the bitmap would need filtering the only sound answer is
 	// to decline and let the caller count the filtered scan (rmp #2290).
 	return s.g.Raw().LabelCountExact(lid, s.g.Snapshot())
+}
+
+// ResolveLabelCountAsOf reports the number of live nodes that carry name as of
+// this resolver's snapshot, ALWAYS exactly — it never declines.
+//
+// It backs [exec.LabelCountScan]'s second choice (rmp #2773). The first choice
+// stays [lpgLabelResolver.ResolveLabelCount], which is exact-or-nothing and
+// costs three atomic loads when it answers; this one exists for the decline,
+// which used to send the operator to [lpgLabelResolver.ResolveLabelBitmap] and
+// so made a bare labelled count CLONE the whole label bitmap purely to read its
+// cardinality. See [lpg.Graph.LabelCountAsOf] for why the clone was vacuous
+// whenever the churn that caused the decline concerned some other label, and for
+// the measurement.
+//
+// An unknown label yields (0, true), matching the empty bitmap
+// [lpgLabelResolver.ResolveLabelBitmap] would return. The bool is never false; it
+// is present so the optional interface has the same shape as the exact-or-nothing
+// one and so a resolver that cannot answer can say so.
+func (s *lpgLabelResolver) ResolveLabelCountAsOf(name string) (int64, bool) {
+	lid, ok := s.g.Registry().Lookup(name)
+	if !ok {
+		return 0, true
+	}
+	return s.g.Raw().LabelCountAsOf(lid, s.g.Snapshot()), true
 }
 
 // ResolveLabelCountBound reports an UPPER BOUND on the number of live nodes that
@@ -9169,6 +9282,11 @@ func wrapWithColumnPassthrough(child exec.Operator, cols []string, schema map[st
 // constructed with its child already wrapped and runs its capability
 // type-assertions against the wrapper. [exec.Profiler.Wrap] therefore preserves
 // whatever the child exposes; see its documentation for why that is load-bearing.
+//
+// It is also the one place a logical node and the operator built from it are both
+// in hand, which is why the cardinality-estimate attribution happens here too
+// (rmp #2765). See plan_estimate_physical.go for the attribution rule and for the
+// shapes it deliberately declines to map.
 func buildOperator(
 	plan ir.LogicalPlan,
 	walker nodeWalkerIface,
@@ -9182,7 +9300,26 @@ func buildOperator(
 	bopts *buildOpts,
 ) (exec.Operator, error) {
 	op, err := buildOperatorRec(plan, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
-	if err != nil || bopts == nil || bopts.profiler == nil {
+	// ONE early-out for the ordinary query, which has neither an estimate collector
+	// nor a profiler. Keeping the common case on a single short-circuit chain is not
+	// cosmetic: this function runs once per operator of every query, and splitting
+	// the chain into two sequential guards was MEASURED at +1.0% on the build phase
+	// of cypher-read-label-small (rmp #2765). Anything added here must stay behind
+	// this line.
+	if err != nil || bopts == nil || (bopts.estimates == nil && bopts.profiler == nil) {
+		return op, err
+	}
+	// Claim the operator for this logical node and record the planner's estimate for
+	// it (rmp #2765). Recorded on the UNWRAPPED operator, before the profiling
+	// wrapper below, because that identity survives an unwrap-and-rebuild
+	// substitution while the wrapper's does not — see [exec.PlanTreeWithEstimates].
+	// The claim is written on the way OUT of the recursion, so a child has always
+	// claimed its operator before its parent sees it, which is what makes
+	// "the deepest node owns it" true by construction rather than by inspection.
+	if bopts.estimates != nil {
+		recordPlanEstimate(bopts.estimates, plan, op, walker, params)
+	}
+	if bopts.profiler == nil {
 		return op, err
 	}
 	return bopts.profiler.Wrap(op), nil
@@ -10906,6 +11043,14 @@ func (b *buildOpts) forWorker() *buildOpts {
 	// and two time.Now calls per row that no reader could ever see. The parallel
 	// tier is measured as one node, which is what exec.Profiler documents.
 	cp.profiler = nil
+	// SHARED MAP, and the more dangerous of the two: a concurrent map write is a
+	// runtime THROW, not a detector report. estimates is written by buildOperator on
+	// whichever goroutine builds, and the per-morsel subtree is built on a worker, so
+	// a shared copy would have N workers writing one map. Clearing it costs the
+	// rendered plan nothing for the same reason clearing the profiler does — a
+	// morsel-parallel leaf implements no exec.PlanChildren, so nothing built below it
+	// is ever reachable from the output (rmp #2765).
+	cp.estimates = nil
 	return &cp
 }
 
@@ -18191,6 +18336,19 @@ func (a *execLabelAdapter) ResolveLabelCount(name string) (int64, bool) {
 		ResolveLabelCount(string) (int64, bool)
 	}); ok {
 		return lc.ResolveLabelCount(name)
+	}
+	return 0, false
+}
+
+// ResolveLabelCountAsOf forwards the always-exact snapshot count to the underlying
+// resolver when it supports one (rmp #2773). A resolver that does not reports
+// ok == false, and [exec.LabelCountScan] then falls back to the bitmap
+// cardinality exactly as it did before.
+func (a *execLabelAdapter) ResolveLabelCountAsOf(name string) (int64, bool) {
+	if lc, ok := a.labelSrc.(interface {
+		ResolveLabelCountAsOf(string) (int64, bool)
+	}); ok {
+		return lc.ResolveLabelCountAsOf(name)
 	}
 	return 0, false
 }

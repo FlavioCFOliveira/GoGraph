@@ -1,5 +1,12 @@
 # Raw measurement data — v0.13.0 comparative campaign
 
+> **Note on the distribution archive.** The raw data files this document points at
+> live in the GoGraph repository and are deliberately **not** shipped in the release
+> tarball, which carries Markdown only (`.goreleaser.yaml`, rmp #2758). Read them at
+> the tag in git; this README travels with the archive so the method is recorded even
+> where the data is not.
+
+
 Every figure in [`../v0.13.0.md`](../v0.13.0.md) traces to a file here.
 
 - `<label>.base.txt` — the `v0.12.0` arm (`f97bbfec`), benchstat-ready.

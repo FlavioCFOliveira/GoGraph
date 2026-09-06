@@ -1,0 +1,90 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/graph/lpg
+cpu: Apple M4
+BenchmarkBarrier_BareRWMutexParallel           	323899716	         3.691 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBarrier_BareRWMutexParallel-8         	26588672	        39.27 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBarrier_BareRWMutexParallel-64        	15788227	        73.55 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBarrier_BareRWMutexParallel-256       	15968444	        74.41 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBarrier_BareRWMutexParallel-1024      	16097335	        73.40 ns/op	       0 B/op	       0 allocs/op
+BenchmarkNodeMetadataReadParallel              	13854506	        90.81 ns/op	      64 B/op	       1 allocs/op
+BenchmarkNodeMetadataReadParallel-8            	 8565044	       139.6 ns/op	      64 B/op	       1 allocs/op
+BenchmarkNodeMetadataReadParallel-64           	 8668507	       137.9 ns/op	      64 B/op	       1 allocs/op
+BenchmarkNodeMetadataReadParallel-256          	 8646984	       137.9 ns/op	      64 B/op	       1 allocs/op
+BenchmarkNodeMetadataReadParallel-1024         	 8342362	       137.4 ns/op	      64 B/op	       1 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/graph/lpg
+cpu: Apple M4
+BenchmarkBarrier_BareRWMutexParallel           	321310626	         3.716 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBarrier_BareRWMutexParallel-8         	26904949	        41.88 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBarrier_BareRWMutexParallel-64        	15802416	        73.83 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBarrier_BareRWMutexParallel-256       	15728396	        73.82 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBarrier_BareRWMutexParallel-1024      	16223605	        73.66 ns/op	       0 B/op	       0 allocs/op
+BenchmarkNodeMetadataReadParallel              	13638468	        90.78 ns/op	      64 B/op	       1 allocs/op
+BenchmarkNodeMetadataReadParallel-8            	 8606530	       139.1 ns/op	      64 B/op	       1 allocs/op
+BenchmarkNodeMetadataReadParallel-64           	 8712531	       137.6 ns/op	      64 B/op	       1 allocs/op
+BenchmarkNodeMetadataReadParallel-256          	 8646765	       137.2 ns/op	      64 B/op	       1 allocs/op
+BenchmarkNodeMetadataReadParallel-1024         	 8541198	       144.7 ns/op	      64 B/op	       1 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/graph/lpg
+cpu: Apple M4
+BenchmarkBarrier_BareRWMutexParallel           	326919877	         3.675 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBarrier_BareRWMutexParallel-8         	27015288	        45.12 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBarrier_BareRWMutexParallel-64        	16207345	        75.02 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBarrier_BareRWMutexParallel-256       	15652284	        74.44 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBarrier_BareRWMutexParallel-1024      	16753975	        74.72 ns/op	       0 B/op	       0 allocs/op
+BenchmarkNodeMetadataReadParallel              	13873333	        89.80 ns/op	      64 B/op	       1 allocs/op
+BenchmarkNodeMetadataReadParallel-8            	 8588533	       138.8 ns/op	      64 B/op	       1 allocs/op
+BenchmarkNodeMetadataReadParallel-64           	 8633352	       138.2 ns/op	      64 B/op	       1 allocs/op
+BenchmarkNodeMetadataReadParallel-256          	 8652044	       139.5 ns/op	      64 B/op	       1 allocs/op
+BenchmarkNodeMetadataReadParallel-1024         	 7947994	       140.3 ns/op	      64 B/op	       1 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/graph/lpg
+cpu: Apple M4
+BenchmarkBarrier_BareRWMutexParallel           	324231873	         3.746 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBarrier_BareRWMutexParallel-8         	26865531	        44.12 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBarrier_BareRWMutexParallel-64        	15660642	        71.14 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBarrier_BareRWMutexParallel-256       	15922052	        72.32 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBarrier_BareRWMutexParallel-1024      	16737460	        71.71 ns/op	       0 B/op	       0 allocs/op
+BenchmarkNodeMetadataReadParallel              	14334876	        90.64 ns/op	      64 B/op	       1 allocs/op
+BenchmarkNodeMetadataReadParallel-8            	 8585143	       139.3 ns/op	      64 B/op	       1 allocs/op
+BenchmarkNodeMetadataReadParallel-64           	 8643238	       137.9 ns/op	      64 B/op	       1 allocs/op
+BenchmarkNodeMetadataReadParallel-256          	 8649248	       138.1 ns/op	      64 B/op	       1 allocs/op
+BenchmarkNodeMetadataReadParallel-1024         	 8308932	       137.9 ns/op	      64 B/op	       1 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/graph/lpg
+cpu: Apple M4
+BenchmarkBarrier_BareRWMutexParallel           	326395353	         3.754 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBarrier_BareRWMutexParallel-8         	26813110	        46.09 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBarrier_BareRWMutexParallel-64        	16453983	        73.84 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBarrier_BareRWMutexParallel-256       	16362390	        72.40 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBarrier_BareRWMutexParallel-1024      	17099659	        71.55 ns/op	       0 B/op	       0 allocs/op
+BenchmarkNodeMetadataReadParallel              	13409218	        91.14 ns/op	      64 B/op	       1 allocs/op
+BenchmarkNodeMetadataReadParallel-8            	 8596560	       139.7 ns/op	      64 B/op	       1 allocs/op
+BenchmarkNodeMetadataReadParallel-64           	 8617946	       138.6 ns/op	      64 B/op	       1 allocs/op
+BenchmarkNodeMetadataReadParallel-256          	 8635249	       140.0 ns/op	      64 B/op	       1 allocs/op
+BenchmarkNodeMetadataReadParallel-1024         	 8382285	       138.0 ns/op	      64 B/op	       1 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/graph/lpg
+cpu: Apple M4
+BenchmarkBarrier_BareRWMutexParallel           	326200749	         3.706 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBarrier_BareRWMutexParallel-8         	26797377	        41.57 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBarrier_BareRWMutexParallel-64        	15440653	        76.04 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBarrier_BareRWMutexParallel-256       	15422322	        77.22 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBarrier_BareRWMutexParallel-1024      	16967016	        75.95 ns/op	       0 B/op	       0 allocs/op
+BenchmarkNodeMetadataReadParallel              	13898808	        89.24 ns/op	      64 B/op	       1 allocs/op
+BenchmarkNodeMetadataReadParallel-8            	 8590952	       139.1 ns/op	      64 B/op	       1 allocs/op
+BenchmarkNodeMetadataReadParallel-64           	 8642865	       138.3 ns/op	      64 B/op	       1 allocs/op
+BenchmarkNodeMetadataReadParallel-256          	 8595069	       138.2 ns/op	      64 B/op	       1 allocs/op
+BenchmarkNodeMetadataReadParallel-1024         	 8220291	       138.4 ns/op	      64 B/op	       1 allocs/op
+PASS

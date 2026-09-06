@@ -160,11 +160,16 @@ func (e *Engine) runExplainPrefixed(
 		snap = e.g.BeginRead()
 		defer e.g.EndRead(snap)
 	}
-	op, cols, err := e.buildReadPhysical(ctx, entry, entry.plan, params, queryReg, nil, snap)
+	// The planner's cardinality estimates, collected during the build so the captured
+	// tree — and through it the Bolt `plan` metadata a driver reads — carries the
+	// numbers the planner acted on (rmp #2765, closing divergence D9). An EXPLAIN
+	// measures nothing, so these are the only figures it has to publish.
+	est := planEstimatesFor(entry.plan)
+	op, cols, err := e.buildReadPhysical(ctx, entry, entry.plan, params, queryReg, nil, snap, est)
 	if err != nil {
 		return nil, fmt.Errorf("cypher: build plan: %w", err)
 	}
-	node := exec.PlanTree(op)
+	node := exec.PlanTreeWithEstimates(op, est.est)
 	return newPlanResult(cols, &node, parser.PlanModeExplain), nil
 }
 
@@ -224,7 +229,7 @@ func (e *Engine) logicalPlanNode(entry *planCacheEntry, params map[string]expr.V
 		have  bool
 		stack []*exec.PlanNode // stack[d] is the node most recently opened at depth d
 	)
-	e.explainInputsFor(entry).walk(func(l planLine) {
+	e.explainInputsFor(entry, params).walk(func(l planLine) {
 		n := exec.PlanNode{Name: l.text}
 		d := l.depth()
 		if d == 0 || !have {
@@ -332,8 +337,10 @@ func (r *Result) Plan() *exec.PlanNode {
 // this tree in the SUCCESS that terminates the stream.
 //
 // Each node's Rows and Time are measured; Time is INCLUSIVE of the node's
-// children. DbHits is derived at the access-path boundary. See [Engine.Profile]
-// for the full contract, which this shares exactly.
+// children. DbHits is mostly derived at the access-path boundary, and is a
+// figure only when [exec.PlanNode.DbHitsKnown] is true — [exec.RenderPlanNode]
+// prints "?" for the rest rather than a zero it did not measure. See
+// [Engine.Profile] for the full contract, which this shares exactly.
 //
 // The returned tree is owned by the Result and must not be mutated.
 func (r *Result) Profile() *exec.PlanNode {

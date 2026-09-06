@@ -1,0 +1,34 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/internal/metrics/prometheus
+cpu: Apple M4
+                        │   v0.13.0    │              v0.14.0               │
+                        │    sec/op    │    sec/op     vs base              │
+IncCounterParallel        9.501n ±  3%   9.438n ±  1%       ~ (p=0.589 n=6)
+IncCounterParallel-8      1.787n ± 26%   2.463n ± 28%       ~ (p=0.132 n=6)
+IncCounterParallel-64     1.842n ± 12%   1.839n ± 14%       ~ (p=1.000 n=6)
+IncCounterParallel-256    1.934n ±  4%   1.950n ±  5%       ~ (p=0.667 n=6)
+IncCounterParallel-1024   1.907n ±  6%   1.883n ±  3%       ~ (p=0.786 n=6)
+geomean                   2.585n         2.749n        +6.37%
+
+                        │   v0.13.0    │              v0.14.0               │
+                        │     B/op     │    B/op     vs base                │
+IncCounterParallel        0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=6) ¹
+IncCounterParallel-8      0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=6) ¹
+IncCounterParallel-64     0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=6) ¹
+IncCounterParallel-256    0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=6) ¹
+IncCounterParallel-1024   0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=6) ¹
+geomean                              ²               +0.00%               ²
+¹ all samples are equal
+² summaries must be >0 to compute geomean
+
+                        │   v0.13.0    │              v0.14.0               │
+                        │  allocs/op   │ allocs/op   vs base                │
+IncCounterParallel        0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=6) ¹
+IncCounterParallel-8      0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=6) ¹
+IncCounterParallel-64     0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=6) ¹
+IncCounterParallel-256    0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=6) ¹
+IncCounterParallel-1024   0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=6) ¹
+geomean                              ²               +0.00%               ²
+¹ all samples are equal
+² summaries must be >0 to compute geomean

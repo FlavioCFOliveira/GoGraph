@@ -1,0 +1,11 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/store/txn
+cpu: Apple M4
+BenchmarkCommit/ops=1-10        	     339	   3754128 ns/op	     593 B/op	      11 allocs/op
+BenchmarkCommit/ops=16-10       	     295	   4247059 ns/op	   11167 B/op	      75 allocs/op
+BenchmarkCommitConcurrent/goroutines=1-10         	     294	   4081523 ns/op	     603 B/op	      11 allocs/op
+BenchmarkCommitConcurrent/goroutines=8-10         	    1167	    972679 ns/op	     606 B/op	      11 allocs/op
+BenchmarkCommitConcurrent/goroutines=64-10        	    9085	    126364 ns/op	     716 B/op	      10 allocs/op
+BenchmarkCommitConcurrent/goroutines=256-10       	   36498	     31309 ns/op	     719 B/op	      10 allocs/op
+PASS

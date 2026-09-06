@@ -1,0 +1,265 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+                                                      │      B       │                 B2                 │
+                                                      │    sec/op    │    sec/op     vs base              │
+ZZReorderSkewed/reorder=on-10                           2.723m ±  2%   2.725m ±  2%       ~ (p=0.937 n=6)
+ZZReorderSkewed/reorder=off-10                          268.0m ±  2%   266.9m ±  2%       ~ (p=0.937 n=6)
+ZZReorderLiveHistory/history=quiet-10                   976.6µ ±  2%   987.6µ ±  2%       ~ (p=0.699 n=6)
+ZZReorderLiveHistory/history=live-10                    987.3µ ±  1%   985.5µ ±  1%       ~ (p=0.589 n=6)
+ZZReorderDrainCost/scan=bare-10                         1.436m ±  1%   1.439m ±  1%       ~ (p=0.937 n=6)
+ZZReorderDrainCost/scan=filtered-10                     1.095m ±  2%   1.094m ±  1%       ~ (p=0.589 n=6)
+ColumnarShape_HopBaseline-10                            3.265m ±  1%   3.290m ±  2%       ~ (p=0.310 n=6)
+ColumnarShape_HopLabelledFarEnd-10                      3.686m ±  1%   3.687m ±  1%       ~ (p=0.699 n=6)
+ColumnarShape_HopAnchorFilter-10                        3.319m ±  3%   3.297m ±  2%       ~ (p=0.589 n=6)
+ColumnarShape_HopAnchorFilterLabelledFarEnd-10          3.682m ±  1%   3.716m ±  2%       ~ (p=0.310 n=6)
+ColumnarShape_HopAnchorAndPostFilter-10                 4.073m ±  2%   4.071m ±  0%       ~ (p=0.937 n=6)
+CountRelVar-10                                          226.6µ ±  2%   226.2µ ±  2%       ~ (p=0.818 n=6)
+CountNodeVar-10                                         207.4µ ±  1%   208.2µ ±  1%       ~ (p=0.065 n=6)
+CountAllNodes-10                                        17.90µ ±  4%   17.90µ ±  3%       ~ (p=1.000 n=6)
+DeleteAccumulated/accumulated=0-10                      16.83m ±  3%   16.52m ±  4%       ~ (p=0.310 n=6)
+DeleteAccumulated/accumulated=20000-10                  16.46m ±  8%   16.29m ±  4%       ~ (p=0.485 n=6)
+DeleteAccumulated/accumulated=60000-10                  16.66m ±  9%   16.78m ±  4%       ~ (p=0.937 n=6)
+CreateRelationships-10                                  2.486m ±  9%   2.521m ±  4%       ~ (p=0.937 n=6)
+ExpandInto_TriangleClose-10                             147.7m ±  1%   147.5m ±  2%       ~ (p=0.589 n=6)
+ExpandInto_TwoCycleClose-10                             6.976m ±  2%   6.999m ±  1%       ~ (p=0.937 n=6)
+ExpandInto_TriangleOpen-10                               2.700 ±  2%    2.717 ±  2%       ~ (p=1.000 n=6)
+ExpandInto_TwoHopOpen-10                                133.3m ±  2%   132.2m ±  1%       ~ (p=0.240 n=6)
+Count_LabelStarBig_Pushdown-10                          919.0n ±  7%   930.6n ±  2%       ~ (p=0.310 n=6)
+Count_LabelStarBig_Serial-10                            917.0n ±  2%   909.4n ±  1%       ~ (p=0.589 n=6)
+Count_LabelVarBig_Pushdown-10                           919.8n ±  9%   929.6n ±  3%       ~ (p=0.310 n=6)
+Count_LabelVarBig_Serial-10                             915.1n ±  2%   910.1n ±  1%       ~ (p=0.509 n=6)
+MergeMatch_DecoyGrowth/hot=64/cold=0-10                 21.79µ ±  3%   21.56µ ±  2%       ~ (p=0.394 n=6)
+MergeMatch_DecoyGrowth/hot=64/cold=1024-10              256.2µ ±  2%   259.1µ ±  3%       ~ (p=0.394 n=6)
+MergeMatch_DecoyGrowth/hot=64/cold=4096-10              10.09µ ±  4%   10.10µ ±  2%       ~ (p=1.000 n=6)
+MergeMatch_DecoyGrowth/hot=64/cold=16384-10             10.27µ ±  2%   10.26µ ±  1%       ~ (p=0.589 n=6)
+MergeMatch_LabelGrowth/hot=64/cold=0-10                 21.84µ ±  4%   21.53µ ±  1%       ~ (p=0.240 n=6)
+MergeMatch_LabelGrowth/hot=1024/cold=0-10               421.8µ ±  2%   423.3µ ±  2%       ~ (p=0.818 n=6)
+MergeMatch_LabelGrowth/hot=4096/cold=0-10               647.9µ ±  2%   644.5µ ±  2%       ~ (p=0.589 n=6)
+MergeMatch_LabelGrowth/hot=16384/cold=0-10              2.643m ±  3%   2.650m ±  1%       ~ (p=1.000 n=6)
+MergeMatch_LabelsOnly/hot=8/cold=0-10                   7.143µ ±  3%   7.123µ ±  2%       ~ (p=0.818 n=6)
+MergeMatch_LabelsOnly/hot=8/cold=4096-10                3.867µ ±  4%   3.896µ ±  4%       ~ (p=0.513 n=6)
+MergeMatch_LabelsOnly/hot=8/cold=16384-10               3.864µ ±  1%   3.852µ ±  4%       ~ (p=0.608 n=6)
+ParallelAggregate_MinBig_Parallel-10                    18.68m ±  3%   18.50m ±  4%       ~ (p=0.310 n=6)
+ParallelAggregate_MinBig_Serial-10                      18.88m ±  9%   18.35m ± 14%       ~ (p=1.000 n=6)
+ParallelAggregate_MaxBig_Parallel-10                    18.48m ±  4%   18.48m ± 10%       ~ (p=0.937 n=6)
+ParallelAggregate_MaxBig_Serial-10                      18.65m ±  9%   18.38m ±  6%       ~ (p=0.589 n=6)
+ParallelAggregate_GroupMinBig_Parallel-10               35.45m ±  5%   34.91m ±  2%       ~ (p=0.589 n=6)
+ParallelAggregate_GroupMinBig_Serial-10                 99.48m ±  9%   99.37m ±  3%       ~ (p=0.699 n=6)
+ParallelAggregate_MinSmall_DefaultEnabled-10            20.95µ ±  4%   21.34µ ±  4%       ~ (p=0.699 n=6)
+ParallelAggregate_MinSmall_Disabled-10                  20.46µ ±  3%   20.56µ ±  3%       ~ (p=0.667 n=6)
+CountPushdown_O1-10                                     1.343µ ±  1%   1.349µ ±  1%       ~ (p=0.370 n=6)
+CountPushdown_FullScan-10                               17.36m ± 16%   16.65m ±  4%       ~ (p=0.240 n=6)
+ParallelAggregate_Concurrent/conc=1/impl=parallel-10    18.59m ±  6%   18.30m ±  2%       ~ (p=0.240 n=6)
+ParallelAggregate_Concurrent/conc=1/impl=serial-10      18.36m ± 10%   18.03m ±  2%       ~ (p=0.589 n=6)
+ParallelAggregate_Concurrent/conc=8/impl=parallel-10    146.8m ±  4%   143.8m ±  3%       ~ (p=0.394 n=6)
+ParallelAggregate_Concurrent/conc=8/impl=serial-10      51.69m ±  4%   50.88m ±  1%       ~ (p=0.240 n=6)
+ParallelAggregate_Concurrent/conc=64/impl=parallel-10   912.9m ±  5%   901.4m ±  3%       ~ (p=0.589 n=6)
+ParallelAggregate_Concurrent/conc=64/impl=serial-10     307.6m ±  4%   305.7m ±  2%       ~ (p=0.394 n=6)
+ParallelLabelScan_LabelledProject_Parallel-10           19.05m ±  6%   18.92m ±  2%       ~ (p=0.394 n=6)
+ParallelLabelScan_LabelledProject_Serial-10             40.61m ±  4%   39.92m ±  3%       ~ (p=0.699 n=6)
+ParallelLabelScan_UnlabelledProject_Parallel-10         19.13m ±  4%   18.86m ±  3%       ~ (p=0.394 n=6)
+ParallelLabelScan_LabelledMin_Parallel-10               19.93m ± 15%   19.84m ±  3%       ~ (p=0.937 n=6)
+ParallelLabelScan_LabelledMin_Serial-10                 19.65m ± 17%   19.81m ±  4%       ~ (p=0.589 n=6)
+ParallelLabelScan_UnlabelledMin_Parallel-10             18.31m ±  3%   18.30m ±  3%       ~ (p=1.000 n=6)
+ParallelLabelScan_UnlabelledMin_Serial-10               19.57m ± 13%   19.18m ±  5%       ~ (p=0.240 n=6)
+ParallelLabelScan_UnlabelledProject_Serial-10           37.75m ±  8%   37.07m ±  2%       ~ (p=0.240 n=6)
+ParallelScan_CountBig_Parallel-10                       1.655m ±  3%   1.648m ±  2%       ~ (p=0.699 n=6)
+ParallelScan_CountBig_Serial-10                         1.312µ ±  0%   1.324µ ±  1%       ~ (p=0.071 n=6)
+ParallelScan_CountSmall_DefaultEnabled-10               2.159µ ±  2%   2.160µ ±  2%       ~ (p=0.589 n=6)
+ParallelScan_CountSmall_Disabled-10                     1.331µ ±  2%   1.342µ ±  2%       ~ (p=0.699 n=6)
+ParallelScanProject_ScanBig_Parallel-10                 19.18m ±  3%   18.90m ±  2%       ~ (p=0.065 n=6)
+ParallelScanProject_ScanBig_Serial-10                   16.95m ± 15%   17.09m ±  4%       ~ (p=0.818 n=6)
+ParallelScanProject_ScanFilterBig_Parallel-10           23.60m ± 15%   23.51m ±  3%       ~ (p=0.818 n=6)
+ParallelScanProject_ScanFilterBig_Serial-10             24.31m ±  5%   23.62m ±  3%       ~ (p=0.310 n=6)
+ParallelScanProject_ScanSmall_DefaultEnabled-10         16.40µ ±  2%   16.49µ ±  4%       ~ (p=0.394 n=6)
+ParallelScanProject_ScanSmall_Disabled-10               15.89µ ±  2%   15.96µ ±  3%       ~ (p=0.937 n=6)
+ParallelScanGate/scan-10                                1.304m ±  2%   1.307m ±  1%       ~ (p=0.937 n=6)
+ParallelScanGate/seek-10                                1.072m ±  2%   1.080m ±  2%       ~ (p=0.310 n=6)
+PlanCacheHit_Parameterised-10                           28.00µ ±  5%   27.79µ ±  4%       ~ (p=0.818 n=6)
+PlanCacheMiss_InlinedLiteral-10                         46.74µ ±  1%   46.52µ ±  2%       ~ (p=0.394 n=6)
+PlanCacheMiss_InlinedLiteralNoComment-10                27.33µ ±  6%   27.61µ ±  4%       ~ (p=1.000 n=6)
+ScalarFilterProjection-10                               835.8µ ±  1%   838.8µ ±  2%       ~ (p=0.589 n=6)
+ReadOnly_Sessionless-10                                 987.7n ±  3%   988.3n ±  4%       ~ (p=0.937 n=6)
+ReadOnly_Session-10                                     998.9n ±  3%   991.8n ±  3%       ~ (p=0.485 n=6)
+geomean                                                 935.2µ         932.2µ        -0.32%
+
+                                                      │      B       │                  B2                  │
+                                                      │     B/op     │     B/op      vs base                │
+ZZReorderSkewed/reorder=on-10                           553.4Ki ± 0%   553.4Ki ± 0%  -0.00% (p=0.013 n=6)
+ZZReorderSkewed/reorder=off-10                          46.12Mi ± 0%   46.12Mi ± 0%       ~ (p=0.937 n=6)
+ZZReorderLiveHistory/history=quiet-10                   280.2Ki ± 0%   280.2Ki ± 0%       ~ (p=0.725 n=6)
+ZZReorderLiveHistory/history=live-10                    293.0Ki ± 0%   293.0Ki ± 0%       ~ (p=1.000 n=6)
+ZZReorderDrainCost/scan=bare-10                         264.9Ki ± 0%   264.9Ki ± 0%       ~ (p=1.000 n=6)
+ZZReorderDrainCost/scan=filtered-10                     233.8Ki ± 0%   233.8Ki ± 0%       ~ (p=1.000 n=6) ¹
+ColumnarShape_HopBaseline-10                            1.267Mi ± 0%   1.267Mi ± 0%       ~ (p=0.974 n=6)
+ColumnarShape_HopLabelledFarEnd-10                      1.269Mi ± 0%   1.269Mi ± 0%       ~ (p=0.383 n=6)
+ColumnarShape_HopAnchorFilter-10                        1.267Mi ± 0%   1.267Mi ± 0%       ~ (p=0.418 n=6)
+ColumnarShape_HopAnchorFilterLabelledFarEnd-10          1.270Mi ± 0%   1.270Mi ± 0%       ~ (p=0.485 n=6)
+ColumnarShape_HopAnchorAndPostFilter-10                 1.414Mi ± 0%   1.414Mi ± 0%       ~ (p=0.610 n=6)
+CountRelVar-10                                          284.0Ki ± 0%   284.0Ki ± 0%       ~ (p=1.000 n=6)
+CountNodeVar-10                                         264.4Ki ± 0%   264.4Ki ± 0%       ~ (p=1.000 n=6)
+CountAllNodes-10                                        3.219Ki ± 0%   3.219Ki ± 0%       ~ (p=1.000 n=6) ¹
+DeleteAccumulated/accumulated=0-10                      62.62Mi ± 0%   62.62Mi ± 0%       ~ (p=0.699 n=6)
+DeleteAccumulated/accumulated=20000-10                  54.88Mi ± 0%   54.88Mi ± 0%       ~ (p=0.937 n=6)
+DeleteAccumulated/accumulated=60000-10                  57.68Mi ± 1%   57.80Mi ± 0%       ~ (p=1.000 n=6)
+CreateRelationships-10                                  5.154Mi ± 5%   5.161Mi ± 3%       ~ (p=0.818 n=6)
+ExpandInto_TriangleClose-10                             24.54Mi ± 0%   24.54Mi ± 0%       ~ (p=0.818 n=6)
+ExpandInto_TwoCycleClose-10                             1.497Mi ± 0%   1.496Mi ± 0%       ~ (p=0.394 n=6)
+ExpandInto_TriangleOpen-10                              199.5Mi ± 0%   199.5Mi ± 0%       ~ (p=0.240 n=6)
+ExpandInto_TwoHopOpen-10                                12.73Mi ± 0%   12.73Mi ± 0%       ~ (p=0.937 n=6)
+Count_LabelStarBig_Pushdown-10                          2.008Ki ± 0%   2.008Ki ± 0%       ~ (p=1.000 n=6) ¹
+Count_LabelStarBig_Serial-10                            2.008Ki ± 0%   2.008Ki ± 0%       ~ (p=1.000 n=6) ¹
+Count_LabelVarBig_Pushdown-10                           2.008Ki ± 0%   2.008Ki ± 0%       ~ (p=1.000 n=6) ¹
+Count_LabelVarBig_Serial-10                             2.008Ki ± 0%   2.008Ki ± 0%       ~ (p=1.000 n=6) ¹
+MergeMatch_DecoyGrowth/hot=64/cold=0-10                 9.930Ki ± 0%   9.930Ki ± 0%       ~ (p=1.000 n=6) ¹
+MergeMatch_DecoyGrowth/hot=64/cold=1024-10              131.2Ki ± 0%   131.2Ki ± 0%       ~ (p=1.000 n=6) ¹
+MergeMatch_DecoyGrowth/hot=64/cold=4096-10              5.992Ki ± 0%   5.992Ki ± 0%       ~ (p=1.000 n=6) ¹
+MergeMatch_DecoyGrowth/hot=64/cold=16384-10             5.992Ki ± 0%   5.992Ki ± 0%       ~ (p=1.000 n=6) ¹
+MergeMatch_LabelGrowth/hot=64/cold=0-10                 9.930Ki ± 0%   9.930Ki ± 0%       ~ (p=1.000 n=6) ¹
+MergeMatch_LabelGrowth/hot=1024/cold=0-10               154.1Ki ± 0%   154.1Ki ± 0%       ~ (p=1.000 n=6) ¹
+MergeMatch_LabelGrowth/hot=4096/cold=0-10               106.9Ki ± 0%   106.9Ki ± 0%       ~ (p=1.000 n=6) ¹
+MergeMatch_LabelGrowth/hot=16384/cold=0-10              394.9Ki ± 0%   394.9Ki ± 0%       ~ (p=1.000 n=6) ¹
+MergeMatch_LabelsOnly/hot=8/cold=0-10                   7.539Ki ± 0%   7.539Ki ± 0%       ~ (p=1.000 n=6) ¹
+MergeMatch_LabelsOnly/hot=8/cold=4096-10                7.102Ki ± 0%   7.102Ki ± 0%       ~ (p=1.000 n=6) ¹
+MergeMatch_LabelsOnly/hot=8/cold=16384-10               7.102Ki ± 0%   7.102Ki ± 0%       ~ (p=1.000 n=6) ¹
+ParallelAggregate_MinBig_Parallel-10                    79.65Mi ± 0%   79.65Mi ± 0%       ~ (p=0.937 n=6)
+ParallelAggregate_MinBig_Serial-10                      9.606Mi ± 0%   9.606Mi ± 0%       ~ (p=1.000 n=6)
+ParallelAggregate_MaxBig_Parallel-10                    79.65Mi ± 0%   79.65Mi ± 0%       ~ (p=0.394 n=6)
+ParallelAggregate_MaxBig_Serial-10                      9.606Mi ± 0%   9.606Mi ± 0%       ~ (p=0.589 n=6)
+ParallelAggregate_GroupMinBig_Parallel-10               154.7Mi ± 0%   154.7Mi ± 0%       ~ (p=0.699 n=6)
+ParallelAggregate_GroupMinBig_Serial-10                 156.0Mi ± 0%   156.0Mi ± 0%       ~ (p=0.794 n=6)
+ParallelAggregate_MinSmall_DefaultEnabled-10            75.80Ki ± 0%   75.80Ki ± 0%       ~ (p=1.000 n=6) ¹
+ParallelAggregate_MinSmall_Disabled-10                  75.80Ki ± 0%   75.80Ki ± 0%       ~ (p=1.000 n=6) ¹
+CountPushdown_O1-10                                     1.977Ki ± 0%   1.977Ki ± 0%       ~ (p=1.000 n=6) ¹
+CountPushdown_FullScan-10                               9.572Mi ± 0%   9.572Mi ± 0%       ~ (p=0.413 n=6)
+ParallelAggregate_Concurrent/conc=1/impl=parallel-10    79.65Mi ± 0%   79.65Mi ± 0%       ~ (p=0.619 n=6)
+ParallelAggregate_Concurrent/conc=1/impl=serial-10      9.605Mi ± 0%   9.605Mi ± 0%       ~ (p=0.455 n=6)
+ParallelAggregate_Concurrent/conc=8/impl=parallel-10    637.1Mi ± 0%   637.1Mi ± 0%       ~ (p=0.394 n=6)
+ParallelAggregate_Concurrent/conc=8/impl=serial-10      76.84Mi ± 0%   76.84Mi ± 0%       ~ (p=0.310 n=6)
+ParallelAggregate_Concurrent/conc=64/impl=parallel-10   4.977Gi ± 0%   4.977Gi ± 0%       ~ (p=0.937 n=6)
+ParallelAggregate_Concurrent/conc=64/impl=serial-10     614.7Mi ± 0%   614.7Mi ± 0%       ~ (p=0.818 n=6)
+ParallelLabelScan_LabelledProject_Parallel-10           63.70Mi ± 0%   63.73Mi ± 0%       ~ (p=0.485 n=6)
+ParallelLabelScan_LabelledProject_Serial-10             9.170Mi ± 0%   9.170Mi ± 0%       ~ (p=1.000 n=6)
+ParallelLabelScan_UnlabelledProject_Parallel-10         63.85Mi ± 0%   63.77Mi ± 0%       ~ (p=0.132 n=6)
+ParallelLabelScan_LabelledMin_Parallel-10               1.640Mi ± 0%   1.640Mi ± 0%       ~ (p=0.571 n=6)
+ParallelLabelScan_LabelledMin_Serial-10                 1.640Mi ± 0%   1.640Mi ± 0%       ~ (p=0.794 n=6)
+ParallelLabelScan_UnlabelledMin_Parallel-10             79.65Mi ± 0%   79.65Mi ± 0%       ~ (p=0.784 n=6)
+ParallelLabelScan_UnlabelledMin_Serial-10               9.606Mi ± 0%   9.606Mi ± 0%       ~ (p=0.152 n=6)
+ParallelLabelScan_UnlabelledProject_Serial-10           17.14Mi ± 0%   17.14Mi ± 0%       ~ (p=0.169 n=6)
+ParallelScan_CountBig_Parallel-10                       7.996Mi ± 0%   7.996Mi ± 0%       ~ (p=1.000 n=6)
+ParallelScan_CountBig_Serial-10                         1.977Ki ± 0%   1.977Ki ± 0%       ~ (p=1.000 n=6) ¹
+ParallelScan_CountSmall_DefaultEnabled-10               1.969Ki ± 0%   1.969Ki ± 0%       ~ (p=1.000 n=6) ¹
+ParallelScan_CountSmall_Disabled-10                     1.969Ki ± 0%   1.969Ki ± 0%       ~ (p=1.000 n=6) ¹
+ParallelScanProject_ScanBig_Parallel-10                 62.37Mi ± 0%   62.21Mi ± 0%       ~ (p=0.065 n=6)
+ParallelScanProject_ScanBig_Serial-10                   11.07Mi ± 0%   11.07Mi ± 0%       ~ (p=0.623 n=6)
+ParallelScanProject_ScanFilterBig_Parallel-10           14.55Mi ± 0%   14.55Mi ± 0%       ~ (p=0.974 n=6)
+ParallelScanProject_ScanFilterBig_Serial-10             14.55Mi ± 0%   14.55Mi ± 0%       ~ (p=0.558 n=6)
+ParallelScanProject_ScanSmall_DefaultEnabled-10         40.89Ki ± 0%   40.89Ki ± 0%       ~ (p=1.000 n=6) ¹
+ParallelScanProject_ScanSmall_Disabled-10               40.89Ki ± 0%   40.89Ki ± 0%       ~ (p=1.000 n=6) ¹
+ParallelScanGate/scan-10                                357.9Ki ± 0%   357.9Ki ± 0%       ~ (p=1.000 n=6)
+ParallelScanGate/seek-10                                230.9Ki ± 0%   230.9Ki ± 0%       ~ (p=1.000 n=6)
+PlanCacheHit_Parameterised-10                           15.22Ki ± 2%   15.27Ki ± 1%       ~ (p=0.455 n=6)
+PlanCacheMiss_InlinedLiteral-10                         32.45Ki ± 0%   32.48Ki ± 0%       ~ (p=0.100 n=6)
+PlanCacheMiss_InlinedLiteralNoComment-10                14.92Ki ± 0%   14.93Ki ± 1%       ~ (p=0.561 n=6)
+ScalarFilterProjection-10                               400.9Ki ± 0%   400.9Ki ± 0%       ~ (p=0.623 n=6)
+ReadOnly_Sessionless-10                                 2.008Ki ± 0%   2.008Ki ± 0%       ~ (p=1.000 n=6) ¹
+ReadOnly_Session-10                                     2.008Ki ± 0%   2.008Ki ± 0%       ~ (p=1.000 n=6) ¹
+geomean                                                 775.2Ki        775.3Ki       +0.01%
+¹ all samples are equal
+
+                                                      │      B       │                  B2                  │
+                                                      │  allocs/op   │  allocs/op    vs base                │
+ZZReorderSkewed/reorder=on-10                           59.97k ±  0%   59.97k ±  0%       ~ (p=1.000 n=6) ¹
+ZZReorderSkewed/reorder=off-10                          5.926M ±  0%   5.926M ±  0%       ~ (p=0.779 n=6)
+ZZReorderLiveHistory/history=quiet-10                   25.03k ±  0%   25.03k ±  0%       ~ (p=1.000 n=6) ¹
+ZZReorderLiveHistory/history=live-10                    25.05k ±  0%   25.05k ±  0%       ~ (p=1.000 n=6) ¹
+ZZReorderDrainCost/scan=bare-10                         19.82k ±  0%   19.82k ±  0%       ~ (p=1.000 n=6) ¹
+ZZReorderDrainCost/scan=filtered-10                     19.83k ±  0%   19.83k ±  0%       ~ (p=1.000 n=6) ¹
+ColumnarShape_HopBaseline-10                            39.63k ±  0%   39.63k ±  0%       ~ (p=1.000 n=6)
+ColumnarShape_HopLabelledFarEnd-10                      39.65k ±  0%   39.65k ±  0%       ~ (p=1.000 n=6)
+ColumnarShape_HopAnchorFilter-10                        39.63k ±  0%   39.63k ±  0%       ~ (p=0.394 n=6)
+ColumnarShape_HopAnchorFilterLabelledFarEnd-10          39.65k ±  0%   39.65k ±  0%       ~ (p=0.448 n=6)
+ColumnarShape_HopAnchorAndPostFilter-10                 58.40k ±  0%   58.40k ±  0%       ~ (p=1.000 n=6)
+CountRelVar-10                                          6.860k ±  0%   6.860k ±  0%       ~ (p=1.000 n=6) ¹
+CountNodeVar-10                                         6.401k ±  0%   6.401k ±  0%       ~ (p=1.000 n=6) ¹
+CountAllNodes-10                                         27.00 ±  0%    27.00 ±  0%       ~ (p=1.000 n=6) ¹
+DeleteAccumulated/accumulated=0-10                      205.2k ±  0%   205.2k ±  0%       ~ (p=0.675 n=6)
+DeleteAccumulated/accumulated=20000-10                  201.4k ±  0%   201.4k ±  0%       ~ (p=0.823 n=6)
+DeleteAccumulated/accumulated=60000-10                  210.3k ±  1%   210.7k ±  0%       ~ (p=0.818 n=6)
+CreateRelationships-10                                  18.08k ±  0%   18.09k ±  0%       ~ (p=0.699 n=6)
+ExpandInto_TriangleClose-10                             2.038M ±  0%   2.038M ±  0%       ~ (p=0.775 n=6)
+ExpandInto_TwoCycleClose-10                             123.4k ±  0%   123.4k ±  0%       ~ (p=0.208 n=6)
+ExpandInto_TriangleOpen-10                              24.46M ±  0%   24.46M ±  0%       ~ (p=0.853 n=6)
+ExpandInto_TwoHopOpen-10                                1.526M ±  0%   1.526M ±  0%       ~ (p=0.634 n=6)
+Count_LabelStarBig_Pushdown-10                           19.00 ±  0%    19.00 ±  0%       ~ (p=1.000 n=6) ¹
+Count_LabelStarBig_Serial-10                             19.00 ±  0%    19.00 ±  0%       ~ (p=1.000 n=6) ¹
+Count_LabelVarBig_Pushdown-10                            19.00 ±  0%    19.00 ±  0%       ~ (p=1.000 n=6) ¹
+Count_LabelVarBig_Serial-10                              19.00 ±  0%    19.00 ±  0%       ~ (p=1.000 n=6) ¹
+MergeMatch_DecoyGrowth/hot=64/cold=0-10                  131.0 ±  0%    131.0 ±  0%       ~ (p=1.000 n=6) ¹
+MergeMatch_DecoyGrowth/hot=64/cold=1024-10               138.0 ±  0%    138.0 ±  0%       ~ (p=1.000 n=6) ¹
+MergeMatch_DecoyGrowth/hot=64/cold=4096-10               125.0 ±  0%    125.0 ±  0%       ~ (p=1.000 n=6) ¹
+MergeMatch_DecoyGrowth/hot=64/cold=16384-10              125.0 ±  0%    125.0 ±  0%       ~ (p=1.000 n=6) ¹
+MergeMatch_LabelGrowth/hot=64/cold=0-10                  131.0 ±  0%    131.0 ±  0%       ~ (p=1.000 n=6) ¹
+MergeMatch_LabelGrowth/hot=1024/cold=0-10               1.866k ±  0%   1.866k ±  0%       ~ (p=1.000 n=6) ¹
+MergeMatch_LabelGrowth/hot=4096/cold=0-10               7.997k ±  0%   7.997k ±  0%       ~ (p=1.000 n=6) ¹
+MergeMatch_LabelGrowth/hot=16384/cold=0-10              32.57k ±  0%   32.57k ±  0%       ~ (p=1.000 n=6) ¹
+MergeMatch_LabelsOnly/hot=8/cold=0-10                    102.0 ±  0%    102.0 ±  0%       ~ (p=1.000 n=6) ¹
+MergeMatch_LabelsOnly/hot=8/cold=4096-10                 99.00 ±  0%    99.00 ±  0%       ~ (p=1.000 n=6) ¹
+MergeMatch_LabelsOnly/hot=8/cold=16384-10                99.00 ±  0%    99.00 ±  0%       ~ (p=1.000 n=6) ¹
+ParallelAggregate_MinBig_Parallel-10                    1.204M ±  0%   1.204M ±  0%       ~ (p=0.288 n=6)
+ParallelAggregate_MinBig_Serial-10                      199.8k ±  0%   199.8k ±  0%       ~ (p=1.000 n=6)
+ParallelAggregate_MaxBig_Parallel-10                    1.204M ±  0%   1.204M ±  0%       ~ (p=1.000 n=6)
+ParallelAggregate_MaxBig_Serial-10                      199.8k ±  0%   199.8k ±  0%       ~ (p=1.000 n=6)
+ParallelAggregate_GroupMinBig_Parallel-10               2.407M ±  0%   2.407M ±  0%       ~ (p=0.697 n=6)
+ParallelAggregate_GroupMinBig_Serial-10                 2.399M ±  0%   2.399M ±  0%       ~ (p=1.000 n=6)
+ParallelAggregate_MinSmall_DefaultEnabled-10             67.00 ±  0%    67.00 ±  0%       ~ (p=1.000 n=6) ¹
+ParallelAggregate_MinSmall_Disabled-10                   67.00 ±  0%    67.00 ±  0%       ~ (p=1.000 n=6) ¹
+CountPushdown_O1-10                                      18.00 ±  0%    18.00 ±  0%       ~ (p=1.000 n=6) ¹
+CountPushdown_FullScan-10                               199.8k ±  0%   199.8k ±  0%       ~ (p=1.000 n=6)
+ParallelAggregate_Concurrent/conc=1/impl=parallel-10    1.204M ±  0%   1.204M ±  0%       ~ (p=0.394 n=6)
+ParallelAggregate_Concurrent/conc=1/impl=serial-10      199.8k ±  0%   199.8k ±  0%       ~ (p=1.000 n=6) ¹
+ParallelAggregate_Concurrent/conc=8/impl=parallel-10    9.630M ±  0%   9.630M ±  0%       ~ (p=0.734 n=6)
+ParallelAggregate_Concurrent/conc=8/impl=serial-10      1.599M ±  0%   1.599M ±  0%       ~ (p=1.000 n=6)
+ParallelAggregate_Concurrent/conc=64/impl=parallel-10   77.04M ±  0%   77.04M ±  0%       ~ (p=0.937 n=6)
+ParallelAggregate_Concurrent/conc=64/impl=serial-10     12.79M ±  0%   12.79M ±  0%       ~ (p=0.554 n=6)
+ParallelLabelScan_LabelledProject_Parallel-10           806.5k ±  0%   806.5k ±  0%       ~ (p=0.407 n=6)
+ParallelLabelScan_LabelledProject_Serial-10             799.0k ±  0%   799.0k ±  0%       ~ (p=1.000 n=6)
+ParallelLabelScan_UnlabelledProject_Parallel-10         806.5k ±  0%   806.5k ±  0%       ~ (p=0.955 n=6)
+ParallelLabelScan_LabelledMin_Parallel-10               199.8k ±  0%   199.8k ±  0%       ~ (p=1.000 n=6)
+ParallelLabelScan_LabelledMin_Serial-10                 199.8k ±  0%   199.8k ±  0%       ~ (p=0.729 n=6)
+ParallelLabelScan_UnlabelledMin_Parallel-10             1.204M ±  0%   1.204M ±  0%       ~ (p=0.706 n=6)
+ParallelLabelScan_UnlabelledMin_Serial-10               199.8k ±  0%   199.8k ±  0%       ~ (p=0.242 n=6)
+ParallelLabelScan_UnlabelledProject_Serial-10           799.0k ±  0%   799.0k ±  0%       ~ (p=0.636 n=6)
+ParallelScan_CountBig_Parallel-10                        103.0 ±  0%    103.0 ±  0%       ~ (p=1.000 n=6) ¹
+ParallelScan_CountBig_Serial-10                          18.00 ±  0%    18.00 ±  0%       ~ (p=1.000 n=6) ¹
+ParallelScan_CountSmall_DefaultEnabled-10                17.00 ±  0%    17.00 ±  0%       ~ (p=1.000 n=6) ¹
+ParallelScan_CountSmall_Disabled-10                      17.00 ±  0%    17.00 ±  0%       ~ (p=1.000 n=6) ¹
+ParallelScanProject_ScanBig_Parallel-10                 607.5k ±  0%   607.5k ±  0%       ~ (p=1.000 n=6)
+ParallelScanProject_ScanBig_Serial-10                   199.8k ±  0%   199.8k ±  0%       ~ (p=0.545 n=6)
+ParallelScanProject_ScanFilterBig_Parallel-10           299.8k ±  0%   299.8k ±  0%       ~ (p=1.000 n=6)
+ParallelScanProject_ScanFilterBig_Serial-10             299.8k ±  0%   299.8k ±  0%       ~ (p=0.152 n=6)
+ParallelScanProject_ScanSmall_DefaultEnabled-10          42.00 ±  0%    42.00 ±  0%       ~ (p=1.000 n=6) ¹
+ParallelScanProject_ScanSmall_Disabled-10                42.00 ±  0%    42.00 ±  0%       ~ (p=1.000 n=6) ¹
+ParallelScanGate/scan-10                                19.79k ±  0%   19.79k ±  0%       ~ (p=1.000 n=6) ¹
+ParallelScanGate/seek-10                                19.80k ±  0%   19.80k ±  0%       ~ (p=1.000 n=6) ¹
+PlanCacheHit_Parameterised-10                            88.00 ± 34%    95.00 ± 19%       ~ (p=0.610 n=6)
+PlanCacheMiss_InlinedLiteral-10                          397.5 ±  3%    401.5 ±  3%       ~ (p=0.149 n=6)
+PlanCacheMiss_InlinedLiteralNoComment-10                 89.50 ± 11%    90.50 ± 16%       ~ (p=0.610 n=6)
+ScalarFilterProjection-10                               19.80k ±  0%   19.80k ±  0%       ~ (p=1.000 n=6)
+ReadOnly_Sessionless-10                                  19.00 ±  0%    19.00 ±  0%       ~ (p=1.000 n=6) ¹
+ReadOnly_Session-10                                      19.00 ±  0%    19.00 ±  0%       ~ (p=1.000 n=6) ¹
+geomean                                                 12.47k         12.48k        +0.13%
+¹ all samples are equal
+
+                                       │      B      │                B2                 │
+                                       │  sec/node   │  sec/node    vs base              │
+DeleteAccumulated/accumulated=0-10       3.366µ ± 3%   3.305µ ± 4%       ~ (p=0.310 n=6)
+DeleteAccumulated/accumulated=20000-10   3.292µ ± 8%   3.257µ ± 4%       ~ (p=0.485 n=6)
+DeleteAccumulated/accumulated=60000-10   3.332µ ± 9%   3.357µ ± 4%       ~ (p=0.937 n=6)
+geomean                                  3.330µ        3.306µ       -0.71%
+
+                       │      B      │              B2              │
+                       │   sec/rel   │   sec/rel    vs base         │
+CreateRelationships-10   4.973µ ± 9%   5.043µ ± 4%  ~ (p=0.937 n=6)

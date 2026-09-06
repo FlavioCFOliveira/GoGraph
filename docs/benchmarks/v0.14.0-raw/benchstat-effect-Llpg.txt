@@ -1,0 +1,49 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/graph/lpg
+cpu: Apple M4
+                                 │   v0.13.0   │              v0.14.0               │
+                                 │   sec/op    │    sec/op     vs base              │
+Barrier_BareRWMutexParallel        3.712n ± 1%   3.701n ±  1%       ~ (p=0.851 n=6)
+Barrier_BareRWMutexParallel-8      42.38n ± 5%   43.38n ± 11%       ~ (p=0.513 n=6)
+Barrier_BareRWMutexParallel-64     75.18n ± 4%   73.33n ±  5%       ~ (p=0.310 n=6)
+Barrier_BareRWMutexParallel-256    73.23n ± 5%   74.06n ±  4%       ~ (p=0.509 n=6)
+Barrier_BareRWMutexParallel-1024   73.13n ± 4%   73.56n ±  6%       ~ (p=0.699 n=6)
+NodeMetadataReadParallel           90.91n ± 1%   90.75n ±  1%       ~ (p=0.818 n=6)
+NodeMetadataReadParallel-8         140.4n ± 0%   139.1n ±  0%  -0.96% (p=0.002 n=6)
+NodeMetadataReadParallel-64        139.4n ± 0%   138.5n ±  1%  -0.72% (p=0.002 n=6)
+NodeMetadataReadParallel-256       139.8n ± 1%   138.6n ±  1%  -0.89% (p=0.017 n=6)
+NodeMetadataReadParallel-1024      144.4n ± 2%   141.5n ±  2%  -2.01% (p=0.037 n=6)
+geomean                            68.51n        68.27n        -0.35%
+
+                                 │   v0.13.0    │              v0.14.0               │
+                                 │     B/op     │    B/op     vs base                │
+Barrier_BareRWMutexParallel        0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=6) ¹
+Barrier_BareRWMutexParallel-8      0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=6) ¹
+Barrier_BareRWMutexParallel-64     0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=6) ¹
+Barrier_BareRWMutexParallel-256    0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=6) ¹
+Barrier_BareRWMutexParallel-1024   0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=6) ¹
+NodeMetadataReadParallel           64.00 ± 0%     64.00 ± 0%       ~ (p=1.000 n=6) ¹
+NodeMetadataReadParallel-8         64.00 ± 0%     64.00 ± 0%       ~ (p=1.000 n=6) ¹
+NodeMetadataReadParallel-64        64.00 ± 0%     64.00 ± 0%       ~ (p=1.000 n=6) ¹
+NodeMetadataReadParallel-256       64.00 ± 0%     64.00 ± 0%       ~ (p=1.000 n=6) ¹
+NodeMetadataReadParallel-1024      64.00 ± 0%     64.00 ± 0%       ~ (p=1.000 n=6) ¹
+geomean                                       ²               +0.00%               ²
+¹ all samples are equal
+² summaries must be >0 to compute geomean
+
+                                 │   v0.13.0    │              v0.14.0               │
+                                 │  allocs/op   │ allocs/op   vs base                │
+Barrier_BareRWMutexParallel        0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=6) ¹
+Barrier_BareRWMutexParallel-8      0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=6) ¹
+Barrier_BareRWMutexParallel-64     0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=6) ¹
+Barrier_BareRWMutexParallel-256    0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=6) ¹
+Barrier_BareRWMutexParallel-1024   0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=6) ¹
+NodeMetadataReadParallel           1.000 ± 0%     1.000 ± 0%       ~ (p=1.000 n=6) ¹
+NodeMetadataReadParallel-8         1.000 ± 0%     1.000 ± 0%       ~ (p=1.000 n=6) ¹
+NodeMetadataReadParallel-64        1.000 ± 0%     1.000 ± 0%       ~ (p=1.000 n=6) ¹
+NodeMetadataReadParallel-256       1.000 ± 0%     1.000 ± 0%       ~ (p=1.000 n=6) ¹
+NodeMetadataReadParallel-1024      1.000 ± 0%     1.000 ± 0%       ~ (p=1.000 n=6) ¹
+geomean                                       ²               +0.00%               ²
+¹ all samples are equal
+² summaries must be >0 to compute geomean

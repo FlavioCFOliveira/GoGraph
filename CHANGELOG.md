@@ -6,6 +6,420 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.14.0] — 2026-09-06
+
+**13 commits** — 5 features, 4 fixes, 1 performance change, 1 documentation change, and
+2 merges. Counted at `94602f46`, the merge that closed sprint 355 into `develop` and the
+commit `release/0.14.0` was cut from; the release-preparation commits that carry this entry
+are necessarily not in their own count. **One sprint delivered this window — 355,
+*GoGraph execution reporting* — and all 11 of its tasks closed.** 158 files changed,
+22 858 insertions, 661 deletions (`git diff --shortstat v0.13.0..94602f46`).
+
+**What that insertion count is**, because 22 858 lines is not 22 858 lines of engine:
+9 841 insertions across 38 `_test.go` files, 5 797 across 79 raw measurement files under
+`docs/benchmarks/*-raw/`, 4 470 across 33 non-test `.go` files, 2 708 across 7 documentation
+files, and 42 in one example README. Bucketed by path from
+`git diff --numstat v0.13.0..94602f46`.
+
+Three things define the release.
+
+**Execution reporting stopped claiming what it had not measured.** The `DbHits` column could
+not distinguish "counted, and it is zero" from "never counted at all" — both printed `0`. It
+is now tri-state: a counted figure, a counted zero, and `?` for a figure nobody counted, with
+an incomplete total rendering `x + ?` rather than silently summing across the gaps. Four
+operator families that read storage and reported nothing now count it, and each is proved by
+an observed arm in which the db-hits figure **differs from the operator's own row count**, so
+the figure cannot have been derived from it. A new `Removed` column reports how many candidate
+rows a predicate threw away.
+
+**The planner consumes its own statistics for the first time.** The property statistics have
+been maintained since #2097 and, until this release, were read by nothing but the `EXPLAIN`
+renderer. They now decide the drive order of the disjoint-component join reorder, under the
+pre-existing trustworthiness veto and evaluated over a certified error interval rather than at
+the point estimate. `Est.Rows` renders **beside** the measured `Rows` with its provenance
+marked, so an estimate and the measurement that tested it can be read from one table over one
+plan; and how wrong the estimates turn out to be is itself observable, as a q-error metric.
+
+**The sprint's own gate found two defects, and both were fixed rather than deferred.** A
+declined MVCC label count was read as an empty label, which demoted the estimate, made the
+planner benefit non-deterministic, and let `EXPLAIN` render a plan the engine did not run
+(#2771). And a labelled count cloned a roaring bitmap and returned it **uncorrected**, purely
+to have `GetCardinality()` called on it (#2773).
+
+**`go.mod` and `go.sum` are byte-identical to `v0.13.0`.** Same pinned toolchain, same
+dependency set at the same versions (`git diff v0.13.0..94602f46 -- go.mod go.sum` is empty).
+There is nothing to report under a dependency heading and nothing is invented to fill one.
+
+**No change is marked breaking** — no commit in the window carries a `BREAKING CHANGE` footer
+or a `!` subject — **but the rendered plan output changed shape**, and any consumer that parses
+plan text or reads the Bolt plan map may need updating. The full list is under
+[*Behaviour a caller can observe — the compatibility surface*](#behaviour-a-caller-can-observe--the-compatibility-surface).
+
+The openCypher TCK gate is unchanged at **3 897/3 897**. `const tckExecutionBaseline = 3897`
+in `cypher/tck/runner_test.go` is untouched and **no `.feature` file changed in this window**
+(`git diff --name-only v0.13.0..94602f46 -- 'cypher/tck/features/**'` is empty over 220
+feature files), so the scenario population is the one `v0.13.0` was measured against.
+
+**Read [`release-notes/v0.14.0.md`](release-notes/v0.14.0.md) before upgrading.** There are no
+data-migration steps, but the observable plan output changed and the release's open gaps are
+listed there.
+
+### Added
+
+#### Cypher — the estimate reaches the physical plan
+
+- **`cypher/exec.PlanEstimate`, `exec.EstimateSource` with `EstimateAbsent`, `EstimateExact`,
+  `EstimateStats` and `EstimateHeuristic`, and the methods `EstimateSource.Known`,
+  `EstimateSource.Exact` and `EstimateSource.String`** (#2765) — the planner's cardinality
+  estimate and its provenance, as carried on a physical plan node.
+- **`cypher/exec.PlanEstimates`, `exec.PlanTreeWithEstimates`** (#2765) — the operator-to-
+  estimate mapping and the plan-tree builder that applies it. Attribution is a single rule at
+  `buildOperator`, the one point holding both a logical node and the operator it lowered to:
+  the deepest logical node whose lowering returns an operator owns the estimate, and it is
+  never overwritten.
+- **`cypher/exec.EstRowsCell`, `exec.EstRowsAnnotation` and `const EstRowsUnknown = "-"`**
+  (#2765) — the `Est.Rows` cell renderer, the tree annotation, and the glyph for an operator
+  with no derivable estimate. Four plan shapes have no logical node at all — the range-seek
+  leaf, the min-label re-anchored scan, the parallel leaves and the columnar fusion chains —
+  and render `-` rather than borrowing a neighbour's number.
+- **`cypher/exec.PlanNode.Est`** (#2765), the field the renderers read.
+
+#### Cypher — db-hits gains an honest unknown
+
+- **`cypher/exec.PlanNode.DbHitsKnown`, `exec.DbHitsCell`, `exec.DbHitsTotalCell` and
+  `const DbHitsUnknown = "?"`** (#2760) — the explicit unknown state and its renderers. A
+  separate boolean was preferred to Neo4j's `OperatorProfile.NO_DATA = -1` sentinel so that no
+  magic number can leak into arithmetic.
+- **`cypher/explain.ProfileReport.TotalDbHitsUncertain`** (#2760), which is what makes the
+  `Total` row render `x + ?` instead of a plain number when any contributing cell is unknown.
+- **`cypher/exec.PlanRows`** (#2760), which reports a plan's total rows together with whether
+  that total is complete.
+
+#### Cypher — rows removed by a filter
+
+- **`cypher/exec.PlanNode.RowsRemovedByFilter`, `PlanNode.RowsRemovedByFilterKnown` and
+  `exec.RowsRemovedCell`** (#2764) — the rejected-row figure and its renderer. `Filter`,
+  `ColumnarFilter` and `Expand` report it, through a `rowsRemovedCounter` marker with a
+  compile-time census.
+
+#### Cypher — the estimate error is observable
+
+- **`cypher.Engine.StatsMisestimatedPairs`** (#2767) — how many `(label, property)` pairs a
+  `PROFILE`d plan has observed to be misestimated past the margin. It returns a **count**, not
+  the pairs themselves. It counts only what a `PROFILE` has actually looked at, so a zero means
+  "nothing observed to be wrong", never "everything is right"; and a successful
+  `Engine.RefreshStatistics` **clears** it, so a non-zero reading after a refresh is the more
+  interesting fact that the fresh statistics are still predicting badly. Safe for concurrent
+  use.
+
+#### `graph/lpg`
+
+- **`graph/lpg.Graph.LabelCountAsOf`** (#2773) — a labelled cardinality as of a snapshot that
+  answers directly, never declines, and allocates nothing when nothing needs correcting.
+
+#### Observability
+
+- **Seven new `cypher.stats.*` metric series** — `cypher.stats.qerror` and
+  `cypher.stats.qerror.high` (#2767), `cypher.stats.label_count.declined` (#2771), and the four
+  fallback-reason partitions `cypher.stats.lookup.fallback.empty_label`, `.no_count`,
+  `.no_statistic` and `.stale` (#2771). `cypher.stats.qerror` observes
+  `max(est, act) / min(est, act)` per operator of a `PROFILE`d plan, and
+  `cypher.stats.qerror.high` counts the samples past the 3× margin. All eleven
+  `cypher.stats.*` series are documented in [docs/metrics.md](docs/metrics.md); a set
+  comparison of the series names in `cypher/stats_metrics.go` against that file is empty in
+  both directions.
+
+### Changed
+
+#### Behaviour a caller can observe — the compatibility surface
+
+These are the release's compatibility surface. Nothing here is marked breaking, but each is
+observable, and the first four change bytes a consumer may be parsing.
+
+- **`Engine.Explain` gained an `(est. rows=N exact)` annotation** on the physical plan tree
+  (#2765). Where an operator has no derivable estimate, no annotation is added.
+- **`Engine.Profile`, `Engine.ProfileTable` and `Result.Profile()` gained `Est.Rows` and
+  `Removed` columns** (#2764, #2765), and **an uncounted db-hits cell now renders `?` rather
+  than `0`** (#2760), with an incomplete total rendering `x + ?`. Each column is dropped
+  entirely when no operator in the plan carries that figure, so a plan with nothing to say in
+  a column does not grow one.
+- **`exec.PlanNode` gained exported fields** — `Est`, `DbHitsKnown`, `RowsRemovedByFilter`
+  and `RowsRemovedByFilterKnown` (#2760, #2764, #2765). **`explain.OperatorStats`** gained the
+  same four, and **`explain.ProfileReport`** gained `TotalDbHitsUncertain`. Code that
+  constructs any of these with an unkeyed composite literal will no longer compile; keyed
+  literals are unaffected.
+- **Bolt `plan` and `profile` metadata gained `EstimatedRows`, `EstimatedRowsSource` and
+  `RowsRemovedByFilter`, and now OMITS `dbHits` for an uncounted operator** rather than
+  sending `0` (#2760, #2764, #2765). `EstimatedRows` is where Neo4j puts it, a plan argument;
+  `EstimatedRowsSource` has no Neo4j counterpart, because Neo4j publishes the estimate
+  unqualified. `RowsRemovedByFilter` is written for an `EXPLAIN`-shaped node too, unlike
+  `dbHits`.
+- **Anything parsing plan text or the Bolt plan map may need updating.** A reader that assumed
+  a db-hits cell is always an integer must now handle `?` and `x + ?`; a Bolt client that
+  assumed `dbHits` is always present must now handle its absence, which is the wire-level half
+  of #2760.
+- **`Expand`'s db-hits figure changed definition, not merely scale** (#2761). It reported the
+  edges it emitted and now reports the adjacency slots it walked. On a source with 99 `:LIKES`
+  and 1 `:KNOWS` out-edge, `-[:KNOWS]->` previously reported `dbhits=1` for the same 100-slot
+  walk that `-->` reported as `100`; both now report `100` while still emitting 1 row and 100
+  rows respectively. Neo4j charges the hit regardless of the predicate outcome, so the old
+  figure was an incompatible definition rather than a different unit. The two binary searches
+  stay outside the figure and now say so.
+- **The three morsel-parallel leaves report a non-zero db-hits figure** (#2762).
+  `ParallelScanProject`, `ParallelAggregateScan` and `ParallelCountScan` reported `0` while
+  their workers walked the whole label; each now reports the node references its workers
+  consumed, equal to what the serial control arm reports for the same graph. The charge is one
+  atomic add **per morsel** — one per 1 024 node references — not per row: #2649 measured
+  per-row shared atomics on this same operator at 18.9 % of flat CPU with scaling stopping past
+  four workers. Their `PlanDetail` no longer says db-hits are not counted.
+- **`ShortestPath` and `AllShortestPaths` report a non-zero db-hits figure** (#2763), the
+  relationship slots their searches read, where both previously reported `0`.
+- **`Filter`, `ColumnarFilter` and `Expand` report a `Removed` figure** (#2764). An operator
+  with no rejection mechanism omits the cell entirely; an operator that has one and rejected
+  nothing prints `removed=0`, because a filter that rejected nothing is exactly the finding a
+  reader of a slow plan wants. This differs from PostgreSQL, which suppresses the zero in text
+  mode, and the divergence is deliberate.
+- **The plan a query runs can now differ when statistics are present** (#2766). The
+  disjoint-component join reorder consumes the property statistics, so the same query over the
+  same graph can plan a different **shape** according to whether `RefreshStatistics` has run.
+  The reorder remains **result-identical** — its order-safety gate is untouched, and a
+  differential suite holds the result multiset — but the plan is not. The gate is a minimax
+  over two cost rules, because `Apply` re-`Init`s the inner arm per outer **row** while a
+  `Selection` may be rewritten into a seek that collapses drain onto rows; the planner cannot
+  see which realisation it will get, so a swap must win under both. `estStats` is consumed over
+  its certified error interval under a 3× margin, and a staleness screen was added for the
+  equality path, which the original design had not anticipated.
+
+#### Documentation corrected against the code
+
+- **Two documents claimed the statistics reach no plan decision, which #2766 made false**
+  (this release). `docs/optimisations.md` described the estimate providers as "display-only —
+  no execution or plan-choice change", and `docs/statistics-design.md` said "the reordering
+  peepholes (P3) are unaffected — they require estExact and never consume statistics". Both are
+  corrected against `cypher/join_reorder_plan.go` (`reorderFilteredRows`) and
+  `cypher/estimate.go` (`trustworthy`, which admits `estStats`). The result-identity claim in
+  `docs/optimisations.md` was checked and **kept**: only the display-only half was wrong.
+- **`docs/reordering-design.md` and `docs/count-store-design.md` described the reorder as
+  inert** (this release). The first said "with no consumer today the whole thing is inert" and
+  sequenced `EstStats` as a later arrival; the second said the P3 reorder is "provably inert
+  until real exact counts are online". Each now carries a dated marker recording what changed
+  and what still holds — there is still no DPccp enumerator, and the single-edge anchor swap is
+  still exact-count-only.
+- **`docs/cypher.md` pointed at the superseded audit** (this release). Its only pointer to the
+  figure classification named `explain-profile-honesty-audit-2026-09-03.md`, whose
+  classifications this release inverted; it now names the 2026-09-05 re-run.
+- **`README.md` listed `cypher/plan` as a module package and described `PROFILE` as three
+  per-operator figures** (this release). `cypher/plan` was deleted in `80954706` (2026-06-22)
+  and no `.go` file imports it; `PROFILE` now reports five figures. Both package lists are
+  corrected.
+- **Four in-code claims that the statistics are inert, and a `PlanNode` godoc that contradicted
+  a compile-time census in its own package, were corrected at `bd9fc194`** (#2768) rather than
+  backlogged. The godoc named `VarLengthExpand` as the only counting operator and
+  `ShortestPath`, `AllShortestPaths` and the parallel leaves as uncounted, while
+  `cypher/exec/profile.go` listed nine `storageAccessCounter` implementations including all
+  four. It now points at the census instead of restating it.
+
+### Fixed
+
+- **A declined MVCC label count was read as an empty label** (#2771). `ResolveLabelCount` is
+  exact-or-nothing and declines while MVCC history is live;
+  `statsRangeEstimateInner` discarded the `ok` flag, and its `n <= 0` guard then demoted the
+  estimate to `estFallback`, so the histogram path went silently inert and the veto kept the
+  written order. The visible symptom was `EXPLAIN` rendering a reorder the run did not take.
+  **The premise the task was opened on was corrected by the evidence**: no concurrent writer is
+  involved. The records are the seed graph's own birth records, reclaimed by an asynchronous
+  vacuum that lags under whole-module parallel load — measured at 303 unreclaimed on an idle
+  graph with no writer. On an idle host the vacuum always wins, which is why the defect was
+  invisible outside `go test -race` over everything. `labelPopulation{n, known}` now carries the
+  distinction in one place, resolving the exact count first and the corrected label bitmap on a
+  decline; the query path pays nothing, taking `N` from the drain it already holds. The
+  fallback counter is now partitioned by four reasons and the partition is asserted.
+- **A labelled count cloned a roaring bitmap it never corrected** (#2773). The count path gated
+  on a **global** unreclaimed-record flag while the bitmap path gated **per-label**, so when the
+  global gate was up and the per-label gate clear, `labelBitmapAsOfFiltered` cloned the bitmap
+  and returned it **uncorrected** — the clone existed solely to have `GetCardinality()` called
+  on it. That no correction ran was proved by the allocation figure being **flat** from 1 to
+  1 000 live records, where a real correction grows with the count. An idle graph reaches the
+  state alone, because `AddNode` writes a life record whose churn set is the labels held at
+  that instant — none — so an unreclaimed birth raises the global flag and no per-label counter
+  at all. `LabelCountAsOf` now answers directly. **Two refutations are recorded**: the task's own
+  brief located the cost in `labelCardinalityEstimate`, which is never on this path, and #2753
+  had attributed the same signature to sibling goroutines and external load.
+
+### Performance
+
+**This release is not measurably faster, and no claim is made that it is.** The
+head-to-head against `v0.13.0` was run in one dimension only — **allocations** — because
+the host carried a load average of 2.86–19.73 throughout, substantially caused by Spotlight
+indexing the measurement's own worktrees. **A timing comparison remains UNMEASURED.** That
+is not the same as "no difference".
+
+Method: two clean worktrees, `-trimpath`, plain build (**no `-race`** — allocation counts
+are not build-invariant), three arms interleaved with the order rotated each round, and the
+noise floor measured first. Full record:
+[`docs/benchmarks/v0130-vs-v0140-2026-09-06.md`](docs/benchmarks/v0130-vs-v0140-2026-09-06.md).
+
+**Noise floor.** Two independent builds of the same `v0.14.0` tree are byte-identical, so
+`B` vs `B2` is the same binary against itself: **169 of 171** benchmarks agree within 0.5 %.
+The two that do not are plan-cache shapes, where this host manufactures an **11.34 %**
+allocation difference from nothing. Separately, the `store/wal` test binary is
+**byte-identical between the two releases**, and all 7 of its benchmarks report identical
+allocations — the method returns "no difference" where none is possible.
+
+**Result — the added counting work costs nothing.** Sprint 355 added slot bracketing to
+`Expand`, a per-morsel atomic to the three parallel leaves, per-run accumulation to the
+shortest-path operators, reject counting to the filters, and an estimate on the physical
+plan. Across **171 benchmarks, 159 are unchanged**; `Expand` is identical in all 14 arms and
+the parallel leaves in all 17. **Nothing regressed.**
+
+**Result — eight benchmarks changed, every one a reduction:**
+
+| Benchmark | `v0.13.0` | `v0.14.0` | Δ `allocs/op` |
+|---|---|---|---|
+| join reorder, skewed shape, reorder on | 5 925 706 | **59 968** | **−98.99 %** |
+| join reorder, live-history shape (quiet / live) | 564 429 / 564 428 | 25 031 / 25 055 | −95.6 % |
+| `ReadAfterWrite_Session` / `_Sessionless` | 53 | 41 | −22.64 % |
+| `ShortestPath_Layered` / `_LayeredTyped` | 126 | 108 | −14.29 % |
+
+**The reorder gain is conditional and must not be quoted as a general speed-up.** It needs
+`RefreshStatistics` to have run **and** a qualifying query shape — a disjoint two-component
+match where a label count cannot identify the cheaper driver but a `(label, property)`
+estimate can. Attribution is direct rather than inferred: the physical plan changes (at
+`v0.13.0` the 100-row `:B` component drives and re-scans the 20 000-node `:A` label once per
+row; at `v0.14.0` the filtered `:A` component, estimated at 3 rows, drives), the results are
+byte-identical across both trees, and the reorder-disabled control is unchanged.
+
+**Four benchmarks are unreliable and no claim is made for them** — the plan-cache shapes,
+whose own round-to-round spread reaches 19 %.
+
+**This release ships no release-level performance claim.** Sprint 355 **adds** counting work to
+several paths that previously did none: slot bracketing in `Expand`, one atomic add per morsel
+in the three parallel leaves, per-run slot accumulation in the two shortest-path operators, and
+rejected-row counting at eight sites across the row and columnar filter paths. Each was
+measured at its own task, against its own baseline, with a noise floor measured first, and
+showed **no statistically significant regression there** — allocations identical across all 18
+`BenchmarkExpand*` arms (#2761), zero allocations added across all 7 shortest-path arms
+(#2763), allocations identical across all 11 filter arms (#2764). **None of those is a
+release-level measurement**, and the aggregate cost of the added counting has **not** been
+measured. The one figure this release can state structurally is that the work was added; whether
+it is visible at release level is an open question until the head-to-head runs.
+
+The single per-task speed-up worth recording, kept explicitly scoped to its own benchmark and
+**not** offered as a release-level gain:
+
+- **The join reorder that #2766 wired to the statistics** turned
+  `BenchmarkJoinReorderStatsSkewed` — 20 000 `:A` of which 3 match, × 100 `:B` — from
+  261.638 m to 2.658 m, **−98.98 % (p = 0.000, n = 12)**, with B/op −98.83 % and allocs/op
+  −98.99 %. Conditions, because the figure is meaningless without them: Apple M4, 10 cores,
+  go1.27.1 darwin/arm64, **non-race** build, `-benchtime=1s -count=1` over 12 interleaved
+  rounds, compared with `benchstat`. The noise floor was measured **first**, same code against
+  itself: 2.658 m ± 1 % versus 2.663 m ± 1 %, `~ (p = 0.887, n = 12)` — no significant
+  same-versus-same difference. **The host was not idle** (load average 1.87–2.72 on 10 cores,
+  with a persistent root `osascript` at ~15 % CPU), so the absolute ns/op figures are not
+  quiet-host numbers and must not be quoted as such; the noise floor was measured under those
+  same conditions, which is why the delta is not attributable to host noise. This is one
+  synthetic skewed shape, chosen to exhibit the effect, and it says nothing about a workload
+  whose arms a label count can already separate.
+- **#2773's fix removed 12 allocations** from a bare labelled `count()` on a plan-cache hit,
+  **32 → 20 allocations per operation** on the arm where unreclaimed records are live, with the
+  quiet arm unchanged as the control. Build mode matters for this figure and is stated:
+  allocation counts here were read in both plain and `-race` builds (19.0 either way in
+  isolation; `-race` changes B/op, 2 064 versus 2 056, not the count). The task also recorded a
+  wall-clock figure for the same arm, which **is not reproduced here** because no noise floor or
+  host load was recorded alongside it.
+
+> **The measured head-to-head against `v0.13.0` is not in this release entry.** It is reserved
+> under *Measured gains against v0.13.0* in
+> [`release-notes/v0.14.0.md`](release-notes/v0.14.0.md), to be filled from a run on a quiet
+> host. Until it lands, this release makes **no claim** to be faster than `v0.13.0`.
+
+### Compliance
+
+- **openCypher TCK, execution level: 3 897/3 897, unchanged.** `const tckExecutionBaseline =
+  3897` is untouched, and no `.feature` file changed in this window across 220 feature files,
+  so the population is the one `v0.13.0` was measured against. The closing audit's verbose run
+  at `83ba8d8b` reports `3897 scenarios, 3897 passed, 0 failed, 0 undefined, 0 inconclusive
+  (baseline=3897)`; in `make ci` the gate runs non-verbose and reports
+  `ok github.com/FlavioCFOliveira/GoGraph/cypher/tck`.
+- **ACID: unchanged.** No task in this window changed a durability, atomicity, isolation or
+  consistency path. #2771 and #2773 both touch MVCC **read** paths; #2773 added a dedicated
+  seam so that `LabelCountAsOf`'s ordering claim — that the gate is sampled after the
+  cardinality — is gated by a test rather than asserted by a godoc.
+- **`make ci` is green on the release tree**, on the **seventh** attempt. `MAKE_EXIT=0`, read
+  from inside the log; `go test -race -count=1 -timeout=30m ./...` with **no `DATA RACE` and no
+  `FAIL`**; `golangci-lint run ./...` reporting `0 issues.`; and
+  `cover_gate: OK (aggregate 88.6% >= 85.0%, all packages >= 75.0%)`. The six preceding runs
+  exited 2 — five at `test-short` and one at `cover-gate` — and the two defects they exposed
+  are #2771 and #2773 above, both of which were in the module rather than in the instruments.
+- **The soak and nightly layers were NOT run for this release**, and nothing here claims
+  otherwise. Under
+  [*Acceptance gates*](CLAUDE.md) the soak layer is a periodic reliability exercise and not a
+  release gate, but it has now gone unrun for a seventh consecutive cycle. This release also
+  carries **no production certification of its own**; the most recent was taken at the
+  `v0.11.0` commit.
+
+### Notes
+
+- **What this release does NOT do.** The closing audit
+  ([docs/explain-profile-honesty-audit-2026-09-05.md](docs/explain-profile-honesty-audit-2026-09-05.md))
+  verified eleven open gaps as still holding at the closing tree. The ones a caller may notice:
+  `exec.OptionalExpand` is **unreachable from any query** — 0 of 11 `OPTIONAL MATCH` shapes
+  plan it, every one lowering to `OptionalApply(… Expand …)` — so it is unwired rather than
+  dead (#2769); `exec.RenderPlan` **has no caller** and renders a plan missing the columns this
+  release added (#2770); an MCV equality estimate is tagged `estExact` with **no staleness
+  check at all**, demonstrated by a plan in which one estimate is live and one is stale and both
+  are tagged `exact` (#2772); `Expand`'s estimate ignores an intervening `Selection`, biasing
+  its q-error high; columnar fusion chains carry no estimate, so **the most-wrong estimate is
+  the one q-error cannot see** — a stale MCV estimate wrong by 400× produces no q-error
+  observation at all, because the shape that exposes it fuses into a columnar chain, and that
+  shape is the commonest read form in the language; a `LIMIT 0` `PROFILE` captures the parallel
+  tier with workers still in flight, yielding a **known zero that is not a fact about the
+  workload**; and the count-store leaves render `?` where a known `0` might be the better
+  answer, which this sprint did not settle. Three ordering claims in `graph/lpg`
+  (`LabelCountExact`, `LabelCountBound`, `LabelsCountExact`) are **real but ungated**, and a
+  same-label bitmap clone still costs 38 allocations.
+- **What the rendering still does not distinguish.** The db-hits column now separates *counted*
+  from *not counted*. It does **not** separate *counted* from *inferred*: a `NodeByLabelScan`
+  reporting `2000` and a `ParallelScanProject` reporting `2000` render identically, and the
+  first is its own row count while the second is a real walk. That is the surviving residue of
+  the audit's divergence D1.
+- **Audit verdicts, for the record.** Of the eleven divergences the 2026-09-03 audit raised
+  against Neo4j, Memgraph and PostgreSQL: **4 closed** (D2 rows-removed, D3 estimate beside
+  actual, D4 uncounted-prints-zero, D9 Bolt estimates), **2 narrowed** (D1 derived db-hits,
+  D6 parallel tier), **5 unchanged** (D5 per-invocation `loops`, D7 memory figure, D8 Bolt
+  `identifiers`, D10 eager warning, D11 `EXPLAIN` on a writing statement). Three of the five
+  unchanged were judged not to matter and that judgement survived re-reading; the two that
+  matter and did not move are D8 and D11, both explicitly out of scope for this sprint.
+- **The closing audit is independent of the code it audits.** It was produced by an external Go
+  module driving GoGraph's public API through a `replace` directive — deliberately **not** the
+  sprint's own test suite, because a gate written by the task under audit cannot be the evidence
+  that the task's claim is true. 31 query shapes over 8 graph shapes, 110 operator instances.
+  It contains **no throughput or latency figure at all**, because the host was not quiet
+  (load average 1.42–2.52); every figure in it is a count, a glyph or a structural comparison.
+- **Release packaging was fixed in this release** (#2758). `.goreleaser.yaml` listed
+  `docs/**/*`, a glob matching only paths carrying at least one directory component, so the
+  `v0.13.0` tarball shipped **0 of the 112 top-level `docs/*.md` files** and instead carried
+  254 nested files — 116 Markdown documents plus **138 raw measurement files** (112 `.txt`,
+  25 `.log`, 1 `.sh`), every one of them under `docs/benchmarks/`. Counted from
+  `git ls-tree -r --name-only v0.13.0 -- docs/`. The file list now ships `docs/*.md` and
+  `docs/**/*.md`, and **both patterns are load-bearing** because `**` never matches zero
+  segments. Verified the only way that counts, by building a snapshot artefact and
+  **extracting** it: **113 of 113** top-level documents present, **233 of 233** Markdown
+  documents in total, **0** `.txt`/`.log`/`.meta`/`.sh` files, identically across all four
+  OS/arch archives. Reading the config is what let the defect stand for a release, so the
+  config now records that the verification must be an extraction. The `v0.13.0` entry's claim
+  that the protection-regime text "reached consumers as supply-chain assurance" was false as a
+  consequence, and is corrected in place above (#2759).
+- **Pre-1.0 stability.** This is a `0.y.z` release. The public Go API may change without a
+  major-version bump until `1.0.0`; pin the exact version you depend on.
+- **Module path.** The Go module path is `github.com/FlavioCFOliveira/GoGraph` with no `/vN`
+  suffix, which is Semantic-Import-Versioning-correct for a `0.x` line.
+- **Examples are not part of the module.** `examples/` is an exercise harness; the module
+  neither imports nor depends on it. One example README changed in this window
+  (`examples/31_metrics_observability/README.md`).
+
+[0.14.0]: https://github.com/FlavioCFOliveira/GoGraph/releases/tag/v0.14.0
+
 ## [0.13.0] — 2026-09-05
 
 **100 commits** — 30 fixes, 27 performance changes, 16 documentation, 12 test, 4 features,
@@ -490,12 +904,24 @@ in place; several were found by a measurement that set out to act on them.
   tag protection returns **404** — and `git log --pretty=%G?` reports `N` for **all 100 commits**
   in this window, so the signing claim was wrong twice over. The repository's own history
   corroborates the absence: `main` carries `f97bbfec`, a **merge commit**, which the
-  "require linear history" rule described as active would have rejected. This shipped —
-  `.goreleaser.yaml` bundles `docs/**/*` into every release tarball, so the claim reached
-  consumers as supply-chain assurance. Both files now lead with the measured absence, keep the
-  intended regime as an explicitly-labelled intent, and carry the three probes as dated
-  evidence. The one control that **is** real — correctness gating via local
-  `make release-preflight` — was verified and kept.
+  "require linear history" rule described as active would have rejected. Both files now lead
+  with the measured absence, keep the intended regime as an explicitly-labelled intent, and
+  carry the three probes as dated evidence. The one control that **is** real — correctness
+  gating via local `make release-preflight` — was verified and kept.
+
+  > **Correction, 2026-09-06 (rmp #2759).** This entry originally continued, after "would have
+  > rejected": *"This shipped — `.goreleaser.yaml` bundles `docs/**/*` into every release
+  > tarball, so the claim reached consumers as supply-chain assurance."* **That sentence was
+  > false.** It was reasoned from the packaging config and never verified against a built
+  > artefact. The glob `docs/**/*` matches only paths carrying at least one directory
+  > component, so **none of the 112 top-level `docs/*.md` files was in the `v0.13.0`
+  > tarball** — `docs/release.md` among them — and `CONTRIBUTING.md` is not in the archive
+  > file list at all. Neither of the two files that carried the false protection claim
+  > reached consumers through the release artefact; both reached them through the repository.
+  > The finding itself is unaffected — the protection regime does not exist, and both files
+  > did assert that it did — and only the claim's *reach* was overstated. The packaging
+  > defect is rmp #2758, fixed in [0.14.0]; the count was measured with
+  > `git ls-tree -r --name-only v0.13.0 -- docs/`.
 
 - **The write barrier holds zero blocked time — premise refuted** (#2697). The round-2
   inventory ranked `execUnderBarrier` at 72–99 % of write-path blocked time; the **flat**

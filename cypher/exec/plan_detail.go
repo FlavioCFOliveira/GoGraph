@@ -90,43 +90,56 @@ func (op *Expand) PlanDetail() string {
 	return "ExpandInto filter"
 }
 
-// PlanDetail names the morsel-parallel tier and states plainly that this leaf's
-// db-hits are not counted.
+// PlanDetail names the morsel-parallel tier and states what the leaf's single
+// line accounts for.
 //
 // The tier is a physical decision a reader needs to see — the same class as the
 // label a scan iterates — and without it a parallel leaf renders bare, so nothing
 // tells a reader that the operator's whole sub-plan collapsed into one line.
 //
-// The db-hits clause is here because the alternative would be worse. A
-// morsel-parallel leaf reads one node reference per node its workers walk, and
-// implements neither [StorageRecordScan] nor storageAccessCounter, so its DbHits
-// cell reads 0 for a full scan of the graph. Zero is also what a pure row
-// transformer reports, and the column has no way to tell "counted, and it is
-// zero" from "not counted at all" — Neo4j's renderer leaves such a cell BLANK and
-// prints "x + ?" for a total it could not complete
-// (renderAsTreeTable.scala / renderSummary.scala, 5.26.16), and PostgreSQL
-// suppresses an unmeasured figure rather than printing 0 (explain.c, REL_17).
-// GoGraph's column prints the zero, so the qualification is put where the reader
-// will see it next to the number (rmp #2720).
+// # What the wording used to say, and why it changed
 //
-// Marking the leaf [StorageRecordScan] instead was rejected: its emitted row
-// count is NOT its node-walk count whenever the fused sub-plan carries a
-// Selection, which is exactly the min-label shape the parallel scan is built for,
-// so the marker would replace an obvious zero with a plausible wrong number.
+// Until rmp #2762 this read "parallel tier; db-hits not counted", because the leaf
+// implemented neither [StorageRecordScan] nor storageAccessCounter and its DbHits
+// cell was a figure nobody had taken. That is no longer true: since #2762 each leaf
+// implements storageAccessCounter and reports the node references its workers
+// consumed, so the same query reports the same figure on either side of the
+// parallel threshold. Leaving the old words in place would have made the plan line
+// contradict its own number.
+//
+// What replaces it is the property that IS still true and still needs saying: the
+// whole parallel phase — every worker, every morsel, and the sub-plan each worker
+// built — is attributed to this ONE node. Rows, time and db-hits are all totals for
+// the phase, and there is no sub-tree below the line to subtract, because a
+// morsel-parallel leaf implements no [PlanChildren] and the builder clears the
+// profiler from the per-worker build options. A reader who does not know that would
+// take the leaf for an ordinary scan and look for the filter and projection that are
+// fused inside it. See the "parallel tier" section of exec.Profiler, which also
+// records why PostgreSQL's per-worker breakdown is deliberately not followed.
+//
+// Marking the leaf [StorageRecordScan] instead was rejected then and is still
+// wrong: its emitted row count is NOT its node-walk count whenever the fused
+// sub-plan carries a Selection, which is exactly the min-label shape the parallel
+// scan is built for, so the marker would have replaced an obvious zero with a
+// plausible wrong number. The figure had to be counted, and now is.
 func (op *ParallelScanProject) PlanDetail() string { return parallelPlanDetail }
 
-// PlanDetail names the tier and its db-hits gap, as [ParallelScanProject.PlanDetail]
-// does. An aggregate leaf emits one row per group while walking the whole label,
-// so for it the row count is not even close to the node-walk count.
+// PlanDetail names the tier and its one-node attribution, as
+// [ParallelScanProject.PlanDetail] does. This leaf emits one row per GROUP while
+// walking the whole node source, so its row count says even less about its storage
+// work than the fused scan's does — which is why its db-hits figure is counted
+// (rmp #2762) rather than derived from rows.
 func (op *ParallelAggregateScan) PlanDetail() string { return parallelPlanDetail }
 
-// PlanDetail names the tier and its db-hits gap, as [ParallelScanProject.PlanDetail]
-// does. A count leaf emits exactly one row however many nodes it walked.
+// PlanDetail names the tier and its one-node attribution, as
+// [ParallelScanProject.PlanDetail] does. This leaf emits exactly ONE row however
+// many nodes it walked, which is the extreme case of the same point: rows=1,
+// dbhits=N.
 func (op *ParallelCountScan) PlanDetail() string { return parallelPlanDetail }
 
 // parallelPlanDetail is the shared detail string of the morsel-parallel leaves, so
 // the three cannot drift apart in what they tell a reader.
-const parallelPlanDetail = "parallel tier; db-hits not counted"
+const parallelPlanDetail = "parallel tier; whole phase on one node"
 
 // PlanDetail reports the build side of the columnar join, as [HashJoin.PlanDetail]
 // does for the row-mode one.
@@ -142,10 +155,15 @@ func buildSideText(onLeft bool) string {
 	return "right"
 }
 
-// The parallel tier deliberately has no PlanDetail. Its engagement is already
-// stated by the operator name — ParallelCountScan, ParallelScanProject and
-// ParallelAggregateScan are distinct types from their serial counterparts, which
-// is what rmp #2222 AC 1 asks the surface to show. The worker count is not a
-// property of the operator: it is negotiated at run time with a shared
-// ParallelGovernor, so there is no fixed number to report and inventing one would
+// The parallel tier's PlanDetail deliberately does NOT report a worker count.
+// Engagement is already stated by the operator name — ParallelCountScan,
+// ParallelScanProject and ParallelAggregateScan are distinct types from their
+// serial counterparts, which is what rmp #2222 AC 1 asks the surface to show — and
+// the worker count is not a property of the operator: it is negotiated at run time
+// with a shared ParallelGovernor against the parallel leaves in flight across every
+// concurrent query, so there is no fixed number to report and inventing one would
 // be worse than saying nothing.
+//
+// This paragraph used to claim the tier had no PlanDetail at all. It has had one
+// since rmp #2720 (the three functions above); the surviving true part is the
+// refusal to print a worker count, which is what it now says.

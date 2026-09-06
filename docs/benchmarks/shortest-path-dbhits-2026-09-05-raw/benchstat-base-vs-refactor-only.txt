@@ -1,0 +1,37 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/exec
+cpu: Apple M4
+                                    │ refac_base.txt │ refac_head.txt │
+                                    │                                                 sec/op                                                 │                                     sec/op                                       vs base               │
+ShortestPath_UnitDegreeChain-10                                                                                                  634.3µ ± 2%                                                                       633.2µ ± 1%       ~ (p=0.630 n=12)
+ShortestPath_Layered-10                                                                                                          91.06µ ± 1%                                                                       90.27µ ± 1%  -0.86% (p=0.007 n=12)
+ShortestPath_LayeredTyped-10                                                                                                     90.84µ ± 0%                                                                       90.28µ ± 1%  -0.62% (p=0.021 n=12)
+ShortestPath_HighDegreeFan-10                                                                                                    1.555m ± 1%                                                                       1.554m ± 1%       ~ (p=0.551 n=12)
+AllShortestPaths_UnitDegreeChain-10                                                                                              1.123m ± 2%                                                                       1.100m ± 2%       ~ (p=0.089 n=12)
+AllShortestPaths_Layered-10                                                                                                      192.6µ ± 1%                                                                       191.6µ ± 1%       ~ (p=0.068 n=12)
+AllShortestPaths_HighDegreeFan-10                                                                                                1.858m ± 1%                                                                       1.835m ± 1%  -1.27% (p=0.017 n=12)
+geomean                                                                                                                          441.7µ                                                                            438.1µ       -0.80%
+
+                                    │ refac_base.txt │ refac_head.txt │
+                                    │                                                  B/op                                                  │                                      B/op                                        vs base               │
+ShortestPath_UnitDegreeChain-10                                                                                                 1.607Mi ± 0%                                                                      1.607Mi ± 0%       ~ (p=0.930 n=12)
+ShortestPath_Layered-10                                                                                                         252.1Ki ± 0%                                                                      251.8Ki ± 0%  -0.13% (p=0.000 n=12)
+ShortestPath_LayeredTyped-10                                                                                                    252.1Ki ± 0%                                                                      251.8Ki ± 0%  -0.13% (p=0.000 n=12)
+ShortestPath_HighDegreeFan-10                                                                                                   4.257Mi ± 0%                                                                      4.257Mi ± 0%  -0.00% (p=0.000 n=12)
+AllShortestPaths_UnitDegreeChain-10                                                                                             12.95Mi ± 0%                                                                      12.95Mi ± 0%       ~ (p=0.468 n=12)
+AllShortestPaths_Layered-10                                                                                                     453.4Ki ± 0%                                                                      453.4Ki ± 0%       ~ (p=1.000 n=12)
+AllShortestPaths_HighDegreeFan-10                                                                                               4.871Mi ± 0%                                                                      4.871Mi ± 0%       ~ (p=0.538 n=12)
+geomean                                                                                                                         1.419Mi                                                                           1.419Mi       -0.04%
+
+                                    │ refac_base.txt │ refac_head.txt │
+                                    │                                               allocs/op                                                │                                  allocs/op                                    vs base                  │
+ShortestPath_UnitDegreeChain-10                                                                                                  11.90k ± 0%                                                                    11.90k ± 0%        ~ (p=1.000 n=12) ¹
+ShortestPath_Layered-10                                                                                                           126.0 ± 0%                                                                     108.0 ± 0%  -14.29% (p=0.000 n=12)
+ShortestPath_LayeredTyped-10                                                                                                      126.0 ± 0%                                                                     108.0 ± 0%  -14.29% (p=0.000 n=12)
+ShortestPath_HighDegreeFan-10                                                                                                     317.0 ± 0%                                                                     314.0 ± 0%   -0.95% (p=0.000 n=12)
+AllShortestPaths_UnitDegreeChain-10                                                                                              5.670k ± 0%                                                                    5.670k ± 0%        ~ (p=1.000 n=12) ¹
+AllShortestPaths_Layered-10                                                                                                      2.938k ± 0%                                                                    2.938k ± 0%        ~ (p=1.000 n=12) ¹
+AllShortestPaths_HighDegreeFan-10                                                                                                20.32k ± 0%                                                                    20.32k ± 0%        ~ (p=1.000 n=12) ¹
+geomean                                                                                                                          1.537k                                                                         1.469k        -4.44%
+¹ all samples are equal

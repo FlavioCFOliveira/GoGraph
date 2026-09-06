@@ -477,6 +477,18 @@ func driveWorkload(
 	if err = driveMVCC(ctx, w, g); err != nil {
 		return fmt.Errorf("mvcc workload: %w", err)
 	}
+
+	// 10. The planner statistics and their QUALITY — the statistics are rebuilt
+	//     only when a caller asks, and until rmp #2767 nothing told a caller when
+	//     to ask. Refresh them, make one of them stale on purpose, and PROFILE a
+	//     query that reads it, so the q-error distribution and the misestimation
+	//     counter carry a real reading rather than a zero. It runs LAST because
+	//     refreshing statistics puts a per-write staleness hook on the write path,
+	//     and the count-store throughput sample above must not be measured with it
+	//     installed.
+	if err = drivePlannerStatistics(ctx, w, eng); err != nil {
+		return fmt.Errorf("planner statistics workload: %w", err)
+	}
 	return nil
 }
 
@@ -738,6 +750,95 @@ func driveCountStore(ctx context.Context, w io.Writer, eng *cypher.Engine) error
 	return nil
 }
 
+// staleTier is the tier value the planner-statistics workload deliberately makes
+// stale, and quarantinedTier is what the services it moves are re-tiered to.
+const (
+	staleTier       = "core"
+	quarantinedTier = "quarantine"
+	// keptInTier is how many services keep staleTier after the move, so the
+	// misestimation is a known factor rather than an accident of the seed.
+	keptInTier = 5
+)
+
+// drivePlannerStatistics exercises the planner statistics and, above all, the
+// observation of how WRONG they turn out to be (rmp #2767).
+//
+// The statistics are best-effort and are rebuilt only by an explicit
+// Engine.RefreshStatistics call — there is no background worker, by design. That
+// leaves an operator with a question nothing could answer: is a refresh overdue?
+// The q-error surface answers it, and this step produces a reading for it that is
+// deterministic rather than incidental:
+//
+//  1. refresh, so the statistics describe the graph exactly;
+//  2. re-tier all but a handful of the services in one tier, WITHOUT refreshing —
+//     the most-common-value list still records the old count, and (unlike the
+//     histogram estimator) it carries no staleness gate, so the planner still
+//     reports that count as EXACT;
+//  3. PROFILE a query that reads it. The estimate and the measurement now sit on
+//     the same plan node, and their ratio is the q-error.
+//
+// It then refreshes again and shows the misestimation count returning to zero,
+// which is what makes the accessor a "refresh overdue?" signal rather than a
+// lifetime tally.
+//
+// Only PROFILE emits any of this: the Engine.Run calls in step 1 and the writes in
+// step 7 above contribute nothing to the two q-error series.
+func drivePlannerStatistics(ctx context.Context, w io.Writer, eng *cypher.Engine) error {
+	if err := eng.RefreshStatistics(ctx); err != nil {
+		return fmt.Errorf("refresh statistics: %w", err)
+	}
+	trackedPairs := eng.StatsTrackedPairs()
+
+	inTier := fmt.Sprintf("MATCH (s:SERVICE) WHERE s.%s = '%s' RETURN count(s) AS c", propTier, staleTier)
+	before, err := cypherCount(ctx, eng, inTier)
+	if err != nil {
+		return fmt.Errorf("count tier before: %w", err)
+	}
+	// Make the statistic stale: move every service in the tier but a few, and do
+	// NOT refresh. The planner keeps predicting `before` for a predicate that now
+	// matches `keptInTier`.
+	if err := cypherWrite(ctx, eng, fmt.Sprintf(
+		"MATCH (s:SERVICE) WHERE s.%s = '%s' WITH s SKIP %d SET s.%s = '%s'",
+		propTier, staleTier, keptInTier, propTier, quarantinedTier), nil); err != nil {
+		return fmt.Errorf("re-tier services: %w", err)
+	}
+	after, err := cypherCount(ctx, eng, inTier)
+	if err != nil {
+		return fmt.Errorf("count tier after: %w", err)
+	}
+
+	// PROFILE the stale predicate. This is the ONLY surface that emits a q-error:
+	// the comparison needs a measurement, and only a profiled build has one.
+	profile, err := eng.ProfileTable(ctx, fmt.Sprintf(
+		"MATCH (s:SERVICE) WHERE s.%s = '%s' RETURN s", propTier, staleTier), nil)
+	if err != nil {
+		return fmt.Errorf("profile stale predicate: %w", err)
+	}
+	misestimated := eng.StatsMisestimatedPairs()
+
+	// A successful refresh clears the observation, because every reading in it was
+	// taken against the snapshot the refresh has just replaced.
+	if err := eng.RefreshStatistics(ctx); err != nil {
+		return fmt.Errorf("refresh statistics again: %w", err)
+	}
+	cleared := eng.StatsMisestimatedPairs()
+
+	// Deterministic facts: the tier really did shrink to the kept few, the stale
+	// statistic really was caught, and the refresh really did clear it.
+	fmt.Fprintf(w, "stats.tracked_pairs_positive=%d\n", boolFact(trackedPairs > 0))
+	fmt.Fprintf(w, "stats.tier_after_move=%d\n", after)
+	fmt.Fprintf(w, "stats.misestimated_pairs=%d\n", misestimated)
+	fmt.Fprintf(w, "stats.misestimated_cleared_by_refresh=%d\n", boolFact(cleared == 0))
+	// Volatile telemetry: the sizes behind the facts, and the profiled plan whose
+	// Est.Rows / Rows pair is the q-error's two inputs.
+	fmt.Fprintf(w, "# stats.tracked_pairs=%d\n", trackedPairs)
+	fmt.Fprintf(w, "# stats.tier_before_move=%d\n", before)
+	for _, line := range strings.Split(strings.TrimRight(profile, "\n"), "\n") {
+		fmt.Fprintf(w, "# stats.profile| %s\n", line)
+	}
+	return nil
+}
+
 // cypherCount runs a scalar count query via Engine.Run and returns the
 // integer in column c.
 func cypherCount(ctx context.Context, eng *cypher.Engine, query string) (int64, error) {
@@ -943,6 +1044,15 @@ var expectedMetrics = []expectedMetric{
 	{"cypher.countstore.recompute", "histogram", "Engine reopen recompute (#2087)"},
 	{"cypher.countstore.delta.applied", "counter", "count-store commit fan-out (#2087)"},
 	{"cypher.countstore.relabel.dirtied", "counter", "count-store relabel (#2087)"},
+	// The planner statistics, and how wrong they turn out to be (#2102, rmp #2767).
+	// The last two are the only series in this list that ONLY a PROFILE can
+	// produce: they compare the planner's estimate with the measurement that
+	// followed it, and an Engine.Run has no measurement to offer.
+	{"cypher.stats.refresh", "counter", "Engine.RefreshStatistics (#2102)"},
+	{"cypher.stats.refresh.latency", "histogram", "Engine.RefreshStatistics (#2102)"},
+	{"cypher.stats.lookup", "counter", "statistics estimate provider (#2102)"},
+	{"cypher.stats.qerror", "histogram", "PROFILE estimate quality (rmp #2767)"},
+	{"cypher.stats.qerror.high", "counter", "estimate wrong by >= 3x (rmp #2767)"},
 	// The MVCC substrate (rmp #2312). Concurrency control is MVCC and nothing
 	// else, so these are not an optional extra: they are how an operator sees
 	// whether the mechanism the whole module rests on is working.

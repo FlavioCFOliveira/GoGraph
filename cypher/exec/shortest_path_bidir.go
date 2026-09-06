@@ -297,10 +297,13 @@ func (op *ShortestPath) biScan(node uint64, pred map[uint64]spPredEntry, dist ma
 	if useFwdCSR {
 		verts, edges = op.fwdVerts, op.fwdEdges
 	}
-	if verts == nil || node+1 >= uint64(len(verts)) {
-		return next
-	}
-	for pos := verts[node]; pos < verts[node+1]; pos++ {
+	// scanRun subsumes the old `verts == nil` guard: a nil slice has length 0, so
+	// node+1 >= 0 holds for every node and the empty range is returned. It also
+	// charges the run to the operator's db-hits counter (rmp #2763) — this is the
+	// scan the two-sided search does all its reading in, and the one whose absence
+	// made a shortestPath PROFILE report no storage access at all.
+	pos, end := op.scanRun(verts, node)
+	for ; pos < end; pos++ {
 		// The gate admits only an untyped search, so this is a constant true
 		// today; it is kept rather than elided so that widening the gate cannot
 		// silently drop the check.

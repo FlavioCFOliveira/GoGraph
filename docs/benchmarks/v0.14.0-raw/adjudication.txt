@@ -1,0 +1,42 @@
+THE BAR — derived ONLY from same-code measurements (identical binaries), per magnitude band.
+For each band the bar is the LARGER of: the worst same-code drift that reached p<0.05, and
+that band's p95 same-code drift. Taken across BOTH floors, so it is the conservative envelope.
+==================================================================================================================================
+  band           F1 p95  F1 worstsig   F2 p95  F2 worstsig    => BAR
+  <100ns          2.59%        0.62%    6.21%        6.21%     6.21%
+  100ns-10us      4.28%        0.60%    1.58%         none     4.28%
+  10us-1ms        2.89%        2.40%    1.75%        1.75%     2.89%
+  >1ms            2.62%        0.59%    0.42%         none     2.62%
+
+ADJUDICATION — every ns/op row with p<0.05, sorted by effect.
+==================================================================================================================================
+block    benchmark                                             v0.13.0    v0.14.0    effect       p        band     bar  verdict
+cy       BenchmarkZZReorderSkewed/reorder=on-10                267.2ms    2.723ms   -98.98%  0.0051        >1ms   2.62%  FINDING
+cy       BenchmarkZZReorderLiveHistory/history=quiet-10        27.69ms    976.6µs   -96.47%  0.0051        >1ms   2.62%  FINDING
+cy       BenchmarkZZReorderLiveHistory/history=live-10          27.7ms    987.3µs   -96.43%  0.0051        >1ms   2.62%  FINDING
+exec     BenchmarkRelTypeProbe_ReverseRecovery/map+recovery-10    7.046ns    5.223ns   -25.87%  0.0051      <100ns   6.21%  FINDING
+Lcypar   BenchmarkPlanReusePhasesParallel/4full-64             1.112µs    1.018µs    -8.50%  0.0082  100ns-10us   4.28%  FINDING
+Lcypar   BenchmarkPlanReusePhasesParallel/4full-8              895.2ns    851.4ns    -4.90%  0.0131  100ns-10us   4.28%  FINDING
+exec     BenchmarkExpandDir_InVsOut_Baseline/OUT_deg1_sources-10    142.2µs    147.1µs    +3.46%  0.0131    10us-1ms   2.89%  FINDING
+exec     BenchmarkAllNodesScan_PerNodeAllocCost-10             10.97µs    11.75µs    +7.11%  0.0051    10us-1ms   2.89%  FINDING
+exec     BenchmarkRelTypeProbe_Column-10                        1.49ns    1.763ns   +18.32%  0.0051      <100ns   6.21%  FINDING
+wal      BenchmarkCRCSinglePassScratch/payload64-10            5.638ns    5.288ns    -6.21%  0.0082      <100ns   6.21%  rejected: inside same-code envelope
+wal      BenchmarkCRCIncremental/payload16-10                  6.271ns    5.979ns    -4.66%  0.0202      <100ns   6.21%  rejected: inside same-code envelope
+wal      BenchmarkCRCSinglePassScratch/payload16-10             4.37ns    4.213ns    -3.57%  0.0131      <100ns   6.21%  rejected: inside same-code envelope
+Lcypar   BenchmarkAdjacencyCacheLookup/serial                   28.2ns    27.46ns    -2.61%  0.0051      <100ns   6.21%  rejected: inside same-code envelope
+Lcypar   BenchmarkAdjacencyCacheLookup/serial-8                27.27ns    26.59ns    -2.51%  0.0202      <100ns   6.21%  rejected: inside same-code envelope
+Llpg     BenchmarkNodeMetadataReadParallel-1024                144.4ns    141.5ns    -2.01%  0.0450  100ns-10us   4.28%  rejected: inside same-code envelope
+Lcypar   BenchmarkAdjacencyCacheLookup/serial-1024              27.3ns    26.76ns    -2.00%  0.0051      <100ns   6.21%  rejected: inside same-code envelope
+exec     BenchmarkExpandFilter_RowMode-10                      1.883ms    1.846ms    -1.98%  0.0453        >1ms   2.62%  rejected: inside same-code envelope
+Lcypar   BenchmarkAdjacencyCacheLookup/serial-64               27.09ns    26.55ns    -1.97%  0.0306      <100ns   6.21%  rejected: inside same-code envelope
+Lcypar   BenchmarkAdjacencyCacheLookup/serial-256              27.06ns    26.56ns    -1.85%  0.0103      <100ns   6.21%  rejected: inside same-code envelope
+exec     BenchmarkShortestPath_Layered-10                      92.13µs    91.14µs    -1.07%  0.0082    10us-1ms   2.89%  rejected: inside same-code envelope
+Llpg     BenchmarkNodeMetadataReadParallel-8                   140.4ns    139.1ns    -0.96%  0.0050  100ns-10us   4.28%  rejected: inside same-code envelope
+Llpg     BenchmarkNodeMetadataReadParallel-256                 139.8ns    138.6ns    -0.89%  0.0247  100ns-10us   4.28%  rejected: inside same-code envelope
+Llpg     BenchmarkNodeMetadataReadParallel-64                  139.4ns    138.4ns    -0.72%  0.0048  100ns-10us   4.28%  rejected: inside same-code envelope
+exec     BenchmarkSort_10k-10                                  1.332ms     1.35ms    +1.38%  0.0306        >1ms   2.62%  rejected: inside same-code envelope
+wal      BenchmarkReader_Replay-10                             82.82µs    84.27µs    +1.75%  0.0306    10us-1ms   2.89%  rejected: inside same-code envelope
+cy       BenchmarkCountRelVar-10                               222.4µs    226.6µs    +1.88%  0.0453    10us-1ms   2.89%  rejected: inside same-code envelope
+wal      BenchmarkCRCIncremental/payload256-10                 18.09ns    18.46ns    +2.07%  0.0450      <100ns   6.21%  rejected: inside same-code envelope
+
+significant rows: 27   FINDINGS: 9   rejected as noise: 18

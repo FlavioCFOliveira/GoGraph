@@ -1,0 +1,22 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/store/txn
+cpu: Apple M4
+                 │      B      │                 B2                 │
+                 │   sec/op    │    sec/op     vs base              │
+Commit/ops=1-10    3.702m ± 1%   3.685m ± 16%       ~ (p=0.485 n=6)
+Commit/ops=16-10   3.811m ± 1%   3.795m ±  1%       ~ (p=0.240 n=6)
+geomean            3.756m        3.740m        -0.44%
+
+                 │      B       │                 B2                 │
+                 │     B/op     │     B/op      vs base              │
+Commit/ops=1-10      593.0 ± 2%     592.0 ± 1%       ~ (p=0.574 n=6)
+Commit/ops=16-10   10.75Ki ± 0%   10.76Ki ± 0%       ~ (p=0.848 n=6)
+geomean            2.495Ki        2.494Ki       -0.06%
+
+                 │     B      │                 B2                 │
+                 │ allocs/op  │ allocs/op   vs base                │
+Commit/ops=1-10    11.00 ± 0%   11.00 ± 0%       ~ (p=1.000 n=6) ¹
+Commit/ops=16-10   75.00 ± 1%   75.00 ± 1%       ~ (p=1.000 n=6)
+geomean            28.72        28.72       +0.00%
+¹ all samples are equal

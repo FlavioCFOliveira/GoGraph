@@ -1,0 +1,274 @@
+package cypher
+
+// zzport_reorder_bench_test.go — a PORTABLE harness, added IDENTICALLY to the
+// v0.13.0 and the v0.14.0 measurement worktrees so the property-statistics reorder
+// (rmp #2766) and the declined-label-count fix (rmp #2771) can be measured
+// HEAD-TO-HEAD, rather than only within one tree.
+//
+// Why this file exists. The sprint's own BenchmarkJoinReorderStatsSkewed and
+// BenchmarkJoinReorderStatsLiveHistory cannot be compiled against v0.13.0 — but not
+// because they use API that v0.13.0 lacks. They use only NewEngine,
+// NewEngineWithOptions, EngineOptions.DisableJoinReorder, RefreshStatistics,
+// Engine.Run and lpg's node/property/label writers, and EVERY one of those exists at
+// v0.13.0. What v0.13.0 lacks is their HELPERS (buildSkewGraph, buildRangeSkewGraph,
+// drainBenchQuery, the five-argument mustNode), which the sprint added. So the
+// obstacle is the instrument, not the engine, and an instrument can be carried
+// across.
+//
+// This file therefore reuses NO helper from either tree. It is self-contained, so it
+// is byte-identical in both arms and the only difference between the arms is the
+// engine compiled under it.
+//
+// Not part of GoGraph. It lives only in the throwaway measurement worktrees and is
+// never committed.
+
+import (
+	"context"
+	"fmt"
+	"sort"
+	"testing"
+
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+)
+
+const (
+	zzNA    = 20000 // :A nodes
+	zzNB    = 100   // :B nodes
+	zzHits  = 3     // :A nodes with x = 1
+	zzRngNA = 5000  // :A nodes for the range/live-history shape
+	zzRngNB = 2000  // :B nodes for the range/live-history shape
+)
+
+// zzNode adds a node with one label and one int64 property. Deliberately spelled
+// out here instead of reusing either tree's mustNode, which differ between them.
+func zzNode(t testing.TB, g *lpg.Graph[string, float64], key, label, prop string, v int64) {
+	t.Helper()
+	if err := g.AddNode(key); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetNodeLabel(key, label); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetNodeProperty(key, prop, lpg.Int64Value(v)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// zzBuildSkewGraph builds the skewed two-component shape: nA :A nodes of which
+// `hits` carry x = 1, and nB :B nodes. A label count cannot separate the components
+// (A is the LARGER label); only a (label, property) estimate can see that the :A
+// component yields `hits` rows.
+func zzBuildSkewGraph(t testing.TB, nA, nB, hits int) *lpg.Graph[string, float64] {
+	t.Helper()
+	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	for i := 0; i < nA; i++ {
+		k := fmt.Sprintf("a%d", i)
+		zzNode(t, g, k, "A", "x", int64(i+2))
+		if i < hits {
+			if err := g.SetNodeProperty(k, "x", lpg.Int64Value(1)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for i := 0; i < nB; i++ {
+		zzNode(t, g, fmt.Sprintf("b%d", i), "B", "y", int64(i))
+	}
+	return g
+}
+
+// zzBuildRangeSkewGraph builds the shape the range estimator reads: nA :A nodes with
+// x = 0..nA-1 and nB :B nodes with y = 0..nB-1.
+func zzBuildRangeSkewGraph(t testing.TB, nA, nB int) *lpg.Graph[string, float64] {
+	t.Helper()
+	g := lpg.New[string, float64](adjlist.Config{Directed: true})
+	for i := 0; i < nA; i++ {
+		zzNode(t, g, fmt.Sprintf("a%d", i), "A", "x", int64(i))
+	}
+	for i := 0; i < nB; i++ {
+		zzNode(t, g, fmt.Sprintf("b%d", i), "B", "y", int64(i))
+	}
+	return g
+}
+
+// zzDrain runs q to completion and fails if it returned no rows, so a benchmark
+// cannot silently measure an empty result.
+func zzDrain(b *testing.B, e *Engine, q string) {
+	b.Helper()
+	res, err := e.Run(context.Background(), q, nil)
+	if err != nil {
+		b.Fatalf("Run(%q): %v", q, err)
+	}
+	n := 0
+	for res.Next() {
+		n++
+	}
+	if err := res.Err(); err != nil {
+		b.Fatalf("Err(%q): %v", q, err)
+	}
+	if err := res.Close(); err != nil {
+		b.Fatalf("Close(%q): %v", q, err)
+	}
+	if n == 0 {
+		b.Fatalf("%q returned no rows; the benchmark is measuring nothing", q)
+	}
+}
+
+func zzEngine(b *testing.B, reorder bool, g *lpg.Graph[string, float64]) *Engine {
+	b.Helper()
+	var e *Engine
+	if reorder {
+		e = NewEngine(g)
+	} else {
+		e = NewEngineWithOptions(g, EngineOptions{DisableJoinReorder: true})
+	}
+	if err := e.RefreshStatistics(context.Background()); err != nil {
+		b.Fatal(err)
+	}
+	return e
+}
+
+// BenchmarkZZReorderSkewed is the head-to-head. The reorder=off arm is the written
+// order in BOTH trees and therefore a cross-arm control; the reorder=on arm is where
+// #2766 can change the plan.
+func BenchmarkZZReorderSkewed(b *testing.B) {
+	g := zzBuildSkewGraph(b, zzNA, zzNB, zzHits)
+	const q = "MATCH (b:B), (a:A {x: 1}) RETURN a.x AS ax, b.y AS bv"
+	for _, arm := range []struct {
+		name    string
+		reorder bool
+	}{{"on", true}, {"off", false}} {
+		b.Run("reorder="+arm.name, func(b *testing.B) {
+			e := zzEngine(b, arm.reorder, g)
+			zzDrain(b, e, q) // warm the plan cache and the statistics snapshot
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				zzDrain(b, e, q)
+			}
+		})
+	}
+}
+
+// BenchmarkZZReorderLiveHistory is the head-to-head for #2771: the same query on the
+// same graph, once with MVCC version records quiet and once with them deliberately
+// live at plan time. history=quiet is the control; history=live is where v0.13.0's
+// estimator read a declined label count as an empty label.
+func BenchmarkZZReorderLiveHistory(b *testing.B) {
+	const q = "MATCH (a:A) WHERE a.x > 4900 MATCH (b:B {y: 7}) RETURN a.x AS ax, b.y AS bv"
+	for _, arm := range []struct {
+		name string
+		live bool
+	}{{"history=quiet", false}, {"history=live", true}} {
+		b.Run(arm.name, func(b *testing.B) {
+			g := zzBuildRangeSkewGraph(b, zzRngNA, zzRngNB)
+			e := NewEngine(g)
+			if err := e.RefreshStatistics(context.Background()); err != nil {
+				b.Fatal(err)
+			}
+			if arm.live {
+				// Reader FIRST so the reclamation watermark cannot pass the write
+				// that follows, and the record stays live for the whole measurement.
+				held := g.BeginRead()
+				defer g.EndRead(held)
+				zzNode(b, g, "zz-bench-live", "ZZUnrelated", "zz", 1)
+				if g.NodeLifeVersionCount() == 0 {
+					b.Fatal("no live node-life record survived; this arm is not " +
+						"measuring what it claims to")
+				}
+			}
+			zzDrain(b, e, q)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				zzDrain(b, e, q)
+			}
+		})
+	}
+}
+
+// BenchmarkZZReorderDrainCost measures the modelling assumption the cost rule rests
+// on — that a Selection over a label scan drains the whole label — in both trees.
+func BenchmarkZZReorderDrainCost(b *testing.B) {
+	g := zzBuildSkewGraph(b, zzNA, 1, zzHits)
+	e := NewEngine(g)
+	if err := e.RefreshStatistics(context.Background()); err != nil {
+		b.Fatal(err)
+	}
+	for _, arm := range []struct {
+		name, query string
+	}{
+		{"bare", "MATCH (a:A) RETURN sum(a.x) AS s"},
+		{"filtered", "MATCH (a:A) WHERE a.x = 1 RETURN sum(a.x) AS s"},
+	} {
+		b.Run("scan="+arm.name, func(b *testing.B) {
+			zzDrain(b, e, arm.query)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				zzDrain(b, e, arm.query)
+			}
+		})
+	}
+}
+
+// TestZZDumpPlanAndResult dumps the PHYSICAL PLAN and the full sorted RESULT for
+// both measured shapes, so that (a) a timing delta between the two trees can be
+// ATTRIBUTED to a plan change rather than merely correlated with one, and (b) the
+// reorder can be shown to be result-identical ACROSS trees by diffing the dumps.
+//
+// Run with -v; it asserts nothing on its own, by design — the comparison it feeds
+// is between two trees and cannot be made inside one process.
+func TestZZDumpPlanAndResult(t *testing.T) {
+	ctx := context.Background()
+	dump := func(name, q string, g *lpg.Graph[string, float64]) {
+		e := NewEngine(g)
+		if err := e.RefreshStatistics(ctx); err != nil {
+			t.Fatal(err)
+		}
+		plan, err := e.Explain(q, nil)
+		if err != nil {
+			t.Fatalf("Explain(%q): %v", q, err)
+		}
+		t.Logf("ZZPLAN[%s]\n%s\nZZPLANEND[%s]", name, plan, name)
+		res, err := e.Run(ctx, q, nil)
+		if err != nil {
+			t.Fatalf("Run(%q): %v", q, err)
+		}
+		rows := []string{}
+		for res.Next() {
+			rows = append(rows, fmt.Sprint(res.Record()))
+		}
+		if err := res.Err(); err != nil {
+			t.Fatal(err)
+		}
+		if err := res.Close(); err != nil {
+			t.Fatal(err)
+		}
+		sort.Strings(rows)
+		t.Logf("ZZROWS[%s] n=%d %v ZZROWSEND[%s]", name, len(rows), rows, name)
+	}
+	dump("skewed", "MATCH (b:B), (a:A {x: 1}) RETURN a.x AS ax, b.y AS bv",
+		zzBuildSkewGraph(t, zzNA, zzNB, zzHits))
+	dump("livehistory-quiet", "MATCH (a:A) WHERE a.x > 4900 MATCH (b:B {y: 7}) RETURN a.x AS ax, b.y AS bv",
+		zzBuildRangeSkewGraph(t, zzRngNA, zzRngNB))
+
+	// The live-history arm needs its own graph with a held reader.
+	g := zzBuildRangeSkewGraph(t, zzRngNA, zzRngNB)
+	e := NewEngine(g)
+	if err := e.RefreshStatistics(ctx); err != nil {
+		t.Fatal(err)
+	}
+	held := g.BeginRead()
+	defer g.EndRead(held)
+	zzNode(t, g, "zz-live", "ZZUnrelated", "zz", 1)
+	if g.NodeLifeVersionCount() == 0 {
+		t.Fatal("no live node-life record survived")
+	}
+	const lq = "MATCH (a:A) WHERE a.x > 4900 MATCH (b:B {y: 7}) RETURN a.x AS ax, b.y AS bv"
+	plan, err := e.Explain(lq, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("ZZPLAN[livehistory-live]\n%s\nZZPLANEND[livehistory-live]", plan)
+}

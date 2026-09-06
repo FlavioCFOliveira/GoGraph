@@ -1,0 +1,19 @@
+round=1 arm=A EXIT=0
+round=1 arm=B EXIT=0
+round=1 arm=B2 EXIT=0
+round=2 arm=B EXIT=0
+round=2 arm=B2 EXIT=0
+round=2 arm=A EXIT=0
+round=3 arm=B2 EXIT=0
+round=3 arm=A EXIT=0
+round=3 arm=B EXIT=0
+round=4 arm=A EXIT=0
+round=4 arm=B EXIT=0
+round=4 arm=B2 EXIT=0
+round=5 arm=B EXIT=0
+round=5 arm=B2 EXIT=0
+round=5 arm=A EXIT=0
+round=6 arm=B2 EXIT=0
+round=6 arm=A EXIT=0
+round=6 arm=B EXIT=0
+DONE

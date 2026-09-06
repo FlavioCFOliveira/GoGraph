@@ -1,0 +1,58 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkZZReorderSkewed/reorder=on-10                      	       4	 269008677 ns/op	48360040 B/op	 5925706 allocs/op
+BenchmarkZZReorderSkewed/reorder=off-10                     	       4	 263272334 ns/op	48360046 B/op	 5925706 allocs/op
+BenchmarkZZReorderLiveHistory/history=quiet-10              	      43	  27569416 ns/op	 5052785 B/op	  564428 allocs/op
+BenchmarkZZReorderLiveHistory/history=live-10               	      42	  27736951 ns/op	 5052798 B/op	  564428 allocs/op
+BenchmarkZZReorderDrainCost/scan=bare-10                    	     828	   1437917 ns/op	  271208 B/op	   19817 allocs/op
+BenchmarkZZReorderDrainCost/scan=filtered-10                	    1088	   1085359 ns/op	  239440 B/op	   19829 allocs/op
+BenchmarkCountAllNodes-10                                   	   71212	     16404 ns/op	    3296 B/op	      27 allocs/op
+BenchmarkDeleteAccumulated/accumulated=0-10                 	      75	  16057519 ns/op	      3212 ns/node	65664385 B/op	  205194 allocs/op
+BenchmarkDeleteAccumulated/accumulated=20000-10             	      76	  16264530 ns/op	      3253 ns/node	57555419 B/op	  201334 allocs/op
+BenchmarkDeleteAccumulated/accumulated=60000-10             	      72	  17103025 ns/op	      3421 ns/node	60408301 B/op	  210798 allocs/op
+BenchmarkCreateRelationships-10                             	     598	   2533640 ns/op	      5067 ns/rel	 5352103 B/op	   18081 allocs/op
+BenchmarkCount_LabelStarBig_Pushdown-10                     	 1287594	       943.0 ns/op	    2056 B/op	      19 allocs/op
+BenchmarkCount_LabelStarBig_Serial-10                       	 1316589	       924.2 ns/op	    2056 B/op	      19 allocs/op
+BenchmarkCount_LabelVarBig_Pushdown-10                      	 1324308	       923.7 ns/op	    2056 B/op	      19 allocs/op
+BenchmarkCount_LabelVarBig_Serial-10                        	 1349070	       887.1 ns/op	    2056 B/op	      19 allocs/op
+BenchmarkCountPushdown_O1-10                                	  841022	      1346 ns/op	    2024 B/op	      18 allocs/op
+BenchmarkCountPushdown_FullScan-10                          	      67	  18476034 ns/op	10036640 B/op	  199820 allocs/op
+BenchmarkParallelLabelScan_LabelledProject_Parallel-10      	      58	  18978421 ns/op	66879903 B/op	  806489 allocs/op
+BenchmarkParallelLabelScan_LabelledProject_Serial-10        	      26	  41361244 ns/op	 9615486 B/op	  799029 allocs/op
+BenchmarkParallelLabelScan_UnlabelledProject_Parallel-10    	      54	  18795604 ns/op	66846458 B/op	  806470 allocs/op
+BenchmarkParallelLabelScan_LabelledMin_Parallel-10          	      50	  21208436 ns/op	 1719910 B/op	  199826 allocs/op
+BenchmarkParallelLabelScan_LabelledMin_Serial-10            	      52	  20368760 ns/op	 1719896 B/op	  199825 allocs/op
+BenchmarkParallelLabelScan_UnlabelledMin_Parallel-10        	      55	  18361801 ns/op	83516658 B/op	 1203857 allocs/op
+BenchmarkParallelLabelScan_UnlabelledMin_Serial-10          	      58	  18641818 ns/op	10072162 B/op	  199838 allocs/op
+BenchmarkParallelLabelScan_UnlabelledProject_Serial-10      	      28	  38498260 ns/op	17968052 B/op	  799041 allocs/op
+BenchmarkParallelScan_CountBig_Parallel-10                  	     720	   1657171 ns/op	 8384437 B/op	     102 allocs/op
+BenchmarkParallelScan_CountBig_Serial-10                    	  889113	      1313 ns/op	    2024 B/op	      18 allocs/op
+BenchmarkParallelScan_CountSmall_DefaultEnabled-10          	  565738	      2111 ns/op	    2016 B/op	      17 allocs/op
+BenchmarkParallelScan_CountSmall_Disabled-10                	  939444	      1303 ns/op	    2016 B/op	      17 allocs/op
+BenchmarkParallelScanProject_ScanBig_Parallel-10            	      57	  18969718 ns/op	65309913 B/op	  607526 allocs/op
+BenchmarkParallelScanProject_ScanBig_Serial-10              	      67	  17797799 ns/op	11609162 B/op	  199811 allocs/op
+BenchmarkParallelScanProject_ScanFilterBig_Parallel-10      	      44	  24581202 ns/op	15261234 B/op	  299842 allocs/op
+BenchmarkParallelScanProject_ScanFilterBig_Serial-10        	      45	  24610109 ns/op	15261227 B/op	  299842 allocs/op
+BenchmarkParallelScanProject_ScanSmall_DefaultEnabled-10    	   75766	     15969 ns/op	   41872 B/op	      42 allocs/op
+BenchmarkParallelScanProject_ScanSmall_Disabled-10          	   77422	     15299 ns/op	   41872 B/op	      42 allocs/op
+BenchmarkPlanCacheHit_Parameterised-10                      	   43690	     26765 ns/op	   15577 B/op	      87 allocs/op
+BenchmarkPlanCacheMiss_InlinedLiteral-10                    	   26313	     46188 ns/op	   33240 B/op	     399 allocs/op
+BenchmarkPlanCacheMiss_InlinedLiteralNoComment-10           	   44767	     26988 ns/op	   15377 B/op	     102 allocs/op
+BenchmarkReadOnly_Sessionless-10                            	 1243136	       969.7 ns/op	    2056 B/op	      19 allocs/op
+BenchmarkReadOnly_Session-10                                	 1209555	       990.3 ns/op	    2056 B/op	      19 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkZZReorderSkewed/reorder=on-10                      	       4	 267601500 ns/op	48360068 B/op	 5925706 allocs/op
+BenchmarkZZReorderSkewed/reorder=off-10                     	       4	 266062156 ns/op	48360640 B/op	 5925712 allocs/op
+BenchmarkZZReorderLiveHistory/history=quiet-10              	      44	  27289580 ns/op	 5052869 B/op	  564429 allocs/op
+BenchmarkZZReorderLiveHistory/history=live-10               	      42	  27302974 ns/op	 5052647 B/op	  564427 allocs/op
+BenchmarkZZReorderDrainCost/scan=bare-10                    	     820	   1448888 ns/op	  271208 B/op	   19817 allocs/op
+BenchmarkZZReorderDrainCost/scan=filtered-10                	    1084	   1095290 ns/op	  239440 B/op	   19829 allocs/op
+BenchmarkCountAllNodes-10                                   	   70033	     16508 ns/op	    3296 B/op	      27 allocs/op
+BenchmarkDeleteAccumulated/accumulated=0-10                 	      78	  16026765 ns/op	      3205 ns/node	65672384 B/op	  205194 allocs/op
+BenchmarkDeleteAccumulated/accumulated=20000-10             	

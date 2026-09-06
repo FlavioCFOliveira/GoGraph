@@ -1,0 +1,96 @@
+Which benchmarks make -test.cpu=1,8,64,256,1024 a REAL GOROUTINE LADDER
+==============================================================================================
+
+-test.cpu only builds a goroutine ladder for a benchmark that creates concurrency ITSELF.
+On a serial benchmark it varies GOMAXPROCS and nothing else: no concurrent reader, no
+contention, no scaling curve.
+
+Two checks, because either one alone misclassifies:
+  * b.RunParallel(...)                      -- the usual form
+  * a hand-rolled `go func` behind a WaitGroup -- e.g. store/txn BenchmarkCommitConcurrent,
+    which drives genuinely concurrent commits and would be misfiled as serial by a
+    RunParallel-only screen.
+A NAME is not evidence either way.
+
+benchmark functions: v0.13.0=595  v0.14.0=605  common=595  added by v0.14.0=10
+CONCURRENT IN BOTH TREES: 57
+
+  bench/audit352
+      BenchmarkConcurrentRead                                b.RunParallel
+      BenchmarkPlanCacheScaling                              b.RunParallel
+  bench/cypher_ldbc
+      BenchmarkIC1_Parallel                                  b.RunParallel
+      BenchmarkIC2_Parallel                                  b.RunParallel
+      BenchmarkIC9_Parallel                                  b.RunParallel
+  bench/mtaudit
+      BenchmarkEngReadUnderWriter                            b.RunParallel
+      BenchmarkEngWriteAutocommit                            b.RunParallel
+  bench/mvccwrite
+      BenchmarkCheckpointUnderWriters                        go func + WaitGroup
+      BenchmarkIndexedReadAtRealisticWriteRate               go func + WaitGroup
+      BenchmarkReadAtRealisticWriteRate                      go func + WaitGroup
+      BenchmarkReadUnderConstantSizeWriter                   go func + WaitGroup
+      BenchmarkReadUnderWriter_FixedCPU                      go func + WaitGroup
+  bench/soak
+      BenchmarkBoltMixed                                     b.RunParallel
+      BenchmarkBoltReadOnly                                  b.RunParallel
+      BenchmarkBoltWriteOnly                                 b.RunParallel
+  bolt/server
+      BenchmarkBoltRecordEncodeParallel                      b.RunParallel
+      BenchmarkMsgObserve_RealBackendParallel                b.RunParallel
+      BenchmarkTxBookkeeping_LadderFloor                     b.RunParallel
+      BenchmarkTxBookkeeping_QuotaDisabled                   b.RunParallel
+      BenchmarkTxBookkeeping_QuotaDistinctPrincipals         b.RunParallel
+      BenchmarkTxBookkeeping_QuotaEnabled                    b.RunParallel
+      BenchmarkTxBookkeeping_RegistryChurn                   b.RunParallel
+      BenchmarkTxBookkeeping_RegistryUpdate                  b.RunParallel
+      BenchmarkTxBookkeeping_RegistryUpdateLegacy            b.RunParallel
+      BenchmarkTxBookkeeping_RegistryUpdateNewQuery          b.RunParallel
+      BenchmarkTxBookkeeping_RegistryUpdatePerEntryMutex     b.RunParallel
+      BenchmarkTxBookkeeping_RegistryUpdateUnchanged         b.RunParallel
+  cypher
+      BenchmarkAdjacencyCacheLookup                          b.RunParallel
+      BenchmarkPlanReusePhasesParallel                       b.RunParallel
+      BenchmarkPrebuiltTreeCeilingParallel                   b.RunParallel
+      BenchmarkReadTx_LockFree                               b.RunParallel
+      BenchmarkReadTx_WriterLock                             b.RunParallel
+      BenchmarkReaderLatencyUnderHeldWriteTx                 go func + WaitGroup
+  graph
+      BenchmarkMapper_Intern_HotKey_Parallel                 b.RunParallel
+  graph/index/btree
+      BenchmarkConcurrentLookup                              b.RunParallel
+      BenchmarkConcurrentMixed90Read                         b.RunParallel
+      BenchmarkConcurrentRangeFirst                          b.RunParallel
+      BenchmarkConcurrentStructuralInsert                    b.RunParallel
+  graph/index/count
+      BenchmarkApply_HotParallel                             b.RunParallel
+      BenchmarkCountE_Parallel                               b.RunParallel
+      BenchmarkMixed_HotParallel                             b.RunParallel
+  graph/index/hash
+      BenchmarkIndex_SpineParallel                           b.RunParallel
+  graph/index/label
+      BenchmarkReadParallelCount                             b.RunParallel
+      BenchmarkWriteAddHotLabel                              b.RunParallel
+      BenchmarkWriteAddManyLabels                            b.RunParallel
+  graph/lpg
+      BenchmarkBarrier_BareRWMutexParallel                   b.RunParallel
+      BenchmarkNodeMetadataReadParallel                      b.RunParallel
+      BenchmarkReadScale1671_ViewBarrier                     b.RunParallel
+      BenchmarkReadScale1671_ViewUnderWriter                 b.RunParallel
+      BenchmarkTombstoneScanClean                            b.RunParallel
+      BenchmarkTombstoneScanTombstoned                       b.RunParallel
+  graph/mvcc
+      BenchmarkGate_WeakParallel                             b.RunParallel
+      BenchmarkPublishConcurrent                             b.RunParallel
+      BenchmarkRWMutexShared_Parallel                        b.RunParallel
+  internal/metrics
+      BenchmarkEmitParallel                                  b.RunParallel
+  internal/metrics/prometheus
+      BenchmarkIncCounterParallel                            b.RunParallel
+  store/txn
+      BenchmarkCommitConcurrent                              go func + WaitGroup
+
+benchmarks whose classification DIFFERS between the trees: 0  []
+
+SERIAL benchmarks that appear in this report's ladder section: none.
+Every ladder block below was drawn from the list above.

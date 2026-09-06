@@ -246,7 +246,7 @@ func (e *Engine) runReadPrefix(ctx context.Context, phase readPhase, query strin
 	if phase == phaseBuildAtPresent {
 		buildAt = nil
 	}
-	op, cols, err := e.buildReadPhysical(ctx, entry, plan, params, queryReg, nil, buildAt)
+	op, cols, err := e.buildReadPhysical(ctx, entry, plan, params, queryReg, nil, buildAt, nil)
 	if err != nil {
 		return err
 	}

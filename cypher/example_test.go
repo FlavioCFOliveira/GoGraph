@@ -141,6 +141,11 @@ func ExampleEngine_RunAny() {
 // comes from the operator itself, the rendering cannot disagree with what runs —
 // an index seek appears as NodeByIndexSeek only when a NodeByIndexSeek is what
 // was built.
+//
+// Each operator the planner estimated also carries that estimate and its
+// provenance (rmp #2765). Here the graph is empty, so the label scan's estimate is
+// an exact count of zero. An operator the planner had no estimate for prints
+// nothing rather than a fabricated number, which is why Project has no annotation.
 func ExampleEngine_Explain() {
 	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
@@ -153,7 +158,7 @@ func ExampleEngine_Explain() {
 	fmt.Print(plan)
 	// Output:
 	// Project
-	// └─ NodeByLabelScan [Person]
+	// └─ NodeByLabelScan [Person] (est. rows=0 exact)
 }
 
 // ExampleEngine_ExplainLogical returns the LOGICAL plan, which is where the

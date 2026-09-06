@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
@@ -289,16 +290,23 @@ func runToCompletion(t *testing.T, eng *Engine, q string) {
 	}
 }
 
-// stripAnnotations removes the per-node measurements so two renderings can be
+// stripAnnotations removes the per-node ANNOTATIONS so two renderings can be
 // compared on structure alone.
+//
+// Three markers can open the annotation group, and all three are stripped. Since
+// rmp #2765 a line may carry the planner's cardinality estimate — " (est. rows=…"
+// — either alone (an EXPLAIN, which measures nothing) or leading the measured
+// group (a PROFILE). Stripping only " (rows=" would leave the estimate on the
+// EXPLAIN side and the whole group on the PROFILE side, and the two would compare
+// unequal for every plan that has an estimate at all: the comparison this helper
+// exists to make would fail on a difference that is not structural.
 func stripAnnotations(plan string) string {
 	lines := strings.Split(plan, "\n")
 	for i, ln := range lines {
-		if k := strings.Index(ln, " (rows="); k >= 0 {
-			ln = ln[:k]
-		}
-		if k := strings.Index(ln, " (not measured)"); k >= 0 {
-			ln = ln[:k]
+		for _, marker := range []string{" (est. rows=", " (rows=", " (not measured)"} {
+			if k := strings.Index(ln, marker); k >= 0 {
+				ln = ln[:k]
+			}
 		}
 		lines[i] = ln
 	}
@@ -332,8 +340,8 @@ func TestProfile_DbHitsDistinguishSeekFromScan(t *testing.T) {
 		t.Fatalf("Profile(scan): %v", err)
 	}
 
-	seekHits := totalDbHits(t, seek)
-	scanHits := totalDbHits(t, scan)
+	seekHits, seekUnknown := totalDbHits(t, seek)
+	scanHits, scanUnknown := totalDbHits(t, scan)
 
 	if seekHits == 0 {
 		t.Fatalf("the seek plan reports no db-hits at all, so the comparison below is "+
@@ -350,20 +358,46 @@ func TestProfile_DbHitsDistinguishSeekFromScan(t *testing.T) {
 			seekHits, scanHits, seek, scan)
 	}
 
-	// A pure row transformer touches no storage, so its own figure must be zero
-	// rather than inheriting its child's.
-	if !strings.Contains(seek, "dbhits=0") {
-		t.Errorf("no operator reports zero db-hits; a projection reads no storage and must "+
-			"not be charged for its child's reads:\n%s", seek)
+	// The projection above the seek must not be charged for its child's reads.
+	//
+	// Before rmp #2760 that was asserted as `strings.Contains(seek, "dbhits=0")`.
+	// It cannot be any more, and the reason is a finding rather than an
+	// inconvenience: a projection evaluates a caller-supplied expression, and a
+	// GoGraph expression can walk the graph (a pattern predicate or a pattern
+	// comprehension does), so the engine does not know what a Project read. Its
+	// cell is now "?" — which still proves the projection did not inherit the
+	// seek's figure, and additionally stops the plan asserting a zero it cannot
+	// stand behind.
+	//
+	// The assertion is therefore not weakened but relocated and split: this pins
+	// that a non-leaf reports NO figure here, and
+	// TestProfileDbHits_PureTransformerReportsAKnownZero pins that an operator
+	// which provably reads nothing still reports a real 0.
+	if seekUnknown == 0 {
+		t.Errorf("every operator in the seek plan reported a db-hits figure. The "+
+			"projection above the seek evaluates an expression that can reach the "+
+			"graph, so its accesses are uncounted and its cell must render %q rather "+
+			"than a number that would read as a measurement:\n%s",
+			exec.DbHitsUnknown, seek)
+	}
+	if scanUnknown == 0 {
+		t.Errorf("every operator in the scan plan reported a db-hits figure; the "+
+			"filter and projection above the scan are uncounted:\n%s", scan)
 	}
 }
 
-// totalDbHits sums the dbhits= figures in a rendered profile. It parses the
-// rendering rather than reading the tree, so it also proves the numbers are
-// actually SURFACED to a user and not merely computed.
-func totalDbHits(t *testing.T, profile string) int64 {
+// totalDbHits sums the dbhits= FIGURES in a rendered profile, and reports how
+// many cells carried no figure at all. It parses the rendering rather than
+// reading the tree, so it also proves the numbers are actually SURFACED to a user
+// and not merely computed.
+//
+// A cell rendering exec.DbHitsUnknown ("?") is counted in unknowns and
+// contributes nothing to the sum: since rmp #2760 an operator whose accesses
+// nobody counted says so instead of printing a zero, and summing a placeholder
+// zero into the total would re-create exactly the ambiguity that change removed.
+// The returned total is therefore a FLOOR whenever unknowns > 0.
+func totalDbHits(t *testing.T, profile string) (total int64, unknowns int) {
 	t.Helper()
-	var total int64
 	found := false
 	for _, line := range strings.Split(profile, "\n") {
 		i := strings.Index(line, "dbhits=")
@@ -375,15 +409,20 @@ func totalDbHits(t *testing.T, profile string) int64 {
 		if end < 0 {
 			t.Fatalf("malformed dbhits field in %q", line)
 		}
-		v, err := strconv.ParseInt(rest[:end], 10, 64)
+		cell := rest[:end]
+		found = true
+		if cell == exec.DbHitsUnknown {
+			unknowns++
+			continue
+		}
+		v, err := strconv.ParseInt(cell, 10, 64)
 		if err != nil {
 			t.Fatalf("unparsable dbhits in %q: %v", line, err)
 		}
 		total += v
-		found = true
 	}
 	if !found {
-		t.Fatalf("a profiled plan reports no db-hits at all:\n%s", profile)
+		t.Fatalf("a profiled plan reports no db-hits cell at all:\n%s", profile)
 	}
-	return total
+	return total, unknowns
 }

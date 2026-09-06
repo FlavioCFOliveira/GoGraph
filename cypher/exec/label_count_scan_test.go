@@ -131,3 +131,79 @@ func TestLabelCountScan_Cancellation(t *testing.T) {
 	}
 	_ = op.Close()
 }
+
+// asOfCountingResolver exposes all THREE count sources with THREE different
+// answers, so a test can name which one the operator took rather than infer it:
+// 42 means the exact-or-nothing direct count, 9 means the always-exact snapshot
+// count, and the bitmap's cardinality means neither.
+type asOfCountingResolver struct {
+	count      int64
+	asOf       int64
+	bitmapCard int
+	countOK    bool
+	asOfOK     bool
+	asOfCalls  int
+}
+
+func (r *asOfCountingResolver) ResolveLabelBitmap(string) *roaring64.Bitmap {
+	bm := roaring64.New()
+	for i := 0; i < r.bitmapCard; i++ {
+		bm.Add(uint64(i))
+	}
+	return bm
+}
+
+func (r *asOfCountingResolver) ResolveLabelCount(string) (int64, bool) {
+	return r.count, r.countOK
+}
+
+func (r *asOfCountingResolver) ResolveLabelCountAsOf(string) (int64, bool) {
+	r.asOfCalls++
+	return r.asOf, r.asOfOK
+}
+
+// TestLabelCountScan_AsOfCountPreemptsTheBitmap is the operator half of rmp
+// #2773: when the exact-or-nothing count declines, the snapshot count must be
+// consulted BEFORE the bitmap, because resolving the bitmap is what cost twelve
+// allocations for a number the resolver could give away.
+func TestLabelCountScan_AsOfCountPreemptsTheBitmap(t *testing.T) {
+	r := &asOfCountingResolver{count: 42, countOK: false, asOf: 9, asOfOK: true, bitmapCard: 7}
+	got := drainLabelCount(t, exec.NewLabelCountScan("Item", r))
+	if got != 9 {
+		t.Fatalf("count = %d, want 9 (the snapshot-count path). 7 means the operator "+
+			"resolved the bitmap anyway, which is the allocation rmp #2773 removed.", got)
+	}
+	if r.asOfCalls != 1 {
+		t.Fatalf("ResolveLabelCountAsOf was called %d times, want exactly 1", r.asOfCalls)
+	}
+}
+
+// TestLabelCountScan_ExactCountStillWinsOverTheAsOfCount pins the ORDER. The
+// exact-or-nothing count costs three atomic loads when it answers and the
+// snapshot count may resolve a bitmap, so a change that reversed the preference
+// would be a silent pessimisation of the common case with no visible symptom.
+func TestLabelCountScan_ExactCountStillWinsOverTheAsOfCount(t *testing.T) {
+	r := &asOfCountingResolver{count: 42, countOK: true, asOf: 9, asOfOK: true, bitmapCard: 7}
+	got := drainLabelCount(t, exec.NewLabelCountScan("Item", r))
+	if got != 42 {
+		t.Fatalf("count = %d, want 42 (exact-or-nothing path first)", got)
+	}
+	if r.asOfCalls != 0 {
+		t.Fatalf("ResolveLabelCountAsOf was consulted %d times although the exact count "+
+			"answered; the second source must not be reached at all", r.asOfCalls)
+	}
+}
+
+// TestLabelCountScan_BitmapStillAnswersWhenBothCountsDecline keeps the original
+// fallback reachable. A resolver that implements the new interface but cannot
+// answer must land on the bitmap, not on a zero.
+func TestLabelCountScan_BitmapStillAnswersWhenBothCountsDecline(t *testing.T) {
+	r := &asOfCountingResolver{count: 42, countOK: false, asOf: 9, asOfOK: false, bitmapCard: 7}
+	got := drainLabelCount(t, exec.NewLabelCountScan("Item", r))
+	if got != 7 {
+		t.Fatalf("count = %d, want 7 (bitmap-cardinality fallback)", got)
+	}
+	if r.asOfCalls != 1 {
+		t.Fatalf("ResolveLabelCountAsOf was called %d times, want exactly 1", r.asOfCalls)
+	}
+}

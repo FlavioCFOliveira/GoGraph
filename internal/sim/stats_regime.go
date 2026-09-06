@@ -325,7 +325,15 @@ func (k *StatsRegime) captureProbeIDs(c *InvariantChecker, tick int64, engine St
 }
 
 // capturePlans renders both arms of every probe through Explain (literal at
-// 2i, param at 2i+1). A rendering failure is reported and aborts the capture.
+// 2i, param at 2i+1) and reduces each rendering to its plan SHAPE. A rendering
+// failure is reported and aborts the capture.
+//
+// The reduction to [planShape] is what keeps [StatsRegime.PlanChanges] measuring
+// what it claims to. Since rmp #2765 the physical rendering carries the planner's
+// cardinality estimate, and a statistics rebuild changes that estimate for every
+// probe whether or not it changes the plan — so comparing raw renderings would
+// make the counter report "the annotation moved", which is guaranteed, instead of
+// "the planner chose differently", which is the signal.
 func (k *StatsRegime) capturePlans(c *InvariantChecker, tick int64, engine StatsEngine, phase string) ([]string, bool) {
 	out := make([]string, 0, 2*len(k.probes))
 	for i := range k.probes {
@@ -342,7 +350,7 @@ func (k *StatsRegime) capturePlans(c *InvariantChecker, tick int64, engine Stats
 				fmt.Sprintf("shape %q: %s-refresh Explain param %q failed: %v", p.Shape, phase, p.Param, err))
 			return nil, false
 		}
-		out = append(out, lit, par)
+		out = append(out, planShape(lit), planShape(par))
 	}
 	return out, true
 }

@@ -375,6 +375,16 @@ type Graph[N comparable, W any] struct {
 	// make a write land exactly inside the window the second sample exists to
 	// close (rmp #2688).
 	//
+	// It fires BEFORE the cardinality read, so a write it drives lands before the
+	// cardinality and before the gate that follows. That position tests one thing
+	// and not another, which was established by mutation in rmp #2773: it kills a
+	// missing second sample (the count then carries the write and is reported
+	// exact) and it does NOT kill an INVERTED order, because a write that lands
+	// before both reads is seen by the second gate wherever that gate sits. See
+	// [Graph.labelCountAsOfWindowProbe] for the seam that does discriminate the
+	// order, and this file's task notes for why LabelCountExact was left on this
+	// one.
+	//
 	// It exists because a CONCURRENT ORACLE CANNOT PIN THIS WINDOW, which was
 	// measured rather than assumed: a 3-reader race gave 110 exact answers in a
 	// whole run and 0 violations against the DEFECTIVE build, and a 96-reader
@@ -393,6 +403,23 @@ type Graph[N comparable, W any] struct {
 	// The cost in production is one nil load and a predictable branch, on a path
 	// that immediately takes the label index's read lock.
 	labelCountGateProbe func()
+	// labelCountAsOfWindowProbe is a TEST-ONLY seam, nil in production and with no
+	// exported setter, called by [Graph.LabelCountAsOf] BETWEEN its cardinality
+	// read and the gate sample that follows it (rmp #2773).
+	//
+	// That position is the whole point, and it is a DIFFERENT window from
+	// [Graph.labelCountGateProbe]'s. The soundness of LabelCountAsOf rests on the
+	// order "cardinality first, gate second", and a seam firing before both reads
+	// cannot test an order: a write driven there lands before the gate whichever
+	// side of the count the gate is on, so the gate refuses either way and an
+	// inverted implementation passes. Firing here lets a test drive the one
+	// interleaving the order exists to defeat — gate reads clear, write raises its
+	// hold and touches the index, cardinality read is contaminated — which is an
+	// Isolation break the inverted order commits and the sound order cannot.
+	//
+	// The cost in production is one nil load and a predictable branch, on a path
+	// that has just taken the label index's read lock.
+	labelCountAsOfWindowProbe func()
 	// mvccClock mints commit timestamps and transaction ids from the two
 	// disjoint ranges either side of mvcc.TxIDBase, so one uint64 on a
 	// version's commit record distinguishes in-flight from committed. Shared

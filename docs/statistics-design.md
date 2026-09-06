@@ -14,6 +14,21 @@ ever approximate. This makes the promotion rule (§3) provably safe (an absolute
 numerator error maps directly to an absolute error on `S`, no denominator
 uncertainty) and lets staleness be measured as `Δ/N` against an exact `N`.
 
+> **Correction (rmp #2771): exact, yes — always AVAILABLE, no.** `N(label)` is
+> exact when it is answered, and the cheap way of answering it *declines*.
+> `lpg.Graph.LabelCountExact` is exact-or-nothing: it refuses whenever any MVCC
+> node-life or label-delta record is unreclaimed, because the raw index count has
+> no object a correction could be re-checked against (rmp #2290). Under a
+> concurrent writer that is the normal state, and version records are reclaimed by
+> an **asynchronous** vacuum, so even a graph with no live writer declines while
+> the vacuum is behind. Reading the count as `n, _ :=` therefore turned "cannot
+> answer" into the number zero and demoted the estimate. The estimator now carries
+> the distinction explicitly (`cypher.labelPopulation`) and resolves `N` from the
+> corrected label bitmap when the cheap count declines — still exact, no longer
+> optional. An **upper** bound (`ResolveLabelCountBound`) is not a substitute: `N`
+> is the DENOMINATOR of `Δ/N`, so over-stating it under-states staleness and would
+> keep the planner trusting a statistic it should demote.
+
 ## 1. Structures and parameters
 
 | Structure | Choice | Error bound | Memory / (label,prop) |
@@ -86,8 +101,12 @@ chosen `v`. Therefore:
   falls back to the exact-count-only equality peephole (already shipped). HLL/NDV
   must never drive an absolute-no-regression equality decision.
 
-The reordering peepholes (P3) are unaffected — they require estExact and never
-consume statistics.
+The reordering peepholes (P3) shipped requiring `estExact`. **Since rmp #2766
+this is no longer true of all of them:** the disjoint-component reorder also
+consumes the property statistics, evaluating an `estStats` range estimate or an
+MCV equality hit over its certified error interval rather than at the point
+estimate (`cypher/join_reorder_plan.go`, `reorderFilteredRows` /
+`reorderSwapWins`). The single-edge anchor swap remains exact-count-only.
 
 ## 5. Numerical-stability requirements
 

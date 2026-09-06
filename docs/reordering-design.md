@@ -47,8 +47,16 @@ A non-default plan `P` replaces the written-order plan `W` only when ALL hold:
 concurrent relabel cannot make a value read exact while its dirty flag is
 missed.
 
-Any veto → keep the written order. With no consumer today the whole thing is
-inert; it lights up per-query exactly when the counts are trustworthy.
+Any veto → keep the written order. It lights up per-query exactly when the
+inputs are trustworthy.
+
+> **Superseded in part (rmp #2766, `v0.14.0`).** This section originally added
+> "with no consumer today the whole thing is inert". That is no longer true on
+> either half: the disjoint-component reorder ships and is on by default
+> (`cypher/api.go`, `joinReorderEnabled`), and its gate no longer reads only the
+> exact counts — since #2766 it also consumes the property statistics
+> (`cypher/join_reorder_plan.go`, `reorderFilteredRows`). The single-edge anchor
+> swap remains exact-count-only.
 
 ## 2. The cost model (single-edge and disjoint)
 
@@ -371,7 +379,13 @@ order for the 86 in-order scenarios). TCK must stay 3897/3897.
 
 The DPccp enumerator is NOT implemented — under §1 it produces only the two
 peepholes. It is documented here as the correctness frame and the growth path:
-when an `EstStats` mode (histograms, P4) later admits margin-gated multi-join
+when an `EstStats` mode (histograms, P4) admits margin-gated multi-join
 reordering, a bounded DPccp over ≤4 connected acyclic leaves becomes the vehicle,
 reusing this gate with `EstStats` added to the trustworthy set. Until then,
 peepholes only.
+
+> **Partly arrived (rmp #2766, `v0.14.0`).** The `EstStats` half has happened:
+> `estStats` is in the trustworthy set (`cypher/estimate.go`, `trustworthy`) and
+> the disjoint-component peephole consumes it. The heading still holds — **no
+> DPccp enumerator exists** — so this remains peepholes only, but no longer for
+> want of a statistics-derived estimate.

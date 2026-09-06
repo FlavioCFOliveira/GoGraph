@@ -149,6 +149,13 @@ type ParallelScanProject struct {
 	results [][]Row // one private result buffer per worker; read only after wg.Wait
 	combo   []Row   // concatenated worker results, streamed by Next
 
+	// storageReads accumulates the node references the workers consumed, for
+	// [ParallelScanProject.storageAccesses] (rmp #2762). It is folded once per
+	// MORSEL in [ParallelScanProject.runMorsel] and never once per row — the same
+	// discipline [budgetTally] enforces on the result-budget counters, and for the
+	// same measured reason.
+	storageReads atomic.Int64
+
 	wg         sync.WaitGroup
 	morselSize int
 	pos        int // cursor into combo
@@ -572,6 +579,20 @@ func (op *ParallelScanProject) runMorsel(ctx context.Context, morsel []graph.Nod
 	if err := sub.Init(ctx); err != nil {
 		return nil, err
 	}
+	// The morsel's node references have now been read: the fused sub-plan's scan
+	// leaf collects every id it will emit inside its own Init (AllNodesScan.Init),
+	// in one pass over the morsel walker, so the count is known here in O(1) and
+	// the row loop below needs no per-record increment. One atomic add per MORSEL —
+	// with [DefaultMorselSize] at 1024, one per 1024 node references — is what keeps
+	// it off the row path. That granularity is not a preference: this very operator
+	// measured a pair of per-row shared atomics at 18.9% of flat CPU and a hard stop
+	// in scaling past four workers (rmp #2649, see [budgetTally]).
+	//
+	// Charging HERE rather than after the drain is also what makes the figure exact
+	// when the loop below exits early on the result budget: the records were read
+	// either way, and a figure that omitted them would under-report the storage cost
+	// of a capped query.
+	op.storageReads.Add(int64(len(morsel)))
 	// Per-worker row arena: instead of allocating a fresh backing slice per
 	// result row (the old append(Row(nil), row...)), pack every row's values into
 	// a pre-sized flat slab and hand out three-index sub-slices into it. A morsel
@@ -667,6 +688,44 @@ func (op *ParallelScanProject) Next(out *Row) (bool, error) {
 	op.pos++
 	return true, nil
 }
+
+// storageAccesses reports the node references this leaf's workers consumed. It
+// implements the storageAccessCounter marker in profile.go, so PROFILE renders
+// this operator's cell as MEASURED rather than as the UNKNOWN "?" it printed
+// between rmp #2760 and #2762 — and the bare 0 it printed before #2760, which is
+// the figure docs/explain-profile-honesty-audit-2026-09-03.md §3 refutation 3
+// reproduced: 2000 nodes walked, `dbhits=0` reported, in a column where 0 also
+// means "read no storage".
+//
+// # Why the emitted row count could never have been this number
+//
+// The fused sub-plan carries the WHERE as a Selection, so this leaf emits the
+// admitted rows and reads every scanned one — which is exactly the min-label shape
+// the parallel scan exists for. [StorageRecordScan]'s derivation would therefore
+// have replaced an obvious zero with a plausible wrong number, which is why the
+// leaf never carried that marker and why the figure had to be counted.
+//
+// # What it counts, exactly
+//
+// One access per node reference the operator's access path yielded and a worker
+// consumed. Init walks the row source once, on the calling goroutine — the whole
+// graph, one label's bitmap, or a multi-label intersection, whichever the planner
+// chose — and splits that walk into disjoint morsels covering it exactly;
+// [ParallelScanProject.runMorsel] charges each morsel's length once, after the
+// sub-plan's scan leaf has read it. So a completed scan reports the same figure
+// the sub-threshold serial plan reports for the same query on the same graph,
+// which is the parity rmp #2762 restored.
+//
+// A node reference is counted ONCE even though two phases touch it — Init's walk
+// of the access path, and the morsel scan's re-read of the slice Init already owns.
+// Charging both would put the parallel plan at 2N against the serial plan's N for
+// identical work, which is a threshold-dependent figure of exactly the kind this
+// task removed.
+//
+// Init does NOT reset the counter, which is [storageAccessCounter]'s documented
+// contract: the figure covers the operator's whole lifetime, including any Init it
+// has been restarted by.
+func (op *ParallelScanProject) storageAccesses() int64 { return op.storageReads.Load() }
 
 // Close cancels any still-running workers and joins them. It is idempotent and
 // safe whether or not Next was ever called: wg.Wait returns immediately once the

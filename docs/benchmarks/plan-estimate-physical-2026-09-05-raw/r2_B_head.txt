@@ -1,0 +1,70 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkPlanReusePhases/3build-10         	 4096942	       586.7 ns/op	    1504 B/op	      15 allocs/op
+BenchmarkPlanReusePhases/4full-10          	 2477384	       983.8 ns/op	    2392 B/op	      21 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkPlanReusePhases/3build-10         	 4110235	       591.9 ns/op	    1504 B/op	      15 allocs/op
+BenchmarkPlanReusePhases/4full-10          	 2488910	      1002 ns/op	    2392 B/op	      21 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkPlanReusePhases/3build-10         	 4075256	       588.1 ns/op	    1504 B/op	      15 allocs/op
+BenchmarkPlanReusePhases/4full-10          	 2476106	       983.0 ns/op	    2392 B/op	      21 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkPlanReusePhases/3build-10         	 4091328	       586.6 ns/op	    1504 B/op	      15 allocs/op
+BenchmarkPlanReusePhases/4full-10          	 2477800	       988.8 ns/op	    2392 B/op	      21 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkPlanReusePhases/3build-10         	 4061730	       589.1 ns/op	    1504 B/op	      15 allocs/op
+BenchmarkPlanReusePhases/4full-10          	 2468083	       993.6 ns/op	    2392 B/op	      21 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkPlanReusePhases/3build-10         	 4061550	       584.2 ns/op	    1504 B/op	      15 allocs/op
+BenchmarkPlanReusePhases/4full-10          	 2495282	       983.2 ns/op	    2392 B/op	      21 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkPlanReusePhases/3build-10         	 4054632	       587.0 ns/op	    1504 B/op	      15 allocs/op
+BenchmarkPlanReusePhases/4full-10          	 2479923	      1015 ns/op	    2392 B/op	      21 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkPlanReusePhases/3build-10         	 4056813	       588.1 ns/op	    1504 B/op	      15 allocs/op
+BenchmarkPlanReusePhases/4full-10          	 2475650	       983.4 ns/op	    2392 B/op	      21 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkPlanReusePhases/3build-10         	 4093270	       594.8 ns/op	    1504 B/op	      15 allocs/op
+BenchmarkPlanReusePhases/4full-10          	 2471588	       988.0 ns/op	    2392 B/op	      21 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkPlanReusePhases/3build-10         	 4073876	       588.3 ns/op	    1504 B/op	      15 allocs/op
+BenchmarkPlanReusePhases/4full-10          	 2486881	       986.9 ns/op	    2392 B/op	      21 allocs/op
+PASS
