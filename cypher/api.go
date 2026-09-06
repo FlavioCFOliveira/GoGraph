@@ -3577,12 +3577,24 @@ func (e *Engine) createBTreeIndexLocked(ctx context.Context, p *ir.CreateIndex, 
 			fmt.Errorf("%w: %q", index.ErrIndexExists, p.Name))
 	}
 
+	// Record every change fanned out from here until the pair is registered
+	// (rmp #2738), exactly as the hash path does; see
+	// [Engine.createHashIndexLocked] and [index.Manager.BeginBuild]. An explicit
+	// transaction's commit-time fan-out is not excluded by the schema gate this
+	// DDL holds, so without the recording a write committed between the backfill
+	// scan and the registration below reaches no index and is lost permanently.
+	// The log is handed to the registration operator via Catching, which replays
+	// it into both indexes at the instant they become reachable.
+	buildLog := idxMgr.BeginBuild()
+	defer idxMgr.AbandonBuild(buildLog)
+
 	idx, err := newBoundNodeBTreeIndex(e.g.ReadAt(nil), p.Label, p.Property)
 	if err != nil {
 		return nil, fmt.Errorf("exec: CreateIndex %q: %w", p.Name, err)
 	}
 	// Backfill BEFORE registration: a concurrent reader's plan build either
-	// misses the index (scan+filter, correct) or sees it fully populated.
+	// misses the index (scan+filter, correct) or sees it fully populated — the
+	// half-built index is not in the manager's map, so no reader can reach it.
 	if err := e.backfillNodeBTreeIndex(ctx, idx, p.Label, p.Property); err != nil {
 		return nil, err
 	}
@@ -3638,7 +3650,7 @@ func (e *Engine) createBTreeIndexLocked(ctx context.Context, p *ir.CreateIndex, 
 		idxMgr,
 		e.g.ApplyAtomically,
 		e.ClearPlanCache,
-	)
+	).Catching(buildLog)
 	if barrierErr := applyDDLOp(ctx, op); barrierErr != nil {
 		// The barrier ran the closure to completion or not at all; if the user
 		// index was registered before the companion failed, unwind it so the

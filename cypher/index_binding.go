@@ -843,13 +843,31 @@ func (e *Engine) createHashIndexLocked(ctx context.Context, p *ir.CreateIndex, i
 			fmt.Errorf("%w: %q", index.ErrIndexExists, p.Name))
 	}
 
+	// Record every change fanned out from here until the pair is registered
+	// (rmp #2738). The DDL's schema gate excludes autocommit writers for the
+	// whole sequence, but an EXPLICIT TRANSACTION takes no such gate — it cannot,
+	// being a registered store writer from BEGIN — so its commit-time index
+	// fan-out can land between the backfill scan below and the registration at
+	// the end, where it reaches no index at all and is lost permanently. The
+	// recording is replayed into both indexes by FinishBuild, under the manager's
+	// exclusive lock, at the instant they become reachable. See
+	// [index.Manager.BeginBuild] for why every change is applied exactly once.
+	//
+	// Retired unconditionally: AbandonBuild is a no-op once FinishBuild has
+	// retired the log, and on every early return below — a duplicate name, a
+	// cancelled backfill, a failed WAL commit — it is what stops the manager
+	// recording into a log nobody will ever drain.
+	buildLog := idxMgr.BeginBuild()
+	defer idxMgr.AbandonBuild(buildLog)
+
 	idx, err := newBoundNodeHashIndex(e.g.ReadAt(nil), p.Label, p.Property)
 	if err != nil {
 		return nil, fmt.Errorf("exec: CreateIndex %q: %w", p.Name, err)
 	}
 
 	// Backfill BEFORE registration: a concurrent reader's plan build either
-	// misses the index (scan+filter, correct) or sees it fully populated. A
+	// misses the index (scan+filter, correct) or sees it fully populated — the
+	// half-built index is not in the manager's map, so no reader can reach it. A
 	// cancelled backfill returns before registration, so the partial index is
 	// discarded (and tx is rolled back by the caller) — nothing is observed.
 	if berr := e.backfillNodeHashIndex(ctx, idx, p.Label, p.Property); berr != nil {
@@ -887,19 +905,33 @@ func (e *Engine) createHashIndexLocked(ctx context.Context, p *ir.CreateIndex, i
 		}
 	}
 
-	if cerr := idxMgr.CreateIndex(p.Name, idx); cerr != nil {
-		if p.IfNotExists && errors.Is(cerr, index.ErrIndexExists) {
+	// Replay the changes recorded since BeginBuild into BOTH indexes and register
+	// them, all under one exclusive hold of the manager's lock (rmp #2738). The
+	// single hold also supplies here what rmp #2703 established for the btree
+	// path with a visibility barrier: the pair becomes reachable in one instant,
+	// so a concurrent fan-out cannot land between the two registrations and reach
+	// one index but not the other.
+	numRegistered := false
+	if ferr := idxMgr.FinishBuild(buildLog, func(reg index.RegisterFunc) error {
+		if cerr := reg(p.Name, idx); cerr != nil {
+			return fmt.Errorf("exec: CreateIndex %q: %w", p.Name, cerr)
+		}
+		// Absorb ErrIndexExists: two CREATE INDEX statements on the same
+		// (label, property) share one companion, whichever index kind they are.
+		// Every companion error is absorbed, exactly as before this became one
+		// locked sequence: the companion is internal and purely an optimisation,
+		// so a user index without it is still correct.
+		if numIdx != nil {
+			if nerr := reg(numName, numIdx); nerr == nil {
+				numRegistered = true
+			}
+		}
+		return nil
+	}); ferr != nil {
+		if p.IfNotExists && errors.Is(ferr, index.ErrIndexExists) {
 			return emptyDDLResult(), nil
 		}
-		return nil, fmt.Errorf("exec: CreateIndex %q: %w", p.Name, cerr)
-	}
-	// Absorb ErrIndexExists: two CREATE INDEX statements on the same
-	// (label, property) share one companion, whichever index kind they are.
-	numRegistered := false
-	if numIdx != nil {
-		if nerr := idxMgr.CreateIndex(numName, numIdx); nerr == nil {
-			numRegistered = true
-		}
+		return nil, ferr
 	}
 	// Real schema mutation: invalidate cached plans built before the index
 	// existed (mirrors CreateIndexOp's onSchemaChange contract).
