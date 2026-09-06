@@ -154,11 +154,17 @@ regressing writes:
   ≤1/B error, MCV-spike isolation), and **exact top-k MCV** — built by an
   explicit `RefreshStatistics` scan, generation-stamped and staleness-gated. NDV
   is never sampled (provably impossible to bound — Charikar et al. PODS'00).
-- **Consumed by EXPLAIN/PROFILE:** each operator is annotated with an estimated
-  row count and its provenance (exact / stats / heuristic), drawn from the exact
-  count-store (`N`, `E`, `D`) and the new statistics. Display-only — no execution
-  or plan-choice change (a differential test proves results identical with/without
-  statistics populated).
+- **Consumed by EXPLAIN/PROFILE, and since #2766 by the planner:** each operator
+  is annotated with an estimated row count and its provenance (exact / stats /
+  heuristic), drawn from the exact count-store (`N`, `E`, `D`) and the property
+  statistics. Until #2766 the estimate providers were display-only: nothing but
+  the EXPLAIN renderer called them. That task wired them to the
+  disjoint-component join reorder, which estimates a filtered component's
+  emitted rows from the statistics
+  (`cypher/join_reorder_plan.go`, `reorderFilteredRows`). The reorder remains
+  **result-identical** — a differential test proves the result multiset is
+  unchanged with and without statistics populated — but it is no longer
+  display-only: the plan *shape* can now differ.
 - **The range-index seek stays exact-count-gated** (already optimal). estStats was
   proven *not* to widen it — the index yields an exact in-range count whenever a
   seek is possible — so the statistics' role is observability plus a documented

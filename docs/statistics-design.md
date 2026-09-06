@@ -101,8 +101,12 @@ chosen `v`. Therefore:
   falls back to the exact-count-only equality peephole (already shipped). HLL/NDV
   must never drive an absolute-no-regression equality decision.
 
-The reordering peepholes (P3) are unaffected — they require estExact and never
-consume statistics.
+The reordering peepholes (P3) shipped requiring `estExact`. **Since rmp #2766
+this is no longer true of all of them:** the disjoint-component reorder also
+consumes the property statistics, evaluating an `estStats` range estimate or an
+MCV equality hit over its certified error interval rather than at the point
+estimate (`cypher/join_reorder_plan.go`, `reorderFilteredRows` /
+`reorderSwapWins`). The single-edge anchor swap remains exact-count-only.
 
 ## 5. Numerical-stability requirements
 

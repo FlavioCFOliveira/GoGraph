@@ -1,0 +1,21 @@
+CHANGED (|delta| >= 0.5% and both arms stable within 0.5%)   n=8
+pkg          benchmark                                                     v0.13.0    v0.14.0     delta  nA  nB
+cypher       BenchmarkZZReorderSkewed/reorder=on-10                        5925706      59968   -98.99%   3   3
+cypher       BenchmarkZZReorderLiveHistory/history=quiet-10                 564429      25031   -95.57%   3   3
+cypher       BenchmarkZZReorderLiveHistory/history=live-10                  564428      25055   -95.56%   3   3
+cypher       BenchmarkReadAfterWrite_Session-10                                 53         41   -22.64%   1   1
+cypher       BenchmarkReadAfterWrite_Sessionless-10                             53         41   -22.64%   1   1
+cypher_exec  BenchmarkShortestPath_Layered-10                                  126        108   -14.29%   3   4
+cypher_exec  BenchmarkShortestPath_LayeredTyped-10                             126        108   -14.29%   3   4
+cypher_exec  BenchmarkShortestPath_HighDegreeFan-10                            317        314    -0.95%   3   4
+
+UNCHANGED within 0.5%   n=159
+
+UNRELIABLE - same binary varied >0.5% between rounds   n=4
+pkg          benchmark                                                   v13 spread  v14 spread   observed
+cypher       BenchmarkParallelScan_CountBig_Parallel-10                       0.98%       0.00%   v13=[102.0, 103.0] v14=[103.0]
+cypher       BenchmarkPlanCacheHit_Parameterised-10                          12.90%       8.25%   v13=[87.0, 99.0] v14=[89.0, 97.0]
+cypher       BenchmarkPlanCacheMiss_InlinedLiteral-10                         2.23%       2.98%   v13=[399.0, 408.0] v14=[397.0, 403.0, 409.0]
+cypher       BenchmarkPlanCacheMiss_InlinedLiteralNoComment-10               19.35%       8.89%   v13=[84.0, 102.0] v14=[88.0, 90.0, 96.0]
+
+TOTAL benchmarks compared: 171

@@ -1,0 +1,82 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkPlanReusePhases/1parse-10                          	21549320	        54.22 ns/op	      48 B/op	       1 allocs/op
+BenchmarkPlanReusePhases/2snapshot-10                       	15155325	        79.25 ns/op	      96 B/op	       2 allocs/op
+BenchmarkPlanReusePhases/3build-10                          	 2023904	       597.3 ns/op	    1504 B/op	      15 allocs/op
+BenchmarkPlanReusePhases/4full-10                           	 1213784	      1014 ns/op	    2392 B/op	      21 allocs/op
+BenchmarkPlanReusePhasesParallel/1parse-10                  	11276839	       111.0 ns/op	      48 B/op	       1 allocs/op
+BenchmarkPlanReusePhasesParallel/2snapshot-10               	 9113398	       142.7 ns/op	      96 B/op	       2 allocs/op
+BenchmarkPlanReusePhasesParallel/3build-10                  	 3500353	       321.6 ns/op	    1504 B/op	      15 allocs/op
+BenchmarkPlanReusePhasesParallel/4full-10                   	 1818225	       685.2 ns/op	    2392 B/op	      21 allocs/op
+BenchmarkZZReorderSkewed/reorder=on-10                      	     436	   2740239 ns/op	  566661 B/op	   59968 allocs/op
+BenchmarkZZReorderSkewed/reorder=off-10                     	       4	 270258969 ns/op	48360308 B/op	 5925708 allocs/op
+BenchmarkZZReorderLiveHistory/history=quiet-10              	    1202	    980385 ns/op	  286937 B/op	   25031 allocs/op
+BenchmarkZZReorderLiveHistory/history=live-10               	    1207	    985255 ns/op	  299992 B/op	   25055 allocs/op
+BenchmarkZZReorderDrainCost/scan=bare-10                    	     858	   1430200 ns/op	  271208 B/op	   19817 allocs/op
+BenchmarkZZReorderDrainCost/scan=filtered-10                	    1094	   1086809 ns/op	  239440 B/op	   19829 allocs/op
+BenchmarkColumnarShape_ScanBaseline-10                      	     500	   2397361 ns/op	 1082554 B/op	   39551 allocs/op
+BenchmarkColumnarShape_ScanConjunctionSameProp-10           	     397	   3010635 ns/op	 1232918 B/op	   58308 allocs/op
+BenchmarkColumnarShape_ScanConjunctionTwoProps-10           	     385	   3090453 ns/op	 1082952 B/op	   39562 allocs/op
+BenchmarkColumnarShape_ScanIn-10                            	     265	   4492041 ns/op	  926662 B/op	   19839 allocs/op
+BenchmarkColumnarShape_HopBaseline-10                       	     357	   3294923 ns/op	 1328794 B/op	   39634 allocs/op
+BenchmarkColumnarShape_HopLabelledFarEnd-10                 	     316	   3713940 ns/op	 1331201 B/op	   39651 allocs/op
+BenchmarkColumnarShape_HopAnchorFilter-10                   	     357	   3282890 ns/op	 1328785 B/op	   39633 allocs/op
+BenchmarkColumnarShape_HopAnchorFilterLabelledFarEnd-10     	     321	   3692784 ns/op	 1330954 B/op	   39649 allocs/op
+BenchmarkColumnarShape_HopAnchorAndPostFilter-10            	     289	   4148408 ns/op	 1482337 B/op	   58403 allocs/op
+BenchmarkColumnarShape_ScanNoLimit-10                       	     502	   2392632 ns/op	 1082554 B/op	   39551 allocs/op
+BenchmarkColumnarShape_ScanInertLimit-10                    	     505	   2399079 ns/op	 1082704 B/op	   39555 allocs/op
+BenchmarkCountAllNodes-10                                   	   68726	     16847 ns/op	    3296 B/op	      27 allocs/op
+BenchmarkDeleteAccumulated/accumulated=0-10                 	      73	  16666045 ns/op	      3333 ns/node	65660364 B/op	  205194 allocs/op
+BenchmarkDeleteAccumulated/accumulated=20000-10             	      74	  16221581 ns/op	      3244 ns/node	57555997 B/op	  201352 allocs/op
+BenchmarkDeleteAccumulated/accumulated=60000-10             	      74	  16883588 ns/op	      3377 ns/node	60389491 B/op	  210716 allocs/op
+BenchmarkCreateRelationships-10                             	     586	   2555176 ns/op	      5110 ns/rel	 5301101 B/op	   18128 allocs/op
+BenchmarkExpandInto_TriangleClose-10                        	       7	 149730345 ns/op	25730107 B/op	 2038336 allocs/op
+BenchmarkExpandInto_TwoCycleClose-10                        	     169	   7013354 ns/op	 1569440 B/op	  123446 allocs/op
+BenchmarkExpandInto_TwoHopOpen-10                           	       8	 133563932 ns/op	13349702 B/op	 1526032 allocs/op
+BenchmarkCount_LabelStarBig_Pushdown-10                     	 1324384	       904.7 ns/op	    2056 B/op	      19 allocs/op
+BenchmarkCount_LabelStarBig_Serial-10                       	 1343722	       906.5 ns/op	    2056 B/op	      19 allocs/op
+BenchmarkCount_LabelVarBig_Pushdown-10                      	 1326529	       915.1 ns/op	    2056 B/op	      19 allocs/op
+BenchmarkCount_LabelVarBig_Serial-10                        	 1337708	       887.2 ns/op	    2056 B/op	      19 allocs/op
+BenchmarkMergeMatch_LabelsOnly/hot=8/cold=0-10              	  170566	      6977 ns/op	    7720 B/op	     102 allocs/op
+BenchmarkMergeMatch_LabelsOnly/hot=8/cold=4096-10           	  302026	      3886 ns/op	    7272 B/op	      99 allocs/op
+BenchmarkMergeMatch_LabelsOnly/hot=8/cold=16384-10          	  312163	      3788 ns/op	    7272 B/op	      99 allocs/op
+BenchmarkParallelAggregate_MinBig_Parallel-10               	      66	  18392787 ns/op	83517886 B/op	 1203866 allocs/op
+BenchmarkParallelAggregate_MinBig_Serial-10                 	      67	  18234713 ns/op	10072121 B/op	  199837 allocs/op
+BenchmarkParallelAggregate_MaxBig_Parallel-10               	      63	  18319282 ns/op	83517386 B/op	 1203866 allocs/op
+BenchmarkParallelAggregate_MaxBig_Serial-10                 	      58	  17877800 ns/op	10072170 B/op	  199839 allocs/op
+BenchmarkParallelAggregate_GroupMinBig_Parallel-10          	      34	  34836168 ns/op	162184922 B/op	 2407483 allocs/op
+BenchmarkParallelAggregate_GroupMinBig_Serial-10            	      10	 100322942 ns/op	163597825 B/op	 2399354 allocs/op
+BenchmarkParallelAggregate_MinSmall_DefaultEnabled-10       	   57910	     20599 ns/op	   77616 B/op	      67 allocs/op
+BenchmarkParallelAggregate_MinSmall_Disabled-10             	   60588	     20130 ns/op	   77616 B/op	      67 allocs/op
+BenchmarkCountPushdown_O1-10                                	  857708	      1349 ns/op	    2024 B/op	      18 allocs/op
+BenchmarkCountPushdown_FullScan-10                          	      57	  18019670 ns/op	10036694 B/op	  199821 allocs/op
+BenchmarkParallelLabelScan_LabelledProject_Parallel-10      	      61	  19376626 ns/op	66984791 B/op	  806488 allocs/op
+BenchmarkParallelLabelScan_LabelledProject_Serial-10        	      27	  41632248 ns/op	 9615449 B/op	  799028 allocs/op
+BenchmarkParallelLabelScan_UnlabelledProject_Parallel-10    	      62	  19852814 ns/op	66913575 B/op	  806467 allocs/op
+BenchmarkParallelLabelScan_LabelledMin_Parallel-10          	      46	  22299737 ns/op	 1719942 B/op	  199826 allocs/op
+BenchmarkParallelLabelScan_LabelledMin_Serial-10            	      49	  20949353 ns/op	 1719917 B/op	  199826 allocs/op
+BenchmarkParallelLabelScan_UnlabelledMin_Parallel-10        	      62	  18847997 ns/op	83516220 B/op	 1203854 allocs/op
+BenchmarkParallelLabelScan_UnlabelledMin_Serial-10          	      49	  21624244 ns/op	10072215 B/op	  199839 allocs/op
+BenchmarkParallelLabelScan_UnlabelledProject_Serial-10      	      30	  38617994 ns/op	17967972 B/op	  799041 allocs/op
+BenchmarkParallelScan_CountBig_Parallel-10                  	     727	   1646886 ns/op	 8384493 B/op	     103 allocs/op
+BenchmarkParallelScan_CountBig_Serial-10                    	  918940	      1316 ns/op	    2024 B/op	      18 allocs/op
+BenchmarkParallelScan_CountSmall_DefaultEnabled-10          	  558985	      2127 ns/op	    2016 B/op	      17 allocs/op
+BenchmarkParallelScan_CountSmall_Disabled-10                	  918044	      1319 ns/op	    2016 B/op	      17 allocs/op
+BenchmarkParallelScanProject_ScanBig_Parallel-10            	      58	  19330757 ns/op	65307576 B/op	  607523 allocs/op
+BenchmarkParallelScanProject_ScanBig_Serial-10              	      66	  17967939 ns/op	11609166 B/op	  199811 allocs/op
+BenchmarkParallelScanProject_ScanFilterBig_Parallel-10      	      42	  25365821 ns/op	15261255 B/op	  299843 allocs/op
+BenchmarkParallelScanProject_ScanFilterBig_Serial-10        	      42	  25586581 ns/op	15261257 B/op	  299843 allocs/op
+BenchmarkParallelScanProject_ScanSmall_DefaultEnabled-10    	   75205	     15890 ns/op	   41872 B/op	      42 allocs/op
+BenchmarkParallelScanProject_ScanSmall_Disabled-10          	   76701	     15678 ns/op	   41872 B/op	      42 allocs/op
+BenchmarkParallelScanGate/scan-10                           	     926	   1290384 ns/op	  366536 B/op	   19789 allocs/op
+BenchmarkParallelScanGate/seek-10                           	    1098	   1086393 ns/op	  236432 B/op	   19800 allocs/op
+BenchmarkPlanCacheHit_Parameterised-10                      	   44482	     26607 ns/op	   15593 B/op	      89 allocs/op
+BenchmarkPlanCacheMiss_InlinedLiteral-10                    	   25791	     46903 ns/op	   33272 B/op	     403 allocs/op
+BenchmarkPlanCacheMiss_InlinedLiteralNoComment-10           	   43584	     26545 ns/op	   15281 B/op	      90 allocs/op
+BenchmarkReadAfterWrite_Sessionless-10                      	  395983	      3129 ns/op	    5143 B/op	      41 allocs/op
+BenchmarkReadAfterWrite_Session-10                          	  368059	      3162 ns/op	    5145 B/op	      41 allocs/op
+BenchmarkReadOnly_Sessionless-10                            	 1232911	       972.6 ns/op	    2056 B/op	      19 allocs/op
+BenchmarkReadOnly_Session-10                                	 1216804	       996.3 ns/op	    2056 B/op	      19 allocs/op
+PASS

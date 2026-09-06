@@ -1386,9 +1386,14 @@ type Engine struct {
 	// falls through to the min-label anchor scan and its residual label Filter.
 	bitmapIntersectEnabled bool
 
-	// joinReorderEnabled gates the count-store-gated disjoint-component ordering
-	// peephole (#2091). True by default; set false by EngineOptions.DisableJoinReorder.
-	// When false the planner always builds the written-order Cartesian.
+	// joinReorderEnabled gates the disjoint-component ordering peephole (#2091).
+	// True by default; set false by EngineOptions.DisableJoinReorder. When false the
+	// planner always builds the written-order Cartesian.
+	//
+	// It is no longer only count-store-gated, which is what this comment said until
+	// rmp #2766: a component carrying a property predicate is now estimated from the
+	// (label, property) statistics as well, so the gate reads two estimate sources.
+	// The trustworthiness veto over both is unchanged.
 	joinReorderEnabled bool
 
 	// anchorSwapEnabled gates the count-store-gated single-edge anchor-swap

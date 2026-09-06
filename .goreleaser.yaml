@@ -46,9 +46,34 @@ archives:
     files:
       - README.md
       - CHANGELOG.md
+      - CONTRIBUTING.md
       - LICENSE
       - SECURITY.md
-      - docs/**/*
+      # Ship the Markdown documentation, and only that.
+      #
+      # BOTH patterns are load-bearing. `**` here matches one or more path
+      # segments, never zero, so `docs/**/*.md` alone reaches
+      # `docs/tck/status.md` but NOT `docs/cypher.md`. That is exactly the
+      # defect rmp #2758 recorded: the previous single `docs/**/*` entry
+      # shipped 0 of the 112 top-level `docs/*.md` files in the v0.13.0
+      # tarball, and 138 raw measurement files instead. Re-measured on this
+      # tree before the fix: 0 of 113 top-level docs, 214 raw files.
+      #
+      # VERIFY THIS BY EXTRACTING A BUILT ARCHIVE, never by reading this
+      # file. Reading it is precisely what let the defect stand for a whole
+      # release, and then put a false claim about it into the changelog
+      # (rmp #2759):
+      #
+      #   goreleaser release --snapshot --clean --skip=publish,before,validate
+      #   tar tzf dist/gograph-*-darwin-arm64.tar.gz | grep -c '^docs/[^/]*\.md$'
+      #
+      # Restricting to `*.md` excludes the raw measurement data under
+      # `docs/benchmarks/**` (`.txt`, `.log`, `.meta`, `.sh`), which is
+      # reproduction input for the benchmark reports rather than
+      # documentation, and which dominated the artefact's size. Every
+      # non-Markdown file under `docs/` lives under `docs/benchmarks/`.
+      - docs/*.md
+      - docs/**/*.md
       - gograph.cdx.json
 
 checksum:

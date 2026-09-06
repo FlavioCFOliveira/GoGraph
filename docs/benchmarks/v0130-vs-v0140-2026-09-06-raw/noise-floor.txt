@@ -1,0 +1,5 @@
+NOISE FLOOR — B vs B2, the SAME v0.14.0 binary against itself (byte-identical by sha256)
+  benchmarks where allocs/op agree within 0.5% : 169
+  benchmarks where they do NOT               : 2
+    cypher       BenchmarkPlanCacheHit_Parameterised-10                   B=97 B2=86  11.34%
+    cypher       BenchmarkPlanCacheMiss_InlinedLiteral-10                 B=403 B2=397  1.49%

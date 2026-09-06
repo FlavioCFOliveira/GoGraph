@@ -1,0 +1,24 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/graph/lpg
+cpu: Apple M4
+BenchmarkEdgeSideRead_LabelsByHandle-10    	43026945	        26.76 ns/op	      16 B/op	       1 allocs/op
+BenchmarkExistence/clean/bitmap-10         	1000000000	         1.172 ns/op	       0 B/op	       0 allocs/op
+BenchmarkExistence/clean/versioned-10      	368296994	         3.224 ns/op	       0 B/op	       0 allocs/op
+BenchmarkExistence/removed=1in8/bitmap-10  	215156682	         5.565 ns/op	       0 B/op	       0 allocs/op
+BenchmarkExistence/removed=1in8/versioned-10         	151765003	         7.998 ns/op	       0 B/op	       0 allocs/op
+BenchmarkLabelRead/deltas=off-10                     	100000000	        11.11 ns/op	       0 B/op	       0 allocs/op
+BenchmarkLabelRead/deltas=on/no-live-delta-10        	100000000	        10.22 ns/op	       0 B/op	       0 allocs/op
+BenchmarkLabelRead/deltas=on/one-live-delta-10       	31329886	        37.53 ns/op	       8 B/op	       1 allocs/op
+BenchmarkPropRead/deltas=off-10                      	156677658	         7.569 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPropRead/deltas=on/no-live-delta-10         	154769653	         7.719 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPropRead/deltas=on/one-live-delta-10        	30927967	        38.95 ns/op	       8 B/op	       2 allocs/op
+BenchmarkTombstoneScanClean-10                       	   28989	     40766 ns/op	       0 B/op	       0 allocs/op
+BenchmarkOutDegree_ByGraphSize/total=1024-10         	122938758	         9.751 ns/op	       0 B/op	       0 allocs/op
+BenchmarkOutDegree_ByGraphSize/total=16384-10        	120745219	        10.05 ns/op	       0 B/op	       0 allocs/op
+BenchmarkOutDegree_ByGraphSize/total=262144-10       	100000000	        10.15 ns/op	       0 B/op	       0 allocs/op
+BenchmarkOutDegreeByType/d=1-10                      	25778893	        46.56 ns/op	       0 B/op	       0 allocs/op
+BenchmarkOutDegreeByType/d=16-10                     	 5255485	       227.9 ns/op	       0 B/op	       0 allocs/op
+BenchmarkOutDegreeByType/d=256-10                    	  391282	      3099 ns/op	       0 B/op	       0 allocs/op
+BenchmarkOutDegreeByType/d=4096-10                   	   24712	     48221 ns/op	       0 B/op	       0 allocs/op
+PASS
