@@ -156,13 +156,29 @@ func (s simCheckpointBackend[N, W]) ReadManifest(path string) (snapshot.Manifest
 	return snapshot.ReadManifestFileFS(simSnapshotFS(s), path)
 }
 
-// VerifySnapshotReadable parses the published snapshot back off the in-memory
-// disk with the SAME full reader the simulated recovery uses
-// ([simRecoveryFS.LoadSnapshot] -> snapshot.LoadSnapshotFullFS), so the
-// checkpointer's pre-truncation readback (rmp #2749) is exercised inside DST
-// with the simulator's fault injection applied to it, exactly as it is in
-// production.
-func (s simCheckpointBackend[N, W]) VerifySnapshotReadable(snapDir string) error {
-	_, err := snapshot.LoadSnapshotFullFS(simSnapshotFS(s), snapDir)
-	return err
+// VerifySnapshotReadable mirrors the production readback
+// ([checkpoint.osSnapshotBackend.VerifySnapshotReadable]) step for step, off the
+// in-memory disk:
+//
+//  1. it parses the published snapshot with the SAME full reader the simulated
+//     recovery uses ([simRecoveryFS.LoadSnapshot] ->
+//     snapshot.LoadSnapshotFullFS), so the checkpointer's pre-truncation
+//     readback (rmp #2749) is exercised inside DST with the simulator's fault
+//     injection applied to it, exactly as it is in production;
+//  2. it then decodes every codec-encoded mapper key with the store's codec,
+//     the step the simulated recovery performs next
+//     (snapshot.ApplyMapperToGraphWithCodec), so DST also exercises the
+//     applier-side half of the guarantee (rmp #2780).
+//
+// Both halves belong here and not only in production: the codec matrix
+// publishes snapshots for key types whose mapper.bin is the version-2 (codec)
+// layout, which is the only layout step 2 has anything to check. Extending one
+// seam and not the other would leave the simulator testing a weaker guarantee
+// than the module ships.
+func (s simCheckpointBackend[N, W]) VerifySnapshotReadable(snapDir string, codec txn.Codec[N]) error {
+	loaded, err := snapshot.LoadSnapshotFullFS(simSnapshotFS(s), snapDir)
+	if err != nil {
+		return err
+	}
+	return snapshot.VerifyMapperDecodable[N](loaded.Mapper, codec)
 }

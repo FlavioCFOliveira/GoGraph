@@ -1082,6 +1082,18 @@ func (c *Checkpointer[N, W]) writeAndTruncate(seq uint64, capt *snapshot.Capture
 	// guarantee the gate's name asserts — "this snapshot alone can restore the
 	// store" — is then established rather than assumed.
 	//
+	// PARSING IS NOT APPLYING, so the readback does both (rmp #2780). Recovery
+	// does not stop at LoadSnapshotFull: it hands the mapper readback straight
+	// to snapshot.ApplyMapperToGraphWithCodec, which decodes every key THROUGH
+	// THE CODEC. The snapshot reader holds no codec — snapshot.ReadMapperBytes
+	// validates magic, format version, record framing and the per-key length cap
+	// and then returns the version-2 key bytes verbatim, by design — so key
+	// bytes the parse accepts can still be bytes the codec refuses: an encoding
+	// it cannot decode, or one it does not consume in full. That is the same
+	// outcome by a different door, and c.codec (the codec that WROTE the mapper)
+	// is right here, so VerifySnapshotReadable runs recovery's decode step too,
+	// over the bytes the parse already brought into memory — no second read.
+	//
 	// It runs HERE, in the lock-free phase 2, and not inside the phase-3 gate:
 	// the readback is disk I/O proportional to the snapshot, and phase 3 holds
 	// the commit lock that every writer serialises on. Placing it here costs the
@@ -1095,7 +1107,7 @@ func (c *Checkpointer[N, W]) writeAndTruncate(seq uint64, capt *snapshot.Capture
 	// (no mapper codec for this key type, a DDL that raced phase 2). An
 	// unreadable published snapshot is not a mode, it is corruption or a defect,
 	// and the module fails stop rather than fail silent.
-	if err := c.snap.VerifySnapshotReadable(snapDir); err != nil {
+	if err := c.snap.VerifySnapshotReadable(snapDir, c.codec); err != nil {
 		metrics.IncCounter("store.checkpoint.snapshot_unreadable", 1)
 		err = fmt.Errorf("checkpoint: published snapshot is not readable, WAL retained: %w", err)
 		c.setErr(seq, err)
@@ -1137,11 +1149,13 @@ func (c *Checkpointer[N, W]) writeAndTruncate(seq uint64, capt *snapshot.Capture
 // unchanged from runNonBlocking via writeAndTruncate.
 //
 // PRECONDITION: the caller has already proved the published snapshot READS BACK
-// (phase 2's [snapshotBackend.VerifySnapshotReadable]; see rmp #2749). This
+// AND its mapper keys DECODE (phase 2's
+// [snapshotBackend.VerifySnapshotReadable]; see rmp #2749 and rmp #2780). This
 // function re-checks composition only, and must never be reached on a snapshot
 // whose readability is unestablished — the manifest-name check it performs
-// cannot detect an unparseable image, and truncating behind one destroys the
-// only surviving copy of the data.
+// cannot detect an unparseable image, nor one whose codec-encoded mapper keys
+// recovery will refuse, and truncating behind either destroys the only
+// surviving copy of the data.
 func (c *Checkpointer[N, W]) truncatePrefixLocked(seq uint64, snapDir string, watermark int64) error {
 	// Re-source needConstraints / needIndexes from the graph's own counts, NOT
 	// from the phase-1 captured slices: a constraint or index DDL committed
@@ -1280,14 +1294,16 @@ func (c *Checkpointer[N, W]) setErr(seq uint64, err error) {
 // unparseable one — a distinction on which the safety of the truncation
 // entirely depends (rmp #2749).
 //
-// READABILITY is established separately, by
+// READABILITY — and APPLICABILITY — are established separately, by
 // [snapshotBackend.VerifySnapshotReadable] in the lock-free phase 2 of
 // [Checkpointer.writeAndTruncate], which parses every declared component with
-// the reader recovery itself uses and aborts the checkpoint if any of them
-// refuses. Truncation therefore requires BOTH: the image parses (phase 2) AND
-// it carries what recovery needs (this function, re-checked under the phase-3
-// lock so a DDL committed during phase 2 cannot slip past). Neither check
-// subsumes the other, and removing either one restores a Durability defect.
+// the reader recovery itself uses, decodes every codec-encoded mapper key with
+// the store's own codec exactly as recovery's next call does, and aborts the
+// checkpoint if either refuses. Truncation therefore requires BOTH: the image
+// parses and applies (phase 2) AND it carries what recovery needs (this
+// function, re-checked under the phase-3 lock so a DDL committed during phase 2
+// cannot slip past). Neither check subsumes the other, and removing either one
+// restores a Durability defect.
 //
 // The split exists because the two checks have opposite cost profiles. This one
 // is a single small JSON read and belongs under the commit lock, where it must

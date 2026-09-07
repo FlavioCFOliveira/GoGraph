@@ -20,7 +20,7 @@ import (
 //
 // The default backend ([osSnapshotBackend]) calls
 // snapshot.WriteSnapshotFullWith* / snapshot.ReadManifestFile /
-// snapshot.LoadSnapshotFull verbatim, so the
+// snapshot.LoadSnapshotFull / snapshot.VerifyMapperDecodable verbatim, so the
 // production checkpoint path is byte-identical to the pre-seam code. The
 // deterministic-simulation harness supplies an in-memory backend via
 // [WithSnapshotFS].
@@ -51,17 +51,36 @@ type snapshotBackend[N comparable, W any] interface {
 	// self-sufficiency before truncating the WAL).
 	ReadManifest(path string) (snapshot.Manifest, error)
 	// VerifySnapshotReadable establishes that the snapshot published at snapDir
-	// can actually be READ BACK by the reader recovery uses, returning nil only
-	// when every component the manifest declares was opened and parsed.
+	// can actually be READ BACK AND APPLIED by recovery, returning nil only when
+	// every component the manifest declares was opened and parsed AND every
+	// codec-encoded mapper key in it decoded through codec.
 	//
-	// An implementation MUST perform the full parse — the same call recovery
-	// makes (see store/recovery.osBackend.LoadSnapshot) — and MUST NOT
-	// substitute a cheaper proxy such as stat-ing the files, re-reading the
-	// manifest, or checking a CRC alone. The checkpointer calls this before it
-	// truncates the WAL prefix, so a weaker check here is a Durability defect:
-	// it would discard the only other copy of the data behind an image nothing
-	// can read (rmp #2749).
-	VerifySnapshotReadable(snapDir string) error
+	// An implementation MUST perform BOTH halves, each with the same call
+	// recovery makes, and MUST NOT substitute a cheaper proxy for either:
+	//
+	//   - THE PARSE — snapshot.LoadSnapshotFull, matching
+	//     store/recovery.osBackend.LoadSnapshot. Not stat-ing the files, not
+	//     re-reading the manifest, not checking a CRC alone (rmp #2749).
+	//   - THE DECODE — snapshot.VerifyMapperDecodable over the mapper readback
+	//     the parse produced, matching the decode step of
+	//     snapshot.ApplyMapperToGraphWithCodec, which is what recovery calls
+	//     next. Not a spot check of one key, not a length or count comparison,
+	//     not an inference from the format version (rmp #2780).
+	//
+	// The two halves are not interchangeable. snapshot.ReadMapperBytes validates
+	// magic, format version, record framing and the per-key length cap and then
+	// returns the key bytes verbatim, asking no codec anything — so an image the
+	// parse accepts can still be one whose keys the codec refuses, and recovery
+	// then fails on the very snapshot this approved.
+	//
+	// codec is the store's node-identifier codec (the checkpointer passes its
+	// own, the one that wrote the mapper). It may be nil, in which case no
+	// version-2 mapper can have been published and there is nothing to decode.
+	//
+	// The checkpointer calls this before it truncates the WAL prefix, so a
+	// weaker check in either half is a Durability defect: it would discard the
+	// only other copy of the data behind an image recovery cannot open.
+	VerifySnapshotReadable(snapDir string, codec txn.Codec[N]) error
 }
 
 // osSnapshotBackend is the production backend: it delegates to the snapshot
@@ -95,17 +114,32 @@ func (osSnapshotBackend[N, W]) ReadManifest(path string) (snapshot.Manifest, err
 	return snapshot.ReadManifestFile(path)
 }
 
-// VerifySnapshotReadable performs the production readback: it is the SAME call
-// store/recovery makes to load a snapshot at startup
-// (recovery.osBackend.LoadSnapshot -> snapshot.LoadSnapshotFull), so a snapshot
-// this accepts is one recovery's reader can parse, and a snapshot this rejects
-// is one recovery would have failed to open.
+// VerifySnapshotReadable performs the production readback in the two steps
+// recovery performs, in recovery's order:
 //
-// The parsed image is discarded: only the error is load-bearing, and holding
-// the readback alive would double the checkpoint's peak footprint for no gain.
-func (osSnapshotBackend[N, W]) VerifySnapshotReadable(snapDir string) error {
-	_, err := snapshot.LoadSnapshotFull(snapDir)
-	return err
+//  1. snapshot.LoadSnapshotFull — the SAME call store/recovery makes to load a
+//     snapshot at startup (recovery.osBackend.LoadSnapshot), so a snapshot this
+//     accepts is one recovery's reader can parse (rmp #2749).
+//  2. snapshot.VerifyMapperDecodable — the decode step of the SAME call
+//     recovery makes next on the readback it just obtained
+//     (snapshot.ApplyMapperToGraphWithCodec, store/recovery/recovery.go), so a
+//     snapshot this accepts is also one whose mapper keys recovery's codec can
+//     decode (rmp #2780).
+//
+// Step 2 adds no I/O: it decodes the mapper bytes step 1 already read into
+// memory. It is not folded into step 1 because the snapshot reader has no codec
+// of its own — the version-2 layout's key bytes are opaque to it by design, and
+// the codec belongs to the store.
+//
+// The parsed image is discarded once both steps agree: only the error is
+// load-bearing, and holding the readback alive would double the checkpoint's
+// peak footprint for no gain.
+func (osSnapshotBackend[N, W]) VerifySnapshotReadable(snapDir string, codec txn.Codec[N]) error {
+	loaded, err := snapshot.LoadSnapshotFull(snapDir)
+	if err != nil {
+		return err
+	}
+	return snapshot.VerifyMapperDecodable[N](loaded.Mapper, codec)
 }
 
 // manifestPath returns the manifest.json path inside a snapshot directory.

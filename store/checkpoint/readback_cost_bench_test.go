@@ -146,6 +146,11 @@ func BenchmarkCheckpoint_FullRunWithReadback(b *testing.B) {
 // BenchmarkCheckpoint_SnapshotReadbackOnly times ONLY the verification the fix
 // adds, on the very snapshot the checkpoint above publishes. This is the added
 // cost, in isolation.
+//
+// The fixture is string-keyed, so its mapper.bin is the frozen version-1
+// layout and the codec-decode half added by rmp #2780 has nothing to decode
+// here: these figures are the PARSE cost alone. The decode cost is measured on
+// a version-2 (codec) mapper in mapper_decode_cost_bench_test.go.
 func BenchmarkCheckpoint_SnapshotReadbackOnly(b *testing.B) {
 	dir := b.TempDir()
 	g := gateBenchGraph(b)
@@ -159,7 +164,7 @@ func BenchmarkCheckpoint_SnapshotReadbackOnly(b *testing.B) {
 	backend := osSnapshotBackend[string, int64]{}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if err := backend.VerifySnapshotReadable(snapDir); err != nil {
+		if err := backend.VerifySnapshotReadable(snapDir, txn.NewStringCodec()); err != nil {
 			b.Fatalf("VerifySnapshotReadable: %v", err)
 		}
 	}
