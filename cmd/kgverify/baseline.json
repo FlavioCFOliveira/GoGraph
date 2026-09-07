@@ -1,0 +1,76 @@
+{
+  "measured": "2026-09-07",
+  "commit": "83bced1e (release/0.14.1)",
+
+  "fabricationFixture": [
+    "TestSchemaWalkHoisted",
+    "TestEvalWithReentrancy",
+    "edgeTypeFilterCache",
+    "edgeTypeFilterFor"
+  ],
+
+  "sanityFloors": {
+    "declarations": 20000,
+    "goFiles": 2500,
+    "symbolNodes": 10000,
+    "documentedLabels": 20,
+    "documentedEdgeForms": 50,
+    "tasksResolved": 400
+  },
+
+  "checks": {
+    "fixture-fabrication-present": 0,
+    "symbol-absent": 327,
+    "symbol-file-absent": 267,
+    "symbol-kind-mismatch": 29,
+    "symbol-pkg-mismatch": 71,
+    "task-id-not-int": 0,
+    "task-legacy-identity": 0,
+    "task-id-duplicated": 5,
+    "task-stub": 3,
+    "task-status-invalid": 0,
+    "task-status-disagrees-with-rmp": 9,
+    "task-absent-in-rmp": 0,
+    "provenance-no-node": 1082,
+    "provenance-no-gitcommit": 1,
+    "edge-off-model": 62,
+    "edge-type-undocumented": 119,
+    "label-undocumented": 18,
+    "component-path-missing": 25,
+    "component-path-absent": 0
+  },
+
+  "rationale": {
+    "_how_to_use": "A count that EXCEEDS its baseline fails the gate. A count BELOW it is reported as 'improved - ratchet the baseline': lower the number here in the same commit that lowers the count, exactly as cypher/tck/runner_test.go ratchets tckExecutionBaseline. Never raise a baseline to get a green run.",
+
+    "_zero_baselines": "fixture-fabrication-present, task-id-not-int, task-legacy-identity, task-status-invalid, task-absent-in-rmp and component-path-absent are at 0 because they were MEASURED at 0 on 2026-09-07, not because 0 is aspirational. These are the classes that must never regress at all.",
+
+    "symbol-absent": "327 symbol-tier nodes name a declaration the tree does not have. 227 point at a file that no longer exists (whole packages were deleted, e.g. cypher/plan and cypher/ir/rewrite); 93 point at a file that DOES exist but declares no such symbol - the same shape as the two fabrications in the fixture; 7 carry no file property. The 93 are the ones worth reading first. This is a repair backlog a checker cannot clear on its own.",
+
+    "symbol-file-absent": "267 nodes name a path that is not in the tree. Overlaps symbol-absent by construction and is kept separate because a wrong path and a wrong name have different repairs.",
+
+    "symbol-kind-mismatch": "29 nodes carry a label the declaration does not bear - most often a Method labelled Function. Distinct from a fabrication: the symbol exists.",
+
+    "symbol-pkg-mismatch": "71 nodes name a symbol that exists, but not in the package they claim. Two causes are folded here: knowledge-model.md records the internal/sim divergence (symbols keyed on `package` holding the directory rather than `pkg` holding the import path) as the model in force, and a genuine wrong-place claim - for example the Example nodes asserting a func Example() in examples/NN_*/example_test.go, where the file exists and declares no such function. Failing on a documented, accepted divergence would leave this gate permanently red, which is only a different way of being useless.",
+
+    "task-id-duplicated": "5 ids bind two nodes each: 2698, 2699 and 2700 are a real node plus an empty stub, and 2605 and 2615 are two nodes with disagreeing statuses. This is the SAME defect class rmp #2612 folded four of and sprint 352 found two more of (2645, 2653): a full-property MERGE against a node with different properties creates a duplicate instead of matching it. It has recurred, which is why it is now counted.",
+
+    "task-stub": "3 Task nodes carry neither title nor status (2698, 2699, 2700) - the empty-stub form.",
+
+    "task-status-disagrees-with-rmp": "9 statuses are stale. THIS COUNT IS TIME-VARYING: rmp is the authority, so every task closed without a graph sync raises it, with no code change involved. The remedy is a sync, never a baseline bump. It is also the strongest argument against wiring this gate into `make ci` unmodified - it would fail a push for a reason unrelated to the change under test.",
+
+    "provenance-no-node": "MEASURED 1000 of 1837 declarations in the 66 .go files the range touched before this task, BASELINED at 1082. Read the 1000 with the coverage figure the tool prints: the graph matches 43.5% of the tree's declarations overall and 45.6% within the touched files, so the two rates are the same and this is a GLOBAL bootstrap gap, not a sprint-local sync failure - which refutes the premise that this sprint's own footprint was skipped. The extra 82 are this tool's own declarations in cmd/kgverify, which join the touched range the moment they are committed and have no graph node yet; the baseline is set for the post-commit state so the gate is green both before and after, and those 82 nodes are owed by the knowledge-graph sync for rmp #2677.",
+
+    "provenance-no-gitcommit": "Exactly 1: Function newBoundNodeBTreeIndex in cypher/index_binding.go. Of the 837 touched declarations that DO have a node, 836 carry provenance.",
+
+    "edge-off-model": "62 endpoint shapes use a documented edge type in an undocumented form. 21 of them are IMPLEMENTED_IN, which is the count the filing named and which this tool reproduces exactly: (Feature)->(Commit) x10, (Commit)->(Feature) x5, (DSTScenario)->(Commit) x4, (Scenario)->(File) x1, (Task)->(Package) x1.",
+
+    "edge-type-undocumented": "119 shapes use an edge type absent from the model's table. knowledge-model.md admits this backlog in its own data-quality note. Counted separately from edge-off-model so the 21 IMPLEMENTED_IN edges are not buried under it.",
+
+    "label-undocumented": "18 labels are in the graph and not in the label table: Audit, AuditRound, Bug, Certification, Config, DesignSpike, Doc, ExampleProgram, File, Finding, Fix, Initiative, Metric, Note, Perf, Scenario, SecurityAudit, SecurityFinding. The filing measured 19 at sprint-352 close. Note that Finding, Perf, AuditRound and SecurityAudit already appear as ENDPOINTS in the edge table, so the model documents edges between labels it does not document.",
+
+    "component-path-missing": "25 Component nodes have no usable path: 17 carry `file` with a NULL `path` and are therefore invisible to the query knowledge-model.md documents for this label, and 8 carry neither. 54 do carry path.",
+
+    "component-path-absent": "0 - every Component that carries a path names something that is in the tree."
+  }
+}

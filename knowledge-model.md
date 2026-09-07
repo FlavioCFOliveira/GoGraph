@@ -1579,6 +1579,62 @@ exactly in sync after broad changes.
 
 ---
 
+### Fidelity gate — `make kg-verify` (rmp #2677, 2026-09-07)
+
+The two sections above describe what a sync **should** do. Nothing checked that it had,
+and by the close of sprint 352 the graph had gone past staleness into **fabrication**:
+`TestSchemaWalkHoisted` and `TestEvalWithReentrancy` existed as `Test` nodes and nowhere
+in the repository, and an earlier "fidelity repair" had itself invented
+`edgeTypeFilterCache` and `edgeTypeFilterFor`, which the code deleted two days later. A gap
+is recoverable; a fabrication is a wrong answer carrying the authority of a verified one.
+
+`make kg-verify` (`cmd/kgverify`) is the enforceable form of this document. It exits
+non-zero when the graph's claims stop holding, across 19 checks in five families:
+
+| Family | What it holds the graph to |
+|---|---|
+| symbol tier | every `Type`/`Function`/`Method`/`Test`/`Benchmark`/`FuzzTarget`/`Example` node names a declaration that is really in the tree, under the right label, in the right package, at a file that exists |
+| `Task` identity | `id` is an INTEGER; the retired `task_id`, `number` and name-as-id forms fail loudly; one id binds one node; no stubs; `status` is one of rmp's five values and AGREES with rmp |
+| provenance | every declaration in a file the audited range touched has a node, and that node carries `gitCommit` |
+| edges | a documented edge type is used only in a documented endpoint shape; an undocumented type is counted separately |
+| labels | every live node label appears in the label table above |
+
+**The oracle is `go/parser`, never a text scan.** This is the mechanism, not a stylistic
+preference, and it is measurable: `edgeTypeFilterFor` is deleted from the code yet still
+named in four Go comments and in this document, so a text scan reports it present while
+the declaration inventory correctly reports it absent. The same holds for
+`BenchmarkBarrier_View`, `ExampleGraph_View` and `BenchmarkRangeSeekSelective` — all three
+survive only as comment text after a rename, and all three are graph nodes today.
+
+**Write symbol nodes from the tree's own output.** `go run ./cmd/kgverify -emit symbols`
+prints the inventory and `-emit missing` prints the declarations that still have no node.
+Copying a name from that output is the supported way to add a symbol node; a name typed
+out of a task description or a report is what produced the two fabrications, and it now
+survives at most until the next `make kg-verify`.
+
+**Baselines, and the ratchet.** `cmd/kgverify/baseline.json` records the count measured for
+each check, with the reasoning for every non-zero one. A count that EXCEEDS its baseline
+fails; a count below it is reported as *improved — ratchet the baseline*, and the number is
+lowered in the same commit that lowers the count, exactly as `tckExecutionBaseline` works.
+Never raise a baseline to get a green run. Six checks are at zero because zero is what was
+measured: `fixture-fabrication-present`, `task-id-not-int`, `task-legacy-identity`,
+`task-status-invalid`, `task-absent-in-rmp` and `component-path-absent`.
+
+**It cannot pass vacuously.** The two fabrications are a permanent regression fixture, and
+the fixture is self-validating: each name must be absent from the tree's declarations, so a
+fixture entry that becomes a real symbol aborts the run (exit 3) instead of passing. Floors
+on the inventory size, the graph read, the documented label count and the resolved task
+count do the same for the run as a whole — a gate that reads nothing finds nothing wrong.
+Exit codes are 0 pass, 1 regression, 2 usage, 3 harness-cannot-conclude.
+
+**Not in `make ci`.** Deliberately, pending a decision: `task-status-disagrees-with-rmp` is
+time-varying, because rmp is the authority and every task closed without a graph sync
+raises it with no code change involved, so an unmodified `kg-verify` inside `ci` would fail
+a push for a reason unrelated to the change under test. Wiring it in is appending
+`kg-verify` to the `ci` target's prerequisites.
+
+---
+
 Incrementally synced at commit `baf4444` (2026-07-16, sprints 284/285/286 —
 CREATE/MERGE+SET non-literal gaps + FOREACH): +23 nodes — 9 `Commit`
 (`cb6cfbd`,`a0cd733`,`c6c0867`,`86d8ea2`,`c8ea848`,`75e70a3`,`81a929d`,`ba14888`,
