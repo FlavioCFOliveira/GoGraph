@@ -53,7 +53,7 @@ func TestBackfillNodeHashIndex_ParallelContentsIdentical(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newBoundNodeHashIndex: %v", err)
 	}
-	if berr := e.backfillNodeHashIndex(context.Background(), e.g.ReadAt(nil), idx, "Person", "name"); berr != nil {
+	if berr := e.backfillNodeHashIndex(context.Background(), e.g.ReadAt(nil), idx, "Person", "name", nil); berr != nil {
 		t.Fatalf("backfill: %v", berr)
 	}
 
@@ -92,7 +92,7 @@ func TestBackfillNodeHashIndex_SerialVsParallelIdentical(t *testing.T) {
 		if err != nil {
 			t.Fatalf("newBoundNodeHashIndex: %v", err)
 		}
-		if berr := e.backfillNodeHashIndex(context.Background(), e.g.ReadAt(nil), idx, "Person", "name"); berr != nil {
+		if berr := e.backfillNodeHashIndex(context.Background(), e.g.ReadAt(nil), idx, "Person", "name", nil); berr != nil {
 			t.Fatalf("backfill (parallel=%v): %v", parallel, berr)
 		}
 		card := make(map[string]uint64, len(names))
@@ -133,7 +133,7 @@ func TestBackfillNodeHashIndex_ContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel before the backfill starts
 
-	if berr := e.backfillNodeHashIndex(ctx, e.g.ReadAt(nil), idx, "Person", "name"); berr == nil {
+	if berr := e.backfillNodeHashIndex(ctx, e.g.ReadAt(nil), idx, "Person", "name", nil); berr == nil {
 		t.Fatal("backfill with cancelled context returned nil, want context.Canceled")
 	} else if !errors.Is(berr, context.Canceled) {
 		t.Fatalf("backfill error = %v, want context.Canceled", berr)
@@ -153,7 +153,7 @@ func TestBackfillNodeHashIndex_SerialSmallGraph(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newBoundNodeHashIndex: %v", err)
 	}
-	if berr := e.backfillNodeHashIndex(context.Background(), e.g.ReadAt(nil), idx, "Person", "name"); berr != nil {
+	if berr := e.backfillNodeHashIndex(context.Background(), e.g.ReadAt(nil), idx, "Person", "name", nil); berr != nil {
 		t.Fatalf("backfill: %v", berr)
 	}
 	var total uint64

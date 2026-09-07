@@ -615,7 +615,7 @@ func TestIndexUnderConstructionIsUnreachableByEveryPlannerRoute(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bind hash: %v", err)
 	}
-	if err := e.backfillNodeHashIndex(ctx, e.g.ReadAt(nil), hashIdx, "Person", "name"); err != nil {
+	if err := e.backfillNodeHashIndex(ctx, e.g.ReadAt(nil), hashIdx, "Person", "name", nil); err != nil {
 		t.Fatalf("backfill hash: %v", err)
 	}
 	btreeIdx, err := newBoundNodeBTreeIndex(e.g.ReadAt(nil), "Person", "name")

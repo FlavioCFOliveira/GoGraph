@@ -21,7 +21,7 @@ func BenchmarkBackfillHashIndexLarge(b *testing.B) {
 		if err != nil {
 			b.Fatalf("newBoundNodeHashIndex: %v", err)
 		}
-		if berr := e.backfillNodeHashIndex(ctx, e.g.ReadAt(nil), idx, "Person", "name"); berr != nil {
+		if berr := e.backfillNodeHashIndex(ctx, e.g.ReadAt(nil), idx, "Person", "name", nil); berr != nil {
 			b.Fatalf("backfill: %v", berr)
 		}
 	}

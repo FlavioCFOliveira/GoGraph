@@ -1908,7 +1908,7 @@ func (e *Engine) registerRecoveredConstraints(defs []ConstraintDef) {
 						// cancels, so the backfill never returns an error here.
 						// Live view: recovery runs before the engine is
 						// published, so no transaction can be open (rmp #2778).
-						_ = e.backfillNodeHashIndex(context.Background(), e.g.ReadAt(nil), boundIdx, d.Label, d.Property)
+						_ = e.backfillNodeHashIndex(context.Background(), e.g.ReadAt(nil), boundIdx, d.Label, d.Property, nil)
 					})
 					sub = boundIdx
 				} else {
@@ -3976,12 +3976,29 @@ func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstra
 			p.Name, exec.ErrConstraintAlreadyExists, constraintKindString(kind), p.Label, p.Property)
 	}
 
-	// Validate the pre-existing data and seed the value-set BEFORE registering,
-	// so a constraint over already-violating data is rejected with nothing
-	// registered (audit gap H2). The scan runs inside the graph's visibility
-	// barrier (see scanLabelProperty), so it cannot observe a half-applied
-	// transaction. ctx-cancellable (rmp #1872): nothing has been registered
-	// yet, so a cancellation here aborts cleanly with no unwind needed.
+	// Validate the pre-existing data BEFORE registering, so a constraint over
+	// already-violating data is rejected with nothing registered (audit gap H2).
+	// ctx-cancellable (rmp #1872): nothing has been registered yet, so a
+	// cancellation here aborts cleanly with no unwind needed.
+	//
+	// THIS SCAN READS THE LIVE GRAPH, AND THAT IS DELIBERATE (rmp #2792). It is
+	// the VALIDATION scan only; the UNIQUE value-set is no longer seeded from it
+	// (see the barrier below). Its live read is load-bearing, and that was
+	// measured rather than reasoned about: an explicit transaction that has
+	// EAGERLY written a duplicate has not committed it, so a snapshot read would
+	// ACCEPT the constraint — and nothing would then refuse that transaction's
+	// commit, because UNIQUE is reserved at WRITE time
+	// (cypher/constraint_check.go) and this transaction's statement ran before
+	// the constraint existed. Measured on this build: with the live read the DDL
+	// is refused ("pre-existing data contains duplicate value"); with a snapshot
+	// read the DDL succeeds, the commit returns nil, and two COMMITTED nodes hold
+	// the same value under an active UNIQUE constraint. A conservatively refused
+	// DDL is a poor answer; a Consistency breach is a different category.
+	//
+	// The converse hole — a COMMITTED duplicate that an open transaction has
+	// eagerly removed, which this live scan cannot see — is closed by the seed
+	// inside the barrier, which reads committed state and lets SeedUniqueValues
+	// refuse.
 	values, anyNull, serr := e.scanLabelProperty(ctx, p.Label, p.Property)
 	if serr != nil {
 		return nil, serr
@@ -4018,38 +4035,95 @@ func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstra
 		//
 		// backfillNodeHashIndex reads graph state directly (no View/Apply) and
 		// is safe to call inside the barrier. newBoundNodeHashIndex only
-		// interacts with index.Manager metadata, also safe.
+		// interacts with index.Manager metadata, also safe. The BINDING closures
+		// it installs keep reading e.g.ReadAt(nil), the live value, and must: they
+		// run at commit time, on the state the index has to converge to.
+		//
+		// seedValues is what the value-set is seeded from. It starts as the live
+		// validation scan's values and is used as such ONLY on the unbound
+		// fallback below, where there is no backing index for it to agree with;
+		// on every real path the backfill's own reads replace it (rmp #2792).
+		seedValues := values
 		op := exec.NewCreateConstraintOp(p.Name, p.Label, p.Property, kind, p.IfNotExists, idxMgr, e.constraintReg, e.ClearPlanCache)
 		if kind == exec.ConstraintUnique {
 			boundIdx, bidxErr := newBoundNodeHashIndex(e.g.ReadAt(nil), p.Label, p.Property)
 			if bidxErr == nil {
-				// Cancellation before registration aborts the constraint with
-				// nothing registered or made durable (atomicity preserved).
-				// Live view, NOT a snapshot: this call runs INSIDE the
-				// visibility barrier, and the value-set seeded below from
-				// scanLabelProperty reads the live bag too, so the two must
-				// answer at the same instant. rmp #2778 changed only the CREATE
-				// INDEX paths; the constraint path's own exposure to an open
-				// transaction's eager mutations is unchanged by that fix and is
-				// not this task's scope.
-				if berr := e.backfillNodeHashIndex(ctx, e.g.ReadAt(nil), boundIdx, p.Label, p.Property); berr != nil {
+				// ONE SNAPSHOT ANSWERS FOR BOTH ENFORCEMENT STRUCTURES (rmp #2792).
+				//
+				// The backfill used to read the live property bag, which carries an
+				// explicit transaction's EAGER, UNCOMMITTED mutations, and
+				// [ExplicitTx.Rollback] discards that transaction's exec.IndexBuffer
+				// WITHOUT inverting it — the buffer describes changes that were never
+				// fanned out — so the backfill's own entry stayed in the backing index
+				// forever. Measured on this build before the fix, one goroutine and no
+				// concurrency at all: after a rolled-back SET the index held 1 entry
+				// for a value the graph never committed and 0 for the value it did
+				// hold, and a NodeByIndexSeek returned the fabricated row while losing
+				// the real one. The value-set, seeded from scanLabelProperty's live
+				// read, was wrong at the same instant and in BOTH directions: a
+				// committed write of the rolled-back value was REFUSED, and a
+				// duplicate of the value the graph actually held was ACCEPTED, leaving
+				// two committed nodes sharing it under an active UNIQUE constraint.
+				//
+				// Both now come from ONE read view at ONE instant — and in fact from
+				// the same READ of each node: the backfill records every non-null
+				// value it resolves into seed, so the index and the value-set cannot
+				// disagree about a node even in principle. See [uniqueValueSeed].
+				//
+				// The snapshot is opened HERE, INSIDE the visibility barrier, and that
+				// placement is what makes a catch-up log unnecessary rather than
+				// merely omitted. rmp #2738's permanent loss needs a transaction to
+				// fan its commit out between the scan and the registration; the
+				// commit-time fan-out runs under [lpg.Graph.ApplyInVersionedTx], which
+				// holds the barrier SHARED, so while this EXCLUSIVE hold is in force
+				// no fan-out can happen at all and a log opened here would record
+				// nothing. On the CREATE INDEX paths the backfill sits OUTSIDE the
+				// barrier, that window is real, and [Engine.beginIndexBuild] is what
+				// closes it — which is why this path does not reuse it.
+				//
+				// BeginRead adds no lock and no ordering: it takes the reclamation
+				// horizon (atomics) and the MVCC clock, never visMu and never the
+				// schema gate, so the documented order schemaGate -> writer admission
+				// -> visMu is untouched. The horizon slot is returned before the
+				// registration — panic included, hence the closure — so a long
+				// registration never pins reclamation.
+				//
+				// Cancellation before registration aborts the constraint with nothing
+				// registered or made durable (atomicity preserved), and the seed is
+				// merged only after every worker returned, so a cancelled backfill
+				// yields no partial seed either.
+				var seed uniqueValueSeed
+				berr := func() error {
+					snap := e.g.BeginRead()
+					defer e.g.EndRead(snap)
+					return e.backfillNodeHashIndex(ctx, e.g.ReadAt(snap), boundIdx, p.Label, p.Property, &seed)
+				}()
+				if berr != nil {
 					return berr
 				}
 				op.WithBackingIndex(boundIdx)
+				seedValues = seed.values
 			}
 			// On binding error fall through: the operator uses an unbound
 			// index as a safe fallback. The value-set (seeded below) remains
 			// the primary enforcement source; the secondary check is cosmetic.
+			// That branch keeps the live validation values, because with no
+			// backing index there is no second structure for them to agree with.
+			// newBoundNodeHashIndex fails only on an empty label or property,
+			// which the DDL parser cannot produce.
 		}
 		if err := applyDDLOp(ctx, op); err != nil {
 			return err
 		}
 		if kind == exec.ConstraintUnique {
-			if err := e.constraintReg.SeedUniqueValues(p.Label, p.Property, values); err != nil {
-				// Unreachable in practice: with writers excluded the seed
-				// re-checks the same values validatePreExisting already
-				// accepted. Unwind defensively so a failure can never leave a
-				// half-registered constraint behind.
+			if err := e.constraintReg.SeedUniqueValues(p.Label, p.Property, seedValues); err != nil {
+				// REACHABLE SINCE rmp #2792, and when it fires it is the correct
+				// refusal. validatePreExisting accepted the LIVE values; these are
+				// the COMMITTED ones, so a duplicate that an open transaction had
+				// eagerly removed is seen here and nowhere earlier. Measured before
+				// the fix: that constraint was REGISTERED over committed data still
+				// holding the duplicate. The unwind below is what refuses it, and
+				// it also remains the defensive path it always was.
 				return e.unwindConstraintRegistration(err, p.Name, p.Label, p.Property, kind, idxMgr)
 			}
 		}
@@ -4194,7 +4268,7 @@ func (e *Engine) rewindConstraintDrop(cause error, name, label, prop string, kin
 			// The rewind is uncancellable by design (see runDDLOp below): a
 			// background context never cancels, so the backfill cannot error.
 			// Live view, matching the CREATE CONSTRAINT path this rewinds.
-			_ = e.backfillNodeHashIndex(context.Background(), e.g.ReadAt(nil), boundIdx, label, prop)
+			_ = e.backfillNodeHashIndex(context.Background(), e.g.ReadAt(nil), boundIdx, label, prop, nil)
 			op.WithBackingIndex(boundIdx)
 		}
 	}

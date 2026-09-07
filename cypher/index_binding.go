@@ -256,8 +256,48 @@ func (e *Engine) beginIndexBuild(idxMgr *index.Manager) (
 	}
 }
 
+// uniqueValueSeed is the property values a UNIQUE constraint's value-set must be
+// seeded with, collected by [Engine.backfillNodeHashIndex] FROM ITS OWN READS
+// (rmp #2792).
+//
+// # Why the seed comes from the backfill and not from a second scan
+//
+// A UNIQUE constraint is enforced by two structures that must agree: the value-set
+// in [exec.ConstraintRegistry], which is what a write is checked against, and the
+// backing hash index, which is what a seek reads. Before rmp #2792 each was
+// populated by its own scan of the LIVE graph — [Engine.scanLabelProperty] for the
+// value-set, this backfill for the index — so each could observe a different
+// instant, and both could observe an explicit transaction's eager, UNCOMMITTED
+// mutations. Measured: a rolled-back SET left the index holding one entry for a
+// value the graph never committed and none for the value it did hold, while the
+// value-set had lost the committed value, so a duplicate of it was ACCEPTED.
+//
+// Collecting the seed here makes the two answer from THE SAME READ of the same
+// node, not merely from the same instant — a stronger property than two scans at
+// one snapshot could give, and it costs no extra pass over the graph.
+//
+// It records the value BEFORE the string projection, because the two structures
+// cover different value sets by design: the hash index takes only
+// [projectStringPropValue]-projectable strings, while
+// [exec.ConstraintRegistry.SeedUniqueValues] canonicalises EVERY non-null value,
+// numbers included. Collecting after the projection would silently drop numeric
+// values from the value-set and stop UNIQUE being enforced over them.
+//
+// A nil *uniqueValueSeed means "do not collect", which is what every CREATE INDEX
+// and recovery call site passes; those paths allocate nothing for it.
+//
+// NOT safe for concurrent use. The parallel phase-2 gives each worker its OWN
+// instance and merges them in worker order afterwards, so the merged slice is
+// byte-for-byte the order the serial path produces.
+type uniqueValueSeed struct {
+	// values holds one entry per node that carried label and a present prop, in
+	// scan order.
+	values []lpg.PropertyValue
+}
+
 // backfillNodeHashIndex inserts every node of label whose prop holds an
-// indexable string, AS OF rv's instant, into idx.
+// indexable string, AS OF rv's instant, into idx, and — when seed is non-nil —
+// records every non-null value of prop it read into seed (rmp #2792).
 //
 // rv decides which state is indexed, and it is the caller's whole choice of
 // semantics (rmp #2778). A CREATE INDEX passes a view bound to a read snapshot
@@ -313,7 +353,7 @@ func (e *Engine) beginIndexBuild(idxMgr *index.Manager) (
 // background context, for which this never returns an error.
 func (e *Engine) backfillNodeHashIndex(
 	ctx context.Context, rv *lpg.ReadView[string, float64],
-	idx *indexhash.Index[string], label, prop string,
+	idx *indexhash.Index[string], label, prop string, seed *uniqueValueSeed,
 ) error {
 	mapper := rv.AdjList().Mapper()
 
@@ -335,7 +375,10 @@ func (e *Engine) backfillNodeHashIndex(
 	// ranges whenever lo is not itself a multiple of 4096 (which chunk
 	// boundaries rarely are), leaving those workers unable to observe an
 	// early cancellation request at all.
-	processRange := func(lo, hi int) error {
+	// out collects the value-set seed for this range, or is nil when the caller
+	// asked for none. Each parallel worker gets its own, so the collection needs
+	// no synchronisation and stays deterministic (see [uniqueValueSeed]).
+	processRange := func(lo, hi int, out *uniqueValueSeed) error {
 		for i := lo; i < hi; i++ {
 			if shouldPollWorkerRelative(i, lo) {
 				if err := ctx.Err(); err != nil {
@@ -353,6 +396,11 @@ func (e *Engine) backfillNodeHashIndex(
 			if !ok {
 				continue
 			}
+			if out != nil {
+				// BEFORE the projection: the value-set covers every non-null
+				// value, the index only projectable strings. See [uniqueValueSeed].
+				out.values = append(out.values, pv)
+			}
 			if s, ok := projectStringPropValue(pv); ok {
 				idx.Insert(s, r.id)
 			}
@@ -365,13 +413,20 @@ func (e *Engine) backfillNodeHashIndex(
 	// single-goroutine path regardless of size; both paths populate identical
 	// index contents, which the serial-vs-parallel differential test relies on.
 	if !e.parallelBackfillEnabled || len(refs) < backfillParallelMinNodes || workers <= 1 {
-		return processRange(0, len(refs))
+		return processRange(0, len(refs), seed)
 	}
 	if workers > len(refs) {
 		workers = len(refs)
 	}
 	chunk := (len(refs) + workers - 1) / workers
 	errs := make([]error, workers)
+	// One seed accumulator per worker, merged in worker order below, so the
+	// parallel phase produces the SAME slice the serial path would: worker w owns
+	// refs[lo:hi] in order, and the ranges are consecutive.
+	var parts []uniqueValueSeed
+	if seed != nil {
+		parts = make([]uniqueValueSeed, workers)
+	}
 	var wg sync.WaitGroup
 	for w := 0; w < workers; w++ {
 		lo := w * chunk
@@ -385,7 +440,11 @@ func (e *Engine) backfillNodeHashIndex(
 		wg.Add(1)
 		go func(w, lo, hi int) {
 			defer wg.Done()
-			errs[w] = processRange(lo, hi)
+			var out *uniqueValueSeed
+			if parts != nil {
+				out = &parts[w]
+			}
+			errs[w] = processRange(lo, hi, out)
 		}(w, lo, hi)
 	}
 	wg.Wait()
@@ -393,6 +452,26 @@ func (e *Engine) backfillNodeHashIndex(
 		if err != nil {
 			return err
 		}
+	}
+	// Merge only after every worker returned without error: a cancelled backfill
+	// registers nothing, so a partial seed must never reach the caller.
+	//
+	// Pre-sized from the parts, because the exact total is known here and growing
+	// into it instead cost measured bytes for nothing: an alloc profile at
+	// -memprofilerate=1 attributed 199.7 MB of 680.2 MB over 30 iterations to this
+	// function's own frame, the growth reallocations of this append among them.
+	// A capacity hint is what [Performance-First Engineering] asks for wherever
+	// the upper bound is knowable, and here it is not merely an upper bound but
+	// the answer.
+	total := 0
+	for w := range parts {
+		total += len(parts[w].values)
+	}
+	if total > 0 {
+		seed.values = append(make([]lpg.PropertyValue, 0, len(seed.values)+total), seed.values...)
+	}
+	for w := range parts {
+		seed.values = append(seed.values, parts[w].values...)
 	}
 	return nil
 }
@@ -880,7 +959,7 @@ func (e *Engine) registerRecoveredIndexes(defs []IndexDef) {
 					// NewEngineWithOptions before the engine is published, so no
 					// transaction can be open against this graph and the live
 					// state IS the committed state (rmp #2778).
-					_ = e.backfillNodeHashIndex(context.Background(), e.g.ReadAt(nil), boundIdx, d.Label, d.Property)
+					_ = e.backfillNodeHashIndex(context.Background(), e.g.ReadAt(nil), boundIdx, d.Label, d.Property, nil)
 				})
 				_ = idxMgr.CreateIndex(d.Name, boundIdx) // absorb ErrIndexExists
 			} else {
@@ -1051,7 +1130,7 @@ func (e *Engine) createHashIndexLocked(ctx context.Context, p *ir.CreateIndex, i
 	// half-built index is not in the manager's map, so no reader can reach it. A
 	// cancelled backfill returns before registration, so the partial index is
 	// discarded (and tx is rolled back by the caller) — nothing is observed.
-	if berr := e.backfillNodeHashIndex(ctx, scanView, idx, p.Label, p.Property); berr != nil {
+	if berr := e.backfillNodeHashIndex(ctx, scanView, idx, p.Label, p.Property, nil); berr != nil {
 		return nil, berr
 	}
 
