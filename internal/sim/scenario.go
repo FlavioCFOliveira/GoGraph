@@ -368,8 +368,10 @@ func concurrentReport(seed uint64, res *ConcurrentResult) *SimReport {
 			Kind: ViolationACIDConsistency,
 			Op:   "<concurrent>",
 			Message: fmt.Sprintf(
-				"quiescence oracle mismatch: engineNodes=%d ackedCreates=%d panics=%d transportErrors=%d",
-				res.EngineNodeCount, res.AckedCreates, res.Panics, res.TransportErrors),
+				"quiescence oracle mismatch: engineNodes=%d ackedCreates=%d panics=%d "+
+					"transportErrors=%d heavyWriteViolations=%d (of %d adjudicated, %d issued)",
+				res.EngineNodeCount, res.AckedCreates, res.Panics, res.TransportErrors,
+				res.OverloadHeavyViolations, res.OverloadHeavyAdjudications, res.OverloadHeavyIssued),
 		}},
 		OracleState: OracleSnapshot{NodeCount: int(res.AckedCreates)},
 	}

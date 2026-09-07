@@ -78,6 +78,43 @@ const overloadUnwindSize = defaultSimResultRowCap + 10_000
 // trip the op cap (which the malformed/abuse paths cover differently).
 const overloadCreateBatch = 5_000
 
+// The label an [OverloadLargeCreateTx] writes, and the property it stamps the
+// caller's run tag into (see [OverloadActor.Tag]).
+const (
+	overloadBulkLabel   = "Bulk"
+	overloadBulkRunProp = "run"
+)
+
+// The three statements one tagged heavy write needs: create, adjudicate, remove.
+// They are consts built from the same label and property names, so the count and
+// the delete cannot drift away from the create that produced the nodes.
+const (
+	overloadBulkCreateFmt       = "UNWIND range(1, %d) AS i CREATE (:" + overloadBulkLabel + " {i: i})"
+	overloadBulkCreateTaggedFmt = "UNWIND range(1, %d) AS i CREATE (:" + overloadBulkLabel +
+		" {" + overloadBulkRunProp + ": $" + overloadBulkRunProp + ", i: i})"
+	overloadBulkCountStmt = "MATCH (n:" + overloadBulkLabel +
+		" {" + overloadBulkRunProp + ": $" + overloadBulkRunProp + "}) RETURN count(n)"
+	overloadBulkDeleteStmt = "MATCH (n:" + overloadBulkLabel +
+		" {" + overloadBulkRunProp + ": $" + overloadBulkRunProp + "}) DETACH DELETE n"
+)
+
+// adjudicateHeavyWrite classifies one heavy-write adjudication: the tagged
+// population the engine holds once the statement has returned must be exactly
+// [overloadCreateBatch] when the commit was acknowledged, and exactly zero when
+// the engine refused it. That is the all-or-nothing contract at the granularity
+// of one heavy transaction — a partially applied heavy write, or an
+// acknowledged one that committed nothing, is a violation.
+//
+// Factored pure, like [observeMonotonic] and [observeBatch], so a test can
+// drive it to fire without needing an engine that loses a write.
+func adjudicateHeavyWrite(acked bool, got int64) (violation bool) {
+	want := int64(0)
+	if acked {
+		want = overloadCreateBatch
+	}
+	return got != want
+}
+
 // overloadProductSide is the per-side size of the Cartesian product an
 // [OverloadLargeResultSet] forms; the product (side²) exceeds the result-row cap.
 const overloadProductSide = 500
@@ -87,12 +124,41 @@ const overloadProductSide = 500
 // bounds (a typed FAILURE or a bounded, fully-streamed success) and degrades
 // gracefully — never OOM, panic, deadlock, or drop an acknowledged write.
 //
+// # Scope: reads AND the one heavy write
+//
+// Three of the four families are reads; [OverloadLargeCreateTx] is the heavy
+// WRITE, and it is the family that answers the write half of the
+// graceful-degradation mandate. It runs on the concurrent overload role when the
+// caller's mix sets [ConcurrentMix.OverloadHeavyWrites] — which the catalogue's
+// "overload" scenario does — and the nodes it commits are adjudicated against
+// its acknowledgement and then removed (see overloadHeavyWriteOp). Before rmp
+// #2736 the concurrent role mapped the family away unconditionally, so the only
+// heavy write was issued by this package's own unit exercise and never on a
+// production path.
+//
 // # Concurrency contract
 //
-// OverloadActor is stateless; each [OverloadActor.Run] call drives one
-// connection it owns. It is safe to call from many goroutines (the concurrent
-// harness does), each with its own connection.
-type OverloadActor struct{}
+// OverloadActor holds no mutable state: Tag is set by the caller at construction
+// and never written afterwards, so each [OverloadActor.Run] call drives only the
+// one connection it is given. It is safe to use from many goroutines (the
+// concurrent harness does), each with its own value and its own connection.
+type OverloadActor struct {
+	// Tag, when non-empty, is stamped into every node an
+	// [OverloadLargeCreateTx] creates, as the "run" property, so the caller can
+	// tell the nodes ITS OWN heavy write committed from every other node
+	// carrying the same label.
+	//
+	// It is load-bearing wherever the heavy write is adjudicated, not
+	// decorative. Several connections issue heavy writes against one engine at
+	// the same time, so an untagged count of the label answers for all of their
+	// populations at once and can therefore adjudicate none of them — the same
+	// cross-writer confusion the contended counter namespace of rmp #2729
+	// exists to prevent, one level down.
+	//
+	// Empty leaves the statement untagged, which is what a single-connection
+	// exercise with the engine to itself wants.
+	Tag string
+}
 
 // Name returns the actor's identifier.
 func (OverloadActor) Name() string { return "OverloadActor" }
@@ -138,15 +204,22 @@ func (a OverloadActor) Run(c *WireClient, family OverloadFamily) (OverloadOutcom
 }
 
 // statement returns the Cypher and parameters for an overload family.
-func (OverloadActor) statement(family OverloadFamily) (string, map[string]any) {
+func (a OverloadActor) statement(family OverloadFamily) (string, map[string]any) {
 	switch family {
 	case OverloadHugeUnwind:
 		// UNWIND a large range and return each element: row count == range size,
 		// which exceeds the result-row cap.
 		return fmt.Sprintf("UNWIND range(1, %d) AS x RETURN x", overloadUnwindSize), nil
 	case OverloadLargeCreateTx:
-		// Create many nodes in one statement (one autocommit transaction).
-		return fmt.Sprintf("UNWIND range(1, %d) AS i CREATE (:Bulk {i: i})", overloadCreateBatch), nil
+		// Create many nodes in one statement (one autocommit transaction). A
+		// tagged actor stamps its run tag into every node so the caller can
+		// adjudicate and remove exactly the population this write committed
+		// (see [OverloadActor.Tag]).
+		if a.Tag == "" {
+			return fmt.Sprintf(overloadBulkCreateFmt, overloadCreateBatch), nil
+		}
+		return fmt.Sprintf(overloadBulkCreateTaggedFmt, overloadCreateBatch),
+			map[string]any{overloadBulkRunProp: a.Tag}
 	case OverloadLargeResultSet:
 		// A self-Cartesian product over a bounded UNWIND: side² rows, exceeding
 		// the result-row cap without touching the graph.
