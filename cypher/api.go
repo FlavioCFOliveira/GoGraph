@@ -8365,6 +8365,33 @@ func copySchema(schema map[string]int) map[string]int {
 	return cp
 }
 
+// restoreSchema overwrites schema in place so it holds exactly snap's entries.
+//
+// It is the counterpart of [copySchema] for an Apply-family operator whose
+// output row is its OUTER row unchanged: the inner subtree is built against the
+// same shared map — it must resolve the correlation variables at their outer
+// column indices — and every column it registers there is private to it. Both
+// directions matter, so a plain re-add would not do: entries the inner build
+// ADDED have to go (they inflate schemaWidth past the forwarded row's real
+// width) and entries it DELETED or REBASED, which buildIRProjection's
+// post-projection reset does to the whole map, have to come back. The map is
+// mutated rather than replaced because callers up the recursion hold the same
+// reference.
+//
+// Used by the SemiApply and AntiSemiApply builders (rmp #2779). The
+// *ir.RollUpApply case performs the same restore inline and then registers the
+// one extra column that operator adds.
+func restoreSchema(schema, snap map[string]int) {
+	for k := range schema {
+		if _, keep := snap[k]; !keep {
+			delete(schema, k)
+		}
+	}
+	for k, v := range snap {
+		schema[k] = v
+	}
+}
+
 // schemaWidth returns the actual row width implied by schema: the maximum
 // column index present plus one. This is the correct "next available column
 // index" to use when appending a new column to the row.
@@ -10058,6 +10085,47 @@ func buildOperatorRec(
 		if err != nil {
 			return nil, err
 		}
+		// SCHEMA ISOLATION on the inner side (rmp #2779). [exec.SemiApply] emits
+		// the OUTER row unchanged and discards the inner row entirely, so the
+		// inner pipeline's column layout is PRIVATE: nothing above this operator
+		// may observe it, and the schema this build leaves behind must be exactly
+		// the outer one.
+		//
+		// The shared `schema` map does not give that by itself. It is threaded
+		// through the whole build, and two inner-side operators write to it in
+		// ways that corrupt the outer layout:
+		//
+		//  1. A Projection is DESTRUCTIVE. buildIRProjection's post-projection
+		//     reset deletes every key it does not keep and rebases the survivors
+		//     to 0..len(items)-1, so a body ending in a RETURN (which
+		//     [ir.existsSubPlan] must translate — the other half of #2779) wipes
+		//     the outer variables out of the map, or rebinds one of their names to
+		//     an inner-side index. Downstream reads of an outer variable then land
+		//     on a slot the forwarded outer row does not carry, and evaluate to
+		//     null. That is the exact refutation #2675 recorded when it tried the
+		//     translator half alone: the TCK fell 3897 → 3892 with `RETURN n`
+		//     yielding [null] (ExistentialSubquery2 [1] [2], ExistentialSubquery3
+		//     [1] [2] [3]).
+		//  2. Every inner scan and Expand APPENDS columns at schemaWidth(schema),
+		//     which survives the inner build and inflates the width the map
+		//     implies. An operator built ABOVE this one then allocates its own
+		//     fresh columns past that inflated width while the row it actually
+		//     receives is only outerWidth wide, so its bindings mis-offset. This
+		//     needed no RETURN in the body at all:
+		//     `MATCH (a:Anchor {id: 0}) WHERE EXISTS { MATCH (a)-[:K]->(x) }
+		//     MATCH (a)-[:K]->(y) RETURN a.id, y.ord` read y.ord as null on every
+		//     row, while the same query without the EXISTS answered correctly.
+		//
+		// Snapshotting the outer schema and restoring it verbatim closes both. It
+		// is the same remedy the *ir.RollUpApply case below already applies, for
+		// defect (1) and in the same words — SemiApply is the simpler of the two,
+		// because it adds no column of its own to register after the restore.
+		//
+		// Inner-only bindings are DROPPED rather than kept, which is what
+		// openCypher requires: CIP2015-05-13-EXISTS states that "any variables
+		// introduced in an <ExistentialSubquery> are not available outside the
+		// subquery context".
+		outerSchemaSnap := copySchema(schema)
 		// Pre-allocate the exec.Argument and register it under the IR
 		// SemiApply's ArgTag so the inner subtree's matching Argument leaf
 		// resolves to this instance and receives the outer row per iteration.
@@ -10072,6 +10140,7 @@ func buildOperatorRec(
 		if argByTag != nil {
 			delete(argByTag, p.ArgTag)
 		}
+		restoreSchema(schema, outerSchemaSnap)
 		return exec.NewSemiApply(outer, inner, arg), nil
 
 	case *ir.AntiSemiApply:
@@ -10079,6 +10148,10 @@ func buildOperatorRec(
 		if err != nil {
 			return nil, err
 		}
+		// Schema isolation on the inner side, identically to *ir.SemiApply above
+		// and for the same two reasons — [exec.AntiSemiApply] likewise forwards the
+		// outer row unchanged and discards the inner one. See that case's comment.
+		outerSchemaSnap := copySchema(schema)
 		arg := exec.NewArgument()
 		if argByTag != nil {
 			argByTag[p.ArgTag] = arg
@@ -10090,6 +10163,7 @@ func buildOperatorRec(
 		if argByTag != nil {
 			delete(argByTag, p.ArgTag)
 		}
+		restoreSchema(schema, outerSchemaSnap)
 		return exec.NewAntiSemiApply(outer, inner, arg), nil
 
 	case *ir.RollUpApply:
