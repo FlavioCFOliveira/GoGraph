@@ -334,7 +334,14 @@ func buildLPG(ctx context.Context, calls []call, cfg config) (*lpg.Graph[string,
 		if err := g.SetNodeLabel(name, labelService); err != nil {
 			return nil, fmt.Errorf("SetNodeLabel %s: %w", name, err)
 		}
-		if err := g.SetNodeProperty(name, propTier, lpg.StringValue(tiers[i%len(tiers)])); err != nil {
+		// The first staleCohortSize services form the dedicated stale cohort; the
+		// rest take a deployment tier round robin. See [staleTier] for why the
+		// cohort is small and fixed.
+		tier := tiers[i%len(tiers)]
+		if i < staleCohortSize(cfg.services) {
+			tier = staleTier
+		}
+		if err := g.SetNodeProperty(name, propTier, lpg.StringValue(tier)); err != nil {
 			return nil, fmt.Errorf("SetNodeProperty %s: %w", name, err)
 		}
 	}
@@ -767,23 +774,49 @@ func driveCountStore(ctx context.Context, w io.Writer, eng *cypher.Engine) error
 // Removing the `:SERVICE` label instead touches no property, so both counters stay
 // at ZERO — the snapshot is pristine by every measure it maintains — while the live
 // `:SERVICE` population falls and the most-common-value entry for staleTier becomes
-// wrong by a factor of before/keptLive. That is the one residual staleness route
-// rmp #2772 could not close: the delta is bumped only on the node-property write
-// path and a label removal passes none of its call sites (recorded on rmp #2772,
-// tracked as rmp #2785). A misestimate the statistics' own counters cannot see is
-// precisely what this metric exists to surface, so the workload is stronger for the
-// change rather than weaker. cypher/plan_qerror_test.go's seedStaleMCVGraph builds
-// the same case, for the same reason.
+// wrong by a factor of before/keptLive.
 //
 // It is also the truthful mutation for this domain: a decommissioned service leaves
 // the live topology, while its node, its `tier` and its `:CALLS` edges stay on the
 // record.
+//
+// # Why the tier is a small dedicated cohort and not a quarter of the fleet (rmp #2785)
+//
+// staleTier used to be `core`, one of the four round-robin `tiers` — a quarter of
+// every service — and the decommission took all but keptLive of them. rmp #2785 gave
+// the staleness screen a population-shrinkage term, so its drift numerator is now the
+// accumulated writes PLUS max(0, N0 − live). Removing the label from a quarter of the
+// fleet shrinks the live `:SERVICE` population by ~22%, far past the screen's ~9.6%
+// firing region, and the estimate is now correctly demoted — which is the rmp #2785
+// fix working, not a regression, and the workload has to move rather than the screen.
+// The premise guard below is what caught it, by name and at the point of cause.
+//
+// What is left is the residual the screen still cannot see, and it is the honest
+// place for this demonstration to sit: the rule is a fraction of the POPULATION, so a
+// SMALL shrinkage CONCENTRATED on one most-common value is invisible to it. A fixed
+// cohort of staleCohort services carries a tier of its own; decommissioning all but
+// keptLive of them removes 9 services from a fleet of ~201 — 4.7%, comfortably inside
+// the firing region, so the snapshot is fresh by the drift rule as well as by its
+// counters — while the most-common-value entry for that tier goes 4x wrong. Δ has
+// always shared that blindness (a small Δ concentrated on one value is wrong in the
+// same way), and closing it would need per-value bookkeeping
+// docs/statistics-design.md §2 deliberately does not maintain.
+//
+// The cohort is a fixed COUNT and not a fraction of `-services` so the demonstration
+// holds at every scale the example advertises: at `-services 200000` the same 9
+// services leave a fleet of 200001, and the miss is still 4x.
+// cypher/plan_qerror_test.go's seedStaleMCVGraph builds the same case, for the same
+// reason and with the same arithmetic.
 const (
-	staleTier = "core"
+	staleTier = "legacy"
+	// staleCohort is how many services carry staleTier. They are the first
+	// staleCohort services, which is what keeps the number independent of
+	// `-services`; see [staleCohortSize] for the clamp at tiny scales.
+	staleCohort = 12
 	// keptLive is how many of staleTier's services keep the `:SERVICE` label, so
-	// the misestimation is a known factor — before/keptLive — rather than an
-	// accident of the seed.
-	keptLive = 5
+	// the misestimation is a known factor — staleCohort/keptLive = 4 — rather than
+	// an accident of the seed.
+	keptLive = 3
 	// statsQErrorHighFactor is the factor past which cypher COUNTS a misestimate
 	// rather than merely observing it: the 3x documented on
 	// cypher.Engine.StatsMisestimatedPairs. The engine's own constant is
@@ -794,10 +827,37 @@ const (
 	// above this one, the guard below would fire on a miss the engine no longer
 	// counts — loudly and at the point of cause, which is the safe direction. If it
 	// were LOWERED, the guard would simply stop demanding a sample in the narrow
-	// band between the two values. At the default scale the miss is 10x, far from
+	// band between the two values. At the default scale the miss is 4x, clear of
 	// either boundary.
 	statsQErrorHighFactor = 3
+	// staleFreshRegion is the fraction of the live population a mutation may remove
+	// before cypher's staleness screen stops trusting the statistic — the design's
+	// firing region b − 1/B, which is 0.09609375 (docs/statistics-design.md §3, and
+	// the shrinkage term added at rmp #2785). Like statsQErrorHighFactor this is an
+	// unexported engine constant copied here, and for the same single purpose: to
+	// decide whether this workload's premise is REACHABLE at the configured scale.
+	//
+	// It is needed because the cohort is a fixed count while the fleet is not: below
+	// roughly 100 services the 9 decommissioned nodes are more than 9.6% of the
+	// fleet, the estimate is demoted exactly as it should be, and there is no
+	// trusted-but-stale reading to take. The guard below is conditional on this so a
+	// small run reports honestly instead of failing — the same treatment the miss
+	// factor already gets. A copy that drifted LOW would relax the guard in a narrow
+	// band; one that drifted HIGH would make it fire on a scale that cannot satisfy
+	// it. At the default scale the shrinkage is 0.047, half the region.
+	staleFreshRegion = 0.09609375
 )
+
+// staleCohortSize is how many services actually carry staleTier: staleCohort, or
+// every service when the run is smaller than that. The clamp exists so a tiny
+// `-services` still builds a valid graph; such a run cannot satisfy this step's
+// premise and the guards below skip themselves rather than fail.
+func staleCohortSize(services int) int {
+	if services < staleCohort {
+		return services
+	}
+	return staleCohort
+}
 
 // drivePlannerStatistics exercises the planner statistics and, above all, the
 // observation of how WRONG they turn out to be (rmp #2767).
@@ -854,6 +914,15 @@ func drivePlannerStatistics(ctx context.Context, w io.Writer, eng *cypher.Engine
 	if err != nil {
 		return fmt.Errorf("count tier after: %w", err)
 	}
+	// The live `:SERVICE` population AFTER the decommission. It is the denominator
+	// of the staleness screen's drift fraction (rmp #2785: N is the smaller of the
+	// build-time and live populations, and the decommission only shrinks it), so
+	// this is the number the reachability guard below has to divide by — not the
+	// tier's own size.
+	liveAfter, err := cypherCount(ctx, eng, countQuery)
+	if err != nil {
+		return fmt.Errorf("count live services after decommission: %w", err)
+	}
 
 	// PROFILE the stale predicate. This is the ONLY surface that emits a q-error:
 	// the comparison needs a measurement, and only a profiled build has one.
@@ -882,16 +951,26 @@ func drivePlannerStatistics(ctx context.Context, w io.Writer, eng *cypher.Engine
 	// estimate wrong by at least statsQErrorHighFactor is counted; an estimate the
 	// planner has demoted contributes no sample at all, and then
 	// `cypher.stats.qerror.high` never fires and this workload demonstrates nothing.
-	// The condition is the achieved miss rather than the configured scale, so it
-	// holds at every -services value that can produce a counted miss.
-	if miss := float64(before) / float64(max(after, 1)); miss >= statsQErrorHighFactor && misestimated == 0 {
+	//
+	// The condition is what this run ACHIEVED and not the configured scale, so it
+	// holds at every -services value, and it has two halves. The miss must be large
+	// enough for the engine to count it at all; and the decommission must have stayed
+	// inside the staleness screen's firing region, because outside it the estimate is
+	// demoted BY DESIGN (rmp #2785) and demanding a sample would be demanding the
+	// screen be wrong. Both are measured against this run's own numbers, so a small
+	// run reports honestly instead of failing. See [staleFreshRegion].
+	miss := float64(before) / float64(max(after, 1))
+	shrinkage := float64(before-after) / float64(max(liveAfter, 1))
+	if miss >= statsQErrorHighFactor && shrinkage < staleFreshRegion && misestimated == 0 {
 		return fmt.Errorf("PROFILE scored no misestimate: the planner predicted %d "+
-			"rows for s.%s = '%s' and the query returned %d, a %.0fx miss, yet no "+
-			"tracked (label, property) statistic was caught. The estimate was demoted "+
-			"rather than trusted, so this step emits no cypher.stats.qerror.high "+
-			"sample — the staleness screen now closes this route too and [staleTier] "+
-			"needs a new one (rmp #2795)",
-			before, propTier, staleTier, after, miss)
+			"rows for s.%s = '%s' and the query returned %d, a %.0fx miss, and the "+
+			"decommission removed only %.1f%% of the %d live services — inside the "+
+			"staleness screen's %.1f%% firing region — yet no tracked (label, property) "+
+			"statistic was caught. The estimate was demoted rather than trusted, so this "+
+			"step emits no cypher.stats.qerror.high sample: the screen now closes this "+
+			"route too and [staleTier] needs a new one (rmp #2795, rmp #2785)",
+			before, propTier, staleTier, after, miss, shrinkage*100, liveAfter,
+			staleFreshRegion*100)
 	}
 
 	// A successful refresh clears the observation, because every reading in it was

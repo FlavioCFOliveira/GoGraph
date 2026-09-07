@@ -40,6 +40,7 @@ import (
 
 	cypherast "github.com/FlavioCFOliveira/GoGraph/cypher/ast"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/ir"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
@@ -123,47 +124,81 @@ func qerrOnly(t *testing.T, got []float64, q string) float64 {
 // estimate that lands one row away.
 func qerrNear(got, want float64) bool { return math.Abs(got-want) <= want/100 }
 
+// The shape of [seedStaleMCVGraph]. They are file-scope so the gates below can
+// derive their expectations from the fixture rather than restate them: the
+// misestimation factor is staleMCVHot/staleMCVRemain, and the live :Person count
+// after the relabel is staleMCVHot + staleMCVCold − (staleMCVHot − staleMCVRemain).
+//
+// The three numbers are chosen together, and the reasoning is on the function.
+const (
+	staleMCVHot    = 100
+	staleMCVCold   = 1300
+	staleMCVRemain = 2
+)
+
 // seedStaleMCVGraph builds an engine whose statistics were correct when they were
-// built and are now wrong by a factor of exactly 100 for one value.
+// built and are now wrong by a factor of exactly 50 for one value.
 //
 // The construction targets the ONE provenance that can be both trustworthy and
 // stale: the most-common-value list's EXACT per-value count, which
 // `statsEqualityEstimateInner` tags estExact.
 //
-//	seed     'hot' on 1000 nodes  → the MCV list records hot → 1000
+//	seed     'hot' on 100 nodes, a distinct value on 1300 → the MCV records hot → 100
 //	refresh  publishes that snapshot
-//	relabel  990 of them lose :Person → 10 nodes still answer p.grp = 'hot'
+//	relabel  98 of them lose :Person → 2 nodes still answer p.grp = 'hot'
 //
-// The planner still predicts 1000 and the query returns 10. Both numbers are real:
-// the estimate is what the planner derived from the statistics it holds, and the
-// row count is what the query actually returned.
+// The planner still predicts 100 and the query returns 2. Both numbers are real: the
+// estimate is what the planner derived from the statistics it holds, and the row
+// count is what the query actually returned.
 //
 // # Why the mutation is a RELABEL and not a property write (rmp #2772)
 //
 // It used to be `SET p.grp = 'moved'`, and that route no longer produces a
 // trustworthy estimate to score. rmp #2772 gave the equality provider the staleness
 // screen its range sibling always had, and a property write moves BOTH staleness
-// counters: measured on this very fixture, Δ = 990 and deletes = 990 against a
-// build-time population of 1400, either of which now demotes the estimate to
-// estFallback. A demoted estimate is [exec.EstimateAbsent] and contributes no sample
-// at all, so the SET route would leave this file's central gate with nothing to
-// measure.
+// counters: measured on the 1000/400 shape this fixture used to have, Δ = 990 and
+// deletes = 990 against a build-time population of 1400, either of which demotes the
+// estimate to estFallback. A demoted estimate is [exec.EstimateAbsent] and
+// contributes no sample at all, so the SET route would leave this file's central gate
+// with nothing to measure.
 //
 // Removing the LABEL instead touches no property, so Δ and the delete counter both
-// stay at ZERO — the snapshot is pristine by every measure it maintains — while the
-// live :Person count falls from 1400 to 410 and the MCV entry for 'hot' becomes 100x
-// wrong. That is not a contrivance to keep a test alive. It is the residual staleness
-// route rmp #2772 could not close: Δ is bumped only on the node-property write path
-// (the four [recordStatsNodePropertyWrite] call sites in cypher/api.go), and a label
-// removal passes none of them. A misestimate the statistics' own counters cannot see
-// is precisely what this metric exists to surface, so the fixture is stronger for the
-// change rather than weaker.
+// stay at ZERO — the snapshot is pristine by every measure it maintains.
+//
+// # Why the shape moved from 1000/400/10 to 100/1300/2 (rmp #2785)
+//
+// The relabel route alone stopped being enough. rmp #2785 gave [statsSnapshotFresh] a
+// population-shrinkage term, so the drift numerator is now Δ plus max(0, N0 − live):
+// the old shape shrank :Person from 1400 to 410, a fraction of 2.41, and the estimate
+// is now correctly demoted. That is the defect being fixed, not a regression, and the
+// fixture has to move rather than the screen.
+//
+// What is left, and what this fixture now is: the screen is a fraction of the
+// POPULATION, so it cannot see a small shrinkage CONCENTRATED on one most-common
+// value. 98 of 1400 :Person rows lose the label — 98/1302 = 0.0753, comfortably
+// inside the 0.0961 firing region, so the snapshot is fresh by the drift rule as well
+// as by its counters — and yet every one of the 98 carried grp='hot', so the MCV
+// entry for that one value is 50x wrong. That blindness is inherent to a
+// population-relative rule, which Δ has always shared (a small Δ concentrated on one
+// value is wrong in exactly the same way), and closing it would need per-value
+// bookkeeping docs/statistics-design.md §2 deliberately does not maintain.
+//
+// So the fixture is still the case this metric exists for — a misestimate no counter
+// and no fraction in the module can see — and the gates below are unchanged in what
+// they claim. Only the arithmetic moved.
+//
+// staleMCVRemain is 2 and not 1 for a reason that is easy to lose: after a REFRESH
+// the MCV list is rebuilt over the live rows, and [TestQError_MisestimatedPairsClearOnRefresh]
+// needs 'hot' to still be IN it. The list is an exact top-32
+// ([stats.BuildTopK]), the 1300 cold values are singletons, and a count of 2 is
+// therefore the strict maximum and certain to be retained. A count of 1 would tie
+// with every cold value and its retention would rest on the heap's hash tie-break.
 func seedStaleMCVGraph(t *testing.T) (e *Engine, hotAfter int64) {
 	t.Helper()
 	const (
-		hot    = 1000
-		cold   = 400
-		remain = 10
+		hot    = staleMCVHot
+		cold   = staleMCVCold
+		remain = staleMCVRemain
 	)
 	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
 	add := func(key, label, grp string, rank int64) {
@@ -200,14 +235,17 @@ func seedStaleMCVGraph(t *testing.T) (e *Engine, hotAfter int64) {
 	if err := e.RefreshStatistics(ctx); err != nil {
 		t.Fatalf("RefreshStatistics: %v", err)
 	}
-	if _, err := e.RunInTx(ctx,
-		`MATCH (p:Person) WHERE p.grp = 'hot' AND p.rank >= 10 REMOVE p:Person`, nil); err != nil {
+	// The hot nodes carry rank 0..hot-1, so this keeps exactly `remain` of them.
+	if _, err := e.RunInTx(ctx, fmt.Sprintf(
+		`MATCH (p:Person) WHERE p.grp = 'hot' AND p.rank >= %d REMOVE p:Person`, remain),
+		nil); err != nil {
 		t.Fatalf("REMOVE label: %v", err)
 	}
 	// The premise of every gate built on this fixture: the statistic is stale in
-	// FACT and fresh by its own counters. A future change to the write path that
-	// started bumping Δ here would silently demote the estimate and turn those gates
-	// into assertions about an absent sample, which is not what they claim to hold.
+	// FACT and TRUSTED by the module. A future change to the write path that started
+	// bumping Δ here, or a tightening of the staleness screen, would silently demote
+	// the estimate and turn those gates into assertions about an absent sample, which
+	// is not what they claim to hold.
 	src := liveResolver(e)
 	st, okStats := lookupStats(src, "Person", "grp")
 	if !okStats {
@@ -217,6 +255,23 @@ func seedStaleMCVGraph(t *testing.T) (e *Engine, hotAfter int64) {
 		t.Fatalf("removing a label moved the staleness counters (delta=%d deletes=%d); "+
 			"the estimate is now demoted and this fixture no longer produces the stale "+
 			"EXACT estimate every gate below scores", st.Delta(), st.Deletes())
+	}
+	// Asserted on the VERDICT and not only on the counters (rmp #2785). The counters
+	// staying at zero was the whole premise until the drift numerator grew a
+	// population-shrinkage term; now the shrinkage fraction has to stay inside the
+	// firing region too, and that is a property of the three constants above rather
+	// than of the mutation. Reading the provider is the one check that cannot go out
+	// of date.
+	got := statsEqualityEstimateWith(src, "Person", "grp",
+		expr.StringValue("hot"), resolveLabelPopulation(src, "Person"))
+	if got.source != estExact {
+		t.Fatalf("the stale most-common-value count is tagged %v, want %v (rows=%v). "+
+			"n0=%d live=%v: the shrinkage this fixture causes has moved outside the "+
+			"freshness screen's firing region, so there is no trustworthy-but-stale "+
+			"estimate for the gates below to score — see the fixture's own comment for "+
+			"how the three constants are chosen",
+			got.source, estExact, got.rows, st.LabelCount(),
+			resolveLabelPopulation(src, "Person").n)
 	}
 	return e, remain
 }
@@ -253,14 +308,14 @@ func TestQError_AnExactEstimateSamplesOne(t *testing.T) {
 }
 
 // TestQError_AStaleExactEstimateSamplesTheFactorItIsWrongBy is the gate the metric
-// exists for: a statistic that was right when it was built and is now wrong by 100x
-// is reported as wrong by 100x.
+// exists for: a statistic that was right when it was built and is now wrong by 50x
+// is reported as wrong by 50x.
 //
 // Without it the surface would be decoration — a distribution that can only ever
 // show agreement measures nothing. The fixture also demonstrates the finding that
 // motivates the whole accessor: the estimate here is tagged EXACT even though it is
-// 100x wrong, because the most-common-value provider's staleness screen (rmp #2772)
-// is driven by counters that a label removal never touches.
+// 50x wrong, because the staleness screen is a fraction of the POPULATION (rmp #2772,
+// rmp #2785) and cannot see a small shrinkage concentrated on one most-common value.
 func TestQError_AStaleExactEstimateSamplesTheFactorItIsWrongBy(t *testing.T) {
 	e, hotAfter := seedStaleMCVGraph(t)
 	const q = "MATCH (p:Person) WHERE p.grp = 'hot' RETURN p"
@@ -268,17 +323,17 @@ func TestQError_AStaleExactEstimateSamplesTheFactorItIsWrongBy(t *testing.T) {
 
 	// Two samples: the Filter (the stale estimate) and the scan beneath it (an
 	// exact live count, so 1). Asserting the pair rather than just "some sample is
-	// 100" is what stops a defect that emits the same number twice from passing.
+	// 50" is what stops a defect that emits the same number twice from passing.
 	if len(got) != 2 {
 		t.Fatalf("PROFILE of %q emitted %d samples %v, want 2 — one for the Filter "+
 			"carrying the stale estimate and one for the exact scan beneath it", q, len(got), got)
 	}
-	const wantQ = 100.0
+	const wantQ = float64(staleMCVHot) / float64(staleMCVRemain)
 	if !qerrNear(got[0], wantQ) {
 		t.Errorf("the Filter's q-error is %v, want %v. The most-common-value list still "+
-			"records 1000 nodes for 'hot' and the query returned %d; a q-error that is not "+
-			"1000/%d means the comparison is not reading the estimate and the measurement "+
-			"it claims to", got[0], wantQ, hotAfter, hotAfter)
+			"records %d nodes for 'hot' and the query returned %d; a q-error that is not "+
+			"%d/%d means the comparison is not reading the estimate and the measurement "+
+			"it claims to", got[0], wantQ, staleMCVHot, hotAfter, staleMCVHot, hotAfter)
 	}
 	if got[1] != 1 {
 		t.Errorf("the scan's q-error is %v, want 1; its estimate is a live exact count", got[1])
@@ -371,8 +426,8 @@ func TestQError_ARepeatedlyInitialisedOperatorEmitsNoSample(t *testing.T) {
 // TestQError_AnAbandonedOperatorEmitsNoSample covers the other comparability guard:
 // an operator stopped before end-of-stream has a row count that is a LOWER BOUND.
 //
-// The fixture's scan is estimated at 1400 and returns 5 because of the LIMIT. An
-// unguarded comparison reports 280x.
+// The fixture's scan is estimated at the live :Person count — 1302 — and returns 5
+// because of the LIMIT. An unguarded comparison reports 260x.
 func TestQError_AnAbandonedOperatorEmitsNoSample(t *testing.T) {
 	e, _ := seedStaleMCVGraph(t)
 	const q = `MATCH (p:Person) RETURN p LIMIT 5`
@@ -422,7 +477,7 @@ func TestQError_RunAndExplainEmitNothing(t *testing.T) {
 	samples, high := s.read()
 	if len(samples) != 0 || high != 0 {
 		t.Errorf("20 Runs and three EXPLAIN surfaces emitted %d q-error samples %v and "+
-			"%d high counts, want none of either. This query's estimate is 100x wrong, so "+
+			"%d high counts, want none of either. This query's estimate is 50x wrong, so "+
 			"a leak onto the Run path would be both loud and permanent",
 			len(samples), samples, high)
 	}
