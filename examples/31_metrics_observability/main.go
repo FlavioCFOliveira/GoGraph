@@ -751,13 +751,52 @@ func driveCountStore(ctx context.Context, w io.Writer, eng *cypher.Engine) error
 }
 
 // staleTier is the tier value the planner-statistics workload deliberately makes
-// stale, and quarantinedTier is what the services it moves are re-tiered to.
+// stale.
+//
+// # Why the mutation is a DECOMMISSION and not a re-tier (rmp #2795)
+//
+// It used to be `SET s.tier = 'quarantine'`, and that route no longer produces a
+// trustworthy estimate to score. rmp #2772 gave the equality provider the staleness
+// screen its range sibling always had, and a property write moves BOTH staleness
+// counters — the accumulated-write delta and the delete counter — so the snapshot
+// is stale by its own measure and the most-common-value count is correctly demoted.
+// A demoted estimate is absent, and an absent estimate is not scored at all
+// (cypher/plan_qerror.go, qErrorQualifies), so the re-tier route left this step
+// with no q-error sample and the exposition without `cypher.stats.qerror.high`.
+//
+// Removing the `:SERVICE` label instead touches no property, so both counters stay
+// at ZERO — the snapshot is pristine by every measure it maintains — while the live
+// `:SERVICE` population falls and the most-common-value entry for staleTier becomes
+// wrong by a factor of before/keptLive. That is the one residual staleness route
+// rmp #2772 could not close: the delta is bumped only on the node-property write
+// path and a label removal passes none of its call sites (recorded on rmp #2772,
+// tracked as rmp #2785). A misestimate the statistics' own counters cannot see is
+// precisely what this metric exists to surface, so the workload is stronger for the
+// change rather than weaker. cypher/plan_qerror_test.go's seedStaleMCVGraph builds
+// the same case, for the same reason.
+//
+// It is also the truthful mutation for this domain: a decommissioned service leaves
+// the live topology, while its node, its `tier` and its `:CALLS` edges stay on the
+// record.
 const (
-	staleTier       = "core"
-	quarantinedTier = "quarantine"
-	// keptInTier is how many services keep staleTier after the move, so the
-	// misestimation is a known factor rather than an accident of the seed.
-	keptInTier = 5
+	staleTier = "core"
+	// keptLive is how many of staleTier's services keep the `:SERVICE` label, so
+	// the misestimation is a known factor — before/keptLive — rather than an
+	// accident of the seed.
+	keptLive = 5
+	// statsQErrorHighFactor is the factor past which cypher COUNTS a misestimate
+	// rather than merely observing it: the 3x documented on
+	// cypher.Engine.StatsMisestimatedPairs. The engine's own constant is
+	// unexported, and this copy is used for one purpose only — to decide whether
+	// this workload's own premise holds at the configured scale, below.
+	//
+	// It is therefore a copy that can drift. If the engine's factor were RAISED
+	// above this one, the guard below would fire on a miss the engine no longer
+	// counts — loudly and at the point of cause, which is the safe direction. If it
+	// were LOWERED, the guard would simply stop demanding a sample in the narrow
+	// band between the two values. At the default scale the miss is 10x, far from
+	// either boundary.
+	statsQErrorHighFactor = 3
 )
 
 // drivePlannerStatistics exercises the planner statistics and, above all, the
@@ -770,10 +809,12 @@ const (
 // deterministic rather than incidental:
 //
 //  1. refresh, so the statistics describe the graph exactly;
-//  2. re-tier all but a handful of the services in one tier, WITHOUT refreshing —
-//     the most-common-value list still records the old count, and (unlike the
-//     histogram estimator) it carries no staleness gate, so the planner still
-//     reports that count as EXACT;
+//  2. DECOMMISSION all but a handful of the services in one tier — they lose the
+//     `:SERVICE` label — WITHOUT refreshing. The most-common-value list still
+//     records the old per-value count, and because a label removal moves neither
+//     staleness counter the equality provider's freshness screen still trusts it,
+//     so the planner reports that count as EXACT (see [staleTier] for why this
+//     route and not a property write);
 //  3. PROFILE a query that reads it. The estimate and the measurement now sit on
 //     the same plan node, and their ratio is the q-error.
 //
@@ -783,6 +824,10 @@ const (
 //
 // Only PROFILE emits any of this: the Engine.Run calls in step 1 and the writes in
 // step 7 above contribute nothing to the two q-error series.
+//
+// Both halves of the premise — that the mutation shrank the tier, and that the
+// resulting misestimate was actually SCORED — are guarded below and abort this step
+// with a named error rather than emitting a silent zero (rmp #2795).
 func drivePlannerStatistics(ctx context.Context, w io.Writer, eng *cypher.Engine) error {
 	if err := eng.RefreshStatistics(ctx); err != nil {
 		return fmt.Errorf("refresh statistics: %w", err)
@@ -794,13 +839,16 @@ func drivePlannerStatistics(ctx context.Context, w io.Writer, eng *cypher.Engine
 	if err != nil {
 		return fmt.Errorf("count tier before: %w", err)
 	}
-	// Make the statistic stale: move every service in the tier but a few, and do
-	// NOT refresh. The planner keeps predicting `before` for a predicate that now
-	// matches `keptInTier`.
+	// Make the statistic stale: DECOMMISSION every service in the tier but a few —
+	// they lose the `:SERVICE` label and leave the live topology — and do NOT
+	// refresh. The planner keeps predicting `before` for a predicate that now
+	// matches `keptLive`. See [staleTier] for why the mutation is a label removal
+	// and not a property write: since rmp #2772 the property route demotes the
+	// estimate, correctly, and a demoted estimate is never scored (rmp #2795).
 	if err := cypherWrite(ctx, eng, fmt.Sprintf(
-		"MATCH (s:SERVICE) WHERE s.%s = '%s' WITH s SKIP %d SET s.%s = '%s'",
-		propTier, staleTier, keptInTier, propTier, quarantinedTier), nil); err != nil {
-		return fmt.Errorf("re-tier services: %w", err)
+		"MATCH (s:SERVICE) WHERE s.%s = '%s' WITH s SKIP %d REMOVE s:%s",
+		propTier, staleTier, keptLive, labelService), nil); err != nil {
+		return fmt.Errorf("decommission services: %w", err)
 	}
 	after, err := cypherCount(ctx, eng, inTier)
 	if err != nil {
@@ -816,6 +864,36 @@ func drivePlannerStatistics(ctx context.Context, w io.Writer, eng *cypher.Engine
 	}
 	misestimated := eng.StatsMisestimatedPairs()
 
+	// Premise guards (rmp #2795). This step's whole output is a reading of ONE
+	// deliberately stale statistic, and both halves of that premise are checked
+	// here rather than assumed. rmp #2795 is what their absence cost: rmp #2772
+	// correctly demoted the estimate the old fixture relied on, the q-error sample
+	// vanished, and the only thing that noticed was the count of present metrics —
+	// a symptom two removes from the cause.
+	//
+	// First: the decommission must really have shrunk the live tier. `SKIP keptLive`
+	// leaves exactly keptLive behind whenever the tier held more than that.
+	if before > keptLive && after != keptLive {
+		return fmt.Errorf("decommission left %d services in tier %q, want %d: the "+
+			"mutation no longer shrinks the live tier, so the statistic is not stale "+
+			"and there is no q-error to observe", after, staleTier, keptLive)
+	}
+	// Second: the stale estimate must really have been SCORED. A trustworthy
+	// estimate wrong by at least statsQErrorHighFactor is counted; an estimate the
+	// planner has demoted contributes no sample at all, and then
+	// `cypher.stats.qerror.high` never fires and this workload demonstrates nothing.
+	// The condition is the achieved miss rather than the configured scale, so it
+	// holds at every -services value that can produce a counted miss.
+	if miss := float64(before) / float64(max(after, 1)); miss >= statsQErrorHighFactor && misestimated == 0 {
+		return fmt.Errorf("PROFILE scored no misestimate: the planner predicted %d "+
+			"rows for s.%s = '%s' and the query returned %d, a %.0fx miss, yet no "+
+			"tracked (label, property) statistic was caught. The estimate was demoted "+
+			"rather than trusted, so this step emits no cypher.stats.qerror.high "+
+			"sample — the staleness screen now closes this route too and [staleTier] "+
+			"needs a new one (rmp #2795)",
+			before, propTier, staleTier, after, miss)
+	}
+
 	// A successful refresh clears the observation, because every reading in it was
 	// taken against the snapshot the refresh has just replaced.
 	if err := eng.RefreshStatistics(ctx); err != nil {
@@ -826,13 +904,13 @@ func drivePlannerStatistics(ctx context.Context, w io.Writer, eng *cypher.Engine
 	// Deterministic facts: the tier really did shrink to the kept few, the stale
 	// statistic really was caught, and the refresh really did clear it.
 	fmt.Fprintf(w, "stats.tracked_pairs_positive=%d\n", boolFact(trackedPairs > 0))
-	fmt.Fprintf(w, "stats.tier_after_move=%d\n", after)
+	fmt.Fprintf(w, "stats.tier_after_decommission=%d\n", after)
 	fmt.Fprintf(w, "stats.misestimated_pairs=%d\n", misestimated)
 	fmt.Fprintf(w, "stats.misestimated_cleared_by_refresh=%d\n", boolFact(cleared == 0))
 	// Volatile telemetry: the sizes behind the facts, and the profiled plan whose
 	// Est.Rows / Rows pair is the q-error's two inputs.
 	fmt.Fprintf(w, "# stats.tracked_pairs=%d\n", trackedPairs)
-	fmt.Fprintf(w, "# stats.tier_before_move=%d\n", before)
+	fmt.Fprintf(w, "# stats.tier_before_decommission=%d\n", before)
 	for _, line := range strings.Split(strings.TrimRight(profile, "\n"), "\n") {
 		fmt.Fprintf(w, "# stats.profile| %s\n", line)
 	}
