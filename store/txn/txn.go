@@ -2327,9 +2327,19 @@ const maxWALSchemaStringLen = 1<<16 - 1
 // maxWALValueLen is the largest byte length a uint32 length prefix in the
 // property-value encoders can represent without truncation. It bounds a
 // property string, a property byte value, a list element payload, and a list
-// element count. Nothing upstream bounds a property value, so — like
-// [maxWALSchemaStringLen] for the uint16 fields — this is the only bound there
-// is.
+// element count.
+//
+// It is a STRUCTURAL bound of the WAL frame — what the prefix can express — and
+// it is NOT the module's cap on a property value. That cap is
+// [maxSnapshotValueLen] (1 GiB), which is tighter, is measured in the snapshot's
+// encoding rather than this one, and is checked first in
+// [encodePropertyValue]. This check stands behind it as the prefix backstop.
+//
+// The claim this comment used to make — that nothing upstream bounds a property
+// value, so this is the only bound there is — was already false when it was
+// written and is doubly false now: [wal.Encode] refuses an assembled op frame
+// over its own 1 GiB maxFrameSize, which for a scalar value binds 17-odd bytes
+// tighter than this prefix ever could (rmp #2750).
 const maxWALValueLen = math.MaxUint32
 
 // maxWALValueLenInt is [maxWALValueLen] as an int, clamped to what the
@@ -2356,6 +2366,13 @@ const maxWALValueLenInt = maxWALValueLen & math.MaxInt
 // [Tx.Commit] and [Tx.CommitWALOnly] (through [Tx.appendOnly]), where the
 // offending transaction consumes a sequence and applies nothing. The store
 // stays usable for the next transaction either way.
+//
+// The same sentinel carries the OTHER refusal a property value can earn at
+// commit: a value whose snapshot encoding would exceed [maxSnapshotValueLen],
+// which the WAL could hold but the checkpointer could never fold (rmp #2750).
+// It is deliberately not a second sentinel — from the caller's side both mean
+// "this field is too long for a durable format to carry", and the message names
+// the length and the cap that was exceeded.
 var ErrFieldTooLong = errors.New("txn: field too long for its WAL length prefix")
 
 // CheckSchemaField reports whether s fits the uint16 length prefix every WAL
@@ -2399,6 +2416,145 @@ func checkWALValueLen(what string, n int) error {
 	return nil
 }
 
+// maxSnapshotValueLen is the module's cap on a single property value: 1 GiB,
+// measured in the SNAPSHOT's encoding of that value.
+//
+// It is the same number as store/snapshot's maxValueLen (properties.go), which
+// is the cap [github.com/FlavioCFOliveira/GoGraph/store/snapshot.ReadProperties]
+// enforces and is therefore the largest value the checkpoint format can carry.
+// The two are separate declarations of one number, because store/txn does not
+// import store/snapshot; TestSnapshotValueCapAgreement_2750 pins each side to
+// the literal and names the other, so neither can be moved alone.
+//
+// # Why the transaction layer enforces a CHECKPOINT bound (rmp #2750)
+//
+// A value the snapshot cannot encode is a value the checkpointer can never
+// fold. Capture (phase 1) refuses it with snapshot.ErrFieldTooLong, the
+// checkpoint fails before phase 3 truncates the WAL prefix, and the WAL is
+// retained — correctly, since the data exists nowhere else. But the checkpoint
+// then fails again on every later attempt, for as long as that value lives in
+// the graph, and the WAL grows without bound. Accepting a write that can never
+// be folded is a bounded-resources defect and a durability trap, so the refusal
+// belongs at COMMIT, where the caller can still act on it.
+//
+// # Why it is not [maxWALValueLen], and why neither bound implies the other
+//
+// [maxWALValueLen] bounds what the WAL's own uint32 length prefix can express.
+// This bounds what the checkpoint format can fold, and it is measured in a
+// DIFFERENT encoding — which is precisely why the two numbers cannot be
+// compared directly:
+//
+//   - For a SCALAR the snapshot encoding is the smaller one (a string is stored
+//     raw, its kind and length living in the record header), so the WAL side
+//     binds first and no scalar can reach this cap. [wal.Encode] refuses an op
+//     frame over its own 1 GiB maxFrameSize, and that frame carries the value
+//     plus at least 17 bytes of framing, so a 1 GiB string is already refused at
+//     commit with [wal.ErrFrameTooLarge] before it is measured here.
+//   - For a [lpg.PropList] the snapshot encoding is the LARGER one. Both formats
+//     write (uint8 kind | uint32 len | payload) per element, but store/snapshot
+//     gives a PropInt64 element a fixed 8 bytes and a PropTime element a fixed
+//     16, where this package writes a varint. A list of small integers therefore
+//     costs 13 bytes per element in the snapshot against 6 in the WAL. Measured,
+//     not estimated: a list of 82_595_525 such elements assembles a
+//     495_573_177-byte WAL frame (comfortably inside maxFrameSize) and a
+//     1_073_741_829-byte snapshot value (5 bytes over this cap). Before this
+//     guard that list committed durably and then made every checkpoint fail,
+//     permanently.
+//
+// So the WAL's frame cap cannot stand in for this one, and this one cannot
+// stand in for the WAL's. Both are enforced.
+const maxSnapshotValueLen = 1 << 30
+
+// snapshotEncodedValueLen reports, exactly, how many bytes store/snapshot's
+// encodePropertyValue produces for v — the length its writeNodePropRecord /
+// writeEdgePropRecord will put behind a uint32 prefix and test against the
+// snapshot's own cap.
+//
+// It COMPUTES rather than encodes, so refusing an unfoldable value at commit
+// costs one allocation-free walk instead of building the snapshot's copy of a
+// value that is about to be rejected. TestSnapshotEncodedValueLen_Exact_2750
+// pins the arithmetic against the real snapshot writer, for every kind and for
+// a list mixing all of them, so the computation cannot drift from the encoder
+// it models.
+//
+// The accumulator is an int64 and not an int: on a 32-bit platform a list of a
+// few hundred million small integers sums past MaxInt32 in the snapshot's
+// encoding, and a truncated sum would compare as SMALL and let the value
+// through.
+//
+// # What it costs, measured
+//
+// This function does not inline (`go build -gcflags='-m' ./store/txn/` reports
+// only checkSnapshotFoldableLen as inlinable), and for a PropString or PropBytes
+// it repeats the type assertion [encodePropertyValue] is about to make. On an
+// Apple M4, six interleaved benchstat pairs against the same tree with the guard
+// call removed:
+//
+//	property value             +2.17ns/op   (3.224n -> 5.398n, +67%, p=0.002 n=6)
+//	list element               +1.04ns/elem (127.2us -> 137.6us for 10k, p=0.002)
+//	FULL COMMIT, one property  no significant difference (3.711m -> 3.696m, p=0.310)
+//
+// The end-to-end figure is the one that decides it: the encode is followed by a
+// WAL append and an fsync that cost six orders of magnitude more. Buying those
+// nanoseconds back means writing the snapshot's length arithmetic a second time,
+// inline, next to the encoder — which is precisely the duplication that let the
+// two formats disagree and opened rmp #2750. Correctness outranks speed.
+func snapshotEncodedValueLen(v lpg.PropertyValue) int64 {
+	if v.Kind() != lpg.PropList {
+		return snapshotEncodedScalarLen(v)
+	}
+	elems, _ := v.List()
+	// uint32 element count, then (uint8 kind | uint32 len | payload) per element.
+	n := int64(4)
+	for i := range elems {
+		n += 5 + snapshotEncodedScalarLen(elems[i])
+	}
+	return n
+}
+
+// snapshotEncodedScalarLen is [snapshotEncodedValueLen] for a value that is not
+// a list, mirroring store/snapshot's per-kind widths: 8 bytes for PropInt64 and
+// PropFloat64 (its fixed64ValueSize), 16 for PropTime (timeValueSize), 1 for
+// PropBool (boolValueSize), and the raw bytes for PropString and PropBytes.
+//
+// A [lpg.PropList] arriving here is a NESTED list. store/snapshot does not size
+// such an element, it refuses the whole value ("nested PropList not supported"),
+// so its fate is settled by that refusal and not by this bound; it is reported
+// as zero, which is what this package's own encoder writes for it. The same
+// goes for a kind neither format knows.
+func snapshotEncodedScalarLen(v lpg.PropertyValue) int64 {
+	switch v.Kind() {
+	case lpg.PropString:
+		s, _ := v.String()
+		return int64(len(s))
+	case lpg.PropBytes:
+		b, _ := v.Bytes()
+		return int64(len(b))
+	case lpg.PropInt64, lpg.PropFloat64:
+		return 8
+	case lpg.PropTime:
+		return 16
+	case lpg.PropBool:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// checkSnapshotFoldableLen rejects a property value whose snapshot encoding
+// would exceed [maxSnapshotValueLen] — a value that would commit durably and
+// then make every checkpoint fail for as long as it lived (rmp #2750).
+//
+// It takes the length rather than the value so the bound can be pinned at its
+// exact boundary without materialising a gigabyte, the way store/snapshot's own
+// checkSnapshotValueLen is pinned.
+func checkSnapshotFoldableLen(what string, n int64) error {
+	if n > maxSnapshotValueLen {
+		return errFieldTooLongN(what, n, maxSnapshotValueLen)
+	}
+	return nil
+}
+
 // errFieldTooLong builds the refusal.
 //
 // It is a separate function, and not the body of the two checks above, so that
@@ -2408,6 +2564,14 @@ func checkWALValueLen(what string, n int) error {
 // `go build -gcflags='-m' ./store/txn/`, which reports both checks
 // "can inline" and this one not.
 func errFieldTooLong(what string, n int, maxLen uint64) error {
+	return errFieldTooLongN(what, int64(n), maxLen)
+}
+
+// errFieldTooLongN is [errFieldTooLong] for a length that is already an int64,
+// which [checkSnapshotFoldableLen] needs because it sums a list's elements and
+// that sum must not be truncated on a 32-bit platform. It holds the ONE format
+// string, so the two refusal shapes cannot drift apart.
+func errFieldTooLongN(what string, n int64, maxLen uint64) error {
 	return fmt.Errorf("%w: %s is %d bytes, maximum %d", ErrFieldTooLong, what, n, maxLen)
 }
 
@@ -2595,8 +2759,15 @@ func encodeOpEdgeWithLabel[N comparable, W any](buf []byte, op Op[N, W], codec C
 }
 
 // encodePropertyValue appends the wire encoding of a [lpg.PropertyValue] to buf.
-// It fails stop, before writing a length prefix, on any payload too long for
-// the uint32 prefix that describes it (rmp #2742) — see [checkWALValueLen].
+//
+// It fails stop, buffering nothing, on a value either durable format could not
+// carry:
+//
+//   - a value whose SNAPSHOT encoding would exceed [maxSnapshotValueLen], which
+//     would commit here and then block every checkpoint for ever (rmp #2750) —
+//     see [checkSnapshotFoldableLen];
+//   - a payload too long for the uint32 prefix that describes it in the WAL
+//     (rmp #2742) — see [checkWALValueLen].
 //
 // Format:
 //
@@ -2618,6 +2789,30 @@ func encodeOpEdgeWithLabel[N comparable, W any](buf []byte, op Op[N, W], codec C
 //
 // Nested PropList elements are not permitted.
 func encodePropertyValue(buf []byte, v lpg.PropertyValue) ([]byte, error) {
+	// Refuse a value the CHECKPOINT format could never fold, before a byte of it
+	// reaches the WAL (rmp #2750). This is the TIGHTER of the two bounds this
+	// function enforces, and is measured in the snapshot's encoding rather than
+	// this one, so it is checked first and the per-field checkWALValueLen calls
+	// below stand behind it as the uint32-prefix backstop — the same
+	// reject-first/backstop-behind pairing rmp #2747 established for the
+	// uint16-prefixed schema strings.
+	//
+	// The fixed-width kinds are skipped rather than tested. store/snapshot gives
+	// each of them a constant width — 8 bytes for PropInt64 and PropFloat64, 1
+	// for PropBool, 16 for PropTime — so a bound test on them is a comparison
+	// that cannot fail, and this package treats such a check as waste, not as
+	// defence. The switch is written as an exemption list and not as an
+	// inclusion list on purpose: a property kind added later falls into default
+	// and IS measured, so the fail-safe direction is the automatic one.
+	// Measured: the exemption removes 2.15ns/op from a PropInt64 value, and the
+	// walk it avoids costs nothing that could ever change the outcome.
+	switch v.Kind() {
+	case lpg.PropInt64, lpg.PropFloat64, lpg.PropBool, lpg.PropTime:
+	default:
+		if err := checkSnapshotFoldableLen("property value", snapshotEncodedValueLen(v)); err != nil {
+			return nil, err
+		}
+	}
 	buf = append(buf, byte(v.Kind()))
 	switch v.Kind() {
 	case lpg.PropString:

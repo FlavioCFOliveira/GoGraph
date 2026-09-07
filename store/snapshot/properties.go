@@ -145,6 +145,25 @@ const fixed64ValueSize = 8
 // Larger values are rejected by [ReadProperties] as corruption —
 // without this cap, a flipped byte in the length prefix could ask the
 // reader to allocate an absurd buffer.
+//
+// # It is the MODULE's cap on a property value (rmp #2750)
+//
+// Because this reader refuses anything larger, this is the largest value the
+// checkpoint format can carry, and therefore the largest value the module may
+// accept at all: a value that commits to the WAL but cannot be folded into a
+// snapshot makes phase-1 capture fail with [ErrFieldTooLong] on every
+// checkpoint attempt, for as long as it lives in the graph, and the WAL prefix
+// is never truncated. store/txn holds the same number as its
+// maxSnapshotValueLen and refuses such a value at COMMIT, where the caller can
+// still act on it, so this cap now bounds what may be WRITTEN and not only what
+// may be read back.
+//
+// The two constants are separate declarations of one number — store/txn does
+// not import this package — and each side's test names the other, so neither
+// can be moved alone. Note that the two formats measure the same value
+// DIFFERENTLY: the per-element widths below (fixed64ValueSize, timeValueSize)
+// make a list of integers or timestamps larger here than in the WAL, which is
+// exactly how a value could pass the WAL's bounds and fail this one.
 const maxValueLen = 1 << 30
 
 // propertiesCapHintMax caps an eager slice reservation in [ReadProperties]
