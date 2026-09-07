@@ -42,7 +42,7 @@ func TestBuildLog_CatchUpReplaysEveryChangeFannedOutDuringTheBuild(t *testing.T)
 	t.Parallel()
 	m := NewManager()
 
-	bl := m.BeginBuild()
+	bl := m.BeginBuild(nil)
 	// Both delivery paths must be recorded, not just the batch one.
 	m.Apply(setProp(7))
 	m.ApplyBatch([]Change{setProp(8), setProp(9)})
@@ -82,7 +82,7 @@ func TestBuildLog_CatchUpReplaysEveryChangeFannedOutDuringTheBuild(t *testing.T)
 func TestBuildLog_IndexUnderConstructionIsUnreachable(t *testing.T) {
 	t.Parallel()
 	m := NewManager()
-	bl := m.BeginBuild()
+	bl := m.BeginBuild(nil)
 	m.Apply(setProp(1))
 
 	if n := m.Count(); n != 0 {
@@ -109,7 +109,7 @@ func TestBuildLog_IndexUnderConstructionIsUnreachable(t *testing.T) {
 func TestBuildLog_AbandonStopsRecordingAndRegistersNothing(t *testing.T) {
 	t.Parallel()
 	m := NewManager()
-	bl := m.BeginBuild()
+	bl := m.BeginBuild(nil)
 	m.Apply(setProp(1))
 	m.AbandonBuild(bl)
 
@@ -134,7 +134,7 @@ func TestBuildLog_AbandonStopsRecordingAndRegistersNothing(t *testing.T) {
 func TestBuildLog_AbandonAfterFinishIsANoOp(t *testing.T) {
 	t.Parallel()
 	m := NewManager()
-	bl := m.BeginBuild()
+	bl := m.BeginBuild(nil)
 	if err := m.FinishBuild(bl, func(reg RegisterFunc) error { return reg("built", &recordSub{}) }); err != nil {
 		t.Fatalf("FinishBuild: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestBuildLog_AbandonAfterFinishIsANoOp(t *testing.T) {
 func TestBuildLog_OverflowRefusesToRegister(t *testing.T) {
 	t.Parallel()
 	m := NewManager()
-	bl := m.BeginBuild()
+	bl := m.BeginBuild(nil)
 	for i := 0; i <= MaxBuildLogChanges; i++ {
 		m.Apply(setProp(graph.NodeID(i)))
 	}
@@ -187,7 +187,7 @@ func TestBuildLog_NoChangeIsLostAcrossFinishBuild(t *testing.T) {
 
 	for attempt := 0; attempt < 20; attempt++ {
 		m := NewManager()
-		bl := m.BeginBuild()
+		bl := m.BeginBuild(nil)
 		fresh := &recordSub{}
 
 		var wg sync.WaitGroup

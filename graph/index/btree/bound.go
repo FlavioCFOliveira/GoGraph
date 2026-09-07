@@ -107,7 +107,12 @@ func (i *Index[V]) BoundNode() (label, property string, ok bool) {
 // readers; writers are single-goroutine per operator tree upstream of the engine's
 // transaction contract. Edge changes and changes for other properties/labels
 // are ignored.
-func (i *Index[V]) applyBound(c index.Change) {
+//
+// rec carries the node state a [index.BuildResolver] captured when the change
+// was fanned out, and is nil on the live fan-out, where the state is read from
+// the graph instead. This is the SINGLE copy of the rules above: the live path
+// and the build-log replay share it precisely so they cannot drift (rmp #2793).
+func (i *Index[V]) applyBound(c index.Change, rec *recordedState[V]) {
 	b := i.binding
 	switch c.Op {
 	case index.OpSetNodeProperty:
@@ -117,7 +122,7 @@ func (i *Index[V]) applyBound(c index.Change) {
 		if old, ok := b.Project(c.OldValue); ok {
 			i.Delete(old, c.Node)
 		}
-		if nv, ok := b.Project(c.NewValue); ok && b.Eligible(c.Node) {
+		if nv, ok := b.Project(c.NewValue); ok && i.eligible(rec, c.Node) {
 			i.Insert(nv, c.Node)
 		}
 	case index.OpDelNodeProperty:
@@ -131,15 +136,43 @@ func (i *Index[V]) applyBound(c index.Change) {
 		if c.Label != b.LabelID {
 			return
 		}
-		if v, ok := b.CurrentValue(c.Node); ok && b.Eligible(c.Node) {
+		if v, ok := i.currentValue(rec, c.Node); ok && i.eligible(rec, c.Node) {
 			i.Insert(v, c.Node)
 		}
 	case index.OpRemoveNodeLabel:
 		if c.Label != b.LabelID {
 			return
 		}
-		if v, ok := b.CurrentValue(c.Node); ok {
+		if v, ok := i.currentValue(rec, c.Node); ok {
 			i.Delete(v, c.Node)
 		}
 	}
+}
+
+// recordedState is the answer a [index.BuildResolver] captured at the instant a
+// change was fanned out, standing in for the binding's own live reads while that
+// change is replayed. A nil *recordedState means "read the graph", which is the
+// live fan-out.
+type recordedState[V cmp.Ordered] struct {
+	value    V
+	hasValue bool
+	eligible bool
+}
+
+// eligible answers [Binding.Eligible] for id, from rec when the change is being
+// replayed from a build log and from the graph otherwise.
+func (i *Index[V]) eligible(rec *recordedState[V], id graph.NodeID) bool {
+	if rec != nil {
+		return rec.eligible
+	}
+	return i.binding.Eligible(id)
+}
+
+// currentValue answers [Binding.CurrentValue] for id, from rec when the change
+// is being replayed from a build log and from the graph otherwise.
+func (i *Index[V]) currentValue(rec *recordedState[V], id graph.NodeID) (V, bool) {
+	if rec != nil {
+		return rec.value, rec.hasValue
+	}
+	return i.binding.CurrentValue(id)
 }

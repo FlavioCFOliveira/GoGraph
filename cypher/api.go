@@ -3628,7 +3628,7 @@ func (e *Engine) createBTreeIndexLocked(ctx context.Context, p *ir.CreateIndex, 
 	// recording starts, exactly as on the hash path — see
 	// [Engine.beginIndexBuild] for the ordering and for why the scan must not
 	// read the live property bag (rmp #2738, rmp #2778).
-	buildLog, scanView, releaseScanView := e.beginIndexBuild(idxMgr)
+	buildLog, scanView, releaseScanView := e.beginIndexBuild(idxMgr, p.Label, p.Property)
 	defer idxMgr.AbandonBuild(buildLog)
 	defer releaseScanView()
 

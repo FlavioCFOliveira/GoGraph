@@ -608,7 +608,7 @@ func TestIndexUnderConstructionIsUnreachableByEveryPlannerRoute(t *testing.T) {
 	// statement builds: the user hash index on (Person, name), the auto-named
 	// string btree on (Person, name), and the internal numeric companion on
 	// (Person, age). None is registered while the build is open.
-	buildLog := mgr.BeginBuild()
+	buildLog := mgr.BeginBuild(nil)
 	defer mgr.AbandonBuild(buildLog)
 
 	hashIdx, err := newBoundNodeHashIndex(e.g.ReadAt(nil), "Person", "name")

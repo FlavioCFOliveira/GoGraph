@@ -41,6 +41,39 @@ package index
 // already registered, and FinishBuild's exclusive hold means it can never fall
 // between the two.
 //
+// # WHEN a recorded change is resolved, and why it is not at replay (rmp #2793)
+//
+// A [Change] does not describe its own effect on an index. A bound index answers
+// two further questions about the changed node from the GRAPH: whether the node
+// is eligible for the index (live, and carrying the bound label), and — for a
+// label add or remove, which carries no property payload — what its current
+// value of the bound property is.
+//
+// Those answers belong to the INSTANT THE CHANGE WAS FANNED OUT. Asking them at
+// replay time instead asks about a later instant, and the graph at that later
+// instant is not the committed state: a statement on an explicit transaction
+// applies EAGERLY, so the live property bag, label bitmap and node-life records
+// carry the writes of every open transaction, and [Manager.FinishBuild] runs
+// long after the recording. rmp #2793 measured all three doors on the hash path
+// — an open transaction's uncommitted SET made the replay of a label add insert
+// 'ghost' (1 entry, want 0) and lose the committed 'real-x' (0 entries, want 1);
+// an uncommitted DETACH DELETE made the replay of a property set drop the
+// committed value (0 entries, want 1); an uncommitted label add made it
+// fabricate an entry for a node the graph holds no such label for. The
+// interfering transaction then rolled back, and because its own
+// [exec.IndexBuffer] describes changes that were never fanned out, nothing
+// inverted what the replay had written.
+//
+// So the log resolves at RECORD time and replays the answer as data: a
+// [BuildResolver] supplied to [Manager.BeginBuild] captures the two answers
+// beside the change, and [ResolvedApplier] hands them back at replay. The
+// property that buys is exact rather than approximate — the replay produces
+// PRECISELY the effects the live fan-out would have produced had the index been
+// registered all along, because it uses the same rules, the same binding and the
+// same resolution instant. This is the same discipline rmp #2778 applied to the
+// backfill scan, through the other door: that one bound the scan to a snapshot,
+// this one binds the log to the instant it recorded.
+//
 // A change may legitimately be counted TWICE — committed after BeginBuild but
 // before the scan reads its node, so the scan sees it and the replay repeats it.
 // That is harmless and is a property the replay relies on rather than avoids: an
@@ -95,10 +128,11 @@ import (
 // MaxBuildLogChanges bounds the number of changes one [BuildLog] retains.
 //
 // The bound is required rather than defensive: without it a sustained write
-// workload concurrent with a long build would grow the log without limit. At
-// roughly 64 bytes per [Change] the ceiling costs about 8 MiB of transient
-// memory for a build that is saturated with concurrent writes, and is released
-// when the build ends.
+// workload concurrent with a long build would grow the log without limit. A
+// recorded entry is a [Change] plus the resolution captured beside it, measured
+// at 88 bytes against the Change's own 64, so the ceiling costs about 11 MiB of
+// transient memory for a build that is saturated with concurrent writes, and is
+// released when the build ends.
 //
 // Reaching it is a saturation condition, and it is answered with
 // [ErrIndexBuildOverflow] rather than by silently truncating: a truncated log
@@ -109,17 +143,65 @@ import (
 // concurrent explicit transactions during a single backfill.
 const MaxBuildLogChanges = 1 << 17
 
+// BuildResolver answers, AT THE INSTANT A CHANGE IS FANNED OUT, the two
+// questions a bound index would otherwise ask the graph when the change is
+// replayed: the changed node's current raw value of the property under build,
+// and whether that node is eligible for the index being built (live, and
+// carrying the label under build).
+//
+// current is returned in whatever representation the subscriber's own value
+// projection accepts — for the engine's indexes an lpg.PropertyValue — and is
+// nil when the node is absent, carries no such property, or the change concerns
+// neither the property nor the label under build. eligible carries the same
+// verdict the index's own Binding.Eligible would return for the node at this
+// instant.
+//
+// A resolver's calls are SERIALISED — this log's own mutex is held across every
+// one — so an implementation need not itself be safe for concurrent use. It is
+// nonetheless entered from whichever goroutine fans the change out, so it must
+// assume no goroutine affinity, and it runs concurrently with graph writers.
+//
+// A resolver is called by [Manager.Apply] and [Manager.ApplyBatch], from every
+// goroutine that fans a change out, while the manager's lock is held SHARED and
+// this log's own mutex is held. It must therefore read the graph exactly as a
+// registered subscriber's Apply already does at that point and take no lock of
+// its own: the log's mutex is a leaf, and a resolver that acquired something a
+// graph writer holds while waiting on the manager's lock would close a cycle.
+//
+// A nil resolver is legitimate ONLY when nothing to be registered against the
+// log resolves anything from the graph — an unbound index, or a test double.
+// Every bound index build must supply one; without it [Manager.FinishBuild]
+// falls back to [Subscriber.Apply], which re-reads the graph at replay time and
+// is exactly the defect rmp #2793 closed (see the file comment).
+type BuildResolver func(c Change) (current any, eligible bool)
+
+// recordedChange is one entry of a [BuildLog]: the change as it was fanned out,
+// plus the [BuildResolver]'s answers captured at that same instant.
+//
+// current and eligible are meaningless when the log has no resolver, and
+// [Manager.FinishBuild] never reads them in that case.
+type recordedChange struct {
+	Change
+	current  any
+	eligible bool
+}
+
 // BuildLog records the changes fanned out by a [Manager] while an index is being
 // built, so [Manager.FinishBuild] can replay them into that index before it
 // becomes reachable. See the file comment for the argument that the replay is
-// exact.
+// exact, and for why each change is RESOLVED as it is recorded rather than as it
+// is replayed.
 //
 // A BuildLog is created by [Manager.BeginBuild] and is valid only until
 // [Manager.FinishBuild] or [Manager.AbandonBuild] retires it. It is safe for
 // concurrent use: the manager records into it from every goroutine that fans a
 // change out.
 type BuildLog struct {
-	changes []Change
+	// resolve captures each change's graph-dependent facts at the instant it is
+	// recorded. It is set once by [Manager.BeginBuild], before the log is
+	// reachable by any fan-out, and never mutated afterwards.
+	resolve BuildResolver
+	changes []recordedChange
 	mu      sync.Mutex
 	// overflowed latches once more than MaxBuildLogChanges changes have been
 	// offered. Once set, the log is no longer a complete account of the window
@@ -146,9 +228,11 @@ func (b *BuildLog) recordBatch(changes []Change) {
 	}
 }
 
-// appendLocked appends one change, latching overflow at the ceiling. Once
-// overflowed the log stops growing: it is already useless for its purpose, and
-// continuing to accumulate would spend memory to no end.
+// appendLocked appends one change together with its resolution, latching
+// overflow at the ceiling. Once overflowed the log stops growing: it is already
+// useless for its purpose, and continuing to accumulate would spend memory — and
+// resolver calls — to no end, which is why the resolver runs only after both
+// guards.
 func (b *BuildLog) appendLocked(c Change) {
 	if b.overflowed {
 		return
@@ -158,7 +242,11 @@ func (b *BuildLog) appendLocked(c Change) {
 		b.changes = nil
 		return
 	}
-	b.changes = append(b.changes, c)
+	r := recordedChange{Change: c}
+	if b.resolve != nil {
+		r.current, r.eligible = b.resolve(c)
+	}
+	b.changes = append(b.changes, r)
 }
 
 // Len reports how many changes the log currently holds. It returns 0 for a log
@@ -201,6 +289,11 @@ type RegisterFunc func(name string, sub Subscriber) error
 // BeginBuild starts recording every change the manager fans out, and returns the
 // log to pass to [Manager.FinishBuild].
 //
+// resolve captures, as each change is recorded, the graph-dependent facts a
+// bound index would otherwise re-read when the change is replayed; see
+// [BuildResolver] for what those are and for the one case in which nil is
+// correct.
+//
 // Call it BEFORE the backfill scan reads anything. A change committed between
 // this call and the scan is recorded AND seen by the scan, which is harmless
 // (the replay is idempotent); a change committed before this call is seen by the
@@ -212,8 +305,8 @@ type RegisterFunc func(name string, sub Subscriber) error
 // [Manager.AbandonBuild]; a log left active makes every subsequent fan-out pay
 // to record into it and never releases the memory. The idiom is a deferred
 // AbandonBuild, which is a no-op once FinishBuild has retired the log.
-func (m *Manager) BeginBuild() *BuildLog {
-	b := &BuildLog{}
+func (m *Manager) BeginBuild(resolve BuildResolver) *BuildLog {
+	b := &BuildLog{resolve: resolve}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.builds = append(m.builds, b)
@@ -246,6 +339,13 @@ func (m *Manager) AbandonBuild(l *BuildLog) {
 // deliberate: it makes it impossible to register an index and forget to catch it
 // up.
 //
+// The replay goes through [ResolvedApplier.ApplyResolved] whenever the
+// subscriber implements it AND the log was given a [BuildResolver], so the
+// change is applied from the state captured when it was fanned out. Otherwise it
+// goes through [Subscriber.Apply], which resolves against the graph as it stands
+// NOW — correct only for a subscriber that resolves nothing from the graph. See
+// the file comment for the measurement behind that distinction (rmp #2793).
+//
 // Registrations performed through that function are indivisible with respect to
 // the fan-out — the property rmp #2703 established for an index and its numeric
 // companion, here supplied by the manager's own lock rather than by a caller's
@@ -266,7 +366,7 @@ func (m *Manager) FinishBuild(l *BuildLog, fn func(reg RegisterFunc) error) erro
 	// exclusive hold excludes, so no goroutine can be inside record while this
 	// runs and l.mu is uncontended.
 	l.mu.Lock()
-	overflowed, recorded := l.overflowed, l.changes
+	overflowed, recorded, resolved := l.overflowed, l.changes, l.resolve != nil
 	l.changes = nil
 	l.mu.Unlock()
 
@@ -285,8 +385,18 @@ func (m *Manager) FinishBuild(l *BuildLog, fn func(reg RegisterFunc) error) erro
 		// Catch up BEFORE the index is reachable: the replay must not be
 		// observable as a sequence of partial states to a reader, and inside
 		// this lock it cannot be.
+		//
+		// The type assertion is hoisted out of the loop: it is one answer for
+		// the whole replay, and a subscriber cannot change its own type
+		// half-way through one.
+		ra, isResolved := sub.(ResolvedApplier)
+		useResolved := isResolved && resolved
 		for k := range recorded {
-			sub.Apply(recorded[k])
+			if useResolved {
+				ra.ApplyResolved(recorded[k].Change, recorded[k].current, recorded[k].eligible)
+				continue
+			}
+			sub.Apply(recorded[k].Change)
 		}
 		m.indexes[name] = sub
 		return nil

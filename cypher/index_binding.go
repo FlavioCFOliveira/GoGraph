@@ -67,6 +67,91 @@ func projectStringPropValue(v any) (string, bool) {
 	return s, true
 }
 
+// nodeIndexEligible returns the [hash.Binding.Eligible] / [btree.Binding.Eligible]
+// predicate for an index scoped to labelID on g: the node must be live and carry
+// the label, read at g's instant.
+//
+// It exists as ONE function because three bindings and the build-log resolver
+// all need the identical verdict, and a fourth copy that drifted would make the
+// build-log replay disagree with the live fan-out — the class of defect rmp
+// #2793 closed. The label bitmap is the graph's own candidate structure and is
+// read as such, exactly as it was before the extraction; nothing about which
+// reads happen, or in which order, changed with it.
+func nodeIndexEligible(g *lpg.ReadView[string, float64], labelID uint32) func(graph.NodeID) bool {
+	nodeIdx := g.NodeIndex()
+	return func(id graph.NodeID) bool {
+		return !g.IsTombstoned(id) && nodeIdx.Has(labelID, id)
+	}
+}
+
+// nodeIndexRawValue returns the node's current value of prop on g, BEFORE any
+// index-key projection, so one reader serves the string index, the numeric
+// companion and the build-log resolver — each of which projects it differently.
+//
+// ok is false when the node is not live at g's instant, is unknown to the
+// mapper, or carries no such property, which are precisely the three cases in
+// which every [hash.Binding.CurrentValue] built on it must report no value.
+func nodeIndexRawValue(
+	g *lpg.ReadView[string, float64], prop string,
+) func(graph.NodeID) (lpg.PropertyValue, bool) {
+	mapper := g.AdjList().Mapper()
+	return func(id graph.NodeID) (lpg.PropertyValue, bool) {
+		if g.IsTombstoned(id) {
+			return lpg.PropertyValue{}, false
+		}
+		key, ok := mapper.Resolve(id)
+		if !ok {
+			return lpg.PropertyValue{}, false
+		}
+		return g.GetNodeProperty(key, prop)
+	}
+}
+
+// nodeIndexBuildResolver is the [index.BuildResolver] every CREATE INDEX build
+// records with: it answers, at the instant a change is fanned out, the two facts
+// a bound index on (label, prop) would otherwise re-read from the graph when
+// that change is replayed.
+//
+// It answers from the SAME closures the bindings themselves are built from, so
+// the replay's verdict is the live fan-out's verdict by construction rather than
+// by a comment asking two copies to agree.
+//
+// A change that concerns neither the bound property nor the bound label is
+// resolved to (nil, false) without touching the graph: every arm of the indexes
+// under build ignores such a change, so the recorded answer is never read, and
+// the fan-out must not pay a property lookup for it. The current value is
+// returned unprojected — an lpg.PropertyValue boxed in an any — because the
+// string index and its numeric companion project it differently; that boxing is
+// one allocation per RELEVANT change recorded during a build, bounded by
+// [index.MaxBuildLogChanges].
+func nodeIndexBuildResolver(
+	g *lpg.ReadView[string, float64], label, prop string,
+) index.BuildResolver {
+	labelID := uint32(g.Registry().Intern(label))
+	propID := uint32(g.PropertyKeys().Intern(prop))
+	eligible := nodeIndexEligible(g, labelID)
+	rawValue := nodeIndexRawValue(g, prop)
+	return func(c index.Change) (any, bool) {
+		switch c.Op {
+		case index.OpAddNodeLabel, index.OpRemoveNodeLabel:
+			if c.Label != labelID {
+				return nil, false
+			}
+		case index.OpSetNodeProperty, index.OpDelNodeProperty:
+			if c.Property != propID {
+				return nil, false
+			}
+		default:
+			return nil, false
+		}
+		pv, ok := rawValue(c.Node)
+		if !ok {
+			return nil, eligible(c.Node)
+		}
+		return pv, eligible(c.Node)
+	}
+}
+
 // newBoundNodeHashIndex builds a hash.Index[string] bound to (label, prop) on
 // g. The binding closures read g's FINAL state — Apply runs at commit time,
 // after the transaction's eager mutations — which is the state the index must
@@ -76,26 +161,16 @@ func newBoundNodeHashIndex(
 ) (*indexhash.Index[string], error) {
 	labelID := uint32(g.Registry().Intern(label))
 	propID := uint32(g.PropertyKeys().Intern(prop))
-	mapper := g.AdjList().Mapper()
-	nodeIdx := g.NodeIndex()
+	rawValue := nodeIndexRawValue(g, prop)
 	return indexhash.NewBound(indexhash.Binding[string]{
 		PropertyID: propID,
 		LabelID:    labelID,
 		Label:      label,
 		Property:   prop,
 		Project:    projectStringPropValue,
-		Eligible: func(id graph.NodeID) bool {
-			return !g.IsTombstoned(id) && nodeIdx.Has(labelID, id)
-		},
+		Eligible:   nodeIndexEligible(g, labelID),
 		CurrentValue: func(id graph.NodeID) (string, bool) {
-			if g.IsTombstoned(id) {
-				return "", false
-			}
-			key, ok := mapper.Resolve(id)
-			if !ok {
-				return "", false
-			}
-			pv, ok := g.GetNodeProperty(key, prop)
+			pv, ok := rawValue(id)
 			if !ok {
 				return "", false
 			}
@@ -240,11 +315,40 @@ func shouldPollWorkerRelative(i, lo int) bool {
 // The build log's own retirement stays with the caller: [index.Manager.AbandonBuild]
 // must run AFTER the registration, where releaseScanView must run before it, so
 // the two cannot share one closure.
-func (e *Engine) beginIndexBuild(idxMgr *index.Manager) (
+//
+// # Why the recording carries a resolver (rmp #2793)
+//
+// A recorded change is replayed by [index.Manager.FinishBuild] after the whole
+// backfill, and a bound index's own Apply answers two questions about the
+// changed node FROM THE GRAPH — eligibility, and the current value of the bound
+// property — which at replay time is a different graph. It is the LIVE graph, so
+// it carries every open transaction's eager, uncommitted writes, exactly as the
+// backfill scan did before rmp #2778 bound it to a snapshot.
+//
+// Measured on the hash path before the resolver existed: with one change in the
+// log and one open transaction, the replay of a label add inserted the
+// transaction's uncommitted 'ghost' and lost the committed 'real-x'; an
+// uncommitted DETACH DELETE made the replay of a property set drop the committed
+// value entirely; and an uncommitted label add made it fabricate an entry for a
+// node the committed graph gives no such label. In each case the transaction
+// then rolled back and nothing inverted the entry, because its
+// [exec.IndexBuffer] describes changes that were never fanned out.
+//
+// The snapshot the scan reads is NOT the answer here, and that is worth stating
+// because it is the obvious first move: it is taken before the recording's
+// changes were committed, so resolving against it would suppress every change
+// that arrived during the build — reintroducing rmp #2738's loss to fix rmp
+// #2793's fabrication. The resolution has to happen when the change is RECORDED,
+// which is what [nodeIndexBuildResolver] does and what makes the replay produce
+// precisely the effects the live fan-out would have produced.
+func (e *Engine) beginIndexBuild(idxMgr *index.Manager, label, prop string) (
 	log *index.BuildLog, scanView *lpg.ReadView[string, float64], releaseScanView func(),
 ) {
-	// Recording FIRST, snapshot SECOND. Do not reorder — see above.
-	log = idxMgr.BeginBuild()
+	// Recording FIRST, snapshot SECOND. Do not reorder — see above. The resolver
+	// reads the LIVE view deliberately: it runs at fan-out time, where the live
+	// state is the committing transaction's final state, which is the same
+	// instant and the same view the live fan-out resolves at.
+	log = idxMgr.BeginBuild(nodeIndexBuildResolver(e.g.ReadAt(nil), label, prop))
 	snap := e.g.BeginRead()
 	released := false
 	return log, e.g.ReadAt(snap), func() {
@@ -545,26 +649,16 @@ func newBoundNodeBTreeIndexNumeric(
 ) (*indexbtree.Index[float64], error) {
 	labelID := uint32(g.Registry().Intern(label))
 	propID := uint32(g.PropertyKeys().Intern(prop))
-	mapper := g.AdjList().Mapper()
-	nodeIdx := g.NodeIndex()
+	rawValue := nodeIndexRawValue(g, prop)
 	return indexbtree.NewBound(indexbtree.Binding[float64]{
 		PropertyID: propID,
 		LabelID:    labelID,
 		Label:      label,
 		Property:   prop,
 		Project:    projectNumericPropValue,
-		Eligible: func(id graph.NodeID) bool {
-			return !g.IsTombstoned(id) && nodeIdx.Has(labelID, id)
-		},
+		Eligible:   nodeIndexEligible(g, labelID),
 		CurrentValue: func(id graph.NodeID) (float64, bool) {
-			if g.IsTombstoned(id) {
-				return 0, false
-			}
-			key, ok := mapper.Resolve(id)
-			if !ok {
-				return 0, false
-			}
-			pv, ok := g.GetNodeProperty(key, prop)
+			pv, ok := rawValue(id)
 			if !ok {
 				return 0, false
 			}
@@ -649,26 +743,16 @@ func newBoundNodeBTreeIndex(
 ) (*indexbtree.Index[string], error) {
 	labelID := uint32(g.Registry().Intern(label))
 	propID := uint32(g.PropertyKeys().Intern(prop))
-	mapper := g.AdjList().Mapper()
-	nodeIdx := g.NodeIndex()
+	rawValue := nodeIndexRawValue(g, prop)
 	return indexbtree.NewBound(indexbtree.Binding[string]{
 		PropertyID: propID,
 		LabelID:    labelID,
 		Label:      label,
 		Property:   prop,
 		Project:    projectStringPropValue,
-		Eligible: func(id graph.NodeID) bool {
-			return !g.IsTombstoned(id) && nodeIdx.Has(labelID, id)
-		},
+		Eligible:   nodeIndexEligible(g, labelID),
 		CurrentValue: func(id graph.NodeID) (string, bool) {
-			if g.IsTombstoned(id) {
-				return "", false
-			}
-			key, ok := mapper.Resolve(id)
-			if !ok {
-				return "", false
-			}
-			pv, ok := g.GetNodeProperty(key, prop)
+			pv, ok := rawValue(id)
 			if !ok {
 				return "", false
 			}
@@ -1116,7 +1200,7 @@ func (e *Engine) createHashIndexLocked(ctx context.Context, p *ir.CreateIndex, i
 	// the recording starts — the ordering, and why the scan must not read the
 	// live property bag at all, are in [Engine.beginIndexBuild] (rmp #2738,
 	// rmp #2778).
-	buildLog, scanView, releaseScanView := e.beginIndexBuild(idxMgr)
+	buildLog, scanView, releaseScanView := e.beginIndexBuild(idxMgr, p.Label, p.Property)
 	defer idxMgr.AbandonBuild(buildLog)
 	defer releaseScanView()
 

@@ -78,6 +78,43 @@ type Subscriber interface {
 	Kind() string
 }
 
+// ResolvedApplier is implemented by a [Subscriber] whose Apply resolves part of
+// a [Change] against the graph rather than from the change alone, and which can
+// instead be handed that resolution as data.
+//
+// # Why the interface exists
+//
+// A bound index answers two questions about the changed node that the Change
+// does not carry: is the node currently ELIGIBLE for this index (live, and
+// carrying the bound label), and what is its CURRENT value of the bound property
+// (a label add/remove carries no property payload). On the live fan-out both are
+// asked at the instant the change is fanned out, which is the instant the
+// committing transaction's state is final — the state the index must converge
+// to.
+//
+// The build-log replay ([Manager.FinishBuild]) applies a change LATER, and
+// asking those questions then answers about a different instant. rmp #2793
+// measured the consequence: a second transaction's eager, uncommitted mutation,
+// opened after the change was recorded and still open at the replay, made the
+// replay insert a value nothing had committed and suppress the value the graph
+// did hold. ApplyResolved closes that by taking the two answers from the log,
+// where they were captured at fan-out time by the log's [BuildResolver].
+//
+// current is the node's raw property value as of the recording, in whatever
+// representation the subscriber's own value projection accepts, and is nil when
+// the node was absent or carried no such property. eligible is the recorded
+// answer to the eligibility question. A subscriber must apply c using exactly
+// the rules its Apply uses, substituting these two values for its own reads, so
+// that the replay produces precisely the effects the live fan-out would have
+// produced.
+//
+// Implementations must be safe for concurrent use on the same terms as
+// [Subscriber.Apply].
+type ResolvedApplier interface {
+	Subscriber
+	ApplyResolved(c Change, current any, eligible bool)
+}
+
 // Serializer is implemented by indexes that can persist and restore
 // their internal state through an [io.Writer] / [io.Reader] pair.
 // The Manager type-asserts every registered [Subscriber] to this
