@@ -29,9 +29,20 @@ import (
 //	after      = ABSENT
 //
 // Two acknowledged transactions gone, and the only trace was a TailErr that
-// [tailErrIsCorruption] classifies as benign — so Open returned success, no
-// corruption metric was incremented, and nothing was logged. The mechanism: the
-// encoder wrote the nested element as (kind 7 | length 0), the decoder refuses
+// [tailErrIsCorruption] classified as benign — so Open returned success, no
+// corruption metric was incremented, and nothing was logged.
+//
+// That misclassification was a SECOND, independent defect, and it is no longer
+// current behaviour: rmp #2794 gave the stop reason a sentinel
+// ([ErrCommittedTxnCorruptOp]), so the same state now reports IsClean() ==
+// false, increments a counter and logs a structured warning (the open still
+// succeeds — see the recorded departure note on [tailErrIsCorruption]). The
+// listing above is the historical measurement, not the contract; the current
+// contract is gated by
+// TestRecovery_CorruptOpInsideCommittedTxn_NotCleanAndDiagnosable_2794.
+//
+// The mechanism of THIS defect: the encoder
+// wrote the nested element as (kind 7 | length 0), the decoder refuses
 // kind 7, and that refusal inside an already-committed v3 transaction stops
 // replay for the rest of the file.
 //

@@ -1258,24 +1258,32 @@ containing the rebuilt `*lpg.Graph[N, W]` plus:
   (`wal.ErrTornFrame`) is the normal crash-after-fsync state and is
   tolerated; genuine corruption inside an already-durable frame
   (`wal.ErrCRCMismatch`, `wal.ErrBadMagic`,
-  `wal.ErrUnsupportedVersion`, `wal.ErrFrameTooLarge`, or
-  `recovery.ErrUnsupportedRecordVersion`) is surfaced.
+  `wal.ErrUnsupportedVersion`, `wal.ErrFrameTooLarge`,
+  `recovery.ErrUnsupportedRecordVersion`, or
+  `recovery.ErrCommittedTxnCorruptOp`) is surfaced.
 
 On genuine corruption, `recovery.Open` / `OpenCtx` are **fail-stop**:
 the function returns that error (the committed prefix is still placed
 in `Result.Graph` for diagnostics) instead of returning nil and
 hiding the damage in `TailErr`. A benign torn tail returns a nil
-error and the committed prefix. The boolean helper
-`Result.IsClean()` is the exact complement of this contract — it
-returns false if and only if the function returned an error — so a
-recover-then-append caller can branch on either signal:
+error and the committed prefix.
+
+`Result.IsClean()` is the **stronger** of the two signals, and the one a
+recover-then-append caller must branch on. It is false for every case in which
+the function returns an error, and for one case in which the function returns
+**nil**: `recovery.ErrCommittedTxnCorruptOp`, an undecodable op inside an
+already-committed transaction. Such a directory opens — the committed prefix is
+intact, and the discarded suffix is irrecoverable, so refusing the open would
+buy no repair — but it did not replay cleanly and must not be appended to:
 
 ```go
 res, err := recovery.Open[int64, float64](dir, opts)
 if err != nil {
     return err // corrupt WAL: do not append onto it
 }
-// equivalently: if !res.IsClean() { ... }
+if !res.IsClean() {
+    return res.TailErr // did not replay cleanly: do not append onto it either
+}
 w, err := wal.Open(walPath) // safe to append: clean or benign torn tail
 ```
 
@@ -1283,7 +1291,34 @@ Appending to a corrupt WAL would permanently embed the corruption and
 silently drop every committed op that followed the bad frame, so the
 safe behaviour — refusing to append — is the default. Every shipped
 example under `examples/` that recovers then reopens the WAL for
-append checks this signal before doing so.
+append checks `IsClean()` before doing so.
+
+### `ErrCommittedTxnCorruptOp`: not clean, but still opens
+
+An op that cannot be decoded and applied inside an **already-durable,
+already-committed** v3 transaction stops replay at that frame. The transaction
+carrying it is not applicable as a unit, and every transaction *after* it is
+discarded too — even though each of those commits was acknowledged. Those ops
+are irrecoverable.
+
+The reported outcome is therefore deliberately asymmetric:
+
+| Signal | Value |
+| --- | --- |
+| `recovery.Open` / `OpenCtx` return value | `nil` — the directory opens, `Result.Graph` holds the committed prefix |
+| `Result.TailErr` | wraps `recovery.ErrCommittedTxnCorruptOp`, naming the transaction sequence, the op's index within it, and the WAL frame |
+| `Result.IsClean()` | **`false`** |
+| Metric | `store.recovery.openCodec.committedTxnCorruptOp` incremented |
+| Log | a structured `slog` warning at `WARN` naming the frame and the transaction |
+
+The open is allowed to succeed because failing it would convert an affected
+directory from "opens, and reports that it lost a suffix" into "does not open,
+ever, with no repair path" — there is nothing left to recover once the bytes are
+undecodable, so a refusal costs the whole service and buys nothing. What the
+fail-stop mandate actually forbids is the *silence*, and that is what is
+removed: the state is not clean, it is counted, and it is logged. The reasoning
+is recorded in the `tailErrIsCorruption` godoc in `store/recovery`, and is a
+decision rather than an oversight (rmp #2794).
 
 Component apply order during open is fixed. When the snapshot is v3
 (carries `mapper.bin`) the mapper is restored first and the snapshot
