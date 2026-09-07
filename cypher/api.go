@@ -1919,8 +1919,11 @@ func (e *Engine) registerRecoveredConstraints(defs []ConstraintDef) {
 			e.constraintReg.RegisterUnique(d.Label, d.Property, idxName)
 			e.constraintReg.SetConstraintName(true, d.Label, d.Property, d.Name)
 			// Recovery must complete: a background context never cancels, so
-			// the scan never returns an error here.
-			values, _, _ := e.scanLabelProperty(context.Background(), d.Label, d.Property)
+			// the scan never returns an error here. LIVE view: recovery runs
+			// before the engine is published, so no transaction can be open and
+			// the live value IS the committed one (rmp #2778, rmp #2798).
+			var values []lpg.PropertyValue
+			_, _ = e.scanLabelProperty(context.Background(), e.g.ReadAt(nil), d.Label, d.Property, &values)
 			e.constraintReg.SeedUniqueValuesIgnoringDuplicates(d.Label, d.Property, values)
 		} else {
 			e.constraintReg.RegisterNotNull(d.Label, d.Property)
@@ -3981,13 +3984,13 @@ func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstra
 	// ctx-cancellable (rmp #1872): nothing has been registered yet, so a
 	// cancellation here aborts cleanly with no unwind needed.
 	//
-	// THIS SCAN READS THE LIVE GRAPH, AND THAT IS DELIBERATE (rmp #2792). It is
-	// the VALIDATION scan only; the UNIQUE value-set is no longer seeded from it
-	// (see the barrier below). Its live read is load-bearing, and that was
-	// measured rather than reasoned about: an explicit transaction that has
-	// EAGERLY written a duplicate has not committed it, so a snapshot read would
-	// ACCEPT the constraint — and nothing would then refuse that transaction's
-	// commit, because UNIQUE is reserved at WRITE time
+	// THIS SCAN READS THE LIVE GRAPH, AND THAT IS DELIBERATE (rmp #2792, kept by
+	// rmp #2798). It is the VALIDATION scan only; the UNIQUE value-set is no
+	// longer seeded from it (see the barrier below). Its live read is
+	// load-bearing, and that was measured rather than reasoned about: an explicit
+	// transaction that has EAGERLY written a duplicate has not committed it, so a
+	// snapshot read would ACCEPT the constraint — and nothing would then refuse
+	// that transaction's commit, because UNIQUE is reserved at WRITE time
 	// (cypher/constraint_check.go) and this transaction's statement ran before
 	// the constraint existed. Measured on this build: with the live read the DDL
 	// is refused ("pre-existing data contains duplicate value"); with a snapshot
@@ -3995,11 +3998,36 @@ func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstra
 	// the same value under an active UNIQUE constraint. A conservatively refused
 	// DDL is a poor answer; a Consistency breach is a different category.
 	//
+	// The SAME argument holds for NOT NULL, in the mirror direction and with the
+	// same verdict — measured, rmp #2798. An open transaction that has eagerly
+	// NULLED a committed property makes a compliant node look violating, so the
+	// live scan refuses a DDL that the committed data would have allowed. That
+	// conservative refusal is deliberately kept, because the alternative is not
+	// symmetric: with validation moved to the snapshot alone, the DDL SUCCEEDS,
+	// the transaction's COMMIT of the removal returns nil, and a committed node
+	// carries no value under an active NOT NULL constraint. Nothing refuses that
+	// commit for the same shape of reason as UNIQUE — [ExplicitTx] allocates its
+	// touched-node set at BeginTx, and a transaction that began before the
+	// constraint existed has none, so its commit-time NOT NULL check is a no-op.
+	// Both single-view designs are therefore unsound, in opposite directions, and
+	// the committed-state scan below is ADDED to this one rather than replacing it.
+	//
 	// The converse hole — a COMMITTED duplicate that an open transaction has
 	// eagerly removed, which this live scan cannot see — is closed by the seed
 	// inside the barrier, which reads committed state and lets SeedUniqueValues
-	// refuse.
-	values, anyNull, serr := e.scanLabelProperty(ctx, p.Label, p.Property)
+	// refuse. Its NOT NULL counterpart is committedNull, likewise inside the
+	// barrier.
+	//
+	// vals is collected ONLY for UNIQUE. NOT NULL reads nothing but anyNull —
+	// validatePreExisting ignores the values and there is no value-set to seed —
+	// so a NOT NULL DDL used to fill, and discard, one PropertyValue per labelled
+	// node.
+	var values []lpg.PropertyValue
+	var vals *[]lpg.PropertyValue
+	if kind == exec.ConstraintUnique {
+		vals = &values
+	}
+	anyNull, serr := e.scanLabelProperty(ctx, e.g.ReadAt(nil), p.Label, p.Property, vals)
 	if serr != nil {
 		return nil, serr
 	}
@@ -4011,11 +4039,14 @@ func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstra
 	// barrier (ApplyAtomically) so concurrent Graph.View readers never observe
 	// the constraint or its backing index in a partially-constructed state.
 	// The visibility barrier is not re-entrant, so nothing inside the closure may
-	// call Graph.View or Graph.ApplyAtomically. scanLabelProperty is outside it for
-	// the ORDERING reason rather than that one — it must complete before the
-	// registration it validates — and no longer takes any barrier itself, so it is
-	// no longer constrained to sit outside; commitConstraintTx only appends a WAL
-	// frame and is outside so the append is not held under visMu.
+	// call Graph.View or Graph.ApplyAtomically. The LIVE scanLabelProperty above is
+	// outside it for the ORDERING reason rather than that one — it must complete
+	// before the registration it validates — and takes no barrier itself, so it is
+	// not constrained to sit outside; commitConstraintTx only appends a WAL frame
+	// and is outside so the append is not held under visMu. The COMMITTED-state NOT
+	// NULL scan is INSIDE, at the top of the closure, and calls neither View nor
+	// ApplyAtomically — see the comment on it for why that placement is what makes
+	// its observation gap-free (rmp #2798).
 	//
 	// Lock ordering: the caller holds [Engine.schemaMu] exclusively, and schemaMu is
 	// taken before visMu everywhere in the write path — the ApplyAtomically call
@@ -4045,6 +4076,64 @@ func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstra
 		// on every real path the backfill's own reads replace it (rmp #2792).
 		seedValues := values
 		op := exec.NewCreateConstraintOp(p.Name, p.Label, p.Property, kind, p.IfNotExists, idxMgr, e.constraintReg, e.ClearPlanCache)
+		if kind == exec.ConstraintNotNull {
+			// COMMITTED-STATE NOT NULL VALIDATION (rmp #2798).
+			//
+			// The live scan above cannot see that a node LACKS the property when an
+			// open transaction has eagerly FILLED it: the fill has not committed, the
+			// live read finds a value, and the DDL registered a NOT NULL constraint
+			// over a committed node that carries nothing. Measured on the pre-fix
+			// build, one goroutine and no concurrency at all: after an eager
+			// `SET n.email = 'x@x'` on a node with no committed email, CREATE
+			// CONSTRAINT returned err = <nil> with the constraint REGISTERED, and the
+			// rollback then left that node with no email under an active constraint.
+			// That is an ACID Consistency breach, and it is the same defect as
+			// rmp #2778 and rmp #2792 from the other side.
+			//
+			// This scan reads COMMITTED state, and it is ADDED to the live scan, not
+			// substituted for it. Either view alone is unsound — see the measurement
+			// recorded above the live scan — so the constraint is registered only when
+			// NEITHER the committed state NOR any in-flight eager state violates it.
+			// The refusal is deliberately conservative in the direction where a
+			// conservative answer is merely unhelpful, and never in the direction where
+			// it would be a breach.
+			//
+			// PLACED INSIDE THE BARRIER, immediately before applyDDLOp, for the reason
+			// rmp #2792 established for the UNIQUE seed and verified on this very path:
+			// commit-time fan-out runs under [lpg.Graph.ApplyInVersionedTx], which
+			// holds the barrier SHARED, so while this EXCLUSIVE hold is in force no
+			// transaction can commit at all. There is therefore NO window between this
+			// observation of the committed state and the registration it authorises —
+			// which the same scan placed outside the barrier could not claim, because
+			// [ExplicitTx] does not take the schema gate and its commit is not excluded
+			// by the caller's StrongLock.
+			//
+			// Re-entrancy: [Engine.scanLabelProperty] takes no barrier and calls
+			// neither Graph.View nor Graph.ApplyAtomically, and BeginRead/EndRead touch
+			// only the reclamation horizon (atomics) and the MVCC clock — never visMu,
+			// never the schema gate. The documented order schemaGate -> writer
+			// admission -> visMu is untouched. The horizon slot is returned before
+			// applyDDLOp, panic included, hence the closure.
+			//
+			// Nothing is registered yet, so a violation — or a ctx cancellation, which
+			// this scan polls — aborts the whole DDL cleanly with no unwind needed.
+			// validatePreExisting is reused so the refusal wording and the
+			// [exec.ErrConstraintViolation] wrap have one source of truth.
+			var committedNull bool
+			cerr := func() error {
+				snap := e.g.BeginRead()
+				defer e.g.EndRead(snap)
+				var serr error
+				committedNull, serr = e.scanLabelProperty(ctx, e.g.ReadAt(snap), p.Label, p.Property, nil)
+				return serr
+			}()
+			if cerr != nil {
+				return cerr
+			}
+			if err := validatePreExisting(kind, p.Label, p.Property, nil, committedNull); err != nil {
+				return err
+			}
+		}
 		if kind == exec.ConstraintUnique {
 			boundIdx, bidxErr := newBoundNodeHashIndex(e.g.ReadAt(nil), p.Label, p.Property)
 			if bidxErr == nil {
@@ -4277,8 +4366,11 @@ func (e *Engine) rewindConstraintDrop(cause error, name, label, prop string, kin
 	}
 	if kind == exec.ConstraintUnique {
 		// The rewind is uncancellable by design (see runDDLOp below): a
-		// background context never cancels, so the scan cannot error.
-		values, _, _ := e.scanLabelProperty(context.Background(), label, prop)
+		// background context never cancels, so the scan cannot error. LIVE view,
+		// matching the backfill above and the CREATE CONSTRAINT path this
+		// rewinds; moving it is rmp #2799's decision, not this call's.
+		var values []lpg.PropertyValue
+		_, _ = e.scanLabelProperty(context.Background(), e.g.ReadAt(nil), label, prop, &values)
 		e.constraintReg.SeedUniqueValuesIgnoringDuplicates(label, prop, values)
 	}
 	return cause
@@ -4373,12 +4465,26 @@ func commitIndexTx(tx *txn.Tx[string, float64], opKind txn.OpKind, kind txn.Inde
 	return tx.CommitWALOnly(0)
 }
 
-// scanLabelProperty walks the live (non-tombstoned) nodes carrying label and
-// returns the values of their prop property and whether any such node lacks the
-// property (a null for the NOT NULL check). It is used both to validate
-// pre-existing data on CREATE CONSTRAINT and to re-seed a UNIQUE value-set on
-// recovery. The scan is O(N) over interned nodes; CREATE CONSTRAINT is a rare
-// schema operation, so the cost is acceptable and bounded by the graph size.
+// scanLabelProperty walks the nodes rv can see that carry label and reports
+// whether any of them lacks prop (a null for the NOT NULL check). When vals is
+// non-nil it also appends the value each such node holds under prop. It is used
+// to validate pre-existing data on CREATE CONSTRAINT and to re-seed a UNIQUE
+// value-set on recovery. The scan is O(N) over interned nodes; CREATE CONSTRAINT
+// is a rare schema operation, so the cost is acceptable and bounded by the graph
+// size.
+//
+// rv decides WHICH STATE is scanned, and that is the caller's whole choice of
+// semantics — the same parameter, for the same reason, as
+// [Engine.backfillNodeHashIndex] (rmp #2778). e.g.ReadAt(nil) reads the LIVE
+// stored value, which carries an explicit transaction's eager, uncommitted
+// mutations; a view bound to a [lpg.Snapshot] reads COMMITTED state. CREATE
+// CONSTRAINT ... IS NOT NULL needs BOTH and neither alone, which is measured
+// rather than reasoned about; see [Engine.createConstraintLocked].
+//
+// vals is nil for a caller that only asks the null question, and that is not a
+// micro-optimisation: a NOT NULL DDL used to collect one [lpg.PropertyValue] per
+// labelled node into a slice that nothing then read, and the committed-state
+// scan this function now also serves would have doubled it.
 //
 // The scan is two-phase to preserve liveness under concurrent writers (task
 // #1339): [graph.Mapper.Walk] holds each shard's read lock while iterating
@@ -4392,25 +4498,28 @@ func commitIndexTx(tx *txn.Tx[string, float64], opKind txn.OpKind, kind txn.Inde
 // tombstone, label, and property state after every shard lock is released. The
 // keys are interned and immutable, so resolving them outside the walk is safe.
 //
-// It takes NO BARRIER. Both phases used to run inside lpg.Graph.View (task
-// #1341) for CATALOG stability across the scan. [Engine.schemaMu] supplies that
-// already, and strictly better: every catalog mutator — both [lpg.Graph.ApplyAtomically]
-// call sites, and every DDL entry point (runCreateBTreeIndex, runCreateHashIndex,
-// runDropIndex, runCreateConstraint, runDropConstraint) — holds schemaMu
-// EXCLUSIVELY, while an ordinary write holds it shared. Each of this function's three
-// callers is therefore already covered: createConstraintLocked and rewindConstraintDrop
-// run under runCreateConstraint's and runDropConstraint's exclusive hold, and
-// registerRecoveredConstraints runs inside NewEngineWithOptions before the engine is
-// published to anyone. Dropping the View also removes a lock-order hazard, since it
-// nested visMu inside schemaMu purely to obtain what schemaMu already guaranteed.
+// It takes NO BARRIER of its own, and it is safe to call from INSIDE one, which
+// the committed-state NOT NULL scan relies on. Both phases used to run inside
+// lpg.Graph.View (task #1341) for CATALOG stability across the scan.
+// [Engine.schemaMu] supplies that already, and strictly better: every catalog
+// mutator — both [lpg.Graph.ApplyAtomically] call sites, and every DDL entry point
+// (runCreateBTreeIndex, runCreateHashIndex, runDropIndex, runCreateConstraint,
+// runDropConstraint) — holds schemaMu EXCLUSIVELY, while an ordinary write holds it
+// shared. Each of this function's callers is therefore already covered:
+// createConstraintLocked and rewindConstraintDrop run under runCreateConstraint's and
+// runDropConstraint's exclusive hold, and registerRecoveredConstraints runs inside
+// NewEngineWithOptions before the engine is published to anyone. Dropping the View
+// also removes a lock-order hazard, since it nested visMu inside schemaMu purely to
+// obtain what schemaMu already guaranteed.
 //
-// It never gave the scan a consistent view of DATA and still does not: since rmp #2320
-// an ordinary write holds the barrier SHARED, so a value a concurrent writer is adding
-// may or may not be seen here. That is sound for what this scan is FOR — it
-// pre-validates a constraint that is not yet registered, and every write after
-// registration is checked by the enforcement path — so a value added during the
-// scan is caught there rather than missed. A scan that needed a consistent data
-// view would take a snapshot instead.
+// On a LIVE view it never gave the scan a consistent view of DATA and still does
+// not: since rmp #2320 an ordinary write holds the barrier SHARED, so a value a
+// concurrent writer is adding may or may not be seen. That is sound for what the
+// live scan is FOR — it pre-validates a constraint that is not yet registered, and
+// every write after registration is checked by the enforcement path — so a value
+// added during the scan is caught there rather than missed. A caller that needs a
+// consistent data view passes a snapshot-bound rv, which is precisely what rmp
+// #2798 added on the NOT NULL path.
 //
 // The #1339 deadlock is prevented by the TWO-PHASE structure below, not by any lock:
 // phase 1 snapshots (id, key) pairs under the mapper shard locks and phase 2 resolves
@@ -4420,10 +4529,14 @@ func commitIndexTx(tx *txn.Tx[string, float64], opKind txn.OpKind, kind txn.Inde
 // (rmp #1872 — this scan polled no cancellation at all before, leaving a large
 // CREATE CONSTRAINT, NOT NULL in particular, uncancellable end-to-end since no
 // other step in createConstraintLocked is ctx-aware). On cancellation err is
-// non-nil and values/anyNull must be ignored — nothing has been registered
-// yet at any call site, so aborting here is always a clean, atomic no-op.
-func (e *Engine) scanLabelProperty(ctx context.Context, label, prop string) (values []lpg.PropertyValue, anyNull bool, err error) {
-	mapper := e.g.AdjList().Mapper()
+// non-nil and anyNull, plus whatever was appended to vals, must be ignored —
+// nothing has been registered yet at any call site, so aborting here is always a
+// clean, atomic no-op.
+func (e *Engine) scanLabelProperty(
+	ctx context.Context, rv *lpg.ReadView[string, float64],
+	label, prop string, vals *[]lpg.PropertyValue,
+) (anyNull bool, err error) {
+	mapper := rv.AdjList().Mapper()
 
 	type nodeRef struct {
 		key string
@@ -4441,24 +4554,26 @@ func (e *Engine) scanLabelProperty(ctx context.Context, label, prop string) (val
 	for i := range refs {
 		if i&pollGranularityMask == 0 {
 			if cerr := ctx.Err(); cerr != nil {
-				return values, anyNull, cerr
+				return anyNull, cerr
 			}
 		}
 		r := refs[i]
-		if e.g.IsTombstoned(r.id) {
+		if rv.IsTombstoned(r.id) {
 			continue
 		}
-		if !e.g.HasNodeLabel(r.key, label) {
+		if !rv.HasNodeLabel(r.key, label) {
 			continue
 		}
-		v, ok := e.g.GetNodeProperty(r.key, prop)
+		v, ok := rv.GetNodeProperty(r.key, prop)
 		if !ok {
 			anyNull = true
 			continue
 		}
-		values = append(values, v)
+		if vals != nil {
+			*vals = append(*vals, v)
+		}
 	}
-	return values, anyNull, err
+	return anyNull, err
 }
 
 // validatePreExisting enforces the at-creation invariant for CREATE CONSTRAINT

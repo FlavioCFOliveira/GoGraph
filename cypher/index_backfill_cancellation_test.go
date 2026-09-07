@@ -234,7 +234,7 @@ func TestCreateConstraint_NotNull_ContextCancelled(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, _, err := e.scanLabelProperty(ctx, "Acct", "email"); err == nil {
+	if _, err := e.scanLabelProperty(ctx, e.g.ReadAt(nil), "Acct", "email", nil); err == nil {
 		t.Fatal("scanLabelProperty with a cancelled context returned nil error, want context.Canceled")
 	} else if !errors.Is(err, context.Canceled) {
 		t.Fatalf("scanLabelProperty error = %v, want context.Canceled", err)
@@ -243,7 +243,8 @@ func TestCreateConstraint_NotNull_ContextCancelled(t *testing.T) {
 	// Sanity: the same scan with a live context still returns correct data,
 	// proving the cancellation check does not interfere with the ordinary
 	// path (mirrors TestBackfillNodeBTreeIndex_NotCancelled_StillCompletes).
-	values, anyNull, err := e.scanLabelProperty(context.Background(), "Acct", "email")
+	var values []lpg.PropertyValue
+	anyNull, err := e.scanLabelProperty(context.Background(), e.g.ReadAt(nil), "Acct", "email", &values)
 	if err != nil {
 		t.Fatalf("scanLabelProperty with a live context: %v", err)
 	}
@@ -276,13 +277,14 @@ func TestCreateConstraint_Unique_ContextCancelled(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, _, err := e.scanLabelProperty(ctx, "Acct", "email"); err == nil {
+	if _, err := e.scanLabelProperty(ctx, e.g.ReadAt(nil), "Acct", "email", nil); err == nil {
 		t.Fatal("scanLabelProperty with a cancelled context returned nil error, want context.Canceled")
 	} else if !errors.Is(err, context.Canceled) {
 		t.Fatalf("scanLabelProperty error = %v, want context.Canceled", err)
 	}
 
-	values, _, err := e.scanLabelProperty(context.Background(), "Acct", "email")
+	var values []lpg.PropertyValue
+	_, err := e.scanLabelProperty(context.Background(), e.g.ReadAt(nil), "Acct", "email", &values)
 	if err != nil {
 		t.Fatalf("scanLabelProperty with a live context: %v", err)
 	}
