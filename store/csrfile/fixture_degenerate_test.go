@@ -102,9 +102,14 @@ var degenerateSpecCases = []struct {
 		wantRefus: false, buildable: true, wantOrder: 2, wantSize: 4,
 	},
 	{
-		// The spec cmd/fmtfixture drives to regenerate testdata/v1/sample.csr.
-		// If the fix moved this, the committed golden file would no longer be
-		// reproducible.
+		// The spec cmd/fmtfixture drives when it writes a csrfile sample.
+		//
+		// It does NOT reproduce the committed testdata/v1/sample.csr, and no
+		// spec can: that file's payload was drawn under a per-process random
+		// shard-hash seed (rmp #2752). What this row pins is the spec's SHAPE —
+		// 96 draws over 32 vertices collapsing to 94 distinct edges on a simple
+		// graph — which is where TestCompat_V1FixtureMaps' frozen NEdges=94
+		// comes from.
 		name: "accept/fmtfixture-production-spec", spec: FixtureSpec{Vertices: 32, Edges: 96, Seed: 0x1337},
 		wantRefus: false, buildable: true, wantOrder: 32, wantSize: 94,
 	},
