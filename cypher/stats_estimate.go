@@ -23,7 +23,7 @@ package cypher
 //   - join_reorder_plan.go consults them for the emitted-row cardinality of a
 //     FILTERED component, and may drive a disjoint Cartesian join with the other
 //     arm as a result. That decision is vetoed by [planStaysDefault] for every
-//     verdict but an MCV-exact equality or a fresh histogram range, and for the
+//     verdict but a FRESH MCV-exact equality or a fresh histogram range, and for the
 //     latter it is taken over the certified error interval rather than the point
 //     estimate.
 //
@@ -261,15 +261,70 @@ func isNaNValue(v expr.Value) bool {
 	return ok && math.IsNaN(float64(f))
 }
 
+// statsSnapshotFresh reports whether a published statistics snapshot is still
+// fresh enough for a verdict a reader — or the planner — may treat as
+// trustworthy. It is the module's ONE staleness formulation, and both the
+// equality provider and the reorder gate's screen go through it.
+//
+// The rule is the design's (docs/statistics-design.md §3): demote once the
+// accumulated-write fraction Δ/N reaches the firing region b − 1/B, or once the
+// accumulated deletes make the HLL's NDV untrustworthy and a rebuild is due.
+//
+// # The denominator, and why the live count alone is not enough (rmp #2772)
+//
+// N is the SMALLER of two numbers that are always available:
+//
+//   - the statistic's own build-time label count ([stats.Stats.LabelCount]), which
+//     is recorded in the snapshot and needs no resolver at all; and
+//   - the caller's live population, when it is known ([labelPopulation]).
+//
+// Taking the smaller maximises Δ/N, which is the conservative direction: it demotes
+// sooner, never later. The live count ALONE is not sufficient, and the gap is
+// measured rather than argued. A bundle built over 1000 `:Person` rows all carrying
+// `grp = 'hot'`, grown by 100 further rows that also carry it, has Δ = 100 against a
+// live count of 1100: Δ/live = 0.0909 is UNDER the 0.0961 threshold, so the live
+// count alone calls the snapshot fresh — and its most-common-value entry then reports
+// 1000 rows for a predicate that now matches 1100, rendered as a bare, unmarked
+// number. Δ/N0 = 0.1000 is over the threshold and rejects it. That case is
+// [TestStatsEqualityFreshness_GrowthAloneDemotesTheMCVCount].
+//
+// An UPPER bound on the population ([labelBounder.ResolveLabelCountBound], the
+// capability built for rmp #2392) is the wrong instrument for the mirror-image
+// reason: it over-states N, under-states Δ/N, and would keep the planner trusting a
+// statistic it should have demoted (docs/statistics-design.md §0, corrected at rmp
+// #2771). Neither number used here is an upper bound — N0 is the exact live count
+// stamped at build time, and [labelPopulation] carries an exact live count or the
+// honest "not known".
+func statsSnapshotFresh(st *stats.Stats[expr.Value], pop labelPopulation) bool {
+	if st == nil || st.NeedsRebuildForDeletes(statsDeleteRebuildTol) {
+		return false
+	}
+	n := float64(st.LabelCount())
+	if pop.known && pop.n < n {
+		n = pop.n
+	}
+	if n <= 0 {
+		// Guard the staleness denominator. Without it the fraction is 0/0 — NaN —
+		// and NaN fails every comparison, so a snapshot describing a population that
+		// no longer exists would be reported fresh.
+		return false
+	}
+	return float64(st.Delta())/n < statsRangeBreakEven-1.0/float64(statsHistogramBuckets)
+}
+
 // statsEqualityEstimate estimates the selectivity of n.<prop> = literal for a
 // node of label, as an absolute row count.
 //
 // An MCV hit yields the EXACT per-value count (estExact — effectively a maintained
-// exact for that literal). Otherwise the estimate is the distribution-average
-// 1/NDV × N, tagged estHeuristic: a NON-gating hint, because a specific literal's
-// true frequency can be arbitrarily far from N/NDV under skew, so 1/NDV can never
-// certify a no-regression equality decision (design §4). A missing statistic, or
-// a NaN literal (=(NaN) matches nothing), yields the safe estimate.
+// exact for that literal) while the statistic behind it is FRESH, and is demoted to
+// estFallback once it is not ([statsSnapshotFresh], rmp #2772). Otherwise the
+// estimate is the distribution-average 1/NDV × N, tagged estHeuristic: a NON-gating
+// hint, because a specific literal's true frequency can be arbitrarily far from
+// N/NDV under skew, so 1/NDV can never certify a no-regression equality decision
+// (design §4). A missing statistic yields the safe estimate, and a NaN literal
+// yields an exact ZERO that no staleness can touch: `= NaN` is false for every row
+// under openCypher, which is a fact of the language and not a reading of the
+// statistic.
 //
 // It wraps the pure estimator with the observability surface (#2102): a lookup
 // against a present collector is counted, and an estFallback verdict increments
@@ -318,6 +373,26 @@ func statsEqualityEstimateInner(src statsSource, label, prop string, literal exp
 	}
 	h := expr.EquivalentHash(literal)
 	if cnt, hit := st.MCV.Lookup(h, literal, statsEquivalent); hit {
+		// The MCV entry is an EXACT per-value count — for the snapshot it was built
+		// from, and for no later one. Until rmp #2772 it was returned estExact with no
+		// staleness term of any kind, while the sibling range provider demoted a stale
+		// histogram, so the two providers disagreed about whether staleness mattered.
+		// Since rmp #2765 that tag decides how the figure RENDERS: estExact prints as a
+		// bare number with no approximation marker, so an arbitrarily drifted count was
+		// presented to the reader as ground truth. Measured on the rmp #2767 fixture:
+		// Est.Rows 1000 beside a measured 10, in EXPLAIN and in ProfileTable alike.
+		if pop.known && pop.n <= 0 {
+			// A label KNOWN to hold no live nodes. Whatever the snapshot recorded for
+			// this value, no row can carry it now, and the emptying is invisible to Δ
+			// when it was done by removing the LABEL rather than the property.
+			return estimate{rows: float64(cnt), source: estFallback}, statsFallbackEmptyLabel
+		}
+		if !statsSnapshotFresh(st, pop) {
+			// A demoted count keeps its number, exactly as [statsRangeEstimateInner]
+			// keeps its computed rows: estFallback is what stops the figure being
+			// RENDERED and what makes [planStaysDefault] hold the default plan.
+			return estimate{rows: float64(cnt), source: estFallback}, statsFallbackStale
+		}
 		return estimate{rows: float64(cnt), source: estExact}, statsFallbackNone
 	}
 	// 1/NDV heuristic. Round D̂ to an integer ≥ 1 and guard 1/D̂ (design §5.3).

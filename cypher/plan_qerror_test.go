@@ -127,20 +127,37 @@ func qerrNear(got, want float64) bool { return math.Abs(got-want) <= want/100 }
 // built and are now wrong by a factor of exactly 100 for one value.
 //
 // The construction targets the ONE provenance that can be both trustworthy and
-// stale. `statsEqualityEstimateInner` returns the most-common-value list's EXACT
-// per-value count tagged estExact, with no staleness gate of any kind — unlike
-// `statsRangeEstimateInner`, which demotes a stale histogram to estFallback. So:
+// stale: the most-common-value list's EXACT per-value count, which
+// `statsEqualityEstimateInner` tags estExact.
 //
 //	seed     'hot' on 1000 nodes  → the MCV list records hot → 1000
 //	refresh  publishes that snapshot
-//	mutate   990 of them to 'moved' → 10 nodes still answer p.grp = 'hot'
+//	relabel  990 of them lose :Person → 10 nodes still answer p.grp = 'hot'
 //
 // The planner still predicts 1000 and the query returns 10. Both numbers are real:
 // the estimate is what the planner derived from the statistics it holds, and the
 // row count is what the query actually returned.
 //
-// The mutation goes through the engine's own write path rather than the graph's, so
-// the fixture exercises the same staleness bookkeeping a real workload does.
+// # Why the mutation is a RELABEL and not a property write (rmp #2772)
+//
+// It used to be `SET p.grp = 'moved'`, and that route no longer produces a
+// trustworthy estimate to score. rmp #2772 gave the equality provider the staleness
+// screen its range sibling always had, and a property write moves BOTH staleness
+// counters: measured on this very fixture, Δ = 990 and deletes = 990 against a
+// build-time population of 1400, either of which now demotes the estimate to
+// estFallback. A demoted estimate is [exec.EstimateAbsent] and contributes no sample
+// at all, so the SET route would leave this file's central gate with nothing to
+// measure.
+//
+// Removing the LABEL instead touches no property, so Δ and the delete counter both
+// stay at ZERO — the snapshot is pristine by every measure it maintains — while the
+// live :Person count falls from 1400 to 410 and the MCV entry for 'hot' becomes 100x
+// wrong. That is not a contrivance to keep a test alive. It is the residual staleness
+// route rmp #2772 could not close: Δ is bumped only on the node-property write path
+// (the four [recordStatsNodePropertyWrite] call sites in cypher/api.go), and a label
+// removal passes none of them. A misestimate the statistics' own counters cannot see
+// is precisely what this metric exists to surface, so the fixture is stronger for the
+// change rather than weaker.
 func seedStaleMCVGraph(t *testing.T) (e *Engine, hotAfter int64) {
 	t.Helper()
 	const (
@@ -184,8 +201,22 @@ func seedStaleMCVGraph(t *testing.T) (e *Engine, hotAfter int64) {
 		t.Fatalf("RefreshStatistics: %v", err)
 	}
 	if _, err := e.RunInTx(ctx,
-		`MATCH (p:Person) WHERE p.grp = 'hot' AND p.rank >= 10 SET p.grp = 'moved'`, nil); err != nil {
-		t.Fatalf("SET: %v", err)
+		`MATCH (p:Person) WHERE p.grp = 'hot' AND p.rank >= 10 REMOVE p:Person`, nil); err != nil {
+		t.Fatalf("REMOVE label: %v", err)
+	}
+	// The premise of every gate built on this fixture: the statistic is stale in
+	// FACT and fresh by its own counters. A future change to the write path that
+	// started bumping Δ here would silently demote the estimate and turn those gates
+	// into assertions about an absent sample, which is not what they claim to hold.
+	src := liveResolver(e)
+	st, okStats := lookupStats(src, "Person", "grp")
+	if !okStats {
+		t.Fatal("the (Person, grp) statistic vanished; the fixture has no subject")
+	}
+	if st.Delta() != 0 || st.Deletes() != 0 {
+		t.Fatalf("removing a label moved the staleness counters (delta=%d deletes=%d); "+
+			"the estimate is now demoted and this fixture no longer produces the stale "+
+			"EXACT estimate every gate below scores", st.Delta(), st.Deletes())
 	}
 	return e, remain
 }
@@ -227,8 +258,9 @@ func TestQError_AnExactEstimateSamplesOne(t *testing.T) {
 //
 // Without it the surface would be decoration — a distribution that can only ever
 // show agreement measures nothing. The fixture also demonstrates the finding that
-// motivates the whole accessor: the estimate here is tagged EXACT, because the
-// most-common-value provider has no staleness gate at all.
+// motivates the whole accessor: the estimate here is tagged EXACT even though it is
+// 100x wrong, because the most-common-value provider's staleness screen (rmp #2772)
+// is driven by counters that a label removal never touches.
 func TestQError_AStaleExactEstimateSamplesTheFactorItIsWrongBy(t *testing.T) {
 	e, hotAfter := seedStaleMCVGraph(t)
 	const q = "MATCH (p:Person) WHERE p.grp = 'hot' RETURN p"

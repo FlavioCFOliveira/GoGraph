@@ -133,8 +133,9 @@ func labelScanEstimate(labelSrc *lpgLabelResolver, label string) (est estimate, 
 // child is a scan leaf, derived from the predicate shape:
 //
 //   - An equality n.prop = literal → the exact per-value MCV count when the
-//     literal is a tracked heavy hitter (estExact), else the 1/NDV * N average
-//     (estHeuristic).
+//     literal is a tracked heavy hitter AND the statistic behind it is still fresh
+//     (estExact), a demotion to estFallback (omitted) when it is not (rmp #2772),
+//     else the 1/NDV * N average (estHeuristic).
 //   - A single range comparison n.prop <op> x → the equi-depth histogram estimate
 //     (estStats) with its certified error, or estFallback (omitted) when the
 //     statistic is absent or stale.

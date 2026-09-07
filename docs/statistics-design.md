@@ -101,6 +101,27 @@ chosen `v`. Therefore:
   falls back to the exact-count-only equality peephole (already shipped). HLL/NDV
   must never drive an absolute-no-regression equality decision.
 
+> **Correction (rmp #2772): "effectively estExact" needed a staleness term, and had
+> none.** §3's staleness→veto was written for the histogram and was implemented only
+> there, so an MCV hit was tagged `estExact` from whatever snapshot was last
+> published, however far it had drifted. That is not merely a planner concern: since
+> rmp #2765 the tag decides how a figure RENDERS — `estExact` prints as a bare number
+> with no approximation marker — so an arbitrarily stale per-value count was shown to
+> a reader as ground truth (measured: `Est.Rows = 1000` against 10 rows). The MCV path
+> now applies the same rule (`cypher.statsSnapshotFresh`), and its denominator is the
+> **smaller** of the build-time `N0` and the live `N`. The live count alone is not
+> enough: a snapshot built over 1000 rows and grown by 100 that carry the same value
+> has `Δ/N_live = 0.0909` — inside the firing region — while its per-value count is
+> already short by 100. An **upper** bound is wrong for the mirror-image reason given
+> in §0.
+>
+> **What it does not close.** `Δ` and the delete counter are moved only by the
+> node-property write path, so any route that changes which rows answer a predicate
+> without writing a tracked property — removing the **label** is the plain example —
+> leaves the snapshot pristine by every measure it maintains while its MCV entry goes
+> arbitrarily wrong. Detecting that needs a signal the current bookkeeping does not
+> carry; the estimate-quality metric of rmp #2767 is what surfaces it meanwhile.
+
 The reordering peepholes (P3) shipped requiring `estExact`. **Since rmp #2766
 this is no longer true of all of them:** the disjoint-component reorder also
 consumes the property statistics, evaluating an `estStats` range estimate or an
