@@ -1616,6 +1616,14 @@ func (t *Tx[N, W]) DropIndex(name string) error {
 // identifier; 4 GiB for a property value. The transaction consumes a sequence,
 // applies nothing, and leaves the store usable for the next one.
 //
+// Commit also returns [ErrFieldTooLong], again having made nothing durable and
+// applied nothing, when the transaction would leave an edge handle carrying
+// more than 1 Mi labels, or more than 1 Mi properties — a record store/snapshot
+// cannot capture, and so one that would block every checkpoint from then on
+// while the WAL grew without bound (rmp #2784). That bound is on the resulting
+// GRAPH rather than on any single op, so unlike the two above it is checked
+// once for the whole transaction; see [Tx.checkFoldableHandleRecords].
+//
 // Reaching Commit is now the BACKSTOP, not the primary refusal. Every mutator
 // that stages a uint16-prefixed field checks it as it is staged, so the caller
 // normally learns at the call that carried the offending string (rmp #2747);
@@ -1955,6 +1963,19 @@ func (t *Tx[N, W]) appendOnly(commitTS uint64) (hasSeq bool, watermark int64, er
 		metrics.IncCounter("store.txn.appendOnly.txnTooLarge", 1)
 		t.markFinished()
 		return false, 0, fmt.Errorf("%w: %d ops > cap %d", ErrTransactionTooLarge, len(t.ops), t.store.maxTxnOps)
+	}
+	// Bounded resources / Durability: reject, on the same terms and for the same
+	// reason, a transaction that would leave an edge handle carrying more labels
+	// or properties than store/snapshot can capture — a record that commits and
+	// then blocks every checkpoint for ever while the WAL grows without bound
+	// (rmp #2784). Like the cap check above it runs BEFORE a sequence is minted
+	// and before any frame is written, so a refusal costs nothing durable. See
+	// [Tx.checkFoldableHandleRecords] for why this bound cannot be enforced by
+	// the encoder the way rmp #2750's value bound is.
+	if err := t.checkFoldableHandleRecords(); err != nil {
+		metrics.IncCounter("store.txn.appendOnly.handleRecordTooLarge", 1)
+		t.markFinished()
+		return false, 0, err
 	}
 	// Mint the sequence, and RECORD IT ON THE Tx in the same step. From here
 	// hasSeq is true on every return: the sequence is consumed, so the apply gate
