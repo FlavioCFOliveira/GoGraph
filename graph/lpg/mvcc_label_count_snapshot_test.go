@@ -8,12 +8,16 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 )
 
-// labelCountProbeBatch is the atomic write unit rmp #2688's oracle is stated
-// against: internal/sim's ST7 commits one transaction per this many nodes, so a
-// count that is NOT a multiple of it is a PARTIALLY APPLIED transaction — an
-// Atomicity break, not merely a stale read. The seam below labels ONE node, so
-// the number the defective build returns is 1 past a whole batch: exactly the
-// 481-after-480 and 266-instead-of-265 signatures ST7 measured.
+// labelCountProbeBatch is the atomic write unit rmp #2688's oracle was stated
+// against: internal/sim's ST7 commits one transaction per this many nodes, and it
+// is kept here so every seeded count below is a whole number of ST7 batches.
+//
+// It is NOT the oracle of any test in this file, and rmp #2775 corrected the
+// claim that it was. The tests here seed in ONE transaction and drive ONE
+// single-node write, so an off-by-one count is a fully applied state of THIS
+// graph — "not a multiple of the batch size" was ST7's production signature
+// (481 after 480, 266 after 265) transplanted onto a fixture that never had that
+// shape. Each test below states the violation it actually observes instead.
 const labelCountProbeBatch = 5
 
 // newLabelCountProbeGraph builds a graph with seeded labelled nodes, spare
@@ -82,6 +86,35 @@ func labelOne(g *Graph[string, float64], idx int) error {
 // for the present-time add window. So the write is driven INTO the window
 // through [Graph.labelCountGateProbe], and the seam's own fire counter is
 // asserted — a test that did not enter the window must fail, not pass quietly.
+//
+// # What the seam's POSITION buys, and what it costs (rmp #2775)
+//
+// The seam fired ABOVE the cardinality read until rmp #2775, and from there this
+// test could not fail on an INVERTED order — a write driven before BOTH reads is
+// seen by the second gate whichever side of the count that gate sits on, so both
+// orders decline and the swap passed. rmp #2775 measured exactly that: inverting
+// the two reads left `go test ./graph/lpg/ ./cypher/ ./cypher/exec/` at exit 0.
+//
+// The seam now fires BETWEEN the cardinality and the gate that follows it, and
+// this test kills BOTH mutants — but on DIFFERENT symptoms, and only one of them
+// is a wrong number:
+//
+//	inverted order        -> (seeded+1, EXACT): the gate read clear, the write
+//	  then landed, and the cardinality after it is present-time.
+//	deleted second sample -> (seeded, EXACT): the count was taken before the
+//	  write, so the VALUE is the snapshot's own and only the FLAG is wrong.
+//
+// The oracle is therefore the exactness FLAG, which both mutants get wrong, and
+// not the value — which is why the failure message below states the flag as the
+// violation and reads the value only as a further symptom. The flag is the
+// documented contract ([Graph.LabelCountExact] promises exact-or-nothing), so
+// asserting it is not a weaker test than asserting a torn number: it is the
+// assertion this test always made, on line `if ok`, unchanged since rmp #2688.
+//
+// The differential check below is what stops the move from weakening anything:
+// it proves the seam write really reached the index, so the sound and inverted
+// orders genuinely have different numbers available and returning the snapshot's
+// own is a choice rather than an accident.
 func TestLabelCountExact_DeclinesWhenHistoryGoesLiveDuringTheCall(t *testing.T) {
 	const seeded = 2 * labelCountProbeBatch // a whole number of batches
 	g, lid := newLabelCountProbeGraph(t, seeded, 8)
@@ -113,13 +146,29 @@ func TestLabelCountExact_DeclinesWhenHistoryGoesLiveDuringTheCall(t *testing.T) 
 		t.Fatal("the seam never fired, so no write landed inside the call: this test did not " +
 			"enter the window it exists to close")
 	}
+	// The oracle is differential as well as absolute: the seam write really did
+	// reach the index, so the sound and inverted orders have DIFFERENT numbers
+	// available to return. Without this, a seam whose write silently failed would
+	// leave every assertion below unfalsifiable.
+	if raw := int64(g.nodeIdx.Count(uint32(lid))); raw != seeded+1 {
+		t.Fatalf("the seam write did not reach the index (raw count %d, want %d): the sound and "+
+			"inverted orders would return the same number here and this test cannot fail",
+			raw, seeded+1)
+	}
 	if ok {
 		t.Fatalf("LabelCountExact returned (%d, EXACT) for a snapshot pinned when the count was "+
-			"%d, after a write landed INSIDE the call. %d is not a multiple of the batch size "+
-			"%d, so it exposes a PARTIALLY APPLIED transaction (Atomicity) as well as a value "+
-			"from after the snapshot (Isolation). The gate must be re-sampled after the "+
-			"cardinality (rmp #2688).",
-			n, seeded, n, labelCountProbeBatch)
+			"%d, after a write landed INSIDE the call — between the cardinality read and the "+
+			"gate sample that follows it, which is where labelCountGateProbe fires.\n"+
+			"The EXACTNESS FLAG is the violation, and the VALUE need not be wrong for it to be "+
+			"one: the write raises its hold BEFORE it touches the index, and a snapshot pinned "+
+			"across the call forbids reclaiming that hold, so a gate sampled AFTER the "+
+			"cardinality must see it and return (0, false). This function promises "+
+			"exact-or-nothing; nothing downstream re-checks a count.\n"+
+			"n == %d says the gate never saw the hold at all — the second sample is missing, or "+
+			"it is taken BEFORE the cardinality (rmp #2688 for the sample itself, rmp #2775 for "+
+			"its order). n == %d says that AND the cardinality was read after the write, so the "+
+			"number is present-time as well as wrongly flagged.",
+			n, seeded, seeded, seeded+1)
 	}
 
 	// The CONTROL: the scan path, under the identical interleaving, is still
