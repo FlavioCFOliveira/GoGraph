@@ -229,6 +229,34 @@ type Expand struct {
 	fwdDone   bool // true after all forward edges for current src are exhausted
 	chunkMode bool // true while the FillChunk (columnar) path drives the operator
 	cScanDone bool // true once the child ChunkProducer is exhausted (a 0-row pull)
+
+	// ─────────────────────────────────────────────────────────────────────────
+	// APPENDED AT THE END DELIBERATELY (rmp #2629)
+	//
+	// These two are the far-endpoint gate, and they sit here rather than beside
+	// the other filter state because adding an 8-byte field EARLIER in this
+	// struct shifts every field after it, and the reverse-cursor state is
+	// cache-line sensitive: placing dstAdmit next to `multiplicity` measured
+	// +6.74% median (n=14 per arm, two interleaved binaries) on
+	// BenchmarkExpandDir_InVsOut_Baseline/IN_deg1_sources — a benchmark carrying
+	// no gate at all — of which only about +1.65% was the branch itself. Appending
+	// instead leaves every existing offset unchanged.
+	//
+	// Do not move them, and do not insert a field above them, without re-running
+	// that benchmark as a two-binary interleaved A/B.
+	// ─────────────────────────────────────────────────────────────────────────
+
+	// dstAdmit is the FAR-ENDPOINT predicate the planner pushed into this
+	// traversal, tested per adjacency slot before the slot becomes a row. nil —
+	// the default and the shape of every hop whose destination carries no
+	// predicate — admits every destination. See [DstAdmit] and
+	// [Expand.WithDstAdmit].
+	dstAdmit DstAdmit
+	// dstGated is the one-word screen the row-mode emit branch tests before it
+	// consults either destination gate: true iff this hop carries an expand-into
+	// column or a pushed far-endpoint predicate. Derived state, never configured
+	// directly — see [Expand.refreshDstGated].
+	dstGated bool
 }
 
 // ExpandConfig carries the optional configuration for [NewExpand].
@@ -290,6 +318,37 @@ type ExpandConfig struct {
 // It is called from [Expand.Init], which runs once per outer row under Apply, so
 // the traversal follows the writes its own statement has made.
 type AdjacencySource func() (fwd, rev CSRAdjacency, admit RelTypeAdmit)
+
+// DstAdmit reports whether an expansion's DESTINATION node satisfies a predicate
+// the planner pushed INTO the traversal, so a slot that cannot survive the
+// predicate never becomes a row at all (rmp #2629).
+//
+// # What it is for
+//
+// It is the far-endpoint counterpart of [RelTypeAdmit]: the relationship type is
+// already decided per slot inside the walk, and this closes the same gap on the
+// node the slot lands on. The motivating shape is an endpoint label —
+// `MATCH (:A)-[:T]->(:B)` — whose predicate the IR translator emits as a
+// Selection ABOVE the Expand, so every matched slot was built into a row, handed
+// across an operator boundary, and only then tested.
+//
+// # The contract the supplier must honour
+//
+// The function is called with the raw destination [graph.NodeID] of a slot that
+// has ALREADY passed the direction, type-filter, tombstone and cyphermorphism
+// gates. It MUST be a pure predicate on that id — no side effects, no dependence
+// on emission order or on how many times it has been called — because the gate
+// runs on both the row and the columnar path and the two visit slots in different
+// batch boundaries.
+//
+// It MUST also decide the id exactly as the predicate it replaces would have
+// decided the row built from that id. Nothing in this operator can check that, so
+// the caller owns it: the cypher planner supplies a closure over the SAME
+// accessor the Selection's predicate would have called, which is what makes the
+// two answer-identical by construction rather than by review.
+//
+// A nil DstAdmit admits every destination.
+type DstAdmit func(dst graph.NodeID) bool
 
 // IntersectAdjacencySource is [AdjacencySource] for the fused cyclic expand, which
 // filters TWO legs and therefore needs two type filters keyed to the one adjacency
@@ -398,6 +457,9 @@ func (op *Expand) Init(ctx context.Context) error {
 	op.revBase = 0
 	op.pendingRemaining, op.pendingRow = 0, nil
 	op.inputRow = nil
+	// Derived from the two destination gates, so a caller that configured either
+	// one after construction cannot leave the screen stale.
+	op.refreshDstGated()
 	// Reset the columnar fan-out cursor so a re-Init (pooled/re-run operator)
 	// re-pulls from the start. cRow = -1 makes the first advanceInputChunk step
 	// to row 0 (or trigger the first child batch pull). These are inert on the
@@ -513,9 +575,9 @@ func (op *Expand) tryFwdEdge(out *Row) (emitted, handled bool) {
 		op.slotsRejected++
 		return false, true
 	default: // edgeEmit
-		if !op.dstMatchesInto(dst) {
+		if op.dstGated && !op.dstEmittable(dst) {
 			op.slotsRejected++
-			return false, true // expand-into: not the bound destination — skip
+			return false, true // a destination gate refused this slot — skip
 		}
 		op.buildRow(out, src, edge, dst)
 		return true, true
@@ -535,13 +597,54 @@ func (op *Expand) tryRevEdge(out *Row) (emitted, handled bool) {
 		op.slotsRejected++
 		return false, true
 	default: // edgeEmit
-		if !op.dstMatchesInto(dst) {
+		if op.dstGated && !op.dstEmittable(dst) {
 			op.slotsRejected++
-			return false, true // expand-into: not the bound destination — skip
+			return false, true // a destination gate refused this slot — skip
 		}
 		op.buildRow(out, src, edge, dst)
 		return true, true
 	}
+}
+
+// dstAdmitted reports whether dst passes the far-endpoint predicate the planner
+// pushed into this traversal, or true when none was pushed — which is the default
+// and the shape of every hop whose destination carries no predicate.
+//
+// It is charged on the EMIT branch and never inside [Expand.advanceFwdEdge] or
+// [Expand.advanceRevEdge]: those two are the innermost code of every expansion and
+// a statement added to them costs a few percent even when it never executes (see
+// [Expand.slotsRejected] for the measurement that established this).
+func (op *Expand) dstAdmitted(dst int64) bool {
+	if op.dstAdmit == nil {
+		return true
+	}
+	return op.dstAdmit(graph.NodeID(dst))
+}
+
+// dstEmittable reports whether dst survives EVERY destination gate this hop
+// carries. It is reached only when [Expand.dstGated] is set, so the common
+// ungated hop never calls it.
+func (op *Expand) dstEmittable(dst int64) bool {
+	return op.dstMatchesInto(dst) && op.dstAdmitted(dst)
+}
+
+// refreshDstGated recomputes the one-word screen the row-mode emit branch tests.
+//
+// # Why a flag and not two checks
+//
+// Both destination gates are absent on the overwhelming majority of hops, and the
+// emit branch is walked once per surviving adjacency slot — 79 172 times for a
+// single labelled count on an 80 000-edge graph. Screening both behind one
+// boolean makes the ungated path one load and one branch, which is fewer than the
+// inlined [Expand.dstMatchesInto] pair it replaces. Testing them separately
+// measured +1.65% on an ungated expansion; see the struct's appended-field note
+// for that measurement and for why the fields' PLACEMENT mattered more than the
+// branch did.
+//
+// It is recomputed by [Expand.Init] and by both setters, so the screen cannot
+// disagree with the gates whichever order the caller configures them in.
+func (op *Expand) refreshDstGated() {
+	op.dstGated = op.intoCol >= 0 || op.dstAdmit != nil
 }
 
 // dstMatchesInto reports whether dst is the already-bound destination this hop must
@@ -563,11 +666,29 @@ func (op *Expand) dstMatchesInto(dst int64) bool {
 	return int64(want) == dst
 }
 
+// WithDstAdmit pushes a far-endpoint predicate INTO this traversal, so a slot whose
+// destination fails it never becomes a row (rmp #2629). Passing nil clears it, which
+// returns the operator to admitting every destination.
+//
+// The caller owns answer-equivalence with the predicate this replaces — see
+// [DstAdmit] for the contract. A rejected slot is charged to
+// [Expand.rowsRemovedByFilter] exactly as a type-filtered or morphism-rejected one
+// is, so the operator's own PROFILE line accounts for the rows the removed Filter
+// used to report.
+//
+// Returns op for chaining; call before Init.
+func (op *Expand) WithDstAdmit(fn DstAdmit) *Expand {
+	op.dstAdmit = fn
+	op.refreshDstGated()
+	return op
+}
+
 // WithExpandInto binds this hop's destination to an already-bound input column, so the
 // operator emits only edges landing on that node instead of one row per neighbour
 // (#2206). col < 0 disables it. Returns op for chaining; call before Init.
 func (op *Expand) WithExpandInto(col int) *Expand {
 	op.intoCol = col
+	op.refreshDstGated()
 	return op
 }
 
@@ -1243,12 +1364,26 @@ type columnarExpand struct {
 	*Expand
 }
 
+// ChunkOperator is an [Operator] that can also be driven column-major.
+//
+// It is the return type of [NewColumnarExpand] rather than a bare [ChunkProducer]
+// so that a recogniser which ends up with NO operator above the expansion — a
+// `count(*)` whose only predicate was pushed into the traversal (rmp #2629) — can
+// return the wrapper as the subtree's operator without a type assertion that
+// cannot fail and therefore cannot be tested. It is the same reasoning
+// [Profiler.WrapChunk] is documented with, applied in the other direction.
+type ChunkOperator interface {
+	Operator
+	ChunkProducer
+}
+
 // NewColumnarExpand presents exp as a [ChunkProducer] when exp's child is itself a
 // [ChunkProducer] (so [Expand.fillChunk] can pull it column-major and the chunk
 // chain stays unbroken). It returns (wrapper, true) on success or (nil, false) when
 // the child is row-mode, in which case the caller keeps the plain row-mode exp. The
-// returned wrapper also implements [NodeIDColumnProducer].
-func NewColumnarExpand(exp *Expand) (ChunkProducer, bool) {
+// returned wrapper also implements [NodeIDColumnProducer] and, being an
+// [Operator] in its own right, [ChunkOperator].
+func NewColumnarExpand(exp *Expand) (ChunkOperator, bool) {
 	cp, ok := exp.input.(ChunkProducer)
 	if !ok {
 		return nil, false
@@ -1348,16 +1483,16 @@ func (op *Expand) fillOneChunkRow(dst *Chunk) (appended, done bool, err error) {
 			return true, false, nil
 		}
 		if src, edge, d, st := op.advanceFwdEdge(); st != edgeNone {
-			if st == edgeEmit {
+			if st == edgeEmit && op.dstAdmitted(d) {
 				op.appendChunkRow(dst, op.cRow, src, edge, d)
 				op.maybeQueueMultiplicityChunk(src, edge, d)
 				return true, false, nil
 			}
 			op.slotsRejected++
-			continue // skipped (filtered / morphism-rejected)
+			continue // skipped (filtered / morphism- / endpoint-rejected)
 		}
 		if src, edge, d, st := op.advanceRevEdge(); st != edgeNone {
-			if st == edgeEmit {
+			if st == edgeEmit && op.dstAdmitted(d) {
 				op.appendChunkRow(dst, op.cRow, src, edge, d)
 				op.maybeQueueMultiplicityChunk(src, edge, d)
 				return true, false, nil

@@ -553,6 +553,13 @@ type buildOpts struct {
 	// safe because the seek is result- and order-identical. Only the read path sets
 	// it, from EngineOptions.DisableExpandIntoSeek.
 	expandIntoSeekDisabled bool
+	// expandLabelPushEnabled gates the far-endpoint label push (#2629) for THIS
+	// build. Only the read path sets it, from EngineOptions.DisableExpandLabelPush;
+	// every other build path leaves it false and keeps the Selection above the
+	// Expand. The polarity is POSITIVE — unlike expandIntoSeekDisabled — because
+	// the rewrite drops an operator the write path's own recognisers may expect to
+	// find, so a build path has to opt in rather than inherit it.
+	expandLabelPushEnabled bool
 	// cyclicIntersectEnabled turns ON the fused cyclic expand (#2157) for THIS
 	// build. Positive polarity, so every build path that never sets it — the write
 	// path, the public BuildPlanWithMutator — keeps today's two-Expand plan.
@@ -894,6 +901,23 @@ type EngineOptions struct {
 	// plan; it exists for the differential test that proves both plans return an
 	// identical result multiset, and as an operational escape hatch.
 	DisableMinLabelScan bool
+
+	// DisableExpandLabelPush turns OFF pushing a far-endpoint label INTO the
+	// expansion (#2629). When false (the default) a lone bare label predicate on an
+	// Expand's own destination variable is enforced inside the traversal
+	// ([exec.Expand.WithDstAdmit]) and the Selection that carried it is not built,
+	// so a slot whose destination lacks the label never becomes a row. When true the
+	// Selection is built as before and every matched slot pays a separate per-row
+	// predicate plus the row compaction the filter performs to hand it upwards.
+	//
+	// The push is result-identical: the gate calls the SAME
+	// [lpg.ReadView.HasNodeLabelByID] accessor both forms of the replaced predicate
+	// resolve to, and applying a conjunct earlier cannot change a multiset. Emission
+	// ORDER is preserved too — the gate drops slots in place and reorders nothing —
+	// so no order-safety companion is needed. It exists for the differential test
+	// that proves both plans return an identical result multiset, and as an
+	// operational escape hatch. See expand_dst_label_plan.go.
+	DisableExpandLabelPush bool
 
 	// DisableExpandIntoSeek turns OFF the O(log d) seek for a hop whose destination
 	// variable is already bound — cycle closing, triangles, mutual-relationship
@@ -1380,6 +1404,11 @@ type Engine struct {
 	// an expand-into hop to walking the whole neighbour run.
 	expandIntoSeekEnabled bool
 
+	// expandLabelPushEnabled gates pushing a far-endpoint label into the expansion
+	// (#2629). True by default; set false by EngineOptions.DisableExpandLabelPush,
+	// which returns the destination label to a Selection above the Expand.
+	expandLabelPushEnabled bool
+
 	// cyclicIntersectEnabled gates the fused cyclic expand (#2157). FALSE by
 	// default — positive polarity — and set only by
 	// EngineOptions.EnableCyclicIntersect.
@@ -1730,6 +1759,7 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 		bitmapIntersectEnabled: !opts.DisableBitmapIntersection,
 		minLabelScanEnabled:    !opts.DisableMinLabelScan,
 		expandIntoSeekEnabled:  !opts.DisableExpandIntoSeek,
+		expandLabelPushEnabled: !opts.DisableExpandLabelPush,
 		cyclicIntersectEnabled: opts.EnableCyclicIntersect,
 		joinReorderEnabled:     !opts.DisableJoinReorder,
 		anchorSwapEnabled:      !opts.DisableAnchorSwap,
@@ -2727,6 +2757,10 @@ func (e *Engine) buildReadPhysical(
 	// Bound-destination seek (#2149): negative polarity, so leaving this unset on
 	// any other build path enables the seek.
 	bopts.expandIntoSeekDisabled = !e.expandIntoSeekEnabled
+	// Far-endpoint label push (#2629): positive polarity, so it is confined to the
+	// read path. The push is result- and order-identical, so it needs no
+	// order-safety companion.
+	bopts.expandLabelPushEnabled = e.expandLabelPushEnabled
 	// Fused cyclic expand (#2157): positive polarity, off unless opted into.
 	bopts.cyclicIntersectEnabled = e.cyclicIntersectEnabled
 	// Set-at-a-time multi-label conjunction (#2133): strictly dominates the
@@ -10180,7 +10214,9 @@ func buildOperatorRec(
 		// exec.Filter, which is not a ChunkProducer, so tryBuildColumnarAggInput
 		// declined and the aggregate fell back to the fully boxed row pipeline. Build
 		// the ColumnarFilter chain instead where the shape and every access-path
-		// decline admit it. Declining costs nothing: the ordinary build follows.
+		// decline admit it — or, when the only predicate is an endpoint label the
+		// traversal can enforce itself, no filter at all (#2629). Declining costs
+		// nothing: the ordinary build follows.
 		var child exec.Operator
 		var err error
 		if colSrc, colOK, colErr := tryBuildColumnarAggSource(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, bopts); colErr != nil {
@@ -16957,6 +16993,16 @@ func tryBuildColumnarExpandFilterChain(
 // It is safe to fire even when [tryBuildColumnarAggInput] later declines the chunk
 // pre-projection: [exec.ColumnarFilter] embeds its [exec.Filter] BY VALUE, so driven
 // row-at-a-time it IS that Filter, at the same one allocation.
+//
+// # It may return NO filter at all (rmp #2629)
+//
+// When the only predicate is a bare label test on the expansion's own destination
+// variable, the test is pushed into the traversal ([exec.Expand.WithDstAdmit]) and
+// the source returned is the columnar expansion itself. A slot whose destination
+// lacks the label then never becomes a row, and the rows that do survive are never
+// compacted out of the expansion's chunk into a filter's chunk for a count that
+// reads no column. See expand_dst_label_plan.go for the equivalence argument and
+// for why the push is confined to a single predicate.
 func tryBuildColumnarAggSource(
 	plan ir.LogicalPlan,
 	walker nodeWalkerIface,
@@ -17093,6 +17139,27 @@ func tryBuildColumnarAggSource(
 			undo.restore(schema, bopts)
 			closeProbe(leafOp)
 			return nil, false, nil
+		}
+		// Far-endpoint label push (#2629): a LONE bare label predicate on this hop's
+		// own destination variable is enforced INSIDE the traversal instead of by a
+		// filter above it, so a slot whose destination lacks the label never becomes
+		// a row and the surviving rows are never compacted from one chunk into
+		// another for a count that reads no column. Answer-identical by construction
+		// — the gate calls the same [lpg.ReadView.HasNodeLabelByID] both forms of
+		// this predicate resolve to — and confined to a single predicate so that
+		// applying it earlier cannot change which predicates a row reaches. See
+		// expand_dst_label_plan.go.
+		if bopts.expandLabelPushEnabled && len(predsInner) == 1 {
+			if labels, pushable := expandDstLabels(predsInner[0], expandArm); pushable {
+				if admit := makeExpandDstLabelAdmit(labels, g); admit != nil {
+					expandExec.WithDstAdmit(admit)
+					expandDstLabelPushCount.Add(1)
+					// Nothing is left to filter: the expansion IS the source. It is
+					// returned as the subtree's operator (a [exec.ChunkOperator]), so
+					// the aggregate above still drains it column-major.
+					return profileIntermediate(bopts, colExp), true, nil
+				}
+			}
 		}
 		// Re-instrument the columnar presentation: the wrapper discarded above was
 		// measuring the row-mode Expand this chain does not run.
