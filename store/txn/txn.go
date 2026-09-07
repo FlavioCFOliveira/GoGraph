@@ -2375,6 +2375,53 @@ const maxWALValueLenInt = maxWALValueLen & math.MaxInt
 // the length and the cap that was exceeded.
 var ErrFieldTooLong = errors.New("txn: field too long for its WAL length prefix")
 
+// ErrNestedPropertyList is the sentinel a commit fails with when a property
+// value is a [lpg.PropList] one of whose elements is itself a PropList. It is a
+// SIBLING of [ErrFieldTooLong] and deliberately not the same sentinel: that one
+// means "this field is too long for a durable format to carry" and names a
+// length and a cap, whereas a nested list is refused for its SHAPE at any size,
+// so folding the two would produce a refusal message with no length to report.
+//
+// # Why it is refused rather than supported (rmp #2783)
+//
+// Neither durable format can carry the value, and the WAL's failure was silent:
+//
+//   - store/txn's own list encoder has a case for every scalar element kind and
+//     none for PropList, so a nested element was written as its kind byte, a
+//     uint32 length of ZERO, and no payload. The inner list's contents never
+//     reached the WAL at all. Measured on
+//     [[1, 2], "tail"]: 07 02000000 | 07 00000000 | 01 04000000 "tail" — and a
+//     three-level nest encodes to the same bytes as a two-level one, so the
+//     depth is not even recoverable in principle.
+//   - Both WAL decoders ([decodeTxnListElement] and store/recovery's
+//     decodeRecoveryListElement) then refuse kind 7 as an unknown element kind.
+//     That error is raised INSIDE an already-committed v3 transaction, so replay
+//     stops there: the acknowledged transaction and every transaction committed
+//     after it were dropped, while Open returned a nil error and reported the
+//     tail clean. A durability breach that announced nothing.
+//   - store/snapshot refuses the same value outright when the checkpointer folds
+//     it ("nested PropList not supported", store/snapshot/properties.go), so
+//     every checkpoint failed for as long as the value lived in the graph and
+//     the WAL prefix was never truncated — the permanent-checkpoint block rmp
+//     #2750 named.
+//
+// Supporting it in both formats would be a durable-format change, and the value
+// is not a legitimate one to begin with: openCypher restricts a property to a
+// primitive or a FLAT list of primitives and classifies a nested list as
+// InvalidPropertyType. The Cypher write path has refused it since the
+// 2026-07-13 security audit (F3) — see cypher/exec.ErrNestedPropertyValue and
+// cypher.isStorableProperty, both of which cite this storage limitation as their
+// reason. Until now the Go API was the one door left open, and it led to silent
+// loss. This sentinel closes it, so all four layers now agree.
+//
+// It reaches the caller from [Tx.Commit] and [Tx.CommitWALOnly] (through
+// [Tx.appendOnly] and [encodePropertyValue]), which is the choke point every
+// property-bearing op passes: OpSetNodeProperty, OpSetEdgeProperty and
+// OpSetEdgePropertyByHandle are the only three kinds that carry a value, and all
+// three encode it there. The offending transaction consumes a sequence and
+// applies nothing; the store stays usable for the next transaction.
+var ErrNestedPropertyList = errors.New("txn: a nested list is not a valid property value")
+
 // CheckSchemaField reports whether s fits the uint16 length prefix every WAL
 // frame reserves for a schema string — a label, a property key, or a schema
 // identifier — returning an error wrapping [ErrFieldTooLong] when it does not.
@@ -2517,11 +2564,17 @@ func snapshotEncodedValueLen(v lpg.PropertyValue) int64 {
 // PropFloat64 (its fixed64ValueSize), 16 for PropTime (timeValueSize), 1 for
 // PropBool (boolValueSize), and the raw bytes for PropString and PropBytes.
 //
-// A [lpg.PropList] arriving here is a NESTED list. store/snapshot does not size
-// such an element, it refuses the whole value ("nested PropList not supported"),
-// so its fate is settled by that refusal and not by this bound; it is reported
-// as zero, which is what this package's own encoder writes for it. The same
-// goes for a kind neither format knows.
+// A [lpg.PropList] arriving here would be a NESTED list, and since rmp #2783 it
+// cannot: [checkFlatPropertyList] refuses such a value in [encodePropertyValue]
+// before this function is reached. It is still reported as zero for the same
+// reason a kind neither format knows is — this function's contract is to model
+// store/snapshot's widths, and store/snapshot does not size a nested element at
+// all, it refuses the whole value. Zero is therefore the honest answer and never
+// a load-bearing one: the value's fate was settled one check earlier.
+//
+// Before #2783 that deferral was the defect. The refusal this comment pointed at
+// lived in store/snapshot and fired at CHECKPOINT time, long after the commit
+// had been acknowledged, so the value was accepted here and lost on replay.
 func snapshotEncodedScalarLen(v lpg.PropertyValue) int64 {
 	switch v.Kind() {
 	case lpg.PropString:
@@ -2551,6 +2604,59 @@ func snapshotEncodedScalarLen(v lpg.PropertyValue) int64 {
 func checkSnapshotFoldableLen(what string, n int64) error {
 	if n > maxSnapshotValueLen {
 		return errFieldTooLongN(what, n, maxSnapshotValueLen)
+	}
+	return nil
+}
+
+// checkFlatPropertyList refuses a [lpg.PropList] that contains a PropList
+// element — a value the WAL encoder would write with a zero-length payload and
+// no decoder could read back, and that store/snapshot refuses outright (rmp
+// #2783; the full account is on [ErrNestedPropertyList]).
+//
+// A value that is not a list is flat by definition and returns immediately, so
+// the walk is paid only where nesting is possible. It tests only the element's
+// KIND and never descends: an element that is itself a list is refused whatever
+// it holds, so there is nothing below the first level to inspect. That also
+// means the check terminates in O(len(elems)) and cannot be driven into deep
+// recursion by a pathological value.
+//
+// It is a separate walk from [snapshotEncodedValueLen] rather than a flag fused
+// into that function's loop, because that function owns the ONE copy of the
+// snapshot's length arithmetic and rmp #2750 was caused by exactly the
+// duplication that fusing would invite.
+//
+// # What the extra walk costs, measured
+//
+// One Kind() read per element, over a slice [snapshotEncodedValueLen] then reads
+// again. On an Apple M4 (loadavg 1.7-2.3 either side, so not an idle host), six
+// interleaved benchstat pairs of [encodePropertyValue] against the same tree
+// with the guard call removed:
+//
+//	flat list, 10 elements       150.2n -> 156.9n   +4.50% (p=0.002 n=6)
+//	flat list, 100_000 elements  1.387m -> 1.419m   +2.32% (p=0.002 n=6)
+//	scalar string                5.324n -> 5.644n   +6.01% (p=0.009 n=6)
+//
+// The noise floor, measured the same way with the same binary on both sides, is
+// no significant difference on all three (p=0.485 / 0.394 / 0.370), so all three
+// deltas are real rather than drift.
+//
+// The list figures are the walk itself, about 0.67ns per element. The scalar
+// figure is 0.32ns on a path this function is never called from — [encodePropertyValue]
+// routes only a PropList here — so it is most likely the extra arm in that
+// function's kind switch rather than work; that attribution is argued from the
+// diff, not established by measurement, and it was not worth the experiment to
+// settle, because the quantity is 0.32ns against a commit that ends in an fsync.
+// Buying it back would mean refusing the value after the encoder had already
+// appended bytes for it. Correctness outranks speed.
+func checkFlatPropertyList(v lpg.PropertyValue) error {
+	if v.Kind() != lpg.PropList {
+		return nil
+	}
+	elems, _ := v.List()
+	for i := range elems {
+		if elems[i].Kind() == lpg.PropList {
+			return fmt.Errorf("%w: element %d of the list is itself a list", ErrNestedPropertyList, i)
+		}
 	}
 	return nil
 }
@@ -2763,6 +2869,10 @@ func encodeOpEdgeWithLabel[N comparable, W any](buf []byte, op Op[N, W], codec C
 // It fails stop, buffering nothing, on a value either durable format could not
 // carry:
 //
+//   - a [lpg.PropList] with a PropList element, which this format writes with a
+//     zero-length payload (destroying it), no decoder can read back, and
+//     store/snapshot refuses outright (rmp #2783) — see
+//     [checkFlatPropertyList] and [ErrNestedPropertyList];
 //   - a value whose SNAPSHOT encoding would exceed [maxSnapshotValueLen], which
 //     would commit here and then block every checkpoint for ever (rmp #2750) —
 //     see [checkSnapshotFoldableLen];
@@ -2787,7 +2897,10 @@ func encodeOpEdgeWithLabel[N comparable, W any](buf []byte, op Op[N, W], codec C
 //	uint32 elem-payload-len
 //	[elem-payload-len]byte elem-payload
 //
-// Nested PropList elements are not permitted.
+// A list element is a scalar. A PropList element is refused with
+// [ErrNestedPropertyList] before any byte is written, and no element kind other
+// than the seven above can occur, so every payload this format emits is one a
+// decoder can read back.
 func encodePropertyValue(buf []byte, v lpg.PropertyValue) ([]byte, error) {
 	// Refuse a value the CHECKPOINT format could never fold, before a byte of it
 	// reaches the WAL (rmp #2750). This is the TIGHTER of the two bounds this
@@ -2808,7 +2921,27 @@ func encodePropertyValue(buf []byte, v lpg.PropertyValue) ([]byte, error) {
 	// walk it avoids costs nothing that could ever change the outcome.
 	switch v.Kind() {
 	case lpg.PropInt64, lpg.PropFloat64, lpg.PropBool, lpg.PropTime:
+	case lpg.PropList:
+		// SHAPE before SIZE. A nested list is refused at any size, and its
+		// length is not a meaningful quantity to report: snapshotEncodedValueLen
+		// sizes a nested element as zero bytes (which is what this package's
+		// encoder used to write for it), so a nested list measures SMALL and
+		// would sail through the fold bound. Refusing the shape first also keeps
+		// the refusal message honest — it names the offending element rather
+		// than a length and a cap (rmp #2783).
+		if err := checkFlatPropertyList(v); err != nil {
+			return nil, err
+		}
+		if err := checkSnapshotFoldableLen("property value", snapshotEncodedValueLen(v)); err != nil {
+			return nil, err
+		}
 	default:
+		// PropString, PropBytes, and any kind added later. None of them can
+		// contain a PropertyValue, so nesting is not reachable here and the
+		// shape check is deliberately NOT called: measured, routing a scalar
+		// through it cost 1.0ns/op for a call that could only ever return nil
+		// (5.319n -> 6.316n on a string value, p=0.002 n=6), and this package
+		// treats a check that cannot fail as waste rather than as defence.
 		if err := checkSnapshotFoldableLen("property value", snapshotEncodedValueLen(v)); err != nil {
 			return nil, err
 		}
@@ -2858,6 +2991,14 @@ func encodePropertyValue(buf []byte, v lpg.PropertyValue) ([]byte, error) {
 //
 //	uint32 LE element-count
 //	element-count × ( uint8 elem-kind | uint32 elem-payload-len | [elem-payload-len]byte elem-payload )
+//
+// The element switch below covers every scalar kind and has NO PropList arm,
+// which is why [encodePropertyValue] refuses a nested list before calling this
+// function. Until rmp #2783 it did not: a PropList element fell through the
+// switch with payload still nil and was written as (kind 7 | length 0), which
+// destroyed the inner list and left a frame no decoder could replay. Adding a
+// PropList arm here would be the other fix, and it is the wrong one — it would
+// change a durable format store/snapshot cannot match.
 func encodeTxnListProp(buf []byte, v lpg.PropertyValue) ([]byte, error) {
 	elems, _ := v.List()
 	if err := checkWALValueLen("property list element count", len(elems)); err != nil {

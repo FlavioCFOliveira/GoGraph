@@ -671,6 +671,35 @@ func encodePropertyValue(v lpg.PropertyValue) ([]byte, error) {
 //	element-count × ( uint8 elem-kind | uint32 elem-valueLen | [elem-valueLen]byte elem-value )
 //
 // Nested lists are rejected: list elements must not be PropList.
+//
+// # Why this refusal is now unreachable in practice, and why it stays (rmp #2783)
+//
+// This is the ORIGINAL refusal of a nested list in the module, and for a long
+// time it was the only one. That made it the wrong refusal in the wrong place:
+// it fires when the checkpointer folds an already-committed graph, so a nested
+// list written through the Go API was acknowledged as durable and only condemned
+// later, at which point every checkpoint failed for as long as the value lived
+// and the WAL prefix was never truncated (the permanent block rmp #2750 named).
+// Worse, store/txn's WAL encoder had no PropList element arm at all, so it wrote
+// such an element as (kind 7 | length 0): the inner list was destroyed at write
+// time, both WAL decoders then refused the unknown element kind, and replay
+// stopped inside an already-committed transaction — dropping that transaction and
+// every one after it while Open reported success.
+//
+// store/txn now refuses the same value AT COMMIT, with
+// txn.ErrNestedPropertyList, so no new store can reach this function with a
+// nested list. The refusal here is kept all the same, for two reasons: it is the
+// last line of defence for a graph assembled by any route that does not pass
+// through store/txn's encoder (a snapshot written from an in-memory lpg.Graph
+// populated directly), and a fold that could not represent the value must fail
+// loudly rather than write a snapshot that silently disagrees with the graph it
+// captured.
+//
+// The decision recorded here is REFUSE, not support. openCypher restricts a
+// property value to a primitive or a flat list of primitives and classifies a
+// nested list as InvalidPropertyType, so supporting one would mean widening two
+// durable formats to carry a value the query language rejects. See
+// txn.ErrNestedPropertyList for the full account and the measured evidence.
 func encodeListPropertyValue(v lpg.PropertyValue) ([]byte, error) {
 	elems, _ := v.List()
 	var buf []byte
