@@ -20543,30 +20543,58 @@ func (a *walMutatorAdapter) RemoveEdge(src, dst string) {
 	// performed. A refused transaction cannot commit, but the WAL is the durable
 	// truth and may only describe work done.
 	//
-	// The counter and the undo inverse wait on a SECOND condition the frame does
-	// not: `present`, i.e. an arc was actually there to take out. [Graph.RemoveEdge]
-	// returns true for "the removal ran, whether or not an arc was actually there"
-	// — its own godoc says so — so on a shape where the arc is already gone this
-	// emits a frame that removes nothing.
+	// The counter and the undo inverse wait on a SECOND condition: `present`, an arc
+	// was actually there to take out. [Graph.RemoveEdge] returns true for "the
+	// removal ran, whether or not an arc was actually there" — its own godoc says
+	// so, and it is the one sibling that does NOT fold "nothing to remove" into its
+	// false — so a shape whose arc is already gone reaches this line with
+	// present == false.
 	//
-	// Measured under rmp #2706, and it is NOT hypothetical on an undirected
-	// engine: `RemoveAllEdgesFrom` retires both directions, so every call the
-	// in-edge sweep at cypher/exec/detach_delete.go:263 then makes is a no-op.
-	// An undirected fan-out of 64 writes 128 frames for 64 removed edges — 2.000
-	// per edge, 48.7% of the delete transaction's WAL bytes — while every
-	// directed shape measures exactly 1.000. Gating the frame on `present` was
-	// shown to recover an identical graph, with negative controls that correctly
-	// reported a difference where those frames are real in-edges. It is NOT done
-	// here because whether Cypher over an undirected LPG is a supported
-	// configuration at all is unsettled, and that question decides the fix:
-	// rmp #2734.
+	// The frame waits on it too, but only where the WAL is a FAITHFUL description
+	// of this graph's adjacency, which is what [walMutatorAdapter.mustDescribeNoOpRemoval]
+	// answers. A frame may be dropped as redundant only if the presence probe above
+	// — which reads the IN-MEMORY adjacency — predicts what a replay will find. On a
+	// directed graph it does: every arc this adapter changes is described by exactly
+	// one frame, so memory and replay stay in step by induction. On an UNDIRECTED
+	// graph it does not, because [walMutatorAdapter.RemoveAllEdgesFrom] retires each
+	// mirror arc while emitting a frame only for the forward one — so there the
+	// "redundant" frame is the one that actually performs the removal on replay, and
+	// dropping it LOSES the deletion. Measured, not reasoned: gating unconditionally
+	// on `present` left deleted edges alive in the recovered graph on 7 of 16
+	// undirected shapes (fan-in-64, mixed-in-and-out, clique-4, detach-all,
+	// reciprocal-pair, detach-path-2cycle, del-r-bothdir), which refutes the claim
+	// rmp #2706 recorded here that the gate "was shown to recover an identical
+	// graph". A smaller WAL that replays to a different graph is data loss, not a
+	// saving (rmp #2734).
+	//
+	// On the directed shapes the gate is worth having, and it is reachable there —
+	// this is NOT only the undirected engine's problem.
+	// `MATCH (a)-[r:R]-(b) WITH r DELETE r` binds one stored relationship in both
+	// traversal directions, so [exec] reaches this method twice for it: before the
+	// gate that wrote 2 frames for 1 relationship removed (37.9% of the delete
+	// transaction's WAL bytes), rising to 4 frames — 64.7% — once an UNWIND doubles
+	// the rows. Across 16 directed shapes the recovered graph is byte-identical with
+	// and without the suppressed frames, while dropping a frame that IS a real
+	// removal changes it — the control proving that comparison can fail.
+	//
+	// Memgraph reaches the same place from the other side: its
+	// `Storage::Accessor::DetachDelete` threads one `std::unordered_set<Gid>` of
+	// already-deleted edge ids through both of its endpoint passes, and
+	// `MarkEdgeAsDeleted` (src/storage/v2/storage.cpp:718-725, tag v3.9.0, commit
+	// 9f6fa8b8372c72d1bc1b24c2a32762af2424629e) creates its `RecreateObjectTag` delta
+	// only `if (!edge->deleted())`, so a second touch of an already-retired edge
+	// emits no durable record. Neo4j sidesteps the question by traversing a node's
+	// single relationship chain once, direction-agnostically
+	// (`Operations.nodeDetachDelete`). Structure taken as evidence, never code.
 	if !a.w().RemoveEdge(src, dst) {
 		return
 	}
 	if present {
 		a.countRelDeleted()
 	}
-	_ = a.tx.RemoveEdge(src, dst) // rmp #2747: [txn.Tx.RemoveEdge] returns ErrTxFinished and nothing else, and this adapter is never reached on a finished transaction. Discarded because [exec.GraphMutator.RemoveEdge] returns nothing — see the discard note on [walMutatorAdapter].
+	if present || a.mustDescribeNoOpRemoval() {
+		_ = a.tx.RemoveEdge(src, dst) // rmp #2747: [txn.Tx.RemoveEdge] returns ErrTxFinished and nothing else, and this adapter is never reached on a finished transaction. Discarded because [exec.GraphMutator.RemoveEdge] returns nothing — see the discard note on [walMutatorAdapter].
+	}
 	r.recordRemoveEdge(&pre, present)
 }
 
@@ -20576,8 +20604,8 @@ func (a *walMutatorAdapter) RemoveEdge(src, dst string) {
 // [txn.OpRemoveEdgeByHandle] frame so the exact instance is gone after recovery.
 // The undo pre-image captures the SPECIFIC instance (weight, handle, its own
 // labels and properties) so a rolled-back statement re-adds exactly that
-// instance. The edges-removed counter and undo record are gated on the actual
-// removal result (rmp #2018).
+// instance. The edges-removed counter, the durable frame and the undo record are
+// all gated on the actual removal result (rmp #2018, rmp #2734).
 func (a *walMutatorAdapter) RemoveEdgeByHandle(src, dst string, handle uint64) {
 	src, dst = orientHandleEndpoints(a.g, src, dst, handle)
 	r := a.rec()
@@ -20595,11 +20623,49 @@ func (a *walMutatorAdapter) RemoveEdgeByHandle(src, dst string, handle uint64) {
 		}
 	}
 	removed := a.w().RemoveEdgeByHandle(src, dst, handle)
+	// The frame waits on `removed` under the same rule as the
+	// [walMutatorAdapter.RemoveEdge] twin, and for the same measured reason — read
+	// that comment first; it carries the evidence for both.
+	// [WriteView.RemoveEdgeByHandle] folds BOTH "refused" and "nothing matched" into
+	// its false (its godoc says so, and that is where it differs from the
+	// [WriteView.RemoveEdge] sibling), and neither case warrants a frame on a graph
+	// whose WAL faithfully describes its adjacency: a refused removal must not be
+	// described durably (rmp #2694/#2725), and a removal that matched nothing removed
+	// nothing. On an undirected graph that faithfulness does not hold, so the frame
+	// is emitted regardless — see [walMutatorAdapter.mustDescribeNoOpRemoval].
+	// Reachable on the supported directed configuration: `MATCH (a)-[r:R]-(b) DELETE r`
+	// binds one stored relationship in both traversal directions and therefore deletes
+	// it twice, which before the gate wrote 2 frames for 1 relationship removed —
+	// 39.2% of that delete transaction's WAL bytes (rmp #2734).
 	if removed {
 		a.countRelDeleted()
 	}
-	_ = a.tx.RemoveEdgeByHandle(src, dst, handle) // rmp #2747: [txn.Tx.RemoveEdgeByHandle] returns ErrTxFinished and nothing else, unreachable here. Discarded: [exec.GraphMutator.RemoveEdgeByHandle] returns nothing.
+	if removed || a.mustDescribeNoOpRemoval() {
+		_ = a.tx.RemoveEdgeByHandle(src, dst, handle) // rmp #2747: [txn.Tx.RemoveEdgeByHandle] returns ErrTxFinished and nothing else, unreachable here. Discarded: [exec.GraphMutator.RemoveEdgeByHandle] returns nothing.
+	}
 	r.recordRemoveEdge(&pre, removed)
+}
+
+// mustDescribeNoOpRemoval reports whether a removal that provably took NOTHING out
+// of the in-memory adjacency must still be written to the WAL.
+//
+// It is true exactly when the WAL is not a faithful description of this graph's
+// adjacency, which on this adapter means an UNDIRECTED backing graph.
+// [walMutatorAdapter.RemoveAllEdgesFrom] emits one frame per OUTGOING neighbour,
+// but on an undirected adjacency the removal also retires each mirror arc, which
+// no frame describes. Recovery therefore reconstructs a different adjacency from
+// the one in memory, and the in-memory presence probe stops predicting what a
+// replay will find: a removal that is a no-op in memory can still be the frame
+// that performs the deletion on replay. Suppressing it there loses the deletion —
+// measured on 7 of 16 undirected shapes (rmp #2734).
+//
+// Cypher over an undirected LPG is not a supported configuration in the first
+// place (docs/cypher.md states `Directed: true` is required for openCypher
+// semantics, and [NewEngineWithOptions] warns at construction, #1892), so this is
+// a guard against regressing a configuration the module still constructs, not a
+// commitment to its durability. It costs one already-cached bool read.
+func (a *walMutatorAdapter) mustDescribeNoOpRemoval() bool {
+	return !a.g.AdjList().Directed()
 }
 
 // SetNodeLabel attaches label to n.
