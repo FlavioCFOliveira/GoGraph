@@ -8740,7 +8740,9 @@ func mapLiteralHasNonLiteralValue(ml *ast.MapLiteral) bool {
 // The closure:
 //  1. Builds an [expr.RowContext] from the current row using the captured schema
 //     and mutator (for upgrading IntegerValue(NodeID) → NodeValue with properties).
-//  2. Calls [expr.Eval] on each value expression in ml.
+//  2. Calls [evalRow] on each value expression in ml, so a value that is an
+//     EXISTS { … }, a COUNT { … } or a pattern predicate is evaluated rather
+//     than refused (rmp #2781).
 //  3. Converts the resulting [expr.Value] to [lpg.PropertyValue]; entries that
 //     evaluate to Null or to an unsupported type are silently omitted — except
 //     that, when mergeContext is true, a value that evaluates to null instead
@@ -8812,7 +8814,17 @@ func buildPropsEvalFn(
 
 		var out []exec.PropEntry
 		for i, k := range keys {
-			v, evalErr := expr.Eval(vals[i], rowCtx, params, reg)
+			// evalRow, not expr.Eval: a property VALUE is an ordinary
+			// expression and may be an EXISTS { … }, a COUNT { … } or a
+			// pattern predicate, exactly as the same expression may be in a
+			// RETURN item. Calling expr.Eval here bypassed buildOpts entirely,
+			// so the two evaluators #2660 wired onto the write path never
+			// reached this closure and every such value failed with
+			// "not supported in this evaluation context" (rmp #2781). evalRow
+			// degrades to expr.Eval by itself when bopts carries no evaluator
+			// — the public BuildPlanWithMutator path — so that path is
+			// unchanged.
+			v, evalErr := evalRow(bopts, vals[i], rowCtx, params, reg)
 			if evalErr != nil {
 				// Fail-stop: a runtime error evaluating a property value fails
 				// the statement rather than being swallowed into a silently
@@ -8964,7 +8976,10 @@ func buildMapEvalFn(
 		var entries []exec.PropEntry
 		var nullKeys []string
 		for i, k := range keys {
-			v, evalErr := expr.Eval(vals[i], rowCtx, params, reg)
+			// evalRow, not expr.Eval — same reason as [buildPropsEvalFn]:
+			// a SET-map value is an ordinary expression and may carry a
+			// subquery or a pattern predicate (rmp #2781).
+			v, evalErr := evalRow(bopts, vals[i], rowCtx, params, reg)
 			if evalErr != nil {
 				return nil, nil, evalErr
 			}
@@ -9008,7 +9023,11 @@ func buildExprMapEvalFn(
 			return expr.Null, nil
 		}
 		rowCtx := buildRowCtxFromMutator(row, schemaCopy, mutator, scalarSnap)
-		return expr.Eval(exprAST, rowCtx, params, reg)
+		// evalRow, not expr.Eval — same reason as [buildPropsEvalFn]. The RHS
+		// here is a whole map-valued expression (a CASE, a coalesce, a map
+		// projection), any sub-expression of which may be a subquery or a
+		// pattern predicate (rmp #2781).
+		return evalRow(bopts, exprAST, rowCtx, params, reg)
 	}
 }
 
@@ -9209,7 +9228,11 @@ func buildMergeActionEvals(
 		propKey := e.Key
 		out[exec.MergeActionEvalKey(e.TargetVar, e.Key)] = func(row exec.Row) (lpg.PropertyValue, bool, bool, error) {
 			rowCtx := buildRowCtxFromMutator(row, schemaCopy, mutator, scalarSnap)
-			v, evalErr := expr.Eval(valAST, rowCtx, params, reg)
+			// evalRow, not expr.Eval — same reason as [buildPropsEvalFn]: a
+			// MERGE ON CREATE / ON MATCH SET right-hand side is an ordinary
+			// expression and may carry a subquery or a pattern predicate
+			// (rmp #2781).
+			v, evalErr := evalRow(bopts, valAST, rowCtx, params, reg)
 			if evalErr != nil {
 				// Fail-stop, matching regular SET: a MERGE ON CREATE/ON MATCH SET
 				// RHS runtime error fails the statement rather than being swallowed
