@@ -404,12 +404,15 @@ type uniqueValueSeed struct {
 // records every non-null value of prop it read into seed (rmp #2792).
 //
 // rv decides which state is indexed, and it is the caller's whole choice of
-// semantics (rmp #2778). A CREATE INDEX passes a view bound to a read snapshot
-// ([Engine.beginIndexBuild]) so the scan reads COMMITTED state and cannot
-// index an explicit transaction's eager, uncommitted mutation. The recovery and
-// constraint call sites pass e.g.ReadAt(nil) — the live stored value, with no
-// version walk — which is what they read before this parameter existed and
-// which is correct for a graph no transaction is open against.
+// semantics (rmp #2778). Every call site that runs while a transaction may be
+// open passes a view bound to a read snapshot, so the scan reads COMMITTED state
+// and cannot index an explicit transaction's eager, uncommitted mutation: CREATE
+// INDEX ([Engine.beginIndexBuild]), CREATE CONSTRAINT (rmp #2792) and the DROP
+// CONSTRAINT rewind (rmp #2799). The RECOVERY re-registration sites are the only
+// ones left passing e.g.ReadAt(nil) — the live stored value, with no version walk
+// — which is what they read before this parameter existed and which is correct
+// there because they run before the engine is published to any caller, so no
+// transaction can be open against the graph at all.
 //
 // Every graph read in the body goes through rv. That is deliberate and is the
 // property to preserve: a reader auditing this scan for a read that escaped the

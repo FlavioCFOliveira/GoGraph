@@ -4343,35 +4343,147 @@ func (e *Engine) dropConstraintLocked(ctx context.Context, p *ir.DropConstraint,
 // rewindConstraintDrop re-establishes a just-removed constraint after a failure
 // later in the DROP CONSTRAINT sequence (the WAL append), by re-registering it
 // with the same identity and, for UNIQUE, re-creating and re-seeding its
-// backing index from the live graph. It is the DROP-path analogue of
+// backing index from COMMITTED state. It is the DROP-path analogue of
 // unwindConstraintRegistration: without it a constraint would vanish in memory
 // while remaining durable, so the next reopen would resurrect it (removed but
 // not durable). It returns cause, optionally joined with the rewind's own error.
 //
 // The rewind runs with an uncancellable context so it completes even when the
 // caller's ctx is already done.
+//
+// # Why this reads a snapshot, and why the LOSS it could have traded for is not
+// reachable (rmp #2799)
+//
+// This used to rebuild both enforcement structures from the LIVE property bag,
+// which carries an explicit transaction's EAGER, UNCOMMITTED mutations — rmp
+// #2778's and rmp #2792's defect, which both of those tasks deliberately left
+// here. Measured on the pre-fix build, one goroutine and NO concurrency, with a
+// transaction holding an eager mutation across a DROP CONSTRAINT whose WAL fsync
+// failed: after `SET n.name = 'seed-1-ghost'` on tag k7 was rolled back, the
+// rebuilt UNIQUE backing index held 1 entry for the value no transaction ever
+// committed and 0 for 'seed-7', the value the graph does hold, so a seek returned
+// the FABRICATED row and LOST the real one. `REMOVE n:Person` and `DETACH DELETE
+// n` each lost the real entry the same way. The value-set was seeded from a
+// second live read and was wrong at the same instant.
+//
+// rmp #2792 could not simply be extended here, and that is why this was its own
+// task. Its backfill sits inside the visibility barrier under an EXCLUSIVE hold,
+// so nothing can commit between its snapshot and the registration it authorises.
+// This rewind held NO barrier, and a snapshot taken outside one cannot see a
+// value committed after it was taken — which would drop that value from the
+// value-set and let a genuine duplicate through UNIQUE enforcement. That trade is
+// worse than the defect.
+//
+// The window is closed on BOTH counts rather than traded:
+//
+//   - STRUCTURALLY, by the barrier. The whole rewind now runs inside
+//     [lpg.Graph.ApplyAtomically], exactly as [Engine.createConstraintLocked]
+//     does, so the snapshot, the backfill and the registration are one instant.
+//     Commit-time fan-out runs under [lpg.Graph.ApplyInVersionedTx], which holds
+//     the barrier SHARED, so while this EXCLUSIVE hold is in force no transaction
+//     can commit and no value can be lost between the read and the registration.
+//   - AND BY REACHABILITY, measured. The rewind runs ONLY after
+//     commitConstraintTx failed, and every failure it can return through the DDL
+//     surface leaves the WAL writer unable to accept another frame: a SyncGroup
+//     or SyncBuffered failure poisons it ([wal.ErrDurabilityFailed], sticky), an
+//     AppendRun failure is either that same sticky error, [wal.ErrWriterClosed],
+//     or a bufio write error whose stickiness fails every later append, and the
+//     remaining branches ([txn.ErrTxFinished], [txn.ErrTransactionTooLarge], the
+//     encoder's identifier cap) cannot fire for a freshly-begun single-op DDL
+//     whose identifiers the parser already bounds at 4096 bytes. Measured on this
+//     build: an explicit transaction held OPEN across the whole failed DROP could
+//     not commit afterwards — Commit returned the poison and its node never
+//     became visible.
+//
+// Which of the two carries the weight TODAY is the reachability half, and that is
+// stated rather than glossed: neutralising the barrier — running the same closure
+// with no exclusive hold — fails NOTHING in the gate below, because on the only
+// reachable path there is nothing left that could commit for it to exclude. The
+// barrier is kept because the reachability half is an argument about ANOTHER
+// package's failure inventory: the day commitConstraintTx acquires a failure that
+// does not fail-stop the writer — a validation refusal at the txn layer, say — the
+// snapshot silently stops being sound, and no test here would notice. The barrier
+// keeps it sound structurally, costs one exclusive hold on a path that runs at
+// most once per fail-stopped store, and makes this function identical in
+// discipline to createConstraintLocked instead of a second variant free to drift.
+//
+// NO UNION with a live read is taken, and that is the difference from rmp #2798.
+// There the union is over a VIOLATION predicate, so admitting the live view only
+// ever refuses a DDL that might have been legal — unhelpful, never a breach.
+// Here a live value would be merged into the enforcement value-set permanently,
+// so a phantom from a rolled-back transaction would refuse a legitimate write
+// forever. Conservative in the harmless direction there; not conservative at all
+// here.
+//
+// Adding an exclusion is NOT how this is done: an explicit transaction still does
+// not take the schema gate, and the lock order stays schemaGate -> writer
+// admission -> visMu. The caller holds schemaGate exclusively and its store
+// transaction is already finished (CommitWALOnly clears the writer registration
+// on failure as well as on success), so taking visMu here is strictly inside the
+// documented order.
 func (e *Engine) rewindConstraintDrop(cause error, name, label, prop string, kind exec.ConstraintKind, idxMgr *index.Manager) error {
 	op := exec.NewCreateConstraintOp(name, label, prop, kind, false, idxMgr, e.constraintReg, e.ClearPlanCache)
-	if kind == exec.ConstraintUnique {
-		if boundIdx, bidxErr := newBoundNodeHashIndex(e.g.ReadAt(nil), label, prop); bidxErr == nil {
-			// The rewind is uncancellable by design (see runDDLOp below): a
-			// background context never cancels, so the backfill cannot error.
-			// Live view, matching the CREATE CONSTRAINT path this rewinds.
-			_ = e.backfillNodeHashIndex(context.Background(), e.g.ReadAt(nil), boundIdx, label, prop, nil)
-			op.WithBackingIndex(boundIdx)
+	// The visibility barrier is not re-entrant, so nothing inside the closure may
+	// call Graph.View or Graph.ApplyAtomically. newBoundNodeHashIndex touches only
+	// index.Manager metadata; backfillNodeHashIndex and scanLabelProperty read
+	// graph state directly and take no barrier; BeginRead/EndRead touch only the
+	// reclamation horizon (atomics) and the MVCC clock. All four are the same
+	// calls createConstraintLocked already makes inside this same barrier.
+	rerr := e.g.ApplyAtomically(func() error {
+		// bound reports whether the backing index was built, hence whether seed
+		// carries the values the index was built from.
+		var seed uniqueValueSeed
+		bound := false
+		if kind == exec.ConstraintUnique {
+			// The binding closures newBoundNodeHashIndex installs keep reading
+			// e.g.ReadAt(nil), the live value, and must: they run at commit time,
+			// on the state the index has to converge to. Only the BACKFILL below
+			// reads the snapshot. This mirrors createConstraintLocked exactly.
+			if boundIdx, bidxErr := newBoundNodeHashIndex(e.g.ReadAt(nil), label, prop); bidxErr == nil {
+				// ONE READ ANSWERS FOR BOTH ENFORCEMENT STRUCTURES (rmp #2792):
+				// the backfill records every non-null value it resolves into seed,
+				// and the value-set is seeded from that, so the index and the
+				// value-set cannot disagree about a node even in principle.
+				//
+				// The rewind is uncancellable by design (see runDDLOp below): a
+				// background context never cancels, so the backfill cannot error.
+				func() {
+					snap := e.g.BeginRead()
+					defer e.g.EndRead(snap)
+					_ = e.backfillNodeHashIndex(context.Background(), e.g.ReadAt(snap), boundIdx, label, prop, &seed)
+				}()
+				op.WithBackingIndex(boundIdx)
+				bound = true
+			}
+			// On binding error fall through: the constraint is re-registered with
+			// an unbound index, and the value-set — seeded below from its own
+			// scan of the same committed state — remains the primary enforcement
+			// source. newBoundNodeHashIndex fails only on an empty label or
+			// property, and both come from a registry entry that was populated by
+			// a DDL the parser had already rejected empty identifiers for.
 		}
-	}
-	if rerr := applyDDLOp(context.Background(), op); rerr != nil {
+		if err := applyDDLOp(context.Background(), op); err != nil {
+			return err
+		}
+		if kind == exec.ConstraintUnique {
+			values := seed.values
+			if !bound {
+				// No backing index was built, so there is no read to reuse. Scan
+				// the SAME committed state the backfill would have read, never the
+				// live one: an unbound fallback is a reason to have no second
+				// structure, not a reason to seed the first from uncommitted data.
+				func() {
+					snap := e.g.BeginRead()
+					defer e.g.EndRead(snap)
+					_, _ = e.scanLabelProperty(context.Background(), e.g.ReadAt(snap), label, prop, &values)
+				}()
+			}
+			e.constraintReg.SeedUniqueValuesIgnoringDuplicates(label, prop, values)
+		}
+		return nil
+	})
+	if rerr != nil {
 		return errors.Join(cause, fmt.Errorf("cypher: rewind constraint drop: %w", rerr))
-	}
-	if kind == exec.ConstraintUnique {
-		// The rewind is uncancellable by design (see runDDLOp below): a
-		// background context never cancels, so the scan cannot error. LIVE view,
-		// matching the backfill above and the CREATE CONSTRAINT path this
-		// rewinds; moving it is rmp #2799's decision, not this call's.
-		var values []lpg.PropertyValue
-		_, _ = e.scanLabelProperty(context.Background(), e.g.ReadAt(nil), label, prop, &values)
-		e.constraintReg.SeedUniqueValuesIgnoringDuplicates(label, prop, values)
 	}
 	return cause
 }
