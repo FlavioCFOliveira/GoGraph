@@ -120,7 +120,7 @@ func TestBackfillNodeBTreeIndex_ContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel before the backfill starts
 
-	if berr := e.backfillNodeBTreeIndex(ctx, idx, "Person", "name"); berr == nil {
+	if berr := e.backfillNodeBTreeIndex(ctx, e.g.ReadAt(nil), idx, "Person", "name"); berr == nil {
 		t.Fatal("backfill with cancelled context returned nil, want context.Canceled")
 	} else if !errors.Is(berr, context.Canceled) {
 		t.Fatalf("backfill error = %v, want context.Canceled", berr)
@@ -151,7 +151,7 @@ func TestBackfillNodeBTreeIndexNumeric_ContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if berr := e.backfillNodeBTreeIndexNumeric(ctx, idx, "Person", "age"); berr == nil {
+	if berr := e.backfillNodeBTreeIndexNumeric(ctx, e.g.ReadAt(nil), idx, "Person", "age"); berr == nil {
 		t.Fatal("backfill with cancelled context returned nil, want context.Canceled")
 	} else if !errors.Is(berr, context.Canceled) {
 		t.Fatalf("backfill error = %v, want context.Canceled", berr)
@@ -171,7 +171,7 @@ func TestBackfillNodeBTreeIndex_NotCancelled_StillCompletes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newBoundNodeBTreeIndex: %v", err)
 	}
-	if berr := e.backfillNodeBTreeIndex(context.Background(), idx, "Person", "name"); berr != nil {
+	if berr := e.backfillNodeBTreeIndex(context.Background(), e.g.ReadAt(nil), idx, "Person", "name"); berr != nil {
 		t.Fatalf("backfill: %v", berr)
 	}
 	for name := range names {

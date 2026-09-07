@@ -132,9 +132,149 @@ func shouldPollWorkerRelative(i, lo int) bool {
 	return (i-lo)&pollGranularityMask == 0
 }
 
-// backfillNodeHashIndex inserts every live node of label whose prop holds an
-// indexable string into idx. Callers must hold the engine's writer
-// serialisation so no write transaction can interleave with the scan.
+// beginIndexBuild opens the two windows a CREATE INDEX build reconciles with —
+// the catch-up recording of rmp #2738 and the scan snapshot of rmp #2778 — in
+// the one order that is correct, and it exists so that order is written down
+// once rather than at each DDL path.
+//
+// It returns the build log to hand [index.Manager.FinishBuild] (or
+// [exec.CreateIndexOp.Catching]), the read view both backfills must scan, and
+// the idempotent release for that view's reclamation-horizon slot.
+//
+// # Why the scan reads a snapshot and not the live graph
+//
+// The backfill used to read the graph's PHYSICAL LATEST state — [lpg.Graph]'s
+// plain accessors, documented to return the current stored value with no version
+// walk. That state includes an explicit transaction's EAGER, UNCOMMITTED
+// mutations: a statement inside an open transaction applies to the property bag
+// immediately and is unwound only by [ExplicitTx.Rollback]'s undo replay. So a
+// backfill running while such a transaction was open indexed a value nothing had
+// committed, and the rollback then discarded that transaction's
+// [exec.IndexBuffer] WITHOUT inverting it — the buffer describes changes that
+// were never fanned out, so there is nothing to invert — leaving the backfill's
+// own entry in the index forever.
+//
+// The consequence was a WRONG answer, not merely an incomplete one: the entry
+// for the uncommitted value was fabricated, and the entry for the value the
+// graph actually held was never written. A seek returned a row the graph does
+// not contain, because [exec.NodeByIndexSeek]'s only residual check is on the
+// node's LABEL and never on its value (graph/index/build.go carries the argument
+// for why that makes a stale entry unfilterable here, unlike in PostgreSQL). No
+// concurrency is needed to reach it: one transaction, one CREATE INDEX, one
+// rollback, on a single goroutine.
+//
+// A snapshot read excludes those mutations by construction. The versioned
+// accessors walk back over any version stamped by a transaction the snapshot
+// cannot see, so the scan reads the last COMMITTED value — which is both the
+// state the index must converge to and the state a label scan over the same
+// predicate reports.
+//
+// # Prior art: this is what PostgreSQL does when writers are NOT excluded
+//
+// PostgreSQL chooses between the two shapes explicitly, on exactly this
+// criterion (postgres REL_17_2, commit 6304632eaa2107bb1763d29e213ff166ff6104c0,
+// src/backend/access/heap/heapam_handler.c heapam_index_build_range_scan,
+// lines 1235-1262):
+//
+//	"In a normal index build, we use SnapshotAny because we must retrieve all
+//	 tuples and do our own time qual checks ... In a concurrent build, or during
+//	 bootstrap, we take a regular MVCC snapshot and index whatever's live
+//	 according to that."
+//
+// The SnapshotAny arm does index an uncommitted insert — "We must index such
+// tuples, since if the index build commits then they're good" (same file, 1528)
+// — and the source states the premise that makes it safe: "Since caller should
+// hold ShareLock or better, normally the only way to see this is if it was
+// inserted earlier in our own transaction", warning when it is not (1474-1484).
+// Both halves of that premise fail here. GoGraph's schema gate is not a
+// ShareLock over explicit transactions — rmp #2738 established it cannot be,
+// without a three-way deadlock against the store quiesce — and the uncommitted
+// writer is a DIFFERENT transaction from the DDL, so their fates are
+// independent: the DDL commits while the transaction rolls back, and "if the
+// index build commits then they're good" simply does not hold. GoGraph's DDL is
+// therefore in PostgreSQL's CONCURRENT position, and the MVCC snapshot is
+// PostgreSQL's own answer for that position.
+//
+// # Why recording starts BEFORE the snapshot is opened
+//
+// The two windows must OVERLAP. Together with the live fan-out they give every
+// change exactly one route into the new index:
+//
+//   - committed at or before the SNAPSHOT — the scan reads it;
+//   - committed after BeginBuild — recorded and replayed by FinishBuild;
+//   - committed after FinishBuild — the index is registered, so the fan-out
+//     delivers it.
+//
+// Because recording starts first, a change committed between the two is applied
+// TWICE, which the build log's contract already relies on being harmless: an
+// index entry is set membership, so a repeated insert is idempotent and a delete
+// of an absent value is a no-op (see graph/index/build.go).
+//
+// Reverse the order and the windows leave a GAP instead: a transaction that
+// commits after the snapshot but before recording starts is invisible to the
+// scan AND unrecorded, so its change reaches the new index by no route at all —
+// the permanent loss rmp #2738 exists to close. This is the same ordering
+// PostgreSQL's CREATE INDEX CONCURRENTLY uses for the same reason: it publishes
+// indisready so writers begin maintaining the index and only THEN takes the
+// reference snapshot — "Now we know that any subsequently-started transactions
+// will see the index and insert their new tuples into it. We then take a new
+// reference snapshot" (src/backend/catalog/index.c, validate_index's header
+// comment at 3247-3252).
+//
+// The order is enforced here by being in ONE place that both DDL paths call,
+// which is the same "correct by construction" discipline rmp #2738 used to keep
+// a half-built index out of the manager's map rather than behind a flag. It is
+// NOT separately gated by a test, and that is stated rather than implied: the
+// window an inversion opens is a few instructions wide, so no test can hit it
+// reliably, and a test that claimed to would be measuring the scheduler.
+//
+// # Lifetime
+//
+// releaseScanView returns the reclamation-horizon slot the snapshot holds and
+// MUST run on every path, including a panic — hence a closure to defer rather
+// than a bare [lpg.Graph.EndRead] to remember. It is idempotent, so a caller
+// defers it AND calls it early, once the scans are done, so the horizon is not
+// pinned across the registration. It is not safe for concurrent use; the DDL
+// releases it on its own goroutine.
+//
+// The build log's own retirement stays with the caller: [index.Manager.AbandonBuild]
+// must run AFTER the registration, where releaseScanView must run before it, so
+// the two cannot share one closure.
+func (e *Engine) beginIndexBuild(idxMgr *index.Manager) (
+	log *index.BuildLog, scanView *lpg.ReadView[string, float64], releaseScanView func(),
+) {
+	// Recording FIRST, snapshot SECOND. Do not reorder — see above.
+	log = idxMgr.BeginBuild()
+	snap := e.g.BeginRead()
+	released := false
+	return log, e.g.ReadAt(snap), func() {
+		if released {
+			return
+		}
+		released = true
+		e.g.EndRead(snap)
+	}
+}
+
+// backfillNodeHashIndex inserts every node of label whose prop holds an
+// indexable string, AS OF rv's instant, into idx.
+//
+// rv decides which state is indexed, and it is the caller's whole choice of
+// semantics (rmp #2778). A CREATE INDEX passes a view bound to a read snapshot
+// ([Engine.beginIndexBuild]) so the scan reads COMMITTED state and cannot
+// index an explicit transaction's eager, uncommitted mutation. The recovery and
+// constraint call sites pass e.g.ReadAt(nil) — the live stored value, with no
+// version walk — which is what they read before this parameter existed and
+// which is correct for a graph no transaction is open against.
+//
+// Every graph read in the body goes through rv. That is deliberate and is the
+// property to preserve: a reader auditing this scan for a read that escaped the
+// snapshot finds no e.g. reference to check. The one exception is the node
+// MAPPER, reached through rv.AdjList(), which is an unversioned CANDIDATE
+// source by design — it may over-approximate with ids an uncommitted
+// transaction created, and the versioned liveness, label and property reads
+// below reject each of them. That is lpg's P4c candidate-set discipline, not a
+// gap: an id the snapshot cannot see fails rv.IsTombstoned or rv.HasNodeLabel.
 //
 // The scan is two-phase for the same liveness reason as
 // [Engine.scanLabelProperty] (task #1339): phase 1 snapshots the interned
@@ -151,14 +291,31 @@ func shouldPollWorkerRelative(i, lo int) bool {
 // lock, so the only effect is shorter wall-clock on the blocking DDL — but that
 // matters: a 100M-node index build must not freeze writers for minutes.
 //
+// How MUCH shorter now depends on rv, and the parallel win is NOT unconditional
+// (measured, rmp #2778). All workers share one [lpg.Snapshot], whose visibility
+// memo is guarded by a single mutex, and a versioned property read takes that
+// mutex once per node that carries a live version record. On a 50 000-node
+// fixture in which EVERY node carried one, the parallel scan went 5.53 ms →
+// 10.61 ms (+91.96%, p=0.002, n=6) against the same scan on a live view, and a
+// mutex profile attributed 460.69 ms of 549.14 ms of total delay (83.89%) to
+// lpg.(*Snapshot).visible reached through rv.GetNodeProperty. With no live
+// version records the two views were indistinguishable (p=0.485). Allocations
+// are identical either way. The cost is bought deliberately: it buys the
+// committed-state guarantee above, it lands only on a blocking DDL that is
+// already O(n), and correctness does not trade down to speed. Removing it needs
+// a per-worker snapshot fork in lpg, which is not this function's to make.
+//
 // ctx is polled every 4096 nodes. On cancellation the backfill stops and
 // returns ctx.Err(); the caller aborts the CREATE INDEX/CONSTRAINT, and because
 // the index is registered only after a successful backfill, a cancelled partial
 // index is discarded and never observed (atomicity preserved). Callers that
 // must not be interruptible (recovery, constraint-drop rewind) pass a
 // background context, for which this never returns an error.
-func (e *Engine) backfillNodeHashIndex(ctx context.Context, idx *indexhash.Index[string], label, prop string) error {
-	mapper := e.g.AdjList().Mapper()
+func (e *Engine) backfillNodeHashIndex(
+	ctx context.Context, rv *lpg.ReadView[string, float64],
+	idx *indexhash.Index[string], label, prop string,
+) error {
+	mapper := rv.AdjList().Mapper()
 
 	type nodeRef struct {
 		key string
@@ -186,13 +343,13 @@ func (e *Engine) backfillNodeHashIndex(ctx context.Context, idx *indexhash.Index
 				}
 			}
 			r := refs[i]
-			if e.g.IsTombstoned(r.id) {
+			if rv.IsTombstoned(r.id) {
 				continue
 			}
-			if !e.g.HasNodeLabel(r.key, label) {
+			if !rv.HasNodeLabel(r.key, label) {
 				continue
 			}
-			pv, ok := e.g.GetNodeProperty(r.key, prop)
+			pv, ok := rv.GetNodeProperty(r.key, prop)
 			if !ok {
 				continue
 			}
@@ -337,20 +494,28 @@ func newBoundNodeBTreeIndexNumeric(
 	})
 }
 
-// backfillNodeBTreeIndexNumeric bulk-loads every live node of label whose prop
-// holds an indexable numeric value (integer or float, NaN excluded) into idx,
-// the float64 companion (#1652). It mirrors [Engine.backfillNodeBTreeIndex]
-// exactly — the same two-phase scan (snapshot interned (id, key) pairs under
-// the mapper shard locks, then resolve liveness/label/property with no shard
-// lock held, #1339), the same ~4096-row cancellation-poll granularity as
-// [Engine.backfillNodeHashIndex] (rmp #1872), and the same O(n log n) BulkLoad
-// (a per-key Insert loop would be O(n²) on the sorted-array leaves). Callers
-// must hold the engine's writer serialisation so no write transaction can
-// interleave with the scan. Returns ctx.Err() if cancelled mid-scan; the
-// index is never registered in that case, so atomicity is unaffected
-// (mirroring the hash path's own contract).
-func (e *Engine) backfillNodeBTreeIndexNumeric(ctx context.Context, idx *indexbtree.Index[float64], label, prop string) error {
-	mapper := e.g.AdjList().Mapper()
+// backfillNodeBTreeIndexNumeric bulk-loads every node of label whose prop holds
+// an indexable numeric value (integer or float, NaN excluded) AS OF rv's
+// instant into idx, the float64 companion (#1652). It mirrors
+// [Engine.backfillNodeBTreeIndex] exactly — the same two-phase scan (snapshot
+// interned (id, key) pairs under the mapper shard locks, then resolve
+// liveness/label/property with no shard lock held, #1339), the same ~4096-row
+// cancellation-poll granularity as [Engine.backfillNodeHashIndex] (rmp #1872),
+// and the same O(n log n) BulkLoad (a per-key Insert loop would be O(n²) on the
+// sorted-array leaves). Returns ctx.Err() if cancelled mid-scan; the index is
+// never registered in that case, so atomicity is unaffected (mirroring the hash
+// path's own contract).
+//
+// rv carries the same contract as [Engine.backfillNodeHashIndex]'s: a CREATE
+// INDEX passes a snapshot-bound view, and it passes THE SAME view it gave the
+// primary index, so the user index and its numeric companion are populated from
+// ONE instant and cannot disagree about a value that changed between the two
+// scans (rmp #2778). Recovery passes e.g.ReadAt(nil).
+func (e *Engine) backfillNodeBTreeIndexNumeric(
+	ctx context.Context, rv *lpg.ReadView[string, float64],
+	idx *indexbtree.Index[float64], label, prop string,
+) error {
+	mapper := rv.AdjList().Mapper()
 
 	type nodeRef struct {
 		key string
@@ -371,13 +536,13 @@ func (e *Engine) backfillNodeBTreeIndexNumeric(ctx context.Context, idx *indexbt
 			}
 		}
 		r := refs[i]
-		if e.g.IsTombstoned(r.id) {
+		if rv.IsTombstoned(r.id) {
 			continue
 		}
-		if !e.g.HasNodeLabel(r.key, label) {
+		if !rv.HasNodeLabel(r.key, label) {
 			continue
 		}
-		pv, ok := e.g.GetNodeProperty(r.key, prop)
+		pv, ok := rv.GetNodeProperty(r.key, prop)
 		if !ok {
 			continue
 		}
@@ -433,12 +598,14 @@ func newBoundNodeBTreeIndex(
 	})
 }
 
-// backfillNodeBTreeIndex bulk-loads every live node of label whose prop holds
-// an indexable string into idx. Callers must hold the engine's writer
-// serialisation so no write transaction can interleave with the scan.
-// Returns ctx.Err() if cancelled mid-scan; the index is never registered in
-// that case, so atomicity is unaffected (mirroring the hash path's own
-// contract).
+// backfillNodeBTreeIndex bulk-loads every node of label whose prop holds an
+// indexable string, AS OF rv's instant, into idx. Returns ctx.Err() if
+// cancelled mid-scan; the index is never registered in that case, so atomicity
+// is unaffected (mirroring the hash path's own contract).
+//
+// rv carries the same contract as [Engine.backfillNodeHashIndex]'s: a CREATE
+// INDEX passes a snapshot-bound view so the scan cannot index an uncommitted
+// mutation (rmp #2778); recovery passes e.g.ReadAt(nil).
 //
 // Unlike [Engine.backfillNodeHashIndex], the population uses
 // [btree.Index.BulkLoad] (O(n log n)), not a per-key Insert loop: the sorted-
@@ -449,8 +616,11 @@ func newBoundNodeBTreeIndex(
 // no shard lock held, so a queued writer cannot deadlock a nested lookup
 // (#1339). Polls ctx at the same ~4096-row granularity as the hash path
 // (rmp #1872 — this backfill polled no cancellation at all before).
-func (e *Engine) backfillNodeBTreeIndex(ctx context.Context, idx *indexbtree.Index[string], label, prop string) error {
-	mapper := e.g.AdjList().Mapper()
+func (e *Engine) backfillNodeBTreeIndex(
+	ctx context.Context, rv *lpg.ReadView[string, float64],
+	idx *indexbtree.Index[string], label, prop string,
+) error {
+	mapper := rv.AdjList().Mapper()
 
 	type nodeRef struct {
 		key string
@@ -471,13 +641,13 @@ func (e *Engine) backfillNodeBTreeIndex(ctx context.Context, idx *indexbtree.Ind
 			}
 		}
 		r := refs[i]
-		if e.g.IsTombstoned(r.id) {
+		if rv.IsTombstoned(r.id) {
 			continue
 		}
-		if !e.g.HasNodeLabel(r.key, label) {
+		if !rv.HasNodeLabel(r.key, label) {
 			continue
 		}
-		pv, ok := e.g.GetNodeProperty(r.key, prop)
+		pv, ok := rv.GetNodeProperty(r.key, prop)
 		if !ok {
 			continue
 		}
@@ -706,7 +876,11 @@ func (e *Engine) registerRecoveredIndexes(defs []IndexDef) {
 				e.populateRecoveredIndex(d.Name, d.Label, d.Property, boundIdx, func() {
 					// Recovery must complete: a background context never
 					// cancels, so the backfill never returns an error here.
-					_ = e.backfillNodeHashIndex(context.Background(), boundIdx, d.Label, d.Property)
+					// Live view, not a snapshot: recovery runs inside
+					// NewEngineWithOptions before the engine is published, so no
+					// transaction can be open against this graph and the live
+					// state IS the committed state (rmp #2778).
+					_ = e.backfillNodeHashIndex(context.Background(), e.g.ReadAt(nil), boundIdx, d.Label, d.Property)
 				})
 				_ = idxMgr.CreateIndex(d.Name, boundIdx) // absorb ErrIndexExists
 			} else {
@@ -726,7 +900,8 @@ func (e *Engine) registerRecoveredIndexes(defs []IndexDef) {
 				e.populateRecoveredIndex(d.Name, d.Label, d.Property, boundIdx, func() {
 					// Recovery must complete: a background context never
 					// cancels, so the backfill never returns an error here.
-					_ = e.backfillNodeBTreeIndex(context.Background(), boundIdx, d.Label, d.Property)
+					// Live view for the reason given on the hash arm above.
+					_ = e.backfillNodeBTreeIndex(context.Background(), e.g.ReadAt(nil), boundIdx, d.Label, d.Property)
 				})
 				_ = idxMgr.CreateIndex(d.Name, boundIdx) // absorb ErrIndexExists
 			} else {
@@ -782,8 +957,9 @@ func (e *Engine) registerNumericCompanion(idxMgr *index.Manager, label, property
 	}
 	e.populateRecoveredIndex(numName, label, property, numIdx, func() {
 		// Recovery must complete: a background context never cancels, so the
-		// backfill never returns an error here.
-		_ = e.backfillNodeBTreeIndexNumeric(context.Background(), numIdx, label, property)
+		// backfill never returns an error here. Live view for the reason given
+		// in [Engine.registerRecoveredIndexes] (rmp #2778).
+		_ = e.backfillNodeBTreeIndexNumeric(context.Background(), e.g.ReadAt(nil), numIdx, label, property)
 	})
 	_ = idxMgr.CreateIndex(numName, numIdx) // absorb ErrIndexExists
 }
@@ -857,8 +1033,13 @@ func (e *Engine) createHashIndexLocked(ctx context.Context, p *ir.CreateIndex, i
 	// retired the log, and on every early return below — a duplicate name, a
 	// cancelled backfill, a failed WAL commit — it is what stops the manager
 	// recording into a log nobody will ever drain.
-	buildLog := idxMgr.BeginBuild()
+	// scanView is the instant BOTH backfills below read, and it is opened after
+	// the recording starts — the ordering, and why the scan must not read the
+	// live property bag at all, are in [Engine.beginIndexBuild] (rmp #2738,
+	// rmp #2778).
+	buildLog, scanView, releaseScanView := e.beginIndexBuild(idxMgr)
 	defer idxMgr.AbandonBuild(buildLog)
+	defer releaseScanView()
 
 	idx, err := newBoundNodeHashIndex(e.g.ReadAt(nil), p.Label, p.Property)
 	if err != nil {
@@ -870,7 +1051,7 @@ func (e *Engine) createHashIndexLocked(ctx context.Context, p *ir.CreateIndex, i
 	// half-built index is not in the manager's map, so no reader can reach it. A
 	// cancelled backfill returns before registration, so the partial index is
 	// discarded (and tx is rolled back by the caller) — nothing is observed.
-	if berr := e.backfillNodeHashIndex(ctx, idx, p.Label, p.Property); berr != nil {
+	if berr := e.backfillNodeHashIndex(ctx, scanView, idx, p.Label, p.Property); berr != nil {
 		return nil, berr
 	}
 
@@ -900,10 +1081,13 @@ func (e *Engine) createHashIndexLocked(ctx context.Context, p *ir.CreateIndex, i
 	numName := numericBTreeName(p.Label, p.Property)
 	numIdx, _ := newBoundNodeBTreeIndexNumeric(e.g.ReadAt(nil), p.Label, p.Property)
 	if numIdx != nil {
-		if berr := e.backfillNodeBTreeIndexNumeric(ctx, numIdx, p.Label, p.Property); berr != nil {
+		if berr := e.backfillNodeBTreeIndexNumeric(ctx, scanView, numIdx, p.Label, p.Property); berr != nil {
 			return nil, berr
 		}
 	}
+	// Both scans are done: return the horizon slot before the registration so a
+	// long registration cannot pin reclamation. Idempotent with the defer above.
+	releaseScanView()
 
 	// Replay the changes recorded since BeginBuild into BOTH indexes and register
 	// them, all under one exclusive hold of the manager's lock (rmp #2738). The

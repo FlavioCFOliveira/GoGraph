@@ -1906,7 +1906,9 @@ func (e *Engine) registerRecoveredConstraints(defs []ConstraintDef) {
 					e.populateRecoveredIndex(idxName, d.Label, d.Property, boundIdx, func() {
 						// Recovery must complete: a background context never
 						// cancels, so the backfill never returns an error here.
-						_ = e.backfillNodeHashIndex(context.Background(), boundIdx, d.Label, d.Property)
+						// Live view: recovery runs before the engine is
+						// published, so no transaction can be open (rmp #2778).
+						_ = e.backfillNodeHashIndex(context.Background(), e.g.ReadAt(nil), boundIdx, d.Label, d.Property)
 					})
 					sub = boundIdx
 				} else {
@@ -3619,8 +3621,13 @@ func (e *Engine) createBTreeIndexLocked(ctx context.Context, p *ir.CreateIndex, 
 	// scan and the registration below reaches no index and is lost permanently.
 	// The log is handed to the registration operator via Catching, which replays
 	// it into both indexes at the instant they become reachable.
-	buildLog := idxMgr.BeginBuild()
+	// scanView is the instant BOTH backfills below read, opened after the
+	// recording starts, exactly as on the hash path — see
+	// [Engine.beginIndexBuild] for the ordering and for why the scan must not
+	// read the live property bag (rmp #2738, rmp #2778).
+	buildLog, scanView, releaseScanView := e.beginIndexBuild(idxMgr)
 	defer idxMgr.AbandonBuild(buildLog)
+	defer releaseScanView()
 
 	idx, err := newBoundNodeBTreeIndex(e.g.ReadAt(nil), p.Label, p.Property)
 	if err != nil {
@@ -3629,7 +3636,7 @@ func (e *Engine) createBTreeIndexLocked(ctx context.Context, p *ir.CreateIndex, 
 	// Backfill BEFORE registration: a concurrent reader's plan build either
 	// misses the index (scan+filter, correct) or sees it fully populated — the
 	// half-built index is not in the manager's map, so no reader can reach it.
-	if err := e.backfillNodeBTreeIndex(ctx, idx, p.Label, p.Property); err != nil {
+	if err := e.backfillNodeBTreeIndex(ctx, scanView, idx, p.Label, p.Property); err != nil {
 		return nil, err
 	}
 
@@ -3649,10 +3656,14 @@ func (e *Engine) createBTreeIndexLocked(ctx context.Context, p *ir.CreateIndex, 
 	numName := numericBTreeName(p.Label, p.Property)
 	numIdx, _ := newBoundNodeBTreeIndexNumeric(e.g.ReadAt(nil), p.Label, p.Property)
 	if numIdx != nil {
-		if err := e.backfillNodeBTreeIndexNumeric(ctx, numIdx, p.Label, p.Property); err != nil {
+		if err := e.backfillNodeBTreeIndexNumeric(ctx, scanView, numIdx, p.Label, p.Property); err != nil {
 			return nil, err
 		}
 	}
+	// Both scans are done: return the horizon slot before the registration
+	// barrier, so the visibility barrier below is never entered while this DDL
+	// still pins reclamation. Idempotent with the defer above.
+	releaseScanView()
 
 	// Register BOTH indexes through the exec-layer DDL operator, which wraps the
 	// pair in ONE invocation of the visibility barrier (rmp #2703). The single
@@ -4014,7 +4025,14 @@ func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstra
 			if bidxErr == nil {
 				// Cancellation before registration aborts the constraint with
 				// nothing registered or made durable (atomicity preserved).
-				if berr := e.backfillNodeHashIndex(ctx, boundIdx, p.Label, p.Property); berr != nil {
+				// Live view, NOT a snapshot: this call runs INSIDE the
+				// visibility barrier, and the value-set seeded below from
+				// scanLabelProperty reads the live bag too, so the two must
+				// answer at the same instant. rmp #2778 changed only the CREATE
+				// INDEX paths; the constraint path's own exposure to an open
+				// transaction's eager mutations is unchanged by that fix and is
+				// not this task's scope.
+				if berr := e.backfillNodeHashIndex(ctx, e.g.ReadAt(nil), boundIdx, p.Label, p.Property); berr != nil {
 					return berr
 				}
 				op.WithBackingIndex(boundIdx)
@@ -4175,7 +4193,8 @@ func (e *Engine) rewindConstraintDrop(cause error, name, label, prop string, kin
 		if boundIdx, bidxErr := newBoundNodeHashIndex(e.g.ReadAt(nil), label, prop); bidxErr == nil {
 			// The rewind is uncancellable by design (see runDDLOp below): a
 			// background context never cancels, so the backfill cannot error.
-			_ = e.backfillNodeHashIndex(context.Background(), boundIdx, label, prop)
+			// Live view, matching the CREATE CONSTRAINT path this rewinds.
+			_ = e.backfillNodeHashIndex(context.Background(), e.g.ReadAt(nil), boundIdx, label, prop)
 			op.WithBackingIndex(boundIdx)
 		}
 	}

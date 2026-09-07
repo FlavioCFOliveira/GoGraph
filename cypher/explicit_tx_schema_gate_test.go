@@ -615,21 +615,21 @@ func TestIndexUnderConstructionIsUnreachableByEveryPlannerRoute(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bind hash: %v", err)
 	}
-	if err := e.backfillNodeHashIndex(ctx, hashIdx, "Person", "name"); err != nil {
+	if err := e.backfillNodeHashIndex(ctx, e.g.ReadAt(nil), hashIdx, "Person", "name"); err != nil {
 		t.Fatalf("backfill hash: %v", err)
 	}
 	btreeIdx, err := newBoundNodeBTreeIndex(e.g.ReadAt(nil), "Person", "name")
 	if err != nil {
 		t.Fatalf("bind btree: %v", err)
 	}
-	if err := e.backfillNodeBTreeIndex(ctx, btreeIdx, "Person", "name"); err != nil {
+	if err := e.backfillNodeBTreeIndex(ctx, e.g.ReadAt(nil), btreeIdx, "Person", "name"); err != nil {
 		t.Fatalf("backfill btree: %v", err)
 	}
 	numIdx, err := newBoundNodeBTreeIndexNumeric(e.g.ReadAt(nil), "Person", "age")
 	if err != nil {
 		t.Fatalf("bind numeric: %v", err)
 	}
-	if err := e.backfillNodeBTreeIndexNumeric(ctx, numIdx, "Person", "age"); err != nil {
+	if err := e.backfillNodeBTreeIndexNumeric(ctx, e.g.ReadAt(nil), numIdx, "Person", "age"); err != nil {
 		t.Fatalf("backfill numeric: %v", err)
 	}
 	// The indexes really are populated: a leak below would surface a WRONG plan,
