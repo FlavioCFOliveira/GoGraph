@@ -1470,7 +1470,8 @@ func openCodec[N comparable, W any](
 	res.SnapshotSelfSufficient = snapshotSideAppliedEarly
 	if len(snapIndexes) > 0 {
 		res.SnapshotIndexPayloads, res.SnapshotIndexes =
-			classifyIndexPayloads(snapIndexes, indexImageReason(snapshotSideAppliedEarly, loaded.Manifest.IndexesCommitTS))
+			classifyIndexPayloads(snapIndexes, indexImageReason(
+				snapshotSideAppliedEarly, loaded.Manifest.IndexesCommitTS, loaded.Manifest.IndexBuilderEpoch))
 	}
 	// Fail-stop on genuine corruption: a CRC mismatch, bad magic,
 	// unsupported frame/record version, or oversized length inside an

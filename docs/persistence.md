@@ -503,7 +503,8 @@ form bit-identical to pre-extension v2 snapshots.
   "indexes": [
     {"name": "labels.nodes",  "size":  1024, "crc32c": 123456789}
   ],
-  "indexes_commit_ts": 4271
+  "indexes_commit_ts": 4271,
+  "index_builder_epoch": 1
 }
 ```
 
@@ -545,6 +546,52 @@ and a newer reader on an older manifest decodes zero — the same *"absent means
 timestamp"* policy the `OpCommit` body uses. `omitempty` keeps a manifest with no
 instant (the legacy CSR-only writer, which has no graph in hand, and any
 non-MVCC graph) byte-identical to what previous builds wrote.
+
+**`index_builder_epoch` (optional).** Which secondary-index **builder** produced
+the `indexes/<name>.bin` payloads, as opposed to *when* they were taken. The full
+writer stamps `snapshot.CurrentIndexBuilderEpoch` (currently `1`) on every
+snapshot it publishes — unconditionally, including when it publishes no payload
+and no watermark, because a snapshot that gains its first index later must not
+inherit a stale absence. A reader hydrates a payload only when the manifest names
+**exactly** its own epoch.
+
+The field exists because an index payload is *durable*. Two backfill defects
+(rmp #2778 on `CREATE INDEX`, rmp #2792 on `CREATE CONSTRAINT`) wrote index
+entries for values an explicit transaction had eagerly written and rolled back;
+a checkpoint then persisted the fabricated entry, and a reopen *loads* it rather
+than rebuilding it — so fixing the builder does not heal a store already on disk.
+Measured on a two-build experiment, a store written by the pre-fix build and
+reopened on the fixed build reported `hydrated=2 rebuilt=0` and answered a seek
+for the rolled-back value with the row of a node that never held it, while the
+seek for that node's real value returned nothing. A pure-WAL store is not
+affected: recovery rebuilds from the committed graph.
+
+Refusing a **newer** epoch as well as an absent one is deliberate: this build
+cannot know what a future builder writes, and a rebuild is always correct, so the
+comparison is equality rather than "at least".
+
+**Absent means never hydrate**, exactly like the watermark, and for the same
+back-compat reason: every snapshot written before the field rebuilds its indexes
+once, `O(N)` in the mapper length, on its first open — after which the next
+checkpoint stamps the current epoch and the store hydrates again. The cost was
+measured, not assumed: at 50 000 nodes with four registered indexes on an Apple
+M4 without `-race`, a whole first open cost **73.79 ms ±1%** with the epoch
+absent against **56.99 ms ±2%** with it present — a one-time **+16.80 ms**
+(+29.48%, `p=0.000`, `n=10`), against a same-code noise floor of about 3% on the
+same host. The benchmarks are `BenchmarkIndexBuilderEpochFirstOpen` (which drives
+the field) and `BenchmarkRecoveredIndexPopulation` (which isolates the
+rebuild-versus-hydrate step), both in package `cypher`.
+
+`omitempty` keeps an epoch-less manifest byte-identical to what previous builds
+wrote, so the `version` field is **not** bumped. A flip in the key name zeroes
+the field into a *rebuild* rather than into a hydration, and fails the manifest
+trailer checksum on top of that.
+
+**Bump the epoch** whenever a defect is fixed in what a backfill *writes into* an
+index — the values, the node set, or the label gate it resolves. Do **not** bump
+it for a payload serialisation change (the payload carries its own magic and
+version, and an index that refuses a payload already falls back to a rebuild) or
+for a performance rewrite.
 
 ### `snapshot/csr.bin` (binary, identical across v1, v2 and v3)
 
@@ -924,10 +971,10 @@ with nil `Bytes`) is one of:
 Neither sentinel is ever the **function** error of `Open` / `OpenCtx`: they are
 per-payload reason codes, exactly like `Result.TailErr`.
 
-**Three preconditions must hold before a payload may be used.** The first two are
-whole-image and are folded into `Err` by recovery; the third is per index and is
-evaluated by the caller, because only the engine knows which `(label, property)`
-an index name covers:
+**Four preconditions must hold before a payload may be used.** The first three
+are whole-image and are folded into `Err` by recovery; the fourth is per index
+and is evaluated by the caller, because only the engine knows which
+`(label, property)` an index name covers:
 
 1. **The snapshot was self-sufficient** (`Result.SnapshotSelfSufficient`) — it
    carried a `mapper.bin`, so node ids were restored rather than re-derived by
@@ -937,7 +984,12 @@ an index name covers:
 2. **The manifest carried `indexes_commit_ts`** (see below). Without the instant
    the payloads describe, there is no way to tell whether the WAL replayed on top
    of them invalidates them.
-3. **The replayed WAL suffix did not touch that index's `(label, property)`**.
+3. **The manifest named this build's `index_builder_epoch`** (see above).
+   Without it the payloads were produced by a builder whose entries this build
+   cannot vouch for — which includes every build that predates the field, and so
+   every payload the rmp #2778 / rmp #2792 backfill defects could have
+   fabricated.
+4. **The replayed WAL suffix did not touch that index's `(label, property)`**.
    Recovery reports the facts — `Result.WALTouchedNodeLabels` and
    `Result.WALTouchedNodePropertyKeys`, both sorted and de-duplicated — and the
    predicate `Result.WALSuffixTouchesNodeIndex(label, property)` over them. The

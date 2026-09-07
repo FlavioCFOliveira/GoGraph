@@ -41,6 +41,36 @@ const ManifestVersion = 3
 // re-intern keys at recovery time.
 const manifestVersionV2 = 2
 
+// CurrentIndexBuilderEpoch identifies the secondary-index BUILDER this build
+// ships, and is what [WriteSnapshotFull] stamps into
+// [Manifest.IndexBuilderEpoch] on every full snapshot it writes. A reader
+// hydrates an `indexes/<name>.bin` payload only when the manifest names THIS
+// epoch; see [Manifest.IndexBuilderEpoch] for why, and
+// store/recovery.indexImageReason for where the refusal is applied.
+//
+// # When to bump it
+//
+// Whenever a defect is fixed in what a backfill WRITES INTO an index — the
+// values, the node set, or the label gate it resolves — because a payload
+// produced before that fix is durable, is rehydrated verbatim, and no fix to the
+// builder can reach it. Bumping is the only remediation: it makes every store
+// written by the defective builder rebuild its indexes once, from the recovered
+// graph, on first open.
+//
+// Do NOT bump it for a change that leaves the CONTENT a correct builder would
+// produce unchanged — a serialisation-format change (the payload carries its own
+// magic and version, and an index that refuses a payload already falls back to a
+// rebuild), a performance rewrite, or a change confined to how the payload is
+// framed on disk.
+//
+// Epoch 1 is the first epoch, introduced for rmp #2797. It is the builder that
+// resolves every backfill read through a snapshot-bound read view (rmp #2778)
+// and seeds a UNIQUE value-set from that same read (rmp #2792). Epoch 0 is not a
+// builder: it is the ABSENCE of the field, which is every snapshot written
+// before this one, and which therefore includes every payload the two defects
+// above could have fabricated.
+const CurrentIndexBuilderEpoch uint64 = 1
+
 // manifestVersionLegacy is the schema version emitted by
 // [WriteSnapshotCSR] and [WriteSnapshotCSRCtx]. Those writers retain
 // the v1 shape on disk so existing readers and the v1 fixture
@@ -403,6 +433,64 @@ type Manifest struct {
 	// `indexes_commit_ts` KEY (which would silently zero it and merely lose the
 	// optimisation) still fails the manifest checksum.
 	IndexesCommitTS uint64 `json:"indexes_commit_ts,omitempty"`
+
+	// IndexBuilderEpoch identifies the secondary-index BUILDER that produced the
+	// `indexes/<name>.bin` payloads in this manifest, or is absent when they were
+	// produced by a build that predates the field.
+	//
+	// # Absent means NEVER HYDRATE, and it is the only remediation there is
+	//
+	// [Manifest.IndexesCommitTS] one field up answers "does the WAL replayed on
+	// top of this image invalidate the payloads?". This field answers a question
+	// that instant cannot reach: "was the builder that produced them one whose
+	// output can be trusted at all?".
+	//
+	// The two are independent because a payload is DURABLE. A defect in what a
+	// backfill writes into an index — rmp #2778 wrote entries for values an open
+	// transaction had eagerly written and rolled back, rmp #2792 did the same on
+	// the UNIQUE constraint path — survives a checkpoint, and a reader that
+	// hydrates it reinstates the fabricated entry verbatim. Fixing the builder
+	// cannot heal such a store: the entry is not rebuilt, it is loaded. Measured
+	// on a two-build experiment before this field existed, a store written by the
+	// pre-#2778 build and reopened on the fixed build reported hydrated=2
+	// rebuilt=0 and answered a seek for the rolled-back value with the row of a
+	// node that never held it, while a seek for that node's real value returned
+	// nothing.
+	//
+	// So the epoch is what makes the fix reach the disk. A reader hydrates only
+	// when the manifest names [CurrentIndexBuilderEpoch]; anything else — absent,
+	// older, or newer than this build knows — falls into the per-index rebuild
+	// path that already exists for a payload with no watermark, and the index is
+	// reconstructed from the recovered graph by the builder this build ships.
+	// Refusing a NEWER epoch too is deliberate: this build cannot know what a
+	// future builder writes, and a rebuild is always correct, so the comparison
+	// is equality and not "at least".
+	//
+	// The cost is bounded and one-time: every upgraded store rebuilds its indexes
+	// once, O(N) in the mapper length, on its first open, after which it carries
+	// this epoch and hydrates again. It was measured rather than assumed, at
+	// 50 000 nodes with four registered indexes, on an Apple M4 without -race:
+	//
+	//	whole first open   pre-epoch 73.79m ±1%  vs current 56.99m ±2%
+	//	                   +16.80 ms one-time  (+29.48%, p=0.000, n=10)
+	//	engine construction only, rebuild vs hydrate
+	//	                   26.59m ±3% vs 10.54m ±4%  (+152%, p=0.000, n=10)
+	//
+	// against a same-code noise floor of about 3% on the same host. The two
+	// benchmarks are BenchmarkIndexBuilderEpochFirstOpen (which drives this field
+	// directly) and BenchmarkRecoveredIndexPopulation (which isolates the
+	// rebuild-versus-hydrate step), both in package cypher.
+	//
+	// NO MANIFEST VERSION BUMP and no migration, for the reason
+	// [Manifest.CommitTS] gives two fields up: the manifest is JSON, an older
+	// reader ignores the unknown key, a newer reader on an older manifest decodes
+	// the zero value — which is exactly the "absent means never hydrate" policy —
+	// and `omitempty` keeps an epoch-less manifest byte-identical to what
+	// previous builds wrote, so no fixture and no golden file moves. It sits
+	// inside the region the trailer checksums like every other field, so a flip
+	// in the `index_builder_epoch` KEY zeroes it into a REBUILD rather than into
+	// a hydration, and fails the manifest checksum on top of that.
+	IndexBuilderEpoch uint64 `json:"index_builder_epoch,omitempty"`
 
 	// Integrity names the framing scheme the writer used, or is empty for a
 	// manifest written before the trailer existed. The current writer always sets

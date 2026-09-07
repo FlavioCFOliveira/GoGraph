@@ -78,8 +78,21 @@ var ErrIndexPayloadUnreadable = errors.New("recovery: snapshot index payload unr
 //     by a present-time writer ([snapshot.WriteSnapshotFull] and friends), and
 //     every snapshot that existed before that field, is in this state — which is
 //     the format's back-compat guarantee: absent watermark means never hydrate.
+//   - The manifest's `index_builder_epoch` is not
+//     [snapshot.CurrentIndexBuilderEpoch]. The watermark says WHEN the payloads
+//     were taken; it cannot say whether the builder that produced them wrote the
+//     right entries. rmp #2778 and rmp #2792 fixed two backfills that indexed
+//     values an open transaction had eagerly written and rolled back, and such a
+//     payload is DURABLE: hydrating it reinstates the fabricated entry, so no
+//     fix to the builder reaches a store already written. Refusing every epoch
+//     but this build's own is what makes those fixes reach the disk — the store
+//     rebuilds once, from the recovered graph, by the builder this build ships.
+//     Absent (every snapshot written before the field) and NEWER (a builder this
+//     build knows nothing about) are both refused; a rebuild is always correct,
+//     so the comparison is equality rather than "at least". See rmp #2797 and
+//     [snapshot.Manifest.IndexBuilderEpoch].
 //
-// A THIRD staleness condition is deliberately NOT folded in here, because
+// A FOURTH staleness condition is deliberately NOT folded in here, because
 // recovery cannot evaluate it: whether the replayed WAL suffix touched a
 // PARTICULAR index's (label, property). Recovery reports the facts for that
 // decision — [Result.WALTouchedNodeLabels],
@@ -197,17 +210,28 @@ func (r Result[N, W]) WALSuffixTouchesNodeIndex(label, property string) bool {
 // payloads to be used, returning nil when it does and the wrapped
 // [ErrIndexPayloadStale] reason when it does not.
 //
-// The two conditions are documented on [ErrIndexPayloadStale]: the image must be
-// self-sufficient (so payload NodeIDs mean what they say), and its manifest must
+// The three conditions are documented on [ErrIndexPayloadStale]: the image must
+// be self-sufficient (so payload NodeIDs mean what they say), its manifest must
 // have named the instant the payloads describe (so the WAL replayed on top can be
-// compared against them). Both are properties of the whole image, so one answer
-// covers every payload in it.
+// compared against them), and it must name the index builder this build ships
+// (so the entries inside them are entries this build considers correct at all).
+// All three are properties of the whole image, so one answer covers every payload
+// in it.
 //
 // A zero indexesCommitTS is exactly "no watermark": the field is omitempty, so an
 // absent watermark and a watermark of 0 encode identically, and both are refused.
 // Refusing a genuine instant 0 costs nothing — a graph at instant 0 has committed
-// nothing, so its indexes are empty and a rebuild is free.
-func indexImageReason(selfSufficient bool, indexesCommitTS uint64) error {
+// nothing, so its indexes are empty and a rebuild is free. A zero
+// indexBuilderEpoch reads the same way and for the same reason: absence and 0 are
+// the same bytes, and 0 is not a builder.
+//
+// The order of the cases is load-bearing for ATTRIBUTION, not for safety: any one
+// of them refuses the whole image, so a caller only ever sees the first that
+// holds. Self-sufficiency is reported first because it is the condition that
+// makes the payload's node ids meaningless — the most fundamental of the three —
+// and the epoch last because it is the only one an operator can act on by
+// upgrading, so naming it is most useful when nothing more basic is wrong.
+func indexImageReason(selfSufficient bool, indexesCommitTS, indexBuilderEpoch uint64) error {
 	switch {
 	case !selfSufficient:
 		return fmt.Errorf("%w: snapshot is not self-sufficient (no mapper.bin), so payload node ids "+
@@ -215,6 +239,11 @@ func indexImageReason(selfSufficient bool, indexesCommitTS uint64) error {
 	case indexesCommitTS == 0:
 		return fmt.Errorf("%w: manifest carries no indexes_commit_ts, so the instant the payloads "+
 			"describe is unknown and the replayed WAL cannot be compared against them", ErrIndexPayloadStale)
+	case indexBuilderEpoch != snapshot.CurrentIndexBuilderEpoch:
+		return fmt.Errorf("%w: manifest names index builder epoch %d and this build ships epoch %d, "+
+			"so the payloads were produced by a builder whose entries this build cannot vouch for "+
+			"and each index is rebuilt from the recovered graph instead",
+			ErrIndexPayloadStale, indexBuilderEpoch, snapshot.CurrentIndexBuilderEpoch)
 	default:
 		return nil
 	}
