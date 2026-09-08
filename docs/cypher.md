@@ -48,9 +48,13 @@ A single `Engine` is safe for concurrent use: any number of `Run` readers may
 execute alongside concurrent `RunInTx` writers. Both the physical-plan build
 and execution run under the graph's visibility barrier, so a writer that grows
 the node space can never tear a concurrent reader's plan build, and readers
-never observe a partially-applied write transaction. When the engine is backed
-by a WAL store, concurrent `RunInTx` calls serialise on the store's single
-writer. The returned `Result` is not safe for concurrent use.
+never observe a partially-applied write transaction. Concurrent `RunInTx`
+calls do **not** serialise against one another on a WAL-backed engine either:
+since rmp #2306 the store's single-writer lock is gone, and `txn.Store.BeginCtx`
+registers a writer without excluding any other. A genuine write-write collision
+is *refused* at the conflicting statement with a retriable serialization error
+rather than prevented by exclusion. The returned `Result` is not safe for
+concurrent use.
 
 To classify a query as read or write without running it (for example, to route
 writers to `RunInTx`), call `cypher.QueryHasWritingClause(query)`; this is the
@@ -228,12 +232,20 @@ Supported predicates:
 | `<`, `>`, `<=`, `>=` | `n.age >= 18` |
 | `IS NULL` | `n.email IS NULL` |
 | `IS NOT NULL` | `n.email IS NOT NULL` |
-| `AND`, `OR`, `NOT` | `n.a = 1 AND NOT n.b IS NULL` |
+| `IN` | `n.status IN ['new', 'open']` |
+| `STARTS WITH`, `ENDS WITH`, `CONTAINS` | `n.name STARTS WITH 'Al'` |
+| `=~` (anchored regex match) | `n.name =~ '[A-Z][a-z]+'` |
+| `AND`, `OR`, `XOR`, `NOT` | `n.a = 1 AND NOT n.b IS NULL` |
+| A label predicate | `n:Person` |
 | `EXISTS { MATCH … }` | `WHERE EXISTS { MATCH (n)-[:KNOWS]->(m) }` |
+| `COUNT { … }` | `WHERE COUNT { (n)-[:KNOWS]->() } > 2` |
 
-The engine pushes predicates through the plan tree; filters on labelled
-properties that have an index are converted to `IndexScan` operators
-automatically.
+The engine pushes predicates through the plan tree; a filter on a labelled
+property that has an index is converted automatically into an index access path
+— `NodeByIndexSeek` for an equality, `NodeByIndexSeekSet` for a key set, and
+`NodeByIndexRangeScan` for a range or a `STARTS WITH` prefix. There is no
+operator named `IndexScan`; use `Engine.Explain` to see which of the three a
+query gets.
 
 #### Subquery expression bodies
 
@@ -351,6 +363,15 @@ and `WITH`:
 | `min(expr)` | Minimum value |
 | `max(expr)` | Maximum value |
 | `collect(expr)` | List of all non-null values |
+| `stDev(expr)` | Sample standard deviation (N−1 denominator) |
+| `stDevP(expr)` | Population standard deviation (N denominator) |
+| `percentileCont(expr, p)` | Continuous (interpolated) percentile, `p` in `[0, 1]` |
+| `percentileDisc(expr, p)` | Discrete percentile — an actual value from the input |
+
+Those ten names are the whole set: `cypher/ir/aggregation.go` recognises
+`count`, `sum`, `avg`, `min`, `max`, `collect`, `stDev`, `stDevP`,
+`percentileCont` and `percentileDisc`, case-insensitively, and any other
+function is planned as a scalar.
 
 ```cypher
 MATCH (n:Person)
@@ -562,9 +583,13 @@ Before this was so, a default index on a numeric property could hold no entries
 at all while still reporting `state: "ONLINE"`, and the query silently scanned.
 
 Index use is a cost decision, not a guarantee: the engine seeks only when the
-label holds at least 1024 nodes and the predicate matches at most 10 % of them,
-and it scans otherwise. Use `Engine.Explain` to see which access path a query
-gets.
+label holds at least **64** nodes and the predicate matches at most 10 % of them,
+and it scans otherwise. The floor was 1024 until rmp #2367 measured its own
+boundary and found the premise behind it false by more than an order of
+magnitude — a label of 1023 nodes cost 68.7 µs on the scan against 5.5 µs for the
+seek one node higher. It is `rangeSeekMinLabelPopulation` in
+`cypher/range_seek_plan.go`, and it governs the key-set path too. Use
+`Engine.Explain` to see which access path a query gets.
 
 **Which key forms reach the index.** The key may be written inline or bound by a
 preceding `WITH`, provided its value is the same on every row:
@@ -1002,7 +1027,7 @@ Use `$paramName` in a query and pass a `map[string]expr.Value` (or
 ```go
 res, err := eng.Run(ctx,
     "MATCH (n:Person {name: $name}) RETURN n",
-    map[string]expr.Value{"name": expr.StringVal("Alice")},
+    map[string]expr.Value{"name": expr.StringValue("Alice")},
 )
 ```
 
@@ -1074,13 +1099,15 @@ The returned `*ExplicitTx` exposes:
 |---|---|---|
 | `Exec` | `Exec(query string, params map[string]expr.Value) (*Result, error)` | Run one statement; its writes accumulate in the transaction. |
 | `ExecAny` | `ExecAny(query string, params map[string]any) (*Result, error)` | As `Exec`, converting native Go params via `BindParams`. |
-| `Commit` | `Commit() error` | Make every accumulated write durable and visible, then release the writer serialisation. |
-| `Rollback` | `Rollback() error` | Unwind every accumulated write, then release the writer serialisation. |
+| `Commit` | `Commit() error` | Make every accumulated write durable and visible, publishing the transaction's commit record at a single instant. |
+| `Rollback` | `Rollback() error` | Unwind every accumulated write, leaving no trace of the transaction. |
 
-The caller MUST finish the handle with exactly one `Commit` or `Rollback`. Until
-then the writer serialisation is held and concurrent writers block (write-write
-isolation). Each `Exec` applies its writes eagerly to the in-memory graph and
-records the inverse into a transaction-wide undo log; `Commit` fsyncs the WAL
+The caller MUST finish the handle with exactly one `Commit` or `Rollback`.
+Leaving it open holds no lock — a concurrent writer neither blocks nor is blocked
+— but it does pin the reclamation horizon, and on a WAL-backed engine it keeps
+the store's writer registration, which holds a quiesce off. Each `Exec` applies
+its writes eagerly to the in-memory graph and records the inverse into a
+transaction-wide undo log; `Commit` fsyncs the WAL
 **once** for the whole transaction (durable-then-visible) and discards the undo
 log, while `Rollback` replays the undo log in reverse to restore the
 pre-transaction state.
@@ -1129,10 +1156,11 @@ Notes on behaviour, all enforced by the implementation:
 **Concurrency contract.** An `ExplicitTx` is **not** safe for concurrent use: it
 is owned by a single caller and its methods must be called in sequence. Distinct
 `ExplicitTx` handles — and an `ExplicitTx` running alongside autocommit
-`RunInTx` calls on the same engine — are safe to use concurrently; they
-serialise on the writer mutex. `Closing` a `Result` returned by `Exec` releases
-only that result's iterator state; it never commits or rolls the transaction
-back.
+`RunInTx` calls on the same engine — are safe to use concurrently, and they do
+**not** serialise against one another: `Engine.writeMu` was retired outright by
+rmp #2306 and no writer mutex exists. `Closing` a `Result` returned by `Exec`
+releases only that result's iterator state; it never commits or rolls the
+transaction back.
 
 This API is the engine substrate for the Bolt `BEGIN` / `RUN` / `COMMIT` /
 `ROLLBACK` protocol (see [docs/bolt.md](bolt.md)).
@@ -1423,7 +1451,10 @@ build in which profiling does not exist.
 >   with 100 out-edges both report 100 db-hits, while emitting 100 rows and 1 row.
 >   Its counter is not a per-slot increment — the expansion cursors already advance
 >   one position per slot, so the count is recovered from them in O(1) per input
->   row, never per slot.
+>   row, never per slot. The `OPTIONAL MATCH` and columnar forms of the expand
+>   report the same figure: `OptionalExpand` forwards the count of the inner
+>   `Expand` it drives — an operator that is private to it and never a node of the
+>   rendered plan — and the columnar expand inherits the counter it embeds.
 >
 >   The **morsel-parallel leaves** measure too: each reports the node references its
 >   workers consumed, so the same query reports the same figure whether the planner
@@ -1452,16 +1483,23 @@ build in which profiling does not exist.
 >   count query can honestly report `0` or a full walk, and the cell tells you
 >   which happened.
 > - **A known `0`** — an operator that opens no access path at all: `Limit`, `Skip`,
->   `Distinct`, `Eager`, `Union`, the aggregations, and the `Apply` family, whose
->   own cost is entirely in the children the plan already shows. Each of these
->   claims the zero explicitly in the engine, so the cell is a measurement.
+>   `Distinct`, `Eager`, `Union`, `UnionAll`, `CountRows`, the aggregations, the
+>   row sources (`Argument`, `SingleRow`, `StaticRows`), and the `Apply` family,
+>   whose own cost is entirely in the children the plan already shows. Each of
+>   these claims the zero explicitly in the engine, so the cell is a measurement.
+>   `Argument` and `CountRows` are the two most often seen: the first is the row
+>   source under every `Apply`, the second is what `RETURN count(*)` lowers to
+>   above a pattern the count store cannot answer.
 > - **`?` — not counted.** Nothing observed this operator's storage accesses, so
 >   the engine reports no figure rather than a `0` that would read as "touched
->   nothing". It covers the labelled count-store leaf, the two row-at-a-time operators that
->   seek or intersect per outer row, and **every
+>   nothing". It covers the labelled count-store leaf (`LabelCountScan`), the two
+>   row-at-a-time operators that seek or intersect per outer row
+>   (`IndexNestedLoopJoin` and `ExpandIntersect`), and **every
 >   operator that evaluates one of your expressions** — `Filter`, `Project`, `Sort`,
->   `Top`, `UNWIND`, the hash joins and procedure calls. The last group is the
->   surprising one, and it is real: a GoGraph expression can walk the graph, so
+>   `Top`, `UNWIND`, `RollUpApply`, the hash joins and procedure calls. The write
+>   operators are classified `?` too, but none of them can reach a `PROFILE`,
+>   which refuses a writing statement. The expression group is the surprising
+>   one, and it is real: a GoGraph expression can walk the graph, so
 >   `WHERE (a)-[:T]->()` and `RETURN size([(a)-->(x) | 1])` read relationship
 >   records *inside* a `Filter` or a `Project`, with no operator in the plan for
 >   them. On a 100-way fan, the pattern-predicate form reports one db-hit for the
@@ -2005,4 +2043,4 @@ build. When editing this file, keep to these rules:
 
 ---
 
-*Last reviewed: 2026-07-29 against commit `b2cb4fe5`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*
+*Last reviewed: 2026-09-08 against commit `99e3c228`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*
