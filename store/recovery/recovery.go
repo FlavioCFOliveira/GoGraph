@@ -198,6 +198,30 @@ type Result[N comparable, W any] struct {
 	// resuming AT the maximum, and it is the same reasoning that makes MaxTxnSeq
 	// count frames this replay goes on to discard.
 	MaxCommitTS uint64
+	// MaxTxnOps is the per-transaction replay bound this recovery actually ran
+	// under, expressed in the caller-facing option convention so it can be
+	// handed straight back to [Result.NewStoreCapped]: a positive op count, or
+	// [txn.MaxTxnOpsUnlimited] when the bound was disabled. It is never 0 on a
+	// Result returned by [Open] / [OpenCtx] / [OpenFS] / [OpenCtxFS]; 0 means
+	// "no information" and is what a hand-built Result carries.
+	//
+	// It exists to make the producer-above-replay mismatch INEXPRESSIBLE on the
+	// reopen path, which is the same placement argument rmp #2522 settled for
+	// [Result.MaxTxnSeq]. The two caps are independently configurable, and when
+	// the producer bound is the looser one the consequence is out of all
+	// proportion to the mistake: the oversized transaction is acknowledged
+	// DURABLE by [txn.Tx.Commit], and the next reopen then refuses the WHOLE
+	// directory with [ErrTransactionTooLarge] — stranding every transaction
+	// committed before it behind a fail-stop and discarding every one committed
+	// after it. Carrying the replay bound through the handoff lets
+	// [Result.NewStoreCapped] clamp the producer down to it, converting an
+	// unopenable store into an ordinary [txn.ErrTransactionTooLarge] refusal at
+	// commit time.
+	//
+	// Callers that construct the two sides independently — building a
+	// [txn.Store] with [txn.NewStoreWithOptionsCapped] rather than through this
+	// handoff — are outside the clamp and own the invariant themselves.
+	MaxTxnOps int
 	// WALTailOffset is the byte offset of the last durable frame boundary
 	// in the WAL. It equals the WAL file size when every frame was
 	// consumed cleanly, and the boundary of the last fully-consumed frame
@@ -317,6 +341,12 @@ func (r Result[N, W]) IsClean() bool {
 // only ever move UP — mirroring [lpg.Graph.RestoreMVCCClock] for the sibling
 // counter, and PostgreSQL's AdvanceNextFullTransactionIdPastXid ratchet.
 //
+// The per-transaction op cap is likewise taken from the recovery rather than
+// left to the caller: this method requests the default and
+// [Result.NewStoreCapped] clamps it to [Result.MaxTxnOps], so a store reopened
+// through the handoff can never commit a transaction its own replay would
+// refuse. See [Result.NewStoreCapped] for what that costs when it is not done.
+//
 // r.Graph must be non-nil, which it is for any Result returned by a completed
 // [Open] / [OpenCtx] / [OpenFS] — including one that reported corruption, whose
 // graph holds the committed prefix for diagnostics but must not be appended to.
@@ -327,15 +357,86 @@ func (r Result[N, W]) NewStore(wlog *wal.Writer, opts txn.Options[N, W]) *txn.St
 // NewStoreCapped is [Result.NewStore] with an explicit per-transaction op cap.
 // maxTxnOps follows the standard convention: 0 selects [txn.DefaultMaxTxnOps],
 // [txn.MaxTxnOpsUnlimited] disables the cap, and any other positive value is
-// the cap verbatim. Pass the same value the recovery ran under
-// ([Options.MaxTxnOps]) so the producer and its own replay agree on the bound.
+// the cap verbatim.
+//
+// # The producer bound is CLAMPED to this recovery's replay bound
+//
+// The producer cap must never exceed the replay cap. When it does, the
+// oversized transaction is not rejected — it is acknowledged DURABLE by
+// [txn.Tx.Commit], and the next reopen then refuses the WHOLE directory with
+// [ErrTransactionTooLarge]: every transaction committed before it is stranded
+// behind a fail-stop and every one committed after it is discarded. A caller
+// who raises the producer bound for a bulk load, or disables it, while leaving
+// recovery at its default converts a rejected write into an unopenable
+// database.
+//
+// Documenting that invariant and trusting the caller is the placement rmp #2522
+// already rejected once for [Result.MaxTxnSeq], so this method does not repeat
+// it: the effective producer bound is lowered to [Result.MaxTxnOps] — the bound
+// this recovery actually ran under — whenever the requested one is looser
+// (including [txn.MaxTxnOpsUnlimited] against a finite replay bound). The
+// mismatch is therefore inexpressible through this handoff, and what the caller
+// gets instead of an unopenable store is an ordinary
+// [txn.ErrTransactionTooLarge] at commit time, before any WAL frame is written.
+// A clamp that fires is logged at warn level and counted as
+// `store.recovery.NewStoreCapped.producerCapClamped`, because a bulk load that
+// silently keeps the default bound is a surprise worth seeing.
+//
+// The clamp only ever lowers. A replay bound of [txn.MaxTxnOpsUnlimited] clamps
+// nothing (nothing can exceed it), and a Result whose MaxTxnOps is 0 — one built
+// by hand rather than returned by [Open] — carries no information and clamps
+// nothing either.
+//
+// Callers that legitimately need the two sides configured independently build
+// the store with [txn.NewStoreWithOptionsCapped] directly; they are outside this
+// clamp and own the invariant themselves.
 func (r Result[N, W]) NewStoreCapped(wlog *wal.Writer, opts txn.Options[N, W], maxTxnOps int) *txn.Store[N, W] {
 	// Ratchet, never assign: raise-only is what makes it safe to apply on top of
 	// a caller-supplied floor, and it is the same rule the MVCC clock follows.
 	if r.MaxTxnSeq > opts.ResumeTxnSeq {
 		opts.ResumeTxnSeq = r.MaxTxnSeq
 	}
-	return txn.NewStoreWithOptionsCapped(r.Graph, wlog, opts, maxTxnOps)
+	producerCap := clampProducerCapToReplay(maxTxnOps, r.MaxTxnOps)
+	if producerCap != maxTxnOps {
+		metrics.IncCounter("store.recovery.NewStoreCapped.producerCapClamped", 1)
+		slog.Default().Warn(
+			"recovery: requested producer transaction op cap exceeds this recovery's replay cap; lowered to the replay cap so a committed transaction cannot become unreplayable",
+			slog.Int("requested_producer_max_txn_ops", maxTxnOps),
+			slog.Int("replay_max_txn_ops", r.MaxTxnOps),
+			slog.Int("effective_producer_max_txn_ops", producerCap),
+		)
+	}
+	return txn.NewStoreWithOptionsCapped(r.Graph, wlog, opts, producerCap)
+}
+
+// clampProducerCapToReplay returns the producer op cap to build the reopened
+// store with: the requested value, unless it resolves looser than the replay
+// bound, in which case the replay bound wins. Both arguments are in the
+// caller-facing option convention (0 -> default, [txn.MaxTxnOpsUnlimited] -> no
+// cap, positive verbatim); the return value is too, and is always a value the
+// producer constructor resolves to a bound no looser than replay's.
+//
+// Lowering is the only safe direction. A producer bound above the replay bound
+// turns a transaction that should have been REFUSED into one that is
+// acknowledged durable and then makes the whole directory unopenable; a producer
+// bound below it merely refuses at commit time, which is what the cap is for.
+func clampProducerCapToReplay(producer, replay int) int {
+	if replay == 0 {
+		// A hand-built Result: no information about the replay bound, so there is
+		// nothing to clamp against. Open always populates it.
+		return producer
+	}
+	replayResolved := resolveRecoveryMaxTxnOps(replay)
+	if replayResolved == 0 {
+		return producer // replay is unbounded; no producer bound can exceed it.
+	}
+	// The producer side resolves the option the same way (txn.resolveMaxTxnOps is
+	// this function's mirror), so one resolver serves both.
+	producerResolved := resolveRecoveryMaxTxnOps(producer)
+	if producerResolved == 0 || producerResolved > replayResolved {
+		return replayResolved // positive: taken verbatim by the producer constructor.
+	}
+	return producer
 }
 
 // tailErrIsCorruption classifies a [Result.TailErr] value as genuine
@@ -464,8 +565,29 @@ type Options[N comparable, W any] struct {
 	// existing caller carries) selects [txn.DefaultMaxTxnOps], the same
 	// default the producer uses, so producer and recovery agree; a negative
 	// value ([txn.MaxTxnOpsUnlimited]) disables the cap; any other positive
-	// value is the cap verbatim. It must be >= the producer cap so every
-	// durably-committed transaction replays.
+	// value is the cap verbatim.
+	//
+	// # It must be >= the producer cap, and the cost of getting that wrong is
+	// an unopenable store
+	//
+	// This bound and the producer bound
+	// ([txn.NewStoreWithOptionsCapped] / [txn.NewStoreWithCodecCapped]) are
+	// independently configurable. By default both resolve to
+	// [txn.DefaultMaxTxnOps], so out of the box there is no exposure. Set this
+	// one BELOW the producer's, however, and the consequence is out of all
+	// proportion to the mistake: the producer does not refuse the oversized
+	// transaction, it acknowledges it DURABLE, and the next reopen then fails
+	// with [ErrTransactionTooLarge] for the WHOLE directory — every transaction
+	// committed before the oversized one is stranded behind that fail-stop, and
+	// every one committed after it is discarded unreplayed. Lowering this bound
+	// for a security-hardened deployment, or raising the producer's for a bulk
+	// load, converts a rejected write into a database that will not open.
+	//
+	// On the reopen path the library enforces this rather than trusting the
+	// caller: [Result.MaxTxnOps] reports the bound the replay ran under and
+	// [Result.NewStoreCapped] clamps the producer down to it. Callers that build
+	// the producer store independently of that handoff own the invariant
+	// themselves.
 	MaxTxnOps int
 }
 
@@ -1008,7 +1130,12 @@ func OpenCtx[N comparable, W any](ctx context.Context, dir string, opts Options[
 		metrics.IncCounter("store.recovery.OpenCtx.errors", 1)
 		return Result[N, W]{}, errors.New("recovery: nil codec")
 	}
-	res, err := openCodec[N, W](ctx, osBackend{}, dir, opts.Codec, opts.WeightCodec, resolveRecoveryMaxTxnOps(opts.MaxTxnOps))
+	replayCap := resolveRecoveryMaxTxnOps(opts.MaxTxnOps)
+	res, err := openCodec[N, W](ctx, osBackend{}, dir, opts.Codec, opts.WeightCodec, replayCap)
+	// Report the bound this replay actually ran under so [Result.NewStoreCapped]
+	// can clamp the producer to it. Set on EVERY returned Result, including the
+	// error ones, so the field never silently reads as "no information".
+	res.MaxTxnOps = recoveryCapOption(replayCap)
 	if err != nil {
 		metrics.IncCounter("store.recovery.OpenCtx.errors", 1)
 	}
@@ -1034,7 +1161,12 @@ func OpenCtxFS[N comparable, W any](ctx context.Context, fsys recoveryFS, dir st
 		metrics.IncCounter("store.recovery.OpenCtxFS.errors", 1)
 		return Result[N, W]{}, errors.New("recovery: nil codec")
 	}
-	res, err := openCodec[N, W](ctx, fsys, dir, opts.Codec, opts.WeightCodec, resolveRecoveryMaxTxnOps(opts.MaxTxnOps))
+	replayCap := resolveRecoveryMaxTxnOps(opts.MaxTxnOps)
+	res, err := openCodec[N, W](ctx, fsys, dir, opts.Codec, opts.WeightCodec, replayCap)
+	// Report the bound this replay actually ran under so [Result.NewStoreCapped]
+	// can clamp the producer to it. Set on EVERY returned Result, including the
+	// error ones, so the field never silently reads as "no information".
+	res.MaxTxnOps = recoveryCapOption(replayCap)
 	if err != nil {
 		metrics.IncCounter("store.recovery.OpenCtxFS.errors", 1)
 	}
@@ -1057,6 +1189,18 @@ func resolveRecoveryMaxTxnOps(maxTxnOps int) int {
 	default:
 		return maxTxnOps
 	}
+}
+
+// recoveryCapOption is the inverse of [resolveRecoveryMaxTxnOps]: it maps an
+// already-resolved replay bound (0 meaning "no cap") back onto the
+// caller-facing option convention, so [Result.MaxTxnOps] can be handed straight
+// back to [Result.NewStoreCapped] or to a second [Options]. It never returns 0,
+// which is what lets 0 mean "no information" on a hand-built Result.
+func recoveryCapOption(resolved int) int {
+	if resolved == 0 {
+		return txn.MaxTxnOpsUnlimited
+	}
+	return resolved
 }
 
 // defaultRecoveryConfig is the adjacency-list configuration used to

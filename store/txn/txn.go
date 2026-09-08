@@ -116,6 +116,26 @@ var ErrTransactionTooLarge = errors.New("txn: transaction exceeds the per-transa
 // with headroom above them so a result-row-capped write still replays);
 // callers that genuinely need an unbounded transaction must opt out
 // explicitly with [MaxTxnOpsUnlimited].
+//
+// # The producer bound must never exceed the replay bound
+//
+// The two bounds are independently configurable — this one via
+// [NewStoreWithCodecCapped] / [NewStoreWithOptionsCapped], the replay one via
+// [store/recovery.Options.MaxTxnOps] — and by default both resolve to this
+// constant, so out of the box there is no exposure. Configure the producer
+// LOOSER than the replayer, though, and the failure is not the symmetrical one
+// a reader expects: the oversized transaction is not rejected, it is
+// acknowledged DURABLE, and the next reopen then refuses the WHOLE directory
+// with [store/recovery.ErrTransactionTooLarge]. Every transaction committed
+// before the oversized one is stranded behind that fail-stop, and every one
+// committed after it is discarded unreplayed. Raising this bound for a bulk
+// load, or disabling it with [MaxTxnOpsUnlimited], while leaving recovery at
+// its default converts a rejected write into a database that will not open.
+//
+// On the reopen path the library enforces the invariant instead of trusting the
+// caller: [store/recovery.Result.NewStoreCapped] clamps the producer bound down
+// to the bound its own replay ran under. Callers that construct the producer
+// store independently of that handoff own the invariant themselves.
 const DefaultMaxTxnOps = 16_000_000
 
 // MaxTxnOpsUnlimited is the explicit opt-out sentinel for the maxTxnOps
@@ -125,6 +145,15 @@ const DefaultMaxTxnOps = 16_000_000
 // can bound transaction size by another means, because an unbounded
 // transaction then forces recovery to buffer every op frame in memory
 // before applying the batch on its [OpCommit] marker.
+//
+// Disabling the PRODUCER bound alone is the sharpest form of the
+// producer-above-replay hazard described on [DefaultMaxTxnOps]: recovery still
+// applies its own finite bound, so the store will happily acknowledge a
+// transaction durable that its own reopen then refuses, and the whole directory
+// stops opening. Disable this bound only together with the replay bound (pass
+// this same sentinel to [store/recovery.Options.MaxTxnOps]), or reopen through
+// [store/recovery.Result.NewStoreCapped], which clamps the producer to the
+// replay bound for you.
 const MaxTxnOpsUnlimited = -1
 
 // ErrCommittedNotApplied is returned by [Tx.Commit] when the transaction
@@ -640,6 +669,16 @@ func NewStoreWithCodec[N comparable, W any](g *lpg.Graph[N, W], wlog *wal.Writer
 // than the resolved cap is rejected by [Tx.Commit] / [Tx.CommitWALOnly] with
 // [ErrTransactionTooLarge] before any WAL frame is written.
 //
+// maxTxnOps MUST NOT resolve looser than the recovery-side bound
+// ([store/recovery.Options.MaxTxnOps]). A transaction that is over the replay
+// bound but under this one is not rejected: it is acknowledged DURABLE, and the
+// next reopen then fails with [store/recovery.ErrTransactionTooLarge] for the
+// WHOLE directory — stranding every earlier committed transaction behind that
+// fail-stop and discarding every later one. Reopening through
+// [store/recovery.Result.NewStoreCapped] enforces this for you by clamping the
+// producer bound to the replay bound; a caller wiring the two sides
+// independently owns the invariant. See [DefaultMaxTxnOps].
+//
 // codec must not be nil. The returned store has no [WeightCodec]; see
 // [NewStoreWithCodec] for the weight-handling contract.
 func NewStoreWithCodecCapped[N comparable, W any](g *lpg.Graph[N, W], wlog *wal.Writer, codec Codec[N], maxTxnOps int) *Store[N, W] {
@@ -685,6 +724,16 @@ func NewStoreWithOptions[N comparable, W any](g *lpg.Graph[N, W], wlog *wal.Writ
 // other positive value is the cap verbatim. A transaction buffering more
 // than the resolved cap is rejected by [Tx.Commit] / [Tx.CommitWALOnly] with
 // [ErrTransactionTooLarge] before any WAL frame is written.
+//
+// maxTxnOps MUST NOT resolve looser than the recovery-side bound
+// ([store/recovery.Options.MaxTxnOps]). A transaction that is over the replay
+// bound but under this one is not rejected: it is acknowledged DURABLE, and the
+// next reopen then fails with [store/recovery.ErrTransactionTooLarge] for the
+// WHOLE directory — stranding every earlier committed transaction behind that
+// fail-stop and discarding every later one. Reopening through
+// [store/recovery.Result.NewStoreCapped] enforces this for you by clamping the
+// producer bound to the replay bound; a caller wiring the two sides
+// independently owns the invariant. See [DefaultMaxTxnOps].
 //
 // opts.Codec and opts.WeightCodec must not be nil.
 func NewStoreWithOptionsCapped[N comparable, W any](g *lpg.Graph[N, W], wlog *wal.Writer, opts Options[N, W], maxTxnOps int) *Store[N, W] {
