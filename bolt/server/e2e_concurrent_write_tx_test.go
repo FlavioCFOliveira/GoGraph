@@ -49,14 +49,19 @@ import (
 // harness caps the pool at 5, which would itself serialise the clients and mask
 // what is being measured.
 //
-// MaxTxIdleTime is set far above these tests' budgets DELIBERATELY. Its 5 s
-// default exists precisely because an open transaction used to hold the global
-// visibility barrier, so the reaper's job was to cut short the outage that caused
-// (see [server.DefaultMaxTxIdleTime] and rmp #2175). Left at the default it also
-// RESCUES these tests: the idle transaction is killed, the barrier is released, and
-// the blocked writer proceeds — so the tests would pass against the very build
-// they exist to fail. Raising it removes the rescue and leaves only the property
-// under test.
+// MaxTxIdleTime is PINNED here rather than inherited, DELIBERATELY — and what the
+// pin buys changed with rmp #2806.
+//
+// While the default was 5 s, ten minutes was a RAISE, and the raise was
+// load-bearing: left at the default the idle reaper killed the idle transaction,
+// released the global visibility barrier the defective build held, and let the
+// blocked writer proceed, so these tests would have passed against the very build
+// they exist to fail (see [server.DefaultMaxTxIdleTime] and rmp #2175). rmp #2806
+// raised the default to 30 minutes, so ten minutes is now a REDUCTION and the pin
+// is no longer what removes that rescue. It is kept so these gates measure against
+// a bound they state, instead of inheriting whatever the default becomes next;
+// both bounds still sit far above these tests' budgets, which is all the property
+// under test requires.
 // # One driver per client, and why it is not cosmetic
 //
 // neo4j-go-driver v5.28.4 has a DATA RACE of its own in Connector.Connect: it lazily

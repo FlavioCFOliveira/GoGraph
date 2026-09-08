@@ -639,9 +639,12 @@ Three consequences, each measured rather than argued:
 - **Two clients overlap.** Gated end-to-end against the official neo4j-go-driver by
   `TestE2E_TwoExplicitWriteTransactionsOverlap` and
   `TestE2E_AnIdleExplicitTransactionDoesNotStallAnotherWriter`, both verified to FAIL
-  against the build that held the barrier. Note that with `MaxTxIdleTime` at its 5 s
-  default **both tests pass against the defective build**, because the idle reaper
-  kills the blocked transaction and releases the barrier; they raise it deliberately.
+  against the build that held the barrier. Note that with `MaxTxIdleTime` at the 5 s
+  default it then had, **both tests pass against the defective build**, because the
+  idle reaper kills the blocked transaction and releases the barrier; they pin ten
+  minutes of their own deliberately. rmp #2806 raised the default to 30 minutes, so
+  that pin is now a reduction rather than a raise, and it is the pin, not the
+  default, that keeps the gates honest.
 - **A collision surfaces at the conflicting STATEMENT**, not at `COMMIT`, as
   `mvcc.ErrSerializationConflict` from `Exec`. That follows from the mechanism:
   first-updater-wins identifies the loser the moment it tries to install a version
@@ -657,8 +660,11 @@ Three consequences, each measured rather than argued:
 
 **The abandoned-transaction cost changed in kind.** It was an availability failure;
 it is now a memory-and-slot failure, because an open transaction pins the reclamation
-horizon. `server.Options.MaxTxIdleTime` was reviewed for this and **kept at 5 s**: the
-original justification is gone, but an unbounded resource cost remains.
+horizon. `server.Options.MaxTxIdleTime` was reviewed for this and kept at 5 s at the
+time: the original justification was gone, but an unbounded resource cost remained.
+**rmp #2806 has since raised the default to 30 minutes**, accepting that longer
+exposure on purpose; `bolt/server/serve.go` states what it costs, and under the
+default configuration `ConnTimeout` (30 s) reclaims a fully silent client first.
 
 ### The reclamation-horizon bound (rmp #2315, sized 2026-08-05)
 
@@ -709,8 +715,9 @@ already had names, and giving one quantity two names would be worse than giving 
 
 The remedy is to reduce concurrent **long-lived read transactions**, not concurrent
 queries: a statement-scoped read holds its slot for microseconds, while an explicit
-read transaction holds one until it commits or rolls back. `MaxTxIdleTime` (5 s) bounds
-the idle case; an application holding more than 1024 read transactions genuinely
+read transaction holds one until it commits or rolls back. `MaxTxIdleTime` (30 minutes
+since rmp #2806, and 30 s of `ConnTimeout` ahead of it for a client that stops sending
+bytes at all) bounds the idle case; an application holding more than 1024 read transactions genuinely
 concurrently needs to shorten them, because raising capacity trades memory for a cliff
 that moves rather than disappearing.
 

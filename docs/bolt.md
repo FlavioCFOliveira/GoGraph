@@ -108,11 +108,11 @@ fall back to a default when left at the zero value:
 | `MaxInFlightPerConnection` | `DefaultMaxInFlightPerConnection` (1024) | Caps the number of `RUN` statements issued inside a single explicit transaction before `COMMIT`/`ROLLBACK`. Exceeding it returns a `Neo.ClientError.General.LimitExceeded` failure. Auto-commit cursors are not counted. |
 | `ConnTimeout` | `DefaultConnTimeout` (30 s) | Per-connection idle read deadline, reset before each message read. It cannot be disabled: a zero or negative value takes the default, because a connection that completes the handshake and then falls silent would otherwise hold its slot and goroutine forever. The unauthenticated handshake is bounded separately and is not configurable here (`DefaultHandshakeTimeout`, 10 s). |
 | `DatabaseName` | `DefaultDatabaseName` (`neo4j`) | The name reported in result metadata for a client that selects no database. A client that names one has its own name echoed back. See the `db` note under [Protocol conformance notes](#protocol-conformance-notes). |
-| `MaxTxIdleTime` | `DefaultMaxTxIdleTime` (5 s) | How long an **open** explicit transaction may go without the client sending a message, after which it is rolled back. Distinct from `DefaultTxTimeout`, which caps total lifetime however busy the transaction is. Cannot be disabled. |
+| `MaxTxIdleTime` | `DefaultMaxTxIdleTime` (30 min) | How long an **open** explicit transaction may go without the client sending a message, after which it is rolled back. Distinct from `DefaultTxTimeout`, which caps total lifetime however busy the transaction is. Cannot be disabled. Raised from 5 s by rmp #2806; under the default configuration it is usually not the bound that fires, because `ConnTimeout` (30 s) tears a silent connection down first — see [Abandoned transactions](#abandoned-transactions). |
 | `MaxOpenTxPerPrincipal` | `DefaultMaxOpenTxPerPrincipal` (2048) | How many explicit transactions one authenticated principal may hold **open** at once, across all its connections. Exceeding it fails the `BEGIN` with `Neo.TransientError.Transaction.MaximumTransactionLimitReached` — Neo4j's own TRANSIENT code, so a driver retries — and the session stays in **READY**, so the retry needs no `RESET` (rmp #2561). A negative value disables it. Under the default configuration the quota cannot bind: a connection holds at most one open transaction and `MaxConnections` defaults to 1024, so the connection ceiling is reached first. It binds again for an operator who raises `MaxConnections` above 2048, and it is what isolates one principal from another (rmp #2419). |
 | `MaxInboundDecodeBytes` | derived, or `DefaultMaxInboundDecodeBytes` (1 GiB) | Engine-wide ceiling on the decoded-collection memory in flight across **all** connections while messages are being decoded, so the per-message cap multiplied by `MaxConnections` is not the real bound. Zero derives one eighth of `GOMEMLIMIT` when the operator has set one, and falls back to 1 GiB when they have not; `MaxInboundDecodeBytesUnlimited` (-1) opts out. When the pool is drawn down, further inbound decodes fail fast with a retryable transient error rather than allocating. |
-| `DefaultTxTimeout` | `DefaultTxTimeout` (30 s) | Total wall-clock lifetime of an explicit transaction when the client sends no `tx_timeout` of its own, however busy it is. A client-supplied `tx_timeout` takes precedence. |
-| `DefaultStatementTimeout` | `DefaultStatementTimeout` (30 s) | The autocommit counterpart: the bound applied to a bare `RUN` outside an explicit transaction when the client supplies no `timeout`. Without it, autocommit `RUN` was the one unbounded-runtime path on a default server, because a super-linear query with a single-row result never trips the row or byte caps. |
+| `DefaultTxTimeout` | `DefaultTxTimeout` (30 min) | Total wall-clock lifetime of an explicit transaction when the client sends no `tx_timeout` of its own, however busy it is. A client-supplied `tx_timeout` takes precedence. Raised from 30 s by rmp #2806, so a long batch transaction completes under the default configuration; the cost is that a transaction which keeps talking but never finishes holds its versions and its horizon slot for up to half an hour. |
+| `DefaultStatementTimeout` | `DefaultStatementTimeout` (30 min) | The autocommit counterpart: the bound applied to a bare `RUN` outside an explicit transaction when the client supplies no `timeout`. Without it, autocommit `RUN` was the one unbounded-runtime path on a default server, because a super-linear query with a single-row result never trips the row or byte caps. Raised from 30 s by rmp #2806, which matches it to `DefaultTxTimeout` again; the cost is that such a statement pins a CPU core for up to half an hour. Note that `ConnTimeout` bounds a single statement too — the read deadline runs while the message loop executes it, and a client waiting for its own records sends nothing — so raising this past `ConnTimeout` (30 s) does nothing for one long statement unless `ConnTimeout` is raised with it. Set `MaxStatementTimeout`, or this field, to bound it more tightly. |
 | `MaxStatementTimeout` | 0 (no server-side cap) | Server-side ceiling on per-statement execution time. A client-supplied timeout is silently clamped to it, and when positive it is applied unconditionally to a client that supplies none. |
 
 The four remaining fields are not bounds and so are not in the table: `Auth`
@@ -138,6 +138,25 @@ reclaimable while it lives, and it occupies one of the reclamation horizon's fix
 number of slots. An availability failure became a memory-and-slot failure, and
 neither is acceptable without a bound — which is why both bounds remain, and why
 raising `MaxTxIdleTime` is now a memory-growth risk rather than an availability one.
+
+**rmp #2806 took that risk deliberately.** `MaxTxIdleTime` went from 5 s to
+30 minutes, and `DefaultTxTimeout` and `DefaultStatementTimeout` from 30 s to the
+same 30 minutes. Where the idle bound is what fires, one abandoned transaction now
+holds its versions and one horizon slot for **half an hour** after its last message
+— 360 times longer than before — and *N* silent clients hold *N* slots for that
+same half hour, so the horizon's capacity can be exhausted by silent clients alone.
+
+Under the **default** configuration the idle bound is usually not what fires.
+`ConnTimeout` is 30 s, the read deadline is armed once per message read, and a Bolt
+NOOP keep-alive chunk is consumed inside that read rather than resetting it, so a
+client that sends nothing the message loop can dispatch trips the connection
+deadline first; the teardown rolls the transaction back and frees the slot.
+`TestReclaim_ConnTimeoutBeatsALongerIdleBound`
+(`bolt/server/default_timeouts_reach_test.go`) measures that at 411 ms against a
+400 ms `ConnTimeout` and a one-hour idle bound. The half hour above is therefore
+the exposure of a deployment that **also** raises `ConnTimeout` past the idle
+bound for long-lived idle sessions. An operator who wants the previous protection
+sets `MaxTxIdleTime` (and, for the total bound, `DefaultTxTimeout`) explicitly.
 
 `DefaultTxTimeout` alone cannot separate an abandoned transaction from legitimate
 long work: lowering it shortens the exposure and kills slow-but-healthy
@@ -732,4 +751,4 @@ against a floor of 30. Each remaining failure is a known gap with a cause:
 
 ---
 
-*Last reviewed: 2026-09-08 against commit `d64a9f0b`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*
+*Last reviewed: 2026-09-08 against commit `728770ff`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*

@@ -58,61 +58,108 @@ const (
 
 	// DefaultTxTimeout is the default value applied to Options.DefaultTxTimeout
 	// when the caller leaves it at zero. It bounds an explicit transaction
-	// (opened by BEGIN) when the client supplies no tx_timeout of its own. A
-	// finite default is mandatory: an explicit transaction holds the engine's
-	// NO serialisation from BEGIN until COMMIT/ROLLBACK (rmp #2305), so a client
-	// that issues BEGIN and then stalls — never sending COMMIT, ROLLBACK, or even
-	// RESET — would otherwise block every other writer on the server forever, a
-	// liveness denial of service (#1302). The default of 30 s is generous enough
-	// not to disturb a legitimate interactive transaction while still guaranteeing
-	// the global write lock is reclaimed if a transaction is abandoned. Operators
-	// may set a larger value for long-lived batch transactions or a smaller one
-	// to reclaim the writer lock more aggressively; the per-statement
+	// (opened by BEGIN) when the client supplies no tx_timeout of its own, and it
+	// bounds its TOTAL life however busy it is — [DefaultMaxTxIdleTime] is the
+	// separate bound on silence.
+	//
+	// A finite default is mandatory. Before rmp #2305 an explicit transaction held
+	// the engine's writer serialisation from BEGIN until COMMIT/ROLLBACK, so a
+	// client that issued BEGIN and then stalled — never sending COMMIT, ROLLBACK,
+	// or even RESET — blocked every other writer on the server for as long as this
+	// bound allowed, a liveness denial of service (#1302). rmp #2305 retired that
+	// hold. What an unfinished transaction costs now is memory rather than other
+	// clients' progress: it pins the reclamation horizon, so no version it could
+	// still read is freed while it lives, and it occupies one of the horizon's
+	// fixed number of slots (graph/mvcc.HorizonCapacity).
+	//
+	// # Why 30 minutes, and what it costs (rmp #2806)
+	//
+	// The default was 30 s. It is now 30 minutes, so a transaction that keeps
+	// talking runs for up to half an hour before this bound ends it, where it used
+	// to be ended at 30 s. That is the case this bound actually governs: a client
+	// that sends a message at least every [DefaultConnTimeout] keeps both the read
+	// deadline and the idle deadline pushed forward, so nothing else reclaims it
+	// first.
+	//
+	// THE COST, stated rather than glossed: a transaction that keeps talking but
+	// never finishes — a client looping RUN/PULL, or one holding the transaction
+	// open across long think-time — holds its versions and its horizon slot for up
+	// to half an hour before this bound reclaims it, where it used to be reclaimed
+	// in 30 s. This is the bound that governs that case: a busy client resets both
+	// the idle deadline and the connection read deadline on every message, so
+	// neither of those reclaims it. An operator who needs the old, tighter
+	// reclamation sets Options.DefaultTxTimeout explicitly.
+	//
+	// A client-supplied tx_timeout takes precedence; the per-statement
 	// MaxStatementTimeout, when set, additionally clamps it.
-	DefaultTxTimeout = 30 * time.Second
+	DefaultTxTimeout = 30 * time.Minute
 
 	// DefaultMaxTxIdleTime is the value applied to Options.MaxTxIdleTime when the
 	// caller leaves it at zero. It bounds how long an OPEN explicit transaction
-	// may go without the client sending a message, which is a different and much
-	// tighter bound than DefaultTxTimeout: that one caps a transaction's total
-	// life, however busy, while this one reclaims one that has been ABANDONED.
+	// may go without the client sending a message, which is a different bound from
+	// DefaultTxTimeout: that one caps a transaction's total life, however busy,
+	// while this one reclaims one that has been ABANDONED. Every inbound message
+	// pushes this deadline forward; a silent client pushes nothing.
 	//
-	// A finite default is mandatory, and 5 s rather than 30 s because of what the
-	// round-3 audit demonstrated: one authenticated client sends BEGIN and stops
-	// talking, and because an open transaction held the global visibility
-	// barrier, a 4.7 ms read on every other connection became 30.001 s —
-	// the full DefaultTxTimeout — followed by a hard TransactionTimedOut, and it
-	// was repeatable indefinitely (rmp #2175). The total-lifetime bound cannot fix
-	// that on its own: lowering it shortens the outage but also kills legitimate
-	// long transactions, whereas an idle bound distinguishes the two cases, since
-	// a working client sends messages.
+	// A finite default is mandatory, and what it protects changed with rmp #2305.
 	//
-	// # Reviewed after rmp #2305, and KEPT at 5 s
+	// # What it protected before rmp #2305: availability
 	//
-	// The outage above is GONE. An open transaction no longer holds the visibility
-	// barrier or any writer serialisation, so an abandoned one blocks nobody: the
-	// gates in bolt/server's e2e_concurrent_write_tx_test.go assert exactly that
-	// against the official driver. The original justification for a bound this tight
-	// therefore no longer applies, and the honest question is whether to relax it.
+	// One authenticated client sent BEGIN and stopped talking, and because an open
+	// transaction held the global visibility barrier, a 4.7 ms read on every other
+	// connection became 30.001 s — the full DefaultTxTimeout as it then stood —
+	// followed by a hard TransactionTimedOut, repeatable indefinitely (rmp #2175).
+	// That outage is GONE. An open transaction no longer holds the visibility
+	// barrier or any writer serialisation, so an abandoned one blocks nobody; the
+	// gates in this package's e2e_concurrent_write_tx_test.go assert exactly that
+	// against the official driver.
 	//
-	// It stays, because what an abandoned transaction now costs is still unbounded,
-	// just in a different resource: it pins the reclamation horizon, so no version it
-	// could still read is freed while it lives, and it occupies one of the horizon's
-	// fixed number of slots. An availability failure became a memory-and-slot failure;
-	// neither is acceptable without a bound, and 5 s remains far longer than any
-	// working client needs between the messages of one transaction.
+	// # What it protects now: memory and reclamation-horizon slots
 	//
-	// What DID change is the severity of setting it high. Before rmp #2305 a large
-	// MaxTxIdleTime was an availability risk; now it is a memory-growth risk. That is
-	// why the concurrency gates can safely raise it to ten minutes to remove the
-	// reaper's interference with what they measure — a thing that would have been
-	// reckless on the previous build.
+	// An abandoned transaction still costs an unbounded amount, in a different
+	// resource. It pins the reclamation horizon, so no version it could still read
+	// is freed while it lives, and it occupies one of the horizon's fixed number of
+	// slots (graph/mvcc.HorizonCapacity). An availability failure became a
+	// memory-and-slot failure; neither is acceptable without a bound.
 	//
-	// 5 s is far longer than any client needs between the messages of one
-	// transaction — a driver pipelines them — and short enough that an abandoned
-	// transaction is reclaimed before it is felt as an outage. Operators driving
-	// transactions from an interactive prompt may raise it.
-	DefaultMaxTxIdleTime = 5 * time.Second
+	// # Why 30 minutes, and what it costs (rmp #2806)
+	//
+	// The default was 5 s, chosen when the failure mode was an outage and defended
+	// on the ground that no working client needs longer between the messages of one
+	// transaction. It is now 30 minutes, which puts it ABOVE [DefaultConnTimeout]
+	// rather than below it: the two bounds have swapped order, and the paragraphs
+	// below say what that means for a silent client.
+	//
+	// THE COST, stated rather than glossed: wherever this is the bound that
+	// applies, ONE abandoned transaction holds every version it could still read,
+	// and one of the horizon's fixed slots, for HALF AN HOUR after its last
+	// message — 360 times longer than the 5 s it used to hold them. N silent
+	// clients hold N slots for that same half hour, so exhausting the horizon's
+	// capacity is reachable by silent clients alone. [DefaultTxTimeout] is now the
+	// same 30 minutes, so the total-life bound reclaims no sooner.
+	//
+	// Under the DEFAULT configuration it is usually NOT the bound that applies, and
+	// that is worth knowing before sizing the exposure. [DefaultConnTimeout] is
+	// 30 s; the read deadline is armed once per ReadMessage call, and a Bolt NOOP
+	// keep-alive chunk is consumed inside that call (bolt/proto/chunking.go), so it
+	// cannot push the deadline forward. A client that sends nothing the message
+	// loop can dispatch therefore trips the connection deadline first, and the
+	// teardown calls [Session.Close], which counts the transaction abandoned and
+	// rolls it back — reclaiming the snapshot and the slot without this reaper ever
+	// running. Measured at 411 ms against a 400 ms ConnTimeout and a one-hour idle
+	// bound (TestReclaim_ConnTimeoutBeatsALongerIdleBound, in
+	// default_timeouts_reach_test.go). The half hour above is therefore the
+	// exposure of an operator who ALSO raises Options.ConnTimeout past this bound
+	// for long-lived idle sessions — which that field's own godoc invites.
+	//
+	// An operator who needs the old, tight protection sets Options.MaxTxIdleTime
+	// explicitly; the bound can be re-sized but not disabled.
+	//
+	// The concurrency gates in e2e_concurrent_write_tx_test.go set ten minutes of
+	// their own. That override was a RAISE against the 5 s default and is a
+	// REDUCTION against this one; it is kept because it pins the value those gates
+	// measure under instead of inheriting whatever this constant becomes.
+	DefaultMaxTxIdleTime = 30 * time.Minute
 
 	// DefaultMaxOpenTxPerPrincipal is the value applied to
 	// Options.MaxOpenTxPerPrincipal when the caller leaves it at zero. It caps
@@ -166,10 +213,11 @@ const (
 	// THE COST, stated rather than glossed: every open transaction pins an MVCC
 	// read snapshot and holds the reclamation horizon back for its lifetime
 	// (rmp #2305, #2307), so a higher ceiling is a weaker bound on that resource.
-	// What limits the damage is [DefaultMaxTxIdleTime]: an abandoned transaction
-	// is reclaimed after 5 s rather than held until the client disconnects. An
-	// embedder that wants the old tight bound sets Options.MaxOpenTxPerPrincipal
-	// explicitly, which is now the only way to get it.
+	// What limits the damage is [DefaultMaxTxIdleTime]: an abandoned transaction is
+	// reclaimed after 30 minutes rather than held until the client disconnects —
+	// which since rmp #2806 is a far weaker limit than the 5 s that applied when
+	// this ceiling was raised. An embedder that wants the old tight bound sets
+	// Options.MaxOpenTxPerPrincipal explicitly, which is now the only way to get it.
 	//
 	// Set a negative value to disable enforcement — which is a deliberate,
 	// visible choice at the call site, not something reachable by accident.
@@ -206,11 +254,33 @@ const (
 	// never fire and the statement pins a CPU core indefinitely. Explicit
 	// transactions already receive DefaultTxTimeout unconditionally; without a
 	// symmetric floor here, autocommit RUN was the sole unbounded-runtime path
-	// under a default server configuration (#1828). The default of 30 s matches
-	// DefaultTxTimeout; operators may set a larger value for long-running
-	// analytical statements. A client-supplied `timeout` takes precedence, and
-	// MaxStatementTimeout, when set, additionally clamps the effective value.
-	DefaultStatementTimeout = 30 * time.Second
+	// under a default server configuration (#1828).
+	//
+	// # Why 30 minutes, and what it costs (rmp #2806)
+	//
+	// The default was 30 s. It is now 30 minutes, which keeps it matched to
+	// [DefaultTxTimeout]. THE COST: where this is the bound that fires, the runaway
+	// statement above pins a CPU core, and holds the reclamation horizon back, for
+	// up to half an hour instead of 30 s.
+	//
+	// It is often NOT the bound that fires, and the reason is [DefaultConnTimeout].
+	// The reader goroutine arms a read deadline of ConnTimeout before every read and
+	// keeps waiting while the message loop executes the statement, so a client that
+	// is waiting for its own records sends nothing, the deadline expires, and the
+	// connection is torn down mid-statement. Measured: ConnTimeout 100 ms,
+	// DefaultStatementTimeout one hour, one autocommit statement of about 900 ms —
+	// the client read EOF at 110 ms. Raising this bound past ConnTimeout therefore
+	// does nothing for a single long statement unless Options.ConnTimeout is raised
+	// with it. That interaction predates rmp #2806 and is not changed by it; what
+	// changed is that the default ordering of the two bounds is now inverted.
+	//
+	// An operator who needs the old, tighter bound sets
+	// Options.DefaultStatementTimeout — or the server-wide MaxStatementTimeout —
+	// explicitly.
+	//
+	// A client-supplied `timeout` takes precedence, and MaxStatementTimeout, when
+	// set, additionally clamps the effective value.
+	DefaultStatementTimeout = 30 * time.Minute
 
 	// DefaultHandshakeTimeout is the deadline that bounds the unauthenticated
 	// version-negotiation handshake — the cheapest phase for an attacker to
@@ -323,10 +393,11 @@ type Options struct {
 	DatabaseName string
 
 	// MaxTxIdleTime bounds how long an OPEN explicit transaction may go without
-	// the client sending a message, after which it is rolled back and the writer
-	// serialisation and visibility barrier are released. Zero or negative defaults
-	// to [DefaultMaxTxIdleTime]; there is no way to disable it, because an
-	// unbounded idle transaction is the outage the round-3 audit demonstrated.
+	// the client sending a message, after which it is rolled back and the MVCC read
+	// snapshot it pinned is released. Zero or negative defaults to
+	// [DefaultMaxTxIdleTime] (30 min); there is no way to disable it, because an
+	// idle transaction holds the reclamation horizon back and occupies one of its
+	// fixed slots for as long as it lives.
 	//
 	// This is NOT DefaultTxTimeout. That bounds a transaction's total life however
 	// active it is; this reclaims one that has stopped talking. A busy transaction
@@ -421,7 +492,7 @@ type Options struct {
 	// engine's former single-writer serialisation, which an explicit transaction held
 	// from BEGIN until COMMIT/ROLLBACK, can never be held indefinitely by an
 	// abandoned transaction (#1302). Zero or negative values default to
-	// [DefaultTxTimeout] (30 s). A client-supplied tx_timeout takes precedence;
+	// [DefaultTxTimeout] (30 min). A client-supplied tx_timeout takes precedence;
 	// MaxStatementTimeout, when set, additionally clamps the effective value. Set
 	// a larger value for long-lived batch transactions.
 	DefaultTxTimeout time.Duration
@@ -434,7 +505,7 @@ type Options struct {
 	// autocommit statement, so an authenticated client can pin a CPU core
 	// indefinitely with a super-linear-runtime / single-row-result query whose
 	// result-row and byte caps never fire (#1828). Zero or negative values
-	// default to [DefaultStatementTimeout] (30 s). A client-supplied `timeout`
+	// default to [DefaultStatementTimeout] (30 min). A client-supplied `timeout`
 	// takes precedence; MaxStatementTimeout, when set, additionally clamps the
 	// effective value. Set a larger value for long-running analytical statements.
 	DefaultStatementTimeout time.Duration
