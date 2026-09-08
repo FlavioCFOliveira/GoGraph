@@ -1071,13 +1071,17 @@ const (
 // # The poisoned contract as MEASURED, not as assumed
 //
 // Three of these were surprising enough to be worth naming, and all three were
-// read off a real run before any assertion was written:
+// read off a real run before any assertion was written. All three have since
+// been written into the [wal.Writer] godoc as well (rmp #2525), so these
+// clauses now hold the CODE to what the documentation promises callers rather
+// than merely recording an undocumented observation:
 //
 //   - [wal.Writer.SyncBuffered] on a poisoned writer returns NIL. The poison
 //     rewinds the accepted offset to the durable one, so "make everything
 //     accepted durable" is already satisfied and the durable-already fast path
 //     fires. It is correct — nothing accepted is un-durable — but it means
 //     SyncBuffered is NOT a health probe; [wal.Writer.Poisoned] is.
+//
 //   - [wal.Writer.Truncate] on a poisoned writer SUCCEEDS and empties the file,
 //     while the writer stays poisoned. Truncate is the one mutator that does not
 //     consult the sticky error. It is not a durability hole — the writer still
@@ -1085,6 +1089,16 @@ const (
 //     and Truncate is documented as a maintenance helper off the production
 //     checkpoint path (which cuts the WAL with TruncatePrefix instead). It is
 //     pinned here so that a change putting Truncate on a live path is caught.
+//
+//     The SUCCESS is specific to this arm's ONE-SHOT disk fault
+//     ([SimDisk.ArmSyncFaultAt]), under which Truncate's own fsync succeeds.
+//     rmp #2525 measured the other regime directly: with the fault still
+//     firing, Truncate empties the file and leaves the writer poisoned exactly
+//     as here, but returns the raw fsync error rather than nil. What this
+//     clause pins is therefore the transient-fault reading; the invariant
+//     common to both is that Truncate never consults the STICKY error, which
+//     StillPoisonedAfterTruncate below is what actually guards.
+//
 //   - After Close, Append and Truncate return [wal.ErrWriterClosed] rather than
 //     the sticky poison: the closed check precedes the poison check. Poisoned()
 //     still reports the sticky error.
@@ -1254,8 +1268,9 @@ func walLifecycleTruncateHalf(ctx context.Context, seed uint64, r *WALLifecycleR
 }
 
 // walLifecyclePoisonHalf drives one writer into the poison and then interrogates
-// every member of its surface, including the two that are NOT documented
-// (Truncate and SyncBuffered on a poisoned writer).
+// every member of its surface, including the two whose poisoned-state behaviour
+// is the surprising one (Truncate and SyncBuffered), which rmp #2525 has since
+// written into the [wal.Writer] godoc.
 func walLifecyclePoisonHalf(ctx context.Context, seed uint64, r *WALLifecycleResult) error {
 	disk := NewSimDisk(NewSeed(seed^durableDiskSeedMix), 0) // faultRate 0: only the armed one-shot fault fires
 	path := walLifecyclePath + ".poison"
@@ -1316,7 +1331,8 @@ func walLifecyclePoisonHalf(ctx context.Context, seed uint64, r *WALLifecycleRes
 	//nolint:errorlint // identity is the contract under test; see the comment above
 	r.SyncGroupLostMarkIsSticky = w.SyncGroup(lost) == sticky
 
-	// Undocumented, therefore measured: Truncate does not consult the poison.
+	// Truncate does not consult the poison. Measured here before it was
+	// documented; the [wal.Writer.Truncate] godoc now states it (rmp #2525).
 	r.TruncateOnPoisonedReturned, r.TruncateOnPoisonedErr = w.Truncate()
 	img, rerr := disk.ReadFile(path)
 	if rerr != nil {
@@ -1341,10 +1357,10 @@ const walLifecycleFrameBytes = wal.HeaderSize + walLifecyclePayload
 // is a PURE function of the measured result, so a test can falsify it with a
 // doctored record.
 //
-// Where the contract is DOCUMENTED the clause states the doc; where it was only
-// MEASURED (SyncBuffered and Truncate on a poisoned writer) the clause pins what
-// was measured and says so, so a future change surfaces as a failure to be
-// judged rather than as a silent drift.
+// Every clause states the documented contract: the two that were originally
+// only MEASURED (SyncBuffered and Truncate on a poisoned writer) are documented
+// on [wal.Writer] as of rmp #2525, so a future change surfaces as a failure to
+// be judged rather than as a silent drift.
 func checkWALLifecycle(r *WALLifecycleResult) []Violation {
 	var v []Violation
 	add := func(kind ViolationKind, msg string) {
@@ -1428,19 +1444,24 @@ func checkWALLifecycle(r *WALLifecycleResult) []Violation {
 			"wal.Stats.Bytes (%d) does not exceed the durable offset (%d) after a discard: the accepted-bytes counter is documented as counting every frame appended, including one a poison threw away",
 			r.AppendedAtPoison, r.DurableAtPoison))
 	}
-	// MEASURED, not documented: SyncBuffered on a poisoned writer returns nil.
+	// SyncBuffered on a poisoned writer returns nil; documented on
+	// [wal.Writer.SyncBuffered] as of rmp #2525, which is why a nil from it is
+	// not evidence of a healthy writer.
 	if r.SyncBufferedAfterPoison != nil {
 		add(ViolationOracleDeviation, fmt.Sprintf(
-			"SyncBuffered on a poisoned writer returned %v; MEASURED behaviour is nil, because the poison rewinds the accepted offset to the durable one "+
+			"SyncBuffered on a poisoned writer returned %v; the documented behaviour is nil, because the poison rewinds the accepted offset to the durable one "+
 				"and the durable-already fast path fires. If this now errors the contract has changed and callers using it as a flush must be re-checked",
 			r.SyncBufferedAfterPoison))
 	}
-	// MEASURED, not documented: Truncate does not consult the poison.
+	// Truncate does not consult the poison; documented on [wal.Writer.Truncate]
+	// as of rmp #2525. Under this arm's ONE-SHOT fault its own fsync succeeds, so
+	// the reading here is nil; rmp #2525 measured the persistent-fault regime,
+	// where it empties the file identically but returns the raw fsync error.
 	if r.TruncateOnPoisonedErr != nil || r.ImageAfterPoisonTruncate != 0 {
 		add(ViolationOracleDeviation, fmt.Sprintf(
-			"Truncate on a POISONED writer returned %v leaving %d byte(s); MEASURED behaviour is a successful empty. Truncate is the one mutator that does not "+
-				"consult the sticky error; it is safe only because the writer stays poisoned and refuses every later append, and because the production checkpoint "+
-				"cuts the WAL with TruncatePrefix instead. A change here needs judging, not absorbing",
+			"Truncate on a POISONED writer returned %v leaving %d byte(s); under this arm's ONE-SHOT fault the documented behaviour is a successful empty. "+
+				"Truncate is the one mutator that does not consult the sticky error; it is safe only because the writer stays poisoned and refuses every later "+
+				"append, and because the production checkpoint cuts the WAL with TruncatePrefix instead. A change here needs judging, not absorbing",
 			r.TruncateOnPoisonedErr, r.ImageAfterPoisonTruncate))
 	}
 	if r.StillPoisonedAfterTruncate == nil {
