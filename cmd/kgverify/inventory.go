@@ -303,3 +303,29 @@ func (inv *inventory) hasDirPrefix(path string) bool {
 	}
 	return false
 }
+
+// declKey is the identity of one declaration, and the single key every check
+// here compares a graph node against.
+//
+// It is (file, name, recv) rather than (file, name), because (file, name) is
+// NOT unique in Go: two methods of the same name on different receivers live in
+// one file legitimately, and 531 pairs in this tree do. A check keyed on
+// (file, name) therefore scores both as covered the moment either has a node,
+// which under-reports the gap by 1680 declarations module-wide and lets a
+// per-package parity check report parity while a declaration still has no node.
+//
+// Receiver spelling matches knowledge-model.md, which records `recv` as the
+// receiver type with the pointer star stripped — the same reduction
+// receiverName performs — so a node written from the model's own convention
+// compares equal.
+//
+// One collision survives this key and cannot be removed: `func init()` may be
+// declared repeatedly in one file, and cypher/write_property_durability_test.go
+// declares it twice. Both map to one node, which is the honest outcome — the
+// two are indistinguishable by name, file and receiver alike.
+func declKey(file, name, recv string) string {
+	return file + "\x00" + name + "\x00" + recv
+}
+
+// key is the declaration's identity as read out of the tree.
+func (d *decl) key() string { return declKey(d.File, d.Name, d.Recv) }

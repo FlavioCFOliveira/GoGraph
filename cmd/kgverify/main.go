@@ -49,8 +49,11 @@
 //	go run ./cmd/kgverify              # verify; exit 1 on any regression
 //	go run ./cmd/kgverify -v           # list every violation, not just a sample
 //	go run ./cmd/kgverify -json        # machine-readable results
-//	go run ./cmd/kgverify -emit symbols
-//	go run ./cmd/kgverify -emit missing
+//	go run ./cmd/kgverify -emit symbols   # every declaration go/parser found
+//	go run ./cmd/kgverify -emit missing   # declarations with no node: the sync worklist
+//	go run ./cmd/kgverify -emit packages  # per-package declarations vs nodes
+//	go run ./cmd/kgverify -emit absent    # nodes naming a symbol the tree does not have
+//	go run ./cmd/kgverify -emit cypher    # one statement per line that closes the gap
 //
 // Exit codes are deliberately distinct, so a broken harness can never be read
 // as either a pass or a fidelity defect:
@@ -139,7 +142,7 @@ func parseFlags() (options, error) {
 	fs.StringVar(&o.repo, "repo", "", "repository root (default: git rev-parse --show-toplevel)")
 	fs.StringVar(&o.roadmap, "roadmap", "gograph", "rmp roadmap holding the knowledge graph")
 	fs.StringVar(&o.since, "since", "", "revision the audited range starts at (default: merge-base with develop)")
-	fs.StringVar(&o.emit, "emit", "", "instead of verifying, print the tree's own facts: symbols | missing")
+	fs.StringVar(&o.emit, "emit", "", "instead of verifying, print the tree's own facts: symbols | missing | packages | absent")
 	fs.BoolVar(&o.verbose, "v", false, "list every violation instead of a sample")
 	fs.BoolVar(&o.asJSON, "json", false, "emit results as JSON")
 	fs.IntVar(&o.detail, "detail", 8, "violations to show per failing check unless -v")
@@ -154,8 +157,10 @@ func parseFlags() (options, error) {
 			o.exclude[id] = struct{}{}
 		}
 	}
-	if o.emit != "" && o.emit != "symbols" && o.emit != "missing" {
-		return o, fmt.Errorf("-emit must be symbols or missing, got %q", o.emit)
+	switch o.emit {
+	case "", "symbols", "missing", "packages", "absent", "cypher":
+	default:
+		return o, fmt.Errorf("-emit must be symbols, missing, packages, absent or cypher, got %q", o.emit)
 	}
 	return o, nil
 }
@@ -212,8 +217,10 @@ func run() (int, error) {
 	if err != nil {
 		return exitHarness, fmt.Errorf("reading symbol nodes: %w", err)
 	}
+	cov, unresolved := buildPackageCoverage(inv, symbols)
 	if opts.emit != "" {
-		return emit(opts.emit, inv, symbols)
+		head, date := gitHeadStamp(repo)
+		return emit(opts.emit, inv, symbols, cov, unresolved, head, date)
 	}
 	if code, err := checkFloors(base.Sanity, inv, len(symbols), mdl); err != nil {
 		return code, err
@@ -223,7 +230,8 @@ func run() (int, error) {
 	if err := runChecks(a, repo, &opts, base, symbols); err != nil {
 		return exitHarness, err
 	}
-	return report(a, base, repo, &opts, inv, symbols)
+	a.checkPackages(cov, base)
+	return report(a, base, repo, &opts, inv, symbols, cov, unresolved)
 }
 
 func checkFloors(f sanityFloors, inv *inventory, symbolNodes int, mdl *model) (int, error) {
@@ -324,34 +332,72 @@ func uniqueIntIDs(tasks []taskNode) []int {
 // sync worklist. A symbol node written by copying a name out of this output
 // cannot be a fabrication, because the name came from go/parser rather than
 // from prose.
-func emit(mode string, inv *inventory, symbols []symNode) (int, error) {
+func emit(mode string, inv *inventory, symbols []symNode, cov []pkgCoverage, unresolved map[string]int, syncCommit, syncDate string) (int, error) {
+	switch mode {
+	case "packages":
+		return emitTo(os.Stdout, emitPackages(cov, unresolved),
+			fmt.Sprintf("kgverify: %d packages accounted, %d unresolved package keys (packages)\n", len(cov), len(unresolved)))
+	case "cypher":
+		repair, create := buildSync(inv, symbols, syncCommit, syncDate)
+		var b strings.Builder
+		for _, st := range repair {
+			b.WriteString(st)
+			b.WriteByte('\n')
+		}
+		for _, st := range create {
+			b.WriteString(st)
+			b.WriteByte('\n')
+		}
+		return emitTo(os.Stdout, b.String(), fmt.Sprintf(
+			"kgverify: emitted %d repair and %d create statements (cypher); run each line through `rmp graph client -r <roadmap> --query`\n",
+			len(repair), len(create)))
+	case "absent":
+		body, n := emitAbsent(inv, symbols)
+		return emitTo(os.Stdout, body,
+			fmt.Sprintf("kgverify: emitted %d of %d symbol nodes naming a declaration absent from the tree (absent)\n", n, len(symbols)))
+	}
 	const header = "# kind\tname\timportPath\tfile\trecv\n"
 	var buf strings.Builder
 	buf.WriteString(header)
 	skip := map[string]struct{}{}
 	if mode == "missing" {
-		for _, n := range symbols {
-			skip[n.File+"\x00"+n.Name] = struct{}{}
+		for i := range symbols {
+			skip[symbols[i].key()] = struct{}{}
 		}
 	}
 	shown := 0
+	seen := map[string]struct{}{}
 	for _, d := range inv.decls {
-		if _, ok := skip[d.File+"\x00"+d.Name]; ok {
+		if _, ok := skip[d.key()]; ok {
 			continue
 		}
+		// One line per declaration IDENTITY. Emitting a duplicate key twice
+		// would make a MERGE-based sync write the second over the first.
+		if _, dup := seen[d.key()]; dup {
+			continue
+		}
+		seen[d.key()] = struct{}{}
 		shown++
 		fmt.Fprintf(&buf, "%s\t%s\t%s\t%s\t%s\n", d.Kind, d.Name, d.ImportPath, d.File, d.Recv)
 	}
-	if _, err := os.Stdout.WriteString(buf.String()); err != nil {
+	return emitTo(os.Stdout, buf.String(),
+		fmt.Sprintf("kgverify: emitted %d of %d declarations (%s)\n", shown, len(inv.decls), mode))
+}
+
+// emitTo writes an emit mode's body to out and its provenance line to stderr,
+// so the body can be piped into a sync script while the count stays visible to
+// the operator. A count that goes unseen is a count nobody ratchets.
+func emitTo(out *os.File, body, note string) (int, error) {
+	if _, err := out.WriteString(body); err != nil {
 		return exitHarness, err
 	}
-	if _, err := fmt.Fprintf(os.Stderr, "kgverify: emitted %d of %d declarations (%s)\n", shown, len(inv.decls), mode); err != nil {
+	if _, err := os.Stderr.WriteString(note); err != nil {
 		return exitHarness, err
 	}
 	return exitOK, nil
 }
 
-func report(a *auditor, base *baseline, repo string, opts *options, inv *inventory, symbols []symNode) (int, error) {
+func report(a *auditor, base *baseline, repo string, opts *options, inv *inventory, symbols []symNode, cov []pkgCoverage, unresolved map[string]int) (int, error) {
 	failed := 0
 	for _, r := range a.results {
 		if _, skip := opts.exclude[r.ID]; skip {
@@ -366,7 +412,7 @@ func report(a *auditor, base *baseline, repo string, opts *options, inv *invento
 		enc.SetIndent("", "  ")
 		if err := enc.Encode(map[string]any{
 			"repo": repo, "baselineMeasured": base.Measured, "results": a.results,
-			"failedChecks": failed,
+			"failedChecks": failed, "packages": cov, "unresolvedPackageKeys": unresolved,
 		}); err != nil {
 			return exitHarness, err
 		}
@@ -386,6 +432,31 @@ func report(a *auditor, base *baseline, repo string, opts *options, inv *invento
 	fmt.Printf("  edge forms documented      %6d\n", len(a.mdl.edgeForms))
 	fmt.Printf("  symbol coverage of tree    %5.1f%%  (%d declarations matched by file+name)\n\n",
 		100*float64(coverage(inv, symbols))/float64(max(len(inv.decls), 1)), coverage(inv, symbols))
+
+	modelled, atParity, worst := 0, 0, make([]pkgCoverage, 0, 10)
+	for _, c := range cov {
+		if !c.Modelled() {
+			continue
+		}
+		modelled++
+		if c.Gap == 0 {
+			atParity++
+		} else if len(worst) < cap(worst) {
+			worst = append(worst, c)
+		}
+	}
+	fmt.Printf("per-package parity (acceptance criterion 1 of rmp #2719)\n")
+	fmt.Printf("  packages in the tree       %6d\n", len(cov))
+	fmt.Printf("  modelled by the graph      %6d  (at least one symbol node)\n", modelled)
+	fmt.Printf("  at parity                  %6d  (every declaration has a node)\n", atParity)
+	fmt.Printf("  unresolved package keys    %6d  (node keys naming no package in the tree)\n", len(unresolved))
+	if len(worst) > 0 {
+		fmt.Printf("  widest gaps:\n")
+		for _, c := range worst {
+			fmt.Printf("    %-58s decls %5d  nodes %5d  gap %5d\n", c.ImportPath, c.Decls, c.Nodes, c.Gap)
+		}
+	}
+	fmt.Printf("  full table: go run ./cmd/kgverify -emit packages\n\n")
 
 	fmt.Printf("%-34s %8s %9s  %s\n", "CHECK", "ACTUAL", "BASELINE", "STATUS")
 	for _, r := range a.results {
@@ -444,12 +515,12 @@ func report(a *auditor, base *baseline, repo string, opts *options, inv *invento
 // sprint-local sync failure.
 func coverage(inv *inventory, symbols []symNode) int {
 	have := make(map[string]struct{}, len(symbols))
-	for _, n := range symbols {
-		have[n.File+"\x00"+n.Name] = struct{}{}
+	for i := range symbols {
+		have[symbols[i].key()] = struct{}{}
 	}
 	n := 0
-	for _, d := range inv.decls {
-		if _, ok := have[d.File+"\x00"+d.Name]; ok {
+	for i := range inv.decls {
+		if _, ok := have[inv.decls[i].key()]; ok {
 			n++
 		}
 	}

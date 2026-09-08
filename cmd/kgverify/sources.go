@@ -11,7 +11,7 @@ import (
 	"strings"
 )
 
-// rows is the shape every `rmp graph query` returns: named columns and untyped
+// rows is the shape every `rmp graph client` reply takes: named columns and untyped
 // row values. The values are kept as any deliberately, because one of the
 // checks is about a value's JSON TYPE — a Task id written as "2494" instead of
 // 2494 is the retired identity form that rmp #2612 migrated away from, and
@@ -55,9 +55,35 @@ func runCmd(dir, bin string, args ...string) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
+// graphSubcommand is the `rmp graph` subcommand that runs a statement.
+//
+// rmp 1.17.0 rebuilt `rmp graph` as a server/client pair: `serve` is the only
+// process that opens the store and `client` is the only way to run a statement.
+// The five subcommands of the previous line — including `query`, which this
+// tool was written against — were removed and now exit 127, "unknown graph
+// subcommand". kgverify folds that into exitHarness, so the gate stopped
+// concluding anything rather than reporting a fidelity defect; because
+// ci-kg-verify is a member of `make ci`, the sprint-close gate was red for a
+// reason unrelated to the graph's contents.
+//
+// It is a named constant so the regression test can assert that rmp still
+// accepts it, rather than the name being buried in a call site.
+const graphSubcommand = "client"
+
+// graphQueryArgs builds the argv for one statement. Extracted from graphQuery
+// so the subcommand can be checked against the live binary without a server
+// running and without executing a statement.
+func graphQueryArgs(roadmap, cypher string) []string {
+	return []string{"graph", graphSubcommand, "-r", roadmap, "--query", cypher}
+}
+
 // graphQuery runs one read-only Cypher query against the roadmap's graph.
+//
+// It needs a running `rmp graph serve` for the roadmap: with nothing listening
+// the client exits 1 and opens nothing — it does not fall back to reading the
+// store.
 func graphQuery(dir, roadmap, cypher string) (*rows, error) {
-	out, err := runCmd(dir, "rmp", "graph", "query", "-r", roadmap, "--query", cypher)
+	out, err := runCmd(dir, "rmp", graphQueryArgs(roadmap, cypher)...)
 	if err != nil {
 		return nil, err
 	}
@@ -205,4 +231,16 @@ func modulePathOf(repo string) (string, error) {
 		}
 	}
 	return "", errors.New("no module directive in go.mod")
+}
+
+// gitHeadStamp reads the provenance pair every written node and edge carries:
+// the full commit hash the fact was last confirmed at, and that commit's date.
+func gitHeadStamp(repo string) (hash, date string) {
+	if out, err := runCmd(repo, "git", "rev-parse", "HEAD"); err == nil {
+		hash = strings.TrimSpace(string(out))
+	}
+	if out, err := runCmd(repo, "git", "show", "-s", "--format=%cs", "HEAD"); err == nil {
+		date = strings.TrimSpace(string(out))
+	}
+	return hash, date
 }

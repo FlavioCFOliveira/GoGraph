@@ -111,6 +111,10 @@ type symNode struct {
 	GitCommit string
 }
 
+// key is the node's claimed declaration identity, in the same form declKey
+// builds from the tree, so the two are directly comparable.
+func (s *symNode) key() string { return declKey(s.File, s.Name, s.Recv) }
+
 func (s *symNode) where() string {
 	loc := s.Pkg
 	if loc == "" {
@@ -246,13 +250,14 @@ func (a *auditor) checkProvenance(touched map[string]struct{}, nodes []symNode, 
 	byKey := make(map[string]symNode, len(nodes))
 	for _, n := range nodes {
 		if n.File != "" && n.Name != "" {
-			byKey[n.File+"\x00"+n.Name] = n
+			byKey[n.key()] = n
 		}
 	}
 	var noNode, noCommit []string
 	touchedDecls := a.inv.declsInFiles(touched)
-	for _, d := range touchedDecls {
-		n, ok := byKey[d.File+"\x00"+d.Name]
+	for i := range touchedDecls {
+		d := &touchedDecls[i]
+		n, ok := byKey[d.key()]
 		if !ok {
 			noNode = append(noNode, fmt.Sprintf("%s %s (%s) was touched in the audited range and has no graph node", d.Kind, d.Name, d.File))
 			continue

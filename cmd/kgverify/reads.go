@@ -8,6 +8,15 @@ import (
 
 // symbolLabelPredicate builds the WHERE clause selecting every symbol-tier
 // label, derived from symbolLabels so the query and the oracle cannot drift.
+//
+// The result is PARENTHESISED, and that is a correctness requirement rather
+// than a matter of taste. Cypher binds AND tighter than OR, so an unbracketed
+// chain spliced into a larger predicate reassociates: `a OR b OR c AND rest`
+// means `a OR b OR (c AND rest)`, which matches every node bearing any label
+// but the last, whatever `rest` says. Read as a WHERE clause on its own the
+// difference is invisible, and every call site did read it that way until one
+// conjoined it with an identity test — a SET behind that predicate wrote the
+// last row's value onto 11652 of 12677 symbol nodes in a single statement.
 func symbolLabelPredicate(v string) string {
 	labels := make([]string, 0, len(symbolLabels))
 	for l := range symbolLabels {
@@ -18,7 +27,7 @@ func symbolLabelPredicate(v string) string {
 	for i, l := range labels {
 		terms[i] = v + ":" + l
 	}
-	return strings.Join(terms, " OR ")
+	return "(" + strings.Join(terms, " OR ") + ")"
 }
 
 // readSymbolNodes reads every symbol-tier node.

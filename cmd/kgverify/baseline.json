@@ -1,6 +1,6 @@
 {
-  "measured": "2026-09-07",
-  "commit": "83bced1e (release/0.14.1)",
+  "measured": "2026-09-08",
+  "commit": "0e7e982d (release/0.14.1), rmp #2719",
 
   "fabricationFixture": [
     "TestSchemaWalkHoisted",
@@ -10,67 +10,74 @@
   ],
 
   "sanityFloors": {
-    "declarations": 20000,
-    "goFiles": 2500,
-    "symbolNodes": 10000,
+    "declarations": 28000,
+    "goFiles": 3000,
+    "symbolNodes": 25000,
     "documentedLabels": 20,
     "documentedEdgeForms": 50,
-    "tasksResolved": 400
+    "tasksResolved": 2500
   },
 
   "checks": {
     "fixture-fabrication-present": 0,
-    "symbol-absent": 327,
-    "symbol-file-absent": 267,
+    "symbol-absent": 0,
+    "symbol-file-absent": 40,
     "symbol-kind-mismatch": 29,
-    "symbol-pkg-mismatch": 71,
+    "symbol-pkg-mismatch": 68,
     "task-id-not-int": 0,
     "task-legacy-identity": 0,
-    "task-id-duplicated": 5,
-    "task-stub": 3,
+    "task-id-duplicated": 0,
+    "task-stub": 0,
     "task-status-invalid": 0,
-    "task-status-disagrees-with-rmp": 9,
+    "task-status-disagrees-with-rmp": 0,
     "task-absent-in-rmp": 0,
-    "provenance-no-node": 1082,
-    "provenance-no-gitcommit": 1,
-    "edge-off-model": 62,
-    "edge-type-undocumented": 119,
+    "provenance-no-node": 160,
+    "provenance-no-gitcommit": 0,
+    "edge-off-model": 60,
+    "edge-type-undocumented": 118,
     "label-undocumented": 18,
     "component-path-missing": 25,
-    "component-path-absent": 0
+    "component-path-absent": 0,
+    "package-symbol-gap": 0
   },
 
   "rationale": {
     "_how_to_use": "A count that EXCEEDS its baseline fails the gate. A count BELOW it is reported as 'improved - ratchet the baseline': lower the number here in the same commit that lowers the count, exactly as cypher/tck/runner_test.go ratchets tckExecutionBaseline. Never raise a baseline to get a green run.",
 
-    "_zero_baselines": "fixture-fabrication-present, task-id-not-int, task-legacy-identity, task-status-invalid, task-absent-in-rmp and component-path-absent are at 0 because they were MEASURED at 0 on 2026-09-07, not because 0 is aspirational. These are the classes that must never regress at all.",
+    "_2719_ratchet": "Ratcheted at rmp #2719 (sprint 357) after the graph was brought to per-package symbol parity. Eleven counts fell, seven of them to zero. The measured deltas: symbol-absent 327->0, symbol-file-absent 267->40, symbol-pkg-mismatch 71->68, task-id-duplicated 5->0, task-stub 3->0, task-status-disagrees-with-rmp 9->0, provenance-no-node 1082->160, provenance-no-gitcommit 1->0, edge-off-model 62->60, edge-type-undocumented 119->118, package-symbol-gap (new) 0. Symbol coverage of the tree went 43.1% -> 95.7% and the graph went 15454 -> 32578 nodes.",
 
-    "symbol-absent": "327 symbol-tier nodes name a declaration the tree does not have. 227 point at a file that no longer exists (whole packages were deleted, e.g. cypher/plan and cypher/ir/rewrite); 93 point at a file that DOES exist but declares no such symbol - the same shape as the two fabrications in the fixture; 7 carry no file property. The 93 are the ones worth reading first. This is a repair backlog a checker cannot clear on its own.",
+    "_zero_baselines": "Twelve checks now sit at zero, and all twelve were MEASURED at zero on 2026-09-08 rather than being aspirational: fixture-fabrication-present, symbol-absent, task-id-not-int, task-legacy-identity, task-id-duplicated, task-stub, task-status-invalid, task-status-disagrees-with-rmp, task-absent-in-rmp, provenance-no-gitcommit, component-path-absent and package-symbol-gap. These are the classes that must never regress at all.",
 
-    "symbol-file-absent": "267 nodes name a path that is not in the tree. Overlaps symbol-absent by construction and is kept separate because a wrong path and a wrong name have different repairs.",
+    "_sanity_floors": "Raised with the population they guard, so a pass still cannot be vacuous: declarations 20000->28000 (measured 29071), goFiles 2500->3000 (3056), symbolNodes 10000->25000 (27956) and tasksResolved 400->2500 (2660 tasks now have a node, up from 483). A floor that stays low while the population trebles stops proving that the checker looked.",
 
-    "symbol-kind-mismatch": "29 nodes carry a label the declaration does not bear - most often a Method labelled Function. Distinct from a fabrication: the symbol exists.",
+    "symbol-absent": "0. The 327 nodes naming a declaration absent from the tree were DELETED under rmp #2719 acceptance criterion 2, together with the 399 edges hanging off them. The deletion was driven by 'go run ./cmd/kgverify -emit absent', never by names read out of a report: the same go/parser oracle that detects a fabrication chose what to remove, which matters because a DELETE keyed on a retyped name removes a node that may have been correct. Verified by a dry run first - the 312 distinct names bound exactly 327 symbol-tier nodes and 0 nodes of any other label - and by reading the count back at 0 afterwards. This baseline must never rise: a node naming a symbol that does not exist is a wrong answer delivered with the authority of a verified one.",
 
-    "symbol-pkg-mismatch": "71 nodes name a symbol that exists, but not in the package they claim. Two causes are folded here: knowledge-model.md records the internal/sim divergence (symbols keyed on `package` holding the directory rather than `pkg` holding the import path) as the model in force, and a genuine wrong-place claim - for example the Example nodes asserting a func Example() in examples/NN_*/example_test.go, where the file exists and declares no such function. Failing on a documented, accepted divergence would leave this gate permanently red, which is only a different way of being useless.",
+    "symbol-file-absent": "40, down from 267. What remains points into cypher/plan and cypher/ir/rewrite, packages deleted in sprint 352. These 40 differ from the 327 above in one respect that decides their fate: their NAME is still declared somewhere in the tree, so the fabrication oracle passes them, and only their file property is wrong. The repair is to re-point the file, not to delete the node, and it needs a judgement about which surviving declaration each one meant.",
 
-    "task-id-duplicated": "5 ids bind two nodes each: 2698, 2699 and 2700 are a real node plus an empty stub, and 2605 and 2615 are two nodes with disagreeing statuses. This is the SAME defect class rmp #2612 folded four of and sprint 352 found two more of (2645, 2653): a full-property MERGE against a node with different properties creates a duplicate instead of matching it. It has recurred, which is why it is now counted.",
+    "symbol-kind-mismatch": "29 nodes carry a label the declaration does not bear - a Method labelled Function, or a Test labelled Benchmark. Distinct from a fabrication: the symbol exists. Unchanged by rmp #2719, which created nodes with the kind go/parser reports and therefore added none.",
 
-    "task-stub": "3 Task nodes carry neither title nor status (2698, 2699, 2700) - the empty-stub form.",
+    "symbol-pkg-mismatch": "68, down from 71. The residue is dominated by Example nodes asserting a 'func Example()' in examples/NN_*/example_test.go where the file exists and declares no such function. Note what this check no longer contains: the internal/sim divergence, where symbols were keyed on 'package' holding the repo-relative directory instead of 'pkg' holding the import path, is GONE - every symbol node's pkg was re-derived from its own file's directory, and 0 nodes now claim a pkg that contradicts it.",
 
-    "task-status-disagrees-with-rmp": "9 statuses are stale. THIS COUNT IS TIME-VARYING: rmp is the authority, so every task closed without a graph sync raises it, with no code change involved. The remedy is a sync, never a baseline bump. It is also the strongest argument against wiring this gate into `make ci` unmodified - it would fail a push for a reason unrelated to the change under test.",
+    "task-id-duplicated": "0, down from 5. 2698, 2699 and 2700 were a real node plus an empty stub; 2605 and 2615 were two nodes with disagreeing statuses. Each duplicate carried exactly one edge that the keeper lacked - three CLOSES from a Commit, one TRACKED_BY from a Defect, one FOLLOWED_UP_BY from Task 2508 - so every edge was REPOINTED onto the keeper and read back before the duplicate was deleted. Deleting first would have destroyed the only record of three tasks' closing commits.",
 
-    "provenance-no-node": "MEASURED 1000 of 1837 declarations in the 66 .go files the range touched before this task, BASELINED at 1082. Read the 1000 with the coverage figure the tool prints: the graph matches 43.5% of the tree's declarations overall and 45.6% within the touched files, so the two rates are the same and this is a GLOBAL bootstrap gap, not a sprint-local sync failure - which refutes the premise that this sprint's own footprint was skipped. The extra 82 are this tool's own declarations in cmd/kgverify, which join the touched range the moment they are committed and have no graph node yet; the baseline is set for the post-commit state so the gate is green both before and after, and those 82 nodes are owed by the knowledge-graph sync for rmp #2677.",
+    "task-stub": "0, down from 3. The three empty stubs were the duplicate halves of 2698, 2699 and 2700; see task-id-duplicated.",
 
-    "provenance-no-gitcommit": "Exactly 1: Function newBoundNodeBTreeIndex in cypher/index_binding.go. Of the 837 touched declarations that DO have a node, 836 carry provenance.",
+    "task-status-disagrees-with-rmp": "0, down from 9. THIS COUNT IS TIME-VARYING: rmp is the authority, so every task closed without a graph sync raises it with no code change involved. It reads 0 because every task in every sprint was re-derived from rmp under rmp #2719. The remedy is always a sync, never a baseline bump. It stays excluded from ci-kg-verify for the same reason it always was.",
 
-    "edge-off-model": "62 endpoint shapes use a documented edge type in an undocumented form. 21 of them are IMPLEMENTED_IN, which is the count the filing named and which this tool reproduces exactly: (Feature)->(Commit) x10, (Commit)->(Feature) x5, (DSTScenario)->(Commit) x4, (Scenario)->(File) x1, (Task)->(Package) x1.",
+    "provenance-no-node": "160, down from 1082, and the population it counts is now explainable rather than merely large. Measured at 136 of 2709 declarations in the 129 touched .go files, ALL of them in the only two touched packages the graph does not model: cmd/kgverify (88) and examples/31_metrics_observability (48). The baseline is set 24 higher, at 160, for the POST-COMMIT state: packages.go, sync.go, sources_test.go and sync_test.go are this task's own new files and contribute 24 declarations that join the touched range the moment they are committed, so the gate is green both before and after. The count still varies with branch length, which is why it stays excluded from ci-kg-verify.",
 
-    "edge-type-undocumented": "119 shapes use an edge type absent from the model's table. knowledge-model.md admits this backlog in its own data-quality note. Counted separately from edge-off-model so the 21 IMPLEMENTED_IN edges are not buried under it.",
+    "provenance-no-gitcommit": "0, down from 1. Every node written or repaired under rmp #2719 carries the gitCommit/gitDate pair, including the three that previously lacked it.",
 
-    "label-undocumented": "18 labels are in the graph and not in the label table: Audit, AuditRound, Bug, Certification, Config, DesignSpike, Doc, ExampleProgram, File, Finding, Fix, Initiative, Metric, Note, Perf, Scenario, SecurityAudit, SecurityFinding. The filing measured 19 at sprint-352 close. Note that Finding, Perf, AuditRound and SecurityAudit already appear as ENDPOINTS in the edge table, so the model documents edges between labels it does not document.",
+    "edge-off-model": "60, down from 62 - the two that went were attached to deleted symbol nodes. 21 remain IMPLEMENTED_IN in an undocumented endpoint shape: (Feature)->(Commit) x10, (Commit)->(Feature) x5, (DSTScenario)->(Commit) x4, (Scenario)->(File) x1, (Task)->(Package) x1.",
 
-    "component-path-missing": "25 Component nodes have no usable path: 17 carry `file` with a NULL `path` and are therefore invisible to the query knowledge-model.md documents for this label, and 8 carry neither. 54 do carry path.",
+    "edge-type-undocumented": "118, down from 119. knowledge-model.md admits this backlog in its own data-quality note. Counted separately from edge-off-model so the 21 IMPLEMENTED_IN edges are not buried under it.",
 
-    "component-path-absent": "0 - every Component that carries a path names something that is in the tree."
+    "label-undocumented": "18 labels are in the graph and not in the label table: Audit, AuditRound, Bug, Certification, Config, DesignSpike, Doc, ExampleProgram, File, Finding, Fix, Initiative, Metric, Note, Perf, Scenario, SecurityAudit, SecurityFinding. Finding, Perf, AuditRound and SecurityAudit already appear as ENDPOINTS in the edge table, so the model documents edges between labels it does not document.",
+
+    "component-path-missing": "25 Component nodes have no usable path: 17 carry 'file' with a NULL 'path' and are therefore invisible to the query knowledge-model.md documents for this label, and 8 carry neither. Untouched by rmp #2719, whose scope was the symbol and task tiers.",
+
+    "component-path-absent": "0 - every Component that carries a path names something that is in the tree.",
+
+    "package-symbol-gap": "0, and this is acceptance criterion 1 of rmp #2719 in enforceable form: for every package the graph models, every declaration has a symbol node. 105 of 105 modelled packages are at parity. 33 packages holding 1245 declarations are NOT modelled - they have no symbol node at all, cmd/kgverify (112) and bench/contention (190) the largest - and they are deliberately excluded, because rmp #2719 puts 'modelling packages the graph does not already cover' out of scope. Read the two numbers together: this check says the graph's claims are complete, not that the graph covers the module. 'go run ./cmd/kgverify -emit packages' prints the full table, and the modelled column is what separates the two readings."
   }
 }
