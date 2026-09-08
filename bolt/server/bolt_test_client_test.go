@@ -289,10 +289,28 @@ func startTestServer(t *testing.T, opts server.Options) string {
 //nolint:gocritic // hugeParam: test helper takes Options by value to mirror the public NewServer signature; not a hot path.
 func startTestServerHandle(t *testing.T, opts server.Options) (*server.Server, string) {
 	t.Helper()
-	eng := newEngine(t)
+	// A zero ConnTimeout DISABLES the idle read deadline since rmp #2807, so a
+	// test that leaves the field alone would run with no deadline at all and a
+	// hung connection would hold a goroutine until the test binary exits. Keep
+	// the historic 5 s substitution for every caller that does not care. A test
+	// that must exercise the real default calls startTestServerVerbatimHandle,
+	// which substitutes nothing.
 	if opts.ConnTimeout == 0 {
 		opts.ConnTimeout = 5 * time.Second
 	}
+	return startTestServerVerbatimHandle(t, opts)
+}
+
+// startTestServerVerbatimHandle is [startTestServerHandle] with NO option
+// substituted: the Options reach [server.NewServer] exactly as the caller wrote
+// them, save for the NoAuthHandler opt-in. It exists for the rmp #2807 gates,
+// which assert what a DEFAULT-configured server does and therefore cannot have
+// the helper quietly install a 5 s ConnTimeout the operator never asked for.
+//
+//nolint:gocritic // hugeParam: test helper takes Options by value to mirror the public NewServer signature; not a hot path.
+func startTestServerVerbatimHandle(t *testing.T, opts server.Options) (*server.Server, string) {
+	t.Helper()
+	eng := newEngine(t)
 	// Test servers run without credentials by default. The production server
 	// is secure-by-default and refuses a nil Auth handler, so opt in here with
 	// the explicit NoAuthHandler{} value unless the caller supplied a real

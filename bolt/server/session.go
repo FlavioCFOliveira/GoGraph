@@ -409,22 +409,22 @@ func (s *Session) setMaxInFlight(n int) {
 	}
 }
 
-// setDefaultTxTimeout sets the bounded transaction timeout applied to an
-// explicit transaction when the client supplies no tx_timeout. Non-positive
-// values are ignored, leaving the default in place. Intended for the server
-// bootstrap path so the operator-configured [Options.DefaultTxTimeout] takes
-// effect.
+// setDefaultTxTimeout sets the total wall-clock bound applied to an explicit
+// transaction when the client supplies no tx_timeout. Non-positive values are
+// ignored, leaving [DefaultTxTimeout] in place — which since rmp #2807 is 0, so
+// the bound stays DISABLED unless an operator sets a positive
+// [Options.DefaultTxTimeout]. Intended for the server bootstrap path.
 func (s *Session) setDefaultTxTimeout(d time.Duration) {
 	if d > 0 {
 		s.defaultTxTimeout = d
 	}
 }
 
-// setDefaultStmtTimeout sets the bounded timeout applied to an autocommit
+// setDefaultStmtTimeout sets the wall-clock bound applied to an autocommit
 // statement when the client supplies no per-statement "timeout". Non-positive
-// values are ignored, leaving the default in place. Intended for the server
-// bootstrap path so the operator-configured [Options.DefaultStatementTimeout]
-// takes effect.
+// values are ignored, leaving [DefaultStatementTimeout] in place — which since
+// rmp #2807 is 0, so the bound stays DISABLED unless an operator sets a positive
+// [Options.DefaultStatementTimeout]. Intended for the server bootstrap path.
 func (s *Session) setDefaultStmtTimeout(d time.Duration) {
 	if d > 0 {
 		s.defaultStmtTimeout = d
@@ -435,18 +435,19 @@ func (s *Session) setDefaultStmtTimeout(d time.Duration) {
 // statement from the three inputs, applying the server's timeout policy:
 //
 //   - a positive client-supplied timeout takes precedence;
-//   - otherwise the server default floor (def) applies — this is the #1828 fix
-//     that guarantees a default-configured server never runs an autocommit
-//     statement without a wall-clock bound;
+//   - otherwise the server default (def) applies;
 //   - the server-side cap (hardCap), when positive, additionally clamps the result
 //     so a client can never request (nor the default grant) a longer bound than
 //     the operator permits.
 //
-// A zero (or negative) return means no bound is applied. In the production
-// server def is always positive (seeded from DefaultStatementTimeout), so the
-// only way to reach an unbounded autocommit statement is an explicit
-// non-positive Options.DefaultStatementTimeout together with an unset
-// MaxStatementTimeout — a deliberate operator choice, not the default.
+// A zero (or negative) return means NO bound is applied, and since rmp #2807
+// that is the default outcome: def is seeded from [DefaultStatementTimeout],
+// which is 0. #1828 added def as a mandatory finite floor; rmp #2807 removed the
+// floor deliberately, to match PostgreSQL's statement_timeout (0) and Neo4j's
+// db.transaction.timeout (0), and [DefaultStatementTimeout] documents what that
+// costs. An autocommit statement is bounded now only when the client supplies a
+// timeout, or the operator sets Options.DefaultStatementTimeout or
+// Options.MaxStatementTimeout.
 func resolveStmtTimeout(client, def, hardCap time.Duration) time.Duration {
 	effective := client
 	if effective <= 0 {
@@ -675,9 +676,10 @@ func (s *Session) txOpened() {
 }
 
 // setMaxTxIdle sets the idle bound applied to an open explicit transaction.
-// Non-positive values are ignored, leaving [DefaultMaxTxIdleTime] in place — the
-// bound cannot be disabled, because an unbounded idle transaction is the outage
-// rmp #2175 exists to close. Intended for the server bootstrap.
+// Non-positive values are ignored, which since rmp #2807 leaves the bound
+// DISABLED: [DefaultMaxTxIdleTime] is 0 and a session starts with maxTxIdle at
+// its zero value, so only an operator-supplied positive Options.MaxTxIdleTime
+// arms the idle reaper. Intended for the server bootstrap.
 func (s *Session) setMaxTxIdle(d time.Duration) {
 	if d > 0 {
 		s.maxTxIdle = d
@@ -1184,16 +1186,16 @@ func (s *Session) handleRun(ctx context.Context, m *proto.Run) ([]any, error) {
 		}
 	}
 	// Resolve the effective wall-clock bound for this autocommit statement. A
-	// client-supplied timeout wins; otherwise the mandatory autocommit default
-	// floor applies (#1828). Without that floor, a default-configured server
-	// (MaxStatementTimeout left at zero) had no wall-clock bound on an autocommit
-	// statement, so an authenticated client could pin a CPU core indefinitely
+	// client-supplied timeout wins; otherwise the server default applies, which
+	// since rmp #2807 is 0 — no bound. #1828 added that default as a mandatory
+	// finite floor precisely because an authenticated client can pin a CPU core
 	// with a super-linear-runtime / single-row-result query (e.g. a disconnected
-	// multi-pattern Cartesian product) whose result-row and byte caps never fire.
-	// This mirrors handleBegin, which applies defaultTxTimeout unconditionally to
-	// every explicit transaction; the bound here only governs the autocommit
-	// RunAny path below (an explicit transaction carries its own deadline
-	// installed at BEGIN and ignores runCtx).
+	// multi-pattern Cartesian product) whose result-row and byte caps never fire;
+	// rmp #2807 removed the floor to match PostgreSQL's statement_timeout, and
+	// [DefaultStatementTimeout] records what that costs and what still bounds it.
+	// The bound here governs only the autocommit RunAny path below (an explicit
+	// transaction carries its own deadline installed at BEGIN and ignores
+	// runCtx).
 	effective := resolveStmtTimeout(s.stmtTimeout, s.defaultStmtTimeout, s.maxStmtTimeout)
 
 	// Record the client's database selection for this statement. Inside an
@@ -1652,14 +1654,19 @@ func (s *Session) handleBegin(ctx context.Context, m *proto.Begin) ([]any, error
 			slog.Any("bookmarks", bms))
 	}
 
-	// Determine the effective transaction timeout. A finite bound is mandatory:
-	// the explicit transaction holds NO engine serialisation (rmp #2305 retired it)
-	// from BEGIN until COMMIT/ROLLBACK, so a client that BEGINs and then stalls
-	// would otherwise block every other writer indefinitely (#1302). Precedence:
-	// the client-supplied tx_timeout if present, else the server default
+	// Determine the effective transaction timeout. Precedence: the
+	// client-supplied tx_timeout if present, else the server default
 	// (defaultTxTimeout). The server-side statement cap (maxStmtTimeout), when
 	// set, clamps the result so a client can never request a longer hold than the
 	// operator permits.
+	//
+	// The result may legitimately be ZERO — no total bound at all — and since
+	// rmp #2807 that is the DEFAULT: defaultTxTimeout is seeded from
+	// [DefaultTxTimeout], which is 0. A finite bound was mandatory when an
+	// explicit transaction held the engine's writer serialisation from BEGIN
+	// until COMMIT/ROLLBACK and one stalled client blocked every other writer
+	// (#1302); rmp #2305 retired that hold, so what an unfinished transaction now
+	// costs is memory and one reclamation-horizon slot. See [DefaultTxTimeout].
 	effective := s.defaultTxTimeout
 	if v, ok := m.Extra["tx_timeout"]; ok {
 		if ms, ok := v.(int64); ok {
@@ -1802,8 +1809,9 @@ func (s *Session) handleBegin(ctx context.Context, m *proto.Begin) ([]any, error
 	// Record the transaction's absolute wall-clock deadline so the serve loop can
 	// reap an idle-but-open transaction at the timeout even if the client keeps
 	// the connection alive with no-op messages (task #1346). A non-positive
-	// effective timeout (never produced by the production server, which installs
-	// a finite default) leaves the deadline zero, i.e. no reaper.
+	// effective timeout leaves the deadline ZERO, i.e. no reaper — which since
+	// rmp #2807 is what a default-configured server produces, because
+	// [DefaultTxTimeout] is 0. Options.DefaultTxTimeout is what arms it.
 	if effective > 0 {
 		s.txDeadline = s.clk.Now().Add(effective)
 	} else {
@@ -1811,7 +1819,8 @@ func (s *Session) handleBegin(ctx context.Context, m *proto.Begin) ([]any, error
 	}
 	// Start the idle clock. BEGIN itself counts as activity, so an abandoned
 	// transaction is reaped maxTxIdle after the BEGIN rather than immediately
-	// (rmp #2175).
+	// (rmp #2175). touchTx is a no-op while maxTxIdle is non-positive, which is
+	// the default since rmp #2807.
 	s.touchTx()
 	// Publish the transaction so an operator can see and end it (rmp #2176). The
 	// registered terminate callback cancels tx's context and signals this

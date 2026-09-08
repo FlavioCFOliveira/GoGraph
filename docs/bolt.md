@@ -98,21 +98,32 @@ opts := server.Options{TLSConfig: cfg}
 
 ## Limits and backpressure
 
-`Options` exposes the bounds that protect the server under load. All of them
-fall back to a default when left at the zero value:
+`Options` exposes the bounds that protect the server under load.
+
+**The four TIMEOUT fields carry a three-way contract** (rmp #2807): `0` — the zero
+value, and the default for all four — **disables** the bound; a positive value
+applies it verbatim, with no default substituted; a **negative value is refused**
+by `NewServer`, which returns a `*server.NegativeTimeoutError` naming the field
+and the value (every offending field is reported at once, and
+`errors.Is(err, server.ErrNegativeTimeout)` classifies it). Coercing a negative to
+a default was the previous behaviour; it hid the caller's mistake and installed a
+bound they never asked for.
+
+Every other field below still falls back to a default when left at the zero
+value.
 
 | Field | Default | Effect |
 |---|---|---|
 | `MaxConnections` | 1024 | Upper bound on concurrent connections. When the limit is reached, a newly accepted connection is closed immediately rather than queued. |
 | `MaxMessageBytes` | `proto.DefaultMaxMessageBytes` (16 MiB) | Caps the cumulative payload of one Bolt message reassembled across chunks, closing the Slowloris-style vector of an unbounded chunk stream. |
 | `MaxInFlightPerConnection` | `DefaultMaxInFlightPerConnection` (1024) | Caps the number of `RUN` statements issued inside a single explicit transaction before `COMMIT`/`ROLLBACK`. Exceeding it returns a `Neo.ClientError.General.LimitExceeded` failure. Auto-commit cursors are not counted. |
-| `ConnTimeout` | `DefaultConnTimeout` (30 s) | Per-connection idle read deadline, reset before each message read. It cannot be disabled: a zero or negative value takes the default, because a connection that completes the handshake and then falls silent would otherwise hold its slot and goroutine forever. The unauthenticated handshake is bounded separately and is not configurable here (`DefaultHandshakeTimeout`, 10 s). |
+| `ConnTimeout` | `DefaultConnTimeout` (**0 — disabled**) | Per-connection read deadline, reset before each message read when set. **Disabled by default since rmp #2807**: it was 30 s, and it ran while the message loop executed the client's own statement, so it closed BUSY connections — measured at 110 ms against a 100 ms bound on a 900 ms statement. Liveness against a peer that has vanished comes from TCP keep-alive instead (see [Liveness: TCP keep-alive](#liveness-tcp-keep-alive)). Set it to reclaim a connection that is alive but silent; note that it also bounds a single long statement, so size it above the slowest statement expected, not merely above think-time. The unauthenticated version-negotiation handshake is bounded separately and unconditionally (`DefaultHandshakeTimeout`, 10 s); the window between that handshake and a successful `LOGON` is bounded by this field alone. |
 | `DatabaseName` | `DefaultDatabaseName` (`neo4j`) | The name reported in result metadata for a client that selects no database. A client that names one has its own name echoed back. See the `db` note under [Protocol conformance notes](#protocol-conformance-notes). |
-| `MaxTxIdleTime` | `DefaultMaxTxIdleTime` (30 min) | How long an **open** explicit transaction may go without the client sending a message, after which it is rolled back. Distinct from `DefaultTxTimeout`, which caps total lifetime however busy the transaction is. Cannot be disabled. Raised from 5 s by rmp #2806; under the default configuration it is usually not the bound that fires, because `ConnTimeout` (30 s) tears a silent connection down first — see [Abandoned transactions](#abandoned-transactions). |
+| `MaxTxIdleTime` | `DefaultMaxTxIdleTime` (**0 — disabled**) | How long an **open** explicit transaction may go without the client sending a message, after which it is rolled back. Distinct from `DefaultTxTimeout`, which caps total lifetime however busy the transaction is. **Disabled by default since rmp #2807** — 5 s until rmp #2806, then 30 minutes — matching PostgreSQL's `idle_in_transaction_session_timeout`. Set it to reclaim an abandoned transaction; see [Abandoned transactions](#abandoned-transactions) for what leaving it disabled costs. |
 | `MaxOpenTxPerPrincipal` | `DefaultMaxOpenTxPerPrincipal` (2048) | How many explicit transactions one authenticated principal may hold **open** at once, across all its connections. Exceeding it fails the `BEGIN` with `Neo.TransientError.Transaction.MaximumTransactionLimitReached` — Neo4j's own TRANSIENT code, so a driver retries — and the session stays in **READY**, so the retry needs no `RESET` (rmp #2561). A negative value disables it. Under the default configuration the quota cannot bind: a connection holds at most one open transaction and `MaxConnections` defaults to 1024, so the connection ceiling is reached first. It binds again for an operator who raises `MaxConnections` above 2048, and it is what isolates one principal from another (rmp #2419). |
 | `MaxInboundDecodeBytes` | derived, or `DefaultMaxInboundDecodeBytes` (1 GiB) | Engine-wide ceiling on the decoded-collection memory in flight across **all** connections while messages are being decoded, so the per-message cap multiplied by `MaxConnections` is not the real bound. Zero derives one eighth of `GOMEMLIMIT` when the operator has set one, and falls back to 1 GiB when they have not; `MaxInboundDecodeBytesUnlimited` (-1) opts out. When the pool is drawn down, further inbound decodes fail fast with a retryable transient error rather than allocating. |
-| `DefaultTxTimeout` | `DefaultTxTimeout` (30 min) | Total wall-clock lifetime of an explicit transaction when the client sends no `tx_timeout` of its own, however busy it is. A client-supplied `tx_timeout` takes precedence. Raised from 30 s by rmp #2806, so a long batch transaction completes under the default configuration; the cost is that a transaction which keeps talking but never finishes holds its versions and its horizon slot for up to half an hour. |
-| `DefaultStatementTimeout` | `DefaultStatementTimeout` (30 min) | The autocommit counterpart: the bound applied to a bare `RUN` outside an explicit transaction when the client supplies no `timeout`. Without it, autocommit `RUN` was the one unbounded-runtime path on a default server, because a super-linear query with a single-row result never trips the row or byte caps. Raised from 30 s by rmp #2806, which matches it to `DefaultTxTimeout` again; the cost is that such a statement pins a CPU core for up to half an hour. Note that `ConnTimeout` bounds a single statement too — the read deadline runs while the message loop executes it, and a client waiting for its own records sends nothing — so raising this past `ConnTimeout` (30 s) does nothing for one long statement unless `ConnTimeout` is raised with it. Set `MaxStatementTimeout`, or this field, to bound it more tightly. |
+| `DefaultTxTimeout` | `DefaultTxTimeout` (**0 — disabled**) | Total wall-clock lifetime of an explicit transaction when the client sends no `tx_timeout` of its own, however busy it is. A client-supplied `tx_timeout` takes precedence. **Disabled by default since rmp #2807** — 30 s until rmp #2806, then 30 minutes — matching PostgreSQL's `transaction_timeout` and Neo4j's `db.transaction.timeout`, both of which also ship at 0. The cost is that a transaction which keeps talking but never finishes holds its versions and its horizon slot for as long as its connection lives. |
+| `DefaultStatementTimeout` | `DefaultStatementTimeout` (**0 — disabled**) | The autocommit counterpart: the bound applied to a bare `RUN` outside an explicit transaction when the client supplies no `timeout`. **Disabled by default since rmp #2807** — 30 s until rmp #2806, then 30 minutes — matching PostgreSQL's `statement_timeout`. THE COST, stated plainly: a default server has no wall-clock bound on an autocommit statement, which is the state #1828 recorded as a defect. A super-linear query whose result collapses to a single row (a disconnected Cartesian product such as `MATCH (a),(b),(c),(d),(e) RETURN count(*)`) never trips the row or byte caps and pins a CPU core until it finishes or the client disconnects. What still bounds it: the engine's result caps for any statement whose result actually grows, `MaxConnections` for how many can run at once, and cancellation on disconnect. Set this field, or `MaxStatementTimeout`, to bound it by the clock. |
 | `MaxStatementTimeout` | 0 (no server-side cap) | Server-side ceiling on per-statement execution time. A client-supplied timeout is silently clamped to it, and when positive it is applied unconditionally to a client that supplies none. |
 
 The four remaining fields are not bounds and so are not in the table: `Auth`
@@ -120,6 +131,41 @@ The four remaining fields are not bounds and so are not in the table: `Auth`
 `Closer` (see [Deployment](#deployment)), and `Logger`, the structured logger that
 receives both accept-loop and session-level events; leave it nil for the default
 `slog` handler.
+
+### Liveness: TCP keep-alive
+
+**The server enables TCP keep-alive on every accepted connection**, and since
+rmp #2807 that is its only automatic liveness check on an established connection.
+The parameters are fixed, not configurable:
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `DefaultKeepAliveIdle` | 15 s | Silence before the first probe is sent. |
+| `DefaultKeepAliveInterval` | 5 s | Gap between probes. |
+| `DefaultKeepAliveCount` | 3 | Unanswered probes before the kernel drops the connection. |
+
+That is a **30-second budget** to notice a peer that has gone — deliberately the
+same reclamation budget the 30 s `ConnTimeout` used to give a dead connection,
+which is what it was really being used for.
+
+**What it detects:** a peer that has VANISHED — a pulled cable, a NAT or firewall
+that silently dropped its state, a client host that went away without sending
+`FIN`. The kernel probes and closes the connection, the server's read fails, and
+the teardown rolls back any open transaction.
+
+**What it does not detect:** a client that is alive and merely silent. Its stack
+answers every probe, so keep-alive holds the connection open indefinitely. Set
+`Options.ConnTimeout` if that case matters — this is exactly PostgreSQL's split
+between TCP keep-alive for liveness and `idle_session_timeout` for policy.
+
+The parameters are set on the accepted connection, not on the listener, so the
+budget does not depend on how the embedder built the `net.Listener` passed to
+`Serve`. A connection that is not a `*net.TCPConn` — a `net.Pipe`, a Unix socket,
+an embedder's own transport — is left alone, because keep-alive is a TCP-level
+concept. The gate is
+`TestKeepAlive_IsEnabledOnAcceptedConnections` (`bolt/server/keepalive_test.go`),
+which reads the socket options back out of the kernel on a connection accepted
+from a listener built with keep-alive **off**, so it can actually fail.
 
 ### Abandoned transactions
 
@@ -135,28 +181,43 @@ official driver: `TestE2E_TwoExplicitWriteTransactionsOverlap` and
 What an abandoned transaction still costs is **memory**, not other clients'
 progress: it pins an MVCC read snapshot, so no version it could still reach is
 reclaimable while it lives, and it occupies one of the reclamation horizon's fixed
-number of slots. An availability failure became a memory-and-slot failure, and
-neither is acceptable without a bound — which is why both bounds remain, and why
-raising `MaxTxIdleTime` is now a memory-growth risk rather than an availability one.
+number of slots. An availability failure became a memory-and-slot failure, so
+raising — or removing — `MaxTxIdleTime` is now a memory-growth risk rather than an
+availability one. That is the trade rmp #2807 took, and the next paragraphs state
+its price.
 
-**rmp #2806 took that risk deliberately.** `MaxTxIdleTime` went from 5 s to
-30 minutes, and `DefaultTxTimeout` and `DefaultStatementTimeout` from 30 s to the
-same 30 minutes. Where the idle bound is what fires, one abandoned transaction now
-holds its versions and one horizon slot for **half an hour** after its last message
-— 360 times longer than before — and *N* silent clients hold *N* slots for that
-same half hour, so the horizon's capacity can be exhausted by silent clients alone.
+**rmp #2806 raised those bounds; rmp #2807 removed them.** `MaxTxIdleTime` went
+from 5 s to 30 minutes and then to **0**; `DefaultTxTimeout` and
+`DefaultStatementTimeout` went from 30 s to 30 minutes and then to **0**;
+`ConnTimeout` went from 30 s to **0**. Zero means disabled, and it is the posture
+both peers ship: PostgreSQL's `statement_timeout`, `transaction_timeout`,
+`idle_in_transaction_session_timeout` and `idle_session_timeout` are all 0, with
+the documentation advising against setting them globally, and Neo4j's
+`db.transaction.timeout` is 0.
 
-Under the **default** configuration the idle bound is usually not what fires.
-`ConnTimeout` is 30 s, the read deadline is armed once per message read, and a Bolt
-NOOP keep-alive chunk is consumed inside that read rather than resetting it, so a
-client that sends nothing the message loop can dispatch trips the connection
-deadline first; the teardown rolls the transaction back and frees the slot.
-`TestReclaim_ConnTimeoutBeatsALongerIdleBound`
-(`bolt/server/default_timeouts_reach_test.go`) measures that at 411 ms against a
-400 ms `ConnTimeout` and a one-hour idle bound. The half hour above is therefore
-the exposure of a deployment that **also** raises `ConnTimeout` past the idle
-bound for long-lived idle sessions. An operator who wants the previous protection
-sets `MaxTxIdleTime` (and, for the total bound, `DefaultTxTimeout`) explicitly.
+THE COST, stated rather than glossed: **one abandoned transaction holds every
+version it could still read, and one of the 1024 horizon slots, for as long as its
+connection lives.** Not 5 s, not half an hour — indefinitely. *N* abandoned
+transactions hold *N* slots on the same terms, so the horizon's capacity is
+exhaustible by silent clients alone, and `MaxConnections` (1024) is what bounds how
+many of them there can be. Nothing reclaims them on a timer: the idle bound, the
+total bound and the connection read deadline are all disabled, and the read
+deadline is what used to tear the connection down and roll the transaction back as
+a side effect.
+
+**The count bounds are untouched**, and they are what bounds the resource:
+`MaxConnections` (1024), `MaxOpenTxPerPrincipal` (2048) and the reclamation
+horizon's fixed 1024 slots. PostgreSQL bounds by count too; only the time bound
+went.
+
+**The remedy is the operator's**, and it is PostgreSQL's: set `MaxTxIdleTime` to
+reclaim an abandoned transaction, `ConnTimeout` to reclaim the connection holding
+it, and `DefaultTxTimeout` for a total bound. `Server.Transactions` and
+`Server.TerminateTransaction` remain the manual route for one transaction at a
+time. The end-to-end gates for the disabled defaults, each paired with a bounded
+control arm, are `TestDefaults_NoWallClockBoundOnAnIdleConnectionOrItsTransaction`
+and `TestDefaults_NoWallClockBoundOnAnAutocommitStatement`
+(`bolt/server/default_timeouts_reach_test.go`).
 
 `DefaultTxTimeout` alone cannot separate an abandoned transaction from legitimate
 long work: lowering it shortens the exposure and kills slow-but-healthy
@@ -751,4 +812,4 @@ against a floor of 30. Each remaining failure is a known gap with a cause:
 
 ---
 
-*Last reviewed: 2026-09-08 against commit `728770ff`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*
+*Last reviewed: 2026-09-08 against commit `b7533eba`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*

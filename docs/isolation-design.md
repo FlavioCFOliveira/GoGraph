@@ -642,9 +642,10 @@ Three consequences, each measured rather than argued:
   against the build that held the barrier. Note that with `MaxTxIdleTime` at the 5 s
   default it then had, **both tests pass against the defective build**, because the
   idle reaper kills the blocked transaction and releases the barrier; they pin ten
-  minutes of their own deliberately. rmp #2806 raised the default to 30 minutes, so
-  that pin is now a reduction rather than a raise, and it is the pin, not the
-  default, that keeps the gates honest.
+  minutes of their own deliberately. The default has moved twice since — rmp #2806
+  raised it to 30 minutes, and rmp #2807 set it to 0, which disables the reaper —
+  so that pin is no longer what removes the rescue. It is kept because it is the
+  pin, not the default, that states the bound these gates measure under.
 - **A collision surfaces at the conflicting STATEMENT**, not at `COMMIT`, as
   `mvcc.ErrSerializationConflict` from `Exec`. That follows from the mechanism:
   first-updater-wins identifies the loser the moment it tries to install a version
@@ -662,9 +663,14 @@ Three consequences, each measured rather than argued:
 it is now a memory-and-slot failure, because an open transaction pins the reclamation
 horizon. `server.Options.MaxTxIdleTime` was reviewed for this and kept at 5 s at the
 time: the original justification was gone, but an unbounded resource cost remained.
-**rmp #2806 has since raised the default to 30 minutes**, accepting that longer
-exposure on purpose; `bolt/server/serve.go` states what it costs, and under the
-default configuration `ConnTimeout` (30 s) reclaims a fully silent client first.
+**rmp #2806 raised the default to 30 minutes and rmp #2807 set it to 0**, which
+disables the idle reaper entirely — the posture PostgreSQL takes with
+`idle_in_transaction_session_timeout`. `ConnTimeout` no longer reclaims a silent
+client either, because rmp #2807 disabled that too; TCP keep-alive reclaims a
+connection whose peer has VANISHED, and nothing reclaims one that is merely
+silent. `bolt/server/serve.go` states the full cost on
+`DefaultMaxTxIdleTime`, and an operator who needs the bound sets
+`Options.MaxTxIdleTime`.
 
 ### The reclamation-horizon bound (rmp #2315, sized 2026-08-05)
 
@@ -715,9 +721,10 @@ already had names, and giving one quantity two names would be worse than giving 
 
 The remedy is to reduce concurrent **long-lived read transactions**, not concurrent
 queries: a statement-scoped read holds its slot for microseconds, while an explicit
-read transaction holds one until it commits or rolls back. `MaxTxIdleTime` (30 minutes
-since rmp #2806, and 30 s of `ConnTimeout` ahead of it for a client that stops sending
-bytes at all) bounds the idle case; an application holding more than 1024 read transactions genuinely
+read transaction holds one until it commits or rolls back. `MaxTxIdleTime` bounds the
+idle case **only when an operator sets it**: rmp #2807 set both it and `ConnTimeout`
+to 0, so a default-configured server reclaims neither an idle transaction nor the
+silent connection holding it. An application holding more than 1024 read transactions genuinely
 concurrently needs to shorten them, because raising capacity trades memory for a cliff
 that moves rather than disappearing.
 

@@ -98,12 +98,14 @@ func NewSimServerAuth(eng *cypher.Engine, clk clock.Clock, auth server.AuthHandl
 // [simServerOptions.maxTxIdle] for why an auth scenario wants a bound well clear
 // of its own runtime instead of racing the reaper.
 //
-// It was chosen against a 5 s default, which it lifted. rmp #2806 raised
-// [server.DefaultMaxTxIdleTime] to 30 minutes, so this is now REDUNDANT — the
-// inherited default would already clear every auth arm's runtime by a wider
-// margin, and installing ten minutes lowers the bound rather than raising it. It
-// is kept, and the value is unchanged, because an auth scenario should state the
-// bound it runs under rather than track a default that has now moved twice.
+// It was chosen against a 5 s default, which it lifted. The default has moved
+// twice since: rmp #2806 raised it to 30 minutes, and rmp #2807 set it to 0,
+// which DISABLES the idle reaper entirely. Against a disabled default this
+// override no longer lifts anything — it installs a bound where there would
+// otherwise be none. It is kept, and the value is unchanged, because an auth
+// scenario should state the bound it runs under rather than track a default that
+// has now moved three times, and because ten minutes is still far clear of every
+// auth arm's runtime.
 const simAuthMaxTxIdle = 10 * time.Minute
 
 // NewSimServerTxRegistry builds a SimServer wired for the transaction-registry and
@@ -332,8 +334,9 @@ type simServerOptions struct {
 	// no-TLS warnings) somewhere other than slog.Default. Nil keeps the default.
 	log *slog.Logger
 	// maxTxIdle overrides [server.Options.MaxTxIdleTime]. Zero keeps
-	// [server.DefaultMaxTxIdleTime], which is 30 minutes of REAL time since rmp
-	// #2806 (a SimServer runs on clock.Real), and was 5 s before it.
+	// [server.DefaultMaxTxIdleTime], which since rmp #2807 is 0 — the idle reaper
+	// is DISABLED. It was 30 minutes of real time between rmp #2806 and rmp #2807,
+	// and 5 s before that.
 	//
 	// A scenario that holds an explicit transaction open across several round trips
 	// while pinning an exact failure code needs a bound clear of its own runtime: if
@@ -341,9 +344,9 @@ type simServerOptions struct {
 	// Neo.ClientError.Transaction.TransactionTimedOut and the arm reports a
 	// violation of something it was not testing. The reaper itself is the subject of
 	// rmp #2482, not of an auth arm, so an auth scenario states its own bound rather
-	// than racing one. Against the 30-minute default that override no longer buys
-	// margin — see [simAuthMaxTxIdle] — but a scenario that wants a SHORTER bound,
-	// which is what every reaper-driving arm wants, still sets it here.
+	// than racing one. Against a DISABLED default no reaper can fire at all, so an
+	// override here is what arms one — which is exactly what every reaper-driving
+	// arm needs, and what [simAuthMaxTxIdle] deliberately keeps stating.
 	maxTxIdle time.Duration
 
 	// clk is the SERVER-side clock: the one [server.Server.SetClock] installs, which
@@ -358,15 +361,16 @@ type simServerOptions struct {
 
 	// defaultTxTimeout overrides [server.Options.DefaultTxTimeout], the TOTAL
 	// lifetime bound handleBegin applies when the client sends no tx_timeout. Zero
-	// keeps [server.DefaultTxTimeout], which is 30 minutes since rmp #2806 and was
-	// 30 s before it.
+	// keeps [server.DefaultTxTimeout], which since rmp #2807 is 0 — there is no
+	// total bound. It was 30 minutes between rmp #2806 and rmp #2807, and 30 s
+	// before that.
 	//
 	// A scenario driving the IDLE reaper must set it ABOVE maxTxIdle: the serve
 	// loop's effectiveTxDeadline takes the EARLIER of the total and idle deadlines,
-	// so leaving it at the default while asking for an idle bound above that would
-	// arm the timer for the total bound and the reap would not be an idle reap at
-	// all. Every reaper-driving arm here sets both explicitly, so the default's
-	// value is not what protects them.
+	// so a total bound below the idle one would arm the timer for the total bound
+	// and the reap would not be an idle reap at all. Every reaper-driving arm here
+	// sets both explicitly, so neither default's value is what protects them —
+	// which matters more now that both defaults are 0.
 	defaultTxTimeout time.Duration
 
 	// maxOpenTxPerPrincipal overrides [server.Options.MaxOpenTxPerPrincipal]. Zero

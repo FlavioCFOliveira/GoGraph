@@ -447,8 +447,9 @@ func ccWipeAll(ctx context.Context, t *testing.T, name string, d neo4j.DriverWit
 // The wipe is BATCHED because a single-statement delete of the whole set does
 // not survive on every engine: a write arm leaves of the order of 10^5 Tmp
 // nodes, and deleting them in one transaction exceeded GoGraph's DefaultTxTimeout,
-// which was 30 s when that was observed (rmp #2806 has since raised it to 30
-// minutes), failing the sweep. Bounding the work per transaction is
+// which was 30 s when that was observed (rmp #2806 raised it to 30 minutes and
+// rmp #2807 set it to 0, so a default-configured server no longer applies it at
+// all), failing the sweep. Bounding the work per transaction is
 // also what a production caller would do, and it keeps the wipe comparable
 // across the three engines instead of measuring one engine's timeout policy.
 func ccWipeTmp(ctx context.Context, t *testing.T, name string, d neo4j.DriverWithContext) {

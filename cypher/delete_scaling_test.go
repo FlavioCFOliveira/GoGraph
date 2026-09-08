@@ -393,12 +393,14 @@ func TestDeleteCycleGateDetectsDegradation(t *testing.T) {
 
 // singleStatementDeleteBudget bounds the one-statement delete below. The
 // assessment found that a single-statement delete of about 90 000 nodes
-// exceeded bolt/server's DefaultTxTimeout — 30 s at the time; rmp #2806 has
-// since raised it to 30 minutes — and returned TransactionTimedOut, which is
-// what made this defect a FAILURE rather than merely slowness. This budget is a
-// third of the 30 s that was in force then, and it is deliberately NOT retied to
-// the raised default: it is the margin that keeps the statement from being
-// anywhere near the cliff the defect fell off, not a performance assertion.
+// exceeded bolt/server's DefaultTxTimeout — 30 s at the time; rmp #2806 raised it
+// to 30 minutes and rmp #2807 set it to 0, so a default-configured server applies
+// no total bound at all — and returned TransactionTimedOut, which is what made
+// this defect a FAILURE rather than merely slowness. This budget is a third of the
+// 30 s that was in force then, and it is deliberately NOT retied to the default,
+// which no longer exists as a number: it is the margin that keeps the statement
+// from being anywhere near the cliff the defect fell off, not a performance
+// assertion.
 const singleStatementDeleteBudget = 10 * time.Second
 
 // TestSingleStatementDeleteOfNinetyThousandNodes deletes 90 000 nodes in ONE

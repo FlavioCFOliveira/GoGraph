@@ -78,12 +78,15 @@ func TestServe_SlowlorisHandshakeDisconnect(t *testing.T) {
 // exported DefaultHandshakeTimeout const) regardless of Options. The real
 // default is 10 s; to keep the test fast and deterministic the bound is
 // shortened through the package test seam — this exercises exactly the same
-// code path NewServer's default server would, only quicker. A defaulted server
-// also fills ConnTimeout (DefaultConnTimeout), asserted separately in
-// TestNewServer_DefaultsConnTimeout.
+// code path NewServer's default server would, only quicker.
+//
+// Since rmp #2807 disabled ConnTimeout by default, this handshake bound is the
+// ONLY deadline a default server applies before authentication — which makes this
+// gate stronger than it was, and is why it runs on a VERBATIM default server
+// rather than one the harness quietly gave a 5 s ConnTimeout.
 func TestServe_DefaultServerEnforcesHandshakeDeadline(t *testing.T) {
 	// Sanity: a default server must enforce a deadline. The const that seeds the
-	// handshake bound is non-zero, and ConnTimeout is defaulted by NewServer.
+	// handshake bound is non-zero.
 	if server.DefaultHandshakeTimeout <= 0 {
 		t.Fatalf("DefaultHandshakeTimeout must be non-zero, got %v", server.DefaultHandshakeTimeout)
 	}
@@ -92,11 +95,9 @@ func TestServe_DefaultServerEnforcesHandshakeDeadline(t *testing.T) {
 	restore := server.SetHandshakeTimeoutForTest(200 * time.Millisecond)
 	defer restore()
 
-	// Empty Options: ConnTimeout takes its NewServer default; the handshake
-	// bound comes from the (seam-shortened) package value, not from Options.
-	addr := startTestServer(t, server.Options{
-		ConnTimeout: server.DefaultConnTimeout,
-	})
+	// A genuinely default server: no option substituted. The handshake bound
+	// comes from the (seam-shortened) package value, not from Options.
+	_, addr := startTestServerVerbatimHandle(t, server.Options{})
 
 	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
 	if err != nil {
@@ -130,13 +131,15 @@ func TestServe_DefaultServerEnforcesHandshakeDeadline(t *testing.T) {
 // nothing), then drives a full handshake + HELLO + RUN + PULL round-trip and
 // asserts every step succeeds. If the handshake deadline bled into the message
 // loop, or the idle ConnTimeout were too aggressive, this exchange would fail.
+//
+// Since rmp #2807 it also guards the hazard of DISABLING that bound: with
+// ConnTimeout at 0 the reader must CLEAR the read deadline, and a read deadline
+// armed at time.Now().Add(0) instead would fail this exchange at the very first
+// message. That is why the server here is VERBATIM — startTestServer would
+// substitute a 5 s ConnTimeout for the zero value and the hazard would go
+// unexercised.
 func TestServe_NormalSessionNotPrematurelyKilled(t *testing.T) {
-	// All-default server: only the engine is provided; timeouts are filled by
-	// NewServer. startTestServer would substitute a 5 s ConnTimeout when zero,
-	// so pin ConnTimeout to the real default to exercise the defaulted path.
-	addr := startTestServer(t, server.Options{
-		ConnTimeout: server.DefaultConnTimeout,
-	})
+	_, addr := startTestServerVerbatimHandle(t, server.Options{})
 
 	c := newBoltTestClient(t, addr)
 	defer c.close(t)
