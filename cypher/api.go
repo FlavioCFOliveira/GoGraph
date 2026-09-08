@@ -527,6 +527,28 @@ type buildOpts struct {
 	// false by every other build path, which therefore always anchors a
 	// multi-label node scan on Labels[0] as today.
 	minLabelScanEnabled bool
+	// indexSeekEnabled gates the EQUALITY hash seek ([tryBuildIndexSeekFromSelection])
+	// and the key-set seek ([tryBuildIndexSeekSetFromSelection]). It is the kill
+	// switch those two rewrites shipped without: until rmp #2814 the equality seek's
+	// only gate was idxMgr != nil, so a caller who found it answering wrongly had no
+	// way to turn it off. Set from EngineOptions.DisableIndexSeek by the read and
+	// write build paths.
+	//
+	// It is a POSITIVE flag like its neighbours, so an unset buildOpts disables the
+	// seek. That is the safe default for a new field, but it means every build path
+	// that wants the seek must set it — including the public
+	// [BuildPlanWithMutator], which does.
+	indexSeekEnabled bool
+	// pendingIdx names the (label, property) coordinates the enclosing WRITE
+	// transaction has already mutated in the graph without the property indexes
+	// having been told, so a property-index access path on those coordinates
+	// declines and the plan falls back to the scan+filter that reads the writer
+	// view (rmp #2814). nil — the state of every read-only build — means nothing is
+	// pending, and costs one nil check per guarded access path.
+	//
+	// See [pendingIndexDelta] for the measured defect this closes and for why the
+	// two-dimensional key is exactly as tight as the change buffer allows.
+	pendingIdx *pendingIndexDelta
 	// reorderSwap is the set of plain Apply nodes whose arms the disjoint-
 	// component ordering peephole (#2091) has decided to swap for THIS query,
 	// keyed by the exact *ir.Apply pointer buildOperator will visit. The read-path
@@ -859,6 +881,27 @@ type EngineOptions struct {
 	// that proves both plans return an identical result multiset, and as an
 	// operational escape hatch.
 	DisableRangeIndexSeek bool
+
+	// DisableIndexSeek turns OFF the EQUALITY hash index seek (the
+	// `n.prop = value` rewrite in tryBuildIndexSeekFromSelection) and the key-set
+	// seek built on top of it (seek_set_plan.go). When false (the default) an
+	// equality predicate on a property backed by a hash index is answered by a
+	// NodeByIndexSeek that SUBSUMES the Selection it replaces, keeping only a
+	// label residual.
+	//
+	// It exists because that rewrite shipped without a kill switch of any kind: its
+	// only gate was `idxMgr != nil` — no population floor, no cost model, no knob —
+	// unlike every other index access path, which meant the one access path capable
+	// of returning a row the graph does not contain could not be turned off (rmp
+	// #2814). Setting it true forces the scan+filter plan, which is what the
+	// mutation arm of TestIndexPendingDelta_* toggles to prove the regression test
+	// can fail, and what an operator reaches for if a seek is ever suspected again.
+	//
+	// It does NOT govern the range/prefix seek (DisableRangeIndexSeek,
+	// DisablePrefixIndexSeek), the bitmap intersection (DisableBitmapIntersection)
+	// or the index nested-loop join (DisableHashJoin): those have their own knobs,
+	// and a caller disabling one does not mean to disable the others.
+	DisableIndexSeek bool
 
 	// DisablePrefixIndexSeek turns OFF the STARTS WITH prefix range seek (#2127)
 	// while leaving the rest of the range seek in place. When false (the default)
@@ -1394,6 +1437,11 @@ type Engine struct {
 	// the other range predicates continue to seek.
 	prefixSeekEnabled bool
 
+	// indexSeekEnabled gates the equality hash seek and the key-set seek. True by
+	// default; set false by EngineOptions.DisableIndexSeek (rmp #2814). When false
+	// an equality predicate on an indexed property keeps the scan+filter plan.
+	indexSeekEnabled bool
+
 	// minLabelScanEnabled gates the min-cardinality multi-label anchor scan
 	// (#2077). True by default; set false by EngineOptions.DisableMinLabelScan.
 	// When false the planner always anchors a multi-label node scan on Labels[0].
@@ -1756,6 +1804,7 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 		hashJoinEnabled:        !opts.DisableHashJoin,
 		rangeSeekEnabled:       !opts.DisableRangeIndexSeek,
 		prefixSeekEnabled:      !opts.DisablePrefixIndexSeek,
+		indexSeekEnabled:       !opts.DisableIndexSeek,
 		bitmapIntersectEnabled: !opts.DisableBitmapIntersection,
 		minLabelScanEnabled:    !opts.DisableMinLabelScan,
 		expandIntoSeekEnabled:  !opts.DisableExpandIntoSeek,
@@ -2753,6 +2802,12 @@ func (e *Engine) buildReadPhysical(
 	bopts.forceColumnarChainDecline = e.forceColumnarChainDeclineForTest
 	bopts.rangeSeekEnabled = e.rangeSeekEnabled
 	bopts.prefixSeekEnabled = e.prefixSeekEnabled
+	// Equality / key-set seek gating (rmp #2814). This build path is the READ path,
+	// so bopts.pendingIdx is deliberately left nil: a read-only statement enqueues
+	// no index change, and the transaction it reads through — if any — cannot have
+	// an unflushed delta of its own. A statement inside an OPEN write transaction
+	// does not come through here; it comes through [Engine.execUnderBarrier].
+	bopts.indexSeekEnabled = e.indexSeekEnabled
 	// Min-label scan gating (#2077): enable the smallest-cardinality
 	// multi-label anchor substitution when the Engine permits it. The
 	// substitution is result-identical (a label conjunction is commutative)
@@ -3261,14 +3316,27 @@ func explainWithIndexesNode(
 		// label source the build would, so the answer it renders is the plan the build
 		// would choose — including a DECLINE when the label cannot be verified
 		// (rmp #2423).
-		if op, fired, err := tryBuildIndexSeekFromSelection(sel, params, schema, idxMgr, labelSrc); err == nil && fired && op != nil {
+		//
+		// rmp #2814 adds two inputs the build reads and this renderer cannot: the
+		// DisableIndexSeek kill switch and the enclosing transaction's unflushed index
+		// delta. It passes indexSeekEnabled: true and a nil delta — i.e. it renders the
+		// access path the plan WOULD take with nothing pending — because this renderer
+		// is reached from the EXPLAIN paths, which plan against a fresh COMMITTED
+		// snapshot in the first place ([Engine.explainPrefixed] passes a nil pinned view
+		// for a statement inside an open write transaction, cypher/exectx.go). Making
+		// the rendered access path depend on a delta the rendering does not read the
+		// graph through would make the tree disagree with itself, not agree with the
+		// build. Assert plan choice from behaviour or a counter, never from EXPLAIN
+		// inside a write transaction.
+		renderOpts := &buildOpts{indexSeekEnabled: true}
+		if op, fired, err := tryBuildIndexSeekFromSelection(sel, params, schema, idxMgr, labelSrc, renderOpts); err == nil && fired && op != nil {
 			opName = "NodeByIndexSeek"
-		} else if _, fired := tryBuildIndexSeekSetFromSelection(sel, params, make(map[string]int), idxMgr, explainGraph); fired {
+		} else if _, fired := tryBuildIndexSeekSetFromSelection(sel, params, make(map[string]int), idxMgr, explainGraph, renderOpts); fired {
 			// A key-set seek SUBSUMES the pushed Selection exactly as the single-key
 			// seek does — both replace the Selection and its scan child — so it
 			// renders in the Selection's place (#2183).
 			opName = "NodeByIndexSeekSet"
-		} else if _, fired := tryBuildRangeSeekChild(sel, make(map[string]int), idxMgr, explainGraph, params, prefixSeek, true); fired {
+		} else if _, fired := tryBuildRangeSeekChild(sel, make(map[string]int), idxMgr, explainGraph, params, prefixSeek, true, nil); fired {
 			// A range seek REPLACES the scan child but the original Selection
 			// Filter is retained on top, so the node renders as Selection over
 			// NodeByIndexRangeScan (not subsumed like the equality seek).
@@ -7481,15 +7549,31 @@ func BuildPlanWithMutator(
 	// adjacency cache to share, so a relationship-type-filtered pattern on this
 	// path always rebuilds its type column — correct, just unamortised.
 	//
-	// It also passes the zero [planGates], so the public entry point keeps the
-	// unoptimised access paths it has always had. Only the Engine, which owns
-	// the EngineOptions that gate each substitution, enables them.
+	// It also passes the zero [planGates] for the ORDER-NEUTRAL substitutions, so
+	// the public entry point keeps the unoptimised access paths it has always had.
+	// Only the Engine, which owns the EngineOptions that gate each substitution,
+	// enables them.
 	//
 	// It passes a nil [writeEvalScaffold] for the same reason: it has no Engine and
 	// no writer view to evaluate an EXISTS { … }, a COUNT { … } or a pattern
 	// predicate against, so this path keeps the bare [expr.Eval] behaviour
 	// documented on [buildOpts] (rmp #2660).
-	return buildPlanWithMutatorFull(plan, walker, labelSrc, reg, params, mutator, nil, nil, 0, nil, planGates{}, nil)
+	//
+	// The two rmp #2814 fields are the exception, and they are NOT left at their
+	// zero value:
+	//
+	//   - indexSeek is set TRUE because the equality hash seek was never gated by
+	//     planGates at all: its only condition was `idxMgr != nil`, so it fired on
+	//     this path already. Passing false here would silently retire an access
+	//     path this entry point has always taken, which is a behaviour change #2814
+	//     is not entitled to make.
+	//   - pendingIdx is read off the mutator, because this path DOES write, its
+	//     writes DO land in the adapter's index buffer, and the seek it takes is
+	//     therefore exposed to exactly the staleness #2814 measured. Reading it
+	//     from the mutator rather than from a new parameter is why
+	//     [mutatorIndexDelta] exists.
+	return buildPlanWithMutatorFull(plan, walker, labelSrc, reg, params, mutator, nil, nil, 0, nil,
+		planGates{indexSeek: true, pendingIdx: mutatorIndexDelta(mutator, plan)}, nil)
 }
 
 // planGates carries the ORDER-NEUTRAL planner substitutions the write-path build
@@ -7530,6 +7614,18 @@ type planGates struct {
 	minLabelScan    bool
 	bitmapIntersect bool
 	hashJoin        bool
+	// indexSeek gates the EQUALITY hash seek and the key-set seek. Unlike the
+	// gates above it is not an order-neutrality question: the equality rewrite
+	// shipped with no kill switch of its own — its only gate was idxMgr != nil —
+	// so there was no way to turn it off when it answered wrongly (rmp #2814).
+	// Wired from EngineOptions.DisableIndexSeek.
+	indexSeek bool
+	// pendingIdx names the (label, property) coordinates this transaction has
+	// already mutated in the graph without the property indexes having been told,
+	// so every property-index access path can decline on them and fall back to
+	// the scan+filter that reads the writer view (rmp #2814). nil means nothing
+	// is pending, which is the state of every read-only build.
+	pendingIdx *pendingIndexDelta
 }
 
 // buildPlanWithMutatorFull is the engine-internal variant of
@@ -7594,6 +7690,15 @@ func buildPlanWithMutatorFull(
 	// paths now gate on this one flag and neither runs a per-query order scan.
 	bopts.hashJoinEnabled = gates.hashJoin
 	bopts.indexNestedLoopEnabled = gates.hashJoin
+	// Equality / key-set seek gating and the pending-index-delta decline (rmp
+	// #2814). BOTH must be threaded here, and this is the ONLY place the write
+	// path can thread them: the equality seek's sole gate used to be
+	// `idxMgr != nil`, so it fired on every write build — including the public
+	// [BuildPlanWithMutator], which passes an all-false planGates — while the
+	// property indexes it reads still described the graph as it was before the
+	// transaction started.
+	bopts.indexSeekEnabled = gates.indexSeek
+	bopts.pendingIdx = gates.pendingIdx
 	// The expression-level evaluators (rmp #2660). Without them [evalRow] saw two
 	// nil fields and degraded to the bare [expr.Eval] path for every expression in
 	// a writing statement, so a pattern predicate, an EXISTS { … } outside WHERE
@@ -9943,7 +10048,7 @@ func buildOperatorRec(
 		// n.prop = $name and a hash index is available, produce NodeByIndexSeek
 		// directly without first building the scan child.
 		if idxMgr != nil {
-			if op, ok, err := tryBuildIndexSeekFromSelection(p, params, schema, idxMgr, labelSrc); err != nil {
+			if op, ok, err := tryBuildIndexSeekFromSelection(p, params, schema, idxMgr, labelSrc, bopts); err != nil {
 				return nil, err
 			} else if ok {
 				return op, nil
@@ -9957,7 +10062,7 @@ func buildOperatorRec(
 			if lw, ok := walker.(*lpgNodeWalker); ok {
 				seekSetG = lw.g
 			}
-			if op, ok := tryBuildIndexSeekSetFromSelection(p, params, schema, idxMgr, seekSetG); ok {
+			if op, ok := tryBuildIndexSeekSetFromSelection(p, params, schema, idxMgr, seekSetG, bopts); ok {
 				return op, nil
 			}
 		}
@@ -13279,13 +13384,24 @@ func buildIndexSeekOperator(
 // with no residual check returned a node for (n:Person) whose labels(n) was empty.
 // labelSrc supplies the per-candidate check; when it cannot, the rewrite DECLINES and
 // the plan keeps the scan that filters correctly.
+// bopts supplies the two rmp #2814 conditions — the DisableIndexSeek kill switch
+// and the transaction's pending-index-delta — and may be nil, which declines the
+// rewrite outright. That nil arm is not merely defensive: this rewrite's ONLY gate
+// used to be `idxMgr != nil`, with no population floor, no cost model and no knob,
+// and it is the one access path that both loses rows and fabricates them, so the
+// absence of the state needed to judge it is a reason to decline rather than to
+// proceed.
 func tryBuildIndexSeekFromSelection(
 	sel *ir.Selection,
 	params map[string]expr.Value,
 	schema map[string]int,
 	idxMgr *index.Manager,
 	labelSrc labelResolverIface,
+	bopts *buildOpts,
 ) (exec.Operator, bool, error) {
+	if bopts == nil || !bopts.indexSeekEnabled {
+		return nil, false, nil
+	}
 	nodeVar, label, ok := scanLeafNodeVar(sel.Child)
 	if !ok {
 		return nil, false, nil
@@ -13298,11 +13414,11 @@ func tryBuildIndexSeekFromSelection(
 	if !canVerify {
 		return nil, false, nil
 	}
-	if op, ok := tryNamedHashSeek(idxMgr, label, propKey, seekVal, admit); ok {
+	if op, ok := tryNamedHashSeek(idxMgr, label, propKey, seekVal, admit, bopts.pendingIdx); ok {
 		schema[nodeVar] = schemaWidth(schema)
 		return op, true, nil
 	}
-	if op, ok := tryAnyHashSeek(idxMgr, label, propKey, seekVal, admit); ok {
+	if op, ok := tryAnyHashSeek(idxMgr, label, propKey, seekVal, admit, bopts.pendingIdx); ok {
 		schema[nodeVar] = schemaWidth(schema)
 		return op, true, nil
 	}
@@ -13381,8 +13497,16 @@ func indexCoversNode(sub index.Subscriber, label, propKey string) bool {
 // tryNamedHashSeek looks up the auto-named hash index for a (label,
 // propKey) pair and returns the seek operator + true when present
 // and applicable to seekVal.
-func tryNamedHashSeek(idxMgr *index.Manager, label, propKey string, seekVal expr.Value, admit func(uint64) bool) (exec.Operator, bool) {
+func tryNamedHashSeek(idxMgr *index.Manager, label, propKey string, seekVal expr.Value, admit func(uint64) bool, pending *pendingIndexDelta) (exec.Operator, bool) {
 	if label == "" || propKey == "" {
+		return nil, false
+	}
+	// The transaction has already moved this coordinate in the graph without the
+	// index being told, so the index's posting list is not this reader's answer
+	// (rmp #2814). Declining hands the shape back to the scan+filter, which reads
+	// the writer view and is right in both directions — the lost row and the
+	// fabricated one.
+	if pending.blocksNodeIndex(label, propKey) {
 		return nil, false
 	}
 	wantName := strings.ToLower(label) + "_" + strings.ToLower(propKey) + "_hash"
@@ -13396,7 +13520,12 @@ func tryNamedHashSeek(idxMgr *index.Manager, label, propKey string, seekVal expr
 // tryAnyHashSeek iterates every registered index and returns the
 // first hash index that both covers the (label, propKey) predicate and can
 // serve seekVal. It is the fallback when the named-index lookup misses.
-func tryAnyHashSeek(idxMgr *index.Manager, label, propKey string, seekVal expr.Value, admit func(uint64) bool) (exec.Operator, bool) {
+func tryAnyHashSeek(idxMgr *index.Manager, label, propKey string, seekVal expr.Value, admit func(uint64) bool, pending *pendingIndexDelta) (exec.Operator, bool) {
+	// See [tryNamedHashSeek]: the same decline, applied before the listing walk so
+	// a blocked coordinate costs no GetIndex calls (rmp #2814).
+	if pending.blocksNodeIndex(label, propKey) {
+		return nil, false
+	}
 	for _, name := range idxMgr.ListIndexes() {
 		sub, err := idxMgr.GetIndex(name)
 		if err != nil || sub.Kind() != "hash" || !indexCoversNode(sub, label, propKey) {
@@ -17048,12 +17177,12 @@ func indexSeekWouldFire(
 	}
 
 	// Hash seek on `n.prop = <const>`.
-	if op, ok, err := tryBuildIndexSeekFromSelection(sel, params, copySchema(schema), idxMgr, labelSrcFromView(g)); err == nil && ok {
+	if op, ok, err := tryBuildIndexSeekFromSelection(sel, params, copySchema(schema), idxMgr, labelSrcFromView(g), bopts); err == nil && ok {
 		closeProbe(op)
 		return true
 	}
 	// Key-set seek: a disjunction of equalities on one property (#2183).
-	if op, ok := tryBuildIndexSeekSetFromSelection(sel, params, copySchema(schema), idxMgr, g); ok {
+	if op, ok := tryBuildIndexSeekSetFromSelection(sel, params, copySchema(schema), idxMgr, g, bopts); ok {
 		closeProbe(op)
 		return true
 	}
@@ -19395,9 +19524,18 @@ func (e *Engine) execUnderBarrier(
 			// Without these it planned every writing statement — including the
 			// `UNWIND … MATCH … CREATE` bulk-load idiom — with a bare label scan
 			// (part A) driving a nested-loop Cartesian product (part B).
+			// #2814: pendingIdx is built HERE, from the buffer this statement's own
+			// adapter enqueues into, and it is built at this exact point for a reason
+			// — the plan is chosen once, before any of this statement's rows flow, so
+			// what it can see is every change the EARLIER statements of this explicit
+			// transaction left unflushed. That is the whole cross-statement half of
+			// the defect. See [pendingIndexDelta] for the same-statement half, which a
+			// plan-time decision cannot reach and which the eager-application design
+			// #2814 declared out of scope would.
 			planGates{rangeSeek: e.rangeSeekEnabled, prefixSeek: e.prefixSeekEnabled,
 				minLabelScan: e.minLabelScanEnabled, bitmapIntersect: e.bitmapIntersectEnabled,
-				hashJoin: e.hashJoinEnabled},
+				hashJoin: e.hashJoinEnabled, indexSeek: e.indexSeekEnabled,
+				pendingIdx: mutatorIndexDelta(mutator, plan)},
 			&evals)
 		if berr != nil {
 			buildErr = berr

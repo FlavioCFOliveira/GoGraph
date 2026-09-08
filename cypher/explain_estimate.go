@@ -340,7 +340,7 @@ func rangeSeekInRangeCount(sel *ir.Selection, idxMgr *index.Manager, g *lpg.Read
 
 	// String range over a bound string btree.
 	if pred, okPred := extractStringRangePred(sel.PredicateExpr, lblScan.NodeVar, params, prefixSeek); okPred {
-		if sub, okSub := findBoundStringBTree(idxMgr, lblScan.Label, pred.propKey); okSub {
+		if sub, okSub := findBoundStringBTree(idxMgr, lblScan.Label, pred.propKey, nil); okSub {
 			lo := ""
 			if pred.lo != nil {
 				if sv, okSv := pred.lo.Value.(expr.StringValue); okSv {
@@ -363,7 +363,7 @@ func rangeSeekInRangeCount(sel *ir.Selection, idxMgr *index.Manager, g *lpg.Read
 
 	// Numeric range over the unified float64 btree companion.
 	if pred, okPred := extractNumericRangePred(sel.PredicateExpr, lblScan.NodeVar, params); okPred {
-		if sub, okSub := findBoundNumericBTree(idxMgr, lblScan.Label, pred.propKey); okSub {
+		if sub, okSub := findBoundNumericBTree(idxMgr, lblScan.Label, pred.propKey, nil); okSub {
 			lo, hi := rangeBoundFloats(pred)
 			if cnt, exact := sub.RangeCount(lo, hi, fullBudget); exact {
 				return int64(cnt), true
