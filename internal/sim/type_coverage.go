@@ -488,8 +488,10 @@ func checkTypedListRow(ctx context.Context, tick, id int64, l []int64, engine *E
 // must equal the modelled length, sum(x) the modelled sum, and collect(x) must
 // reproduce the modelled elements.
 //
-// collect is compared as a MULTISET (both sides sorted by canonical rendering)
-// because openCypher does not specify the input order an aggregate observes.
+// collect is compared as a MULTISET through [collectMultisetDiff] — both sides
+// sorted by canonical rendering — because openCypher does not specify the input
+// order an aggregate observes. The pinning test over this very query calls the
+// same helper, so the two cannot drift apart (rmp #2786).
 // The ORDER of the same list is pinned separately, and absolutely, by the
 // n.lst[0] / n.lst[-1] / n.lst[0..2] columns of [checkTypedListRow] — so a
 // reversed list still fails, just not here.
@@ -517,17 +519,8 @@ func checkTypedListUnwind(ctx context.Context, tick, id int64, l []int64, engine
 				id, typedValueDesc(got[2])),
 		})
 	}
-	gotElems := make([]string, 0, len(lv))
-	for _, v := range lv {
-		gotElems = append(gotElems, v.String())
-	}
-	wantElems := make([]string, 0, len(l))
-	for _, e := range l {
-		wantElems = append(wantElems, canonicalValueString(e))
-	}
-	slices.Sort(gotElems)
-	slices.Sort(wantElems)
-	if !equalStrings(gotElems, wantElems) {
+	gotElems, wantElems, equal := collectMultisetDiff(lv, l)
+	if !equal {
 		vs = append(vs, Violation{
 			Kind: ViolationOracleDeviation, Tick: tick, Op: op,
 			Message: fmt.Sprintf("Typed{id:%d}: collect(x) over UNWIND n.lst = %v, oracle-modelled elements are %v"+
@@ -535,6 +528,39 @@ func checkTypedListUnwind(ctx context.Context, tick, id int64, l []int64, engine
 		})
 	}
 	return vs
+}
+
+// collectMultisetDiff compares an engine-returned collect() list against the
+// oracle's modelled elements as a MULTISET: it renders every element of each
+// side by its canonical string, SORTS both sides, and reports whether they
+// agree. Sorting forgives the PERMUTATION and nothing else — a missing, a
+// duplicated and a substituted element each still differ, because the two
+// sorted slices are then compared length-first and element-wise.
+//
+// This is the ONE comparison collect() is held to in this package, and it is
+// deliberately shared: openCypher does not specify the input order an aggregate
+// observes, so neither the DST checker [checkTypedListUnwind] nor the pinning
+// test over the same query may assert the emission order. Both call this, so
+// the two cannot drift apart into a checker that forgives a reorder and a test
+// that does not (rmp #2751, #2786).
+//
+// It returns the SORTED renderings of both sides alongside the verdict, so a
+// caller reports the multisets it actually compared rather than the emission
+// order it was handed. A comparison of two EMPTY sides agrees while proving
+// nothing, so a caller whose want side is not fixed by construction must guard
+// its non-emptiness itself.
+func collectMultisetDiff(lv expr.ListValue, want []int64) (gotElems, wantElems []string, equal bool) {
+	gotElems = make([]string, 0, len(lv))
+	for _, v := range lv {
+		gotElems = append(gotElems, v.String())
+	}
+	wantElems = make([]string, 0, len(want))
+	for _, e := range want {
+		wantElems = append(wantElems, canonicalValueString(e))
+	}
+	slices.Sort(gotElems)
+	slices.Sort(wantElems)
+	return gotElems, wantElems, equalStrings(gotElems, wantElems)
 }
 
 // checkTypedListMembership counts the Typed nodes whose STORED list contains
