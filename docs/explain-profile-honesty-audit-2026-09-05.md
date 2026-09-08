@@ -157,7 +157,7 @@ renders as `0`.
 | Operator | Renders | Why it is unknown |
 |---|---|---|
 | `Filter` (11 instances), `Project` (27), `ColumnarProject` (8), `Sort` (2), `Top`, `Unwind` | `?` | holds a caller-supplied expression closure that can reach the graph |
-| `LabelCountScan`, `AllNodesCountScan` | `?` | answers from a maintained counter; claims no marker |
+| `LabelCountScan` | `?` | answers from a maintained counter, and its fallback resolves a filtered bitmap **below the resolver interface**, where the operator cannot see it (corrected 2026-09-08, #2777) |
 | incomplete total | `2000 + ?` | some operators counted, some did not |
 | wholly unknown total | `?` | no operator in the plan counted |
 
@@ -181,6 +181,22 @@ defensible here: no records were read". At the closing tree they render `?`, not
 claim neither `noStorageAccess` nor a counter. Whether `?` or a known `0` is the better
 answer for an operator that reads one maintained counter is a real question this sprint did
 not settle; it is listed in §9.
+
+> **Settled 2026-09-08 (rmp #2777), and the two leaves parted company.** The question was
+> decided by measuring which arm answers on the shapes a real query plans, not by arguing
+> about the counter. `AllNodesCountScan` now reports a **PATH-AWARE measured figure** —
+> a real `0` for its O(1) counter read, and one db-hit per node id when the counter
+> declines and it walks; the walk was measured being taken by a plain
+> `MATCH (n) RETURN count(*)` run against a single uncommitted `CREATE` in another
+> transaction, which is why a flat `0` was not available to it.
+> `LabelCountScan` stays `?`: rmp #2773 made its exec-level bitmap arm unreachable
+> (0 entries across seven measured substrate states) but moved the record read down into
+> `lpg.Graph.LabelCountAsOf`, which still resolves the filtered bitmap when the churn
+> concerns the counted label — measured 14.00 allocs/op there against 0.00 when the churn
+> is elsewhere. `ResolveLabelCountAsOf` reports only `(count, ok)`, so the operator cannot
+> know which arm answered, and the correction arm reads roaring containers rather than node
+> references, which this column has no unit for. See the census in
+> `cypher/exec/dbhits_classification_test.go`.
 
 ## 2. Verdict on distinguishability
 
@@ -424,10 +440,11 @@ Every item below was **verified to still hold** at `83ba8d8b`.
 | 8 | The `PlanNode` godoc contradicts its own package's census | §7.1. `cypher/exec/plan.go:71-72`, `:86-88` | **none — new** |
 | 9 | Three in-code assertions still say the statistics are inert | §7.5 | **none — new** |
 | 10 | Estimate coverage: 80 of 110 operator instances render `-` | §1, §5 D3. **Corrected 2026-09-08 (#2787):** predominantly a property of the estimator, but **not wholly** — the columnar fusion chains lose a figure their logical node does carry, which is a defect of #2765's mapping. Measured re-partition in the 2026-09-08 addendum | documents corrected under **#2787**; the code fix is a separate task |
-| 11 | The count-store leaves render `?` rather than a known `0` | §1. They read one maintained counter; whether `?` or `0` is honest for that is unsettled | **none — new** |
+| 11 | The count-store leaves render `?` rather than a known `0` | §1. **Settled 2026-09-08 (#2777):** measured per arm rather than argued. `AllNodesCountScan` reports a path-aware measured figure (a real `0` on its counter, a full walk when the counter declines — reached by an ordinary count query against one uncommitted `CREATE`); `LabelCountScan` stays `?` because its fallback sits below the resolver interface, which reports only `(count, ok)` | **#2777** |
 
-Items 8 to 11 have **no backlog task**. They are reported here rather than filed, because
-filing is a scope decision for the user, not for this audit.
+Items 8 to 10 had **no backlog task** when this audit closed; item 11 was filed as #2777
+and closed on 2026-09-08. They were reported here rather than filed, because filing is a
+scope decision for the user, not for this audit.
 
 ## 9. Limits of this audit
 

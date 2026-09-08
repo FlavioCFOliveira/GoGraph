@@ -1442,13 +1442,22 @@ build in which profiling does not exist.
 >   slot the relationship-type filter rejects is counted: it had to be read before it
 >   could be judged. The charge is one add per adjacency **run**, never per slot;
 >   the loop's own bound is the charge.
+>   The **unlabelled count pushdown** measures too, and its figure depends on the
+>   path it took. `MATCH (n) RETURN count(*)` normally answers from a maintained
+>   live-node counter and reports a real **`0`** — it walked nothing. When that
+>   counter cannot vouch for the count at your snapshot's instant, which is the case
+>   while any other transaction holds an uncommitted create or delete, the leaf
+>   walks every live node id instead and reports one db-hit per node — the same
+>   figure a plain `MATCH (n) RETURN n` reports over the same graph. So the same
+>   count query can honestly report `0` or a full walk, and the cell tells you
+>   which happened.
 > - **A known `0`** — an operator that opens no access path at all: `Limit`, `Skip`,
 >   `Distinct`, `Eager`, `Union`, the aggregations, and the `Apply` family, whose
 >   own cost is entirely in the children the plan already shows. Each of these
 >   claims the zero explicitly in the engine, so the cell is a measurement.
 > - **`?` — not counted.** Nothing observed this operator's storage accesses, so
 >   the engine reports no figure rather than a `0` that would read as "touched
->   nothing". It covers the count-store leaves, the two row-at-a-time operators that
+>   nothing". It covers the labelled count-store leaf, the two row-at-a-time operators that
 >   seek or intersect per outer row, and **every
 >   operator that evaluates one of your expressions** — `Filter`, `Project`, `Sort`,
 >   `Top`, `UNWIND`, the hash joins and procedure calls. The last group is the
