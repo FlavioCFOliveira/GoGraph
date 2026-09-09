@@ -1,0 +1,37 @@
+START 2026-09-08T21:30:45Z load1=1.90 hot=[/usr/sbin/system_profiler:28,8 osascript:17,1 /Applications/iTerm.app/Contents/MacOS/iTerm2:14,0 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer:11,1 system_profiler:6,2 claude:5,8 ]
+block=exec BEFORE 22:30  up 11:44, 3 users, load averages: 1,90 1,72 1,77 hot=[/usr/sbin/system_profiler:28,8 osascript:17,1 /Applications/iTerm.app/Contents/MacOS/iTerm2:14,0 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer:11,1 system_profiler:6,2 claude:5,8 ]
+round=0 block=exec arm=B EXIT=0 SECONDS=99 T0=1788903045.882 T1=1788903144.287 RESULTLINES=62
+block=exec AFTER  22:32  up 11:46, 3 users, load averages: 2,15 1,88 1,83 hot=[/Applications/iTerm.app/Contents/MacOS/iTerm2:14,7 osascript:10,6 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer:8,7 claude:7,1 osascript:5,7 ]
+block=cy BEFORE 22:32  up 11:46, 3 users, load averages: 2,15 1,88 1,83 hot=[/Applications/iTerm.app/Contents/MacOS/iTerm2:14,7 osascript:10,6 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer:8,7 claude:7,1 osascript:5,7 ]
+round=0 block=cy arm=B EXIT=0 SECONDS=204 T0=1788903144.361 T1=1788903348.522 RESULTLINES=115
+block=cy AFTER  22:35  up 11:49, 3 users, load averages: 3,96 2,81 2,22 hot=[osascript:17,0 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer:8,8 ]
+block=rec BEFORE 22:35  up 11:49, 3 users, load averages: 3,96 2,81 2,22 hot=[osascript:17,0 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer:8,8 ]
+round=0 block=rec arm=B EXIT=0 SECONDS=11 T0=1788903348.597 T1=1788903359.628 RESULTLINES=4
+block=rec AFTER  22:35  up 11:49, 3 users, load averages: 3,76 2,82 2,24 hot=[osascript:14,1 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer:8,5 osascript:5,1 ]
+block=txn BEFORE 22:35  up 11:49, 3 users, load averages: 3,76 2,82 2,24 hot=[osascript:14,1 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer:8,5 osascript:5,1 ]
+round=0 block=txn arm=B EXIT=0 SECONDS=3 T0=1788903359.703 T1=1788903362.967 RESULTLINES=2
+block=txn AFTER  22:36  up 11:49, 3 users, load averages: 3,76 2,82 2,24 hot=[]
+block=bolt BEFORE 22:36  up 11:49, 3 users, load averages: 3,76 2,82 2,24 hot=[]
+round=0 block=bolt arm=B EXIT=0 SECONDS=32 T0=1788903363.040 T1=1788903395.789 RESULTLINES=27
+block=bolt AFTER  22:36  up 11:50, 3 users, load averages: 4,46 3,05 2,34 hot=[osascript:13,6 osascript:12,1 /usr/sbin/system_profiler:11,1 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer:10,1 ]
+block=ckpt BEFORE 22:36  up 11:50, 3 users, load averages: 4,46 3,05 2,34 hot=[osascript:13,6 osascript:12,1 /usr/sbin/system_profiler:11,1 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer:10,1 ]
+round=0 block=ckpt arm=B EXIT=0 SECONDS=11 T0=1788903395.863 T1=1788903406.694 RESULTLINES=5
+block=ckpt AFTER  22:36  up 11:50, 3 users, load averages: 4,52 3,12 2,37 hot=[/usr/sbin/system_profiler:15,5 osascript:14,8 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer:9,5 osascript:5,1 ]
+block=search BEFORE 22:36  up 11:50, 3 users, load averages: 4,52 3,12 2,37 hot=[osascript:14,7 (system_profiler):9,6 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer:9,4 osascript:5,1 ]
+round=0 block=search arm=B EXIT=0 SECONDS=67 T0=1788903406.769 T1=1788903473.354 RESULTLINES=4
+block=search AFTER  22:37  up 11:51, 3 users, load averages: 4,91 3,62 2,62 hot=[/usr/libexec/sysmond:15,2 /sbin/launchd:6,1 /Applications/iTerm.app/Contents/MacOS/iTerm2:5,1 ]
+block=centrality BEFORE 22:37  up 11:51, 3 users, load averages: 4,91 3,62 2,62 hot=[/usr/libexec/sysmond:15,2 /sbin/launchd:6,1 /Applications/iTerm.app/Contents/MacOS/iTerm2:5,1 ]
+round=0 block=centrality arm=B EXIT=0 SECONDS=2 T0=1788903473.427 T1=1788903475.436 RESULTLINES=1
+block=centrality AFTER  22:37  up 11:51, 3 users, load averages: 4,60 3,57 2,61 hot=[osascript:15,6 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer:10,2 osascript:5,2 ]
+block=cnt BEFORE 22:37  up 11:51, 3 users, load averages: 4,60 3,57 2,61 hot=[osascript:15,6 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer:10,0 osascript:5,2 ]
+round=0 block=cnt arm=B EXIT=0 SECONDS=13 T0=1788903475.511 T1=1788903488.939 RESULTLINES=9
+block=cnt AFTER  22:38  up 11:52, 3 users, load averages: 5,38 3,78 2,70 hot=[/System/Library/PrivateFrameworks/CacheDelete.framework/deleted:76,0 /System/Library/PrivateFrameworks/CloudKitDaemon.framework/Support/cloudd:45,6 /usr/libexec/triald_system:35,7 /System/Library/Frameworks/Accounts.framework/Versions/A/Support/accountsd:14,1 /System/Library/PrivateFrameworks/TCC.framework/Support/tccd:9,6 /System/Library/PrivateFrameworks/TCC.framework/Support/tccd:9,2 /Applicati]
+block=Lreadtx BEFORE 22:38  up 11:52, 3 users, load averages: 5,38 3,78 2,70 hot=[/System/Library/PrivateFrameworks/CacheDelete.framework/deleted:84,6 /System/Library/PrivateFrameworks/CloudKitDaemon.framework/Support/cloudd:53,2 /usr/libexec/triald_system:22,3 /System/Library/Frameworks/Accounts.framework/Versions/A/Support/accountsd:14,4 /System/Library/PrivateFrameworks/TCC.framework/Support/tccd:9,1 /System/Library/PrivateFrameworks/TCC.framework/Support/tccd:9,0 /Applicati]
+round=0 block=Lreadtx arm=B EXIT=0 SECONDS=14 T0=1788903489.019 T1=1788903503.430 RESULTLINES=10
+block=Lreadtx AFTER  22:38  up 11:52, 3 users, load averages: 12,03 5,32 3,26 hot=[]
+block=Ltxn BEFORE 22:38  up 11:52, 3 users, load averages: 12,03 5,32 3,26 hot=[]
+round=0 block=Ltxn arm=B EXIT=0 SECONDS=7 T0=1788903503.504 T1=1788903510.195 RESULTLINES=4
+block=Ltxn AFTER  22:38  up 11:52, 3 users, load averages: 10,50 5,21 3,25 hot=[/usr/libexec/sysmond:18,3 /Applications/iTerm.app/Contents/MacOS/iTerm2:6,9 ]
+END 2026-09-08T21:38:30Z
+SIZING_ALLDONE
+SAMPLER STILL ALIVE pid=14379

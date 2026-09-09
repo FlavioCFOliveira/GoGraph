@@ -388,15 +388,52 @@ func (v *ReadView[N, W]) NodeIndex() *label.Index { return v.g.NodeIndex() }
 // IndexManager returns the secondary-index manager, a candidate source read at
 // the PRESENT.
 //
-// Its candidates ARE re-checked against the versioned property store, so a seek
-// cannot return a node that did not match at the reader's instant. That was
-// asserted here without evidence until it was measured: the check is
-// cypher.TestIndexSeek_SelfContradictionUnderConcurrentWrites, which seeks by an
-// indexed property and then asserts the SAME property in a WHERE clause — a
-// contradiction that can only survive if the two answered at different instants.
-// Roughly two thousand observations per run against a writer churning the
-// indexed nodes produce zero, and the test carries sensitivity controls so it
-// cannot pass vacuously.
+// # Its candidates are NOT re-checked against the property store
+//
+// This comment used to claim the opposite — that the candidates "ARE re-checked
+// against the versioned property store, so a seek cannot return a node that did
+// not match at the reader's instant" — and cited
+// cypher.TestIndexSeek_SelfContradictionUnderConcurrentWrites as the measured
+// evidence for it. The claim is false in BOTH directions, and the citation does
+// not support it (rmp #2814).
+//
+// What the code actually does. A [github.com/FlavioCFOliveira/GoGraph/graph/index/hash.Index]
+// takes no snapshot parameter and holds no per-version state; there is no
+// property-side analogue of mvcc_index.go's label overlay. The only residual a
+// property seek carries is the LABEL check that cypher's rewrite attaches
+// (rmp #2423, exec.NewNodeByIndexSeekAdmitting) — the label half IS
+// snapshot-correct, the property half is not re-checked at all. The single-key
+// equality rewrite goes further and SUBSUMES the Selection it replaces, so the
+// value predicate is dropped from the plan entirely; the range, prefix and
+// intersection rewrites retain the original predicate as a residual Filter, which
+// can remove a candidate the index over-reported but can never supply one it
+// omitted.
+//
+// What that costs, measured at 5b7e930 with a hash index on (:L, s) over 512
+// nodes, inside a transaction whose writes are applied to the graph but not yet
+// to the index:
+//
+//	uncommitted SET moves s from "v7" to "zzz", seek the OLD key "v7":
+//	    seek returns 1 — a row NO NODE CARRIES ANY MORE
+//	the same, seek the NEW key "zzz":
+//	    seek returns 0 — the row is LOST
+//
+// What the cited test does and does not establish. It seeks by an indexed
+// property and then asserts the SAME property in a WHERE clause, so it can only
+// ever catch a FABRICATED row — a self-contradiction has no way to notice a row
+// that never arrived — and it drives every query through the read-only
+// cypher.Engine.Run, never through an open write transaction. It therefore
+// establishes that a COMMITTED concurrent write does not make a seek
+// self-contradictory, which is a genuine and useful property. It establishes
+// nothing about lost rows, and nothing about a transaction reading its own
+// uncommitted writes.
+//
+// The mitigation in force is in the PLANNER, not here: cypher declines every
+// property-index access path whose (label, property) the enclosing transaction
+// has already dirtied (cypher.pendingIndexDelta), so such a read falls back to
+// the scan+filter, which resolves through this view and is correct in both
+// directions. Callers reaching the manager directly through this accessor get no
+// such protection and must not assume one.
 func (v *ReadView[N, W]) IndexManager() *index.Manager { return v.g.IndexManager() }
 
 // ── immutable metadata ───────────────────────────────────────────────────────

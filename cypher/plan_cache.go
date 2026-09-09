@@ -176,3 +176,123 @@ func mergeAutoParams(params map[string]expr.Value, auto map[string]string) map[s
 	}
 	return out
 }
+
+// planBuild is one in-flight compilation of a single cache key. done is
+// closed exactly once, by the goroutine that performed the build; entry and
+// err are written before the close and read only after it, so the close is the
+// happens-before edge that publishes them.
+type planBuild struct {
+	done  chan struct{}
+	entry *planCacheEntry
+	err   error
+}
+
+// planBuildGroup collapses the concurrent compilations of one cache key into a
+// single compilation whose result every caller shares.
+//
+// # Why it exists
+//
+// The plan cache absorbs a repeated query completely — but only from the
+// SECOND execution onwards, and only after the first has published its entry.
+// Until then every concurrent caller misses, and every one of them compiles.
+// Measured on bench/contention at rmp #2740, the miss count was exactly the
+// concurrency level at every rung of the ladder (8, 64, 128, 192, 256, 384,
+// 512, 1024): each goroutine misses once, on its first call, and hits forever
+// after. So N goroutines released together perform N redundant compilations of
+// the same text.
+//
+// That is expensive twice over. The obvious cost is N-1 wasted parses. The
+// large one is that they are not independent: the ANTLR parser and lexer share
+// ONE ATN per grammar for the whole process (gen.CypherParserParserStaticData
+// and gen.CypherLexerLexerStaticData are package-level), and the ATN's
+// stateMu, edgeMu and mu are taken — the first two in WRITE mode — while the
+// DFA for a not-yet-seen token path is filled in. N concurrent first parses
+// therefore serialise on a process-global mutex. On cypher-read-scan-large at
+// level 1024, over five interleaved replicas of bench/contention, the median
+// was 762.68 s of mutex delay inside parser.ParseStatement out of 762.90 s in
+// the whole process. Publishing the entry before the same workload ran — the
+// single-variable control — took the parse-path figure to exactly zero.
+//
+// # Prior art
+//
+// Neo4j reaches the same conclusion for the same topology — one shared plan
+// cache behind many concurrent clients. Its query and execution-plan caches go
+// through LFUCache.computeIfAbsent (neo4j/neo4j, branch dev,
+// community/cypher/cypher-cache/src/main/scala/org/neo4j/cypher/internal/cache/LFUCache.scala),
+// which is a single call to Caffeine's Cache.get(key, mappingFunction) rather
+// than a get / compute / put sequence. That method's contract (ben-manes/caffeine,
+// tag v3.1.8, caffeine/src/main/java/com/github/benmanes/caffeine/cache/Cache.java)
+// is "The entire method invocation is performed atomically, so the function is
+// applied at most once per key", with other callers blocked while it runs.
+//
+// PostgreSQL takes the other route and is worth recording because it does NOT
+// transfer: its plan cache is per-backend — "the backend's list of 'saved'
+// CachedPlanSources" (postgres/postgres, REL_16_STABLE,
+// src/backend/utils/cache/plancache.c) — so a process-wide stampede cannot
+// arise in the first place. GoGraph is embedded and shares one Engine across
+// every goroutine, which is Neo4j's shape, not PostgreSQL's.
+//
+// # What it does and does not change
+//
+// It changes WHO compiles, never WHAT is compiled. The build is a pure
+// function of the query text and the index schema, and the entry it produces
+// is immutable once published, which is already why the LRU may hand the same
+// pointer to every later caller. Sharing it with the callers that raced the
+// first one is the same sharing, one execution earlier. No openCypher-visible
+// behaviour depends on which goroutine ran the parser.
+//
+// The group is NOT a cache: an entry lives in the map only while its build is
+// running, and is removed as soon as it finishes, whether it succeeded or
+// failed. Failures are therefore not cached, exactly as before. The map's size
+// is bounded by the number of DISTINCT query texts being compiled at one
+// instant, which is bounded in turn by the number of goroutines executing a
+// query — the same bound the caller already imposes, and far smaller than the
+// N simultaneous parse trees the unshared path allocated.
+//
+// planBuildGroup is safe for concurrent use by any number of goroutines.
+type planBuildGroup struct {
+	inflight map[string]*planBuild
+	mu       sync.Mutex
+}
+
+// newPlanBuildGroup constructs an empty group.
+func newPlanBuildGroup() *planBuildGroup {
+	return &planBuildGroup{inflight: make(map[string]*planBuild)}
+}
+
+// do returns the result of build(key), performing at most one build per key
+// per instant: the first caller runs build while every caller that arrives
+// before it finishes waits and receives that same result.
+//
+// g.mu guards only the in-flight map and is never held across build, so a
+// compilation of one query never delays a lookup — or a build — of another.
+//
+// If build panics, the deferred close still releases the waiters, which then
+// see the zero (nil, nil) result and build for themselves rather than
+// deadlocking. build never returns (nil, nil) on any non-panicking path, so
+// that pair is unambiguous as a signal. The panic itself is not recovered:
+// panics indicate programmer error and must surface.
+func (g *planBuildGroup) do(key string, build func(string) (*planCacheEntry, error)) (*planCacheEntry, error) {
+	g.mu.Lock()
+	if b, ok := g.inflight[key]; ok {
+		g.mu.Unlock()
+		<-b.done
+		if b.entry == nil && b.err == nil {
+			return build(key) // leader panicked; do not inherit its silence
+		}
+		return b.entry, b.err
+	}
+	b := &planBuild{done: make(chan struct{})}
+	g.inflight[key] = b
+	g.mu.Unlock()
+
+	defer func() {
+		g.mu.Lock()
+		delete(g.inflight, key)
+		g.mu.Unlock()
+		close(b.done)
+	}()
+
+	b.entry, b.err = build(key)
+	return b.entry, b.err
+}

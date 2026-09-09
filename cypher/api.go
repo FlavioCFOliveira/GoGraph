@@ -527,6 +527,28 @@ type buildOpts struct {
 	// false by every other build path, which therefore always anchors a
 	// multi-label node scan on Labels[0] as today.
 	minLabelScanEnabled bool
+	// indexSeekEnabled gates the EQUALITY hash seek ([tryBuildIndexSeekFromSelection])
+	// and the key-set seek ([tryBuildIndexSeekSetFromSelection]). It is the kill
+	// switch those two rewrites shipped without: until rmp #2814 the equality seek's
+	// only gate was idxMgr != nil, so a caller who found it answering wrongly had no
+	// way to turn it off. Set from EngineOptions.DisableIndexSeek by the read and
+	// write build paths.
+	//
+	// It is a POSITIVE flag like its neighbours, so an unset buildOpts disables the
+	// seek. That is the safe default for a new field, but it means every build path
+	// that wants the seek must set it — including the public
+	// [BuildPlanWithMutator], which does.
+	indexSeekEnabled bool
+	// pendingIdx names the (label, property) coordinates the enclosing WRITE
+	// transaction has already mutated in the graph without the property indexes
+	// having been told, so a property-index access path on those coordinates
+	// declines and the plan falls back to the scan+filter that reads the writer
+	// view (rmp #2814). nil — the state of every read-only build — means nothing is
+	// pending, and costs one nil check per guarded access path.
+	//
+	// See [pendingIndexDelta] for the measured defect this closes and for why the
+	// two-dimensional key is exactly as tight as the change buffer allows.
+	pendingIdx *pendingIndexDelta
 	// reorderSwap is the set of plain Apply nodes whose arms the disjoint-
 	// component ordering peephole (#2091) has decided to swap for THIS query,
 	// keyed by the exact *ir.Apply pointer buildOperator will visit. The read-path
@@ -553,6 +575,13 @@ type buildOpts struct {
 	// safe because the seek is result- and order-identical. Only the read path sets
 	// it, from EngineOptions.DisableExpandIntoSeek.
 	expandIntoSeekDisabled bool
+	// expandLabelPushEnabled gates the far-endpoint label push (#2629) for THIS
+	// build. Only the read path sets it, from EngineOptions.DisableExpandLabelPush;
+	// every other build path leaves it false and keeps the Selection above the
+	// Expand. The polarity is POSITIVE — unlike expandIntoSeekDisabled — because
+	// the rewrite drops an operator the write path's own recognisers may expect to
+	// find, so a build path has to opt in rather than inherit it.
+	expandLabelPushEnabled bool
 	// cyclicIntersectEnabled turns ON the fused cyclic expand (#2157) for THIS
 	// build. Positive polarity, so every build path that never sets it — the write
 	// path, the public BuildPlanWithMutator — keeps today's two-Expand plan.
@@ -853,6 +882,27 @@ type EngineOptions struct {
 	// operational escape hatch.
 	DisableRangeIndexSeek bool
 
+	// DisableIndexSeek turns OFF the EQUALITY hash index seek (the
+	// `n.prop = value` rewrite in tryBuildIndexSeekFromSelection) and the key-set
+	// seek built on top of it (seek_set_plan.go). When false (the default) an
+	// equality predicate on a property backed by a hash index is answered by a
+	// NodeByIndexSeek that SUBSUMES the Selection it replaces, keeping only a
+	// label residual.
+	//
+	// It exists because that rewrite shipped without a kill switch of any kind: its
+	// only gate was `idxMgr != nil` — no population floor, no cost model, no knob —
+	// unlike every other index access path, which meant the one access path capable
+	// of returning a row the graph does not contain could not be turned off (rmp
+	// #2814). Setting it true forces the scan+filter plan, which is what the
+	// mutation arm of TestIndexPendingDelta_* toggles to prove the regression test
+	// can fail, and what an operator reaches for if a seek is ever suspected again.
+	//
+	// It does NOT govern the range/prefix seek (DisableRangeIndexSeek,
+	// DisablePrefixIndexSeek), the bitmap intersection (DisableBitmapIntersection)
+	// or the index nested-loop join (DisableHashJoin): those have their own knobs,
+	// and a caller disabling one does not mean to disable the others.
+	DisableIndexSeek bool
+
 	// DisablePrefixIndexSeek turns OFF the STARTS WITH prefix range seek (#2127)
 	// while leaving the rest of the range seek in place. When false (the default)
 	// the planner rewrites `n.p STARTS WITH 'x'` on a property backed by a bound
@@ -894,6 +944,23 @@ type EngineOptions struct {
 	// plan; it exists for the differential test that proves both plans return an
 	// identical result multiset, and as an operational escape hatch.
 	DisableMinLabelScan bool
+
+	// DisableExpandLabelPush turns OFF pushing a far-endpoint label INTO the
+	// expansion (#2629). When false (the default) a lone bare label predicate on an
+	// Expand's own destination variable is enforced inside the traversal
+	// ([exec.Expand.WithDstAdmit]) and the Selection that carried it is not built,
+	// so a slot whose destination lacks the label never becomes a row. When true the
+	// Selection is built as before and every matched slot pays a separate per-row
+	// predicate plus the row compaction the filter performs to hand it upwards.
+	//
+	// The push is result-identical: the gate calls the SAME
+	// [lpg.ReadView.HasNodeLabelByID] accessor both forms of the replaced predicate
+	// resolve to, and applying a conjunct earlier cannot change a multiset. Emission
+	// ORDER is preserved too — the gate drops slots in place and reorders nothing —
+	// so no order-safety companion is needed. It exists for the differential test
+	// that proves both plans return an identical result multiset, and as an
+	// operational escape hatch. See expand_dst_label_plan.go.
+	DisableExpandLabelPush bool
 
 	// DisableExpandIntoSeek turns OFF the O(log d) seek for a hop whose destination
 	// variable is already bound — cycle closing, triangles, mutual-relationship
@@ -1167,6 +1234,11 @@ type Engine struct {
 	indexDefReg *indexDefRegistry
 	procReg     *procs.Registry
 	cache       *planCache
+	// planBuilds collapses the concurrent compilations of one cache key into
+	// one, so that N goroutines racing the first execution of a query perform
+	// one parse between them rather than N. See [planBuildGroup]; it holds no
+	// state between builds and is not a second cache.
+	planBuilds *planBuildGroup
 	// csrPairCache amortises csrPairFromGraph's O(V+E) forward+reverse build
 	// across queries against an unchanged graph, invalidated by
 	// lpg.Graph.TopoGeneration exactly as edgeTypeFilterCache is (rmp #2143).
@@ -1365,6 +1437,11 @@ type Engine struct {
 	// the other range predicates continue to seek.
 	prefixSeekEnabled bool
 
+	// indexSeekEnabled gates the equality hash seek and the key-set seek. True by
+	// default; set false by EngineOptions.DisableIndexSeek (rmp #2814). When false
+	// an equality predicate on an indexed property keeps the scan+filter plan.
+	indexSeekEnabled bool
+
 	// minLabelScanEnabled gates the min-cardinality multi-label anchor scan
 	// (#2077). True by default; set false by EngineOptions.DisableMinLabelScan.
 	// When false the planner always anchors a multi-label node scan on Labels[0].
@@ -1374,6 +1451,11 @@ type Engine struct {
 	// by default; set false by EngineOptions.DisableExpandIntoSeek, which returns
 	// an expand-into hop to walking the whole neighbour run.
 	expandIntoSeekEnabled bool
+
+	// expandLabelPushEnabled gates pushing a far-endpoint label into the expansion
+	// (#2629). True by default; set false by EngineOptions.DisableExpandLabelPush,
+	// which returns the destination label to a Selection above the Expand.
+	expandLabelPushEnabled bool
 
 	// cyclicIntersectEnabled gates the fused cyclic expand (#2157). FALSE by
 	// default — positive polarity — and set only by
@@ -1714,6 +1796,7 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 		indexDefReg:            newIndexDefRegistry(),
 		procReg:                procs.NewRegistry(),
 		cache:                  newPlanCache(opts.PlanCacheCapacity),
+		planBuilds:             newPlanBuildGroup(),
 		csrPairCache:           newCSRPairCacheIfEnabled(opts.DisableCSRPairCache),
 		maxResultRows:          resolveMaxResultRows(opts.MaxResultRows),
 		maxResultBytes:         resolveMaxResultBytes(opts.MaxResultBytes),
@@ -1721,9 +1804,11 @@ func NewEngineWithOptions(g *lpg.Graph[string, float64], opts EngineOptions) *En
 		hashJoinEnabled:        !opts.DisableHashJoin,
 		rangeSeekEnabled:       !opts.DisableRangeIndexSeek,
 		prefixSeekEnabled:      !opts.DisablePrefixIndexSeek,
+		indexSeekEnabled:       !opts.DisableIndexSeek,
 		bitmapIntersectEnabled: !opts.DisableBitmapIntersection,
 		minLabelScanEnabled:    !opts.DisableMinLabelScan,
 		expandIntoSeekEnabled:  !opts.DisableExpandIntoSeek,
+		expandLabelPushEnabled: !opts.DisableExpandLabelPush,
 		cyclicIntersectEnabled: opts.EnableCyclicIntersect,
 		joinReorderEnabled:     !opts.DisableJoinReorder,
 		anchorSwapEnabled:      !opts.DisableAnchorSwap,
@@ -1870,7 +1955,9 @@ func (e *Engine) registerRecoveredConstraints(defs []ConstraintDef) {
 					e.populateRecoveredIndex(idxName, d.Label, d.Property, boundIdx, func() {
 						// Recovery must complete: a background context never
 						// cancels, so the backfill never returns an error here.
-						_ = e.backfillNodeHashIndex(context.Background(), boundIdx, d.Label, d.Property)
+						// Live view: recovery runs before the engine is
+						// published, so no transaction can be open (rmp #2778).
+						_ = e.backfillNodeHashIndex(context.Background(), e.g.ReadAt(nil), boundIdx, d.Label, d.Property, nil)
 					})
 					sub = boundIdx
 				} else {
@@ -1881,8 +1968,11 @@ func (e *Engine) registerRecoveredConstraints(defs []ConstraintDef) {
 			e.constraintReg.RegisterUnique(d.Label, d.Property, idxName)
 			e.constraintReg.SetConstraintName(true, d.Label, d.Property, d.Name)
 			// Recovery must complete: a background context never cancels, so
-			// the scan never returns an error here.
-			values, _, _ := e.scanLabelProperty(context.Background(), d.Label, d.Property)
+			// the scan never returns an error here. LIVE view: recovery runs
+			// before the engine is published, so no transaction can be open and
+			// the live value IS the committed one (rmp #2778, rmp #2798).
+			var values []lpg.PropertyValue
+			_, _ = e.scanLabelProperty(context.Background(), e.g.ReadAt(nil), d.Label, d.Property, &values)
 			e.constraintReg.SeedUniqueValuesIgnoringDuplicates(d.Label, d.Property, values)
 		} else {
 			e.constraintReg.RegisterNotNull(d.Label, d.Property)
@@ -2712,6 +2802,12 @@ func (e *Engine) buildReadPhysical(
 	bopts.forceColumnarChainDecline = e.forceColumnarChainDeclineForTest
 	bopts.rangeSeekEnabled = e.rangeSeekEnabled
 	bopts.prefixSeekEnabled = e.prefixSeekEnabled
+	// Equality / key-set seek gating (rmp #2814). This build path is the READ path,
+	// so bopts.pendingIdx is deliberately left nil: a read-only statement enqueues
+	// no index change, and the transaction it reads through — if any — cannot have
+	// an unflushed delta of its own. A statement inside an OPEN write transaction
+	// does not come through here; it comes through [Engine.execUnderBarrier].
+	bopts.indexSeekEnabled = e.indexSeekEnabled
 	// Min-label scan gating (#2077): enable the smallest-cardinality
 	// multi-label anchor substitution when the Engine permits it. The
 	// substitution is result-identical (a label conjunction is commutative)
@@ -2721,6 +2817,10 @@ func (e *Engine) buildReadPhysical(
 	// Bound-destination seek (#2149): negative polarity, so leaving this unset on
 	// any other build path enables the seek.
 	bopts.expandIntoSeekDisabled = !e.expandIntoSeekEnabled
+	// Far-endpoint label push (#2629): positive polarity, so it is confined to the
+	// read path. The push is result- and order-identical, so it needs no
+	// order-safety companion.
+	bopts.expandLabelPushEnabled = e.expandLabelPushEnabled
 	// Fused cyclic expand (#2157): positive polarity, off unless opted into.
 	bopts.cyclicIntersectEnabled = e.cyclicIntersectEnabled
 	// Set-at-a-time multi-label conjunction (#2133): strictly dominates the
@@ -3216,14 +3316,27 @@ func explainWithIndexesNode(
 		// label source the build would, so the answer it renders is the plan the build
 		// would choose — including a DECLINE when the label cannot be verified
 		// (rmp #2423).
-		if op, fired, err := tryBuildIndexSeekFromSelection(sel, params, schema, idxMgr, labelSrc); err == nil && fired && op != nil {
+		//
+		// rmp #2814 adds two inputs the build reads and this renderer cannot: the
+		// DisableIndexSeek kill switch and the enclosing transaction's unflushed index
+		// delta. It passes indexSeekEnabled: true and a nil delta — i.e. it renders the
+		// access path the plan WOULD take with nothing pending — because this renderer
+		// is reached from the EXPLAIN paths, which plan against a fresh COMMITTED
+		// snapshot in the first place ([Engine.explainPrefixed] passes a nil pinned view
+		// for a statement inside an open write transaction, cypher/exectx.go). Making
+		// the rendered access path depend on a delta the rendering does not read the
+		// graph through would make the tree disagree with itself, not agree with the
+		// build. Assert plan choice from behaviour or a counter, never from EXPLAIN
+		// inside a write transaction.
+		renderOpts := &buildOpts{indexSeekEnabled: true}
+		if op, fired, err := tryBuildIndexSeekFromSelection(sel, params, schema, idxMgr, labelSrc, renderOpts); err == nil && fired && op != nil {
 			opName = "NodeByIndexSeek"
-		} else if _, fired := tryBuildIndexSeekSetFromSelection(sel, params, make(map[string]int), idxMgr, explainGraph); fired {
+		} else if _, fired := tryBuildIndexSeekSetFromSelection(sel, params, make(map[string]int), idxMgr, explainGraph, renderOpts); fired {
 			// A key-set seek SUBSUMES the pushed Selection exactly as the single-key
 			// seek does — both replace the Selection and its scan child — so it
 			// renders in the Selection's place (#2183).
 			opName = "NodeByIndexSeekSet"
-		} else if _, fired := tryBuildRangeSeekChild(sel, make(map[string]int), idxMgr, explainGraph, params, prefixSeek, true); fired {
+		} else if _, fired := tryBuildRangeSeekChild(sel, make(map[string]int), idxMgr, explainGraph, params, prefixSeek, true, nil); fired {
 			// A range seek REPLACES the scan child but the original Selection
 			// Filter is retained on top, so the node renders as Selection over
 			// NodeByIndexRangeScan (not subsumed like the equality seek).
@@ -3571,13 +3684,30 @@ func (e *Engine) createBTreeIndexLocked(ctx context.Context, p *ir.CreateIndex, 
 			fmt.Errorf("%w: %q", index.ErrIndexExists, p.Name))
 	}
 
+	// Record every change fanned out from here until the pair is registered
+	// (rmp #2738), exactly as the hash path does; see
+	// [Engine.createHashIndexLocked] and [index.Manager.BeginBuild]. An explicit
+	// transaction's commit-time fan-out is not excluded by the schema gate this
+	// DDL holds, so without the recording a write committed between the backfill
+	// scan and the registration below reaches no index and is lost permanently.
+	// The log is handed to the registration operator via Catching, which replays
+	// it into both indexes at the instant they become reachable.
+	// scanView is the instant BOTH backfills below read, opened after the
+	// recording starts, exactly as on the hash path — see
+	// [Engine.beginIndexBuild] for the ordering and for why the scan must not
+	// read the live property bag (rmp #2738, rmp #2778).
+	buildLog, scanView, releaseScanView := e.beginIndexBuild(idxMgr, p.Label, p.Property)
+	defer idxMgr.AbandonBuild(buildLog)
+	defer releaseScanView()
+
 	idx, err := newBoundNodeBTreeIndex(e.g.ReadAt(nil), p.Label, p.Property)
 	if err != nil {
 		return nil, fmt.Errorf("exec: CreateIndex %q: %w", p.Name, err)
 	}
 	// Backfill BEFORE registration: a concurrent reader's plan build either
-	// misses the index (scan+filter, correct) or sees it fully populated.
-	if err := e.backfillNodeBTreeIndex(ctx, idx, p.Label, p.Property); err != nil {
+	// misses the index (scan+filter, correct) or sees it fully populated — the
+	// half-built index is not in the manager's map, so no reader can reach it.
+	if err := e.backfillNodeBTreeIndex(ctx, scanView, idx, p.Label, p.Property); err != nil {
 		return nil, err
 	}
 
@@ -3597,10 +3727,14 @@ func (e *Engine) createBTreeIndexLocked(ctx context.Context, p *ir.CreateIndex, 
 	numName := numericBTreeName(p.Label, p.Property)
 	numIdx, _ := newBoundNodeBTreeIndexNumeric(e.g.ReadAt(nil), p.Label, p.Property)
 	if numIdx != nil {
-		if err := e.backfillNodeBTreeIndexNumeric(ctx, numIdx, p.Label, p.Property); err != nil {
+		if err := e.backfillNodeBTreeIndexNumeric(ctx, scanView, numIdx, p.Label, p.Property); err != nil {
 			return nil, err
 		}
 	}
+	// Both scans are done: return the horizon slot before the registration
+	// barrier, so the visibility barrier below is never entered while this DDL
+	// still pins reclamation. Idempotent with the defer above.
+	releaseScanView()
 
 	// Register BOTH indexes through the exec-layer DDL operator, which wraps the
 	// pair in ONE invocation of the visibility barrier (rmp #2703). The single
@@ -3632,7 +3766,7 @@ func (e *Engine) createBTreeIndexLocked(ctx context.Context, p *ir.CreateIndex, 
 		idxMgr,
 		e.g.ApplyAtomically,
 		e.ClearPlanCache,
-	)
+	).Catching(buildLog)
 	if barrierErr := applyDDLOp(ctx, op); barrierErr != nil {
 		// The barrier ran the closure to completion or not at all; if the user
 		// index was registered before the companion failed, unwind it so the
@@ -3913,13 +4047,55 @@ func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstra
 			p.Name, exec.ErrConstraintAlreadyExists, constraintKindString(kind), p.Label, p.Property)
 	}
 
-	// Validate the pre-existing data and seed the value-set BEFORE registering,
-	// so a constraint over already-violating data is rejected with nothing
-	// registered (audit gap H2). The scan runs inside the graph's visibility
-	// barrier (see scanLabelProperty), so it cannot observe a half-applied
-	// transaction. ctx-cancellable (rmp #1872): nothing has been registered
-	// yet, so a cancellation here aborts cleanly with no unwind needed.
-	values, anyNull, serr := e.scanLabelProperty(ctx, p.Label, p.Property)
+	// Validate the pre-existing data BEFORE registering, so a constraint over
+	// already-violating data is rejected with nothing registered (audit gap H2).
+	// ctx-cancellable (rmp #1872): nothing has been registered yet, so a
+	// cancellation here aborts cleanly with no unwind needed.
+	//
+	// THIS SCAN READS THE LIVE GRAPH, AND THAT IS DELIBERATE (rmp #2792, kept by
+	// rmp #2798). It is the VALIDATION scan only; the UNIQUE value-set is no
+	// longer seeded from it (see the barrier below). Its live read is
+	// load-bearing, and that was measured rather than reasoned about: an explicit
+	// transaction that has EAGERLY written a duplicate has not committed it, so a
+	// snapshot read would ACCEPT the constraint — and nothing would then refuse
+	// that transaction's commit, because UNIQUE is reserved at WRITE time
+	// (cypher/constraint_check.go) and this transaction's statement ran before
+	// the constraint existed. Measured on this build: with the live read the DDL
+	// is refused ("pre-existing data contains duplicate value"); with a snapshot
+	// read the DDL succeeds, the commit returns nil, and two COMMITTED nodes hold
+	// the same value under an active UNIQUE constraint. A conservatively refused
+	// DDL is a poor answer; a Consistency breach is a different category.
+	//
+	// The SAME argument holds for NOT NULL, in the mirror direction and with the
+	// same verdict — measured, rmp #2798. An open transaction that has eagerly
+	// NULLED a committed property makes a compliant node look violating, so the
+	// live scan refuses a DDL that the committed data would have allowed. That
+	// conservative refusal is deliberately kept, because the alternative is not
+	// symmetric: with validation moved to the snapshot alone, the DDL SUCCEEDS,
+	// the transaction's COMMIT of the removal returns nil, and a committed node
+	// carries no value under an active NOT NULL constraint. Nothing refuses that
+	// commit for the same shape of reason as UNIQUE — [ExplicitTx] allocates its
+	// touched-node set at BeginTx, and a transaction that began before the
+	// constraint existed has none, so its commit-time NOT NULL check is a no-op.
+	// Both single-view designs are therefore unsound, in opposite directions, and
+	// the committed-state scan below is ADDED to this one rather than replacing it.
+	//
+	// The converse hole — a COMMITTED duplicate that an open transaction has
+	// eagerly removed, which this live scan cannot see — is closed by the seed
+	// inside the barrier, which reads committed state and lets SeedUniqueValues
+	// refuse. Its NOT NULL counterpart is committedNull, likewise inside the
+	// barrier.
+	//
+	// vals is collected ONLY for UNIQUE. NOT NULL reads nothing but anyNull —
+	// validatePreExisting ignores the values and there is no value-set to seed —
+	// so a NOT NULL DDL used to fill, and discard, one PropertyValue per labelled
+	// node.
+	var values []lpg.PropertyValue
+	var vals *[]lpg.PropertyValue
+	if kind == exec.ConstraintUnique {
+		vals = &values
+	}
+	anyNull, serr := e.scanLabelProperty(ctx, e.g.ReadAt(nil), p.Label, p.Property, vals)
 	if serr != nil {
 		return nil, serr
 	}
@@ -3931,11 +4107,14 @@ func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstra
 	// barrier (ApplyAtomically) so concurrent Graph.View readers never observe
 	// the constraint or its backing index in a partially-constructed state.
 	// The visibility barrier is not re-entrant, so nothing inside the closure may
-	// call Graph.View or Graph.ApplyAtomically. scanLabelProperty is outside it for
-	// the ORDERING reason rather than that one — it must complete before the
-	// registration it validates — and no longer takes any barrier itself, so it is
-	// no longer constrained to sit outside; commitConstraintTx only appends a WAL
-	// frame and is outside so the append is not held under visMu.
+	// call Graph.View or Graph.ApplyAtomically. The LIVE scanLabelProperty above is
+	// outside it for the ORDERING reason rather than that one — it must complete
+	// before the registration it validates — and takes no barrier itself, so it is
+	// not constrained to sit outside; commitConstraintTx only appends a WAL frame
+	// and is outside so the append is not held under visMu. The COMMITTED-state NOT
+	// NULL scan is INSIDE, at the top of the closure, and calls neither View nor
+	// ApplyAtomically — see the comment on it for why that placement is what makes
+	// its observation gap-free (rmp #2798).
 	//
 	// Lock ordering: the caller holds [Engine.schemaMu] exclusively, and schemaMu is
 	// taken before visMu everywhere in the write path — the ApplyAtomically call
@@ -3955,31 +4134,153 @@ func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstra
 		//
 		// backfillNodeHashIndex reads graph state directly (no View/Apply) and
 		// is safe to call inside the barrier. newBoundNodeHashIndex only
-		// interacts with index.Manager metadata, also safe.
+		// interacts with index.Manager metadata, also safe. The BINDING closures
+		// it installs keep reading e.g.ReadAt(nil), the live value, and must: they
+		// run at commit time, on the state the index has to converge to.
+		//
+		// seedValues is what the value-set is seeded from. It starts as the live
+		// validation scan's values and is used as such ONLY on the unbound
+		// fallback below, where there is no backing index for it to agree with;
+		// on every real path the backfill's own reads replace it (rmp #2792).
+		seedValues := values
 		op := exec.NewCreateConstraintOp(p.Name, p.Label, p.Property, kind, p.IfNotExists, idxMgr, e.constraintReg, e.ClearPlanCache)
+		if kind == exec.ConstraintNotNull {
+			// COMMITTED-STATE NOT NULL VALIDATION (rmp #2798).
+			//
+			// The live scan above cannot see that a node LACKS the property when an
+			// open transaction has eagerly FILLED it: the fill has not committed, the
+			// live read finds a value, and the DDL registered a NOT NULL constraint
+			// over a committed node that carries nothing. Measured on the pre-fix
+			// build, one goroutine and no concurrency at all: after an eager
+			// `SET n.email = 'x@x'` on a node with no committed email, CREATE
+			// CONSTRAINT returned err = <nil> with the constraint REGISTERED, and the
+			// rollback then left that node with no email under an active constraint.
+			// That is an ACID Consistency breach, and it is the same defect as
+			// rmp #2778 and rmp #2792 from the other side.
+			//
+			// This scan reads COMMITTED state, and it is ADDED to the live scan, not
+			// substituted for it. Either view alone is unsound — see the measurement
+			// recorded above the live scan — so the constraint is registered only when
+			// NEITHER the committed state NOR any in-flight eager state violates it.
+			// The refusal is deliberately conservative in the direction where a
+			// conservative answer is merely unhelpful, and never in the direction where
+			// it would be a breach.
+			//
+			// PLACED INSIDE THE BARRIER, immediately before applyDDLOp, for the reason
+			// rmp #2792 established for the UNIQUE seed and verified on this very path:
+			// commit-time fan-out runs under [lpg.Graph.ApplyInVersionedTx], which
+			// holds the barrier SHARED, so while this EXCLUSIVE hold is in force no
+			// transaction can commit at all. There is therefore NO window between this
+			// observation of the committed state and the registration it authorises —
+			// which the same scan placed outside the barrier could not claim, because
+			// [ExplicitTx] does not take the schema gate and its commit is not excluded
+			// by the caller's StrongLock.
+			//
+			// Re-entrancy: [Engine.scanLabelProperty] takes no barrier and calls
+			// neither Graph.View nor Graph.ApplyAtomically, and BeginRead/EndRead touch
+			// only the reclamation horizon (atomics) and the MVCC clock — never visMu,
+			// never the schema gate. The documented order schemaGate -> writer
+			// admission -> visMu is untouched. The horizon slot is returned before
+			// applyDDLOp, panic included, hence the closure.
+			//
+			// Nothing is registered yet, so a violation — or a ctx cancellation, which
+			// this scan polls — aborts the whole DDL cleanly with no unwind needed.
+			// validatePreExisting is reused so the refusal wording and the
+			// [exec.ErrConstraintViolation] wrap have one source of truth.
+			var committedNull bool
+			cerr := func() error {
+				snap := e.g.BeginRead()
+				defer e.g.EndRead(snap)
+				var serr error
+				committedNull, serr = e.scanLabelProperty(ctx, e.g.ReadAt(snap), p.Label, p.Property, nil)
+				return serr
+			}()
+			if cerr != nil {
+				return cerr
+			}
+			if err := validatePreExisting(kind, p.Label, p.Property, nil, committedNull); err != nil {
+				return err
+			}
+		}
 		if kind == exec.ConstraintUnique {
 			boundIdx, bidxErr := newBoundNodeHashIndex(e.g.ReadAt(nil), p.Label, p.Property)
 			if bidxErr == nil {
-				// Cancellation before registration aborts the constraint with
-				// nothing registered or made durable (atomicity preserved).
-				if berr := e.backfillNodeHashIndex(ctx, boundIdx, p.Label, p.Property); berr != nil {
+				// ONE SNAPSHOT ANSWERS FOR BOTH ENFORCEMENT STRUCTURES (rmp #2792).
+				//
+				// The backfill used to read the live property bag, which carries an
+				// explicit transaction's EAGER, UNCOMMITTED mutations, and
+				// [ExplicitTx.Rollback] discards that transaction's exec.IndexBuffer
+				// WITHOUT inverting it — the buffer describes changes that were never
+				// fanned out — so the backfill's own entry stayed in the backing index
+				// forever. Measured on this build before the fix, one goroutine and no
+				// concurrency at all: after a rolled-back SET the index held 1 entry
+				// for a value the graph never committed and 0 for the value it did
+				// hold, and a NodeByIndexSeek returned the fabricated row while losing
+				// the real one. The value-set, seeded from scanLabelProperty's live
+				// read, was wrong at the same instant and in BOTH directions: a
+				// committed write of the rolled-back value was REFUSED, and a
+				// duplicate of the value the graph actually held was ACCEPTED, leaving
+				// two committed nodes sharing it under an active UNIQUE constraint.
+				//
+				// Both now come from ONE read view at ONE instant — and in fact from
+				// the same READ of each node: the backfill records every non-null
+				// value it resolves into seed, so the index and the value-set cannot
+				// disagree about a node even in principle. See [uniqueValueSeed].
+				//
+				// The snapshot is opened HERE, INSIDE the visibility barrier, and that
+				// placement is what makes a catch-up log unnecessary rather than
+				// merely omitted. rmp #2738's permanent loss needs a transaction to
+				// fan its commit out between the scan and the registration; the
+				// commit-time fan-out runs under [lpg.Graph.ApplyInVersionedTx], which
+				// holds the barrier SHARED, so while this EXCLUSIVE hold is in force
+				// no fan-out can happen at all and a log opened here would record
+				// nothing. On the CREATE INDEX paths the backfill sits OUTSIDE the
+				// barrier, that window is real, and [Engine.beginIndexBuild] is what
+				// closes it — which is why this path does not reuse it.
+				//
+				// BeginRead adds no lock and no ordering: it takes the reclamation
+				// horizon (atomics) and the MVCC clock, never visMu and never the
+				// schema gate, so the documented order schemaGate -> writer admission
+				// -> visMu is untouched. The horizon slot is returned before the
+				// registration — panic included, hence the closure — so a long
+				// registration never pins reclamation.
+				//
+				// Cancellation before registration aborts the constraint with nothing
+				// registered or made durable (atomicity preserved), and the seed is
+				// merged only after every worker returned, so a cancelled backfill
+				// yields no partial seed either.
+				var seed uniqueValueSeed
+				berr := func() error {
+					snap := e.g.BeginRead()
+					defer e.g.EndRead(snap)
+					return e.backfillNodeHashIndex(ctx, e.g.ReadAt(snap), boundIdx, p.Label, p.Property, &seed)
+				}()
+				if berr != nil {
 					return berr
 				}
 				op.WithBackingIndex(boundIdx)
+				seedValues = seed.values
 			}
 			// On binding error fall through: the operator uses an unbound
 			// index as a safe fallback. The value-set (seeded below) remains
 			// the primary enforcement source; the secondary check is cosmetic.
+			// That branch keeps the live validation values, because with no
+			// backing index there is no second structure for them to agree with.
+			// newBoundNodeHashIndex fails only on an empty label or property,
+			// which the DDL parser cannot produce.
 		}
 		if err := applyDDLOp(ctx, op); err != nil {
 			return err
 		}
 		if kind == exec.ConstraintUnique {
-			if err := e.constraintReg.SeedUniqueValues(p.Label, p.Property, values); err != nil {
-				// Unreachable in practice: with writers excluded the seed
-				// re-checks the same values validatePreExisting already
-				// accepted. Unwind defensively so a failure can never leave a
-				// half-registered constraint behind.
+			if err := e.constraintReg.SeedUniqueValues(p.Label, p.Property, seedValues); err != nil {
+				// REACHABLE SINCE rmp #2792, and when it fires it is the correct
+				// refusal. validatePreExisting accepted the LIVE values; these are
+				// the COMMITTED ones, so a duplicate that an open transaction had
+				// eagerly removed is seen here and nowhere earlier. Measured before
+				// the fix: that constraint was REGISTERED over committed data still
+				// holding the duplicate. The unwind below is what refuses it, and
+				// it also remains the defensive path it always was.
 				return e.unwindConstraintRegistration(err, p.Name, p.Label, p.Property, kind, idxMgr)
 			}
 		}
@@ -4110,31 +4411,147 @@ func (e *Engine) dropConstraintLocked(ctx context.Context, p *ir.DropConstraint,
 // rewindConstraintDrop re-establishes a just-removed constraint after a failure
 // later in the DROP CONSTRAINT sequence (the WAL append), by re-registering it
 // with the same identity and, for UNIQUE, re-creating and re-seeding its
-// backing index from the live graph. It is the DROP-path analogue of
+// backing index from COMMITTED state. It is the DROP-path analogue of
 // unwindConstraintRegistration: without it a constraint would vanish in memory
 // while remaining durable, so the next reopen would resurrect it (removed but
 // not durable). It returns cause, optionally joined with the rewind's own error.
 //
 // The rewind runs with an uncancellable context so it completes even when the
 // caller's ctx is already done.
+//
+// # Why this reads a snapshot, and why the LOSS it could have traded for is not
+// reachable (rmp #2799)
+//
+// This used to rebuild both enforcement structures from the LIVE property bag,
+// which carries an explicit transaction's EAGER, UNCOMMITTED mutations — rmp
+// #2778's and rmp #2792's defect, which both of those tasks deliberately left
+// here. Measured on the pre-fix build, one goroutine and NO concurrency, with a
+// transaction holding an eager mutation across a DROP CONSTRAINT whose WAL fsync
+// failed: after `SET n.name = 'seed-1-ghost'` on tag k7 was rolled back, the
+// rebuilt UNIQUE backing index held 1 entry for the value no transaction ever
+// committed and 0 for 'seed-7', the value the graph does hold, so a seek returned
+// the FABRICATED row and LOST the real one. `REMOVE n:Person` and `DETACH DELETE
+// n` each lost the real entry the same way. The value-set was seeded from a
+// second live read and was wrong at the same instant.
+//
+// rmp #2792 could not simply be extended here, and that is why this was its own
+// task. Its backfill sits inside the visibility barrier under an EXCLUSIVE hold,
+// so nothing can commit between its snapshot and the registration it authorises.
+// This rewind held NO barrier, and a snapshot taken outside one cannot see a
+// value committed after it was taken — which would drop that value from the
+// value-set and let a genuine duplicate through UNIQUE enforcement. That trade is
+// worse than the defect.
+//
+// The window is closed on BOTH counts rather than traded:
+//
+//   - STRUCTURALLY, by the barrier. The whole rewind now runs inside
+//     [lpg.Graph.ApplyAtomically], exactly as [Engine.createConstraintLocked]
+//     does, so the snapshot, the backfill and the registration are one instant.
+//     Commit-time fan-out runs under [lpg.Graph.ApplyInVersionedTx], which holds
+//     the barrier SHARED, so while this EXCLUSIVE hold is in force no transaction
+//     can commit and no value can be lost between the read and the registration.
+//   - AND BY REACHABILITY, measured. The rewind runs ONLY after
+//     commitConstraintTx failed, and every failure it can return through the DDL
+//     surface leaves the WAL writer unable to accept another frame: a SyncGroup
+//     or SyncBuffered failure poisons it ([wal.ErrDurabilityFailed], sticky), an
+//     AppendRun failure is either that same sticky error, [wal.ErrWriterClosed],
+//     or a bufio write error whose stickiness fails every later append, and the
+//     remaining branches ([txn.ErrTxFinished], [txn.ErrTransactionTooLarge], the
+//     encoder's identifier cap) cannot fire for a freshly-begun single-op DDL
+//     whose identifiers the parser already bounds at 4096 bytes. Measured on this
+//     build: an explicit transaction held OPEN across the whole failed DROP could
+//     not commit afterwards — Commit returned the poison and its node never
+//     became visible.
+//
+// Which of the two carries the weight TODAY is the reachability half, and that is
+// stated rather than glossed: neutralising the barrier — running the same closure
+// with no exclusive hold — fails NOTHING in the gate below, because on the only
+// reachable path there is nothing left that could commit for it to exclude. The
+// barrier is kept because the reachability half is an argument about ANOTHER
+// package's failure inventory: the day commitConstraintTx acquires a failure that
+// does not fail-stop the writer — a validation refusal at the txn layer, say — the
+// snapshot silently stops being sound, and no test here would notice. The barrier
+// keeps it sound structurally, costs one exclusive hold on a path that runs at
+// most once per fail-stopped store, and makes this function identical in
+// discipline to createConstraintLocked instead of a second variant free to drift.
+//
+// NO UNION with a live read is taken, and that is the difference from rmp #2798.
+// There the union is over a VIOLATION predicate, so admitting the live view only
+// ever refuses a DDL that might have been legal — unhelpful, never a breach.
+// Here a live value would be merged into the enforcement value-set permanently,
+// so a phantom from a rolled-back transaction would refuse a legitimate write
+// forever. Conservative in the harmless direction there; not conservative at all
+// here.
+//
+// Adding an exclusion is NOT how this is done: an explicit transaction still does
+// not take the schema gate, and the lock order stays schemaGate -> writer
+// admission -> visMu. The caller holds schemaGate exclusively and its store
+// transaction is already finished (CommitWALOnly clears the writer registration
+// on failure as well as on success), so taking visMu here is strictly inside the
+// documented order.
 func (e *Engine) rewindConstraintDrop(cause error, name, label, prop string, kind exec.ConstraintKind, idxMgr *index.Manager) error {
 	op := exec.NewCreateConstraintOp(name, label, prop, kind, false, idxMgr, e.constraintReg, e.ClearPlanCache)
-	if kind == exec.ConstraintUnique {
-		if boundIdx, bidxErr := newBoundNodeHashIndex(e.g.ReadAt(nil), label, prop); bidxErr == nil {
-			// The rewind is uncancellable by design (see runDDLOp below): a
-			// background context never cancels, so the backfill cannot error.
-			_ = e.backfillNodeHashIndex(context.Background(), boundIdx, label, prop)
-			op.WithBackingIndex(boundIdx)
+	// The visibility barrier is not re-entrant, so nothing inside the closure may
+	// call Graph.View or Graph.ApplyAtomically. newBoundNodeHashIndex touches only
+	// index.Manager metadata; backfillNodeHashIndex and scanLabelProperty read
+	// graph state directly and take no barrier; BeginRead/EndRead touch only the
+	// reclamation horizon (atomics) and the MVCC clock. All four are the same
+	// calls createConstraintLocked already makes inside this same barrier.
+	rerr := e.g.ApplyAtomically(func() error {
+		// bound reports whether the backing index was built, hence whether seed
+		// carries the values the index was built from.
+		var seed uniqueValueSeed
+		bound := false
+		if kind == exec.ConstraintUnique {
+			// The binding closures newBoundNodeHashIndex installs keep reading
+			// e.g.ReadAt(nil), the live value, and must: they run at commit time,
+			// on the state the index has to converge to. Only the BACKFILL below
+			// reads the snapshot. This mirrors createConstraintLocked exactly.
+			if boundIdx, bidxErr := newBoundNodeHashIndex(e.g.ReadAt(nil), label, prop); bidxErr == nil {
+				// ONE READ ANSWERS FOR BOTH ENFORCEMENT STRUCTURES (rmp #2792):
+				// the backfill records every non-null value it resolves into seed,
+				// and the value-set is seeded from that, so the index and the
+				// value-set cannot disagree about a node even in principle.
+				//
+				// The rewind is uncancellable by design (see runDDLOp below): a
+				// background context never cancels, so the backfill cannot error.
+				func() {
+					snap := e.g.BeginRead()
+					defer e.g.EndRead(snap)
+					_ = e.backfillNodeHashIndex(context.Background(), e.g.ReadAt(snap), boundIdx, label, prop, &seed)
+				}()
+				op.WithBackingIndex(boundIdx)
+				bound = true
+			}
+			// On binding error fall through: the constraint is re-registered with
+			// an unbound index, and the value-set — seeded below from its own
+			// scan of the same committed state — remains the primary enforcement
+			// source. newBoundNodeHashIndex fails only on an empty label or
+			// property, and both come from a registry entry that was populated by
+			// a DDL the parser had already rejected empty identifiers for.
 		}
-	}
-	if rerr := applyDDLOp(context.Background(), op); rerr != nil {
+		if err := applyDDLOp(context.Background(), op); err != nil {
+			return err
+		}
+		if kind == exec.ConstraintUnique {
+			values := seed.values
+			if !bound {
+				// No backing index was built, so there is no read to reuse. Scan
+				// the SAME committed state the backfill would have read, never the
+				// live one: an unbound fallback is a reason to have no second
+				// structure, not a reason to seed the first from uncommitted data.
+				func() {
+					snap := e.g.BeginRead()
+					defer e.g.EndRead(snap)
+					_, _ = e.scanLabelProperty(context.Background(), e.g.ReadAt(snap), label, prop, &values)
+				}()
+			}
+			e.constraintReg.SeedUniqueValuesIgnoringDuplicates(label, prop, values)
+		}
+		return nil
+	})
+	if rerr != nil {
 		return errors.Join(cause, fmt.Errorf("cypher: rewind constraint drop: %w", rerr))
-	}
-	if kind == exec.ConstraintUnique {
-		// The rewind is uncancellable by design (see runDDLOp below): a
-		// background context never cancels, so the scan cannot error.
-		values, _, _ := e.scanLabelProperty(context.Background(), label, prop)
-		e.constraintReg.SeedUniqueValuesIgnoringDuplicates(label, prop, values)
 	}
 	return cause
 }
@@ -4228,12 +4645,26 @@ func commitIndexTx(tx *txn.Tx[string, float64], opKind txn.OpKind, kind txn.Inde
 	return tx.CommitWALOnly(0)
 }
 
-// scanLabelProperty walks the live (non-tombstoned) nodes carrying label and
-// returns the values of their prop property and whether any such node lacks the
-// property (a null for the NOT NULL check). It is used both to validate
-// pre-existing data on CREATE CONSTRAINT and to re-seed a UNIQUE value-set on
-// recovery. The scan is O(N) over interned nodes; CREATE CONSTRAINT is a rare
-// schema operation, so the cost is acceptable and bounded by the graph size.
+// scanLabelProperty walks the nodes rv can see that carry label and reports
+// whether any of them lacks prop (a null for the NOT NULL check). When vals is
+// non-nil it also appends the value each such node holds under prop. It is used
+// to validate pre-existing data on CREATE CONSTRAINT and to re-seed a UNIQUE
+// value-set on recovery. The scan is O(N) over interned nodes; CREATE CONSTRAINT
+// is a rare schema operation, so the cost is acceptable and bounded by the graph
+// size.
+//
+// rv decides WHICH STATE is scanned, and that is the caller's whole choice of
+// semantics — the same parameter, for the same reason, as
+// [Engine.backfillNodeHashIndex] (rmp #2778). e.g.ReadAt(nil) reads the LIVE
+// stored value, which carries an explicit transaction's eager, uncommitted
+// mutations; a view bound to a [lpg.Snapshot] reads COMMITTED state. CREATE
+// CONSTRAINT ... IS NOT NULL needs BOTH and neither alone, which is measured
+// rather than reasoned about; see [Engine.createConstraintLocked].
+//
+// vals is nil for a caller that only asks the null question, and that is not a
+// micro-optimisation: a NOT NULL DDL used to collect one [lpg.PropertyValue] per
+// labelled node into a slice that nothing then read, and the committed-state
+// scan this function now also serves would have doubled it.
 //
 // The scan is two-phase to preserve liveness under concurrent writers (task
 // #1339): [graph.Mapper.Walk] holds each shard's read lock while iterating
@@ -4247,25 +4678,28 @@ func commitIndexTx(tx *txn.Tx[string, float64], opKind txn.OpKind, kind txn.Inde
 // tombstone, label, and property state after every shard lock is released. The
 // keys are interned and immutable, so resolving them outside the walk is safe.
 //
-// It takes NO BARRIER. Both phases used to run inside lpg.Graph.View (task
-// #1341) for CATALOG stability across the scan. [Engine.schemaMu] supplies that
-// already, and strictly better: every catalog mutator — both [lpg.Graph.ApplyAtomically]
-// call sites, and every DDL entry point (runCreateBTreeIndex, runCreateHashIndex,
-// runDropIndex, runCreateConstraint, runDropConstraint) — holds schemaMu
-// EXCLUSIVELY, while an ordinary write holds it shared. Each of this function's three
-// callers is therefore already covered: createConstraintLocked and rewindConstraintDrop
-// run under runCreateConstraint's and runDropConstraint's exclusive hold, and
-// registerRecoveredConstraints runs inside NewEngineWithOptions before the engine is
-// published to anyone. Dropping the View also removes a lock-order hazard, since it
-// nested visMu inside schemaMu purely to obtain what schemaMu already guaranteed.
+// It takes NO BARRIER of its own, and it is safe to call from INSIDE one, which
+// the committed-state NOT NULL scan relies on. Both phases used to run inside
+// lpg.Graph.View (task #1341) for CATALOG stability across the scan.
+// [Engine.schemaMu] supplies that already, and strictly better: every catalog
+// mutator — both [lpg.Graph.ApplyAtomically] call sites, and every DDL entry point
+// (runCreateBTreeIndex, runCreateHashIndex, runDropIndex, runCreateConstraint,
+// runDropConstraint) — holds schemaMu EXCLUSIVELY, while an ordinary write holds it
+// shared. Each of this function's callers is therefore already covered:
+// createConstraintLocked and rewindConstraintDrop run under runCreateConstraint's and
+// runDropConstraint's exclusive hold, and registerRecoveredConstraints runs inside
+// NewEngineWithOptions before the engine is published to anyone. Dropping the View
+// also removes a lock-order hazard, since it nested visMu inside schemaMu purely to
+// obtain what schemaMu already guaranteed.
 //
-// It never gave the scan a consistent view of DATA and still does not: since rmp #2320
-// an ordinary write holds the barrier SHARED, so a value a concurrent writer is adding
-// may or may not be seen here. That is sound for what this scan is FOR — it
-// pre-validates a constraint that is not yet registered, and every write after
-// registration is checked by the enforcement path — so a value added during the
-// scan is caught there rather than missed. A scan that needed a consistent data
-// view would take a snapshot instead.
+// On a LIVE view it never gave the scan a consistent view of DATA and still does
+// not: since rmp #2320 an ordinary write holds the barrier SHARED, so a value a
+// concurrent writer is adding may or may not be seen. That is sound for what the
+// live scan is FOR — it pre-validates a constraint that is not yet registered, and
+// every write after registration is checked by the enforcement path — so a value
+// added during the scan is caught there rather than missed. A caller that needs a
+// consistent data view passes a snapshot-bound rv, which is precisely what rmp
+// #2798 added on the NOT NULL path.
 //
 // The #1339 deadlock is prevented by the TWO-PHASE structure below, not by any lock:
 // phase 1 snapshots (id, key) pairs under the mapper shard locks and phase 2 resolves
@@ -4275,10 +4709,14 @@ func commitIndexTx(tx *txn.Tx[string, float64], opKind txn.OpKind, kind txn.Inde
 // (rmp #1872 — this scan polled no cancellation at all before, leaving a large
 // CREATE CONSTRAINT, NOT NULL in particular, uncancellable end-to-end since no
 // other step in createConstraintLocked is ctx-aware). On cancellation err is
-// non-nil and values/anyNull must be ignored — nothing has been registered
-// yet at any call site, so aborting here is always a clean, atomic no-op.
-func (e *Engine) scanLabelProperty(ctx context.Context, label, prop string) (values []lpg.PropertyValue, anyNull bool, err error) {
-	mapper := e.g.AdjList().Mapper()
+// non-nil and anyNull, plus whatever was appended to vals, must be ignored —
+// nothing has been registered yet at any call site, so aborting here is always a
+// clean, atomic no-op.
+func (e *Engine) scanLabelProperty(
+	ctx context.Context, rv *lpg.ReadView[string, float64],
+	label, prop string, vals *[]lpg.PropertyValue,
+) (anyNull bool, err error) {
+	mapper := rv.AdjList().Mapper()
 
 	type nodeRef struct {
 		key string
@@ -4296,24 +4734,26 @@ func (e *Engine) scanLabelProperty(ctx context.Context, label, prop string) (val
 	for i := range refs {
 		if i&pollGranularityMask == 0 {
 			if cerr := ctx.Err(); cerr != nil {
-				return values, anyNull, cerr
+				return anyNull, cerr
 			}
 		}
 		r := refs[i]
-		if e.g.IsTombstoned(r.id) {
+		if rv.IsTombstoned(r.id) {
 			continue
 		}
-		if !e.g.HasNodeLabel(r.key, label) {
+		if !rv.HasNodeLabel(r.key, label) {
 			continue
 		}
-		v, ok := e.g.GetNodeProperty(r.key, prop)
+		v, ok := rv.GetNodeProperty(r.key, prop)
 		if !ok {
 			anyNull = true
 			continue
 		}
-		values = append(values, v)
+		if vals != nil {
+			*vals = append(*vals, v)
+		}
 	}
-	return values, anyNull, err
+	return anyNull, err
 }
 
 // validatePreExisting enforces the at-creation invariant for CREATE CONSTRAINT
@@ -5162,7 +5602,26 @@ func (e *Engine) parseAndAnalyse(query string) (*planCacheEntry, map[string]stri
 // [Engine.parseAndAnalyse], split out so the literal-hoisting path can build an
 // entry for the rewritten text and fall back to the original when the rewrite
 // does not parse.
+//
+// Concurrent misses on the SAME text are collapsed into one compilation by
+// [planBuildGroup]: the first caller compiles, the rest wait and share its
+// result. This is a change of who runs the parser, never of what it produces —
+// the entry is a pure function of the query text and the index schema, and is
+// immutable once published, which is already why the LRU hands one pointer to
+// every later caller.
+//
+// Without it, N goroutines starting together each miss and each parse, and
+// those parses are not independent: they contend on the ONE ATN the generated
+// ANTLR lexer and parser share process-wide. Measured at rmp #2740, that was a
+// median 762.68 s of mutex delay at concurrency 1024 on cypher-read-scan-large,
+// out of 762.90 s process-wide; with this collapse it is 0.
 func (e *Engine) buildPlanCacheEntry(query string) (*planCacheEntry, error) {
+	return e.planBuilds.do(query, e.compilePlanCacheEntry)
+}
+
+// compilePlanCacheEntry is the body of [Engine.buildPlanCacheEntry], run by
+// exactly one goroutine per query text at a time.
+func (e *Engine) compilePlanCacheEntry(query string) (*planCacheEntry, error) {
 	astNode, planMode, err := parser.ParseStatement(query)
 	if err != nil {
 		return nil, fmt.Errorf("cypher: parse: %w", err)
@@ -7090,10 +7549,31 @@ func BuildPlanWithMutator(
 	// adjacency cache to share, so a relationship-type-filtered pattern on this
 	// path always rebuilds its type column — correct, just unamortised.
 	//
-	// It also passes the zero [planGates], so the public entry point keeps the
-	// unoptimised access paths it has always had. Only the Engine, which owns
-	// the EngineOptions that gate each substitution, enables them.
-	return buildPlanWithMutatorFull(plan, walker, labelSrc, reg, params, mutator, nil, nil, 0, nil, planGates{})
+	// It also passes the zero [planGates] for the ORDER-NEUTRAL substitutions, so
+	// the public entry point keeps the unoptimised access paths it has always had.
+	// Only the Engine, which owns the EngineOptions that gate each substitution,
+	// enables them.
+	//
+	// It passes a nil [writeEvalScaffold] for the same reason: it has no Engine and
+	// no writer view to evaluate an EXISTS { … }, a COUNT { … } or a pattern
+	// predicate against, so this path keeps the bare [expr.Eval] behaviour
+	// documented on [buildOpts] (rmp #2660).
+	//
+	// The two rmp #2814 fields are the exception, and they are NOT left at their
+	// zero value:
+	//
+	//   - indexSeek is set TRUE because the equality hash seek was never gated by
+	//     planGates at all: its only condition was `idxMgr != nil`, so it fired on
+	//     this path already. Passing false here would silently retire an access
+	//     path this entry point has always taken, which is a behaviour change #2814
+	//     is not entitled to make.
+	//   - pendingIdx is read off the mutator, because this path DOES write, its
+	//     writes DO land in the adapter's index buffer, and the seek it takes is
+	//     therefore exposed to exactly the staleness #2814 measured. Reading it
+	//     from the mutator rather than from a new parameter is why
+	//     [mutatorIndexDelta] exists.
+	return buildPlanWithMutatorFull(plan, walker, labelSrc, reg, params, mutator, nil, nil, 0, nil,
+		planGates{indexSeek: true, pendingIdx: mutatorIndexDelta(mutator, plan)}, nil)
 }
 
 // planGates carries the ORDER-NEUTRAL planner substitutions the write-path build
@@ -7134,6 +7614,18 @@ type planGates struct {
 	minLabelScan    bool
 	bitmapIntersect bool
 	hashJoin        bool
+	// indexSeek gates the EQUALITY hash seek and the key-set seek. Unlike the
+	// gates above it is not an order-neutrality question: the equality rewrite
+	// shipped with no kill switch of its own — its only gate was idxMgr != nil —
+	// so there was no way to turn it off when it answered wrongly (rmp #2814).
+	// Wired from EngineOptions.DisableIndexSeek.
+	indexSeek bool
+	// pendingIdx names the (label, property) coordinates this transaction has
+	// already mutated in the graph without the property indexes having been told,
+	// so every property-index access path can decline on them and fall back to
+	// the scan+filter that reads the writer view (rmp #2814). nil means nothing
+	// is pending, which is the state of every read-only build.
+	pendingIdx *pendingIndexDelta
 }
 
 // buildPlanWithMutatorFull is the engine-internal variant of
@@ -7143,6 +7635,11 @@ type planGates struct {
 // maxCollectItems carries the Engine's per-group element budget for buffering
 // aggregators into the write-path build, using the EngineOptions.MaxCollectItems
 // encoding (0 → default, <0 → no cap, >0 → active).
+//
+// evals carries the statement's expression-level evaluators (rmp #2660) and is
+// nil on the public [BuildPlanWithMutator] path, which keeps the bare
+// [expr.Eval] behaviour it has always had. See [writeEvalScaffold] for what was
+// broken while this was unconditionally absent.
 func buildPlanWithMutatorFull(
 	plan ir.LogicalPlan,
 	walker nodeWalkerIface,
@@ -7155,6 +7652,7 @@ func buildPlanWithMutatorFull(
 	maxCollectItems int,
 	procReg *procs.Registry,
 	gates planGates,
+	evals *writeEvalScaffold,
 ) (op exec.Operator, cols []string, err error) {
 	schema := make(map[string]int)
 	argByTag := make(map[uint32]*exec.Argument)
@@ -7192,6 +7690,24 @@ func buildPlanWithMutatorFull(
 	// paths now gate on this one flag and neither runs a per-query order scan.
 	bopts.hashJoinEnabled = gates.hashJoin
 	bopts.indexNestedLoopEnabled = gates.hashJoin
+	// Equality / key-set seek gating and the pending-index-delta decline (rmp
+	// #2814). BOTH must be threaded here, and this is the ONLY place the write
+	// path can thread them: the equality seek's sole gate used to be
+	// `idxMgr != nil`, so it fired on every write build — including the public
+	// [BuildPlanWithMutator], which passes an all-false planGates — while the
+	// property indexes it reads still described the graph as it was before the
+	// transaction started.
+	bopts.indexSeekEnabled = gates.indexSeek
+	bopts.pendingIdx = gates.pendingIdx
+	// The expression-level evaluators (rmp #2660). Without them [evalRow] saw two
+	// nil fields and degraded to the bare [expr.Eval] path for every expression in
+	// a writing statement, so a pattern predicate, an EXISTS { … } outside WHERE
+	// position and a COUNT { … } anywhere all failed with a typed "not supported in
+	// this evaluation context" error that the identical read-only statement does
+	// not raise. Bound HERE, after the gates, because [subqueryEvaluator.bind]
+	// stores THIS bopts back on the evaluator; the remaining assignments below are
+	// nonetheless visible to it, since what it stores is the pointer.
+	evals.bindInto(bopts, params)
 	bopts.writeFallback = func(child ir.LogicalPlan) (exec.Operator, error) {
 		return buildOperatorWrite(child, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)
 	}
@@ -7400,12 +7916,15 @@ func buildOperatorWrite(
 				v, evalErr := evalRow(capturedBopts, capturedExpr, rowCtx, capturedParams, capturedReg)
 				if evalErr != nil {
 					// Fail-stop: a runtime error evaluating the SET RHS (arithmetic,
-					// type, an unsupported subquery expression, …) must fail the
-					// statement so it rolls back atomically — never be swallowed
-					// into a silent no-op. Swallowing it caused, e.g.,
-					// `SET n.p = COUNT { (n)-->() }` under RunInTx to leave n.p
-					// unset with no diagnostic, while the same RHS raises loudly in
-					// RETURN/WHERE (audit 2026-07-13 cypher F1).
+					// type, an out-of-domain index, …) must fail the statement so it
+					// rolls back atomically — never be swallowed into a silent no-op.
+					// Swallowing it left the property unset with no diagnostic at all,
+					// while the same RHS raises loudly in RETURN/WHERE (audit
+					// 2026-07-13 cypher F1). The example this comment used to give —
+					// `SET n.p = COUNT { (n)-->() }` — stopped being one when rmp #2660
+					// wired the write path's evaluators: that RHS now evaluates and
+					// stores the count. TestSet_EvalErrorRHS_FailStop drives this
+					// branch with `n.name[0]` instead.
 					return lpg.PropertyValue{}, false, false, evalErr
 				}
 				if v == nil || expr.IsNull(v) {
@@ -8252,6 +8771,33 @@ func copySchema(schema map[string]int) map[string]int {
 	return cp
 }
 
+// restoreSchema overwrites schema in place so it holds exactly snap's entries.
+//
+// It is the counterpart of [copySchema] for an Apply-family operator whose
+// output row is its OUTER row unchanged: the inner subtree is built against the
+// same shared map — it must resolve the correlation variables at their outer
+// column indices — and every column it registers there is private to it. Both
+// directions matter, so a plain re-add would not do: entries the inner build
+// ADDED have to go (they inflate schemaWidth past the forwarded row's real
+// width) and entries it DELETED or REBASED, which buildIRProjection's
+// post-projection reset does to the whole map, have to come back. The map is
+// mutated rather than replaced because callers up the recursion hold the same
+// reference.
+//
+// Used by the SemiApply and AntiSemiApply builders (rmp #2779). The
+// *ir.RollUpApply case performs the same restore inline and then registers the
+// one extra column that operator adds.
+func restoreSchema(schema, snap map[string]int) {
+	for k := range schema {
+		if _, keep := snap[k]; !keep {
+			delete(schema, k)
+		}
+	}
+	for k, v := range snap {
+		schema[k] = v
+	}
+}
+
 // schemaWidth returns the actual row width implied by schema: the maximum
 // column index present plus one. This is the correct "next available column
 // index" to use when appending a new column to the row.
@@ -8299,7 +8845,9 @@ func mapLiteralHasNonLiteralValue(ml *ast.MapLiteral) bool {
 // The closure:
 //  1. Builds an [expr.RowContext] from the current row using the captured schema
 //     and mutator (for upgrading IntegerValue(NodeID) → NodeValue with properties).
-//  2. Calls [expr.Eval] on each value expression in ml.
+//  2. Calls [evalRow] on each value expression in ml, so a value that is an
+//     EXISTS { … }, a COUNT { … } or a pattern predicate is evaluated rather
+//     than refused (rmp #2781).
 //  3. Converts the resulting [expr.Value] to [lpg.PropertyValue]; entries that
 //     evaluate to Null or to an unsupported type are silently omitted — except
 //     that, when mergeContext is true, a value that evaluates to null instead
@@ -8371,7 +8919,17 @@ func buildPropsEvalFn(
 
 		var out []exec.PropEntry
 		for i, k := range keys {
-			v, evalErr := expr.Eval(vals[i], rowCtx, params, reg)
+			// evalRow, not expr.Eval: a property VALUE is an ordinary
+			// expression and may be an EXISTS { … }, a COUNT { … } or a
+			// pattern predicate, exactly as the same expression may be in a
+			// RETURN item. Calling expr.Eval here bypassed buildOpts entirely,
+			// so the two evaluators #2660 wired onto the write path never
+			// reached this closure and every such value failed with
+			// "not supported in this evaluation context" (rmp #2781). evalRow
+			// degrades to expr.Eval by itself when bopts carries no evaluator
+			// — the public BuildPlanWithMutator path — so that path is
+			// unchanged.
+			v, evalErr := evalRow(bopts, vals[i], rowCtx, params, reg)
 			if evalErr != nil {
 				// Fail-stop: a runtime error evaluating a property value fails
 				// the statement rather than being swallowed into a silently
@@ -8523,7 +9081,10 @@ func buildMapEvalFn(
 		var entries []exec.PropEntry
 		var nullKeys []string
 		for i, k := range keys {
-			v, evalErr := expr.Eval(vals[i], rowCtx, params, reg)
+			// evalRow, not expr.Eval — same reason as [buildPropsEvalFn]:
+			// a SET-map value is an ordinary expression and may carry a
+			// subquery or a pattern predicate (rmp #2781).
+			v, evalErr := evalRow(bopts, vals[i], rowCtx, params, reg)
 			if evalErr != nil {
 				return nil, nil, evalErr
 			}
@@ -8567,7 +9128,11 @@ func buildExprMapEvalFn(
 			return expr.Null, nil
 		}
 		rowCtx := buildRowCtxFromMutator(row, schemaCopy, mutator, scalarSnap)
-		return expr.Eval(exprAST, rowCtx, params, reg)
+		// evalRow, not expr.Eval — same reason as [buildPropsEvalFn]. The RHS
+		// here is a whole map-valued expression (a CASE, a coalesce, a map
+		// projection), any sub-expression of which may be a subquery or a
+		// pattern predicate (rmp #2781).
+		return evalRow(bopts, exprAST, rowCtx, params, reg)
 	}
 }
 
@@ -8768,7 +9333,11 @@ func buildMergeActionEvals(
 		propKey := e.Key
 		out[exec.MergeActionEvalKey(e.TargetVar, e.Key)] = func(row exec.Row) (lpg.PropertyValue, bool, bool, error) {
 			rowCtx := buildRowCtxFromMutator(row, schemaCopy, mutator, scalarSnap)
-			v, evalErr := expr.Eval(valAST, rowCtx, params, reg)
+			// evalRow, not expr.Eval — same reason as [buildPropsEvalFn]: a
+			// MERGE ON CREATE / ON MATCH SET right-hand side is an ordinary
+			// expression and may carry a subquery or a pattern predicate
+			// (rmp #2781).
+			v, evalErr := evalRow(bopts, valAST, rowCtx, params, reg)
 			if evalErr != nil {
 				// Fail-stop, matching regular SET: a MERGE ON CREATE/ON MATCH SET
 				// RHS runtime error fails the statement rather than being swallowed
@@ -9479,7 +10048,7 @@ func buildOperatorRec(
 		// n.prop = $name and a hash index is available, produce NodeByIndexSeek
 		// directly without first building the scan child.
 		if idxMgr != nil {
-			if op, ok, err := tryBuildIndexSeekFromSelection(p, params, schema, idxMgr, labelSrc); err != nil {
+			if op, ok, err := tryBuildIndexSeekFromSelection(p, params, schema, idxMgr, labelSrc, bopts); err != nil {
 				return nil, err
 			} else if ok {
 				return op, nil
@@ -9493,7 +10062,7 @@ func buildOperatorRec(
 			if lw, ok := walker.(*lpgNodeWalker); ok {
 				seekSetG = lw.g
 			}
-			if op, ok := tryBuildIndexSeekSetFromSelection(p, params, schema, idxMgr, seekSetG); ok {
+			if op, ok := tryBuildIndexSeekSetFromSelection(p, params, schema, idxMgr, seekSetG, bopts); ok {
 				return op, nil
 			}
 		}
@@ -9945,6 +10514,47 @@ func buildOperatorRec(
 		if err != nil {
 			return nil, err
 		}
+		// SCHEMA ISOLATION on the inner side (rmp #2779). [exec.SemiApply] emits
+		// the OUTER row unchanged and discards the inner row entirely, so the
+		// inner pipeline's column layout is PRIVATE: nothing above this operator
+		// may observe it, and the schema this build leaves behind must be exactly
+		// the outer one.
+		//
+		// The shared `schema` map does not give that by itself. It is threaded
+		// through the whole build, and two inner-side operators write to it in
+		// ways that corrupt the outer layout:
+		//
+		//  1. A Projection is DESTRUCTIVE. buildIRProjection's post-projection
+		//     reset deletes every key it does not keep and rebases the survivors
+		//     to 0..len(items)-1, so a body ending in a RETURN (which
+		//     [ir.existsSubPlan] must translate — the other half of #2779) wipes
+		//     the outer variables out of the map, or rebinds one of their names to
+		//     an inner-side index. Downstream reads of an outer variable then land
+		//     on a slot the forwarded outer row does not carry, and evaluate to
+		//     null. That is the exact refutation #2675 recorded when it tried the
+		//     translator half alone: the TCK fell 3897 → 3892 with `RETURN n`
+		//     yielding [null] (ExistentialSubquery2 [1] [2], ExistentialSubquery3
+		//     [1] [2] [3]).
+		//  2. Every inner scan and Expand APPENDS columns at schemaWidth(schema),
+		//     which survives the inner build and inflates the width the map
+		//     implies. An operator built ABOVE this one then allocates its own
+		//     fresh columns past that inflated width while the row it actually
+		//     receives is only outerWidth wide, so its bindings mis-offset. This
+		//     needed no RETURN in the body at all:
+		//     `MATCH (a:Anchor {id: 0}) WHERE EXISTS { MATCH (a)-[:K]->(x) }
+		//     MATCH (a)-[:K]->(y) RETURN a.id, y.ord` read y.ord as null on every
+		//     row, while the same query without the EXISTS answered correctly.
+		//
+		// Snapshotting the outer schema and restoring it verbatim closes both. It
+		// is the same remedy the *ir.RollUpApply case below already applies, for
+		// defect (1) and in the same words — SemiApply is the simpler of the two,
+		// because it adds no column of its own to register after the restore.
+		//
+		// Inner-only bindings are DROPPED rather than kept, which is what
+		// openCypher requires: CIP2015-05-13-EXISTS states that "any variables
+		// introduced in an <ExistentialSubquery> are not available outside the
+		// subquery context".
+		outerSchemaSnap := copySchema(schema)
 		// Pre-allocate the exec.Argument and register it under the IR
 		// SemiApply's ArgTag so the inner subtree's matching Argument leaf
 		// resolves to this instance and receives the outer row per iteration.
@@ -9959,6 +10569,7 @@ func buildOperatorRec(
 		if argByTag != nil {
 			delete(argByTag, p.ArgTag)
 		}
+		restoreSchema(schema, outerSchemaSnap)
 		return exec.NewSemiApply(outer, inner, arg), nil
 
 	case *ir.AntiSemiApply:
@@ -9966,6 +10577,10 @@ func buildOperatorRec(
 		if err != nil {
 			return nil, err
 		}
+		// Schema isolation on the inner side, identically to *ir.SemiApply above
+		// and for the same two reasons — [exec.AntiSemiApply] likewise forwards the
+		// outer row unchanged and discards the inner one. See that case's comment.
+		outerSchemaSnap := copySchema(schema)
 		arg := exec.NewArgument()
 		if argByTag != nil {
 			argByTag[p.ArgTag] = arg
@@ -9977,6 +10592,7 @@ func buildOperatorRec(
 		if argByTag != nil {
 			delete(argByTag, p.ArgTag)
 		}
+		restoreSchema(schema, outerSchemaSnap)
 		return exec.NewAntiSemiApply(outer, inner, arg), nil
 
 	case *ir.RollUpApply:
@@ -10120,7 +10736,9 @@ func buildOperatorRec(
 		// exec.Filter, which is not a ChunkProducer, so tryBuildColumnarAggInput
 		// declined and the aggregate fell back to the fully boxed row pipeline. Build
 		// the ColumnarFilter chain instead where the shape and every access-path
-		// decline admit it. Declining costs nothing: the ordinary build follows.
+		// decline admit it — or, when the only predicate is an endpoint label the
+		// traversal can enforce itself, no filter at all (#2629). Declining costs
+		// nothing: the ordinary build follows.
 		var child exec.Operator
 		var err error
 		if colSrc, colOK, colErr := tryBuildColumnarAggSource(p.Child, walker, labelSrc, reg, params, schema, idxMgr, procReg, bopts); colErr != nil {
@@ -12766,13 +13384,24 @@ func buildIndexSeekOperator(
 // with no residual check returned a node for (n:Person) whose labels(n) was empty.
 // labelSrc supplies the per-candidate check; when it cannot, the rewrite DECLINES and
 // the plan keeps the scan that filters correctly.
+// bopts supplies the two rmp #2814 conditions — the DisableIndexSeek kill switch
+// and the transaction's pending-index-delta — and may be nil, which declines the
+// rewrite outright. That nil arm is not merely defensive: this rewrite's ONLY gate
+// used to be `idxMgr != nil`, with no population floor, no cost model and no knob,
+// and it is the one access path that both loses rows and fabricates them, so the
+// absence of the state needed to judge it is a reason to decline rather than to
+// proceed.
 func tryBuildIndexSeekFromSelection(
 	sel *ir.Selection,
 	params map[string]expr.Value,
 	schema map[string]int,
 	idxMgr *index.Manager,
 	labelSrc labelResolverIface,
+	bopts *buildOpts,
 ) (exec.Operator, bool, error) {
+	if bopts == nil || !bopts.indexSeekEnabled {
+		return nil, false, nil
+	}
 	nodeVar, label, ok := scanLeafNodeVar(sel.Child)
 	if !ok {
 		return nil, false, nil
@@ -12785,11 +13414,11 @@ func tryBuildIndexSeekFromSelection(
 	if !canVerify {
 		return nil, false, nil
 	}
-	if op, ok := tryNamedHashSeek(idxMgr, label, propKey, seekVal, admit); ok {
+	if op, ok := tryNamedHashSeek(idxMgr, label, propKey, seekVal, admit, bopts.pendingIdx); ok {
 		schema[nodeVar] = schemaWidth(schema)
 		return op, true, nil
 	}
-	if op, ok := tryAnyHashSeek(idxMgr, label, propKey, seekVal, admit); ok {
+	if op, ok := tryAnyHashSeek(idxMgr, label, propKey, seekVal, admit, bopts.pendingIdx); ok {
 		schema[nodeVar] = schemaWidth(schema)
 		return op, true, nil
 	}
@@ -12868,8 +13497,16 @@ func indexCoversNode(sub index.Subscriber, label, propKey string) bool {
 // tryNamedHashSeek looks up the auto-named hash index for a (label,
 // propKey) pair and returns the seek operator + true when present
 // and applicable to seekVal.
-func tryNamedHashSeek(idxMgr *index.Manager, label, propKey string, seekVal expr.Value, admit func(uint64) bool) (exec.Operator, bool) {
+func tryNamedHashSeek(idxMgr *index.Manager, label, propKey string, seekVal expr.Value, admit func(uint64) bool, pending *pendingIndexDelta) (exec.Operator, bool) {
 	if label == "" || propKey == "" {
+		return nil, false
+	}
+	// The transaction has already moved this coordinate in the graph without the
+	// index being told, so the index's posting list is not this reader's answer
+	// (rmp #2814). Declining hands the shape back to the scan+filter, which reads
+	// the writer view and is right in both directions — the lost row and the
+	// fabricated one.
+	if pending.blocksNodeIndex(label, propKey) {
 		return nil, false
 	}
 	wantName := strings.ToLower(label) + "_" + strings.ToLower(propKey) + "_hash"
@@ -12883,7 +13520,12 @@ func tryNamedHashSeek(idxMgr *index.Manager, label, propKey string, seekVal expr
 // tryAnyHashSeek iterates every registered index and returns the
 // first hash index that both covers the (label, propKey) predicate and can
 // serve seekVal. It is the fallback when the named-index lookup misses.
-func tryAnyHashSeek(idxMgr *index.Manager, label, propKey string, seekVal expr.Value, admit func(uint64) bool) (exec.Operator, bool) {
+func tryAnyHashSeek(idxMgr *index.Manager, label, propKey string, seekVal expr.Value, admit func(uint64) bool, pending *pendingIndexDelta) (exec.Operator, bool) {
+	// See [tryNamedHashSeek]: the same decline, applied before the listing walk so
+	// a blocked coordinate costs no GetIndex calls (rmp #2814).
+	if pending.blocksNodeIndex(label, propKey) {
+		return nil, false
+	}
 	for _, name := range idxMgr.ListIndexes() {
 		sub, err := idxMgr.GetIndex(name)
 		if err != nil || sub.Kind() != "hash" || !indexCoversNode(sub, label, propKey) {
@@ -16368,6 +17010,40 @@ func buildIRProjection(
 		}
 		projBinder = binder
 	}
+	// ERROR-TO-NULL FOR HIDDEN ITEMS (rmp #2662). A Hidden item exists only so a
+	// downstream Sort can read an ORDER BY key it does not output (#1805), and
+	// since #2662 it may carry the KEY EXPRESSION rather than the entity. Reading
+	// the key through a projection column instead of through the sort operator
+	// must not change what a failing key does: [exec.sortKeyValue] maps an
+	// evaluator error to NULL, so `UNWIND ['a'] AS s RETURN 1 AS x ORDER BY s.foo`
+	// orders on NULL and returns its rows. A projection error, by contrast, fails
+	// the query. Give the hidden column sortKeyValue's contract so the two are the
+	// same program.
+	//
+	// It is installed AFTER the fusion above (which replaces Eval) and BEFORE the
+	// columnar builders below (which capture Eval by value as their per-row
+	// fallback), so every route to the value carries it. It cannot affect a
+	// VISIBLE column: only Hidden items are wrapped, and a Hidden item never
+	// reaches a result set.
+	for i, item := range items {
+		if !item.Hidden || projItems[i].Eval == nil {
+			continue
+		}
+		inner := projItems[i].Eval
+		projItems[i].Eval = func(row exec.Row) (expr.Value, error) {
+			v, err := inner(row)
+			if err != nil {
+				//nolint:nilerr // deliberate: this IS the error-to-NULL contract of
+				// exec.sortKeyValue (cypher/exec/sort.go), reproduced here so that
+				// reading an ORDER BY key through a hidden projection column is the
+				// same program as reading it through the sort operator. Propagating
+				// the error would fail queries that #1805 requires to return rows
+				// ordered on NULL.
+				return expr.Null, nil
+			}
+			return v, nil
+		}
+	}
 	// Late-materialisation columnar projection (#1704 P2, #1823): when EVERY item
 	// is a plain scalar-property access on a bound node, build a [exec.ColumnarProject]
 	// that fills a typed Chunk and boxes only at the sink. Each filler carries the
@@ -16501,12 +17177,12 @@ func indexSeekWouldFire(
 	}
 
 	// Hash seek on `n.prop = <const>`.
-	if op, ok, err := tryBuildIndexSeekFromSelection(sel, params, copySchema(schema), idxMgr, labelSrcFromView(g)); err == nil && ok {
+	if op, ok, err := tryBuildIndexSeekFromSelection(sel, params, copySchema(schema), idxMgr, labelSrcFromView(g), bopts); err == nil && ok {
 		closeProbe(op)
 		return true
 	}
 	// Key-set seek: a disjunction of equalities on one property (#2183).
-	if op, ok := tryBuildIndexSeekSetFromSelection(sel, params, copySchema(schema), idxMgr, g); ok {
+	if op, ok := tryBuildIndexSeekSetFromSelection(sel, params, copySchema(schema), idxMgr, g, bopts); ok {
 		closeProbe(op)
 		return true
 	}
@@ -16863,6 +17539,16 @@ func tryBuildColumnarExpandFilterChain(
 // It is safe to fire even when [tryBuildColumnarAggInput] later declines the chunk
 // pre-projection: [exec.ColumnarFilter] embeds its [exec.Filter] BY VALUE, so driven
 // row-at-a-time it IS that Filter, at the same one allocation.
+//
+// # It may return NO filter at all (rmp #2629)
+//
+// When the only predicate is a bare label test on the expansion's own destination
+// variable, the test is pushed into the traversal ([exec.Expand.WithDstAdmit]) and
+// the source returned is the columnar expansion itself. A slot whose destination
+// lacks the label then never becomes a row, and the rows that do survive are never
+// compacted out of the expansion's chunk into a filter's chunk for a count that
+// reads no column. See expand_dst_label_plan.go for the equivalence argument and
+// for why the push is confined to a single predicate.
 func tryBuildColumnarAggSource(
 	plan ir.LogicalPlan,
 	walker nodeWalkerIface,
@@ -16999,6 +17685,27 @@ func tryBuildColumnarAggSource(
 			undo.restore(schema, bopts)
 			closeProbe(leafOp)
 			return nil, false, nil
+		}
+		// Far-endpoint label push (#2629): a LONE bare label predicate on this hop's
+		// own destination variable is enforced INSIDE the traversal instead of by a
+		// filter above it, so a slot whose destination lacks the label never becomes
+		// a row and the surviving rows are never compacted from one chunk into
+		// another for a count that reads no column. Answer-identical by construction
+		// — the gate calls the same [lpg.ReadView.HasNodeLabelByID] both forms of
+		// this predicate resolve to — and confined to a single predicate so that
+		// applying it earlier cannot change which predicates a row reaches. See
+		// expand_dst_label_plan.go.
+		if bopts.expandLabelPushEnabled && len(predsInner) == 1 {
+			if labels, pushable := expandDstLabels(predsInner[0], expandArm); pushable {
+				if admit := makeExpandDstLabelAdmit(labels, g); admit != nil {
+					expandExec.WithDstAdmit(admit)
+					expandDstLabelPushCount.Add(1)
+					// Nothing is left to filter: the expansion IS the source. It is
+					// returned as the subtree's operator (a [exec.ChunkOperator]), so
+					// the aggregate above still drains it column-major.
+					return profileIntermediate(bopts, colExp), true, nil
+				}
+			}
 		}
 		// Re-instrument the columnar presentation: the wrapper discarded above was
 		// measuring the row-mode Expand this chain does not run.
@@ -18798,6 +19505,16 @@ func (e *Engine) execUnderBarrier(
 		} else {
 			walker, labelSrc = &lpgNodeWalker{g: wv}, &lpgLabelResolver{g: wv}
 		}
+		// The statement's expression-level evaluators (rmp #2660), against the
+		// SAME writer view every other read in this build resolves through, so an
+		// EXISTS { … }, a COUNT { … } or a pattern predicate written after a write
+		// clause observes the work this statement has already applied. One heap
+		// object for both, exactly as [readBuildScaffold] holds the read path's —
+		// and not reused across the statements of an explicit transaction, because
+		// the subquery evaluator memoises compiled inner operators bound to THIS
+		// statement's view.
+		var evals writeEvalScaffold
+		evals.init(ctx, e, wv, walker, labelSrc, queryReg)
 		op, cols, berr := buildPlanWithMutatorFull(plan, walker, labelSrc, queryReg, params, mutator, e.constraintReg, e.g.IndexManager(), e.maxCollectItems,
 			// #2229: the write path resolves `CALL db.*` from the same registry the
 			// read path uses. Shared, not snapshotted — procs.Registry is
@@ -18807,9 +19524,19 @@ func (e *Engine) execUnderBarrier(
 			// Without these it planned every writing statement — including the
 			// `UNWIND … MATCH … CREATE` bulk-load idiom — with a bare label scan
 			// (part A) driving a nested-loop Cartesian product (part B).
+			// #2814: pendingIdx is built HERE, from the buffer this statement's own
+			// adapter enqueues into, and it is built at this exact point for a reason
+			// — the plan is chosen once, before any of this statement's rows flow, so
+			// what it can see is every change the EARLIER statements of this explicit
+			// transaction left unflushed. That is the whole cross-statement half of
+			// the defect. See [pendingIndexDelta] for the same-statement half, which a
+			// plan-time decision cannot reach and which the eager-application design
+			// #2814 declared out of scope would.
 			planGates{rangeSeek: e.rangeSeekEnabled, prefixSeek: e.prefixSeekEnabled,
 				minLabelScan: e.minLabelScanEnabled, bitmapIntersect: e.bitmapIntersectEnabled,
-				hashJoin: e.hashJoinEnabled})
+				hashJoin: e.hashJoinEnabled, indexSeek: e.indexSeekEnabled,
+				pendingIdx: mutatorIndexDelta(mutator, plan)},
+			&evals)
 		if berr != nil {
 			buildErr = berr
 			return nil
@@ -20019,6 +20746,32 @@ func (a *lpgMutatorAdapter) WalkNodeIDs(fn func(graph.NodeID) bool) {
 // visibility barrier (#1282). It is independent of the WAL transaction and the
 // index buffer, which roll back through their own mechanisms; the undo log
 // closes only the in-memory-vs-durable divergence.
+//
+// # The discard note (rmp #2747)
+//
+// Every method below buffers its op with a call on a.tx whose error must be
+// accounted for. Eighteen of those calls used to discard it under a comment
+// asserting "ErrTxFinished impossible here". Seven sit in methods that return
+// an error and now PROPAGATE it. Eleven sit in [exec.GraphMutator] methods that
+// return NOTHING, so there is no return path to propagate along; each of those
+// carries, on its own line, the set its callee can actually return, read from
+// store/txn/txn.go rather than inherited.
+//
+// Six of the eleven CAN now raise [txn.ErrFieldTooLong] — RemoveNodeLabel,
+// DelNodeProperty, SetEdgeLabel, DelEdgeProperty, SetEdgeLabelByHandle and
+// DelEdgePropertyByHandle all stage a uint16-prefixed label or property key.
+// For those the encoder backstop at Commit remains the refusal, exactly as it
+// was before rmp #2747: the statement succeeds, the commit is refused, and
+// [Result.commitUnderBarrier] rolls the whole transaction back. Nothing is
+// silently lost. What they do NOT get is the early refusal the seven with a
+// return path now have, and closing that gap means widening
+// [exec.GraphMutator] — an interface change across every implementation and
+// call site in cypher/exec, which is a decision for the user, not for this
+// fix.
+//
+// A discard here is never to be "fixed" with a panic: CLAUDE.md forbids a panic
+// on a recoverable condition, and a refused buffering is recoverable by
+// construction — the encoder refuses the same field at Commit.
 type walMutatorAdapter struct {
 	// counters accumulates this statement's openCypher write effects (#2212), exactly
 	// as on [lpgMutatorAdapter]. Both adapters carry it because both are reachable
@@ -20268,13 +21021,23 @@ func (a *walMutatorAdapter) AddNode(n string) (graph.NodeID, error) {
 	if err := a.w().AddNode(n); err != nil {
 		return 0, err
 	}
-	_ = a.tx.AddNode(n) // tx is non-nil; only ErrTxFinished possible, which cannot occur here
+	// rmp #2747: propagated, never discarded. The error is captured and returned
+	// only AFTER the bookkeeping below, because the in-memory AddNode has already
+	// happened: returning here would leave a write the undo log had not yet
+	// recorded, which no rollback could reverse. Today the only reachable value
+	// is nil — [txn.Tx.AddNode] returns ErrTxFinished alone, and this adapter is
+	// never reached on a finished transaction — so nothing that runs today
+	// changes; what goes is the trap that made a NEW error class disappear.
+	txErr := a.tx.AddNode(n)
 	id, _ := a.g.AdjList().Mapper().Lookup(n)
 	if !existed {
 		a.countNodeCreated()
 	}
 	a.rec().recordAddNode(n, !existed)
 	a.countMarkFresh(n, existed) // count-store (#2082): initial-label vs relabel
+	if txErr != nil {
+		return 0, txErr
+	}
 	return id, nil
 }
 
@@ -20289,7 +21052,16 @@ func (a *walMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 	if err := a.w().AddEdge(src, dst, w); err != nil {
 		return 0, 0, err
 	}
-	_ = a.tx.AddEdge(src, dst, w) // ErrNoWeightCodec cannot occur — store has wcodec via NewEngineWithStore
+	// rmp #2747: propagated, never discarded — see [walMutatorAdapter.AddNode]
+	// for why the error is held until the bookkeeping below has run.
+	//
+	// [txn.Tx.AddEdge] returns ErrTxFinished (unreachable here) or
+	// ErrNoWeightCodec, and the comment that stood here claimed the latter
+	// "cannot occur — store has wcodec via NewEngineWithStore". It can:
+	// [NewEngineWithStore] accepts ANY [txn.Store], including one built by
+	// [txn.NewStoreWithCodec], which has no weight codec. On such a store this
+	// call refuses every non-zero weight.
+	txErr := a.tx.AddEdge(src, dst, w)
 	srcID, _ := a.g.AdjList().Mapper().Lookup(src)
 	dstID, _ := a.g.AdjList().Mapper().Lookup(dst)
 	if !srcExisted {
@@ -20311,6 +21083,9 @@ func (a *walMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 		a.rec().recordAddEdge(src, dst, !srcExisted, !dstExisted)
 	}
 	a.countClearFresh(src, dst) // count-store (#2082): endpoints now carry an edge
+	if txErr != nil {
+		return 0, 0, txErr
+	}
 	return srcID, dstID, nil
 }
 
@@ -20333,7 +21108,19 @@ func (a *walMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 	if err != nil {
 		return 0, 0, 0, err
 	}
-	_ = a.tx.AddEdgeWithHandle(src, dst, w, handle) // ErrNoWeightCodec cannot occur — store has wcodec via NewEngineWithStore
+	// rmp #2747: propagated, never discarded — and here the discard was not a
+	// latent trap but a live ACID Durability breach.
+	//
+	// [txn.Tx.AddEdgeWithHandle] returns ErrNoWeightCodec whenever the store has
+	// no weight codec, for ANY weight — unlike [txn.Tx.AddEdge], which refuses
+	// only a non-zero one. An engine built by [NewEngineWithStore] over a
+	// [txn.NewStoreWithCodec] store therefore had EVERY relationship this path
+	// staged refused, the refusal discarded here, and the commit acknowledged:
+	// the edge lived in memory and in no WAL frame, so recovery returned the two
+	// endpoints, their labels and their properties, and no relationship between
+	// them. Measured on this tree before the fix — see
+	// TestRelationshipDurability_NoWeightCodec_2747.
+	txErr := a.tx.AddEdgeWithHandle(src, dst, w, handle)
 	srcID, _ := a.g.AdjList().Mapper().Lookup(src)
 	dstID, _ := a.g.AdjList().Mapper().Lookup(dst)
 	if !srcExisted {
@@ -20351,6 +21138,9 @@ func (a *walMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 		a.rec().recordAddEdge(src, dst, !srcExisted, !dstExisted)
 	}
 	a.countClearFresh(src, dst) // count-store (#2082): endpoints now carry an edge
+	if txErr != nil {
+		return 0, 0, 0, txErr
+	}
 	return srcID, dstID, handle, nil
 }
 
@@ -20375,30 +21165,58 @@ func (a *walMutatorAdapter) RemoveEdge(src, dst string) {
 	// performed. A refused transaction cannot commit, but the WAL is the durable
 	// truth and may only describe work done.
 	//
-	// The counter and the undo inverse wait on a SECOND condition the frame does
-	// not: `present`, i.e. an arc was actually there to take out. [Graph.RemoveEdge]
-	// returns true for "the removal ran, whether or not an arc was actually there"
-	// — its own godoc says so — so on a shape where the arc is already gone this
-	// emits a frame that removes nothing.
+	// The counter and the undo inverse wait on a SECOND condition: `present`, an arc
+	// was actually there to take out. [Graph.RemoveEdge] returns true for "the
+	// removal ran, whether or not an arc was actually there" — its own godoc says
+	// so, and it is the one sibling that does NOT fold "nothing to remove" into its
+	// false — so a shape whose arc is already gone reaches this line with
+	// present == false.
 	//
-	// Measured under rmp #2706, and it is NOT hypothetical on an undirected
-	// engine: `RemoveAllEdgesFrom` retires both directions, so every call the
-	// in-edge sweep at cypher/exec/detach_delete.go:263 then makes is a no-op.
-	// An undirected fan-out of 64 writes 128 frames for 64 removed edges — 2.000
-	// per edge, 48.7% of the delete transaction's WAL bytes — while every
-	// directed shape measures exactly 1.000. Gating the frame on `present` was
-	// shown to recover an identical graph, with negative controls that correctly
-	// reported a difference where those frames are real in-edges. It is NOT done
-	// here because whether Cypher over an undirected LPG is a supported
-	// configuration at all is unsettled, and that question decides the fix:
-	// rmp #2734.
+	// The frame waits on it too, but only where the WAL is a FAITHFUL description
+	// of this graph's adjacency, which is what [walMutatorAdapter.mustDescribeNoOpRemoval]
+	// answers. A frame may be dropped as redundant only if the presence probe above
+	// — which reads the IN-MEMORY adjacency — predicts what a replay will find. On a
+	// directed graph it does: every arc this adapter changes is described by exactly
+	// one frame, so memory and replay stay in step by induction. On an UNDIRECTED
+	// graph it does not, because [walMutatorAdapter.RemoveAllEdgesFrom] retires each
+	// mirror arc while emitting a frame only for the forward one — so there the
+	// "redundant" frame is the one that actually performs the removal on replay, and
+	// dropping it LOSES the deletion. Measured, not reasoned: gating unconditionally
+	// on `present` left deleted edges alive in the recovered graph on 7 of 16
+	// undirected shapes (fan-in-64, mixed-in-and-out, clique-4, detach-all,
+	// reciprocal-pair, detach-path-2cycle, del-r-bothdir), which refutes the claim
+	// rmp #2706 recorded here that the gate "was shown to recover an identical
+	// graph". A smaller WAL that replays to a different graph is data loss, not a
+	// saving (rmp #2734).
+	//
+	// On the directed shapes the gate is worth having, and it is reachable there —
+	// this is NOT only the undirected engine's problem.
+	// `MATCH (a)-[r:R]-(b) WITH r DELETE r` binds one stored relationship in both
+	// traversal directions, so [exec] reaches this method twice for it: before the
+	// gate that wrote 2 frames for 1 relationship removed (37.9% of the delete
+	// transaction's WAL bytes), rising to 4 frames — 64.7% — once an UNWIND doubles
+	// the rows. Across 16 directed shapes the recovered graph is byte-identical with
+	// and without the suppressed frames, while dropping a frame that IS a real
+	// removal changes it — the control proving that comparison can fail.
+	//
+	// Memgraph reaches the same place from the other side: its
+	// `Storage::Accessor::DetachDelete` threads one `std::unordered_set<Gid>` of
+	// already-deleted edge ids through both of its endpoint passes, and
+	// `MarkEdgeAsDeleted` (src/storage/v2/storage.cpp:718-725, tag v3.9.0, commit
+	// 9f6fa8b8372c72d1bc1b24c2a32762af2424629e) creates its `RecreateObjectTag` delta
+	// only `if (!edge->deleted())`, so a second touch of an already-retired edge
+	// emits no durable record. Neo4j sidesteps the question by traversing a node's
+	// single relationship chain once, direction-agnostically
+	// (`Operations.nodeDetachDelete`). Structure taken as evidence, never code.
 	if !a.w().RemoveEdge(src, dst) {
 		return
 	}
 	if present {
 		a.countRelDeleted()
 	}
-	_ = a.tx.RemoveEdge(src, dst) // ErrTxFinished impossible here
+	if present || a.mustDescribeNoOpRemoval() {
+		_ = a.tx.RemoveEdge(src, dst) // rmp #2747: [txn.Tx.RemoveEdge] returns ErrTxFinished and nothing else, and this adapter is never reached on a finished transaction. Discarded because [exec.GraphMutator.RemoveEdge] returns nothing — see the discard note on [walMutatorAdapter].
+	}
 	r.recordRemoveEdge(&pre, present)
 }
 
@@ -20408,8 +21226,8 @@ func (a *walMutatorAdapter) RemoveEdge(src, dst string) {
 // [txn.OpRemoveEdgeByHandle] frame so the exact instance is gone after recovery.
 // The undo pre-image captures the SPECIFIC instance (weight, handle, its own
 // labels and properties) so a rolled-back statement re-adds exactly that
-// instance. The edges-removed counter and undo record are gated on the actual
-// removal result (rmp #2018).
+// instance. The edges-removed counter, the durable frame and the undo record are
+// all gated on the actual removal result (rmp #2018, rmp #2734).
 func (a *walMutatorAdapter) RemoveEdgeByHandle(src, dst string, handle uint64) {
 	src, dst = orientHandleEndpoints(a.g, src, dst, handle)
 	r := a.rec()
@@ -20427,15 +21245,73 @@ func (a *walMutatorAdapter) RemoveEdgeByHandle(src, dst string, handle uint64) {
 		}
 	}
 	removed := a.w().RemoveEdgeByHandle(src, dst, handle)
+	// The frame waits on `removed` under the same rule as the
+	// [walMutatorAdapter.RemoveEdge] twin, and for the same measured reason — read
+	// that comment first; it carries the evidence for both.
+	// [WriteView.RemoveEdgeByHandle] folds BOTH "refused" and "nothing matched" into
+	// its false (its godoc says so, and that is where it differs from the
+	// [WriteView.RemoveEdge] sibling), and neither case warrants a frame on a graph
+	// whose WAL faithfully describes its adjacency: a refused removal must not be
+	// described durably (rmp #2694/#2725), and a removal that matched nothing removed
+	// nothing. On an undirected graph that faithfulness does not hold, so the frame
+	// is emitted regardless — see [walMutatorAdapter.mustDescribeNoOpRemoval].
+	// Reachable on the supported directed configuration: `MATCH (a)-[r:R]-(b) DELETE r`
+	// binds one stored relationship in both traversal directions and therefore deletes
+	// it twice, which before the gate wrote 2 frames for 1 relationship removed —
+	// 39.2% of that delete transaction's WAL bytes (rmp #2734).
 	if removed {
 		a.countRelDeleted()
 	}
-	_ = a.tx.RemoveEdgeByHandle(src, dst, handle) // ErrTxFinished impossible here
+	if removed || a.mustDescribeNoOpRemoval() {
+		_ = a.tx.RemoveEdgeByHandle(src, dst, handle) // rmp #2747: [txn.Tx.RemoveEdgeByHandle] returns ErrTxFinished and nothing else, unreachable here. Discarded: [exec.GraphMutator.RemoveEdgeByHandle] returns nothing.
+	}
 	r.recordRemoveEdge(&pre, removed)
+}
+
+// mustDescribeNoOpRemoval reports whether a removal that provably took NOTHING out
+// of the in-memory adjacency must still be written to the WAL.
+//
+// It is true exactly when the WAL is not a faithful description of this graph's
+// adjacency, which on this adapter means an UNDIRECTED backing graph.
+// [walMutatorAdapter.RemoveAllEdgesFrom] emits one frame per OUTGOING neighbour,
+// but on an undirected adjacency the removal also retires each mirror arc, which
+// no frame describes. Recovery therefore reconstructs a different adjacency from
+// the one in memory, and the in-memory presence probe stops predicting what a
+// replay will find: a removal that is a no-op in memory can still be the frame
+// that performs the deletion on replay. Suppressing it there loses the deletion —
+// measured on 7 of 16 undirected shapes (rmp #2734).
+//
+// Cypher over an undirected LPG is not a supported configuration in the first
+// place (docs/cypher.md states `Directed: true` is required for openCypher
+// semantics, and [NewEngineWithOptions] warns at construction, #1892), so this is
+// a guard against regressing a configuration the module still constructs, not a
+// commitment to its durability. It costs one already-cached bool read.
+func (a *walMutatorAdapter) mustDescribeNoOpRemoval() bool {
+	return !a.g.AdjList().Directed()
 }
 
 // SetNodeLabel attaches label to n.
 func (a *walMutatorAdapter) SetNodeLabel(n, label string) error {
+	// REJECT AT THE API, BACKSTOP AT THE ENCODER (rmp #2747). A label too long
+	// for the uint16 length prefix its WAL frame reserves is refused HERE, before
+	// the in-memory write, against [txn]'s single definition of the bound.
+	//
+	// It used to be refused only at the encoder, which [Result.commitUnderBarrier]
+	// reaches at Commit and routes to rollbackUnderBarrier (rmp #2742). That is
+	// still correct and still in place, but it is late in two ways this is not.
+	// The statement had already succeeded, so inside an explicit transaction a
+	// later statement could read back a label the WAL would never accept. And the
+	// lpg write interns the label into the process-lifetime [lpg.LabelRegistry],
+	// which rollback does NOT reverse — a refused 70000-byte label stayed
+	// interned for the life of the process. Both measured on this tree; see
+	// TestOverlongLabelRefusedBeforeInMemoryWrite_2747.
+	//
+	// This gate is on the WAL-backed adapter only. The in-memory engine has no
+	// WAL frame to overflow, so bounding a label there would be a new policy,
+	// not this defect (rmp #2747 scope note).
+	if err := txn.CheckSchemaField("node label", label); err != nil {
+		return err
+	}
 	// See the lpgMutatorAdapter twin: UNIQUE is enforced at this surface, before the
 	// write (rmp #2358).
 	if err := exec.EnforceUniqueOnLabelSet(a.constraintReg(), a, a.g.IndexManager(), n, label); err != nil {
@@ -20457,7 +21333,12 @@ func (a *walMutatorAdapter) SetNodeLabel(n, label string) error {
 		a.countLabelAdded()
 	}
 	r.recordSetNodeLabel(n, label, hadLabel)
-	_ = a.tx.SetNodeLabel(n, label) // ErrTxFinished impossible here
+	// rmp #2747: propagated, never discarded — held until the bookkeeping below
+	// has run, as in [walMutatorAdapter.AddNode]. [txn.Tx.SetNodeLabel] returns
+	// ErrTxFinished (unreachable here) or ErrFieldTooLong, and the gate at the
+	// top of this method has already refused every label that could raise the
+	// second, so nil is the only value reachable today.
+	txErr := a.tx.SetNodeLabel(n, label)
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
 			Op:    index.OpAddNodeLabel,
@@ -20468,7 +21349,7 @@ func (a *walMutatorAdapter) SetNodeLabel(n, label string) error {
 	if countNew {
 		countRelabel(a.g, a.cs(), a.countBuf(), n, label, +1)
 	}
-	return nil
+	return txErr
 }
 
 // RemoveNodeLabel detaches label from n.
@@ -20489,7 +21370,7 @@ func (a *walMutatorAdapter) RemoveNodeLabel(n, label string) {
 		a.countLabelRemoved()
 	}
 	r.recordRemoveNodeLabel(n, label, hadLabel)
-	_ = a.tx.RemoveNodeLabel(n, label) // ErrTxFinished impossible here
+	_ = a.tx.RemoveNodeLabel(n, label) // rmp #2747: [txn.Tx.RemoveNodeLabel] returns ErrTxFinished (unreachable here) or ErrFieldTooLong on a label over 65535 bytes. The SECOND is reachable and is DISCARDED: [exec.GraphMutator.RemoveNodeLabel] returns nothing, so the encoder backstop at Commit is what refuses it — see the discard note on [walMutatorAdapter].
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
 			Op:    index.OpRemoveNodeLabel,
@@ -20529,7 +21410,7 @@ func (a *walMutatorAdapter) RemoveNode(n string) {
 		a.countNodeDeleted()
 		a.rec().recordRemoveNode(n, true)
 	}
-	_ = a.tx.RemoveNode(n) // ErrTxFinished impossible here; not-found is safe to ignore
+	_ = a.tx.RemoveNode(n) // rmp #2747: [txn.Tx.RemoveNode] returns ErrTxFinished and nothing else, unreachable here; it stages no schema string, so no field bound applies. Discarded: [exec.GraphMutator.RemoveNode] returns nothing.
 }
 
 // IsTombstoned reports whether the NodeID has been tombstoned.
@@ -20539,6 +21420,14 @@ func (a *walMutatorAdapter) IsTombstoned(id graph.NodeID) bool {
 
 // SetNodeProperty sets the named property on n.
 func (a *walMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyValue) error {
+	// Reject at the API, backstop at the encoder — see
+	// [walMutatorAdapter.SetNodeLabel] (rmp #2747). The uint16-prefixed field
+	// here is the property KEY; the value is uint32-prefixed and bounded at the
+	// encoder alone, where the 4 GiB cap it would have to breach makes an early
+	// refusal worth nothing.
+	if err := txn.CheckSchemaField("node property key", key); err != nil {
+		return err
+	}
 	// See the lpgMutatorAdapter twin (rmp #2358).
 	if err := exec.EnforceUniqueOnPropertySet(a.constraintReg(), a, a.g.IndexManager(), n, key, value); err != nil {
 		return err
@@ -20559,7 +21448,10 @@ func (a *walMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 	r.recordSetNodeProperty(n, key, prev, had)
 	// PreValidated: a.w().SetNodeProperty above already ran the schema validator
 	// on this value, and a stateful validator must not see it twice (rmp #2602).
-	_ = a.tx.SetNodePropertyPreValidated(n, key, value) // ErrTxFinished impossible here
+	// rmp #2747: propagated, never discarded.
+	// [txn.Tx.SetNodePropertyPreValidated] returns ErrTxFinished (unreachable
+	// here) or ErrFieldTooLong, which the gate at the top has already refused.
+	txErr := a.tx.SetNodePropertyPreValidated(n, key, value)
 	if a.buf != nil {
 		ch := index.Change{
 			Op:       index.OpSetNodeProperty,
@@ -20576,7 +21468,7 @@ func (a *walMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 		recordStatsNodePropertyWrite(sc, a.g.NodeIndex(), a.resolveID(n),
 			uint32(a.g.PropertyKeys().Intern(key)), had)
 	}
-	return nil
+	return txErr
 }
 
 // DelNodeProperty removes the named property from n.
@@ -20600,7 +21492,7 @@ func (a *walMutatorAdapter) DelNodeProperty(n, key string) {
 	}
 	a.w().DelNodeProperty(n, key)
 	r.recordDelNodeProperty(n, key, prev, had)
-	_ = a.tx.DelNodeProperty(n, key) // ErrTxFinished impossible here
+	_ = a.tx.DelNodeProperty(n, key) // rmp #2747: [txn.Tx.DelNodeProperty] returns ErrTxFinished (unreachable here) or ErrFieldTooLong on a key over 65535 bytes. The SECOND is reachable and is DISCARDED: [exec.GraphMutator.DelNodeProperty] returns nothing; the encoder backstop refuses it at Commit.
 	if a.buf != nil {
 		ch := index.Change{
 			Op:       index.OpDelNodeProperty,
@@ -20658,7 +21550,7 @@ func (a *walMutatorAdapter) SetEdgeLabel(src, dst, label string) {
 	hadLabel := r.active() && a.g.HasEdgeLabel(src, dst, label)
 	a.w().SetEdgeLabel(src, dst, label)
 	r.recordSetEdgeLabel(src, dst, label, hadLabel)
-	_ = a.tx.SetEdgeLabel(src, dst, label) // ErrTxFinished impossible here
+	_ = a.tx.SetEdgeLabel(src, dst, label) // rmp #2747: [txn.Tx.SetEdgeLabel] returns ErrTxFinished (unreachable here) or ErrFieldTooLong on a label over 65535 bytes. The SECOND is reachable and is DISCARDED: [exec.GraphMutator.SetEdgeLabel] returns nothing; the encoder backstop refuses it at Commit.
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
 			Op:    index.OpAddEdgeLabel,
@@ -20671,6 +21563,11 @@ func (a *walMutatorAdapter) SetEdgeLabel(src, dst, label string) {
 
 // SetEdgeProperty sets the named property on the directed edge (src, dst).
 func (a *walMutatorAdapter) SetEdgeProperty(src, dst, key string, value lpg.PropertyValue) error {
+	// Reject at the API, backstop at the encoder — see
+	// [walMutatorAdapter.SetNodeLabel] (rmp #2747).
+	if err := txn.CheckSchemaField("edge property key", key); err != nil {
+		return err
+	}
 	r := a.rec()
 	var prev lpg.PropertyValue
 	var had bool
@@ -20683,7 +21580,10 @@ func (a *walMutatorAdapter) SetEdgeProperty(src, dst, key string, value lpg.Prop
 	a.countPropertySet()
 	r.recordSetEdgeProperty(src, dst, key, prev, had)
 	// PreValidated: see the SetNodeProperty twin (rmp #2602).
-	_ = a.tx.SetEdgePropertyPreValidated(src, dst, key, value) // ErrTxFinished impossible here
+	// rmp #2747: propagated, never discarded.
+	// [txn.Tx.SetEdgePropertyPreValidated] returns ErrTxFinished (unreachable
+	// here) or ErrFieldTooLong, which the gate at the top has already refused.
+	txErr := a.tx.SetEdgePropertyPreValidated(src, dst, key, value)
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
 			Op:       index.OpSetEdgeProperty,
@@ -20693,7 +21593,7 @@ func (a *walMutatorAdapter) SetEdgeProperty(src, dst, key string, value lpg.Prop
 			NewValue: value,
 		})
 	}
-	return nil
+	return txErr
 }
 
 // DelEdgeProperty removes the named property from the directed edge (src, dst).
@@ -20719,7 +21619,7 @@ func (a *walMutatorAdapter) delEdgePropertyUncounted(src, dst, key string) {
 	}
 	a.w().DelEdgeProperty(src, dst, key)
 	r.recordDelEdgeProperty(src, dst, key, prev, had)
-	_ = a.tx.DelEdgeProperty(src, dst, key) // ErrTxFinished impossible here
+	_ = a.tx.DelEdgeProperty(src, dst, key) // rmp #2747: [txn.Tx.DelEdgeProperty] returns ErrTxFinished (unreachable here) or ErrFieldTooLong on a key over 65535 bytes. The SECOND is reachable and is DISCARDED: this helper and both its callers ([walMutatorAdapter.DelEdgeProperty], [walMutatorAdapter.DelEdgePropertyOnInstance]) return nothing; the encoder backstop refuses it at Commit.
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
 			Op:       index.OpDelEdgeProperty,
@@ -20822,7 +21722,7 @@ func (a *walMutatorAdapter) RemoveEdgeInstance(src, dst string, idx int64) {
 // uses, so the per-pair and per-handle stores stay atomic together.
 func (a *walMutatorAdapter) SetEdgeLabelByHandle(src, dst string, handle uint64, label string) {
 	a.w().SetEdgeLabelByHandle(src, dst, handle, label)
-	_ = a.tx.SetEdgeLabelByHandle(src, dst, handle, label) // ErrTxFinished impossible here
+	_ = a.tx.SetEdgeLabelByHandle(src, dst, handle, label) // rmp #2747: [txn.Tx.SetEdgeLabelByHandle] returns ErrTxFinished (unreachable here) or ErrFieldTooLong on a label over 65535 bytes. The SECOND is reachable and is DISCARDED: [exec.GraphMutator.SetEdgeLabelByHandle] returns nothing; the encoder backstop refuses it at Commit.
 	// Count-store (#2082): the single authoritative once-per-edge typing hook.
 	if a.cs() != nil {
 		countEdgeTyped(a.g, a.cs(), a.countBuf(), src, dst, label)
@@ -20832,6 +21732,11 @@ func (a *walMutatorAdapter) EdgeLabelsByHandle(src, dst string, handle uint64) [
 	return a.g.EdgeLabelsByHandle(src, dst, handle)
 }
 func (a *walMutatorAdapter) SetEdgePropertyByHandle(src, dst string, handle uint64, key string, value lpg.PropertyValue) error {
+	// Reject at the API, backstop at the encoder — see
+	// [walMutatorAdapter.SetNodeLabel] (rmp #2747).
+	if err := txn.CheckSchemaField("edge property key", key); err != nil {
+		return err
+	}
 	r := a.rec()
 	var prev lpg.PropertyValue
 	var had bool
@@ -20843,8 +21748,11 @@ func (a *walMutatorAdapter) SetEdgePropertyByHandle(src, dst string, handle uint
 	}
 	r.recordSetEdgePropertyByHandle(src, dst, handle, key, prev, had)
 	// PreValidated: see the SetNodeProperty twin (rmp #2602).
-	_ = a.tx.SetEdgePropertyByHandlePreValidated(src, dst, handle, key, value) // ErrTxFinished impossible here
-	return nil
+	// rmp #2747: propagated, never discarded.
+	// [txn.Tx.SetEdgePropertyByHandlePreValidated] returns ErrTxFinished
+	// (unreachable here) or ErrFieldTooLong, which the gate at the top has
+	// already refused.
+	return a.tx.SetEdgePropertyByHandlePreValidated(src, dst, handle, key, value)
 }
 func (a *walMutatorAdapter) DelEdgePropertyByHandle(src, dst string, handle uint64, key string) {
 	r := a.rec()
@@ -20855,14 +21763,14 @@ func (a *walMutatorAdapter) DelEdgePropertyByHandle(src, dst string, handle uint
 	}
 	a.w().DelEdgePropertyByHandle(src, dst, handle, key)
 	r.recordDelEdgePropertyByHandle(src, dst, handle, key, prev, had)
-	_ = a.tx.DelEdgePropertyByHandle(src, dst, handle, key) // ErrTxFinished impossible here
+	_ = a.tx.DelEdgePropertyByHandle(src, dst, handle, key) // rmp #2747: [txn.Tx.DelEdgePropertyByHandle] returns ErrTxFinished (unreachable here) or ErrFieldTooLong on a key over 65535 bytes. The SECOND is reachable and is DISCARDED: [exec.GraphMutator.DelEdgePropertyByHandle] returns nothing; the encoder backstop refuses it at Commit.
 }
 func (a *walMutatorAdapter) EdgePropertiesByHandle(src, dst string, handle uint64) map[string]lpg.PropertyValue {
 	return a.g.EdgePropertiesByHandle(src, dst, handle)
 }
 func (a *walMutatorAdapter) RemoveEdgeInstanceByHandle(src, dst string, handle uint64) {
 	a.w().RemoveEdgeInstanceByHandle(src, dst, handle)
-	_ = a.tx.RemoveEdgeInstanceByHandle(src, dst, handle) // ErrTxFinished impossible here
+	_ = a.tx.RemoveEdgeInstanceByHandle(src, dst, handle) // rmp #2747: [txn.Tx.RemoveEdgeInstanceByHandle] returns ErrTxFinished and nothing else, unreachable here; it stages no schema string. Discarded: [exec.GraphMutator.RemoveEdgeInstanceByHandle] returns nothing.
 }
 
 // RecordConstraintInverse is [lpgMutatorAdapter.RecordConstraintInverse] for the
@@ -20925,7 +21833,7 @@ func (a *walMutatorAdapter) RemoveAllEdgesFrom(n string) {
 	// cannot commit, but the frames must not be written on the strength of that
 	// alone — the WAL is the durable truth and it may only describe work done.
 	for _, dst := range outgoing {
-		_ = a.tx.RemoveEdge(n, dst) // ErrTxFinished impossible here
+		_ = a.tx.RemoveEdge(n, dst) // rmp #2747: [txn.Tx.RemoveEdge] returns ErrTxFinished and nothing else, unreachable here. Discarded: [exec.GraphMutator.RemoveAllEdgesFrom] returns nothing.
 	}
 	journalAllOutEdgesRemoved(r, a, pre)
 }

@@ -617,16 +617,27 @@ func TestProfileDbHits_ParallelLeavesCountTheirWorkersNodeWalk(t *testing.T) {
 		// This leaf has no scanning serial twin, and the gate says so rather than
 		// papering over it. Below the threshold the SAME query plans an
 		// AllNodesCountScan, which answers from the maintained live-node counter in
-		// O(1): it walks nothing, counts nothing, and honestly renders "?". Asserting
-		// that here is what stops this explanation going stale — if the sub-threshold
-		// plan ever becomes a real scan, this fails and the control below can be
-		// replaced by the direct twin.
+		// O(1): it walks nothing, and since rmp #2777 it says so with a MEASURED
+		// ZERO instead of the "?" it used to render. Asserting that here is what
+		// stops this explanation going stale — the substitute control below exists
+		// because this leaf does not walk, and a non-zero figure would mean it did.
+		//
+		// It is a ZERO and not an absent cell: the two were the same rendering
+		// before rmp #2760 and the whole column exists to distinguish them.
 		countControl := profile(t, serialThreshold, q)
-		if _, _, known, ok := profiledCells(countControl, "AllNodesCountScan"); !ok || known {
-			t.Fatalf("the sub-threshold plan for %q is no longer an AllNodesCountScan with "+
-				"an unknown db-hits cell (found=%v, known=%v). The comment above and the "+
-				"substitute control below both depend on that being so:\n%s",
-				q, ok, known, countControl)
+		ccRows, ccHits, ccKnown, ccFound := profiledCells(countControl, "AllNodesCountScan")
+		if !ccFound || !ccKnown || ccHits != 0 {
+			t.Fatalf("the sub-threshold plan for %q is no longer an AllNodesCountScan "+
+				"reporting a MEASURED zero (found=%v, known=%v, dbhits=%d). The comment "+
+				"above and the substitute control below both depend on that being so; the "+
+				"leaf's fallback walk, which reports a real count, is gated by "+
+				"TestProfileDbHits_CountStoreLeaves:\n%s",
+				q, ccFound, ccKnown, ccHits, countControl)
+		}
+		if ccRows != 1 {
+			t.Fatalf("the sub-threshold AllNodesCountScan emitted %d rows, want 1 — a zero "+
+				"measured over an operator that produced nothing proves nothing:\n%s",
+				ccRows, countControl)
 		}
 
 		// The substitute control: the same whole-graph node walk, done serially, by the

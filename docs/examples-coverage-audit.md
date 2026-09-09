@@ -92,11 +92,30 @@ The standalone index family (`graph/index/btree` RANGE, `hash`, `label`) is
 undriven directly. Sustained high-concurrency (the 1/8/64/256/1024-goroutine
 load mandate) and at-scale concurrent writes in a runnable `run` are absent.
 
+> **SUPERSEDED (noted 2026-09-08): `graph/generation` has four callers.** The
+> sentence above was accurate at this audit's pinned commit `1dc09ad` and is not
+> accurate now. `graph/generation` is imported by
+> `internal/sim/generation_swap.go` (added 2026-08-21, `1dfb3a38`), by
+> `bench/contention/ceiling_arms.go` and
+> `bench/contention/workloads_unreached.go` (both added 2026-09-02, `410e2f6f`),
+> and by `examples/33_generation_swap/main.go` — which landed on the audit's own
+> day, `47a1fe07`, but **after** `1dc09ad` and so was outside the audited tree.
+> The example half of the finding is therefore also closed: the package is
+> demonstrated by an example.
+
 ### F. Module feature gaps (not example gaps — the module does not implement these)
 
 - `POINT` / spatial type and `point()` function: unimplemented.
 - `PROFILE`: the `cypher/explain` package exists but is not exposed on the
   public `Engine` (`EXPLAIN` is, via `Engine.Explain`; `PROFILE` is test-only).
+
+  > **SUPERSEDED (noted 2026-09-08): `PROFILE` is exposed on the public
+  > `Engine`.** True at `1dc09ad`, closed since. `Engine.Profile` shipped on
+  > 2026-07-27 in commit `f69530af` ("render the physical plan, and add
+  > PROFILE") and is declared at `cypher/api.go:2971`; the table-rendering
+  > sibling `Engine.ProfileTable` is at `cypher/explain_table.go:338`. Both are
+  > exported, so this is no longer a module feature gap — it is an example gap,
+  > and belongs with §E rather than §F.
 - `FOREACH` and general correlated `CALL {}` subqueries: intentionally
   unsupported (example 25's test pins the `FOREACH` rejection). Not gaps.
 

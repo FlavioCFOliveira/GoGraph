@@ -302,11 +302,17 @@ func (e *Engine) observeOperatorQError(op, inner exec.Operator, sink *planEstima
 // Including EXACT is not a formality. Two very different things carry that tag:
 // a LIVE label count, which cannot be stale and whose q-error is therefore a check
 // on this instrument rather than on the planner; and a most-common-value hit, which
-// is read from the statistics SNAPSHOT and has no staleness gate at all
-// (statsEqualityEstimateInner returns estExact from the MCV list unconditionally,
-// where statsRangeEstimateInner demotes a stale histogram to estFallback). An
-// "exact" estimate from a stale MCV entry can therefore be arbitrarily wrong, and
-// this metric is the first thing in the module able to see that.
+// is read from the statistics SNAPSHOT.
+//
+// The MCV hit had no staleness gate of any kind until rmp #2772, which gave it the
+// one its range sibling always had (statsSnapshotFresh). That closes the drift a
+// tracked property write causes, and it does NOT close all of it: Δ and the delete
+// counter are moved only by the node-property write path, so a route that changes
+// which rows answer a predicate WITHOUT writing a tracked property — removing the
+// label is the plain example — leaves the snapshot pristine by every measure it
+// maintains while its per-value count goes arbitrarily wrong. An "exact" estimate
+// can still be wrong by any factor for that reason, and this metric remains the only
+// thing in the module able to see it. seedStaleMCVGraph builds exactly that case.
 func qErrorQualifies(s exec.EstimateSource) bool {
 	return s == exec.EstimateExact || s == exec.EstimateStats
 }

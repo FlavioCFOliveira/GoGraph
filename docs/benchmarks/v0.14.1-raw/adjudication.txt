@@ -1,0 +1,42 @@
+comparable result rows, v0.14.0 vs v0.14.1: 229
+rows reaching p<0.05: 25
+
+block      benchmark                                                     v0.14.0    v0.14.1    delta      p    bar  verdict
+exec       BenchmarkRelTypeProbe_Column-10                               1.735ns    1.471ns  -15.19%  0.005  1.95%  FINDING
+exec       BenchmarkAllNodesScan_PerNodeAllocCost-10                      11.6µs    10.98µs   -5.39%  0.005  7.87%  inconclusive
+cy         BenchmarkPrebuiltTreeCeiling-10                               393.8ns    381.4ns   -3.14%  0.005  2.13%  FINDING
+exec       BenchmarkBoundedOrder/n=000110/Top-10                         1.442ms    1.402ms   -2.75%  0.020  1.28%  FINDING
+exec       BenchmarkBoundedOrder/n=000010/Top-10                          1.41ms    1.374ms   -2.56%  0.005  1.28%  FINDING
+cy         BenchmarkReorderDrainCost/scan=filtered-10                    1.105ms    1.079ms   -2.40%  0.008  1.28%  FINDING
+exec       BenchmarkBoundedOrder/n=010010/Top-10                         4.858ms    4.756ms   -2.10%  0.005  1.28%  FINDING
+cy         BenchmarkJoinReorderStatsSkewed/reorder=on-10                 2.707ms    2.665ms   -1.56%  0.008  1.28%  FINDING
+exec       BenchmarkColumnarAgg_MinMaxGroupBy/row_off-10                  55.5ms    54.73ms   -1.39%  0.045  1.28%  FINDING
+exec       BenchmarkBoundedOrder/n=000110/Sort-10                        8.487ms    8.373ms   -1.34%  0.045  1.28%  FINDING
+cy         BenchmarkJoinReorderStatsLiveHistory/history=quiet-10           980µs      968µs   -1.22%  0.031  7.87%  rejected as noise
+cy         BenchmarkCountNodeVar-10                                      212.4µs      210µs   -1.12%  0.005  7.87%  rejected as noise
+exec       BenchmarkColumnarAgg_SumCountGroupBy/row_off-10                50.5ms    49.99ms   -1.02%  0.045  1.28%  rejected as noise
+cy         BenchmarkIndexedPointLookup/numeric/hash/n=20000-10           4.165µs    4.186µs   +0.50%  0.045  2.13%  rejected as noise
+cy         BenchmarkIndexIntersectPlan_ControlNoIndex-10                 2.493µs    2.508µs   +0.62%  0.037  2.13%  rejected as noise
+cy         BenchmarkNumericEqualitySeek_EntitySeek/16000-10              4.027µs    4.068µs   +1.01%  0.031  2.13%  rejected as noise
+cy         BenchmarkBlockFormCount/labelled_hop/rows=250/pattern_rewritten-10    138.8µs    140.3µs   +1.07%  0.045  7.87%  rejected as noise
+cy         BenchmarkBlockFormCount/labelled_hop/rows=250/block_unrewritten-10    314.8µs    318.1µs   +1.07%  0.031  7.87%  rejected as noise
+cy         BenchmarkColumnarShape_HopAnchorFilterLabelledFarEnd-10       3.694ms    3.738ms   +1.22%  0.045  1.28%  rejected as noise
+bolt       BenchmarkMsgObserve_RealBackend-10                            68.17ns    69.63ns   +2.13%  0.031  1.95%  FINDING
+cy         BenchmarkScalarFilterProjection-10                            829.5µs    852.1µs   +2.72%  0.005  7.87%  inconclusive
+Ltxn       BenchmarkCommitConcurrent/goroutines=8-10                     866.4µs    897.2µs   +3.56%  0.013  7.87%  inconclusive
+exec       BenchmarkExpandOut_PerEdge_SingleSource/K=65536-10            1.271ms    1.327ms   +4.37%  0.005  1.28%  FINDING
+exec       BenchmarkExpandDir_InVsOut_Baseline/IN_deg1_sources-10        93.27µs    98.69µs   +5.81%  0.005  7.87%  inconclusive
+exec       BenchmarkExpandOut_PerEdge_SingleSource/K=4096-10              78.1µs    83.21µs   +6.54%  0.005  7.87%  inconclusive
+
+FINDINGS: 11   inconclusive: 5   rejected as noise: 9
+
+--- geomean per block (all comparable rows, not only significant ones) ---
+  exec         n=  62  effect geomean   -0.38%   same-binary floor geomean   -0.03%
+  cy           n= 115  effect geomean   +0.15%   same-binary floor geomean   +0.02%
+  rec          n=   4  effect geomean   -0.01%   same-binary floor geomean   +0.25%
+  txn          n=   2  effect geomean   -0.07%   same-binary floor geomean   -0.28%
+  bolt         n=  27  effect geomean   +0.07%   same-binary floor geomean   -0.27%
+  search       n=   4  effect geomean   +0.80%   same-binary floor geomean   -0.19%
+  centrality   n=   1  effect geomean   -0.68%   same-binary floor geomean   -0.70%
+  Lreadtx      n=  10  effect geomean   +1.78%   same-binary floor geomean   -4.57%
+  Ltxn         n=   4  effect geomean   +0.41%   same-binary floor geomean   -0.05%

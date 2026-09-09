@@ -35,10 +35,18 @@ package cypher
 //     error [statsRangeEstimate] returns is 1/B + Delta/N, so by the time the write
 //     fraction Delta/N reaches the screen's b - 1/B threshold the interval has
 //     already widened by ~0.096*N rows, which is far more than any selective range
-//     estimate — rule 1 then declines on the interval alone. The screen is
-//     load-bearing for the EQUALITY path, whose MCV count carries no error term at
-//     all, and TestJoinReorderStats_StaleStatistic_NoSwap and its two isolating
-//     companions hold it there.
+//     estimate — rule 1 then declines on the interval alone. It remains in place
+//     because it is the only thing applying the SMALLER denominator to a range
+//     estimate, which is the one reading that sees a snapshot invalidated by growth
+//     (TestJoinReorderStats_GrowthDemotesWhereTheProviderDoesNot), and aligning the
+//     range provider on that denominator was out of scope at rmp #2772.
+//     Until rmp #2772 the screen was ALSO load-bearing for the equality path, whose
+//     MCV count carries no error term at all. It is not any more: the provider now
+//     applies the identical rule itself, where the RENDERER can see it too, so the
+//     equality call site was removed as a proven no-op
+//     (TestReorderStatsFreshness_EqualityScreenIsRedundant).
+//     TestJoinReorderStats_StaleStatistic_NoSwap and its two isolating companions
+//     still hold the equality OUTCOME, wherever the screen lives.
 //   - reorderFilteredRows' final "unrecognised shape" return is unreachable from
 //     its only caller: [reorderFilteredScan] has already matched the same two
 //     extractors, and passing real parameters instead of nil can only change a
@@ -459,7 +467,7 @@ func TestJoinReorderStats_DeleteToleranceAloneDemotes(t *testing.T) {
 		t.Fatal("10 replaced values over 500 rows exceed the 1% delete rebuild tolerance, " +
 			"but the statistic still drove a swap")
 	}
-	if got, want := mustExplainTable(t, on, q, nil), mustExplainTable(t, off, q, nil); got != want {
+	if got, want := explainPlanShape(t, on, q, nil), explainPlanShape(t, off, q, nil); got != want {
 		t.Fatalf("plan deviated from the default:\n%s", got)
 	}
 }
@@ -498,7 +506,7 @@ func TestJoinReorderStats_WriteFractionAloneDemotes(t *testing.T) {
 		t.Fatal("60 first-time writes over a 500-row build-time population pass the " +
 			"b - 1/B staleness threshold, but the statistic still drove a swap")
 	}
-	if got, want := mustExplainTable(t, on, q, nil), mustExplainTable(t, off, q, nil); got != want {
+	if got, want := explainPlanShape(t, on, q, nil), explainPlanShape(t, off, q, nil); got != want {
 		t.Fatalf("plan deviated from the default:\n%s", got)
 	}
 }

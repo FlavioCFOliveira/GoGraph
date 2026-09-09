@@ -1,0 +1,61 @@
+GO=go version go1.27.1 darwin/arm64
+START 2026-09-08T20:21:53Z load1=1.45
+build arm=A pkg=cypher EXIT=0
+build arm=A pkg=cypher/exec EXIT=0
+build arm=A pkg=graph EXIT=0
+build arm=A pkg=graph/index EXIT=0
+build arm=A pkg=graph/index/btree EXIT=0
+build arm=A pkg=graph/index/hash EXIT=0
+build arm=A pkg=graph/index/count EXIT=0
+build arm=A pkg=graph/lpg EXIT=0
+build arm=A pkg=graph/mvcc EXIT=0
+build arm=A pkg=store/txn EXIT=0
+build arm=A pkg=store/checkpoint EXIT=0
+build arm=A pkg=store/recovery EXIT=0
+build arm=A pkg=store/snapshot EXIT=0
+build arm=A pkg=store/wal EXIT=0
+build arm=A pkg=bolt/server EXIT=0
+build arm=A pkg=search EXIT=0
+build arm=A pkg=search/centrality EXIT=0
+build arm=A pkg=internal/metrics/prometheus EXIT=0
+ARM A DONE 2026-09-08T20:22:37Z free=8548M
+build arm=B pkg=cypher EXIT=0
+build arm=B pkg=cypher/exec EXIT=0
+build arm=B pkg=graph EXIT=0
+build arm=B pkg=graph/index EXIT=0
+build arm=B pkg=graph/index/btree EXIT=0
+build arm=B pkg=graph/index/hash EXIT=0
+build arm=B pkg=graph/index/count EXIT=0
+build arm=B pkg=graph/lpg EXIT=0
+build arm=B pkg=graph/mvcc EXIT=0
+build arm=B pkg=store/txn EXIT=0
+build arm=B pkg=store/checkpoint EXIT=0
+build arm=B pkg=store/recovery EXIT=0
+build arm=B pkg=store/snapshot EXIT=0
+build arm=B pkg=store/wal EXIT=0
+build arm=B pkg=bolt/server EXIT=0
+build arm=B pkg=search EXIT=0
+build arm=B pkg=search/centrality EXIT=0
+build arm=B pkg=internal/metrics/prometheus EXIT=0
+ARM B DONE 2026-09-08T20:23:17Z free=7498M
+build arm=B2 pkg=cypher EXIT=0
+build arm=B2 pkg=cypher/exec EXIT=0
+build arm=B2 pkg=graph EXIT=0
+build arm=B2 pkg=graph/index EXIT=0
+build arm=B2 pkg=graph/index/btree EXIT=0
+build arm=B2 pkg=graph/index/hash EXIT=0
+build arm=B2 pkg=graph/index/count EXIT=0
+build arm=B2 pkg=graph/lpg EXIT=0
+build arm=B2 pkg=graph/mvcc EXIT=0
+build arm=B2 pkg=store/txn EXIT=0
+build arm=B2 pkg=store/checkpoint EXIT=0
+build arm=B2 pkg=store/recovery EXIT=0
+build arm=B2 pkg=store/snapshot EXIT=0
+build arm=B2 pkg=store/wal EXIT=0
+build arm=B2 pkg=bolt/server EXIT=0
+build arm=B2 pkg=search EXIT=0
+build arm=B2 pkg=search/centrality EXIT=0
+build arm=B2 pkg=internal/metrics/prometheus EXIT=0
+ARM B2 DONE 2026-09-08T20:23:23Z free=7204M
+END 2026-09-08T20:23:23Z
+BUILD_ALLDONE

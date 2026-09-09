@@ -394,13 +394,12 @@ type existsWriteVariant struct {
 	wantRowCount int
 	wantNonNull  []string
 
-	// wantErrContains, when non-empty, pins a variant that currently fails.
-	// This is deliberate: the two variants that carry it are blocked on rmp
-	// #2660 (no PatternEvaluator / SubqueryEvaluator wired on the write path),
-	// which is filed separately and is NOT fixed here. When #2660 lands, these
-	// two expectations must be replaced with the correct row sets — the failure
-	// this produces is the intended signal, not a regression.
-	wantErrContains string
+	// A wantErrContains field used to live here, carried by exactly two
+	// variants — V6 and V15 — that were pinned to the typed error rmp #2660
+	// produced, with the instruction to replace them with the correct row sets
+	// once #2660 landed. It has landed, both variants now assert rows like
+	// every other, and the field and its branch went with them rather than
+	// staying behind as a condition no variant can reach.
 
 	// why records what this variant discriminates, so a future reader can tell
 	// which variants are load-bearing and which are controls.
@@ -419,6 +418,14 @@ type existsWriteVariant struct {
 func TestExistsAfterWriteMatrix(t *testing.T) {
 	const n = 4
 	all4 := sidRows(existsWriteBaseSID, existsWriteBaseSID+1, existsWriteBaseSID+2, existsWriteBaseSID+3)
+	// all4ExistsTrue is all4 for the one variant that PROJECTS the subquery
+	// instead of filtering on it, so its rows carry the boolean as well.
+	all4ExistsTrue := sortedRows(
+		fmt.Sprintf("ex=true sid=%d", existsWriteBaseSID),
+		fmt.Sprintf("ex=true sid=%d", existsWriteBaseSID+1),
+		fmt.Sprintf("ex=true sid=%d", existsWriteBaseSID+2),
+		fmt.Sprintf("ex=true sid=%d", existsWriteBaseSID+3),
+	)
 	// selectiveSetup gives a :Z self-edge to the first two nodes only.
 	selectiveSetup := fmt.Sprintf(`MATCH (a:P) WHERE a.sid < %d CREATE (a)-[:Z]->(a)`, existsWriteBaseSID+2)
 	// allSetup gives a :Z self-edge to every node.
@@ -463,10 +470,10 @@ func TestExistsAfterWriteMatrix(t *testing.T) {
 			why:      "a non-subquery WHERE on the same WITH was always correct: the subquery is the trigger, not WITH+WHERE",
 		},
 		{
-			name:            "V6_with_pattern_predicate",
-			query:           `MATCH (a:P) CREATE (a)-[:Z]->(a) WITH a WHERE (a)-[:Z]->(:P) RETURN a.sid AS sid`,
-			wantErrContains: "no PatternEvaluator",
-			why:             "blocked on rmp #2660, filed separately and NOT fixed here; replace with all4 when #2660 lands",
+			name:     "V6_with_pattern_predicate",
+			query:    `MATCH (a:P) CREATE (a)-[:Z]->(a) WITH a WHERE (a)-[:Z]->(:P) RETURN a.sid AS sid`,
+			wantRows: all4,
+			why:      "the bare pattern-predicate spelling of V1: it refused to run until rmp #2660 wired patEval on the write path, and must now answer exactly as the EXISTS spelling does",
 		},
 		{
 			name:         "V7_return_whole_node",
@@ -523,10 +530,10 @@ func TestExistsAfterWriteMatrix(t *testing.T) {
 			why:      "MERGE broke the same way as CREATE: the trigger is the class of clause, not the keyword",
 		},
 		{
-			name:            "V15_exists_in_projection",
-			query:           `MATCH (a:P) CREATE (a)-[:Z]->(a) WITH a RETURN a.sid AS sid, EXISTS { MATCH (a)-[:Z]->(:P) } AS ex`,
-			wantErrContains: "no SubqueryEvaluator",
-			why:             "blocked on rmp #2660, filed separately and NOT fixed here; replace with real rows when #2660 lands",
+			name:     "V15_exists_in_projection",
+			query:    `MATCH (a:P) CREATE (a)-[:Z]->(a) WITH a RETURN a.sid AS sid, EXISTS { MATCH (a)-[:Z]->(:P) } AS ex`,
+			wantRows: all4ExistsTrue,
+			why:      "EXISTS in PROJECTION position has no SemiApply lowering, so it is evaluated as an expression; it refused to run until rmp #2660 wired subEval on the write path",
 		},
 		{
 			name:     "V16_uncorrelated_exists",
@@ -605,13 +612,6 @@ func TestExistsAfterWriteMatrix(t *testing.T) {
 			}
 			got, errText := drainExistsWrite(t, e, v.query)
 
-			if v.wantErrContains != "" {
-				if !strings.Contains(errText, v.wantErrContains) {
-					t.Fatalf("expected an error containing %q (rmp #2660 — see wantErrContains), got error %q and rows %v",
-						v.wantErrContains, errText, got)
-				}
-				return
-			}
 			if errText != "" {
 				t.Fatalf("unexpected error: %s", errText)
 			}

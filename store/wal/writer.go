@@ -105,6 +105,44 @@ type Stats struct {
 // violating Atomicity and Durability. A poisoned Writer accepts only
 // [Writer.Close]; the owner must discard it and re-open the WAL,
 // which re-validates the tail.
+//
+// # Which method answers "is this Writer healthy" — rmp #2525
+//
+// [Writer.Poisoned] does, and it is the only member that does. Every exported
+// method was called on a poisoned Writer and the result read off the run
+// (rmp #2525; the gate is TestWriter_PoisonedStateSurface). The set splits
+// three ways, and the split is NOT uniform, which is why it is written down:
+//
+//   - They return the sticky poison error — the IDENTICAL error value, not
+//     merely one of the same class, that [Writer.Poisoned] reports:
+//     [Writer.Append], [Writer.AppendCtx], [Writer.AppendRun], [Writer.Sync],
+//     [Writer.SyncCtx], [Writer.TruncatePrefix] and [Writer.Close]. For these,
+//     and only these, a nil return does imply the Writer was not poisoned at
+//     the moment of the call.
+//   - They can return nil WHILE the Writer is poisoned: [Writer.SyncBuffered]
+//     always does, because the poison rewinds the accepted offset to the
+//     durable one and the already-durable fast path fires; [Writer.SyncGroup]
+//     does for a watermark that was already durable before the failing round,
+//     which is the deliberate durability-first rule of rmp #2322 — a committer
+//     whose marker is on the platter must not be told its commit failed.
+//     SyncGroup still returns the sticky error for a watermark the poison
+//     discarded. A nil from either of these says nothing about the Writer's
+//     health.
+//   - It does not consult the poison at all: [Writer.Truncate] empties the file
+//     and leaves the Writer poisoned, returning nil if its own fsync succeeds
+//     and the raw fsync error — neither the sticky error nor an
+//     [ErrDurabilityFailed] — if it does not. Its return therefore says nothing
+//     about the fail-stop state in either direction. [Writer.Stats] and
+//     [Writer.DurableOffset] have no error channel; [Stats.SyncFailed] counts
+//     the failed sync rounds and is 1 after one poison.
+//
+// So a caller that needs to know whether this handle can still accept work
+// calls [Writer.Poisoned]. A flush that returned nil is not evidence.
+//
+// After [Writer.Close] every method in the three groups above returns
+// [ErrWriterClosed] instead of the sticky error — the closed check precedes the
+// poison check — while [Writer.Poisoned] still reports the sticky error, so the
+// owner can still learn why the handle died.
 type Writer struct {
 	f WALFile
 
@@ -684,6 +722,27 @@ func (w *Writer) SyncGroup(target int64) error {
 // (rmp #2322). Use [Writer.AppendRun]'s returned watermark with
 // [Writer.SyncGroup] for that. This exists for the callers that have nothing of
 // their own to acknowledge and merely want any buffered tail on disk.
+//
+// # A nil return does NOT mean the Writer is healthy — rmp #2525
+//
+// On a POISONED Writer SyncBuffered returns nil. [Writer.poison] rewinds the
+// accepted offset to the durable one, so "make everything accepted durable" is
+// already satisfied and [Writer.syncToLocked]'s already-durable fast path fires
+// before the sticky error is ever tested. Measured on a Writer poisoned after
+// one 30-byte frame had been acknowledged: two consecutive SyncBuffered calls
+// both returned nil, while [Writer.Poisoned] returned the sticky
+// [ErrDurabilityFailed] and [Writer.Append] was still refused.
+//
+// The nil is defensible on its own terms — nothing accepted is un-durable — but
+// it means SyncBuffered CANNOT be used to ask whether this Writer is still
+// usable, which is the question a caller holding a flush that "succeeded" will
+// naturally believe it has answered. A caller that proceeds on that nil is
+// working against a Writer that refuses every append. [Writer.Poisoned] is the
+// probe for that, and the only one; see the [Writer] type documentation for the
+// measured per-method table.
+//
+// After [Writer.Close] SyncBuffered returns [ErrWriterClosed], so the nil is
+// specific to the poisoned-but-open state.
 func (w *Writer) SyncBuffered() error {
 	defer metrics.Time("store.wal.SyncBuffered").Stop()
 	if w.closed.Load() {
@@ -921,6 +980,39 @@ func (w *Writer) Stats() Stats {
 //
 // On error the WAL may be in a partially-truncated state; callers
 // should not continue using the Writer.
+//
+// # On a POISONED Writer — rmp #2525
+//
+// Truncate is the one exported method that never consults the sticky poison
+// error. On a poisoned Writer it empties the file anyway, resets the durable
+// and accepted bookkeeping to zero, and leaves the Writer poisoned — so its
+// return value carries NO information about the fail-stop state, in either
+// direction. What it returns instead depends only on whether this method's own
+// fsync succeeds, which is to say on whether the failure that poisoned the
+// Writer was transient. Both regimes were measured on a Writer poisoned after
+// one 30-byte frame had been acknowledged:
+//
+//   - fsync recovered (a transient fault): Truncate returned (30, nil). A
+//     SUCCESS on a Writer that is still dead.
+//   - fsync still failing (a persistent fault): Truncate returned (30, err)
+//     where err is the raw error from its own fsync — NOT the sticky error and
+//     NOT wrapped in [ErrDurabilityFailed], so `errors.Is(err,
+//     ErrDurabilityFailed)` is false on it even though the Writer is poisoned.
+//
+// In both regimes the file went from 30 bytes to 0, [Writer.DurableOffset]
+// became 0, the lifetime [Writer.Stats] were unchanged, [Writer.Poisoned] still
+// returned the identical sticky error, and the very next [Writer.Append] was
+// still refused with it.
+//
+// That is not a durability hole. Nothing can be written onto the emptied file
+// through this handle, because every append and every commit-path sync still
+// fail-stops; and the production non-blocking checkpoint does not cut the WAL
+// with this whole-file helper but with [Writer.TruncatePrefix], which DOES
+// return the sticky error on a poisoned Writer. The behaviour is recorded here
+// so that a change to it is judged rather than absorbed: putting Truncate on a
+// live commit or checkpoint path would first have to re-examine whether
+// emptying the log of a Writer whose durability has already failed is still
+// safe.
 func (w *Writer) Truncate() (int64, error) {
 	defer metrics.Time("store.wal.Truncate").Stop()
 	if w.closed.Load() {
@@ -998,6 +1090,14 @@ func (w *Writer) DurableOffset() int64 {
 // and nil while the writer is healthy. The returned error is the same sentinel
 // every subsequent Append/Sync returns.
 //
+// It is the Writer's ONLY health probe, and a caller asking "can this handle
+// still accept work" must use it rather than infer health from another method's
+// nil: [Writer.SyncBuffered] returns nil on a poisoned Writer and
+// [Writer.Truncate] succeeds on one. The [Writer] type documentation carries the
+// measured per-method table (rmp #2525). Poisoned remains legible after
+// [Writer.Close], which is where every other method reports [ErrWriterClosed]
+// instead of the sticky error.
+//
 // It is the WAL-health probe a non-blocking checkpoint consults under the
 // store's quiesce boundary ([txn.Store.RunUnderCommitLock]) BEFORE it captures
 // and publishes a snapshot (rmp #1919). A concurrent schema DDL (CREATE/DROP
@@ -1063,6 +1163,13 @@ func (w *Writer) Poisoned() error {
 // and the Writer continues against the suffix-only file. On a path-less
 // Writer ([OpenWith]) it returns [ErrPrefixTruncateUnsupported].
 //
+// On an already-POISONED Writer TruncatePrefix returns the sticky poison error
+// and touches nothing — the check precedes even the path-less and range
+// rejections, so a path-less poisoned Writer reports the poison rather than
+// [ErrPrefixTruncateUnsupported], and upTo == 0 is not the documented no-op
+// (measured, rmp #2525). It is therefore the truncation entry point that DOES
+// report a poisoned Writer, unlike the whole-file [Writer.Truncate].
+//
 // Error handling splits on the atomic rename:
 //
 //   - A failure BEFORE the rename (suffix copy, or the rename itself) leaves
@@ -1089,9 +1196,12 @@ func (w *Writer) TruncatePrefix(upTo int64) (int64, error) {
 		metrics.IncCounter("store.wal.TruncatePrefix.errors", 1)
 		return 0, w.syncErr
 	}
-	// Reject a path-less (OpenWith) writer before any other check: the
+	// Reject a path-less (OpenWith) writer before the offset checks: the
 	// atomic copy-then-rename has no path to rename over, so the operation is
-	// fundamentally unsupported regardless of the offset.
+	// fundamentally unsupported regardless of the offset. The sticky-poison
+	// check above still comes FIRST, so a path-less POISONED writer reports the
+	// poison rather than ErrPrefixTruncateUnsupported (measured, rmp #2525):
+	// the fail-stop state is the more urgent fact about the handle.
 	if w.path == "" {
 		metrics.IncCounter("store.wal.TruncatePrefix.errors", 1)
 		return 0, ErrPrefixTruncateUnsupported

@@ -1,0 +1,66 @@
+
+========================================================================================================
+FLOOR 1 — B vs B2: the SAME BYTE-IDENTICAL BINARY against itself, interleaved
+          in the SAME rounds, under the SAME load, as the signal it calibrates.
+========================================================================================================
+  [ns/op]
+  all blocks pooled                            n= 243  median|Δ|=  0.49%  p95|Δ|=  1.95%  max|Δ|= 26.13%  sig@p<0.05=17
+      largest drift : BenchmarkReadTx_LockFree-1024                          4.798µs -> 3.545µs     -26.13%  p=0.0202405705770774
+      SIGNIFICANT   BenchmarkReadTx_LockFree-1024                       -26.13%  p=0.0202  sprA=±28.6% sprB=±24.5%
+      SIGNIFICANT   BenchmarkIndexedPointLookup/numeric/hash/n=5000-10   +1.89%  p=0.0129  sprA=±0.9% sprB=±1.3%
+      SIGNIFICANT   BenchmarkIndexedPointLookup/numeric/btree/n=5000-10   +1.79%  p=0.0051  sprA=±1.2% sprB=±0.6%
+      SIGNIFICANT   BenchmarkIndexedPointLookup/numeric/btree/n=20000-10   +1.51%  p=0.0050  sprA=±0.9% sprB=±0.7%
+      SIGNIFICANT   BenchmarkIndexedPointLookup/numeric/hash/n=20000-10   +1.43%  p=0.0051  sprA=±0.7% sprB=±0.7%
+      SIGNIFICANT   BenchmarkJoinReorderStatsLiveHistory/history=quiet-10   +1.36%  p=0.0306  sprA=±0.6% sprB=±1.4%
+      SIGNIFICANT   BenchmarkRelTypeProbe_Column-10                      -1.36%  p=0.0103  sprA=±2.9% sprB=±1.0%
+      SIGNIFICANT   BenchmarkMsgObserve_NoopBackend-10                   +1.30%  p=0.0301  sprA=±1.4% sprB=±0.5%
+      band                  n  median|Δ|   p95|Δ|   max|Δ|  worst sig
+      < 100 ns             34      0.55%    1.95%    6.28%      1.36%
+      100 ns - 10 us       58      0.48%    4.08%   26.13%     26.13%
+      10 us - 1 ms         67      0.53%    2.59%    4.62%      1.36%
+      > 1 ms               84      0.46%    1.17%    1.68%      1.28%
+
+========================================================================================================
+FLOOR 2 — A vs B on the packages whose TEST BINARY is byte-identical BETWEEN
+          the releases. Measured ACROSS the arms, so it catches what a
+          within-arm floor structurally cannot. Every number is noise by
+          construction.
+========================================================================================================
+  [ns/op]
+  identical-binary packages                    n=   9  median|Δ|=  1.05%  p95|Δ|=  2.63%  max|Δ|=  7.87%  sig@p<0.05=0
+      largest drift : BenchmarkStoreFootprint-10                             13.41µs -> 14.47µs     +7.87%  p=0.10869458079652472
+      band                  n  median|Δ|   p95|Δ|   max|Δ|  worst sig
+      < 100 ns              6      0.44%    1.05%    1.25%      0.00%
+      100 ns - 10 us        2      2.38%    2.13%    2.63%      0.00%
+      10 us - 1 ms          1      7.87%    7.87%    7.87%      0.00%
+
+========================================================================================================
+FLOOR 1 — B vs B2: the SAME BYTE-IDENTICAL BINARY against itself, interleaved
+          in the SAME rounds, under the SAME load, as the signal it calibrates.
+========================================================================================================
+  [allocs/op]
+  all blocks pooled                            n= 243  median|Δ|=  0.00%  p95|Δ|=  0.00%  max|Δ|=  0.14%  sig@p<0.05=2
+      largest drift : BenchmarkPlanCacheHit_Parameterised-10                   89.50 -> 87.00       -2.79%  p=0.23057135296393616
+      SIGNIFICANT   BenchmarkIndexesRecoveryVsRebuild/rebuild-10         +0.01%  p=0.0194  sprA=±0.0% sprB=±0.0%
+      SIGNIFICANT   BenchmarkColumnarShape_HopBaseline-10                -0.00%  p=0.0325  sprA=±0.0% sprB=±0.0%
+      band                  n  median|Δ|   p95|Δ|   max|Δ|  worst sig
+      > 1 ms              243      0.00%    0.00%    0.14%      0.01%
+
+========================================================================================================
+FLOOR 2 — A vs B on the packages whose TEST BINARY is byte-identical BETWEEN
+          the releases. Measured ACROSS the arms, so it catches what a
+          within-arm floor structurally cannot. Every number is noise by
+          construction.
+========================================================================================================
+  [allocs/op]
+  identical-binary packages                    n=   9  median|Δ|=   nan%  p95|Δ|=   nan%  max|Δ|=  0.00%  sig@p<0.05=0
+      largest drift : BenchmarkApply_HotParallel-10                             0.00 -> 0.00        +nan%  p=1.0
+      band                  n  median|Δ|   p95|Δ|   max|Δ|  worst sig
+      > 1 ms                9       nan%     nan%    0.00%      0.00%
+
+ADJUDICATION BAR per magnitude band = max(p95 same-code drift, worst same-code
+drift that reached p<0.05), taken across BOTH floors:
+   < 100 ns             1.95%
+   100 ns - 10 us      26.13%
+   10 us - 1 ms         7.87%
+   > 1 ms               1.28%

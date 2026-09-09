@@ -9,6 +9,38 @@ foundation a follow-up must build first.
 Audited at HEAD `8f0e785`. Certified by `cypher-expert-consultant` (pipeline
 breaker taxonomy) and `storage-engine-auditor` (Isolation foundation).
 
+> **SUPERSEDED (rmp #2344 / #2289, noted 2026-09-08): the foundation this spike
+> declared absent has since been built.** The verdict below rests on three
+> statements about the tree at HEAD `8f0e785`, and none of them describes the
+> engine now:
+>
+> 1. **`Graph.View` no longer exists.** It was removed by rmp #2344, and its
+>    absence is enforced as a source gate — `internal/scriptgate/no_read_barrier_gate_test.go`
+>    fails the build if `lpg.Graph.View` reappears or if any production file
+>    outside `graph/lpg` acquires the visibility gate. So "`Graph.View(fn)` holds
+>    `visMu.RLock` for `fn`'s whole duration" no longer names any code path;
+>    reads take **no** barrier at all.
+> 2. **`type Snapshot` exists.** The claim "There is **no** `type Snapshot` …
+>    in `graph/` (verified)" is false at this tree: `graph/lpg/snapshot.go:45`
+>    declares `type Snapshot struct`, obtained with `Graph.BeginRead` and
+>    released with `Graph.EndRead` (rmp #2289, MVCC P4b). It is an MVCC read
+>    view — two timestamps and a reclamation slot — rather than the immutable
+>    per-shard graph root behind `atomic.Pointer[Snapshot]` that
+>    `isolation-design.md` specified, and no `atomic.Pointer[Snapshot]` exists
+>    in `graph/`.
+> 3. **Isolation is therefore no longer provided by mutual exclusion on
+>    `visMu`.** A read resolves each value as-of its pinned snapshot, and
+>    correlated reads are tied together by the per-snapshot visibility verdict
+>    added in rmp #2378 (see the `verdict` field's comment in
+>    `graph/lpg/snapshot.go`).
+>
+> What this does **not** establish is the spike's conclusion in reverse: nothing
+> here re-measures whether bounded-memory streaming is now safe, and
+> `Result.materialize` is still the shape the engine ships. The verdict below is
+> kept as the record of *why* streaming was declined on the F3 foundation; it
+> must be re-derived against the MVCC snapshot foundation before it is quoted as
+> a current answer.
+
 ## The question
 
 The seam audit flagged that a query returning a large result set

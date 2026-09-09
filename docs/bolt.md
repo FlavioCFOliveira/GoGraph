@@ -7,6 +7,8 @@ GoGraph includes a Bolt v5 server compatible with `neo4j-go-driver` v5 and `cyph
 ```go
 import (
     "context"
+    "log"
+
     "github.com/FlavioCFOliveira/GoGraph/bolt/server"
     "github.com/FlavioCFOliveira/GoGraph/cypher"
     "github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
@@ -63,51 +65,174 @@ opts := server.Options{
 
 ## TLS
 
+The server wraps an accepted connection with whatever `*tls.Config` it is given,
+verbatim: it imposes no minimum version and no cipher policy of its own, and a
+nil `TLSConfig` means plain TCP (`NewServer` logs a warning in that case).
+`DefaultTLSConfig` is the hardened starting point — a TLS 1.2 floor and an
+AEAD-only ECDHE cipher list for the 1.2 handshake, with TLS 1.3 negotiated
+automatically. It carries no certificate, so the caller must supply one:
+
 ```go
-opts := server.Options{
-    TLSConfig: &tls.Config{...},
+cfg := server.DefaultTLSConfig()
+cfg.Certificates = []tls.Certificate{cert}
+opts := server.Options{TLSConfig: cfg}
+```
+
+To rotate certificates without restarting the server, wire the on-disk
+reloader instead of a fixed certificate. `CertReloader` swaps the live
+certificate only once the new pair reads, parses, pairs, and its leaf is valid
+at the current instant; a reload that fails any of those leaves the working
+certificate in service and reports the error through `onError`:
+
+```go
+reloader, err := server.NewCertReloader("/etc/gograph/tls.crt", "/etc/gograph/tls.key", nil)
+if err != nil {
+    log.Fatalf("bolt: tls: %v", err)
 }
+go reloader.Watch(1*time.Minute, stop)
+
+cfg := server.DefaultTLSConfig()
+cfg.GetCertificate = reloader.GetCertificate
+opts := server.Options{TLSConfig: cfg}
 ```
 
 ## Limits and backpressure
 
-`Options` exposes the bounds that protect the server under load. All of them
-fall back to a default when left at the zero value:
+`Options` exposes the bounds that protect the server under load.
+
+**The four TIMEOUT fields carry a three-way contract** (rmp #2807): `0` — the zero
+value, and the default for all four — **disables** the bound; a positive value
+applies it verbatim, with no default substituted; a **negative value is refused**
+by `NewServer`, which returns a `*server.NegativeTimeoutError` naming the field
+and the value (every offending field is reported at once, and
+`errors.Is(err, server.ErrNegativeTimeout)` classifies it). Coercing a negative to
+a default was the previous behaviour; it hid the caller's mistake and installed a
+bound they never asked for.
+
+Every other field below still falls back to a default when left at the zero
+value.
 
 | Field | Default | Effect |
 |---|---|---|
 | `MaxConnections` | 1024 | Upper bound on concurrent connections. When the limit is reached, a newly accepted connection is closed immediately rather than queued. |
 | `MaxMessageBytes` | `proto.DefaultMaxMessageBytes` (16 MiB) | Caps the cumulative payload of one Bolt message reassembled across chunks, closing the Slowloris-style vector of an unbounded chunk stream. |
 | `MaxInFlightPerConnection` | `DefaultMaxInFlightPerConnection` (1024) | Caps the number of `RUN` statements issued inside a single explicit transaction before `COMMIT`/`ROLLBACK`. Exceeding it returns a `Neo.ClientError.General.LimitExceeded` failure. Auto-commit cursors are not counted. |
-| `ConnTimeout` | 0 (disabled) | Per-connection idle read deadline, reset before each message read. |
+| `ConnTimeout` | `DefaultConnTimeout` (**0 — disabled**) | Per-connection read deadline, reset before each message read when set. **Disabled by default since rmp #2807**: it was 30 s, and it ran while the message loop executed the client's own statement, so it closed BUSY connections — measured at 110 ms against a 100 ms bound on a 900 ms statement. Liveness against a peer that has vanished comes from TCP keep-alive instead (see [Liveness: TCP keep-alive](#liveness-tcp-keep-alive)). Set it to reclaim a connection that is alive but silent; note that it also bounds a single long statement, so size it above the slowest statement expected, not merely above think-time. The unauthenticated version-negotiation handshake is bounded separately and unconditionally (`DefaultHandshakeTimeout`, 10 s); the window between that handshake and a successful `LOGON` is bounded by this field alone. |
 | `DatabaseName` | `DefaultDatabaseName` (`neo4j`) | The name reported in result metadata for a client that selects no database. A client that names one has its own name echoed back. See the `db` note under [Protocol conformance notes](#protocol-conformance-notes). |
-| `MaxTxIdleTime` | `DefaultMaxTxIdleTime` (5 s) | How long an **open** explicit transaction may go without the client sending a message, after which it is rolled back. Distinct from `DefaultTxTimeout`, which caps total lifetime however busy the transaction is. Cannot be disabled. |
-| `MaxOpenTxPerPrincipal` | `DefaultMaxOpenTxPerPrincipal` (16) | How many explicit transactions one authenticated principal may hold **open** at once, across all its connections. Exceeding it fails the `BEGIN` with `Neo.TransientError.Transaction.MaximumTransactionLimitReached` — Neo4j's own TRANSIENT code, so a driver retries — and the session stays in **READY**, so the retry needs no `RESET` (rmp #2561). A negative value disables it. |
+| `MaxTxIdleTime` | `DefaultMaxTxIdleTime` (**0 — disabled**) | How long an **open** explicit transaction may go without the client sending a message, after which it is rolled back. Distinct from `DefaultTxTimeout`, which caps total lifetime however busy the transaction is. **Disabled by default since rmp #2807** — 5 s until rmp #2806, then 30 minutes — matching PostgreSQL's `idle_in_transaction_session_timeout`. Set it to reclaim an abandoned transaction; see [Abandoned transactions](#abandoned-transactions) for what leaving it disabled costs. |
+| `MaxOpenTxPerPrincipal` | `DefaultMaxOpenTxPerPrincipal` (2048) | How many explicit transactions one authenticated principal may hold **open** at once, across all its connections. Exceeding it fails the `BEGIN` with `Neo.TransientError.Transaction.MaximumTransactionLimitReached` — Neo4j's own TRANSIENT code, so a driver retries — and the session stays in **READY**, so the retry needs no `RESET` (rmp #2561). A negative value disables it. Under the default configuration the quota cannot bind: a connection holds at most one open transaction and `MaxConnections` defaults to 1024, so the connection ceiling is reached first. It binds again for an operator who raises `MaxConnections` above 2048, and it is what isolates one principal from another (rmp #2419). |
+| `MaxInboundDecodeBytes` | derived, or `DefaultMaxInboundDecodeBytes` (1 GiB) | Engine-wide ceiling on the decoded-collection memory in flight across **all** connections while messages are being decoded, so the per-message cap multiplied by `MaxConnections` is not the real bound. Zero derives one eighth of `GOMEMLIMIT` when the operator has set one, and falls back to 1 GiB when they have not; `MaxInboundDecodeBytesUnlimited` (-1) opts out. When the pool is drawn down, further inbound decodes fail fast with a retryable transient error rather than allocating. |
+| `DefaultTxTimeout` | `DefaultTxTimeout` (**0 — disabled**) | Total wall-clock lifetime of an explicit transaction when the client sends no `tx_timeout` of its own, however busy it is. A client-supplied `tx_timeout` takes precedence. **Disabled by default since rmp #2807** — 30 s until rmp #2806, then 30 minutes — matching PostgreSQL's `transaction_timeout` and Neo4j's `db.transaction.timeout`, both of which also ship at 0. The cost is that a transaction which keeps talking but never finishes holds its versions and its horizon slot for as long as its connection lives. |
+| `DefaultStatementTimeout` | `DefaultStatementTimeout` (**0 — disabled**) | The autocommit counterpart: the bound applied to a bare `RUN` outside an explicit transaction when the client supplies no `timeout`. **Disabled by default since rmp #2807** — 30 s until rmp #2806, then 30 minutes — matching PostgreSQL's `statement_timeout`. THE COST, stated plainly: a default server has no wall-clock bound on an autocommit statement, which is the state #1828 recorded as a defect. A super-linear query whose result collapses to a single row (a disconnected Cartesian product such as `MATCH (a),(b),(c),(d),(e) RETURN count(*)`) never trips the row or byte caps and pins a CPU core until it finishes or the client disconnects. What still bounds it: the engine's result caps for any statement whose result actually grows, `MaxConnections` for how many can run at once, and cancellation on disconnect. Set this field, or `MaxStatementTimeout`, to bound it by the clock. |
+| `MaxStatementTimeout` | 0 (no server-side cap) | Server-side ceiling on per-statement execution time. A client-supplied timeout is silently clamped to it, and when positive it is applied unconditionally to a client that supplies none. |
+
+The four remaining fields are not bounds and so are not in the table: `Auth`
+(required — see [Authentication](#authentication)), `TLSConfig` (see [TLS](#tls)),
+`Closer` (see [Deployment](#deployment)), and `Logger`, the structured logger that
+receives both accept-loop and session-level events; leave it nil for the default
+`slog` handler.
+
+### Liveness: TCP keep-alive
+
+**The server enables TCP keep-alive on every accepted connection**, and since
+rmp #2807 that is its only automatic liveness check on an established connection.
+The parameters are fixed, not configurable:
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `DefaultKeepAliveIdle` | 15 s | Silence before the first probe is sent. |
+| `DefaultKeepAliveInterval` | 5 s | Gap between probes. |
+| `DefaultKeepAliveCount` | 3 | Unanswered probes before the kernel drops the connection. |
+
+That is a **30-second budget** to notice a peer that has gone — deliberately the
+same reclamation budget the 30 s `ConnTimeout` used to give a dead connection,
+which is what it was really being used for.
+
+**What it detects:** a peer that has VANISHED — a pulled cable, a NAT or firewall
+that silently dropped its state, a client host that went away without sending
+`FIN`. The kernel probes and closes the connection, the server's read fails, and
+the teardown rolls back any open transaction.
+
+**What it does not detect:** a client that is alive and merely silent. Its stack
+answers every probe, so keep-alive holds the connection open indefinitely. Set
+`Options.ConnTimeout` if that case matters — this is exactly PostgreSQL's split
+between TCP keep-alive for liveness and `idle_session_timeout` for policy.
+
+The parameters are set on the accepted connection, not on the listener, so the
+budget does not depend on how the embedder built the `net.Listener` passed to
+`Serve`. A connection that is not a `*net.TCPConn` — a `net.Pipe`, a Unix socket,
+an embedder's own transport — is left alone, because keep-alive is a TCP-level
+concept. The gate is
+`TestKeepAlive_IsEnabledOnAcceptedConnections` (`bolt/server/keepalive_test.go`),
+which reads the socket options back out of the kernel on a connection accepted
+from a listener built with keep-alive **off**, so it can actually fail.
 
 ### Abandoned transactions
 
-An open explicit **write** transaction holds the engine's global visibility
-barrier, so while one is open every reader on every other connection waits. A
-client that sends `BEGIN` and then stops talking therefore stalls the whole
-server for as long as the transaction lives.
+**An abandoned transaction no longer blocks anybody.** Until rmp #2305/#2306 an
+open explicit **write** transaction held the engine's writer serialisation and its
+global visibility barrier for its whole lifetime, so a client that sent `BEGIN` and
+then stopped talking stalled every other reader and writer on the server; that is
+the outage the bounds below were built for, and it is gone. Two gates in
+`bolt/server/e2e_concurrent_write_tx_test.go` assert its absence against the
+official driver: `TestE2E_TwoExplicitWriteTransactionsOverlap` and
+`TestE2E_AnIdleExplicitTransactionDoesNotStallAnotherWriter`.
 
-`DefaultTxTimeout` alone cannot separate that from legitimate long work: lowering
-it shortens the outage and kills slow-but-healthy transactions at the same time.
-`MaxTxIdleTime` distinguishes the two, because a working client sends messages and
-an abandoned one does not — every inbound message pushes the idle deadline
-forward, while the total-lifetime deadline is untouched.
+What an abandoned transaction still costs is **memory**, not other clients'
+progress: it pins an MVCC read snapshot, so no version it could still reach is
+reclaimable while it lives, and it occupies one of the reclamation horizon's fixed
+number of slots. An availability failure became a memory-and-slot failure, so
+raising — or removing — `MaxTxIdleTime` is now a memory-growth risk rather than an
+availability one. That is the trade rmp #2807 took, and the next paragraphs state
+its price.
 
-Measured with one client abandoning a `BEGIN` and another reading, both bounds at
-their defaults except a 20 s total timeout: before the idle bound existed the
-reader received no response at all within 10 s; with it, the reader is served
-after 5.0 s, the idle bound.
+**rmp #2806 raised those bounds; rmp #2807 removed them.** `MaxTxIdleTime` went
+from 5 s to 30 minutes and then to **0**; `DefaultTxTimeout` and
+`DefaultStatementTimeout` went from 30 s to 30 minutes and then to **0**;
+`ConnTimeout` went from 30 s to **0**. Zero means disabled, and it is the posture
+both peers ship: PostgreSQL's `statement_timeout`, `transaction_timeout`,
+`idle_in_transaction_session_timeout` and `idle_session_timeout` are all 0, with
+the documentation advising against setting them globally, and Neo4j's
+`db.transaction.timeout` is 0.
 
-`MaxOpenTxPerPrincipal` bounds the other dimension. Note where it binds: a write
-transaction holds the writer serialisation, so the engine already caps those at
-one server-wide, and this limit is therefore about **read** transactions
-(`BEGIN` with `mode: "r"`), which take no writer serialisation and no barrier and
-can genuinely be concurrent. It counts open transactions, not `BEGIN`s queued on
-the writer — concurrent `BEGIN`s are bounded by `MaxConnections`.
+THE COST, stated rather than glossed: **one abandoned transaction holds every
+version it could still read, and one of the 1024 horizon slots, for as long as its
+connection lives.** Not 5 s, not half an hour — indefinitely. *N* abandoned
+transactions hold *N* slots on the same terms, so the horizon's capacity is
+exhaustible by silent clients alone, and `MaxConnections` (1024) is what bounds how
+many of them there can be. Nothing reclaims them on a timer: the idle bound, the
+total bound and the connection read deadline are all disabled, and the read
+deadline is what used to tear the connection down and roll the transaction back as
+a side effect.
+
+**The count bounds are untouched**, and they are what bounds the resource:
+`MaxConnections` (1024), `MaxOpenTxPerPrincipal` (2048) and the reclamation
+horizon's fixed 1024 slots. PostgreSQL bounds by count too; only the time bound
+went.
+
+**The remedy is the operator's**, and it is PostgreSQL's: set `MaxTxIdleTime` to
+reclaim an abandoned transaction, `ConnTimeout` to reclaim the connection holding
+it, and `DefaultTxTimeout` for a total bound. `Server.Transactions` and
+`Server.TerminateTransaction` remain the manual route for one transaction at a
+time. The end-to-end gates for the disabled defaults, each paired with a bounded
+control arm, are `TestDefaults_NoWallClockBoundOnAnIdleConnectionOrItsTransaction`
+and `TestDefaults_NoWallClockBoundOnAnAutocommitStatement`
+(`bolt/server/default_timeouts_reach_test.go`).
+
+`DefaultTxTimeout` alone cannot separate an abandoned transaction from legitimate
+long work: lowering it shortens the exposure and kills slow-but-healthy
+transactions at the same time. `MaxTxIdleTime` distinguishes the two, because a
+working client sends messages and an abandoned one does not — every inbound
+message pushes the idle deadline forward, while the total-lifetime deadline is
+untouched.
+
+`MaxOpenTxPerPrincipal` bounds the other dimension, and it binds on **both** modes.
+It once could not be the binding constraint for a write transaction, because the
+engine capped concurrently-open write transactions at one server-wide; rmp #2305
+retired that hold, so write transactions now overlap freely and the quota is a real
+limit for them too. It counts open transactions, not `BEGIN`s waiting to be
+admitted — a burst of concurrent `BEGIN`s from one principal is bounded by
+`MaxConnections`.
 
 Since rmp #2307 a read transaction does hold one thing: an MVCC read snapshot,
 pinned at `BEGIN` for its whole lifetime. That is what gives it **snapshot
@@ -199,9 +324,11 @@ goroutine. The transaction's context is cancelled synchronously, so a statement
 already executing is interrupted immediately. Call `Transactions` again to confirm
 it has gone. Both calls are safe from any goroutine while the server is serving.
 
-Measured: with both automatic bounds set to 5 minutes, a reader blocked behind an
-abandoned `BEGIN` was served 203 ms after the `BEGIN` — released by the
-termination, since nothing else could have.
+(A 2026-07 measurement recorded here — a reader blocked behind an abandoned
+`BEGIN` served 203 ms after an operator terminated it — described the pre-rmp
+#2305 engine, in which an open write transaction blocked readers. On the current
+engine there is no such reader to release, so the figure no longer measures
+anything and has been withdrawn rather than restated.)
 
 Neo4j offers the equivalent as `SHOW TRANSACTIONS` and `TERMINATE TRANSACTIONS`
 in Community, and Memgraph offers both; the Go API is the embeddable form of the
@@ -252,9 +379,32 @@ already streaming), which bounds the following intentional limitations:
   `Options.DatabaseName` (default `neo4j`). An unknown name is echoed rather than
   refused, where Neo4j would answer
   `Neo.ClientError.Database.DatabaseNotFound`.
-- **`stats`** — not sent. Write counters on the driver's `ResultSummary`
-  therefore read zero and `ContainsUpdates()` is false even after a successful
-  write. Verify write effects with a follow-up `MATCH`.
+- **`stats`** — sent on the terminal `PULL`/`DISCARD` `SUCCESS` of a statement
+  that changed something (rmp #2190), so the driver's `ResultSummary` write
+  counters and `ContainsUpdates()` are populated. Only non-zero counters are
+  sent, as Neo4j does, so a read-only statement's `SUCCESS` is unchanged. One
+  mapping is lossy at the protocol boundary: openCypher counts a property
+  removal as its own `-properties` effect and Bolt has no `properties-removed`,
+  so removals are summed into `properties-set`.
+- **`bookmark`** — minted on the terminal `SUCCESS` of an **autocommit**
+  statement and on the `COMMIT` `SUCCESS`, and omitted on a statement inside an
+  explicit transaction, where the Bolt specification puts the bookmark on the
+  `COMMIT` (rmp #2563). The token names work that is already durable. The server
+  is single-host, so incoming bookmarks are logged and otherwise ignored.
+- **`notifications`** — sent when the statement produced any, in Neo4j's
+  notification shape.
+- **`plan`** / **`profile`** — sent when the statement carried an `EXPLAIN` or a
+  `PROFILE` prefix, never both, so `ResultSummary.Plan()` and `Profile()` are
+  populated (rmp #2721). Alongside the operator tree, `args` carries `Details`,
+  `EstimatedRows` and its provenance, and — for a `PROFILE` — `RowsRemovedByFilter`.
+  The page-cache figures Neo4j reports are absent because GoGraph measures none of
+  them, and a fabricated zero would read as a measurement. Two limitations sit
+  inside the pair: `PROFILE` refuses a writing statement, and neither prefix may
+  precede a schema statement.
+- **`type`** — not sent, so `ResultSummary.StatementType` reads
+  `StatementTypeUnknown`.
+- **`t_first`** / **`t_last`** — not sent; the server does not measure them, so
+  the driver reports -1 ms.
 
 ## Auto-commit and explicit transactions
 
@@ -286,8 +436,15 @@ open is rejected with `Neo.ClientError.Statement.SemanticError`.
 ## Routing
 
 The server responds to `ROUTE` with a single-host routing table pointing all
-roles (WRITE, READ, ROUTE) at its own listener address. This satisfies drivers
-that require a routing table before sending queries.
+roles (WRITE, READ, ROUTE) at its own listener address, with a TTL of 300
+seconds. This satisfies drivers that require a routing table before sending
+queries.
+
+`ROUTE` is gated on authentication and on session state: an unauthenticated
+connection, or one that is neither in READY nor in TX_READY, is answered with
+`Neo.ClientError.Request.Invalid` and receives no routing table. That is
+wire-compatible with the official driver, which completes `HELLO` (and `LOGON`
+on Bolt 5.1 and above) before issuing `ROUTE`.
 
 ## Concurrency contract
 
@@ -305,9 +462,18 @@ if err := srv.Shutdown(ctx); err != nil {
 }
 ```
 
-`Shutdown` stops accepting new connections and waits up to the context deadline
-for all active connections to close. If the deadline is exceeded it returns an
-error but does not forcibly close connections.
+`Shutdown` stops accepting new connections and waits for all active connections
+to close. The wait is the **shorter** of the context deadline and a fixed 30 s
+drain timeout, so a context deadline longer than 30 s does not extend it. If the
+drain does not complete it returns an error and does not forcibly close
+connections; a still-running `Serve` stays blocked on the same drain and
+performs the post-drain teardown itself when the abandoned connections finally
+finish.
+
+When `Options.Closer` is set, the drain-success path also closes it — exactly
+once, whichever of `Serve` or `Shutdown` gets there first — so the durability
+stack is torn down in its crash-safe order only after no in-flight transaction
+can still be writing. A failed close is returned, not swallowed.
 
 ---
 
@@ -373,12 +539,19 @@ func main() {
 }
 ```
 
+The entry-point above embeds the in-memory engine, which owns no files. When the
+engine is backed by the durable stack instead, hand the `*store.DB` to the server
+as `Options.Closer` rather than closing it from the entry-point: the server then
+closes it only after every connection has drained, which is the one teardown order
+in which no in-flight transaction can still be writing. See
+[Graceful shutdown](#graceful-shutdown).
+
 ### Docker
 
 Build a minimal image from your entry-point binary:
 
 ```dockerfile
-FROM golang:1.26-alpine AS builder
+FROM golang:1.27-alpine AS builder
 WORKDIR /src
 COPY . .
 RUN go build -o /gograph ./cmd/server
@@ -438,20 +611,35 @@ leak:
 | `bolt.server.conn.accepted` | Connections admitted past the `MaxConnections` semaphore (one per per-connection handler goroutine started). |
 | `bolt.server.conn.closed` | Per-connection handler goroutines that have exited, for any reason. |
 | `bolt.server.conn.rejected` | Connections refused because the `MaxConnections` semaphore was already full. |
-| `bolt.server.tx.opened` | Explicit transactions opened by a `BEGIN` that acquired the engine writer serialisation. |
+| `bolt.server.tx.opened` | Explicit transactions opened by a `BEGIN` that was admitted. Paired with `tx.closed` it derives the number of open transactions. |
 | `bolt.server.tx.closed` | Explicit transactions that ended — committed, rolled back, discarded by `RESET`/`GOODBYE`, or rolled back on connection teardown. |
 | `bolt.server.tx.abandoned` | Explicit transactions still open at an abnormal disconnect (the client dropped the connection, hit the idle timeout, or the handler recovered a panic) without sending `COMMIT`, `ROLLBACK`, or `RESET`. A strict subset of `tx.closed`. |
 | `bolt.server.tx.timedout` | Explicit transactions reaped for exceeding their **total** wall-clock deadline (`DefaultTxTimeout` or a client `tx_timeout`) while the connection stayed alive. A strict subset of `tx.closed`. |
 | `bolt.server.tx.idlereaped` | Explicit transactions reaped for **silence** — no inbound message for `MaxTxIdleTime`. Separated from `tx.timedout` so an abandoned `BEGIN` is distinguishable from a legitimately long transaction. A strict subset of `tx.closed`. |
+| `bolt.server.tx.quotarejected` | `BEGIN`s refused because the authenticated principal already held `MaxOpenTxPerPrincipal` open transactions. A rising count means one principal is monopolising transactions. |
+| `bolt.server.tx.terminated` | Explicit transactions rolled back because an operator called `Server.TerminateTransaction`. Kept separate from the automatic reaps: only this one means a human had to intervene. A strict subset of `tx.closed`. |
+| `bolt.server.conn.panics` | Recovered panics in a connection handler goroutine (defence-in-depth boundary). |
 
 The three server-initiated endings — `tx.timedout`, `tx.idlereaped`, and
 `tx.terminated` — are mutually **disjoint**: exactly one of them counts any given
 transaction. Until rmp #2560 `tx.timedout` was incremented by the shared teardown and
 was therefore a superset of the other two, which silently undid the separation the
 other two exist to provide.
-| `bolt.server.tx.quotarejected` | `BEGIN`s refused because the authenticated principal already held `MaxOpenTxPerPrincipal` open transactions. A rising count means one principal is monopolising transactions. |
-| `bolt.server.tx.terminated` | Explicit transactions rolled back because an operator called `Server.TerminateTransaction`. Kept separate from the automatic reaps: only this one means a human had to intervene. A strict subset of `tx.closed`. |
-| `bolt.server.conn.panics` | Recovered panics in a connection handler goroutine (defence-in-depth boundary). |
+
+The server also publishes a **per-message latency histogram** (rmp #2715), so a
+Bolt latency regression is visible to the module itself rather than only to an
+example's own instrumentation. The `metrics.Backend` interface has no label
+dimension, so the message type is part of the series name:
+
+```
+bolt.server.HandleMessage.message.<kind>
+```
+
+where `<kind>` is one of `hello`, `logon`, `logoff`, `goodbye`, `reset`, `run`,
+`pull`, `discard`, `begin`, `commit`, `rollback`, `route`, and `other`.
+Cardinality is bounded by construction: the label is chosen by a type switch over
+the message types `bolt/proto` defines, never taken from the wire, and the
+thirteen names are built once at init so an emission allocates nothing.
 
 Two of these quantities are conceptually gauges — the number of live
 connections and the number of open transactions. The `metrics.Backend`
@@ -506,6 +694,8 @@ if err := driver.VerifyConnectivity(ctx); err != nil {
 The server maps internal errors to Neo4j-style dot-delimited error codes sent
 in `FAILURE` messages. The mapping (from `bolt/server/errors.go`) is:
 
+The rules are tested in the order below; the first match wins.
+
 | Go error | Neo4j error code |
 |---|---|
 | `context.DeadlineExceeded` | `Neo.ClientError.Transaction.TransactionTimedOut` |
@@ -514,11 +704,33 @@ in `FAILURE` messages. The mapping (from `bolt/server/errors.go`) is:
 | `server.ErrInvalidTransition` | `Neo.ClientError.Request.InvalidFormat` |
 | `*parser.ParseError` | `Neo.ClientError.Statement.SyntaxError` |
 | `*parser.SemaError` | `Neo.ClientError.Statement.SemanticError` |
-| `*exec.ConstraintViolationError` | `Neo.ClientError.Schema.ConstraintViolationOnCreate` |
+| `*sema.SemanticError` | `Neo.ClientError.Statement.SyntaxError`, `.TypeError` or `.SemanticError`, from its TCK-pinned `Category` |
+| `*expr.EvalError` | `Neo.ClientError.Statement.TypeError`, `.EntityNotFound`, `.ArgumentError` or `.ArithmeticError`, from its message's TCK-pinned prefix |
+| `cypher.ErrUnsupportedParamType` | `Neo.ClientError.Statement.TypeError` |
+| `cypher.ErrWriteInReadOnlyTx` | `Neo.ClientError.Request.Invalid` |
+| `txn.ErrTransactionTooLarge` | `Neo.ClientError.General.TransactionOutOfMemoryError` |
+| `wal.ErrDurabilityFailed` | `Neo.DatabaseError.General.UnknownError` |
+| `mvcc.ErrSerializationConflict` | `Neo.TransientError.Transaction.Outdated` |
+| `cypher.ErrResultRowsExceeded`, `cypher.ErrResultBytesExceeded`, `funcs.ErrCollectItemsExceeded` | `Neo.ClientError.General.LimitExceeded` |
+| `*exec.ConstraintViolationError` | `Neo.ClientError.Schema.ConstraintValidationFailed` |
+| `exec.ErrConstraintNotFound` | `Neo.ClientError.Schema.ConstraintDropFailed` |
+| `exec.ErrConstraintAlreadyExists` | `Neo.ClientError.Schema.ConstraintAlreadyExists` |
+| `exec.ErrConstraintNameConflict` | `Neo.ClientError.Schema.ConstraintWithNameAlreadyExists` |
 | `index.ErrIndexExists` | `Neo.ClientError.Schema.IndexAlreadyExists` |
 | `index.ErrIndexNotFound` | `Neo.ClientError.Schema.IndexNotFound` |
 | `procs.ErrProcNotFound` | `Neo.ClientError.Procedure.ProcedureNotFound` |
+| an untyped engine error whose message carries a TCK category (`cypher: SyntaxError.`, `SemanticError.`, `TypeError.`, `ArgumentError.`) | the matching `Neo.ClientError.Statement.*` code |
 | (any other error) | `Neo.DatabaseError.General.UnknownError` |
+
+Two of these classifications are load-bearing for a driver's retry decision, and
+both were chosen against the driver's own source rather than by appearance.
+`mvcc.ErrSerializationConflict` is `TransientError` because a fresh snapshot
+would include the change it collided with, and `neo4j-go-driver` v5.28.4 retries
+on exactly that classification; `Neo.TransientError.Transaction.Terminated` was
+rejected as the code for it, because the same driver rewrites that spelling to a
+`ClientError` *before* reading the classification, so it would never be retried.
+`wal.ErrDurabilityFailed` is deliberately **not** transient: the writer is
+poisoned and the next attempt fails the same way.
 
 Error matching uses `errors.Is` and `errors.As`, so wrapped errors are matched
 correctly.
@@ -559,11 +771,34 @@ A few codes are produced directly by the session handlers rather than by the
 
 | Driver | Supported versions |
 |---|---|
-| `neo4j-go-driver` | v5.x |
+| `neo4j-go-driver` | v5.x (pinned at v5.28.4 in `go.mod`) |
 | `cypher-shell` | 5.x (ships with Neo4j 5) |
 | Bolt 4.4 clients | Supported via the Bolt 4.4 fallback handshake |
 
 Drivers that negotiate Bolt 3.x or earlier are not supported.
+
+Compatibility is measured, not asserted. `bolt/server/driver_compat_test.go` is a
+standing, ratcheted suite that drives the official driver against an in-process
+server across 37 checks and fails if the passing count drops below a recorded
+floor. It is slower than the short test layer's budget allows, so it is gated
+behind a build tag:
+
+```bash
+go test -tags=drivercompat -run TestDriverCompatibility -v ./bolt/server/
+```
+
+The position at the time of this review is **PASS=30, FAIL=6, DEGRADED=1**
+against a floor of 30. Each remaining failure is a known gap with a cause:
+
+- temporal, `Point2D` and `[]byte` **parameter** round-trips — `cypher.BindParams`
+  rejects `packstream.Struct` and `[]uint8`, so inbound temporal and spatial
+  parameters are not implemented. Outbound temporal values already work.
+- `ResultSummary.StatementType` — the server does not send the `type` field.
+- `SHOW TRANSACTIONS` — the DDL parser has no such form; the operator API above
+  is the reachable equivalent.
+- `CALL dbms.components()` — the `dbms.*` procedure namespace is not implemented.
+- DEGRADED: `ResultSummary` timing (`t_first` / `t_last`) — not measured, so the
+  driver reports -1 ms. A missing feature, not a defect.
 
 ---
 
@@ -577,4 +812,4 @@ Drivers that negotiate Bolt 3.x or earlier are not supported.
 
 ---
 
-*Last reviewed: 2026-07-26 against commit `01f5bea`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*
+*Last reviewed: 2026-09-08 against commit `b7533eba`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*

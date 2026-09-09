@@ -150,14 +150,36 @@ None is a candidate for near-term wiring.
   `tryNewHashSeek`, `tryNamedHashSeek`, `tryAnyHashSeek`) performs an ad-hoc
   rewrite of `Selection(n.prop = v, {AllNodesScan|NodeByLabelScan})` into an
   `exec.NodeByIndexSeek` when a hash index exists. Param typing is index-aware.
+
+  > **SUPERSEDED — an existing hash index is no longer sufficient.** Since
+  > commit `efd32fb9` (rmp #2814) `tryBuildIndexSeekFromSelection`
+  > (`cypher/api.go:13394`) takes a `*buildOpts` and declines outright when it is
+  > nil, when `EngineOptions.DisableIndexSeek` has turned the rewrite off
+  > (`cypher/api.go:904`, threaded as `indexSeekEnabled` at `api.go:1807`), or
+  > when the enclosing transaction has dirtied the `(label, property)`
+  > coordinates the index covers (`bopts.pendingIdx`, see
+  > `cypher/index_pending_delta.go`). The rewrite still needs an index; it now
+  > needs three further conditions besides.
+
 - **Range predicates are NOT solved.** `WHERE n.p > x` always runs as
   `NodeByLabelScan + Selection`. The exec operator `NodeByIndexRangeScan`
   (`cypher/exec/scan_index_btree.go`) and its `Int64RangeIndex` adapter exist and
   are unit-tested, but **are never constructed in production** — verified dead
   code on the production path today. This is the concrete win behind #1505.
+
+  > **SUPERSEDED — `NodeByIndexRangeScan` is live.** #1505 shipped, and the
+  > operator is constructed on the production plan-build path from two sites in
+  > `cypher/range_seek_plan.go`: `:340` over a bound string btree and `:803` over
+  > its float64 companion. It is no longer dead code in any sense.
+
 - **No hash-join operator exists** anywhere in `cypher/exec/`. Disconnected /
   multi-pattern MATCH degrades to a nested-loop product. This is the work behind
   #1506 (a new exec operator, not just wiring).
+
+  > **SUPERSEDED — the hash join exists.** #1506 shipped: `exec.HashJoin` is
+  > declared at `cypher/exec/hash_join.go:90` and built by
+  > `exec.NewHashJoin` at `cypher/exec/hash_join.go:126`.
+
 - The `go list` import graph confirms **neither `cypher/plan` nor
   `cypher/ir/rewrite` is in the production `cypher` package's transitive
   dependencies.**

@@ -14,6 +14,30 @@ edge type, or property is added or removed, update both in the same change.
   element was last confirmed) and `gitDate` (ISO `YYYY-MM-DD`).
 
 Counts as of commit `567253c` + in-flight worktree (2026-06-11): **11,867 nodes**, **15,360 edges**.
+Re-measured live 2026-09-08: **15,447 nodes**, **19,507 edges**, **0 indexes**, **0 constraints**.
+
+> ## ⚠️ Read this before copying any command out of this file
+>
+> **The `rmp graph` CLI was rebuilt in rmp 1.17.0 and the five old subcommands are
+> gone.** `create`, `query`, `update`, `delete`, `search` and `execute` each now exit
+> **127**. There are two: **`serve`** (opens the store, binds a socket, long-lived)
+> and **`client`** (sends one statement, needs a running server).
+>
+> The current contract is [How the graph is reached](#how-the-graph-is-reached--the-serverclient-contract-rmp-1170),
+> and the model's rules now live in [Constraints](#constraints) and
+> [Recommended indexes](#recommended-indexes).
+>
+> **The dated `Sprint NNN sync` narratives below are historical records and are kept
+> as written.** Several of them mention `graph create`, `graph update` or the
+> operation-class guard-rail — including the claim that `create` cannot carry a
+> `SET`, which is why upserts were split in two. **That constraint no longer exists:
+> `MERGE … ON CREATE SET … ON MATCH SET …` now works in one statement.** Read those
+> passages as what was true on their date, never as instructions for today.
+>
+> What did **not** change: **pattern-`MERGE` still creates every node in the pattern
+> afresh unless the whole pattern matches**, which is the cause of the 249 stub
+> `Package` nodes recorded under Constraints. The new `counters` block in every
+> write's response is now the detector for it.
 Incrementally synced at commit `257ce96` (2026-06-14, task #1502): +4 nodes
 (`NodePropertiesByIDFunc` Method, `nodePropsToExprMap` Function,
 `TestNodePropertiesByIDFunc_MatchesByID` Test, `BenchmarkNodeReturnToPackstream`
@@ -1274,6 +1298,57 @@ rather than introduced:
 | `Component` | A named unit of implementation finer than a `Package` and coarser than a symbol — a type plus the machinery around it, a subsystem, or a named mechanism. **Present in the live graph long before this table documented it** (48 nodes at 2026-08-20); documented 2026-08-20 (`f3c40f22`, sprint 349), when 22 nodes were added for the DST harness's units. | `name` (the identity — a dotted or qualified name, e.g. `sim.SimDisk`, `mvcc.Horizon`), `path` (**the file or directory the unit lives in — this label uses `path`, not `file`**), `responsibility` (one sentence stating what the unit owns, per the *Exemplary components* mandate), `note` (the non-obvious behaviour, fidelity limits, or traps), `gitCommit`, `gitDate`. Heterogeneous on the older nodes, which variously carry `location`, `mvcc_verdict`, `commit`, `commit_date`, `sprint`, `task` |
 | `Decision` | A recorded decision or standing convention, with the reasoning that settles it. **Present in the live graph long before this table documented it** (21 nodes at 2026-08-20); documented 2026-08-20 (`f3c40f22`), when the 7 DST conventions were added as `dst-*` nodes. | `name` (a slug, the identity), `statement` (the convention or decision, stated so it can be applied without reading the source), `kind` (`convention` on the `dst-*` nodes; older nodes use it differently), `date`, `gitCommit`, `gitDate`. Heterogeneous on the older nodes, which variously carry `verdict`, `reason`, `supersededBy`, `audit`, `task`, `premise`, `mechanism`, `justification`, `behaviourChange`, `sideEffect`, `ref` — and at least one older node has **no `name` at all**, so it is unreachable by identity |
 
+### The `pkg` and `file` key conventions (rmp #2719)
+
+Every symbol-tier label — `Type`, `Function`, `Method`, `Test`, `Benchmark`, `FuzzTarget`,
+`Example` — locates itself with the same two properties, and the two use **different**
+spellings of the same location:
+
+| Property | Holds | Example |
+|---|---|---|
+| `pkg` | The **full import path**, exactly as `go list` prints it. | `github.com/FlavioCFOliveira/GoGraph/cypher/exec` |
+| `file` | The **repo-relative path**, slash-separated, no leading `./`. | `cypher/exec/project.go` |
+
+`Package` carries both spellings under separate names, and they must not be confused with
+the pair above: `importPath` is the full path and `path` is the repo-relative **directory**.
+`Component` uses neither — it locates itself with `path`, which for that label may be a file
+*or* a directory.
+
+**Why this is stated as a rule rather than left to the table.** Writing the short path into
+`pkg` does not fail. It produces a node that every later `MATCH` on the import path misses,
+and a `MATCH` that binds nothing is **not an error**: `rmp graph client` returns exit 0 and,
+since rmp 1.17.0, simply omits the `counters` key. So a sync that wrote the wrong spelling
+reports success, the node it meant to update stays untouched, and the next writer creates a
+duplicate instead of matching it. The failure is silent at every step.
+
+The divergence this caused is now closed. `internal/sim` symbols were keyed on a `package`
+property holding the repo-relative directory rather than `pkg` holding the import path, so a
+`pkg`-based query missed **every** sim symbol; the same drift left 190 symbol nodes with no
+`pkg` at all. Under rmp #2719 every symbol node's `pkg` was re-derived from its own `file`,
+which is what determines a Go symbol's package in the first place, and the result is
+asserted: **0 nodes carry a `pkg` that contradicts their `file`'s directory.**
+
+```cypher
+// The invariant. It must return 0.
+MATCH (n) WHERE (n:Type OR n:Function OR n:Method OR n:Test OR n:Benchmark
+                 OR n:FuzzTarget OR n:Example)
+  AND n.pkg IS NOT NULL AND n.file IS NOT NULL
+  AND NOT (n.pkg = 'github.com/FlavioCFOliveira/GoGraph/' +
+           substring(n.file, 0, size(n.file) - size(split(n.file,'/')[size(split(n.file,'/'))-1]) - 1))
+RETURN count(n) AS contradictions
+```
+
+**Bracket a label predicate before conjoining it.** Cypher binds `AND` tighter than `OR`, so
+the seven-label disjunction above reassociates the moment another condition is appended to it:
+`n:Type OR … OR n:Example AND n.name = $x` means `n:Type OR … OR (n:Example AND n.name = $x)`,
+which matches **every** node bearing any of the first six labels whatever the name test says.
+Behind a `SET` that is not a slow query but a silent overwrite — measured on this graph at
+**11652 of 12677 symbol nodes** having their `pkg` rewritten to a single package path by one
+statement. Always write `WHERE (n:A OR n:B) AND …`. `cmd/kgverify` builds the group through
+`symbolLabelPredicate`, which brackets it, and `TestSymbolLabelPredicateBracketsItsOrChain`
+fails if that bracket is ever removed.
+
+
 ### The canonical `Task` shape, and why the id TYPE is part of it (rmp #2612)
 
 **`Task.id` is an INTEGER.** This is not a formatting preference. `MERGE` matches the
@@ -1297,8 +1372,11 @@ provenance with `MERGE (t:Task {id: 2508})` created a *new* node, because the ex
 was keyed on `task_id` — one of the four duplicates this migration folded was produced by
 following the drifted schema. The same trap fired again mid-migration: an edge rebuild
 matching `{id: 2507}` silently created nothing, because node 2507 was still on `task_id`,
-and `rmp graph create` reports `ok` for a `MATCH` that binds nothing. **Normalise the
-identity key before rebuilding any edge, and verify every write by reading it back.**
+and `rmp graph` reports `ok` for a `MATCH` that binds nothing (then `graph create`,
+now `graph client`). **Normalise the identity key before rebuilding any edge, and
+verify every write by reading it back.** Since rmp 1.17.0 there is a second
+oracle: such a statement returns **no `counters` key at all**, which is the
+signature of a write that changed nothing.
 
 Migration result, verified: 337 → **333** nodes (four duplicates folded, each after its
 single edge was recreated on the surviving node), **0** legacy keys, **0** string ids,
@@ -1476,74 +1554,218 @@ maps onto a feature.
 
 ---
 
-## ⚠️ Guard-rail gotcha — what `rmp graph` actually rejects
+## How the graph is reached — the server/client contract (rmp 1.17.0)
 
-**Corrected 2026-08-18 by measurement (commit `0ed5d4d1`). The previous version of this
-section was wrong, and wrong in the expensive direction: it told every reader to mangle
-property values to dodge a raw-text scan that this `rmp` build does not perform.** The
-superseded claim is preserved at the end of this section so a corrected document can be told
-apart from a careless one.
+**Superseded 2026-09-08 by measurement. The section that stood here described five
+class-locked `rmp graph` subcommands. They no longer exist**: `create`, `query`,
+`update`, `delete`, `search` and `execute` each exit **127** as unresolved
+subcommands. What replaced them is a server/client pair, and the operation-class
+guard-rail is gone entirely.
 
-### The rule that IS true — each subcommand is class-locked
+| | Now |
+|---|---|
+| Subcommands | **two**: `serve` and `client` |
+| `serve` | Binds a Unix domain socket, holds the store's **exclusive lock** for the process lifetime, speaks **Bolt v5**, and is long-lived — it exits only on SIGINT/SIGTERM, whereupon it drains, checkpoints, releases the lock and removes the socket. Starting one against a roadmap with no graph is what **creates** the graph. One server per roadmap; a second fails exit 1 and does not queue. |
+| `client` | Sends **exactly one** statement and prints the result. Requires a live server — with nothing listening it exits 1 and opens nothing. There is no fallback route into the store. |
+| Guard-rails | **None.** One `client` invocation runs a `MATCH`, a `SET`, a `DETACH DELETE`, schema DDL and `SHOW` listings alike. Nothing inspects the statement. |
+| Exit 6 | No longer a class mismatch. Its only cause on `client` is a statement longer than 1048576 bytes. |
 
-`rmp graph` rejects a query whose **write clauses** belong to another operation class. This is
-a clause check, so it fires on the query's structure, never on its data:
+The socket is configured in the project's `.rmp` (`socket = …`), read by **both**
+ends — see the `knowledge-authority` skill, which owns this contract in full.
 
-| Subcommand | Accepts | A wrong-class clause gives |
-|---|---|---|
-| `create` | `CREATE` / `MERGE` only | `rc=6 graph create accepts only CREATE/MERGE queries` |
-| `update` | `SET` / `REMOVE` only | `rc=6 graph update accepts only SET/REMOVE queries` |
-| `delete` | `DELETE` / `DETACH DELETE` | `rc=6` for the same reason |
-| `query` / `search` | read-only | `rc=6 graph query accepts only read-only queries` |
+### Two consequences for every write in this document
 
-The consequence that still governs every write: **`create` rejects a real `SET` clause, even
-inside `MERGE … ON CREATE SET …`**, so upserting a node with mutable or provenance properties
-is always two calls — `create` to `MERGE` the identity, then `update` to `SET` the rest. Keep
-the `MERGE` map to identity properties only, since `MERGE` matches the *whole* pattern and a
-differing mutable property creates a duplicate instead of matching.
+**1. The upsert is now ONE statement.** The two-step `create`-then-`update` dance
+existed only because a guard-rail rejected `SET`. `MERGE … ON CREATE SET … ON
+MATCH SET …` is accepted and works. Keep the `MERGE` map to **identity properties
+only** — `MERGE` still matches the whole pattern, so a mutable property inside the
+map creates a duplicate when it changes.
 
-### What was measured, and how
+**2. Pattern-`MERGE` still duplicates, and this is the graph's main injury.**
+`MERGE` over a *pattern* creates every node in it afresh unless the whole pattern
+already matches; it does not bind an existing node by its property map. Measured
+at 1.17.0:
 
-Probed directly against this build before relying on it (2026-08-18, all `rc=0`, and each
-probe bound nothing so the graph was unchanged — verified afterwards with a count of stray
-nodes and properties, which was 0):
+| Sequence | Result |
+|---|---|
+| `CREATE (a:M1 {id:1})` then `MERGE (a:M1 {id:1})-[:R]->(b:M2 {id:2})` | `nodesCreated: 2` — duplicate + orphan |
+| Two pattern-`MERGE`s sharing `(c:M3 {id:9})` | **two** `M3` nodes |
+| `MATCH (a) MATCH (b) MERGE (a)-[:R]->(b)` | `relationshipsCreated` only, **no node created** |
 
-| Probe | Class | Result |
-|---|---|---|
-| `WHERE m.name = 'Delete'` — *the old section's own counter-example* | `query` | **accepted**, returned 2 rows |
-| `WHERE n.title = 'DETACH DELETE semantics'` | `query` | **accepted** |
-| `WHERE b.name = 'Delete'` over `CONTAINS*1..2` | `search` | **accepted**, returned 6 rows |
-| `WHERE m.name = 'Set' OR m.name = 'RemoveLabel'` | `query` | **accepted** |
-| `SET n.note = 'Remove and RemoveAll unlink a name'` | `update` | **accepted** |
-| `SET n.note = '… any delete(d.dirs) outside three bodies; no detach here'` | `update` | **accepted** |
-| `MERGE (m:Package {name:'a delete probe'})` | `create` | **accepted** (reached execution; failed later on a null bound variable) |
+So: link nodes that already exist with **two `MATCH` clauses then `MERGE` the
+relationship alone**, never a pattern-`MERGE`.
 
-So `SET`, `DELETE`, `REMOVE` and `DETACH` inside **string literals** are accepted in the
-`query`, `search`, `create` and `update` classes alike.
+**The `counters` block is the new detector.** Every statement that changed the
+graph returns one (`nodesCreated`, `relationshipsCreated`, `propertiesWritten`,
+`indexesAdded`, …); a statement that changed nothing carries no `counters` key at
+all. **`nodesCreated > 0` on a `MERGE` that should have matched is the trap
+firing.** This is the first time the damage is visible at the moment it happens —
+and one counter lies: `DROP INDEX <missing> IF EXISTS` falsely reports
+`indexesRemoved: 1`.
 
-### What this means for writing to the graph
+### Still true, and re-verified
 
-- **Write plain, readable prose in property values.** GoGraph's own vocabulary — `Delete`,
-  `Set`, `RemoveLabel`, `RemoveAll`, `detach_delete.go`, `delete(d.dirs)` — needs no
-  disguising, and disguising it made stored descriptions harder to read for no protection.
-- **No data migration is needed.** Values previously written as `'Dele'+'te'` evaluated to
-  `Delete` at insert time, so what is stored is already byte-identical to the plain form; the
-  old workaround cost readability of the *Cypher*, not correctness of the *data*.
-- **Re-probe before trusting this section again.** It was wrong once. If a future `rmp`
-  reinstates a raw-text scan, the four probes above are the cheapest way to find out, and a
-  read probe costs nothing.
+Operation-class words inside **string literals** are fine — `Delete`, `Set`,
+`RemoveLabel`, `detach_delete.go` need no disguising in property values. The 2026-08-18
+correction on this point stands, and the older `'Dele'+'te'` workaround remains
+unnecessary. (It is now moot in any case: no class check exists to trip.)
 
-### Superseded claim (kept deliberately, do not act on it)
+### Also measured, and easy to lose an hour to
 
-Until 2026-08-18 this section asserted that `rmp graph` "enforces operation-class guard-rails
-by **scanning the raw Cypher text**" for `SET`/`DELETE`/`REMOVE`/`DETACH` (whole-word,
-case-insensitive), that this "trips on those words appearing **inside string data** — both
-when writing and when reading", that `query`/`search` "reject a read whose literals contain"
-them (offering `WHERE m.name = 'Delete'` as an example of a rejected read), and it prescribed
-splitting every such literal as `'Dele'+'te'`. **Every part of that except the class-lock rule
-was refuted by the probes above.** The claim also propagated into assistant memory, so treat a
-second-hand warning about this scan as unverified until re-probed.
+* **One statement per invocation, enforced by silence.** A clause after schema DDL
+  is **discarded with no error and no notification**: `CREATE INDEX ix FOR (n:L) ON
+  (n.p) MATCH (m:L) SET m.x=true` creates the index, returns `{"ok":true}`, exits
+  0 — and never runs the `SET`.
+* **A `MATCH` that binds nothing reports success**, so a stamp that matched
+  nothing is the default failure mode. Verify every write with a read.
+* **A 5-second statement budget** is enforced server-side; a cancelled statement
+  writes nothing.
+* **`SHOW  INDEXES` (two spaces) is a parse error.** So is `||` string
+  concatenation, and `distinct` as a column alias (it is reserved).
+* **Socket paths are length-capped** — measured 103 bytes on macOS.
 
+---
+
+## Constraints
+
+The model's integrity rules. **The engine supports exactly two kinds, each on a
+single node property:** `IS UNIQUE` (reported type `UNIQUE`) and `IS NOT NULL`
+(`NOT_NULL`). Composite `NODE KEY`, `ASSERT exists(...)` and type constraints
+(`IS :: STRING`) all fail with an opaque internal error. **UNIQUE is genuinely
+enforced** — a violating write is rejected with exit 1 — which makes it the only
+real defence against the pattern-`MERGE` duplication above.
+
+**Live schema state, 2026-09-08 (15447 nodes, 19507 edges): zero constraints and
+zero indexes exist.** Everything below is therefore *declared*, and each row says
+whether the data permits enforcing it today. A constraint marked VIOLATED is still
+the model's rule — it is a repair waiting to be scheduled, not an abandoned idea.
+
+### Uniqueness — enforceable today
+
+Measured clean (no duplicate values, no nulls):
+
+| Label | Property | Nodes | DDL |
+|---|---|---:|---|
+| `Spec` | `path` | 83 | `CREATE CONSTRAINT spec_path_uniq IF NOT EXISTS FOR (n:Spec) REQUIRE n.path IS UNIQUE` |
+| `Feature` | `name` | 87 | `CREATE CONSTRAINT feature_name_uniq IF NOT EXISTS FOR (n:Feature) REQUIRE n.name IS UNIQUE` |
+| `Component` | `name` | 79 | `CREATE CONSTRAINT component_name_uniq IF NOT EXISTS FOR (n:Component) REQUIRE n.name IS UNIQUE` |
+| `DSTScenario` | `id` | 57 | `CREATE CONSTRAINT dstscenario_id_uniq IF NOT EXISTS FOR (n:DSTScenario) REQUIRE n.id IS UNIQUE` |
+| `Memory` | `name` | 29 | `CREATE CONSTRAINT memory_name_uniq IF NOT EXISTS FOR (n:Memory) REQUIRE n.name IS UNIQUE` |
+| `Document` | `path` | 5 | `CREATE CONSTRAINT document_path_uniq IF NOT EXISTS FOR (n:Document) REQUIRE n.path IS UNIQUE` |
+| `Agent` | `name` | 5 | `CREATE CONSTRAINT agent_name_uniq IF NOT EXISTS FOR (n:Agent) REQUIRE n.name IS UNIQUE` |
+| `Skill` | `name` | 2 | `CREATE CONSTRAINT skill_name_uniq IF NOT EXISTS FOR (n:Skill) REQUIRE n.name IS UNIQUE` |
+
+### Uniqueness — VIOLATED, cannot be created until repaired
+
+| Label | Property | Violation (measured 2026-09-08) | Cause |
+|---|---|---|---|
+| `Package` | `path` | **9 values across 256 nodes.** 249 of 369 `Package` nodes are null-`name` stubs; the worst path, `graph/index/hash`, has **115** nodes | pattern-`MERGE` |
+| `Task` | `id` | **5 values across 10 nodes** | pattern-`MERGE`, plus the historical `task_id`/`number` key drift |
+| `Commit` | `hash` | **3 values across 10 nodes** | pattern-`MERGE` |
+
+The `Package` split is not cosmetic: 234 edges hang off the stubs (219 `CONTAINS`
+out, 15 `TOUCHES` in). The named `cypher/exec` node holds **1086** `CONTAINS`
+edges while its 64 stubs hold **63**, so *"what does `cypher/exec` contain?"*
+answers 1086 or 1149 depending on which node binds. Filed as rmp **#2802**.
+
+Detect with:
+
+```
+MATCH (n:Package) WHERE n.name IS NULL RETURN count(n)
+MATCH (n:L) WHERE n.p IS NOT NULL WITH n.p AS v, count(*) AS c WHERE c > 1
+  RETURN count(v) AS dup_values, sum(c) AS dup_nodes
+```
+
+### Presence (`IS NOT NULL`) — enforceable today
+
+Measured with zero nulls: `Package.path`, `Task.id`, `Commit.hash`, and the
+**`name` of every symbol label** — `Type`, `Function`, `Method`, `Test`,
+`Benchmark`, `FuzzTarget`, `Example` (all 0 nulls). Also `Spec.path`,
+`Feature.name`, `Component.name`, `DSTScenario.id`, `Memory.name`,
+`Document.path`, `Agent.name`, `Skill.name`.
+
+### Presence — deliberately NOT declared
+
+These nulls are a **modelling choice or a known divergence, not damage**. Do not
+propose `IS NOT NULL` for them without deciding the model question first:
+
+| Label | Property | Nulls | Why it is null |
+|---|---|---:|---|
+| `Defect` | `id` | 32 of 53 | those nodes key on `ref` instead — a second, accepted keying |
+| `Package` | `importPath` | 258 of 369 | mostly the 249 stubs; the real packages carry it |
+| `Test` | `pkg` | 207 | the `internal/sim` divergence: keyed on `package`, not `pkg` |
+| `Function` / `Type` / `Method` | `pkg` | 59 / 47 / 20 | the same `internal/sim` divergence |
+| `Sprint` | `id` | 14 of 87 | legacy nodes predating the canonical shape |
+| `Decision` | `name` | 6 of 32 | heterogeneous older nodes; at least one has no identity at all |
+| `Lesson` | `name` | 2 of 45 | one node carries the `DSTScenario` shape, keyed on `id` — reach it with `coalesce(l.name, l.id)` |
+| `Release` | `name` | 1 of 7 | one legacy node |
+| `Method` | `recv` | 17 | receiver not resolved for those |
+
+### Why the symbol labels get no uniqueness constraint
+
+`Type`, `Function`, `Method`, `Test` and friends have a **composite identity** —
+`name` scoped by `pkg` (plus `recv` for a method). Composite constraints are
+unsupported by this engine, so their identity **cannot be enforced at all**. And
+the composite is not even unique in the live data: `Function` has **12 duplicated
+`(name, pkg)` pairs across 31 nodes**. Uniqueness for symbols is therefore a
+convention this skill must uphold in its statements, not a rule the engine holds.
+
+---
+
+## Recommended indexes
+
+**The engine's index is single-property, node-only, and hash — therefore
+equality-only.** `SHOW INDEXES` reports `type: hash`. Measured: with an index on
+`Seed.key`, `MATCH (n:Seed {key:'k7'})` plans `NodeByIndexSeek`; `WHERE n.key >
+'k1'` plans `NodeByLabelScan` + a filter. **A range predicate does not use the
+index.** `TEXT`/`RANGE`/`POINT`/`FULLTEXT`/`LOOKUP`, composite, and
+relationship-property indexes are all unsupported.
+
+So an index pays exactly where this graph is queried by **equality on one
+property** — which is what every identity lookup is. Ranked by label size ×
+measured selectivity (2026-09-08):
+
+| Label | Property | Nodes | Distinct | Selectivity | Verdict |
+|---|---|---:|---:|---:|---|
+| `Test` | `name` | 4796 | 4719 | 98.4% | **create — highest value** |
+| `Method` | `name` | 3666 | 1633 | 44.5% | **create** — 2.2 rows per seek still beats 3666 scanned |
+| `Function` | `name` | 3145 | 2907 | 92.4% | **create** |
+| `Type` | `name` | 1075 | 980 | 91.2% | **create** |
+| `Commit` | `hash` | 748 | 741 | 99.1% | create |
+| `Task` | `id` | 499 | 494 | 99.0% | create |
+| `Package` | `path` | 369 | 122 | 33.1% | create — **after** the stub repair; see below |
+| `Benchmark` | `name` | 190 | 190 | 100% | skip — the label is too small to pay |
+| `Feature` | `name` | 87 | 87 | 100% | skip |
+| `Spec` | `path` | 83 | 83 | 100% | skip |
+| `Component` | `name` | 79 | 79 | 100% | skip |
+| `DSTScenario` | `id` | 57 | 57 | 100% | skip |
+
+```
+CREATE INDEX test_name       IF NOT EXISTS FOR (n:Test)     ON (n.name)
+CREATE INDEX method_name     IF NOT EXISTS FOR (n:Method)   ON (n.name)
+CREATE INDEX function_name   IF NOT EXISTS FOR (n:Function) ON (n.name)
+CREATE INDEX type_name       IF NOT EXISTS FOR (n:Type)     ON (n.name)
+CREATE INDEX commit_hash     IF NOT EXISTS FOR (n:Commit)   ON (n.hash)
+CREATE INDEX task_id         IF NOT EXISTS FOR (n:Task)     ON (n.id)
+CREATE INDEX package_path    IF NOT EXISTS FOR (n:Package)  ON (n.path)
+```
+
+One statement per invocation — a clause after DDL is silently discarded.
+
+Three notes that keep this honest:
+
+* **`Package.path`'s 33.1% is an artefact, not a property of the model.** It is the
+  249 stubs; on the 122 real packages the key is unique. The fix is the repair plus
+  the UNIQUE constraint, not a different index.
+* **A composite lookup cannot be indexed.** `Function {name, pkg}` matches two
+  properties; index the more selective one (`name`) and let the engine filter `pkg`.
+* **A UNIQUE constraint brings its own backing index** — it appears in `SHOW
+  INDEXES` as `__uniq__<Label>.<prop>` with **empty** `labelsOrTypes` and
+  `properties`, a reporting quirk. Do not mistake it for a stray index and drop it,
+  and do not create a second index on a property already covered by one.
+* **Prove any change with `EXPLAIN`** before and after — `NodeByLabelScan` +
+  `Filter` means no usable index, `NodeByIndexSeek` means it is used. `PROFILE`
+  adds `rows`, `timeNs` and `dbHits` when a claim needs measuring.
 ---
 
 ## Maintenance
@@ -1557,11 +1779,26 @@ throwaway tool, not part of the module) and is run as:
 ```bash
 COMMIT=$(git log -1 --format="%H"); DATE=$(git log -1 --format="%ad" --date=format:"%Y-%m-%d")
 go run /tmp/kgextract.go "$PWD" "github.com/FlavioCFOliveira/GoGraph" "$COMMIT" "$DATE" /tmp/kgcypher
-for f in $(ls /tmp/kgcypher/*.cypher | sort); do rmp graph create -r gograph < "$f"; done
+
+# A server must be running: it is the only thing that opens the store, and
+# starting one is also what creates the graph in the first place.
+nohup rmp graph serve -r gograph > /tmp/kg-serve.log 2>&1 &
+until grep -q '"socket"' /tmp/kg-serve.log; do sleep 0.25; done
+
+# One statement per invocation. Each file must therefore hold ONE statement —
+# a clause after a satisfied statement is silently discarded.
+for f in $(ls /tmp/kgcypher/*.cypher | sort); do rmp graph client -r gograph < "$f"; done
 ```
 
-The `q()` helper in the extractor applies the concatenation split described above to every
-string value, so creation never trips the guard-rail.
+**Updated 2026-09-08:** this loop used `rmp graph create`, which now exits 127. It
+also relied on a server being started first — under the old CLI each invocation
+opened the store itself.
+
+The extractor's `q()` helper applies a string-concatenation split to every value.
+**That split is now pointless** — it was a workaround for a raw-text guard-rail
+this `rmp` does not have (and the 2026-08-18 correction had already shown the scan
+was not happening). It is harmless, since the concatenation evaluates at insert
+time to a byte-identical value, but a rebuilt extractor should drop it.
 
 ### Post-commit sync
 
@@ -1576,6 +1813,90 @@ For each changed `.go` file: bump the provenance of its package and surviving sy
 `Feature`/`Spec` provenance when their backing files change. Because the graph is large,
 a full rebuild (wipe + re-materialise) is also acceptable and is the simplest way to stay
 exactly in sync after broad changes.
+
+---
+
+### Fidelity gate — `make kg-verify` (rmp #2677, 2026-09-07)
+
+The two sections above describe what a sync **should** do. Nothing checked that it had,
+and by the close of sprint 352 the graph had gone past staleness into **fabrication**:
+`TestSchemaWalkHoisted` and `TestEvalWithReentrancy` existed as `Test` nodes and nowhere
+in the repository, and an earlier "fidelity repair" had itself invented
+`edgeTypeFilterCache` and `edgeTypeFilterFor`, which the code deleted two days later. A gap
+is recoverable; a fabrication is a wrong answer carrying the authority of a verified one.
+
+`make kg-verify` (`cmd/kgverify`) is the enforceable form of this document. It exits
+non-zero when the graph's claims stop holding, across 20 checks in six families:
+
+| Family | What it holds the graph to |
+|---|---|
+| symbol tier | every `Type`/`Function`/`Method`/`Test`/`Benchmark`/`FuzzTarget`/`Example` node names a declaration that is really in the tree, under the right label, in the right package, at a file that exists |
+| `Task` identity | `id` is an INTEGER; the retired `task_id`, `number` and name-as-id forms fail loudly; one id binds one node; no stubs; `status` is one of rmp's five values and AGREES with rmp |
+| provenance | every declaration in a file the audited range touched has a node, and that node carries `gitCommit` |
+| edges | a documented edge type is used only in a documented endpoint shape; an undocumented type is counted separately |
+| labels | every live node label appears in the label table above |
+| per-package parity (rmp #2719) | for every package the graph models, every declaration has a symbol node — `package-symbol-gap`, baseline 0 |
+
+**The oracle is `go/parser`, never a text scan.** This is the mechanism, not a stylistic
+preference, and it is measurable: `edgeTypeFilterFor` is deleted from the code yet still
+named in four Go comments and in this document, so a text scan reports it present while
+the declaration inventory correctly reports it absent. The same holds for
+`BenchmarkBarrier_View`, `ExampleGraph_View` and `BenchmarkRangeSeekSelective` — all three
+survive only as comment text after a rename, and all three are graph nodes today.
+
+**Write symbol nodes from the tree's own output.** Five emit modes exist so that no name
+ever has to be typed by hand:
+
+| Mode | Prints |
+|---|---|
+| `-emit symbols` | every declaration `go/parser` found |
+| `-emit missing` | the declarations with no node — the sync worklist |
+| `-emit packages` | per package: declarations, nodes, covered, gap, and whether the graph models it |
+| `-emit absent` | the symbol nodes naming a declaration the tree does not have — the deletion worklist |
+| `-emit cypher` | one statement per line that closes the gap: a repair pass, then a create pass |
+
+Copying a name from that output is the supported way to add a symbol node; a name typed
+out of a task description or a report is what produced the two fabrications, and it now
+survives at most until the next `make kg-verify`. The same applies in reverse to deletion:
+`-emit absent` exists because a `DELETE` keyed on a retyped name is worse than a `CREATE`
+keyed on one — it removes a node that may have been correct.
+
+**`-emit cypher` orders its two passes, and the order is load-bearing.** Repair runs first,
+because a node whose `pkg` is null or names a deleted package is invisible to its real
+package; merging that declaration before the node is repaired creates a SECOND node for it
+rather than matching it, turning a mis-keyed node into a duplicate.
+
+**Baselines, and the ratchet.** `cmd/kgverify/baseline.json` records the count measured for
+each check, with the reasoning for every non-zero one. A count that EXCEEDS its baseline
+fails; a count below it is reported as *improved — ratchet the baseline*, and the number is
+lowered in the same commit that lowers the count, exactly as `tckExecutionBaseline` works.
+Never raise a baseline to get a green run. **Twelve** checks are at zero because zero is
+what was measured on 2026-09-08: `fixture-fabrication-present`, `symbol-absent`,
+`task-id-not-int`, `task-legacy-identity`, `task-id-duplicated`, `task-stub`,
+`task-status-invalid`, `task-status-disagrees-with-rmp`, `task-absent-in-rmp`,
+`provenance-no-gitcommit`, `component-path-absent` and `package-symbol-gap`.
+
+**The gate could not run at all between rmp 1.17.0 and rmp #2719.** It shelled out to
+`rmp graph query`, one of the five subcommands that release removed, so every invocation
+exited 3 — *the harness could not conclude*. `ci-kg-verify` is a member of `make ci`, so the
+sprint-close gate was red for a reason unrelated to the graph, and exit 3 is neither a pass
+nor a reported defect. Two tests now pin the subcommand: one on the constructed argv, and
+one that asks the live binary whether it still accepts it, with a control arm asserting that
+the retired `query` is still rejected — otherwise the check could pass by being unable to
+fail.
+
+**It cannot pass vacuously.** The two fabrications are a permanent regression fixture, and
+the fixture is self-validating: each name must be absent from the tree's declarations, so a
+fixture entry that becomes a real symbol aborts the run (exit 3) instead of passing. Floors
+on the inventory size, the graph read, the documented label count and the resolved task
+count do the same for the run as a whole — a gate that reads nothing finds nothing wrong.
+Exit codes are 0 pass, 1 regression, 2 usage, 3 harness-cannot-conclude.
+
+**Not in `make ci`.** Deliberately, pending a decision: `task-status-disagrees-with-rmp` is
+time-varying, because rmp is the authority and every task closed without a graph sync
+raises it with no code change involved, so an unmodified `kg-verify` inside `ci` would fail
+a push for a reason unrelated to the change under test. Wiring it in is appending
+`kg-verify` to the `ci` target's prerequisites.
 
 ---
 
@@ -3856,12 +4177,15 @@ private to the plan-cache builder.
 (`grep-hit-list-is-the-finding`). 14 edges, all stamped and **verified by a
 read-back**.
 
-**Warning recorded, because it cost five edges.** `rmp graph create` with a
-multi-pattern `MATCH` is all-or-nothing: `MATCH (a),(b),(c) MERGE …` writes
-**nothing** when any one pattern is unmatched, and still prints `{"ok":true}` and
-exits 0. `Sprint {id: 350}` was absent, so a five-edge statement silently created
-none of them. Bind one pattern pair per statement, or always follow a write batch
-with a counting read. Exit 0 from `rmp graph create` is not evidence of effect.
+**Warning recorded, because it cost five edges.** A multi-pattern `MATCH` is
+all-or-nothing: `MATCH (a),(b),(c) MERGE …` writes **nothing** when any one
+pattern is unmatched, and still prints `{"ok":true}` and exits 0. `Sprint {id:
+350}` was absent, so a five-edge statement silently created none of them. Bind one
+pattern pair per statement, or always follow a write batch with a counting read.
+**Exit 0 is not evidence of effect** — that was true of `rmp graph create` and is
+equally true of `rmp graph client`. Since rmp 1.17.0 the cheap check is the
+**`counters` block**: a statement that changed nothing carries no `counters` key,
+so its absence on an intended write is the alarm.
 
 **Two gates whose limits are modelled, not just their existence.**
 `TestSubqueryConcurrentFirstExecution_2508` carries `limitation`: it detects
@@ -4267,3 +4591,51 @@ The 2026-06-11 tables above are kept for their date; these are the live counts.
 |  |  | | `REGRESSION_FOR` | 1 |
 |  |  | | `DEFINED_IN` | 1 |
 
+
+### Sprint 357 sync — the graph brought to per-package symbol parity (rmp #2719, 2026-09-08)
+
+Recorded in full, with the per-package table, in
+[`docs/knowledge-graph-fidelity-2026-09-08.md`](docs/knowledge-graph-fidelity-2026-09-08.md).
+
+**The gate was not running.** `cmd/kgverify` called `rmp graph query`, removed in rmp 1.17.0,
+and exited 3 on every invocation. `ci-kg-verify` is a member of `make ci`, so the sprint-close
+gate had been red for a reason unrelated to the graph. Fixed, and pinned by two tests.
+
+**What changed in the graph**, every count measured by `cmd/kgverify` before and after:
+
+| | Before | After |
+|---|---:|---:|
+| Nodes / edges | 15 454 / 19 515 | 32 578 / 19 116 |
+| Symbol nodes | 13 004 | 27 956 |
+| Symbol coverage of the tree | 43.1% | **95.7%** |
+| Modelled packages at parity | 8 of 104 | **105 of 105** |
+| `Task` nodes | 495 | **2 672** |
+| Nodes naming a symbol the tree lacks | 327 | **0** |
+
+- **327 false symbol nodes deleted**, with the 399 edges on them, driven by
+  `-emit absent` — the `go/parser` oracle, never a text scan.
+- **15 279 symbol nodes created** from `-emit cypher`, for the 105 packages the graph already
+  modelled. The 33 packages it does not model (1 245 declarations) were left alone: rmp #2719
+  puts them out of scope.
+- **2 177 `Task` nodes created**, so all 2 660 tasks that belong to a sprint now have one
+  carrying status, type, sprint and closing commit (2 672 `Task` nodes in total, the other
+  12 being backlog-only tasks that already had one). All 55 of sprint 353's are present and closed.
+- **Five duplicate `Task` nodes folded.** Each duplicate held exactly one edge the keeper
+  lacked, so every edge was repointed and read back *before* the duplicate was deleted —
+  three `CLOSES` from a `Commit` carried the only record of those tasks' closing commits.
+- **The `internal/sim` package-keying divergence is closed.** Every symbol node's `pkg` was
+  re-derived from its own `file`, and the invariant is now asserted: 0 nodes carry a `pkg`
+  that contradicts their `file`'s directory. See *The `pkg` and `file` key conventions*.
+
+**An incident, recorded because the lesson generalises.** The first repair pass overwrote
+`pkg` on 11 652 of 12 677 symbol nodes in one statement. The cause was Cypher precedence:
+an unbracketed `OR` chain of labels, conjoined with an identity test, reassociates so that
+every node bearing any label but the last matches unconditionally. `pkg` is derived, so
+12 657 of the 12 677 were rebuilt exactly from `file`; the 20 that were not are file-less
+nodes matching no declaration, and their false `pkg` was removed rather than left standing.
+The rule — bracket a label group before conjoining it — is now in this document, in
+`symbolLabelPredicate`, and in two tests confirmed red against a controlled revert.
+
+**Not touched.** rmp #2802's 249 null-named `Package` stubs and their 234 edges. They name
+no symbol, so the fabrication check does not reach them; the audit script reports them as
+unresolved package keys and never writes to them.

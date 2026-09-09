@@ -85,6 +85,25 @@ type ConcurrentMix struct {
 	// RYOWWriterWeight selects the read-your-own-writes probe role
 	// (rmp #2440): write then immediately read back on the same connection.
 	RYOWWriterWeight float64
+	// OverloadHeavyWrites lets the overload role draw the heavy-WRITE family
+	// [OverloadLargeCreateTx] instead of mapping it to a read (rmp #2736). It
+	// is the write half of the graceful-degradation mandate: a read-only
+	// overload population cannot establish that a large legitimate WRITE is
+	// either served in full or refused with a typed error.
+	//
+	// It is opt-in rather than the default for a measured reason, not a
+	// cautious one. A heavy write is ~6-10 ms and ~1.2 MiB of engine heap
+	// against ~5 us for a read family whose connection is already in the Bolt
+	// FAILED state, so enabling it everywhere would multiply the cost of every
+	// caller that leaves Mix nil — including bench/contention's
+	// dst-concurrent-bolt, whose operation count is calibrated on a documented
+	// ~2.6 ms per operation. Callers whose subject IS heavy-write saturation
+	// ask for it by name; the catalogue's "overload" scenario does.
+	//
+	// The population stays neutral either way: an enabled run tags, adjudicates
+	// and then removes each heavy write's nodes, so the node-count oracle of
+	// [ConcurrentResult.Consistent] holds unchanged and nothing accumulates.
+	OverloadHeavyWrites bool
 }
 
 // defaultConcurrentMix is a write/read/overload population that keeps the graph
@@ -195,6 +214,32 @@ type ConcurrentResult struct {
 	// is provably non-vacuous.
 	IsoReads int64
 
+	// Heavy-write overload ledger (rmp #2736), populated only when the mix set
+	// [ConcurrentMix.OverloadHeavyWrites]:
+	//
+	//   - OverloadHeavyIssued / OverloadHeavyAcked — heavy-write transactions
+	//     SENT, and those whose commit the server acknowledged. Issued is the
+	//     non-vacuity evidence: a run that reports zero drew the family never,
+	//     so any heavy-write claim over it is empty.
+	//   - OverloadHeavyIgnored — heavy writes the server DISCARDED because the
+	//     connection was still in the Bolt FAILED state from an earlier bound.
+	//     Nothing reached the engine, so such an attempt exercises nothing; it
+	//     must be zero, and it is the tally that distinguishes a heavy write
+	//     the engine refused from one that was never issued.
+	//   - OverloadHeavyAdjudications — how many of them had their committed
+	//     population actually counted. It is to the violations below what
+	//     IsoReads is to the isolation violations: a green run with zero
+	//     adjudications proved nothing.
+	//   - OverloadHeavyViolations — heavy writes whose committed population did
+	//     not match their acknowledgement (all of the batch on an acknowledged
+	//     commit, none of it on a refusal). Must be zero, and breaks
+	//     [ConcurrentResult.Consistent] when it is not.
+	OverloadHeavyIssued        int64
+	OverloadHeavyAcked         int64
+	OverloadHeavyIgnored       int64
+	OverloadHeavyAdjudications int64
+	OverloadHeavyViolations    int64
+
 	// WireParamFailures holds one description per divergence found by the Bolt
 	// parameter type matrix ([probeWireParamTypes], rmp #2462): every PackStream
 	// kind a driver can bind — String, Integer, Float, Boolean, Null, List, Map —
@@ -211,14 +256,15 @@ func (r *ConcurrentResult) TxConserved() bool {
 
 // Consistent reports whether the eventual-consistency oracle holds: the engine's
 // node count equals the acknowledged creates, with no panics and no unexpected
-// transport errors, and every Bolt parameter kind round-tripped as specified.
-// Bounded rejects (overload caps) are expected and do not break consistency
-// because a rejected write is never acknowledged and so is never counted in
-// AckedCreates.
+// transport errors, every Bolt parameter kind round-tripped as specified, and
+// every heavy overload write all-or-nothing (rmp #2736). Bounded rejects
+// (overload caps) are expected and do not break consistency because a rejected
+// write is never acknowledged and so is never counted in AckedCreates.
 func (r *ConcurrentResult) Consistent() bool {
 	return r.Panics == 0 &&
 		r.TransportErrors == 0 &&
 		r.EngineNodeCount == r.AckedCreates &&
+		r.OverloadHeavyViolations == 0 &&
 		len(r.WireParamFailures) == 0
 }
 
@@ -372,7 +418,7 @@ func RunConcurrent(ctx context.Context, srv *SimServer, cfg ConcurrentConfig) (C
 					panics.Add(1)
 				}
 			}()
-			runConnection(ctx, srv, connSeed, role, cfg.OpsPerConn, space, &counters{
+			runConnection(ctx, srv, connSeed, role, cfg.OpsPerConn, mix.OverloadHeavyWrites, space, &counters{
 				ackedCreates:    &ackedCreates,
 				transportErrors: &transportErrors,
 				boundedRejects:  &boundedRejects,
@@ -406,6 +452,11 @@ func RunConcurrent(ctx context.Context, srv *SimServer, cfg ConcurrentConfig) (C
 		res.IsoRYOWViolations += writerLogs[i].isoRYOWViolations
 		res.IsoBatchViolations += writerLogs[i].isoBatchViolations
 		res.IsoReads += writerLogs[i].isoReads
+		res.OverloadHeavyIssued += writerLogs[i].overloadHeavyIssued
+		res.OverloadHeavyAcked += writerLogs[i].overloadHeavyAcked
+		res.OverloadHeavyIgnored += writerLogs[i].overloadHeavyIgnored
+		res.OverloadHeavyAdjudications += writerLogs[i].overloadHeavyAdjudications
+		res.OverloadHeavyViolations += writerLogs[i].overloadHeavyViolations
 		for k, v := range writerLogs[i].contendedAcked {
 			res.ContendedAcked[k] += v
 		}
@@ -511,7 +562,9 @@ type counters struct {
 // writerLog records the create names a single writer connection issued, had
 // acknowledged, and saw explicitly failed. It is owned by exactly one goroutine
 // (never shared), so it needs no synchronisation; the harness reads it only
-// after joining that goroutine. Read/overload connections leave it empty.
+// after joining that goroutine. A reader connection leaves it empty, and an
+// overload connection populates only the heavy-write tallies below, and only
+// when its mix enabled that family (rmp #2736).
 type writerLog struct {
 	issued []string // every create name sent (RUN issued), any outcome
 	acked  []string // create names with a SUCCESS-terminated PULL
@@ -533,6 +586,16 @@ type writerLog struct {
 	// contended counter count; nil for other roles).
 	contendedAcked []int64
 
+	// Heavy-write overload tallies (rmp #2736), goroutine-owned like the rest
+	// and reconciled into [ConcurrentResult] after the join. Zero for every
+	// role but the overload one, and for an overload connection whose mix did
+	// not enable the family.
+	overloadHeavyIssued        int64
+	overloadHeavyAcked         int64
+	overloadHeavyIgnored       int64
+	overloadHeavyAdjudications int64
+	overloadHeavyViolations    int64
+
 	// During-run isolation oracle state (rmp #2440), goroutine-owned like the
 	// rest: last-observed floors, violation tallies, and the observation count
 	// that proves a green run non-vacuous.
@@ -548,7 +611,7 @@ type writerLog struct {
 // operations (stopping early on ctx cancellation), and closes the connection. It
 // never panics out: a transport error stops the connection cleanly (recorded in
 // the counters), so a connection reset by the server does not crash the harness.
-func runConnection(ctx context.Context, srv *SimServer, connSeed uint64, role concurrentRole, opsPerConn int, space counterSpace, c *counters, wl *writerLog) {
+func runConnection(ctx context.Context, srv *SimServer, connSeed uint64, role concurrentRole, opsPerConn int, heavyWrites bool, space counterSpace, c *counters, wl *writerLog) {
 	client, err := srv.Dial()
 	if err != nil {
 		c.transportErrors.Add(1)
@@ -577,7 +640,7 @@ func runConnection(ctx context.Context, srv *SimServer, connSeed uint64, role co
 		if ctx.Err() != nil {
 			return
 		}
-		if stop := playOneOp(client, role, seed, uniq, op, space, c, wl); stop {
+		if stop := playOneOp(client, role, seed, uniq, op, heavyWrites, space, c, wl); stop {
 			return
 		}
 	}
@@ -585,14 +648,14 @@ func runConnection(ctx context.Context, srv *SimServer, connSeed uint64, role co
 
 // playOneOp performs one operation for the connection's role and returns true if
 // the connection should stop (a transport error indicating the server closed it).
-func playOneOp(client *WireClient, role concurrentRole, seed *Seed, uniq uint64, op int, space counterSpace, c *counters, wl *writerLog) (stop bool) {
+func playOneOp(client *WireClient, role concurrentRole, seed *Seed, uniq uint64, op int, heavyWrites bool, space counterSpace, c *counters, wl *writerLog) (stop bool) {
 	switch role {
 	case roleWriter:
 		return writerOp(client, seed, uniq, op, c, wl)
 	case roleReader:
 		return readerOp(client, seed, c)
 	case roleOverload:
-		return overloadOp(client, seed, c)
+		return overloadOp(client, seed, uniq, op, heavyWrites, c, wl)
 	case roleTxWriter:
 		return txWriterOp(client, seed, uniq, op, false, space, c, wl)
 	case roleTxContended:
@@ -678,14 +741,50 @@ func readerOp(client *WireClient, seed *Seed, c *counters) (stop bool) {
 	return false
 }
 
-// overloadOp issues one bounded overload read; the engine's cap (a typed bound
-// error) is the expected, acceptable outcome and is counted as a bounded reject,
-// not a fault.
-func overloadOp(client *WireClient, seed *Seed, c *counters) (stop bool) {
+// overloadOp issues one bounded overload operation; the engine's cap (a typed
+// bound error) is the expected, acceptable outcome and is counted as a bounded
+// reject, not a fault.
+//
+// # Why the heavy WRITE family is conditional (rmp #2736)
+//
+// [OverloadLargeCreateTx] is the only write-shaped family, and it is drawn only
+// when the caller's mix set [ConcurrentMix.OverloadHeavyWrites]. Otherwise it is
+// mapped to the large-result READ, exactly as it was before #2736.
+//
+// The reason the mapping exists is the run's own node-count oracle:
+// [ConcurrentResult.Consistent] compares the engine's WHOLE live population
+// against the acknowledged creates, and queryNodeCount counts every label. A
+// heavy write commits [overloadCreateBatch] nodes that no tally acknowledged, so
+// an unaccounted one would break that oracle on every run it was drawn in — and
+// the count cannot simply be scoped to the writers' label, because a
+// label-scoped count would stop seeing a phantom of any other label. So the
+// mapping was never accidental; what was wrong is that it applied
+// unconditionally, which left the only heavy-write family issued by no
+// production path at all.
+//
+// An enabled run keeps the oracle intact the way probeWireParamTypes keeps its
+// own fixture harmless — by leaving the population as it found it. Each heavy
+// write is tagged, adjudicated against its acknowledgement, and then deleted;
+// see [overloadHeavyWriteOp].
+//
+// A typed bound also leaves the connection in the Bolt FAILED state, which makes
+// the server IGNORE every later message on it. An enabled connection therefore
+// RESETs after a bound, or the heavy family would be drawn and then discarded
+// unissued. Measured on the "overload" scenario's own shape and seed (12
+// connections x 8 operations, seed 0x07E410AD), which draws 13 heavy writes:
+// without this RESET the engine acknowledged 3 of them and IGNORED 10; with it,
+// 13 of 13 were acknowledged and none IGNORED. That is what
+// [ConcurrentResult.OverloadHeavyIgnored] exists to keep visible.
+func overloadOp(client *WireClient, seed *Seed, uniq uint64, op int, heavyWrites bool, c *counters, wl *writerLog) (stop bool) {
 	fam := OverloadFamily(seed.IntN(overloadFamilyCount))
-	// Only the read-shaped families here; a writer connection handles writes. Map
-	// a write family to the large-result read so an overload connection stays
-	// read-only and does not perturb the acked-create oracle.
+	if fam == OverloadLargeCreateTx && heavyWrites {
+		// The tag mirrors writerOp's unique-name scheme: the connection seed, the
+		// op index, and a draw from the connection's own stream, so no two heavy
+		// writes — in this run or any other against the same server — can be
+		// adjudicated against each other's nodes.
+		tag := fmt.Sprintf("bulk-c%d-o%d-%d", uniq, op, seed.Uint64N(1<<32))
+		return overloadHeavyWriteOp(client, tag, c, wl)
+	}
 	if fam == OverloadLargeCreateTx {
 		fam = OverloadLargeResultSet
 	}
@@ -696,6 +795,146 @@ func overloadOp(client *WireClient, seed *Seed, c *counters) (stop bool) {
 	}
 	if out.BoundedError {
 		c.boundedRejects.Add(1)
+		if heavyWrites {
+			// Clear the FAILED state so this connection's remaining operations —
+			// one of which may be a heavy write — are issued instead of IGNOREd.
+			return txReset(client, c)
+		}
+	}
+	return false
+}
+
+// overloadHeavyWriteOp issues one tagged heavy write, adjudicates the population
+// it committed against its acknowledgement, and removes it again (rmp #2736).
+// The three steps are one unit on purpose:
+//
+//   - ISSUE — one autocommit statement creating [overloadCreateBatch] nodes,
+//     every one carrying tag in its run property.
+//   - ADJUDICATE — count the nodes carrying THIS tag. An acknowledged commit
+//     must have committed all of the batch; a refused one must have committed
+//     none of it. Anything else is [adjudicateHeavyWrite]'s violation, tallied
+//     in [ConcurrentResult.OverloadHeavyViolations] and asserted zero by
+//     [ConcurrentResult.Consistent]. The tag is what makes the count answerable
+//     at all, since sibling connections are writing the same label concurrently.
+//   - REMOVE — delete the tagged nodes, so the heavy write leaves the run's
+//     population as it found it and the node-count oracle stays valid. A cleanup
+//     the engine refuses leaves residue, which that same oracle then reports.
+//
+// A bound at any step is a bounded reject followed by a RESET, so the later
+// steps still run on this connection rather than being IGNOREd.
+func overloadHeavyWriteOp(client *WireClient, tag string, c *counters, wl *writerLog) (stop bool) {
+	query, params := OverloadActor{Tag: tag}.statement(OverloadLargeCreateTx)
+
+	wl.overloadHeavyIssued++
+	outcome, stop := runHeavyCreate(client, query, params, c)
+	if stop {
+		return true
+	}
+	switch outcome {
+	case heavyCreateAcked:
+		wl.overloadHeavyAcked++
+	case heavyCreateIgnored:
+		wl.overloadHeavyIgnored++
+	case heavyCreateRefused:
+	}
+	acked := outcome == heavyCreateAcked
+
+	got, ok, stop := wireScalar(client, overloadBulkCountStmt, params, c)
+	if stop {
+		return true
+	}
+	if ok {
+		wl.overloadHeavyAdjudications++
+		if adjudicateHeavyWrite(acked, got) {
+			wl.overloadHeavyViolations++
+		}
+	}
+
+	return overloadBulkCleanup(client, params, c)
+}
+
+// heavyCreateOutcome is how the server answered one heavy create.
+type heavyCreateOutcome int
+
+const (
+	// heavyCreateAcked — the commit was acknowledged (a SUCCESS terminal).
+	heavyCreateAcked heavyCreateOutcome = iota
+	// heavyCreateRefused — a typed FAILURE: the engine declared a bound and
+	// applied nothing. An acceptable, graceful outcome.
+	heavyCreateRefused
+	// heavyCreateIgnored — an IGNORED reply: the connection was still in the
+	// Bolt FAILED state from an earlier bound, so the statement never reached
+	// the engine. NOT an outcome of the write, but the absence of one.
+	heavyCreateIgnored
+)
+
+// runHeavyCreate issues one heavy create and classifies the server's answer.
+//
+// A typed refusal is the engine's declared bound: it is counted as a bounded
+// reject and cleared with a RESET, so the caller can still adjudicate the
+// (necessarily empty) population it left behind.
+//
+// An IGNORED reply is kept SEPARATE from that refusal on purpose. Both leave the
+// engine untouched, so the population adjudication cannot tell them apart, and
+// classifyResponse maps them to the same bucket — but a refusal is the engine
+// answering and an IGNORED is the harness having lost the exercise, and counting
+// the second as the first is how the read-only path measured graceful
+// degradation it had never provoked.
+func runHeavyCreate(client *WireClient, query string, params map[string]any, c *counters) (heavyCreateOutcome, bool) {
+	resp, err := client.Run(query, params)
+	if err != nil {
+		c.transportErrors.Add(1)
+		return heavyCreateIgnored, true
+	}
+	if outcome, refused := classifyHeavyResponse(resp, c); refused {
+		return outcome, txReset(client, c)
+	}
+	_, term, err := client.PullAll()
+	if err != nil {
+		c.transportErrors.Add(1)
+		return heavyCreateIgnored, true
+	}
+	if outcome, refused := classifyHeavyResponse(term, c); refused {
+		return outcome, txReset(client, c)
+	}
+	return heavyCreateAcked, false
+}
+
+// classifyHeavyResponse splits a non-acknowledging reply into the engine's own
+// typed refusal (a bounded reject, tallied) and a discarded message (nothing
+// tallied, because nothing happened).
+func classifyHeavyResponse(resp any, c *counters) (heavyCreateOutcome, bool) {
+	switch resp.(type) {
+	case *proto.Ignored:
+		return heavyCreateIgnored, true
+	case *proto.Failure:
+		c.boundedRejects.Add(1)
+		return heavyCreateRefused, true
+	}
+	return heavyCreateAcked, false
+}
+
+// overloadBulkCleanup removes the nodes carrying one heavy write's tag, so the
+// heavy write is population-neutral and the run's node-count oracle is unchanged
+// by it.
+func overloadBulkCleanup(client *WireClient, params map[string]any, c *counters) (stop bool) {
+	resp, err := client.Run(overloadBulkDeleteStmt, params)
+	if err != nil {
+		c.transportErrors.Add(1)
+		return true
+	}
+	if _, refused := classifyResponse(resp); refused {
+		c.boundedRejects.Add(1)
+		return txReset(client, c)
+	}
+	_, term, err := client.PullAll()
+	if err != nil {
+		c.transportErrors.Add(1)
+		return true
+	}
+	if _, refused := classifyResponse(term); refused {
+		c.boundedRejects.Add(1)
+		return txReset(client, c)
 	}
 	return false
 }

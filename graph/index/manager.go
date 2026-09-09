@@ -48,6 +48,17 @@ var ErrIndexCorrupted = errors.New("index: serialized form corrupted")
 // supported types before registering the index for snapshot durability.
 var ErrIndexValueTypeUnsupported = errors.New("index: value type not supported for serialization")
 
+// ErrIndexBuildOverflow is returned by [Manager.FinishBuild] when more than
+// [MaxBuildLogChanges] changes were fanned out while the index was being built,
+// so the recorded catch-up log is no longer complete.
+//
+// It is a saturation signal, not a corruption: nothing was registered, the
+// half-built index is discarded, and the statement can simply be retried. It is
+// reported rather than absorbed because absorbing it is precisely the defect
+// [Manager.BeginBuild] exists to prevent — an index registered while some of the
+// writes concurrent with its build were never applied to it.
+var ErrIndexBuildOverflow = errors.New("index: concurrent-change log overflowed during an index build")
+
 // Subscriber is implemented by every concrete index that wishes to
 // receive change events from the [Manager]. The Apply method must
 // be idempotent: replays of the same change must not produce
@@ -65,6 +76,43 @@ type Subscriber interface {
 	// implementation, used for introspection (e.g. "label", "hash",
 	// "btree").
 	Kind() string
+}
+
+// ResolvedApplier is implemented by a [Subscriber] whose Apply resolves part of
+// a [Change] against the graph rather than from the change alone, and which can
+// instead be handed that resolution as data.
+//
+// # Why the interface exists
+//
+// A bound index answers two questions about the changed node that the Change
+// does not carry: is the node currently ELIGIBLE for this index (live, and
+// carrying the bound label), and what is its CURRENT value of the bound property
+// (a label add/remove carries no property payload). On the live fan-out both are
+// asked at the instant the change is fanned out, which is the instant the
+// committing transaction's state is final — the state the index must converge
+// to.
+//
+// The build-log replay ([Manager.FinishBuild]) applies a change LATER, and
+// asking those questions then answers about a different instant. rmp #2793
+// measured the consequence: a second transaction's eager, uncommitted mutation,
+// opened after the change was recorded and still open at the replay, made the
+// replay insert a value nothing had committed and suppress the value the graph
+// did hold. ApplyResolved closes that by taking the two answers from the log,
+// where they were captured at fan-out time by the log's [BuildResolver].
+//
+// current is the node's raw property value as of the recording, in whatever
+// representation the subscriber's own value projection accepts, and is nil when
+// the node was absent or carried no such property. eligible is the recorded
+// answer to the eligibility question. A subscriber must apply c using exactly
+// the rules its Apply uses, substituting these two values for its own reads, so
+// that the replay produces precisely the effects the live fan-out would have
+// produced.
+//
+// Implementations must be safe for concurrent use on the same terms as
+// [Subscriber.Apply].
+type ResolvedApplier interface {
+	Subscriber
+	ApplyResolved(c Change, current any, eligible bool)
 }
 
 // Serializer is implemented by indexes that can persist and restore
@@ -153,7 +201,14 @@ func (c Change) IsEdgeChange() bool {
 // Manager is safe for concurrent use.
 type Manager struct {
 	indexes map[string]Subscriber
-	mu      sync.RWMutex
+	// builds holds the change logs of the index builds currently in flight.
+	// It is written only under mu held exclusively and read under mu held
+	// shared, so [Manager.Apply] and [Manager.ApplyBatch] observe a stable
+	// slice for the whole fan-out. It is nil in the overwhelmingly common
+	// case that no build is running, which is the only cost the fan-out pays
+	// for this mechanism: one length check per call.
+	builds []*BuildLog
+	mu     sync.RWMutex
 }
 
 // NewManager returns an empty Manager.
@@ -253,6 +308,13 @@ func (m *Manager) Apply(c Change) {
 	for _, sub := range m.indexes {
 		sub.Apply(c)
 	}
+	// Record for every build in flight, under the SAME lock hold as the
+	// fan-out, so a change is either recorded here or delivered to an index
+	// that FinishBuild has already registered — never neither. See
+	// [Manager.BeginBuild].
+	for _, b := range m.builds {
+		b.record(c)
+	}
 }
 
 // ApplyBatch fans an ordered slice of changes out to every subscriber
@@ -265,5 +327,10 @@ func (m *Manager) ApplyBatch(changes []Change) {
 		for k := range changes {
 			sub.Apply(changes[k])
 		}
+	}
+	// The whole batch is recorded contiguously for every build in flight; see
+	// [Manager.Apply] for why this shares the fan-out's lock hold.
+	for _, b := range m.builds {
+		b.recordBatch(changes)
 	}
 }

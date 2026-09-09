@@ -13,6 +13,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
@@ -83,6 +84,57 @@ func mustExplainTable(t testing.TB, e *Engine, q string, params map[string]expr.
 		t.Fatalf("ExplainTable(%q): %v", q, err)
 	}
 	return s
+}
+
+// explainPlanShape renders e's plan for q with the Est.Rows column removed, so that
+// a comparison sees the OPERATOR TREE and not the cardinality annotation beside it.
+//
+// The distinction became load-bearing at rmp #2772. [statsReorderPair]'s two engines
+// hold SEPARATE statistics collectors over one shared graph, and only the engine the
+// dirtying writes are issued through observes them — so after those writes the two
+// snapshots genuinely differ in freshness. Since #2772 freshness decides whether an
+// MCV estimate is rendered at all, which means the Est.Rows column of the pair
+// legitimately differs while the plan they describe is identical. Comparing the whole
+// table would assert the two engines hold equally fresh statistics, which is not what
+// these gates are about and is not true.
+//
+// Every gate that uses it also asserts the swap did not fire, via
+// [joinReorderBuildCount]; this is the independent check on the resulting SHAPE.
+func explainPlanShape(t testing.TB, e *Engine, q string, params map[string]expr.Value) string {
+	t.Helper()
+	table := mustExplainTable(t, e, q, params)
+	lines := strings.Split(table, "\n")
+	// Locate the column by its HEADER: Est.Rows is conditional (rmp #2765), so a
+	// fixed index would delete the Vars column from a table that has no estimates.
+	col := -1
+	for _, line := range lines {
+		if !strings.HasPrefix(line, "|") {
+			continue
+		}
+		for i, f := range strings.Split(line, "|") {
+			if strings.TrimSpace(f) == "Est.Rows" {
+				col = i
+			}
+		}
+		break // the first content line is the header row
+	}
+	if col < 0 {
+		return table
+	}
+	var b strings.Builder
+	for _, line := range lines {
+		sep := "|"
+		if strings.HasPrefix(line, "+") {
+			sep = "+" // the rule lines between rows use the corner glyph as separator
+		}
+		f := strings.Split(line, sep)
+		if col >= len(f) {
+			b.WriteString(line + "\n")
+			continue
+		}
+		b.WriteString(strings.Join(append(f[:col:col], f[col+1:]...), sep) + "\n")
+	}
+	return b.String()
 }
 
 func sortedRows(t testing.TB, e *Engine, q string) []string {
@@ -305,10 +357,13 @@ func TestJoinReorderStats_NonMCVLiteral_NoSwap(t *testing.T) {
 	}
 }
 
-// TestJoinReorderStats_StaleStatistic_NoSwap: an MCV hit is tagged estExact even
-// when the snapshot it came from is long out of date, so the planner applies its
-// own freshness screen ([reorderStatsFreshness]). Enough writes to the tracked
-// (label, property) pair must stop the swap.
+// TestJoinReorderStats_StaleStatistic_NoSwap: an MCV hit is an exact per-value count
+// for the snapshot it came from and for no later one, so it is screened for
+// staleness ([statsSnapshotFresh]) before it may drive anything. Enough writes to the
+// tracked (label, property) pair must stop the swap. Since rmp #2772 the screen lives
+// in the PROVIDER rather than in [reorderStatsFreshness], which is why the plan
+// comparison below is on the shape: the demotion is now visible in the Est.Rows
+// column, and the two engines' statistics differ in freshness.
 func TestJoinReorderStats_StaleStatistic_NoSwap(t *testing.T) {
 	const nA, nB = 500, 20
 	g := buildSkewGraph(t, nA, nB, 3)
@@ -343,7 +398,7 @@ func TestJoinReorderStats_StaleStatistic_NoSwap(t *testing.T) {
 	if joinReorderBuildCount.Load() != before {
 		t.Fatal("a stale statistic drove a swap; the freshness screen did not hold")
 	}
-	if tbl, ref := mustExplainTable(t, on, q, nil), mustExplainTable(t, off, q, nil); tbl != ref {
+	if tbl, ref := explainPlanShape(t, on, q, nil), explainPlanShape(t, off, q, nil); tbl != ref {
 		t.Fatalf("plan deviated from the default on a stale statistic:\n%s", tbl)
 	}
 	if len(got) != 3*nB {

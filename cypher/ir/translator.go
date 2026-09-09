@@ -40,6 +40,13 @@ func FromAST(q ast.Query) (LogicalPlan, error) {
 // supplied correlation variables and ArgTag. The returned plan is suitable as
 // the inner pipeline of a per-row subquery driver.
 //
+// The body's reading clauses AND its trailing RETURN are both translated, so the
+// plan's row count is the body's own output cardinality — after any DISTINCT,
+// ORDER BY, SKIP, LIMIT or aggregation the RETURN carries. That is the quantity
+// COUNT { … } counts and the one EXISTS { … } tests for emptiness; see the
+// citation at the q.Return branch below. A body with no trailing RETURN takes
+// exactly the path it always did.
+//
 // outerVars is the list of variable names visible from the lexical outer
 // scope at the subquery's call site; they are injected into the inner
 // pipeline through the leading Argument so correlated patterns (e.g.
@@ -80,7 +87,57 @@ func TranslateSubquery(q *ast.SingleQuery, outerVars []string, argTag uint32) (L
 			return nil, err
 		}
 	}
+	// The body's TRAILING projection is PART of the body, and dropping it was a
+	// wrong ANSWER, not a lost optimisation (rmp #2675). Before this line the loop
+	// above was the whole function, so `COUNT { MATCH (a)-[:K]->(x) RETURN count(*) }`
+	// counted the two matches instead of the one row the aggregation emits, and
+	// `COUNT { … RETURN x LIMIT 1 }` counted two instead of one.
+	//
+	// A WITH was never affected — the parser appends every WITH to ReadingClauses
+	// in document order (cypher/parser/visitor.go, VisitMultiPartQ) — so only the
+	// trailing RETURN, and with it DISTINCT / ORDER BY / SKIP / LIMIT and any
+	// aggregation, was lost.
+	//
+	// The counted quantity is the row count of the body AFTER its own projection.
+	// Read at github.com/neo4j/neo4j, release tag 2026.07.1 (commit
+	// f213380f812b820a1b312e2ea52cb3d8f1931ccc),
+	// community/cypher/cypher-planner/src/main/scala/org/neo4j/cypher/internal/compiler/ast/convert/plannerQuery/CreateIrExpressions.scala:
+	// `case countExpression @ CountExpression(q)` converts the WHOLE body query,
+	// then either overrides its final horizon with `AggregatingQueryProjection(count(*))`
+	// — permitted only for a `RegularQueryProjection` with `QueryPagination.empty`
+	// and `Selections.empty`, a plain projection that cannot change the row count —
+	// or, for every other horizon, appends a TAIL carrying that aggregation over the
+	// body's own output. Either way count(*) counts the rows the body produces.
+	// `case existsExpression @ ExistsExpression(q)` in the same file converts the
+	// body with no override at all, so EXISTS is "the body produced at least one
+	// row" — which is why an aggregating body, emitting one row even over an empty
+	// input, is TRUE and not FALSE.
+	if q.Return != nil {
+		projected, err := t.returnClause(q.Return, plan)
+		if err != nil {
+			return nil, err
+		}
+		plan = stripProduceResults(projected)
+	}
 	return plan, nil
+}
+
+// stripProduceResults returns plan without the terminal [ProduceResults] that
+// [translator.returnClause] wraps every projection in.
+//
+// A subquery body is not a query: its rows are consumed by the EXISTS / COUNT
+// driver in cypher/subquery_eval.go, which only asks how many there are, never
+// what they are called. [ProduceResults] exists to name and order a RESULT's
+// columns, and the physical builder handles it only at the plan ROOT
+// (cypher/api.go asserts the root is a *ir.ProduceResults and builds its child),
+// so leaving one in the middle of a subquery pipeline would fail the build. It
+// changes no cardinality — it drops the hidden ORDER-BY passthrough columns and
+// renames the rest — so removing it cannot change the counted quantity.
+func stripProduceResults(plan LogicalPlan) LogicalPlan {
+	if pr, ok := plan.(*ProduceResults); ok {
+		return pr.Child
+	}
+	return plan
 }
 
 // translator is an internal, single-use helper that threads the bottom-up plan
@@ -501,7 +558,7 @@ func (t *translator) returnClause(r *ast.Return, child LogicalPlan) (LogicalPlan
 	// in with.go).
 	if !hasAgg {
 		preVars := collectAllVars(planAfterComp)
-		items = appendOrderByPassthrough(items, proj, preVars)
+		items = appendOrderByPassthrough(items, proj, preVars, true)
 	}
 	if hasAgg {
 		plan = NewEagerAggregationWithExprs(groupBy, groupByExprs, aggs, planAfterComp)

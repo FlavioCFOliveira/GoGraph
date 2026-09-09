@@ -118,6 +118,11 @@ release:
     name: GoGraph
   draft: true
   prerelease: auto
+  # NOTE: header and footer apply only when goreleaser composes the body itself.
+  # The release workflow passes --release-notes with a body built by
+  # scripts/release_body.sh from the CHANGELOG entry, which SUPERSEDES both, so a
+  # release describes what it delivered rather than pointing at a file. The header
+  # below is the fallback for a local `goreleaser release` run without that flag.
   header: |
     GoGraph {{ .Tag }} — see CHANGELOG.md for the per-release entry.
   footer: |

@@ -1,0 +1,28 @@
+=== the Expand family — is the regression systematic across K? ===
+benchmark                                                         v0.14.0    v0.14.1    delta      p    floor
+BenchmarkExpandDir_InVsOut_Baseline/IN_deg1_sources-10           93.27 µs   98.69 µs   +5.81%  0.005   -0.65%
+BenchmarkExpandDir_InVsOut_Baseline/OUT_deg1_sources-10            146 µs   146.1 µs   +0.10%  0.689   +0.02%
+BenchmarkExpandFilter_Columnar-10                                2.156 ms   2.172 ms   +0.74%  0.230   -0.62%
+BenchmarkExpandFilter_RowMode-10                                 1.867 ms   1.861 ms   -0.32%  0.936   -0.44%
+BenchmarkExpandIn_PerEdge_vs_SourceOutdegree/K=16/one_in_edge-10     188 ns     187 ns   -0.53%  0.335   +0.03%
+BenchmarkExpandIn_PerEdge_vs_SourceOutdegree/K=256/one_in_edge-10   197.1 ns   196.8 ns   -0.15%  0.810   +0.69%
+BenchmarkExpandIn_PerEdge_vs_SourceOutdegree/K=4096/one_in_edge-10   200.8 ns   200.4 ns   -0.22%  0.575   +0.70%
+BenchmarkExpandIn_PerEdge_vs_SourceOutdegree/K=65536/one_in_edge-10   203.7 ns   204.6 ns   +0.42%  0.936   -0.29%
+BenchmarkExpandIn_TypeFiltered_vs_SourceOutdegree/K=16/one_in_edge_typed-10   660.5 ns   656.7 ns   -0.57%  0.471   -0.46%
+BenchmarkExpandIn_TypeFiltered_vs_SourceOutdegree/K=256/one_in_edge_typed-10   5.366 µs   5.382 µs   +0.30%  0.470   -0.09%
+BenchmarkExpandIn_TypeFiltered_vs_SourceOutdegree/K=4096/one_in_edge_typed-10   81.27 µs   81.05 µs   -0.27%  0.810   +0.75%
+BenchmarkExpandIn_TypeFiltered_vs_SourceOutdegree/K=65536/one_in_edge_typed-10   1.201 ms   1.198 ms   -0.22%  0.810   -0.02%
+BenchmarkExpandOut_PerEdge_SingleSource/K=4096-10                 78.1 µs   83.21 µs   +6.54%  0.005   +0.21%
+BenchmarkExpandOut_PerEdge_SingleSource/K=65536-10               1.271 ms   1.327 ms   +4.37%  0.005   -0.40%
+
+=== the BoundedOrder family — the ORDER BY key hoist (#2662) ===
+BenchmarkBoundedOrder/n=000010/Sort-10                           8.432 ms   8.279 ms   -1.82%  0.066   +0.12%
+BenchmarkBoundedOrder/n=000010/Top-10                             1.41 ms   1.374 ms   -2.56%  0.005   +0.12%
+BenchmarkBoundedOrder/n=000110/Sort-10                           8.487 ms   8.373 ms   -1.34%  0.045   -0.64%
+BenchmarkBoundedOrder/n=000110/Top-10                            1.442 ms   1.402 ms   -2.75%  0.020   -0.46%
+BenchmarkBoundedOrder/n=010010/Sort-10                           8.472 ms   8.364 ms   -1.28%  0.066   -0.19%
+BenchmarkBoundedOrder/n=010010/Top-10                            4.858 ms   4.756 ms   -2.10%  0.005   -0.42%
+BenchmarkBoundedOrder/n=060000/Sort-10                            8.63 ms   8.453 ms   -2.06%  0.066   -0.04%
+BenchmarkBoundedOrder/n=060000/Top-10                            8.926 ms   8.998 ms   +0.80%  0.689   -1.23%
+BenchmarkBoundedOrder/n=120000/Sort-10                           8.739 ms   8.631 ms   -1.24%  0.173   -0.58%
+BenchmarkBoundedOrder/n=120000/Top-10                            8.831 ms   8.657 ms   -1.97%  0.230   +0.45%

@@ -1,8 +1,12 @@
 # Write-write conflict detection
 
-**Status:** design — the specification for rmp #2300, sprint 334
+**Status:** **implemented** — the specification for rmp #2300, sprint 334
 **Date:** 2026-08-02
 **Audit:** [`audit-mvcc-sole-cc-2026-08-02.md`](audit-mvcc-sole-cc-2026-08-02.md) §4.3
+
+> **Status corrected (2026-09-08 at `efd32fb9`).** The header read "design"; rmp #2300
+> has shipped. The sections below are the specification as written, with the delivered
+> state marked inline where they disagree with the code.
 
 ---
 
@@ -13,6 +17,19 @@ first-updater-wins, no validation phase, no abort wired to a statement —
 `graph/lpg/mvcc_txn.go:139-143` says so in its own words about `labelTx.abort`.
 A grep for `Serializ|Conflict|Retriable` returns only *name*-conflict and
 constraint-name-conflict errors.
+
+> **SUPERSEDED (rmp #2300 delivered; verified 2026-09-08 at `efd32fb9`).** This section
+> is the pre-#2300 baseline, and it is the state this document exists to remove — it is
+> retained for the argument that follows, not as current fact. Detection ships:
+> `mvcc.ErrSerializationConflict` and the `mvcc.Conflict` error that wraps it are in
+> `graph/mvcc/conflict.go:56` and `:63`, the rule itself is `mvcc.Conflicts` (`:144`),
+> and `graph/lpg/mvcc_txn.go` now documents the opposite of the sentence above: its
+> `labelTx.commit` reads the conflict record off the `writeCtx` as a backstop and
+> ABORTS, marking the shared commit record `mvcc.AbortedTS` (see the doc comment at
+> `graph/lpg/mvcc_txn.go:129-146` above `labelTx.commit`, which cites Memgraph's
+> `Storage::Commit` / `transaction_.must_abort` as the prior art). The cited line range
+> `graph/lpg/mvcc_txn.go:139-143` now lands inside that very argument, so it no longer
+> supports the claim it was cited for.
 
 That was correct while there was one writer.
 [`isolation-design.md`](isolation-design.md) states it plainly: "write-write
@@ -302,14 +319,32 @@ aborting transaction itself.
 
 ### The chain is NOT reclaimable today — measured 2026-08-03, rmp #2318
 
+> **SUPERSEDED (rmp #2318 closed; verified 2026-09-08 at `efd32fb9`).** The chain IS
+> reclaimable. `graph/lpg/mvcc_abort_reclaim.go` implements exactly the fix this
+> section prescribes — the vacuum applies the undo to the stored value and then drops
+> the delta — and `mvcc.Conflicts` refuses a writer that would build on a dirty base, so
+> an aborted delta is always at its chain's head. Pinned by
+> `TestAbort_VersionsAreReleasedBySweep` and `TestAbort_WithdrawnWritesStayInvisible`
+> (`graph/lpg/mvcc_abort_reclaim_test.go:22`, `:77`). The measurement below stands as a
+> record of the defect at `b3e1aa0b`; see
+> [`design-mvcc-abort-withdrawal.md`](design-mvcc-abort-withdrawal.md) for the design as
+> built.
+
 This section previously claimed the chain "becomes reclaimable". It does not, and
 the claim was corrected only when a test was written to assert it.
 
 Measured at `b3e1aa0b`: seed 50 versions, reclaim to zero, abort a transaction
 that wrote 50 more, reclaim again with no live reader → **`freed=0`, 50 records
 still live**. `AbortedTS` is `^uint64(0)`, the maximum `uint64`, and every
-reclaimer truncates on `stamp <= watermark` (`mvcc_reclaim.go:73,79,115,121`,
-`mvcc_sidemap.go:234,243`), which that value can never satisfy.
+reclaimer truncates on `stamp <= watermark` (`mvcc_reclaim.go:89,99,147,155`,
+`mvcc_sidemap.go:243,254`), which that value can never satisfy.
+
+> **Line references corrected (2026-09-08 at `efd32fb9`).** They read
+> `mvcc_reclaim.go:73,79,115,121` and `mvcc_sidemap.go:234,243`; five of those six numbers
+> no longer name a truncation site. The six `stamp <= watermark` comparisons at
+> `efd32fb9` are `graph/lpg/mvcc_reclaim.go:89`, `:99`, `:147`, `:155` and
+> `graph/lpg/mvcc_sidemap.go:243`, `:254`. The claim itself — that `AbortedTS` satisfies
+> none of them — is unchanged and still holds.
 
 The second half is the one that matters more. `labelTx.abort()` marks the record
 and **does not restore the stored value**, so the stored bag still holds the

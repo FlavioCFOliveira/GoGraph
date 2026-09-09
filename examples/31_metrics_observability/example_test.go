@@ -99,6 +99,39 @@ func TestRun(t *testing.T) {
 			boltAfter-boltBefore)
 	}
 
+	// The planner-statistics step (rmp #2767) is the example's q-error
+	// demonstration, and these four facts assert the demonstration ITSELF rather
+	// than a symptom of it. rmp #2795 is what their absence cost: rmp #2772
+	// correctly demoted the stale estimate the old fixture relied on, the q-error
+	// sample vanished, and the only assertion that noticed was the metric COUNT
+	// below — which a later change could just as easily have "fixed" by lowering 45
+	// to 44. A count is not a guard; these are.
+	//
+	// stats.misestimated_pairs is the load-bearing one. It is non-zero only when a
+	// PROFILE scored a TRUSTWORTHY estimate wrong by 3x or more, so a zero here
+	// means the estimate was demoted or never scored, and neither
+	// cypher.stats.qerror.high nor Engine.StatsMisestimatedPairs carries a reading.
+	if got := mustInt(t, facts, "stats.tracked_pairs_positive"); got != 1 {
+		t.Errorf("stats.tracked_pairs_positive = %d, want 1 (the engine holds no "+
+			"tracked (label, property) statistic, so there is nothing to misestimate)", got)
+	}
+	if got := mustInt(t, facts, "stats.tier_after_decommission"); got != keptLive {
+		t.Errorf("stats.tier_after_decommission = %d, want %d (the decommission must "+
+			"shrink the live tier, or the statistic is not stale)", got, keptLive)
+	}
+	if got := mustInt(t, facts, "stats.misestimated_pairs"); got != 1 {
+		t.Errorf("stats.misestimated_pairs = %d, want 1: PROFILE scored no stale "+
+			"trustworthy estimate, so the example emits no cypher.stats.qerror.high "+
+			"sample and no longer demonstrates the q-error surface. The fixture needs "+
+			"a staleness route the freshness screen still trusts — see [staleTier] "+
+			"(rmp #2795)", got)
+	}
+	if got := mustInt(t, facts, "stats.misestimated_cleared_by_refresh"); got != 1 {
+		t.Errorf("stats.misestimated_cleared_by_refresh = %d, want 1 (a refresh must "+
+			"clear the observation, which is what makes the accessor a "+
+			"\"refresh overdue?\" signal rather than a lifetime tally)", got)
+	}
+
 	// Every expected instrumented metric must be present in the exposition.
 	for _, m := range expectedMetrics {
 		key := "metric.present." + m.name

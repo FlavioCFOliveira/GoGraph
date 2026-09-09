@@ -1,0 +1,54 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/store/recovery
+cpu: Apple M4
+BenchmarkIndexesRecoveryVsRebuild/snapshot-10         	      55	  21220477 ns/op	40156098 B/op	  735100 allocs/op
+BenchmarkIndexesRecoveryVsRebuild/rebuild-10          	      36	  32964904 ns/op	29862779 B/op	  137958 allocs/op
+BenchmarkSnapshotApply_Snapshot-10                    	       9	 113537847 ns/op	157445138 B/op	 1961500 allocs/op
+BenchmarkSnapshotApply_WALReplay-10                   	       4	 250582458 ns/op	222582160 B/op	 4440505 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/store/recovery
+cpu: Apple M4
+BenchmarkIndexesRecoveryVsRebuild/snapshot-10         	      56	  21066923 ns/op	40237949 B/op	  735102 allocs/op
+BenchmarkIndexesRecoveryVsRebuild/rebuild-10          	      37	  32406668 ns/op	29890050 B/op	  137960 allocs/op
+BenchmarkSnapshotApply_Snapshot-10                    	      10	 116664817 ns/op	157445197 B/op	 1961500 allocs/op
+BenchmarkSnapshotApply_WALReplay-10                   	       4	 251522427 ns/op	221240906 B/op	 4440508 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/store/recovery
+cpu: Apple M4
+BenchmarkIndexesRecoveryVsRebuild/snapshot-10         	      57	  20856437 ns/op	40265368 B/op	  735102 allocs/op
+BenchmarkIndexesRecoveryVsRebuild/rebuild-10          	      34	  32558631 ns/op	29890063 B/op	  137960 allocs/op
+BenchmarkSnapshotApply_Snapshot-10                    	       9	 114579889 ns/op	157445200 B/op	 1961500 allocs/op
+BenchmarkSnapshotApply_WALReplay-10                   	       5	 252614708 ns/op	220987899 B/op	 4435053 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/store/recovery
+cpu: Apple M4
+BenchmarkIndexesRecoveryVsRebuild/snapshot-10         	      56	  20868507 ns/op	40155843 B/op	  735100 allocs/op
+BenchmarkIndexesRecoveryVsRebuild/rebuild-10          	      36	  32847981 ns/op	29862784 B/op	  137958 allocs/op
+BenchmarkSnapshotApply_Snapshot-10                    	       9	 115240324 ns/op	157445345 B/op	 1961500 allocs/op
+BenchmarkSnapshotApply_WALReplay-10                   	       5	 245804975 ns/op	222760798 B/op	 4445057 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/store/recovery
+cpu: Apple M4
+BenchmarkIndexesRecoveryVsRebuild/snapshot-10         	      56	  21356938 ns/op	40155777 B/op	  735104 allocs/op
+BenchmarkIndexesRecoveryVsRebuild/rebuild-10          	      36	  32792515 ns/op	29589822 B/op	  137938 allocs/op
+BenchmarkSnapshotApply_Snapshot-10                    	       9	 115294630 ns/op	157449426 B/op	 1961501 allocs/op
+BenchmarkSnapshotApply_WALReplay-10                   	       5	 251070450 ns/op	221182476 B/op	 4435208 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/store/recovery
+cpu: Apple M4
+BenchmarkIndexesRecoveryVsRebuild/snapshot-10         	      56	  20931885 ns/op	40237782 B/op	  735104 allocs/op
+BenchmarkIndexesRecoveryVsRebuild/rebuild-10          	      34	  32783777 ns/op	29671702 B/op	  137944 allocs/op
+BenchmarkSnapshotApply_Snapshot-10                    	       9	 114236861 ns/op	157445145 B/op	 1961500 allocs/op
+BenchmarkSnapshotApply_WALReplay-10                   	       5	 249090325 ns/op	221268180 B/op	 4441218 allocs/op
+PASS

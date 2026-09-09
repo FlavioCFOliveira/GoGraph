@@ -182,7 +182,7 @@ func buildRangeSeekIfEnabled(
 		return nil, false
 	}
 	return tryBuildRangeSeekChild(sel, schema, idxMgr, g, params,
-		bopts.prefixSeekEnabled, bopts.bitmapIntersectEnabled)
+		bopts.prefixSeekEnabled, bopts.bitmapIntersectEnabled, bopts.pendingIdx)
 }
 
 // tryBuildRangeSeekChild attempts to build a NodeByIndexRangeScan to replace
@@ -217,6 +217,18 @@ func labelBitmapOf(g *lpg.ReadView[string, float64], label string) func() *roari
 	return func() *roaring64.Bitmap { return src.ResolveLabelBitmap(label) }
 }
 
+// pending is the enclosing write transaction's unflushed index delta (rmp
+// #2814), threaded rather than read off bopts because every function in this file
+// takes its inputs explicitly. It reaches the two bound-btree lookups
+// [findBoundStringBTree] and [findBoundNumericBTree], which are the single funnels
+// through which this whole family — string range, prefix, numeric range and the
+// multi-property intersection — obtains an index.
+//
+// The range family retains the original predicate as a residual Filter, so a stale
+// index here cannot FABRICATE a row the way the equality seek can; it can still
+// LOSE one, when the value the transaction has already written into the graph is in
+// range but the index still holds the out-of-range value it replaced. That is the
+// same defect, one direction of it, and the same decline closes it.
 func tryBuildRangeSeekChild(
 	sel *ir.Selection,
 	schema map[string]int,
@@ -225,6 +237,7 @@ func tryBuildRangeSeekChild(
 	params map[string]expr.Value,
 	prefixSeek bool,
 	intersectSeek bool,
+	pending *pendingIndexDelta,
 ) (exec.Operator, bool) {
 	if idxMgr == nil || g == nil || sel.PredicateExpr == nil {
 		// No index, or no AST predicate to build the residual Filter from:
@@ -249,17 +262,17 @@ func tryBuildRangeSeekChild(
 	// shipped gate, and the residual Filter is retained as always, so a declined
 	// composition falls straight through to the single-property paths below.
 	if intersectSeek {
-		if op, ok := tryIndexIntersectionSeek(sel, schema, idxMgr, g, lblScan, nodeVar, params, prefixSeek); ok {
+		if op, ok := tryIndexIntersectionSeek(sel, schema, idxMgr, g, lblScan, nodeVar, params, prefixSeek, pending); ok {
 			return op, true
 		}
 	}
 	// Try the string-btree path first (a string range over a string-typed
 	// index). When the predicate is not a string range — typically a numeric
 	// range n.age > 30 — fall through to the unified numeric companion.
-	if op, ok := tryStringRangeSeek(sel, schema, idxMgr, g, lblScan, nodeVar, params, prefixSeek); ok {
+	if op, ok := tryStringRangeSeek(sel, schema, idxMgr, g, lblScan, nodeVar, params, prefixSeek, pending); ok {
 		return op, true
 	}
-	return tryNumericRangeSeek(sel, schema, idxMgr, g, lblScan, nodeVar, params)
+	return tryNumericRangeSeek(sel, schema, idxMgr, g, lblScan, nodeVar, params, pending)
 }
 
 // tryStringRangeSeek builds a NodeByIndexRangeScan over a bound string btree
@@ -275,13 +288,14 @@ func tryStringRangeSeek(
 	nodeVar string,
 	params map[string]expr.Value,
 	prefixSeek bool,
+	pending *pendingIndexDelta,
 ) (exec.Operator, bool) {
 	pred, ok := extractStringRangePred(sel.PredicateExpr, nodeVar, params, prefixSeek)
 	if !ok {
 		return nil, false
 	}
 
-	sub, ok := findBoundStringBTree(idxMgr, lblScan.Label, pred.propKey)
+	sub, ok := findBoundStringBTree(idxMgr, lblScan.Label, pred.propKey, pending)
 	if !ok {
 		return nil, false
 	}
@@ -396,7 +410,15 @@ func rangeCountWithinBudget(count uint64, exact bool, budget uint64) bool {
 // findBoundStringBTree returns the first bound string btree index covering
 // (label, propKey). Coverage is the same exact (label, property) match the hash
 // path uses; an unbound btree (BoundNode ok == false) is never returned.
-func findBoundStringBTree(idxMgr *index.Manager, label, propKey string) (boundStringRange, bool) {
+// pending declines the lookup outright when the enclosing transaction has already
+// mutated (label, propKey) in the graph without this index being told (rmp #2814).
+// Expressing the decline as "no covering index" rather than as a separate branch at
+// each caller is what makes ONE edit cover the string range, the prefix rewrite and
+// the multi-property intersection: all three reach an index only through here.
+func findBoundStringBTree(idxMgr *index.Manager, label, propKey string, pending *pendingIndexDelta) (boundStringRange, bool) {
+	if pending.blocksNodeIndex(label, propKey) {
+		return nil, false
+	}
 	// Auto-named index first ("<label>_<property>_btree"), matching the naming
 	// the DDL parser assigns, then any covering bound btree.
 	wantName := strings.ToLower(label) + "_" + strings.ToLower(propKey) + "_btree"
@@ -748,13 +770,14 @@ func tryNumericRangeSeek(
 	lblScan *ir.NodeByLabelScan,
 	nodeVar string,
 	params map[string]expr.Value,
+	pending *pendingIndexDelta,
 ) (exec.Operator, bool) {
 	pred, ok := extractNumericRangePred(sel.PredicateExpr, nodeVar, params)
 	if !ok {
 		return nil, false
 	}
 
-	sub, ok := findBoundNumericBTree(idxMgr, lblScan.Label, pred.propKey)
+	sub, ok := findBoundNumericBTree(idxMgr, lblScan.Label, pred.propKey, pending)
 	if !ok {
 		return nil, false
 	}
@@ -788,7 +811,12 @@ func tryNumericRangeSeek(
 // name ("<label>_<property>_btree_num") first, then any covering bound numeric
 // btree as a fallback. An unbound btree (BoundNode ok == false) and a string
 // btree (whose Range signature differs) are never returned.
-func findBoundNumericBTree(idxMgr *index.Manager, label, propKey string) (boundNumericRange, bool) {
+// pending: see [findBoundStringBTree]. This helper is the funnel for the numeric
+// range seek AND for the index nested-loop join's inner-arm probe (rmp #2814).
+func findBoundNumericBTree(idxMgr *index.Manager, label, propKey string, pending *pendingIndexDelta) (boundNumericRange, bool) {
+	if pending.blocksNodeIndex(label, propKey) {
+		return nil, false
+	}
 	wantName := numericBTreeName(label, propKey)
 	if sub, err := idxMgr.GetIndex(wantName); err == nil && sub.Kind() == "btree" {
 		if br, ok := asBoundNumericRange(sub, label, propKey); ok {

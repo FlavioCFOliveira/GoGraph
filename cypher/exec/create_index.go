@@ -78,6 +78,7 @@ type CreateIndexOp struct {
 	onSchemaChange func()
 	primary        index.Subscriber
 	companion      index.Subscriber
+	buildLog       *index.BuildLog
 	name           string
 	companionName  string
 	idxType        IndexKindExec
@@ -256,11 +257,41 @@ func (op *CreateIndexOp) Next(_ *Row) (bool, error) {
 	return false, op.barrier(func() error { return op.register(sub) })
 }
 
+// Catching makes this operator finish the index build recorded by l: every
+// change the manager fanned out since [index.Manager.BeginBuild] is replayed
+// into each subscriber at the instant it is registered (rmp #2738).
+//
+// It is what lets the caller run the backfill scan WITHOUT excluding concurrent
+// writers, which an explicit transaction's commit cannot be excluded from — see
+// [index.Manager.BeginBuild]. Chainable, and a no-op when l is nil, in which
+// case the operator registers exactly as it did before.
+func (op *CreateIndexOp) Catching(l *index.BuildLog) *CreateIndexOp {
+	op.buildLog = l
+	return op
+}
+
 // register performs both registrations. It is the body the barrier wraps, so
 // everything it does — the primary, the companion, and the schema-change
 // notification — happens inside ONE barrier invocation.
+//
+// With a build log attached ([CreateIndexOp.Catching]) the registrations run
+// inside [index.Manager.FinishBuild] instead, which replays the recorded changes
+// into each subscriber before it becomes reachable and holds the manager's lock
+// exclusively across the whole sequence. That hold is strictly inside the
+// barrier's, so the pair is still published in one indivisible instant.
 func (op *CreateIndexOp) register(sub index.Subscriber) error {
-	if err := op.mgr.CreateIndex(op.name, sub); err != nil {
+	if op.buildLog == nil {
+		return op.registerWith(op.mgr.CreateIndex, sub)
+	}
+	return op.mgr.FinishBuild(op.buildLog, func(reg index.RegisterFunc) error {
+		return op.registerWith(reg, sub)
+	})
+}
+
+// registerWith is register's body, parameterised on the registration function so
+// the caught-up and plain forms share one implementation and one error shape.
+func (op *CreateIndexOp) registerWith(reg index.RegisterFunc, sub index.Subscriber) error {
+	if err := reg(op.name, sub); err != nil {
 		if op.ifNotExists && errors.Is(err, index.ErrIndexExists) {
 			// IF NOT EXISTS — silently succeed; no schema change, and no
 			// companion registration either: an index already covering this
@@ -276,7 +307,7 @@ func (op *CreateIndexOp) register(sub index.Subscriber) error {
 		// (label, property) shares the one companion already registered.
 		// companionDone stays false there, so the caller's unwind never drops a
 		// companion another live index relies on.
-		if err := op.mgr.CreateIndex(op.companionName, op.companion); err == nil {
+		if err := reg(op.companionName, op.companion); err == nil {
 			op.companionDone = true
 		} else if !errors.Is(err, index.ErrIndexExists) {
 			return fmt.Errorf("exec: CreateIndex %q (numeric companion): %w", op.companionName, err)

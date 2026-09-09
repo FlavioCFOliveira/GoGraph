@@ -101,6 +101,55 @@ chosen `v`. Therefore:
   falls back to the exact-count-only equality peephole (already shipped). HLL/NDV
   must never drive an absolute-no-regression equality decision.
 
+> **Correction (rmp #2772): "effectively estExact" needed a staleness term, and had
+> none.** §3's staleness→veto was written for the histogram and was implemented only
+> there, so an MCV hit was tagged `estExact` from whatever snapshot was last
+> published, however far it had drifted. That is not merely a planner concern: since
+> rmp #2765 the tag decides how a figure RENDERS — `estExact` prints as a bare number
+> with no approximation marker — so an arbitrarily stale per-value count was shown to
+> a reader as ground truth (measured: `Est.Rows = 1000` against 10 rows). The MCV path
+> now applies the same rule (`cypher.statsSnapshotFresh`), and its denominator is the
+> **smaller** of the build-time `N0` and the live `N`. The live count alone is not
+> enough: a snapshot built over 1000 rows and grown by 100 that carry the same value
+> has `Δ/N_live = 0.0909` — inside the firing region — while its per-value count is
+> already short by 100. An **upper** bound is wrong for the mirror-image reason given
+> in §0.
+>
+> **What it did not close, and what rmp #2785 then closed.** `Δ` and the delete
+> counter are moved only by the node-property write path, so any route that changes
+> which rows answer a predicate without writing a tracked property — removing the
+> **label** is the plain example — left the snapshot pristine by every measure it
+> maintained while its MCV entry went arbitrarily wrong.
+
+> **Correction (rmp #2785): the drift numerator is `Δ + max(0, N0 − N_live)`.** The
+> signal the paragraph above called missing was already there: the live label count
+> falls when rows leave the label, and nothing consulted it. Measured over the four
+> routes that can take the same 990 of 1400 `:Person` rows out of one predicate, and
+> measured before the term existed: `SET p.grp`, `DETACH DELETE` and `REMOVE p.grp`
+> each moved `Δ = 990` and `deletes = 990` and were demoted, while `REMOVE p:Person`
+> moved neither counter, dropped the live count from 1400 to 410, and was still
+> tagged `estExact` at 100x wrong. Rows that LEFT the label are rows the MCV entry
+> may still be counting, exactly as rows whose property was rewritten are, so the two
+> belong in ONE numerator — the same §3 rule, the same firing region, the same single
+> screen `cypher.statsSnapshotFresh`, not a third one. The shrinkage is read from
+> STATE (a difference of two population counts) rather than from an event stream,
+> which is why it was preferred to bumping `Δ` on the label-write paths: a counter
+> sees only the routes it was wired into, and a label removed straight on
+> `lpg.Graph` — bypassing every cypher mutator adapter — was measured leaving
+> `Δ = 0` with the population down by 990. Under `DETACH DELETE` the two terms
+> double-count the same rows; that is deliberate and costs nothing observable, since
+> over-counting only closes the firing region sooner and any delete large enough to
+> matter has already tripped the 1% delete tolerance.
+>
+> **What it still does not close.** The rule is a fraction of the POPULATION, so a
+> SMALL shrinkage CONCENTRATED on one most-common value is invisible to it — and `Δ`
+> has always shared that blindness in exactly the same way. A shrinkage CANCELLED by
+> equal growth nets to zero and is invisible too. Both would need per-value
+> bookkeeping §2 deliberately does not maintain; the estimate-quality metric of rmp
+> #2767 is what surfaces them meanwhile, and its fixtures
+> (`cypher/plan_qerror_test.go`, `examples/31_metrics_observability`) are built in
+> exactly that residual window.
+
 The reordering peepholes (P3) shipped requiring `estExact`. **Since rmp #2766
 this is no longer true of all of them:** the disjoint-component reorder also
 consumes the property statistics, evaluating an `estStats` range estimate or an

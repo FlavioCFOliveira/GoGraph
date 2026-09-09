@@ -28,6 +28,14 @@ type estSource uint8
 const (
 	// estExact is a maintained, exact count — e.g. a label's live-node count read
 	// from the label index. It is ground truth for the query's pinned snapshot.
+	//
+	// One producer is exact for a SNAPSHOT rather than for the query: a
+	// most-common-value hit is the per-value count as at the last statistics
+	// rebuild. It carries this tag only while that snapshot is still fresh
+	// ([statsSnapshotFresh], rmp #2772) — before then it carried it unconditionally,
+	// and since rmp #2765 the tag decides whether a figure renders with an
+	// approximation marker, so an arbitrarily drifted count was shown as ground
+	// truth.
 	estExact estSource = iota
 	// estStats is a histogram- or sample-derived count. Trustworthy enough to
 	// drive a plan decision, though not exact. It is produced by

@@ -2061,6 +2061,15 @@ func (t *translator) appendEqSelection(boundVar, syntheticVar string, plan Logic
 // physical builder evaluates them via expr.Eval rather than treating
 // them as an opaque pass-through string (which would silently always
 // match, defeating predicates like `OPTIONAL MATCH (n)-[r]-(m:NonExistent)`).
+//
+// The label is emitted here UNCONDITIONALLY, and [Expand] carries no
+// far-endpoint predicate of its own, so at the IR level a destination label is
+// always a separate row-at-a-time test. The physical builder may then push a
+// LONE such predicate into the traversal instead of building this Selection —
+// see cypher/expand_dst_label_plan.go (rmp #2629). The IR shape is deliberately
+// left alone by that rewrite: several plan-shape recognisers (the anchor swap,
+// the min-label re-anchor, the label intersection) match on this exact
+// Selection-over-Expand shape, and changing it here would change what they see.
 func (t *translator) matchApplyNodeFilter(np *ast.NodePattern, nodeVar string, plan LogicalPlan) LogicalPlan {
 	if len(np.Labels) > 0 {
 		labels := make([]string, len(np.Labels))

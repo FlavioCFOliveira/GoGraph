@@ -371,19 +371,35 @@ type Graph[N comparable, W any] struct {
 
 	// labelCountGateProbe is a TEST-ONLY seam, nil in production and with no
 	// exported setter, called by [Graph.LabelCountExact] and
-	// [Graph.LabelsCountExact] BETWEEN their two gate samples — so a test can
-	// make a write land exactly inside the window the second sample exists to
-	// close (rmp #2688).
+	// [Graph.LabelsCountExact] inside the window their second gate sample exists
+	// to close — so a test can make a write land exactly inside it (rmp #2688).
 	//
-	// It fires BEFORE the cardinality read, so a write it drives lands before the
-	// cardinality and before the gate that follows. That position tests one thing
-	// and not another, which was established by mutation in rmp #2773: it kills a
-	// missing second sample (the count then carries the write and is reported
-	// exact) and it does NOT kill an INVERTED order, because a write that lands
-	// before both reads is seen by the second gate wherever that gate sits. See
-	// [Graph.labelCountAsOfWindowProbe] for the seam that does discriminate the
-	// order, and this file's task notes for why LabelCountExact was left on this
-	// one.
+	// !! ITS POSITION DIFFERS BETWEEN THE TWO CALL SITES, DELIBERATELY !!
+	//
+	//	[Graph.LabelCountExact]  — BETWEEN the cardinality and the gate that
+	//	  follows it (moved there by rmp #2775).
+	//	[Graph.LabelsCountExact] — BEFORE the cardinality read.
+	//
+	// The position decides which mutant the seam can kill, which was established
+	// by mutation in rmp #2773 and re-measured in rmp #2775. From BEFORE the
+	// cardinality it kills a MISSING second sample — the count then carries the
+	// driven write and is reported exact — and it CANNOT kill an INVERTED order,
+	// because a write landing before both reads is seen by the second gate
+	// wherever that gate sits, so both orders decline. From BETWEEN the two reads
+	// it kills the INVERTED order, and it still kills the missing second sample on
+	// the other symptom: the value is then the snapshot's own and only the
+	// exactness flag is wrong.
+	//
+	// LabelCountExact can be gated from the between-position alone because its
+	// oracle is the FLAG, which both mutants get wrong. LabelsCountExact CORRECTS
+	// rather than declines, so its oracle is the VALUE, and the value distinguishes
+	// the two mutants only from opposite sides of the cardinality — it therefore
+	// keeps this seam at the before-position and takes the between-position from
+	// [Graph.labelCountWindowProbe]. Neither function pays for both.
+	//
+	// !! NOTHING DEFENDS EITHER POSITION !! A mutation that relocates a call site
+	// instead of reordering the reads restores the hole with no test failing. Only
+	// this godoc and the comment at each call site hold them in place.
 	//
 	// It exists because a CONCURRENT ORACLE CANNOT PIN THIS WINDOW, which was
 	// measured rather than assumed: a 3-reader race gave 110 exact answers in a
@@ -401,8 +417,49 @@ type Graph[N comparable, W any] struct {
 	// cannot be obtained any other way. This is not a one-off.
 	//
 	// The cost in production is one nil load and a predictable branch, on a path
-	// that immediately takes the label index's read lock.
+	// that takes the label index's read lock either side of it.
 	labelCountGateProbe func()
+	// labelCountWindowProbe is a TEST-ONLY seam, nil in production and with no
+	// exported setter, called by [Graph.LabelsCountExact] and
+	// [Graph.LabelCountBound] BETWEEN their cardinality read and the gate sample
+	// that follows it (rmp #2775).
+	//
+	// It is [Graph.labelCountAsOfWindowProbe]'s shape, for the two functions whose
+	// ORDER claim rmp #2775 found undefended, and it is kept SEPARATE from that
+	// field so a test driving one function's window cannot be re-entered from
+	// another's.
+	//
+	// The position is the whole point, and it is why
+	// [Graph.labelCountGateProbe] could not serve here. That seam fires BEFORE the
+	// cardinality in [Graph.LabelsCountExact], and a write driven from there lands
+	// before both reads, so the gate that follows sees its hold whichever side of
+	// the cardinality it sits on: an inverted implementation returns the corrected
+	// answer and passes. Firing HERE drives the one interleaving the order exists
+	// to defeat — the gate reads clear, the write raises its hold and touches the
+	// index, and the cardinality read that follows is contaminated — which the
+	// inverted order returns and the sound order cannot.
+	//
+	// Both call sites keep their own reason for existing:
+	//
+	//	[Graph.LabelsCountExact] — also fires [Graph.labelCountGateProbe] from the
+	//	  before-position, because its oracle is the VALUE and the two mutants are
+	//	  distinguished only from opposite sides of the cardinality.
+	//	[Graph.LabelCountBound]  — had NO seam at all, so its documented order was
+	//	  untestable rather than merely untested.
+	//
+	// A CONCURRENT ORACLE CANNOT PIN THIS WINDOW — the measurement recorded on
+	// [Graph.labelCountGateProbe] applies unchanged: a 3-reader race gave 110 exact
+	// answers and 0 violations against the DEFECTIVE build, and a 96-reader race
+	// did not finish. The window is a few nanoseconds between two atomic loads.
+	//
+	// The cost in production is one nil load and a predictable branch, on paths
+	// that have just taken the label index's read lock. rmp #2775 MEASURED it on
+	// [Graph.LabelCountBound]'s cheapest path rather than assuming it away:
+	// +0.337 ns/op, 9.410n ± 2% against 9.073n ± 1%, +3.58%, p=0.004, n=6,
+	// interleaved A/B on an Apple M4 at loadavg ~2.4 (not idle), with B/op and
+	// allocs/op unchanged at 0. Real, and ~1e-4 of the plan build that calls it
+	// once. [Graph.LabelCountBound] carries the full weighing.
+	labelCountWindowProbe func()
 	// labelCountAsOfWindowProbe is a TEST-ONLY seam, nil in production and with no
 	// exported setter, called by [Graph.LabelCountAsOf] BETWEEN its cardinality
 	// read and the gate sample that follows it (rmp #2773).

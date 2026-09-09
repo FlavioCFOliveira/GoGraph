@@ -64,3 +64,20 @@ func (b *IndexBuffer) reset() {
 
 // Len returns the number of changes currently buffered.
 func (b *IndexBuffer) Len() int { return len(b.changes) }
+
+// Pending returns the changes buffered so far, for READ-ONLY inspection.
+//
+// The slice aliases the buffer's own backing array — usually [IndexBuffer.inline],
+// which is part of the buffer itself — so a caller must neither write through it
+// nor retain it past the next Enqueue, which may reallocate. It is a plain slice
+// rather than a copy or an iterator because the one caller is the planner
+// (cypher.newPendingIndexDelta), which reads it once per statement and keeps
+// nothing.
+//
+// It exists so the planner can ask which (label, property) pairs the enclosing
+// transaction has already dirtied WITHOUT the buffer maintaining that answer
+// incrementally: Enqueue runs once per mutation and is on the measured
+// zero-allocation write path (see the inline field), whereas the question is asked
+// at most once per statement build. Deriving it here keeps the write path at the
+// cost rmp #2339 measured it down to.
+func (b *IndexBuffer) Pending() []index.Change { return b.changes }

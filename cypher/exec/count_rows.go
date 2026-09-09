@@ -38,6 +38,12 @@ package exec
 // per-row Filter that checks the far endpoint's label costs about 18.2ms of
 // 26.1ms while this operator's own cost is about 2.6ms.
 //
+// The per-row Filter in that second measurement no longer exists: rmp #2629
+// pushed a lone endpoint label into the expansion itself, so the labelled shape
+// now plans CountRows directly over the columnar expansion. The numbers above are
+// kept as the record of what this operator was measured against, not as a
+// description of today's plan.
+//
 // On the 7-million-edge labelled count in examples/26_social_scale_bench, an
 // INTERLEAVED A/B of five runs per arm puts the latency gain at a modest +6.7%
 // median for FRIEND (8.040s to 7.504s, 1.149 to 1.073 us/edge) and +2.8% for

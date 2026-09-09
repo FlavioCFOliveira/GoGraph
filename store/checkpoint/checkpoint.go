@@ -1064,6 +1064,55 @@ func (c *Checkpointer[N, W]) writeAndTruncate(seq uint64, capt *snapshot.Capture
 		c.setErr(seq, err)
 		return err
 	}
+	// READ THE PUBLISHED SNAPSHOT BACK BEFORE ANY WAL BYTE IS DISCARDED.
+	//
+	// Everything above proves the snapshot was WRITTEN. Nothing above proves it
+	// can be READ. The phase-3 gate ([snapshotIsSelfSufficient]) matches manifest
+	// file NAMES, so it answers "the components are present", never "the
+	// components parse" — and the WAL prefix it releases is the only other copy
+	// of the data (rmp #2749). A snapshot that is byte-for-byte what the writer
+	// intended and still unreadable by the reader — a component format version
+	// the reader does not accept, a reader bound tightened without the writer, a
+	// codec the two sides disagree on — passed that gate, the WAL was truncated
+	// behind it, and the store never opened again.
+	//
+	// So the image is parsed here by the SAME reader recovery uses
+	// (snapshot.LoadSnapshotFull, via recovery.osBackend.LoadSnapshot), and a
+	// failure aborts the checkpoint before the truncation is even attempted. The
+	// guarantee the gate's name asserts — "this snapshot alone can restore the
+	// store" — is then established rather than assumed.
+	//
+	// PARSING IS NOT APPLYING, so the readback does both (rmp #2780). Recovery
+	// does not stop at LoadSnapshotFull: it hands the mapper readback straight
+	// to snapshot.ApplyMapperToGraphWithCodec, which decodes every key THROUGH
+	// THE CODEC. The snapshot reader holds no codec — snapshot.ReadMapperBytes
+	// validates magic, format version, record framing and the per-key length cap
+	// and then returns the version-2 key bytes verbatim, by design — so key
+	// bytes the parse accepts can still be bytes the codec refuses: an encoding
+	// it cannot decode, or one it does not consume in full. That is the same
+	// outcome by a different door, and c.codec (the codec that WROTE the mapper)
+	// is right here, so VerifySnapshotReadable runs recovery's decode step too,
+	// over the bytes the parse already brought into memory — no second read.
+	//
+	// It runs HERE, in the lock-free phase 2, and not inside the phase-3 gate:
+	// the readback is disk I/O proportional to the snapshot, and phase 3 holds
+	// the commit lock that every writer serialises on. Placing it here costs the
+	// guarantee nothing — the snapshot directory is published and immutable, and
+	// [Checkpointer.RunCheckpoint]'s concurrency contract forbids a second
+	// checkpoint republishing it underneath — while keeping the writer stall at
+	// the brief truncate it already was.
+	//
+	// This is deliberately stricter than the "not self-sufficient" outcome below,
+	// which retains the WAL and returns nil: that is a SUPPORTED degraded mode
+	// (no mapper codec for this key type, a DDL that raced phase 2). An
+	// unreadable published snapshot is not a mode, it is corruption or a defect,
+	// and the module fails stop rather than fail silent.
+	if err := c.snap.VerifySnapshotReadable(snapDir, c.codec); err != nil {
+		metrics.IncCounter("store.checkpoint.snapshot_unreadable", 1)
+		err = fmt.Errorf("checkpoint: published snapshot is not readable, WAL retained: %w", err)
+		c.setErr(seq, err)
+		return err
+	}
 	// fsync the WAL so the suffix [watermark, end) — the frames committed
 	// concurrently during the snapshot write — is durable before we touch the
 	// prefix. Snapshot durable (writeSnapshot publishes with its own fsync +
@@ -1098,6 +1147,15 @@ func (c *Checkpointer[N, W]) writeAndTruncate(seq uint64, capt *snapshot.Capture
 // bytes in [0, watermark), preserving every frame committed during phase 2.
 // seq is this attempt's setErr sequence number (rmp #1873), threaded
 // unchanged from runNonBlocking via writeAndTruncate.
+//
+// PRECONDITION: the caller has already proved the published snapshot READS BACK
+// AND its mapper keys DECODE (phase 2's
+// [snapshotBackend.VerifySnapshotReadable]; see rmp #2749 and rmp #2780). This
+// function re-checks composition only, and must never be reached on a snapshot
+// whose readability is unestablished — the manifest-name check it performs
+// cannot detect an unparseable image, nor one whose codec-encoded mapper keys
+// recovery will refuse, and truncating behind either destroys the only
+// surviving copy of the data.
 func (c *Checkpointer[N, W]) truncatePrefixLocked(seq uint64, snapDir string, watermark int64) error {
 	// Re-source needConstraints / needIndexes from the graph's own counts, NOT
 	// from the phase-1 captured slices: a constraint or index DDL committed
@@ -1227,6 +1285,31 @@ func (c *Checkpointer[N, W]) setErr(seq uint64, err error) {
 // iff its manifest lists [snapshot.MapperFile] (and
 // [snapshot.ConstraintsFile] when needConstraints is set, and
 // [snapshot.IndexDefsFile] when needIndexes is set).
+//
+// # What this function does NOT establish, and where that is established
+//
+// This is a COMPOSITION check: it answers "are the components recovery needs
+// present in this image", and it answers it from manifest file names alone. It
+// does not open a single component and cannot tell a parseable snapshot from an
+// unparseable one — a distinction on which the safety of the truncation
+// entirely depends (rmp #2749).
+//
+// READABILITY — and APPLICABILITY — are established separately, by
+// [snapshotBackend.VerifySnapshotReadable] in the lock-free phase 2 of
+// [Checkpointer.writeAndTruncate], which parses every declared component with
+// the reader recovery itself uses, decodes every codec-encoded mapper key with
+// the store's own codec exactly as recovery's next call does, and aborts the
+// checkpoint if either refuses. Truncation therefore requires BOTH: the image
+// parses and applies (phase 2) AND it carries what recovery needs (this
+// function, re-checked under the phase-3 lock so a DDL committed during phase 2
+// cannot slip past). Neither check subsumes the other, and removing either one
+// restores a Durability defect.
+//
+// The split exists because the two checks have opposite cost profiles. This one
+// is a single small JSON read and belongs under the commit lock, where it must
+// be to see a phase-2 DDL. The readback is I/O proportional to the whole
+// snapshot and must NOT be under that lock, which is why it is not folded in
+// here despite the name.
 func (c *Checkpointer[N, W]) snapshotIsSelfSufficient(dir string, needConstraints, needIndexes bool) (bool, error) {
 	m, err := c.snap.ReadManifest(manifestPath(dir))
 	if err != nil {

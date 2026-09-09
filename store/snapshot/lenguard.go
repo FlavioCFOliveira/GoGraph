@@ -49,9 +49,27 @@ const maxStringTableLen = 1 << 20
 // previously grew unclamped for any count a sufficiently large body could
 // satisfy. It is enforced on the write side too, so the pair stays symmetric.
 //
-// 1 Mi labels or properties on one edge handle is far beyond anything the
-// engine can produce; the ceiling is slack by many orders of magnitude and
-// exists to bound a hostile file, not to constrain a legitimate graph.
+// 1 Mi labels or properties on one edge handle is far beyond anything an engine
+// caller produces in practice; the ceiling is slack by many orders of magnitude
+// and exists to bound a hostile file, not to constrain a legitimate graph.
+//
+// It is NOT, however, beyond what the engine can produce — the stronger claim
+// this comment used to make. rmp #2784 measured it: nothing on the write path
+// bounds the count (a property is one op, store/txn's DefaultMaxTxnOps admits
+// 16 M of them, and a handle's bag accumulates across commits), so a handle
+// carrying cap+1 properties committed durably and then made EVERY checkpoint
+// fail with [ErrFieldTooLong] — capture refuses, the checkpointer returns
+// before phase 3, and the WAL prefix is never truncated. Reaching the real cap
+// costs on the order of eight hours of CPU on an Apple M4, but cost is not a
+// bound.
+//
+// The refusal therefore now happens at COMMIT, where the caller can still act on
+// it: store/txn declares this same number as maxSnapshotPerRecordCount
+// (handle_record_count.go) and rejects the transaction before it mints a
+// sequence. This constant and that one are pinned to each other by
+// TestSnapshotPerRecordCountCapAgreement_2784, so neither can be moved alone.
+// The check here remains, as the writer's half of the reader's ceiling and as
+// the backstop for any path that reaches capture without passing store/txn.
 const maxPerRecordCount = 1 << 20
 
 // checkSnapshotValueLen rejects an encoded property value whose byte length

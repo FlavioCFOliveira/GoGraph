@@ -135,7 +135,13 @@ func tryBuildIndexNestedLoopJoin(
 	if !ok {
 		return nil, false, nil
 	}
-	numIdx, ok := findBoundNumericBTree(idxMgr, innerLabel, propKey)
+	// rmp #2814: the inner arm's seek reads the property index for
+	// (innerLabel, propKey) with no residual value check of its own — the operator's
+	// only fallback is a scan for a key the index cannot hold, not for a key whose
+	// entry is stale — so an unflushed delta on that coordinate makes the join lose
+	// rows. Declining returns the shape to the hash join, whose build side reads
+	// the writer view.
+	numIdx, ok := findBoundNumericBTree(idxMgr, innerLabel, propKey, bopts.pendingIdx)
 	if !ok {
 		return nil, false, nil
 	}

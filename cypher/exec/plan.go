@@ -86,15 +86,20 @@ type PlanNode struct {
 	// DbHitsKnown reports whether DbHits is a figure at all.
 	//
 	// It is false for an operator that reads storage and claims none of the three
-	// markers — the count-store leaves, and every operator holding a
+	// markers — [LabelCountScan], and every operator holding a
 	// caller-supplied expression closure that can reach the graph ([Filter],
 	// [Project], [Sort], [Top], [Unwind], the hash joins, [RollUpApply],
 	// [ProcedureCallOp]). DbHits is then 0 only because an int64 has to hold
 	// something, and NO renderer may print it as a count.
 	//
 	// [ShortestPath], [AllShortestPaths] and the morsel-parallel leaves were in
-	// that list until rmp #2762 and #2763 taught them to count; the census in
-	// profile.go is the one place that says which operators are which.
+	// that list until rmp #2762 and #2763 taught them to count, and
+	// [AllNodesCountScan] until rmp #2777 gave it a PATH-AWARE counter — a
+	// measured 0 for its O(1) counter read and a real count for its fallback
+	// walk. [LabelCountScan] did not follow it: its fallback lives BELOW the
+	// resolver interface, which reports only (count, ok), so the operator cannot
+	// know whether it happened. The census in profile.go is the one place that
+	// says which operators are which.
 	//
 	// The distinction exists because it could not previously be drawn: both a pure
 	// projection and a parallel scan of 2000 nodes printed `dbhits=0`, so the

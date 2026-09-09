@@ -8,21 +8,28 @@ space, and how analytical algorithms expose results in that space.
 
 `graph.Mapper[N]` interns user keys into compact `NodeID` values. To
 keep concurrent inserts contention-free, the mapper is sharded into
-**256 stripes** by `maphash(N) & 0xFF`; the shard index is encoded in
-the top byte of the resulting NodeID.
+**256 stripes** by the low 8 bits of a deterministic, deliberately
+unseeded FNV-1a hash of the key (`mapperShardFor`,
+`graph/mapper.go:502`; the hash is fixed so that shard placement is
+reproducible across processes). The shard index is encoded in the
+**low** byte of the resulting NodeID and the intra-shard index in the
+high bits (`packNodeID(shard, idx) = (idx << 8) | (shard & 0xFF)`,
+`graph/mapper.go:551`).
 
 A consequence: NodeIDs are *not* assigned densely starting at 0. The
 first interned key lands in some stripe — say stripe 17, position 0 —
-and gets `NodeID(17 << 56)`. The second goes to whichever stripe its
-hash routes to. After a handful of insertions the NodeID space is
-sparse.
+and gets `NodeID(17)`. The second goes to whichever stripe its hash
+routes to; a *second* key landing in stripe 17 takes position 1 and so
+gets `NodeID((1 << 8) | 17)` = `NodeID(273)`. After a handful of
+insertions the NodeID space is sparse.
 
 `graph.Mapper.MaxNodeID()` returns the smallest NodeID strictly
-greater than every NodeID actually assigned. On a graph built from
-**5 unique keys**, `MaxNodeID()` will commonly round up to a number
-in the low hundreds (16, 32, 256, ...) because at least one shard
-needed an entry past its first slot, and `MaxNodeID()` reports the
-upper bound of the packed space.
+greater than every NodeID actually assigned. It is computed as
+`packNodeID(255, maxIntra-1) + 1` (`graph/mapper.go:458`), where
+`maxIntra` is the largest number of keys any single shard holds, so it
+always equals **`256 × maxIntra`**. On a graph built from **5 unique
+keys** that hash to five distinct shards, `MaxNodeID()` is therefore
+**256**; it rises to 512 as soon as any one shard holds a second key.
 
 A NodeID `id` with `id < MaxNodeID()` is **not necessarily live** —
 it may be a "ghost slot" within a shard whose intervening positions

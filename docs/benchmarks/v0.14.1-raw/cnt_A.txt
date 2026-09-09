@@ -1,0 +1,84 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/graph/index/count
+cpu: Apple M4
+BenchmarkCountE_Serial-10          	569232957	         2.095 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCountE_Parallel-10        	1000000000	         0.3669 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCountE_SpreadSerial-10    	217942873	         5.538 ns/op	       0 B/op	       0 allocs/op
+BenchmarkApply_HotParallel-10      	24771636	        47.37 ns/op	       0 B/op	       0 allocs/op
+BenchmarkApply_HotSerial-10        	95898346	        12.67 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMixed_HotParallel-10      	200771478	         5.728 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCells/1-10                	 1504612	       791.7 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCells/1024-10             	 1345722	       864.4 ns/op	       0 B/op	       0 allocs/op
+BenchmarkStoreFootprint-10         	   82804	     14065 ns/op	    123712 B/store	  123720 B/op	     581 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/graph/index/count
+cpu: Apple M4
+BenchmarkCountE_Serial-10          	567518548	         2.117 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCountE_Parallel-10        	1000000000	         0.3722 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCountE_SpreadSerial-10    	229412259	         5.341 ns/op	       0 B/op	       0 allocs/op
+BenchmarkApply_HotParallel-10      	24601549	        48.47 ns/op	       0 B/op	       0 allocs/op
+BenchmarkApply_HotSerial-10        	100000000	        12.77 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMixed_HotParallel-10      	212482333	         5.684 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCells/1-10                	 1427809	       825.9 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCells/1024-10             	 1286389	       879.6 ns/op	       0 B/op	       0 allocs/op
+BenchmarkStoreFootprint-10         	   86256	     13417 ns/op	    123712 B/store	  123720 B/op	     581 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/graph/index/count
+cpu: Apple M4
+BenchmarkCountE_Serial-10          	566828600	         2.120 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCountE_Parallel-10        	1000000000	         0.3760 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCountE_SpreadSerial-10    	226069183	         5.306 ns/op	       0 B/op	       0 allocs/op
+BenchmarkApply_HotParallel-10      	24258003	        48.57 ns/op	       0 B/op	       0 allocs/op
+BenchmarkApply_HotSerial-10        	95993280	        12.79 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMixed_HotParallel-10      	200730715	         5.912 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCells/1-10                	 1501936	       893.0 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCells/1024-10             	 1242514	       904.5 ns/op	       0 B/op	       0 allocs/op
+BenchmarkStoreFootprint-10         	   86278	     13405 ns/op	    123712 B/store	  123720 B/op	     581 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/graph/index/count
+cpu: Apple M4
+BenchmarkCountE_Serial-10          	575614568	         2.127 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCountE_Parallel-10        	1000000000	         0.3764 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCountE_SpreadSerial-10    	221417652	         5.379 ns/op	       0 B/op	       0 allocs/op
+BenchmarkApply_HotParallel-10      	24279722	        48.48 ns/op	       0 B/op	       0 allocs/op
+BenchmarkApply_HotSerial-10        	95485014	        12.58 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMixed_HotParallel-10      	208050634	         5.845 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCells/1-10                	 1431853	       809.2 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCells/1024-10             	 1395499	       895.7 ns/op	       0 B/op	       0 allocs/op
+BenchmarkStoreFootprint-10         	   86012	     13626 ns/op	    123712 B/store	  123720 B/op	     581 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/graph/index/count
+cpu: Apple M4
+BenchmarkCountE_Serial-10          	563836909	         2.114 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCountE_Parallel-10        	1000000000	         0.3677 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCountE_SpreadSerial-10    	225604460	         5.282 ns/op	       0 B/op	       0 allocs/op
+BenchmarkApply_HotParallel-10      	24777837	        49.86 ns/op	       0 B/op	       0 allocs/op
+BenchmarkApply_HotSerial-10        	96001920	        12.79 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMixed_HotParallel-10      	199713175	         5.792 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCells/1-10                	 1379294	       863.2 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCells/1024-10             	 1284422	       911.7 ns/op	       0 B/op	       0 allocs/op
+BenchmarkStoreFootprint-10         	   83730	     13382 ns/op	    123712 B/store	  123720 B/op	     581 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/graph/index/count
+cpu: Apple M4
+BenchmarkCountE_Serial-10          	566378919	         2.107 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCountE_Parallel-10        	1000000000	         0.3762 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCountE_SpreadSerial-10    	219237062	         5.328 ns/op	       0 B/op	       0 allocs/op
+BenchmarkApply_HotParallel-10      	25102522	        48.80 ns/op	       0 B/op	       0 allocs/op
+BenchmarkApply_HotSerial-10        	93522884	        12.71 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMixed_HotParallel-10      	211092206	         5.853 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCells/1-10                	 1505470	       849.9 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCells/1024-10             	 1329650	       854.5 ns/op	       0 B/op	       0 allocs/op
+BenchmarkStoreFootprint-10         	   86428	     13285 ns/op	    123712 B/store	  123720 B/op	     581 allocs/op
+PASS

@@ -154,6 +154,43 @@ func (t *translator) existsSubPlan(exists *ast.ExistsSubquery, outer LogicalPlan
 				return nil, err
 			}
 		}
+		// The body's TRAILING projection is PART of the body, exactly as it is in
+		// [TranslateSubquery] (rmp #2675), and this lowering dropped it (rmp #2779).
+		// EXISTS is "the body produced at least one row" and the row count is the
+		// one the body's own RETURN yields, so a body carrying LIMIT 0, a SKIP past
+		// the end, or an aggregation over an empty match was read in the wrong
+		// direction:
+		//
+		//	WHERE EXISTS { MATCH (a)-[:K]->(x) RETURN x LIMIT 0 }        was TRUE, must be FALSE
+		//	WHERE EXISTS { MATCH (a)-[:K]->(x) RETURN x SKIP 2 }         was TRUE, must be FALSE
+		//	WHERE EXISTS { MATCH (z)-[:K]->(x) RETURN count(*) }         was FALSE, must be TRUE
+		//
+		// and the same predicate with `AND true` appended answered the other way,
+		// because a non-top-level EXISTS is evaluated as an expression through
+		// [TranslateSubquery], which #2675 had already fixed. Two spellings of one
+		// predicate disagreeing is the observable defect; see the citations at the
+		// q.Return branch of [TranslateSubquery] for where the required answers come
+		// from (github.com/neo4j/neo4j release tag 2026.07.1, CreateIrExpressions.scala,
+		// `case existsExpression @ ExistsExpression(q)`, plus this repo's own TCK
+		// Return4.feature [6] for the one-row-over-empty-input rule).
+		//
+		// This line ALONE is a regression, and #2675 measured it: the TCK fell from
+		// 3897 to 3892 (ExistentialSubquery2 [1] [2], ExistentialSubquery3 [1] [2]
+		// [3]) because the Projection this adds re-registers columns in the physical
+		// builder's SHARED column-index map at inner-side indices, while
+		// SemiApply/AntiSemiApply forward the narrower OUTER row — so the outer
+		// query's own variables resolved to absent slots and read null. The
+		// companion half of this fix is therefore the schema isolation the physical
+		// builder now applies to the SemiApply / AntiSemiApply inner side; see
+		// `case *ir.SemiApply` in cypher/api.go. Neither half is correct without the
+		// other.
+		if exists.Query.Return != nil {
+			projected, err := t.returnClause(exists.Query.Return, plan)
+			if err != nil {
+				return nil, err
+			}
+			plan = stripProduceResults(projected)
+		}
 		return plan, nil
 	}
 

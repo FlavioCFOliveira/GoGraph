@@ -1,0 +1,60 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/store/checkpoint
+cpu: Apple M4
+BenchmarkCheckpoint_CodecReadback_ParseOnly-10         	      84	  14233176 ns/op	     50000 mapperPairs	        15.39 snapshotMiB	28092057 B/op	  750118 allocs/op
+BenchmarkCheckpoint_CodecReadback_ParseAndDecode-10    	      82	  14467466 ns/op	     50000 mapperPairs	        15.39 snapshotMiB	28092803 B/op	  750118 allocs/op
+BenchmarkCheckpoint_MapperDecodeOnly-10                	    4990	    239900 ns/op	     50000 mapperPairs	       0 B/op	       0 allocs/op
+BenchmarkCheckpoint_FullRunWithReadback-10             	       7	 146134780 ns/op	        15.55 snapshotMiB	93142532 B/op	  950352 allocs/op
+BenchmarkCheckpoint_SnapshotReadbackOnly-10            	      75	  15006946 ns/op	        15.55 snapshotMiB	28529651 B/op	  800117 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/store/checkpoint
+cpu: Apple M4
+BenchmarkCheckpoint_CodecReadback_ParseOnly-10         	      81	  14156894 ns/op	     50000 mapperPairs	        15.39 snapshotMiB	28092075 B/op	  750118 allocs/op
+BenchmarkCheckpoint_CodecReadback_ParseAndDecode-10    	      84	  14798773 ns/op	     50000 mapperPairs	        15.39 snapshotMiB	28093004 B/op	  750118 allocs/op
+BenchmarkCheckpoint_MapperDecodeOnly-10                	    5074	    234633 ns/op	     50000 mapperPairs	       0 B/op	       0 allocs/op
+BenchmarkCheckpoint_FullRunWithReadback-10             	       7	 151854530 ns/op	        15.55 snapshotMiB	93135586 B/op	  950343 allocs/op
+BenchmarkCheckpoint_SnapshotReadbackOnly-10            	      80	  14766006 ns/op	        15.55 snapshotMiB	28529536 B/op	  800116 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/store/checkpoint
+cpu: Apple M4
+BenchmarkCheckpoint_CodecReadback_ParseOnly-10         	      84	  14964550 ns/op	     50000 mapperPairs	        15.39 snapshotMiB	28092099 B/op	  750118 allocs/op
+BenchmarkCheckpoint_CodecReadback_ParseAndDecode-10    	      80	  14689505 ns/op	     50000 mapperPairs	        15.39 snapshotMiB	28093146 B/op	  750118 allocs/op
+BenchmarkCheckpoint_MapperDecodeOnly-10                	    5088	    226749 ns/op	     50000 mapperPairs	       0 B/op	       0 allocs/op
+BenchmarkCheckpoint_FullRunWithReadback-10             	       7	 150911435 ns/op	        15.55 snapshotMiB	93141547 B/op	  950354 allocs/op
+BenchmarkCheckpoint_SnapshotReadbackOnly-10            	      72	  14671701 ns/op	        15.55 snapshotMiB	28529160 B/op	  800116 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/store/checkpoint
+cpu: Apple M4
+BenchmarkCheckpoint_CodecReadback_ParseOnly-10         	      85	  14182428 ns/op	     50000 mapperPairs	        15.39 snapshotMiB	28091853 B/op	  750117 allocs/op
+BenchmarkCheckpoint_CodecReadback_ParseAndDecode-10    	      78	  14769190 ns/op	     50000 mapperPairs	        15.39 snapshotMiB	28091577 B/op	  750117 allocs/op
+BenchmarkCheckpoint_MapperDecodeOnly-10                	    5094	    236554 ns/op	     50000 mapperPairs	       0 B/op	       0 allocs/op
+BenchmarkCheckpoint_FullRunWithReadback-10             	       8	 150268401 ns/op	        15.55 snapshotMiB	93141744 B/op	  950354 allocs/op
+BenchmarkCheckpoint_SnapshotReadbackOnly-10            	      78	  14832317 ns/op	        15.55 snapshotMiB	28530098 B/op	  800116 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/store/checkpoint
+cpu: Apple M4
+BenchmarkCheckpoint_CodecReadback_ParseOnly-10         	      79	  14251777 ns/op	     50000 mapperPairs	        15.39 snapshotMiB	28093371 B/op	  750118 allocs/op
+BenchmarkCheckpoint_CodecReadback_ParseAndDecode-10    	      74	  14711901 ns/op	     50000 mapperPairs	        15.39 snapshotMiB	28092350 B/op	  750118 allocs/op
+BenchmarkCheckpoint_MapperDecodeOnly-10                	    5097	    237208 ns/op	     50000 mapperPairs	       0 B/op	       0 allocs/op
+BenchmarkCheckpoint_FullRunWithReadback-10             	       7	 150268298 ns/op	        15.55 snapshotMiB	93139008 B/op	  950350 allocs/op
+BenchmarkCheckpoint_SnapshotReadbackOnly-10            	      81	  14624828 ns/op	        15.55 snapshotMiB	28531061 B/op	  800117 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/store/checkpoint
+cpu: Apple M4
+BenchmarkCheckpoint_CodecReadback_ParseOnly-10         	      84	  14359398 ns/op	     50000 mapperPairs	        15.39 snapshotMiB	28091842 B/op	  750117 allocs/op
+BenchmarkCheckpoint_CodecReadback_ParseAndDecode-10    	      82	  14499565 ns/op	     50000 mapperPairs	        15.39 snapshotMiB	28092845 B/op	  750118 allocs/op
+BenchmarkCheckpoint_MapperDecodeOnly-10                	    5084	    229853 ns/op	     50000 mapperPairs	       0 B/op	       0 allocs/op
+BenchmarkCheckpoint_FullRunWithReadback-10             	       7	 147432851 ns/op	        15.55 snapshotMiB	93142104 B/op	  950353 allocs/op
+BenchmarkCheckpoint_SnapshotReadbackOnly-10            	      80	  14703001 ns/op	        15.55 snapshotMiB	28529929 B/op	  800116 allocs/op
+PASS

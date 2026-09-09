@@ -31,11 +31,11 @@ package audit352_test
 // The legacy and decorated paths are distinguished by a FRAME, not by a number:
 //
 //	legacy   Sort: allocations beneath cypher/exec.(*Sort).rowLess
-//	legacy   Top : allocations beneath cypher/exec.rowLessForKeys
+//	legacy   Top : allocations beneath cypher/exec.rowCompareForKeys
 //	decorated Sort: allocations beneath cypher/exec.(*Sort).sortDecorated,
 //	                and ZERO beneath (*Sort).rowLess
-//	decorated Top : allocations beneath cypher/exec.(*Top).consumeAndFinish,
-//	                and ZERO beneath rowLessForKeys
+//	decorated Top : allocations beneath cypher/exec.(*Top).decorateArrivals,
+//	                and ZERO beneath rowCompareForKeys
 //
 // A frame cannot be mislabelled: absence of a frame is proof the code did not
 // run, and at MemProfileRate=1 presence is not a sampling accident either. This
@@ -524,11 +524,30 @@ func hasFrameSuffix(fn, suffix string) bool {
 
 // The frames that distinguish the two execution paths. Neither is reachable on
 // the other arm, so presence/absence is a proof, not a correlation.
+//
+// # Both names are PINNED to the source, not remembered (rmp #2782)
+//
+// frameTopLegacy named cypher/exec.rowLessForKeys until 83be4a40 renamed the
+// function to rowCompareForKeys (bool -> int, so Top could tie-break on the
+// arrival ordinal). The constant was not renamed with it, so [attribution.cum]
+// — which matches by SUFFIX and reports 0 for a name nothing in the binary
+// carries — returned 0 on BOTH arms of every Top cell from 2026-08-29. The
+// assertion that reads it could not fail on what it measures. A frame constant
+// that names a function which does not exist is indistinguishable, at the
+// assertion, from a seam that stopped working; the only defence is that these
+// names are checked against cypher/exec whenever either operator is touched.
+//
+// frameTopDecorated named (*Top).consumeAndFinish, which is the operator's whole
+// blocking phase and therefore runs on BOTH arms — measured, n=1000 limit=10:
+// 14 804 objects on the legacy arm against 11 449 on the decorated one. It could
+// not discriminate the arms at all. (*Top).decorateArrivals is the exact
+// counterpart of (*Sort).sortDecorated: it returns immediately unless
+// topHeap.decorated is set, so it is unreachable on the legacy arm.
 const (
 	frameSortLegacy     = "cypher/exec.(*Sort).rowLess"
 	frameSortDecorated  = "cypher/exec.(*Sort).sortDecorated"
-	frameTopLegacy      = "cypher/exec.rowLessForKeys"
-	frameTopDecorated   = "cypher/exec.(*Top).consumeAndFinish"
+	frameTopLegacy      = "cypher/exec.rowCompareForKeys"
+	frameTopDecorated   = "cypher/exec.(*Top).decorateArrivals"
 	frameCollectAndSort = "cypher/exec.(*Sort).collectAndSort"
 	frameSortKeyValue   = "cypher/exec.sortKeyValue"
 )

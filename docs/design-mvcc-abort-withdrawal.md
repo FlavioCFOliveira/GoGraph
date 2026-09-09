@@ -124,12 +124,23 @@ losing it is the unrecoverable direction.
 
 ## 7. Tests
 
+> **Correction (2026-09-08 at `efd32fb9`).** The last row of this table cited
+> `TestAbort_VersionsAreNotYetReclaimable_2318` as the test whose inversion it is. That
+> test **does not exist** and was never committed under that name; the only trace of it
+> in the module is a stale file comment at `graph/lpg/mvcc_abort_test.go:32`, left behind
+> when this design replaced the behaviour it was to have pinned. The row now names the
+> file and line of the test it describes and states the inversion directly. The other
+> four `TestAbort_*` rows are correct: `TestAbort_VersionsAreReleasedBySweep`,
+> `TestAbort_WithdrawnWritesStayInvisible`,
+> `TestAbort_StoredValueEqualsTheSerialSchedule` and `TestAbort_DirtyBaseIsNotWritable`
+> are at `graph/lpg/mvcc_abort_reclaim_test.go:22`, `:77`, `:142` and `:228`.
+
 | Test | What it pins |
 |---|---|
 | `TestAbort_VersionsAreReleasedBySweep` | The ticket's reproduction: 50 aborted versions, zero retained afterwards, and a later sweep finds nothing left. |
 | `TestAbort_WithdrawnWritesStayInvisible` | The stored value is clean immediately after the abort, and to a reader starting later — so the fix is a withdrawal and not a removal of the mask. |
 | `TestAbort_StoredValueEqualsTheSerialSchedule` | Every touched store compared against a **control graph** driven through the identical committed writes with the aborted transaction omitted, so the oracle cannot inherit the code's mistake. |
 | `TestAbort_DirtyBaseIsNotWritable` | Liveness: the object is writable once withdrawn, which is what rmp #2300's exemption existed to guarantee. |
-| `TestAbort_VersionsAreWithdrawnAtAbort` | The **inversion** of `TestAbort_VersionsAreNotYetReclaimable_2318`, whose own failure message asked for exactly this. |
+| `TestAbort_VersionsAreWithdrawnAtAbort` (`graph/lpg/mvcc_abort_test.go:217`) | The **inversion** of the pre-#2318 behaviour: the aborted versions are withdrawn at the abort itself. |
 | `TestConflicts_TheFourCases` (`graph/mvcc`) | The reversed contract, with both measurements recorded in the failure text. |
 | `TestLabelTx_ComposesWithPhysicalUndo` | Updated from "2 deltas retained" to zero: the composition's cost is now nothing rather than twice the deltas. |

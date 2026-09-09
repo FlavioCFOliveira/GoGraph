@@ -67,6 +67,9 @@ soak-artefacts/
 # Anchor at the repo root so the pattern matches only the compiled
 # binary, not the cmd/crashinject-helper/ directory containing main.go.
 /crashinject-helper
+# Same reason, same anchoring: `go build ./cmd/kgverify` drops a 5 MB binary
+# here, and an unanchored `kgverify` would also ignore cmd/kgverify/.
+/kgverify
 
 # pgregory.net/rapid writes a reproduction file under testdata/rapid/<Test>/ when a
 # property FAILS. Those are transient debugging artefacts of a failing run — twice

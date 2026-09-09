@@ -12,9 +12,9 @@ Task: rmp #2340, sprint 335.
 
 ## Why it exists
 
-GoGraph already has a great deal of isolation testing: roughly 199 test
-functions across `graph/lpg/mvcc_*_test.go` and `store/txn/`, the randomised DST
-battery in `internal/sim`, and the crash-injection battery in
+GoGraph already has a great deal of isolation testing: **281** test
+functions across `graph/lpg/mvcc_*_test.go` (165) and `store/txn/` (116), the
+randomised DST battery in `internal/sim`, and the crash-injection battery in
 `internal/crashinject`. None of them enumerates the **interleavings** of a
 scripted scenario — every concurrent isolation test either fixes one
 interleaving by hand or samples the space at random.

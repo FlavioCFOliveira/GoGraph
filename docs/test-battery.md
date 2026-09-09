@@ -23,7 +23,7 @@ small one completely.
 ## Table of contents
 
 1. [Architecture overview](#architecture-overview)
-2. [The Shape interface and `internal/shapegen`](#the-shape-interface-and-internalshapengen)
+2. [The Shape interface and `internal/shapegen`](#the-shape-interface-and-internalshapegen)
 3. [Shape catalogue](#shape-catalogue)
 4. [Real-world dataset loaders](#real-world-dataset-loaders)
 5. [Invariant checkers (`internal/invariants`)](#invariant-checkers-internalinvariants)
@@ -84,8 +84,11 @@ type Shape[N comparable, W any] interface {
 }
 ```
 
-- **`Name()`** — the canonical, human-readable name of the shape
-  (e.g. `"PathGraph-n5"`, `"ErdosRenyi-n1000-p0.01"`).
+- **`Name()`** — the canonical catalogue identifier of the shape: a
+  dotted, family-prefixed, parameter-free string (e.g. `"trivial.empty"`,
+  `"classic.path"`, `"random.erdos-renyi-np"`, `"specials.petersen"`).
+  Because the name omits the knob values, two `Path` shapes built with
+  different `n` share one name and therefore one registry key.
 - **`Build(cfg)`** — constructs and returns a new graph on every call.
   The result must be reproducible given the same parameters and seed.
   Build is safe for concurrent calls.
@@ -109,30 +112,43 @@ integer per knob — in declaration order, using each knob's `Name` as
 its rapid label — so property-based tests can sweep the parameter space
 with self-describing counter-examples.
 
+No catalogue shape registers itself: `Register` is exercised only by
+`internal/shapegen/shapegen_test.go`, and nothing in the module enumerates the
+registry. It is a working, tested facility with no production consumer, which
+is why step 6 of the [add-new-shape recipe](#add-new-shape-recipe) has nothing
+to ask a new family to do.
+
 ---
 
 ## Shape catalogue
 
-The following families are implemented in `internal/shapegen`:
+The following families are implemented in `internal/shapegen`. Each row lists
+the file's exported constructors, which is what the catalogue actually offers;
+`snap.go` and `graphalytics.go` are the dataset loaders and are described in
+[Real-world dataset loaders](#real-world-dataset-loaders) instead.
 
-| File | Family | Shapes |
+| File | Family | Exported constructors |
 |---|---|---|
-| `trivial.go` | Degenerate | Empty, single node, single edge, self-loop, parallel digon, isolated-only, universal self-loops |
-| `classic.go` | Classic | Path Pₙ, Cycle Cₙ, Star Sₙ, Complete Kₙ, Complete bipartite Kₘₙ, Petersen, hypercube Qₙ, grid, torus |
-| `trees.go` | Trees | Star tree, path tree, balanced binary tree, random spanning tree |
-| `structured.go` | Structured | Ladder, wheel, friendship, Möbius–Kantor, Cayley (dihedral) |
-| `erdos_renyi.go` | Random | Erdős–Rényi G(n,p) and G(n,m) |
-| `barabasi_albert.go` | Scale-free | Barabási–Albert preferential attachment |
-| `watts_strogatz.go` | Small-world | Watts–Strogatz rewiring |
-| `configmodel.go` | Degree sequences | Configuration model, Chung–Lu |
-| `sbm.go` | Community | Stochastic block model, planted partition |
-| `lfr.go` | Community | LFR community benchmark |
-| `rmat.go` | Synthetic large | R-MAT graph generator |
-| `rgg.go` | Geometric | Random geometric graph |
-| `dags.go` | DAGs | Random DAG, layered DAG |
-| `adversarial.go` | Adversarial | Adversarial edge weights and labels |
-| `mapperadv.go` | Adversarial | Mapper shard-0 key preimage generator |
-| `specials.go` | Special | Specials: path, cycle, bipartite for rapid |
+| `trivial.go` | Degenerate | `EmptyGraph`, `SingleNode`, `SingleEdge` (K₂, or the lone self-loop when `selfLoop` is set), `ParallelDigon`, `IsolatedOnly`, `UniversalSelfLoops` |
+| `classic.go` | Classic | `Path` Pₙ, `Cycle` Cₙ, `Star` Sₙ, `DoubleStar`, `Complete` Kₙ, `CompleteBipartite` Kₘ,ₙ, `Multipartite` |
+| `trees.go` | Trees | `BalancedBinary`, `CompleteKAry`, `PruferTree`, `PathDegenerate`, `Caterpillar`, `Spider`, `Lobster` |
+| `structured.go` | Structured 2D/3D | `Hypercube` Qₙ, `Grid`, `Torus`, `Rook`, `Mobius` (the Möbius ladder Mₙ), `Ladder`, `Prism`, `Theta` |
+| `specials.go` | Named sparse specials | `Petersen`, `Dodecahedral`, `GoldnerHarary`, `MoserSpindle`, `Kneser` |
+| `erdos_renyi.go` | Random | `ErdosRenyiNP` G(n,p), `ErdosRenyiNM` G(n,m) |
+| `barabasi_albert.go` | Scale-free | `BarabasiAlbert` preferential attachment |
+| `watts_strogatz.go` | Small-world | `WattsStrogatz` rewiring |
+| `configmodel.go` | Degree sequences | `RandomRegular`, `ConfigurationModel` |
+| `sbm.go` | Community | `SBM` (stochastic block model), `PlantedPartition` |
+| `lfr.go` | Community | `LFR` community benchmark |
+| `rmat.go` | Synthetic large | `RMAT`; `RMATPick` exposes the quadrant draw on its own |
+| `rgg.go` | Geometric | `RGG` random geometric graph |
+| `dags.go` | DAGs | `TransitiveTournament`, `Diamond`, `Layered`, `LengauerTarjanExample`, `BuildDepDAG`; plus `NegativeWeightAcyclic` |
+| `adversarial.go` | Adversarial property values | `AdversarialIntWeights`, `AdversarialFloatWeights`, `AdversarialStrings`, `AdversarialBytes`, `AdversarialTimes`, `AdversarialBools`, `AllMix`, `ApplyAdversarialProps` |
+| `mapperadv.go` | Adversarial natural keys | `GenerateShardZeroKeys` — a flood of distinct keys that all hash to mapper shard 0 |
+
+`adversarial.go` and `mapperadv.go` are the two exceptions to the pattern: they
+return property values and key material rather than a `Shape`, and are applied
+to a graph built by one of the other families.
 
 ---
 
@@ -143,7 +159,13 @@ The following families are implemented in `internal/shapegen`:
 Package-level loader functions for Stanford Network Analysis Project
 (SNAP) datasets. Datasets are fetched from
 `https://snap.stanford.edu/data/` on first use and cached under
-`$GOGRAPH_SNAP_DIR` (default: `$HOME/.cache/gograph-snap`).
+`$GOGRAPH_SNAP_DIR`; when that is unset the cache is
+`$HOME/.cache/gograph-snap`, falling back to `$TMPDIR/gograph-snap` when the
+home directory cannot be resolved. Every archive is verified against the
+SHA-256 pinned in `SNAPDatasets`; a mismatch is `ErrSNAPChecksumMismatch`, a
+failed fetch is `ErrSNAPOffline`, and an unregistered name is
+`ErrSNAPUnknownDataset`. `LoadSNAP(name, cacheDir)` is the generic form of the
+three named loaders.
 
 | Function | Dataset | Nodes | Edges | Layer |
 |---|---|---|---|---|
@@ -154,9 +176,16 @@ Package-level loader functions for Stanford Network Analysis Project
 ### LDBC Graphalytics datasets (`graphalytics.go`)
 
 Package-level loader `LoadGraphalytics(name, cacheDir)` and reference
-output accessor `LoadGraphalyticsReference(name, alg, cacheDir)`. Data
-is fetched from the SURF cold-storage mirror; HTTP 409 is surfaced as
-`ErrGraphalyticsStaging`.
+output accessor `LoadGraphalyticsReference(name, alg, cacheDir)`. Data is
+fetched from the SURF Data Repository and cached under
+`$GOGRAPH_GRAPHALYTICS_DIR`. Because the repository keeps these archives on
+cold storage, a request for a file that has not been staged answers HTTP 409,
+which is surfaced as `ErrGraphalyticsStaging`; `ErrGraphalyticsOffline`,
+`ErrGraphalyticsChecksumMismatch`, `ErrGraphalyticsUnknownDataset` and
+`ErrGraphalyticsUnknownAlgorithm` are the other typed outcomes. Archives are
+verified against the SHA-256 in `GraphalyticsDatasets` when one is recorded,
+and against the repository's published MD5 otherwise — no registered dataset
+carries a SHA-256 yet, so all three currently verify by MD5.
 
 | Dataset | Nodes | Edges | Algorithms | Layer |
 |---|---|---|---|---|
@@ -181,9 +210,9 @@ Package: `github.com/FlavioCFOliveira/GoGraph/internal/invariants`
 All helpers call `t.Errorf` (not `t.Fatalf`) so multiple invariants can
 be checked in a single test body with all failures accumulated.
 
-`BuildBFSDepths[W](ctx, csr, src)` is a convenience function that runs
-BFS from `src` and returns `map[graph.NodeID]int` for use with
-`AssertDistanceBound`.
+`BuildBFSDepths[W](ctx, csr, src)` is a convenience function that runs BFS
+from `src` over a `*csr.CSR[W]` and returns
+`(map[graph.NodeID]int, error)` for use with `AssertDistanceBound`.
 
 Each checker is exercised on real generator output by
 `internal/shapegen/invariants_battery_test.go` (the four topology checkers
@@ -203,22 +232,31 @@ to paper coverage.
 Package: `github.com/FlavioCFOliveira/GoGraph/internal/testfs`
 
 `FaultFile` wraps `*os.File` with configurable fault injection. It
-implements the `File` interface accepted by `store/wal.OpenWith` and
-future store adapters.
+implements `testfs.File`, the minimal filesystem interface used by the
+`store/wal` and `store/snapshot` write paths, and accepted by
+`store/wal.OpenWith`.
 
 ```go
 type Faults struct {
-    FailWritesAfterBytes int64          // truncate writes at N bytes total
+    FailWritesAfterBytes int64          // Write fails with ErrPartialWrite past N cumulative bytes
     ReturnENOSPC         bool           // all writes return syscall.ENOSPC
     FsyncDelay           time.Duration  // sleep before each Sync
-    CorruptOnRead        func(offset, n int64) bool // flip first byte on read
+    FailSyncAfter        int            // first N Syncs succeed, then ErrSyncFailed
+    ReturnEIOOnSync      bool           // every Sync fails with ErrSyncFailed
+    CorruptOnRead        func(offset, n int64) bool // invert the first byte of the read buffer
 }
 
 ff, _ := testfs.New(path, testfs.Faults{FailWritesAfterBytes: 128})
 w, _ := wal.OpenWith(ff)  // inject fault into WAL writer
 ```
 
-`IsENOSPC(err)` unwraps `*os.PathError` to check for `syscall.ENOSPC`.
+The two sync faults model the post-"fsyncgate" kernel contract: when the fault
+fires, the bytes written since the last successful `Sync` are discarded, so the
+file is left holding exactly the durable prefix a crash would preserve.
+
+`IsENOSPC(err)` reports `syscall.ENOSPC`, unwrapping an `*os.PathError` first.
+`FaultFile` is safe for concurrent `Read`/`Write`/`Seek`/`Sync`/`Truncate`/
+`Close`; all mutations serialise on an internal mutex.
 
 ### `internal/crashpoint` and `internal/crashinject`
 
@@ -230,32 +268,59 @@ runner.
 
 Package: `github.com/FlavioCFOliveira/GoGraph/internal/crashpoint`
 
-The production-callable half. It holds the `Breakpoint` hook and the two
+The production-callable half. It holds the `Breakpoint` hook and three
 environment-variable constants (`EnvCrashAt` = `GOGRAPH_CRASH_AT`,
-`EnvCrashDir` = `GOGRAPH_CRASH_DIR`) and depends on nothing beyond `os`
-and `syscall`. Production write paths embed breakpoints by importing it
-directly:
+`EnvCrashDir` = `GOGRAPH_CRASH_DIR`, `EnvCrashAfter` = `GOGRAPH_CRASH_AFTER`)
+and depends on nothing beyond `os` and `syscall`. Production write paths embed
+breakpoints by importing it directly:
 
 ```go
 // In production library code (store/checkpoint, store/wal, …):
-crashpoint.Breakpoint("checkpoint.mid-truncate") // no-op in production
+crashpoint.Breakpoint("checkpoint.p2-snapshot-published-pre-truncate")
 ```
 
-`Breakpoint(name)` is a no-op when `GOGRAPH_CRASH_AT` is unset or does
-not match `name` (one string comparison, no locks, safe for concurrent
-use). When it matches, the process sends itself SIGKILL, simulating an
-abrupt crash at that exact execution point.
+**`Breakpoint` is gated by the `gograph_crashinject` build tag, and the tag is
+what makes it live.** Two implementations are selected at compile time:
+
+- `crashpoint_disabled.go` (`//go:build !gograph_crashinject`) — the default,
+  and what every released binary links. `Breakpoint` is an empty function: it
+  does not read `GOGRAPH_CRASH_AT`, links no syscall, and the compiler elides
+  it. An inherited `GOGRAPH_CRASH_AT` therefore cannot kill a production
+  process, and the durability paths pay nothing per call.
+- `crashpoint_enabled.go` (`//go:build gograph_crashinject`) — the active hook.
+  `Breakpoint(name)` returns immediately when `GOGRAPH_CRASH_AT` is unset or
+  does not equal `name`; on a match it sends itself SIGKILL, simulating an
+  abrupt crash at that exact execution point. `GOGRAPH_CRASH_AFTER=n` lets the
+  first `n` matching hits through and kills on the `(n+1)`th, so a breakpoint on
+  a hot path can be moved past the degenerate first-commit window into the
+  steady state where several writers are in flight.
+
+The exported API is identical in both modes, so call sites never change. Run
+the battery with `make test-crashinject`, or `go test -tags=gograph_crashinject`.
+Every crash test is itself headed `//go:build gograph_crashinject`, so without
+the tag those tests are not compiled at all: `go test -list '.*'
+./internal/crashinject/` lists 14 harness unit tests and not one crash
+scenario. A green `go test ./...` therefore says nothing about crash safety.
+
+The breakpoints compiled into production packages are
+`checkpoint.p2-snapshot-published-pre-truncate` (`store/checkpoint`),
+`checkpoint.truncprefix.tmp-written-pre-rename`,
+`checkpoint.truncprefix.post-rename-pre-dirfsync`,
+`checkpoint.truncprefix.post-rename-pre-bookkeeping`,
+`wal.appendrun.frame-emitted`, `wal.sync.pre-datasync` (`store/wal`),
+`recovery.snapshot-promote-post-rename-pre-fsync` (`store/recovery`) and
+`mvcc.commit.post-fsync-pre-publish` (`cypher`).
 
 #### `internal/crashinject`
 
 Package: `github.com/FlavioCFOliveira/GoGraph/internal/crashinject`
 
 The subprocess crash harness. It re-exports `Breakpoint`, `EnvCrashAt`,
-and `EnvCrashDir` from `crashpoint` so existing call sites keep working,
-and adds the `Run` driver:
+and `EnvCrashDir` from `crashpoint` so existing call sites keep working
+(`EnvCrashAfter` is not re-exported), and adds the `Run` driver:
 
 ```go
-// In tests:
+// In tests, in a file built with -tags gograph_crashinject:
 out, err := crashinject.Run(t, "wal.mid-frame", crashinject.Opts{})
 // out.Killed == true; out.Dir contains the artefacts
 ```
@@ -264,16 +329,36 @@ out, err := crashinject.Run(t, "wal.mid-frame", crashinject.Opts{})
 `GOGRAPH_CRASH_AT=<scenario>` and `GOGRAPH_CRASH_DIR=<dir>`. The helper
 exercises the scenario's write path until a `Breakpoint` call at the
 named execution point triggers SIGKILL, leaving the artefacts in a
-deterministically torn state for the parent to inspect.
+deterministically torn state for the parent to inspect. `Opts` carries the
+artefact `Dir` (default a fresh `t.TempDir()`), extra child `Env`, and a
+`Timeout` (default 30 s). `Out.Killed` reports a genuine breakpoint self-kill
+and is false when the deadline elapsed instead — that case sets `Out.TimedOut`.
 
 **Registered scenarios in `cmd/crashinject-helper`:**
 
 | Scenario | Breakpoint site | Description |
 |---|---|---|
 | `wal.mid-frame` | helper | Writes one complete WAL frame, appends a partial second-frame header, then SIGKILL; `wal.Reader` must report `ErrTornFrame` |
-| `checkpoint.post-snapshot-pre-truncate` | `store/checkpoint` | Commits an int64-keyed workload, then drives a codec-aware checkpoint that crashes after the self-sufficient snapshot is durable but before the WAL is truncated; recovery rebuilds state from the snapshot plus the still-intact WAL |
-| `checkpoint.mid-truncate` | `store/wal` | Same workload and checkpoint, but the crash lands mid-truncation (the WAL file is already shrunk to zero); recovery rebuilds state from the self-sufficient snapshot alone |
-| `recovery.snapshot-promote-post-rename-pre-fsync` | `store/recovery` | Commits and checkpoints a self-sufficient int64-keyed snapshot, then stages the interrupted-publish state (the live snapshot archived to `snapshot.bak`) and drives `recovery.Open`, which crashes after promoting `.bak` back onto the live snapshot name via rename but before the parent-directory fsync; a second recovery must still observe the promoted snapshot (the rename and its dirent are durably re-promoted) — guards A1-F4 (#1454) |
+| `checkpoint.p2-snapshot-published-pre-truncate` | `store/checkpoint` | Commits an int64-keyed workload, then drives a codec-aware checkpoint that crashes after the self-sufficient snapshot is published and durable but before the WAL prefix is truncated; recovery rebuilds state from the snapshot plus the still-intact WAL |
+| `checkpoint.truncprefix.tmp-written-pre-rename` | `store/wal` | Crash inside `wal.Writer.TruncatePrefix`, after the replacement WAL is written to its temp name but before the rename |
+| `checkpoint.truncprefix.post-rename-pre-dirfsync` | `store/wal` | Same truncate, crashing after the rename but before the parent-directory fsync |
+| `checkpoint.truncprefix.post-rename-pre-bookkeeping` | `store/wal` | Same truncate, crashing after the rename is durable but before the writer updates its own offset bookkeeping |
+| `recovery.snapshot-promote-post-rename-pre-fsync` | `store/recovery` | Stages the interrupted-publish state (the live snapshot archived to `snapshot.bak`) and drives `recovery.Open`, which crashes after promoting `.bak` back onto the live snapshot name via rename but before the parent-directory fsync; a second recovery must still observe the promoted snapshot — guards A1-F4 (#1454) |
+| `constraint.drop.post-wal-sync` | helper | Commits a durable `CREATE CONSTRAINT` (UNIQUE) and a node, then a durable `DROP CONSTRAINT` frame, and crashes after the fsync; recovery must show the constraint and its backing index gone together, with no torn intermediate (#1556) |
+| `edgehandle.setprop.post-wal-sync` | helper | Two parallel edges over one ordered `(src, dst)` pair; a durable `OpSetEdgePropertyByHandle` touches the first handle only, then SIGKILL. Recovery must show the property on that handle alone, the sibling untouched, and still exactly two parallel edges (#1686) |
+| `edgehandle.delprop.post-wal-sync` | helper | The same two edges, with `tag` seeded on the first handle at CREATE; a durable `OpDelEdgePropertyByHandle` then removes it from that handle, and the crash follows the fsync. Recovery must show `tag` gone from handle 1 and the sibling's own state intact |
+| `edgehandle.delete.post-wal-sync` | helper | A durable `OpRemoveEdgeByHandle` retires the second of two parallel edges, then SIGKILL; recovery must land on exactly the first handle, with its own property intact (rmp #2018) |
+| `wal.appendrun.frame-emitted` | `store/wal` | Several writer goroutines commit multi-op transactions concurrently and the crash lands mid-append run, with transactions in flight |
+| `wal.sync.pre-datasync` | `store/wal` | The same concurrent workload, crashing inside `wal.Writer.SyncGroup` before the data fsync |
+| `mvcc.commit.post-fsync-pre-publish` | `cypher` | Commits through the Cypher engine and crashes in the window between the WAL fsync and the MVCC visibility publish (rmp #2309, MVCC C3c) |
+
+The helper also honours a **workload override**, `GOGRAPH_CRASH_WORKLOAD`.
+Every scenario above is selected by its breakpoint name, which works only while
+each breakpoint has one workload worth driving it through. Setting
+`GOGRAPH_CRASH_WORKLOAD=checkpoint-concurrent` runs
+`checkpoint.p2-snapshot-published-pre-truncate` with transactions committing
+*throughout* the checkpoint — a different question at the same crash point,
+and one no second breakpoint name would express honestly (rmp #2310).
 
 ### `internal/subproc`
 
@@ -328,10 +413,13 @@ transcript** catches a change in behaviour, while **`Runner.Observe`** catches
 incorrect behaviour by asserting an invariant over each step's structured rows.
 A failing permutation is named, and `Runner.Only` replays it alone.
 
-Shipped: `lost-update`, `write-skew`, `bank-transfer` and a named
-`read-only-anomaly` permutation at the **short** layer (20 permutations each);
-the exhaustive `read-only-anomaly` (4 200 permutations, ~15 s under `-race`) at
-**soak**. The harness is proven to catch a real fault rather than merely to pass
+Shipped at the **short** layer: `lost-update`, `write-skew` and
+`bank-transfer`, each two sessions of three steps and therefore C(6,3) = 20
+permutations, plus one *named* `read-only-anomaly` permutation — PostgreSQL's
+own interleaving, run on its own. The exhaustive `read-only-anomaly`
+(4 200 permutations) runs at **soak** behind `testlayers.RequireSoak`, and
+asserts an `Observe` invariant rather than a golden, because a
+4 200-permutation transcript is a diff nobody would read. The harness is proven to catch a real fault rather than merely to pass
 — see the negative control in `fault_test.go`.
 
 Full specification, including the enumeration algorithm, the determinism
@@ -370,11 +458,25 @@ and the rmp #2336 classification attempt:
 | Layer | Build tag | Env var | Make target | Budget |
 |---|---|---|---|---|
 | **short** | _(default)_ | — | `make test-short` | see [docs/test-layers.md](test-layers.md) |
-| **soak** | `-tags=soak` | `SOAK_FULL=1` | `make test-soak` | minutes |
-| **nightly** | `-tags=nightly` | `GOGRAPH_NIGHTLY=1` | `make test-nightly` | hours |
+| **soak** | `-tags=soak` | `SOAK_FULL=1` | `make test-soak` (`-tags=soak`) | minutes |
+| **nightly** | `-tags=nightly` | `GOGRAPH_NIGHTLY=1` | `make test-nightly` (`-tags=soak,nightly,soakfull`) | hours |
 
-Each layer is a strict superset: `nightly` always includes `soak` and
-`short`. The short-layer budget is enforced by `scripts/pkg_time_budget.sh`,
+The layers are supersets, but *which* mechanism delivers that differs, and the
+difference bites. The runtime helpers nest correctly:
+`testlayers.IsSoak` is true under any of `soak`, `nightly`, `soakfull` or
+`stress`, so `RequireSoak` passes under `-tags=nightly`. **Compile-time gating
+does not nest**: a file headed `//go:build soak` is not compiled by
+`-tags=nightly` alone, and 13 such soak-only files exist in the tree (plus two
+headed `//go:build soakfull`). That is why `make test-nightly` passes
+`-tags=soak,nightly,soakfull` rather than `-tags=nightly` — use the make
+target, not the bare tag, to get the whole superset.
+
+The crash-injection battery is a fourth, orthogonal gate rather than a layer:
+it needs `-tags=gograph_crashinject` (`make test-crashinject`) and is inert
+without it. See
+[`internal/crashpoint` and `internal/crashinject`](#internalcrashpoint-and-internalcrashinject).
+
+The short-layer budget is enforced by `scripts/pkg_time_budget.sh`,
 which `make test-short` pipes its output through, so every `make ci` reads it.
 **The figures are deliberately not repeated here** — they live in one place, with
 the measurements and the exceptions that justify them, because three documents
@@ -384,8 +486,8 @@ Makefile targets.
 
 ### Runnable godoc examples
 
-The public packages ship runnable `Example` functions (around 97 across
-the `graph/`, `cypher/`, `search/`, `store/`, `bolt/`, and `ds/` trees).
+The public packages ship 101 runnable `Example` functions: `graph/` 36,
+`cypher/` 28, `search/` 18, `store/` 10, `bolt/` 5, `ds/` 3 and `metrics/` 1.
 They carry `// Output:` markers, so the `testing` framework compiles and
 executes them — and verifies their printed output — as part of the
 default **short** layer on plain `go test ./...`. They double as
@@ -402,6 +504,11 @@ Follow these steps whenever a new graph family is added to the battery.
 Add `internal/shapegen/<family>.go`. Implement the `Shape` interface or
 expose a package-level constructor function. Document the family's
 asymptotic properties and the range of each knob.
+
+Every existing catalogue family returns `Shape[int, int64]`, with `int64(0)`
+as the "unweighted" sentinel; the sketch below takes the simpler
+package-level-constructor option, which is why it can be handed straight to
+`invariants` in step 4 but cannot be handed to `Register` in step 6.
 
 ```go
 // internal/shapegen/myfamily.go
@@ -435,13 +542,22 @@ func TestMyFamily_Rapid(t *testing.T) {
 
 ### 3. Lock the determinism with a golden
 
-Run once with `-update` to create the golden file:
+Write the golden assertion with the shared helper,
+`goldens.Assert(t, "testdata/<family>.golden", got)`, then run once to create
+the file:
 
 ```bash
 GOGRAPH_UPDATE_GOLDENS=1 go test ./internal/shapegen/... -run TestMyFamily_Golden
 ```
 
 Then commit `internal/shapegen/testdata/<family>.golden`.
+
+Note that the families already in the catalogue do **not** use
+`internal/goldens`. Each has its own copy of an `assertGolden` helper, driven
+by a package-local `-shapegen-update` flag declared in `trivial_test.go`, and
+writes to `testdata/shapegen/<family>/<name>.txt`. `GOGRAPH_UPDATE_GOLDENS=1`
+has no effect on those. New families should use the shared helper as above;
+the migration of the existing ones is tracked as #526.
 
 ### 4. Add invariant assertions (optional but recommended)
 
@@ -462,6 +578,12 @@ invariants.AssertBipartite(t, g)     // bipartite families
 
 package shapegen
 
+import (
+    "testing"
+
+    "github.com/FlavioCFOliveira/GoGraph/internal/invariants"
+)
+
 func TestMyFamily_Soak(t *testing.T) {
     g := MyFamilyShape(1_000_000, 10)
     invariants.AssertConnected(t, g)
@@ -469,11 +591,19 @@ func TestMyFamily_Soak(t *testing.T) {
 }
 ```
 
+A `//go:build soak` header is compiled by `-tags=soak` and by
+`make test-nightly`, but **not** by a bare `-tags=nightly` — see
+[Test layers quick-reference](#test-layers-quick-reference).
+
 ### 6. Register the shape in any conformance / regression harness
 
-If the project has a shape-level conformance matrix (e.g.
-`internal/shapegen/registry.go`), add the new shape there so it is
-automatically exercised by cross-algorithm correctness checks.
+There is currently **nothing to do here**, and that is a measured fact rather
+than an omission: the module has no shape-level conformance matrix, there is no
+`internal/shapegen/registry.go` file (the registry lives in `shapegen.go`), and
+`Register` has no caller outside `internal/shapegen/shapegen_test.go`. A family
+that implements `Shape` may still register itself, but nothing enumerates the
+registry, so registration exercises nothing today. Delete this step from your
+checklist unless and until a matrix exists.
 
 ### 7. Update this document
 
@@ -482,4 +612,4 @@ and update the "Last reviewed" footer at the bottom of this file.
 
 ---
 
-*Last reviewed: 2026-07-14 against commit `908a83e`. This document's freshness is checked by `scripts/check_doc_freshness.sh`, run locally.*
+*Last reviewed: 2026-09-08 against commit `8c83329b`. This document's freshness is checked by `scripts/check_doc_freshness.sh`, run locally.*

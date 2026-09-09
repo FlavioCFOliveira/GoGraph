@@ -122,6 +122,22 @@ later transaction; that is a session property, and GoGraph states it separately 
 > is rmp #2318, and `lpg.TestAbort_VersionsAreNotYetReclaimable_2318` pins the current
 > behaviour so closing it has something to invert.
 >
+> **SUPERSEDED (rmp #2318 closed; verified 2026-09-08 at `efd32fb9`).** The paragraph
+> above records the state at the time rmp #2318 was opened, and it is no longer true.
+> Aborted versions ARE reclaimed: the background vacuum withdraws an aborted
+> transaction's writes from every store it touched and releases its versions
+> (`graph/lpg/mvcc_abort_reclaim.go` — `withdrawAbortedNow` fans out to
+> `withdrawAbortedLabels`, `withdrawAbortedProps`, `withdrawAbortedIndexRemovals` and
+> `withdrawAbortedSides`), and `mvcc.Conflicts` (`graph/mvcc/conflict.go`) now treats an
+> aborted head as a conflict so no writer can build on a dirty base. The named test
+> `lpg.TestAbort_VersionsAreNotYetReclaimable_2318` **does not exist**; the only trace of
+> it in the module is a stale file comment at `graph/lpg/mvcc_abort_test.go:32`. The
+> tests that do exist assert the opposite of the paragraph above:
+> `TestAbort_VersionsAreReleasedBySweep` (`graph/lpg/mvcc_abort_reclaim_test.go:22`) and
+> `TestAbort_WithdrawnWritesStayInvisible` (`:77`). See
+> [`design-mvcc-abort-withdrawal.md`](design-mvcc-abort-withdrawal.md) for the design as
+> built.
+>
 > **A client must retry.** This is the half that is new to callers. A conflict can
 > arise even between transactions on DISJOINT objects, because a transaction's start
 > timestamp is the CONTIGUOUS commit frontier (rmp #2298): under N concurrent writers
@@ -400,6 +416,16 @@ in the pre-existing bug the audit found.
   its new version into the same atomic `Snapshot` flip. Subscribers without
   `Serializer` keep the rebuild-on-restart contract.
 
+  > **SUPERSEDED (F3.4 delivered; verified 2026-09-08 at `efd32fb9`).** The gap above
+  > describes the state F3.4 was written against, and the paragraph contradicted the
+  > F3.4 entry in the staging list further down this document. Live maintenance IS
+  > wired. Every write operator enqueues an `index.Change` into a per-transaction
+  > `exec.IndexBuffer` (`cypher/exec/index_writeback.go`), and the buffer is drained
+  > through `index.Manager.ApplyBatch` inside the write bracket at three production
+  > sites: `cypher/exectx.go:808` (`ExplicitTx.Commit`) and `cypher/api.go:6732` and
+  > `:6911` (`Result.commitUnderBarrier` and `Result.closeLocked`, the autocommit and
+  > `RunInTx` paths). A rollback takes `IndexBuffer.Rollback` and applies nothing.
+
 **Invariant:** every read-servable structure is reachable *only* through the
 `Snapshot` root. Any structure left directly mutable-and-read is a hole through
 which a partial transaction leaks; the single-root rule is what makes
@@ -542,6 +568,37 @@ the engine single-writer, because two writes holding it shared do not exclude ea
 The shared acquisition cost nothing measurable: store-less scaling at sixteen writers went
 1.768× → 1.900× across the change.
 
+> **Correction (rmp #2738, commit `efedd8f8`; verified 2026-09-08 at `efd32fb9`).** Two
+> things above have moved, and the second changes the guarantee rather than only a name.
+>
+> **The primitive.** There is no `schemaMu` field any more. rmp #2337 replaced the
+> `sync.RWMutex` with `mvcc.Gate`, an equivalent weak/strong lock whose weak side is
+> striped over padded per-slot counters, because the RWMutex's single `readerCount` word
+> was a coherence miss taken by every write on every core purely to announce a
+> non-conflict. The field is `Engine.schemaGate` (`cypher/api.go:1401`); the weak/strong
+> contract is unchanged, and the Go source still uses `[Engine.schemaMu]` as a doc anchor.
+>
+> **The exclusion.** "A DDL must exclude ordinary WRITES too" holds only for an
+> **autocommit** statement, which takes the gate weakly for its own duration
+> (`cypher/api.go:19203`). An **explicit transaction takes no schema gate at all**:
+> `schemaGate` appears nowhere in `cypher/exectx.go`, and `cypher/api.go:4487-4488`
+> states the invariant outright. It cannot take it — an explicit transaction is a
+> registered store writer from BEGIN, so blocking on the gate closes a three-way cycle
+> with the store's quiesce (`txn.Store.RunUnderCommitLock`), reproduced as a 20.23 s
+> hang; making it safe would require inverting the documented lock order at six sites,
+> which was considered and rejected. So a whole explicit transaction can commit inside
+> a `CREATE INDEX`'s scan-and-register window, which measured 20 losses in 20 trials
+> against 0 in 20 for the identical autocommit workload.
+>
+> That window is closed by **reconciliation, not exclusion**. `graph/index/build.go` adds a
+> catch-up log: `Manager.BeginBuild` records every change the manager fans out while a
+> build is in flight, and `Manager.FinishBuild` replays the recording into the freshly
+> built index before registering it, all under the manager's exclusive lock. The log
+> resolves each change's index effect at RECORD time via a `BuildResolver` rather than at
+> replay time, because an explicit transaction applies eagerly and the live graph at replay
+> time is not the committed state (rmp #2793). A recording that exceeds
+> `MaxBuildLogChanges` returns `ErrIndexBuildOverflow` and registers nothing.
+
 `visMu` cannot do this job even though it has exactly the same reader/writer shape: its
 exclusive hold covers only the registration, and extending it over the backfill would stop
 the scan using `Graph.View`, since visMu is not re-entrant. `schemaMu` sits one level out
@@ -639,9 +696,13 @@ Three consequences, each measured rather than argued:
 - **Two clients overlap.** Gated end-to-end against the official neo4j-go-driver by
   `TestE2E_TwoExplicitWriteTransactionsOverlap` and
   `TestE2E_AnIdleExplicitTransactionDoesNotStallAnotherWriter`, both verified to FAIL
-  against the build that held the barrier. Note that with `MaxTxIdleTime` at its 5 s
-  default **both tests pass against the defective build**, because the idle reaper
-  kills the blocked transaction and releases the barrier; they raise it deliberately.
+  against the build that held the barrier. Note that with `MaxTxIdleTime` at the 5 s
+  default it then had, **both tests pass against the defective build**, because the
+  idle reaper kills the blocked transaction and releases the barrier; they pin ten
+  minutes of their own deliberately. The default has moved twice since — rmp #2806
+  raised it to 30 minutes, and rmp #2807 set it to 0, which disables the reaper —
+  so that pin is no longer what removes the rescue. It is kept because it is the
+  pin, not the default, that states the bound these gates measure under.
 - **A collision surfaces at the conflicting STATEMENT**, not at `COMMIT`, as
   `mvcc.ErrSerializationConflict` from `Exec`. That follows from the mechanism:
   first-updater-wins identifies the loser the moment it tries to install a version
@@ -657,8 +718,16 @@ Three consequences, each measured rather than argued:
 
 **The abandoned-transaction cost changed in kind.** It was an availability failure;
 it is now a memory-and-slot failure, because an open transaction pins the reclamation
-horizon. `server.Options.MaxTxIdleTime` was reviewed for this and **kept at 5 s**: the
-original justification is gone, but an unbounded resource cost remains.
+horizon. `server.Options.MaxTxIdleTime` was reviewed for this and kept at 5 s at the
+time: the original justification was gone, but an unbounded resource cost remained.
+**rmp #2806 raised the default to 30 minutes and rmp #2807 set it to 0**, which
+disables the idle reaper entirely — the posture PostgreSQL takes with
+`idle_in_transaction_session_timeout`. `ConnTimeout` no longer reclaims a silent
+client either, because rmp #2807 disabled that too; TCP keep-alive reclaims a
+connection whose peer has VANISHED, and nothing reclaims one that is merely
+silent. `bolt/server/serve.go` states the full cost on
+`DefaultMaxTxIdleTime`, and an operator who needs the bound sets
+`Options.MaxTxIdleTime`.
 
 ### The reclamation-horizon bound (rmp #2315, sized 2026-08-05)
 
@@ -698,10 +767,14 @@ that is where `Oldest` turns super-linear (5.3× for 4× slots against 4.1× bel
 **For an operator.** Three series matter, and only the third is new — the live counts
 already had names, and giving one quantity two names would be worse than giving it none:
 
-- `lpg.mvcc.readers.unregistered` — **alert on any non-zero value.** It means
+- `lpg.mvcc.snapshots.unregistered` — **alert on any non-zero value.** It means
   reclamation is suspended and version memory is growing. The vacuum gauges cannot tell
   you this: `passes` and `reclaimed` both flatten, and nothing distinguishes "no garbage
-  to collect" from "unable to collect".
+  to collect" from "unable to collect". (**Corrected 2026-09-08 at `efd32fb9`:** this
+  line named `lpg.mvcc.readers.unregistered`, which is emitted nowhere. v0.11.0 renamed
+  the gauge to `lpg.mvcc.snapshots.unregistered`, and that is the only name published —
+  `graph/lpg/mvcc_stats.go:313`. The stale name survives in a comment at
+  `graph/lpg/mvcc_vacuum.go:896`.)
 - `lpg.mvcc.readers.active` — registered readers. Approaching capacity is the leading
   indicator.
 - `lpg.mvcc.horizon.capacity` — **new in #2315**, the compiled bound, so utilisation can
@@ -709,8 +782,10 @@ already had names, and giving one quantity two names would be worse than giving 
 
 The remedy is to reduce concurrent **long-lived read transactions**, not concurrent
 queries: a statement-scoped read holds its slot for microseconds, while an explicit
-read transaction holds one until it commits or rolls back. `MaxTxIdleTime` (5 s) bounds
-the idle case; an application holding more than 1024 read transactions genuinely
+read transaction holds one until it commits or rolls back. `MaxTxIdleTime` bounds the
+idle case **only when an operator sets it**: rmp #2807 set both it and `ConnTimeout`
+to 0, so a default-configured server reclaims neither an idle transaction nor the
+silent connection holding it. An application holding more than 1024 read transactions genuinely
 concurrently needs to shorten them, because raising capacity trades memory for a cliff
 that moves rather than disappearing.
 
@@ -823,6 +898,17 @@ Delivered:
   visible but whose index change is not. The live roaring label bitmaps already
   update inside the same window (`SetNodeLabel`/`SetEdgeLabel` run there). Lock
   order `visMu → index` matches the read side (`View → index`), so no deadlock.
+
+  > **Correction (2026-09-08 at `efd32fb9`): the mechanism is right, the name is
+  > gone.** There is no `commitIndexUnderBarrier` anywhere in the module. The buffer
+  > is drained by `exec.IndexBuffer.Commit` → `index.Manager.ApplyBatch`, called from
+  > `cypher/exectx.go:808`, `cypher/api.go:6732` and `cypher/api.go:6911`, in each case
+  > inside the write bracket and AFTER the WAL fsync, so the ordering is
+  > durable-then-visible. `Graph.View` no longer exists either (rmp #2344; see the
+  > reading note at the top of this document), so the read side of the stated lock
+  > order is now "a read takes no barrier at all" and the surviving order is
+  > `schemaGate → writer admission → visMu`.
+
 - **F3.5 (fixed by routing the checkpoint through the commit mutex).** The
   checkpointer now runs its whole snapshot+truncate window under
   `txn.Store.RunUnderCommitLock` (wired via `checkpoint.WithCommitSerialiser`)

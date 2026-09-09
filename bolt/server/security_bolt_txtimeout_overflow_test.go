@@ -28,10 +28,18 @@ package server
 // DefaultTxTimeout bound (#1302) exist precisely to guarantee that an explicit
 // transaction can never hold the engine's single global writer serialisation
 // indefinitely while the client keeps the connection alive. This overflow
-// DEFEATS that guarantee on a default-configured server: a client BEGINs with
-// the overflow timeout, then refreshes the idle ConnTimeout with a trivial
-// RUN/PULL every <ConnTimeout, holding the writer lock effectively forever and
-// blocking every other writer on the server — a liveness denial of service.
+// DEFEATS that guarantee: a client BEGINs with the overflow timeout, then
+// refreshes the idle ConnTimeout with a trivial RUN/PULL, holding the writer lock
+// effectively forever and blocking every other writer on the server — a liveness
+// denial of service.
+//
+// Two things have changed since, and neither weakens this gate. rmp #2305 retired
+// the writer serialisation, so the cost of an unreclaimed transaction is memory
+// and one reclamation-horizon slot rather than other clients' progress.
+// rmp #2807 set DefaultTxTimeout to 0, so a DEFAULT-configured server arms no
+// reaper either — which is why these gates configure the bound explicitly (see
+// overflowTestTxTimeout). The property under test is unchanged: a hostile
+// tx_timeout must not silently disarm a bound the operator DID configure.
 //
 // CWE-190 (Integer Overflow) leading to CWE-400 / CWE-667
 // (uncontrolled resource consumption / writer-lock starvation).
@@ -57,15 +65,28 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
+// overflowTestTxTimeout is the server-side total transaction bound these gates
+// run with. It is set EXPLICITLY rather than taken from [DefaultTxTimeout].
+//
+// rmp #2807 set DefaultTxTimeout to 0 — no bound at all by default — and this
+// file's subject is that an overflowing client tx_timeout must not DEFEAT a
+// bound the operator configured. With no bound configured there is nothing to
+// defeat and every assertion below would be vacuous: txDeadline would be zero
+// for the honest reason as well as the hostile one, and the two would be
+// indistinguishable. 30 s is the value DefaultTxTimeout carried when #1484 was
+// fixed, so the gates measure under exactly the configuration that found the
+// defect.
+const overflowTestTxTimeout = 30 * time.Second
+
 // beginWithTxTimeout HELLOs, BEGINs with the given tx_timeout ms on a session
-// configured like the production default (DefaultTxTimeout set, no
-// MaxStatementTimeout), and returns the session for inspection.
+// configured with an explicit total transaction bound and no MaxStatementTimeout,
+// and returns the session for inspection.
 func beginWithTxTimeout(t *testing.T, ms int64) *Session {
 	t.Helper()
 	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	sess := newSession(eng, NoAuthHandler{}, "")
-	sess.setDefaultTxTimeout(DefaultTxTimeout) // production default; no MaxStatementTimeout
+	sess.setDefaultTxTimeout(overflowTestTxTimeout) // operator-configured bound; no MaxStatementTimeout
 	if _, err := sess.HandleMessage(context.Background(), helloMsg()); err != nil {
 		t.Fatalf("HELLO: %v", err)
 	}
@@ -125,10 +146,10 @@ func TestSec_TxTimeoutOverflow_ReaperBypassed(t *testing.T) {
 			}
 			// Conformant post-fix behaviour: a finite, bounded deadline is
 			// armed, no further in the future than the default bound.
-			maxAllowed := time.Now().Add(DefaultTxTimeout + time.Second)
+			maxAllowed := time.Now().Add(overflowTestTxTimeout + time.Second)
 			if sess.txDeadline.After(maxAllowed) {
-				t.Errorf("tx_timeout=%d produced txDeadline %v, further in the future than the default bound %v; the overflow clamp must not admit an unbounded deadline",
-					tc.ms, sess.txDeadline, DefaultTxTimeout)
+				t.Errorf("tx_timeout=%d produced txDeadline %v, further in the future than the configured bound %v; the overflow clamp must not admit an unbounded deadline",
+					tc.ms, sess.txDeadline, overflowTestTxTimeout)
 			}
 		})
 	}
@@ -143,7 +164,7 @@ func TestSec_TxTimeoutOverflow_CaughtWhenMaxStmtTimeoutSet(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{})
 	eng := cypher.NewEngine(g)
 	sess := newSession(eng, NoAuthHandler{}, "")
-	sess.setDefaultTxTimeout(DefaultTxTimeout)
+	sess.setDefaultTxTimeout(overflowTestTxTimeout)
 	sess.setMaxStmtTimeout(10 * time.Second) // operator-configured cap
 
 	if _, err := sess.HandleMessage(context.Background(), helloMsg()); err != nil {

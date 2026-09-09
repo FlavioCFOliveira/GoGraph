@@ -1,0 +1,56 @@
+================================================================================================
+FLOOR 1 — B vs B2, byte-identical binary, same rounds, same load  [ns/op]
+================================================================================================
+
+  SERIAL and low-concurrency (<=8 goroutines)  (n=237)
+    band                  n   median     p95     max  worst sig     BAR
+    < 100 ns             34    0.55%   1.95%   6.28%      1.36%   1.95%
+    100 ns - 10 us       55    0.46%   1.79%   4.08%      1.89%   1.89%
+    10 us - 1 ms         64    0.52%   2.59%   4.62%      1.36%   2.59%
+    > 1 ms               84    0.46%   1.17%   1.68%      1.28%   1.28%
+
+  OVERSUBSCRIBED ladder cells (64/256/1024 goroutines)  (n=6)
+    band                  n   median     p95     max  worst sig     BAR
+    100 ns - 10 us        3   10.68%  10.68%  26.13%     26.13%  26.13%
+    10 us - 1 ms          3    0.75%   0.75%   1.34%      0.00%   0.75%
+
+================================================================================================
+FLOOR 2 — A vs B on graph/index/count, whose TEST BINARY is byte-identical
+          BETWEEN the releases. n is small; it is a cross-CHECK on Floor 1,
+          not a substitute for it.
+================================================================================================
+
+  cross-arm, identical binary  (n=9)
+    band                  n   median     p95     max  worst sig     BAR
+    < 100 ns              6    0.44%   1.05%   1.25%      0.00%   1.05%
+    100 ns - 10 us        2    2.38%   2.13%   2.63%      0.00%   2.13%
+    10 us - 1 ms          1    7.87%   7.87%   7.87%      0.00%   7.87%
+
+================================================================================================
+THE BARS ACTUALLY USED
+================================================================================================
+   serial          < 100 ns             1.95%
+   serial          100 ns - 10 us       2.13%
+   serial          10 us - 1 ms         7.87%
+   serial          > 1 ms               1.28%
+   oversubscribed  100 ns - 10 us      26.13%
+   oversubscribed  10 us - 1 ms         0.75%
+
+Every Floor-1 row that reached p<0.05, with its population:
+    -26.13%  p=0.0202  OVERSUBSCRIBED BenchmarkReadTx_LockFree-1024
+     +1.89%  p=0.0129  serial         BenchmarkIndexedPointLookup/numeric/hash/n=5000-10
+     +1.79%  p=0.0051  serial         BenchmarkIndexedPointLookup/numeric/btree/n=5000-10
+     +1.51%  p=0.0050  serial         BenchmarkIndexedPointLookup/numeric/btree/n=20000-10
+     +1.43%  p=0.0051  serial         BenchmarkIndexedPointLookup/numeric/hash/n=20000-10
+     +1.36%  p=0.0306  serial         BenchmarkJoinReorderStatsLiveHistory/history=quiet-10
+     -1.36%  p=0.0103  serial         BenchmarkRelTypeProbe_Column-10
+     +1.30%  p=0.0301  serial         BenchmarkMsgObserve_NoopBackend-10
+     +1.28%  p=0.0453  serial         BenchmarkSnapshotApply_WALReplay-10
+     -1.16%  p=0.0453  serial         BenchmarkMsgKindOf-10
+     +1.06%  p=0.0202  serial         BenchmarkPlanReusePhases/2snapshot-10
+     +1.02%  p=0.0453  serial         BenchmarkDistinct_10k-10
+     -0.99%  p=0.0453  serial         BenchmarkBlockFormCount/bounded_comparison/rows=250/pattern_rewritten-10
+     +0.97%  p=0.0453  serial         BenchmarkBlockFormCount/bounded_comparison/rows=2500/pattern_unrewritten-10
+     +0.90%  p=0.0129  serial         BenchmarkIndexIntersectPlan_AcceptTwoOfThree-10
+     +0.84%  p=0.0453  serial         BenchmarkShortestPath_HighDegreeFan-10
+     -0.62%  p=0.0292  serial         BenchmarkIndexIntersectPlan_ControlNoIndex-10

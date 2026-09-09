@@ -1,0 +1,26 @@
+    runner_test.go:2140:   InvalidRelationshipPattern         matched 0/2  diags=map[parser.ParseError:2]
+    runner_test.go:2140:   InvalidUnicodeCharacter            matched 0/1  diags=map[parser.ParseError:1]
+    runner_test.go:2140:   InvalidUnicodeLiteral              matched 0/1  diags=map[parser.ParseError:1]
+    runner_test.go:2140:   MapElementAccessByNonString        matched 0/2  diags=map[*fmt.wrapError:2]
+    runner_test.go:2140:   MergeReadOwnWrites                 matched 0/2  diags=map[*fmt.wrapError:2]
+    runner_test.go:2140:   MissingParameter                   matched 0/1  diags=map[*fmt.wrapError:1]
+    runner_test.go:2140:   NegativeIntegerArgument            matched 4/7  diags=map[*fmt.wrapError:3 sema.ScopeError:NEGATIVE_INTEGER_ARGUMENT:4]
+    runner_test.go:2140:   NestedAggregation                  matched 1/1  diags=map[sema.ScopeError:NESTED_AGGREGATION:1]
+    runner_test.go:2140:   NoExpressionAlias                  matched 1/1  diags=map[sema.ScopeError:NO_EXPRESSION_ALIAS:1]
+    runner_test.go:2140:   NoSingleRelationshipType           matched 0/5  diags=map[*fmt.wrapError:3 sema.ScopeError:INVALID_ARGUMENT_TYPE:2]
+    runner_test.go:2140:   NoVariablesInScope                 matched 1/1  diags=map[sema.ScopeError:NO_VARIABLES_IN_SCOPE:1]
+    runner_test.go:2140:   NonConstantExpression              matched 0/4  diags=map[sema.ScopeError:INVALID_ARGUMENT_TYPE:4]
+    runner_test.go:2140:   NumberOutOfRange                   matched 0/11  diags=map[*fmt.wrapError:11]
+    runner_test.go:2140:   ProcedureNotFound                  matched 0/2  diags=map[*fmt.wrapError:2]
+    runner_test.go:2140:   RelationshipUniquenessViolation    matched 1/1  diags=map[sema.ScopeError:RELATIONSHIP_UNIQUENESS:1]
+    runner_test.go:2140:   RequiresDirectedRelationship       matched 0/2  diags=map[sema.ScopeError:INVALID_ARGUMENT_TYPE:2]
+    runner_test.go:2140:   UndefinedVariable                  matched 69/70  diags=map[sema.ScopeError:AMBIGUOUS_AGGREGATION_EXPRESSION:1 sema.ScopeError:UNDEFINED_VAR:69]
+    runner_test.go:2140:   UnexpectedSyntax                   matched 0/24  diags=map[parser.ParseError:12 parser.SemaError:projectionItem:11 parser.SemaError:setItem:1]
+    runner_test.go:2140:   UnknownFunction                    matched 1/1  diags=map[sema.ScopeError:UNKNOWN_FUNCTION:1]
+    runner_test.go:2140:   VariableAlreadyBound               matched 9/91  diags=map[*fmt.wrapError:1 sema.ScopeError:INVALID_ARGUMENT_TYPE:1 sema.ScopeError:REDECLARATION:80 sema.ScopeError:VARIABLE_ALREADY_BOUND:9]
+    runner_test.go:2140:   VariableTypeConflict               matched 0/159  diags=map[sema.ScopeError:REDECLARATION:159]
+    runner_test.go:2150: TCK execution: 3897 scenarios, 3897 passed, 0 failed, 0 undefined, 0 inconclusive (baseline=3897)
+--- PASS: TestTCKExecution (1.69s)
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/cypher/tck	2.034s
+PIPESTATUS_go=

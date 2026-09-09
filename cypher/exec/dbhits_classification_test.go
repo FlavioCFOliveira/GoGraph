@@ -58,10 +58,12 @@ const (
 //     #2761 converted Expand, OptionalExpand and columnarExpand — which is why the
 //     DERIVED group now holds only access-path leaves — #2762 converted the three
 //     morsel-parallel leaves, and #2763 converted ShortestPath and
-//     AllShortestPaths. What survives here is the count-store leaves, whose two
-//     answering paths (an O(1) maintained counter and a full materialisation)
-//     would need two different figures, and the two row-at-a-time operators that
-//     seek or intersect per outer row.
+//     AllShortestPaths. rmp #2777 then split the count-store leaves, which had been
+//     treated as one case because both answer from a maintained counter with a
+//     record-reading fallback behind it: AllNodesCountScan's fallback is INSIDE the
+//     operator and is now MEASURED, while LabelCountScan's is behind the resolver
+//     interface and stays here. What survives is that one leaf and the two
+//     row-at-a-time operators that seek or intersect per outer row.
 //   - HOLDS AN EXPRESSION CLOSURE — the operator evaluates a caller-supplied
 //     expression, and a GoGraph expression can WALK THE GRAPH: cypher's evalRow
 //     bridge passes expr.PatternEvaluator, whose EvalPattern /
@@ -89,6 +91,12 @@ var dbHitsCensus = map[string]struct {
 	"ParallelCountScan":     {classMeasured, "as ParallelScanProject; its worker already accumulates the morsel lengths for the count itself, and publishes the same figure once per morsel (rmp #2762)"},
 	"ShortestPath":          {classMeasured, "reports the adjacency slots every one of its five searches read — the two-sided BFS above all, which is the common path and was uncounted; charged one add per adjacency RUN, whose length is the scan loop's own bound, never per slot (rmp #2763)"},
 	"AllShortestPaths":      {classMeasured, "as ShortestPath, over its four searches; its BFS is level-synchronous rather than two-sided, and its rows mis-estimate the walk in both directions (rmp #2763)"},
+	"AllNodesCountScan": {classMeasured, "PATH-AWARE, and the only entry whose figure is a genuine 0 on its common path: " +
+		"0 when the O(1) live-node counter answers, and one per node id consumed when it declines and Init walks " +
+		"WalkNodeIDs. noStorageAccess could not state that — it is a claim about the TYPE, and rmp #2777 MEASURED the " +
+		"walk being taken by a plain `MATCH (n) RETURN count(*)` run against one uncommitted CREATE in another " +
+		"transaction (64 of 64 node ids consumed, against 0 on a drained substrate), so a flat 0 would have been " +
+		"false there. The counter is the walk's own n, so the charge is one add per Init and none per record (rmp #2777)"},
 
 	// ── DERIVED ────────────────────────────────────────────────────────────────
 	"AllNodesScan":         {classDerived, "one node reference per emitted row"},
@@ -122,8 +130,42 @@ var dbHitsCensus = map[string]struct {
 	// ── UNKNOWN: reads storage, counts nothing ─────────────────────────────────
 	"ExpandIntersect":     {classUnknown, "walks two CSR ranges and intersects them"},
 	"IndexNestedLoopJoin": {classUnknown, "seeks the index once per outer row"},
-	"LabelCountScan":      {classUnknown, "answers from a maintained counter when it can, and otherwise MATERIALISES the label bitmap; it counts neither path"},
-	"AllNodesCountScan":   {classUnknown, "answers from a maintained counter when it can, and otherwise WALKS every node id; it counts neither path"},
+	// RE-DECIDED TWICE AND STILL UNKNOWN (rmp #2777). The 2026-09-03 audit called a
+	// flat 0 defensible; rmp #2760 refused it because of the bitmap fallback; rmp
+	// #2773 then narrowed that fallback and reopened the question. It was settled by
+	// MEASURING which arm answers, on the shapes a real query plans, and the reason
+	// it stays "?" is NOT the one #2760 gave — it is a seam, not a cost:
+	//
+	//   - The exec-level ResolveLabelBitmap arm is now UNREACHABLE through any
+	//     planned query. Every production build hands this operator an
+	//     execLabelAdapter over cypher's *lpgLabelResolver, whose
+	//     ResolveLabelCountAsOf never declines, so the arm answered 0 times across
+	//     seven measured states (quiet, churn elsewhere, churn on the counted label,
+	//     a delete, and an open uncommitted transaction each way). It stays because
+	//     NewLabelCountScan is exported and takes any labelResolver: an embedder's
+	//     resolver with neither fast path materialises a bitmap on every count.
+	//   - The record read did not disappear with it, it MOVED BELOW THE INTERFACE.
+	//     lpg.Graph.LabelCountAsOf answers from the raw counter only while the churn
+	//     concerns some OTHER label; when it concerns the counted one it resolves the
+	//     filtered bitmap itself. Measured: 0.00 allocs/op in the first state against
+	//     14.00 in the second, identical to the ResolveLabelBitmap route it replaced,
+	//     with the bitmap arm taken 201 of 201 times. So #2773 removed a VACUOUS
+	//     clone, not the fallback.
+	//   - ResolveLabelCountAsOf returns (int64, bool) and nothing else, so the
+	//     operator cannot tell which arm answered. Unlike AllNodesCountScan it has no
+	//     path to be aware OF.
+	//
+	// And a figure for the correction arm would have to be invented: it reads roaring
+	// containers and a suspect set, not node references, so neither the cardinality
+	// nor the suspect count is "records read" in this column's unit. Reporting one
+	// anyway is exactly the number nobody stands behind that rmp #2760 removed. "?"
+	// is the true cell; a 0 would be false whenever a writer touches the label.
+	"LabelCountScan": {classUnknown, "answers from a maintained counter, and when the churn is on the counted label " +
+		"lpg.Graph.LabelCountAsOf resolves the filtered bitmap BELOW the resolver interface — measured 14.00 allocs/op " +
+		"there against 0.00 when the churn is elsewhere. ResolveLabelCountAsOf reports only (count, ok), so the operator " +
+		"cannot know which arm answered, and the correction arm reads bitmap containers rather than node references, " +
+		"which this column has no unit for. Re-decided on the post-#2773 code and NOT reopened: \"?\" is true, a 0 would " +
+		"be false under any writer on the label (rmp #2777)"},
 
 	// ── UNKNOWN: holds a caller-supplied expression closure ────────────────────
 	"Filter":           {classUnknown, "predFn may be a pattern predicate, which walks adjacency"},

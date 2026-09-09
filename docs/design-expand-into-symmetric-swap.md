@@ -369,6 +369,17 @@ where
   candidate this peephole can see**. `k = 1` is unreachable here and must not be
   assumed as the common case.
 
+  > **SUPERSEDED (noted 2026-09-08): there is no `…ByHandle` variant any more.**
+  > `Expand.lookupFwdEdgePosByHandle` was removed by commit `ef633fe3`
+  > ("a relationship's emitted identity is its stable handle", 2026-08-06), first
+  > shipped in **v0.11.0**. Only `Expand.lookupFwdEdgePos` survives, at
+  > `cypher/exec/expand.go:1126`. The `k = 2` conclusion is unaffected — the
+  > second probe is still taken, now unconditionally through
+  > `lookupFwdEdgePos` — so read the parenthesis as naming one function rather
+  > than two. Three stale doc-comment references to the removed name also
+  > survive in the source, at `cypher/exec/revtofwd.go:29`,
+  > `cypher/exec/varlen_expand.go:229` and `cypher/anchor_swap_plan.go:156`.
+
 `c_out`, `c_in` and `c_p` must be **measured, not carried over**: #2089a's
 β_out ≈ 19 ns predates #2142. #2150 calibrates all three on this machine and
 records the measurement in a code comment beside the constants, as the task
