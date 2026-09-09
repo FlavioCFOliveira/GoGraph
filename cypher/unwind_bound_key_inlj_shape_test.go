@@ -272,11 +272,8 @@ func TestUnwindBoundKey_IRShapeOfBothSpellings(t *testing.T) {
 			plan := inljLowerPlan(t, tc.query)
 			rendered := ir.Explain(plan)
 			sel, apply := inljFindSelectionOverApply(plan)
-			var shape string
-			switch {
-			case sel == nil:
-				shape = "no Selection over Apply"
-			default:
+			shape := "no Selection over Apply"
+			if sel != nil {
 				shape = fmt.Sprintf("Selection(%q) over Apply(outer=%s, inner=%s)",
 					sel.Predicate, ir.OperatorName(apply.Outer), ir.OperatorName(apply.Inner))
 			}
