@@ -297,16 +297,39 @@ func TestTypeCoverage_ListPredicateContractsPinned(t *testing.T) {
 		}
 	}
 
-	// UNWIND over the STORED list, aggregated three ways.
+	// UNWIND over the STORED list, aggregated three ways. count(x) and sum(x)
+	// are order-INVARIANT scalars, so they are pinned exactly. collect(x) is
+	// not: openCypher does not specify the input order an aggregate observes,
+	// so an ordered literal here would assert something the specification does
+	// not guarantee. It is compared as a MULTISET through the very helper the
+	// production checker uses, [collectMultisetDiff], so the two cannot drift
+	// apart (rmp #2786). What the multiset comparison must and must not forgive
+	// is guarded by TestTypeCoverage_CollectMultisetForgivesOrderOnly.
 	got, err := sm.engine.projectRowValues(ctx,
 		"MATCH (n:Typed {id:1}) UNWIND n.lst AS x RETURN count(x), sum(x), collect(x)", 3)
 	if err != nil || got == nil {
 		t.Fatalf("UNWIND probe: got=%v err=%v", got, err)
 	}
-	for i, w := range []string{"3", "60", "[10, 20, 30]"} {
+	for i, w := range []string{"3", "60"} {
 		if got[i].String() != w {
 			t.Errorf("UNWIND column %d = %s, want %s", i, got[i].String(), w)
 		}
+	}
+	lv, isList := got[2].(expr.ListValue)
+	if !isList {
+		t.Fatalf("UNWIND column 2 (collect) is %s, want a list", typedValueDesc(got[2]))
+	}
+	gotElems, wantElems, equal := collectMultisetDiff(lv, []int64{10, 20, 30})
+	// NON-VACUITY. A multiset comparison of two EMPTY sides agrees while
+	// proving nothing, so the want side actually compared is pinned to its
+	// rendered form: a helper that dropped or emptied its elements, or a change
+	// in the canonical rendering, surfaces here instead of as a silent pass.
+	if w := "[10 20 30]"; fmt.Sprint(wantElems) != w {
+		t.Fatalf("the collect multiset compares the want side as %s, want %s — an "+
+			"empty or truncated comparison cannot fail", fmt.Sprint(wantElems), w)
+	}
+	if !equal {
+		t.Errorf("collect(x) over UNWIND n.lst = %v, want the multiset %v", gotElems, wantElems)
 	}
 
 	// Membership over the whole label: 20 is in both lists, 10 in one, and the
@@ -327,6 +350,118 @@ func TestTypeCoverage_ListPredicateContractsPinned(t *testing.T) {
 
 	if v := CheckTypedListPredicates(1, sm.oracle, sm.engine); len(v) > 0 {
 		t.Fatalf("list-predicate checker fired on a faithful model: %v", v)
+	}
+}
+
+// TestTypeCoverage_CollectMultisetForgivesOrderOnly is the GUARD on the rmp
+// #2786 fix, in the shape rmp #2751 established for the same defect elsewhere:
+// sorting both sides before the comparison must forgive the PERMUTATION and
+// NOTHING else.
+//
+// A normalisation applied before an assertion is exactly the kind of change
+// that quietly turns a test into one that cannot fail, so both halves of the
+// contract are asserted here rather than described in a comment:
+//
+//   - THE MULTISET IS NOT FORGIVEN. A missing element, a duplicated element and
+//     a substituted element must each still be reported unequal. This half is
+//     deterministic, and it is the direct guard on the pinning test's oracle
+//     AND on [checkTypedListUnwind]'s, because both go through the same helper.
+//   - THE PERMUTATION IS FORGIVEN, end to end against the real engine — and the
+//     reorder is OBSERVED, not assumed, because a half that never sees a
+//     reorder proves nothing about one. collect() over UNWIND of a stored list
+//     emits in the STORED order (measured: a descending stored list emits
+//     descending), so seeding the SAME multiset in two different stored orders
+//     hands the comparison two genuinely different emission orders.
+func TestTypeCoverage_CollectMultisetForgivesOrderOnly(t *testing.T) {
+	list := func(vals ...int64) expr.ListValue {
+		lv := make(expr.ListValue, 0, len(vals))
+		for _, v := range vals {
+			lv = append(lv, expr.IntegerValue(v))
+		}
+		return lv
+	}
+	// The oracle side every arm is compared against: the fixture's own list.
+	want := []int64{10, 20, 30}
+
+	// Half one: what the comparison must and must not absorb.
+	for _, tc := range []struct {
+		name  string
+		got   expr.ListValue
+		equal bool // must it be reported EQUAL to the want multiset?
+	}{
+		{"identity", list(10, 20, 30), true},
+		{"reversed", list(30, 20, 10), true},
+		{"rotated", list(20, 30, 10), true},
+		{"missing first element", list(20, 30), false},
+		{"missing last element", list(10, 20), false},
+		{"duplicated first element", list(10, 10, 20, 30), false},
+		{"duplicated last element", list(10, 20, 30, 30), false},
+		{"substituted element", list(10, 20, 40), false},
+		{"element swapped for a duplicate", list(10, 10, 30), false},
+		{"no elements at all", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gotElems, wantElems, equal := collectMultisetDiff(tc.got, want)
+			if tc.equal && !equal {
+				t.Errorf("%s reported UNEQUAL (%v vs %v) — the comparison has stopped "+
+					"forgiving a permutation and the pinning test will flake",
+					tc.name, gotElems, wantElems)
+			}
+			if !tc.equal && equal {
+				t.Errorf("%s reported EQUAL (%v vs %v) — the pinning test and "+
+					"checkTypedListUnwind can no longer detect it and prove nothing",
+					tc.name, gotElems, wantElems)
+			}
+		})
+	}
+
+	// NON-VACUITY of half one. Two EMPTY sides agree, which is correct for a
+	// multiset yet proves nothing, so it is recorded here as the case every
+	// caller must guard against rather than left to be discovered as a silent
+	// pass. The pinning test carries that guard.
+	if _, _, equal := collectMultisetDiff(nil, nil); !equal {
+		t.Error("two empty sides must compare EQUAL; if that changed, the callers' " +
+			"non-emptiness guards are describing the wrong hazard")
+	}
+
+	// Half two: the same property end to end, on the very query the pinning
+	// test and checkTypedListUnwind both drive.
+	ctx := context.Background()
+	const q = "MATCH (n:Typed {id:1}) UNWIND n.lst AS x RETURN count(x), sum(x), collect(x)"
+	emitted := map[string]int{}
+	for _, stored := range [][]any{
+		{int64(10), int64(20), int64(30)},
+		{int64(30), int64(10), int64(20)},
+	} {
+		sm := typedListFixture(t, map[int64][]any{1: stored, 2: {int64(20), int64(40)}})
+		got, err := sm.engine.projectRowValues(ctx, q, 3)
+		if err != nil || got == nil {
+			t.Fatalf("stored %v: got=%v err=%v", stored, got, err)
+		}
+		lv, isList := got[2].(expr.ListValue)
+		if !isList {
+			t.Fatalf("stored %v: collect is %s, want a list", stored, typedValueDesc(got[2]))
+		}
+		emitted[got[2].String()]++ // BEFORE the comparison, which sorts its own copies
+		gotElems, wantElems, equal := collectMultisetDiff(lv, want)
+		if !equal {
+			t.Errorf("stored %v: collect multiset %v != oracle %v, but the two hold the "+
+				"same elements", stored, gotElems, wantElems)
+		}
+		// The oracle-driven checker must agree, on the same store.
+		if vs := checkTypedListUnwind(ctx, 1, 1, want, sm.engine); len(vs) > 0 {
+			t.Errorf("stored %v: checkTypedListUnwind fired on a faithful multiset: %v", stored, vs)
+		}
+	}
+	// NON-VACUITY of half two. If collect ever emits one fixed order whatever
+	// the stored order, this half stops exercising a reorder and would pass
+	// without proving anything about one.
+	if len(emitted) < 2 {
+		t.Errorf("both stored orders emitted the SAME collect order (%v), so this half "+
+			"no longer exercises a reorder and proves nothing about one. That is not "+
+			"necessarily a defect — the aggregate may have legitimately become "+
+			"order-stable — but establish that and pin the order deliberately; do not "+
+			"just delete this check", emitted)
 	}
 }
 

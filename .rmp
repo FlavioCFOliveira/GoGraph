@@ -1,1 +1,29 @@
-gograph
+# Groadmap project settings. Format: `key = value`, one per line.
+# `#` starts a comment. Unknown keys are ignored.
+#
+# This file is SHARED. Both skills that drive `rmp` read it with the same logic:
+#   * roadmap-manager    — reads `roadmap` only (tasks, sprints, backlog).
+#   * knowledge-authority — reads `roadmap` and `socket` (the knowledge graph).
+# So when either one edits this file it amends only its own key and preserves
+# every other line: dropping `socket` breaks the graph connection, and dropping
+# `roadmap` breaks both skills.
+#
+# The legacy form of this file was a single bare line holding just the roadmap
+# name. Both skills still accept it; this keyed form supersedes it.
+
+# The rmp roadmap that holds this project's tasks, sprints and knowledge graph.
+# Must match ^[a-z0-9_-]+$, at most 50 characters. Passed to rmp as `-r`.
+roadmap = gograph
+
+# Unix domain socket for the knowledge-graph server. `rmp graph serve` binds it
+# and `rmp graph client` connects to it, so BOTH ends must resolve the same path.
+#
+# This is deliberately the path rmp derives from the roadmap name. Keeping it
+# means `rmp web` — which cannot be told a socket — resolves the same file and
+# still works. A non-default path here makes the web interface unable to reach
+# the graph.
+#
+# `~` is expanded to $HOME. The path must fit the platform's socket-address
+# limit — measured at 103 bytes on macOS — or `serve` fails with exit 1 and
+# says so.
+socket = ~/.roadmaps/gograph/graph.sock

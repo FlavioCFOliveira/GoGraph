@@ -621,6 +621,31 @@ func (g *Graph[N, W]) LabelCountExact(lid LabelID, s *Snapshot) (int64, bool) {
 	// count path kept the single sample. [Graph.LabelCountBound] never had the
 	// defect because it reads the cardinality FIRST and the gate second.
 	//
+	// # The ORDER of the two reads is load-bearing, and is gated since rmp #2775
+	//
+	// Having two samples is not enough; the second must follow the cardinality.
+	// Swap them and a gate reading clear lets a write raise its hold, touch the
+	// index, and have the contaminated number returned as EXACT — the same
+	// Isolation break the second sample exists to prevent, reintroduced by
+	// reordering rather than by deletion.
+	//
+	// That swap passed every test in this package until rmp #2775, and the reason
+	// was the SEAM'S POSITION, not a missing test: [Graph.labelCountGateProbe]
+	// fired ABOVE the cardinality, and a write driven from there lands before BOTH
+	// reads, so the second gate sees its hold whichever side of the count it sits
+	// on and both orders decline. Moving the seam one line down — between the
+	// cardinality and the gate — makes
+	// [TestLabelCountExact_DeclinesWhenHistoryGoesLiveDuringTheCall] fail on the
+	// swap, and it still fails on a DELETED second sample, on the other symptom:
+	// the value is then the snapshot's own but the exactness flag is wrong.
+	//
+	// !! THE SEAM'S POSITION IS ITSELF UNDEFENDED !! Every gate here is defeated by
+	// a mutation that relocates the seam instead of the reads: move
+	// fireLabelCountGateProbe back above the cardinality and the swap passes again,
+	// with no test failing. Nothing but this comment and the godoc on
+	// [Graph.labelCountGateProbe] holds it in place. The same limit applies to
+	// [Graph.LabelCountAsOf], [Graph.LabelsCountExact] and [Graph.LabelCountBound].
+	//
 	// # Why the second sample is sound
 	//
 	// A write that could make the raw count disagree with s raises the gate before
@@ -661,8 +686,15 @@ func (g *Graph[N, W]) LabelCountExact(lid LabelID, s *Snapshot) (int64, bool) {
 	if g.labelBitmapNeedsFilter(s) {
 		return 0, false
 	}
-	g.fireLabelCountGateProbe()
 	n := int64(g.nodeIdx.Count(uint32(lid)))
+	// The seam sits HERE, BETWEEN the cardinality and the gate sample that
+	// follows it, because that is the only position from which the ORDER of
+	// those two reads is observable at all (rmp #2775). It fired ABOVE the
+	// cardinality until then, and from there a driven write lands before BOTH
+	// reads, so the second gate sees its hold wherever that gate sits and an
+	// INVERTED implementation passed every test in this package. See
+	// [Graph.labelCountGateProbe].
+	g.fireLabelCountGateProbe()
 	if g.labelBitmapNeedsFilter(s) {
 		return 0, false
 	}
@@ -748,6 +780,14 @@ func (g *Graph[N, W]) fireLabelCountGateProbe() {
 	}
 }
 
+// fireLabelCountWindowProbe runs the test-only seam described on
+// [Graph.labelCountWindowProbe]. It is a nil check in production.
+func (g *Graph[N, W]) fireLabelCountWindowProbe() {
+	if p := g.labelCountWindowProbe; p != nil {
+		p()
+	}
+}
+
 // fireLabelCountAsOfWindowProbe runs the test-only seam described on
 // [Graph.labelCountAsOfWindowProbe]. It is a nil check in production.
 func (g *Graph[N, W]) fireLabelCountAsOfWindowProbe() {
@@ -791,9 +831,62 @@ func (g *Graph[N, W]) fireLabelCountAsOfWindowProbe() {
 // gives. A caller that needs an exact count must still use that method; this one
 // never promises one.
 //
+// # The ORDER of the two reads is load-bearing, and is gated since rmp #2775
+//
+// The cardinality is read FIRST and the gate second, and that is not incidental
+// — it is why this function never had [Graph.LabelCountExact]'s rmp #2688 defect.
+// Swap them and a gate reading clear lets a write raise its hold, touch the
+// index, and have the contaminated present-time number returned as EXACT for a
+// snapshot that predates it: the same Isolation break, committed by ordering
+// alone rather than by a missing sample.
+//
+// The claim went undefended until rmp #2775 because this function had NO seam,
+// so the interleaving was untestable rather than merely untested — the window is
+// a few nanoseconds between two atomic loads and a concurrent oracle was MEASURED
+// not to pin it (see [Graph.labelCountGateProbe]). It now fires
+// [Graph.labelCountWindowProbe] between the two reads, and
+// [TestLabelCountBound_TheInvertedOrderReportsAWriteFromInsideTheWindow] fails on
+// the swap.
+//
+// # What the seam costs, MEASURED, and why it was added anyway
+//
+// It is NOT free, and rmp #2775 measured it rather than assuming it away. On this
+// function's cheapest path — drained graph, present-time reader, exact arm — the
+// added nil load and branch cost +0.337 ns/op: 9.410n ± 2% with the seam against
+// 9.073n ± 1% without, +3.58%, p=0.004, n=6, interleaved A/B, Apple M4, plain
+// build, host at loadavg ~2.4 and therefore NOT idle. B/op and allocs/op stay 0.
+//
+// The relative figure is the misleading one. This is called ONCE per plan build
+// per label (the parallel-scan screen in cypher/api.go), so a third of a
+// nanosecond is ~1e-4 of one microsecond-scale plan — set against the 4.1 GB of
+// bitmap clones over one run of examples/35_mvcc_mixed_workload that the function
+// exists to avoid (rmp #2392).
+//
+// rmp #2775 also measured the blast radius of the DEFECT, and it is narrower than
+// the claim: no production caller reads exact.
+// [lpgLabelResolver.ResolveLabelCountBound]'s only non-test consumer discards it
+// (`n, _ :=`, cypher/api.go), the statistics path rejected the bound outright as
+// the wrong instrument (rmp #2771), and the inverted order's error in n is an
+// OVER-count — the safe direction for an upper bound. The seam was added anyway
+// because this method is EXPORTED: the claim binds callers outside this
+// repository, and correct outranks fast.
+//
+// A build-tagged seam would cost zero in production and was rejected: it would
+// mean the tested build is not the shipped build. The nil-func field is this
+// package's house pattern ([Graph.disarmMVCCForTest]) precisely because it keeps
+// them the same binary.
+//
+// !! THE SEAM'S POSITION IS ITSELF UNDEFENDED !! Relocating the call above the
+// cardinality restores the hole with no test failing. See [Graph.LabelCountExact]
+// for that limit stated in full.
+//
 // Safe for concurrent use.
 func (g *Graph[N, W]) LabelCountBound(lid LabelID, s *Snapshot) (n int64, exact bool) {
 	raw := int64(g.nodeIdx.Count(uint32(lid)))
+	// The seam sits HERE, between the two reads, because that is the only place
+	// from which the order above can be tested at all. See
+	// [Graph.labelCountWindowProbe].
+	g.fireLabelCountWindowProbe()
 	if !g.labelBitmapNeedsFilter(s) {
 		return raw, true
 	}
@@ -821,6 +914,28 @@ func (g *Graph[N, W]) LabelCountBound(lid LabelID, s *Snapshot) (n int64, exact 
 //
 // ok is false only when the conjunction is not answerable at all (no labels).
 //
+// # Both the SECOND SAMPLE and the ORDER are load-bearing, and gated since rmp #2775
+//
+// The gate is sampled either side of the cardinality, and the second sample must
+// FOLLOW it. Deleting that sample returns a present-time conjunction count to a
+// snapshot reader; swapping it above the cardinality lets a write raise its hold,
+// touch both bitmaps, and have the contaminated intersection returned instead.
+// Both are Isolation breaks, and rmp #2775 measured that NEITHER failed a test:
+// the function was undriven entirely — no test in the repository installed
+// [Graph.labelCountGateProbe] and called it.
+//
+// It now carries TWO seams, because its oracle is the VALUE rather than a flag
+// and one position cannot expose both mutants. [Graph.labelCountGateProbe] fires
+// BEFORE the cardinality, where a driven write contaminates it and a deleted
+// second sample returns the contaminated number
+// ([TestLabelsCountExact_CorrectsWhenHistoryGoesLiveDuringTheCall]).
+// [Graph.labelCountWindowProbe] fires BETWEEN the two reads, where only the
+// inverted order picks the write up
+// ([TestLabelsCountExact_TheInvertedOrderReportsAWriteFromInsideTheWindow]).
+//
+// !! BOTH SEAM POSITIONS ARE THEMSELVES UNDEFENDED !! See [Graph.LabelCountExact]
+// for that limit stated in full.
+//
 // Safe for concurrent use.
 func (g *Graph[N, W]) LabelsCountExact(lids []LabelID, s *Snapshot) (int64, bool) {
 	if len(lids) == 0 {
@@ -838,6 +953,10 @@ func (g *Graph[N, W]) LabelsCountExact(lids []LabelID, s *Snapshot) (int64, bool
 	if !ok {
 		return 0, false
 	}
+	// The second seam, at the between-position this time, because the one above
+	// cannot test the ORDER of the two reads below it — a write driven from there
+	// lands before both. See [Graph.labelCountWindowProbe].
+	g.fireLabelCountWindowProbe()
 	// The second gate sample, for the same reason and with the same soundness
 	// argument (and the same horizon dependency) as [Graph.LabelCountExact]
 	// (rmp #2688): the zero-alloc branch was reached on a gate reading taken

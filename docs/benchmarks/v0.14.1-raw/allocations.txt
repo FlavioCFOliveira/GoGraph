@@ -1,0 +1,146 @@
+====================================================================================================
+allocs/op: rows whose MEDIAN differs between the arms
+====================================================================================================
+  exec      BenchmarkColumnarAgg_SumCountGroupBy/row_off-10               3146647 -> 3146648       +0.00%  samples vary
+  cy        BenchmarkColumnarShape_HopAnchorFilterLabelledFarEnd-10         39649 -> 39650         +0.00%  samples vary
+  cy        BenchmarkColumnarShape_HopBaseline-10                           39634 -> 39635         +0.00%  samples vary
+  cy        BenchmarkColumnarShape_HopLabelledFarEnd-10                     39650 -> 39650         +0.00%  samples vary
+  cy        BenchmarkCountAllNodes-10                                          27 -> 28            +3.70%  every sample equal
+  cy        BenchmarkCountNodeVar-10                                         6571 -> 6572          +0.02%  every sample equal
+  cy        BenchmarkCreateRelationships-10                                 18065 -> 18062         -0.02%  samples vary
+  cy        BenchmarkDeleteAccumulated/accumulated=0-10                    205194 -> 205197        +0.00%  every sample equal
+  cy        BenchmarkDeleteAccumulated/accumulated=20000-10                201354 -> 201357        +0.00%  samples vary
+  cy        BenchmarkDeleteAccumulated/accumulated=60000-10                210720 -> 210190        -0.25%  samples vary
+  cy        BenchmarkIndexSeek_vs_LabelScan/IndexSeek-10                     2903 -> 2904          +0.02%  samples vary
+  cy        BenchmarkMergeUnwindBatch/batch=200/cold=0-10                   47396 -> 47397         +0.00%  every sample equal
+  cy        BenchmarkMergeUnwindBatch/batch=200/cold=16384-10               45795 -> 45796         +0.00%  every sample equal
+  cy        BenchmarkMergeUnwindBatch/batch=200/cold=4096-10                45795 -> 45796         +0.00%  every sample equal
+  cy        BenchmarkNumericEqualitySeek_ScalarSeek/64000-10               258456 -> 258456        -0.00%  samples vary
+  cy        BenchmarkPlanCacheHit_Parameterised-10                             90 -> 90            -1.10%  samples vary
+  cy        BenchmarkPlanCacheMiss_InlinedLiteral-10                          403 -> 402           -0.37%  samples vary
+  cy        BenchmarkPlanCacheMiss_InlinedLiteralNoComment-10                  92 -> 90            -2.17%  samples vary
+  cy        BenchmarkRecoveredIndexPopulation/backfill-10                  267836 -> 267842        +0.00%  samples vary
+  cy        BenchmarkRecoveredIndexPopulation/hydrate-10                   318857 -> 318867        +0.00%  samples vary
+  cy        BenchmarkScalarFilterProjection-10                              19801 -> 19802         +0.01%  every sample equal
+  rec       BenchmarkIndexesRecoveryVsRebuild/rebuild-10                   137942 -> 137938        -0.00%  samples vary
+  rec       BenchmarkIndexesRecoveryVsRebuild/snapshot-10                  735102 -> 735101        -0.00%  samples vary
+  rec       BenchmarkSnapshotApply_Snapshot-10                            1961500 -> 1961500       -0.00%  samples vary
+  rec       BenchmarkSnapshotApply_WALReplay-10                           4439547 -> 4441972       +0.05%  samples vary
+  Lreadtx   BenchmarkReadTx_WriterLock                                        114 -> 116           +1.75%  every sample equal
+  Lreadtx   BenchmarkReadTx_WriterLock-1024                                   114 -> 116           +1.75%  every sample equal
+  Lreadtx   BenchmarkReadTx_WriterLock-256                                    114 -> 116           +1.75%  every sample equal
+  Lreadtx   BenchmarkReadTx_WriterLock-64                                     114 -> 116           +1.75%  every sample equal
+  Lreadtx   BenchmarkReadTx_WriterLock-8                                      114 -> 116           +1.75%  every sample equal
+  -> 30 of 229 rows moved; 32 are zero-allocation in both arms
+
+====================================================================================================
+B/op: rows whose MEDIAN differs between the arms
+====================================================================================================
+  exec      BenchmarkAllShortestPaths_HighDegreeFan-10                    5107414 -> 5107412       -0.00%  samples vary
+  exec      BenchmarkAllShortestPaths_UnitDegreeChain-10                 13581810 -> 13581808      -0.00%  samples vary
+  exec      BenchmarkBoundedOrder/n=000010/Sort-10                       23134490 -> 23134492      +0.00%  samples vary
+  exec      BenchmarkBoundedOrder/n=010010/Sort-10                       23134492 -> 23134490      -0.00%  samples vary
+  exec      BenchmarkBoundedOrder/n=010010/Top-10                         4219314 -> 4219314       -0.00%  samples vary
+  exec      BenchmarkBoundedOrder/n=060000/Sort-10                       23134490 -> 23134491      +0.00%  samples vary
+  exec      BenchmarkBoundedOrder/n=060000/Top-10                        26976604 -> 26976602      -0.00%  samples vary
+  exec      BenchmarkBoundedOrder/n=120000/Sort-10                       23134492 -> 23134490      -0.00%  samples vary
+  exec      BenchmarkBoundedOrder/n=120000/Top-10                        23134555 -> 23134554      -0.00%  samples vary
+  exec      BenchmarkBuildReverse_vs_E/E=10000-10                          508016 -> 508017        +0.00%  samples vary
+  exec      BenchmarkBuildReverse_vs_E/E=100000-10                        4817010 -> 4817009       -0.00%  samples vary
+  exec      BenchmarkBuildReverse_vs_E/E=1000000-10                      48021620 -> 48021622      +0.00%  samples vary
+  exec      BenchmarkColumnarAgg_MinMaxGroupBy/columnar_on-10              144368 -> 144370        +0.00%  samples vary
+  exec      BenchmarkColumnarAgg_MinMaxGroupBy/row_off-10                58764278 -> 58764264      -0.00%  samples vary
+  exec      BenchmarkColumnarAgg_SumCountGroupBy/columnar_on-10            140683 -> 140680        -0.00%  samples vary
+  exec      BenchmarkColumnarAgg_SumCountGroupBy/row_off-10              58766280 -> 58766276      -0.00%  samples vary
+  exec      BenchmarkDistinct_10k-10                                       275865 -> 275864        -0.00%  samples vary
+  exec      BenchmarkExpandFilter_Columnar-10                              297744 -> 297808        +0.02%  samples vary
+  exec      BenchmarkExpandFilter_RowMode-10                              1497682 -> 1497748       +0.00%  samples vary
+  exec      BenchmarkExpandIn_TypeFiltered_vs_SourceOutdegree/K=65536/one_in_edge_typed-10    4552117 -> 4552118       +0.00%  samples vary
+  exec      BenchmarkExpandOut_PerEdge_SingleSource/K=65536-10            1044700 -> 1044700       +0.00%  samples vary
+  exec      BenchmarkLimit_Throughput-10                                   590066 -> 590065        -0.00%  samples vary
+  exec      BenchmarkPermuteRowsBuffered-10                               2883585 -> 2883584       -0.00%  samples vary
+  exec      BenchmarkShortestPath_HighDegreeFan-10                        4463509 -> 4463510       +0.00%  samples vary
+  exec      BenchmarkShortestPath_UnitDegreeChain-10                      1685532 -> 1685533       +0.00%  samples vary
+  exec      BenchmarkSort_10k-10                                          2519854 -> 2519854       +0.00%  samples vary
+  cy        BenchmarkBlockFormCount/bounded_comparison/rows=250/block_unrewritten-10     316164 -> 316230        +0.02%  samples vary
+  cy        BenchmarkBlockFormCount/bounded_comparison/rows=250/pattern_unrewritten-10     316214 -> 316278        +0.02%  samples vary
+  cy        BenchmarkBlockFormCount/bounded_comparison/rows=2500/block_unrewritten-10    3183282 -> 3183350       +0.00%  samples vary
+  cy        BenchmarkBlockFormCount/bounded_comparison/rows=2500/pattern_unrewritten-10    3183340 -> 3183400       +0.00%  samples vary
+  cy        BenchmarkBlockFormCount/labelled_hop/rows=250/block_unrewritten-10     320006 -> 320072        +0.02%  samples vary
+  cy        BenchmarkBlockFormCount/labelled_hop/rows=250/pattern_unrewritten-10     320054 -> 320118        +0.02%  samples vary
+  cy        BenchmarkBlockFormCount/labelled_hop/rows=2500/block_unrewritten-10    3223986 -> 3224052       +0.00%  samples vary
+  cy        BenchmarkBlockFormCount/labelled_hop/rows=2500/pattern_unrewritten-10    3224026 -> 3224100       +0.00%  samples vary
+  cy        BenchmarkBlockFormCount/typed_degree/rows=250/block_unrewritten-10     342808 -> 342872        +0.02%  every sample equal
+  cy        BenchmarkBlockFormCount/typed_degree/rows=250/pattern_unrewritten-10     342856 -> 342920        +0.02%  samples vary
+  cy        BenchmarkBlockFormCount/typed_degree/rows=2500/block_unrewritten-10    3462444 -> 3462508       +0.00%  samples vary
+  cy        BenchmarkBlockFormCount/typed_degree/rows=2500/pattern_rewritten-10    1945114 -> 1945114       -0.00%  samples vary
+  cy        BenchmarkBlockFormCount/typed_degree/rows=2500/pattern_unrewritten-10    3462492 -> 3462556       +0.00%  samples vary
+  cy        BenchmarkColumnarShape_HopAnchorAndPostFilter-10              1482222 -> 1482402       +0.01%  samples vary
+  cy        BenchmarkColumnarShape_HopAnchorFilter-10                     1328672 -> 1328870       +0.01%  samples vary
+  cy        BenchmarkColumnarShape_HopAnchorFilterLabelledFarEnd-10       1330978 -> 1331307       +0.02%  samples vary
+  cy        BenchmarkColumnarShape_HopBaseline-10                         1328718 -> 1328954       +0.02%  samples vary
+  cy        BenchmarkColumnarShape_HopLabelledFarEnd-10                   1330846 -> 1331098       +0.02%  samples vary
+  cy        BenchmarkCountAllNodes-10                                        3296 -> 3488          +5.83%  every sample equal
+  cy        BenchmarkCountNodeVar-10                                       278403 -> 278643        +0.09%  every sample equal
+  cy        BenchmarkCountPushdown_FullScan-10                           10036597 -> 10036596      -0.00%  samples vary
+  cy        BenchmarkCountPushdown_O1-10                                     2024 -> 2040          +0.79%  every sample equal
+  cy        BenchmarkCreateRelationships-10                               5551596 -> 5562670       +0.20%  samples vary
+  cy        BenchmarkDeleteAccumulated/accumulated=0-10                  65675380 -> 65670126      -0.01%  samples vary
+  cy        BenchmarkDeleteAccumulated/accumulated=20000-10              57552998 -> 57554938      +0.00%  samples vary
+  cy        BenchmarkDeleteAccumulated/accumulated=60000-10              60504858 -> 60454232      -0.08%  samples vary
+  cy        BenchmarkIndexSeek_vs_LabelScan/IndexSeek-10                  5484740 -> 5484754       +0.00%  samples vary
+  cy        BenchmarkIndexSeek_vs_LabelScan/LabelScan-10                 10139974 -> 10143753      +0.04%  samples vary
+  cy        BenchmarkJoinReorderStatsLiveHistory/history=live-10           299868 -> 299866        -0.00%  samples vary
+  cy        BenchmarkJoinReorderStatsLiveHistory/history=quiet-10          286815 -> 286816        +0.00%  samples vary
+  cy        BenchmarkJoinReorderStatsSkewed/reorder=off-10               48355471 -> 48355626      +0.00%  samples vary
+  cy        BenchmarkJoinReorderStatsSkewed/reorder=on-10                  566559 -> 566561        +0.00%  samples vary
+  cy        BenchmarkMergeUnwindBatch/batch=200/cold=0-10                 4036578 -> 4036764       +0.00%  samples vary
+  cy        BenchmarkMergeUnwindBatch/batch=200/cold=16384-10             1053872 -> 1054046       +0.02%  samples vary
+  cy        BenchmarkMergeUnwindBatch/batch=200/cold=4096-10              1053884 -> 1054060       +0.02%  samples vary
+  cy        BenchmarkNumericEqualitySeek_EntityScan/16000-10               520006 -> 520007        +0.00%  samples vary
+  cy        BenchmarkNumericEqualitySeek_EntityScan/64000-10              5990839 -> 5990838       -0.00%  samples vary
+  cy        BenchmarkNumericEqualitySeek_EntitySeek/64000-10              5990988 -> 5990992       +0.00%  samples vary
+  cy        BenchmarkNumericEqualitySeek_ScalarScan/16000-10               460774 -> 460776        +0.00%  samples vary
+  cy        BenchmarkNumericEqualitySeek_ScalarScan/4000-10                172723 -> 172724        +0.00%  samples vary
+  cy        BenchmarkNumericEqualitySeek_ScalarScan/64000-10              1613039 -> 1613034       -0.00%  samples vary
+  cy        BenchmarkNumericEqualitySeek_ScalarSeek/64000-10              6040771 -> 6040772       +0.00%  samples vary
+  cy        BenchmarkNumericRangeSeek_Scan-10                             2724717 -> 2724730       +0.00%  samples vary
+  cy        BenchmarkParallelScan_CountBig_Parallel-10                    8384062 -> 8384053       -0.00%  samples vary
+  cy        BenchmarkParallelScan_CountBig_Serial-10                         2024 -> 2040          +0.79%  every sample equal
+  cy        BenchmarkParallelScan_CountSmall_DefaultEnabled-10               2016 -> 2032          +0.79%  every sample equal
+  cy        BenchmarkParallelScan_CountSmall_Disabled-10                     2016 -> 2032          +0.79%  every sample equal
+  cy        BenchmarkPlanCacheHit_Parameterised-10                          15597 -> 15758         +1.03%  samples vary
+  cy        BenchmarkPlanCacheMiss_InlinedLiteral-10                        33263 -> 33545         +0.85%  samples vary
+  cy        BenchmarkPlanCacheMiss_InlinedLiteralNoComment-10               15289 -> 15441         +0.99%  samples vary
+  cy        BenchmarkRecoveredIndexPopulation/backfill-10                22124816 -> 22105128      -0.09%  samples vary
+  cy        BenchmarkRecoveredIndexPopulation/hydrate-10                 20299595 -> 20298346      -0.01%  samples vary
+  cy        BenchmarkReorderDrainCost/scan=bare-10                         271234 -> 271235        +0.00%  samples vary
+  cy        BenchmarkReorderDrainCost/scan=filtered-10                     239462 -> 239463        +0.00%  samples vary
+  cy        BenchmarkResultMaterialize_FullScanLarge-10                   5557708 -> 5557710       +0.00%  samples vary
+  cy        BenchmarkScalarFilterProjection-10                             410338 -> 410515        +0.04%  samples vary
+  rec       BenchmarkIndexesRecoveryVsRebuild/rebuild-10                 29644400 -> 29589804      -0.18%  samples vary
+  rec       BenchmarkIndexesRecoveryVsRebuild/snapshot-10                40155754 -> 40094254      -0.15%  samples vary
+  rec       BenchmarkSnapshotApply_Snapshot-10                          157446867 -> 157446760     -0.00%  samples vary
+  rec       BenchmarkSnapshotApply_WALReplay-10                         221600501 -> 221903130     +0.14%  samples vary
+  txn       BenchmarkCommit/ops=1-10                                          592 -> 592           +0.08%  samples vary
+  txn       BenchmarkCommit/ops=16-10                                       11054 -> 11042         -0.11%  samples vary
+  bolt      BenchmarkBoltRecordEncodePage/baseline-10                     2880005 -> 2880004       -0.00%  samples vary
+  bolt      BenchmarkNodeReturnToPackstream-10                             293316 -> 293315        -0.00%  samples vary
+  search    BenchmarkDijkstra_Large-10                                    1129160 -> 1129156       -0.00%  samples vary
+  search    BenchmarkYen_K100-10                                           459678 -> 459630        -0.01%  samples vary
+  Lreadtx   BenchmarkReadTx_LockFree                                         4182 -> 4188          +0.14%  samples vary
+  Lreadtx   BenchmarkReadTx_LockFree-1024                                    4190 -> 4196          +0.12%  samples vary
+  Lreadtx   BenchmarkReadTx_LockFree-256                                     4174 -> 4210          +0.89%  samples vary
+  Lreadtx   BenchmarkReadTx_LockFree-64                                      4188 -> 4211          +0.56%  samples vary
+  Lreadtx   BenchmarkReadTx_LockFree-8                                       4168 -> 4171          +0.06%  samples vary
+  Lreadtx   BenchmarkReadTx_WriterLock                                      48281 -> 48633         +0.73%  every sample equal
+  Lreadtx   BenchmarkReadTx_WriterLock-1024                                 48318 -> 48675         +0.74%  samples vary
+  Lreadtx   BenchmarkReadTx_WriterLock-256                                  48296 -> 48647         +0.73%  samples vary
+  Lreadtx   BenchmarkReadTx_WriterLock-64                                   48291 -> 48642         +0.73%  samples vary
+  Lreadtx   BenchmarkReadTx_WriterLock-8                                    48288 -> 48639         +0.73%  samples vary
+  Ltxn      BenchmarkCommitConcurrent/goroutines=1-10                         593 -> 596           +0.42%  samples vary
+  Ltxn      BenchmarkCommitConcurrent/goroutines=256-10                       716 -> 718           +0.35%  samples vary
+  Ltxn      BenchmarkCommitConcurrent/goroutines=64-10                        686 -> 690           +0.44%  samples vary
+  Ltxn      BenchmarkCommitConcurrent/goroutines=8-10                         588 -> 590           +0.51%  samples vary
+  -> 106 of 229 rows moved; 32 are zero-allocation in both arms
+

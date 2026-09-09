@@ -655,24 +655,35 @@ func TestMVCCRegression_RefusedRetirementPhasesStrandNothing(t *testing.T) {
 	}
 }
 
-// regressionRows renders one projected column of an engine query, as a string,
-// so an arm can compare against a literal.
-// regressionRows renders a query's rows in a SORTED, order-independent form.
+// regressionRows renders one projected column of an engine query in a SORTED,
+// order-independent form, so an arm can compare it against a literal.
 //
 // # Why sorted (rmp #2751)
 //
 // None of these queries carries an ORDER BY, and openCypher does not specify row
-// order without one, so comparing the emission order against a literal tests
-// something the specification does not guarantee. It bites in both directions:
-// the multi-row arm read ["y" "x"] under `make ci`'s cover gate while passing 30
-// times out of 30 in isolation, and — the worse half — an assertion that happens
-// to match one ordering says nothing about the SET that came back.
+// order without one, so comparing the emission order against a literal tested
+// something the specification does not guarantee. It bit in both directions. The
+// visible half is the spurious failure: with the sort removed, the multi-row arm
+// reports ["y" "x"] in 59 runs out of 120 — a coin flip, not a rare flake, and
+// the only arm of the five that ever moves. The worse half is silent: an
+// assertion that happens to match one ordering says nothing about the SET that
+// came back.
 //
 // Sorting is deliberately not the same as dropping the check. These arms exist
 // to prove a refused retirement strands nothing, so the property is the
-// multiset: a MISSING row still shortens the result and a DUPLICATE still
-// lengthens it, and both still fail. Only the permutation is forgiven.
+// MULTISET: a missing row still shortens the result and a duplicate still
+// lengthens it, and both still fail. Only the permutation is forgiven — which is
+// asserted, not merely claimed, by
+// TestRegressionRowsForgivesOrderButNotMultiset.
 func regressionRows(t *testing.T, eng *cypher.Engine, q string) string {
+	t.Helper()
+	return renderRegressionRows(regressionRawRows(t, eng, q))
+}
+
+// regressionRawRows drains one projected column in EMISSION order. Every
+// assertion goes through renderRegressionRows instead; only the #2751 guard
+// consumes the raw order, and only to prove the engine really does reorder.
+func regressionRawRows(t *testing.T, eng *cypher.Engine, q string) []string {
 	t.Helper()
 	res, err := eng.Run(context.Background(), q, nil)
 	if err != nil {
@@ -686,8 +697,116 @@ func regressionRows(t *testing.T, eng *cypher.Engine, q string) string {
 		t.Fatalf("query %q drain: %v", q, err)
 	}
 	_ = res.Close()
-	sort.Strings(out)
-	return fmt.Sprint(out)
+	return out
+}
+
+// renderRegressionRows sorts a COPY of a drained column and renders it. The copy
+// is what lets a caller inspect the emission order and the rendered form of the
+// same drain without the first being sorted out from under it. A nil column
+// still renders "[]", exactly as the unsorted version did.
+func renderRegressionRows(rows []string) string {
+	sorted := append([]string(nil), rows...)
+	sort.Strings(sorted)
+	return fmt.Sprint(sorted)
+}
+
+// TestRegressionRowsForgivesOrderButNotMultiset is the GUARD on the rmp #2751
+// fix: sorting before the comparison must forgive the PERMUTATION and nothing
+// else.
+//
+// A normalisation applied before an assertion is exactly the kind of change that
+// quietly turns a test into one that cannot fail, so both halves of the contract
+// are asserted here rather than described in a comment:
+//
+//   - THE MULTISET IS NOT FORGIVEN. A missing row, a duplicated row and a
+//     substituted row must each still render differently from the base. This
+//     half is deterministic, and it is the direct guard on the arms' oracle.
+//   - THE PERMUTATION IS FORGIVEN, end to end against the real engine — and the
+//     reorder is OBSERVED, not assumed, because a half that never sees a reorder
+//     proves nothing about one. The reorder lives BETWEEN stores, not between
+//     queries, so this half opens a fresh store per iteration.
+func TestRegressionRowsForgivesOrderButNotMultiset(t *testing.T) {
+	// The engine renders a projected string as a QUOTED token, so the guard uses
+	// the same tokens the multi-row arm compares. Pinning base to that arm's own
+	// want literal means a change in either the sort or the value rendering
+	// surfaces here rather than as a mystery failure in the arm.
+	const qx, qy, qz = `"x"`, `"y"`, `"z"`
+	base := renderRegressionRows([]string{qx, qy})
+	if want := `["x" "y"]`; base != want {
+		t.Fatalf("base renders %s, want %s — the multi-row arm's want literal no "+
+			"longer describes what the render produces", base, want)
+	}
+
+	// Half one: what the render must and must not absorb.
+	for _, tc := range []struct {
+		name string
+		rows []string
+		same bool // must it render identically to the base?
+	}{
+		{"identity", []string{qx, qy}, true},
+		{"permutation", []string{qy, qx}, true},
+		{"missing first row", []string{qy}, false},
+		{"missing second row", []string{qx}, false},
+		{"duplicated first row", []string{qx, qx, qy}, false},
+		{"duplicated second row", []string{qx, qy, qy}, false},
+		{"substituted row", []string{qx, qz}, false},
+		{"no rows at all", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := renderRegressionRows(tc.rows)
+			if tc.same && got != base {
+				t.Errorf("%s renders %s, want the base %s — the comparison has "+
+					"stopped forgiving a permutation and the arms will flake",
+					tc.name, got, base)
+			}
+			if !tc.same && got == base {
+				t.Errorf("%s renders %s, which MATCHES the base — the arms' oracle "+
+					"can no longer detect this and proves nothing", tc.name, got)
+			}
+		})
+	}
+
+	// Half two: the same property end to end, on the very query and the very seed
+	// the multi-row arm uses.
+	//
+	// A FRESH STORE PER ITERATION IS LOAD-BEARING, and measured, not assumed. The
+	// emission order is STABLE WITHIN ONE ENGINE — 64 repeats of this query on a
+	// single engine returned one order 64 times — and varies BETWEEN stores, at
+	// close to one flip in two. Which of the two a store settles on, and what fixes
+	// it, was not established. Looping the query on one engine would therefore
+	// observe no reorder however long it ran. Each arm of the table opens its own
+	// store, so a store per iteration is also the faithful exercise.
+	//
+	// At a measured per-store reorder rate near one half, 40 stores put the odds
+	// of drawing a single order below 2^-38.
+	const iterations = 40
+	rawOrders := map[string]int{}
+	rendered := map[string]int{}
+	for i := 0; i < iterations; i++ {
+		eng := regressionStore(t).Engine()
+		seeder := eng.NewSession()
+		mustExecCommit(t, seeder, "CREATE (n:Person {name:'x', age:1})", nil)
+		mustExecCommit(t, seeder, "CREATE (n:Person {name:'y', age:2})", nil)
+		raw := regressionRawRows(t, eng, "MATCH (n:Person) RETURN n.name")
+		rawOrders[fmt.Sprint(raw)]++ // BEFORE the render, which sorts a copy
+		rendered[renderRegressionRows(raw)]++
+	}
+	if len(rendered) != 1 {
+		t.Errorf("%d identical queries produced %d distinct renders (%v); "+
+			"regressionRows is not order-independent", iterations, len(rendered), rendered)
+	}
+	if _, ok := rendered[base]; !ok {
+		t.Errorf("the engine rendered %v, want every run to render %s", rendered, base)
+	}
+	// NON-VACUITY. If the scan ever emits one fixed order, this half stops
+	// exercising a reorder and would pass without proving anything about one.
+	if len(rawOrders) < 2 {
+		t.Errorf("%d independent stores all emitted the SAME row order (%v), so "+
+			"this half no longer exercises a reorder and proves nothing about one. "+
+			"That is not necessarily a defect — the scan may have legitimately "+
+			"become order-stable — but establish that and pin the order "+
+			"deliberately; do not just delete this check", iterations, rawOrders)
+	}
 }
 
 // regressionKeyOfNamed resolves the lpg node key carrying name, so a test can

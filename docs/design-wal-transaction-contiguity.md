@@ -5,13 +5,26 @@
 Audit: [`audit-mvcc-sole-cc-2026-08-02.md`](audit-mvcc-sole-cc-2026-08-02.md), finding **E5** —
 "the most dangerous item in the whole sprint because its only symptom is a counter".
 
+> **Correction (2026-09-08): the five `file:line` anchors were re-derived against
+> the current tree.** Every identifier named in this document still exists and
+> still does what the document says; only the line numbers had drifted. §1's
+> anchor for the `TxnSeq`-suffix filter moved from
+> `store/recovery/recovery.go:1421-1429` to `:1990-1998` — the nine quoted lines
+> are still exactly the code at that anchor — and the four frames of the call
+> stack in §"Only one direction is asserted" moved as follows:
+> `lpg.ApplyAtomically` `lpg.go:712` → `:1089`,
+> `lpg.reclaimAfterDirectWrite` `mvcc_gc.go:135` → `:151`,
+> `lpg.addNodeInfo` `lpg.go:1206` → `:1951`, and
+> `recovery.applyOpCodec` `recovery.go:1616` → `:2136`. No argument in this
+> document changes.
+
 ---
 
 ## 1. The defect
 
 Recovery buffers a v3 transaction's ops until its `OpCommit` marker arrives, then commits **the
 contiguous suffix** whose `TxnSeq` matches the marker's
-(`store/recovery/recovery.go:1421-1429`):
+(`store/recovery/recovery.go:1990-1998`):
 
 ```go
 commitSeq := op.TxnSeq
@@ -247,10 +260,10 @@ on the **same goroutine**, on the dominant path:
 
 ```
 adjlist.BeginCommit
-lpg.ApplyAtomically              (lpg.go:712)
-lpg.reclaimAfterDirectWrite      (mvcc_gc.go:135)
-lpg.addNodeInfo                  (lpg.go:1206)
-recovery.applyOpCodec            (recovery.go:1616)
+lpg.ApplyAtomically              (lpg.go:1089)
+lpg.reclaimAfterDirectWrite      (mvcc_gc.go:151)
+lpg.addNodeInfo                  (lpg.go:1951)
+recovery.applyOpCodec            (recovery.go:2136)
 ```
 
 A replay creates versions fast enough to cross the reclamation threshold, and the sweep runs inside

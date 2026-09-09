@@ -131,10 +131,23 @@ made. Observed provenance across the census:
 | column absent entirely | no operator in the plan has an estimate | observed on `MATCH (n:Wide) RETURN count(n)` |
 
 **The estimate provenance machinery remains exemplary and is now visible where it matters.**
-The `-` is not a mapping failure: `ExplainTable` renders `-` for `Selection`, `Projection`,
-`ProduceResults` and `CartesianProduct` on the **logical** plan too, so the estimator itself
-only attributes cardinality to access-path leaves. That is a pre-existing coverage limit
-that #2765 exposed rather than caused, and it is recorded as an open item in §9.
+
+> **CORRECTED 2026-09-08 (rmp #2787, v0.14.1).** The paragraph that stood here read: *"The
+> `-` is not a mapping failure: `ExplainTable` renders `-` for `Selection`, `Projection`,
+> `ProduceResults` and `CartesianProduct` on the **logical** plan too, so the estimator
+> itself only attributes cardinality to access-path leaves. That is a pre-existing coverage
+> limit that #2765 exposed rather than caused."* The first clause is true of **most** of the
+> 80, and remains the right description of them. It is **false of the columnar fusion
+> chains**, whose logical node exists, carries a figure, and loses it in the mapping. See
+> the [2026-09-08 addendum](#addendum--2026-09-08-rmp-2787-sprint-357) for the disproving
+> query pair, the mechanism, and a measured re-partition.
+
+Most of the 80 are a coverage limit of the ESTIMATOR: `ExplainTable` renders `-` for
+`Selection`, `Projection`, `ProduceResults` and `CartesianProduct` on the **logical** plan
+too, so for those nodes there is no figure on either surface and #2765 exposed the limit
+rather than causing it. The exception is the columnar family, where the figure exists on the
+logical plan and is lost on the way to the operator. Both are recorded as open items in
+§8 (items 6 and 10).
 
 ### Figures that are UNCOUNTED — and now say so
 
@@ -144,7 +157,7 @@ renders as `0`.
 | Operator | Renders | Why it is unknown |
 |---|---|---|
 | `Filter` (11 instances), `Project` (27), `ColumnarProject` (8), `Sort` (2), `Top`, `Unwind` | `?` | holds a caller-supplied expression closure that can reach the graph |
-| `LabelCountScan`, `AllNodesCountScan` | `?` | answers from a maintained counter; claims no marker |
+| `LabelCountScan` | `?` | answers from a maintained counter, and its fallback resolves a filtered bitmap **below the resolver interface**, where the operator cannot see it (corrected 2026-09-08, #2777) |
 | incomplete total | `2000 + ?` | some operators counted, some did not |
 | wholly unknown total | `?` | no operator in the plan counted |
 
@@ -168,6 +181,22 @@ defensible here: no records were read". At the closing tree they render `?`, not
 claim neither `noStorageAccess` nor a counter. Whether `?` or a known `0` is the better
 answer for an operator that reads one maintained counter is a real question this sprint did
 not settle; it is listed in §9.
+
+> **Settled 2026-09-08 (rmp #2777), and the two leaves parted company.** The question was
+> decided by measuring which arm answers on the shapes a real query plans, not by arguing
+> about the counter. `AllNodesCountScan` now reports a **PATH-AWARE measured figure** —
+> a real `0` for its O(1) counter read, and one db-hit per node id when the counter
+> declines and it walks; the walk was measured being taken by a plain
+> `MATCH (n) RETURN count(*)` run against a single uncommitted `CREATE` in another
+> transaction, which is why a flat `0` was not available to it.
+> `LabelCountScan` stays `?`: rmp #2773 made its exec-level bitmap arm unreachable
+> (0 entries across seven measured substrate states) but moved the record read down into
+> `lpg.Graph.LabelCountAsOf`, which still resolves the filtered bitmap when the churn
+> concerns the counted label — measured 14.00 allocs/op there against 0.00 when the churn
+> is elsewhere. `ResolveLabelCountAsOf` reports only `(count, ok)`, so the operator cannot
+> know which arm answered, and the correction arm reads roaring containers rather than node
+> references, which this column has no unit for. See the census in
+> `cypher/exec/dbhits_classification_test.go`.
 
 ## 2. Verdict on distinguishability
 
@@ -233,7 +262,7 @@ is **unchanged**.
 |---|---|---|---|
 | **D1** | Db-hits derived from rows, not counted at the storage layer | **NARROWED** | Eight operator kinds now count for real (§1), each proved by an arm where dbhits ≠ rows. Derivation survives only on the access-path leaves, where the one-record-per-row identity is the marker's actual contract. The residue: the rendering does not distinguish a counted figure from an inferred one. The peer correction survives re-reading and is stronger than stated — Memgraph's `ACTUAL HITS` is `actual_hits++` in **both** `ScopedProfile` constructors (`scoped_profile.hpp:58`, `:89`), before `start_time_ = ReadTSC()` and touching no storage, so it counts `Pull()` invocations |
 | **D2** | No `Rows Removed by Filter` equivalent | **CLOSED** | A `Removed` column in `ProfileTable` and `removed=N` in the tree. Measured: `Filter` reports `removed=1990` above a 2000-row scan emitting 10; `Expand` reports `removed=99` for a type filter admitting 1 of 100. Reported by `Filter` in 11 of 11 instances and by `Expand` in 6 of 6. PostgreSQL's mechanism re-verified: exactly **19** `Rows Removed by Filter` print sites in `explain.c`, each guarded by `if (plan->qual)` |
-| **D3** | Estimated and actual never side by side | **CLOSED**, with a measured coverage limit | `Est.Rows` renders beside `Rows` in one table over one plan, and `est. rows=N exact` leads the parenthesis in the tree. The limit: 80 of 110 observed instances render `-`, because the estimator attributes cardinality only to access-path leaves — visible on the **logical** plan too, so it is not a mapping loss. Recorded as an open item |
+| **D3** | Estimated and actual never side by side | **CLOSED**, with a measured coverage limit | `Est.Rows` renders beside `Rows` in one table over one plan, and `est. rows=N exact` leads the parenthesis in the tree. The limit: 80 of 110 observed instances render `-`. **Corrected 2026-09-08 (#2787):** for most of them the estimator attributes cardinality only to access-path leaves, and the `-` is visible on the **logical** plan too — but **not for the columnar fusion chains**, whose `ir.Selection` carries `est. rows=1, exact` on the logical plan and whose `ColumnarFilter` renders nothing. That one IS a mapping loss; see the 2026-09-08 addendum. Recorded as an open item |
 | **D4** | A figure that was not counted prints `0` | **CLOSED** | `?` for an uncounted figure, `x + ?` for an incomplete total, `?` for a wholly unknown one, and the column dropped when no operator has the figure. Neo4j's three-level discipline re-verified: `NO_DATA = -1L` (`OperatorProfile.java:59`), argument dropped (`PlanDescriptionBuilder.scala:156-161`), cell blanked (`renderAsTreeTable.scala:415-431`), column removed (`:54`), `"?"` / `"$x + ?"` (`renderSummary.scala:37-44`) |
 | **D5** | No `loops` / per-invocation figure | **UNCHANGED** | The token `loops` appears nowhere in any rendered surface. Figures remain lifetime totals across re-`Init`, a self-consistent convention now documented on `RowsRemovedByFilter` as well. PostgreSQL still divides by `nloops` (`explain.c:1844-1847`) |
 | **D6** | Parallel tier collapsed to one node | **NARROWED** | The db-hits half is closed (D1). The collapse itself is unchanged: no per-worker rows, and the tokens `Worker`/`worker` appear nowhere in any rendered surface. PostgreSQL's per-worker actuals are computed at `execParallel.c:1039-1043` and printed at `explain.c:1893-1941` |
@@ -297,9 +326,11 @@ markers — **[ShortestPath], [AllShortestPaths], the morsel-parallel leaves**, 
 count-store leaves, …".
 
 Both statements are false at HEAD, and the contradiction is visible **inside the same
-package**: `cypher/exec/profile.go:713-721` is a compile-time census listing nine
+package**: `cypher/exec/profile.go:716-731` is a compile-time census listing
 `storageAccessCounter` implementations, five of which are the very operators the godoc
-names as unknown. The measurement agrees with the census and not with the godoc —
+names as unknown. It listed **nine** when this audit was written and lists **ten**
+since `0e7e982d` (#2777) added `(*AllNodesCountScan)`, which now reports the node
+walk its `Init` fallback performs. The measurement agrees with the census and not with the godoc —
 `ShortestPath` renders `117`, `AllShortestPaths` renders `117`, and all three parallel
 leaves render `2000`.
 
@@ -399,6 +430,16 @@ of citations, including every load-bearing one. Six are off, none fatally:
 
 Every item below was **verified to still hold** at `83ba8d8b`.
 
+> **Correction (2026-09-08, v0.14.1):** "verified to still hold" was true at
+> `83ba8d8b` and is **no longer true of rows 1 and 2**, both of which were fixed in
+> the `v0.14.1` window. Row 1 is closed by `9ec1a6c7` (#2785) and row 2 by
+> `29641046` (#2772) — `cypher.statsSnapshotFresh` did not exist at `v0.14.0`
+> (`git show v0.14.0:cypher/stats_estimate.go` contains zero occurrences; the
+> current file has four) and now demotes a stale most-common-value hit to
+> `estFallback`. Rows 10 and 11 already carried in-place corrections under #2787;
+> rows 1 and 2 did not, and this note supplies them. The rows are left standing as
+> the record of what the audit found, not as a statement of the present tree.
+
 | # | Gap | Evidence at the closing tree | Backlog |
 |---|---|---|---|
 | 1 | The range estimator reads a **declined** label count as an empty label | `cypher/stats_estimate.go`: `n, _ := src.ResolveLabelCount(label)` discards the second return; the `if n <= 0` guard below then returns `estFallback`. Under a concurrent writer that declines the count, the histogram path goes silently inert | **#2771** |
@@ -410,11 +451,12 @@ Every item below was **verified to still hold** at `83ba8d8b`.
 | 7 | A `LIMIT 0` `PROFILE` captures the tree with workers still in flight | Measured: `MATCH (n:B) WHERE n.v = 0 RETURN n.k + 1 LIMIT 0` at threshold 10 renders `ParallelScanProject` with `rows=0, dbhits=0` and `DbHitsKnown=true` — a **known zero that is not a fact about the workload** | #2762 finding, no task |
 | 8 | The `PlanNode` godoc contradicts its own package's census | §7.1. `cypher/exec/plan.go:71-72`, `:86-88` | **none — new** |
 | 9 | Three in-code assertions still say the statistics are inert | §7.5 | **none — new** |
-| 10 | Estimate coverage: 80 of 110 operator instances render `-` | §1, §5 D3. A property of the estimator, not of #2765's mapping | **none — new** |
-| 11 | The count-store leaves render `?` rather than a known `0` | §1. They read one maintained counter; whether `?` or `0` is honest for that is unsettled | **none — new** |
+| 10 | Estimate coverage: 80 of 110 operator instances render `-` | §1, §5 D3. **Corrected 2026-09-08 (#2787):** predominantly a property of the estimator, but **not wholly** — the columnar fusion chains lose a figure their logical node does carry, which is a defect of #2765's mapping. Measured re-partition in the 2026-09-08 addendum | documents corrected under **#2787**; the code fix is a separate task |
+| 11 | The count-store leaves render `?` rather than a known `0` | §1. **Settled 2026-09-08 (#2777):** measured per arm rather than argued. `AllNodesCountScan` reports a path-aware measured figure (a real `0` on its counter, a full walk when the counter declines — reached by an ordinary count query against one uncommitted `CREATE`); `LabelCountScan` stays `?` because its fallback sits below the resolver interface, which reports only `(count, ok)` | **#2777** |
 
-Items 8 to 11 have **no backlog task**. They are reported here rather than filed, because
-filing is a scope decision for the user, not for this audit.
+Items 8 to 10 had **no backlog task** when this audit closed; item 11 was filed as #2777
+and closed on 2026-09-08. They were reported here rather than filed, because filing is a
+scope decision for the user, not for this audit.
 
 ## 9. Limits of this audit
 
@@ -460,7 +502,7 @@ python3 census.py > census_final.txt
 The gates, run on the closing tree, exit status read from inside each log:
 
 ```bash
-go test -count=1 -run 'TestProfileDbHits_|TestExplainFidelity_|TestProfileRowsRemoved|TestProfileEstimate|TestQError|TestStatsQError|TestDbHitsClassification' ./cypher/ ./cypher/exec/
+go test -count=1 -run 'TestProfileDbHits_|TestExplainFidelity_|TestProfileRowsRemoved|TestProfileEstimate|TestQError|TestDbHitsClassification' ./cypher/ ./cypher/exec/
 #   -> ok cypher 1.075s, ok cypher/exec 0.406s, GO_TEST_EXIT=0
 
 go test -count=1 -v -run TestTCKExecution ./cypher/tck/...
@@ -485,3 +527,195 @@ git -C <scratchpad>/refs/postgres rev-parse HEAD  # 4639b6cfe3f310b71e1e227dd2a9
 
 Environment: Apple M4, 10 cores, 32 GB, macOS 26.5.2 (darwin arm64), Go 1.27.1, load
 average 1.42–2.52 throughout.
+
+---
+
+## Addendum — 2026-09-08, rmp #2787 (sprint 357)
+
+**Tree:** `release/0.14.1`, commit `9ec1a6c790c4692669ec0388513614c5688f00ff`. **Host:** Apple
+M4, 10 cores, 32 GB, macOS 26.5.2 (darwin arm64), Go 1.27.1, load average 3.48 / 4.77 / 3.98 —
+**the host was not quiet**, and, exactly as in the body of this document, every figure below is
+a count, a glyph or a structural comparison, so none of them is affected by load. No timing is
+claimed here.
+
+### The `-` on a columnar chain IS a mapping loss
+
+Three statements shipped — two in this document, one in `release-notes/v0.14.0.md` — asserting
+that the missing estimates on a columnar plan belong to the estimator and not to #2765's
+mapping. **They are false for the columnar family**, and a single query pair disproves them.
+
+Seed one `:Component {tag:'rare'}` among 60 `{tag:'common'}`, call `Engine.RefreshStatistics`,
+then read the two plans. The two queries differ in **one** thing — what the `RETURN` projects —
+so the planner reasons about identical inputs in both:
+
+```
+MATCH (c:Component) WHERE c.tag = 'rare' RETURN c        MATCH (c:Component) WHERE c.tag = 'rare' RETURN c.key
+
+  ExplainLogical (IDENTICAL in both):                      ExplainLogical (IDENTICAL in both):
+    ProduceResults                                           ProduceResults
+    └─ Projection                                            └─ Projection
+       └─ Selection (est. rows=1, exact)                        └─ Selection (est. rows=1, exact)
+          └─ NodeByLabelScan (est. rows=61, exact)                └─ NodeByLabelScan (est. rows=61, exact)
+
+  Explain (physical):                                      Explain (physical):
+    Project                                                  ColumnarProject
+    └─ Filter (est. rows=1 exact)                            └─ ColumnarFilter                <- NO ESTIMATE
+       └─ NodeByLabelScan (est. rows=61 exact)                  └─ NodeByLabelScan (est. rows=61 exact)
+```
+
+The logical node exists. It carries a figure. The figure survives the row lowering and does not
+survive the columnar one. The scan carries the same `61 exact` on both physical plans, which
+rules out the reading that the two arms were planned against different statistics.
+
+### The mechanism, measured — and where the source comment is imprecise
+
+`cypher/plan_estimate_physical.go:69-72` already says the loss is in the mapping, and is the
+statement the three passages should have been aligned to. Its wording is nonetheless not quite
+what the build does. Instrumenting the estimate sink directly — the map `buildOperator` fills,
+read back before rendering — gives, for the pair above:
+
+| build | operators in the tree | claims in the sink |
+|---|---|---|
+| row (`RETURN c`) | `Project`, `Filter`, `NodeByLabelScan` | **3** — `NodeByLabelScan` 61 exact, `Filter` 1 exact, `Project` empty |
+| columnar (`RETURN c.key`) | `ColumnarProject`, `ColumnarFilter`, `NodeByLabelScan` | **2** — `NodeByLabelScan` 61 exact, `ColumnarProject` empty |
+
+Two claims for three operators. The `ColumnarFilter` is claimed by **nothing**, and the reason
+is not that an operator was discarded: `tryBuildColumnarFilterChain` calls `buildOperator` on
+`sel.Child` **only** (`cypher/api.go:17171`), and builds `exec.NewColumnarFilter` itself from
+`sel.PredicateExpr`. The `ir.Selection` therefore never reaches the one funnel
+where a logical node and its operator are both in hand, so **no operator is ever produced for
+it to discard**. The same holds for `tryBuildColumnarAggSource`. The comment's "discarded"
+wording is accurate for one case only — `tryBuildColumnarExpandFilterChain`, where the
+`*exec.Expand` that `buildOperator` produced **is** claimed (`est. rows=60, exact` observed) and
+is then replaced by `exec.NewColumnarExpand`, whose identity is not in the map, so the claim is
+never looked up.
+
+`ColumnarProject`, by contrast, **is** claimed — by the `ir.Projection`, with an empty estimate,
+exactly as the row `Project` is. Its `-` is estimator coverage, not a mapping loss. The loss is
+one operator wide per chain, and it lands on the operator that carries the selectivity.
+
+### The re-partition, measured
+
+The published **80 of 110** cannot itself be re-partitioned: the external `audit2768` harness
+that produced it did not survive its session, so its 31 shapes over 8 graphs are not
+recoverable. A census was therefore built afresh, over a **different and recorded** shape set,
+and its totals are **not comparable with 110** — only its proportions carry over. Reported here
+because a re-partition asserted without measurement would repeat the error being corrected.
+
+**Census** — 31 distinct shapes over 2 graph fixtures, each run twice (before and after
+`RefreshStatistics`) = 62 shape-runs, **228 operator instances**:
+
+| | instances |
+|---|---:|
+| renders a figure | 71 |
+| renders `-` | **157** |
+| … of which **claimed with an empty estimate** — ESTIMATOR COVERAGE | **125** |
+| … of which **never claimed at all** — NOT MAPPED | **32** |
+
+The 32 unmapped instances, by operator: `ColumnarFilter` 20, `columnarExpand` 4,
+`ColumnarProject` 2, `Project` 4, `SingleRow` 2. **26 of the 32 are columnar.** The six that are
+not are intermediates built outside `buildOperator`'s funnel; that mechanism is read from the
+source (`profileIntermediate`, `cypher/api.go:9792-9834`) and was **not** separately measured
+here.
+
+Being unmapped costs a figure only where the logical node had one. That half was measured as a
+**single-variable A/B**: the same fixtures, the same shapes, the same estimator, differing only
+in whether the columnar recognisers are allowed to fire (`forceColumnarChainDeclineForTest`).
+
+| arm | instances | carry a figure | render `-` |
+|---|---:|---:|---:|
+| columnar recognisers ON | 228 | 71 | 157 |
+| columnar recognisers forced to DECLINE | 230 | **83** | 147 |
+
+**12 estimates are lost purely to the columnar mapping** across this census — every one of them
+in a columnar shape, and each visible as a straight substitution in the rendered plan:
+
+```
+                                          recognisers ON            recognisers DECLINED
+MATCH (a:A) WHERE a.tag='rare' RETURN a.k   ColumnarFilter    ->    Filter (est. rows=1 exact)
+MATCH (a:A)-[:L]->(b:B) RETURN b.k          columnarExpand    ->    Expand (est. rows=100 exact)
+MATCH (a:A) WHERE a.tag='rare' RETURN count(a)  ColumnarFilter ->   Filter (est. rows=1 exact)
+```
+
+So, on this census, the `-` instances partition as **125 estimator coverage · 20 unmapped with
+no figure behind them · 12 unmapped with a real figure lost, all columnar**. The proportion that
+the corrected text has to carry is that the columnar mapping loss is a small minority of the
+`-` cells and is nonetheless real, attributable, and concentrated on the commonest read shape in
+the language.
+
+### What this addendum does NOT establish
+
+* It does **not** re-derive the body's 110-instance census; that instrument is gone, and the
+  body's figures stand as measured on `83ba8d8b`.
+* It does **not** measure the morsel-parallel leaves or the two build-synthesised leaves. Their
+  mechanisms are read from `cypher/plan_estimate_physical.go` and are unverified here.
+* It changes **no behaviour**. The code fix for the mapping is a separate task.
+
+### Reproduction
+
+The census was an in-package Go test, run and then removed — an instrument, not a gate. Its
+binary is as gone as `audit2768`'s, so the **shape list and the fixtures are recorded here**
+instead. That is the whole lesson of the 110 figure: a count whose inputs were not written down
+cannot be re-partitioned later, only re-measured.
+
+**Fixture A** — 400 `:A` nodes, `tag` = `'rare'` on the first and `'common'` on the rest, `age`
+= `i mod 80`, `k` = the node key; 100 `:B` nodes, `v` = `i mod 4`, `k` = the node key; 100
+`(:A)-[:L]->(:B)` edges pairing the first 100 of each. **Fixture C** — a 60-node `:N` chain
+linked by `[:NEXT]`, `i` = the index.
+
+Each fixture is walked twice, once before `RefreshStatistics` and once after, which is what
+makes 31 shapes into 62 shape-runs.
+
+**Shapes on fixture A** (28): `MATCH (a:A) RETURN a` · `… RETURN a.k` · `… WHERE a.tag='rare'
+RETURN a` · `… RETURN a.k` · `… RETURN a.k, a.age` · `… WHERE a.age<30 RETURN a` · `… RETURN
+a.k` · `… WHERE a.tag='rare' RETURN count(a)` · `MATCH (a:A) RETURN count(a)` · `MATCH (n)
+RETURN n` · `MATCH (n) RETURN count(*)` · `MATCH (a:A)-[:L]->(b:B) RETURN b` · `… RETURN b.k` ·
+`… WHERE b.v=0 RETURN b.k` · `… WHERE a.tag='rare' RETURN b` · `MATCH (a:A), (b:B) WHERE
+a.age=b.v RETURN count(*)` · `MATCH (a:A) RETURN a.k ORDER BY a.k LIMIT 5` · `… WHERE
+a.tag='rare' RETURN a.k ORDER BY a.k` · `MATCH (b:B) RETURN b.v AS g, count(*) AS c` · `MATCH
+(a:A) WITH a.age AS x WHERE x>40 RETURN x` · `… WHERE a.tag='rare' OR a.age=3 RETURN a` · `…
+WHERE a.tag='rare' RETURN a.k SKIP 0 LIMIT 1` · `MATCH (a:A) OPTIONAL MATCH (a)-[:L]->(b:B)
+RETURN a, b` · `MATCH (a:A) WHERE NOT (a)-[:L]->() RETURN count(a)` · `UNWIND [1,2,3] AS x
+RETURN x` · `MATCH (a:A) WHERE a.k='a0' RETURN a` · `… RETURN a.tag` · `MATCH (a:A) RETURN
+DISTINCT a.tag`.
+
+**Shapes on fixture C** (3): `MATCH (a:N {i:0})-[*3..3]->(z) RETURN z` · `MATCH (a:N {i:0}),
+(b:N {i:59}) MATCH p = shortestPath((a)-[*]-(b)) RETURN p` · `MATCH (n:N) WHERE n.i>30 RETURN
+n.i`.
+
+For each shape the instrument builds the physical plan through the same path
+`Engine.explainPhysical` uses — `planEstimatesFor` then `Engine.buildReadPhysical` — walks the
+operator tree, and records per operator whether it renders a figure and whether its UNWRAPPED
+identity is a key in the sink. The A/B arm repeats the whole thing with
+`Engine.forceColumnarChainDeclineForTest` set, which is the only variable that differs.
+
+The DURABLE artefact is the gate `cypher/plan_estimate_columnar_gap_test.go`, which pins the
+asymmetry so this claim cannot drift again in either direction — it fails both if the columnar
+chain starts carrying an estimate and if the logical node stops carrying one:
+
+```bash
+go test -count=1 -run 'TestPlanEstimateColumnarGap' -v ./cypher/   # 3 tests, EXIT=0
+```
+
+Its non-vacuity was established by four single-variable neutralisations, each applied to the
+production source, run, and reverted: forcing the columnar recognisers to decline (2 failures);
+removing the physical `ir.Selection` estimate (2); removing the logical tree's Selection
+annotation (1); and **simulating the fix** by recording the Selection's claim on the
+`ColumnarFilter` (2). Seven failures over four arms, with all three gates covered.
+
+### Gates run for this addendum
+
+```bash
+go build ./...                                            # BUILD_EXIT=0
+go vet ./...                                              # VET_EXIT=0
+gofmt -l .                                                # empty list
+go test -race -count=1 ./cypher/...                       # RACE_EXIT=0, all packages ok
+go test -count=1 -v ./cypher/tck/...                      # TCK_EXIT=0
+#   -> "TCK execution: 3897 scenarios, 3897 passed, 0 failed, 0 undefined, 0 inconclusive (baseline=3897)"
+#   -> "TCK error-type fidelity: 122/695 error scenarios raised the exact expected type (124 classified; baseline=122)"
+go test -count=1 ./internal/docscheck/... ./internal/cypherdocgate/... ./internal/scriptgate/...   # DOCS_EXIT=0
+golangci-lint run ./...                                   # LINT_EXIT=0, 0 issues
+```
+
+`make ci` was **not** run by this task, and neither the soak nor the nightly layer was; this
+addendum makes no claim about them.

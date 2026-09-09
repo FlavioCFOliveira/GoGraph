@@ -1,0 +1,29 @@
+START 2026-09-08T21:39:39Z rounds=6 gate=2.5 sample=2s go=go version go1.27.1 darwin/arm64
+PRE-CAMPAIGN load1=3.84 hot=[claude:21,9 osascript:17,5 system_profiler:16,5 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer:9,0 /usr/libexec/sysmond:5,7 ]
+ROUND 1 GATE_OPEN load1=2.25 waited=80s hot=[system_profiler:24,4 osascript:17,0 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer:9,6 /System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow:9,5 ] 2026-09-08T21:41:00Z
+ROUND 1 START 2026-09-08T21:41:00Z order=[A B B2] load=[2,25 3,69 2,93]
+ROUND 1 COMPLETE 2026-09-08T22:03:56Z load=[9,14 6,58 4,86]
+ROUND 1 MIRRORED 2026-09-08T22:03:56Z
+ROUND 2 GATE_OPEN load1=2.41 waited=140s hot=[] 2026-09-08T22:06:16Z
+ROUND 2 START 2026-09-08T22:06:16Z order=[B B2 A] load=[2,41 4,92 4,45]
+ROUND 2 COMPLETE 2026-09-08T22:29:14Z load=[17,03 9,08 5,89]
+ROUND 2 MIRRORED 2026-09-08T22:29:14Z
+ROUND 3 GATE_OPEN load1=2.47 waited=140s hot=[osascript:30,2 /usr/libexec/sysmond:12,7 ] 2026-09-08T22:31:34Z
+ROUND 3 START 2026-09-08T22:31:34Z order=[B2 A B] load=[2,47 6,04 5,14]
+ROUND 3 COMPLETE 2026-09-08T22:54:29Z load=[10,95 7,07 5,34]
+ROUND 3 MIRRORED 2026-09-08T22:54:29Z
+ROUND 4 GATE_OPEN load1=2.34 waited=120s hot=[/Users/flaviocfo/Library/Application:75,7 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer:8,7 btop:5,7 ] 2026-09-08T22:56:29Z
+ROUND 4 START 2026-09-08T22:56:29Z order=[A B B2] load=[2,34 5,07 4,77]
+ROUND 4 COMPLETE 2026-09-08T23:19:23Z load=[17,35 9,71 6,33]
+ROUND 4 MIRRORED 2026-09-08T23:19:23Z
+ROUND 5 GATE_OPEN load1=2.34 waited=160s hot=[osascript:17,2 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer:10,0 ] 2026-09-08T23:22:03Z
+ROUND 5 START 2026-09-08T23:22:03Z order=[B B2 A] load=[2,34 6,16 5,44]
+ROUND 5 COMPLETE 2026-09-08T23:44:57Z load=[19,81 10,35 6,50]
+ROUND 5 MIRRORED 2026-09-08T23:44:57Z
+ROUND 6 GATE_OPEN load1=2.49 waited=160s hot=[] 2026-09-08T23:47:37Z
+ROUND 6 START 2026-09-08T23:47:37Z order=[B2 A B] load=[2,49 6,50 5,56]
+ROUND 6 COMPLETE 2026-09-09T00:10:30Z load=[12,33 7,01 5,27]
+ROUND 6 MIRRORED 2026-09-09T00:10:30Z
+END 2026-09-09T00:10:30Z load=[12,33 7,01 5,27] hot=[/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mds:5,3 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer:5,2 ]
+CAMPAIGN_ALLDONE
+SAMPLER STOPPED pid=17869 samples=    4518

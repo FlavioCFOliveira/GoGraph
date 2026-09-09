@@ -25,6 +25,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"os"
 	"path/filepath"
@@ -57,15 +58,24 @@ type Result[N comparable, W any] struct {
 	//   - Genuine corruption inside an already-durable frame
 	//     ([wal.ErrCRCMismatch], [wal.ErrBadMagic],
 	//     [wal.ErrUnsupportedVersion], [wal.ErrFrameTooLarge],
-	//     [wal.ErrTornFrameMasksData], [ErrUnsupportedRecordVersion], or
-	//     [ErrTransactionTooLarge]). The committed prefix up to the bad frame
-	//     is still placed in Graph for diagnostics, but the same error is
+	//     [wal.ErrTornFrameMasksData], or [ErrUnsupportedRecordVersion]), and
+	//     the over-cap in-flight transaction [ErrTransactionTooLarge]. The
+	//     committed prefix up to the bad frame is still placed in Graph for
+	//     diagnostics, but the same error is
 	//     returned as the function error and [Result.IsClean] reports false, so
 	//     a caller cannot accidentally append to a corrupt WAL.
 	//     [wal.ErrTornFrameMasksData] is the case where a corrupt length field
 	//     over-declared past EOF and swallowed the durable frames that followed
 	//     it: it looks like a torn tail but is treated as corruption so those
 	//     frames are never silently dropped.
+	//
+	// [ErrCommittedTxnCorruptOp] is the one outcome that falls between them: an
+	// undecodable op inside an ALREADY-COMMITTED transaction. It is reported
+	// not-clean ([Result.IsClean] false) and counted and logged at the detection
+	// site, but [Open]/[OpenCtx] still return a nil error and the committed
+	// prefix is usable — the discarded suffix is irrecoverable, so refusing the
+	// open would buy no repair. See [tailErrIsCorruption] for the recorded
+	// reasoning, and branch on [Result.IsClean] rather than on the error alone.
 	TailErr error
 	Graph   *lpg.Graph[N, W]
 	// Constraints reports the durable schema constraints recovered for the
@@ -188,6 +198,30 @@ type Result[N comparable, W any] struct {
 	// resuming AT the maximum, and it is the same reasoning that makes MaxTxnSeq
 	// count frames this replay goes on to discard.
 	MaxCommitTS uint64
+	// MaxTxnOps is the per-transaction replay bound this recovery actually ran
+	// under, expressed in the caller-facing option convention so it can be
+	// handed straight back to [Result.NewStoreCapped]: a positive op count, or
+	// [txn.MaxTxnOpsUnlimited] when the bound was disabled. It is never 0 on a
+	// Result returned by [Open] / [OpenCtx] / [OpenFS] / [OpenCtxFS]; 0 means
+	// "no information" and is what a hand-built Result carries.
+	//
+	// It exists to make the producer-above-replay mismatch INEXPRESSIBLE on the
+	// reopen path, which is the same placement argument rmp #2522 settled for
+	// [Result.MaxTxnSeq]. The two caps are independently configurable, and when
+	// the producer bound is the looser one the consequence is out of all
+	// proportion to the mistake: the oversized transaction is acknowledged
+	// DURABLE by [txn.Tx.Commit], and the next reopen then refuses the WHOLE
+	// directory with [ErrTransactionTooLarge] — stranding every transaction
+	// committed before it behind a fail-stop and discarding every one committed
+	// after it. Carrying the replay bound through the handoff lets
+	// [Result.NewStoreCapped] clamp the producer down to it, converting an
+	// unopenable store into an ordinary [txn.ErrTransactionTooLarge] refusal at
+	// commit time.
+	//
+	// Callers that construct the two sides independently — building a
+	// [txn.Store] with [txn.NewStoreWithOptionsCapped] rather than through this
+	// handoff — are outside the clamp and own the invariant themselves.
+	MaxTxnOps int
 	// WALTailOffset is the byte offset of the last durable frame boundary
 	// in the WAL. It equals the WAL file size when every frame was
 	// consumed cleanly, and the boundary of the last fully-consumed frame
@@ -224,14 +258,25 @@ type Result[N comparable, W any] struct {
 // reopen the WAL for append — and false when TailErr is a
 // genuine-corruption sentinel ([wal.ErrCRCMismatch], [wal.ErrBadMagic],
 // [wal.ErrUnsupportedVersion], [wal.ErrFrameTooLarge],
-// [ErrUnsupportedRecordVersion], or [ErrTransactionTooLarge]).
+// [wal.ErrTornFrameMasksData], [ErrUnsupportedRecordVersion],
+// [ErrTransactionTooLarge], or [ErrCommittedTxnCorruptOp]).
 //
-// IsClean is the exact complement of the function-error contract: [Open]
-// and [OpenCtx] return a non-nil error if and only if IsClean is false.
-// Callers that recover-then-append should branch on IsClean (or on the
-// returned error) and refuse to append when it is false; appending to a
-// corrupt WAL would permanently embed the corruption and silently drop
-// every committed op that followed the bad frame.
+// # IsClean is the STRONGER signal; the function error is not equivalent
+//
+// IsClean is false for every case in which [Open] / [OpenCtx] return a non-nil
+// error, and for one case in which they return NIL: an undecodable op inside an
+// already-committed transaction ([ErrCommittedTxnCorruptOp]). That directory
+// opens — the committed prefix is intact and the discarded suffix is
+// irrecoverable, so refusing the open would buy no repair — but it did NOT
+// replay cleanly, and the WAL must not be appended to. The trade-off is a
+// recorded decision, argued in full on [tailErrIsCorruption]; before rmp #2794
+// that case reported IsClean true, which is what let a whole WAL suffix of
+// acknowledged transactions disappear in silence.
+//
+// So a recover-then-append caller must branch on IsClean, NOT on the returned
+// error alone. Appending to a WAL that did not replay cleanly would permanently
+// embed the damage and silently drop every committed op that followed the bad
+// frame.
 func (r Result[N, W]) IsClean() bool {
 	return !tailErrIsCorruption(r.TailErr)
 }
@@ -275,11 +320,13 @@ func (r Result[N, W]) IsClean() bool {
 // wlog. Recovery deliberately does not open the WAL for append: a directory
 // whose [Result.IsClean] reports false must NEVER be appended to, and keeping
 // the wal.Open call at the embedder keeps that gate visible where the decision
-// is actually taken. Check IsClean (or the error from [Open]) first, open the
-// WAL, then call this:
+// is actually taken. Check IsClean FIRST — not the error alone, which since rmp
+// #2794 is nil for the one not-clean-but-still-opens case
+// ([ErrCommittedTxnCorruptOp]) — then open the WAL and call this:
 //
 //	res, err := recovery.Open[string, float64](dir, ropts)
 //	if err != nil { return err }          // genuine corruption: do not append
+//	if !res.IsClean() { return res.TailErr } // did not replay cleanly: do not append
 //	w, err := wal.Open(filepath.Join(dir, "wal"))
 //	if err != nil { return err }
 //	st := res.NewStore(w, txn.Options[string, float64]{
@@ -294,6 +341,12 @@ func (r Result[N, W]) IsClean() bool {
 // only ever move UP — mirroring [lpg.Graph.RestoreMVCCClock] for the sibling
 // counter, and PostgreSQL's AdvanceNextFullTransactionIdPastXid ratchet.
 //
+// The per-transaction op cap is likewise taken from the recovery rather than
+// left to the caller: this method requests the default and
+// [Result.NewStoreCapped] clamps it to [Result.MaxTxnOps], so a store reopened
+// through the handoff can never commit a transaction its own replay would
+// refuse. See [Result.NewStoreCapped] for what that costs when it is not done.
+//
 // r.Graph must be non-nil, which it is for any Result returned by a completed
 // [Open] / [OpenCtx] / [OpenFS] — including one that reported corruption, whose
 // graph holds the committed prefix for diagnostics but must not be appended to.
@@ -304,29 +357,126 @@ func (r Result[N, W]) NewStore(wlog *wal.Writer, opts txn.Options[N, W]) *txn.St
 // NewStoreCapped is [Result.NewStore] with an explicit per-transaction op cap.
 // maxTxnOps follows the standard convention: 0 selects [txn.DefaultMaxTxnOps],
 // [txn.MaxTxnOpsUnlimited] disables the cap, and any other positive value is
-// the cap verbatim. Pass the same value the recovery ran under
-// ([Options.MaxTxnOps]) so the producer and its own replay agree on the bound.
+// the cap verbatim.
+//
+// # The producer bound is CLAMPED to this recovery's replay bound
+//
+// The producer cap must never exceed the replay cap. When it does, the
+// oversized transaction is not rejected — it is acknowledged DURABLE by
+// [txn.Tx.Commit], and the next reopen then refuses the WHOLE directory with
+// [ErrTransactionTooLarge]: every transaction committed before it is stranded
+// behind a fail-stop and every one committed after it is discarded. A caller
+// who raises the producer bound for a bulk load, or disables it, while leaving
+// recovery at its default converts a rejected write into an unopenable
+// database.
+//
+// Documenting that invariant and trusting the caller is the placement rmp #2522
+// already rejected once for [Result.MaxTxnSeq], so this method does not repeat
+// it: the effective producer bound is lowered to [Result.MaxTxnOps] — the bound
+// this recovery actually ran under — whenever the requested one is looser
+// (including [txn.MaxTxnOpsUnlimited] against a finite replay bound). The
+// mismatch is therefore inexpressible through this handoff, and what the caller
+// gets instead of an unopenable store is an ordinary
+// [txn.ErrTransactionTooLarge] at commit time, before any WAL frame is written.
+// A clamp that fires is logged at warn level and counted as
+// `store.recovery.NewStoreCapped.producerCapClamped`, because a bulk load that
+// silently keeps the default bound is a surprise worth seeing.
+//
+// The clamp only ever lowers. A replay bound of [txn.MaxTxnOpsUnlimited] clamps
+// nothing (nothing can exceed it), and a Result whose MaxTxnOps is 0 — one built
+// by hand rather than returned by [Open] — carries no information and clamps
+// nothing either.
+//
+// Callers that legitimately need the two sides configured independently build
+// the store with [txn.NewStoreWithOptionsCapped] directly; they are outside this
+// clamp and own the invariant themselves.
 func (r Result[N, W]) NewStoreCapped(wlog *wal.Writer, opts txn.Options[N, W], maxTxnOps int) *txn.Store[N, W] {
 	// Ratchet, never assign: raise-only is what makes it safe to apply on top of
 	// a caller-supplied floor, and it is the same rule the MVCC clock follows.
 	if r.MaxTxnSeq > opts.ResumeTxnSeq {
 		opts.ResumeTxnSeq = r.MaxTxnSeq
 	}
-	return txn.NewStoreWithOptionsCapped(r.Graph, wlog, opts, maxTxnOps)
+	producerCap := clampProducerCapToReplay(maxTxnOps, r.MaxTxnOps)
+	if producerCap != maxTxnOps {
+		metrics.IncCounter("store.recovery.NewStoreCapped.producerCapClamped", 1)
+		slog.Default().Warn(
+			"recovery: requested producer transaction op cap exceeds this recovery's replay cap; lowered to the replay cap so a committed transaction cannot become unreplayable",
+			slog.Int("requested_producer_max_txn_ops", maxTxnOps),
+			slog.Int("replay_max_txn_ops", r.MaxTxnOps),
+			slog.Int("effective_producer_max_txn_ops", producerCap),
+		)
+	}
+	return txn.NewStoreWithOptionsCapped(r.Graph, wlog, opts, producerCap)
+}
+
+// clampProducerCapToReplay returns the producer op cap to build the reopened
+// store with: the requested value, unless it resolves looser than the replay
+// bound, in which case the replay bound wins. Both arguments are in the
+// caller-facing option convention (0 -> default, [txn.MaxTxnOpsUnlimited] -> no
+// cap, positive verbatim); the return value is too, and is always a value the
+// producer constructor resolves to a bound no looser than replay's.
+//
+// Lowering is the only safe direction. A producer bound above the replay bound
+// turns a transaction that should have been REFUSED into one that is
+// acknowledged durable and then makes the whole directory unopenable; a producer
+// bound below it merely refuses at commit time, which is what the cap is for.
+func clampProducerCapToReplay(producer, replay int) int {
+	if replay == 0 {
+		// A hand-built Result: no information about the replay bound, so there is
+		// nothing to clamp against. Open always populates it.
+		return producer
+	}
+	replayResolved := resolveRecoveryMaxTxnOps(replay)
+	if replayResolved == 0 {
+		return producer // replay is unbounded; no producer bound can exceed it.
+	}
+	// The producer side resolves the option the same way (txn.resolveMaxTxnOps is
+	// this function's mirror), so one resolver serves both.
+	producerResolved := resolveRecoveryMaxTxnOps(producer)
+	if producerResolved == 0 || producerResolved > replayResolved {
+		return replayResolved // positive: taken verbatim by the producer constructor.
+	}
+	return producer
 }
 
 // tailErrIsCorruption classifies a [Result.TailErr] value as genuine
 // on-disk corruption (true) versus a benign / absent stop condition
 // (false). It mirrors [wal.Reader.Replay], which surfaces every WAL-reader
 // error except [wal.ErrTornFrame] as a hard error, and additionally treats
-// recovery's own [ErrUnsupportedRecordVersion] and [ErrTransactionTooLarge]
-// as corruption.
+// recovery's own [ErrUnsupportedRecordVersion], [ErrTransactionTooLarge] and
+// [ErrCommittedTxnCorruptOp] as corruption.
 //
 // A nil error, a torn tail, and the CRC-valid-but-unparseable trailing-frame
 // markers raised by the codec apply path (a truncated v2 body, a missing
 // trailing label/key length) are all benign: each represents an interrupted
 // final write whose committed prefix is intact, identical to the durability
 // contract documented on [store/txn.Tx.Commit].
+//
+// # ErrCommittedTxnCorruptOp is a DELIBERATE, RECORDED departure from the letter of fail-stop
+//
+// Every other member of the true set above is also fail-stop: [openCodec]
+// returns it as the function error, so the store does not open. This one does
+// not — see [tailErrIsOpenFatal], which is the predicate the open path uses.
+//
+// The departure was decided deliberately, on rmp #2794, and is recorded here so
+// it is not re-litigated as an oversight. CLAUDE.md's "fail-stop, never
+// fail-silent" mandate, read to the letter, says refuse the open. But the ops in
+// the discarded suffix are IRRECOVERABLE: rmp #2783 measured that the bytes are
+// gone, so there is nothing left to repair after failing. Refusing the open
+// would therefore convert an affected store from "opens, and reports that it
+// lost a suffix" into "does not open, ever, with no repair path" — trading
+// silent data loss for total loss of service and buying nothing back.
+//
+// What the mandate actually forbids is the SILENCE, and that is what rmp #2794
+// removed: the state is classified not-clean here, a counter is incremented, and
+// a structured warning naming the frame and the transaction is logged at the
+// detection site in [replayWALInto]. The loss is now countable, logged, and
+// visible to every caller that checks [Result.IsClean] — which is every shipped
+// example and both simulator reopen paths.
+//
+// If this trade-off is ever revisited, revisit it as a decision: move the
+// sentinel into [tailErrIsOpenFatal] and accept that affected directories stop
+// opening.
 func tailErrIsCorruption(err error) bool {
 	if err == nil {
 		return false
@@ -347,7 +497,10 @@ func tailErrIsCorruption(err error) bool {
 		errors.Is(err, wal.ErrUnsupportedVersion),
 		errors.Is(err, wal.ErrFrameTooLarge),
 		errors.Is(err, ErrUnsupportedRecordVersion),
-		errors.Is(err, ErrTransactionTooLarge):
+		errors.Is(err, ErrTransactionTooLarge),
+		errors.Is(err, ErrCommittedTxnCorruptOp):
+		// ErrCommittedTxnCorruptOp is not-clean but not fail-stop; see the
+		// recorded-departure section above and [tailErrIsOpenFatal].
 		return true
 	default:
 		// CRC-valid-but-unparseable trailing frame (truncated v2 body,
@@ -355,6 +508,22 @@ func tailErrIsCorruption(err error) bool {
 		// tail — the committed prefix is intact.
 		return false
 	}
+}
+
+// tailErrIsOpenFatal reports whether a [Result.TailErr] must be surfaced as the
+// FUNCTION error by [Open] / [OpenCtx] / [OpenFS], so the directory does not
+// open at all.
+//
+// It is [tailErrIsCorruption] minus [ErrCommittedTxnCorruptOp]. The two
+// predicates were one until rmp #2794, and splitting them is what lets the
+// not-clean report and the fail-stop refusal be decided separately: the
+// corrupt-op-inside-a-committed-transaction case is not-clean (the loss is real,
+// the WAL must not be appended to) yet still opens (the loss is irrecoverable,
+// so refusing buys no repair). The full reasoning, and the instruction to treat
+// any change here as a decision rather than a tidy-up, is on
+// [tailErrIsCorruption].
+func tailErrIsOpenFatal(err error) bool {
+	return tailErrIsCorruption(err) && !errors.Is(err, ErrCommittedTxnCorruptOp)
 }
 
 // Options carries the codecs used by [Open] and [OpenCtx] plus the
@@ -396,8 +565,29 @@ type Options[N comparable, W any] struct {
 	// existing caller carries) selects [txn.DefaultMaxTxnOps], the same
 	// default the producer uses, so producer and recovery agree; a negative
 	// value ([txn.MaxTxnOpsUnlimited]) disables the cap; any other positive
-	// value is the cap verbatim. It must be >= the producer cap so every
-	// durably-committed transaction replays.
+	// value is the cap verbatim.
+	//
+	// # It must be >= the producer cap, and the cost of getting that wrong is
+	// an unopenable store
+	//
+	// This bound and the producer bound
+	// ([txn.NewStoreWithOptionsCapped] / [txn.NewStoreWithCodecCapped]) are
+	// independently configurable. By default both resolve to
+	// [txn.DefaultMaxTxnOps], so out of the box there is no exposure. Set this
+	// one BELOW the producer's, however, and the consequence is out of all
+	// proportion to the mistake: the producer does not refuse the oversized
+	// transaction, it acknowledges it DURABLE, and the next reopen then fails
+	// with [ErrTransactionTooLarge] for the WHOLE directory — every transaction
+	// committed before the oversized one is stranded behind that fail-stop, and
+	// every one committed after it is discarded unreplayed. Lowering this bound
+	// for a security-hardened deployment, or raising the producer's for a bulk
+	// load, converts a rejected write into a database that will not open.
+	//
+	// On the reopen path the library enforces this rather than trusting the
+	// caller: [Result.MaxTxnOps] reports the bound the replay ran under and
+	// [Result.NewStoreCapped] clamps the producer down to it. Callers that build
+	// the producer store independently of that handoff own the invariant
+	// themselves.
 	MaxTxnOps int
 }
 
@@ -500,6 +690,34 @@ var ErrUnsupportedRecordVersion = errors.New("recovery: unsupported WAL record v
 // clean, and the committed prefix that pre-dates the run stays in
 // [Result.Graph] for diagnostics.
 var ErrTransactionTooLarge = errors.New("recovery: v3 transaction exceeds the per-transaction op cap")
+
+// ErrCommittedTxnCorruptOp is reported via [Result.TailErr] /
+// [ReplayResult.TailErr] when an op INSIDE an already-durable, already-committed
+// v3 transaction cannot be decoded and applied — a frame that passed its CRC and
+// sits before a written [txn.OpCommit] marker, but whose body cannot be walked
+// through the codec (or whose apply the graph refuses; see [applyOpCodec]).
+//
+// Replay cannot continue past it. The transaction carrying the op is not
+// applicable as a unit, so applying its other ops would publish a state no
+// committed transaction ever produced; and every transaction AFTER it is
+// discarded too, because replay stops at the frame. The ops in that discarded
+// suffix were acknowledged to their callers and are irrecoverable.
+//
+// # This sentinel is classified not-clean but is NOT fail-stop
+//
+// [Result.IsClean] reports false for it — the loss is real and the WAL must not
+// be appended to — but [Open] / [OpenCtx] still return a NIL error and the
+// committed prefix in [Result.Graph] is usable. It is the one member of the
+// not-clean set that behaves this way; the departure is recorded and reasoned at
+// [tailErrIsCorruption], and a caller that must distinguish "opened, but lost a
+// suffix" from a clean open branches on [Result.IsClean] (or on errors.Is
+// against this sentinel), never on the function error alone.
+//
+// It exists as a sentinel rather than a plain error because a plain
+// errors.New is exactly what made the loss invisible: the classifier fell to
+// its default arm, called the state benign, and reported it clean while two
+// acknowledged transactions were gone (rmp #2794).
+var ErrCommittedTxnCorruptOp = errors.New("recovery: corrupt op inside a committed v3 transaction")
 
 // Decode parses one payload back into an [Op]. The parser peeks the
 // first byte to select the decoder:
@@ -879,10 +1097,20 @@ func accumulateIndexOp(is *indexSet, op *Op) (isIndex, ok bool) {
 // a legacy/garbage record version surfaced as [ErrUnsupportedRecordVersion])
 // is fail-stop: Open returns that error (the committed prefix is still
 // placed in [Result.Graph] for diagnostics) and [Result.IsClean] reports
-// false. Callers that recover-then-append must branch on the returned error
-// or [Result.IsClean] and refuse to append onto a corrupt WAL, which would
-// otherwise permanently embed the corruption and drop every committed op
-// past the bad frame.
+// false.
+//
+// One outcome is not-clean WITHOUT being fail-stop: an undecodable op inside an
+// already-committed transaction ([ErrCommittedTxnCorruptOp]). Open returns nil
+// and the committed prefix is usable, but [Result.IsClean] reports false, a
+// counter is incremented, and a structured warning naming the frame and the
+// transaction is logged — because that transaction and every one after it are
+// discarded, irrecoverably. See [tailErrIsCorruption] for why the open is still
+// allowed to succeed.
+//
+// So callers that recover-then-append must branch on [Result.IsClean], not on
+// the returned error alone, and refuse to append onto a WAL that did not replay
+// cleanly — which would otherwise permanently embed the damage and drop every
+// committed op past the bad frame.
 func Open[N comparable, W any](dir string, opts Options[N, W]) (Result[N, W], error) {
 	defer metrics.Time("store.recovery.Open").Stop()
 	res, err := OpenCtx[N, W](context.Background(), dir, opts)
@@ -902,7 +1130,12 @@ func OpenCtx[N comparable, W any](ctx context.Context, dir string, opts Options[
 		metrics.IncCounter("store.recovery.OpenCtx.errors", 1)
 		return Result[N, W]{}, errors.New("recovery: nil codec")
 	}
-	res, err := openCodec[N, W](ctx, osBackend{}, dir, opts.Codec, opts.WeightCodec, resolveRecoveryMaxTxnOps(opts.MaxTxnOps))
+	replayCap := resolveRecoveryMaxTxnOps(opts.MaxTxnOps)
+	res, err := openCodec[N, W](ctx, osBackend{}, dir, opts.Codec, opts.WeightCodec, replayCap)
+	// Report the bound this replay actually ran under so [Result.NewStoreCapped]
+	// can clamp the producer to it. Set on EVERY returned Result, including the
+	// error ones, so the field never silently reads as "no information".
+	res.MaxTxnOps = recoveryCapOption(replayCap)
 	if err != nil {
 		metrics.IncCounter("store.recovery.OpenCtx.errors", 1)
 	}
@@ -928,7 +1161,12 @@ func OpenCtxFS[N comparable, W any](ctx context.Context, fsys recoveryFS, dir st
 		metrics.IncCounter("store.recovery.OpenCtxFS.errors", 1)
 		return Result[N, W]{}, errors.New("recovery: nil codec")
 	}
-	res, err := openCodec[N, W](ctx, fsys, dir, opts.Codec, opts.WeightCodec, resolveRecoveryMaxTxnOps(opts.MaxTxnOps))
+	replayCap := resolveRecoveryMaxTxnOps(opts.MaxTxnOps)
+	res, err := openCodec[N, W](ctx, fsys, dir, opts.Codec, opts.WeightCodec, replayCap)
+	// Report the bound this replay actually ran under so [Result.NewStoreCapped]
+	// can clamp the producer to it. Set on EVERY returned Result, including the
+	// error ones, so the field never silently reads as "no information".
+	res.MaxTxnOps = recoveryCapOption(replayCap)
 	if err != nil {
 		metrics.IncCounter("store.recovery.OpenCtxFS.errors", 1)
 	}
@@ -951,6 +1189,18 @@ func resolveRecoveryMaxTxnOps(maxTxnOps int) int {
 	default:
 		return maxTxnOps
 	}
+}
+
+// recoveryCapOption is the inverse of [resolveRecoveryMaxTxnOps]: it maps an
+// already-resolved replay bound (0 meaning "no cap") back onto the
+// caller-facing option convention, so [Result.MaxTxnOps] can be handed straight
+// back to [Result.NewStoreCapped] or to a second [Options]. It never returns 0,
+// which is what lets 0 mean "no information" on a hand-built Result.
+func recoveryCapOption(resolved int) int {
+	if resolved == 0 {
+		return txn.MaxTxnOpsUnlimited
+	}
+	return resolved
 }
 
 // defaultRecoveryConfig is the adjacency-list configuration used to
@@ -1470,7 +1720,8 @@ func openCodec[N comparable, W any](
 	res.SnapshotSelfSufficient = snapshotSideAppliedEarly
 	if len(snapIndexes) > 0 {
 		res.SnapshotIndexPayloads, res.SnapshotIndexes =
-			classifyIndexPayloads(snapIndexes, indexImageReason(snapshotSideAppliedEarly, loaded.Manifest.IndexesCommitTS))
+			classifyIndexPayloads(snapIndexes, indexImageReason(
+				snapshotSideAppliedEarly, loaded.Manifest.IndexesCommitTS, loaded.Manifest.IndexBuilderEpoch))
 	}
 	// Fail-stop on genuine corruption: a CRC mismatch, bad magic,
 	// unsupported frame/record version, or oversized length inside an
@@ -1481,7 +1732,15 @@ func openCodec[N comparable, W any](
 	// benign torn tail ([wal.ErrTornFrame]) and a CRC-valid-but-unparseable
 	// trailing frame are NOT corruption and return success — the normal
 	// crash-after-fsync recovery case (see [tailErrIsCorruption]).
-	if tailErrIsCorruption(res.TailErr) {
+	//
+	// The gate is [tailErrIsOpenFatal], NOT tailErrIsCorruption: since rmp #2794
+	// the two differ by exactly one sentinel. [ErrCommittedTxnCorruptOp] is
+	// classified not-clean — res.IsClean() is false and the detection site
+	// already counted and logged the loss — but still opens, because the
+	// discarded suffix is irrecoverable and refusing the open would buy no
+	// repair. That trade-off is a recorded decision; it is argued in full on
+	// [tailErrIsCorruption].
+	if tailErrIsOpenFatal(res.TailErr) {
 		metrics.IncCounter("store.recovery.openCodec.corruptTail", 1)
 		return res, res.TailErr
 	}
@@ -1526,9 +1785,16 @@ type ReplayResult struct {
 
 // IsClean reports whether replay stopped at a state from which it is safe to
 // reopen the WAL for append: a clean EOF or a benign torn tail. It mirrors
-// [Result.IsClean] exactly (the complement of the genuine-corruption set). The
-// pointer receiver avoids copying the result struct on the call; it does not
-// mutate it.
+// [Result.IsClean] exactly (the complement of the genuine-corruption set,
+// [ErrCommittedTxnCorruptOp] included). The pointer receiver avoids copying the
+// result struct on the call; it does not mutate it.
+//
+// [ReplayWAL] never returns a corruption stop reason as its function error — the
+// only non-nil error it reports is a ctx cancellation — so on this core IsClean
+// is the ONLY signal that replay did not complete. That is what makes it the
+// path rmp #2794 was filed against: the corrupt-op-inside-a-committed-transaction
+// case reported clean, so a caller checking both the error and IsClean saw
+// nothing at all.
 func (r *ReplayResult) IsClean() bool { return !tailErrIsCorruption(r.TailErr) }
 
 // ReplayWAL replays the v2/v3 transaction-encoded frames of r into g and reports
@@ -1556,6 +1822,17 @@ func (r *ReplayResult) IsClean() bool { return !tailErrIsCorruption(r.TailErr) }
 // frame is surfaced via TailErr and reported not-clean. A ctx cancellation
 // observed mid-replay (checked every 4096 ops) is returned as the function error
 // alongside the partial [ReplayResult].
+//
+// "Reported not-clean" includes the case an op inside an ALREADY-COMMITTED
+// transaction cannot be decoded and applied: TailErr wraps
+// [ErrCommittedTxnCorruptOp], IsClean is false, the
+// store.recovery.openCodec.committedTxnCorruptOp counter is incremented, and a
+// structured warning naming the frame and the transaction is logged. That
+// transaction, and every transaction after it, are discarded irrecoverably even
+// though each commit was acknowledged — so the report is the only trace the loss
+// leaves, and it must not be ignored. Until rmp #2794 the stop reason was a
+// plain error that the classifier read as benign, so this exact case reported
+// CLEAN.
 //
 // ReplayWAL does NOT apply the snapshot side (labels, properties, mapper,
 // tombstones, indexes) — that orchestration is [openCodec]'s job. A caller that
@@ -1646,7 +1923,14 @@ func replayWALInto[N comparable, W any](
 	// discarded on the next marker by the TxnSeq suffix filter below,
 	// never merged into the committed transaction.
 	var pending []Op
+	// frameIdx is the 1-based ordinal of the frame currently being processed. It
+	// exists only so the rmp #2794 diagnostic can NAME the frame replay stopped
+	// at: a byte offset is not available mid-iteration (the reader publishes
+	// [wal.Reader.TailOffset] when iteration ends), and an ordinal is what a WAL
+	// dump counts, so it is the coordinate an operator can act on.
+	frameIdx := 0
 	for f := range r.Frames() {
+		frameIdx++
 		if res.WALOps&0xFFF == 0 {
 			if err := ctx.Err(); err != nil {
 				return res, err
@@ -1712,17 +1996,55 @@ func replayWALInto[N comparable, W any](
 				metrics.IncCounter("store.recovery.openCodec.orphanedOps", uint64(start))
 			}
 			committed := pending[start:]
-			ok := true
+			failedIdx := -1
 			for i := range committed {
 				if !applyOrAccumulate(g, &committed[i], codec, wcodec, cAcc, iAcc, touched) {
-					ok = false
+					failedIdx = i
 					break
 				}
 				res.WALOps++
 			}
+			// Read what the diagnostic needs BEFORE the buffer is reset: the
+			// truncation below only changes pending's length, but reading through
+			// a slice whose header has already been rewound is the kind of aliasing
+			// a later edit breaks silently.
+			txnOps := len(committed)
+			var failedKind txn.OpKind
+			if failedIdx >= 0 {
+				failedKind = committed[failedIdx].Kind
+			}
 			pending = pending[:0]
-			if !ok {
-				res.TailErr = errors.New("recovery: corrupt op inside a committed v3 transaction")
+			if failedIdx >= 0 {
+				// An op inside an ALREADY-COMMITTED transaction cannot be applied.
+				// Replay stops here, so this transaction and every transaction
+				// after it are discarded even though each commit was
+				// acknowledged, and those ops are irrecoverable.
+				//
+				// Until rmp #2794 this was a plain errors.New: [tailErrIsCorruption]
+				// fell to its default arm, called the state benign, and let
+				// [Result.IsClean] report TRUE while a whole WAL suffix of
+				// acknowledged transactions was gone — no counter, no log line, no
+				// error. The store still opens (the recorded decision; see
+				// [tailErrIsCorruption]), but the loss is now classified not-clean,
+				// counted, and named in the log so it is diagnosable in production.
+				res.TailErr = fmt.Errorf(
+					"%w: txn seq %d, op %d of %d (kind %d) at WAL frame %d; this transaction and every transaction after it are discarded",
+					ErrCommittedTxnCorruptOp, commitSeq, failedIdx+1, txnOps, failedKind, frameIdx)
+				metrics.IncCounter("store.recovery.openCodec.committedTxnCorruptOp", 1)
+				// frameIdx names the OpCommit marker — the frame replay stopped
+				// at; the offending data frame is the (failedIdx+1)-th frame of
+				// this transaction, which txn_op_index gives. op_kind is the
+				// on-disk [txn.OpKind] tag, as a WAL dump shows it.
+				slog.Default().Warn(
+					"recovery: undecodable op inside an already-committed transaction; this transaction and every transaction after it were discarded",
+					slog.Uint64("txn_seq", commitSeq),
+					slog.Int("wal_frame", frameIdx),
+					slog.Int("txn_op_index", failedIdx+1),
+					slog.Int("txn_ops", txnOps),
+					slog.Uint64("op_kind", uint64(failedKind)),
+					slog.Int("wal_ops_applied", res.WALOps),
+					slog.Any("reason", res.TailErr),
+				)
 				break
 			}
 			continue

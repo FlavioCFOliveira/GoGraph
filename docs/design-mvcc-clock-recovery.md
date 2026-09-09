@@ -1,8 +1,21 @@
 # Restoring the MVCC clock on recovery — specification
 
-rmp #2309 (MVCC C3). Status: **specified, not yet implemented.** This document is
-the Specify step; it records what was verified against the code rather than
-assumed, settles the on-disk compatibility question, and subdivides the work.
+rmp #2309 (MVCC C3). Status: **implemented.** This document began as the Specify
+step; it records what was verified against the code rather than assumed, settles the
+on-disk compatibility question, and subdivides the work.
+
+> **Status corrected (2026-09-08 at `efd32fb9`).** The header read "specified, not yet
+> implemented", and the design has since shipped. What is in the code today:
+> `lpg.Graph.RestoreMVCCClock` (`graph/lpg/mvcc_write.go:320`) raises the clock and never
+> lowers it; recovery derives the floor as `recovery.Result.MaxCommitTS` and applies it at
+> two sites, `store/recovery/recovery.go:1666` and `:1876`, as
+> `g.RestoreMVCCClock(res.MaxCommitTS + 1)`; and the durable instant is carried both in
+> the `OpCommit` body and in the snapshot manifest as `commit_ts`
+> (`snapshot.Manifest.CommitTS`, `store/snapshot/manifest.go:405`).
+> The manifest field lies inside the region the trailer checksums, so a flip that would
+> silently decode it as 0 and skip the restore now fail-stops recovery. Sections below
+> that speak of the work as pending should be read as the specification they were, not as
+> current state.
 
 ## The problem
 
@@ -13,6 +26,16 @@ Today the consequences are bounded, because timestamps are only ever compared
 within one process lifetime. They stop being bounded the moment anything needs to
 name an instant durably: an MVCC-consistent checkpoint (#2310), a point-in-time or
 as-of read, or replication.
+
+> **Correction (2026-09-08 at `efd32fb9`): this is the defect as it was, not as it is.**
+> The second sentence is now false in both halves. `store/recovery` records the highest
+> durable instant it saw as `recovery.Result.MaxCommitTS` and restores the clock from it
+> (`store/recovery/recovery.go:1666`, `:1876`), and `store/snapshot` persists the instant
+> the image was captured at as `commit_ts` (`snapshot.Manifest.CommitTS`). A reopened
+> graph therefore never re-mints an instant the durable image already contains. The
+> sibling watermark for the secondary-index payloads, `indexes_commit_ts`
+> (`snapshot.Manifest.IndexesCommitTS`), was added later and answers a different
+> question — see [`dst-feature-coverage.md`](dst-feature-coverage.md).
 
 ## Verified against the code — three findings
 

@@ -282,6 +282,16 @@ the same closure shape:
   early exit at `budget`;
 - fire only when the count is exact, non-zero, and within budget.
 
+> **Correction (rmp #2367, 2026-09-08): the population floor is 64, not 1024.**
+> `rangeSeekMinLabelPopulation` was lowered to **64** by rmp #2367, and
+> `cypher/range_seek_plan.go:99` now carries the measurement that motivated the
+> change: the constant's own comment records the 1024 premise as "false by more
+> than an order of magnitude". The gate's *shape* is unchanged and the argument
+> in this section still holds — only the number moved, so the prefix path fires
+> from a label population of 64 upward rather than 1024.
+> `rangeSeekMaxSelectivity` (0.10) is unchanged. The two occurrences of `1024`
+> above are left in place as the design's own record; read `64` in both.
+
 Because the count is exact rather than an estimate, the estimate-provenance veto
 is satisfied trivially — the same argument #1505 established. The change
 therefore lands inside the proven no-regression frame, and cannot regress a

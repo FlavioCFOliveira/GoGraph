@@ -133,8 +133,9 @@ func labelScanEstimate(labelSrc *lpgLabelResolver, label string) (est estimate, 
 // child is a scan leaf, derived from the predicate shape:
 //
 //   - An equality n.prop = literal → the exact per-value MCV count when the
-//     literal is a tracked heavy hitter (estExact), else the 1/NDV * N average
-//     (estHeuristic).
+//     literal is a tracked heavy hitter AND the statistic behind it is still fresh
+//     (estExact), a demotion to estFallback (omitted) when it is not (rmp #2772),
+//     else the 1/NDV * N average (estHeuristic).
 //   - A single range comparison n.prop <op> x → the equi-depth histogram estimate
 //     (estStats) with its certified error, or estFallback (omitted) when the
 //     statistic is absent or stale.
@@ -339,7 +340,7 @@ func rangeSeekInRangeCount(sel *ir.Selection, idxMgr *index.Manager, g *lpg.Read
 
 	// String range over a bound string btree.
 	if pred, okPred := extractStringRangePred(sel.PredicateExpr, lblScan.NodeVar, params, prefixSeek); okPred {
-		if sub, okSub := findBoundStringBTree(idxMgr, lblScan.Label, pred.propKey); okSub {
+		if sub, okSub := findBoundStringBTree(idxMgr, lblScan.Label, pred.propKey, nil); okSub {
 			lo := ""
 			if pred.lo != nil {
 				if sv, okSv := pred.lo.Value.(expr.StringValue); okSv {
@@ -362,7 +363,7 @@ func rangeSeekInRangeCount(sel *ir.Selection, idxMgr *index.Manager, g *lpg.Read
 
 	// Numeric range over the unified float64 btree companion.
 	if pred, okPred := extractNumericRangePred(sel.PredicateExpr, lblScan.NodeVar, params); okPred {
-		if sub, okSub := findBoundNumericBTree(idxMgr, lblScan.Label, pred.propKey); okSub {
+		if sub, okSub := findBoundNumericBTree(idxMgr, lblScan.Label, pred.propKey, nil); okSub {
 			lo, hi := rangeBoundFloats(pred)
 			if cnt, exact := sub.RangeCount(lo, hi, fullBudget); exact {
 				return int64(cnt), true

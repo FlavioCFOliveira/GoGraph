@@ -696,10 +696,28 @@ func NewProjection(items []ProjectionItem, child LogicalPlan) *Projection {
 func (p *Projection) Children() []LogicalPlan { return []LogicalPlan{p.Child} }
 
 // Vars implements LogicalPlan.
+//
+// A synthetic ORDER-BY key column is NOT a variable binding and is excluded:
+// since #2662 a Hidden item may carry the key EXPRESSION rather than a
+// pre-projection variable, so its Name is a property path such as `p.salary`,
+// which no clause can name and which nothing downstream may bind. Leaving it in
+// made `RETURN *` / `WITH *` re-project it as a real output column — the one
+// place [translator.returnClause]'s Hidden filter cannot catch it, because the
+// wildcard synthesises a fresh, non-hidden item from the name.
+//
+// The ENTITY passthrough — a Hidden item whose Expr is a bare variable (#1805) —
+// is deliberately still reported. That name IS a binding, every consumer of Vars
+// has always seen it, and narrowing it here would change what liveOutputVars and
+// the logical-plan rendering see for reasons unrelated to the key column.
 func (p *Projection) Vars() []string {
-	out := make([]string, len(p.Items))
-	for i, it := range p.Items {
-		out[i] = it.Name
+	out := make([]string, 0, len(p.Items))
+	for _, it := range p.Items {
+		if it.Hidden {
+			if _, isVar := it.Expr.(*ast.Variable); !isVar {
+				continue
+			}
+		}
+		out = append(out, it.Name)
 	}
 	return out
 }

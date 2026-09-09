@@ -1,0 +1,54 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/store/txn
+cpu: Apple M4
+BenchmarkCommitConcurrent/goroutines=1-10         	     336	   3704727 ns/op	     595 B/op	      11 allocs/op
+BenchmarkCommitConcurrent/goroutines=8-10         	    1396	    901746 ns/op	     585 B/op	      11 allocs/op
+BenchmarkCommitConcurrent/goroutines=64-10        	   10093	    119185 ns/op	     684 B/op	      10 allocs/op
+BenchmarkCommitConcurrent/goroutines=256-10       	   38628	     30396 ns/op	     714 B/op	      10 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/store/txn
+cpu: Apple M4
+BenchmarkCommitConcurrent/goroutines=1-10         	     337	   3715874 ns/op	     596 B/op	      11 allocs/op
+BenchmarkCommitConcurrent/goroutines=8-10         	    1317	    900435 ns/op	     589 B/op	      11 allocs/op
+BenchmarkCommitConcurrent/goroutines=64-10        	   10105	    119538 ns/op	     685 B/op	      10 allocs/op
+BenchmarkCommitConcurrent/goroutines=256-10       	   37390	     32035 ns/op	     719 B/op	      10 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/store/txn
+cpu: Apple M4
+BenchmarkCommitConcurrent/goroutines=1-10         	     308	   3749258 ns/op	     609 B/op	      11 allocs/op
+BenchmarkCommitConcurrent/goroutines=8-10         	    1364	    922177 ns/op	     592 B/op	      11 allocs/op
+BenchmarkCommitConcurrent/goroutines=64-10        	    9858	    121006 ns/op	     694 B/op	      10 allocs/op
+BenchmarkCommitConcurrent/goroutines=256-10       	   36256	     31066 ns/op	     727 B/op	      10 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/store/txn
+cpu: Apple M4
+BenchmarkCommitConcurrent/goroutines=1-10         	     331	   3733868 ns/op	     590 B/op	      11 allocs/op
+BenchmarkCommitConcurrent/goroutines=8-10         	    1348	    890204 ns/op	     595 B/op	      11 allocs/op
+BenchmarkCommitConcurrent/goroutines=64-10        	    9835	    121885 ns/op	     694 B/op	      10 allocs/op
+BenchmarkCommitConcurrent/goroutines=256-10       	   37244	     31381 ns/op	     719 B/op	      10 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/store/txn
+cpu: Apple M4
+BenchmarkCommitConcurrent/goroutines=1-10         	     345	   3709758 ns/op	     603 B/op	      11 allocs/op
+BenchmarkCommitConcurrent/goroutines=8-10         	    1189	    893947 ns/op	     608 B/op	      11 allocs/op
+BenchmarkCommitConcurrent/goroutines=64-10        	   10228	    119363 ns/op	     683 B/op	      10 allocs/op
+BenchmarkCommitConcurrent/goroutines=256-10       	   37809	     30651 ns/op	     715 B/op	      10 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/store/txn
+cpu: Apple M4
+BenchmarkCommitConcurrent/goroutines=1-10         	     338	   3682665 ns/op	     592 B/op	      11 allocs/op
+BenchmarkCommitConcurrent/goroutines=8-10         	    1380	    873104 ns/op	     587 B/op	      11 allocs/op
+BenchmarkCommitConcurrent/goroutines=64-10        	    9714	    122108 ns/op	     697 B/op	      10 allocs/op
+BenchmarkCommitConcurrent/goroutines=256-10       	   37292	     33182 ns/op	     718 B/op	      10 allocs/op
+PASS

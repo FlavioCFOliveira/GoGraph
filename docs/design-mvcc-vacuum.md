@@ -155,10 +155,18 @@ ceiling existed, and 8 480 after.
 ## 7. Observability
 
 `Graph.VacuumStats()` reports `Running`, `Starts`, `Exits`, `Passes`,
-`Reclaimed`, `CappedPasses`, `Backlog` and `RecordsPerPass`. Exported as gauges
+`Reclaimed`, `CappedPasses`, `Backlog`, `RecordsPerPass` and `PassTotal`, plus the
+`MeanPass()` accessor, which is `PassTotal / Passes`. Exported as gauges
 under `lpg.mvcc.vacuum.*`, alongside the substrate's own `lpg.mvcc.versions.*`
 (now including `ceiling`). The goroutine carries the pprof label
 `gograph.goroutine=lpg.mvcc.vacuum`.
+
+> **Field list completed (2026-09-08 at `efd32fb9`).** This paragraph omitted `PassTotal`
+> — the total time spent inside passes, added by rmp #2312 for a caller with no histogram
+> backend, and the numerator of `VacuumStats.MeanPass()` (its denominator is `Passes`).
+> The distribution itself is published separately as the latency series
+> `lpg.mvcc.vacuum.pass`. The nine fields listed above are now the complete set declared
+> by `VacuumStats` at `graph/lpg/mvcc_vacuum.go:297`.
 
 `lpg.mvcc.vacuum.pressure_unrelieved` counts the ceiling waits that timed out
 without a pass — the states in which no pass will come (a closed graph, a sweeper

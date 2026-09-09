@@ -407,6 +407,53 @@ cover: ## Run tests with coverage
 cover-gate: ## Enforce aggregate (>=85%) and per-package (>=75%) coverage gates
 	GOGRAPH_PARALLEL_SUITE=1 GO=$(GO) MIN_TOTAL=85.0 MIN_PER_PKG=75.0 bash scripts/cover_gate.sh
 
+.PHONY: kg-verify
+kg-verify: ## Verify knowledge-graph fidelity against the tree, rmp and knowledge-model.md (exit 1 on regression)
+	$(GO) run ./cmd/kgverify $(KGVERIFY_FLAGS)
+
+.PHONY: ci-kg-verify
+ci-kg-verify: ## kg-verify as `ci` runs it: every check gates except the two that vary without the code
+	$(GO) run ./cmd/kgverify -exclude task-status-disagrees-with-rmp,provenance-no-node
+
+# A MEMBER of `ci`, by the user's decisions on rmp #2677 and #2796, with exactly
+# TWO checks excluded. Both are excluded for the SAME reason: their count moves
+# without the code under test moving, so inside `ci` they would fail a push for a
+# reason unrelated to the change being pushed.
+#
+#   task-status-disagrees-with-rmp — TIME-varying. rmp is the authority, so a
+#   task closed without a graph sync raises it with no change to the tree at all.
+#
+#   provenance-no-node — BRANCH-LENGTH-varying. Its population is "declarations
+#   in files touched since the merge-base", so every commit widens it and pulls
+#   in declarations that already existed and were never part of any change. The
+#   baseline was recorded against 1837 declarations in 66 touched files; twenty-
+#   two commits into release/0.14.1 it was 2026 in 84, and the count had risen
+#   from 1082 to 1187 without anyone adding un-noded code. Measuring against the
+#   DIFF HUNKS rather than the touched files would make it branch-independent and
+#   able to gate; that repair was considered and not taken here.
+#
+# Both stay MEASURED and PRINTED on every run — the rows appear in the table and
+# are marked FAIL when they exceed their baseline — so neither number goes
+# unseen; they simply do not gate.
+#
+# THE PROVENANCE DEBT IS REAL AND IS NOT DECLARED PAID BY THIS EXCLUSION. At the
+# time of writing 1187 declarations in touched files carry no graph node, and
+# symbol-absent stands at 327 — of which 93 name a symbol in a file that EXISTS
+# and does not declare it, the same shape as the two fabrications that opened
+# #2677. Excluding a check that cannot converge is not the same as paying what
+# it measures.
+#
+# THOSE TWO FIGURES ARE HISTORICAL and were already superseded inside the same
+# release window: #2719 took symbol-absent to 0 and coverage to 95.7% at
+# 0e7e982d. Do not quote either number as current — run the gate. The measured
+# state, with the commit it was measured at, is in
+# docs/knowledge-graph-fidelity-2026-09-08.md.
+#
+# Every other check gates, including the twelve whose baseline is ZERO: a
+# fabricated node, a retired name-as-string task identity and a string task id
+# each turn `ci` red immediately, which is the recurrence #2677 exists to
+# prevent.
+
 .PHONY: bench
 bench: ## Run benchmarks ($(BENCH_PATTERN), count=$(BENCH_COUNT))
 	$(GO) test -bench=$(BENCH_PATTERN) -benchmem -count=$(BENCH_COUNT) -run=^$$ $(PACKAGES)
@@ -451,7 +498,7 @@ lint: ## Run golangci-lint (auto-install if missing)
 	golangci-lint run $(PACKAGES)
 
 .PHONY: ci
-ci: shell-guard tidy fmt vet build vulncheck test-short test-timing test-uninstrumented lint cover-gate ## Full CI pipeline: tidy + fmt + vet + build + vulncheck + test-short + test-timing + test-uninstrumented + lint + cover-gate
+ci: shell-guard tidy fmt vet build vulncheck test-short test-timing test-uninstrumented lint cover-gate ci-kg-verify ## Full CI pipeline: tidy + fmt + vet + build + vulncheck + test-short + test-timing + test-uninstrumented + lint + cover-gate + kg-verify
 
 .PHONY: ci-soak
 ci-soak: shell-guard tidy fmt vet build vulncheck test-soak test-timing test-uninstrumented lint cover-gate ## CI pipeline with soak layer: like ci but runs test-soak

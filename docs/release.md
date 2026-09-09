@@ -33,9 +33,18 @@ Before tagging a new release:
    [CONTRIBUTING.md](../CONTRIBUTING.md#dependency-policy) governs
    how upgrades are landed between releases.
 
-3. CHANGELOG.md has a new `## [vX.Y.Z] — YYYY-MM-DD` entry summarising
+3. CHANGELOG.md has a new `## [X.Y.Z] — YYYY-MM-DD` entry summarising
    the work landed since the previous tag. Follow the Keep-a-Changelog
    format: Added / Changed / Fixed / Removed / Performance / Security.
+
+   **The heading carries no `v` prefix.** `make release-accuracy` greps
+   for `## [$(echo $VERSION | sed 's/^v//')]`, so `## [v0.14.1]` fails the
+   gate and `## [0.14.1]` passes it. The matching `[0.14.1]:` link
+   definition goes at the **end of that version's own section**, just
+   before the next `## [` heading — that is where every entry since
+   `v0.7.0` puts it, and `scripts/release_body.sh` extracts the section up
+   to the next `## [`, so a definition parked at the bottom of the file
+   would leave the published release body with an unresolved link.
 
 4. Release notes — long-form narrative for the
    `release-notes/vX.Y.Z.md` file — are drafted.
@@ -72,9 +81,12 @@ $ gh api repos/FlavioCFOliveira/GoGraph/tags/protection
 
 Classic branch protection is absent, the newer rulesets mechanism is
 empty, and tag protection is absent. The repository's own history
-corroborates it: `main` carries `f97bbfec`, a **merge commit**, which
-the "require linear history" rule described below as active would have
-rejected outright.
+corroborates it: `main` carries a **merge commit** at its tip — it was
+`f97bbfec` when this was probed and is `7c59a02c` (the `v0.14.0` release
+merge) as of `v0.14.1` — which the "require linear history" rule
+described below as active would have rejected outright. The probe above
+is dated deliberately and has **not** been re-run for `v0.14.1`; treat it
+as the last measured state rather than as today's.
 
 Consequently, on `main` and on the `v*` tag namespace, a direct push
 by an account with write access **succeeds**. Nothing but developer
@@ -121,8 +133,10 @@ On `main`:
   `--no-ff`; adopting it means changing the branching model too, and
   that decision has not been taken.
 - **Require signed commits.** `git log --pretty=%G?` reports `N` — no
-  signature — for **all 99 commits** in the `v0.12.0..v0.13.0` window,
-  because no signing key is configured on the release workstation.
+  signature — for **all 99 commits** in the `v0.12.0..v0.13.0` window and
+  for **all 50 commits** in `v0.14.0..v0.14.1`, because no signing key is
+  configured on the release workstation. Re-measure this per release; it
+  is one command and it has never yet come back green.
 
 On the `v*` tag namespace:
 
@@ -130,8 +144,10 @@ On the `v*` tag namespace:
   cannot reach the `Release` workflow in the first place. No such team
   exists today.
 - **Signed tags.** Release tags are currently annotated but
-  **unsigned** — `v0.10.0`, `v0.11.0`, `v0.12.0` and `v0.13.0` are all
-  `git tag -a` objects, verified with `git cat-file -t`. Adopting
+  **unsigned** — `v0.10.0`, `v0.11.0`, `v0.12.0`, `v0.13.0` and
+  `v0.14.0` are all `git tag -a` objects, verified with
+  `git cat-file -t` (which reports `tag` for an annotated object and
+  `commit` for a lightweight one). Adopting
   `git tag -s` requires a signing key, a documented key-custody
   process, and the matching GitHub tag rule; until those exist, do not
   claim signed tags anywhere.
@@ -217,9 +233,14 @@ The `Release` workflow at `.github/workflows/release.yml` triggers
 on the tag push and runs `VERSION=<tag> make release-accuracy` — the
 release-doc consistency gate — and then invokes goreleaser with
 `GITHUB_TOKEN` from the default actions secret. The result is a
-**draft** release on GitHub — review the artefact list (source tarballs,
-soak-harness binaries for linux/darwin × amd64/arm64, checksums) and
-publish manually.
+**draft** release on GitHub — review the artefact list and publish
+manually. **Five assets are published, not six**: four
+source-and-tools tarballs (`linux/amd64`, `linux/arm64`,
+`darwin/amd64`, `darwin/arm64`) plus `checksums.txt`. The
+soak-harness binary ships **inside** each tarball for that platform
+and is **not** a separately downloadable asset — see *What goreleaser
+ships* below, and verify by extraction rather than by reading this
+list or the config.
 
 The workflow deliberately does **not** re-run the correctness gates.
 Before pushing the tag, the releaser must run the canonical
@@ -256,15 +277,30 @@ in order, BEFORE goreleaser is invoked:
 
 **Correctness + coverage** (`make ci`, run exactly once):
 
-7. `make ci` is green — the full correctness+coverage gate: `go mod tidy`,
-   `gofmt`/`goimports`, `go vet ./...`, `go build ./...`,
-   `go test -race ./...` (which includes the `cypher/tck`
-   `TestTCKExecution` =100 % execution baseline, so a TCK regression fails
-   this gate), `golangci-lint run ./...`, and `make cover-gate`
-   (aggregate ≥ 85 %, per-package ≥ 75 %). The suite runs once here — the
+7. `make ci` is green. Its members, in the order the target lists them, are
+   `shell-guard`, `tidy` (`go mod tidy`), `fmt` (`gofmt`/`goimports`),
+   `vet` (`go vet ./...`), `build` (`go build ./...`), `vulncheck`
+   (`govulncheck`), `test-short` (`go test -race ./...`, which includes the
+   `cypher/tck` `TestTCKExecution` =100 % execution baseline, so a TCK
+   regression fails this gate), `test-timing`, `test-uninstrumented`,
+   `lint` (`golangci-lint run ./...`), `cover-gate` (aggregate ≥ 85 %,
+   per-package ≥ 75 %) and `ci-kg-verify`. The suite runs once here — the
    gate does not re-run it. (`scripts/pre-release.sh` is a separate
    standalone convenience gate that runs vet/build/-race/lint without
    coverage; it is **not** invoked by `release-preflight`.)
+
+   **`ci-kg-verify` needs a running knowledge-graph server.** It joined
+   `make ci` in `v0.14.1` (rmp #2677, #2796) and runs `cmd/kgverify`, which
+   reaches the graph through `rmp graph client`. `rmp graph serve -r gograph`
+   is the only process that opens the store, so with nothing listening the
+   client exits 1, `kgverify` cannot conclude, and **`make ci` — and therefore
+   `make release-preflight` — fails for a reason unrelated to the change being
+   gated.** Start the server before running the release gate. Two checks are
+   excluded inside `ci-kg-verify` and gate nothing:
+   `task-status-disagrees-with-rmp`, whose count moves with `rmp` rather than
+   with the code, and `provenance-no-node`, whose population grows with branch
+   length. Both stay measured and printed. `make kg-verify` runs the full gate
+   with nothing excluded.
 
 **Performance** (informational on a release tag):
 
@@ -286,16 +322,55 @@ Per the `.goreleaser.yaml` in the repo root, a tag release publishes
   `linux/arm64`, `darwin/amd64`, `darwin/arm64`. Each tarball bundles,
   for that platform, the static `soak` binary (a single-file
   reliability driver consumers can drop on a host and run to validate
-  their build), the project docs (`README.md`, `CHANGELOG.md`,
-  `LICENSE`, `SECURITY.md`, `docs/**`), and the CycloneDX SBOM
+  their build), the root documents (`README.md`, `CHANGELOG.md`,
+  `CONTRIBUTING.md`, `LICENSE`, `SECURITY.md`), the Markdown
+  documentation under `docs/` and **only** that (`docs/*.md` plus
+  `docs/**/*.md` — both patterns, see below), and the CycloneDX SBOM
   (`gograph.cdx.json`). The `soak` binary and the SBOM ship **inside**
   each tarball, not as separate downloadable assets.
 - `checksums.txt` (SHA-256 over the four tarballs).
 
-The GitHub release body is headed by an auto-generated changelog
-excerpt from `git log` between the previous and current tag (used
-only as the body header; the authoritative changelog is
-CHANGELOG.md).
+**The list above is read off `.goreleaser.yaml`, and reading that file is
+exactly what once produced a published falsehood — so it is not
+evidence.** The single `docs/**/*` glob it used to carry matches only
+paths with a directory component, so the `v0.13.0` tarball shipped **0 of
+112** top-level `docs/*.md` files while shipping 138 raw benchmark data
+files instead, and the `v0.13.0` changelog then claimed those documents
+"reached consumers as supply-chain assurance". Both are recorded as rmp
+#2758 (the defect) and #2759 (the erratum), both fixed and closed in the
+`v0.14.0` window. The fix was verified the only way that counts, by
+**extracting a built artefact**: 113 of 113 top-level documents present,
+0 raw `.txt`/`.log`/`.meta`/`.sh` files, identically across all four
+archives.
+
+**So verify packaging per release by extraction, never by reading the
+config:**
+
+```bash
+goreleaser release --snapshot --clean --skip=publish,before,validate
+tar tzf dist/gograph-*-darwin-arm64.tar.gz | grep -c '^docs/[^/]*\.md$'
+tar tzf dist/gograph-*-darwin-arm64.tar.gz | grep -cE '\.(txt|log|meta|sh)$'
+```
+
+The first count must equal `ls docs/*.md | wc -l`; the second must be 0.
+
+Note also that this file's `builds:` stanza declares **one** binary,
+`soak`. `.goreleaser.yaml`'s own header comment claims the config "also
+builds the bundled examples"; it does not, and that comment is stale.
+
+**The GitHub release body is composed from `CHANGELOG.md`.** Since
+`v0.14.0` the release workflow runs `scripts/release_body.sh <tag>` before
+goreleaser and passes the result via `--release-notes`, so the body is the
+tag's own `## [x.y.z]` changelog entry followed by links to the narrative
+release notes, the benchmark report, the changelog at that tag and the
+commit range. The script **exits non-zero when the tag has no matching
+changelog entry**, so a release cannot ship with an empty description. The
+`header:`/`footer:` keys in `.goreleaser.yaml` apply only when goreleaser
+composes the body itself, and are now the fallback for a local
+`goreleaser release` run without that flag. Before this, every body was
+goreleaser's default — a one-line pointer plus an autogenerated commit
+list — and ten of the seventeen releases published before `v0.14.0`
+carried nothing else.
 
 ## Software Bill of Materials (SBOM)
 
@@ -317,7 +392,7 @@ cyclonedx-gomod mod -licenses -json -output gograph.cdx.json
 
 At release time the SBOM is generated by the `Release` workflow
 (see `.github/workflows/release.yml`), which installs
-`cyclonedx-gomod` pinned to `v1.10.0` and lets goreleaser invoke it
+`cyclonedx-gomod` pinned to `v1.12.0` and lets goreleaser invoke it
 through the `before:` hook in `.goreleaser.yaml`. There is no
 `sboms:` stanza: the document is generated once by that hook and
 embedded into every archive via the `archives.files` list.

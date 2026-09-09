@@ -6,6 +6,512 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.14.1] — 2026-09-09
+
+**50 commits** — 26 fixes, 7 documentation changes, 6 test changes, 3 features, 3
+performance changes, 3 build changes, 1 chore and 1 merge. Counted at `efd32fb9`, the last
+commit before release preparation; the release-preparation commits that carry this entry
+are necessarily not in their own count. **One sprint delivered this window — 357, *clear
+every open bug and chore, and ship GoGraph v0.14.1* — and 46 of its 47 tasks closed.** The
+forty-seventh, #2812 (an indexed-`MERGE` index probe), was carried to sprint 358 and is
+**not** in this release. 184 files changed, 33 244 insertions, 1 679 deletions
+(`git diff --shortstat v0.14.0..efd32fb9`).
+
+**Every one of the 46 closed tasks has exactly one commit in this window, and every commit
+carrying a `Refs` line names one of them.** That is a 1:1 mapping, established by comparing
+the two sets rather than asserted: 46 task ids in the sprint, 46 distinct task ids across
+the commit bodies, empty in both directions.
+
+**What the insertion count is**, because 33 244 lines is not 33 244 lines of engine.
+Bucketed by path from `git diff --numstat v0.14.0..efd32fb9`:
+
+| bucket | files | insertions | deletions |
+|---|---:|---:|---:|
+| `*_test.go` | 93 | 20 921 | 374 |
+| `*.go` (non-test) | 71 | 9 343 | 745 |
+| `docs/` (prose) | 9 | 1 980 | 341 |
+| root Markdown (`README.md`, `knowledge-model.md`) | 2 | 635 | 193 |
+| `.rmp`, `cmd/kgverify/baseline.json` | 2 | 112 | 1 |
+| build, CI and release tooling | 5 | 106 | 2 |
+| `release-notes/v0.14.0.md` (the erratum) | 1 | 95 | 9 |
+| `examples/` (one README) | 1 | 52 | 14 |
+| **total** | **184** | **33 244** | **1 679** |
+
+The engine change is 9 343 lines across 71 files, and the largest single bucket is tests —
+which is the shape a bug-clearing sprint should have: every fix in this window carries a
+regression test that fails on the old behaviour and passes on the new, by a sprint rule
+carried over from sprint 350.
+
+**Three things define this release.**
+
+**A `MATCH` on an indexed property could return a wrong answer, and did in the shipped
+`v0.14.0`.** The equality index seek was blind to writes the statement itself had made, so
+it both **lost rows the transaction had written** and **returned rows that no longer
+matched** — with no explicit transaction needed, on a single statement. #2814 declines the
+index access path for the coordinates the transaction has dirtied, keyed per
+`(label, property)`, which turns a wrong answer into a slower correct one. This is the most
+important item in the release and the reason it exists.
+
+**Four index-build paths could put a row in an index that the graph does not contain, or
+leave one out.** The backfill read *uncommitted* mutations, so a seek could return a
+fabricated row (#2778); `CREATE CONSTRAINT`'s backfill had the same defect (#2792);
+`FinishBuild`'s replay resolved against the live property bag, so a concurrent write could
+fabricate an entry (#2793); and `rewindConstraintDrop` read live state, where the obvious
+fix traded a fabricated entry for a lost one (#2799). Because a store written by an
+affected build can hold fabricated payloads **on disk**, #2797 stamps an index-builder
+epoch into the snapshot manifest and recovery now **refuses to hydrate** a payload written
+before the fix, rebuilding the index once instead.
+
+**The durability path stopped calling three different failures clean.** The checkpoint
+self-sufficiency gate matched filenames and never verified the snapshot was readable, so a
+WAL prefix could be discarded against a snapshot nothing could load (#2749); the readback
+that fixed it covered the recovery *reader* but not its *applier* (#2780); `ReplayWAL`
+reported corruption inside an already-committed frame as benign, contradicting its own
+documented contract (#2794); and a producer op cap above the replay cap made committed data
+unreplayable rather than merely rejected (#2530).
+
+**`go.mod` and `go.sum` are byte-identical to `v0.14.0`** — same pinned toolchain, same
+dependency set at the same versions (`git diff v0.14.0..efd32fb9 -- go.mod go.sum` is
+empty). There is nothing to report under a dependency heading and nothing is invented to
+fill one.
+
+**No change is marked breaking** — no commit in the window carries a `BREAKING CHANGE`
+footer or a `!` subject, verified over the full commit bodies rather than the subjects
+alone. **The exported surface did grow**: 31 new exported declarations and 6 new exported
+struct fields, with **none removed**. Under [docs/semver.md](docs/semver.md) a new exported
+identifier is the MINOR trigger, so the delta is itemised in full under
+*Added* below rather than summarised, and the two changes a caller can actually
+feel — four exported default constants that changed value, and one exported function whose
+declared return type changed — are set out under
+*Changed* below, with the evidence for each.
+
+**This release is numbered `0.14.1` — a PATCH — by explicit decision, not by oversight.**
+Under [docs/semver.md](docs/semver.md) the 31 new exported identifiers are a MINOR trigger,
+and PATCH is otherwise reserved for changes that preserve every previously-documented API
+contract; four exported constants changing value does not preserve them. The number was
+nonetheless kept at PATCH deliberately. **So do not read `0.14.1` as a drop-in upgrade:**
+treat the *Changed* section below as the checklist a MINOR bump would have signalled. The
+two items that will reach a caller silently are `DefaultConnTimeout`, `DefaultTxTimeout`,
+`DefaultMaxTxIdleTime` and `DefaultStatementTimeout`, every one of which is now `0` —
+disabled — where three of them were 30 s, 30 s and 5 s; and `NewServer`, which now
+**returns an error** for a negative timeout it previously coerced to a default in silence.
+
+The openCypher TCK gate is unchanged at **3 897/3 897**. `const tckExecutionBaseline = 3897`
+in `cypher/tck/runner_test.go` is untouched and **no `.feature` file changed in this window**
+(`git diff --name-only v0.14.0..efd32fb9 -- 'cypher/tck/features/**'` is empty), so the
+scenario population is the one `v0.14.0` was measured against.
+
+**Read [`release-notes/v0.14.1.md`](release-notes/v0.14.1.md) before upgrading.** There is
+no data migration, but a store written by `v0.14.0` or earlier rebuilds its secondary
+indexes once on first open, and the Bolt server's four timeout defaults are now disabled.
+
+### Fixed
+
+#### Cypher — the index access path returned wrong answers
+
+- **A `MATCH` on an indexed property no longer loses rows the statement wrote, nor returns
+  rows that no longer match** (#2814). The equality hash-index seek and the range seek both
+  read the committed index while ignoring the transaction's own pending mutations. Two
+  wrong answers followed from one cause: a row created or updated in the same statement was
+  **missing** from the result, and a row whose indexed property had been changed away from
+  the sought value was still **returned**. It needed no explicit transaction — a single
+  autocommit statement was enough. The fix tracks the `(label, property)` coordinates a
+  transaction has dirtied and declines the index access path for exactly those, falling back
+  to the label scan; correct and slower beats fast and wrong. `EngineOptions.DisableIndexSeek`
+  is the kill switch. Gated by `cypher/index_seek_uncommitted_write_test.go`, mutation-tested
+  from both sides: disabling the guard turns all four behavioural cases red, and a blanket
+  decline kills the precision cases, so "never seek on a write path" could not have passed
+  for it.
+- **An index build no longer reads uncommitted mutations, so a seek cannot return a
+  fabricated row** (#2778). `CREATE INDEX` backfilled from the live property bag, which
+  includes writes no reader should see; a row that was never committed could therefore be
+  indexed, and a later seek would return it. The build now runs against a snapshot.
+- **`CREATE CONSTRAINT`'s backfill had the same defect and is fixed the same way** (#2792),
+  and its uniqueness seed is now taken from the same read its index is built from, so the
+  two cannot disagree.
+- **`FinishBuild`'s replay answers with the graph it recorded, not the graph it finds**
+  (#2793). Concurrent writes were reconciled against live state at the end of the build, so
+  a write that landed mid-build could fabricate an entry. The replay now resolves against
+  the recorded change log, which is bounded at `MaxBuildLogChanges` and reports overflow as
+  `ErrIndexBuildOverflow` rather than silently truncating.
+- **`rewindConstraintDrop` rebuilds from committed state** (#2799). Reading live state
+  fabricated an entry; the first fix considered traded that for a *lost* one, and both
+  failure directions are now covered by tests.
+- **`CREATE CONSTRAINT … IS NOT NULL` no longer succeeds over committed data that violates
+  it** (#2798). Validation ran against live state only, so a violating row that was already
+  durable was not seen. It is now validated against committed state as well.
+- **An explicit transaction now takes the schema gate, so its commit-time index fan-out
+  cannot escape a DDL barrier** (#2738), and concurrent writes are reconciled into an index
+  built without excluding them.
+
+#### Cypher — subqueries, projections and reported counts
+
+- **`COUNT { … }` block form counts the rows its body returns** (#2675). `TranslateSubquery`
+  dropped the body's trailing `RETURN`, so the count was taken over the wrong row set. The
+  same defect in `existsSubPlan` is fixed separately (#2779), where the naive fix was
+  measured and **refuted** before the working one was found; the `SemiApply` inner schema is
+  now isolated and the body's `RETURN` translated.
+- **Pattern predicates and `EXISTS`/`COUNT` subqueries now run inside a writing statement**
+  (#2660). The write path never wired the subquery and pattern evaluators, so a writing
+  statement carrying either refused to run. Five `COUNT` block-form placements that bypassed
+  `evalRow` entirely are fixed with it (#2781), including a property value, which is an
+  ordinary expression and may therefore be a subquery.
+- **Eighteen Cypher write-op call sites no longer discard the error the WAL layer uses to
+  refuse** (#2747). A refused write was reported as a success.
+- **A relationship removal that took nothing out is no longer described as if it had**
+  (#2734). On the directed engine, `DELETE r` over an undirected match pattern wrote twice
+  the WAL frames, half of them removing nothing.
+- **A stale MCV equality estimate is demoted instead of being tagged exact** (#2772). The
+  staleness veto was implemented for the histogram only, so a most-common-value hit was
+  reported as `estExact` from whatever snapshot was last published, however far it had
+  drifted — and since `v0.14.0` that tag also decides how the figure **renders**, so a stale
+  per-value count was shown to a reader as ground truth (measured: `Est.Rows = 1000` against
+  10 rows).
+- **A statistic now notices the rows that left the label, not just the writes** (#2785). The
+  drift numerator is `Δ + max(0, N0 − N_live)`: `REMOVE p:Person` moved neither counter,
+  dropped the live count from 1 400 to 410, and was still tagged `estExact` at 100× wrong.
+
+#### Persistence — the checkpoint, the WAL and the transaction commit
+
+- **The checkpoint verifies the snapshot is readable before discarding the WAL prefix**
+  (#2749). The self-sufficiency gate matched filenames; it now reads the snapshot back. The
+  readback initially covered the recovery reader but not its applier, so the mapper is now
+  **decoded**, not merely parsed (#2780).
+- **Recovery reports a discarded committed suffix instead of calling it clean** (#2794).
+  Corruption inside an already-durable frame is surfaced as `ErrCommittedTxnCorruptOp`,
+  which is what the function's own contract always promised.
+- **Recovery refuses to hydrate an index payload written by an older builder** (#2797). The
+  snapshot manifest carries `index_builder_epoch`, and a reader hydrates only on an exact
+  match with `snapshot.CurrentIndexBuilderEpoch`; anything else — absent, older or newer —
+  rebuilds. This is what makes the #2778 and #2792 fixes reach a store that is already on
+  disk.
+- **A producer op cap above the replay cap is clamped at the reopen handoff** (#2530).
+  Committed data was made unreplayable rather than merely rejected; `recovery.Result` now
+  reports `MaxTxnOps`.
+- **A property value between 1 GiB and 4 GiB no longer commits durably only to block every
+  later checkpoint** (#2750). Such a value is refused at commit, where the caller can act on
+  it, instead of at checkpoint time, where nobody can.
+- **A nested property list is refused at commit instead of being silently dropped on replay**
+  (#2783). `encodeTxnListProp` had no `PropList` case, so a nested list survived the commit
+  and vanished on recovery; it is now `ErrNestedPropertyList`.
+- **An edge-handle record count above the snapshot cap is refused at commit** (#2784), for
+  the same reason: it committed durably and then blocked every checkpoint.
+
+#### Instruments that could not fail on what they measured
+
+Four test-layer defects, each of which made a green result meaningless rather than wrong.
+
+- **A DST regression assertion compared an unordered result against an ordered literal**
+  (#2751), and a DST `collect` assertion compared against an ordered literal that its own
+  production checker sorts (#2786). Both now compare as the multiset the engine produces.
+- **`TestSortDecorationArmFrames` pointed at functions that do not exist and a plan that
+  does not sort** (#2782) — it could not fail on what it measured, and was red at `HEAD`.
+- **The v1 CSR golden fixture was stale and its compatibility test could not notice**
+  (#2752): it asserted the header and never the decoded payload.
+- **The overload role mapped its only heavy-write family away, so nothing read the nodes it
+  created** (#2736).
+- **Three ordering claims in `graph/lpg` that carry the Isolation mandate now have tests
+  that defend them** (#2775); they were asserted in godoc and gated by nothing.
+
+#### Knowledge-graph fidelity gate
+
+- **The fidelity gate could not run at all, and the graph it guarded was half empty**
+  (#2719). `cmd/kgverify` shelled out to `rmp graph query`, one of five subcommands `rmp`
+  1.17.0 removed when it rebuilt `rmp graph` as a server/client pair, so every invocation
+  exited 3 — *the harness could not conclude* — and because `ci-kg-verify` is a member of
+  `make ci`, the sprint-close gate had been red for a reason unrelated to the graph. Repaired
+  and re-measured **at `0e7e982d`**: symbol coverage of the tree **43.1 % → 95.7 %**
+  (12 518 → 27 826 declarations with a node), `package-symbol-gap` **97 → 0** (modelled
+  packages at parity 8 → 105 of 105), `symbol-absent` **327 → 0**. Recorded in
+  [`docs/knowledge-graph-fidelity-2026-09-08.md`](docs/knowledge-graph-fidelity-2026-09-08.md)
+  so the next cycle measures drift instead of rediscovering the gap. **Those figures are
+  stamped to `0e7e982d` and are a measurement of that commit, not a standing property of the
+  branch** — every later commit that adds or deletes a declaration moves them, which is why
+  the gate is a member of `make ci` rather than a report anybody has to remember to read.
+- **The `provenance-no-node` check no longer gates `ci`** (#2796), because its population is
+  "declarations in files touched since the merge-base" and therefore grows with the branch:
+  the baseline was recorded against 1 837 declarations in 66 touched files, and twenty-two
+  commits into `release/0.14.1` it was 2 026 in 84, with the count risen from 1 082 to 1 187
+  without anyone adding un-noded code. It stays **measured and printed** on every run — at
+  the release tip it reads **257 of 3 137 declarations in 164 touched files** against a
+  baseline of 160 — the 1 187 above being the figure of the day the exclusion was written,
+  not a current one. The debt it measures is **not** declared paid by the exclusion.
+
+#### Examples
+
+- **The metrics example produces the q-error sample it asserts** (#2795). #2772's staleness
+  demotion removed a metric the example asserted on, which turned `make ci` red.
+
+### Added
+
+The full exported-surface delta for this release. It was derived by diffing the two trees'
+declarations — top-level declarations, struct fields, and a `go doc` cross-check — not read
+off the commit log.
+
+#### `bolt/server`
+
+- **`DefaultKeepAliveIdle` (15 s), `DefaultKeepAliveInterval` (5 s) and
+  `DefaultKeepAliveCount` (3)** — the TCP keep-alive budget now enabled on every accepted
+  connection, which is what replaces the read deadline as the liveness check (#2807).
+- **`ErrNegativeTimeout` and `NegativeTimeoutError`** (with `Field` and `Value`, `Error` and
+  `Unwrap`) — a negative timeout is now **refused** by `NewServer` rather than coerced to a
+  default. `validateTimeouts` runs first and returns `errors.Join` of one error per
+  offending field, so a caller with two mistakes learns both at once (#2807).
+
+#### `cypher`
+
+- **`EngineOptions.DisableIndexSeek`** (#2814) — turns off the equality index seek, so the
+  #2814 guard can be exercised and disabled from outside the package.
+- **`EngineOptions.DisableExpandLabelPush`** (#2629) — turns off the far-endpoint label
+  admission, which is the control arm its benchmark needs.
+- **`ExpandDstLabelPushCount`** (#2629) — how many times the far-endpoint label predicate
+  was admitted into the expansion. Safe for concurrent use.
+
+#### `cypher/exec`
+
+- **`DstAdmit` and `Expand.WithDstAdmit`** (#2629) — the destination-label admission
+  predicate and the builder that installs it.
+- **`ChunkOperator`** (#2629) — an `Operator` that can also be driven column-major. It
+  exists so a recogniser that ends up with **no** operator above the expansion — a
+  `count(*)` whose only predicate was pushed into the traversal — can return the wrapper as
+  the subtree's operator without a type assertion that cannot fail and therefore cannot be
+  tested.
+- **`IndexBuffer.Pending`** (#2814) and **`CreateIndexOp.Catching`** (#2793) — the pending
+  index delta and the concurrent-change catch-up, exposed so the guards above are testable.
+
+#### `graph/index`
+
+- **`Manager.BeginBuild`, `Manager.FinishBuild`, `Manager.AbandonBuild`** (#2793) — the
+  explicit index-build lifecycle that replaces building against live state.
+- **`BuildLog`, `BuildLog.Len`, `BuildLog.Overflowed`, `BuildResolver`, `RegisterFunc`,
+  `ResolvedApplier`, `MaxBuildLogChanges` (131 072) and `ErrIndexBuildOverflow`** (#2793) —
+  the bounded concurrent-change log the replay resolves against, and the typed error for the
+  bound being reached. The bound is explicit and surfaced, as the bounded-resource mandate
+  requires.
+- **`btree.Index.ApplyResolved` and `hash.Index.ApplyResolved`** (#2793) — apply an already
+  resolved change, so the resolution cannot happen twice against two different graphs.
+
+#### `store`
+
+- **`snapshot.CurrentIndexBuilderEpoch` (1), `Manifest.IndexBuilderEpoch` and
+  `snapshot.VerifyMapperDecodable`** (#2797, #2780) — the builder watermark a reader matches
+  before hydrating an index payload, and the decode check the checkpoint readback performs.
+  `index_builder_epoch` is an **additive** manifest field, absent-means-never-hydrate, so
+  there is no manifest version step and no migration.
+- **`recovery.ErrCommittedTxnCorruptOp`** (#2794) and **`recovery.Result.MaxTxnOps`**
+  (#2530).
+- **`txn.ErrNestedPropertyList`** (#2783) and **`txn.CheckSchemaField`** — the refusals that
+  replace a silent loss.
+
+#### Tooling
+
+- **`cmd/kgverify`, `make kg-verify` and `make ci-kg-verify`** (#2677, #2719) — the
+  knowledge-graph fidelity gate. Its oracle is `go/parser`: the inventory of what exists is
+  built by **parsing** every `.go` file, never by scanning text, which is the whole mechanism
+  by which a fabricated symbol node is caught. `edgeTypeFilterFor`, deleted from the code in
+  sprint 352, still appears in four Go comments and one Markdown document, so a text scan
+  reports it present while the declaration inventory correctly reports it absent. Twelve of
+  its twenty checks have a baseline of **zero** and fail `ci` immediately.
+- **`scripts/release_body.sh`** — composes the GitHub release body from this file's entry
+  for the tag, and exits non-zero when the tag has no matching entry. Until `v0.14.0` every
+  release body was goreleaser's default — a one-line pointer plus an autogenerated commit
+  list — and ten of the seventeen published releases carried nothing else. The release
+  workflow now passes its output to `goreleaser --release-notes`.
+- **`cmd/fmtfixture`** — a formatting fixture helper for the test layer.
+
+### Changed
+
+- **The Bolt server's four timeout defaults are now `0`, which means disabled, and a
+  negative value is refused** (#2806, #2807). `DefaultConnTimeout` (was 30 s),
+  `DefaultTxTimeout` (was 30 s), `DefaultStatementTimeout` (was 30 s) and
+  `DefaultMaxTxIdleTime` (was 5 s) all ship at zero. The three-way contract is explicit:
+  **zero disables the bound, a positive value sets it, and a negative one is an error**. The
+  `if opts.X <= 0 { opts.X = DefaultX }` clauses are **deleted** rather than neutered,
+  because those clauses were precisely what swallowed a negative and substituted a number
+  the caller never asked for.
+
+  The reason is not the size of the number. The server armed
+  `SetReadDeadline(now + ConnTimeout)` before **every** read of the post-handshake message
+  loop, and the reader sits in that read while the loop executes the client's own statement
+  — so the deadline ran against a **busy server** rather than an idle client. Measured under
+  #2806: with `ConnTimeout` at 100 ms, an autocommit statement of about 900 ms had its
+  connection closed at 110 ms. Both peers this module is measured against ship the
+  equivalent bounds disabled and use a different liveness check — PostgreSQL ships
+  `statement_timeout`, `transaction_timeout`, `idle_in_transaction_session_timeout` and
+  `idle_session_timeout` all at 0 and leans on TCP keep-alive; Neo4j ships
+  `db.transaction.timeout` at 0 and uses protocol-level NOOP chunks. **The bounds on count
+  are untouched** — `MaxConnections` 1 024, `MaxOpenTxPerPrincipal` 2 048, horizon capacity
+  1 024 — so the bounded-resource mandate is still met by count, as PostgreSQL also meets
+  it. What disabling costs is under *Security* below, stated rather than
+  glossed.
+- **`make ci` gained `ci-kg-verify`** (#2677, #2796), which runs `cmd/kgverify` with exactly
+  two checks excluded — `task-status-disagrees-with-rmp`, whose count varies with time
+  because `rmp` is the authority, and `provenance-no-node`, whose population varies with
+  branch length. Both remain measured and printed. **This gate needs a running
+  `rmp graph serve -r gograph`**: with nothing listening, `kgverify` cannot conclude and
+  `make ci` fails for a reason unrelated to the change being gated.
+- **The GitHub release body is now composed from this file** rather than from a `git log`
+  excerpt (`scripts/release_body.sh`, wired in `.github/workflows/release.yml`). The
+  `header:`/`footer:` keys in `.goreleaser.yaml` apply only when goreleaser composes the
+  body itself and are now the fallback for a local `goreleaser release` run.
+- **`cypher/exec.NewColumnarExpand` returns `ChunkOperator` instead of `ChunkProducer`.**
+  The declared return type changed, and it is **not** a source break: `ChunkProducer`
+  already embeds `Operator`, so `ChunkOperator` (`Operator` + `ChunkProducer`) has an
+  identical method set and remains assignable to a `ChunkProducer` variable. Verified by
+  compiling the `v0.14.0` caller shape — `var p exec.ChunkProducer; p, ok =
+  exec.NewColumnarExpand(e)` — against this tree, unmodified, exit 0. No other exported
+  signature changed and no exported identifier was removed.
+- **The snapshot manifest carries a third additive field, `index_builder_epoch`** (#2797),
+  on the same terms as the two `v0.12.0` additions: absent means never hydrate, so no
+  version step and no migration. `docs/semver.md`'s on-disk-format table records it.
+
+### Performance
+
+Three changes in this window were made for performance, and several correctness fixes were
+bought with a measured cost. Both directions are reported. The release-level campaign —
+`v0.14.1` against `v0.14.0`, three arms, interleaved, with its own noise floor measured
+first — is [`docs/benchmarks/v0.14.1.md`](docs/benchmarks/v0.14.1.md).
+
+**Measured at release level.** Three arms — `v0.14.0`, the candidate, and a second
+compilation of the candidate verified byte-identical by sha256 — interleaved with the arm
+order rotated every round, `n=6`, load-gated, **192 invocations, 192 exiting 0, 0 malformed
+result lines**, over 150.9 minutes. Of **229 comparable rows, 25 reached `p<0.05` and 11
+survive adjudication** against a same-code floor measured in the same rounds: **8
+improvements and 3 regressions.**
+
+- **The ORDER BY key hoist pays** (#2662). Nine of ten `BoundedOrder` rows move the same way;
+  four clear their band's bar: `Top` at **−2.75 %**, **−2.56 %** and **−2.10 %**, `Sort` at
+  **−1.34 %**. A whole family moving together is what a real change looks like.
+- **The largest regression `v0.14.0` published is given back.** `AllNodesScan_PerNodeAllocCost`
+  goes **11.60 µs → 10.98 µs (−5.39 %, `p=0.005`)**; `v0.14.0`'s own report named it as that
+  release's biggest cost at +7.11 %. Across six rounds the two candidate arms agree to 0.4 %
+  while the `v0.14.0` arm sits 5.4 % above both, every time.
+- **`ExpandDir_InVsOut_Baseline/OUT_deg1_sources`, `v0.14.0`'s +3.46 % regression, is back to
+  parity** at +0.10 %.
+- **Three regressions, and they are not systemic.** `ExpandOut_PerEdge_SingleSource` at
+  **+6.54 %** (78.10 → 83.21 µs) and **+4.37 %** (1.271 → 1.327 ms),
+  `ExpandDir_InVsOut_Baseline/IN_deg1_sources` at **+5.81 %**, and `bolt`'s
+  `MsgObserve_RealBackend` at **+2.13 %** (68.17 → 69.63 ns). Eleven of the fourteen
+  `Expand*` rows are flat, so the cost is confined to the OUT single-source per-edge path and
+  the IN deg1-sources baseline rather than to the expansion machinery. `cypher/exec/expand.go`
+  changed in this window, which is the obvious candidate — **attribution is a hypothesis, not
+  established**, since no arm was built with the admission disabled.
+- **The Cypher read path is unchanged at all five published concurrency levels** (1, 8, 64,
+  256, 1024). Not one of the ten cells is significant, and the block's same-binary floor
+  geomean (−4.57 %) is larger than its effect geomean (+1.78 %).
+- **The durable commit path is unchanged and still scales 119× from 1 to 256 writers.** One
+  cell, `goroutines=8` at +3.56 %, is reported **inconclusive** rather than as a result.
+- **The counting added in #2777 costs one allocation.** `CountAllNodes` goes **27 → 28
+  allocs/op and 3 296 → 3 488 B/op with every sample equal in both arms**, and the count
+  pushdown paths take **+16 B/op**. `ReadTx_WriterLock` takes **+2 allocs/op and +352 B/op**
+  identically at every concurrency level — plausibly #2814's plan footprint, again a
+  hypothesis. **No allocation count fell, and none rose by more than two.**
+- **The checkpoint readback is priced, and has no baseline because it is new.** Reading the
+  snapshot back costs **14.73 ms against a 150.3 ms checkpoint — 9.8 %** — and #2780's decode
+  pass adds **0.46 ms** on top, 0.31 % of a checkpoint. That is what #2749 and #2780 cost to
+  stop a WAL prefix being discarded against a snapshot nothing can read.
+- **The headline set is flat**, which is what makes the rest credible: no file under
+  `search/` changed, and `Dijkstra_PostWarmup`, `Dijkstra_Large`, `Yen_K100` and
+  `Brandes_RandomGraph` are all non-significant. `BFSDirectionOpt_PowerLaw` at +2.92 %
+  (`p=0.066`) does not reach significance and is reported unresolved rather than flat.
+- **`bolt/server` closes a gap `v0.14.0` named as its own**: all 24 benchmarks were run,
+  including the eleven `TxBookkeeping_*` that report left unmeasured. None is significant.
+
+**`cypher` is sampled, not covered — 60 of 149 benchmark functions.** The full sweep costs
+454 s per arm against 204 s for the targeted set, which is disproportionate for a patch
+release; `graph/index{,/btree,/hash}`, `graph/lpg`, `store/snapshot`, `store/wal` and six
+further concurrency ladders were sized and dropped. Each omission, and its reason, is listed
+in the report. **Task-level figures measured while a change landed are labelled as such in
+[`release-notes/v0.14.1.md`](release-notes/v0.14.1.md) and were not re-measured here.**
+
+### Security
+
+- **Disabling `ConnTimeout` by default removes the only bound on an unauthenticated
+  client's connection slot** (#2807), and this is a real exposure rather than a theoretical
+  one. `DefaultHandshakeTimeout` bounds version negotiation only, so a client that completes
+  the handshake and then falls silent **before LOGON** now holds one of the 1 024 connection
+  slots and its two goroutines indefinitely. PostgreSQL bounds that window with a separate
+  `authentication_timeout` (1 minute by default); **GoGraph has no such bound today.** An
+  operator exposing this server to an untrusted network should set `Options.ConnTimeout`
+  explicitly until it does.
+- **A silent but live client is no longer reclaimed at all.** TCP keep-alive reclaims a peer
+  that has *vanished* — a pulled cable, a dropped NAT binding, a host that went away without
+  a FIN — within roughly 15 s + 3 × 5 s. It does **not** reclaim a peer whose stack answers
+  probes while its process never sends another Bolt message. Where such a client left an
+  explicit transaction open, that transaction pins the MVCC reclamation horizon and one of
+  its 1 024 slots for as long as the connection lives. The remedy is the operator's, and it
+  is the one PostgreSQL offers for the same exposure: set `Options.MaxTxIdleTime` and
+  `Options.ConnTimeout`.
+- **A refused write is no longer reported as a success** (#2747), and **corruption inside a
+  committed WAL frame is no longer reported as clean** (#2794). Both were integrity failures
+  that presented as normal operation.
+- **`go.mod` and `go.sum` did not move**, so no dependency advisory is in scope for this
+  release. `govulncheck` runs inside `make ci` and is part of the release gate.
+
+### Documentation
+
+- **`docs/persistence.md`, `docs/bolt.md`, `docs/cypher.md` and `docs/test-battery.md` were
+  each re-read against the tree and corrected** — 31, 19, 12 and 17 drifted claims
+  respectively (#2206, #2803, #2804, #2805). All four carry the
+  `scripts/check_doc_freshness.sh` footer and the gate reports zero errors.
+- **`docs/knowledge-graph-fidelity-2026-09-08.md`** is new: the measured state of the
+  knowledge graph, with the commands that produced every figure.
+- **`docs/statistics-design.md`** carries two in-place corrections (#2772, #2785) rather
+  than silent rewrites, each stating what it did **not** close.
+- **`docs/isolation-design.md`** is corrected for the timeout changes: three claims that
+  derived from the old 5 s `MaxTxIdleTime` default no longer hold, and the abandoned-
+  transaction cost is restated for a default that reclaims neither the transaction nor the
+  connection.
+- **`docs/explain-profile-honesty-audit-2026-09-05.md`** gains the 2026-09-08 addendum
+  behind #2787, and **`release-notes/v0.14.0.md`** carries the matching erratum in place:
+  the columnar fusion chains **do** have a logical node and it **does** carry an estimate,
+  so two passages that blamed the estimator were wrong and are corrected where they were
+  read rather than quietly rewritten. The durable guard is
+  `cypher/plan_estimate_columnar_gap_test.go`.
+- **`docs/wal`'s `Writer` health contract is now stated** (#2525): `SyncBuffered` returns
+  `nil` on a poisoned writer, so a caller using it as a health probe is silently misled;
+  the godoc now names the method that does answer.
+
+### Compliance
+
+- **100 % openCypher TCK-compliant at the execution level** — **3 897 / 3 897 scenarios**,
+  against `const tckExecutionBaseline = 3897`, which is untouched. No `.feature` file
+  changed in this window, so the population is the one `v0.14.0` was measured against. This
+  release **preserves** the compliance; it does not extend it.
+- **100 % ACID-compliant, and this release is where several of those guarantees stopped
+  being merely asserted.** #2749, #2780 and #2794 close paths on which a durability claim
+  could be made about state that was not durable or not readable; #2778, #2792, #2793 and
+  #2799 close paths on which an index could disagree with the graph, which is a Consistency
+  failure; #2814 closes a read that returned rows violating the statement's own writes,
+  which is an Isolation failure visible without any concurrency at all. Verified by the WAL
+  recovery tests in `store/wal` and `store/recovery` and the deterministic crash-injection
+  battery in `internal/crashinject`.
+
+### Notes
+
+- **Pre-1.0 stability.** This is a `0.y.z` release. The public Go API may change without a
+  major-version bump until `1.0.0`; pin the exact version you depend on.
+- **Module path.** The Go module path is `github.com/FlavioCFOliveira/GoGraph` with no `/vN`
+  suffix, which is Semantic-Import-Versioning-correct for a `0.x` line.
+- **Adding a field to an exported struct breaks an unkeyed composite literal.** Four
+  pre-existing exported structs gained a field — `cypher.EngineOptions` (two),
+  `store/recovery.Result` and `store/snapshot.Manifest`. A caller that writes
+  `cypher.EngineOptions{…}` with keys is unaffected; one that writes it positionally will not
+  compile. Keys are the idiomatic form and the one every example uses.
+- **A store written before this release rebuilds its secondary indexes once on first open**
+  (#2797), because its snapshot manifest carries no `index_builder_epoch`. That is the
+  intended behaviour, not a fault: it is what removes any index payload the #2778 and #2792
+  defects could have fabricated. No data is lost and no migration step is required.
+- **Examples are not part of the module.** `examples/` is an exercise harness; the module
+  neither imports nor depends on it. One example changed in this window
+  (`examples/31_metrics_observability`).
+- **Gates not run for this release.** The soak and nightly layers were not run, and this
+  release carries **no production certification of its own** — the most recent was taken at
+  the `v0.11.0` commit. Latency percentiles at the published concurrency levels remain
+  unmeasured.
+
+[0.14.1]: https://github.com/FlavioCFOliveira/GoGraph/releases/tag/v0.14.1
+
 ## [0.14.0] — 2026-09-06
 
 **13 commits** — 5 features, 4 fixes, 1 performance change, 1 documentation change, and

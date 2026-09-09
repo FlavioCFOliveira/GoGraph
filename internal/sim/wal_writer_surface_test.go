@@ -601,12 +601,12 @@ func TestWALLifecycle_GateDetectsEachDefect(t *testing.T) {
 		{
 			name:    "SyncBuffered on a poisoned writer changed behaviour",
 			doctor:  func(r *WALLifecycleResult) { r.SyncBufferedAfterPoison = wal.ErrDurabilityFailed },
-			wantMsg: "MEASURED behaviour is nil",
+			wantMsg: "documented behaviour is nil",
 		},
 		{
 			name:    "Truncate on a poisoned writer changed behaviour",
 			doctor:  func(r *WALLifecycleResult) { r.TruncateOnPoisonedErr = wal.ErrDurabilityFailed },
-			wantMsg: "MEASURED behaviour is a successful empty",
+			wantMsg: "documented behaviour is a successful empty",
 		},
 		{
 			name:    "a closed writer no longer reports ErrWriterClosed",

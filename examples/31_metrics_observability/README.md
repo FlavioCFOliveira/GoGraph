@@ -69,7 +69,11 @@ list (latency in microseconds) for the CSV round-trip, and a CSR (built
 from that adjacency list) for Dijkstra. Over the property graph a small
 write burst then adds and retires monitored `CALLS` relationships and marks
 one service `:DEGRADED` and back, exercising the count-store maintenance
-paths so their observability metrics appear in the scrape.
+paths so their observability metrics appear in the scrape. A final phase
+decommissions most of a small dedicated `legacy` tier — those services lose the
+`:SERVICE` label and leave the live topology, while their nodes, their `tier`
+and their `:CALLS` edges stay on the record — which is what makes the
+planner's statistics stale for the q-error reading described below.
 
 ## How to run
 
@@ -114,7 +118,7 @@ mvcc.conflicts.observed=1
 mvcc.writers.settled=0
 mvcc.chain_depth.deepest_at_least_two=1
 stats.tracked_pairs_positive=1
-stats.tier_after_move=5
+stats.tier_after_decommission=3
 stats.misestimated_pairs=1
 stats.misestimated_cleared_by_refresh=1
 metric.present.cypher.Run=true
@@ -162,8 +166,8 @@ metric.present.lpg.mvcc.oldest_snapshot_age=true
 metric.present.lpg.mvcc.snapshots.active=true
 metric.present.lpg.mvcc.vacuum.passes=true
 metric.present.lpg.mvcc.vacuum.pass=true
-metric.present.count=40
-metric.expected.count=40
+metric.present.count=45
+metric.expected.count=45
 ```
 
 Followed by `# `-prefixed telemetry that varies per run and per machine,
@@ -216,17 +220,51 @@ and pinned by the test; the observed values behind them are telemetry.
   to the write path is observable.
 - **How wrong the planner's estimates turn out to be** — the statistics are
   rebuilt only when a caller invokes `RefreshStatistics`, and nothing used to
-  tell a caller when to. Step 10 refreshes, moves 45 of the 50 `core` services
-  to another tier WITHOUT refreshing, and PROFILEs a query that reads the now
-  stale statistic. The profiled plan (telemetry, `# stats.profile|`) shows
-  `Est.Rows = 50` beside `Rows = 5` on the same `Filter` line, the
-  `cypher.stats.qerror` histogram carries that 10x ratio as a sample, and
-  `stats.misestimated_pairs=1` names how many tracked `(label, property)`
-  statistics were caught. A second refresh clears it
+  tell a caller when to. Step 10 refreshes, **decommissions** 9 of the 12
+  `legacy` services — they lose the `:SERVICE` label — WITHOUT refreshing, and
+  PROFILEs a query that reads the now stale statistic. The profiled plan
+  (telemetry, `# stats.profile|`) shows `Est.Rows = 12` beside `Rows = 3` on the
+  same `Filter` line, the `cypher.stats.qerror` histogram carries that 4x ratio
+  as a sample, and `stats.misestimated_pairs=1` names how many tracked
+  `(label, property)` statistics were caught. A second refresh clears it
   (`stats.misestimated_cleared_by_refresh=1`), which is what makes the accessor
-  a "refresh overdue?" signal rather than a lifetime tally. Note that the stale
-  estimate is tagged **exact**: the most-common-value provider has no staleness
-  gate, so this metric is the only thing in the module that can see it.
+  a "refresh overdue?" signal rather than a lifetime tally.
+- **Why the mutation is a decommission and not a re-tier** (rmp #2795) — it was
+  a property write (`SET s.tier = 'quarantine'`) until rmp #2772 gave the
+  most-common-value provider the staleness screen its range sibling always had.
+  A property write moves both staleness counters, so the snapshot is stale by
+  its own measure and the estimate is correctly **demoted** — and a demoted
+  estimate is scored by nothing, which left this step emitting no q-error at
+  all. Removing the label instead touches no property, so both counters stay at
+  zero while the live `:SERVICE` population falls and the most-common-value
+  entry goes 4x wrong.
+- **Why the tier is a small dedicated cohort and not a quarter of the fleet**
+  (rmp #2785) — the decommission used to take 45 of the 50 `core` services,
+  and rmp #2785 closed that route: the staleness screen's drift numerator now
+  carries a population-**shrinkage** term as well as the write counter, so
+  removing a quarter of the fleet shrinks `:SERVICE` by ~22%, far past the
+  screen's 9.6% firing region, and the estimate is correctly demoted. That is
+  the fix working, and the workload moved rather than the screen — the premise
+  guard below caught it by name, at the point of cause. What is left is the
+  residual the screen still cannot see, and it is the honest place for this
+  demonstration: the rule is a fraction of the **population**, so a small
+  shrinkage **concentrated** on one most-common value is invisible to it. 9
+  services leaving a fleet of 193 is 4.7%, inside the region, while the
+  most-common-value entry for their tier goes 4x wrong. The stale estimate is
+  therefore still tagged **exact** and rendered as a bare, unmarked number, and
+  this metric is the only thing in the module that can see it. Both halves of
+  the premise — that the tier really shrank, and that the resulting misestimate
+  really was scored — abort step 10 with a named error rather than reporting a
+  silent zero, and the regression test asserts `stats.misestimated_pairs`
+  directly so a future change to the staleness screen cannot hollow the
+  demonstration out unnoticed. The cohort is a fixed count, so the 4x miss holds
+  at every scale; what does vary is whether the 9 removed services are a small
+  enough fraction of the fleet, which measures as `-services 101` (94 live
+  services after the decommission, 9/94 = 9.57%) being the smallest scale at
+  which `cypher.stats.qerror.high` fires, and `-services 100` (93 live,
+  9/93 = 9.68%) the largest at which it does not. The second premise guard is
+  conditional on both the achieved miss and the achieved shrinkage for exactly
+  that reason, so a small run reports honestly instead of failing.
 - **The MVCC substrate under concurrent writers** — `mvcc.commits.delta`
   counts the transactions that published an instant, `mvcc.conflicts.observed`
   proves the conflict path was actually taken rather than hoped for,

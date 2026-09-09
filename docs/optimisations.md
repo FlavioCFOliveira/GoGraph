@@ -182,6 +182,21 @@ stays exact-MCV-or-heuristic (uniformity error is unbounded under skew); multi-j
 independence is never promoted. TCK 3897/3897 throughout. Design:
 [statistics-design.md](statistics-design.md).
 
+> **Correction (rmp #2772, 2026-09-08): equality has a third outcome,
+> `estFallback`.** "Exact-MCV-or-heuristic" was true when this entry was written
+> and stopped being true at commit `29641046`. An MCV hit is now tagged
+> `estExact` only while the statistic behind it is **fresh**: when
+> `cypher.statsSnapshotFresh` judges the published snapshot to have drifted,
+> `statsEqualityEstimateInner` keeps the count but demotes its provenance to
+> `estFallback` (`cypher/stats_estimate.go:443-447`), which is an absolute veto —
+> it stops the figure being rendered and holds the default plan. A label known to
+> hold no live nodes demotes the same way (`cypher/stats_estimate.go:437-441`,
+> `statsFallbackEmptyLabel`). Before the fix an arbitrarily stale per-value count
+> was presented as ground truth: the commit reproduced `Est.Rows = 1000` against
+> 10 measured rows, in the EXPLAIN tree, `ExplainTable` and `ProfileTable` alike.
+> The "uniformity error is unbounded under skew" limit on the 1/NDV heuristic is
+> unchanged.
+
 ## Sprint 309 — columnar/vectorized execution deepening (P5/F3, 2026-07-24)
 
 Extends the columnar late-materialization runtime (the differentiator neither

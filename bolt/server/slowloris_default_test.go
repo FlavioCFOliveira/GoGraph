@@ -18,46 +18,52 @@ func newInProcEngine() *cypher.Engine {
 	return cypher.NewEngine(g)
 }
 
-// TestNewServer_DefaultsConnTimeout verifies that NewServer fills a non-zero
-// ConnTimeout when the embedder leaves it at zero. This is the second
-// acceptance criterion: a default server must enforce an idle deadline so a
-// connection that completes the handshake but then stalls cannot hold its slot
-// and goroutine forever. The test inspects the resolved option directly.
-func TestNewServer_DefaultsConnTimeout(t *testing.T) {
+// TestNewServer_LeavesConnTimeoutDisabled verifies that NewServer does NOT fill
+// ConnTimeout when the embedder leaves it at zero.
+//
+// It used to assert the opposite. Until rmp #2807 a default server armed a 30 s
+// idle read deadline so a connection that completed the handshake and then
+// stalled could not hold its slot and goroutine for ever. That deadline is gone,
+// because it also ran while the message loop executed the client's own statement
+// and closed busy connections; TCP keep-alive reclaims a connection whose PEER
+// has vanished, and Options.ConnTimeout is what an operator sets to reclaim one
+// that is merely silent. [DefaultConnTimeout] carries the full reasoning and the
+// cost.
+//
+// The unauthenticated version-negotiation handshake is still bounded
+// unconditionally — TestHandshakeTimeoutIsAlwaysArmed below — so what changed is
+// the post-handshake message loop, not the pre-handshake one.
+func TestNewServer_LeavesConnTimeoutDisabled(t *testing.T) {
 	srv, err := NewServer(newInProcEngine(), Options{Auth: NoAuthHandler{}})
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
-	if srv.opts.ConnTimeout != DefaultConnTimeout {
-		t.Fatalf("ConnTimeout: got %v, want default %v", srv.opts.ConnTimeout, DefaultConnTimeout)
-	}
-	if srv.opts.ConnTimeout <= 0 {
-		t.Fatalf("ConnTimeout must be non-zero by default, got %v", srv.opts.ConnTimeout)
+	if srv.opts.ConnTimeout != 0 {
+		t.Fatalf("ConnTimeout: got %v, want 0 (rmp #2807 disabled the idle read deadline by default)", srv.opts.ConnTimeout)
 	}
 }
 
-// TestHandshakeTimeoutDefaults verifies that the unauthenticated handshake is
-// always bounded: the exported DefaultHandshakeTimeout const is non-zero and
-// the package-level handshakeTimeout var (applied in handleConn) is seeded from
-// it. The handshake bound is intentionally a fixed package value rather than a
-// configurable Options field, so the Options struct stays small; this test is
-// the in-package guard that the bound is never zero by default.
-func TestHandshakeTimeoutDefaults(t *testing.T) {
+// TestHandshakeTimeoutIsAlwaysArmed verifies that the unauthenticated
+// version-negotiation handshake is bounded unconditionally: the exported
+// DefaultHandshakeTimeout const is non-zero and the package-level
+// handshakeTimeout var (applied in handleConn) is seeded from it. The handshake
+// bound is intentionally a fixed package value rather than a configurable
+// Options field, so the Options struct stays small; this test is the in-package
+// guard that the bound is never zero.
+//
+// It used to also assert DefaultHandshakeTimeout < DefaultConnTimeout — the
+// handshake bound being the tighter of two pre-authentication deadlines.
+// rmp #2807 set DefaultConnTimeout to 0, so there is no second bound to be
+// shorter than, and this is now the ONLY pre-authentication deadline a
+// default-configured server applies. It covers version negotiation only, not the
+// window between a completed handshake and a successful LOGON; see
+// [DefaultConnTimeout] for that exposure.
+func TestHandshakeTimeoutIsAlwaysArmed(t *testing.T) {
 	if DefaultHandshakeTimeout <= 0 {
 		t.Fatalf("DefaultHandshakeTimeout must be non-zero, got %v", DefaultHandshakeTimeout)
 	}
-	if DefaultConnTimeout <= 0 {
-		t.Fatalf("DefaultConnTimeout must be non-zero, got %v", DefaultConnTimeout)
-	}
 	if got := time.Duration(handshakeTimeout.Load()); got != DefaultHandshakeTimeout {
 		t.Fatalf("handshakeTimeout: got %v, want seed %v", got, DefaultHandshakeTimeout)
-	}
-	// The handshake bound is deliberately shorter than the post-handshake idle
-	// bound: a legitimate client sends its 20-byte handshake immediately, so a
-	// stalled handshake should be reclaimed sooner than an idle session.
-	if DefaultHandshakeTimeout >= DefaultConnTimeout {
-		t.Errorf("DefaultHandshakeTimeout (%v) should be shorter than DefaultConnTimeout (%v)",
-			DefaultHandshakeTimeout, DefaultConnTimeout)
 	}
 }
 

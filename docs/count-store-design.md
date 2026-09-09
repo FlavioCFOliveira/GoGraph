@@ -3,6 +3,22 @@
 Sprint 306, task **#2081** (design SPIKE, design-only — no production code changes).
 Foundation for **P3** count-store-gated join reordering.
 
+> **Correction (2026-09-08): the `file:line` anchors were re-derived against the
+> current tree.** Every identifier this document names still exists; only the
+> line numbers had drifted, in some cases by thousands of lines
+> (`lpgLabelResolver.ResolveLabelCount` had moved from `cypher/api.go:4405` to
+> `:7332`, `Result.commitUnderBarrier` from `:4005` to `:6665`). All such
+> references have been updated in place.
+>
+> **Four references are deliberately left as they were**, all in §4 and §7: the
+> `cypher/api.go:1743` / `:1728` anchors for the `e.g.View(func(){ … })` plan
+> build, and the `graph/lpg/lpg.go:629` anchor for `lpg.Graph.View` taking
+> `visMu.RLock`. `Graph.View` was removed by rmp #2344 — a source gate,
+> `internal/scriptgate/no_read_barrier_gate_test.go`, now fails the build if it
+> returns — so there is no current line for those references to point at. The
+> superseded note already standing in §4 records that change; the anchors are
+> retained as historical citations rather than re-pointed at unrelated code.
+
 ## 0. Executive recommendation (decisive)
 
 Build a **derived, non-durable, engine-owned count-store** that maintains three
@@ -11,18 +27,18 @@ already exists:
 
 | Stat | Meaning | Home | Provenance it can feed |
 |---|---|---|---|
-| `N(label)` | live nodes carrying `label` | **existing** `graph/index/label.Index` (`nodeIdx`), read via `lpgLabelResolver.ResolveLabelCount` (`cypher/api.go:4405`) | `estExact` (already, #2076) |
+| `N(label)` | live nodes carrying `label` | **existing** `graph/index/label.Index` (`nodeIdx`), read via `lpgLabelResolver.ResolveLabelCount` (`cypher/api.go:7332`) | `estExact` (already, #2076) |
 | `E(relType)` | live edges of type `relType` | new count-store | `estExact` |
 | `D(label, relType, dir)` | edge-endpoints of `relType` in direction `dir` whose *this-end* node carries `label` (a degree-sum) | new count-store | `estExact` |
 | `T(labelA, relType, labelB)` | live edges `(:labelA)-[:relType]->(:labelB)` | new count-store | `estExact` |
 
 Maintenance is driven from a transaction-scoped **`CountBuffer`**, an exact
 structural twin of `exec.IndexBuffer` (`cypher/exec/index_writeback.go`), flushed
-inside `Result.commitUnderBarrier` (`cypher/api.go:4005`) **after** the WAL
+inside `Result.commitUnderBarrier` (`cypher/api.go:6665`) **after** the WAL
 fsync succeeds and **while `visMu` is held** — the same durable-then-visible seam
 the secondary-index fan-out already uses. The store is **recomputed in O(V+E)
 from the recovered graph on reopen** (mirroring `registerRecoveredIndexes`,
-`cypher/index_binding.go:663`), so it carries **no on-disk format, no WAL op, no
+`cypher/index_binding.go:1007`), so it carries **no on-disk format, no WAL op, no
 checkpoint component, and no new fsync** — it cannot diverge from the graph
 because it is a pure function of it.
 
@@ -69,10 +85,11 @@ the respective labels; `D` requires only the one end.
 
 Node labels **and** relationship types are interned in the **same registry**,
 `g.reg` (`*lpg.LabelRegistry`): `SetNodeLabel` calls `g.reg.Intern(name)`
-(`graph/lpg/lpg.go:1459`) and `AddEdgeLabeled` calls `g.reg.Intern(relType)`
-(`graph/lpg/lpg.go:988`). The registry is a **lock-free, monotone-append,
-copy-on-write** structure (`graph/lpg/lpg.go:87-159`); interned ids are **stable
-and never reused**, even after a label/type falls out of use. Therefore a
+(`graph/lpg/lpg.go:3125`, in the `setNodeLabelInfo` body it delegates to) and
+`AddEdgeLabeled` calls `g.reg.Intern(relType)` (`graph/lpg/lpg.go:2303`). The
+registry is a **lock-free, monotone-append, copy-on-write** structure
+(`graph/lpg/lpg.go:80-188`); interned ids are **stable and never reused**, even
+after a label/type falls out of use. Therefore a
 `uint32` id captured in a count-store key is permanently valid and can be
 resolved against the live registry without a lock — the same property the
 adjacency `Snapshot` relies on for its shared mapper.
@@ -98,8 +115,8 @@ Each cell is an `*atomic.Int64`. Counter *mutation on an existing key* and
 *counter read* are lock-free atomic ops; only *key insertion* (first observation
 of a combo) and *key deletion* (counter reaches zero) take a write lock. Maps are
 **sharded** by a hash of the key across `countShards` buckets (reuse the existing
-`propMapShards` fan-out constant, 64/256, that `nodeLabelShards` etc. use,
-`graph/lpg/lpg.go:306`), each shard guarding its three maps with a `sync.RWMutex`.
+`propMapShards` fan-out constant, 64, that `nodeLabelShards` etc. use,
+`graph/lpg/lpg.go:213`), each shard guarding its three maps with a `sync.RWMutex`.
 This mirrors the sharding discipline the reliability mandates require ("sharded
 structures … lock-free read paths") and keeps insertion contention off the hot
 counter path.
@@ -109,7 +126,7 @@ counter path.
 Growth is bounded by the number of **currently-observed distinct combos**, not by
 history and not by data size. When a decrement drives a cell to zero the key is
 **deleted** (exactly as `label.Index.Remove` deletes an emptied bitmap,
-`graph/index/label/index.go:103`), so a combo that no longer occurs frees its
+`graph/index/label/index.go:334`), so a combo that no longer occurs frees its
 slot. Upper bounds: `|E| ≤ |relTypes|`, `|D| ≤ 2·|labels|·|relTypes|`,
 `|T| ≤ |labels|²·|relTypes|` — all functions of **schema cardinality**, never of
 `|V|` or `|E|`. §5 quantifies the absolute footprint.
@@ -124,13 +141,13 @@ The secondary-index maintenance is the exact template to follow:
 
 1. Write operators enqueue `index.Change` events into an `exec.IndexBuffer`
    during statement execution (`a.buf.Enqueue(...)` on the `lpgMutatorAdapter`,
-   `cypher/api.go:13197+`; node-removal fan-out via `enqueueNodeRemovalChanges`,
-   `cypher/index_binding.go:518`; old values captured because `OpSetNodeProperty`
-   carries `OldValue`, `graph/index/manager.go:113`).
+   `cypher/api.go:20220+`; node-removal fan-out via `enqueueNodeRemovalChanges`,
+   `cypher/index_binding.go:854`; old values captured because `OpSetNodeProperty`
+   carries `OldValue`, `graph/index/manager.go:180`).
 2. At the transaction boundary the buffer is applied atomically:
    `r.buf.Commit(r.idxMgr)` inside `commitUnderBarrier` on success
-   (`cypher/api.go:4040`), **after** `tx.CommitWALOnly()` fsyncs the WAL
-   (`cypher/api.go:4029`); discarded via `buf.Rollback()` on failure.
+   (`cypher/api.go:6732`), **after** `tx.CommitWALOnly()` fsyncs the WAL
+   (`cypher/api.go:6709`); discarded via `buf.Rollback()` on failure.
 
 The count-store adds a parallel, sibling buffer:
 
@@ -146,16 +163,16 @@ fan-out, so the write path grows one more buffer, not a new code path:
 
 | Adapter method (`cypher/api.go`) | Count delta | Cost |
 |---|---|---|
-| `AddNode` (`:13058`) | none for E/D/T (bare node has no edges); `N` via label index | O(labels) for N (existing) |
-| `AddEdge` / `AddEdgeH` / labelled create (`:13089`, `:13120`) | `E(rt)+1`; `D(l,rt,OUT)+1 ∀l∈L(src)`; `D(l,rt,IN)+1 ∀l∈L(dst)`; `T(a,rt,b)+1 ∀(a,b)∈L(src)×L(dst)` | **O(\|L(src)\|·\|L(dst)\|)** |
-| `SetEdgeLabel` (`:13314`) | edge-delete of old type + edge-create of new type, for that one edge | O(\|L(src)\|·\|L(dst)\|) |
-| `RemoveEdge` / `RemoveEdgeByHandle` (`:13154`, `:13175`) | symmetric decrements of the create deltas | O(\|L(src)\|·\|L(dst)\|) |
-| `RemoveNode` (`:13225`) | none for E/D/T (DETACH strips incident edges first, each an edge-delete already counted); `N` via label index | O(labels) for N |
-| `SetNodeLabel` (`:13189`) | **the hazard** — see §3.3 | O(deg(node)) |
-| `RemoveNodeLabel` (`:13207`) | **the hazard** — symmetric | O(deg(node)) |
+| `AddNode` (`:19990`) | none for E/D/T (bare node has no edges); `N` via label index | O(labels) for N (existing) |
+| `AddEdge` / `AddEdgeH` / labelled create (`:20022`, `:20054`) | `E(rt)+1`; `D(l,rt,OUT)+1 ∀l∈L(src)`; `D(l,rt,IN)+1 ∀l∈L(dst)`; `T(a,rt,b)+1 ∀(a,b)∈L(src)×L(dst)` | **O(\|L(src)\|·\|L(dst)\|)** |
+| `SetEdgeLabel` (`:20433`) | edge-delete of old type + edge-create of new type, for that one edge | O(\|L(src)\|·\|L(dst)\|) |
+| `RemoveEdge` / `RemoveEdgeByHandle` (`:20099`, `:20166`) | symmetric decrements of the create deltas | O(\|L(src)\|·\|L(dst)\|) |
+| `RemoveNode` (`:20266`) | none for E/D/T (DETACH strips incident edges first, each an edge-delete already counted); `N` via label index | O(labels) for N |
+| `SetNodeLabel` (`:20193`) | **the hazard** — see §3.3 | O(deg(node)) |
+| `RemoveNodeLabel` (`:20233`) | **the hazard** — symmetric | O(deg(node)) |
 
 Endpoint labels are available at delta time: the adapter holds `a.g`
-(`*lpg.Graph`) and reads `a.g.NodeLabels(...)` (`cypher/api.go:13304`), which sees
+(`*lpg.Graph`) and reads `a.g.NodeLabels(...)` (`cypher/api.go:20395`), which sees
 the transaction's **eager** in-flight state — exactly as the index fan-out reads
 eager state for `OldValue` capture. Deltas are therefore computed against the
 same graph the statement is building, and applied as one batch at commit.
@@ -164,20 +181,20 @@ same graph the statement is building, and applied as one batch at commit.
 
 Placing maintenance in the buffer (engine level) rather than inline in the
 `lpg.Graph` mutation methods (as `SetNodeLabel` maintains `nodeIdx` at
-`graph/lpg/lpg.go:1469`) is deliberate:
+`graph/lpg/lpg.go:3320`) is deliberate:
 
 - **Atomic rollback for free.** A failed/aborted/capped write discards the buffer
   (`CountBuffer.Rollback`), exactly like `IndexBuffer.Rollback`
-  (`cypher/exec/index_writeback.go:32`). Inline `lpg` maintenance would have to be
+  (`cypher/exec/index_writeback.go:51`). Inline `lpg` maintenance would have to be
   reversed through the transaction undo log (`cypher/undo.go`) — more code, more
   risk. The count-store already needs no undo.
 - **Durable-then-visible.** Flushing in `commitUnderBarrier` *after* the WAL fsync
-  and *before* the barrier releases (`cypher/api.go:4029-4041`) puts the count
+  and *before* the barrier releases (`cypher/api.go:6709-6732`) puts the count
   update on the exact same side of the durability seam as the index update: a
   crash before the fsync leaves nothing to reconcile; a reader that sees the
   writes sees the matching counts.
 - **Recovery is a separate concern.** WAL replay (`replayWALInto`,
-  `store/recovery/recovery.go:1317`) runs at the store layer and would drive
+  `store/recovery/recovery.go:1894`) runs at the store layer and would drive
   inline `lpg` maintenance during replay; keeping the count-store out of `lpg`
   means replay stays byte-for-byte its current cost and the store is populated by
   one authoritative recompute afterward (§6).
@@ -243,7 +260,7 @@ O(deg(node)) in **both** directions. That is true only for the OUT direction.
 GoGraph's directed graph stores adjacency **out-of-node only** (`adjlist`
 forward slots); there is **no reverse in-edge index**, and the sole way to
 enumerate a node's in-edges is a full `Mapper().Walk` — **O(V+E)** (confirmed:
-`lpgMutatorAdapter.InNeighbours`, `cypher/api.go:13495`). Exact incremental
+`lpgMutatorAdapter.InNeighbours`, `cypher/api.go:20660`). Exact incremental
 `D(*,*,IN)` / `T(*,rt,X)` maintenance on a relabel of node `X` therefore is
 **not** achievable in O(delta): even *checking* the budget would cost O(V+E).
 
@@ -305,7 +322,7 @@ commits.
   call `g.View`/`g.ApplyAtomically`"*). The count-store resolver is consulted
   there, so its reads hold `visMu.RLock`.
 - **Writes flush under the barrier.** `CountBuffer.Commit` runs inside
-  `commitUnderBarrier` with `visMu` held (`cypher/api.go:4005-4041`).
+  `commitUnderBarrier` with `visMu` held (`cypher/api.go:6665-6732`).
 - **Therefore `visMu` provides cross-substructure transactional atomicity:** a
   `View` reader observes either *all* of a committed transaction's count deltas or
   *none* — never a mid-commit partial — for exactly the same reason it observes an
@@ -394,21 +411,22 @@ of its own**:
   path's durability surface is unchanged.
 - **No checkpoint component.** Unlike `constraints.bin` / `indexdefs.bin` — which
   exist because constraints and index *definitions* are **not** derivable from
-  graph data and would be lost by a WAL-truncating checkpoint (#1755/#1756,
-  `graph/lpg/lpg.go:401-429`) — the counts **are** fully derivable from the
-  snapshot's graph payload, so persisting them would be redundant and a new
+  graph data and would be lost by a WAL-truncating checkpoint (#1755/#1756;
+  the self-sufficiency gates are `Graph.HasConstraints`, `graph/lpg/lpg.go:4074`,
+  and `Graph.HasIndexes`, `graph/lpg/lpg.go:4197`) — the counts **are** fully
+  derivable from the snapshot's graph payload, so persisting them would be redundant and a new
   torn-write / divergence risk for no benefit.
-- **Recompute at reopen.** After `store/recovery.Open` (`recovery.go:739`)
+- **Recompute at reopen.** After `store/recovery.Open` (`recovery.go:1114`)
   rebuilds the graph (snapshot + WAL replay), the engine populates the count-store
   in **one O(V+E) pass** over the recovered graph — enumerate every live edge,
   read its type and both endpoints' labels, apply the create deltas of §3.1. This
-  mirrors `registerRecoveredIndexes` (`cypher/index_binding.go:663`), which
+  mirrors `registerRecoveredIndexes` (`cypher/index_binding.go:1007`), which
   backfills bound indexes from the recovered graph, and the numeric-companion
   btree that is re-derived (never persisted) at recovery. Wire it in the
   `NewEngineWithStore*` / `NewEngineWithOptions` construction path
-  (`cypher/api.go:913`, `:1027`), after `registerRecoveredConstraints` /
-  `registerRecoveredIndexes` (`:1126`/`:1132`), from the same fully-materialised
-  graph. O(V+E) at startup is explicitly acceptable.
+  (`cypher/api.go:1640`, `:1754`), after the `registerRecoveredConstraints` /
+  `registerRecoveredIndexes` calls (`:1880`/`:1886`), from the same
+  fully-materialised graph. O(V+E) at startup is explicitly acceptable.
 
 ### 6.2 Recovery-correctness argument (kill -9 mid-commit)
 
@@ -418,7 +436,7 @@ pass:
 
 1. WAL recovery is already crash-consistent and certified: committed transactions
    are present, an uncommitted torn tail is discarded (the `OpCommit`-marker /
-   `TxnSeq` suffix filter, `recovery.go:1389-1397`; torn-frame / CRC handling).
+   `TxnSeq` suffix filter, `recovery.go:1990-1998`; torn-frame / CRC handling).
    After `Open`, the graph is *some* well-defined committed state `G*`.
 2. The recompute reads `G*` and produces counts that equal, cell-for-cell, the
    counts of `G*` by definition.
@@ -445,20 +463,20 @@ count-store does not participate in the checkpoint at all.
 ## 7. Question 6 — The estExact promotion rule
 
 The count-store exposes a resolver consumed exactly like `labelCounter`
-(`cypher/estimate.go:96`) and `lpgLabelResolver.ResolveLabelCount`
-(`cypher/api.go:4405`), producing an `estimate{rows, source}` (`estimate.go:64`)
-via a helper analogous to `labelCardinalityEstimate` (`estimate.go:111`). The
+(`cypher/estimate.go:110`) and `lpgLabelResolver.ResolveLabelCount`
+(`cypher/api.go:7332`), producing an `estimate{rows, source}` (`estimate.go:78`)
+via a helper analogous to `labelCardinalityEstimate` (`estimate.go:140`). The
 promotion rule:
 
 1. **`E(relType)` → `estExact`, always.** Unknown/never-interned type → `(0,
    estExact)` (the type has zero live edges — an exact zero, matching how
-   `ResolveLabelCount` returns `(0, true)` for an unknown label, `api.go:4408`).
+   `ResolveLabelCount` returns `(0, true)` for an unknown label, `api.go:7335`).
 2. **`N(label)` → `estExact`, always** (unchanged; served by the label index).
 3. **`D(label, relType, dir)` / `T(labelA, relType, labelB)` → `estExact` iff the
    family is not dirty.** Unresolvable label/type id → exact `0`. When `dExact` /
    `tExact` is **false** (a hub relabel tripped the budget, §3.3), the lookup
    returns **`estFallback`** — an absolute veto: `planStaysDefault`
-   (`estimate.go:82`) forces P3 back to today's default plan. Never a fabricated
+   (`estimate.go:96`) forces P3 back to today's default plan. Never a fabricated
    or stale exact.
 4. **Barrier requirement.** A count read that feeds an `estExact` estimate MUST be
    issued under the query's `View` (guaranteed on the read path, `api.go:1743`),

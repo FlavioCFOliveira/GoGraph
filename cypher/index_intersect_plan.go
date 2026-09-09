@@ -129,6 +129,7 @@ func tryIndexIntersectionSeek(
 	nodeVar string,
 	params map[string]expr.Value,
 	prefixSeek bool,
+	pending *pendingIndexDelta,
 ) (exec.Operator, bool) {
 	// Cheapest possible gate, and it must come FIRST: only a top-level AND can hold
 	// two conjuncts, so anything else is declined before a single allocation.
@@ -196,7 +197,7 @@ func tryIndexIntersectionSeek(
 			}
 			continue
 		}
-		part, recognised := recogniseIndexedConjunct(e, nodeVar, lblScan.Label, idxMgr, budget, params, prefixSeek)
+		part, recognised := recogniseIndexedConjunct(e, nodeVar, lblScan.Label, idxMgr, budget, params, prefixSeek, pending)
 		if !recognised || len(parts) == len(partBuf) {
 			continue
 		}
@@ -257,10 +258,11 @@ func recogniseIndexedConjunct(
 	budget uint64,
 	params map[string]expr.Value,
 	prefixSeek bool,
+	pending *pendingIndexDelta,
 ) (indexRangeConjunct, bool) {
 	// String / prefix conjunct over a bound string btree.
 	if pred, ok := extractSingleStringCmp(e, nodeVar, params, prefixSeek); ok {
-		if sub, found := findBoundStringBTree(idxMgr, label, pred.propKey); found {
+		if sub, found := findBoundStringBTree(idxMgr, label, pred.propKey, pending); found {
 			lo, hi := boundsOf(pred.lo, pred.hi)
 			count, exact := budgetedStringRangeCount(sub, pred, budget)
 			if rangeCountWithinBudget(count, exact, budget) {
@@ -276,7 +278,7 @@ func recogniseIndexedConjunct(
 	}
 	// Numeric conjunct over the unified float64 companion.
 	if pred, ok := extractSingleNumericCmp(e, nodeVar, params); ok {
-		if sub, found := findBoundNumericBTree(idxMgr, label, pred.propKey); found {
+		if sub, found := findBoundNumericBTree(idxMgr, label, pred.propKey, pending); found {
 			lo, hi := rangeBoundFloats(pred)
 			count, exact := sub.RangeCount(lo, hi, budget)
 			if rangeCountWithinBudget(count, exact, budget) {

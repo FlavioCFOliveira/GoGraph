@@ -34,10 +34,20 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/internal/sortseam"
 )
 
-// sortComplexityQuery is the #2652 reproduction. `p.salary` is NOT projected, so
+// sortComplexityQuery is the #2652 reproduction. The key is NOT projected, so
 // irSortKeys cannot resolve it by schema lookup (Case 1) and compiles an
 // expression evaluator instead (Case 2) — the shape whose evaluation count this
 // file measures.
+//
+// The key is spelled `coalesce(p.salary, 0)` rather than the bare `p.salary`
+// this file was written with. #2662 projects a bare `var.prop` ORDER BY key into
+// its own hidden column, so `ORDER BY p.salary` now resolves by schema lookup
+// and evaluates the key ZERO times — which is the point of that task, and which
+// left every assertion here reading 0 and failing loudly rather than passing
+// vacuously. coalesce() is a shape #2662 declines to hoist (its receiver is not
+// a bare variable), so the evaluator is still compiled and still measured. On
+// this fixture salary is set on every node, so the key VALUES and the resulting
+// order are exactly what the bare property produced.
 //
 // It carries NO pagination clause. It used to be spelled `SKIP 0 LIMIT 10`,
 // chosen because any SKIP blocked ORDER BY+LIMIT fusion and so forced the full
@@ -47,7 +57,7 @@ import (
 // limitation, so it is the durable spelling for this oracle.
 // TestSortKeyEvalPlanIsSort is the guard that fails if that ever stops being
 // true.
-const sortComplexityQuery = `MATCH (p:Person) RETURN p.firstName ORDER BY p.salary`
+const sortComplexityQuery = `MATCH (p:Person) RETURN p.firstName ORDER BY coalesce(p.salary, 0)`
 
 // sortComplexityGraph builds n :Person nodes carrying the two properties the
 // reproduction needs.
@@ -184,7 +194,7 @@ func TestSortKeyEvalIsLinearInRows(t *testing.T) {
 // call-site family in cypher/exec/top.go is exercised end to end. The SKIP is
 // present deliberately: it is the clause that used to defeat the fusion, so this
 // query is also the end-to-end witness that it no longer does.
-const topComplexityQuery = `MATCH (p:Person) RETURN p.firstName ORDER BY p.salary SKIP 0 LIMIT 10`
+const topComplexityQuery = `MATCH (p:Person) RETURN p.firstName ORDER BY coalesce(p.salary, 0) SKIP 0 LIMIT 10`
 
 // TestTopKeyEvalIsLinearInRows is TestSortKeyEvalIsLinearInRows for the Top
 // operator. It is a separate test because Top's evaluation count depends on the
@@ -292,19 +302,19 @@ func TestOrderByResultsIdenticalAcrossSeam(t *testing.T) {
 
 	queries := []string{
 		// Sort, single evaluator-backed key, ASC.
-		`MATCH (p:Person) RETURN p.firstName ORDER BY p.salary SKIP 0`,
+		`MATCH (p:Person) RETURN p.firstName ORDER BY coalesce(p.salary, 0) SKIP 0`,
 		// Sort, single evaluator-backed key, DESC.
-		`MATCH (p:Person) RETURN p.firstName ORDER BY p.salary DESC SKIP 0`,
+		`MATCH (p:Person) RETURN p.firstName ORDER BY coalesce(p.salary, 0) DESC SKIP 0`,
 		// Sort, two evaluator-backed keys with mixed direction.
-		`MATCH (p:Person) RETURN p.firstName ORDER BY p.salary ASC, p.department DESC SKIP 0`,
+		`MATCH (p:Person) RETURN p.firstName ORDER BY coalesce(p.salary, 0) ASC, coalesce(p.department, 0) DESC SKIP 0`,
 		// Sort, one projected key (ColIdx) and one evaluator-backed key.
-		`MATCH (p:Person) RETURN p.department, p.firstName ORDER BY p.department, p.salary SKIP 0`,
+		`MATCH (p:Person) RETURN p.department, p.firstName ORDER BY p.department, coalesce(p.salary, 0) SKIP 0`,
 		// Top: ORDER BY + LIMIT fused, limit well below the input size.
-		`MATCH (p:Person) RETURN p.firstName ORDER BY p.salary LIMIT 25`,
+		`MATCH (p:Person) RETURN p.firstName ORDER BY coalesce(p.salary, 0) LIMIT 25`,
 		// Top: multi-key, mixed direction.
-		`MATCH (p:Person) RETURN p.firstName ORDER BY p.salary DESC, p.department ASC LIMIT 40`,
+		`MATCH (p:Person) RETURN p.firstName ORDER BY coalesce(p.salary, 0) DESC, coalesce(p.department, 0) ASC LIMIT 40`,
 		// Top: limit at the input size, i.e. every row admitted.
-		fmt.Sprintf(`MATCH (p:Person) RETURN p.firstName ORDER BY p.salary LIMIT %d`, n),
+		fmt.Sprintf(`MATCH (p:Person) RETURN p.firstName ORDER BY coalesce(p.salary, 0) LIMIT %d`, n),
 	}
 
 	collect := func(q string) [][]expr.Value {

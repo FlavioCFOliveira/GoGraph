@@ -637,7 +637,8 @@ is a **headroom** problem, not an attribution problem: no amount of care in
 apportioning the cost would make a 600 s ceiling survive it.
 
 `make race` carries the same variable. It is not a gate — `ci` is
-`tidy fmt vet build test-short lint cover-gate` — but it runs the same corpus
+`shell-guard tidy fmt vet build vulncheck test-short test-timing
+test-uninstrumented lint cover-gate ci-kg-verify` — but it runs the same corpus
 under the same detector, so it has the same exposure.
 
 **Why 30m.** It is **3.05×** the slowest package measured that actually
@@ -683,9 +684,22 @@ Three composite pipeline targets wrap these:
 
 | Target | Purpose |
 |---|---|
-| `make ci` | Full local gate: tidy + fmt + vet + build + **test-short** + lint + cover-gate |
-| `make ci-soak` | Like `ci` but runs **test-soak** instead of test-short |
-| `make ci-nightly` | Like `ci` but runs **test-nightly** instead of test-short |
+| `make ci` | Full local gate: shell-guard + tidy + fmt + vet + build + vulncheck + **test-short** + test-timing + test-uninstrumented + lint + cover-gate + **ci-kg-verify** |
+| `make ci-soak` | Like `ci` but runs **test-soak** instead of test-short — **and omits `ci-kg-verify`** |
+| `make ci-nightly` | Like `ci` but runs **test-nightly** instead of test-short — **and omits `ci-kg-verify`** |
+| `make kg-verify` | The knowledge-graph fidelity gate with **nothing** excluded (`cmd/kgverify`) |
+
+**`ci-kg-verify` joined `make ci` in `v0.14.1`** (rmp #2677, #2796) and is the one
+member that needs something outside the repository: it reaches the knowledge graph
+through `rmp graph client`, and `rmp graph serve -r gograph` is the only process
+that opens the store. **With nothing listening, `make ci` fails for a reason
+unrelated to the change being gated.** It runs `cmd/kgverify` with two checks
+excluded — `task-status-disagrees-with-rmp`, whose count moves with `rmp` rather
+than with the code, and `provenance-no-node`, whose population grows with branch
+length — and both stay measured and printed. `make kg-verify` excludes neither.
+
+Note that `ci-soak` and `ci-nightly` do **not** carry `ci-kg-verify`, so "like `ci`
+but runs test-soak" is now true only of the test layer, not of the member list.
 
 ## What the soak layer asserts — and what it does not
 

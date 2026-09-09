@@ -83,13 +83,21 @@ import (
 // ok is false whenever the rewrite does not apply, which the caller treats as
 // "build the child scan instead". An over-budget key set is one such case, not an
 // error: the scan is the correct and cheaper answer.
+// bopts supplies the rmp #2814 conditions the key-set seek shares with the
+// single-key seek it sits behind: the DisableIndexSeek kill switch and the
+// transaction's pending-index-delta. A nil bopts declines, exactly as in
+// [tryBuildIndexSeekFromSelection] and for the same reason.
 func tryBuildIndexSeekSetFromSelection(
 	sel *ir.Selection,
 	params map[string]expr.Value,
 	schema map[string]int,
 	idxMgr *index.Manager,
 	g *lpg.ReadView[string, float64],
+	bopts *buildOpts,
 ) (exec.Operator, bool) {
+	if bopts == nil || !bopts.indexSeekEnabled {
+		return nil, false
+	}
 	if sel.PredicateExpr == nil || idxMgr == nil || g == nil {
 		return nil, false
 	}
@@ -134,7 +142,7 @@ func tryBuildIndexSeekSetFromSelection(
 	if !canVerify {
 		return nil, false
 	}
-	return buildSeekSetOperator(idxMgr, label, propKey, keys, budget, nodeVar, schema, admit)
+	return buildSeekSetOperator(idxMgr, label, propKey, keys, budget, nodeVar, schema, admit, bopts.pendingIdx)
 }
 
 // countOrDisjuncts counts the operands of a chain of OR without allocating.
@@ -196,7 +204,15 @@ func buildSeekSetOperator(
 	nodeVar string,
 	schema map[string]int,
 	admit func(uint64) bool,
+	pending *pendingIndexDelta,
 ) (exec.Operator, bool) {
+	// The transaction has already moved this coordinate in the graph without the
+	// index being told (rmp #2814). The key-set seek keeps only the label residual,
+	// exactly as the single-key seek does, so a stale posting list is a stale
+	// answer; decline and let the scan+filter read the writer view.
+	if pending.blocksNodeIndex(label, propKey) {
+		return nil, false
+	}
 	for _, name := range idxMgr.ListIndexes() {
 		sub, err := idxMgr.GetIndex(name)
 		if err != nil || sub.Kind() != "hash" || !indexCoversNode(sub, label, propKey) {
@@ -342,9 +358,12 @@ func seekClaimsHint(
 	idxMgr *index.Manager,
 	g *lpg.ReadView[string, float64],
 ) bool {
-	if op, fired, err := tryBuildIndexSeekFromSelection(sel, params, make(map[string]int), idxMgr, labelSrcFromView(g)); err == nil && fired && op != nil {
+	// See the EXPLAIN-rendering note in [explainWithIndexesNode] for why this
+	// renderer passes indexSeekEnabled: true and a nil pending delta (rmp #2814).
+	renderOpts := &buildOpts{indexSeekEnabled: true}
+	if op, fired, err := tryBuildIndexSeekFromSelection(sel, params, make(map[string]int), idxMgr, labelSrcFromView(g), renderOpts); err == nil && fired && op != nil {
 		return true
 	}
-	_, fired := tryBuildIndexSeekSetFromSelection(sel, params, make(map[string]int), idxMgr, g)
+	_, fired := tryBuildIndexSeekSetFromSelection(sel, params, make(map[string]int), idxMgr, g, renderOpts)
 	return fired
 }

@@ -42,77 +42,154 @@ const (
 	// connections to finish after stopping the accept loop.
 	shutdownDrainTimeout = 30 * time.Second
 
-	// DefaultConnTimeout is the default value applied to Options.ConnTimeout
-	// when the caller leaves it at zero. It is the per-message idle deadline
-	// applied throughout the post-handshake message loop: the server resets it
-	// before each read, so it bounds the time a connection may sit silent
-	// between messages, not the total session duration. A non-zero default is
-	// mandatory: with no deadline a client that completes the handshake but then
-	// stops sending bytes would hold its connection slot and goroutine forever,
-	// a Slowloris-style denial of service. The default of 30 s is generous
-	// enough not to disturb a legitimate interactive session pausing between
-	// queries while still reclaiming abandoned connections. Operators may set a
-	// larger value for long-lived idle sessions or a smaller one to reclaim
-	// connections more aggressively.
-	DefaultConnTimeout = 30 * time.Second
+	// DefaultConnTimeout is the value applied to Options.ConnTimeout when the
+	// caller leaves it at zero. It IS zero: the per-message idle read deadline is
+	// DISABLED by default. See [Options.ConnTimeout] for what the field does when
+	// an operator sets it, and for the three-way contract (0 disables, a positive
+	// value bounds, a negative value is rejected by [NewServer]).
+	//
+	// # Why it is disabled (rmp #2807)
+	//
+	// The default was 30 s, and the bound was a read deadline armed before EVERY
+	// read of the post-handshake message loop. The reader goroutine sits in that
+	// read while the message loop executes the client's own statement, so the
+	// deadline ran against a BUSY server rather than against an idle client: a
+	// client waiting for the records it just asked for sends nothing, and this
+	// deadline could not tell that apart from silence. Measured under rmp #2806:
+	// with ConnTimeout 100 ms and a one-hour statement bound, an autocommit
+	// statement of about 900 ms had its connection closed at 110 ms — the server
+	// cutting itself off for being busy. Neither peer this module is measured
+	// against does that.
+	//
+	// Both peers ship the equivalent bounds disabled. PostgreSQL ships
+	// statement_timeout, transaction_timeout, idle_in_transaction_session_timeout
+	// and idle_session_timeout all at 0 and advises against setting them globally
+	// in postgresql.conf; its liveness check is TCP keepalive, never a read
+	// deadline. Neo4j ships db.transaction.timeout at 0 and keeps connections
+	// live with protocol-level NOOP chunks.
+	//
+	// # What replaces it
+	//
+	// TCP keepalive, enabled on every accepted connection — see
+	// [DefaultKeepAliveIdle] for the budget and for what it does and does not
+	// detect. A peer that is GONE (a pulled cable, a NAT that dropped its state,
+	// a host that vanished without sending FIN) is reclaimed by the kernel within
+	// that budget, which is what the read deadline was being misused to
+	// approximate.
+	//
+	// The bounds on COUNT are untouched and are what bound the resource:
+	// [Options.MaxConnections] (1024), [DefaultMaxOpenTxPerPrincipal] (2048) and
+	// the reclamation horizon's fixed slot count
+	// (graph/mvcc.HorizonCapacity, 1024). PostgreSQL bounds by count too; only
+	// the time bound goes.
+	//
+	// THE COST, stated rather than glossed, in two parts:
+	//
+	//   - A client that is ALIVE and silent — its TCP stack answers keepalive
+	//     probes, its process simply never sends another Bolt message — is no
+	//     longer reclaimed at all. It holds one of the 1024 connection slots and
+	//     its two goroutines until it disconnects or the server shuts down, and
+	//     where it left an explicit transaction open, that transaction pins the
+	//     MVCC reclamation horizon and one of its 1024 slots for exactly as long.
+	//     The remedy is the operator's, and it is the one PostgreSQL offers for
+	//     the same exposure: set [Options.MaxTxIdleTime] to reclaim the
+	//     transaction and [Options.ConnTimeout] to reclaim the connection.
+	//   - The window between a completed handshake and a successful LOGON is no
+	//     longer bounded either. [DefaultHandshakeTimeout] bounds version
+	//     negotiation only, so an unauthenticated client that negotiates and then
+	//     falls silent now holds its slot indefinitely. PostgreSQL bounds that
+	//     window with a separate authentication_timeout (1 minute by default);
+	//     GoGraph has no such bound today. An operator exposing this server to an
+	//     untrusted network should set Options.ConnTimeout explicitly until it
+	//     does.
+	DefaultConnTimeout time.Duration = 0
 
-	// DefaultTxTimeout is the default value applied to Options.DefaultTxTimeout
-	// when the caller leaves it at zero. It bounds an explicit transaction
-	// (opened by BEGIN) when the client supplies no tx_timeout of its own. A
-	// finite default is mandatory: an explicit transaction holds the engine's
-	// NO serialisation from BEGIN until COMMIT/ROLLBACK (rmp #2305), so a client
-	// that issues BEGIN and then stalls — never sending COMMIT, ROLLBACK, or even
-	// RESET — would otherwise block every other writer on the server forever, a
-	// liveness denial of service (#1302). The default of 30 s is generous enough
-	// not to disturb a legitimate interactive transaction while still guaranteeing
-	// the global write lock is reclaimed if a transaction is abandoned. Operators
-	// may set a larger value for long-lived batch transactions or a smaller one
-	// to reclaim the writer lock more aggressively; the per-statement
-	// MaxStatementTimeout, when set, additionally clamps it.
-	DefaultTxTimeout = 30 * time.Second
+	// DefaultTxTimeout is the value applied to Options.DefaultTxTimeout when the
+	// caller leaves it at zero. It IS zero: an explicit transaction that supplies
+	// no tx_timeout of its own gets NO total wall-clock bound by default.
+	//
+	// When an operator does set the field, it bounds an explicit transaction
+	// (opened by BEGIN) however busy it is — [Options.MaxTxIdleTime] is the
+	// separate bound on silence — and a client-supplied tx_timeout still takes
+	// precedence, with Options.MaxStatementTimeout clamping the effective value
+	// when it is set.
+	//
+	// # Why it is disabled (rmp #2807)
+	//
+	// The default was 30 s until rmp #2806 and 30 minutes after it. It is now 0,
+	// matching PostgreSQL's transaction_timeout, which ships at 0 with the
+	// documentation advising against setting it globally, and Neo4j's
+	// db.transaction.timeout, which also ships at 0.
+	//
+	// A bounded default was defensible when an explicit transaction held the
+	// engine's writer serialisation from BEGIN until COMMIT/ROLLBACK: one stalled
+	// client then blocked every other writer on the server, a liveness denial of
+	// service (#1302). rmp #2305 retired that hold. An unfinished transaction now
+	// costs memory rather than other clients' progress: it pins the reclamation
+	// horizon, so no version it could still read is freed while it lives, and it
+	// occupies one of the horizon's fixed slots (graph/mvcc.HorizonCapacity).
+	//
+	// THE COST, stated rather than glossed: a long-running transaction is no
+	// longer killed for being long. A client looping RUN/PULL forever, or holding
+	// a transaction open across unbounded think-time, holds its versions and its
+	// horizon slot for as long as its connection lives. Nothing else reclaims it:
+	// the idle bound is disabled too, and so is the connection read deadline. An
+	// operator who wants a total bound sets Options.DefaultTxTimeout explicitly.
+	DefaultTxTimeout time.Duration = 0
 
 	// DefaultMaxTxIdleTime is the value applied to Options.MaxTxIdleTime when the
-	// caller leaves it at zero. It bounds how long an OPEN explicit transaction
-	// may go without the client sending a message, which is a different and much
-	// tighter bound than DefaultTxTimeout: that one caps a transaction's total
-	// life, however busy, while this one reclaims one that has been ABANDONED.
+	// caller leaves it at zero. It IS zero: an OPEN explicit transaction that
+	// stops receiving messages is NOT reclaimed by default.
 	//
-	// A finite default is mandatory, and 5 s rather than 30 s because of what the
-	// round-3 audit demonstrated: one authenticated client sends BEGIN and stops
-	// talking, and because an open transaction held the global visibility
-	// barrier, a 4.7 ms read on every other connection became 30.001 s —
-	// the full DefaultTxTimeout — followed by a hard TransactionTimedOut, and it
-	// was repeatable indefinitely (rmp #2175). The total-lifetime bound cannot fix
-	// that on its own: lowering it shortens the outage but also kills legitimate
-	// long transactions, whereas an idle bound distinguishes the two cases, since
-	// a working client sends messages.
+	// When an operator does set the field, it bounds how long an open explicit
+	// transaction may go without the client sending a message, which is a
+	// different bound from [Options.DefaultTxTimeout]: that one caps a
+	// transaction's total life however busy, while this one reclaims one that has
+	// been ABANDONED. Every inbound message pushes this deadline forward; a silent
+	// client pushes nothing.
 	//
-	// # Reviewed after rmp #2305, and KEPT at 5 s
+	// # What it protected, and what changed
 	//
-	// The outage above is GONE. An open transaction no longer holds the visibility
-	// barrier or any writer serialisation, so an abandoned one blocks nobody: the
-	// gates in bolt/server's e2e_concurrent_write_tx_test.go assert exactly that
-	// against the official driver. The original justification for a bound this tight
-	// therefore no longer applies, and the honest question is whether to relax it.
+	// Before rmp #2305 an open transaction held the global visibility barrier, so
+	// one authenticated client that sent BEGIN and stopped talking turned a 4.7 ms
+	// read on every other connection into a 30.001 s stall followed by a hard
+	// TransactionTimedOut, repeatable indefinitely (rmp #2175). That outage is
+	// GONE: an open transaction holds no barrier and no writer serialisation, and
+	// the gates in this package's e2e_concurrent_write_tx_test.go assert exactly
+	// that against the official driver.
 	//
-	// It stays, because what an abandoned transaction now costs is still unbounded,
-	// just in a different resource: it pins the reclamation horizon, so no version it
-	// could still read is freed while it lives, and it occupies one of the horizon's
-	// fixed number of slots. An availability failure became a memory-and-slot failure;
-	// neither is acceptable without a bound, and 5 s remains far longer than any
-	// working client needs between the messages of one transaction.
+	// What an abandoned transaction still costs is memory and horizon slots. It
+	// pins the reclamation horizon, so no version it could still read is freed
+	// while it lives, and it occupies one of the horizon's fixed slots
+	// (graph/mvcc.HorizonCapacity). An availability failure became a
+	// memory-and-slot failure.
 	//
-	// What DID change is the severity of setting it high. Before rmp #2305 a large
-	// MaxTxIdleTime was an availability risk; now it is a memory-growth risk. That is
-	// why the concurrency gates can safely raise it to ten minutes to remove the
-	// reaper's interference with what they measure — a thing that would have been
-	// reckless on the previous build.
+	// # Why it is disabled (rmp #2807)
 	//
-	// 5 s is far longer than any client needs between the messages of one
-	// transaction — a driver pipelines them — and short enough that an abandoned
-	// transaction is reclaimed before it is felt as an outage. Operators driving
-	// transactions from an interactive prompt may raise it.
-	DefaultMaxTxIdleTime = 5 * time.Second
+	// The default was 5 s until rmp #2806 and 30 minutes after it. It is now 0,
+	// matching PostgreSQL's idle_in_transaction_session_timeout — the bound that
+	// governs exactly this case, shipped at 0, with the documentation advising
+	// against setting it globally in postgresql.conf.
+	//
+	// THE COST, stated rather than glossed: ONE abandoned transaction holds every
+	// version it could still read, and one of the horizon's 1024 slots, for as
+	// long as its connection lives — no longer for 5 s, nor for half an hour, but
+	// indefinitely. N abandoned transactions hold N slots on the same terms, so
+	// the horizon's capacity is exhaustible by silent clients alone, and
+	// [Options.MaxConnections] (1024) is what bounds how many of them there can
+	// be. Nothing reclaims them on a timer any more: [DefaultTxTimeout] is
+	// disabled, and so is [DefaultConnTimeout], which used to tear the connection
+	// down and roll the transaction back as a side effect.
+	//
+	// The remedy is the operator's, and it is PostgreSQL's posture exactly: set
+	// Options.MaxTxIdleTime explicitly. Server.Transactions and
+	// Server.TerminateTransaction remain the manual route for one transaction at
+	// a time.
+	//
+	// The concurrency gates in e2e_concurrent_write_tx_test.go set ten minutes of
+	// their own. That override is kept because it pins the value those gates
+	// measure under instead of inheriting whatever this constant becomes.
+	DefaultMaxTxIdleTime time.Duration = 0
 
 	// DefaultMaxOpenTxPerPrincipal is the value applied to
 	// Options.MaxOpenTxPerPrincipal when the caller leaves it at zero. It caps
@@ -166,10 +243,14 @@ const (
 	// THE COST, stated rather than glossed: every open transaction pins an MVCC
 	// read snapshot and holds the reclamation horizon back for its lifetime
 	// (rmp #2305, #2307), so a higher ceiling is a weaker bound on that resource.
-	// What limits the damage is [DefaultMaxTxIdleTime]: an abandoned transaction
-	// is reclaimed after 5 s rather than held until the client disconnects. An
-	// embedder that wants the old tight bound sets Options.MaxOpenTxPerPrincipal
-	// explicitly, which is now the only way to get it.
+	// NOTHING limits the damage on a timer any more. [DefaultMaxTxIdleTime] was
+	// 5 s when this ceiling was raised and 30 minutes after rmp #2806; since
+	// rmp #2807 it is 0, so an abandoned transaction is held until its client
+	// disconnects. This ceiling and [Options.MaxConnections] are therefore the
+	// bounds that actually apply, and an embedder that wants a time bound as well
+	// sets Options.MaxTxIdleTime explicitly. One that wants the old tight count
+	// bound sets Options.MaxOpenTxPerPrincipal explicitly, which is the only way
+	// to get it.
 	//
 	// Set a negative value to disable enforcement — which is a deliberate,
 	// visible choice at the call site, not something reachable by accident.
@@ -194,36 +275,98 @@ const (
 	// reporting the field at all.
 	DefaultDatabaseName = "neo4j"
 
-	// DefaultStatementTimeout is the default value applied to
-	// Options.DefaultStatementTimeout when the caller leaves it at zero. It
-	// bounds an AUTOCOMMIT statement (a bare RUN outside an explicit
-	// transaction) when the client supplies no per-statement timeout of its
-	// own. A finite default is mandatory for the same reason it is for explicit
-	// transactions: an authenticated client can submit a statement whose runtime
-	// is super-linear in the graph size yet whose result collapses to a single
-	// row (a disconnected multi-pattern Cartesian product such as
-	// `MATCH (a),(b),(c),(d),(e) RETURN count(*)`), so the result-row / byte caps
-	// never fire and the statement pins a CPU core indefinitely. Explicit
-	// transactions already receive DefaultTxTimeout unconditionally; without a
-	// symmetric floor here, autocommit RUN was the sole unbounded-runtime path
-	// under a default server configuration (#1828). The default of 30 s matches
-	// DefaultTxTimeout; operators may set a larger value for long-running
-	// analytical statements. A client-supplied `timeout` takes precedence, and
-	// MaxStatementTimeout, when set, additionally clamps the effective value.
-	DefaultStatementTimeout = 30 * time.Second
+	// DefaultStatementTimeout is the value applied to
+	// Options.DefaultStatementTimeout when the caller leaves it at zero. It IS
+	// zero: an AUTOCOMMIT statement (a bare RUN outside an explicit transaction)
+	// that supplies no per-statement timeout of its own gets NO wall-clock bound
+	// by default.
+	//
+	// When an operator does set the field, a client-supplied `timeout` still takes
+	// precedence, and Options.MaxStatementTimeout, when set, additionally clamps
+	// the effective value.
+	//
+	// # Why it is disabled (rmp #2807)
+	//
+	// The default was 30 s until rmp #2806 and 30 minutes after it. It is now 0,
+	// matching PostgreSQL's statement_timeout, which ships at 0 with the
+	// documentation advising against setting it globally in postgresql.conf.
+	//
+	// THE COST, stated rather than glossed: a default-configured server has no
+	// wall-clock bound on an autocommit statement, which is the state #1828
+	// recorded as a defect when the alternative was an unbounded bound on an
+	// otherwise bounded server. An authenticated client can submit a statement
+	// whose runtime is super-linear in the graph size yet whose result collapses
+	// to a single row — a disconnected multi-pattern Cartesian product such as
+	// `MATCH (a),(b),(c),(d),(e) RETURN count(*)` — so the result-row and
+	// result-byte caps never fire and the statement pins a CPU core until it
+	// finishes or the client disconnects. [DefaultConnTimeout] no longer cuts it
+	// short either, because it too is disabled.
+	//
+	// What still bounds it: the engine's own result caps
+	// (cypher.EngineOptions.MaxResultRows and MaxResultBytes) for any statement
+	// whose result actually grows, the connection ceiling for how many such
+	// statements can run at once, and cancellation — a client that disconnects
+	// cancels the connection context, which stops the statement. An operator who
+	// wants a wall-clock bound sets Options.DefaultStatementTimeout, or the
+	// server-wide Options.MaxStatementTimeout, explicitly.
+	DefaultStatementTimeout time.Duration = 0
 
 	// DefaultHandshakeTimeout is the deadline that bounds the unauthenticated
 	// version-negotiation handshake — the cheapest phase for an attacker to
 	// abuse, since it requires no valid protocol bytes (a client may open a
 	// socket, send a single byte, and otherwise stall). The deadline is applied
 	// to the connection before [proto.Negotiate] and cleared on success so it
-	// never bleeds into normal operation. It is deliberately shorter than
-	// DefaultConnTimeout: a legitimate client sends its 20-byte handshake
-	// immediately, so 10 s is ample, while a stalled handshake is reclaimed
-	// promptly. The handshake bound is fixed (not configurable via Options) to
-	// keep the Options struct small; the package var handshakeTimeout is seeded
-	// from this const and overridable only by tests.
+	// never bleeds into normal operation. A legitimate client sends its 20-byte
+	// handshake immediately, so 10 s is ample, while a stalled handshake is
+	// reclaimed promptly. The handshake bound is fixed (not configurable via
+	// Options) to keep the Options struct small; the package var handshakeTimeout
+	// is seeded from this const and overridable only by tests.
+	//
+	// It bounds VERSION NEGOTIATION ONLY. Since rmp #2807 disabled
+	// [DefaultConnTimeout], nothing bounds the window between a completed
+	// handshake and a successful LOGON by default, so this is no longer the
+	// shorter of two pre-authentication bounds — it is the only one. See
+	// [DefaultConnTimeout] for what that costs and how an operator closes it.
 	DefaultHandshakeTimeout = 10 * time.Second
+
+	// DefaultKeepAliveIdle is how long an accepted connection must be silent
+	// before the kernel sends its first TCP keep-alive probe.
+	//
+	// It is one of three parameters — with [DefaultKeepAliveInterval] and
+	// [DefaultKeepAliveCount] — that the server installs on every accepted
+	// connection that is a *[net.TCPConn]. Together they bound how long a
+	// connection whose peer has GONE (a pulled cable, a NAT or firewall that
+	// silently dropped its state, a host that vanished without sending FIN)
+	// survives: the first probe after this idle period, further probes every
+	// interval, and the connection dropped after that many consecutive probes go
+	// unanswered. 15 s + 3 x 5 s is 30 s, which is deliberately the reclamation
+	// budget the 30 s [DefaultConnTimeout] used to give a dead connection before
+	// rmp #2807 disabled it.
+	//
+	// This is the liveness mechanism PostgreSQL relies on, and it REPLACES the
+	// read deadline rather than supplementing it. What it detects is a DEAD peer.
+	// What it does NOT detect is a live client that is merely silent: its stack
+	// answers every probe, so nothing here reclaims it. That is the exposure
+	// [DefaultConnTimeout] documents, and Options.ConnTimeout is what closes it.
+	//
+	// The values are fixed rather than configurable, for the same reason
+	// [DefaultHandshakeTimeout] is: the Options struct stays small. Go's own
+	// listener default (15 s / 15 s / 9, so roughly 150 s) applies to a
+	// connection accepted from a net.Listener the caller did not configure; the
+	// server overrides it on every accepted connection so the budget does not
+	// depend on how the embedder built the listener, nor on the platform default
+	// (7200 s / 75 s / 8, measured on this project's development host) when the
+	// embedder disabled the listener's own keep-alive.
+	DefaultKeepAliveIdle = 15 * time.Second
+
+	// DefaultKeepAliveInterval is the gap between successive TCP keep-alive
+	// probes on an accepted connection. See [DefaultKeepAliveIdle].
+	DefaultKeepAliveInterval = 5 * time.Second
+
+	// DefaultKeepAliveCount is how many consecutive TCP keep-alive probes may go
+	// unanswered before the kernel drops the connection. See
+	// [DefaultKeepAliveIdle].
+	DefaultKeepAliveCount = 3
 )
 
 // handshakeTimeout holds, in nanoseconds, the effective deadline applied to the
@@ -323,10 +466,18 @@ type Options struct {
 	DatabaseName string
 
 	// MaxTxIdleTime bounds how long an OPEN explicit transaction may go without
-	// the client sending a message, after which it is rolled back and the writer
-	// serialisation and visibility barrier are released. Zero or negative defaults
-	// to [DefaultMaxTxIdleTime]; there is no way to disable it, because an
-	// unbounded idle transaction is the outage the round-3 audit demonstrated.
+	// the client sending a message, after which it is rolled back and the MVCC read
+	// snapshot it pinned is released.
+	//
+	// Three-way contract, the same for all four timeout fields:
+	//
+	//   - 0 (the zero value) DISABLES the bound. This is the default — see
+	//     [DefaultMaxTxIdleTime] for why, and for what leaving it disabled costs.
+	//   - A positive value is used verbatim; nothing substitutes a default for it.
+	//   - A NEGATIVE value is an error: [NewServer] refuses it with a
+	//     [*NegativeTimeoutError] rather than coercing it to a default, because
+	//     coercion hides the caller's mistake and installs a bound they never
+	//     asked for.
 	//
 	// This is NOT DefaultTxTimeout. That bounds a transaction's total life however
 	// active it is; this reclaims one that has stopped talking. A busy transaction
@@ -398,14 +549,30 @@ type Options struct {
 	MaxInFlightPerConnection int
 
 	// ConnTimeout is the per-connection idle read deadline applied throughout
-	// the post-handshake message loop. Each time the server is about to read
-	// the next message, the deadline is reset to now+ConnTimeout, so it bounds
-	// the silent gap between messages rather than the total session duration.
-	// Zero or negative values default to [DefaultConnTimeout] (30 s); a
-	// non-zero deadline is always applied so an idle connection cannot hold its
-	// slot and goroutine forever. Set a larger value for long-lived idle
-	// sessions. The unauthenticated handshake phase is bounded separately and
-	// is not configurable here; see [DefaultHandshakeTimeout].
+	// the post-handshake message loop. When it is positive, the deadline is reset
+	// to now+ConnTimeout before every read.
+	//
+	// Three-way contract, the same for all four timeout fields:
+	//
+	//   - 0 (the zero value) DISABLES the deadline: reads carry no deadline at
+	//     all. This is the default — see [DefaultConnTimeout] for why, and for
+	//     what leaving it disabled costs. Liveness against a dead peer comes from
+	//     TCP keep-alive instead (see [DefaultKeepAliveIdle]).
+	//   - A positive value is used verbatim; nothing substitutes a default for it.
+	//   - A NEGATIVE value is an error: [NewServer] refuses it with a
+	//     [*NegativeTimeoutError].
+	//
+	// Read the name as an IDLE bound with care: the reader goroutine sits in the
+	// read while the message loop executes the client's own statement, so a
+	// positive value also bounds a single long statement — a client waiting for
+	// the records it asked for is silent, and this deadline cannot tell that from
+	// abandonment. Size it above the slowest statement the deployment expects,
+	// not merely above its think-time.
+	//
+	// The unauthenticated version-negotiation handshake is bounded separately and
+	// unconditionally; see [DefaultHandshakeTimeout]. The window between that
+	// handshake and a successful LOGON is bounded by THIS field alone, so a
+	// server exposed to an untrusted network wants it set.
 	ConnTimeout time.Duration
 
 	// MaxStatementTimeout is the server-side upper bound on per-statement
@@ -416,28 +583,106 @@ type Options struct {
 	// server-side cap (client controls its own timeout).
 	MaxStatementTimeout time.Duration
 
-	// DefaultTxTimeout is the bounded timeout applied to an explicit transaction
-	// (opened by BEGIN) when the client supplies no tx_timeout. It guarantees the
-	// engine's former single-writer serialisation, which an explicit transaction held
-	// from BEGIN until COMMIT/ROLLBACK, can never be held indefinitely by an
-	// abandoned transaction (#1302). Zero or negative values default to
-	// [DefaultTxTimeout] (30 s). A client-supplied tx_timeout takes precedence;
-	// MaxStatementTimeout, when set, additionally clamps the effective value. Set
-	// a larger value for long-lived batch transactions.
+	// DefaultTxTimeout is the total wall-clock bound applied to an explicit
+	// transaction (opened by BEGIN) when the client supplies no tx_timeout of its
+	// own, however busy the transaction is.
+	//
+	// Three-way contract, the same for all four timeout fields:
+	//
+	//   - 0 (the zero value) DISABLES the bound. This is the default — see
+	//     [DefaultTxTimeout] for why, and for what leaving it disabled costs.
+	//   - A positive value is used verbatim; nothing substitutes a default for it.
+	//   - A NEGATIVE value is an error: [NewServer] refuses it with a
+	//     [*NegativeTimeoutError].
+	//
+	// A client-supplied tx_timeout takes precedence; MaxStatementTimeout, when
+	// set, additionally clamps the effective value.
 	DefaultTxTimeout time.Duration
 
-	// DefaultStatementTimeout is the bounded timeout applied to an AUTOCOMMIT
+	// DefaultStatementTimeout is the wall-clock bound applied to an AUTOCOMMIT
 	// statement (a bare RUN outside an explicit transaction) when the client
 	// supplies no per-statement `timeout` of its own. It is the autocommit
-	// counterpart of DefaultTxTimeout: without it, a default-configured server
-	// (MaxStatementTimeout left at zero) has no wall-clock bound on an
-	// autocommit statement, so an authenticated client can pin a CPU core
-	// indefinitely with a super-linear-runtime / single-row-result query whose
-	// result-row and byte caps never fire (#1828). Zero or negative values
-	// default to [DefaultStatementTimeout] (30 s). A client-supplied `timeout`
-	// takes precedence; MaxStatementTimeout, when set, additionally clamps the
-	// effective value. Set a larger value for long-running analytical statements.
+	// counterpart of DefaultTxTimeout.
+	//
+	// Three-way contract, the same for all four timeout fields:
+	//
+	//   - 0 (the zero value) DISABLES the bound. This is the default — see
+	//     [DefaultStatementTimeout] for why, and for what leaving it disabled
+	//     costs (#1828 is the defect report that argued for a finite floor here;
+	//     read it before deciding a deployment can do without one).
+	//   - A positive value is used verbatim; nothing substitutes a default for it.
+	//   - A NEGATIVE value is an error: [NewServer] refuses it with a
+	//     [*NegativeTimeoutError].
+	//
+	// A client-supplied `timeout` takes precedence; MaxStatementTimeout, when set,
+	// additionally clamps the effective value.
 	DefaultStatementTimeout time.Duration
+}
+
+// ErrNegativeTimeout is the sentinel every negative-duration refusal from
+// [NewServer] unwraps to, so a caller can classify one with
+// errors.Is(err, [ErrNegativeTimeout]) without naming each field. The concrete
+// error is a [*NegativeTimeoutError], which carries the field and the value;
+// reach it with errors.As.
+var ErrNegativeTimeout = errors.New("bolt: negative timeout")
+
+// NegativeTimeoutError reports one Options timeout field that was given a
+// negative duration. The four timeout fields — ConnTimeout, DefaultTxTimeout,
+// DefaultStatementTimeout and MaxTxIdleTime — read 0 as "disabled" and a
+// positive value as "bounded at that value", which leaves a negative duration
+// with no meaning at all. [NewServer] refuses it rather than coercing it:
+// coercion would hide the caller's mistake and install a bound they never asked
+// for, and the same field's zero value already expresses "no bound" precisely.
+//
+// This is a construction-time refusal in the style of [ErrNoAuthHandler], not a
+// panic: an invalid configuration value is a recoverable condition validated
+// once at the public API boundary.
+type NegativeTimeoutError struct {
+	// Field is the Options field name, e.g. "ConnTimeout".
+	Field string
+	// Value is the negative duration the caller supplied.
+	Value time.Duration
+}
+
+// Error implements error.
+func (e *NegativeTimeoutError) Error() string {
+	return fmt.Sprintf("bolt: Options.%s is %v: a negative timeout has no meaning; use 0 to disable the bound or a positive duration to set it", e.Field, e.Value)
+}
+
+// Unwrap makes errors.Is(err, [ErrNegativeTimeout]) report true.
+func (e *NegativeTimeoutError) Unwrap() error { return ErrNegativeTimeout }
+
+// validateTimeouts refuses a negative value in any of the four timeout fields.
+//
+// It reports EVERY offending field, joined with [errors.Join], rather than the
+// first: the checks are independent and cost nothing, so a caller that got two
+// of them wrong should not have to fix them one round trip at a time.
+// errors.Is still classifies the join as [ErrNegativeTimeout], and errors.As
+// still reaches the first [*NegativeTimeoutError] in it.
+//
+// It deliberately does NOT validate the count bounds (MaxConnections,
+// MaxInFlightPerConnection, MaxOpenTxPerPrincipal, MaxMessageBytes,
+// MaxInboundDecodeBytes, MaxStatementTimeout): each of those already assigns a
+// meaning to a non-positive value — a default, or a documented opt-out sentinel
+// — and changing that is a separate decision.
+//
+//nolint:gocritic // hugeParam: mirrors NewServer's by-value Options signature; called once per server.
+func validateTimeouts(opts Options) error {
+	var errs []error
+	for _, f := range [...]struct {
+		name string
+		val  time.Duration
+	}{
+		{"ConnTimeout", opts.ConnTimeout},
+		{"DefaultTxTimeout", opts.DefaultTxTimeout},
+		{"DefaultStatementTimeout", opts.DefaultStatementTimeout},
+		{"MaxTxIdleTime", opts.MaxTxIdleTime},
+	} {
+		if f.val < 0 {
+			errs = append(errs, &NegativeTimeoutError{Field: f.name, Value: f.val})
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // ErrNoAuthHandler is returned by [NewServer] when Options.Auth is nil. The
@@ -589,29 +834,31 @@ type Server struct {
 //
 //nolint:gocritic // hugeParam: Options is passed by value intentionally; NewServer is the public constructor and the by-value signature is its stable contract.
 func NewServer(eng *cypher.Engine, opts Options) (*Server, error) {
+	// Validate before anything is filled in. The four timeout fields carry a
+	// three-way contract (0 disables, positive bounds, negative is invalid), so a
+	// negative one is refused here rather than coerced into a default further
+	// down — see [validateTimeouts] and [NegativeTimeoutError].
+	if err := validateTimeouts(opts); err != nil {
+		return nil, err
+	}
 	if opts.MaxConnections <= 0 {
 		opts.MaxConnections = defaultMaxConnections
 	}
 	if opts.MaxInFlightPerConnection <= 0 {
 		opts.MaxInFlightPerConnection = DefaultMaxInFlightPerConnection
 	}
-	if opts.ConnTimeout <= 0 {
-		opts.ConnTimeout = DefaultConnTimeout
-	}
-	if opts.DefaultTxTimeout <= 0 {
-		opts.DefaultTxTimeout = DefaultTxTimeout
-	}
+	// The four timeout fields are deliberately NOT defaulted here. Their
+	// defaults are all zero (rmp #2807) and zero already means "disabled" at
+	// every point of use — tx.go's newTx and session.go's handleRun both gate on
+	// `> 0` — so a coercion clause would be a no-op that reads as if it did
+	// something, and it is exactly the clause that used to swallow a negative.
+	// [DefaultConnTimeout], [DefaultTxTimeout], [DefaultStatementTimeout] and
+	// [DefaultMaxTxIdleTime] document the values and what disabling them costs.
 	if opts.DatabaseName == "" {
 		opts.DatabaseName = DefaultDatabaseName
 	}
-	if opts.MaxTxIdleTime <= 0 {
-		opts.MaxTxIdleTime = DefaultMaxTxIdleTime
-	}
 	if opts.MaxOpenTxPerPrincipal == 0 {
 		opts.MaxOpenTxPerPrincipal = DefaultMaxOpenTxPerPrincipal
-	}
-	if opts.DefaultStatementTimeout <= 0 {
-		opts.DefaultStatementTimeout = DefaultStatementTimeout
 	}
 	log := opts.Logger
 	if log == nil {
@@ -783,6 +1030,12 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) (err error) {
 		// the goroutine's deferred cleanup balances the live-connection derivation
 		// (accepted − closed) back to zero on every exit path.
 		incCounter(metricConnAccepted)
+
+		// Liveness. Since rmp #2807 the per-message read deadline is disabled by
+		// default, so TCP keep-alive is what reclaims a connection whose peer has
+		// gone. It is configured on the RAW connection, before any TLS wrapper,
+		// because the socket options live on the underlying *net.TCPConn.
+		s.configureKeepAlive(conn)
 
 		if s.opts.TLSConfig != nil {
 			conn = tls.Server(conn, s.opts.TLSConfig)
@@ -1107,12 +1360,18 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 			// Idle ConnTimeout bound on the read. The transaction-timeout reaper
 			// is handled by the message loop's timer below, so the reader only
 			// enforces the idle bound here.
-			if s.opts.ConnTimeout > 0 {
-				if err := conn.SetReadDeadline(time.Now().Add(s.opts.ConnTimeout)); err != nil {
-					cancelConn()
-					sendRead(connCtx, msgCh, readResultT{err: err})
-					return
-				}
+			//
+			// readDeadlineAt returns the ZERO time when the bound is disabled,
+			// which CLEARS the deadline. Passing time.Now().Add(0) instead would
+			// arm an IMMEDIATE deadline — a deadline in the past by the time the
+			// read starts — and every read on every connection would fail at
+			// once. That distinction is the whole hazard of defaulting this bound
+			// to zero, so it is expressed once, in one function, and asserted by
+			// TestReadDeadlineAt_DisabledClearsRatherThanArms.
+			if err := conn.SetReadDeadline(readDeadlineAt(s.opts.ConnTimeout)); err != nil {
+				cancelConn()
+				sendRead(connCtx, msgCh, readResultT{err: err})
+				return
 			}
 			raw, err := cr.ReadMessage()
 			if err != nil {
@@ -1400,14 +1659,32 @@ func sendRead(ctx context.Context, ch chan<- readResultT, res readResultT) bool 
 	}
 }
 
+// readDeadlineAt converts the configured idle bound into the absolute deadline
+// to install on the connection before a read or a write.
+//
+// A non-positive bound yields the ZERO time, which [net.Conn.SetReadDeadline]
+// documents as "no deadline". The alternative — time.Now().Add(d) with d == 0 —
+// is an IMMEDIATE deadline that has already expired by the time the read
+// begins, so every read would fail with os.ErrDeadlineExceeded and no
+// connection could complete a single message. Since rmp #2807 made zero the
+// DEFAULT for Options.ConnTimeout, that distinction is on the path every
+// default-configured server takes, which is why it is a named function with its
+// own test rather than an inline branch.
+func readDeadlineAt(d time.Duration) time.Time {
+	if d <= 0 {
+		return time.Time{} // clear: no deadline at all
+	}
+	return time.Now().Add(d)
+}
+
 // writeResponse sets the per-message write deadline (idle ConnTimeout) and
 // writes one response, logging and returning false on a write error so the
 // caller tears the connection down. It centralises the write-deadline handling
 // the per-read deadline (now owned by the reader goroutine) no longer covers.
 func (s *Server) writeResponse(cw *proto.ChunkedWriter, conn net.Conn, msg any, remote string) bool {
-	if s.opts.ConnTimeout > 0 {
-		_ = conn.SetWriteDeadline(time.Now().Add(s.opts.ConnTimeout)) // a write error below tears the conn down anyway
-	}
+	// Zero ConnTimeout CLEARS the write deadline rather than arming an immediate
+	// one; see readDeadlineAt.
+	_ = conn.SetWriteDeadline(readDeadlineAt(s.opts.ConnTimeout)) // a write error below tears the conn down anyway
 	if err := sendResponse(cw, msg); err != nil {
 		s.log.Warn("bolt: write error",
 			slog.String("remote", remote),

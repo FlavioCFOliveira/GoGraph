@@ -91,24 +91,101 @@ func ApplyMapperToGraphWithCodec[N comparable, W any](g *lpg.Graph[N, W], rb Map
 	mapper := g.AdjList().Mapper()
 	entries := make([]graph.MapperEntry[N], len(rb.RawPairs))
 	for i := range rb.RawPairs {
-		key, rest, derr := codec.Decode(rb.RawPairs[i].Key)
+		key, derr := decodeMapperKey(rb.RawPairs[i], codec)
 		if derr != nil {
 			metrics.IncCounter("store.snapshot.ApplyMapperToGraphWithCodec.errors", 1)
-			return fmt.Errorf("%w: decode key for node %d: %w",
-				ErrMapperApply, uint64(rb.RawPairs[i].ID), derr)
-		}
-		if len(rest) != 0 {
-			// The writer encoded exactly one key per record; trailing bytes
-			// mean the on-disk record and the codec disagree on framing.
-			metrics.IncCounter("store.snapshot.ApplyMapperToGraphWithCodec.errors", 1)
-			return fmt.Errorf("%w: trailing bytes after key for node %d (%d left)",
-				ErrMapperApply, uint64(rb.RawPairs[i].ID), len(rest))
+			return fmt.Errorf("%w: %w", ErrMapperApply, derr)
 		}
 		entries[i] = graph.MapperEntry[N]{ID: rb.RawPairs[i].ID, Key: key}
 	}
 	if err := mapper.LoadFrom(entries); err != nil {
 		metrics.IncCounter("store.snapshot.ApplyMapperToGraphWithCodec.errors", 1)
 		return fmt.Errorf("%w: %w", ErrMapperApply, err)
+	}
+	return nil
+}
+
+// decodeMapperKey decodes ONE raw mapper record's codec-encoded key bytes and
+// enforces the writer's one-key-per-record framing.
+//
+// It is the SINGLE implementation of the decode step — the step that can refuse
+// bytes [ReadMapperBytes] has already accepted, because the reader validates
+// magic, format version, record framing and the per-key length cap and then
+// hands the key bytes back verbatim, asking no codec anything.
+//
+// Two callers share it and MUST NOT be allowed to drift:
+//
+//   - [ApplyMapperToGraphWithCodec], the call recovery makes when it restores a
+//     version-2 mapper;
+//   - [VerifyMapperDecodable], the call the checkpointer makes before it
+//     discards the WAL prefix behind a published snapshot (rmp #2780).
+//
+// If the checkpointer's decode ever accepted a key recovery's decode then
+// refused, the checkpointer would release the only other copy of the data
+// behind an image recovery cannot apply — the Durability defect rmp #2749 and
+// rmp #2780 close between them. Sharing this function is what makes the two
+// answers the same answer by construction rather than by review.
+func decodeMapperKey[N comparable](p MapperRawPair, codec keyDecoder[N]) (N, error) {
+	key, rest, derr := codec.Decode(p.Key)
+	if derr != nil {
+		var zero N
+		return zero, fmt.Errorf("decode key for node %d: %w", uint64(p.ID), derr)
+	}
+	if len(rest) != 0 {
+		// The writer encoded exactly one key per record; trailing bytes
+		// mean the on-disk record and the codec disagree on framing.
+		var zero N
+		return zero, fmt.Errorf("trailing bytes after key for node %d (%d left)",
+			uint64(p.ID), len(rest))
+	}
+	return key, nil
+}
+
+// VerifyMapperDecodable decodes every codec-encoded key in rb through codec and
+// discards the decoded values, returning nil only when the readback would
+// survive the decode step of [ApplyMapperToGraphWithCodec] — the call recovery
+// makes on this same readback. It performs NO filesystem I/O: rb is already in
+// memory, so the whole cost is CPU over bytes the caller has already read.
+//
+// It exists for the checkpointer (rmp #2780). Parsing a published snapshot
+// establishes that the reader accepts it; it does NOT establish that the
+// applier accepts it, and the checkpointer discards the WAL prefix — the only
+// other copy of the data — on the strength of the latter. A key whose encoding
+// the codec refuses, or whose bytes the codec does not consume in full, passes
+// [LoadSnapshotFull] and fails recovery.
+//
+// An empty readback (a version-1 string mapper, whose keys carry no codec
+// framing and land in [MapperReadback.Pairs], or no mapper.bin at all) is a
+// no-op and returns nil: there is nothing to decode. A nil codec with a
+// non-empty [MapperReadback.RawPairs] is refused, exactly as
+// [ApplyMapperToGraphWithCodec] refuses it — the keys cannot be verified and
+// must not be assumed good.
+//
+// # What this does NOT establish
+//
+// The structural half of the apply — [graph.Mapper.LoadFrom]'s intra-shard gap,
+// hash/shard and duplicate-key invariants — is NOT checked here, because
+// running it requires an interning table to load into, and the caller's purpose
+// is to verify an image rather than to build a graph from it. Nor does it
+// establish media durability: like the parse it accompanies, it reads bytes the
+// process handed to the OS moments earlier.
+//
+// Errors wrap [ErrMapperApply] and the underlying codec error, so callers can
+// branch on either via [errors.Is].
+func VerifyMapperDecodable[N comparable](rb MapperReadback, codec keyDecoder[N]) error {
+	defer metrics.Time("store.snapshot.VerifyMapperDecodable").Stop()
+	if len(rb.RawPairs) == 0 {
+		return nil
+	}
+	if codec == nil {
+		metrics.IncCounter("store.snapshot.VerifyMapperDecodable.errors", 1)
+		return fmt.Errorf("%w: nil codec", ErrMapperApply)
+	}
+	for i := range rb.RawPairs {
+		if _, derr := decodeMapperKey(rb.RawPairs[i], codec); derr != nil {
+			metrics.IncCounter("store.snapshot.VerifyMapperDecodable.errors", 1)
+			return fmt.Errorf("%w: %w", ErrMapperApply, derr)
+		}
 	}
 	return nil
 }

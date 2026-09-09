@@ -62,10 +62,32 @@ label.Index.Intersect(L₁, L₂, …, L_k)      ordered by ASCENDING cardinalit
 
 and **drop the residual label `Filter`**, which the bitmap subsumes (§5).
 
-`Intersect` is already implemented (`graph/index/label/index.go:186`): it holds
-`i.mu.RLock()` for the whole k-way AND, materialises a caller-owned bitmap from
-the first label (cloning when the source aliases the live bitmap), ANDs the rest
-in, and exits early the moment the result is empty.
+`Intersect` is already implemented (`graph/index/label/index.go:497`): it
+materialises a caller-owned bitmap from the first label (cloning when the source
+aliases the live bitmap), ANDs the rest in, and exits early the moment the result
+is empty.
+
+> **Correction (2026-09-08): the locking is per-entry, not one index-wide
+> `RLock` across the whole AND.** This section, and §6's first bullet, asserted
+> that `Intersect` "holds `i.mu.RLock()` for the whole k-way AND". It does not.
+> `graph/index/label/index.go:497-532` takes the index-wide `i.mu.RLock` only
+> inside each `i.lookup(label)` call — one per label, and released before the
+> bitmap is touched: `Index.lookup` (`graph/index/label/index.go:231`) is three
+> lines long, and its own godoc states that "the caller therefore holds no lock
+> on return". `Intersect` then takes the **per-entry** `e.mu.RLock` /
+> `o.mu.RLock` around each label's own bitmap and releases it before moving to
+> the next label. `Index` carries `mu` to guard the `spine` map only; each
+> `entry` carries its own `mu` for its set.
+>
+> The consequence is confined but real: **the "the AND is atomic" argument in
+> §6 is no longer established by the mechanism it cites.** Nothing here shows
+> the conclusion to be false, and the isolation model has itself changed since
+> this design was written — rmp #2344 removed `lpg.Graph.View`, so a read no
+> longer holds the visibility barrier this section assumed but resolves through
+> a pinned MVCC snapshot instead. Whether that path makes the k-way AND atomic
+> is a different argument, and this correction does not make it. §6's second and
+> third bullets are untouched. Treat §6's atomicity claim as **open** until it
+> is re-derived against the MVCC read path.
 
 ## 3. The gate
 
@@ -165,6 +187,12 @@ than widening it.
 - **The AND is atomic.** `Intersect` holds `i.mu.RLock()` across every label, so
   the k-way result is a consistent image of the label index — not k independently
   sampled bitmaps.
+
+  > **Correction (2026-09-08): the cited mechanism is not what the code does.**
+  > See the correction under §2: `Intersect` takes the index-wide lock per spine
+  > lookup and a per-entry lock per label, not one `i.mu.RLock` spanning the
+  > whole AND. This bullet's conclusion is therefore unsupported as written and
+  > must be re-derived against the MVCC read path before it is relied on.
 - **The image is a committed state.** Writes update the live Roaring label bitmaps
   *inside* the `ApplyAtomically` / `visMu` window, together with the graph and
   (since F3.4) the secondary indexes, so graph and labels flip together
@@ -282,4 +310,4 @@ report the end-to-end ratio with that floor stated.
 | The clone makes the AND lose | Ordering smallest-first (§4, measured 6.0×); the gate vetoes to the shipped plan, never to something worse; #2136 measures the break-even fixture. |
 | Precedence regression against an existing peephole | §7 fixes the order; an index-seek precedence test is already required by #2133's acceptance criteria. |
 | Property-predicate extension drops the mandatory Filter | §8 states it is mandatory and why the label case differs; #2134's differential must include a case where the range bitmap over-returns. |
-| Concurrency divergence | §6: the AND is atomic under one RLock and matches the per-statement snapshot contract more closely than the per-row re-check it replaces. |
+| Concurrency divergence | §6: the AND is atomic under one RLock and matches the per-statement snapshot contract more closely than the per-row re-check it replaces. **(See the 2026-09-08 correction in §2 and §6: the "one RLock" premise does not hold, and this row's conclusion is open.)** |

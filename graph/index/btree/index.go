@@ -596,7 +596,22 @@ func (i *Index[V]) Apply(c index.Change) {
 	if i.binding == nil {
 		return
 	}
-	i.applyBound(c)
+	i.applyBound(c, nil)
+}
+
+// ApplyResolved applies a change RECORDED DURING THIS INDEX'S BUILD, taking the
+// node state from the recording instead of reading it back off the graph —
+// [index.ResolvedApplier]. It mirrors hash.Index.ApplyResolved, shares
+// [Index.applyBound] with [Index.Apply] so the two rule sets cannot drift, and
+// is a no-op for an unbound index for the same reason Apply is. See
+// [index.ResolvedApplier] for the defect it closes (rmp #2793).
+func (i *Index[V]) ApplyResolved(c index.Change, current any, eligible bool) {
+	b := i.binding
+	if b == nil {
+		return
+	}
+	v, hasValue := b.Project(current)
+	i.applyBound(c, &recordedState[V]{value: v, hasValue: hasValue, eligible: eligible})
 }
 
 // RangeCount returns the exact number of NodeIDs whose value falls within the

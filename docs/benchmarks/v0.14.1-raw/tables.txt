@@ -1,0 +1,52 @@
+
+=== Lreadtx  [ns/op]  A=v0.14.0  B=v0.14.1 ===
+benchmark                                                v0.14.0     v0.14.1    delta      p    B vs B2 floor
+BenchmarkReadTx_LockFree                                3.053 µs     3.04 µs   -0.41%  0.809   +0.18% p=0.936
+BenchmarkReadTx_LockFree-1024                           4.619 µs    4.798 µs   +3.89%  0.936   -26.13% p=0.020
+BenchmarkReadTx_LockFree-256                            2.719 µs    2.823 µs   +3.84%  0.810   -10.68% p=0.128
+BenchmarkReadTx_LockFree-64                             2.149 µs    2.236 µs   +4.07%  0.575   -4.78% p=0.470
+BenchmarkReadTx_LockFree-8                              1.653 µs    1.653 µs   +0.00%  0.936   +0.33% p=0.936
+BenchmarkReadTx_WriterLock                                101 µs    101.6 µs   +0.65%  0.298   +0.44% p=0.810
+BenchmarkReadTx_WriterLock-1024                         28.35 µs    29.49 µs   +4.00%  0.128   -1.34% p=0.936
+BenchmarkReadTx_WriterLock-256                          24.84 µs     25.1 µs   +1.06%  0.230   +0.75% p=0.471
+BenchmarkReadTx_WriterLock-64                           23.75 µs    23.99 µs   +1.01%  0.066   +0.17% p=0.810
+BenchmarkReadTx_WriterLock-8                            24.78 µs    24.75 µs   -0.13%  0.936   -0.83% p=0.066
+
+=== Ltxn  [ns/op]  A=v0.14.0  B=v0.14.1 ===
+benchmark                                                v0.14.0     v0.14.1    delta      p    B vs B2 floor
+BenchmarkCommitConcurrent/goroutines=1-10               3.732 ms    3.713 ms   -0.50%  0.298   +0.25% p=0.936
+BenchmarkCommitConcurrent/goroutines=256-10             31.31 µs    31.22 µs   -0.29%  0.936   +0.08% p=0.810
+BenchmarkCommitConcurrent/goroutines=64-10              121.5 µs    120.3 µs   -1.04%  0.378   -0.43% p=0.471
+BenchmarkCommitConcurrent/goroutines=8-10               866.4 µs    897.2 µs   +3.56%  0.013   -0.12% p=0.936
+
+=== search  [ns/op]  A=v0.14.0  B=v0.14.1 ===
+benchmark                                                v0.14.0     v0.14.1    delta      p    B vs B2 floor
+BenchmarkBFSDirectionOpt_PowerLaw-10                    27.69 ms     28.5 ms   +2.92%  0.066   +0.10% p=0.936
+BenchmarkDijkstra_Large-10                              8.129 ms    8.123 ms   -0.07%  0.471   -0.51% p=0.230
+BenchmarkDijkstra_PostWarmup-10                         8.032 ms    8.081 ms   +0.62%  0.471   -0.45% p=0.689
+BenchmarkYen_K100-10                                    14.53 ms    14.49 ms   -0.26%  0.471   +0.10% p=0.936
+
+=== centrality  [ns/op]  A=v0.14.0  B=v0.14.1 ===
+benchmark                                                v0.14.0     v0.14.1    delta      p    B vs B2 floor
+BenchmarkBrandes_RandomGraph-10                         7.829 ms    7.776 ms   -0.68%  0.173   -0.70% p=0.093
+
+=== txn  [ns/op]  A=v0.14.0  B=v0.14.1 ===
+benchmark                                                v0.14.0     v0.14.1    delta      p    B vs B2 floor
+BenchmarkCommit/ops=1-10                                3.718 ms    3.724 ms   +0.17%  0.810   -0.27% p=0.810
+BenchmarkCommit/ops=16-10                               3.796 ms    3.785 ms   -0.30%  0.298   -0.29% p=0.936
+
+=== rec  [ns/op]  A=v0.14.0  B=v0.14.1 ===
+benchmark                                                v0.14.0     v0.14.1    delta      p    B vs B2 floor
+BenchmarkIndexesRecoveryVsRebuild/rebuild-10            32.67 ms    32.56 ms   -0.36%  0.575   +0.72% p=0.936
+BenchmarkIndexesRecoveryVsRebuild/snapshot-10           20.98 ms    20.98 ms   -0.03%  0.936   +0.10% p=0.810
+BenchmarkSnapshotApply_Snapshot-10                      115.4 ms    116.2 ms   +0.67%  0.173   -1.08% p=0.128
+BenchmarkSnapshotApply_WALReplay-10                     248.4 ms    247.7 ms   -0.31%  0.378   +1.28% p=0.045
+
+=== ckpt — ONE-ARMED: these five benchmarks do not exist at v0.14.0 ===
+Absolute v0.14.1 figures, median of 6, with the same-binary floor beside them.
+benchmark                                             v0.14.1 median     B vs B2 floor
+BenchmarkCheckpoint_CodecReadback_ParseAndDecode-10          14.7 ms    -0.36% p=0.936
+BenchmarkCheckpoint_CodecReadback_ParseOnly-10              14.24 ms    -0.40% p=0.471
+BenchmarkCheckpoint_FullRunWithReadback-10                  150.3 ms    -0.57% p=0.689
+BenchmarkCheckpoint_MapperDecodeOnly-10                     235.6 µs    -2.59% p=0.093
+BenchmarkCheckpoint_SnapshotReadbackOnly-10                 14.73 ms    -0.53% p=0.230

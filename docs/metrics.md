@@ -1,9 +1,31 @@
 # Metrics Inventory
 
-This document enumerates every observability metric exported by
-GoGraph's public blocking APIs. It is the authoritative companion
-to the `internal/metrics` package and the CLAUDE.md mandate on
-"latency histograms on every public blocking API".
+This document indexes the observability metrics exported by GoGraph's
+public blocking APIs. It is the companion to the `internal/metrics`
+package and the CLAUDE.md mandate on "latency histograms on every
+public blocking API".
+
+> **Correction (2026-09-08): this inventory is partial, and the shortfall
+> is one-directional.** It used to claim to enumerate *every* metric, and
+> it does not. Counted from the non-test sources of the module proper
+> (excluding `bench/`, `examples/` and `cmd/`), the module emits **555
+> distinct metric names**, which collapse to **390 families** once the
+> paired `.errors` siblings described below are folded in. The tables in
+> this document name **211** of those families — 206 before this
+> correction, plus the five added by it — so **179 families remain
+> undocumented here**. At least 78 of the absent families are latency
+> observations taken with `metrics.Time`; the remainder are counters and
+> gauges.
+>
+> Nothing documented here is stale: every table row corresponds to a name
+> the current tree still emits. The five rows whose names carry `<…>` or
+> `{…}` placeholders are the documented forms of names composed at
+> runtime, and they match by expansion rather than literally.
+>
+> Enumerating the remaining 179 families is out of scope for this
+> correction. Treat the tables below as an index of the metrics that have
+> been reviewed and described, not as the complete emission surface; read
+> the emission surface from the source.
 
 The metrics are emitted through the [`metrics.Backend`][pubmetrics]
 interface, exposed by the public `github.com/FlavioCFOliveira/GoGraph/metrics`
@@ -116,12 +138,13 @@ work and is explicitly forbidden by the wire-up guidelines.
 
 ## Metric inventory
 
-The complete list of wired latency observations is grouped below by
-package. Every entry has, in addition, a paired `.errors` counter
-that increments once per failing path (a returned non-nil `error`
-or a cancellation-driven return). The `.errors` counter is omitted
-for functions whose only outcome is non-error (e.g. `search.BFS`
-with no return value).
+The reviewed latency observations are grouped below by package; see the
+correction at the top of this document for what the grouping does **not**
+cover. Every entry has, in addition, a paired `.errors` counter that
+increments once per failing path (a returned non-nil `error` or a
+cancellation-driven return). The `.errors` counter is omitted for
+functions whose only outcome is non-error (e.g. `search.BFS` with no
+return value).
 
 ### `search`
 
@@ -291,6 +314,7 @@ a call records a single sample regardless of entry point (rmp #1524).
 | `store.snapshot.LoadIndexes`            | Read every `indexes/<name>.bin` referenced by the manifest.    |
 | `store.snapshot.indexes.written`         | Counter: number of index payloads a snapshot publish wrote.    |
 | `store.snapshot.indexes.corrupted`      | Counter: number of indexes whose file was missing or CRC-bad.  |
+| `store.snapshot.VerifyMapperDecodable`  | Verify that every raw mapper key in a snapshot read-back decodes through the caller's codec (`store/snapshot/apply.go:176`). The `.errors` sibling fires on a nil codec and on the first undecodable key. |
 
 ### `store/txn`
 
@@ -300,6 +324,7 @@ a call records a single sample regardless of entry point (rmp #1524).
 | `store.txn.BeginCtx`         | Open a new transaction with context.                                  |
 | `store.txn.Commit`           | fsync-append every buffered op then apply to the graph.               |
 | `store.txn.Rollback`         | Discard buffered ops without touching WAL or graph.                   |
+| `store.txn.appendOnly.handleRecordTooLarge` | Counter: commits refused **before** a sequence was minted because an edge handle would carry more labels or properties than `store/snapshot` can capture, which would commit a record that then blocks every checkpoint for ever (`store/txn/txn.go:2025`). |
 
 ### `store/checkpoint`
 
@@ -308,6 +333,7 @@ a call records a single sample regardless of entry point (rmp #1524).
 | `store.checkpoint.Trigger`                   | Request a checkpoint (synchronous wrapper).                              |
 | `store.checkpoint.TriggerCtx`                | Request a checkpoint with context.                                       |
 | `store.checkpoint.wal_truncated_bytes`       | Counter: bytes reclaimed from the WAL prefix on each successful checkpoint. Emitted post-snapshot, post-truncate; the lifetime aggregate is also surfaced as `Stats.WALTruncBytes`. |
+| `store.checkpoint.snapshot_unreadable`       | Counter: published snapshots that `VerifySnapshotReadable` rejected. The checkpoint then fails stop and **retains** the WAL rather than truncating it (`store/checkpoint/checkpoint.go:1111`). |
 
 ### `store/recovery`
 
@@ -316,6 +342,8 @@ a call records a single sample regardless of entry point (rmp #1524).
 | `store.recovery.Decode`               | Decode one transactional WAL payload.                            |
 | `store.recovery.Open`                 | Snapshot+WAL recovery into a fresh graph (any key type).         |
 | `store.recovery.OpenCtx`              | Context-aware recovery; honours cancellation and deadlines.      |
+| `store.recovery.NewStoreCapped.producerCapClamped` | Counter: reopens where the requested producer transaction op cap exceeded this recovery's replay cap and was ratcheted down to it, so a committed transaction cannot become unreplayable (`store/recovery/recovery.go:401`). |
+| `store.recovery.openCodec.committedTxnCorruptOp`   | Counter: committed transactions whose op body could not be decoded. That transaction and every later one are discarded, the result is classified **not** clean, and `ErrCommittedTxnCorruptOp` is reported through `Result.TailErr` (`store/recovery/recovery.go:2033`). |
 
 The counters below are emitted by the **engine** (`cypher`) as it re-registers
 each recovered secondary index, not by `store/recovery` itself, which loads none.

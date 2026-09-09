@@ -11,6 +11,18 @@
 //
 // The fixtures themselves live under each package's testdata/v<N>/
 // tree and are read by *_compat_test.go in that same package.
+//
+// # store/csrfile is an exception: do NOT refresh it
+//
+// store/csrfile/testdata/v1/sample.csr must stay exactly as committed, and
+// -pkg all overwrites it. Its value is that an OLDER build wrote it, so
+// refreshing it deletes the only guarantee it carries; and its payload is not
+// reproducible even in principle, because the build that wrote it drew a fresh
+// random shard-hash seed per process. csrfile.TestCompat_V1FixtureMaps pins the
+// file's SHA-256 and fails if it changes — see that test's docstring for the
+// full account (rmp #2752). When a csrfile format change makes the v1 sample
+// genuinely unreadable, add a v2 fixture beside it rather than regenerating
+// this one.
 package main
 
 import (
@@ -149,6 +161,10 @@ func mustWriteSnapshotFixture() {
 	fmt.Printf("fmtfixture: wrote %s/{manifest.json, csr.bin}\n", dst)
 }
 
+// mustWriteCSRFileFixture writes the csrfile v1 sample. It is retained to
+// document how the committed fixture was originally produced, and to seed a
+// FRESH fixture directory; it is NOT a refresh path for the committed one. See
+// the exception in this command's package documentation before running it.
 func mustWriteCSRFileFixture() {
 	dst := filepath.Join("store", "csrfile", "testdata", "v1", "sample.csr")
 	if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {

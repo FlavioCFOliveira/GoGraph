@@ -666,8 +666,11 @@ func (*NodeByIndexRangeScan) storageRecordPerRow() {}
 // in use:
 //
 //   - The counter ALREADY EXISTS for the operator's own reasons — a traversal
-//     budget, a safety cap. [VarLengthExpand] reports the figure its budget
-//     maintains, so it costs a non-PROFILE run nothing at all.
+//     budget, a safety cap, the answer itself. [VarLengthExpand] reports the figure
+//     its budget maintains, so it costs a non-PROFILE run nothing at all.
+//     [AllNodesCountScan] is the extreme case: on its fallback the number of node
+//     ids the walk consumed IS the count it was asked for, so the charge is one
+//     integer add per Init and nothing per record (rmp #2777).
 //   - The count is RECOVERED from state that already advances with the work.
 //     [Expand] reads it off its adjacency cursors, which already move one position
 //     per slot consumed, so [Expand.closeSlotWindow] recovers it in O(1) per INPUT
@@ -719,6 +722,13 @@ var (
 	_ storageAccessCounter = (*ParallelCountScan)(nil)
 	_ storageAccessCounter = (*ShortestPath)(nil)
 	_ storageAccessCounter = (*AllShortestPaths)(nil)
+	// AllNodesCountScan is the only member whose figure is a genuine ZERO on its
+	// common path. It is here rather than in the [noStorageAccess] block below
+	// precisely because that marker is a type-level claim and this operator's
+	// answer depends on which path Init took — the O(1) counter reads nothing, the
+	// fallback walks every live node id (rmp #2777). See
+	// [AllNodesCountScan.storageAccesses].
+	_ storageAccessCounter = (*AllNodesCountScan)(nil)
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -748,6 +758,17 @@ var (
 // TestDbHitsClassification_EveryOperatorIsClassified is the drift gate on it —
 // it derives the operator set from the package source and fails when an operator
 // is added, renamed, or reclassified without the census below being updated.
+//
+// # It cannot express "zero on this path, counted on that one"
+//
+// The claim is attached to the TYPE, so an operator whose answer depends on which
+// branch it took may not make it, however common the reading-nothing branch is.
+// [AllNodesCountScan] is that case: its O(1) counter read is a real zero and its
+// fallback walks every live node id, and rmp #2777 measured the fallback being
+// taken by an ordinary `MATCH (n) RETURN count(*)` run against any uncommitted
+// write. An operator in that position reports the zero through
+// [storageAccessCounter] instead, which is a figure per EXECUTION and can
+// therefore be honest on both paths.
 //
 // # The bar for claiming it
 //

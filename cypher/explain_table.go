@@ -299,13 +299,20 @@ func (e *Engine) ExplainTable(query string, params map[string]expr.Value) (s str
 //     reports the SAME figure whether it planned a serial scan or a parallel one.
 //     Their rows say nothing about it — the aggregate leaf emits one row per group
 //     and the count leaf exactly one row, for a walk of the whole node source.
+//   - For [exec.AllNodesCountScan] the cell is MEASURED and PATH-AWARE, since
+//     rmp #2777: a real 0 when the O(1) live-node counter answers, and one per
+//     node id when it declines and the leaf walks the graph to count. The same
+//     query therefore reports 0 on a drained substrate and a full walk while
+//     another transaction holds an uncommitted create.
 //   - For an operator that opens no access path — Limit, Skip, Distinct, Eager,
 //     the aggregations, the Apply family — the cell is a KNOWN 0.
 //   - For every other operator the cell is "?": nothing counted its accesses.
-//     That covers [exec.ShortestPath], [exec.AllShortestPaths], the count-store
-//     leaves, and every operator holding a caller-supplied expression closure that
-//     can reach the graph (Filter, Project, Sort, Top, Unwind, the hash joins,
-//     RollUpApply, ProcedureCallOp).
+//     That covers [exec.ShortestPath], [exec.AllShortestPaths],
+//     [exec.LabelCountScan] — whose own fallback resolves a filtered bitmap below
+//     the resolver interface, where the operator cannot see it — and every
+//     operator holding a caller-supplied expression closure that can reach the
+//     graph (Filter, Project, Sort, Top, Unwind, the hash joins, RollUpApply,
+//     ProcedureCallOp).
 //
 // In every case the column counts ACCESS-PATH record reads and never property
 // reads, which is a documented divergence from Neo4j (see docs/cypher.md). Neo4j

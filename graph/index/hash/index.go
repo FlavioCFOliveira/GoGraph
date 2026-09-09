@@ -2056,10 +2056,66 @@ func (*Index[V]) Kind() string { return "hash" }
 // On recovery from a corrupted snapshot, the index is left empty;
 // callers re-populate via [Index.Insert] from the live LPG.
 func (i *Index[V]) Apply(c index.Change) {
+	if i.binding == nil {
+		return
+	}
+	i.applyBound(c, nil)
+}
+
+// ApplyResolved applies a change RECORDED DURING THIS INDEX'S BUILD, taking the
+// node state from the recording instead of reading it back off the graph —
+// [index.ResolvedApplier]. It satisfies that interface, and carries the same
+// idempotence and concurrency properties as [Index.Apply], whose rules it shares
+// verbatim through [Index.applyBound].
+//
+// current is the node's raw property value as of the recording; it is projected
+// through the binding's own Project, so exactly the values Apply would index are
+// indexed here. eligible is the recorded eligibility verdict.
+//
+// A no-op for an unbound index, for the same reason [Index.Apply] is.
+func (i *Index[V]) ApplyResolved(c index.Change, current any, eligible bool) {
 	b := i.binding
 	if b == nil {
 		return
 	}
+	v, hasValue := b.Project(current)
+	i.applyBound(c, &recordedState[V]{value: v, hasValue: hasValue, eligible: eligible})
+}
+
+// recordedState is the answer a [index.BuildResolver] captured at the instant a
+// change was fanned out, standing in for the binding's own live reads while that
+// change is replayed. A nil *recordedState means "read the graph", which is the
+// live fan-out.
+type recordedState[V comparable] struct {
+	value    V
+	hasValue bool
+	eligible bool
+}
+
+// eligible answers [Binding.Eligible] for id, from rec when the change is being
+// replayed from a build log and from the graph otherwise.
+func (i *Index[V]) eligible(rec *recordedState[V], id graph.NodeID) bool {
+	if rec != nil {
+		return rec.eligible
+	}
+	return i.binding.Eligible(id)
+}
+
+// currentValue answers [Binding.CurrentValue] for id, from rec when the change
+// is being replayed from a build log and from the graph otherwise.
+func (i *Index[V]) currentValue(rec *recordedState[V], id graph.NodeID) (V, bool) {
+	if rec != nil {
+		return rec.value, rec.hasValue
+	}
+	return i.binding.CurrentValue(id)
+}
+
+// applyBound is the single copy of the maintenance rules documented on
+// [Index.Apply], shared by the live fan-out (rec == nil) and by the build-log
+// replay (rec non-nil). The two must not drift: that they cannot is the reason
+// this is one function and not two.
+func (i *Index[V]) applyBound(c index.Change, rec *recordedState[V]) {
+	b := i.binding
 	switch c.Op {
 	case index.OpSetNodeProperty:
 		if c.Property != b.PropertyID {
@@ -2068,7 +2124,7 @@ func (i *Index[V]) Apply(c index.Change) {
 		if old, ok := b.Project(c.OldValue); ok {
 			i.Delete(old, c.Node)
 		}
-		if nv, ok := b.Project(c.NewValue); ok && b.Eligible(c.Node) {
+		if nv, ok := b.Project(c.NewValue); ok && i.eligible(rec, c.Node) {
 			i.Insert(nv, c.Node)
 		}
 	case index.OpDelNodeProperty:
@@ -2082,14 +2138,14 @@ func (i *Index[V]) Apply(c index.Change) {
 		if c.Label != b.LabelID {
 			return
 		}
-		if v, ok := b.CurrentValue(c.Node); ok && b.Eligible(c.Node) {
+		if v, ok := i.currentValue(rec, c.Node); ok && i.eligible(rec, c.Node) {
 			i.Insert(v, c.Node)
 		}
 	case index.OpRemoveNodeLabel:
 		if c.Label != b.LabelID {
 			return
 		}
-		if v, ok := b.CurrentValue(c.Node); ok {
+		if v, ok := i.currentValue(rec, c.Node); ok {
 			i.Delete(v, c.Node)
 		}
 	}

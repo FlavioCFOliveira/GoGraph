@@ -433,8 +433,17 @@ func overloadScenario() Scenario {
 		DefaultSeed: 0x07E410AD,
 		Connections: 12,
 		OpsPerConn:  8,
-		// A high overload weight so most connections push the engine's bounds.
-		Mix: &ConcurrentMix{WriterWeight: 0.3, ReaderWeight: 0.1, OverloadWeight: 0.6},
+		// A high overload weight so most connections push the engine's bounds,
+		// and the heavy-WRITE family enabled (rmp #2736) so the "giant tx" this
+		// scenario's description promises is actually issued. Before #2736 the
+		// concurrent overload role mapped that family to a read, so no scenario
+		// drove a heavy write over the wire; the write is tagged, adjudicated
+		// against its acknowledgement and removed, so the population — and the
+		// node-count oracle over it — is unchanged.
+		Mix: &ConcurrentMix{
+			WriterWeight: 0.3, ReaderWeight: 0.1, OverloadWeight: 0.6,
+			OverloadHeavyWrites: true,
+		},
 	}
 }
 

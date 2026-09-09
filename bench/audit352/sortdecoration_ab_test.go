@@ -86,7 +86,7 @@ var topABSizes = []int{1_000, 4_000, 16_000, 64_000, 256_000}
 //
 // It is structural: the two execution paths are distinguished by a FRAME in an
 // exact/near-exact allocation profile, not by a number. The legacy comparator
-// (Sort.rowLess / rowLessForKeys) is unreachable on the decorated path and vice
+// (Sort.rowLess / rowCompareForKeys) is unreachable on the decorated path and vice
 // versa, so:
 //
 //   - a legacy cell must show allocation beneath the legacy comparator;
@@ -98,12 +98,18 @@ var topABSizes = []int{1_000, 4_000, 16_000, 64_000, 256_000}
 // mallocs-volume signature (which cannot separate the arms at all at n=2, where
 // they do identical work, nor at n=8).
 //
-// Cost: one untimed query plus the snapshot GCs, at rate 1 up to n=16 000 and at
-// rate 1/512 above it. Sampling weakens nothing that matters here: the legacy arm
-// at n=256 000 allocates ~23.5M objects beneath rowLess, so at rate 1/512 a
-// decorated cell reading zero samples rules out the legacy path by an
-// overwhelming margin. Lag in the profile could only ADD a previous cell's frames
-// to this window, i.e. cause a false FAILURE, never a false pass.
+// Cost: one untimed query plus the snapshot GCs. [profileRateFor] picks the rate,
+// and since [largestExactFrameSize] is 256 000 — the largest size either sweep
+// runs — that is rate 1, EXACTLY, at every cell of both; the sampled branch is
+// reached only if a larger size is ever added. (This sentence used to claim rate
+// 1/512 above n=16 000, which the code has never done; corrected under rmp #2782,
+// where a stale instrument comment was the whole defect.) Were the coarse branch
+// ever taken it would weaken nothing that matters here: the legacy arm at
+// n=256 000 allocates ~23.5M objects beneath rowLess — measured 23.46M at
+// 66a64107 — so at rate 1/512 a decorated cell reading zero samples would still
+// rule out the legacy path by an overwhelming margin. Lag in the profile could
+// only ADD a previous cell's frames to this window, i.e. cause a false FAILURE,
+// never a false pass.
 func assertArmFramesForCell(tb testing.TB, eng *cypher.Engine, query string, wantRows int,
 	a sortArm, legacyFrame, decorFrame string, rate int) {
 	tb.Helper()
@@ -221,10 +227,7 @@ func runArmed(b *testing.B, eng *cypher.Engine, query string, wantRows, n int, a
 func BenchmarkSortDecoration(b *testing.B) {
 	for _, n := range sortABSizes {
 		eng := sortShapeEngine(b, n)
-		wantRows := 10
-		if n < 10 {
-			wantRows = n
-		}
+		wantRows := sortShapeRows(n)
 		assertSortOperator(b, eng, sortShapeQuery, "Sort", "Top")
 		for _, a := range armOrder() {
 			b.Run(fmt.Sprintf("shape=sort/n=%d/arm=%s", n, a.name), func(b *testing.B) {
@@ -277,10 +280,7 @@ func BenchmarkSortNoiseFloor(b *testing.B) {
 	}
 	for _, n := range sortABSizes {
 		eng := sortShapeEngine(b, n)
-		wantRows := 10
-		if n < 10 {
-			wantRows = n
-		}
+		wantRows := sortShapeRows(n)
 		for _, a := range order {
 			b.Run(fmt.Sprintf("shape=sort/n=%d/arm=%s", n, a.name), func(b *testing.B) {
 				runArmed(b, eng, sortShapeQuery, wantRows, n, a, frameSortLegacy, frameSortDecorated)
@@ -365,16 +365,90 @@ func sortShapeEngine(tb testing.TB, n int) *cypher.Engine {
 			tb.Fatalf("SetNodeProperty salary: %v", err)
 		}
 	}
+	// HOLD THE #2662 HOIST OFF FOR THIS ENGINE'S PLANS.
+	//
+	// sortseam.KeyHoistDisabled is read at TRANSLATE time and a translated plan is
+	// cached per Engine, so warming the three shapes here — under the control —
+	// fixes the arm for every later caller, whatever the control says by then.
+	// Without it `ORDER BY p.salary` resolves by schema lookup and compiles NO key
+	// evaluator, and this whole sweep measures a seam that is no longer on the
+	// path. See [sortShapeQuery] for why the query is not re-spelled instead.
 	e := cypher.NewEngine(g)
+	restore := sortseam.SetKeyHoistDisabled(true)
+	for _, q := range []string{sortShapeQuery, topShapeQuery(10), topShapeQuery(n)} {
+		if _, err := e.Explain(q, nil); err != nil {
+			restore()
+			tb.Fatalf("warm Explain(%q): %v", q, err)
+		}
+	}
+	restore()
 	sortEngines[n] = e
 	return e
 }
 
 // sortShapeQuery is the #2652 reproduction. `p.salary` is not projected, so
 // irSortKeys compiles an expression evaluator rather than resolving the key by
-// schema lookup — the shape whose evaluation count the defect amplified. The
-// `SKIP 0` blocks ORDER BY+LIMIT fusion (#2509) and forces the full Sort.
-const sortShapeQuery = `MATCH (p:Person) RETURN p.firstName ORDER BY p.salary SKIP 0 LIMIT 10`
+// schema lookup — the shape whose evaluation count the defect amplified.
+//
+// # Why there is no SKIP/LIMIT any more (rmp #2782)
+//
+// This shape's ONE structural requirement is that it compile to a full,
+// unbounded [cypher/exec.Sort] — the operator whose comparator #2652 rewrote.
+// [assertSortOperator] states that requirement directly ("Sort", banning "Top"),
+// and this constant has to satisfy it.
+//
+// It used to read `… ORDER BY p.salary SKIP 0 LIMIT 10`, because at the time ANY
+// SKIP refused the ORDER BY+LIMIT fusion and so forced the Sort. 83be4a40 removed
+// that refusal: `SKIP s LIMIT k` now fuses into Skip(s) over Top(s+k), which is
+// the whole point of that commit — `SKIP 0 LIMIT 10` no longer full-sorts 120 000
+// rows to ship 10. The spelling that used to FORCE a Sort became a spelling that
+// forbids one, and every cell of this sweep's sort half silently ran Top instead:
+// measured at HEAD 66a64107, the sort n=1000 cell and the top/limit=10 n=1000
+// cell allocated 14 856 and 14 854 objects — the same plan, twice.
+//
+// Dropping the pagination clauses restores the operator rather than working
+// around the planner: ir.fusibleTopBound (cypher/ir/with.go) refuses the fusion
+// outright when proj.Limit is nil ("ORDER BY with no LIMIT is an unbounded
+// Sort"), so the plan
+// is Project → Sort → …, with no Skip and no Top. The Sort's own work is
+// unchanged by the edit — it always sorted all n rows; only the emission changes,
+// from 10 rows to n, and both arms pay that identically. The instrument's own
+// recorded constants confirm the shape is the one it was calibrated on:
+// [armSignatureMargin] derives its floor from a measured surplus of 48 355
+// mallocs at n=1000, and this spelling measures 62 176-13 821 = 48 355;
+// [assertArmFramesForCell] cites "~23.5M objects beneath rowLess" at n=256 000,
+// and this spelling measures 23.46M (23 465 876 and 23 457 704 on two runs — the
+// count is not bit-stable at this size because ParallelScanProject delivers the
+// rows in a nondeterministic order, which changes the comparison count; the
+// assertions are presence/absence, so they do not depend on the exact value).
+//
+// # The key stays evaluator-backed
+//
+// The property is spelled bare, and [sortShapeEngine] holds the #2662 key hoist
+// OFF for the engines that run it. That is deliberate, and the alternative was
+// MEASURED and rejected: re-spelling the key as a shape #2662 declines to hoist
+// (`coalesce(p.salary, 0)`, `p.salary + 0`) adds frames to the evaluation stack,
+// and this instrument reads runtime.MemProfileRecord.Stack0, which is a FIXED
+// [32]uintptr. The bare-property stack peaks at 31 frames; both re-spellings peak
+// at exactly 32, and the truncation drops the OPERATOR frames off the bottom —
+// measured, on the n=1000 cell: cypher/exec.(*Sort).sortDecorated cum fell to 0
+// on BOTH arms while the arms' totals still differed 1.40x. Every frame assertion
+// in TestSortDecorationArmFrames would have failed for an instrumentation reason
+// that has nothing to do with the seam it gates. Removing the SKIP/LIMIT moves in
+// the safe direction on that axis: it takes a Skip frame OUT of the stack.
+//
+// The #2662 shape is not left unmeasured by this: keyhoist_soak_test.go profiles
+// the production spelling directly, on both of ITS arms.
+const sortShapeQuery = `MATCH (p:Person) RETURN p.firstName ORDER BY p.salary`
+
+// sortShapeRows is the row count [sortShapeQuery] ships for an n-row fixture.
+//
+// It exists so the four call sites that drive that query cannot drift apart. They
+// used to spell `10, or n when n < 10` inline, four times over, because the query
+// carried a LIMIT 10; an unbounded ORDER BY emits every input row. A cell whose
+// expected count is wrong does not measure a wrong number, it aborts on
+// `shipped %d rows, want %d` — which is the failure mode this helper removes.
+func sortShapeRows(n int) int { return n }
 
 // topShapeQuery is the same reproduction WITHOUT the SKIP, so ORDER BY + LIMIT
 // fuses into Top.

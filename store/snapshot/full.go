@@ -779,6 +779,15 @@ func writeCaptureCore[W any](
 		// graph instead; see [Manifest.IndexesCommitTS]. omitempty keeps a
 		// watermark-less manifest byte-identical to what previous builds wrote.
 		IndexesCommitTS: indexesCommitTS,
+		// The BUILDER that produced those payloads, as opposed to the instant
+		// they describe. It is stamped unconditionally — including when
+		// idxEntries is empty and when there is no watermark — for the reason the
+		// watermark comment above gives: the two facts are independent, and a
+		// snapshot that gains its first index later must not inherit a stale
+		// absence. A reader hydrates only on an exact match, so a manifest
+		// written before this field (which is every manifest any earlier build
+		// produced) rebuilds once instead; see [Manifest.IndexBuilderEpoch].
+		IndexBuilderEpoch: CurrentIndexBuilderEpoch,
 		GraphConfig: &GraphConfig{
 			Directed:   cfg.Directed,
 			Multigraph: cfg.Multigraph,

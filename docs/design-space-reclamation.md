@@ -29,6 +29,20 @@ by **all four** of these, and each is a distinct hazard:
 1. **Any live reader.** Readers run under `Graph.View`; a slot freed while a reader holds an
    interior pointer into it is a use-after-free in Go terms (a stale value, not a crash) —
    an **Isolation** violation.
+
+   > **Correction (2026-09-08 at `efd32fb9`): the hazard stands, the mechanism named for
+   > it is gone.** `Graph.View` no longer exists — rmp #2344 removed it, and
+   > `internal/scriptgate/no_read_barrier_gate_test.go` is a source gate that fails the
+   > build if it returns. A reader takes no barrier at all: it pins an MVCC snapshot with
+   > `Graph.BeginRead` / `Graph.ReadAt` and releases it with `Graph.EndRead`, and
+   > `visMu` — now an `mvcc.Gate`, not a `sync.RWMutex` (rmp #2337) — is the schema
+   > barrier, which `Engine.Run` does not acquire in any mode
+   > (`graph/lpg/lpg.go:734`). So this hazard must be discharged against the
+   > **reclamation horizon** the readers register in (`mvcc.Horizon`, whose `Oldest`
+   > gives the watermark the version reclaimer already truncates on), not against a
+   > read lock that no longer exists. Whichever strategy §3 settles on has to answer to
+   > that horizon.
+
 2. **Any replayable WAL record.** Recovery replays from the last checkpoint. If a record
    references a slot that has since been reused for a different entity, replay writes the
    old entity's data into the new one — **Consistency** loss, and silent.

@@ -455,18 +455,19 @@ func weakerSource(a, b estSource) estSource {
 // [statsRangeEstimate] had no consumer outside the EXPLAIN renderer.
 //
 // labelRows is the component's drain estimate — the exact N(label) — passed in
-// rather than re-derived; see [reorderStatsFreshness] for why the caller's copy
-// is the one that can be trusted.
+// rather than re-derived; see [statsSnapshotFresh] for why an exact count, and never
+// an upper bound, is the only sound denominator for the staleness fraction.
 //
 // An estimate is produced only for the shape [reorderFilteredScan] admitted, with
 // THIS execution's parameters bound. An unbound or null operand yields
 // estFallback: `n.p = null` and `n.p < null` match nothing under openCypher three-
 // valued logic, which is not a row count a distribution statistic describes.
 //
-// Every verdict except an MCV hit or a fresh histogram range is untrustworthy by
-// construction — an equality on a value absent from the MCV list is the 1/NDV
-// distribution average (estHeuristic), and an absent statistic is estFallback —
-// and [planStaysDefault] then keeps the written order.
+// Every verdict except a FRESH MCV hit or a fresh histogram range is untrustworthy
+// by construction — an equality on a value absent from the MCV list is the 1/NDV
+// distribution average (estHeuristic), a stale MCV hit is demoted by the provider
+// (rmp #2772), and an absent statistic is estFallback — and [planStaysDefault] then
+// keeps the written order.
 func reorderFilteredRows(
 	sel *ir.Selection,
 	scan *ir.NodeByLabelScan,
@@ -490,11 +491,15 @@ func reorderFilteredRows(
 			return estimate{source: estFallback}, 0
 		}
 		// An MCV hit is an exact per-value count for the snapshot the statistic was
-		// built from, so its certified error is zero and the freshness screen below
-		// is the only thing standing between it and a plan decision.
-		e := reorderStatsFreshness(src, scan.Label, prop, labelRows,
-			statsEqualityEstimateWith(src, scan.Label, prop, lit, pop))
-		return e, 0
+		// built from, so its certified error is zero — and since rmp #2772 the
+		// PROVIDER screens it for staleness itself, with the very rule
+		// [reorderStatsFreshness] applies ([statsSnapshotFresh], which both now call).
+		// The screen was applied here as well until then; on this path it is a proven
+		// no-op and has been removed rather than left as a second screen nobody has
+		// reasoned about. [TestReorderStatsFreshness_EqualityScreenIsRedundant] holds
+		// the equivalence, and [TestStatsEqualityFreshness_NaNLiteralSurvivesStaleness]
+		// holds the one verdict whose treatment the removal changes.
+		return statsEqualityEstimateWith(src, scan.Label, prop, lit, pop), 0
 	}
 	if prop, op, bound, okRange := extractRangeComparison(sel.PredicateExpr, scan.NodeVar, params); okRange {
 		if bound == nil || expr.IsNull(bound) {
@@ -514,46 +519,53 @@ func reorderFilteredRows(
 	return estimate{source: estFallback}, 0
 }
 
-// reorderStatsFreshness demotes a trustworthy statistics estimate to estFallback
-// when the statistic behind it is STALE, so the trustworthiness veto keeps the
-// written order. It is a planner-side screen applied on top of the estimate
-// providers, and it changes neither of them.
+// reorderStatsFreshness demotes a trustworthy RANGE estimate to estFallback when
+// the statistic behind it is STALE by the planner's denominator, so the
+// trustworthiness veto keeps the written order. It is a planner-side screen applied
+// on top of [statsRangeEstimate], and it changes neither provider.
 //
-// It exists because the two providers do not screen alike. [statsRangeEstimate]
-// applies the design's staleness rule itself (docs/statistics-design.md §3:
-// demote once the accumulated-write term reaches the firing region b - 1/B, or
-// once deletes exceed the rebuild tolerance). [statsEqualityEstimate] does NOT: an
-// MCV hit returns the recorded per-value count tagged estExact no matter how many
-// writes have landed since the snapshot was published. A plan decision must not
-// rest on a count that stopped being true, so the screen is applied to BOTH paths
-// here, at the one place that consumes them for a decision.
+// # What is left of it after rmp #2772, and why
 //
-// # The denominator, and the ResolveLabelCount finding (rmp #2765, #2392, #2771)
+// It was applied to BOTH the equality and the range path, because the two providers
+// did not screen alike: [statsRangeEstimate] applied the design's staleness rule
+// itself, while [statsEqualityEstimate] returned an MCV hit tagged estExact no
+// matter how many writes had landed since the snapshot was published. rmp #2772
+// moved that rule into the equality provider — where the RENDERER can see it too,
+// which a screen living in this gate never could — so the equality call site here
+// became a proven no-op and was removed.
 //
-// The staleness fraction needs a live-node count N for the label, and
-// [lpgLabelResolver.ResolveLabelCount] is exact-or-nothing: it declines whenever
-// any MVCC history is live, which under a concurrent writer is always.
-// [statsRangeEstimateInner] used to take it as `n, _ :=`, could not distinguish
-// that decline from a real zero, and its `n <= 0` guard then demoted the whole
-// range estimate — the defect rmp #2771 fixed by giving the estimator an explicit
-// [labelPopulation] whose `known` flag carries the difference. THE ESTIMATOR NO
-// LONGER MAKES THAT MISTAKE, and this screen never did.
+// The RANGE call site remains, and it is kept as a DEFENCE rather than as a
+// demonstrated necessity. The distinction is recorded here rather than glossed.
 //
-// This screen's denominator is the SMALLER of two numbers that are always
-// available:
+// What it does that the provider does not: the two screens divide by DIFFERENT
+// populations. [statsRangeEstimateInner] divides Δ by the LIVE count, while this one
+// divides by the smaller of the live count and the statistic's build-time count,
+// which is the only reading that sees a snapshot invalidated by GROWTH.
+// [TestJoinReorderStats_GrowthDemotesWhereTheProviderDoesNot] builds that window and
+// shows this screen demoting inside it.
 //
-//   - the statistic's own build-time label count (stats.Stats.LabelCount), which is
-//     recorded in the snapshot and needs no resolver at all; and
-//   - the caller's drain estimate, but only when it is estExact —
-//     [labelCardinalityEstimate] falls back to the label bitmap's cardinality when
-//     the count declines, so it yields an exact live count where ResolveLabelCount
-//     yields nothing.
+// What could NOT be shown is that the demotion ever changes a PLAN. Deleting this
+// call site leaves the whole cypher package green (measured at rmp #2772), and no
+// counter-example could be constructed: the certified error the range provider
+// returns is 1/B + Δ/N_live, so in exactly the window where this screen fires and
+// the provider does not, that interval has already widened by ~0.096·N — which is
+// enough for [reorderSwapWins]'s pessimistic end to decline on its own. The shape
+// that would defeat that coupling needs the widened arm as the INNER of the written
+// order, and a trailing WHERE is not pushed into its component, so it could not be
+// reached. rmp #2766's own mutation ledger (join_reorder_stats_gate_test.go) records
+// the same conclusion, reached independently.
 //
-// Taking the SMALLER maximises the staleness fraction, which is the conservative
-// direction: it demotes sooner, never later. That also answers why an UPPER bound
-// (ResolveLabelCountBound, the capability built for rmp #2392) is the WRONG
-// instrument here — a bound that over-states N under-states staleness and would
-// keep the planner trusting a statistic it should have demoted.
+// It is kept because that redundancy is a COUPLING between two independently tunable
+// constants — the firing region b − 1/B and the swap margins — and not an invariant.
+// A change to either, or the index-aware realisation [reorderSwapWins] anticipates,
+// would reinstate the case with nothing left to catch it. Aligning the range
+// provider's denominator with this one would make the call site redundant BY
+// CONSTRUCTION and is the right eventual fix; it is out of scope at rmp #2772, which
+// may not change the histogram estimators.
+//
+// The whole formulation — the deletes tolerance, the denominator, and the b − 1/B
+// firing region — lives in [statsSnapshotFresh] so that the provider and this screen
+// cannot drift into two different rules.
 func reorderStatsFreshness(src statsSource, label, prop string, labelRows, e estimate) estimate {
 	if !e.trustworthy() {
 		return e
@@ -562,17 +574,7 @@ func reorderStatsFreshness(src statsSource, label, prop string, labelRows, e est
 	if !ok {
 		return estimate{rows: e.rows, source: estFallback}
 	}
-	if st.NeedsRebuildForDeletes(statsDeleteRebuildTol) {
-		return estimate{rows: e.rows, source: estFallback}
-	}
-	n := float64(st.LabelCount())
-	if labelRows.source == estExact && labelRows.rows < n {
-		n = labelRows.rows
-	}
-	if n <= 0 {
-		return estimate{rows: e.rows, source: estFallback}
-	}
-	if float64(st.Delta())/n >= statsRangeBreakEven-1.0/float64(statsHistogramBuckets) {
+	if !statsSnapshotFresh(st, populationFromDrain(labelRows)) {
 		return estimate{rows: e.rows, source: estFallback}
 	}
 	return e

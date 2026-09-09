@@ -116,6 +116,26 @@ var ErrTransactionTooLarge = errors.New("txn: transaction exceeds the per-transa
 // with headroom above them so a result-row-capped write still replays);
 // callers that genuinely need an unbounded transaction must opt out
 // explicitly with [MaxTxnOpsUnlimited].
+//
+// # The producer bound must never exceed the replay bound
+//
+// The two bounds are independently configurable — this one via
+// [NewStoreWithCodecCapped] / [NewStoreWithOptionsCapped], the replay one via
+// [store/recovery.Options.MaxTxnOps] — and by default both resolve to this
+// constant, so out of the box there is no exposure. Configure the producer
+// LOOSER than the replayer, though, and the failure is not the symmetrical one
+// a reader expects: the oversized transaction is not rejected, it is
+// acknowledged DURABLE, and the next reopen then refuses the WHOLE directory
+// with [store/recovery.ErrTransactionTooLarge]. Every transaction committed
+// before the oversized one is stranded behind that fail-stop, and every one
+// committed after it is discarded unreplayed. Raising this bound for a bulk
+// load, or disabling it with [MaxTxnOpsUnlimited], while leaving recovery at
+// its default converts a rejected write into a database that will not open.
+//
+// On the reopen path the library enforces the invariant instead of trusting the
+// caller: [store/recovery.Result.NewStoreCapped] clamps the producer bound down
+// to the bound its own replay ran under. Callers that construct the producer
+// store independently of that handoff own the invariant themselves.
 const DefaultMaxTxnOps = 16_000_000
 
 // MaxTxnOpsUnlimited is the explicit opt-out sentinel for the maxTxnOps
@@ -125,6 +145,15 @@ const DefaultMaxTxnOps = 16_000_000
 // can bound transaction size by another means, because an unbounded
 // transaction then forces recovery to buffer every op frame in memory
 // before applying the batch on its [OpCommit] marker.
+//
+// Disabling the PRODUCER bound alone is the sharpest form of the
+// producer-above-replay hazard described on [DefaultMaxTxnOps]: recovery still
+// applies its own finite bound, so the store will happily acknowledge a
+// transaction durable that its own reopen then refuses, and the whole directory
+// stops opening. Disable this bound only together with the replay bound (pass
+// this same sentinel to [store/recovery.Options.MaxTxnOps]), or reopen through
+// [store/recovery.Result.NewStoreCapped], which clamps the producer to the
+// replay bound for you.
 const MaxTxnOpsUnlimited = -1
 
 // ErrCommittedNotApplied is returned by [Tx.Commit] when the transaction
@@ -640,6 +669,16 @@ func NewStoreWithCodec[N comparable, W any](g *lpg.Graph[N, W], wlog *wal.Writer
 // than the resolved cap is rejected by [Tx.Commit] / [Tx.CommitWALOnly] with
 // [ErrTransactionTooLarge] before any WAL frame is written.
 //
+// maxTxnOps MUST NOT resolve looser than the recovery-side bound
+// ([store/recovery.Options.MaxTxnOps]). A transaction that is over the replay
+// bound but under this one is not rejected: it is acknowledged DURABLE, and the
+// next reopen then fails with [store/recovery.ErrTransactionTooLarge] for the
+// WHOLE directory — stranding every earlier committed transaction behind that
+// fail-stop and discarding every later one. Reopening through
+// [store/recovery.Result.NewStoreCapped] enforces this for you by clamping the
+// producer bound to the replay bound; a caller wiring the two sides
+// independently owns the invariant. See [DefaultMaxTxnOps].
+//
 // codec must not be nil. The returned store has no [WeightCodec]; see
 // [NewStoreWithCodec] for the weight-handling contract.
 func NewStoreWithCodecCapped[N comparable, W any](g *lpg.Graph[N, W], wlog *wal.Writer, codec Codec[N], maxTxnOps int) *Store[N, W] {
@@ -685,6 +724,16 @@ func NewStoreWithOptions[N comparable, W any](g *lpg.Graph[N, W], wlog *wal.Writ
 // other positive value is the cap verbatim. A transaction buffering more
 // than the resolved cap is rejected by [Tx.Commit] / [Tx.CommitWALOnly] with
 // [ErrTransactionTooLarge] before any WAL frame is written.
+//
+// maxTxnOps MUST NOT resolve looser than the recovery-side bound
+// ([store/recovery.Options.MaxTxnOps]). A transaction that is over the replay
+// bound but under this one is not rejected: it is acknowledged DURABLE, and the
+// next reopen then fails with [store/recovery.ErrTransactionTooLarge] for the
+// WHOLE directory — stranding every earlier committed transaction behind that
+// fail-stop and discarding every later one. Reopening through
+// [store/recovery.Result.NewStoreCapped] enforces this for you by clamping the
+// producer bound to the replay bound; a caller wiring the two sides
+// independently owns the invariant. See [DefaultMaxTxnOps].
 //
 // opts.Codec and opts.WeightCodec must not be nil.
 func NewStoreWithOptionsCapped[N comparable, W any](g *lpg.Graph[N, W], wlog *wal.Writer, opts Options[N, W], maxTxnOps int) *Store[N, W] {
@@ -1164,9 +1213,47 @@ func (t *Tx[N, W]) AddEdge(src, dst N, w W) error {
 }
 
 // SetNodeLabel buffers a SetNodeLabel(node, label) operation.
+//
+// It returns an error wrapping [ErrFieldTooLong] when label does not fit the
+// uint16 length prefix its WAL frame reserves, and buffers nothing in that
+// case. This is the anchor for the shape every uint16-prefixed mutator on [Tx]
+// follows — REJECT AT THE API, BACKSTOP AT THE ENCODER (rmp #2747):
+//
+//   - the mutator that stages the field refuses it as it is staged, so the
+//     error names the call that carried the offending string and the caller can
+//     abandon the work before doing any of it;
+//   - the encoder ([checkWALSchemaString], reached from [Tx.Commit] and
+//     [Tx.CommitWALOnly]) checks again, because it is the one point every
+//     writer passes and it must hold for any future op kind whose mutator
+//     forgets. Nothing rmp #2742 added is removed.
+//
+// Two engines that face the same problem both put the refusal at the staging
+// API rather than at serialisation, and both were read at a pinned version
+// before this was adopted:
+//
+//   - PostgreSQL REL_17_2, src/backend/access/transam/xloginsert.c,
+//     XLogRegisterBufData: it rejects at registration when the data would
+//     overflow the uint16 XLogRecordBlockHeader.data_length
+//     ("regbuf->rdata_len + len > UINT16_MAX || len > UINT16_MAX" →
+//     ereport(ERROR)). Its assembler, XLogRecordAssemble, keeps only an
+//     Assert before narrowing to uint16 — a backstop compiled out of a
+//     production build.
+//   - RocksDB v9.7.3, db/write_batch.cc, WriteBatchInternal::Put: it calls
+//     CheckSlicePartsLength first thing and returns Status::InvalidArgument
+//     before a byte is appended to the batch.
+//
+// GoGraph departs from PostgreSQL on ONE point, deliberately. ereport(ERROR)
+// longjmps, so a PostgreSQL caller structurally cannot discard the refusal,
+// which is what lets that assembler settle for an assertion. A Go caller can
+// discard an error — the Cypher adapter discarded these at eighteen sites, and
+// that is precisely why rmp #2742 could not put the check here in the first
+// place. So the encoder guard stays a real runtime refusal, not an assertion.
 func (t *Tx[N, W]) SetNodeLabel(node N, label string) error {
 	if t.finished {
 		return ErrTxFinished
+	}
+	if err := checkWALSchemaString("node label", label); err != nil {
+		return err
 	}
 	t.ops = append(t.ops, Op[N, W]{Kind: OpSetNodeLabel, Src: node, Label: label})
 	return nil
@@ -1175,9 +1262,16 @@ func (t *Tx[N, W]) SetNodeLabel(node N, label string) error {
 // SetEdgeLabel buffers a SetEdgeLabel(src, dst, label) operation.
 // The underlying edge must exist at apply time; otherwise the
 // underlying SetEdgeLabel call is a documented no-op.
+//
+// It returns an error wrapping [ErrFieldTooLong], buffering nothing, when label
+// does not fit its uint16 WAL length prefix — reject at the API, backstop at
+// the encoder; see [Tx.SetNodeLabel] (rmp #2747).
 func (t *Tx[N, W]) SetEdgeLabel(src, dst N, label string) error {
 	if t.finished {
 		return ErrTxFinished
+	}
+	if err := checkWALSchemaString("edge label", label); err != nil {
+		return err
 	}
 	t.ops = append(t.ops, Op[N, W]{Kind: OpSetEdgeLabel, Src: src, Dst: dst, Label: label})
 	return nil
@@ -1204,9 +1298,16 @@ func (t *Tx[N, W]) RemoveNode(key N) error {
 }
 
 // RemoveNodeLabel buffers a RemoveNodeLabel(node, label) operation.
+//
+// It returns an error wrapping [ErrFieldTooLong], buffering nothing, when label
+// does not fit its uint16 WAL length prefix — reject at the API, backstop at
+// the encoder; see [Tx.SetNodeLabel] (rmp #2747).
 func (t *Tx[N, W]) RemoveNodeLabel(node N, label string) error {
 	if t.finished {
 		return ErrTxFinished
+	}
+	if err := checkWALSchemaString("node label", label); err != nil {
+		return err
 	}
 	t.ops = append(t.ops, Op[N, W]{Kind: OpRemoveNodeLabel, Src: node, Label: label})
 	return nil
@@ -1254,9 +1355,16 @@ func (t *Tx[N, W]) validateProperty(propKey string, value lpg.PropertyValue) err
 // USE ONLY when the value has already been validated. A caller that has not
 // validated must use [Tx.SetNodeProperty], or a refused value reaches the WAL —
 // which is the whole defect rmp #2602 closed.
+//
+// It returns an error wrapping [ErrFieldTooLong], buffering nothing, when propKey
+// does not fit its uint16 WAL length prefix — reject at the API, backstop at
+// the encoder; see [Tx.SetNodeLabel] (rmp #2747).
 func (t *Tx[N, W]) SetNodePropertyPreValidated(node N, propKey string, value lpg.PropertyValue) error {
 	if t.finished {
 		return ErrTxFinished
+	}
+	if err := checkWALSchemaString("node property key", propKey); err != nil {
+		return err
 	}
 	t.ops = append(t.ops, Op[N, W]{Kind: OpSetNodeProperty, Src: node, Key: propKey, Value: value})
 	return nil
@@ -1264,9 +1372,16 @@ func (t *Tx[N, W]) SetNodePropertyPreValidated(node N, propKey string, value lpg
 
 // SetEdgePropertyPreValidated is [Tx.SetNodePropertyPreValidated] for an edge
 // property. The same contract and the same warning apply.
+//
+// It returns an error wrapping [ErrFieldTooLong], buffering nothing, when propKey
+// does not fit its uint16 WAL length prefix — reject at the API, backstop at
+// the encoder; see [Tx.SetNodeLabel] (rmp #2747).
 func (t *Tx[N, W]) SetEdgePropertyPreValidated(src, dst N, propKey string, value lpg.PropertyValue) error {
 	if t.finished {
 		return ErrTxFinished
+	}
+	if err := checkWALSchemaString("edge property key", propKey); err != nil {
+		return err
 	}
 	t.ops = append(t.ops, Op[N, W]{Kind: OpSetEdgeProperty, Src: src, Dst: dst, Key: propKey, Value: value})
 	return nil
@@ -1274,18 +1389,32 @@ func (t *Tx[N, W]) SetEdgePropertyPreValidated(src, dst N, propKey string, value
 
 // SetEdgePropertyByHandlePreValidated is [Tx.SetNodePropertyPreValidated] for a
 // per-instance edge property. The same contract and the same warning apply.
+//
+// It returns an error wrapping [ErrFieldTooLong], buffering nothing, when propKey
+// does not fit its uint16 WAL length prefix — reject at the API, backstop at
+// the encoder; see [Tx.SetNodeLabel] (rmp #2747).
 func (t *Tx[N, W]) SetEdgePropertyByHandlePreValidated(src, dst N, handle uint64, propKey string, value lpg.PropertyValue) error {
 	if t.finished {
 		return ErrTxFinished
+	}
+	if err := checkWALSchemaString("edge property key", propKey); err != nil {
+		return err
 	}
 	t.ops = append(t.ops, Op[N, W]{Kind: OpSetEdgePropertyByHandle, Src: src, Dst: dst, Handle: handle, Key: propKey, Value: value})
 	return nil
 }
 
 // SetNodeProperty buffers a SetNodeProperty(node, propKey, value) operation.
+//
+// It returns an error wrapping [ErrFieldTooLong], buffering nothing, when propKey
+// does not fit its uint16 WAL length prefix — reject at the API, backstop at
+// the encoder; see [Tx.SetNodeLabel] (rmp #2747).
 func (t *Tx[N, W]) SetNodeProperty(node N, propKey string, value lpg.PropertyValue) error {
 	if t.finished {
 		return ErrTxFinished
+	}
+	if err := checkWALSchemaString("node property key", propKey); err != nil {
+		return err
 	}
 	if err := t.validateProperty(propKey, value); err != nil {
 		return err
@@ -1295,9 +1424,16 @@ func (t *Tx[N, W]) SetNodeProperty(node N, propKey string, value lpg.PropertyVal
 }
 
 // DelNodeProperty buffers a DelNodeProperty(node, propKey) operation.
+//
+// It returns an error wrapping [ErrFieldTooLong], buffering nothing, when propKey
+// does not fit its uint16 WAL length prefix — reject at the API, backstop at
+// the encoder; see [Tx.SetNodeLabel] (rmp #2747).
 func (t *Tx[N, W]) DelNodeProperty(node N, propKey string) error {
 	if t.finished {
 		return ErrTxFinished
+	}
+	if err := checkWALSchemaString("node property key", propKey); err != nil {
+		return err
 	}
 	t.ops = append(t.ops, Op[N, W]{Kind: OpDelNodeProperty, Src: node, Key: propKey})
 	return nil
@@ -1313,9 +1449,16 @@ func (t *Tx[N, W]) RemoveEdge(src, dst N) error {
 }
 
 // SetEdgeProperty buffers a SetEdgeProperty(src, dst, propKey, value) operation.
+//
+// It returns an error wrapping [ErrFieldTooLong], buffering nothing, when propKey
+// does not fit its uint16 WAL length prefix — reject at the API, backstop at
+// the encoder; see [Tx.SetNodeLabel] (rmp #2747).
 func (t *Tx[N, W]) SetEdgeProperty(src, dst N, propKey string, value lpg.PropertyValue) error {
 	if t.finished {
 		return ErrTxFinished
+	}
+	if err := checkWALSchemaString("edge property key", propKey); err != nil {
+		return err
 	}
 	if err := t.validateProperty(propKey, value); err != nil {
 		return err
@@ -1325,9 +1468,16 @@ func (t *Tx[N, W]) SetEdgeProperty(src, dst N, propKey string, value lpg.Propert
 }
 
 // DelEdgeProperty buffers a DelEdgeProperty(src, dst, propKey) operation.
+//
+// It returns an error wrapping [ErrFieldTooLong], buffering nothing, when propKey
+// does not fit its uint16 WAL length prefix — reject at the API, backstop at
+// the encoder; see [Tx.SetNodeLabel] (rmp #2747).
 func (t *Tx[N, W]) DelEdgeProperty(src, dst N, propKey string) error {
 	if t.finished {
 		return ErrTxFinished
+	}
+	if err := checkWALSchemaString("edge property key", propKey); err != nil {
+		return err
 	}
 	t.ops = append(t.ops, Op[N, W]{Kind: OpDelEdgeProperty, Src: src, Dst: dst, Key: propKey})
 	return nil
@@ -1355,9 +1505,16 @@ func (t *Tx[N, W]) AddEdgeWithHandle(src, dst N, w W, handle uint64) error {
 // SetEdgeLabelByHandle buffers an [OpSetEdgeLabelByHandle] operation,
 // persisting `label` against one parallel edge's stable `handle` on the
 // (src, dst) pair so the per-CREATE type survives recovery.
+//
+// It returns an error wrapping [ErrFieldTooLong], buffering nothing, when label
+// does not fit its uint16 WAL length prefix — reject at the API, backstop at
+// the encoder; see [Tx.SetNodeLabel] (rmp #2747).
 func (t *Tx[N, W]) SetEdgeLabelByHandle(src, dst N, handle uint64, label string) error {
 	if t.finished {
 		return ErrTxFinished
+	}
+	if err := checkWALSchemaString("edge label", label); err != nil {
+		return err
 	}
 	t.ops = append(t.ops, Op[N, W]{Kind: OpSetEdgeLabelByHandle, Src: src, Dst: dst, Handle: handle, Label: label})
 	return nil
@@ -1366,9 +1523,16 @@ func (t *Tx[N, W]) SetEdgeLabelByHandle(src, dst N, handle uint64, label string)
 // SetEdgePropertyByHandle buffers an [OpSetEdgePropertyByHandle] operation,
 // persisting key=value against one parallel edge's stable `handle` on the
 // (src, dst) pair.
+//
+// It returns an error wrapping [ErrFieldTooLong], buffering nothing, when propKey
+// does not fit its uint16 WAL length prefix — reject at the API, backstop at
+// the encoder; see [Tx.SetNodeLabel] (rmp #2747).
 func (t *Tx[N, W]) SetEdgePropertyByHandle(src, dst N, handle uint64, propKey string, value lpg.PropertyValue) error {
 	if t.finished {
 		return ErrTxFinished
+	}
+	if err := checkWALSchemaString("edge property key", propKey); err != nil {
+		return err
 	}
 	if err := t.validateProperty(propKey, value); err != nil {
 		return err
@@ -1383,9 +1547,16 @@ func (t *Tx[N, W]) SetEdgePropertyByHandle(src, dst N, handle uint64, propKey st
 // untouched. The single-key removal analogue of
 // [Tx.SetEdgePropertyByHandle]; emitted for REMOVE r.x / SET r.x = null on a
 // bound parallel relationship.
+//
+// It returns an error wrapping [ErrFieldTooLong], buffering nothing, when propKey
+// does not fit its uint16 WAL length prefix — reject at the API, backstop at
+// the encoder; see [Tx.SetNodeLabel] (rmp #2747).
 func (t *Tx[N, W]) DelEdgePropertyByHandle(src, dst N, handle uint64, propKey string) error {
 	if t.finished {
 		return ErrTxFinished
+	}
+	if err := checkWALSchemaString("edge property key", propKey); err != nil {
+		return err
 	}
 	t.ops = append(t.ops, Op[N, W]{Kind: OpDelEdgePropertyByHandle, Src: src, Dst: dst, Handle: handle, Key: propKey})
 	return nil
@@ -1491,12 +1662,26 @@ func (t *Tx[N, W]) DropIndex(name string) error {
 // Commit returns [ErrFieldTooLong], having made nothing durable and applied
 // nothing, when any buffered op carries a string too long for the length prefix
 // its WAL frame reserves: 65535 bytes for a label, a property key, or a schema
-// identifier; 4 GiB for a property value. The check lives at the encoder rather
-// than at the buffering mutators because the encoder is the one point every
-// writer passes, and the only one whose error no caller can discard — the
-// Cypher engine's adapter deliberately ignores the mutators' return value
-// (rmp #2742). The transaction consumes a sequence, applies nothing, and leaves
-// the store usable for the next one.
+// identifier; 4 GiB for a property value. The transaction consumes a sequence,
+// applies nothing, and leaves the store usable for the next one.
+//
+// Commit also returns [ErrFieldTooLong], again having made nothing durable and
+// applied nothing, when the transaction would leave an edge handle carrying
+// more than 1 Mi labels, or more than 1 Mi properties — a record store/snapshot
+// cannot capture, and so one that would block every checkpoint from then on
+// while the WAL grew without bound (rmp #2784). That bound is on the resulting
+// GRAPH rather than on any single op, so unlike the two above it is checked
+// once for the whole transaction; see [Tx.checkFoldableHandleRecords].
+//
+// Reaching Commit is now the BACKSTOP, not the primary refusal. Every mutator
+// that stages a uint16-prefixed field checks it as it is staged, so the caller
+// normally learns at the call that carried the offending string (rmp #2747);
+// this guard still stands behind them because the encoder is the one point
+// every writer passes, including a future op kind whose mutator forgets to
+// check. Until rmp #2747 the encoder was the ONLY guard, because the Cypher
+// engine's adapter discarded the mutators' return value at eighteen sites and a
+// refusal raised there would have been swallowed (rmp #2742); those sites either
+// propagate now or carry a verified statement of what their callee can return.
 func (t *Tx[N, W]) Commit() error {
 	defer metrics.Time("store.txn.Commit").Stop()
 	if t.finished {
@@ -1644,11 +1829,14 @@ func (t *Tx[N, W]) Commit() error {
 // the covering fsync preserves durable-before-visible.
 //
 // It refuses an unencodable field exactly as [Tx.Commit] does, with
-// [ErrFieldTooLong]. An eager caller must undo its in-memory writes on that
-// error; the Cypher engine's commitUnderBarrier already does, through
+// [ErrFieldTooLong], and for the same reason is now the backstop rather than
+// the primary refusal. An eager caller must still undo its in-memory writes on
+// that error; the Cypher engine's commitUnderBarrier already does, through
 // rollbackUnderBarrier, so an over-long label rejects the whole statement
 // atomically rather than leaving visible a label the WAL never recorded
-// (rmp #2742).
+// (rmp #2742). Since rmp #2747 that adapter also refuses the field BEFORE the
+// in-memory write, so the undo path is no longer the first line of defence for
+// a field the caller supplied.
 func (t *Tx[N, W]) CommitWALOnly(commitTS uint64) error {
 	defer metrics.Time("store.txn.CommitWALOnly").Stop()
 	if t.finished {
@@ -1824,6 +2012,19 @@ func (t *Tx[N, W]) appendOnly(commitTS uint64) (hasSeq bool, watermark int64, er
 		metrics.IncCounter("store.txn.appendOnly.txnTooLarge", 1)
 		t.markFinished()
 		return false, 0, fmt.Errorf("%w: %d ops > cap %d", ErrTransactionTooLarge, len(t.ops), t.store.maxTxnOps)
+	}
+	// Bounded resources / Durability: reject, on the same terms and for the same
+	// reason, a transaction that would leave an edge handle carrying more labels
+	// or properties than store/snapshot can capture — a record that commits and
+	// then blocks every checkpoint for ever while the WAL grows without bound
+	// (rmp #2784). Like the cap check above it runs BEFORE a sequence is minted
+	// and before any frame is written, so a refusal costs nothing durable. See
+	// [Tx.checkFoldableHandleRecords] for why this bound cannot be enforced by
+	// the encoder the way rmp #2750's value bound is.
+	if err := t.checkFoldableHandleRecords(); err != nil {
+		metrics.IncCounter("store.txn.appendOnly.handleRecordTooLarge", 1)
+		t.markFinished()
+		return false, 0, err
 	}
 	// Mint the sequence, and RECORD IT ON THE Tx in the same step. From here
 	// hasSeq is true on every return: the sequence is consumed, so the apply gate
@@ -2196,9 +2397,19 @@ const maxWALSchemaStringLen = 1<<16 - 1
 // maxWALValueLen is the largest byte length a uint32 length prefix in the
 // property-value encoders can represent without truncation. It bounds a
 // property string, a property byte value, a list element payload, and a list
-// element count. Nothing upstream bounds a property value, so — like
-// [maxWALSchemaStringLen] for the uint16 fields — this is the only bound there
-// is.
+// element count.
+//
+// It is a STRUCTURAL bound of the WAL frame — what the prefix can express — and
+// it is NOT the module's cap on a property value. That cap is
+// [maxSnapshotValueLen] (1 GiB), which is tighter, is measured in the snapshot's
+// encoding rather than this one, and is checked first in
+// [encodePropertyValue]. This check stands behind it as the prefix backstop.
+//
+// The claim this comment used to make — that nothing upstream bounds a property
+// value, so this is the only bound there is — was already false when it was
+// written and is doubly false now: [wal.Encode] refuses an assembled op frame
+// over its own 1 GiB maxFrameSize, which for a scalar value binds 17-odd bytes
+// tighter than this prefix ever could (rmp #2750).
 const maxWALValueLen = math.MaxUint32
 
 // maxWALValueLenInt is [maxWALValueLen] as an int, clamped to what the
@@ -2219,15 +2430,93 @@ const maxWALValueLenInt = maxWALValueLen & math.MaxInt
 // instead, so the caller sees a typed, testable error rather than an
 // acknowledgement of a write recovery will read back wrong.
 //
-// It reaches the caller from [Tx.Commit] and [Tx.CommitWALOnly] (through
-// [Tx.appendOnly]); the offending transaction consumes a sequence and applies
-// nothing, and the store stays usable for the next one.
+// It reaches the caller from every [Tx] mutator that stages a uint16-prefixed
+// field, which refuses the string as it is staged and buffers nothing (rmp
+// #2747), and — as the backstop for anything those checks do not cover — from
+// [Tx.Commit] and [Tx.CommitWALOnly] (through [Tx.appendOnly]), where the
+// offending transaction consumes a sequence and applies nothing. The store
+// stays usable for the next transaction either way.
+//
+// The same sentinel carries the OTHER refusal a property value can earn at
+// commit: a value whose snapshot encoding would exceed [maxSnapshotValueLen],
+// which the WAL could hold but the checkpointer could never fold (rmp #2750).
+// It is deliberately not a second sentinel — from the caller's side both mean
+// "this field is too long for a durable format to carry", and the message names
+// the length and the cap that was exceeded.
 var ErrFieldTooLong = errors.New("txn: field too long for its WAL length prefix")
+
+// ErrNestedPropertyList is the sentinel a commit fails with when a property
+// value is a [lpg.PropList] one of whose elements is itself a PropList. It is a
+// SIBLING of [ErrFieldTooLong] and deliberately not the same sentinel: that one
+// means "this field is too long for a durable format to carry" and names a
+// length and a cap, whereas a nested list is refused for its SHAPE at any size,
+// so folding the two would produce a refusal message with no length to report.
+//
+// # Why it is refused rather than supported (rmp #2783)
+//
+// Neither durable format can carry the value, and the WAL's failure was silent:
+//
+//   - store/txn's own list encoder has a case for every scalar element kind and
+//     none for PropList, so a nested element was written as its kind byte, a
+//     uint32 length of ZERO, and no payload. The inner list's contents never
+//     reached the WAL at all. Measured on
+//     [[1, 2], "tail"]: 07 02000000 | 07 00000000 | 01 04000000 "tail" — and a
+//     three-level nest encodes to the same bytes as a two-level one, so the
+//     depth is not even recoverable in principle.
+//   - Both WAL decoders ([decodeTxnListElement] and store/recovery's
+//     decodeRecoveryListElement) then refuse kind 7 as an unknown element kind.
+//     That error is raised INSIDE an already-committed v3 transaction, so replay
+//     stops there: the acknowledged transaction and every transaction committed
+//     after it were dropped, while Open returned a nil error and reported the
+//     tail clean. A durability breach that announced nothing.
+//   - store/snapshot refuses the same value outright when the checkpointer folds
+//     it ("nested PropList not supported", store/snapshot/properties.go), so
+//     every checkpoint failed for as long as the value lived in the graph and
+//     the WAL prefix was never truncated — the permanent-checkpoint block rmp
+//     #2750 named.
+//
+// Supporting it in both formats would be a durable-format change, and the value
+// is not a legitimate one to begin with: openCypher restricts a property to a
+// primitive or a FLAT list of primitives and classifies a nested list as
+// InvalidPropertyType. The Cypher write path has refused it since the
+// 2026-07-13 security audit (F3) — see cypher/exec.ErrNestedPropertyValue and
+// cypher.isStorableProperty, both of which cite this storage limitation as their
+// reason. Until now the Go API was the one door left open, and it led to silent
+// loss. This sentinel closes it, so all four layers now agree.
+//
+// It reaches the caller from [Tx.Commit] and [Tx.CommitWALOnly] (through
+// [Tx.appendOnly] and [encodePropertyValue]), which is the choke point every
+// property-bearing op passes: OpSetNodeProperty, OpSetEdgeProperty and
+// OpSetEdgePropertyByHandle are the only three kinds that carry a value, and all
+// three encode it there. The offending transaction consumes a sequence and
+// applies nothing; the store stays usable for the next transaction.
+var ErrNestedPropertyList = errors.New("txn: a nested list is not a valid property value")
+
+// CheckSchemaField reports whether s fits the uint16 length prefix every WAL
+// frame reserves for a schema string — a label, a property key, or a schema
+// identifier — returning an error wrapping [ErrFieldTooLong] when it does not.
+// what names the field in that error ("node label", "edge property key", ...).
+//
+// It exists so a caller that stages work of its own BEFORE it reaches a [Tx]
+// mutator can refuse an unencodable field at its own API boundary, against the
+// ONE definition of the bound rather than a second copy of the number. The
+// Cypher engine's WAL-backed adapter uses it exactly that way (rmp #2747): it
+// refuses an over-long label before the in-memory write lands, so the refusal
+// costs no mutation to undo and, in particular, leaves no entry in the
+// process-lifetime [lpg.LabelRegistry], which a rollback does not reverse.
+//
+// A caller that has nothing to do before the mutator does not need it: every
+// [Tx] mutator that stages a uint16-prefixed field checks its own argument.
+func CheckSchemaField(what, s string) error { return checkWALSchemaString(what, s) }
 
 // checkWALSchemaString rejects a string whose byte length would overflow the
 // uint16 length prefix its frame reserves, converting silent truncation into a
 // fail-stop commit error (#1903 for the schema encoders, rmp #2742 for the five
 // mutation encoders the guard originally missed).
+//
+// It is called TWICE on a staged field, and deliberately: once by the mutator
+// that stages it (reject at the API) and once by the encoder that writes it
+// (backstop). See [Tx.SetNodeLabel] for why both.
 func checkWALSchemaString(what, s string) error {
 	if len(s) > maxWALSchemaStringLen {
 		return errFieldTooLong(what, len(s), maxWALSchemaStringLen)
@@ -2244,6 +2533,204 @@ func checkWALValueLen(what string, n int) error {
 	return nil
 }
 
+// maxSnapshotValueLen is the module's cap on a single property value: 1 GiB,
+// measured in the SNAPSHOT's encoding of that value.
+//
+// It is the same number as store/snapshot's maxValueLen (properties.go), which
+// is the cap [github.com/FlavioCFOliveira/GoGraph/store/snapshot.ReadProperties]
+// enforces and is therefore the largest value the checkpoint format can carry.
+// The two are separate declarations of one number, because store/txn does not
+// import store/snapshot; TestSnapshotValueCapAgreement_2750 pins each side to
+// the literal and names the other, so neither can be moved alone.
+//
+// # Why the transaction layer enforces a CHECKPOINT bound (rmp #2750)
+//
+// A value the snapshot cannot encode is a value the checkpointer can never
+// fold. Capture (phase 1) refuses it with snapshot.ErrFieldTooLong, the
+// checkpoint fails before phase 3 truncates the WAL prefix, and the WAL is
+// retained — correctly, since the data exists nowhere else. But the checkpoint
+// then fails again on every later attempt, for as long as that value lives in
+// the graph, and the WAL grows without bound. Accepting a write that can never
+// be folded is a bounded-resources defect and a durability trap, so the refusal
+// belongs at COMMIT, where the caller can still act on it.
+//
+// # Why it is not [maxWALValueLen], and why neither bound implies the other
+//
+// [maxWALValueLen] bounds what the WAL's own uint32 length prefix can express.
+// This bounds what the checkpoint format can fold, and it is measured in a
+// DIFFERENT encoding — which is precisely why the two numbers cannot be
+// compared directly:
+//
+//   - For a SCALAR the snapshot encoding is the smaller one (a string is stored
+//     raw, its kind and length living in the record header), so the WAL side
+//     binds first and no scalar can reach this cap. [wal.Encode] refuses an op
+//     frame over its own 1 GiB maxFrameSize, and that frame carries the value
+//     plus at least 17 bytes of framing, so a 1 GiB string is already refused at
+//     commit with [wal.ErrFrameTooLarge] before it is measured here.
+//   - For a [lpg.PropList] the snapshot encoding is the LARGER one. Both formats
+//     write (uint8 kind | uint32 len | payload) per element, but store/snapshot
+//     gives a PropInt64 element a fixed 8 bytes and a PropTime element a fixed
+//     16, where this package writes a varint. A list of small integers therefore
+//     costs 13 bytes per element in the snapshot against 6 in the WAL. Measured,
+//     not estimated: a list of 82_595_525 such elements assembles a
+//     495_573_177-byte WAL frame (comfortably inside maxFrameSize) and a
+//     1_073_741_829-byte snapshot value (5 bytes over this cap). Before this
+//     guard that list committed durably and then made every checkpoint fail,
+//     permanently.
+//
+// So the WAL's frame cap cannot stand in for this one, and this one cannot
+// stand in for the WAL's. Both are enforced.
+const maxSnapshotValueLen = 1 << 30
+
+// snapshotEncodedValueLen reports, exactly, how many bytes store/snapshot's
+// encodePropertyValue produces for v — the length its writeNodePropRecord /
+// writeEdgePropRecord will put behind a uint32 prefix and test against the
+// snapshot's own cap.
+//
+// It COMPUTES rather than encodes, so refusing an unfoldable value at commit
+// costs one allocation-free walk instead of building the snapshot's copy of a
+// value that is about to be rejected. TestSnapshotEncodedValueLen_Exact_2750
+// pins the arithmetic against the real snapshot writer, for every kind and for
+// a list mixing all of them, so the computation cannot drift from the encoder
+// it models.
+//
+// The accumulator is an int64 and not an int: on a 32-bit platform a list of a
+// few hundred million small integers sums past MaxInt32 in the snapshot's
+// encoding, and a truncated sum would compare as SMALL and let the value
+// through.
+//
+// # What it costs, measured
+//
+// This function does not inline (`go build -gcflags='-m' ./store/txn/` reports
+// only checkSnapshotFoldableLen as inlinable), and for a PropString or PropBytes
+// it repeats the type assertion [encodePropertyValue] is about to make. On an
+// Apple M4, six interleaved benchstat pairs against the same tree with the guard
+// call removed:
+//
+//	property value             +2.17ns/op   (3.224n -> 5.398n, +67%, p=0.002 n=6)
+//	list element               +1.04ns/elem (127.2us -> 137.6us for 10k, p=0.002)
+//	FULL COMMIT, one property  no significant difference (3.711m -> 3.696m, p=0.310)
+//
+// The end-to-end figure is the one that decides it: the encode is followed by a
+// WAL append and an fsync that cost six orders of magnitude more. Buying those
+// nanoseconds back means writing the snapshot's length arithmetic a second time,
+// inline, next to the encoder — which is precisely the duplication that let the
+// two formats disagree and opened rmp #2750. Correctness outranks speed.
+func snapshotEncodedValueLen(v lpg.PropertyValue) int64 {
+	if v.Kind() != lpg.PropList {
+		return snapshotEncodedScalarLen(v)
+	}
+	elems, _ := v.List()
+	// uint32 element count, then (uint8 kind | uint32 len | payload) per element.
+	n := int64(4)
+	for i := range elems {
+		n += 5 + snapshotEncodedScalarLen(elems[i])
+	}
+	return n
+}
+
+// snapshotEncodedScalarLen is [snapshotEncodedValueLen] for a value that is not
+// a list, mirroring store/snapshot's per-kind widths: 8 bytes for PropInt64 and
+// PropFloat64 (its fixed64ValueSize), 16 for PropTime (timeValueSize), 1 for
+// PropBool (boolValueSize), and the raw bytes for PropString and PropBytes.
+//
+// A [lpg.PropList] arriving here would be a NESTED list, and since rmp #2783 it
+// cannot: [checkFlatPropertyList] refuses such a value in [encodePropertyValue]
+// before this function is reached. It is still reported as zero for the same
+// reason a kind neither format knows is — this function's contract is to model
+// store/snapshot's widths, and store/snapshot does not size a nested element at
+// all, it refuses the whole value. Zero is therefore the honest answer and never
+// a load-bearing one: the value's fate was settled one check earlier.
+//
+// Before #2783 that deferral was the defect. The refusal this comment pointed at
+// lived in store/snapshot and fired at CHECKPOINT time, long after the commit
+// had been acknowledged, so the value was accepted here and lost on replay.
+func snapshotEncodedScalarLen(v lpg.PropertyValue) int64 {
+	switch v.Kind() {
+	case lpg.PropString:
+		s, _ := v.String()
+		return int64(len(s))
+	case lpg.PropBytes:
+		b, _ := v.Bytes()
+		return int64(len(b))
+	case lpg.PropInt64, lpg.PropFloat64:
+		return 8
+	case lpg.PropTime:
+		return 16
+	case lpg.PropBool:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// checkSnapshotFoldableLen rejects a property value whose snapshot encoding
+// would exceed [maxSnapshotValueLen] — a value that would commit durably and
+// then make every checkpoint fail for as long as it lived (rmp #2750).
+//
+// It takes the length rather than the value so the bound can be pinned at its
+// exact boundary without materialising a gigabyte, the way store/snapshot's own
+// checkSnapshotValueLen is pinned.
+func checkSnapshotFoldableLen(what string, n int64) error {
+	if n > maxSnapshotValueLen {
+		return errFieldTooLongN(what, n, maxSnapshotValueLen)
+	}
+	return nil
+}
+
+// checkFlatPropertyList refuses a [lpg.PropList] that contains a PropList
+// element — a value the WAL encoder would write with a zero-length payload and
+// no decoder could read back, and that store/snapshot refuses outright (rmp
+// #2783; the full account is on [ErrNestedPropertyList]).
+//
+// A value that is not a list is flat by definition and returns immediately, so
+// the walk is paid only where nesting is possible. It tests only the element's
+// KIND and never descends: an element that is itself a list is refused whatever
+// it holds, so there is nothing below the first level to inspect. That also
+// means the check terminates in O(len(elems)) and cannot be driven into deep
+// recursion by a pathological value.
+//
+// It is a separate walk from [snapshotEncodedValueLen] rather than a flag fused
+// into that function's loop, because that function owns the ONE copy of the
+// snapshot's length arithmetic and rmp #2750 was caused by exactly the
+// duplication that fusing would invite.
+//
+// # What the extra walk costs, measured
+//
+// One Kind() read per element, over a slice [snapshotEncodedValueLen] then reads
+// again. On an Apple M4 (loadavg 1.7-2.3 either side, so not an idle host), six
+// interleaved benchstat pairs of [encodePropertyValue] against the same tree
+// with the guard call removed:
+//
+//	flat list, 10 elements       150.2n -> 156.9n   +4.50% (p=0.002 n=6)
+//	flat list, 100_000 elements  1.387m -> 1.419m   +2.32% (p=0.002 n=6)
+//	scalar string                5.324n -> 5.644n   +6.01% (p=0.009 n=6)
+//
+// The noise floor, measured the same way with the same binary on both sides, is
+// no significant difference on all three (p=0.485 / 0.394 / 0.370), so all three
+// deltas are real rather than drift.
+//
+// The list figures are the walk itself, about 0.67ns per element. The scalar
+// figure is 0.32ns on a path this function is never called from — [encodePropertyValue]
+// routes only a PropList here — so it is most likely the extra arm in that
+// function's kind switch rather than work; that attribution is argued from the
+// diff, not established by measurement, and it was not worth the experiment to
+// settle, because the quantity is 0.32ns against a commit that ends in an fsync.
+// Buying it back would mean refusing the value after the encoder had already
+// appended bytes for it. Correctness outranks speed.
+func checkFlatPropertyList(v lpg.PropertyValue) error {
+	if v.Kind() != lpg.PropList {
+		return nil
+	}
+	elems, _ := v.List()
+	for i := range elems {
+		if elems[i].Kind() == lpg.PropList {
+			return fmt.Errorf("%w: element %d of the list is itself a list", ErrNestedPropertyList, i)
+		}
+	}
+	return nil
+}
+
 // errFieldTooLong builds the refusal.
 //
 // It is a separate function, and not the body of the two checks above, so that
@@ -2253,6 +2740,14 @@ func checkWALValueLen(what string, n int) error {
 // `go build -gcflags='-m' ./store/txn/`, which reports both checks
 // "can inline" and this one not.
 func errFieldTooLong(what string, n int, maxLen uint64) error {
+	return errFieldTooLongN(what, int64(n), maxLen)
+}
+
+// errFieldTooLongN is [errFieldTooLong] for a length that is already an int64,
+// which [checkSnapshotFoldableLen] needs because it sums a list's elements and
+// that sum must not be truncated on a 32-bit platform. It holds the ONE format
+// string, so the two refusal shapes cannot drift apart.
+func errFieldTooLongN(what string, n int64, maxLen uint64) error {
 	return fmt.Errorf("%w: %s is %d bytes, maximum %d", ErrFieldTooLong, what, n, maxLen)
 }
 
@@ -2440,8 +2935,19 @@ func encodeOpEdgeWithLabel[N comparable, W any](buf []byte, op Op[N, W], codec C
 }
 
 // encodePropertyValue appends the wire encoding of a [lpg.PropertyValue] to buf.
-// It fails stop, before writing a length prefix, on any payload too long for
-// the uint32 prefix that describes it (rmp #2742) — see [checkWALValueLen].
+//
+// It fails stop, buffering nothing, on a value either durable format could not
+// carry:
+//
+//   - a [lpg.PropList] with a PropList element, which this format writes with a
+//     zero-length payload (destroying it), no decoder can read back, and
+//     store/snapshot refuses outright (rmp #2783) — see
+//     [checkFlatPropertyList] and [ErrNestedPropertyList];
+//   - a value whose SNAPSHOT encoding would exceed [maxSnapshotValueLen], which
+//     would commit here and then block every checkpoint for ever (rmp #2750) —
+//     see [checkSnapshotFoldableLen];
+//   - a payload too long for the uint32 prefix that describes it in the WAL
+//     (rmp #2742) — see [checkWALValueLen].
 //
 // Format:
 //
@@ -2461,8 +2967,55 @@ func encodeOpEdgeWithLabel[N comparable, W any](buf []byte, op Op[N, W], codec C
 //	uint32 elem-payload-len
 //	[elem-payload-len]byte elem-payload
 //
-// Nested PropList elements are not permitted.
+// A list element is a scalar. A PropList element is refused with
+// [ErrNestedPropertyList] before any byte is written, and no element kind other
+// than the seven above can occur, so every payload this format emits is one a
+// decoder can read back.
 func encodePropertyValue(buf []byte, v lpg.PropertyValue) ([]byte, error) {
+	// Refuse a value the CHECKPOINT format could never fold, before a byte of it
+	// reaches the WAL (rmp #2750). This is the TIGHTER of the two bounds this
+	// function enforces, and is measured in the snapshot's encoding rather than
+	// this one, so it is checked first and the per-field checkWALValueLen calls
+	// below stand behind it as the uint32-prefix backstop — the same
+	// reject-first/backstop-behind pairing rmp #2747 established for the
+	// uint16-prefixed schema strings.
+	//
+	// The fixed-width kinds are skipped rather than tested. store/snapshot gives
+	// each of them a constant width — 8 bytes for PropInt64 and PropFloat64, 1
+	// for PropBool, 16 for PropTime — so a bound test on them is a comparison
+	// that cannot fail, and this package treats such a check as waste, not as
+	// defence. The switch is written as an exemption list and not as an
+	// inclusion list on purpose: a property kind added later falls into default
+	// and IS measured, so the fail-safe direction is the automatic one.
+	// Measured: the exemption removes 2.15ns/op from a PropInt64 value, and the
+	// walk it avoids costs nothing that could ever change the outcome.
+	switch v.Kind() {
+	case lpg.PropInt64, lpg.PropFloat64, lpg.PropBool, lpg.PropTime:
+	case lpg.PropList:
+		// SHAPE before SIZE. A nested list is refused at any size, and its
+		// length is not a meaningful quantity to report: snapshotEncodedValueLen
+		// sizes a nested element as zero bytes (which is what this package's
+		// encoder used to write for it), so a nested list measures SMALL and
+		// would sail through the fold bound. Refusing the shape first also keeps
+		// the refusal message honest — it names the offending element rather
+		// than a length and a cap (rmp #2783).
+		if err := checkFlatPropertyList(v); err != nil {
+			return nil, err
+		}
+		if err := checkSnapshotFoldableLen("property value", snapshotEncodedValueLen(v)); err != nil {
+			return nil, err
+		}
+	default:
+		// PropString, PropBytes, and any kind added later. None of them can
+		// contain a PropertyValue, so nesting is not reachable here and the
+		// shape check is deliberately NOT called: measured, routing a scalar
+		// through it cost 1.0ns/op for a call that could only ever return nil
+		// (5.319n -> 6.316n on a string value, p=0.002 n=6), and this package
+		// treats a check that cannot fail as waste rather than as defence.
+		if err := checkSnapshotFoldableLen("property value", snapshotEncodedValueLen(v)); err != nil {
+			return nil, err
+		}
+	}
 	buf = append(buf, byte(v.Kind()))
 	switch v.Kind() {
 	case lpg.PropString:
@@ -2508,6 +3061,14 @@ func encodePropertyValue(buf []byte, v lpg.PropertyValue) ([]byte, error) {
 //
 //	uint32 LE element-count
 //	element-count × ( uint8 elem-kind | uint32 elem-payload-len | [elem-payload-len]byte elem-payload )
+//
+// The element switch below covers every scalar kind and has NO PropList arm,
+// which is why [encodePropertyValue] refuses a nested list before calling this
+// function. Until rmp #2783 it did not: a PropList element fell through the
+// switch with payload still nil and was written as (kind 7 | length 0), which
+// destroyed the inner list and left a frame no decoder could replay. Adding a
+// PropList arm here would be the other fix, and it is the wrong one — it would
+// change a durable format store/snapshot cannot match.
 func encodeTxnListProp(buf []byte, v lpg.PropertyValue) ([]byte, error) {
 	elems, _ := v.List()
 	if err := checkWALValueLen("property list element count", len(elems)); err != nil {

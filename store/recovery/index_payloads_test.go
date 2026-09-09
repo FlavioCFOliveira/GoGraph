@@ -14,6 +14,7 @@ package recovery
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -26,25 +27,29 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/store/wal"
 )
 
-// ─── indexImageReason: the two whole-image preconditions ────────────────────
+// ─── indexImageReason: the three whole-image preconditions ──────────────────
 
 func TestIndexImageReason(t *testing.T) {
 	t.Parallel()
+	const epoch = snapshot.CurrentIndexBuilderEpoch
 	tests := []struct {
-		name            string
-		selfSufficient  bool
-		indexesCommitTS uint64
-		wantErr         error
+		name              string
+		selfSufficient    bool
+		indexesCommitTS   uint64
+		indexBuilderEpoch uint64
+		wantErr           error
 	}{
-		{"self-sufficient and watermarked", true, 7, nil},
-		{"not self-sufficient", false, 7, ErrIndexPayloadStale},
-		{"no watermark", true, 0, ErrIndexPayloadStale},
-		{"neither", false, 0, ErrIndexPayloadStale},
+		{"self-sufficient, watermarked and current epoch", true, 7, epoch, nil},
+		{"not self-sufficient", false, 7, epoch, ErrIndexPayloadStale},
+		{"no watermark", true, 0, epoch, ErrIndexPayloadStale},
+		{"no builder epoch", true, 7, 0, ErrIndexPayloadStale},
+		{"newer builder epoch", true, 7, epoch + 1, ErrIndexPayloadStale},
+		{"none of the three", false, 0, 0, ErrIndexPayloadStale},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := indexImageReason(tc.selfSufficient, tc.indexesCommitTS)
+			got := indexImageReason(tc.selfSufficient, tc.indexesCommitTS, tc.indexBuilderEpoch)
 			if tc.wantErr == nil {
 				if got != nil {
 					t.Fatalf("indexImageReason = %v, want nil", got)
@@ -56,12 +61,32 @@ func TestIndexImageReason(t *testing.T) {
 			}
 		})
 	}
-	// The two refusals must be DISTINGUISHABLE in their message, or an operator
-	// cannot tell a mapper-less image from an unwatermarked one.
-	noMapper := indexImageReason(false, 7).Error()
-	noWatermark := indexImageReason(true, 0).Error()
-	if noMapper == noWatermark {
-		t.Fatalf("both refusals produced the identical message %q", noMapper)
+	// The three refusals must be DISTINGUISHABLE in their message, or an operator
+	// cannot tell a mapper-less image from an unwatermarked one from one written
+	// by a different index builder — and only the last is fixed by upgrading.
+	mustRefuse := func(what string, err error) string {
+		t.Helper()
+		if err == nil {
+			t.Fatalf("indexImageReason accepted the image with %s, so there is no message to "+
+				"compare and the whole-image precondition is not enforced", what)
+		}
+		return err.Error()
+	}
+	noMapper := mustRefuse("no mapper.bin", indexImageReason(false, 7, epoch))
+	noWatermark := mustRefuse("no watermark", indexImageReason(true, 0, epoch))
+	noEpoch := mustRefuse("no builder epoch", indexImageReason(true, 7, 0))
+	for _, pair := range [][2]string{{noMapper, noWatermark}, {noMapper, noEpoch}, {noWatermark, noEpoch}} {
+		if pair[0] == pair[1] {
+			t.Fatalf("two refusals produced the identical message %q", pair[0])
+		}
+	}
+	// The epoch refusal must name BOTH epochs: "the payload is from another
+	// builder" is only actionable when an operator can see which one and which
+	// one this build wants.
+	for _, want := range []string{"epoch 0", fmt.Sprintf("epoch %d", epoch)} {
+		if !strings.Contains(noEpoch, want) {
+			t.Fatalf("epoch refusal %q does not mention %q", noEpoch, want)
+		}
 	}
 }
 
@@ -102,7 +127,7 @@ func TestClassifyIndexPayloads(t *testing.T) {
 
 	t.Run("image reason wins over per-payload state", func(t *testing.T) {
 		t.Parallel()
-		reason := indexImageReason(false, 0)
+		reason := indexImageReason(false, 0, 0)
 		out, n := classifyIndexPayloads(rb, reason)
 		if n != 0 {
 			t.Fatalf("hydratable = %d, want 0 for an unhydratable image", n)

@@ -11,11 +11,38 @@ package audit352_test
 // graphs of up to 256 000 nodes, on BOTH arms of the seam. That is the whole
 // point — it is what makes the frame assertions exact rather than sampled — and
 // it is also why it does not belong in the short layer. Measured on the reference
-// host (Apple M4, 10 cores, darwin/arm64, go1.27.0), without -race:
+// host (Apple M4, 10 cores, darwin/arm64), without -race, at 66a64107 + rmp #2782
+// on go1.27.1. Each test was timed in its own process, alone. The parenthetical
+// is the previous figure, and it says whether that figure was re-measured here or
+// only carried over from the comment this one replaces:
 //
-//	TestSortDecorationArmFrames      119.1 s   (17 cells x 2 arms)
-//	TestSortShapeAllocProfile         77.8 s   (4 shapes x 2 arms)
-//	TestSortDecorationArmSignatures   17.2 s   (18 cells x 2 arms)
+//	TestSortDecorationArmFrames      373.5 s  18 cells x 2 arms   (re-measured at
+//	                                                               66a64107 before
+//	                                                               the fix: 130.7 s)
+//	TestSortDecorationArmSignatures   11.8 s  18 cells x 2 arms   (doc said 17.2 s;
+//	                                                               not re-measured
+//	                                                               before the fix)
+//	TestSortShapeAllocProfile          2.9 s   4 shapes x 2 arms  (doc said 77.8 s;
+//	                                                               unchanged by the
+//	                                                               fix — see below)
+//
+// The ArmFrames increase is the repair, not a regression: its eight `sort` cells
+// had silently collapsed onto Top (see [sortShapeQuery]) and were profiling a
+// bounded ten-row query instead of the unbounded sort they are named for. The
+// legacy n=256 000 sort window alone records 26.2M allocations, each with a stack
+// walk at MemProfileRate = 1. Nothing was traded away for the time: the rate is
+// still 1 at every cell ([largestExactFrameSize]), and coarsening it is the one
+// change the frame assertions could not survive.
+//
+// The 77.8 s once recorded for TestSortShapeAllocProfile is likewise not a
+// regression in the other direction, and it was not re-measured until #2782: at
+// 66a64107 that test runs in 2.9 s because BOTH of the changes above reached it —
+// #2662 hoists its ORDER BY key into its own column, so no evaluator is compiled,
+// and 83be4a40 fuses its "sort_skip0_limit10" shape into Skip over Top, so it
+// sorts ten rows rather than 120 000. It asserts only that each window describes
+// itself, so it still passes; what it profiles is simply no longer the workload
+// the audit named it after. Left as found, and recorded here, under #2782 whose
+// scope is TestSortDecorationArmFrames alone.
 //
 // Left in the short layer they took bench/audit352 from 70 s to 565 s, past the
 // 240 s hard ceiling that scripts/pkg_time_budget.sh fails `make ci` on — and
@@ -62,11 +89,7 @@ func TestSortDecorationArmFrames(t *testing.T) {
 	}
 	cells := make([]cell, 0, len(sortABSizes)+2*len(topABSizes))
 	for _, n := range sortABSizes {
-		want := 10
-		if n < 10 {
-			want = n
-		}
-		cells = append(cells, cell{"sort", n, sortShapeQuery, want, frameSortLegacy, frameSortDecorated})
+		cells = append(cells, cell{"sort", n, sortShapeQuery, sortShapeRows(n), frameSortLegacy, frameSortDecorated})
 	}
 	for _, n := range topABSizes {
 		cells = append(cells,
@@ -169,6 +192,23 @@ func ratio(a, b int64) float64 {
 // depends on. All of them run over the SHARED 120 000-node fixture with ~960 000
 // edges, which is the graph the audit's original profile was taken on, so the
 // shares reported here and the shares reported there describe the same workload.
+//
+// After #2662 the three ORDER BY shapes below have NO evaluator-backed sort key:
+// the key is projected into its own hidden column and resolved by schema lookup.
+// The two sortseam arms this test drives therefore COINCIDE on them — it is a
+// reporting test, asserting only that each window describes itself, so that costs
+// runtime rather than truth, but a reader must not take the two arms here as a
+// measured difference. The arm-separating A/B for the decoration seam lives in
+// TestSortDecorationArmFrames, whose engines hold the #2662 hoist OFF while they
+// translate (see [sortShapeEngine]); the A/B for the HOIST seam is
+// keyhoist_soak_test.go.
+//
+// These shapes are ALSO no longer the operators their names claim (rmp #2782):
+// 83be4a40 fused `SKIP s LIMIT k` into Skip over Top, so "sort_skip0_limit10"
+// profiles a Top. The names are left as the audit recorded them because this test
+// asserts nothing about the operator and its output is read as a profile of a
+// query text, not of an operator; [sortShapeQuery] carries the same history for
+// the shape that DOES assert one.
 var profileShapes = []struct {
 	name     string
 	query    string
@@ -268,13 +308,9 @@ func pct(v, total int64) float64 {
 // rather than trusting a threshold.
 func TestSortDecorationArmSignatures(t *testing.T) {
 	for _, n := range sortABSizes {
-		want := 10
-		if n < 10 {
-			want = n
-		}
 		eng := sortShapeEngine(t, n)
 		// Sort retains every row in its comparator, so heapRows == n.
-		l, d := assertArm(t, eng, sortShapeQuery, n, n, want)
+		l, d := assertArm(t, eng, sortShapeQuery, n, n, sortShapeRows(n))
 		t.Logf("shape=sort   n=%-7d legacy=%-12d decorated=%-10d ratio=%.3f surplus=%-10d "+
 			"(assert surplus >= %d)",
 			n, l, d, ratio(int64(l), int64(d)), int64(l)-int64(d), armSignatureMargin(n, n))

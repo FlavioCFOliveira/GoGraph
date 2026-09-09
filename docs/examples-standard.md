@@ -412,5 +412,3 @@ A checklist, in order:
 - `bolt/server/example_test.go` — the in-repo precedent for an
   assertion-based test that drives a non-deterministic round-trip with clean
   teardown and a no-leak guarantee.
-</content>
-</invoke>
