@@ -95,13 +95,40 @@ Then iterate: when step 3 shows the objectives are not yet met, return to step 1
 carrying the evidence the tests produced. The cycle closes only once the objectives
 are met.
 
+**Batch tasks of similar scope into the same iteration.** Whenever several open
+tasks share a scope — the same component, the same kind of change, the same body of
+knowledge to be brought to bear — carry them through **one** iteration together, as
+though they were a single task: one analysis, one bulk pass of code, one test pass
+over the whole of it. Seek this actively at every opportunity: two related tasks
+handled as one spare an entire redundant round of analysis, context loading and
+validation, and being maximally efficient at writing the code and testing it is
+precisely the point.
+
+**A batch is delegated to exactly ONE specialist sub-agent** — the one whose
+expertise best matches the objectives and requirements of the tasks being batched.
+The loop above then runs over the batch as if it were one task. Never split a batch
+across several sub-agents, and never set two sub-agents to work two different tasks
+at the same time; see
+[Every task is developed under a specialist sub-agent](#every-task-is-developed-under-a-specialist-sub-agent).
+
 **Development is FOCUSED AND OBJECTIVE, and NEVER attempts to go beyond what is
 required.** Deliver exactly what the task asks for: no speculative feature, no
 adjacent refactor, no unrequested improvement, no groundwork for work nobody has
 asked for. This is not a licence to deliver less —
 [Self-contained development](#self-contained-development) still requires the whole
 of what was asked. Focused means the requested scope, complete, and nothing beyond
-it.
+it. Concretely:
+
+- **Do not invent tasks.** Work only the tasks that exist, bound strictly and
+  closedly to their stated objectives and requirements. A genuine need that
+  planning missed is *recorded* as a task and resolved under
+  [Self-contained development](#self-contained-development) — it is never smuggled
+  in as unrecorded extra work, and a need you merely imagine is not recorded at
+  all.
+- **Do no more than is strictly necessary for each task to succeed**, and do that
+  efficiently. An operation that cannot change whether the task succeeds is time
+  spent for nothing; wasted time is a defect, exactly as a wasted resource is under
+  [ULTRA EFFICIENT by Design](#4-ultra-efficient-by-design).
 
 This loop sits inside the sequence the project already requires: the work is
 **specified** before the first iteration (see [Planning](#planning)) and
@@ -111,24 +138,58 @@ is skipped or reordered.
 
 #### What to test, and when
 
+- **Judge the necessary extent of the tests at every moment.** Before each run,
+  decide deliberately how far it must reach for the changes in hand — which tests,
+  which packages, which gates — instead of reaching for a habitual command. The
+  extent follows from what the change can actually reach, and it is re-judged every
+  iteration, because every iteration changes something different.
 - **Test what you are developing, never the whole project.** Step 3 runs the tests
   that cover the changes just made, in the packages those changes live in.
 - **Extend the tests to related components when it is foreseeable that their
   stability is affected** — direct dependents, and any component the change can
   reach. Decide this from the change itself: a package the change cannot reach does
   not warrant a run.
-- **The complete test run is reserved for special occasions**: the close of a
-  sprint, before any push, and whenever the user asks for it. It is never a
-  per-task step.
+- **The full `make ci` gate is reserved for very special moments**, and there are
+  exactly three: the close of a sprint, any push, and a specific request from the
+  user. Nothing else qualifies — it is never a per-task step and never a reflex at
+  the end of an iteration.
 - The enforceable detail — what the targeted validation must cover, which
   compliance gates a change drags in, what `make ci` still guarantees, and how to
   read its exit status — is in [Tests and validation](#concrete-applications).
+
+### Skills that own an operation
+
+Three skills own whole classes of operation in this project. When an operation
+falls to one of them, it is **executed through that skill** — never improvised, and
+never reproduced by hand because the direct command looked shorter.
+
+| Skill | Owns |
+|---|---|
+| `gitflow` | **Every git WRITE operation** — `add`, `commit`, `branch`, `checkout`/`switch`, `merge`, `tag`, `push`, and anything else that changes a ref, the index, or the working tree. See [Git command execution](#git-command-execution). |
+| `roadmap-manager` | **Every operation that coordinates or maintains tasks and sprints** — creating, editing, ordering, transitioning, closing, commenting, and every other write to `rmp`. See [Single source of truth](#single-source-of-truth). |
+| `knowledge-authority` | **Every task that turns on knowing what the project *is*** — its structure, components, files, features, tests, and provenance. See [Knowledge Graph](#knowledge-graph). |
+
+- **The skill is the route, not a formality.** Each carries the model, the
+  conventions, and the safeguards of its domain; going around it discards exactly
+  the knowledge it exists to apply.
+- **Read-only enquiries are not owned.** A plain `git log`, an `rmp` query for a
+  single fact, or a graph query issued to answer one question needs no skill. What
+  is owned is the operation that *changes* something, and — for
+  `knowledge-authority` — the task whose substance is the project's own knowledge.
+- **Ownership does not transfer authority over the facts.** `knowledge-authority`
+  answers where things are and how they relate; for what the code actually *does*,
+  the primary sources still govern (see [Knowledge Graph](#knowledge-graph) and the
+  [Compliance Mandates](#compliance-mandates)).
+- **A skill never suspends the rules around it.** Whatever `gitflow` prescribes is
+  still issued one `git` invocation at a time, and whatever `roadmap-manager`
+  records still needs a commit hash actually read with `git rev-parse HEAD`.
 
 ### Git command execution
 
 **Every `git` command is prepared and executed individually, under the coordination of the `gitflow` skill.** The skill owns the branching model and decides *which* git operation is correct for the situation; this section governs *how* each one is issued.
 
-- **The `gitflow` skill coordinates every git operation.** Invoke it for the operations it owns — opening and closing a sprint's working branch, recording a closed task as a commit, cutting a release or a hotfix, merging, and any question about branch state relative to the gitflow model. Do not improvise a branching or merging decision that the skill exists to make.
+- **Every git WRITE operation is executed through the `gitflow` skill.** Invoke it for anything that changes a ref, the index, or the working tree — `add`, `commit`, `branch`, `checkout`/`switch`, `merge`, `tag`, `push` — and for the operations it owns: opening and closing a sprint's working branch, recording a closed task as a commit, cutting a release or a hotfix, merging, and any question about branch state relative to the gitflow model. Do not improvise a branching or merging decision that the skill exists to make.
+- **Read-only git may be issued directly.** `git status`, `log`, `diff`, `show`, `blame`, and `ls-remote` change nothing, so they need no coordination — while still obeying the one-invocation-per-execution rule below.
 - **The skill coordinates; it does not batch.** Whatever the skill prescribes is still issued one `git` invocation at a time, exactly as the rules below require. A plan produced by the skill is a sequence of individual executions, never a single compound one.
 
 **Every `git` command is executed individually, on its own, and never together with any other command.** One `git` invocation per command execution — nothing before it, nothing after it.
@@ -286,7 +347,7 @@ If, while executing, you find that the cheap route you chose is not producing th
 
 ### Single source of truth
 
-Use the `rmp` CLI (available system-wide) as the **sole source of truth** for all planning and task tracking in this project. No other tool or method should be used for this purpose. Drive every task- and sprint-related operation through the `roadmap-manager` skill, which is the sole operator of the `rmp` CLI.
+Use the `rmp` CLI (available system-wide) as the **sole source of truth** for all planning and task tracking in this project. No other tool or method should be used for this purpose. **Every operation that coordinates or maintains tasks and sprints is executed through the `roadmap-manager` skill**, which is the sole operator of the `rmp` CLI: every creation, edit, reordering, status transition, closure, comment, and dependency change. Reading a single fact back with an `rmp` query needs no skill; changing anything does.
 
 The same `rmp` instance also hosts the project **Knowledge Graph** (see [Knowledge Graph](#knowledge-graph)) — the authoritative model of what the project *is* (its components, features, and provenance), distinct from rmp's role as the source of truth for *planning and tasks*. Consult it throughout planning to understand the components involved, their relationships, and the scope and impact of the proposed work.
 
@@ -314,29 +375,29 @@ Use the **Knowledge Graph** to identify the **foundational and highest-leverage 
 
 ### Execution
 
-Task execution is the natural continuation of planning. For each unit of work, follow this sequence using `rmp`:
+Task execution is the natural continuation of planning. A **unit of work** is a single task, or a batch of similar-scope tasks carried together as one (see [Development workflow](#development-workflow)). For each unit of work, follow this sequence using `rmp`:
 
 1. Check whether any open task is already in progress and, if so, continue it.
-2. Identify the next task to start.
-3. Read and fully understand the task — its objective, functional and technical requirements, and acceptance criteria — consulting the **Knowledge Graph** to gauge its scope and impact.
-4. Determine the most appropriate sub-agent for the work and delegate its execution to that specialist, under the rule in [Every task is developed under a specialist sub-agent](#every-task-is-developed-under-a-specialist-sub-agent).
-5. Implement the task through the [Development workflow](#development-workflow) loop — analyse, write all its code in bulk, test those changes — then verify that **all** acceptance criteria are satisfied before considering it done.
-6. Close the task with a concise summary of what was done.
-7. Create a **git commit** following conventional-commit conventions and describing what was done, before moving to the next task.
+2. Identify the next task to start, and the open tasks of similar scope that should be batched with it into the same iteration.
+3. Read and fully understand every task in the unit — its objective, functional and technical requirements, and acceptance criteria — consulting the **Knowledge Graph** to gauge its scope and impact.
+4. Determine the single most appropriate sub-agent for the whole unit of work and delegate its execution to that specialist, under the rule in [Every task is developed under a specialist sub-agent](#every-task-is-developed-under-a-specialist-sub-agent).
+5. Implement the unit of work through the [Development workflow](#development-workflow) loop — analyse, write all its code in bulk, test those changes — then verify that **all** acceptance criteria of **every** task in it are satisfied before considering it done.
+6. Close each task in the unit with a concise summary of what was done.
+7. Create the **git commit(s)** for the unit of work, in conventional-commit format, before moving to the next unit. One commit per task when the changes separate cleanly by file; when the tasks' changes interleave inside the same file, one commit for the batch whose footer names every task it closes (`Refs #<id>, #<id>`), and that single hash is the one recorded at the close of each of those tasks. Never split a hunk merely to manufacture per-task commits, and never write down a hash you have not read with `git rev-parse HEAD`.
 8. Update the **Knowledge Graph** to reflect the change (see [Knowledge Graph](#knowledge-graph)), stamping the affected nodes and edges with the commit hash and date.
 
 **Sequencing rules:**
-- **Task and sprint execution is strictly sequential.** Sprints run one at a time, and within a sprint tasks run one at a time. There is no justified exception: do not overlap two tasks, however independent they appear.
+- **Execution is strictly sequential: one unit of work at a time.** Sprints run one at a time, and within a sprint one unit of work at a time. Two units never overlap and two sub-agents never work different tasks concurrently, however independent they appear. **Batching is not overlapping:** a batch is *one* unit — analysed once, coded once, tested once, under one specialist — and that is the efficient route, not an exception to sequencing.
 - **Evaluations and audits** are the sole exception. They may run in parallel, but any such parallel execution **always requires the user's explicit prior authorisation** (see [Sub-Agents (Specialists)](#sub-agents-specialists)).
 - **Never run more than two (2) evaluations or audits at once**, even once authorised. Plan the full set up front, then execute them at most two at a time, starting the next only as one finishes, so the limit of two concurrent is never exceeded.
 
-**Model and effort.** Wherever possible, match the model and its reasoning-effort level to the demands of each individual operation within a task.
+**Model and effort.** Wherever possible, match the model and its reasoning-effort level to the demands of each individual operation within the unit of work.
 
 ---
 
 ## Knowledge Graph
 
-Maintain a project **Knowledge Graph (KG)** using the graph features of `rmp` (its built-in *Groadmap* graph), driven through the `knowledge-authority` skill — the empirical single source of truth about the project's own contents, which queries the graph store first and reads source files only as a fallback. The KG is the authoritative, queryable model of the project, and you must keep it as current as possible. To **locate and understand project structure** — components, features, tests, and provenance — query the graph first and fall back to reading source files only when the graph cannot answer. This is a navigation shortcut, not authority over the code: for any question of *actual behaviour* — above all openCypher conformance — the primary sources still govern, so consult the specification, the relevant TCK feature files, and the source itself as the [Compliance Mandates](#compliance-mandates) require.
+Maintain a project **Knowledge Graph (KG)** using the graph features of `rmp` (its built-in *Groadmap* graph), driven through the `knowledge-authority` skill — the empirical single source of truth about the project's own contents, which queries the graph store first and reads source files only as a fallback. The KG is the authoritative, queryable model of the project, and you must keep it as current as possible. **Every task that turns on knowing what the project *is* is executed through the `knowledge-authority` skill** — its structure, components, files, features, tests, and provenance, whether the task reads that knowledge or records it. To **locate and understand project structure**, query the graph first and fall back to reading source files only when the graph cannot answer. This is a navigation shortcut, not authority over the code: for any question of *actual behaviour* — above all openCypher conformance — the primary sources still govern, so consult the specification, the relevant TCK feature files, and the source itself as the [Compliance Mandates](#compliance-mandates) require.
 
 ### What the graph must capture
 
@@ -583,6 +644,11 @@ Read both before choosing, and pass both to the specialist as context. A
 specialist that does not know the sprint's purpose cannot tell which of several
 correct-looking approaches serves it.
 
+For a **batch** of tasks carried in one iteration, read *every* task in the batch
+and choose the single specialist that fits the batch as a whole. If no one
+specialist fits all of them, the batch itself is wrong: split it, rather than
+splitting the delegation.
+
 **What the coordinator still owns**, and must not delegate:
 
 - reading the task and the sprint, and writing the specialist's brief;
@@ -591,12 +657,20 @@ correct-looking approaches serves it.
 - the git commits, the `rmp` state transitions, and the task's closing record;
 - every decision reserved to the user by [Decision autonomy](#decision-autonomy).
 
-**Boundaries.** One task at a time, as [Execution](#execution) requires: several
-specialists may run concurrently only when they serve the *same* task with
-independent inputs, or when the user has authorised parallel evaluations subject
-to the cap of two. When two specialists could touch the same files, say so in
-each brief and scope them apart; concurrent edits to one file by two agents
-produce a result neither of them validated.
+**One specialist per iteration, whether it carries one task or a batch.** When
+several tasks of similar scope are batched into one iteration (see
+[Development workflow](#development-workflow)), they are delegated **together, to a
+single sub-agent** — the one whose expertise best matches the objectives and
+requirements of the tasks in the batch — and that agent runs the analyse → bulk
+code → test loop over the batch as though it were one task.
+
+**Boundaries.** One unit of work at a time, as [Execution](#execution) requires:
+two sub-agents never work two different tasks concurrently. Several specialists may
+run concurrently only when they serve the *same* unit of work with independent
+inputs, or when the user has authorised parallel evaluations subject to the cap of
+two. When two specialists could touch the same files, say so in each brief and
+scope them apart; concurrent edits to one file by two agents produce a result
+neither of them validated.
 
 ### Mandatory consultation rules
 
