@@ -1174,6 +1174,47 @@ The decision is per index, by name, and hydration requires all three of:
    `(label, property)`** — the only precondition the engine, rather than recovery,
    can evaluate, because only the engine knows which pair a name covers.
 
+> **Corrected: there are FIVE preconditions, not three (rmp #2797, commit `806fbdb0`;
+> verified 2026-09-08 at `efd32fb9`).** Two were added after this list was written, and
+> the second of them is operationally significant. The complete set, in the order it is
+> evaluated:
+>
+> 1. the snapshot was **self-sufficient** — `indexImageReason` case `!selfSufficient`
+>    (`store/recovery/index_payloads.go`);
+> 2. the manifest carries a non-zero **`indexes_commit_ts`** — case
+>    `indexesCommitTS == 0`. Without the instant the payloads describe there is no way
+>    to tell whether the WAL replayed on top of them invalidates them. Absence and a
+>    literal 0 encode identically (`omitempty`) and both are refused, which is the
+>    format's back-compat guarantee: **absent watermark means never hydrate**;
+> 3. the manifest's **`index_builder_epoch` equals `snapshot.CurrentIndexBuilderEpoch`**
+>    — case `indexBuilderEpoch != snapshot.CurrentIndexBuilderEpoch`, **new in this
+>    release window**;
+> 4. the payload is **readable and CRC-valid** — `ErrIndexPayloadUnreadable`, the one
+>    per-payload rather than whole-image refusal;
+> 5. **nothing the replayed WAL suffix committed touched that index's
+>    `(label, property)`** — `Result.WALSuffixTouchesNodeIndex`, still the only one the
+>    engine rather than recovery evaluates, and checked first on the engine side
+>    (`cypher/index_hydration.go:203`) so a stale index is never metered as a payload
+>    fault.
+>
+> Conditions 1–3 are properties of the WHOLE IMAGE, so one answer covers every payload
+> in it; their order is load-bearing for attribution only, since any one of them refuses
+> the image.
+>
+> **Why the epoch check matters to a consumer.** The watermark says WHEN the payloads
+> were taken; it cannot say whether the builder that produced them wrote the right
+> entries. rmp #2778 and rmp #2792 fixed two backfills that had indexed values an open
+> transaction wrote eagerly and then rolled back — and such a payload is DURABLE, so
+> hydrating it would reinstate the fabricated entry and no fix to the builder would ever
+> reach a store already on disk. The comparison is therefore EQUALITY rather than "at
+> least": both an absent epoch (every snapshot written before the field existed) and a
+> newer one (a builder this build knows nothing about) are refused, because a rebuild is
+> always correct. The observable consequence is that **every store written by an earlier
+> build rebuilds its secondary indexes on first open instead of hydrating them** — once,
+> from the recovered graph, by the builder this build ships. It is visible in
+> `store.recovery.indexes.rebuilt` and in the engine-scoped population counter, and it
+> is not a fault.
+
 Anything else is a rebuild. That is what makes the surface hard to test: a
 hydrated index and a rebuilt one must, by contract, answer **identically**, so no
 result-level oracle can tell them apart. The only sound instrument is the
@@ -1252,6 +1293,40 @@ writer of the subscriber registry, and every one of its twelve production call
 sites — `cypher/index_binding.go:711,714,731,734,788,890,900`,
 `cypher/api.go:1728,3273,3289`, `cypher/exec/create_index.go:107`,
 `cypher/exec/create_constraint.go:125` — registers a `hash` or `btree` index.
+
+> **Corrected (rmp #2738, commit `efedd8f8`; verified 2026-09-08 at `efd32fb9`).** The
+> conclusion survives — `NewIndex()` is still right for both of lpg's label indexes,
+> because the field the other constructors set is still never read on any path a
+> `label.Index` takes — but both premises above have moved. `graph/index/build.go` is new
+> in this release window and adds a second registry writer and a second `Apply` route.
+>
+> **`Subscriber.Apply` has THREE call sites, not one.** The live fan-out is
+> `Manager.Apply` (`graph/index/manager.go:309`) and `Manager.ApplyBatch` (`:328`) — the
+> two the cited `:254`/`:266` have drifted from — and the third is the build-log replay
+> inside `Manager.FinishBuild` (`graph/index/build.go:399`), which prefers
+> `ResolvedApplier.ApplyResolved` when the subscriber implements it and the log was given
+> a `BuildResolver`, and falls back to `Subscriber.Apply` otherwise.
+>
+> **The subscriber registry has THREE writers, not one.** `Manager.indexes` is written by
+> `Manager.CreateIndex` (`graph/index/manager.go:227`), deleted from by
+> `Manager.DropIndex` (`:238`), and written by the `RegisterFunc` that
+> `Manager.FinishBuild` hands its callback (`graph/index/build.go:401`). Production
+> reaches the first and third through a single switch, `CreateIndexOp.register`
+> (`cypher/exec/create_index.go:282-288`): `Manager.CreateIndex` when no build log is
+> attached, `Manager.FinishBuild` when `CreateIndexOp.Catching` gave it one. That route
+> exists because an explicit transaction takes no schema gate and so cannot be excluded
+> from a `CREATE INDEX`'s scan-and-register window; the log reconciles instead of
+> excluding.
+>
+> **The enumeration is stale in both its count and its line numbers.** At `efd32fb9`
+> there are EIGHT `Manager.CreateIndex` sites under `cypher/`, not twelve:
+> `cypher/api.go:1966`, `cypher/index_binding.go:1051`, `:1054`, `:1072`, `:1075`,
+> `:1130`, `cypher/exec/create_constraint.go:125`, and `cypher/exec/create_index.go:284`
+> (passed as a method value rather than called). Every one of them still registers a
+> `hash` or `btree` index, which is the property the argument rests on.
+> `graph/index/label/index.go:17` still states the retired "sole writer" claim in its own
+> package documentation.
+
 Only three production packages import `graph/index/label` at all (`cypher`,
 `cypher/exec`, `graph/lpg`, VERIFIED through `go list`), and two of them only
 read an index lpg owns. A second, structural check agrees without reading a
@@ -3720,6 +3795,22 @@ one with `has_more` false (`:1397`); and the terminal DISCARD SUCCESS (`:1500`).
 rmp #2484 established that the terminal reply is also the durability acknowledgement,
 the bookmark rides on the ack.
 
+> **Corrected (rmp #2563; verified 2026-09-08 at `efd32fb9`).** The paragraph above, and
+> the two consequences below it, record the behaviour this scenario MEASURED and rmp
+> #2563 then fixed — the re-measurement further down this document records the fix, so
+> the document contradicted itself. `s.bookmark` is no longer assigned in one place: at
+> `efd32fb9` there are THREE assignments, all in `bolt/server/session.go` — the terminal
+> PULL SUCCESS (`:1492`, in `handlePull`), the terminal DISCARD SUCCESS (`:1614`, in
+> `handleDiscard`), and `handleCommit` (`:1878`). The two stream-terminating sites mint a
+> fresh token only when `s.autocommitStmt` is set, and omit the `bookmark` key altogether
+> inside an explicit transaction, where the Bolt specification puts the field on the
+> COMMIT SUCCESS. So an autocommit write's terminal reply now carries a token naming its
+> own committed work, and neither the empty string nor a stale predecessor's token
+> reaches a driver. The delivery line references also drifted: `NextBookmark` is still at
+> `bolt/server/bookmark.go:20-23` with its counter at `:13`, but the COMMIT SUCCESS
+> metadata is now `session.go:1879-1881` rather than `:1696`, and `ExtractBookmarks` is
+> read at `:1169` (RUN) and `:1651` (BEGIN) rather than `:1099` and `:1529`.
+
 Two consequences follow from "assigned only in `handleCommit`", and both are pinned
 because both are what a driver sees:
 
@@ -5274,9 +5365,19 @@ The coverage work exercised the engine against these scenarios and found:
     `MATCH (n {name:'A'})-[:LIKES]->(m {name:'B'}) RETURN count(*) AS n` returned **0**
     while the same query aliased `AS c` returned 1. Three existing
     `TestEdgeTypeFilterCache_*` tests caught it, and `installAggOutputSchema` — which
-    carries the alias-shadow guard — is what it uses now. `cypher/exec`'s own
-    `PlanChildren` completeness gate caught a second omission. **The count-store fast
-    path the task prescribed is REFUTED and not built:** `count.Store.CountE` takes no
+    carries the alias-shadow guard — is what it uses now. (**Test names corrected
+    2026-09-08 at `efd32fb9`:** no test named `TestEdgeTypeFilterCache_*` exists any
+    more. Commit `aea749a4`, 2026-08-29, retired the bounded LRU those tests were named
+    after — rmp #2251 replaced it with a slot-aligned relationship-type column — and
+    renamed the whole six-test family to `TestRelTypeColumn_*`, moving
+    `cypher/edge_type_filter_cache_test.go` to `cypher/reltype_column_cache_test.go`.
+    The three that caught this are among the six now in that file; the rename was
+    mechanical and dropped none of them. The only surviving identifier carrying
+    the old spelling is `TestEdgeTypeFilterCacheCapacityOptionIsInert`
+    (`cypher/deprecated_option_inert_test.go:82`), a different test, which pins the
+    deprecated `EngineOptions.EdgeTypeFilterCacheCapacity` as having no effect.)
+    `cypher/exec`'s own `PlanChildren` completeness gate caught a second omission.
+    **The count-store fast path the task prescribed is REFUTED and not built:** `count.Store.CountE` takes no
     snapshot and a read transaction pins its view — a scan answered 2000 before and
     after 100 edges committed outside it, while a fresh query answered 2100 — so
     answering from the store would violate snapshot isolation.

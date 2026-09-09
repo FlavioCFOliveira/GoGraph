@@ -1728,6 +1728,13 @@ two over an injected filesystem — return a `Result` containing the rebuilt
 - `MaxCommitTS uint64` — the MVCC instant floor derived from the snapshot's
   `commit_ts` and the maximum `commitTS` in the replayed WAL, so a reopened
   graph never re-mints an instant an already-durable transaction used.
+- `MaxTxnOps int` — the per-transaction op cap **this recovery replayed under**,
+  reported so a producer can never be built looser than the replayer that will
+  have to read it back. `NewStoreCapped` clamps a looser request down to it (rmp
+  #2530); see *Handing recovery's result to the transaction store* below for why
+  a mismatch turned a rejected write into an unopenable database. 0 on a `Result`
+  built by hand rather than returned by `Open`, which carries no information and
+  clamps nothing.
 - `TailErr error` — why WAL replay stopped before the end of the
   file, or nil at a clean EOF. A benign torn tail
   (`wal.ErrTornFrame`) is the normal crash-after-fsync state and is
@@ -1788,8 +1795,29 @@ re-mints numbers that transactions still present in the same WAL already carry �
 one WAL then holds two different transactions under one sequence, and recovery's
 TxnSeq-suffix atomicity filter only disambiguates them by the accident of frame
 contiguity, which stops holding the moment a reopen follows a torn tail
-(rmp #2302, rmp #2522). `NewStoreCapped` is the same constructor with an
-explicit per-transaction op cap.
+(rmp #2302, rmp #2522).
+
+`NewStoreCapped` is the same constructor with an explicit per-transaction op cap,
+and **the cap it installs is not necessarily the one you asked for**: since rmp
+#2530 the requested producer bound is **clamped down** to `Result.MaxTxnOps` — the
+bound this recovery actually replayed under — whenever the request is looser,
+including `txn.MaxTxnOpsUnlimited` against a finite replay bound. The clamp only
+ever lowers; a replay bound of `txn.MaxTxnOpsUnlimited` clamps nothing, and a
+`Result` built by hand rather than returned by `Open` carries no information and
+clamps nothing either.
+
+The reason is that a producer cap above the replay cap does not reject the
+oversized transaction: `txn.Tx.Commit` acknowledges it **durable**, and the next
+reopen then refuses the whole directory with `ErrTransactionTooLarge` — stranding
+every transaction committed before it behind a fail-stop and discarding every one
+committed after. Raising the producer bound for a bulk load while leaving recovery
+at its default therefore converted a rejected write into an unopenable database.
+What the caller gets instead is an ordinary `txn.ErrTransactionTooLarge` at commit
+time, before any WAL frame is written. **A clamp that fires is logged at warn level
+and counted as `store.recovery.NewStoreCapped.producerCapClamped`**, because a bulk
+load that silently keeps the default bound is a surprise worth seeing. Callers that
+legitimately need the two sides configured independently build the store with
+`txn.NewStoreWithOptionsCapped` directly and own the invariant themselves.
 
 `Result.WALTailOffset` is the byte offset of the last durable frame boundary. A
 caller that reopens the WAL for append by some other route must truncate the
@@ -1908,4 +1936,4 @@ change that intentionally bumps the on-disk shape, and add a fresh
 
 ---
 
-*Last reviewed: 2026-09-08 against commit `0bbaf32acce6fcf57213e41864916ba9cb40c1fa`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*
+*Last reviewed: 2026-09-08 against commit `efd32fb991f415c3a2871dab1ea1bfb83434d189`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*

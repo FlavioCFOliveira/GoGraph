@@ -7,6 +7,19 @@ that authorised the rest.
 property of the design that was tried, not of MVCC.
 **Motivating defect:** rmp #2274. **Also resolves:** rmp #2193, and unblocks #1825/#1826.
 
+> **Reading note (2026-09-08 at `efd32fb9`).** `lpg.Graph.View` appears throughout this
+> document and **no longer exists**: rmp #2344 removed it, and
+> `internal/scriptgate/no_read_barrier_gate_test.go` is a source gate that fails the build
+> if it — or any acquisition of the visibility gate from outside `graph/lpg` — comes
+> back. A read now takes no barrier at all; it pins an MVCC snapshot with `Graph.BeginRead` /
+> `Graph.ReadAt` and releases it with `Graph.EndRead`. `visMu` survives, but as the
+> **schema barrier** and as an `mvcc.Gate` rather than a `sync.RWMutex` (rmp #2337):
+> `Engine.Run` does not acquire it in any mode, an ordinary write holds it SHARED for its
+> whole bracket (rmp #2320), and only index/constraint registration and an explicit
+> transaction's `LockBarrier` still hold it exclusively — see the `visMu` field comment at
+> `graph/lpg/lpg.go:734`. Every `View` below is therefore a record of the design at that
+> stage, not a description of the code.
+
 ---
 
 ## 1. The defect this exists to remove
@@ -17,6 +30,15 @@ it for the query's whole duration. A write takes the same barrier exclusively,
 via `lpg.Graph.ApplyAtomically`. Go's `sync.RWMutex` prefers a waiting writer, so
 once a writer queues behind a long read, **every short reader arriving after it
 parks until the long read finishes and the write completes.**
+
+> **This paragraph is the defect, not the current state (verified 2026-09-08 at
+> `efd32fb9`).** It is written in the present tense and every clause of it has since been
+> removed. `Engine.Run` acquires no barrier (rmp #2290 took reads off the read path, rmp
+> #2344 deleted `Graph.View` outright); an ordinary write holds `visMu` SHARED, not
+> exclusively (rmp #2320), so writers no longer exclude one another either; and `visMu` is
+> an `mvcc.Gate`, not a `sync.RWMutex` (rmp #2337), so the writer-preference queueing this
+> section measures has no primitive left to arise from. The `-29.3×` to `-30.8×` collapse
+> below is the measurement that authorised the design, retained as evidence.
 
 Measured 2026-07-31 at `f848e854`, Apple M4 (10 cores), durable engine over a
 real WAL-backed `txn.Store`, 20 000 nodes with an index on `:P(w)`, against a
@@ -51,7 +73,8 @@ Read from source, not documentation, as the project's prior-art rule requires.
 |---|---|---|---|
 | **Neo4j** | none — reads take no locks | none global; per-node and per-relationship locks (Forseti) | n/a |
 | **Memgraph** | `main_lock_`, **shared** | `main_lock_`, **shared** (mode `WRITE`) | `UNIQUE` only — index creation, storage-mode change |
-| **GoGraph** | `visMu.RLock()` | `visMu.Lock()` — **exclusive** | **every write** |
+| **GoGraph** (2026-07-31, the state surveyed) | `visMu.RLock()` | `visMu.Lock()` — **exclusive** | **every write** |
+| **GoGraph** (at `efd32fb9`) | none — a read takes no barrier | `visMu` **shared** (`mvcc.Gate` weak) | DDL and `LockBarrier` only |
 
 **Memgraph** (`src/utils/resource_lock.hpp`, `src/storage/v2/storage.hpp`,
 `src/storage/v2/vertex.hpp`, `src/storage/v2/delta.hpp`, read at `master`,

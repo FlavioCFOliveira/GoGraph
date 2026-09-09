@@ -326,9 +326,11 @@ markers — **[ShortestPath], [AllShortestPaths], the morsel-parallel leaves**, 
 count-store leaves, …".
 
 Both statements are false at HEAD, and the contradiction is visible **inside the same
-package**: `cypher/exec/profile.go:713-721` is a compile-time census listing nine
+package**: `cypher/exec/profile.go:716-731` is a compile-time census listing
 `storageAccessCounter` implementations, five of which are the very operators the godoc
-names as unknown. The measurement agrees with the census and not with the godoc —
+names as unknown. It listed **nine** when this audit was written and lists **ten**
+since `0e7e982d` (#2777) added `(*AllNodesCountScan)`, which now reports the node
+walk its `Init` fallback performs. The measurement agrees with the census and not with the godoc —
 `ShortestPath` renders `117`, `AllShortestPaths` renders `117`, and all three parallel
 leaves render `2000`.
 
@@ -428,6 +430,16 @@ of citations, including every load-bearing one. Six are off, none fatally:
 
 Every item below was **verified to still hold** at `83ba8d8b`.
 
+> **Correction (2026-09-08, v0.14.1):** "verified to still hold" was true at
+> `83ba8d8b` and is **no longer true of rows 1 and 2**, both of which were fixed in
+> the `v0.14.1` window. Row 1 is closed by `9ec1a6c7` (#2785) and row 2 by
+> `29641046` (#2772) — `cypher.statsSnapshotFresh` did not exist at `v0.14.0`
+> (`git show v0.14.0:cypher/stats_estimate.go` contains zero occurrences; the
+> current file has four) and now demotes a stale most-common-value hit to
+> `estFallback`. Rows 10 and 11 already carried in-place corrections under #2787;
+> rows 1 and 2 did not, and this note supplies them. The rows are left standing as
+> the record of what the audit found, not as a statement of the present tree.
+
 | # | Gap | Evidence at the closing tree | Backlog |
 |---|---|---|---|
 | 1 | The range estimator reads a **declined** label count as an empty label | `cypher/stats_estimate.go`: `n, _ := src.ResolveLabelCount(label)` discards the second return; the `if n <= 0` guard below then returns `estFallback`. Under a concurrent writer that declines the count, the histogram path goes silently inert | **#2771** |
@@ -490,7 +502,7 @@ python3 census.py > census_final.txt
 The gates, run on the closing tree, exit status read from inside each log:
 
 ```bash
-go test -count=1 -run 'TestProfileDbHits_|TestExplainFidelity_|TestProfileRowsRemoved|TestProfileEstimate|TestQError|TestStatsQError|TestDbHitsClassification' ./cypher/ ./cypher/exec/
+go test -count=1 -run 'TestProfileDbHits_|TestExplainFidelity_|TestProfileRowsRemoved|TestProfileEstimate|TestQError|TestDbHitsClassification' ./cypher/ ./cypher/exec/
 #   -> ok cypher 1.075s, ok cypher/exec 0.406s, GO_TEST_EXIT=0
 
 go test -count=1 -v -run TestTCKExecution ./cypher/tck/...

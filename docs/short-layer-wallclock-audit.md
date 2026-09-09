@@ -119,6 +119,35 @@ statement about the audit and does not silently drift as the tree grows.
 | store/txn | begin_ctx_cancellable_test.go:117 | TestStore_BeginCtx_DeadlineUnderQuiesce | BeginCtx elapsed | `>= 5 s` (100x) | elapsed vs constant |
 | store/wal | embed_scan_budget_test.go:56 | TestEmbedsValidFrame_AdversarialTailIsBounded | scan elapsed | `> 2 s` (~2000x) | elapsed vs constant |
 
+> **Correction (rmp #2589, 2026-09-08): the three `cypher/delete_scaling_test.go`
+> rows above no longer assert on CPU time.** They were accurate at this
+> document's frozen tree, `1faafff5`; commit `985d5398` ("gate delete scaling on
+> allocation volume, and drop the quiet-machine guard", 2026-08-25) landed
+> afterwards and is not an ancestor of it. All three now assert
+> `allocRatio(alloc)` — the ratio of the bytes the last wipe allocated to the
+> bytes the first did, which the commit's own measurements found load-invariant
+> to within 0.5% across a 35.9x wall inflation. Current anchors:
+>
+> | test | assertion | threshold |
+> |---|---|---|
+> | `TestDeleteDoesNotDegradeAcrossCycles` | `delete_scaling_test.go:326` | `allocRatio > maxCycleRatio` (2.5) |
+> | `TestDetachDeleteDoesNotDegradeAcrossCycles` | `delete_scaling_test.go:345` | `allocRatio > maxCycleRatio` (2.5) |
+> | `TestDeleteCycleGateDetectsDegradation` | `delete_scaling_test.go:383` | power control: `allocRatio <= maxCycleRatio` fails |
+>
+> The "load-sensitive because" column is therefore the *reason the statistic was
+> changed*, not a live property of these three gates. The wall-clock ratio
+> survives verbatim in `cypher/delete_scaling_soak_test.go`, behind the soak
+> layer's quiet-machine precondition.
+>
+> **Outstanding, and outside this document:** `cypher/delete_scaling_test.go`'s
+> own file header still argues the opposite. The section headed *"Which layer
+> measures what, and why the short layer measures CPU"* still presents CPU time
+> as "the load-invariant instrument", and still lists allocation counts among
+> "Two instruments were measured and REJECTED", concluding "so allocations are
+> not asserted on" — while the three assertions further down the same file, at
+> `:326`, `:345` and `:383`, assert exactly that, and the helper at `:249` is
+> itself commented `allocRatio is THE gated statistic (rmp #2589)`. The header needs the same correction this note records.
+
 Not counted, listed for completeness: `bench/mvccwrite/gate_test.go:323`
 (`commitsPerSec() <= 0`) — a throughput floor of literally zero, tripped only by a
 total stall.
@@ -140,10 +169,10 @@ class and is recorded here, with the measurement that motivated its guard.
 
 | package | file:line | test | asserted | threshold | load-sensitive because |
 |---|---|---|---|---|---|
-| bench/audit352 | labelcount_gate_ab_test.go:509 | TestLabelCountPushdownIsConstantTime | max(ns/op) ÷ min(ns/op) over n = 1 000 … 100 000 | `ratio > 1.50` | **#2673**; two `testing.Benchmark` windows measured seconds apart, one per graph size |
+| bench/audit352 | labelcount_gate_ab_test.go:526 | TestLabelCountPushdownIsConstantTime | max(ns/op) ÷ min(ns/op) over n = 1 000 … 100 000 | `ratio > 1.50` | **#2673**; two `testing.Benchmark` windows measured seconds apart, one per graph size |
 
-**Status:** guarded with `testlayers.RequireQuietMachine` at :502, ahead of the
-assertion at :509, and listed in `TIMING_PKGS` / `TIMING_RUN`. The wall-clock ratio
+**Status:** guarded with `testlayers.RequireQuietMachine` at :519, ahead of the
+assertion at :526, and listed in `TIMING_PKGS` / `TIMING_RUN`. The wall-clock ratio
 is measured and logged unconditionally, then asserted only on a quiet machine; the
 test's **allocation** and **byte** arms are unguarded and keep asserting in the
 short layer.
@@ -193,7 +222,7 @@ without gaining a valid one.
 `bench/mtaudit/fairness_soak_test.go:173,278,283,289`;
 `bench/soak/gc_pause_stable_test.go:231`; `bench/soak/latency_p99_stable_test.go:271`;
 `bench/scenarios/streaming_ingest_test.go:94`;
-`cypher/delete_scaling_test.go:405`; `cypher/delete_scaling_soak_test.go:38,51`;
+`cypher/delete_scaling_test.go:445`; `cypher/delete_scaling_soak_test.go:38,51`;
 `cypher/security_mixed_dos_soak_test.go:158`; `graph/csr/csr_megabuild_test.go:49`;
 `graph/index/label/security_store_label_maphint_test.go:131`;
 `internal/stress/ctxcancel_{bfs,brandes,dijkstra,leiden}_test.go`;

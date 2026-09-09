@@ -582,14 +582,20 @@ property; `OPTIONS {indexType: 'btree'}` is needed only for a **string** range.
 Before this was so, a default index on a numeric property could hold no entries
 at all while still reporting `state: "ONLINE"`, and the query silently scanned.
 
-Index use is a cost decision, not a guarantee: the engine seeks only when the
+Index use is a cost decision, not a guarantee, and **the gates differ by access
+path** — a single figure quoted for all of them would be wrong for the commonest
+one. On the **range** path and the **key-set** path the engine seeks only when the
 label holds at least **64** nodes and the predicate matches at most 10 % of them,
-and it scans otherwise. The floor was 1024 until rmp #2367 measured its own
-boundary and found the premise behind it false by more than an order of
-magnitude — a label of 1023 nodes cost 68.7 µs on the scan against 5.5 µs for the
-seek one node higher. It is `rangeSeekMinLabelPopulation` in
-`cypher/range_seek_plan.go`, and it governs the key-set path too. Use
-`Engine.Explain` to see which access path a query gets.
+and it scans otherwise; that floor is `rangeSeekMinLabelPopulation` in
+`cypher/range_seek_plan.go`. It was 1024 until rmp #2367 measured its own boundary
+and found the premise behind it false by more than an order of magnitude — a label
+of 1023 nodes cost 68.7 µs on the scan against 5.5 µs for the seek one node
+higher. The **single-key equality hash seek** carries **neither** gate: no
+population floor and no selectivity gate, because one probe of a hash index costs
+the same whatever the label's size. The **index nested-loop join**, which seeks
+once per outer row, has a floor of its own — `indexNestedLoopMinPopulation`, 64,
+in `cypher/index_nested_loop_plan.go`. Use `Engine.Explain` to see which access
+path a query gets, rather than deriving it from the gates.
 
 **Which key forms reach the index.** The key may be written inline or bound by a
 preceding `WITH`, provided its value is the same on every row:
@@ -614,21 +620,51 @@ Duplicate keys in the list cost nothing extra — they are deduplicated before
 probing — and a `null` or type-incompatible element simply contributes no rows
 rather than disabling the seek.
 
-A key bound to something that varies per row does **not** seek, and scans
-instead: a key drawn from the graph (`MATCH (q:Q) WITH q.email AS k …`), or a key
-list supplied at runtime (`UNWIND $keys AS k …`), whose elements cannot be
-enumerated when the plan is built. The distinction is row-invariance, not syntax:
-a `WITH`-bound literal or parameter, and the elements of a literal list, are all
-known before the first row, whereas a data-derived key would need the engine to
-drain its input before probing.
+A key bound to something that varies per row does not reach the access paths
+above, because their elements cannot be enumerated when the plan is built:
+a key drawn from the graph (`MATCH (q:Q) WITH q.email AS k …`), or a key list
+supplied at runtime (`UNWIND $keys AS k …`).
 
-The seek is chosen for the same reasons in all cases, so it can also decline: a
-key whose type the index cannot serve (an integer against a string-keyed hash
-index) falls back to a scan with the original predicate as the filter, and
-returns the rows openCypher requires either way. A key **set** is additionally
-cost-gated on its exact merged posting count — a set covering more than 10 % of
-the label is answered by a scan, because probing that many keys costs more than
-the scan it would replace.
+**Such a key can still be seeked, per row, and whether it is depends on its TYPE
+and not on row-invariance.** A previous edition of this section said the
+distinction was row-invariance and named `UNWIND $keys AS k` as a form that does
+not seek. That is false for a **numeric** key: the **index nested-loop join**
+seeks the numeric B-tree companion once per outer row whenever the inner
+population is at least `indexNestedLoopMinPopulation` (64), and
+`cypher/unwind_bound_key_inlj_shape_test.go` asserts exactly that for
+`UNWIND $keys AS k MATCH (b:P {age: k})`. The real discriminator is the operator's
+capability: `exec.NumericPointLookup` is
+`LookupAppend(value float64, dst []uint64) []uint64` — **numeric only**
+(`cypher/exec/join_index_nested_loop.go`). A **string** key above the same floor
+renders `NodeByLabelScan` plus a `HashJoin` instead, and the same test asserts
+that. rmp #2813 established this by measurement; the remaining half of the
+question — that no index makes `MERGE` stop scanning its label posting list — is
+rmp #2812 and is not fixed in this release.
+
+The seek is chosen for the same reasons in all cases, so it can also decline.
+There are four reasons it does:
+
+- **The key's type is one the index cannot serve** — an integer against a
+  string-keyed hash index. The plan falls back to a scan carrying the original
+  predicate as the filter, and returns the rows openCypher requires either way.
+- **A key set covers too much of the label.** The key-set path is additionally
+  cost-gated on its exact merged posting count: a set covering more than 10 % of
+  the label is answered by a scan, because probing that many keys costs more than
+  the scan it would replace.
+- **The transaction has already written the coordinates being sought.** Since rmp
+  #2814 the planner declines **every** node index access path for a
+  `(label, property)` pair the current transaction has dirtied, and falls back to
+  the label scan. The committed index does not carry the statement's own pending
+  writes, so seeking it would both lose rows the statement wrote and return rows
+  that no longer match; declining turns a wrong answer into a slower correct one.
+  The decline is keyed per coordinate, so a query touching one indexed property
+  keeps the index on every other. The predicate is `blocksNodeIndex` in
+  `cypher/index_pending_delta.go`, applied in `cypher/api.go`,
+  `cypher/range_seek_plan.go` and `cypher/seek_set_plan.go`.
+- **The caller turned it off.** `EngineOptions.DisableIndexSeek` disables the
+  equality hash seek outright. It exists so the guard above can be exercised from
+  outside the package; turning it on changes the **access path** and never the
+  answer, which `TestPendingIndexDelta_DisableIndexSeekOption` asserts.
 
 A multi-label pattern combined with a property equality — `MATCH (a:A:B {p: v})` —
 does not reach the **property** index, for any key form. The labels are still
@@ -1087,8 +1123,17 @@ loser is known the moment it tries to install its version. Over Bolt the error m
 to a `TransientError`, so the official driver's managed transactions retry it.
 
 An abandoned transaction no longer causes an outage, but it still pins the
-reclamation horizon — no version it could read is freed while it lives — which is
-why `server.Options.MaxTxIdleTime` keeps a finite bound.
+reclamation horizon — no version it could read is freed while it lives, and it
+holds one of the horizon's fixed slots. **`server.Options.MaxTxIdleTime` no longer
+bounds that by default.** Its default was 5 s, then 30 minutes under rmp #2806, and
+is **`0` — disabled — since rmp #2807**, matching PostgreSQL's
+`idle_in_transaction_session_timeout`. `Options.ConnTimeout` no longer reclaims a
+silent client either, for the same reason. So under the default configuration an
+abandoned transaction pins the horizon for as long as its connection lives, and an
+operator who needs the bound must set `Options.MaxTxIdleTime` explicitly. The full
+cost, and what TCP keep-alive does and does not reclaim, is on
+`DefaultMaxTxIdleTime` in `bolt/server/serve.go` and in
+[bolt.md](bolt.md).
 
 If `ctx` is already cancelled or its deadline has elapsed, `BeginTx` returns
 promptly, wrapping the context error.
@@ -2043,4 +2088,4 @@ build. When editing this file, keep to these rules:
 
 ---
 
-*Last reviewed: 2026-09-08 against commit `99e3c228`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*
+*Last reviewed: 2026-09-08 against commit `efd32fb9`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*

@@ -443,6 +443,12 @@ ci-kg-verify: ## kg-verify as `ci` runs it: every check gates except the two tha
 # #2677. Excluding a check that cannot converge is not the same as paying what
 # it measures.
 #
+# THOSE TWO FIGURES ARE HISTORICAL and were already superseded inside the same
+# release window: #2719 took symbol-absent to 0 and coverage to 95.7% at
+# 0e7e982d. Do not quote either number as current — run the gate. The measured
+# state, with the commit it was measured at, is in
+# docs/knowledge-graph-fidelity-2026-09-08.md.
+#
 # Every other check gates, including the twelve whose baseline is ZERO: a
 # fabricated node, a retired name-as-string task identity and a string task id
 # each turn `ci` red immediately, which is the recurrence #2677 exists to

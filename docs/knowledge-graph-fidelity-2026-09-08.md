@@ -58,6 +58,32 @@ Pinned by `TestGraphQueryArgsNameTheClientSubcommand` and, against the live bina
 Counts unchanged by this task, and still open: `symbol-kind-mismatch` 29,
 `label-undocumented` 18, `component-path-missing` 25.
 
+> **One row does not reconcile with the committed baseline, and it is recorded as
+> unresolved rather than picked.** This table gives `provenance-no-node` an *After*
+> of **136**, while `cmd/kgverify/baseline.json` — written in the same task, at the
+> same commit — records **160** for that check. The two describe the same check at
+> the same tree and cannot both be right. The `-exclude` rationale in the `Makefile`
+> quotes a third figure, 1 082, for the count "at the time of writing". Which is
+> correct cannot be settled after the fact, because the check's population is
+> "declarations in files touched since the merge-base" and both the tree and the
+> graph have moved since; re-measuring now answers a different question. **The
+> gating number is the one in `baseline.json`**, since that is what the gate
+> compares against. Treat 136 as unverified.
+>
+> **Read the whole table as a measurement of `0e7e982d`, not as a property of the
+> branch.** Every figure in it moves with every commit that adds or deletes a
+> declaration. Measured again at `efd32fb9`, the release tip — seven commits later,
+> with no graph sync in between — the same gate reports symbol coverage **95.4 %**,
+> **101** of 105 modelled packages at parity, `symbol-absent` **4**,
+> `symbol-kind-mismatch` **30**, `package-symbol-gap` **4**, and
+> `provenance-no-node` **257 of 3 137 declarations in 164 touched files**. The four
+> `symbol-absent` entries are `Test` nodes naming functions that `e9cf9cb5` deleted
+> (`TestHandshakeTimeoutDefaults`, `TestNewServer_DefaultsConnTimeout`,
+> `TestNewServer_DefaultStatementTimeoutSecureByDefault`,
+> `TestSession_AutocommitCarriesDefaultStmtTimeout`), confirmed absent with
+> `git grep`. That is the gate working as designed: `symbol-absent` is
+> zero-baselined precisely so a node outliving its declaration turns `make ci` red.
+
 ## The three findings, re-measured at HEAD
 
 The task filed three findings from sprint 353. Two had moved and are restated here with the

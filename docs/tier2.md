@@ -107,7 +107,8 @@ if err != nil { return err }
 defer r.Close()
 _ = r.SetHint(csrfile.AccessSequential)
 
-ranks, iters := extern.PageRank(r, extern.DefaultPageRankOptions())
+ranks, iters, err := extern.PageRank(r, extern.DefaultPageRankOptions())
+if err != nil { return err }
 fmt.Printf("PageRank converged in %d iterations\n", iters)
 _ = ranks
 ```

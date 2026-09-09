@@ -11,6 +11,27 @@ comprehensive `go test -race` battery (zero data races), with the full
 durability suite under crash injection (`internal/crashinject`, `store/wal`,
 `store/recovery`).
 
+> **Note (2026-09-08): every figure and `file:line` anchor below is as of the
+> 2026-05-29 evidence baseline, and must be read that way.** Two things have
+> moved, and neither is corrected in place, deliberately:
+>
+> 1. **"61 packages green" is the package count of the tree that was audited.**
+>    `go list ./...` reports **137** packages today. The number is a property of
+>    the run, not a claim about the module, so it is left as recorded.
+> 2. **The `file:line` anchors in the F1–F5 "Evidence" sections point at
+>    PRE-FIX code, and pointing them at the current tree would be wrong.** Each
+>    section cites the defect as it stood before its own fix; the code those
+>    lines described has since been replaced by the fix the same section
+>    records. `store/txn/txn.go:436-456` and `:457-463`, for instance, cited the
+>    one-frame-per-op `Tx.Commit` loop and now land inside the `txn.Options`
+>    struct's field comments — an unrelated place, not a moved version of the
+>    same code. The same holds for `store/wal/format.go:53-84`,
+>    `store/recovery/recovery.go:662-683`, `store/wal/writer.go:54-65` and
+>    `:124-152`, `store/snapshot/writer.go:177-184`,
+>    `store/checkpoint/checkpoint.go:234-244` and `store/snapshot/full.go:41-66`.
+>    Read them as citations into the 2026-05-29 tree — recoverable with
+>    `git show`, not with a grep of HEAD.
+
 ACID is defined here exactly as the mandate states:
 
 - **Atomicity** — every transaction is all-or-nothing: either every write
