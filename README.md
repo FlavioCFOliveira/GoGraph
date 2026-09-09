@@ -346,9 +346,17 @@ func main() {
 
 ## Workflow
 
-The project follows a strict `Specify -> Implement -> Test -> Document`
-workflow. Sprint planning lives in the local `rmp` CLI roadmap. The
-`Makefile` `ci` target runs the full validation pipeline:
+Development runs as repeated iterations of `Analyse -> write all the
+code in bulk -> test those changes`, until the objectives are met. The
+work is specified before the first iteration and documented once the
+objectives are met, and it stays focused on what is required without
+reaching beyond it. Sprint planning lives in the local `rmp` CLI
+roadmap.
+
+Each iteration tests the changes just made: the packages under change
+and any component whose stability those changes can foreseeably affect.
+The full pipeline is reserved for the close of a sprint and for every
+push, and runs from the `Makefile` `ci` target:
 
 ```
 make ci
@@ -358,7 +366,8 @@ The pipeline runs `go mod tidy`, `gofmt`, `go vet`, `go build`, the
 short test layer under the race detector (`go test -race`),
 `golangci-lint run`, and the coverage gate (`cover-gate`), which
 enforces **≥ 85 % aggregate** and **≥ 75 % per-package** statement
-coverage. Every change must pass it before being committed.
+coverage. It must be green before a sprint is closed and before
+anything is pushed.
 
 ## Performance
 

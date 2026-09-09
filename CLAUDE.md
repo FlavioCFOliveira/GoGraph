@@ -74,13 +74,55 @@ Documentation must be **accurate and faithful to the code** — never document i
 
 ### Development workflow
 
-Every piece of work must follow this exact sequence:
+Development proceeds as **repeated iterations** of three steps, and the cycle
+repeats until the objectives are met:
 
 ```
-Specify → Implement → Test → Document
+1. Analyse  →  2. Write all the code, in bulk  →  3. Test the changes made in step 2
 ```
 
-No step may be skipped or reordered.
+- **1. Analyse.** Establish what is required — the task and the sprint objective it
+  serves, the code involved, the evidence — and decide what must change, before
+  writing anything.
+- **2. Write all the code, in bulk.** Produce in one pass the **complete** set of
+  changes the analysis calls for. Wherever possible, write all the code of a task —
+  or of several tasks together — in bulk, rather than a trickle of small edits each
+  followed by its own test run.
+- **3. Test the changes made in step 2.** Exercise what was just written, and only
+  that; see [What to test, and when](#what-to-test-and-when).
+
+Then iterate: when step 3 shows the objectives are not yet met, return to step 1
+carrying the evidence the tests produced. The cycle closes only once the objectives
+are met.
+
+**Development is FOCUSED AND OBJECTIVE, and NEVER attempts to go beyond what is
+required.** Deliver exactly what the task asks for: no speculative feature, no
+adjacent refactor, no unrequested improvement, no groundwork for work nobody has
+asked for. This is not a licence to deliver less —
+[Self-contained development](#self-contained-development) still requires the whole
+of what was asked. Focused means the requested scope, complete, and nothing beyond
+it.
+
+This loop sits inside the sequence the project already requires: the work is
+**specified** before the first iteration (see [Planning](#planning)) and
+**documented** once the objectives are met (see
+[Documentation language and quality](#documentation-language-and-quality)). No step
+is skipped or reordered.
+
+#### What to test, and when
+
+- **Test what you are developing, never the whole project.** Step 3 runs the tests
+  that cover the changes just made, in the packages those changes live in.
+- **Extend the tests to related components when it is foreseeable that their
+  stability is affected** — direct dependents, and any component the change can
+  reach. Decide this from the change itself: a package the change cannot reach does
+  not warrant a run.
+- **The complete test run is reserved for special occasions**: the close of a
+  sprint, before any push, and whenever the user asks for it. It is never a
+  per-task step.
+- The enforceable detail — what the targeted validation must cover, which
+  compliance gates a change drags in, what `make ci` still guarantees, and how to
+  read its exit status — is in [Tests and validation](#concrete-applications).
 
 ### Git command execution
 
@@ -205,8 +247,9 @@ If the answer to any of these is "no" or "I do not know", the cheap alternative 
 - **`make ci` runs ONCE, at SPRINT CLOSE — never per task.** The full gate takes
   roughly fifteen minutes and re-runs the entire module, so running it after every
   task spends hours re-proving what has not changed. It runs at the close of the
-  sprint, and before any push.
-- **Per task, run the targeted validation instead:** the package under change, its
+  sprint, before any push, and whenever the user asks for it.
+- **Per task, run the targeted validation instead** — this is step 3 of the
+  [Development workflow](#development-workflow) loop: the package under change, its
   direct dependents, and any gate the change can plausibly move — plus the
   compliance gates the change touches (the openCypher TCK when `cypher/` changed,
   the crash/recovery battery when `store/` changed). Name in the task's closing
@@ -277,7 +320,7 @@ Task execution is the natural continuation of planning. For each unit of work, f
 2. Identify the next task to start.
 3. Read and fully understand the task — its objective, functional and technical requirements, and acceptance criteria — consulting the **Knowledge Graph** to gauge its scope and impact.
 4. Determine the most appropriate sub-agent for the work and delegate its execution to that specialist, under the rule in [Every task is developed under a specialist sub-agent](#every-task-is-developed-under-a-specialist-sub-agent).
-5. Implement the task, then verify that **all** acceptance criteria are satisfied before considering it done.
+5. Implement the task through the [Development workflow](#development-workflow) loop — analyse, write all its code in bulk, test those changes — then verify that **all** acceptance criteria are satisfied before considering it done.
 6. Close the task with a concise summary of what was done.
 7. Create a **git commit** following conventional-commit conventions and describing what was done, before moving to the next task.
 8. Update the **Knowledge Graph** to reflect the change (see [Knowledge Graph](#knowledge-graph)), stamping the affected nodes and edges with the commit hash and date.
