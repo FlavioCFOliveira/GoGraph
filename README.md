@@ -5,80 +5,99 @@ designed to scale from in-memory graphs to graphs that exceed RAM.
 
 ## Status
 
-**Current release: `v0.14.0`.** This is the project's **seventeenth
+**Current release: `v0.14.1`.** This is the project's **eighteenth
 release**, published at a pre-1.0 baseline: under Semantic Versioning a
 `0.y.z` version signals that the public API is **not yet stable** and may
 change without a major bump while the module matures toward `1.0.0`.
-`v0.14.0` is a pre-1.0 **MINOR** release of **13 commits** from **one
-sprint (355, *GoGraph execution reporting*) and 11 closed tasks**. No
-change is marked breaking, and `go.mod` and `go.sum` are
-**byte-identical** to `v0.13.0` — same pinned toolchain, same dependency
-set — so nothing in the supply chain moved. It is an **execution-reporting
-release**: it changes what `EXPLAIN` and `PROFILE` tell you, and it makes
-the planner act on a measurement for the first time.
+`v0.14.1` is a pre-1.0 **PATCH** release of **50 commits** from **one
+sprint (357, *clear every open bug and chore, and ship GoGraph v0.14.1*)
+and 46 closed tasks**. No change is marked breaking, and `go.mod` and
+`go.sum` are **byte-identical** to `v0.14.0` — same pinned toolchain, same
+dependency set — so nothing in the supply chain moved. It is a
+**correctness release**: 26 of its 50 commits are fixes, and it exists
+because `v0.14.0` returns wrong answers on a query that `v0.14.0` itself
+made faster.
 
-**A db-hits figure nobody counted no longer prints as `0`.** The column
-became tri-state — a counted figure, a counted zero, and `?` for a figure
-that was never counted — and an incomplete total renders `x + ?` instead
-of silently summing across the gaps. Four operator families that read
-storage and reported nothing now count it: `Expand` reports the adjacency
-slots it walked rather than the edges it emitted (a type-filtered hop had
-under-reported by 100×); the three morsel-parallel leaves report their
-workers' node walk (they reported `0` for a 2 000-node scan); and
-`ShortestPath` and `AllShortestPaths` report the relationship slots their
-searches read. A new `Removed` column reports how many rows a predicate
-rejected, omitted entirely for an operator that has no rejection
-mechanism.
+**Upgrade from `v0.14.0` if you use any index or constraint.** The equality
+index seek was blind to writes the statement itself had made, so a `MATCH`
+on an indexed property could both **lose rows the transaction had
+written** and **return rows that no longer matched** — with no explicit
+transaction, on a single autocommit statement (rmp #2814). The fix
+declines the index access path for the `(label, property)` coordinates a
+transaction has dirtied, turning a wrong answer into a slower correct one.
 
-**The planner consumes its own statistics for the first time.** The
-property statistics have been built since #2097 and, until this release,
-were read by nothing but the `EXPLAIN` renderer. They now drive the
-disjoint-component join reorder, under the pre-existing trustworthiness
-veto and over a certified error interval. `Est.Rows` renders beside the
-measured `Rows` with its provenance marked, so an estimate and the
-measurement that tested it can be read in one table; and how wrong the
-estimates turn out to be is itself observable, as a q-error metric with
-`Engine.StatsMisestimatedPairs` reporting how many `(label, property)`
-pairs are currently behind it.
+**Four routes by which a secondary index could disagree with the graph are
+closed.** The `CREATE INDEX` backfill read *uncommitted* mutations, so a
+seek could return a row that was never committed (#2778); `CREATE
+CONSTRAINT` had the same defect (#2792); `FinishBuild`'s replay resolved
+against live state, so a concurrent write could fabricate an entry
+(#2793); and `rewindConstraintDrop` read live state, where the obvious fix
+traded a fabricated entry for a **lost** one (#2799). Because an affected
+build can have written fabricated entries to disk, the snapshot manifest
+now carries an index-builder epoch and recovery **refuses to hydrate** an
+older payload (#2797) — so **a store written by `v0.14.0` or earlier
+rebuilds its secondary indexes once, on first open**. That is deliberate,
+requires nothing of you, and is what removes the fabricated entries.
 
-**Two defects were found by the sprint's own gate, and fixed.** A declined
-MVCC label count was read as an empty label, which made the planner
-benefit non-deterministic and let `EXPLAIN` render a plan the engine did
-not run; and a labelled count cloned a roaring bitmap and returned it
-uncorrected, purely to read its cardinality.
+**The durability path stopped calling three different failures clean.** The
+checkpoint gate verified that the expected snapshot files *existed* and
+then discarded the WAL prefix, without ever verifying the snapshot could be
+**read** (#2749); the readback that fixed it covered recovery's reader but
+not its applier (#2780); and `ReplayWAL` reported corruption inside an
+already-durable frame as benign, contradicting its own documented contract
+(#2794). Three values that committed durably and then blocked every later
+checkpoint — a property between 1 GiB and 4 GiB, a nested property list
+that was **silently lost on replay**, and an over-cap edge-handle record
+count — are now refused at commit, where the caller can act (#2750,
+#2783, #2784).
 
-**This release adds counting work to several hot paths** — slot bracketing
-in `Expand`, one atomic add per morsel in the parallel leaves, slot
-accumulation in the shortest-path searches, and reject counting in the
-filters. **The aggregate cost has since been measured** in a three-arm
-interleaved campaign against the `v0.13.0` tree
-([docs/benchmarks/v0.14.0.md](docs/benchmarks/v0.14.0.md)), and **the added
-work costs nothing that campaign can resolve**: of 272 comparable result
-rows, nine deltas survive adjudication against a same-code noise floor —
-six improvements and three regressions, the largest of them **+7.11 %** on
-one 11 µs benchmark. The Cypher read path, which the counting was added to,
-is **unchanged at all five published concurrency levels**. One gain is
-large and **conditional**: with `(label, property)` statistics populated,
-the join reorder takes a skewed two-component shape from **267.155 ms to
-2.723 ms (−98.98 %)** — a figure that must never be read as a general
-speed-up. See [Performance](#performance).
+**The Bolt server's four timeout defaults are now `0`, which means
+disabled.** The old defaults armed a read deadline before *every* read of
+the message loop, and the reader sits in that read while the loop executes
+the client's own statement — so the deadline ran against a **busy server**
+rather than an idle client: measured, a 900 ms statement was cut off at
+110 ms against a 100 ms `ConnTimeout` (#2806, #2807). PostgreSQL and Neo4j
+both ship the equivalent bounds disabled and use TCP keep-alive or NOOP
+chunks for liveness, and GoGraph now does the same. The contract is
+three-way and explicit — zero disables, a positive value bounds, a
+negative one is an error. **This has a security cost, and it is stated
+rather than glossed:** an unauthenticated client that completes the
+handshake and falls silent before LOGON now holds its connection slot
+indefinitely. Set `Options.ConnTimeout` explicitly before exposing the
+server to an untrusted network.
+
+**This release was measured against `v0.14.0` first-hand**, three arms interleaved with a
+noise floor measured in the same rounds
+([docs/benchmarks/v0.14.1.md](docs/benchmarks/v0.14.1.md)). **Of 229 comparable result rows,
+11 survive adjudication — eight improvements and three regressions**, the largest regression
+**+6.54 %** on one 78 µs benchmark. The **Cypher read path is unchanged at all five published
+concurrency levels** and the **durable commit path is unchanged**, still scaling **119×** from
+1 to 256 writers. The clearest gain is the `ORDER BY` key hoist, where nine of ten
+`BoundedOrder` rows move together (`Top` **−2.75 %**, **−2.56 %**, **−2.10 %**); and
+`v0.14.1` **gives back the largest regression `v0.14.0` published**, taking
+`AllNodesScan_PerNodeAllocCost` from 11.60 µs back to 10.98 µs (**−5.39 %**). The counting
+`v0.14.0` added costs **one allocation** on the count-store leaf, measured. See
+[Performance](#performance).
 
 The two compliance invariants remain in force: the module is **100 %
 openCypher TCK-compliant at the execution level** (**3 897/3 897
 scenarios**, preserved rather than extended — no `.feature` file changed
-this cycle) and **100 % ACID-compliant**. `make ci` is green on the
-release tree: race-clean, `golangci-lint` 0 issues, aggregate library
-coverage 88.6 %. **The soak and nightly layers were not run for this
-release**, and it carries **no production certification of its own** — the
-most recent was taken at the `v0.11.0` commit, and the whole-tree soak
-layer has now gone unrun for a seventh consecutive cycle. One openCypher
-divergence also ships open and the TCK is structurally blind to it (rmp
-#2675: a subquery body's final projection is never translated, and zero of
-220 feature files contain `COUNT {`). The module uses the conventional Go
-path `github.com/FlavioCFOliveira/GoGraph` and is fetchable with
-`go get github.com/FlavioCFOliveira/GoGraph@v0.14.0`. See
+this cycle) and **100 % ACID-compliant** — and this is the release in
+which several of the second one's guarantees stopped being merely
+asserted, with named fixes under Isolation (#2814), Consistency (#2778,
+#2792, #2793, #2799), Durability (#2749, #2780, #2794, #2530) and
+Atomicity (#2750, #2783, #2784). **The soak and nightly layers were not
+run for this release**, and it carries **no production certification of
+its own** — the most recent was taken at the `v0.11.0` commit, and the
+whole-tree soak layer has now gone unrun for an eighth consecutive cycle.
+The openCypher divergence `v0.14.0` shipped open (rmp #2675: a subquery
+body's final projection was never translated) **is fixed in this
+release**, along with #2779 and #2781; the TCK remains structurally blind
+to it, since zero of 220 feature files contain `COUNT {`. The module uses
+the conventional Go path `github.com/FlavioCFOliveira/GoGraph` and is
+fetchable with `go get github.com/FlavioCFOliveira/GoGraph@v0.14.1`. See
 [CHANGELOG.md](CHANGELOG.md) and
-[release-notes/v0.14.0.md](release-notes/v0.14.0.md) for the full release
+[release-notes/v0.14.1.md](release-notes/v0.14.1.md) for the full release
 narrative, the behaviour changes a caller must know about, and what the
 release does **not** establish.
 
@@ -344,192 +363,158 @@ coverage. Every change must pass it before being committed.
 ## Performance
 
 **The authoritative, per-release record for this release is
-[docs/benchmarks/v0.14.0.md](docs/benchmarks/v0.14.0.md)** — run environment,
-method, the two noise floors, what the figures do *not* establish, and
-reproduce commands. This section is a summary, not a second source.
+[docs/benchmarks/v0.14.1.md](docs/benchmarks/v0.14.1.md)** — the arms, the two noise floors,
+the adjudication rule, the load conditions, every rejected row, and reproduce commands. This
+section is a summary, not a second source.
 
-**`v0.14.0` was measured against `v0.13.0` first-hand, on three arms.** `A` is a
-worktree of tag `v0.13.0` (`b439283e`), `B` is the release tree (`f8a3ac0b`),
-and **`B2` is a second, independent build of that same `v0.14.0` tree** —
-byte-identical to `B` by sha256 on all twelve packages, so `B` vs `B2` is one
-binary measured against itself in the same rounds, at the same concurrency
-levels, under the same load as the signal it calibrates. All three arms were
-compiled once each by the same `go1.27.1`, then run **interleaved with the arm
-order rotated every round**, `-race` off, `-count=6`, load-gated per round:
-**252 invocations, 252 exiting 0**, across 189.8 minutes on 2026-09-06.
-`go.mod` and `go.sum` are byte-identical between the two trees, so no toolchain
-or dependency change is mixed into any comparison.
+**`v0.14.1` was measured against `v0.14.0` first-hand, on three arms.** `A` is tag `v0.14.0`
+(`7c59a02c`), `B` is the release tree (`efd32fb9`), and **`B2` is a second, independent
+compilation of that same `v0.14.1` tree** — byte-identical to `B` by sha256 on all eighteen
+packages, so `B` vs `B2` is one binary measured against itself in the same rounds, at the same
+concurrency levels, under the same load as the signal it calibrates. All three were compiled
+once each by the same `go1.27.1`, then run **interleaved with the arm order rotated every
+round**, `-race` off, `n=6`, load-gated per round: **192 invocations, 192 exiting 0**, across
+150.9 minutes on 2026-09-08/09. `go.mod` and `go.sum` are byte-identical between the trees.
 
-**The noise floor is scale-dependent, and that governs every verdict below.**
-Above 1 ms the cross-arm same-code floor is **0.17 % at the median and 0.87 % at
-the maximum**; below 100 ns it reaches **37.80 %**, and a **statistically
-significant −6.21 %** was produced by a **byte-identical binary**. A delta is
-therefore reported as a finding only when it is significant **and** exceeds its
-own magnitude band's same-code envelope — 6.21 % under 100 ns, 4.28 % to 10 µs,
-2.89 % to 1 ms, 2.62 % above. **27 rows reached `p<0.05`; nine are findings and
-eighteen are rejected as noise**, four of them in `store/wal`, whose test binary
-is byte-identical between the releases and therefore cannot have changed.
-`allocs/op` behaves in the opposite way: it is **exact across the arms — 0.00 %
-at the median, the p95 *and* the maximum** — so every allocation delta below is
-real.
+**The noise floor is scale- and kind-dependent, and that governs every verdict below.** A
+byte-identical binary measured against itself drifted **0.49 % at the median and 1.95 % at the
+p95** over 243 comparisons — but produced a **statistically significant −26.13 %** on one
+1024-goroutine cell. Serial millisecond-scale benchmarks are where this host is trustworthy
+(same-code maximum **1.68 %** over 84 comparisons); oversubscribed cells below 10 µs are where
+it is not. A delta is a finding only when it is significant **and** exceeds its own
+population's same-code envelope. **25 rows reached `p<0.05`; 11 are findings, 5 inconclusive,
+9 rejected as noise.** `allocs/op` behaves oppositely — **0.00 % at the median and the p95** —
+so every allocation delta below is real.
 
-**Of 272 comparable result rows, nine survive: six improvements and three
-regressions.** The largest regression is **+7.11 %**, on one 11 µs benchmark.
-`cypher/exec`, which carries most of sprint 355's 4 478 changed non-test lines,
-was swept completely (36 benchmark functions, 62 rows) and has an **effect
-geomean of +0.50 % against its own same-binary floor geomean of −0.84 %**: the
-package did not move.
-
-**What a consumer actually feels: the Cypher read path is unchanged, and that is
-the result.** This is the path the release added db-hit and rows-removed
-counting to, so it is the one that matters most.
+**What a consumer actually feels: the Cypher read path is unchanged, and that is the result.**
 
 | Goroutines | 1 | 8 | 64 | 256 | 1024 |
 |---|---:|---:|---:|---:|---:|
-| `ReadTx_LockFree` `v0.13.0` → `v0.14.0` | 3.102 → 3.058 µs | 1.696 → 1.677 µs | 2.252 → 2.152 µs | 2.910 → 2.632 µs | 5.250 → 4.529 µs |
-| `ReadTx_WriterLock` `v0.13.0` → `v0.14.0` | 104.9 → 105.3 µs | 24.73 → 24.84 µs | 24.00 → 24.22 µs | 25.32 → 25.89 µs | 29.91 → 30.94 µs |
+| `ReadTx_LockFree` `v0.14.0` → `v0.14.1` | 3.053 → 3.040 µs | 1.653 → 1.653 µs | 2.149 → 2.236 µs | 2.719 → 2.823 µs | 4.619 → 4.798 µs |
+| `ReadTx_WriterLock` `v0.14.0` → `v0.14.1` | 101.0 → 101.6 µs | 24.78 → 24.75 µs | 23.75 → 23.99 µs | 24.84 → 25.10 µs | 28.35 → 29.49 µs |
 
-**Not one cell is significant** (geomean **−2.43 %** against a block floor of
-−0.71 %), so the **−73 % geomean `v0.13.0` won on this path is held, not
-eroded**, by a release that added counting work to it. The absolute figures
-reproduce `v0.13.0`'s published head arm to within a few percent at **37 and
-114 `allocs/op` on both arms** — two independent campaigns, a day apart,
-agreeing. Note `ns/op` under `RunParallel` is inverse *aggregate* throughput,
-not per-goroutine latency, and the 1024 cells are the weakest data in the
-campaign: an identical binary differed by 38 % at 8 goroutines elsewhere in the
-same session.
+**Not one cell is significant** (smallest `p` = 0.066), and the block's same-binary floor
+geomean of **−4.57 %** is larger than its effect geomean of +1.78 % — the floor exceeds the
+signal. The 64/256/1024 cells carry a same-code drift of up to −26.13 % in this very
+campaign, so the apparent +3.8 % there is **not** reported as a result. Note `ns/op` under
+`RunParallel` is inverse *aggregate* throughput, not per-goroutine latency.
 
-**The release's one large gain — the join reorder — is conditional and must
-never be quoted as a general speed-up.** With `(label, property)` statistics
-populated, the planner now picks the cheaper driver on a disjoint two-component
-match where a label count alone picks the wrong one:
+**The `ORDER BY` key hoist is the release's clearest gain, and the whole family moves
+together.** #2662 hoists a non-projected sort key into its own hidden column so the projection
+stops materialising the whole node per row:
 
-| Benchmark | `v0.13.0` | `v0.14.0` | Δ `sec/op` | speed-up |
+| Benchmark | `v0.14.0` | `v0.14.1` | Δ | p |
 |---|---:|---:|---:|---:|
-| `ZZReorderSkewed/reorder=on` | 267.155 ms | **2.723 ms** | **−98.98 %** | **98.1×** |
-| `ZZReorderLiveHistory/history=quiet` | 27.685 ms | **976.6 µs** | −96.47 % | 28.3× |
-| `ZZReorderLiveHistory/history=live` | 27.695 ms | **987.3 µs** | −96.43 % | 28.0× |
-| `ZZReorderSkewed/reorder=off` — **control** | 267.4 ms | 268.0 ms | `~` (p=0.589) | — |
+| `BoundedOrder/n=000110/Top` | 1.442 ms | **1.402 ms** | **−2.75 %** | 0.020 |
+| `BoundedOrder/n=000010/Top` | 1.410 ms | **1.374 ms** | **−2.56 %** | 0.005 |
+| `BoundedOrder/n=010010/Top` | 4.858 ms | **4.756 ms** | **−2.10 %** | 0.005 |
+| `BoundedOrder/n=000110/Sort` | 8.487 ms | **8.373 ms** | **−1.34 %** | 0.045 |
 
-All three resource vectors move together — `ZZReorderSkewed/reorder=on` also
-falls **47 226.6 KiB → 553.4 KiB** (−98.83 %) and **5 925 706 → 59 968
-`allocs/op`** (−98.99 %) — the plan changes shape between the trees, the two
-controls are flat, and the result set hashes identically on both arms. **It
-fires only** when `RefreshStatistics` has run, the query is a qualifying
-disjoint two-component shape, and the trustworthiness veto does not fire.
-**A workload of ordinary queries sees none of this 98 %**; it sees what
-`reorder=off` measures, which is unchanged.
+Nine of the ten `BoundedOrder` rows move the same way; the four above clear their band's
+1.28 % bar. A coherent family is stronger evidence than any single row.
 
-**The controls confirm the harness rather than the code.** `search/`,
-`search/centrality/` and `store/txn`'s commit path have **no changed source file**
-in this release, and all seven of their benchmarks are non-significant
-(`search` geomean **−0.03 %**, `store/txn` **−0.06 %**) — which is what makes the
-−98.98 % above code and not session drift.
+**`v0.14.1` gives back the largest regression `v0.14.0` published.**
+`AllNodesScan_PerNodeAllocCost` — named in `v0.14.0`'s own report as **that release's biggest
+cost at +7.11 %**, when per-node db-hits counting was added to exactly this path — measures
+**11.60 µs → 10.98 µs (−5.39 %, `p=0.005`)**. Across six rounds `B` and `B2` agree to 0.4 %
+while `A` sits 5.4 % above both, every time. Separately,
+`ExpandDir_InVsOut_Baseline/OUT_deg1_sources`, `v0.14.0`'s **+3.46 %** regression, is back to
+parity at **+0.10 %**.
 
-| Operation | `v0.14.0` | vs `v0.13.0` |
-|---|---|---|
-| `search.Dijkstra` (post-warmup, reusable state) | 8.193 ms, **0 B, 0 allocs** | `~` (p=0.485) |
-| `search.Dijkstra` (large) | 8.210 ms, 1.13 MB, 4 allocs | `~` (p=0.818) |
-| `search.BFS` direction-optimising (power law) | 28.90 ms, **0 B, 0 allocs** | `~` (p=0.485) |
-| `search.Yen` k=100 | 14.71 ms, 459 KB, 1,280 allocs | `~` (p=0.093) |
-| `centrality.Brandes` (random graph) | 7.897 ms, 62 KB, 10 allocs | `~` (p=0.589) |
-| `Mapper.Intern` (hot key, uncontended) | 8.67 ns/op, 0 B, 0 allocs | carried forward from `v0.11.0` |
+**And the costs, because a README that lists only wins is not a faithful one.**
 
-**The zero-allocation hot-path mandate holds, verified rather than asserted:**
-`allocs/op` is byte-identical on all five search benchmarks with **every sample
-equal** (0, 4, 0, 1 280, 10); the `B/op` figures are carried forward from the
-`v0.13.0` campaign, since no file under `search/` changed. `Yen_K100` is worth
-naming — it was `v0.13.0`'s smallest reported regression (+2.42 %) and it did
-**not** regress further here.
+| Benchmark | `v0.14.0` → `v0.14.1` | Δ | p |
+|---|---:|---:|---:|
+| `cypher/exec` `ExpandOut_PerEdge_SingleSource/K=4096` | 78.10 → 83.21 µs | **+6.54 %** | 0.005 |
+| `cypher/exec` `ExpandDir_InVsOut_Baseline/IN_deg1_sources` | 93.27 → 98.69 µs | **+5.81 %** | 0.005 |
+| `cypher/exec` `ExpandOut_PerEdge_SingleSource/K=65536` | 1.271 → 1.327 ms | **+4.37 %** | 0.005 |
+| `bolt/server` `MsgObserve_RealBackend` | 68.17 → 69.63 ns | **+2.13 %** | 0.031 |
+
+**They are not systemic.** Eleven of the fourteen `Expand*` rows are flat, including all four
+`ExpandIn_PerEdge_*` (−0.53 % to +0.42 %) and all four `ExpandIn_TypeFiltered_*` (−0.57 % to
++0.30 %). The cost is confined to the OUT single-source per-edge path and the IN deg1-sources
+baseline. `cypher/exec/expand.go` changed in this window, which is the obvious candidate —
+but **attribution is a hypothesis, not established**: no arm was built with the destination-
+label admission disabled.
+
+**Allocations moved, and every figure here is real because the floor is exactly zero.**
+`CountAllNodes` goes **27 → 28 `allocs/op`** and **3 296 → 3 488 `B/op`** with *every sample
+equal in both arms* — #2777's "one integer add per `Init`" showing up exactly where it should
+— and the count-pushdown paths take **+16 `B/op`**. `ReadTx_WriterLock` takes **+2
+`allocs/op` and +352 `B/op`** identically at all five concurrency levels, plausibly #2814's
+plan footprint. **No allocation count fell, and none rose by more than two.**
 
 **Durable write throughput, at the concurrency levels the module publishes**
-(`store/txn` `BenchmarkCommitConcurrent`, a hand-rolled `go func` fan-out behind
-a `WaitGroup`, median of 6, re-measured at both trees):
+(`store/txn` `BenchmarkCommitConcurrent`, median of 6, re-measured at both trees):
 
 | Writers | 1 | 8 | 64 | 256 | 1024 |
 |---|---:|---:|---:|---:|---:|
-| `v0.13.0` | 3.687 ms | 885.4 µs | 120.2 µs | 30.64 µs | *not measured* |
-| `v0.14.0` | 3.672 ms | 920.4 µs | 119.9 µs | 30.82 µs | *not measured* |
-| scaling vs own level 1 (`v0.14.0`) | 1.00× | 3.99× | 30.62× | **119.14×** | — |
+| `v0.14.0` | 3.732 ms | 866.4 µs | 121.5 µs | 31.31 µs | *not measured* |
+| `v0.14.1` | 3.713 ms | 897.2 µs | 120.3 µs | 31.22 µs | *not measured* |
+| scaling vs own level 1 (`v0.14.1`) | 1.00× | 4.14× | 30.87× | **118.93×** | — |
 
-**The durable commit path scales 119–120× from 1 to 256 concurrent writers,
-identically on both arms**; no cell is significant (geomean +0.95 % against a
-floor of −0.30 %). The single-writer rate is this device's fsync rate, and the
-gain is group-commit fsync amortisation. **This instrument stops at 256**, so
-the published 1024 level is measured for reads and metrics but **not for durable
-commits**; the last figure there remains `v0.11.0`'s **111,483 ops/s** (store
-API) / **115,301 ops/s** (Cypher engine) at 422.05 commits per fsync, carried
-forward and not re-measured since.
+**The durable commit path scales 119× from 1 to 256 concurrent writers and is unchanged.**
+Three of four cells are non-significant; `goroutines=8` at +3.56 % is reported
+**inconclusive** rather than as a result. **This instrument stops at 256**, so the published
+1024 level remains unmeasured for durable commits.
 
-**Concurrency scaling elsewhere.** `graph`, `graph/mvcc` and
-`internal/metrics/prometheus` compile to **byte-identical binaries** between the
-releases, so their full five-level ladders are floors measured at every level —
-including 1024. `graph/mvcc` shows **no significant cell** across twenty
-(geomean −0.07 %), and its lock-free read gate `Gate_WeakParallel` scales
-**8.0×** from 1 to 1024 goroutines, agreeing to within 2 % with the 8.19×/8.12×
-`v0.13.0` measured in a different session. The hot-key intern probe
-(`Mapper_Intern_HotKey_Parallel`) has no significant cell either, the arms
-agreeing to **0.85 % at level 1 and 0.03–0.35 % above it**.
+**The controls confirm the harness rather than the code.** No file under `search/` changed in
+this window, and all five headline benchmarks are non-significant:
 
-**And the costs, because a README that lists only wins is not a faithful one.**
-Three regressions survive adjudication, and **all three have byte-identical
-`B/op` and `allocs/op` with every sample equal** — more work per operation, not
-more garbage:
+| Operation | `v0.14.1` | vs `v0.14.0` |
+|---|---|---|
+| `search.Dijkstra` (post-warmup, reusable state) | 8.081 ms, **0 B, 0 allocs** | `~` (p=0.471) |
+| `search.Dijkstra` (large) | 8.123 ms | `~` (p=0.471) |
+| `search.BFS` direction-optimising (power law) | 28.50 ms, **0 B, 0 allocs** | `~` (p=0.066), the largest — **unresolved, not flat** |
+| `search.Yen` k=100 | 14.49 ms | `~` (p=0.471) |
+| `centrality.Brandes` (random graph) | 7.776 ms | `~` (p=0.173) |
 
-| Benchmark | `v0.13.0` → `v0.14.0` | Δ | p |
-|---|---:|---:|---:|
-| `cypher/exec` `AllNodesScan_PerNodeAllocCost` | 10.97 → 11.75 µs | **+7.11 %** | 0.002 |
-| `cypher/exec` `ExpandDir_InVsOut_Baseline/OUT_deg1_sources` | 142.2 → 147.1 µs | **+3.46 %** | 0.009 |
-| `cypher/exec` `RelTypeProbe_Column` | 1.490 → 1.763 ns | **+18.32 %** | 0.002 |
+**The zero-allocation hot-path mandate holds, verified rather than asserted:** `allocs/op` is
+identical on `Dijkstra_PostWarmup` and `BFSDirectionOpt_PowerLaw` with **every sample equal**
+in both arms.
 
-The first is the most coherent: the benchmark exists to price the per-node cost
-of the all-nodes scan, and this release added per-node db-hits counting to
-exactly that path — but **attribution is a hypothesis, not established**, since
-no third arm with the counting disabled was built. The third is a **0.27
-nanosecond** difference in the band where a byte-identical binary produced a
-significant −6.21 %, and is the weakest of the three. The two surviving
-improvements outside the reorder are
-`RelTypeProbe_ReverseRecovery/map+recovery` (**−25.87 %**, 7.046 → 5.224 ns) and
-`PlanReusePhasesParallel/4full` (**−4.90 %** at 8 goroutines, **−8.50 %** at 64).
+**The durability fix is priced, and it has no baseline because it is new.** The five
+`store/checkpoint` benchmarks do not exist at `v0.14.0`, so nothing is compared and nothing is
+carried over. Measured within this release: reading the snapshot back costs **14.73 ms against
+a 150.3 ms checkpoint — 9.8 %** — and #2780's decode pass adds **0.46 ms** on top, 0.31 % of a
+checkpoint, with `MapperDecodeOnly` at 235.6 µs carrying no filesystem call at all.
 
-**Allocations fell and nothing regressed one.** Beyond the reorder rows, the
-shortest-path operators that #2763 *added* per-run slot accumulation to allocate
-**less**: `ShortestPath_Layered` and `_LayeredTyped` both **126 → 108
-(−14.29 %)**, `_HighDegreeFan` 317 → 314. That reduction is measured, not
-explained. Nothing else in the campaign moved an allocation count.
+**`bolt/server` closes a gap `v0.14.0` named as its own.** That report recorded the whole
+`TxBookkeeping_*` family as unmeasured; all 24 `bolt/server` benchmarks were run here,
+including its eleven, and **none is significant**.
 
-**Footprint** closes a gap `v0.13.0` named as unmeasured. The `graph/index/count`
-test binary is byte-identical across all three arms, and `BenchmarkStoreFootprint`
-reports **123 712 `B/store` on every one of 18 samples, ±0.00 %**. **On-disk
-footprint remains unmeasured** — no benchmark reporting bytes written to disk
-exists in both trees.
+**What this release does not establish.** **`cypher` is sampled, not covered — 60 of 149
+benchmark functions**, the full sweep costing 454 s per arm against 204 s for the targeted
+set, which is disproportionate for a patch release. `graph/index{,/btree,/hash}`,
+`graph/lpg`, `store/snapshot`, `store/wal` and six further concurrency ladders were sized and
+**dropped**, each with its reason recorded. **Latency percentiles at the published
+concurrency levels are unmeasured for an eighth consecutive cycle**; 1 024 concurrent writers
+on the durable path is unmeasured; on-disk footprint growth is unmeasured; `bench/mtaudit`'s
+engine-under-writer ladder remains the highest-value measurement not made, now for three
+releases. The soak and nightly layers were not run, no `-race` figures and no profiles were
+captured, **attribution is established for nothing**, and everything here is **one host, one
+architecture**: Apple M4, 10 cores, `darwin/arm64`, macOS 26.6.2. The floors above are
+properties of that host and the adjudication bars derived from them do not transfer.
 
-**What this release does not establish.** **Latency percentiles at the published
-concurrency levels are unmeasured for a seventh consecutive cycle** — the
-figures above are per-op cost and aggregate throughput, not a distribution.
-**1024 concurrent writers on the durable path** is unmeasured. **43 of the 57
-benchmarks that are genuinely concurrent in both trees were not exercised**,
-including the whole `bolt/server` `TxBookkeeping_*` family (on a release that
-changed `bolt/server/plan_meta.go` by 103 lines) and `bench/mtaudit`'s
-engine-under-writer ladder, which remains **the single highest-value measurement
-not made, now for two consecutive releases**. `cypher` is **sampled, not
-covered** — 62 of its 144 benchmark functions, 43 %. The soak and nightly layers
-were not run, no `-race` figures and no profiles were captured, attribution to
-individual commits is established only for the reorder, and everything here is
-**one host, one architecture**: Apple M4, 10 cores, `darwin/arm64`. The floors
-above are properties of that host and the adjudication bars derived from them do
-not transfer.
+> **Reproduce:** the exact commands — the three-arm interleaved harness, the load gate, the
+> whole-campaign load sampler and the noise-floor procedure — are in
+> [docs/benchmarks/v0.14.1.md](docs/benchmarks/v0.14.1.md) §7 and were used verbatim from
+> [docs/benchmarks/v0.14.1-raw/](docs/benchmarks/v0.14.1-raw/); the general workflow is
+> `make bench BENCH_PATTERN=. BENCH_COUNT=5` and [docs/profiling.md](docs/profiling.md).
+> Hardware deltas should be reported in CHANGELOG.md alongside any number that regresses
+> beyond the local `benchstat` regression gate (`scripts/bench_gate.sh`), which is run
+> locally to compare a candidate against its baseline before the change lands.
 
-> **Reproduce:** the exact commands, including the three-arm interleaved
-> harness, the load gate and the noise-floor procedure, are in
-> [docs/benchmarks/v0.14.0.md](docs/benchmarks/v0.14.0.md) §9 and were used
-> verbatim from [docs/benchmarks/v0.14.0-raw/](docs/benchmarks/v0.14.0-raw/);
-> the general workflow is `make bench BENCH_PATTERN=. BENCH_COUNT=5` and
-> [docs/profiling.md](docs/profiling.md).
-> Hardware deltas should be reported in CHANGELOG.md alongside
-> any number that regresses beyond the local `benchstat` regression
-> gate (`scripts/bench_gate.sh`), which is run locally to compare a
-> candidate against its baseline before the change lands.
+**Figures from earlier releases, kept and labelled rather than relabelled.** The following are
+**not** `v0.14.1` measurements and were not re-measured by this campaign: the conditional
+join-reorder result (`ZZReorderSkewed/reorder=on`, **267.155 ms → 2.723 ms, −98.98 %**) is a
+**`v0.13.0` → `v0.14.0`** figure from the `v0.14.0` campaign, and fires only when
+`RefreshStatistics` has run on a qualifying disjoint two-component shape; `Mapper.Intern`
+(hot key, uncontended) at **8.67 ns/op, 0 B, 0 allocs** is carried forward from **`v0.11.0`**;
+and the 1 024-level durable write rate of **111,483 ops/s** (store API) / **115,301 ops/s**
+(Cypher engine) at 422.05 commits per fsync is **`v0.11.0`**'s and has not been re-measured
+since.
+
 
 Per-release reports live in [docs/benchmarks/](docs/benchmarks/), one per tag;
 per-change tracking is in [docs/benchmarks/history/](docs/benchmarks/history/)

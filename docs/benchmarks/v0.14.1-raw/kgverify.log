@@ -1,0 +1,97 @@
+go run ./cmd/kgverify -exclude task-status-disagrees-with-rmp,provenance-no-node
+kgverify — knowledge-graph fidelity gate
+  repo             /Users/flaviocfo/dev/xumiga/GoGraph
+  head             efd32fb9 (release/0.14.1)
+  baseline         measured 2026-09-08 at 0e7e982d (release/0.14.1), rmp #2719
+
+harness (floors proved, so a pass cannot be vacuous)
+  declarations parsed         29165
+  .go files parsed             3070
+  symbol nodes in graph       27958
+  labels documented              23
+  edge forms documented          61
+  symbol coverage of tree     95.4%  (27823 declarations matched by file+name)
+
+per-package parity (acceptance criterion 1 of rmp #2719)
+  packages in the tree          138
+  modelled by the graph         105  (at least one symbol node)
+  at parity                     101  (every declaration has a node)
+  unresolved package keys         3  (node keys naming no package in the tree)
+  widest gaps:
+    github.com/FlavioCFOliveira/GoGraph/bolt/server            decls   835  nodes   792  gap    49
+    github.com/FlavioCFOliveira/GoGraph/cypher                 decls  4520  nodes  4483  gap    40
+    github.com/FlavioCFOliveira/GoGraph/store/recovery         decls   413  nodes   406  gap     7
+    github.com/FlavioCFOliveira/GoGraph/cypher/exec            decls  2618  nodes  2621  gap     1
+  full table: go run ./cmd/kgverify -emit packages
+
+CHECK                                ACTUAL  BASELINE  STATUS
+fixture-fabrication-present               0         0  ok
+symbol-absent                             4         0  FAIL
+symbol-file-absent                       40        40  ok
+symbol-kind-mismatch                     30        29  FAIL
+symbol-pkg-mismatch                      68        68  ok
+task-id-not-int                           0         0  ok
+task-legacy-identity                      0         0  ok
+task-id-duplicated                        0         0  ok
+task-stub                                 0         0  ok
+task-status-invalid                       0         0  ok
+task-status-disagrees-with-rmp           12         0  FAIL
+task-absent-in-rmp                        0         0  ok
+provenance-no-node                      257       160  FAIL
+provenance-no-gitcommit                   0         0  ok
+edge-off-model                           60        60  ok
+edge-type-undocumented                  118       118  ok
+label-undocumented                       18        18  ok
+component-path-missing                   25        25  ok
+component-path-absent                     0         0  ok
+package-symbol-gap                        4         0  FAIL
+
+symbol-absent (4, baseline 0) — symbol-tier node naming a declaration absent from the tree
+  - Test TestHandshakeTimeoutDefaults at github.com/FlavioCFOliveira/GoGraph/bolt/server (bolt/server/slowloris_default_test.go) is declared nowhere in the tree
+  - Test TestNewServer_DefaultStatementTimeoutSecureByDefault at github.com/FlavioCFOliveira/GoGraph/bolt/server (bolt/server/autocommit_stmt_timeout_test.go) is declared nowhere in the tree
+  - Test TestNewServer_DefaultsConnTimeout at github.com/FlavioCFOliveira/GoGraph/bolt/server (bolt/server/slowloris_default_test.go) is declared nowhere in the tree
+  - Test TestSession_AutocommitCarriesDefaultStmtTimeout at github.com/FlavioCFOliveira/GoGraph/bolt/server (bolt/server/autocommit_stmt_timeout_test.go) is declared nowhere in the tree
+
+symbol-kind-mismatch (30, baseline 29) — name exists in the tree but never under the node's label
+  - Benchmark TestThreeWay at github.com/FlavioCFOliveira/GoGraph/bench/comparison (bench/comparison/threeway_test.go) is declared, but never as a Benchmark
+  - Function LabelCountAsOf at graph/lpg is declared, but never as a Function
+  - Function NodeLabelsInUse at github.com/FlavioCFOliveira/GoGraph/graph/lpg (graph/lpg/introspect.go) is declared, but never as a Function
+  - Function OutDegreeMatchingBoundedByID at lpg is declared, but never as a Function
+  - Function PropertyKeysInUse at github.com/FlavioCFOliveira/GoGraph/graph/lpg (graph/lpg/introspect.go) is declared, but never as a Function
+  - Function RangeCount at github.com/FlavioCFOliveira/GoGraph/graph/index/btree (graph/index/btree/index.go) is declared, but never as a Function
+  - Function RelationshipTypesInUse at github.com/FlavioCFOliveira/GoGraph/graph/lpg (graph/lpg/introspect.go) is declared, but never as a Function
+  - Function configureKeepAlive at github.com/FlavioCFOliveira/GoGraph/bolt/server (bolt/server/keepalive.go) is declared, but never as a Function
+  … 22 more (use -v)
+
+task-status-disagrees-with-rmp (12, baseline 0) — graph Task.status disagrees with rmp, the authority
+  - Task 2060: graph says SPRINT, rmp says BACKLOG
+  - Task 2061: graph says SPRINT, rmp says BACKLOG
+  - Task 2063: graph says SPRINT, rmp says BACKLOG
+  - Task 2064: graph says SPRINT, rmp says BACKLOG
+  - Task 2069: graph says SPRINT, rmp says BACKLOG
+  - Task 2559: graph says SPRINT, rmp says BACKLOG
+  - Task 2595: graph says SPRINT, rmp says BACKLOG
+  - Task 2610: graph says SPRINT, rmp says BACKLOG
+  … 4 more (use -v)
+
+provenance-no-node (257, baseline 160) — declaration in a touched file with no node at all, of 3137 declarations in 164 touched .go files
+  - Function at (cmd/kgverify/reads.go) was touched in the audited range and has no graph node
+  - Function boltCount (examples/31_metrics_observability/main.go) was touched in the audited range and has no graph node
+  - Function boltEncode (examples/31_metrics_observability/main.go) was touched in the audited range and has no graph node
+  - Function boolFact (examples/31_metrics_observability/main.go) was touched in the audited range and has no graph node
+  - Function boolWord (examples/31_metrics_observability/main.go) was touched in the audited range and has no graph node
+  - Function buildAdjList (examples/31_metrics_observability/main.go) was touched in the audited range and has no graph node
+  - Function buildInventory (cmd/kgverify/inventory.go) was touched in the audited range and has no graph node
+  - Function buildLPG (examples/31_metrics_observability/main.go) was touched in the audited range and has no graph node
+  … 249 more (use -v)
+
+package-symbol-gap (4, baseline 0) — package the graph models where a declaration has no symbol node
+  - github.com/FlavioCFOliveira/GoGraph/bolt/server: 835 declarations, 792 nodes, 49 declarations with no node
+  - github.com/FlavioCFOliveira/GoGraph/cypher/exec: 2618 declarations, 2621 nodes, 1 declarations with no node
+  - github.com/FlavioCFOliveira/GoGraph/cypher: 4520 declarations, 4483 nodes, 40 declarations with no node
+  - github.com/FlavioCFOliveira/GoGraph/store/recovery: 413 declarations, 406 nodes, 7 declarations with no node
+
+FAIL: 3 of 20 checks exceed their baseline: symbol-absent, symbol-kind-mismatch, package-symbol-gap
+exit status 1
+make: *** [ci-kg-verify] Error 1
+MAKE_EXIT=2

@@ -1,0 +1,90 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkReadTx_WriterLock           	   10000	    100821 ns/op	   48633 B/op	     116 allocs/op
+BenchmarkReadTx_WriterLock-8         	   47337	     24443 ns/op	   48639 B/op	     116 allocs/op
+BenchmarkReadTx_WriterLock-64        	   49851	     23843 ns/op	   48642 B/op	     116 allocs/op
+BenchmarkReadTx_WriterLock-256       	   45990	     24960 ns/op	   48647 B/op	     116 allocs/op
+BenchmarkReadTx_WriterLock-1024      	   37323	     28378 ns/op	   48665 B/op	     116 allocs/op
+BenchmarkReadTx_LockFree             	  390490	      3013 ns/op	    4187 B/op	      37 allocs/op
+BenchmarkReadTx_LockFree-8           	  649857	      1585 ns/op	    4173 B/op	      37 allocs/op
+BenchmarkReadTx_LockFree-64          	  600966	      2032 ns/op	    4231 B/op	      37 allocs/op
+BenchmarkReadTx_LockFree-256         	  384721	      3187 ns/op	    4253 B/op	      37 allocs/op
+BenchmarkReadTx_LockFree-1024        	  408145	      5001 ns/op	    4179 B/op	      37 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkReadTx_WriterLock           	   10000	    101503 ns/op	   48633 B/op	     116 allocs/op
+BenchmarkReadTx_WriterLock-8         	   47775	     24930 ns/op	   48639 B/op	     116 allocs/op
+BenchmarkReadTx_WriterLock-64        	   48409	     24053 ns/op	   48642 B/op	     116 allocs/op
+BenchmarkReadTx_WriterLock-256       	   45660	     26150 ns/op	   48649 B/op	     116 allocs/op
+BenchmarkReadTx_WriterLock-1024      	   42232	     29265 ns/op	   48674 B/op	     116 allocs/op
+BenchmarkReadTx_LockFree             	  378710	      3084 ns/op	    4199 B/op	      37 allocs/op
+BenchmarkReadTx_LockFree-8           	  648306	      1719 ns/op	    4168 B/op	      37 allocs/op
+BenchmarkReadTx_LockFree-64          	  454810	      2344 ns/op	    4240 B/op	      37 allocs/op
+BenchmarkReadTx_LockFree-256         	  456598	      3001 ns/op	    4170 B/op	      37 allocs/op
+BenchmarkReadTx_LockFree-1024        	  377930	      3425 ns/op	    4327 B/op	      37 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkReadTx_WriterLock           	   10000	    104042 ns/op	   48633 B/op	     116 allocs/op
+BenchmarkReadTx_WriterLock-8         	   46868	     24624 ns/op	   48639 B/op	     116 allocs/op
+BenchmarkReadTx_WriterLock-64        	   48830	     23840 ns/op	   48642 B/op	     116 allocs/op
+BenchmarkReadTx_WriterLock-256       	   47919	     24776 ns/op	   48646 B/op	     116 allocs/op
+BenchmarkReadTx_WriterLock-1024      	   37782	     31316 ns/op	   48687 B/op	     116 allocs/op
+BenchmarkReadTx_LockFree             	  381801	      3028 ns/op	    4188 B/op	      37 allocs/op
+BenchmarkReadTx_LockFree-8           	  628484	      1783 ns/op	    4172 B/op	      37 allocs/op
+BenchmarkReadTx_LockFree-64          	  493561	      2350 ns/op	    4172 B/op	      37 allocs/op
+BenchmarkReadTx_LockFree-256         	  462681	      2558 ns/op	    4169 B/op	      37 allocs/op
+BenchmarkReadTx_LockFree-1024        	  246886	      4967 ns/op	    4191 B/op	      37 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkReadTx_WriterLock           	   10000	    101036 ns/op	   48633 B/op	     116 allocs/op
+BenchmarkReadTx_WriterLock-8         	   47558	     24677 ns/op	   48639 B/op	     116 allocs/op
+BenchmarkReadTx_WriterLock-64        	   49537	     23944 ns/op	   48643 B/op	     116 allocs/op
+BenchmarkReadTx_WriterLock-256       	   46078	     24858 ns/op	   48647 B/op	     116 allocs/op
+BenchmarkReadTx_WriterLock-1024      	   38174	     27948 ns/op	   48676 B/op	     116 allocs/op
+BenchmarkReadTx_LockFree             	  386832	      3022 ns/op	    4181 B/op	      37 allocs/op
+BenchmarkReadTx_LockFree-8           	  628765	      1652 ns/op	    4169 B/op	      37 allocs/op
+BenchmarkReadTx_LockFree-64          	  495786	      2286 ns/op	    4351 B/op	      37 allocs/op
+BenchmarkReadTx_LockFree-256         	  498064	      2415 ns/op	    4267 B/op	      37 allocs/op
+BenchmarkReadTx_LockFree-1024        	  329251	      4436 ns/op	    4396 B/op	      37 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkReadTx_WriterLock           	   10000	    101778 ns/op	   48633 B/op	     116 allocs/op
+BenchmarkReadTx_WriterLock-8         	   47977	     24821 ns/op	   48639 B/op	     116 allocs/op
+BenchmarkReadTx_WriterLock-64        	   50226	     24370 ns/op	   48642 B/op	     116 allocs/op
+BenchmarkReadTx_WriterLock-256       	   46470	     25241 ns/op	   48649 B/op	     116 allocs/op
+BenchmarkReadTx_WriterLock-1024      	   36621	     36751 ns/op	   48680 B/op	     116 allocs/op
+BenchmarkReadTx_LockFree             	  387609	      3052 ns/op	    4186 B/op	      37 allocs/op
+BenchmarkReadTx_LockFree-8           	  728353	      1654 ns/op	    4171 B/op	      37 allocs/op
+BenchmarkReadTx_LockFree-64          	  541579	      2187 ns/op	    4191 B/op	      37 allocs/op
+BenchmarkReadTx_LockFree-256         	  490284	      2645 ns/op	    4251 B/op	      37 allocs/op
+BenchmarkReadTx_LockFree-1024        	  367664	      4683 ns/op	    4200 B/op	      37 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkReadTx_WriterLock           	   10000	    104537 ns/op	   48633 B/op	     116 allocs/op
+BenchmarkReadTx_WriterLock-8         	   46666	     24836 ns/op	   48639 B/op	     116 allocs/op
+BenchmarkReadTx_WriterLock-64        	   49276	     24028 ns/op	   48642 B/op	     116 allocs/op
+BenchmarkReadTx_WriterLock-256       	   45178	     25557 ns/op	   48646 B/op	     116 allocs/op
+BenchmarkReadTx_WriterLock-1024      	   35920	     29706 ns/op	   48663 B/op	     116 allocs/op
+BenchmarkReadTx_LockFree             	  386740	      3083 ns/op	    4189 B/op	      37 allocs/op
+BenchmarkReadTx_LockFree-8           	  698976	      1576 ns/op	    4171 B/op	      37 allocs/op
+BenchmarkReadTx_LockFree-64          	  576961	      2032 ns/op	    4169 B/op	      37 allocs/op
+BenchmarkReadTx_LockFree-256         	  433729	      3047 ns/op	    4170 B/op	      37 allocs/op
+BenchmarkReadTx_LockFree-1024        	  451122	      4914 ns/op	    4180 B/op	      37 allocs/op
+PASS

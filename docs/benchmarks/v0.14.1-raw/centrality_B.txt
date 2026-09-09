@@ -1,0 +1,36 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/search/centrality
+cpu: Apple M4
+BenchmarkBrandes_RandomGraph-10    	     154	   7805966 ns/op	   62242 B/op	      10 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/search/centrality
+cpu: Apple M4
+BenchmarkBrandes_RandomGraph-10    	     154	   7800221 ns/op	   62208 B/op	      10 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/search/centrality
+cpu: Apple M4
+BenchmarkBrandes_RandomGraph-10    	     152	   7709733 ns/op	   62243 B/op	      10 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/search/centrality
+cpu: Apple M4
+BenchmarkBrandes_RandomGraph-10    	     152	   7805577 ns/op	   62243 B/op	      10 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/search/centrality
+cpu: Apple M4
+BenchmarkBrandes_RandomGraph-10    	     154	   7751430 ns/op	   62208 B/op	      10 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/search/centrality
+cpu: Apple M4
+BenchmarkBrandes_RandomGraph-10    	     153	   7729692 ns/op	   62208 B/op	      10 allocs/op
+PASS
