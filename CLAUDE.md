@@ -66,9 +66,30 @@ When asking for clarification:
 - Present multiple options labelled `a)`, `b)`, `c)`, … and explicitly state which option you recommend.
 - When there are multiple open questions, ask them **one at a time**, sequentially — never bundle several questions into a single prompt.
 
+### Delegation to sub-agents
+
+**Every piece of work in this project is delegated to a specialist sub-agent**, chosen as the best available match for the objectives that work must achieve. The coordinating agent never performs the work itself.
+
+**Exactly one sub-agent runs at a time.** Use as many sub-agents as the objective needs — in series, never in parallel: each one finishes before the next starts.
+
+**The only exception is the user's explicit prior authorisation**, granted for a named piece of work and revoked automatically when that work ends; even then, never more than two at a time. The full contract is in [Sub-Agents (Specialists)](#sub-agents-specialists).
+
+### Language
+
+Everything written and everything interpreted must be **explicit**, **objective**, **closed**, and **concise**:
+
+- **Explicit** — the intent is stated, never left to be inferred.
+- **Objective** — what must be executed is stated.
+- **Closed** — the scope of the work is bounded.
+- **Concise** — few words carry the meaning.
+
+This governs every written output: documentation, task and sprint records, sub-agent briefs, commit messages, code comments, and replies to the user.
+
 ### Documentation language and quality
 
-All project documentation must be written in **English**, at the highest standard: no spelling, grammar, or syntactic errors. Use clear, simple, unambiguous technical language aimed at human readers.
+All project documentation — from the top-level `README.md` to the specification and to the code documentation — must be written in **English**, at the highest professional standard: no spelling, grammar, or syntactic errors. Use clear, simple, unambiguous technical language aimed at human readers.
+
+Every document must also satisfy the four properties in [Language](#language): explicit, objective, closed, and concise.
 
 Documentation must be **accurate and faithful to the code** — never document intent, only what is actually implemented.
 
@@ -157,6 +178,21 @@ is skipped or reordered.
   compliance gates a change drags in, what `make ci` still guarantees, and how to
   read its exit status — is in [Tests and validation](#concrete-applications).
 
+### Volunteering and proactivity
+
+- **Action is directed strictly at the objective of the work in hand.** Nothing
+  outside that objective is started, changed, or explored.
+- **Starting any work that was not explicitly requested is forbidden** — no
+  speculative feature, no adjacent refactor, no unrequested improvement, no
+  groundwork for work nobody has asked for.
+- **A need identified outside the scope of the work in hand is put to the user**,
+  who decides whether and when it is worked; it is never started proactively (see
+  [Decision autonomy](#decision-autonomy)).
+
+This is the discipline the **Development is FOCUSED AND OBJECTIVE** rule imposes
+inside a task (see [Development workflow](#development-workflow)), applied to
+every piece of work.
+
 ### Skills that own an operation
 
 Three skills own whole classes of operation in this project. When an operation
@@ -165,17 +201,17 @@ never reproduced by hand because the direct command looked shorter.
 
 | Skill | Owns |
 |---|---|
-| `gitflow` | **Every git WRITE operation** — `add`, `commit`, `branch`, `checkout`/`switch`, `merge`, `tag`, `push`, and anything else that changes a ref, the index, or the working tree. See [Git command execution](#git-command-execution). |
-| `roadmap-manager` | **Every operation that coordinates or maintains tasks and sprints** — creating, editing, ordering, transitioning, closing, commenting, and every other write to `rmp`. See [Single source of truth](#single-source-of-truth). |
-| `knowledge-authority` | **Every task that turns on knowing what the project *is*** — its structure, components, files, features, tests, and provenance. See [Knowledge Graph](#knowledge-graph). |
+| `gitflow` | **Every git WRITE operation** — `add`, `commit`, `branch`, `checkout`/`switch`, `merge`, `tag`, `push`, and anything else that changes a ref, the index, or the working tree — executed following the gitflow branching-model best practice for this repository. See [Git command execution](#git-command-execution). |
+| `roadmap-manager` | **The coordination and management of tasks, sprints, and comments, and every `rmp` CLI operation with the sole exception of `rmp graph …`** — creating, editing, ordering, transitioning, closing, commenting, and every read. See [Single source of truth](#single-source-of-truth). |
+| `knowledge-authority` | **The project Knowledge Graph, exclusively** — what the project *is*: its structure, components, files, features, tests, and provenance — and therefore every `rmp graph …` invocation, read or write. See [Knowledge Graph](#knowledge-graph). |
 
 - **The skill is the route, not a formality.** Each carries the model, the
   conventions, and the safeguards of its domain; going around it discards exactly
   the knowledge it exists to apply.
-- **Read-only enquiries are not owned.** A plain `git log`, an `rmp` query for a
-  single fact, or a graph query issued to answer one question needs no skill. What
-  is owned is the operation that *changes* something, and — for
-  `knowledge-authority` — the task whose substance is the project's own knowledge.
+- **Only read-only git is unowned.** `git status`, `log`, `diff`, `show`, and
+  `blame` need no skill. Every `rmp` invocation is executed through
+  `roadmap-manager`, and every `rmp graph` invocation through
+  `knowledge-authority` — reads exactly as much as writes.
 - **Ownership does not transfer authority over the facts.** `knowledge-authority`
   answers where things are and how they relate; for what the code actually *does*,
   the primary sources still govern (see [Knowledge Graph](#knowledge-graph) and the
@@ -201,6 +237,8 @@ never reproduced by hand because the direct command looked shorter.
 - **Precedence.** This rule overrides the general guidance to group independent commands or tool calls into a single message (see [Token Economy](#token-economy)): saving a round trip never justifies combining a `git` command with anything else. Isolation makes each command's exit status unambiguous and keeps a failed step from being masked by the next one.
 
 ### Self-contained development
+
+**Executing work only partially is forbidden.** Work that is started is carried through to full completion; nothing is left half-done or partially done.
 
 Every development cycle must be **self-contained**: never deliver only part of a task. Each cycle must produce a complete, usable result.
 
@@ -272,7 +310,7 @@ If the answer to any of these is "no" or "I do not know", the cheap alternative 
 - Examples:
   - `git log`, `git show`, `git diff`, `git blame` locally, instead of consulting the repository's web interface.
   - `gh issue view`, `gh pr view`, `gh api` (the GitHub CLI), instead of opening the corresponding web pages.
-  - `rmp` for everything concerning tasks, sprints, and the Knowledge Graph (see [Planning and Task Execution](#planning-and-task-execution) and [Knowledge Graph](#knowledge-graph)) — which is in any case the single source of truth.
+  - `rmp` — through `roadmap-manager`, and `rmp graph …` through `knowledge-authority` — for everything concerning tasks, sprints, and the Knowledge Graph (see [Planning and Task Execution](#planning-and-task-execution) and [Knowledge Graph](#knowledge-graph)), which is in any case the single source of truth.
   - `--help`, `man`, or the command's own documentation, instead of searching for the same documentation online.
   - Filtering and aggregating data locally (for example with `grep`, `jq`, `sort`, `wc`), instead of pulling the full set into context.
 - Reserve the more expensive routes — web, browser, remote services — for the cases where **no** local command can produce the same result.
@@ -286,7 +324,7 @@ If the answer to any of these is "no" or "I do not know", the cheap alternative 
 
 **Consulting this project.**
 
-- Consult the **Knowledge Graph first** (see [Knowledge Graph](#knowledge-graph)). Reading the graph is cheaper than reading files or walking the code for the same answer — this is precisely what the graph is for.
+- Consult the **Knowledge Graph first**, through `knowledge-authority` (see [Knowledge Graph](#knowledge-graph)). Reading the graph is cheaper than reading files or walking the code for the same answer — this is precisely what the graph is for.
 - Use targeted searches (`grep`/`glob` with precise patterns) instead of reading whole files to find a reference.
 - When reading a large file, read only the range of lines needed rather than the whole file.
 - For wide sweeps — many files or directories — **delegate to a sub-agent** that returns only the conclusion, instead of pulling the content of every file into the main context.
@@ -332,8 +370,8 @@ If the answer to any of these is "no" or "I do not know", the cheap alternative 
 **Model, effort, and parallelism.**
 
 - Match the model and the reasoning-effort level to the real difficulty of each operation (see [Execution](#execution)): simple, mechanical operations do not justify the most expensive model or the highest effort.
-- Group tool calls that are independent of one another into a single message, instead of issuing them one at a time. The sole exception is `git`: every `git` command runs alone, never grouped or chained with another command (see [Git command execution](#git-command-execution)).
-- Respect the limit of two concurrent evaluations or audits (see [Execution](#execution)): excessive parallelism multiplies cost without accelerating the result.
+- Group tool calls that are independent of one another into a single message, instead of issuing them one at a time. Two exceptions: every `git` command runs alone, never grouped or chained with another command (see [Git command execution](#git-command-execution)); and a sub-agent is never grouped with anything, because exactly one sub-agent runs at a time (see [Delegation to sub-agents](#delegation-to-sub-agents)).
+- Respect the one-sub-agent-at-a-time rule, and the ceiling of two even once the user has authorised concurrency (see [Execution](#execution)): excessive parallelism multiplies cost without accelerating the result.
 
 ### Safeguard
 
@@ -347,7 +385,7 @@ If, while executing, you find that the cheap route you chose is not producing th
 
 ### Single source of truth
 
-Use the `rmp` CLI (available system-wide) as the **sole source of truth** for all planning and task tracking in this project. No other tool or method should be used for this purpose. **Every operation that coordinates or maintains tasks and sprints is executed through the `roadmap-manager` skill**, which is the sole operator of the `rmp` CLI: every creation, edit, reordering, status transition, closure, comment, and dependency change. Reading a single fact back with an `rmp` query needs no skill; changing anything does.
+Use the `rmp` CLI (available system-wide) as the **sole source of truth** for all planning and task tracking in this project. No other tool or method should be used for this purpose. **The coordination and management of tasks, sprints, and comments is executed through the `roadmap-manager` skill**, the sole operator of the `rmp` CLI with the sole exception of `rmp graph …`: every creation, edit, reordering, status transition, closure, comment, and dependency change, and every read. `rmp graph …` belongs exclusively to `knowledge-authority` (see [Knowledge Graph](#knowledge-graph)).
 
 The same `rmp` instance also hosts the project **Knowledge Graph** (see [Knowledge Graph](#knowledge-graph)) — the authoritative model of what the project *is* (its components, features, and provenance), distinct from rmp's role as the source of truth for *planning and tasks*. Consult it throughout planning to understand the components involved, their relationships, and the scope and impact of the proposed work.
 
@@ -375,7 +413,7 @@ Use the **Knowledge Graph** to identify the **foundational and highest-leverage 
 
 ### Execution
 
-Task execution is the natural continuation of planning. A **unit of work** is a single task, or a batch of similar-scope tasks carried together as one (see [Development workflow](#development-workflow)). For each unit of work, follow this sequence using `rmp`:
+Task execution is the natural continuation of planning. A **unit of work** is a single task, or a batch of similar-scope tasks carried together as one (see [Development workflow](#development-workflow)). For each unit of work, follow this sequence, using `rmp` through `roadmap-manager`:
 
 1. Check whether any open task is already in progress and, if so, continue it.
 2. Identify the next task to start, and the open tasks of similar scope that should be batched with it into the same iteration.
@@ -388,8 +426,8 @@ Task execution is the natural continuation of planning. A **unit of work** is a 
 
 **Sequencing rules:**
 - **Execution is strictly sequential: one unit of work at a time.** Sprints run one at a time, and within a sprint one unit of work at a time. Two units never overlap and two sub-agents never work different tasks concurrently, however independent they appear. **Batching is not overlapping:** a batch is *one* unit — analysed once, coded once, tested once, under one specialist — and that is the efficient route, not an exception to sequencing.
-- **Evaluations and audits** are the sole exception. They may run in parallel, but any such parallel execution **always requires the user's explicit prior authorisation** (see [Sub-Agents (Specialists)](#sub-agents-specialists)).
-- **Never run more than two (2) evaluations or audits at once**, even once authorised. Plan the full set up front, then execute them at most two at a time, starting the next only as one finishes, so the limit of two concurrent is never exceeded.
+- **Sub-agents run one at a time, evaluations and audits included.** Concurrent execution **always requires the user's explicit prior authorisation** for a named piece of work, and that authorisation is revoked automatically when that work ends (see [Sub-Agents (Specialists)](#sub-agents-specialists)).
+- **Never run more than two (2) sub-agents at once**, even once authorised. Plan the full set up front, then execute them at most two at a time, starting the next only as one finishes, so the limit of two concurrent is never exceeded.
 
 **Model and effort.** Wherever possible, match the model and its reasoning-effort level to the demands of each individual operation within the unit of work.
 
@@ -397,7 +435,7 @@ Task execution is the natural continuation of planning. A **unit of work** is a 
 
 ## Knowledge Graph
 
-Maintain a project **Knowledge Graph (KG)** using the graph features of `rmp` (its built-in *Groadmap* graph), driven through the `knowledge-authority` skill — the empirical single source of truth about the project's own contents, which queries the graph store first and reads source files only as a fallback. The KG is the authoritative, queryable model of the project, and you must keep it as current as possible. **Every task that turns on knowing what the project *is* is executed through the `knowledge-authority` skill** — its structure, components, files, features, tests, and provenance, whether the task reads that knowledge or records it. To **locate and understand project structure**, query the graph first and fall back to reading source files only when the graph cannot answer. This is a navigation shortcut, not authority over the code: for any question of *actual behaviour* — above all openCypher conformance — the primary sources still govern, so consult the specification, the relevant TCK feature files, and the source itself as the [Compliance Mandates](#compliance-mandates) require.
+Maintain a project **Knowledge Graph (KG)** using the graph features of `rmp` (its built-in *Groadmap* graph). The graph is managed **exclusively** through the `knowledge-authority` skill, the sole operator of `rmp graph …` — reads exactly as much as writes — and the empirical single source of truth about the project's own contents, which queries the graph store first and reads source files only as a fallback. The KG is the authoritative, queryable model of the project, and you must keep it as current as possible. **Every task that turns on knowing what the project *is* is executed through the `knowledge-authority` skill** — its structure, components, files, features, tests, and provenance, whether the task reads that knowledge or records it. To **locate and understand project structure**, query the graph first and fall back to reading source files only when the graph cannot answer. This is a navigation shortcut, not authority over the code: for any question of *actual behaviour* — above all openCypher conformance — the primary sources still govern, so consult the specification, the relevant TCK feature files, and the source itself as the [Compliance Mandates](#compliance-mandates) require.
 
 ### What the graph must capture
 
@@ -608,7 +646,7 @@ This module must operate **without failure under sustained high load and high co
 
 ## Sub-Agents (Specialists)
 
-Your working team comprises **all available sub-agents** — global, user, and project. Use them collaboratively and complementarily so that every task is completed with the greatest possible confidence, effectiveness, and assertiveness, with each specialist contributing its expertise proactively. The specialists in the table below **must be actively consulted** to maximise output quality — do not implement a component in isolation when a relevant specialist can provide material input — but treat the table as the key specialists, not the limit of the team.
+Your working team comprises **all available sub-agents** — global, user, and project. Use them collaboratively and complementarily, one at a time, so that every piece of work is completed with the greatest possible confidence, effectiveness, and assertiveness, each specialist contributing its expertise within the objective it is given. The specialists in the table below **must be actively consulted** to maximise output quality — do not implement a component in isolation when a relevant specialist can provide material input — but treat the table as the key specialists, not the limit of the team.
 
 | Agent | When to invoke |
 |---|---|
@@ -620,11 +658,22 @@ Your working team comprises **all available sub-agents** — global, user, and p
 
 ### Every task is developed under a specialist sub-agent
 
-**Every task is developed under the isolation of a sub-agent, and never by the
-coordinating agent directly.** This is not a preference about who types: it keeps
-each task's exploration, dead ends, and file churn out of the coordinating
-context, so the coordinator retains the judgement to verify the result instead of
-having spent itself producing it.
+**Every piece of work in this project is developed under the isolation of a
+sub-agent, and never by the coordinating agent directly** — a task, a batch, an
+analysis, an evaluation, an audit, a documentation pass. The specialist is chosen
+as the best available match for the objectives that work must achieve. This is
+not a preference about who types: it keeps each task's exploration, dead ends,
+and file churn out of the coordinating context, so the coordinator retains the
+judgement to verify the result instead of having spent itself producing it.
+
+**Exactly one sub-agent runs at a time**, alongside the main conversation; never
+a second one concurrently. Use as many sub-agents as the objective needs — **in
+series, never in parallel**: each one finishes before the next starts.
+
+**The only exception is the user's explicit prior authorisation**, granted for a
+named piece of work. That authorisation is **automatically revoked when that work
+ends**, and never carries over to the next piece of work. Even once authorised,
+**never more than two sub-agents at a time**.
 
 **Choosing the specialist.** Pick the available sub-agent whose expertise matches
 the work the task actually consists of. That match is read from **two** sources,
@@ -665,19 +714,19 @@ requirements of the tasks in the batch — and that agent runs the analyse → b
 code → test loop over the batch as though it were one task.
 
 **Boundaries.** One unit of work at a time, as [Execution](#execution) requires:
-two sub-agents never work two different tasks concurrently. Several specialists may
-run concurrently only when they serve the *same* unit of work with independent
-inputs, or when the user has authorised parallel evaluations subject to the cap of
-two. When two specialists could touch the same files, say so in each brief and
-scope them apart; concurrent edits to one file by two agents produce a result
-neither of them validated.
+two sub-agents never work two different tasks concurrently. Specialists run
+concurrently only under the user's explicit prior authorisation for a named piece
+of work, capped at two at a time and lapsing when that work ends. When two
+authorised specialists could touch the same files, say so in each brief and scope
+them apart; concurrent edits to one file by two agents produce a result neither of
+them validated.
 
 ### Mandatory consultation rules
 
 - **`graph-theory-expert` must be consulted** before finalising the representation of any graph type and before selecting any search or traversal algorithm.
 - **`go-developer` must validate** all Go code for idiom conformance before a task is closed.
-- Specialists may be **consulted in parallel** — to inform in-flight implementation — when their inputs are independent (e.g., consulting `graph-theory-expert` on algorithm choice while `go-developer` drafts an adjacent module).
-- **Evaluations and audits run in parallel only with the user's explicit prior authorisation, and never more than two at a time.** Parallel *consultation* that informs implementation is always allowed when inputs are independent; running standalone *evaluations or audits* concurrently is not — it must be authorised by the user beforehand, and the concurrency cap of **two** applies even after authorisation. Plan every evaluation or audit the work needs, then run them two at a time, starting the next only as one finishes.
+- **Specialists are consulted in series, never in parallel** — one returns before the next is invoked, however independent their inputs appear. Consulting `graph-theory-expert` on algorithm choice and `go-developer` on the Go implementation are two consecutive invocations, never two concurrent ones.
+- **Evaluations and audits obey the same rule**: one at a time. Concurrent execution requires the user's **explicit prior authorisation** for a named piece of work, is capped at **two** at a time, and lapses automatically when that work ends. Plan every evaluation or audit the work needs, then run them within that cap, starting the next only as one finishes.
 - Findings from specialists must be summarised in the task description or in a code comment when they influence a non-obvious design decision.
 
 ---
