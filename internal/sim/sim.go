@@ -419,19 +419,33 @@ func (s *Simulator) finalCheck(lastTick int64, lastOp Op) *SimReport {
 
 // engineRunDDL runs a DDL statement (CREATE/DROP INDEX/CONSTRAINT) against the
 // live engine and drains it. It is used by the schema-chaos scenario to churn
-// schema deterministically over the same engine the safety loop drives. DDL
-// statements go through the engine's read path ([cypher.Engine.Run]), which is
-// where the DDL operators live.
+// schema deterministically over the same engine the safety loop drives, and by
+// the scenarios that install a fixed schema before their run. DDL statements go
+// through the engine's read path ([cypher.Engine.Run]), which is where the DDL
+// operators live.
+//
+// It ADJUDICATES the statement's counters (rmp #2822). This function used to
+// discard the *Result and propagate only the error, which is why no DDL effect
+// counter was ever observed by any oracle; it now routes through
+// [runDDLChecked], and a counter that disagrees with the schema effect the
+// engine's own registries show is returned as an error. Call sites inside the
+// tick loop want a [SimReport] instead and call [Simulator.engineRunDDLChecked].
 func (s *Simulator) engineRunDDL(ctx context.Context, query string) error {
-	res, err := s.engine.Run(ctx, query, nil)
+	violations, err := s.engineRunDDLChecked(ctx, query, 0)
 	if err != nil {
 		return err
 	}
-	for res.Next() {
+	if len(violations) > 0 {
+		return ddlCountersError(query, violations)
 	}
-	drainErr := res.Err()
-	_ = res.Close()
-	return drainErr
+	return nil
+}
+
+// engineRunDDLChecked is [Simulator.engineRunDDL] returning the counters oracle's
+// violations rather than folding them into an error, for the tick loop, which
+// reports a violation as a [SimReport] against the tick it happened on.
+func (s *Simulator) engineRunDDLChecked(ctx context.Context, query string, tick int64) ([]Violation, error) {
+	return runDDLChecked(ctx, s.engine, query, tick)
 }
 
 // schemaChurnStep pairs one idempotent churn DDL statement with the mutation
@@ -495,8 +509,14 @@ func (s *Simulator) runWithDDL(ctx context.Context, ddlEvery int, model *SchemaM
 		if ddlEvery > 0 && tick%int64(ddlEvery) == 0 {
 			step := schemaChurnSteps[churnIdx%len(schemaChurnSteps)]
 			churnIdx++
-			if err := s.engineRunDDL(ctx, step.ddl); err != nil {
+			ddlViolations, err := s.engineRunDDLChecked(ctx, step.ddl, tick)
+			if err != nil {
 				return nil, fmt.Errorf("sim: schema churn DDL %q at tick %d: %w", step.ddl, tick, err)
+			}
+			// The churn statement's own effect report (rmp #2822), adjudicated
+			// against the engine's schema registries before and after it ran.
+			if len(ddlViolations) > 0 {
+				return s.report(tick, Op{Kind: OpMatch, Cypher: step.ddl}, ddlViolations), nil
 			}
 			step.apply(model)
 			if violations := CheckSchemaIntrospection(tick, model, s.engine); len(violations) > 0 {

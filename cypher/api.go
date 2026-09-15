@@ -3549,11 +3549,30 @@ func (e *Engine) runDDL(ctx context.Context, query string, params map[string]exp
 // DDL has succeeded, so Bolt can report indexes-added / constraints-added and the
 // driver's ContainsUpdates is true for a schema write.
 //
-// The effect is recorded only on success: a DDL that errors returns before this point,
-// and an IF NOT EXISTS / IF EXISTS statement that resolved to a no-op is counted by its
-// operator reporting nothing to count. openCypher's side-effect vocabulary does not name
-// schema effects at all, so unlike the data counters these have no TCK table to match —
-// they exist because Bolt reports them.
+// WHAT IT GUARANTEES, AND WHAT IT LEAVES TO ITS CALLER (rmp #2824). It applies the
+// recorder the caller supplied, and nothing besides:
+//
+//   - a nil record builds no counter set at all, so the Result reports nothing;
+//   - a non-nil record is invoked exactly once, on a fresh zero counter set;
+//   - either way the recording happens only on SUCCESS, because a DDL whose operator
+//     errors returns before this point.
+//
+// It does NOT decide whether a statement that resolved to a no-op counts. The CALLER
+// chooses the recorder, so the caller owns that decision. This godoc used to claim the
+// opposite — that "an IF NOT EXISTS / IF EXISTS statement that resolved to a no-op is
+// counted by its operator reporting nothing to count" — and DROP INDEX was the standing
+// counter-example: both branches of [Engine.runDropIndex] passed the indexes-removed
+// bump unconditionally, so `DROP INDEX <missing> IF EXISTS` reported indexesRemoved: 1
+// across an index listing that was identical before and after (rmp #2818). The operator
+// absorbed the IF EXISTS; it reported nothing to this function either way.
+//
+// [dropIndexCounter] is the worked example of a caller that suppresses the count: it
+// returns nil — which records NOTHING — when the index did not exist, and the bump when
+// it did.
+//
+// openCypher's side-effect vocabulary does not name schema effects at all, so unlike
+// the data counters these have no TCK table to match — they exist because Bolt reports
+// them.
 func (e *Engine) runDDLOpCounted(ctx context.Context, op exec.Operator, record func(*exec.QueryCounters)) (*Result, error) {
 	if err := applyDDLOp(ctx, op); err != nil {
 		return nil, err
@@ -3598,9 +3617,23 @@ func applyDDLOp(ctx context.Context, op exec.Operator) error {
 // (#2212), so Bolt reports indexes-added / indexes-removed / constraints-added /
 // constraints-removed and a driver's ContainsUpdates is true for a schema write.
 //
-// It is used only on the SUCCESS paths that actually changed the schema. An
-// IF NOT EXISTS / IF EXISTS statement that resolved to a no-op keeps [emptyDDLResult],
-// which reports nothing — the same applied-not-attempted rule the data counters follow.
+// It records UNCONDITIONALLY: record is invoked on every call. That is correct only
+// where the caller has ALREADY established that the schema changed, so — exactly as for
+// [Engine.runDDLOpCounted] — the applied-not-attempted rule is a property of the CALL
+// SITES, not of this helper (rmp #2824). Every site was re-read when this was written,
+// and each reaches this function only on a branch that applied the effect:
+//
+//   - [Engine.runCreateBTreeIndex] and [Engine.runCreateHashIndex] return
+//     [emptyDDLResult] on an IF NOT EXISTS absorbed by an existing index;
+//   - [Engine.runCreateConstraint] does the same for an already-registered constraint;
+//   - [Engine.dropConstraintLocked] resolves the NAME first and returns [emptyDDLResult]
+//     when it resolves to no constraint, so its IF EXISTS absorption never reaches here
+//     (which is why DROP CONSTRAINT never had the #2818 defect — rmp #2820).
+//
+// [Engine.runDropIndex] is the one path that could not be written this way: its operator
+// absorbs IF EXISTS internally, so the statement cannot be diverted before the operator
+// runs. It takes the [Engine.runDDLOpCounted] route with [dropIndexCounter] instead,
+// which suppresses the counter for the same outcome (rmp #2818).
 func countedDDLResult(record func(*exec.QueryCounters)) *Result {
 	r := emptyDDLResult()
 	r.counters = &exec.QueryCounters{}
@@ -3802,7 +3835,8 @@ func (e *Engine) createBTreeIndexLocked(ctx context.Context, p *ir.CreateIndex, 
 	registered, numRegistered := op.Registered(), op.CompanionRegistered()
 	if !registered {
 		// IF NOT EXISTS absorbed an already-registered name: no schema change,
-		// no WAL record.
+		// no WAL record, and no indexes-added counter — [emptyDDLResult] carries
+		// none, which is the applied-not-attempted rule (rmp #2824).
 		return emptyDDLResult(), nil
 	}
 
@@ -4400,7 +4434,11 @@ func (e *Engine) runDropConstraint(ctx context.Context, p *ir.DropConstraint, id
 //     index record. The pair is therefore a single all-or-nothing WAL frame:
 //     recovery yields BOTH-present or BOTH-absent, never a partial state.
 //   - constraint absent + IF EXISTS → clean no-op success, no schema change,
-//     no WAL record.
+//     no WAL record, and — because this branch returns [emptyDDLResult] rather
+//     than reaching the [countedDDLResult] at the end — no constraints-removed
+//     counter either (rmp #2820, the DROP INDEX defect #2818 checked for here
+//     and not found: resolving the NAME before the operator runs is what keeps
+//     the two in step).
 //   - constraint absent + no IF EXISTS → typed error wrapping
 //     exec.ErrConstraintNotFound; never a fail-silent success.
 //
@@ -5983,10 +6021,22 @@ func (r *Result) Notifications() []Notification { return r.notifications }
 // between a MATCH and a MERGE that matched.
 //
 // The counts reflect what was APPLIED, so a re-intern of an existing node is not a
-// creation, removing an absent property counts nothing, and a statement that failed or
-// rolled back never produces a Result to report from. The nodes and relationships
+// creation and removing an absent property counts nothing. The nodes and relationships
 // counters are incremented at the same call sites as the graph-scoped side-effect
 // counters the openCypher TCK comparator verifies, so the two cannot drift.
+//
+// A FAILED STATEMENT REPORTS NOTHING (rmp #2823). Most failure paths never hand back a
+// Result at all: [ExplicitTx.Exec] returns the error alone, and [Engine.RunInTx] does
+// the same for a WAL-commit, serialization-conflict or NOT NULL failure. The one path
+// that does is an autocommit statement whose pipeline errored mid-drain, which carries
+// its error on [Result.Err]; there the eager mutations were undone inside the write
+// bracket by [Result.rollbackUnderBarrier], which drops the counter set with them, so
+// this returns nil.
+//
+// This godoc used to assert that such a statement "never produces a Result to report
+// from", which was not true of that last path: `MERGE (m:X {…}) ON CREATE SET m.other =
+// b`, with b bound to a node, answered propertiesSet: 1 and nodesCreated: 1 on a
+// statement that raised InvalidPropertyType and stored nothing.
 //
 // The returned pointer is owned by the Result; treat it as read-only.
 func (r *Result) Counters() *exec.QueryCounters { return r.counters }
@@ -6828,6 +6878,16 @@ func (r *Result) rollbackUnderBarrier() {
 	if r.tx != nil {
 		_ = r.tx.Rollback() // release store mutex; in-memory state already restored
 	}
+	// THE REPORT GOES WITH THE EFFECTS (rmp #2823). The counters accumulated as the
+	// statement applied each mutation eagerly, and the replay above has just reversed
+	// every one of them: a report of those effects describes a graph state that no
+	// longer exists and that never became visible or durable. Dropping the reference is
+	// the whole fix — the counter set lives on this statement's own mutator adapter,
+	// which nothing outliving the Result reads — and it makes [Result.Counters] answer
+	// nil, which is what every other failure path already answers by handing back no
+	// Result at all. It is also what a Bolt client already sees: a failed statement
+	// terminates its stream with a FAILURE message, and FAILURE carries no stats.
+	r.counters = nil
 	r.bufHandled = true
 	r.walHandled = true
 }
