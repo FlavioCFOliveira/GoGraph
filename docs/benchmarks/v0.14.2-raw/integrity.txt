@@ -1,0 +1,43 @@
+================================================================================================================
+INTEGRITY — every kept line must match ^Benchmark\S*\s+\d+\s+ ; arms must carry the same benchmark set
+================================================================================================================
+block        rounds used  A lines  B lines  B2 lines  malformed  benches  n/arm after truncation  verdict
+harness                2       16       16        16          0        8                     [2]  OK
+exec                   2      124      124       124          0       62                     [2]  OK
+cy                     2      230      230       230          0      115                     [2]  OK
+bolt                   2       54       54        54          0       27                     [2]  OK
+search                 1        4        8         8          0        4                     [1]  OK
+centrality             1        1        1         1          0        1                     [1]  OK
+cnt                    1        9        9         9          0        9                     [1]  OK
+
+result lines kept (before truncation): A=438, B=442, B2=442
+malformed lines: 0
+ALL BLOCKS CLEAN: True
+
+================================================================================================================
+FLOOR 1 — B vs B2: the SAME BYTE-IDENTICAL BINARY against itself  [ns/op]
+================================================================================================================
+  changed-binary blocks pooled                   n= 212  median|Δ|=  0.55%  p90=  1.83%  p95=  2.88%  max= 16.48%
+      largest same-code drift: exec/BenchmarkScan_PerNode/N=4096-10                  7.21µs -> 6.021µs    -16.48%
+      band                  n    median      p90      p95      max
+      < 100 ns             26     0.96%    2.20%    3.96%    7.83%
+      100 ns - 10 us       54     0.60%    2.02%    2.88%   16.48%
+      10 us - 1 ms         63     0.49%    1.71%    1.83%   15.61%
+      > 1 ms               69     0.51%    1.36%    2.02%   13.72%
+
+FLOOR 2 — A vs B on packages whose TEST BINARY is byte-identical between the releases  [ns/op]
+  identical-binary packages (cross-arm)          n=  14  median|Δ|=  0.99%  p90=  3.15%  p95=  4.27%  max=  4.88%
+      largest same-code drift: cnt/BenchmarkCells/1024-10                          909.3ns -> 953.7ns    +4.88%
+      band                  n    median      p90      p95      max
+      < 100 ns              6     0.27%    2.66%    2.66%    3.15%
+      100 ns - 10 us        2     3.35%    1.82%    1.82%    4.88%
+      10 us - 1 ms          1     4.27%    4.27%    4.27%    4.27%
+      > 1 ms                5     0.84%    1.13%    1.13%    1.47%
+
+SCREENING BAR per magnitude band = p95 of same-code |delta| across BOTH floors.
+At n<=2 this is a SCREENING envelope, NOT the six-round adjudication bar v0.14.1 published.
+Clearing it is necessary, never sufficient: sign consistency and the row own floor decide.
+   < 100 ns             3.96%
+   100 ns - 10 us       2.88%
+   10 us - 1 ms         4.27%
+   > 1 ms               2.02%

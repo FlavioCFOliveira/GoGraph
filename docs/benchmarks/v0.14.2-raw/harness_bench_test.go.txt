@@ -1,0 +1,210 @@
+// Package benchharness is a PURPOSE-BUILT measurement vehicle for the v0.14.2
+// benchmark record. It is NOT part of the GoGraph module: it exists only inside
+// the three scratch trees the campaign extracts with `git archive`, it is never
+// written into the repository, and no production path reaches it.
+//
+// WHY IT EXISTS. The v0.14.2 window changes two write paths that the module's
+// own benchmark corpus does not drive:
+//
+//   - the SET entity-value rejection (cypher/exec/set.go, set_all.go,
+//     cypher/api.go: isEntityPropertyValue / errEntityPropertyValue and the
+//     relStorageDirection normalisation), and
+//   - the DROP INDEX existence read (cypher/api.go: dropIndexCounter).
+//
+// Scanned from source, exactly one of the module's 149 `cypher` benchmarks and
+// none of its 36 `cypher/exec` benchmarks names a Cypher SET clause, and that
+// one (BenchmarkQueryHasWritingClause) only classifies a query string without
+// executing it. Two more (BenchmarkReadPhaseForeignWriter,
+// BenchmarkReadPhaseAttribution) drive a throttled background `SET n.bal = $v`
+// while MEASURING a read, which prices the read path, not the write. No
+// benchmark anywhere in the module issues DROP INDEX. Without this file the
+// record could only say "unmeasured" about the two paths the release actually
+// changed.
+//
+// REPRESENTATIVENESS, STATED PLAINLY. This is a minimal in-memory vehicle: one
+// lpg graph, no store, no WAL, no durability, no concurrency. It therefore
+// prices the CHANGED CODE as a fraction of a statement's in-memory execution,
+// which is the LEAST favourable denominator the change can be measured against
+// — a durable deployment adds fsync time to the denominator and makes the same
+// absolute cost a smaller proportion. It is not a model of a production
+// workload and no throughput claim is made from it.
+//
+// Every arm links the byte-identical copy of this file, so the only difference
+// between arms is the engine code under it.
+package benchharness
+
+import (
+	"context"
+	"fmt"
+	"testing"
+
+	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+)
+
+// ringNodes is the fixture size. Small on purpose: the quantity under test is a
+// per-row / per-statement constant, so a large graph would only dilute it with
+// scan time and make the instrument less able to resolve the change.
+const ringNodes = 64
+
+// newRing builds N nodes labelled :N with an id and a scalar property, joined in
+// a directed ring by :R edges carrying their own property. Seeded exclusively
+// through the public Cypher API, so the harness depends on nothing unexported.
+func newRing(tb testing.TB) (context.Context, *cypher.Engine) {
+	tb.Helper()
+	ctx := context.Background()
+	// Multigraph: true is what the engine itself asks for over Cypher, and it is
+	// also what makes this instrument valid: parallel-edge semantics give every
+	// relationship a stable per-instance HANDLE, and relStorageDirection's
+	// by-handle probe — the added work being priced — is only reached when the
+	// handle is non-zero. A non-multigraph fixture would silently skip it.
+	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+	eng := cypher.NewEngine(g)
+	for i := 0; i < ringNodes; i++ {
+		if _, err := eng.RunInTxAny(ctx,
+			"CREATE (n:N {id: $id, v: 0, k: $id})",
+			map[string]any{"id": int64(i)}); err != nil {
+			tb.Fatalf("seed node %d: %v", i, err)
+		}
+	}
+	for i := 0; i < ringNodes; i++ {
+		if _, err := eng.RunInTxAny(ctx,
+			"MATCH (a:N {id: $a}), (b:N {id: $b}) CREATE (a)-[r:R {v: 0}]->(b)",
+			map[string]any{"a": int64(i), "b": int64((i + 1) % ringNodes)}); err != nil {
+			tb.Fatalf("seed edge %d: %v", i, err)
+		}
+	}
+	return ctx, eng
+}
+
+// run executes one statement and drains it, failing the benchmark on any error
+// so a measurement can never be taken over a statement that did not run.
+func run(b *testing.B, ctx context.Context, eng *cypher.Engine, q string, params map[string]any) {
+	res, err := eng.RunInTxAny(ctx, q, params)
+	if err != nil {
+		b.Fatalf("%s: %v", q, err)
+	}
+	for res.Next() {
+	}
+	if err := res.Err(); err != nil {
+		b.Fatalf("%s drain: %v", q, err)
+	}
+	if err := res.Close(); err != nil {
+		b.Fatalf("%s close: %v", q, err)
+	}
+}
+
+// --- the control -----------------------------------------------------------
+
+// BenchmarkH_MatchReturn is the harness's own internal control: a read that
+// reaches no symbol this window changed. A delta here is evidence the
+// MEASUREMENT moved, not the code.
+func BenchmarkH_MatchReturn(b *testing.B) {
+	ctx, eng := newRing(b)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		run(b, ctx, eng, "MATCH (n:N {id: $id}) RETURN n.v",
+			map[string]any{"id": int64(i % ringNodes)})
+	}
+}
+
+// --- the SET entity-value guard (rmp #2816) --------------------------------
+
+// BenchmarkH_SetNodeProp prices the per-row isEntityPropertyValue guard added to
+// buildOperatorWrite's SET value evaluator. The property already exists, so the
+// graph does not grow across b.N.
+func BenchmarkH_SetNodeProp(b *testing.B) {
+	ctx, eng := newRing(b)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		run(b, ctx, eng, "MATCH (n:N {id: $id}) SET n.v = $v",
+			map[string]any{"id": int64(i % ringNodes), "v": int64(i)})
+	}
+}
+
+// BenchmarkH_SetNodeReplaceMap prices the REPLACE form, whose map evaluator
+// (buildMapEvalFn) gained the same guard per map entry per row.
+func BenchmarkH_SetNodeReplaceMap(b *testing.B) {
+	ctx, eng := newRing(b)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		run(b, ctx, eng, "MATCH (n:N {id: $id}) SET n = {id: $id, v: $v, k: $id}",
+			map[string]any{"id": int64(i % ringNodes), "v": int64(i)})
+	}
+}
+
+// BenchmarkH_SetNodePropPlanMiss forces a parse and a plan build on every
+// iteration by varying the statement TEXT, so the cost of the
+// scalarColSnapshot call added at BUILD time is inside the measurement rather
+// than amortised away by the plan cache. Its denominator includes parsing, so
+// it resolves a build-time change less sharply than the cached form resolves a
+// per-row one; it is reported with that limitation.
+func BenchmarkH_SetNodePropPlanMiss(b *testing.B) {
+	ctx, eng := newRing(b)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		q := fmt.Sprintf("MATCH (n:N {id: %d}) SET n.v = $v", i%ringNodes)
+		run(b, ctx, eng, q, map[string]any{"v": int64(i)})
+	}
+}
+
+// --- the relationship storage-order normalisation (rmp #2817) --------------
+
+// BenchmarkH_SetRelPropDirected binds one edge in its storage orientation, so
+// relStorageDirection takes its first by-handle probe and returns unswapped.
+func BenchmarkH_SetRelPropDirected(b *testing.B) {
+	ctx, eng := newRing(b)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		run(b, ctx, eng, "MATCH (a:N {id: $id})-[r:R]->(b:N) SET r.v = $v",
+			map[string]any{"id": int64(i % ringNodes), "v": int64(i)})
+	}
+}
+
+// BenchmarkH_SetRelPropUndirected is the shape #2817 fixed: an undirected
+// pattern binds each anchor's outgoing AND incoming edge, so half the bound
+// rows arrive in the REVERSE of storage order and take relStorageDirection's
+// second by-handle probe and the swap. Two rows per statement.
+func BenchmarkH_SetRelPropUndirected(b *testing.B) {
+	ctx, eng := newRing(b)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		run(b, ctx, eng, "MATCH (a:N {id: $id})-[r:R]-(b:N) SET r.v = $v",
+			map[string]any{"id": int64(i % ringNodes), "v": int64(i)})
+	}
+}
+
+// --- the DROP INDEX existence read (rmp #2818) -----------------------------
+
+// BenchmarkH_DropIndexMissing is the absorbed IF EXISTS path, and the cleanest
+// vehicle for the added idxMgr.GetIndex read: the statement changes nothing, so
+// the added lookup is essentially the whole difference between the arms.
+func BenchmarkH_DropIndexMissing(b *testing.B) {
+	ctx, eng := newRing(b)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		run(b, ctx, eng, "DROP INDEX bench_absent IF EXISTS", nil)
+	}
+}
+
+// BenchmarkH_CreateDropIndex is the real-removal path. One CREATE INDEX and one
+// DROP INDEX per iteration, because the removal branch cannot be reached twice
+// without re-creating the index; the CREATE is part of the denominator and is
+// named as such.
+func BenchmarkH_CreateDropIndex(b *testing.B) {
+	ctx, eng := newRing(b)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		run(b, ctx, eng, "CREATE INDEX bench_tmp FOR (n:N) ON (n.k)", nil)
+		run(b, ctx, eng, "DROP INDEX bench_tmp", nil)
+	}
+}

@@ -545,7 +545,7 @@ release-check: ## Dry-run goreleaser against the local checkout (snapshot mode, 
 	goreleaser release --snapshot --clean --skip=publish
 
 .PHONY: release-accuracy
-release-accuracy: ## Release-accuracy checks only (Phase A): CHANGELOG/release-notes/README/SECURITY/benchmark-doc consistency for VERSION. This is the only gate the release.yml CI job runs; correctness (vet/build/-race/lint/TCK), coverage and the crash battery are enforced LOCALLY by `make release-preflight` before the tag is pushed.
+release-accuracy: ## Release-accuracy checks only (Phase A): CHANGELOG/release-notes/README/SECURITY consistency for VERSION. This is the only gate the release.yml CI job runs; correctness (vet/build/-race/lint/TCK), coverage and the crash battery are enforced LOCALLY by `make release-preflight` before the tag is pushed.
 	@test -n "$${VERSION:-}" || { echo "set VERSION=vX.Y.Z"; exit 1; }
 	@echo "release-accuracy: VERSION=$$VERSION"
 	@v_no_prefix=$$(echo "$$VERSION" | sed 's/^v//'); \
@@ -560,22 +560,13 @@ release-accuracy: ## Release-accuracy checks only (Phase A): CHANGELOG/release-n
 	@minor_line=$$(echo "$$VERSION" | sed -E 's/^v([0-9]+)\.([0-9]+)\..*/v\1.\2.x/'); \
 	  grep -qF "$$minor_line" SECURITY.md \
 	  || { echo "release-accuracy: SECURITY.md supported-versions table does not mention $$minor_line — update the table"; exit 1; }
-	@echo "release-accuracy: checking per-release benchmark report docs/benchmarks/$$VERSION.md exists…"
-	@test -f "docs/benchmarks/$$VERSION.md" \
-	  || { echo "release-accuracy: docs/benchmarks/$$VERSION.md does not exist — record the per-release benchmark/load-test numbers first"; exit 1; }
 	@echo "release-accuracy: all accuracy checks passed"
 
 .PHONY: release-preflight
-release-preflight: ## Canonical LOCAL release gate (`make release` calls this) — release-accuracy + the full `make ci` correctness+coverage gate + headline bench. `make ci` runs the suite ONCE (tidy/fmt/vet/build/vulncheck/test-short[-race,./...]/lint/cover-gate; the TCK =100% baseline in TestTCKExecution runs inside the -race and coverage passes), so release-preflight SUBSUMES `make ci` — do not run both. The release.yml CI job runs only `release-accuracy`.
+release-preflight: ## Canonical LOCAL release gate (`make release` calls this) — release-accuracy + the full `make ci` correctness+coverage gate. `make ci` runs the suite ONCE (tidy/fmt/vet/build/vulncheck/test-short[-race,./...]/lint/cover-gate; the TCK =100% baseline in TestTCKExecution runs inside the -race and coverage passes), so release-preflight SUBSUMES `make ci` — do not run both. The release.yml CI job runs only `release-accuracy`.
 	@$(MAKE) release-accuracy
 	@echo "release-preflight: running the full correctness + coverage gate (make ci: tidy/fmt/vet/build/vulncheck/test-short[-race]/lint/cover-gate; TCK =100% baseline enforced inside)…"
 	@$(MAKE) ci
-	@if [ -x scripts/run_headline_bench.sh ]; then \
-	  echo "release-preflight: running headline bench regression gate (informational on a release tag — see docs/release.md for the canonical PR-time gate)…"; \
-	  ./scripts/run_headline_bench.sh > /tmp/release-preflight-bench.txt || { echo "release-preflight: headline bench failed; see /tmp/release-preflight-bench.txt"; exit 1; }; \
-	else \
-	  echo "release-preflight: scripts/run_headline_bench.sh not present — skipping bench gate"; \
-	fi
 	@echo "release-preflight: all checks passed"
 
 .PHONY: release

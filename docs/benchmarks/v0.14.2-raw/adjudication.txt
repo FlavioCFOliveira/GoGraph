@@ -1,0 +1,103 @@
+======================================================================================================================
+ADJUDICATION [ns/op] — calibrated on byte-identical binaries
+======================================================================================================================
+
+CALIBRATION — 14 rows on packages whose test binary is byte-identical between
+the releases (search, search/centrality, graph/index/count). Every one is the SAME CODE.
+  rows                      : 14
+  FALSE 'separations'       : 5  (36% of rows)
+  differing 'constants'     : 0   <- must be 0, or the constant test is unsound
+    cnt/BenchmarkApply_HotParallel-10                    +4.40%  gap  3.15%
+    search/BenchmarkDijkstra_Large-10                       +0.88%  gap  0.29%
+    search/BenchmarkDijkstra_PostWarmup-10                  -0.84%  gap  0.55%
+    cnt/BenchmarkCountE_SpreadSerial-10                  +0.82%  gap  0.26%
+    search/BenchmarkBFSDirectionOpt_PowerLaw-10             -0.25%  gap  0.23%
+
+  BAR = the worst FALSE positive this campaign produced on unchanged code:
+        |Δ| > 4.40%  AND  gap > 3.15%
+
+RESULT over 212 rows in the four changed-binary blocks
+  clears the calibration bar          : 2
+  differing per-operation CONSTANTS   : 0
+  separates but does NOT clear the bar: 27   -> NOT ADJUDICABLE at this power
+  overlapping ranges                  : 183
+
+  block     benchmark                                          v0.14.1     v0.14.2        Δ     gap  verdict
+  harness   BenchmarkH_DropIndexMissing-10                     1.003µs     1.121µs  +11.81%   9.47%  SEPARATION clears calibration
+  exec      BenchmarkBuildReverse_vs_E/E=1000000-10            5.554ms     5.073ms   -8.65%   6.97%  SEPARATION clears calibration
+
+  NOT ADJUDICABLE at this power (separated, but inside the false-positive envelope):
+  exec      BenchmarkScan_PerNode/N=4096-10                    7.577µs     6.615µs  -12.69%   1.44%
+  bolt      BenchmarkTxBookkeeping_RegistryUpdateUnchanged-10    0.3912ns    0.4137ns   +5.73%   0.15%
+  cy        BenchmarkNumericEqualitySeek_EntitySeek/64000-10     3.586ms      3.39ms   -5.48%   0.26%
+  cy        BenchmarkNumericEqualitySeek_ScalarSeek/64000-10      3.64ms     3.464ms   -4.83%   0.72%
+  exec      BenchmarkBuildReverse_vs_E/E=100000-10             568.8µs     541.4µs   -4.81%   2.67%
+  cy        BenchmarkNumericEqualitySeek_EntityScan/64000-10     3.522ms     3.383ms   -3.94%   0.39%
+  cy        BenchmarkNumericEqualitySeek_EntityScan/16000-10     2.442ms     2.367ms   -3.04%   0.46%
+  cy        BenchmarkNumericEqualitySeek_ScalarScan/64000-10     9.178ms      8.93ms   -2.70%   0.62%
+  bolt      BenchmarkBoltRecordEncodeParallel/baseline-10      20.37ns     19.84ns   -2.58%   1.18%
+  harness   BenchmarkH_SetNodeProp-10                          15.36µs     14.97µs   -2.54%   0.69%
+  cy        BenchmarkRowCtxPool_Width2-10                      96.96ns     99.33ns   +2.44%   0.19%
+  cy        BenchmarkNumericEqualitySeek_ScalarSeek/16000-10     4.454µs     4.365µs   -1.99%   0.02%
+  cy        BenchmarkResultMaterialize_ScalarProjection-10     10.59µs     10.79µs   +1.91%   0.49%
+  exec      BenchmarkBoundedOrder/n=120000/Sort-10             8.691ms     8.857ms   +1.91%   1.27%
+  ... and 13 more
+
+======================================================================================================================
+ADJUDICATION [allocs/op] — calibrated on byte-identical binaries
+======================================================================================================================
+
+CALIBRATION — 4 rows on packages whose test binary is byte-identical between
+the releases (search, search/centrality, graph/index/count). Every one is the SAME CODE.
+  rows                      : 4
+  FALSE 'separations'       : 0  (0% of rows)
+  differing 'constants'     : 0   <- must be 0, or the constant test is unsound
+
+  BAR = the worst FALSE positive this campaign produced on unchanged code:
+        |Δ| > 0.00%  AND  gap > 0.00%
+
+RESULT over 182 rows in the four changed-binary blocks
+  clears the calibration bar          : 0
+  differing per-operation CONSTANTS   : 3
+  separates but does NOT clear the bar: 0   -> NOT ADJUDICABLE at this power
+  overlapping ranges                  : 23
+
+  block     benchmark                                          v0.14.1     v0.14.2        Δ     gap  verdict
+  harness   BenchmarkH_DropIndexMissing-10                          25          27   +8.00%   0.00%  CONSTANT DIFFERS (power-independent)
+  harness   BenchmarkH_SetRelPropUndirected-10                     251         261   +3.98%   0.00%  CONSTANT DIFFERS (power-independent)
+  harness   BenchmarkH_SetRelPropDirected-10                       214         215   +0.47%   0.00%  CONSTANT DIFFERS (power-independent)
+
+======================================================================================================================
+ADJUDICATION [B/op] — calibrated on byte-identical binaries
+======================================================================================================================
+
+CALIBRATION — 4 rows on packages whose test binary is byte-identical between
+the releases (search, search/centrality, graph/index/count). Every one is the SAME CODE.
+  rows                      : 4
+  FALSE 'separations'       : 2  (50% of rows)
+  differing 'constants'     : 0   <- must be 0, or the constant test is unsound
+    search/BenchmarkDijkstra_Large-10                       +3.31%  gap  0.01%
+    centrality/BenchmarkBrandes_RandomGraph-10                  -0.03%  gap  0.00%
+
+  BAR = the worst FALSE positive this campaign produced on unchanged code:
+        |Δ| > 3.31%  AND  gap > 0.01%
+
+RESULT over 182 rows in the four changed-binary blocks
+  clears the calibration bar          : 1
+  differing per-operation CONSTANTS   : 0
+  separates but does NOT clear the bar: 8   -> NOT ADJUDICABLE at this power
+  overlapping ranges                  : 80
+
+  block     benchmark                                          v0.14.1     v0.14.2        Δ     gap  verdict
+  cy        BenchmarkCreateRelationships-10                    5083988     5417322   +6.56%   0.79%  SEPARATION clears calibration
+
+  NOT ADJUDICABLE at this power (separated, but inside the false-positive envelope):
+  harness   BenchmarkH_SetRelPropUndirected-10                   44654       45112   +1.03%   1.01%
+  harness   BenchmarkH_SetRelPropDirected-10                     41434       41472   +0.09%   0.06%
+  cy        BenchmarkMergeUnwindBatch/batch=200/cold=4096-10     1054069     1054062   -0.00%   0.00%
+  cy        BenchmarkCountPushdown_FullScan-10                10036688    10036646   -0.00%   0.00%
+  cy        BenchmarkMergeUnwindBatch/batch=200/cold=0-10      4036760     4036773   +0.00%   0.00%
+  exec      BenchmarkAllShortestPaths_UnitDegreeChain-10      13581808    13581814   +0.00%   0.00%
+  exec      BenchmarkBoundedOrder/n=120000/Top-10             23134554    23134559   +0.00%   0.00%
+  exec      BenchmarkBuildReverse_vs_E/E=1000000-10           48021620    48021623   +0.00%   0.00%
+

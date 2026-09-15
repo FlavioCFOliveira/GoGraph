@@ -1,0 +1,9 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/search
+cpu: Apple M4
+BenchmarkBFSDirectionOpt_PowerLaw-10    	      40	  28925272 ns/op	       0 B/op	       0 allocs/op
+BenchmarkDijkstra_Large-10              	     145	   8181718 ns/op	 1129264 B/op	       4 allocs/op
+BenchmarkDijkstra_PostWarmup-10         	     144	   8224970 ns/op	       0 B/op	       0 allocs/op
+BenchmarkYen_K100-10                    	      79	  14734812 ns/op	  459282 B/op	    1280 allocs/op
+PASS

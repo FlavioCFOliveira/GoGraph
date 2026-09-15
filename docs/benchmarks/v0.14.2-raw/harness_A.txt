@@ -1,0 +1,26 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/benchharness
+cpu: Apple M4
+BenchmarkH_MatchReturn-10             	   40746	     33574 ns/op	   15841 B/op	      98 allocs/op
+BenchmarkH_SetNodeProp-10             	   71317	     15482 ns/op	   10612 B/op	     101 allocs/op
+BenchmarkH_SetNodeReplaceMap-10       	   70988	     16336 ns/op	   12126 B/op	     130 allocs/op
+BenchmarkH_SetNodePropPlanMiss-10     	   81100	     14672 ns/op	   10662 B/op	     102 allocs/op
+BenchmarkH_SetRelPropDirected-10      	   31580	     47921 ns/op	   41426 B/op	     214 allocs/op
+BenchmarkH_SetRelPropUndirected-10    	   28404	     50553 ns/op	   44659 B/op	     251 allocs/op
+BenchmarkH_DropIndexMissing-10        	 1000000	      1000 ns/op	    1313 B/op	      25 allocs/op
+BenchmarkH_CreateDropIndex-10         	   63277	     18735 ns/op	   24409 B/op	     108 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/benchharness
+cpu: Apple M4
+BenchmarkH_MatchReturn-10             	   43692	     29305 ns/op	   15841 B/op	      98 allocs/op
+BenchmarkH_SetNodeProp-10             	   78044	     15229 ns/op	   10640 B/op	     101 allocs/op
+BenchmarkH_SetNodeReplaceMap-10       	   68623	     16446 ns/op	   12147 B/op	     130 allocs/op
+BenchmarkH_SetNodePropPlanMiss-10     	   80448	     14683 ns/op	   10720 B/op	     102 allocs/op
+BenchmarkH_SetRelPropDirected-10      	   30874	     48496 ns/op	   41441 B/op	     214 allocs/op
+BenchmarkH_SetRelPropUndirected-10    	   28965	     50248 ns/op	   44648 B/op	     251 allocs/op
+BenchmarkH_DropIndexMissing-10        	 1000000	      1006 ns/op	    1313 B/op	      25 allocs/op
+BenchmarkH_CreateDropIndex-10         	   63226	     19296 ns/op	   24409 B/op	     108 allocs/op
+PASS

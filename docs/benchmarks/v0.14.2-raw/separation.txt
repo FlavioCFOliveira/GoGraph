@@ -1,0 +1,102 @@
+======================================================================================================================
+SEPARATION TEST [ns/op] — arm A range vs the pooled same-code range of B u B2
+======================================================================================================================
+
+  harness — 2 of 8 rows separate or differ as a constant
+    benchmark                                        v0.14.1     v0.14.2        Δ     gap  verdict
+    BenchmarkH_DropIndexMissing-10                   1.003µs     1.121µs  +11.81%   9.47%  SEPARATION (slower)
+    BenchmarkH_SetNodeProp-10                        15.36µs     14.97µs   -2.54%   0.69%  SEPARATION (faster)
+
+  exec — 8 of 62 rows separate or differ as a constant
+    benchmark                                        v0.14.1     v0.14.2        Δ     gap  verdict
+    BenchmarkScan_PerNode/N=4096-10                  7.577µs     6.615µs  -12.69%   1.44%  SEPARATION (faster)
+    BenchmarkBuildReverse_vs_E/E=1000000-10          5.554ms     5.073ms   -8.65%   6.97%  SEPARATION (faster)
+    BenchmarkBuildReverse_vs_E/E=100000-10           568.8µs     541.4µs   -4.81%   2.67%  SEPARATION (faster)
+    BenchmarkBoundedOrder/n=120000/Sort-10           8.691ms     8.857ms   +1.91%   1.27%  SEPARATION (slower)
+    BenchmarkBoundedOrder/n=060000/Sort-10           8.826ms      8.67ms   -1.76%   0.17%  SEPARATION (faster)
+    BenchmarkDynamicChunkFullBatch-10                14.42µs     14.25µs   -1.20%   0.24%  SEPARATION (faster)
+    BenchmarkFilter_Throughput-10                    135.3µs     136.6µs   +0.94%   0.11%  SEPARATION (slower)
+    BenchmarkColumnarAgg_SumCountGroupBy/columnar_on-10      34.9ms     34.61ms   -0.84%   0.25%  SEPARATION (faster)
+
+  cy — 16 of 115 rows separate or differ as a constant
+    benchmark                                        v0.14.1     v0.14.2        Δ     gap  verdict
+    BenchmarkNumericEqualitySeek_EntitySeek/64000-10     3.586ms      3.39ms   -5.48%   0.26%  SEPARATION (faster)
+    BenchmarkNumericEqualitySeek_ScalarSeek/64000-10      3.64ms     3.464ms   -4.83%   0.72%  SEPARATION (faster)
+    BenchmarkNumericEqualitySeek_EntityScan/64000-10     3.522ms     3.383ms   -3.94%   0.39%  SEPARATION (faster)
+    BenchmarkNumericEqualitySeek_EntityScan/16000-10     2.442ms     2.367ms   -3.04%   0.46%  SEPARATION (faster)
+    BenchmarkNumericEqualitySeek_ScalarScan/64000-10     9.178ms      8.93ms   -2.70%   0.62%  SEPARATION (faster)
+    BenchmarkRowCtxPool_Width2-10                    96.96ns     99.33ns   +2.44%   0.19%  SEPARATION (slower)
+    BenchmarkNumericEqualitySeek_ScalarSeek/16000-10     4.454µs     4.365µs   -1.99%   0.02%  SEPARATION (faster)
+    BenchmarkResultMaterialize_ScalarProjection-10     10.59µs     10.79µs   +1.91%   0.49%  SEPARATION (slower)
+    BenchmarkPrebuiltTreeCeiling-10                  386.4ns     379.7ns   -1.74%   0.67%  SEPARATION (faster)
+    BenchmarkIndexIntersectPlan_AcceptNumericAndString-10     2.111µs     2.145µs   +1.61%   0.33%  SEPARATION (slower)
+    BenchmarkCount_LabelVarBig_Pushdown-10           946.7ns     932.4ns   -1.51%   0.31%  SEPARATION (faster)
+    BenchmarkNumericEqualitySeek_ScalarScan/4000-10     525.3µs     517.9µs   -1.41%   0.44%  SEPARATION (faster)
+    BenchmarkNumericRangeSeek_Seek-10                91.35µs     90.08µs   -1.39%   0.48%  SEPARATION (faster)
+    BenchmarkQueryHasWritingClause/comment_and_string-10     254.9ns     258.4ns   +1.35%   0.08%  SEPARATION (slower)
+    BenchmarkCountPushdown_O1-10                     1.369µs     1.355µs   -0.97%   0.29%  SEPARATION (faster)
+    BenchmarkRowCtxPool_Width8-10                    200.2ns       202ns   +0.91%   0.60%  SEPARATION (slower)
+
+  bolt — 3 of 27 rows separate or differ as a constant
+    benchmark                                        v0.14.1     v0.14.2        Δ     gap  verdict
+    BenchmarkTxBookkeeping_RegistryUpdateUnchanged-10    0.3912ns    0.4137ns   +5.73%   0.15%  SEPARATION (slower)
+    BenchmarkBoltRecordEncodeParallel/baseline-10     20.37ns     19.84ns   -2.58%   1.18%  SEPARATION (faster)
+    BenchmarkCertReloader_ParseCostAvoidedBySkip-10     38.26µs     37.99µs   -0.72%   0.28%  SEPARATION (faster)
+
+  search — 3 of 4 rows separate or differ as a constant
+    benchmark                                        v0.14.1     v0.14.2        Δ     gap  verdict
+    BenchmarkDijkstra_Large-10                       8.182ms     8.254ms   +0.88%   0.29%  SEPARATION (slower)
+    BenchmarkDijkstra_PostWarmup-10                  8.225ms     8.156ms   -0.84%   0.55%  SEPARATION (faster)
+    BenchmarkBFSDirectionOpt_PowerLaw-10             28.93ms     28.85ms   -0.25%   0.23%  SEPARATION (faster)
+
+  cnt — 2 of 9 rows separate or differ as a constant
+    benchmark                                        v0.14.1     v0.14.2        Δ     gap  verdict
+    BenchmarkApply_HotParallel-10                    47.02ns     49.09ns   +4.40%   3.15%  SEPARATION (slower)
+    BenchmarkCountE_SpreadSerial-10                  5.452ns     5.497ns   +0.82%   0.26%  SEPARATION (slower)
+
+  rows compared: 226   range-disjoint separations: 34   differing constants: 0
+
+======================================================================================================================
+SEPARATION TEST [allocs/op] — arm A range vs the pooled same-code range of B u B2
+======================================================================================================================
+
+  harness — 3 of 8 rows separate or differ as a constant
+    benchmark                                        v0.14.1     v0.14.2        Δ     gap  verdict
+    BenchmarkH_DropIndexMissing-10                        25          27   +8.00%   0.00%  CONSTANT DIFFERS
+    BenchmarkH_SetRelPropUndirected-10                   251         261   +3.98%   0.00%  CONSTANT DIFFERS
+    BenchmarkH_SetRelPropDirected-10                     214         215   +0.47%   0.00%  CONSTANT DIFFERS
+
+  rows compared: 226   range-disjoint separations: 0   differing constants: 3
+
+======================================================================================================================
+SEPARATION TEST [B/op] — arm A range vs the pooled same-code range of B u B2
+======================================================================================================================
+
+  harness — 2 of 8 rows separate or differ as a constant
+    benchmark                                        v0.14.1     v0.14.2        Δ     gap  verdict
+    BenchmarkH_SetRelPropUndirected-10                 44654       45112   +1.03%   1.01%  SEPARATION (slower)
+    BenchmarkH_SetRelPropDirected-10                   41434       41472   +0.09%   0.06%  SEPARATION (slower)
+
+  exec — 3 of 62 rows separate or differ as a constant
+    benchmark                                        v0.14.1     v0.14.2        Δ     gap  verdict
+    BenchmarkAllShortestPaths_UnitDegreeChain-10    13581808    13581814   +0.00%   0.00%  SEPARATION (slower)
+    BenchmarkBoundedOrder/n=120000/Top-10           23134554    23134559   +0.00%   0.00%  SEPARATION (slower)
+    BenchmarkBuildReverse_vs_E/E=1000000-10         48021620    48021623   +0.00%   0.00%  SEPARATION (slower)
+
+  cy — 4 of 115 rows separate or differ as a constant
+    benchmark                                        v0.14.1     v0.14.2        Δ     gap  verdict
+    BenchmarkCreateRelationships-10                  5083988     5417322   +6.56%   0.79%  SEPARATION (slower)
+    BenchmarkMergeUnwindBatch/batch=200/cold=4096-10     1054069     1054062   -0.00%   0.00%  SEPARATION (faster)
+    BenchmarkCountPushdown_FullScan-10              10036688    10036646   -0.00%   0.00%  SEPARATION (faster)
+    BenchmarkMergeUnwindBatch/batch=200/cold=0-10     4036760     4036773   +0.00%   0.00%  SEPARATION (slower)
+
+  search — 1 of 4 rows separate or differ as a constant
+    benchmark                                        v0.14.1     v0.14.2        Δ     gap  verdict
+    BenchmarkDijkstra_Large-10                       1129264     1166596   +3.31%   0.01%  SEPARATION (slower)
+
+  centrality — 1 of 1 rows separate or differ as a constant
+    benchmark                                        v0.14.1     v0.14.2        Δ     gap  verdict
+    BenchmarkBrandes_RandomGraph-10                    62244       62226   -0.03%   0.00%  SEPARATION (faster)
+
+  rows compared: 226   range-disjoint separations: 11   differing constants: 0
+
