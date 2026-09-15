@@ -299,6 +299,11 @@ func (op *SetProperty) resolveEntity(varName string, row Row) (entityBinding, er
 // relationship SET/REMOVE can maintain the per-instance by-handle property
 // store (#1686). A handle of 0 (no stable identity / unresolved) leaves the
 // by-handle store untouched downstream.
+//
+// The endpoint columns carry the row's TRAVERSAL order, which is not the edge's
+// STORAGE order on the reverse hop of an undirected pattern, so the pair is
+// normalised by [relStorageDirection] before it becomes a write target (rmp
+// #2817).
 func resolveRelBinding(rc *RelCols, row Row, mut GraphMutator) (entityBinding, error) {
 	srcCol, dstCol := rc.SrcCol, rc.DstCol
 	if srcCol >= len(row) || dstCol >= len(row) {
@@ -314,12 +319,57 @@ func resolveRelBinding(rc *RelCols, row Row, mut GraphMutator) (entityBinding, e
 	if !srcResolved || !dstResolved {
 		return entityBinding{}, fmt.Errorf("cannot resolve relationship endpoint NodeIDs (%d, %d)", graph.NodeID(srcIV), graph.NodeID(dstIV))
 	}
+	handle := resolveRelHandle(rc, row, srcKey, dstKey, mut)
+	stKey, enKey := relStorageDirection(mut, srcKey, dstKey, handle)
 	return entityBinding{
 		isRel:     true,
-		relSrcKey: srcKey,
-		relDstKey: dstKey,
-		relHandle: resolveRelHandle(rc, row, srcKey, dstKey, mut),
+		relSrcKey: stKey,
+		relDstKey: enKey,
+		relHandle: handle,
 	}, nil
+}
+
+// relStorageDirection maps the row's TRAVERSAL endpoint order onto the edge's
+// STORAGE order, returning the (start, end) pair every edge-property mutator on
+// the SET path must be keyed by (rmp #2817).
+//
+// Expand emits (src, r, dst) in the order the pattern was walked. For a directed
+// pattern that is always the storage order, but `MATCH (a)-[r:R]-(b)` also walks
+// each edge against storage: the reverse hop yields a row whose src/dst columns
+// are the SWAP of how the edge is stored. Writing (src, dst) verbatim then
+// targets a DIFFERENT edge than the one bound — and when a reciprocal edge
+// happens to exist there, the write lands on it. With `(a)-[:R]->(b)` and
+// `(b)-[:R]->(a)` both present, `MATCH (n)-[r:R]-(m {key:'b'}) SET r.stamp = …`
+// bound both edges and counted two property writes, yet both writes were keyed
+// (a, b): one edge was stamped twice and the other never. The read path has
+// always normalised this (see relStoredInverted in package cypher, and
+// removeEdgeEitherDirection for DELETE); SET did not.
+//
+// The handle is the exact disambiguator and is consulted first: a Cypher-created
+// edge always has its (mandatory, immutable) type recorded by-handle on the pair
+// that stores it, so whichever orientation carries that record IS the storage
+// orientation — which is decisive even for a reciprocal pair, where topology
+// alone cannot tell the two edges apart. Without a usable handle the decision
+// falls back to topology, matching removeEdgeEitherDirection: swap only when the
+// traversal pair holds no edge and the reverse pair does. A pair that is
+// ambiguous under both tests keeps the traversal order, so no existing
+// single-direction behaviour moves.
+func relStorageDirection(mut GraphMutator, srcKey, dstKey string, handle uint64) (string, string) {
+	if srcKey == dstKey {
+		return srcKey, dstKey // self-loop: both orientations are the same pair
+	}
+	if handle != 0 {
+		if len(mut.EdgeLabelsByHandle(srcKey, dstKey, handle)) > 0 {
+			return srcKey, dstKey
+		}
+		if len(mut.EdgeLabelsByHandle(dstKey, srcKey, handle)) > 0 {
+			return dstKey, srcKey
+		}
+	}
+	if !mut.HasEdge(srcKey, dstKey) && mut.HasEdge(dstKey, srcKey) {
+		return dstKey, srcKey
+	}
+	return srcKey, dstKey
 }
 
 // resolveRelHandle reads the stable handle of the bound relationship instance

@@ -326,6 +326,13 @@ func exprMapValueToEntries(entityVar string, mv expr.MapValue) (props []propLite
 		if !exprValueIsStorable(vv) {
 			return nil, nil, fmt.Errorf("InvalidPropertyType: SET %s: value for key %q is a map or a list of maps, which cannot be stored as a property", entityVar, k)
 		}
+		// A graph entity is equally unstorable. It used to fall through to the
+		// defensive `continue` below, which made `SET n = {k: <node>}` report
+		// success while writing nothing — and, on the REPLACE form, still clear
+		// every key the entity already carried (rmp #2816).
+		if exprValueIsEntity(vv) {
+			return nil, nil, fmt.Errorf("InvalidPropertyType: SET %s: value for key %q is a node, relationship or path, which cannot be stored as a property", entityVar, k)
+		}
 		var pv lpg.PropertyValue
 		var perr error
 		if lst, isList := vv.(expr.ListValue); isList {
@@ -357,6 +364,30 @@ func exprValueIsStorable(v expr.Value) bool {
 		}
 	}
 	return true
+}
+
+// exprValueIsEntity reports whether v is a graph ENTITY — a node, a
+// relationship, or a path — or a list carrying one at any depth.
+//
+// openCypher 9 restricts a property value to a primitive or a homogeneous list
+// of primitives, so an entity is InvalidPropertyType and must be REFUSED. It
+// used to be dropped instead: [valueToPropertyValue] reports an entity as an
+// error, which [exprMapValueToEntries]'s defensive `continue` turned into a
+// silent omission, so the statement reported success and stored nothing (rmp
+// #2816). This is the exec-side mirror of isEntityPropertyValue in package
+// cypher, alongside [exprValueIsStorable]'s mirror of isStorableProperty.
+func exprValueIsEntity(v expr.Value) bool {
+	switch x := v.(type) {
+	case expr.NodeValue, expr.RelationshipValue, expr.PathValue:
+		return true
+	case expr.ListValue:
+		for _, el := range x {
+			if exprValueIsEntity(el) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Init initialises the operator and its child.
