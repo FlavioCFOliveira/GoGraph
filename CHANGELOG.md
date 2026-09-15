@@ -6,6 +6,298 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.14.2] — 2026-09-15
+
+**9 commits** — 3 fixes, 4 documentation changes and 2 merges. Counted at `92c47fda`, the
+branch tip before release preparation; the release-preparation commits that carry this entry
+are necessarily not in their own count. **One sprint delivered this window — 361, *bug fixing
+campaign 26.09.15* — and all 12 of its tasks closed.** 25 files changed, 3 235 insertions,
+103 deletions (`git diff --shortstat v0.14.1..92c47fda`).
+
+**The 12 closed tasks and the 3 fix commits that carry them match in both directions** — twelve
+ids in the sprint, twelve distinct ids across the commit bodies, empty both ways, with each fix
+commit's `Refs` footer naming exactly four. This is **not** a 1:1 task-to-commit mapping and is
+not claimed as one: the sprint was worked as three batches of four tasks sharing a scope, which
+is what the project's batching rule asks for. The remaining six commits are four documentation
+commits, the sprint merge and the `v0.14.1` back-merge.
+
+**What the insertion count is**, because 3 235 lines is not 3 235 lines of engine. Bucketed by
+path from `git diff --numstat v0.14.1..92c47fda`:
+
+| bucket | files | insertions | deletions |
+|---|---:|---:|---:|
+| `*_test.go` (regression tests) | 13 | 2 254 | 10 |
+| engine `*.go` (non-test, shipped) | 5 | 354 | 30 |
+| `internal/sim/` (the simulator's oracle, non-test) | 4 | 318 | 15 |
+| root Markdown (`CLAUDE.md`, `README.md`) | 2 | 255 | 46 |
+| `docs/` (prose) | 1 | 54 | 2 |
+| **total** | **25** | **3 235** | **103** |
+
+**The shipped engine change is 354 insertions across five files, and one of those five is
+godoc.** `bolt/server/serve.go` (+23/−4) changes comments only and has no compiled effect, so
+**four** files carry the whole of this release's behaviour: `cypher/api.go` (+181/−21),
+`bolt/server/errors.go` (+66/−2), `cypher/exec/set.go` (+53/−3) and `cypher/exec/set_all.go`
+(+31/−0). Against that stand 2 254 lines of regression test across 13 files — the shape a
+bug-fixing sprint should have, and the sprint's own rule: every fix closes with a test that
+fails on the old behaviour and passes on the corrected one.
+
+**One defect runs through this entire release: the module said one thing and did another.**
+Every item below is an instance of it. A `SET` reported success and discarded the value
+(#2816). An undirected `SET` reported two relationship writes and made one (#2817). A
+`DROP INDEX … IF EXISTS` reported a removal that never happened (#2818). A statement that
+failed and rolled back still reported the counters for the work it had just undone (#2823).
+Three faults the *client* had committed reached it as "An internal error occurred" (#2819).
+Three godocs asserted intent the code did not implement (#2811, #2824), and one counter
+counted more than its name admits (#2791). This is a release about the gap between what
+GoGraph reports and what GoGraph does, and it closes that gap in every place the sprint
+found it.
+
+**Two of the twelve tasks refuted their own premise and shipped no fix** (#2815, #2820). Both
+are reported in full under *Notes* rather than quietly dropped, because a report that turns
+out not to reproduce at `HEAD` is a result, and the regression coverage written to establish
+it ships with the release.
+
+**`go.mod` and `go.sum` are byte-identical to `v0.14.1`** — same pinned toolchain, same
+dependency set at the same versions (`git diff v0.14.1..92c47fda -- go.mod go.sum` is empty).
+There is nothing to report under a dependency heading and nothing is invented to fill one.
+
+**The exported API is unchanged, and that is what makes this a PATCH.** Five functions were
+added and **all five are unexported** — `relStorageDirection`, `isEntityPropertyValue`,
+`exprValueIsEntity`, `errEntityPropertyValue` and `dropIndexCounter`. **No exported identifier
+was added, removed or re-signed, and no exported struct gained a field.** Under
+[docs/semver.md](docs/semver.md) a new exported identifier is the MINOR trigger and there is
+not one, so `0.14.2` is a PATCH by the rule rather than by decision — which is the opposite of
+`v0.14.1`, where a MINOR surface was shipped as a PATCH deliberately. **There is therefore no
+*Added* section in this entry**, and the heading is omitted because there is genuinely nothing
+to put under it, not because the surface went unexamined.
+
+**No change is marked breaking** — no commit in the window carries a `BREAKING CHANGE` footer
+or a `!` subject, verified over the full commit bodies rather than the subjects alone. Three
+behaviours a caller can observe do change, and every one of them replaces a wrong answer with
+a right one; they are itemised under *Fixed* and revisited in
+[`release-notes/v0.14.2.md`](release-notes/v0.14.2.md).
+
+The openCypher TCK gate is unchanged at **3 897/3 897**. `const tckExecutionBaseline = 3897`
+in `cypher/tck/runner_test.go` is untouched and **no `.feature` file changed in this window**,
+so the scenario population is the one `v0.14.1` was measured against.
+
+**All 9 commits in this window are unsigned** (`git log --pretty=%G?` returns `N` for every
+one). [docs/release.md](docs/release.md) asks for this to be re-measured per release rather
+than assumed; this is that measurement, and it has not changed.
+
+### Fixed
+
+#### Cypher — the effect a statement reports now equals the effect it applied
+
+- **A `SET` no longer discards a node-, relationship- or path-valued property while reporting
+  success** (#2816). `isStorableProperty` rejected only maps, so five write paths each read its
+  `ok=false` as "no value was produced" and moved on. **The defect was wider than reported:** on
+  the REPLACE forms the dropped entry still cleared the existing keys, so `SET a = {other: b}`
+  answered `ok` with `propertiesRemoved=1` and left the node **with no properties at all** —
+  silent destruction of data the caller never asked to remove. All five sites now raise
+  `InvalidPropertyType`. Gated by `cypher/set_entity_property_value_test.go`.
+- **An undirected `SET` over a reciprocal relationship pair now writes both relationships**
+  (#2817). `resolveRelBinding` keyed the edge-property mutation on the row's *traversal* order,
+  and the reverse hop of an undirected pattern is the swap of the edge's *storage* order — so
+  both rows addressed the same stored edge, one edge was stamped twice and the other never
+  touched. `id(r)` returns two distinct relationships, so under openCypher 9 relationship
+  isomorphism the statement owes two rows and two writes: **the counter was right and the write
+  was missing.** `relStorageDirection` normalises the target to storage order. Gated by
+  `cypher/set_undirected_reciprocal_test.go` and
+  `cypher/exec/set_rel_storage_direction_test.go`.
+- **`DROP INDEX … IF EXISTS` no longer counts a removal that never happened** (#2818). Both
+  branches of `runDropIndex` bumped `IndexesRemoved` unconditionally, so absorbing a missing
+  index reported `indexesRemoved: 1` over an index listing identical before and after.
+  `dropIndexCounter` now reads for existence before the operator runs and reports the effect
+  actually applied. **WAL behaviour is unchanged** — nothing was ever written on the absorbed
+  path; only the report was wrong. This fix has a measured cost, stated under *Performance*.
+- **A statement that failed and rolled back no longer reports the counters for the work it
+  undid** (#2823). `rollbackUnderBarrier` correctly reversed every eager mutation and then left
+  `r.counters` pointing at them, so a caller that inspected the result of a failed statement was
+  told about writes that no longer existed. **It is not MERGE-specific as reported** — a plain
+  multi-assignment `SET` and a `CREATE … WITH … SET` reproduce it identically. The evidence for
+  the corrected behaviour is unanimous across three independent sources. **The TCK corpus never
+  asks for counters from a statement that raised.** Of the 1 615 scenario blocks in
+  `cypher/tck/features/`, **192 carry a "should be raised" step and 1 423 carry a side-effect
+  assertion, and the intersection is empty.** The 1 423 counts both forms the TCK uses, because
+  both assert about side effects: **244** state them as an explicit `the side effects should
+  be:` table and **1 179** use `no side effects`, which asserts just as positively that the
+  statement changed nothing (244 + 1 179 = 1 423 exactly, so no block carries both forms). It is
+  still empty on the executed population, where those 1 615 blocks expand to the 3 897 scenarios
+  the baseline counts: 695 raising, 3 202 asserting side effects, **0 both**. A Bolt `FAILURE`
+  message carries no stats field, and the reference driver returns no summary at all when the
+  query failed. Gated by
+  `cypher/failed_statement_counters_test.go`.
+
+#### Bolt — three client faults the server was masking
+
+- **Three errors a client can act on now reach it as client errors instead of
+  "An internal error occurred"** (#2819), and they were masked for three *different* reasons.
+  `txn.ErrFieldTooLong` had no `FailureCode` case at all; the unsupported-DDL refusal arrives
+  untyped, as a wrapped `fmt.Errorf`; and `validatePreExisting`'s NOT NULL arm wrapped only the
+  bare sentinel where `errors.As` needed the type. They are now
+  `Neo.ClientError.Statement.ArgumentError`, `Neo.ClientError.Statement.SyntaxError` and
+  `Neo.ClientError.Schema.ConstraintValidationFailed` respectively. **Each code follows
+  precedent already in the module rather than being invented for the occasion**, and the
+  reasoning is recorded beside the branch that uses it:
+  `Neo.ClientError.General.LimitExceeded` was considered for the over-long field and
+  **rejected**, because rmp #2561 established that it does not appear in Neo4j's status codes
+  at all. **Every forwarded
+  message was checked to carry only static text, the client's own tokens and a format
+  constant** — no server path, no internal identifier — **and that check is now asserted
+  permanently** rather than performed once, in
+  `bolt/server/named_client_faults_wire_test.go`.
+
+#### Instruments that could not see what they measured
+
+- **The deterministic simulator can now see a DDL counter** (#2822). No DDL counter reached any
+  oracle, because the simulator discarded the `Result` — which is precisely why #2818's oracle
+  criterion had been met **only vacuously**, by an oracle structurally incapable of observing
+  the quantity it was said to check. The new oracle derives its expectation from the engine's
+  own index and constraint registries, read either side of the statement, and it was **proved
+  to have teeth by a mutant**: restoring the pre-#2818 unconditional increment turns it red.
+  `internal/sim/ddl_counters_oracle.go`, with `internal/sim/ddl_counters_oracle_test.go`.
+- **A metrics wire test that failed about one run in seven now cannot** (#2821). This was **not
+  a server race.** `ObserveLatency` interns the histogram before it records into it, so a scrape
+  landing between those two steps emits a complete, well-formed `_count 0` line — which the
+  test's substring wait accepted as "the metric has appeared" before asserting on the zero it
+  had just raced. The wait now requires the value, not the line.
+
+### Changed
+
+- **Benchmark execution has been removed from the release path**, by decision, in the
+  release-preparation commits — which are therefore not in this entry's 9-commit count.
+  `make release-accuracy` no longer requires `docs/benchmarks/VERSION.md` to exist (its other
+  five checks are untouched), and `make release-preflight` no longer runs
+  `scripts/run_headline_bench.sh`. The correctness gate is **unchanged**: `release-accuracy`
+  plus the full `make ci` — `go test -race ./...`, the TCK `=100 %` baseline, `golangci-lint`,
+  `govulncheck` and the coverage gate — still stands between a tag and a publication.
+  **This is a change of gate, not of standard.** Measurement still decides every performance
+  question in this project and `scripts/bench_gate.sh` still compares a candidate against its
+  baseline locally, before a change lands; what stopped is producing a per-release campaign as a
+  *precondition for tagging*. [docs/release.md](docs/release.md) and the `release.yml` comments
+  are corrected to describe the gate that now exists.
+
+### Performance
+
+**This release ships a measured benchmark record, and that record is explicitly
+underpowered — read what it does not support before quoting it.**
+[`docs/benchmarks/v0.14.2.md`](docs/benchmarks/v0.14.2.md) compares `v0.14.1` and `v0.14.2`
+first-hand on one host, in three interleaved arms with a same-binary noise floor measured in
+the same rounds. **The campaign was designed as six rounds and was stopped by decision after
+one complete round plus a partial second**, when benchmarking left the release path. At
+`n ≤ 2` per arm **no p-value is computed anywhere in that document, and `benchstat`'s
+confidence interval is unavailable.** A row that separates but does not clear the campaign's
+own false-positive envelope is reported there as *not adjudicable at this power* — **not** as
+unchanged — and that distinction is preserved here.
+
+- **Three packages are proved unchanged rather than measured unchanged.** `search`,
+  `search/centrality` and `graph/index/count` compile to **byte-identical test binaries**
+  (sha256, `-trimpath`) at `v0.14.1` and at `v0.14.2`. Those three host the release gate's
+  entire headline set — `Dijkstra_PostWarmup`, `Dijkstra_Large`, `BFSDirectionOpt_PowerLaw`,
+  `Yen_K100`, `Brandes_RandomGraph` — so **the headline benchmarks execute identical machine
+  code at both releases**. A hash establishes equality; a benchmark could only ever fail to
+  detect a difference. Their measured rows are used as a cross-arm noise floor, not as results.
+- **The `DROP INDEX … IF EXISTS` existence read costs +115 ns and +2 allocations on the
+  absorbed path** — 1.003 µs → 1.117 µs, **+11.4 %** (#2818). This is the one time cost in the
+  release established beyond any question of statistical power: arm `A` measured 1 000 and
+  1 006 ns while arms `B`/`B2` measured 1 101–1 150 ns, **four samples against two with the
+  ranges fully disjoint**, in both rounds and in both arm orders. It is published rather than
+  buried because it is what a correctness fix cost. **In proportion it is a DDL statement's
+  cost, not a query path's**: `DROP INDEX` runs once per statement under the engine's exclusive
+  DDL lock, and on the real-removal path (`H_CreateDropIndex`, which pays a `CREATE INDEX` in
+  the same iteration) the added read **does not rise above the floor at all** — 19.02 → 18.77 µs
+  with allocations unchanged at 108.
+- **#2817's storage-order normalisation costs allocations, as exact per-operation constants**:
+  **+1 alloc/op** on a one-row directed relationship `SET`, and **+10 allocs/op and +458 B/op**
+  on a two-row undirected statement. Every sample within each arm is equal in both arms, so
+  these hold at any sample size. **Part of the +10 is not overhead but the second edge write
+  `v0.14.1` wrongly skipped** — at `v0.14.1` both rows wrote to the same pair, which was the
+  bug. **That split is a hypothesis consistent with the diff, not a measured attribution:**
+  separating the two would need a third arm with the normalisation disabled, and none was
+  built. No time cost is resolvable on either shape at this power.
+- **#2816's `SET` entity-value rejection shows no measurable cost.** The three node-`SET`
+  shapes — scalar, REPLACE-map, and the plan-miss form that forces a fresh plan build — hold
+  their allocation counts **exactly** at 101, 130 and 102 across both arms, and their timings
+  sit inside the false-positive envelope. The guard is a type switch on a value the evaluator
+  already holds.
+- **`bolt/server` changed and did not move.** Its edit is on the error path; none of its 24
+  benchmark functions names `FailureCode`, `sanitiseErr` or `isClientFaultErr`, so no benchmark
+  reaches the new code and none was expected to. All 27 rows were run anyway: block geomean
+  +0.10 % against a +0.32 % same-binary floor.
+- **Of the 212 comparable rows in the four packages whose binary did change, two clear the
+  calibration and 27 separate without clearing it.** The second of the two,
+  `exec/BuildReverse_vs_E/E=1000000` at −8.61 %, is an **improvement that no changed symbol
+  explains** and is reported as unexplained rather than claimed — nothing in `set.go` or
+  `set_all.go` is on the reverse-adjacency build path.
+
+**The published concurrency ladders were not re-measured.** The `-test.cpu=1,8,64,256,1024`
+ladders `v0.14.1` published were in the six-round design and **were dropped with the campaign,
+not by choice**: the concurrency levels this project publishes are **unmeasured for this
+release**. Latency percentiles at those levels are unmeasured for the ninth consecutive cycle.
+
+### Documentation
+
+- **`MaxInFlightPerConnection`'s godoc carried three false claims** and is corrected (#2811) —
+  the code it said was emitted, the retry classification it asserted, and the session state it
+  described after the cap trips. Of the three godocs reported stale in that task, **two had
+  already been corrected by #2806** in the `v0.14.1` window; that is stated rather than
+  re-claimed as new work. Gated by `bolt/server/inflight_cap_doc_agreement_test.go`.
+- **`runDDLOpCounted`'s godoc asserted intent rather than code** and is corrected, with its
+  siblings swept in the same pass (#2824).
+- **`docs/bolt.md` now declares the properties-set counter divergence** (#2791): the Bolt
+  properties-set counter carries removals as well as additions. It is documented as a
+  protocol-conformance divergence, with its reproduction, **because the incumbent has no
+  separate counter either** — changing the number would diverge from the implementation every
+  client is written against. **No counter code changed** — the only non-test change under
+  `bolt/` in this whole window is `FailureCode`'s three new branches (#2819) and a godoc
+  block — which is why this appears here and not under *Fixed*.
+
+### Compliance
+
+- **100 % openCypher TCK-compliant at the execution level** — **3 897 / 3 897 scenarios**,
+  against `const tckExecutionBaseline = 3897`, which is untouched. No `.feature` file changed in
+  this window, so the population is the one `v0.14.1` was measured against. This release
+  **preserves** the compliance; it does not extend it. #2823's fix was decided against the TCK
+  corpus rather than against intuition: of 1 615 scenario blocks, 192 raise an error and
+  **1 423 assert side effects** — 244 as an explicit table, 1 179 as `no side effects` — and
+  **no block does both**, nor does any of the 3 897 scenarios those blocks expand to.
+- **100 % ACID-compliant.** #2816 and #2817 are Atomicity and Consistency failures in the
+  narrow sense that matters to a caller — a statement that reports an effect it did not apply
+  leaves the caller's model of the graph inconsistent with the graph — and #2823 closes a result
+  that described state a rollback had already removed. **No durability path changed in this
+  window:** `store/wal`, `store/recovery`, `store/checkpoint`, `store/snapshot` and `store/txn`
+  are byte-identical to `v0.14.1`, and #2818 alters a counter, never a WAL frame.
+
+### Notes
+
+- **Pre-1.0 stability.** This is a `0.y.z` release. The public Go API may change without a
+  major-version bump until `1.0.0`; pin the exact version you depend on.
+- **Module path.** The Go module path is `github.com/FlavioCFOliveira/GoGraph` with no `/vN`
+  suffix, which is Semantic-Import-Versioning-correct for a `0.x` line.
+- **Two premises were refuted, and neither shipped a fix.** #2815 reported a
+  relationship-property read divergence; it **could not be reproduced at `HEAD` on any path** —
+  embedded API, Bolt 4.4 and 5.0, autocommit and managed transactions, directed and undirected,
+  multigraph and simple, WAL-backed, and across a store reopen. #2820 reported a
+  `DROP CONSTRAINT` twin of #2818; **that twin does not exist**, because `dropConstraintLocked`
+  must resolve the name to a kind, label and property before it can act and returns the empty
+  result on an unresolved name *before* the counting wrapper is reached. Both shipped as
+  permanent regression coverage (`cypher/rel_accessor_agreement_test.go`,
+  `bolt/server/rel_accessor_agreement_wire_test.go`,
+  `cypher/drop_constraint_if_exists_counter_test.go`) so that the behaviour each was said to
+  violate is now defended by a test, whatever the original report meant.
+- **No store migration, and no on-disk format change.** A store written by `v0.14.1` opens
+  unchanged; nothing in this window touches a snapshot, a manifest or a WAL record layout.
+- **Examples are not part of the module.** `examples/` is an exercise harness; the module
+  neither imports nor depends on it. **No example changed in this window.**
+- **Gates not run for this release.** The soak and nightly layers were not run, and this release
+  carries **no production certification of its own** — the most recent was taken at the
+  `v0.11.0` commit. The benchmark campaign behind
+  [`docs/benchmarks/v0.14.2.md`](docs/benchmarks/v0.14.2.md) was stopped after one complete
+  round of six, and the concurrency ladders were dropped with it.
+
+[0.14.2]: https://github.com/FlavioCFOliveira/GoGraph/releases/tag/v0.14.2
+
 ## [0.14.1] — 2026-09-09
 
 **50 commits** — 26 fixes, 7 documentation changes, 6 test changes, 3 features, 3

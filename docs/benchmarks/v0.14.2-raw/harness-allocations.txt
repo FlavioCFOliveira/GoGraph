@@ -1,0 +1,66 @@
+
+================================================================================================================
+FLOOR 1 — B vs B2: the SAME BYTE-IDENTICAL BINARY against itself  [ns/op]
+================================================================================================================
+  changed-binary blocks pooled                   n= 212  median|Δ|=  0.55%  p90=  1.83%  p95=  2.88%  max= 16.48%
+      largest same-code drift: exec/BenchmarkScan_PerNode/N=4096-10                  7.21µs -> 6.021µs    -16.48%
+      band                  n    median      p90      p95      max
+      < 100 ns             26     0.96%    2.20%    3.96%    7.83%
+      100 ns - 10 us       54     0.60%    2.02%    2.88%   16.48%
+      10 us - 1 ms         63     0.49%    1.71%    1.83%   15.61%
+      > 1 ms               69     0.51%    1.36%    2.02%   13.72%
+
+FLOOR 2 — A vs B on packages whose TEST BINARY is byte-identical between the releases  [ns/op]
+  identical-binary packages (cross-arm)          n=  14  median|Δ|=  0.99%  p90=  3.15%  p95=  4.27%  max=  4.88%
+      largest same-code drift: cnt/BenchmarkCells/1024-10                          909.3ns -> 953.7ns    +4.88%
+      band                  n    median      p90      p95      max
+      < 100 ns              6     0.27%    2.66%    2.66%    3.15%
+      100 ns - 10 us        2     3.35%    1.82%    1.82%    4.88%
+      10 us - 1 ms          1     4.27%    4.27%    4.27%    4.27%
+      > 1 ms                5     0.84%    1.13%    1.13%    1.47%
+
+SCREENING BAR per magnitude band = p95 of same-code |delta| across BOTH floors.
+At n<=2 this is a SCREENING envelope, NOT the six-round adjudication bar v0.14.1 published.
+Clearing it is necessary, never sufficient: sign consistency and the row own floor decide.
+   < 100 ns             3.96%
+   100 ns - 10 us       2.88%
+   10 us - 1 ms         4.27%
+   > 1 ms               2.02%
+
+================================================================================================================
+FLOOR 1 — B vs B2: the SAME BYTE-IDENTICAL BINARY against itself  [allocs/op]
+================================================================================================================
+  changed-binary blocks pooled                   n= 182  median|Δ|=  0.00%  p90=  0.00%  p95=  0.00%  max=  4.06%
+      largest same-code drift: cy/BenchmarkPlanCacheMiss_InlinedLiteralNoComment-10      98.50 -> 94.50      -4.06%
+      band                  n    median      p90      p95      max
+      > 1 ms              182     0.00%    0.00%    0.00%    4.06%
+
+FLOOR 2 — A vs B on packages whose TEST BINARY is byte-identical between the releases  [allocs/op]
+  identical-binary packages (cross-arm)          n=   4  median|Δ|=  0.00%  p90=  0.00%  p95=  0.00%  max=  0.00%
+      largest same-code drift: centrality/BenchmarkBrandes_RandomGraph-10                   10.00 -> 10.00      +0.00%
+      band                  n    median      p90      p95      max
+      > 1 ms                4     0.00%    0.00%    0.00%    0.00%
+
+--- harness [allocs/op]  A(v0.14.1) -> B(v0.14.2),  n=2 per arm,  8 rows ---
+benchmark                                       v0.14.1    v0.14.2        Δ  floor B|B2           per-round Δ  verdict
+BenchmarkH_CreateDropIndex-10                       108        108   +0.00%      +0.00%         +0.00% +0.00%  CONSTANT — equal
+BenchmarkH_MatchReturn-10                            98         98   +0.00%      +0.00%         +0.00% +0.00%  CONSTANT — equal
+BenchmarkH_SetNodeProp-10                           101        101   +0.00%      +0.00%         +0.00% +0.00%  CONSTANT — equal
+BenchmarkH_SetNodePropPlanMiss-10                   102        102   +0.00%      +0.00%         +0.00% +0.00%  CONSTANT — equal
+BenchmarkH_SetNodeReplaceMap-10                     130        130   +0.00%      +0.00%         +0.00% +0.00%  CONSTANT — equal
+BenchmarkH_SetRelPropDirected-10                    214        215   +0.47%      +0.00%         +0.47% +0.47%  CONSTANT — DIFFERS
+BenchmarkH_SetRelPropUndirected-10                  251        261   +3.98%      +0.00%         +3.98% +3.98%  CONSTANT — DIFFERS
+BenchmarkH_DropIndexMissing-10                       25         27   +8.00%      +0.00%         +8.00% +8.00%  CONSTANT — DIFFERS
+GEOMEAN                                                              +1.52%      +0.00%
+
+--- harness [B/op]  A(v0.14.1) -> B(v0.14.2),  n=2 per arm,  8 rows ---
+benchmark                                       v0.14.1    v0.14.2        Δ  floor B|B2           per-round Δ  verdict
+BenchmarkH_CreateDropIndex-10                     24409      24409   +0.00%      +0.00%         +0.00% +0.00%  CONSTANT — equal
+BenchmarkH_DropIndexMissing-10                     1313       1313   +0.00%      +0.00%         +0.00% +0.00%  CONSTANT — equal
+BenchmarkH_MatchReturn-10                         15841      15841   +0.00%      -0.00%         +0.00% +0.00%  CONSTANT — equal
+BenchmarkH_SetNodeReplaceMap-10                   12136      12136   +0.00%      -0.47%         -0.02% +0.02%  within screening floor
+BenchmarkH_SetNodePropPlanMiss-10                 10691      10695   +0.04%      -0.16%         +0.00% +0.07%  NOT ADJUDICABLE — sign flipped between rounds
+BenchmarkH_SetRelPropDirected-10                  41434      41469   +0.09%      +0.01%         +0.11% +0.06%  SEPARATION — sign held, every round clears the bar
+BenchmarkH_SetNodeProp-10                         10626      10636   +0.10%      +0.02%         +0.04% +0.16%  SEPARATION — sign held, every round clears the bar
+BenchmarkH_SetRelPropUndirected-10                44654      45112   +1.03%      +0.00%         +1.02% +1.03%  SEPARATION — sign held, every round clears the bar
+GEOMEAN                                                              +0.16%      -0.08%

@@ -3549,11 +3549,30 @@ func (e *Engine) runDDL(ctx context.Context, query string, params map[string]exp
 // DDL has succeeded, so Bolt can report indexes-added / constraints-added and the
 // driver's ContainsUpdates is true for a schema write.
 //
-// The effect is recorded only on success: a DDL that errors returns before this point,
-// and an IF NOT EXISTS / IF EXISTS statement that resolved to a no-op is counted by its
-// operator reporting nothing to count. openCypher's side-effect vocabulary does not name
-// schema effects at all, so unlike the data counters these have no TCK table to match —
-// they exist because Bolt reports them.
+// WHAT IT GUARANTEES, AND WHAT IT LEAVES TO ITS CALLER (rmp #2824). It applies the
+// recorder the caller supplied, and nothing besides:
+//
+//   - a nil record builds no counter set at all, so the Result reports nothing;
+//   - a non-nil record is invoked exactly once, on a fresh zero counter set;
+//   - either way the recording happens only on SUCCESS, because a DDL whose operator
+//     errors returns before this point.
+//
+// It does NOT decide whether a statement that resolved to a no-op counts. The CALLER
+// chooses the recorder, so the caller owns that decision. This godoc used to claim the
+// opposite — that "an IF NOT EXISTS / IF EXISTS statement that resolved to a no-op is
+// counted by its operator reporting nothing to count" — and DROP INDEX was the standing
+// counter-example: both branches of [Engine.runDropIndex] passed the indexes-removed
+// bump unconditionally, so `DROP INDEX <missing> IF EXISTS` reported indexesRemoved: 1
+// across an index listing that was identical before and after (rmp #2818). The operator
+// absorbed the IF EXISTS; it reported nothing to this function either way.
+//
+// [dropIndexCounter] is the worked example of a caller that suppresses the count: it
+// returns nil — which records NOTHING — when the index did not exist, and the bump when
+// it did.
+//
+// openCypher's side-effect vocabulary does not name schema effects at all, so unlike
+// the data counters these have no TCK table to match — they exist because Bolt reports
+// them.
 func (e *Engine) runDDLOpCounted(ctx context.Context, op exec.Operator, record func(*exec.QueryCounters)) (*Result, error) {
 	if err := applyDDLOp(ctx, op); err != nil {
 		return nil, err
@@ -3598,14 +3617,48 @@ func applyDDLOp(ctx context.Context, op exec.Operator) error {
 // (#2212), so Bolt reports indexes-added / indexes-removed / constraints-added /
 // constraints-removed and a driver's ContainsUpdates is true for a schema write.
 //
-// It is used only on the SUCCESS paths that actually changed the schema. An
-// IF NOT EXISTS / IF EXISTS statement that resolved to a no-op keeps [emptyDDLResult],
-// which reports nothing — the same applied-not-attempted rule the data counters follow.
+// It records UNCONDITIONALLY: record is invoked on every call. That is correct only
+// where the caller has ALREADY established that the schema changed, so — exactly as for
+// [Engine.runDDLOpCounted] — the applied-not-attempted rule is a property of the CALL
+// SITES, not of this helper (rmp #2824). Every site was re-read when this was written,
+// and each reaches this function only on a branch that applied the effect:
+//
+//   - [Engine.runCreateBTreeIndex] and [Engine.runCreateHashIndex] return
+//     [emptyDDLResult] on an IF NOT EXISTS absorbed by an existing index;
+//   - [Engine.runCreateConstraint] does the same for an already-registered constraint;
+//   - [Engine.dropConstraintLocked] resolves the NAME first and returns [emptyDDLResult]
+//     when it resolves to no constraint, so its IF EXISTS absorption never reaches here
+//     (which is why DROP CONSTRAINT never had the #2818 defect — rmp #2820).
+//
+// [Engine.runDropIndex] is the one path that could not be written this way: its operator
+// absorbs IF EXISTS internally, so the statement cannot be diverted before the operator
+// runs. It takes the [Engine.runDDLOpCounted] route with [dropIndexCounter] instead,
+// which suppresses the counter for the same outcome (rmp #2818).
 func countedDDLResult(record func(*exec.QueryCounters)) *Result {
 	r := emptyDDLResult()
 	r.counters = &exec.QueryCounters{}
 	record(r.counters)
 	return r
+}
+
+// dropIndexCounter returns the [Engine.runDDLOpCounted] recorder for a DROP
+// INDEX: the indexes-removed bump when an index was actually removed, and nil —
+// which records NOTHING — when it was not (rmp #2818).
+//
+// Both branches of [Engine.runDropIndex] used to pass the bump unconditionally,
+// so `DROP INDEX <missing> IF EXISTS` reported indexesRemoved: 1 while the index
+// listing was byte-identical before and after. The counter is the statement's
+// report of the effect it APPLIED, so an absorbed IF EXISTS reports nothing —
+// exactly as CREATE INDEX … IF NOT EXISTS already does on an existing index, and
+// as the durability side already did by emitting no WAL record.
+//
+// existed is read BEFORE the operator runs, under the exclusive DDL lock, so the
+// decision is race-free.
+func dropIndexCounter(existed bool) func(*exec.QueryCounters) {
+	if !existed {
+		return nil
+	}
+	return func(c *exec.QueryCounters) { c.IndexesRemoved++ }
 }
 
 // emptyDDLResult returns the canonical zero-row Result that every DDL
@@ -3782,7 +3835,8 @@ func (e *Engine) createBTreeIndexLocked(ctx context.Context, p *ir.CreateIndex, 
 	registered, numRegistered := op.Registered(), op.CompanionRegistered()
 	if !registered {
 		// IF NOT EXISTS absorbed an already-registered name: no schema change,
-		// no WAL record.
+		// no WAL record, and no indexes-added counter — [emptyDDLResult] carries
+		// none, which is the applied-not-attempted rule (rmp #2824).
 		return emptyDDLResult(), nil
 	}
 
@@ -3842,8 +3896,14 @@ func (e *Engine) runDropIndex(ctx context.Context, p *ir.DropIndex, idxMgr *inde
 		// internal numeric companion (#1652) can be cleaned up alongside it; see
 		// dropNumericCompanionIfOrphaned.
 		lbl, prop, hadCoverage := indexCoverage(idxMgr, p.Name)
+		// Existence BEFORE the operator, under the exclusive DDL lock, so the
+		// counter reports the effect APPLIED rather than the effect attempted
+		// (rmp #2818). An IF EXISTS that absorbs a missing index removes
+		// nothing, so it must report nothing — the same applied-not-attempted
+		// rule CREATE INDEX … IF NOT EXISTS already follows.
+		_, existsErr := idxMgr.GetIndex(p.Name)
 		res, err := e.runDDLOpCounted(ctx, exec.NewDropIndexOp(p.Name, p.IfExists, idxMgr, e.ClearPlanCache),
-			func(c *exec.QueryCounters) { c.IndexesRemoved++ })
+			dropIndexCounter(existsErr == nil))
 		if err != nil {
 			return nil, err
 		}
@@ -3871,12 +3931,13 @@ func (e *Engine) runDropIndex(ctx context.Context, p *ir.DropIndex, idxMgr *inde
 		lbl, prop, hadCoverage := indexCoverage(idxMgr, p.Name)
 
 		res, err := e.runDDLOpCounted(ctx, exec.NewDropIndexOp(p.Name, p.IfExists, idxMgr, e.ClearPlanCache),
-			func(c *exec.QueryCounters) { c.IndexesRemoved++ })
+			dropIndexCounter(indexExisted))
 		if err != nil {
 			return nil, err
 		}
 		if !indexExisted {
-			// IF EXISTS no-op: nothing was dropped, nothing to record.
+			// IF EXISTS no-op: nothing was dropped, nothing to record — neither a
+			// WAL record nor an indexes-removed counter (rmp #2818).
 			return res, nil
 		}
 		// Forget the def from the engine registry BEFORE the WAL commit, while
@@ -4373,7 +4434,11 @@ func (e *Engine) runDropConstraint(ctx context.Context, p *ir.DropConstraint, id
 //     index record. The pair is therefore a single all-or-nothing WAL frame:
 //     recovery yields BOTH-present or BOTH-absent, never a partial state.
 //   - constraint absent + IF EXISTS → clean no-op success, no schema change,
-//     no WAL record.
+//     no WAL record, and — because this branch returns [emptyDDLResult] rather
+//     than reaching the [countedDDLResult] at the end — no constraints-removed
+//     counter either (rmp #2820, the DROP INDEX defect #2818 checked for here
+//     and not found: resolving the NAME before the operator runs is what keeps
+//     the two in step).
 //   - constraint absent + no IF EXISTS → typed error wrapping
 //     exec.ErrConstraintNotFound; never a fail-silent success.
 //
@@ -5956,10 +6021,22 @@ func (r *Result) Notifications() []Notification { return r.notifications }
 // between a MATCH and a MERGE that matched.
 //
 // The counts reflect what was APPLIED, so a re-intern of an existing node is not a
-// creation, removing an absent property counts nothing, and a statement that failed or
-// rolled back never produces a Result to report from. The nodes and relationships
+// creation and removing an absent property counts nothing. The nodes and relationships
 // counters are incremented at the same call sites as the graph-scoped side-effect
 // counters the openCypher TCK comparator verifies, so the two cannot drift.
+//
+// A FAILED STATEMENT REPORTS NOTHING (rmp #2823). Most failure paths never hand back a
+// Result at all: [ExplicitTx.Exec] returns the error alone, and [Engine.RunInTx] does
+// the same for a WAL-commit, serialization-conflict or NOT NULL failure. The one path
+// that does is an autocommit statement whose pipeline errored mid-drain, which carries
+// its error on [Result.Err]; there the eager mutations were undone inside the write
+// bracket by [Result.rollbackUnderBarrier], which drops the counter set with them, so
+// this returns nil.
+//
+// This godoc used to assert that such a statement "never produces a Result to report
+// from", which was not true of that last path: `MERGE (m:X {…}) ON CREATE SET m.other =
+// b`, with b bound to a node, answered propertiesSet: 1 and nodesCreated: 1 on a
+// statement that raised InvalidPropertyType and stored nothing.
 //
 // The returned pointer is owned by the Result; treat it as read-only.
 func (r *Result) Counters() *exec.QueryCounters { return r.counters }
@@ -6801,6 +6878,16 @@ func (r *Result) rollbackUnderBarrier() {
 	if r.tx != nil {
 		_ = r.tx.Rollback() // release store mutex; in-memory state already restored
 	}
+	// THE REPORT GOES WITH THE EFFECTS (rmp #2823). The counters accumulated as the
+	// statement applied each mutation eagerly, and the replay above has just reversed
+	// every one of them: a report of those effects describes a graph state that no
+	// longer exists and that never became visible or durable. Dropping the reference is
+	// the whole fix — the counter set lives on this statement's own mutator adapter,
+	// which nothing outliving the Result reads — and it makes [Result.Counters] answer
+	// nil, which is what every other failure path already answers by handing back no
+	// Result at all. It is also what a Bolt client already sees: a failed statement
+	// terminates its stream with a FAILURE message, and FAILURE carries no stats.
+	r.counters = nil
 	r.bufHandled = true
 	r.walHandled = true
 }
@@ -7907,6 +7994,7 @@ func buildOperatorWrite(
 			capturedParams := params
 			capturedReg := reg
 			capturedBopts := bopts
+			capturedScalarSnap := scalarColSnapshot(bopts)
 			var capturedG *lpg.ReadView[string, float64]
 			if lw, ok := walker.(*lpgNodeWalker); ok {
 				capturedG = lw.g
@@ -7936,6 +8024,20 @@ func buildOperatorWrite(
 				// runtime (Set1 [10]).
 				if !isStorableProperty(v) {
 					return lpg.PropertyValue{}, false, false, fmt.Errorf("exec: SET %s: InvalidPropertyType: maps cannot be stored as property values", p.PropertyKey)
+				}
+				// A node-, relationship- or path-valued RHS is equally
+				// unstorable and must be REFUSED, not dropped into the
+				// !hasValue no-op below that reported success and wrote
+				// nothing (rmp #2816). The scalar-column escape hatch applies
+				// here for the same reason it does in buildPropsEvalFn: a
+				// scalar integer column can be mis-upgraded to a NodeValue when
+				// it coincides with a live node id, and that mis-upgrade must
+				// stay a drop rather than become a spurious error.
+				if isEntityPropertyValue(v) {
+					if !valueExprIsScalarCol(capturedExpr, capturedScalarSnap) {
+						return lpg.PropertyValue{}, false, false, errEntityPropertyValue("SET", p.PropertyKey)
+					}
+					return lpg.PropertyValue{}, false, false, nil
 				}
 				pv, ok := exprValueToLPGProp(v)
 				if !ok {
@@ -8966,11 +9068,12 @@ func buildPropsEvalFn(
 				// to such a column, drop the mis-upgrade rather than error
 				// (Merge1 flake guard) — a genuine entity reference is never a
 				// scalar column.
-				switch v.(type) {
-				case expr.NodeValue, expr.RelationshipValue:
-					if !valueExprIsScalarCol(vals[i], scalarSnap) {
-						return nil, fmt.Errorf("exec: property %s: InvalidPropertyType: a node or relationship is not a valid property value", k)
-					}
+				//
+				// A PATH is equally unstorable and equally silent when dropped,
+				// so the guard classifies by [isEntityPropertyValue] — which also
+				// reaches an entity nested inside a list (rmp #2816).
+				if isEntityPropertyValue(v) && !valueExprIsScalarCol(vals[i], scalarSnap) {
+					return nil, errEntityPropertyValue("property", k)
 				}
 				continue
 			}
@@ -9096,9 +9199,19 @@ func buildMapEvalFn(
 			if !isStorableProperty(v) {
 				return nil, nil, fmt.Errorf("exec: property %s: %w", k, exec.ErrNestedPropertyValue)
 			}
+			// An entity-valued entry is InvalidPropertyType and is REFUSED, not
+			// dropped (rmp #2816). Dropping it made `SET n = {k: b}` report
+			// success while writing nothing — and, because `=` is a REPLACE, the
+			// dropped entry still cleared every key the entity already carried.
+			if isEntityPropertyValue(v) {
+				if !valueExprIsScalarCol(vals[i], scalarSnap) {
+					return nil, nil, errEntityPropertyValue("property", k)
+				}
+				continue // scalar-vs-NodeID mis-upgrade: drop, as before
+			}
 			pv, ok := exprValueToLPGProp(v)
 			if !ok {
-				continue // e.g. a NodeValue: dropped (shared scalar-vs-NodeID guard)
+				continue
 			}
 			entries = append(entries, exec.PropEntry{Key: k, Value: pv})
 		}
@@ -9350,6 +9463,15 @@ func buildMergeActionEvals(
 			if !isStorableProperty(v) {
 				return lpg.PropertyValue{}, false, false, fmt.Errorf("exec: MERGE SET %s: InvalidPropertyType: maps cannot be stored as property values", propKey)
 			}
+			// Entity-valued RHS: refuse, matching regular SET, rather than fall
+			// into the !hasValue no-op that reported success and wrote nothing
+			// (rmp #2816).
+			if isEntityPropertyValue(v) {
+				if !valueExprIsScalarCol(valAST, scalarSnap) {
+					return lpg.PropertyValue{}, false, false, errEntityPropertyValue("MERGE SET", propKey)
+				}
+				return lpg.PropertyValue{}, false, false, nil
+			}
 			pv, ok := exprValueToLPGProp(v)
 			if !ok {
 				return lpg.PropertyValue{}, false, false, nil
@@ -9443,6 +9565,44 @@ func isStorableProperty(v expr.Value) bool {
 		}
 	}
 	return true
+}
+
+// isEntityPropertyValue reports whether v is a graph ENTITY — a node, a
+// relationship, or a path — or a list carrying one at any depth.
+//
+// openCypher 9 restricts a property value to a primitive or a homogeneous list
+// of primitives (§3.2 "Property types"), so an entity is InvalidPropertyType.
+// [exprValueToLPGProp] already refuses to convert one, but it reports the
+// refusal as `ok == false`, which every SET write path read as "no value
+// produced" and turned into a SILENT no-op: the statement returned success and
+// stored nothing, while the identical statement with a map right-hand side
+// raised InvalidPropertyType (rmp #2816). Worse, on the REPLACE forms the
+// dropped entry still cleared the entity's existing keys, so `SET a = {k: b}`
+// reported success and DESTROYED a's properties.
+//
+// Classifying the value here lets each write path raise the same
+// InvalidPropertyType the map case already raises, so no statement reports an
+// effect it did not apply. It never makes an entity storable — refusing is the
+// spec-mandated outcome; the defect was refusing SILENTLY.
+func isEntityPropertyValue(v expr.Value) bool {
+	switch val := v.(type) {
+	case expr.NodeValue, expr.RelationshipValue, expr.PathValue:
+		return true
+	case expr.ListValue:
+		for _, el := range val {
+			if isEntityPropertyValue(el) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// errEntityPropertyValue builds the InvalidPropertyType error a write path
+// raises for an entity-valued property, naming the clause and the key so the
+// diagnostic matches the shape the map case already produces (rmp #2816).
+func errEntityPropertyValue(clause, key string) error {
+	return fmt.Errorf("exec: %s %s: InvalidPropertyType: a node, relationship or path is not a valid property value", clause, key)
 }
 
 func exprValueToLPGProp(v expr.Value) (lpg.PropertyValue, bool) {

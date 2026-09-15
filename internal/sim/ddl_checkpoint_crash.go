@@ -474,17 +474,18 @@ func ddlCheckpointWriteBatch(ctx context.Context, engine *EngineAdapter, rnd *Se
 
 // engineRunDDLOn runs a DDL statement through an engine adapter and drains it.
 // It is [Simulator.engineRunDDL] for a scenario that owns its store directly
-// rather than through a [Simulator].
+// rather than through a [Simulator], and adjudicates the statement's counters
+// against the engine's own schema registries exactly as that one does
+// (rmp #2822).
 func engineRunDDLOn(ctx context.Context, engine *EngineAdapter, query string) error {
-	res, err := engine.Run(ctx, query, nil)
+	violations, err := runDDLChecked(ctx, engine, query, 0)
 	if err != nil {
 		return err
 	}
-	for res.Next() { // draining is the point
+	if len(violations) > 0 {
+		return ddlCountersError(query, violations)
 	}
-	drainErr := res.Err()
-	_ = res.Close()
-	return drainErr
+	return nil
 }
 
 // runWriteCommitted runs a write statement through the engine's write path and

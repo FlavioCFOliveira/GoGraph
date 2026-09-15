@@ -1,0 +1,25 @@
+START 2026-09-15T19:01:56Z load1=2.17 hot=[/Applications/iTerm.app/Contents/MacOS/iTerm2:16,7 osascript:10,5 /sbin/launchd:9,1 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer:9,0 claude:5,5 /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine:5,3 ]
+block=harness BEFORE 20:01  up 7 days,  9:15, 6 users, load averages: 2,17 2,07 3,18 hot=[/Applications/iTerm.app/Contents/MacOS/iTerm2:24,2 claude:16,3 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer:12,1 osascript:10,5 /usr/bin/osascript:10,3 /sbin/launchd:6,2 ]
+round=0 block=harness arm=B EXIT=0 SECONDS=15 T0=1789498917.008 T1=1789498932.313 RESULTLINES=8
+block=harness AFTER  20:02  up 7 days,  9:16, 6 users, load averages: 2,27 2,10 3,17 hot=[/Applications/iTerm.app/Contents/MacOS/iTerm2:15,6 osascript:12,0 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer:10,8 ]
+block=exec BEFORE 20:02  up 7 days,  9:16, 6 users, load averages: 2,27 2,10 3,17 hot=[/Applications/iTerm.app/Contents/MacOS/iTerm2:15,6 osascript:12,0 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer:10,8 ]
+round=0 block=exec arm=B EXIT=0 SECONDS=95 T0=1789498932.399 T1=1789499027.663 RESULTLINES=62
+block=exec AFTER  20:03  up 7 days,  9:17, 6 users, load averages: 2,90 2,37 3,16 hot=[/Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container:67,1 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer:18,0 /Applications/iTerm.app/Contents/MacOS/iTerm2:17,0 osascript:15,5 osascript:12,6 /Applications/Firefox.app/Contents/MacOS/firefox:11,1 ]
+block=cy BEFORE 20:03  up 7 days,  9:17, 6 users, load averages: 2,90 2,37 3,16 hot=[/Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container:67,1 /Applications/iTerm.app/Contents/MacOS/iTerm2:17,0 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer:15,7 osascript:15,5 osascript:12,7 /Applications/Firefox.app/Contents/MacOS/firefox:11,1 ]
+round=0 block=cy arm=B EXIT=0 SECONDS=206 T0=1789499027.751 T1=1789499233.513 RESULTLINES=115
+block=cy AFTER  20:07  up 7 days,  9:21, 7 users, load averages: 4,76 3,36 3,39 hot=[osascript:32,3 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer:13,8 osascript:11,6 /Applications/iTerm.app/Contents/MacOS/iTerm2:10,6 /usr/sbin/system_profiler:8,1 /System/Library/CoreServices/Finder.app/Contents/MacOS/Finder:6,6 /usr/libexec/sysmond:5,8 ]
+block=bolt BEFORE 20:07  up 7 days,  9:21, 7 users, load averages: 4,76 3,36 3,39 hot=[osascript:32,3 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer:13,8 osascript:11,6 /Applications/iTerm.app/Contents/MacOS/iTerm2:10,6 /usr/sbin/system_profiler:8,1 /System/Library/CoreServices/Finder.app/Contents/MacOS/Finder:6,6 /usr/libexec/sysmond:5,8 ]
+round=0 block=bolt arm=B EXIT=0 SECONDS=33 T0=1789499233.603 T1=1789499266.866 RESULTLINES=27
+block=bolt AFTER  20:07  up 7 days,  9:21, 7 users, load averages: 6,43 3,86 3,56 hot=[osascript:21,7 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer:14,0 ]
+block=search BEFORE 20:07  up 7 days,  9:21, 7 users, load averages: 6,43 3,86 3,56 hot=[osascript:19,7 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer:13,4 ]
+round=0 block=search arm=B EXIT=0 SECONDS=70 T0=1789499266.954 T1=1789499336.912 RESULTLINES=4
+block=search AFTER  20:08  up 7 days,  9:22, 6 users, load averages: 6,27 4,49 3,83 hot=[osascript:36,7 /Applications/iTerm.app/Contents/MacOS/iTerm2:19,5 osascript:12,0 /usr/libexec/sysmond:9,1 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer:5,5 ]
+block=centrality BEFORE 20:08  up 7 days,  9:22, 6 users, load averages: 6,27 4,49 3,83 hot=[osascript:36,7 /Applications/iTerm.app/Contents/MacOS/iTerm2:19,5 osascript:12,0 /usr/libexec/sysmond:9,1 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer:5,5 ]
+round=0 block=centrality arm=B EXIT=0 SECONDS=2 T0=1789499336.999 T1=1789499339.440 RESULTLINES=1
+block=centrality AFTER  20:08  up 7 days,  9:22, 6 users, load averages: 6,27 4,49 3,83 hot=[/Applications/iTerm.app/Contents/MacOS/iTerm2:16,2 osascript:12,3 ]
+block=cnt BEFORE 20:08  up 7 days,  9:22, 6 users, load averages: 6,27 4,49 3,83 hot=[/Applications/iTerm.app/Contents/MacOS/iTerm2:16,7 osascript:12,2 ]
+round=0 block=cnt arm=B EXIT=0 SECONDS=14 T0=1789499339.525 T1=1789499353.342 RESULTLINES=9
+block=cnt AFTER  20:09  up 7 days,  9:23, 6 users, load averages: 5,25 4,35 3,79 hot=[osascript:37,7 /Applications/iTerm.app/Contents/MacOS/iTerm2:20,3 osascript:11,0 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer:7,2 system_profiler:5,2 ]
+END 2026-09-15T19:09:13Z
+SIZING_ALLDONE
+SAMPLER STILL ALIVE pid=90624

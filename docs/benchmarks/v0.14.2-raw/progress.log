@@ -1,0 +1,9 @@
+START 2026-09-15T19:11:03Z rounds=6 gate=2.5 sample=2s go=go version go1.27.1 darwin/arm64
+PRE-CAMPAIGN load1=2.36 hot=[/System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer:28,2 /Applications/Firefox.app/Contents/MacOS/firefox:24,1 /Applications/WhatsApp.app/Contents/MacOS/WhatsApp:15,7 osascript:14,3 /Applications/iTerm.app/Contents/MacOS/iTerm2:13,4 osascript:10,7 /Applications/Firefox.app/Contents/MacOS/gpu-helper.app/Contents/MacOS/Firefox:10,2 /System/Library/PrivateFrameworks/TextInputU]
+ROUND 1 GATE_OPEN load1=2.36 waited=0s hot=[/System/Library/CoreServices/talagentd:34,3 /Applications/Firefox.app/Contents/MacOS/firefox:32,4 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer:30,5 system_profiler:18,4 /Applications/Firefox.app/Contents/MacOS/gpu-helper.app/Contents/MacOS/Firefox:14,4 osascript:13,0 /Applications/WhatsApp.app/Contents/MacOS/WhatsApp:12,8 /Applications/iTerm.app/Contents/MacOS/iTerm2] 2026-09-15T19:11:03Z
+ROUND 1 START 2026-09-15T19:11:03Z order=[A B B2] load=[2,36 3,60 3,56]
+ROUND 1 COMPLETE 2026-09-15T19:32:51Z load=[5,48 5,55 4,55]
+ROUND 1 MIRRORED (scratch, .noindex) 2026-09-15T19:32:51Z
+ROUND 2 GATE_OPEN load1=2.21 waited=100s hot=[osascript:18,5 /Applications/iTerm.app/Contents/MacOS/iTerm2:14,0 osascript:11,4 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer:9,7 system_profiler:6,6 /usr/sbin/system_profiler:5,4 ] 2026-09-15T19:34:31Z
+ROUND 2 START 2026-09-15T19:34:31Z order=[B B2 A] load=[2,21 4,40 4,21]
+SAMPLER STOPPED pid=93338 samples=    1310

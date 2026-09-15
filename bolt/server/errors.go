@@ -115,6 +115,30 @@ func FailureCode(err error) string {
 		return "Neo.ClientError.General.TransactionOutOfMemoryError"
 	}
 
+	// A field the durable formats cannot carry ([txn.ErrFieldTooLong], rmp #2819):
+	// a label or a property key whose length overruns the uint16 length prefix every
+	// WAL op body reserves for a schema string (65535 bytes), or a property value
+	// whose snapshot encoding would exceed the checkpointer's per-field cap. Every
+	// one of those bytes came from the client's own statement and the refusal is
+	// deterministic — the same statement fails the same way — so it is a CLIENT
+	// fault, in the Statement family for the reason rmp #2570 gave when it
+	// reclassified the parameter-nesting cap: the message decoded and the statement
+	// was dispatched, so what is invalid is the ARGUMENT, not the form of the
+	// request.
+	//
+	// isClientFaultErr (derived from this function) then forwards the sentinel's own
+	// message, which names the field kind ("node label", "edge property key"), its
+	// length and the cap that was exceeded. That is the client's own diagnostic: no
+	// path, no Go type, no server state. Before this rule the server logged exactly
+	// that sentence to its stderr and sent the client a session id, so the one party
+	// that could shorten the label was the one party not told why.
+	//
+	// Neo.ClientError.General.LimitExceeded was rejected: rmp #2561 established that
+	// it does not appear in Neo4j's status codes at all (see [txQuotaRefusalCode]).
+	if errors.Is(err, txn.ErrFieldTooLong) {
+		return "Neo.ClientError.Statement.ArgumentError"
+	}
+
 	// A DURABILITY failure ([wal.ErrDurabilityFailed], rmp #2306): the write-ahead
 	// log could not be made durable, the un-synced suffix was discarded, and the
 	// writer is poisoned. It is the exact OPPOSITE of the conflict below and must not
@@ -194,6 +218,21 @@ func FailureCode(err error) string {
 		return "Neo.ClientError.Schema.ConstraintValidationFailed"
 	}
 
+	// The same violation reaching this layer wrapped around the SENTINEL only, with
+	// no typed error to recover (rmp #2819). CREATE CONSTRAINT validates the
+	// pre-existing data before it registers anything, and its two arms are not
+	// symmetric: the UNIQUE arm returns SeedUniqueValues' *ConstraintViolationError,
+	// which errors.As above already matches, while the NOT NULL arm builds its
+	// refusal with fmt.Errorf around exec.ErrConstraintViolation alone (cypher/api.go,
+	// validatePreExisting). A presence constraint refused over pre-existing null data
+	// therefore fell through to the server-fault code while the identical uniqueness
+	// refusal explained itself — an asymmetry no client can predict. Matching the
+	// sentinel as well as the type closes it for every wrap shape, and keeps the two
+	// constraint kinds answering alike.
+	if errors.Is(err, exec.ErrConstraintViolation) {
+		return "Neo.ClientError.Schema.ConstraintValidationFailed"
+	}
+
 	// DROP CONSTRAINT naming a constraint that does not exist (without IF
 	// EXISTS) — a deterministic client fault, mapped to Neo4j's official
 	// constraint-drop-failed code rather than a generic database error.
@@ -244,6 +283,30 @@ func FailureCode(err error) string {
 		return "Neo.ClientError.Statement.ArgumentError"
 	}
 
+	// Every refusal from the hand-written DDL parser (rmp #2819). CREATE/DROP INDEX
+	// and CREATE/DROP CONSTRAINT bypass the ANTLR grammar and are parsed by
+	// cypher/ir.ParseDDL, whose errors [cypher.Engine.runDDL] wraps as
+	// "cypher: DDL parse: %w" (cypher/api.go). Every one of them refuses the client's
+	// own statement TEXT — a composite index or composite constraint, an index or a
+	// constraint on a relationship, IS KEY / IS NODE KEY, a reserved or over-long
+	// schema identifier, a malformed pattern — so every one of them is a client
+	// fault, and SyntaxError is the code this module already gives a parser's refusal
+	// of a statement it will not accept ("invalid or unsupported syntax").
+	//
+	// The WRAP is the classification point because the DDL parser returns plain
+	// fmt.Errorf values with no type to match, and that prefix is produced at exactly
+	// two call sites in cypher/api.go and nowhere else. The one error that travels
+	// under the prefix without coming from the parser — the DDL byte-length guard's
+	// *parser.ParseError, from guardDDLLength — is matched by errors.As far above and
+	// never reaches here. Tested AFTER the TCK-category switch so a DDL statement
+	// that somehow carried a category keeps the more specific code.
+	//
+	// The forwarded message is static text plus the client's own tokens, so it
+	// discloses nothing internal.
+	if strings.Contains(msg, "cypher: DDL parse: ") {
+		return "Neo.ClientError.Statement.SyntaxError"
+	}
+
 	return "Neo.DatabaseError.General.UnknownError"
 }
 
@@ -275,8 +338,9 @@ func evalErrorCode(ee *expr.EvalError) (code string, ok bool) {
 }
 
 // isClientFaultErr reports whether err describes a condition caused by the
-// client's own request — a syntax/semantic/type error, a constraint
-// violation, a resource cap, an index/procedure misuse — whose message is the
+// client's own request — a syntax/semantic/type error, a constraint violation, a
+// resource cap, an index/procedure misuse, a DDL statement the parser will not
+// accept, a field too long for the durable formats — whose message is the
 // client's own diagnostic rather than internal server state. It derives from
 // [FailureCode] so the status-code classification and [Session.sanitiseErr]'s
 // message-forwarding decision can never diverge: every Neo.ClientError.* code

@@ -385,7 +385,8 @@ already streaming), which bounds the following intentional limitations:
   sent, as Neo4j does, so a read-only statement's `SUCCESS` is unchanged. One
   mapping is lossy at the protocol boundary: openCypher counts a property
   removal as its own `-properties` effect and Bolt has no `properties-removed`,
-  so removals are summed into `properties-set`.
+  so removals are summed into `properties-set`. See
+  [Declared divergence: `properties-set` carries removals too](#declared-divergence-properties-set-carries-removals-too).
 - **`bookmark`** — minted on the terminal `SUCCESS` of an **autocommit**
   statement and on the `COMMIT` `SUCCESS`, and omitted on a statement inside an
   explicit transaction, where the Bolt specification puts the bookmark on the
@@ -405,6 +406,54 @@ already streaming), which bounds the following intentional limitations:
   `StatementTypeUnknown`.
 - **`t_first`** / **`t_last`** — not sent; the server does not measure them, so
   the driver reports -1 ms.
+
+#### Declared divergence: `properties-set` carries removals too
+
+A Bolt client cannot tell a property assignment from a property removal. Both
+land in `properties-set`, so two statements with different effects are
+byte-identical on the wire. Measured over a real socket at commit `df0b1866`:
+
+| statement | `stats` on the terminal `SUCCESS` |
+|---|---|
+| `MATCH (g:G {id: 1}) SET g.a = 1 SET g.b = 2` | `properties-set: 2`, `contains-updates: true` |
+| `MATCH (g:G {id: 1}) SET g.c = 3 REMOVE g.a` | `properties-set: 2`, `contains-updates: true` |
+| `MATCH (g:G {id: 1}) REMOVE g.b REMOVE g.c` | `properties-set: 2`, `contains-updates: true` |
+
+The third row is the clearest statement of it: two removals and no assignment at
+all still report `properties-set: 2`.
+
+**This is protocol conformance, not a defect, and the collapse is deliberate.**
+Bolt has no `properties-removed` counter to carry the distinction, and neither
+does Neo4j, which is the protocol's reference implementation:
+
+- The official driver's `Counters` interface
+  (`neo4j-go-driver` v5.28.4, `neo4j/resultsummary.go:104-133`, the version
+  pinned in `go.mod`) declares fourteen fixed accessors — `ContainsUpdates`,
+  `NodesCreated`, `NodesDeleted`, `RelationshipsCreated`,
+  `RelationshipsDeleted`, `PropertiesSet`, `LabelsAdded`, `LabelsRemoved`,
+  `IndexesAdded`, `IndexesRemoved`, `ConstraintsAdded`, `ConstraintsRemoved`,
+  `SystemUpdates`, `ContainsSystemUpdates` — with no `PropertiesRemoved()` and
+  no generic accessor. The string `properties-removed` does not occur anywhere
+  in that module, so no Neo4j server could deliver such a counter to a Go client
+  even if it maintained one.
+- Neo4j maintains none. In `neo4j/neo4j` at commit
+  `f213380f812b820a1b312e2ea52cb3d8f1931ccc`,
+  `UpdateCountingQueryContext.scala:57` declares only `propertiesSet`, and
+  `CountingOps.removeProperty` (`:362-368`) increments that same counter — the
+  identical collapse, in the engine rather than at the encoder (read under
+  rmp #2791).
+
+GoGraph is in fact *more* faithful than the wire format underneath it: the
+engine keeps openCypher's two effects apart as `+properties` and `-properties`
+throughout, and folds them only at the Bolt boundary, in
+`bolt/server/result_stats.go`. Nothing is lost inside the engine.
+
+**An embedder keeps the two apart.** `cypher.Result.Counters()` returns the
+`*exec.QueryCounters` the statement actually produced, whose `PropertiesSet` and
+`PropertiesRemoved` fields are separate and faithful to the specification. A
+caller that needs the distinction reads it there rather than over Bolt. A Bolt
+client that needs it has no protocol-level route to it and must derive it from
+the statement it sent.
 
 ## Auto-commit and explicit transactions
 
@@ -709,10 +758,12 @@ The rules are tested in the order below; the first match wins.
 | `cypher.ErrUnsupportedParamType` | `Neo.ClientError.Statement.TypeError` |
 | `cypher.ErrWriteInReadOnlyTx` | `Neo.ClientError.Request.Invalid` |
 | `txn.ErrTransactionTooLarge` | `Neo.ClientError.General.TransactionOutOfMemoryError` |
+| `txn.ErrFieldTooLong` | `Neo.ClientError.Statement.ArgumentError` |
 | `wal.ErrDurabilityFailed` | `Neo.DatabaseError.General.UnknownError` |
 | `mvcc.ErrSerializationConflict` | `Neo.TransientError.Transaction.Outdated` |
 | `cypher.ErrResultRowsExceeded`, `cypher.ErrResultBytesExceeded`, `funcs.ErrCollectItemsExceeded` | `Neo.ClientError.General.LimitExceeded` |
 | `*exec.ConstraintViolationError` | `Neo.ClientError.Schema.ConstraintValidationFailed` |
+| `exec.ErrConstraintViolation` (the sentinel alone, with no typed error to recover) | `Neo.ClientError.Schema.ConstraintValidationFailed` |
 | `exec.ErrConstraintNotFound` | `Neo.ClientError.Schema.ConstraintDropFailed` |
 | `exec.ErrConstraintAlreadyExists` | `Neo.ClientError.Schema.ConstraintAlreadyExists` |
 | `exec.ErrConstraintNameConflict` | `Neo.ClientError.Schema.ConstraintWithNameAlreadyExists` |
@@ -720,6 +771,7 @@ The rules are tested in the order below; the first match wins.
 | `index.ErrIndexNotFound` | `Neo.ClientError.Schema.IndexNotFound` |
 | `procs.ErrProcNotFound` | `Neo.ClientError.Procedure.ProcedureNotFound` |
 | an untyped engine error whose message carries a TCK category (`cypher: SyntaxError.`, `SemanticError.`, `TypeError.`, `ArgumentError.`) | the matching `Neo.ClientError.Statement.*` code |
+| any refusal from the hand-written DDL parser, wrapped as `cypher: DDL parse: …` | `Neo.ClientError.Statement.SyntaxError` |
 | (any other error) | `Neo.DatabaseError.General.UnknownError` |
 
 Two of these classifications are load-bearing for a driver's retry decision, and
@@ -812,4 +864,4 @@ against a floor of 30. Each remaining failure is a known gap with a cause:
 
 ---
 
-*Last reviewed: 2026-09-08 against commit `b7533eba`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*
+*Last reviewed: 2026-09-15 against commit `df0b1866`. If you edit code referenced by this document and do not update this footer, the doc-staleness lint will flag the PR.*

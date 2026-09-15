@@ -1,0 +1,14 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/graph/index/count
+cpu: Apple M4
+BenchmarkCountE_Serial-10          	563632658	         2.135 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCountE_Parallel-10        	1000000000	         0.3827 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCountE_SpreadSerial-10    	215086912	         5.466 ns/op	       0 B/op	       0 allocs/op
+BenchmarkApply_HotParallel-10      	24150922	        48.50 ns/op	       0 B/op	       0 allocs/op
+BenchmarkApply_HotSerial-10        	97249981	        12.94 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMixed_HotParallel-10      	204381802	         5.683 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCells/1-10                	 1372477	       843.9 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCells/1024-10             	 1367116	       953.7 ns/op	       0 B/op	       0 allocs/op
+BenchmarkStoreFootprint-10         	   84758	     15084 ns/op	    123712 B/store	  123720 B/op	     581 allocs/op
+PASS

@@ -85,6 +85,31 @@ func (a *EngineAdapter) Profile(ctx context.Context, query string, params map[st
 	return a.eng.Profile(ctx, query, ev)
 }
 
+// ListIndexes returns the names of every secondary index currently registered on
+// the wrapped engine ([cypher.Engine.ListIndexes]), in unspecified order. It is
+// the live in-memory registry, INTERNAL indexes included: the "__uniq__" index
+// backing a UNIQUE constraint and the "_btree_num" numeric companion of a user
+// index both appear. The DDL counters oracle (rmp #2822) reads it as one half of
+// the schema surface it derives a statement's expected effect from, and filters
+// those two kinds out itself ([isInternalIndexName]).
+func (a *EngineAdapter) ListIndexes() []string {
+	return a.eng.ListIndexes()
+}
+
+// ConstraintNames returns the name of every schema constraint currently
+// registered on the wrapped engine ([cypher.Engine.Constraints]), in the engine's
+// deterministic order. It is the other half of the surface the DDL counters
+// oracle derives from (rmp #2822); a constraint's backing index is NOT in it,
+// which is what keeps a CREATE CONSTRAINT from looking like an index effect.
+func (a *EngineAdapter) ConstraintNames() []string {
+	defs := a.eng.Constraints()
+	names := make([]string, 0, len(defs))
+	for i := range defs {
+		names = append(names, defs[i].Name)
+	}
+	return names
+}
+
 // StatsTrackedPairs reports how many distinct (label, property) pairs the
 // wrapped engine currently holds planner statistics for
 // ([cypher.Engine.StatsTrackedPairs]): 0 until the first completed

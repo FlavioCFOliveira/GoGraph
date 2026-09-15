@@ -5,99 +5,84 @@ designed to scale from in-memory graphs to graphs that exceed RAM.
 
 ## Status
 
-**Current release: `v0.14.1`.** This is the project's **eighteenth
+**Current release: `v0.14.2`.** This is the project's **nineteenth
 release**, published at a pre-1.0 baseline: under Semantic Versioning a
 `0.y.z` version signals that the public API is **not yet stable** and may
 change without a major bump while the module matures toward `1.0.0`.
-`v0.14.1` is a pre-1.0 **PATCH** release of **50 commits** from **one
-sprint (357, *clear every open bug and chore, and ship GoGraph v0.14.1*)
-and 46 closed tasks**. No change is marked breaking, and `go.mod` and
-`go.sum` are **byte-identical** to `v0.14.0` — same pinned toolchain, same
-dependency set — so nothing in the supply chain moved. It is a
-**correctness release**: 26 of its 50 commits are fixes, and it exists
-because `v0.14.0` returns wrong answers on a query that `v0.14.0` itself
-made faster.
+`v0.14.2` is a pre-1.0 **PATCH** release of **9 commits** from **one
+sprint (361, *bug fixing campaign 26.09.15*) and 12 closed tasks**. No
+change is marked breaking, **no exported identifier was added, removed or
+re-signed**, and `go.mod` and `go.sum` are **byte-identical** to `v0.14.1`
+— same pinned toolchain, same dependency set — so nothing in the supply
+chain moved. Unlike `v0.14.1`, which shipped a MINOR surface as a PATCH by
+decision, this number means exactly what SemVer says it means.
 
-**Upgrade from `v0.14.0` if you use any index or constraint.** The equality
-index seek was blind to writes the statement itself had made, so a `MATCH`
-on an indexed property could both **lose rows the transaction had
-written** and **return rows that no longer matched** — with no explicit
-transaction, on a single autocommit statement (rmp #2814). The fix
-declines the index access path for the `(label, property)` coordinates a
-transaction has dirtied, turning a wrong answer into a slower correct one.
+**It is a correctness release, and one defect runs through all of it: the
+module reported one thing and did another.** A `SET` whose value was a
+node, relationship or path was **silently discarded** while the statement
+reported success — and on the REPLACE forms the discarded entry still
+cleared the node's existing keys, so `SET a = {other: b}` answered `ok`
+with `propertiesRemoved=1` and left the node **with no properties at all**
+(rmp #2816). An undirected `SET` over a reciprocal relationship pair
+reported two writes and made one, because the mutation was keyed on the
+row's traversal order rather than the edge's storage order, so both rows
+addressed the same stored edge (#2817). **If you write a property from
+another bound entity, or update relationships through an undirected
+pattern, upgrade.**
 
-**Four routes by which a secondary index could disagree with the graph are
-closed.** The `CREATE INDEX` backfill read *uncommitted* mutations, so a
-seek could return a row that was never committed (#2778); `CREATE
-CONSTRAINT` had the same defect (#2792); `FinishBuild`'s replay resolved
-against live state, so a concurrent write could fabricate an entry
-(#2793); and `rewindConstraintDrop` read live state, where the obvious fix
-traded a fabricated entry for a **lost** one (#2799). Because an affected
-build can have written fabricated entries to disk, the snapshot manifest
-now carries an index-builder epoch and recovery **refuses to hydrate** an
-older payload (#2797) — so **a store written by `v0.14.0` or earlier
-rebuilds its secondary indexes once, on first open**. That is deliberate,
-requires nothing of you, and is what removes the fabricated entries.
+**Reported counters were wrong in both directions.** A statement that
+failed and rolled back still reported the counters for the work it had
+just undone — not MERGE-specific as reported, but any eager mutation
+(#2823) — and `DROP INDEX … IF EXISTS` counted a removal that never
+happened (#2818). **Three client faults the Bolt server was masking** as
+"An internal error occurred" now arrive as `ArgumentError`, `SyntaxError`
+and `ConstraintValidationFailed`, each masked for a different reason and
+each carrying the client's own diagnostic (#2819).
 
-**The durability path stopped calling three different failures clean.** The
-checkpoint gate verified that the expected snapshot files *existed* and
-then discarded the WAL prefix, without ever verifying the snapshot could be
-**read** (#2749); the readback that fixed it covered recovery's reader but
-not its applier (#2780); and `ReplayWAL` reported corruption inside an
-already-durable frame as benign, contradicting its own documented contract
-(#2794). Three values that committed durably and then blocked every later
-checkpoint — a property between 1 GiB and 4 GiB, a nested property list
-that was **silently lost on replay**, and an over-cap edge-handle record
-count — are now refused at commit, where the caller can act (#2750,
-#2783, #2784).
+**Two of the twelve tasks refuted their own premise and shipped no fix**,
+which is a result and is recorded as one: a reported relationship-property
+read divergence **could not be reproduced at `HEAD`** on any path — both
+Bolt versions, autocommit and managed transactions, directed and
+undirected, multigraph and simple, WAL-backed, across a reopen (#2815) —
+and the `DROP CONSTRAINT` twin of #2818 **cannot exist**, because the drop
+must resolve the name before it can act and returns early on an unresolved
+one (#2820). Both shipped as permanent regression coverage instead.
 
-**The Bolt server's four timeout defaults are now `0`, which means
-disabled.** The old defaults armed a read deadline before *every* read of
-the message loop, and the reader sits in that read while the loop executes
-the client's own statement — so the deadline ran against a **busy server**
-rather than an idle client: measured, a 900 ms statement was cut off at
-110 ms against a 100 ms `ConnTimeout` (#2806, #2807). PostgreSQL and Neo4j
-both ship the equivalent bounds disabled and use TCP keep-alive or NOOP
-chunks for liveness, and GoGraph now does the same. The contract is
-three-way and explicit — zero disables, a positive value bounds, a
-negative one is an error. **This has a security cost, and it is stated
-rather than glossed:** an unauthenticated client that completes the
-handshake and falls silent before LOGON now holds its connection slot
-indefinitely. Set `Options.ConnTimeout` explicitly before exposing the
-server to an untrusted network.
-
-**This release was measured against `v0.14.0` first-hand**, three arms interleaved with a
-noise floor measured in the same rounds
-([docs/benchmarks/v0.14.1.md](docs/benchmarks/v0.14.1.md)). **Of 229 comparable result rows,
-11 survive adjudication — eight improvements and three regressions**, the largest regression
-**+6.54 %** on one 78 µs benchmark. The **Cypher read path is unchanged at all five published
-concurrency levels** and the **durable commit path is unchanged**, still scaling **119×** from
-1 to 256 writers. The clearest gain is the `ORDER BY` key hoist, where nine of ten
-`BoundedOrder` rows move together (`Top` **−2.75 %**, **−2.56 %**, **−2.10 %**); and
-`v0.14.1` **gives back the largest regression `v0.14.0` published**, taking
-`AllNodesScan_PerNodeAllocCost` from 11.60 µs back to 10.98 µs (**−5.39 %**). The counting
-`v0.14.0` added costs **one allocation** on the count-store leaf, measured. See
-[Performance](#performance).
+**This release was measured against `v0.14.1` first-hand**, and the record
+is deliberately modest about its own power
+([docs/benchmarks/v0.14.2.md](docs/benchmarks/v0.14.2.md)). The campaign
+was designed as six rounds and **stopped by decision after one**, when
+benchmark execution was removed from the release path, so **no p-value is
+computed anywhere** and 27 rows are reported as *not adjudicable at this
+power* rather than as unchanged. Two things are solid. **`search`,
+`search/centrality` and `graph/index/count` compile to byte-identical test
+binaries at both releases** (sha256), and they host the entire headline
+set — so the headline benchmarks execute identical machine code at
+`v0.14.1` and `v0.14.2`, which a hash proves and a benchmark could only
+fail to disprove. And **#2818's existence read costs +115 ns and +2
+allocations on an absorbed `DROP INDEX … IF EXISTS`** (1.003 → 1.117 µs,
++11.4 %, ranges fully disjoint) — a real, published cost of a correctness
+fix, which does not rise above the floor at all on the real-removal path.
 
 The two compliance invariants remain in force: the module is **100 %
 openCypher TCK-compliant at the execution level** (**3 897/3 897
 scenarios**, preserved rather than extended — no `.feature` file changed
-this cycle) and **100 % ACID-compliant** — and this is the release in
-which several of the second one's guarantees stopped being merely
-asserted, with named fixes under Isolation (#2814), Consistency (#2778,
-#2792, #2793, #2799), Durability (#2749, #2780, #2794, #2530) and
-Atomicity (#2750, #2783, #2784). **The soak and nightly layers were not
-run for this release**, and it carries **no production certification of
-its own** — the most recent was taken at the `v0.11.0` commit, and the
-whole-tree soak layer has now gone unrun for an eighth consecutive cycle.
-The openCypher divergence `v0.14.0` shipped open (rmp #2675: a subquery
-body's final projection was never translated) **is fixed in this
-release**, along with #2779 and #2781; the TCK remains structurally blind
-to it, since zero of 220 feature files contain `COUNT {`. The module uses
-the conventional Go path `github.com/FlavioCFOliveira/GoGraph` and is
-fetchable with `go get github.com/FlavioCFOliveira/GoGraph@v0.14.1`. See
+this cycle) and **100 % ACID-compliant**. **No durable format changed and
+no durability path changed**: `store/` is byte-identical to `v0.14.1`, so
+there is **no migration and no index rebuild** — the upgrade is a version
+bump. **The soak and nightly layers were not run**, this release carries
+**no production certification of its own** — the most recent was taken at
+the `v0.11.0` commit — and the concurrency ladders `v0.14.1` published
+were **dropped with the benchmark campaign** and are unmeasured here.
+Benchmark execution has also left the release path: the correctness gate
+(`release-accuracy` + the full `make ci`) is unchanged, but a per-release
+benchmark report is no longer a precondition for tagging.
+
+The module uses the conventional Go path
+`github.com/FlavioCFOliveira/GoGraph` and is fetchable with
+`go get github.com/FlavioCFOliveira/GoGraph@v0.14.2`. See
 [CHANGELOG.md](CHANGELOG.md) and
-[release-notes/v0.14.1.md](release-notes/v0.14.1.md) for the full release
+[release-notes/v0.14.2.md](release-notes/v0.14.2.md) for the full release
 narrative, the behaviour changes a caller must know about, and what the
 release does **not** establish.
 
@@ -346,9 +331,17 @@ func main() {
 
 ## Workflow
 
-The project follows a strict `Specify -> Implement -> Test -> Document`
-workflow. Sprint planning lives in the local `rmp` CLI roadmap. The
-`Makefile` `ci` target runs the full validation pipeline:
+Development runs as repeated iterations of `Analyse -> write all the
+code in bulk -> test those changes`, until the objectives are met. The
+work is specified before the first iteration and documented once the
+objectives are met, and it stays focused on what is required without
+reaching beyond it. Sprint planning lives in the local `rmp` CLI
+roadmap.
+
+Each iteration tests the changes just made: the packages under change
+and any component whose stability those changes can foreseeably affect.
+The full pipeline is reserved for the close of a sprint and for every
+push, and runs from the `Makefile` `ci` target:
 
 ```
 make ci
@@ -358,7 +351,8 @@ The pipeline runs `go mod tidy`, `gofmt`, `go vet`, `go build`, the
 short test layer under the race detector (`go test -race`),
 `golangci-lint run`, and the coverage gate (`cover-gate`), which
 enforces **≥ 85 % aggregate** and **≥ 75 % per-package** statement
-coverage. Every change must pass it before being committed.
+coverage. It must be green before a sprint is closed and before
+anything is pushed.
 
 ## Performance
 
