@@ -1,17 +1,15 @@
-// Example 23_bolt_server drives the GoGraph Bolt v5 server end to end: it
-// starts the embedded [bolt/server] over an in-memory labelled property
-// graph, connects the official neo4j-go-driver/v5 as a real client, runs a
-// battery of Cypher queries over driver sessions, and shuts everything down
-// cleanly with no goroutine left behind.
+// Example 23_bolt_server is the Bolt v5 extreme-concurrency laboratory: it
+// starts the embedded [bolt/server] over an in-memory labelled property graph,
+// connects the official neo4j-go-driver/v5 as a real client, drives the wire
+// path at a chosen number of CONCURRENT CONNECTIONS, and writes out every
+// artefact needed to attribute what that cost.
 //
-// Unlike a hello-world round-trip, this example seeds the served graph from a
-// seeded, scale-parametrised generator and then puts the wire path under
-// load, so it doubles as a Bolt-throughput benchmark. It reports the evidence
-// that matters for the Bolt/Cypher subject — query throughput, a p50/p95/p99
-// latency distribution, and live Go heap — as volatile telemetry, while the
-// deterministic results (a label-scan count equal to the known node count and
-// the number of queries that succeeded) are printed as bare facts a
-// regression test can pin.
+// It is both a didactic end-to-end demonstration of serving Cypher over Bolt
+// and a controlled instrument: the same binary runs a small deterministic
+// default that a regression test pins, and sweeps the module's published
+// concurrency ladder — 1, 8, 64, 256 and 1024 connections — plus a saturation
+// rung that deliberately offers more connections than the server's
+// [bolt/server.Options.MaxConnections] semaphore admits.
 //
 // # Model
 //
@@ -27,28 +25,67 @@
 // value (lpg.TimeValue is not used: the Cypher reader maps it to null, whereas
 // the tagged date strings round-trip).
 //
-// # Scale and load
+// # Two client dimensions, and why they are not one
 //
-// Run with no flags, the example seeds a small deterministic graph (2000
-// people) and fires 2000 read queries from a pool of driver sessions, fast
-// enough to stay well under the 60 s short-test budget. Every dimension is a
-// flag, so the same binary scales the dataset and the query load up to where
-// the Bolt path's behaviour is actually observable:
+//   - -sessions is the driver's own concurrency: how many logical Bolt sessions
+//     issue queries. How many SOCKETS that opens is the driver pool's decision.
+//   - -connections is the socket count itself: each connection is an
+//     independent driver whose pool holds exactly one connection, so the number
+//     of live server-side connections is exactly what was asked for.
 //
-//	go run ./examples/23_bolt_server -nodes 200000 -queries 50000 -sessions 16 -seed 7
+// Only the second dimension can reach the server's MaxConnections semaphore,
+// which is why it exists. With -connections 0 (the default) the example keeps
+// its original shape: one shared driver pool of -sessions concurrent sessions.
 //
-// The deterministic facts are reproducible for a fixed -seed; only the
-// telemetry (lines prefixed with "# ") — throughput, latency percentiles, and
-// heap — varies between runs and machines.
+// # Saturation
+//
+// Offering more connections than the semaphore admits drives the reject branch
+// of Serve (bolt/server/serve.go, the select on s.sem). The refusal is visible
+// nowhere on the client — a rejected connection simply fails to connect — so
+// the example installs a metrics sink and reports bolt.server.conn.rejected
+// directly:
+//
+//	go run ./examples/23_bolt_server -connections 256 -max-connections 128 -queries 20000
+//
+// Every connection handshakes and then waits at a barrier until every other
+// offered connection has resolved, so the server really does hold them all at
+// once; without that barrier the early connections would release their
+// semaphore slots before the late ones dialled, and nothing would be refused.
+//
+// # Evidence
+//
+// With -artifact-dir set, a run writes cpu.pprof, heap.pprof, mutex.pprof,
+// block.pprof, goroutine.pprof, trace.out, metrics.json, host.json and
+// bench.txt. The goroutine profile is taken AT the peak, while every connection
+// is live; a profile taken after teardown would show an idle server. The
+// unprofiled repetitions and the profiled window are reported separately:
+// full-rate contention profiling perturbs what it measures, so the profiled
+// window supplies attribution and never a throughput number.
+//
+// With -ladder, one invocation sweeps the whole ladder, running each rung in a
+// fresh child process — the mutex, block and allocation profiles accumulate for
+// a process's lifetime with no way to reset them, so two rungs in one process
+// would contaminate each other:
+//
+//	go run ./examples/23_bolt_server -ladder -artifact-dir /tmp/boltlab -queries 20000 -repetitions 5
 //
 // # Teardown
 //
 // The listener binds to 127.0.0.1:0 so the kernel assigns a free port and a
 // test run never collides. Serve runs under a cancellable context; on
-// completion the client driver is closed, the server is gracefully shut down,
+// completion the client drivers are closed, the server is gracefully shut down,
 // and the serve goroutine is drained. Serve only returns after every
 // per-connection goroutine has finished, so the drain guarantees no goroutine
 // leaks — the same teardown discipline as bolt/server/example_test.go.
+//
+// # Reading the output
+//
+// Bare lines carry deterministic facts, reproducible for a fixed -seed. Lines
+// prefixed with "# " carry volatile telemetry — throughput, latency
+// percentiles, counters, heap, and the host's load average — which varies per
+// run and per machine and is never pinned by a test. A run is called idle only
+// when its pre-run load average was actually read and was below the threshold;
+// an unread load average is reported as not certified idle, never as idle.
 package main
 
 import (
@@ -59,21 +96,13 @@ import (
 	"io"
 	"log"
 	"math/rand"
-	"net"
 	"os"
 	"runtime"
-	"sort"
-	"sync"
-	"sync/atomic"
+	"strconv"
 	"time"
 
-	"github.com/FlavioCFOliveira/GoGraph/bolt/server"
-	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/examples/internal/exprof"
-	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
-
-	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 )
 
 // Node label and relationship type. Centralised so the model is described in
@@ -89,36 +118,91 @@ const (
 	propKnowsSince = "since"
 )
 
-// config captures every scale and shape knob of the benchmark. The zero value
-// is not valid; build one with defaultConfig and override fields from flags
-// (see main) or construct one directly (see the regression test).
+// config captures every scale, shape, and instrument knob of the laboratory.
+// The zero value is not valid; build one with defaultConfig and override fields
+// from flags (see main) or construct one directly (see the regression test).
+//
+// Fields added for the connection laboratory tolerate their zero value on
+// purpose: a config built by hand in a test names only the dimensions it cares
+// about, and the accessors below (reps, dialTimeout, sessionsPerConn,
+// effectiveMaxConnections) turn a zero into the documented default rather than
+// into a failure.
 type config struct {
 	nodes    int   // number of :Person nodes
 	knowsMin int   // minimum KNOWS out-degree per person (inclusive)
 	knowsMax int   // maximum KNOWS out-degree per person (inclusive)
 	queries  int   // number of read queries to fire over the wire
-	sessions int   // number of concurrent driver sessions issuing queries
+	sessions int   // driver sessions: concurrent in pooled mode, per connection otherwise
 	seed     int64 // RNG seed; fixes the deterministic data shape
+
+	// connections is the independent-connection dimension: 0 keeps the shared
+	// driver pool, and any positive value opens exactly that many sockets, one
+	// driver each. It is the only dimension that can reach the server's
+	// MaxConnections semaphore.
+	connections int
+	// maxConnections is bolt/server Options.MaxConnections verbatim; 0 derives
+	// it from the offered load (see effectiveMaxConnections).
+	maxConnections int
+	// repetitions is how many UNPROFILED measurement windows a rung runs, so
+	// benchstat has a spread to compare. 0 means one.
+	repetitions int
+	// connectTimeout bounds the client's dial and connection acquisition. It is
+	// what keeps a saturation run from stalling on the driver's 60 s default
+	// once the server starts refusing connections.
+	connectTimeout time.Duration
+
+	// mutexFraction and blockRate configure the profiled window's contention
+	// profilers; 0 disables either one.
+	mutexFraction int
+	blockRate     int
+
+	// artifactDir, when set, turns the run into an instrumented one: the full
+	// artefact set is written there.
+	artifactDir string
+	// label is the benchstat sub-name; empty derives one from the shape.
+	label string
+
+	// ladder sweeps the published concurrency ladder, one child process per
+	// rung. It requires artifactDir.
+	ladder       bool
+	ladderLevels string
+	// satOffer and satAdmit define the ladder's saturation rung: satOffer
+	// connections are offered to a server that admits satAdmit. Either at 0
+	// drops the rung.
+	satOffer int
+	satAdmit int
 }
 
 // defaultConfig returns a small, deterministic default: a 2000-person graph
-// queried 2000 times over four sessions. It is the shape the regression test
-// pins and is fast enough to stay well under the short-layer 60 s budget.
+// queried 2000 times over four sessions of one shared pool. It is the shape the
+// regression test pins and is fast enough to stay well under the short-layer
+// 60 s budget. The laboratory dimensions default to off, so `go run` with no
+// flags still runs the plain demonstration.
 func defaultConfig() config {
 	return config{
-		nodes:    2000,
-		knowsMin: 5,
-		knowsMax: 8,
-		queries:  2000,
-		sessions: 4,
-		seed:     42,
+		nodes:          2000,
+		knowsMin:       5,
+		knowsMax:       8,
+		queries:        2000,
+		sessions:       4,
+		seed:           42,
+		connections:    0,
+		maxConnections: 0,
+		repetitions:    1,
+		connectTimeout: 5 * time.Second,
+		mutexFraction:  1,
+		blockRate:      1,
+		ladderLevels:   defaultLadderLevels,
+		satOffer:       256,
+		satAdmit:       128,
 	}
 }
 
 // validate rejects a configuration that cannot produce the requested shape —
-// for instance more acquaintances than there are other people. It is checked
-// once, at the boundary, before any work.
-func (c config) validate() error {
+// for instance more acquaintances than there are other people, or a saturation
+// rung that offers no more connections than it admits. It is checked once, at
+// the boundary, before any work.
+func (c *config) validate() error {
 	switch {
 	case c.nodes <= 0:
 		return fmt.Errorf("nodes must be > 0, got %d", c.nodes)
@@ -130,20 +214,155 @@ func (c config) validate() error {
 		return fmt.Errorf("queries must be > 0, got %d", c.queries)
 	case c.sessions <= 0:
 		return fmt.Errorf("sessions must be > 0, got %d", c.sessions)
+	case c.connections < 0:
+		return fmt.Errorf("connections must be >= 0, got %d", c.connections)
+	case c.maxConnections < 0:
+		return fmt.Errorf("max-connections must be >= 0, got %d", c.maxConnections)
+	case c.repetitions < 0:
+		return fmt.Errorf("repetitions must be >= 0, got %d", c.repetitions)
+	case c.connectTimeout < 0:
+		return fmt.Errorf("connect-timeout must be >= 0, got %s", c.connectTimeout)
+	case c.mutexFraction < 0:
+		return fmt.Errorf("mutex-fraction must be >= 0, got %d", c.mutexFraction)
+	case c.blockRate < 0:
+		return fmt.Errorf("block-rate must be >= 0, got %d", c.blockRate)
+	case c.satOffer < 0 || c.satAdmit < 0:
+		return fmt.Errorf("saturation offer/admit must be >= 0, got %d/%d", c.satOffer, c.satAdmit)
+	case c.ladder && c.artifactDir == "":
+		return fmt.Errorf("-ladder writes one artefact directory per rung and needs -artifact-dir")
+	case c.ladder && c.satOffer > 0 && c.satAdmit > 0 && c.satOffer <= c.satAdmit:
+		return fmt.Errorf("saturation offers %d connections to a semaphore of %d: nothing would be refused", c.satOffer, c.satAdmit)
 	}
 	return nil
 }
 
+// reps is the number of unprofiled measurement windows, treating the zero value
+// as one.
+func (c *config) reps() int { return max(1, c.repetitions) }
+
+// dialTimeout is the client's dial and acquisition bound, treating the zero
+// value as the default.
+func (c *config) dialTimeout() time.Duration {
+	if c.connectTimeout <= 0 {
+		return 5 * time.Second
+	}
+	return c.connectTimeout
+}
+
+// sessionsPerConn is how many sessions each independent connection opens in
+// turn over its share of the queries.
+func (c *config) sessionsPerConn() int { return max(1, c.sessions) }
+
+// effectiveMaxConnections is the semaphore the server is given. An explicit
+// -max-connections wins; otherwise it is the offered load plus a small headroom
+// for the driver's own connectivity probe, which preserves the value this
+// example used before the connection dimension existed (sessions + 4).
+func (c *config) effectiveMaxConnections() int {
+	if c.maxConnections > 0 {
+		return c.maxConnections
+	}
+	if c.connections > 0 {
+		return c.connections + connHeadroom
+	}
+	return c.sessions + connHeadroom
+}
+
+// expectRejections reports whether this run offers more connections than the
+// semaphore admits. When it does, a failed establish is the experiment's result
+// and is counted rather than returned as an error.
+func (c *config) expectRejections() bool {
+	return c.connections > 0 && c.connections > c.effectiveMaxConnections()
+}
+
+// rungLabel is the benchstat sub-name for this run.
+func (c *config) rungLabel() string {
+	switch {
+	case c.label != "":
+		return c.label
+	case c.connections > 0:
+		return "conn=" + strconv.Itoa(c.connections)
+	default:
+		return "pooled"
+	}
+}
+
+// asJSON renders the configuration for the machine-readable record.
+func (c *config) asJSON() configJSON {
+	return configJSON{
+		Nodes:            c.nodes,
+		KnowsMin:         c.knowsMin,
+		KnowsMax:         c.knowsMax,
+		Queries:          c.queries,
+		Sessions:         c.sessions,
+		Seed:             c.seed,
+		Connections:      c.connections,
+		MaxConnections:   c.effectiveMaxConnections(),
+		Repetitions:      c.reps(),
+		ConnectTimeout:   c.dialTimeout().String(),
+		MutexFraction:    c.mutexFraction,
+		BlockRate:        c.blockRate,
+		ExpectRejections: c.expectRejections(),
+	}
+}
+
+// bindFlags registers every flag of the laboratory on fs against cfg and
+// returns the profiling configuration exprof binds alongside them.
+//
+// It is one function rather than a block inside main so that the ladder's
+// child-process arguments can be parsed back through exactly the same flag set
+// they were rendered for: a flag renamed on one side and not the other is then
+// a test failure rather than a sweep that silently runs every rung at the
+// default.
+func bindFlags(fs *flag.FlagSet, cfg *config) *exprof.Config {
+	fs.IntVar(&cfg.nodes, "nodes", cfg.nodes, "number of :Person nodes to seed")
+	fs.IntVar(&cfg.knowsMin, "knows-min", cfg.knowsMin, "minimum KNOWS out-degree per person")
+	fs.IntVar(&cfg.knowsMax, "knows-max", cfg.knowsMax, "maximum KNOWS out-degree per person")
+	fs.IntVar(&cfg.queries, "queries", cfg.queries, "number of read queries to fire over the wire")
+	fs.IntVar(&cfg.sessions, "sessions", cfg.sessions,
+		"driver sessions: concurrent sessions in pooled mode, sessions opened per connection otherwise")
+	fs.Int64Var(&cfg.seed, "seed", cfg.seed, "RNG seed (fixes the deterministic data shape)")
+
+	fs.IntVar(&cfg.connections, "connections", cfg.connections,
+		"number of INDEPENDENT Bolt connections to open (0 = one shared driver pool of -sessions sessions)")
+	fs.IntVar(&cfg.maxConnections, "max-connections", cfg.maxConnections,
+		"bolt/server Options.MaxConnections (0 = derive from the offered load)")
+	fs.IntVar(&cfg.repetitions, "repetitions", cfg.repetitions,
+		"unprofiled measurement windows per run, so benchstat has a spread")
+	fs.DurationVar(&cfg.connectTimeout, "connect-timeout", cfg.connectTimeout,
+		"client dial and connection-acquisition timeout")
+
+	fs.IntVar(&cfg.mutexFraction, "mutex-fraction", cfg.mutexFraction,
+		"runtime.SetMutexProfileFraction for the profiled window (0 disables)")
+	fs.IntVar(&cfg.blockRate, "block-rate", cfg.blockRate,
+		"runtime.SetBlockProfileRate in ns for the profiled window (0 disables)")
+	fs.StringVar(&cfg.artifactDir, "artifact-dir", cfg.artifactDir,
+		"if set, write this run's full artefact set here (five profiles, trace, metrics.json, host.json, bench.txt)")
+	fs.StringVar(&cfg.label, "label", cfg.label,
+		"benchstat sub-name for this run (default: conn=<n>, or pooled)")
+
+	fs.BoolVar(&cfg.ladder, "ladder", cfg.ladder,
+		"sweep the published concurrency ladder, one child process per rung (requires -artifact-dir)")
+	fs.StringVar(&cfg.ladderLevels, "ladder-levels", cfg.ladderLevels,
+		"comma-separated connection ladder for -ladder")
+	fs.IntVar(&cfg.satOffer, "saturation-offer", cfg.satOffer,
+		"connections offered by the ladder's saturation rung (0 drops the rung)")
+	fs.IntVar(&cfg.satAdmit, "saturation-admit", cfg.satAdmit,
+		"Options.MaxConnections for the ladder's saturation rung")
+
+	return exprof.Bind(fs)
+}
+
 func main() {
 	cfg := defaultConfig()
-	flag.IntVar(&cfg.nodes, "nodes", cfg.nodes, "number of :Person nodes to seed")
-	flag.IntVar(&cfg.knowsMin, "knows-min", cfg.knowsMin, "minimum KNOWS out-degree per person")
-	flag.IntVar(&cfg.knowsMax, "knows-max", cfg.knowsMax, "maximum KNOWS out-degree per person")
-	flag.IntVar(&cfg.queries, "queries", cfg.queries, "number of read queries to fire over the wire")
-	flag.IntVar(&cfg.sessions, "sessions", cfg.sessions, "number of concurrent driver sessions")
-	flag.Int64Var(&cfg.seed, "seed", cfg.seed, "RNG seed (fixes the deterministic data shape)")
-	prof := exprof.Bind(flag.CommandLine)
+	prof := bindFlags(flag.CommandLine, &cfg)
 	flag.Parse()
+
+	// -artifact-dir owns every profile of an instrumented run, including the
+	// trace; letting exprof's own flags run alongside it would start a second
+	// CPU profile and fail, or silently write the trace somewhere else.
+	if cfg.artifactDir != "" && prof.Enabled() {
+		log.Fatal("-artifact-dir owns this run's profiles; do not combine it with -profile-dir or -trace")
+	}
 
 	if err := prof.Run(os.Stdout, func() error {
 		return run(context.Background(), os.Stdout, cfg)
@@ -152,116 +371,21 @@ func main() {
 	}
 }
 
-// run seeds the social graph described by cfg, starts a Bolt v5 server on an
-// ephemeral port, drives cfg.queries read queries from cfg.sessions concurrent
-// driver sessions, and writes a report to w before tearing everything down
-// cleanly. Bare lines carry deterministic facts (counts and query results,
-// reproducible for a fixed seed); lines prefixed with "# " carry volatile
-// telemetry (throughput, latency percentiles, heap) that varies per run and
-// per machine. All output goes to w so a test can capture and assert on it;
-// run returns wrapped errors rather than terminating the process, and honours
-// ctx cancellation.
+// run validates cfg and dispatches: a ladder sweep forks one child per rung,
+// and anything else is a single rung measured in this process.
+//
+// It writes every byte of its output to w and returns wrapped errors rather
+// than terminating the process, so a test can capture and assert on both.
+//
+//nolint:gocritic // hugeParam: run takes the config BY VALUE because docs/examples-standard.md fixes this signature for every example; it is called once per process and hands a pointer to everything below it.
 func run(ctx context.Context, w io.Writer, cfg config) error {
 	if err := cfg.validate(); err != nil {
 		return fmt.Errorf("config: %w", err)
 	}
-
-	fmt.Fprintf(w, "config.nodes=%d\n", cfg.nodes)
-	fmt.Fprintf(w, "config.knows=[%d,%d]\n", cfg.knowsMin, cfg.knowsMax)
-	fmt.Fprintf(w, "config.queries=%d\n", cfg.queries)
-	fmt.Fprintf(w, "config.sessions=%d\n", cfg.sessions)
-	fmt.Fprintf(w, "config.seed=%d\n", cfg.seed)
-
-	// Engine over an in-memory labelled property graph, seeded from cfg.
-	// Directed + Multigraph are required for openCypher semantics — relationships
-	// are directed, and CREATE always adds a relationship, including a parallel
-	// edge between an existing node pair. Weightless drops the per-node edge-weight
-	// column: Cypher has no edge-weight concept, so the []float64 holds no
-	// information (every relationship is recorded with the zero weight).
-	// This example never runs a weighted search/ algorithm over g; one that did
-	// (Dijkstra, Bellman-Ford, A*) must leave Weightless unset.
-	g := lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true, Weightless: true})
-	eng := cypher.NewEngine(g)
-	stats, err := seed(ctx, g, cfg)
-	if err != nil {
-		return fmt.Errorf("seed graph: %w", err)
+	if cfg.ladder {
+		return runLadder(ctx, w, &cfg)
 	}
-	fmt.Fprintf(w, "nodes.person=%d\n", stats.persons)
-	fmt.Fprintf(w, "edges.knows=%d\n", stats.knowsEdges)
-
-	// Bolt v5 server with a per-connection idle timeout. The explicit
-	// NoAuthHandler{} value is the opt-in that lets this development example
-	// run without credentials; the server is secure-by-default and otherwise
-	// refuses to start with a nil Auth handler. A production deployment would
-	// instead set Options.Auth to a real AuthHandler and start from
-	// server.DefaultTLSConfig() with a certificate as Options.TLSConfig.
-	srv, err := server.NewServer(eng, server.Options{
-		MaxConnections: cfg.sessions + 4,
-		ConnTimeout:    30 * time.Second,
-		Auth:           server.NoAuthHandler{},
-	})
-	if err != nil {
-		return fmt.Errorf("new server: %w", err)
-	}
-
-	// Kernel-assigned port; ln.Addr() reveals the chosen port for the client,
-	// so a parallel test run never collides on a fixed port.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return fmt.Errorf("listen: %w", err)
-	}
-	addr := ln.Addr().String()
-
-	// Serve in the background under a cancellable context so Serve exits
-	// cleanly once the load finishes and the context is cancelled.
-	serveCtx, serveCancel := context.WithCancel(ctx)
-	serveErr := make(chan error, 1)
-	go func() { serveErr <- srv.Serve(serveCtx, ln) }()
-
-	// Drive the load and gather evidence. driveLoad connects the driver, fires
-	// the queries across sessions, verifies the deterministic result of each,
-	// and closes its own driver before returning.
-	report, loadErr := driveLoad(ctx, addr, cfg)
-
-	// Graceful shutdown with a deadline, then cancel Serve and drain its
-	// goroutine. Serve only returns after every connection goroutine has
-	// finished, so the drain guarantees no leaked goroutine.
-	shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	shutErr := srv.Shutdown(shutCtx)
-	shutCancel()
-	serveCancel()
-	serveDrain := <-serveErr
-
-	// Surface the first meaningful failure, preferring the client load.
-	if loadErr != nil {
-		return fmt.Errorf("load: %w", loadErr)
-	}
-	if shutErr != nil {
-		return fmt.Errorf("shutdown: %w", shutErr)
-	}
-	if serveDrain != nil {
-		return fmt.Errorf("serve: %w", serveDrain)
-	}
-
-	// Deterministic facts: the fixed query's result over the seeded data (the
-	// label-scan count equals the known node count) and how many of the fired
-	// queries succeeded. Both are reproducible for a fixed seed and are the
-	// lines the regression test pins.
-	fmt.Fprintf(w, "q.count_person=%d\n", report.countPerson)
-	fmt.Fprintf(w, "queries.ok=%d\n", report.ok)
-
-	// Volatile telemetry: query throughput, the latency distribution, and live
-	// heap. These vary per run and per machine, so they are "# "-prefixed and
-	// never pinned by the test.
-	fmt.Fprintf(w, "# load.elapsed=%s\n", report.elapsed.Round(time.Millisecond))
-	fmt.Fprintf(w, "# load.throughput=%.0f queries/s\n", rate(report.ok, report.elapsed))
-	fmt.Fprintf(w, "# load.latency_p50=%s\n", report.p50.Round(time.Microsecond))
-	fmt.Fprintf(w, "# load.latency_p95=%s\n", report.p95.Round(time.Microsecond))
-	fmt.Fprintf(w, "# load.latency_p99=%s\n", report.p99.Round(time.Microsecond))
-	fmt.Fprintf(w, "# mem.heap_alloc=%s\n", humanBytes(readMem().HeapAlloc))
-
-	fmt.Fprintln(w, "# server shut down cleanly")
-	return nil
+	return runRung(ctx, w, &cfg)
 }
 
 // seedStats reports the realised shape of a seeded graph (the random degrees
@@ -277,7 +401,7 @@ type seedStats struct {
 // ids are 24-char hex strings drawn from the seeded RNG; names are realistic
 // strings assembled from fixed word lists. The seed honours ctx cancellation
 // between phases and on a periodic check.
-func seed(ctx context.Context, g *lpg.Graph[string, float64], cfg config) (seedStats, error) {
+func seed(ctx context.Context, g *lpg.Graph[string, float64], cfg *config) (seedStats, error) {
 	//nolint:gosec // G404: a seeded math/rand is intentional here — the example
 	// must reproduce a fixed dataset for a given -seed; crypto/rand would defeat that.
 	rng := rand.New(rand.NewSource(cfg.seed))
@@ -406,187 +530,6 @@ func realisticName(rng *rand.Rand) string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Load driver — the Bolt-throughput evidence
-// ─────────────────────────────────────────────────────────────────────────────
-
-// loadReport carries the deterministic results and the volatile telemetry of a
-// load run.
-type loadReport struct {
-	countPerson int64         // result of the fixed label-scan query (deterministic)
-	ok          int           // number of queries that succeeded (deterministic)
-	elapsed     time.Duration // wall-clock of the load phase (telemetry)
-	p50         time.Duration // per-query latency percentiles (telemetry)
-	p95         time.Duration
-	p99         time.Duration
-}
-
-// countPersonQuery is the fixed query every load worker runs. Its result — the
-// count of :Person nodes — is deterministic over the seeded data (it equals
-// cfg.nodes), which makes it the regression baseline the test pins.
-const countPersonQuery = "MATCH (n:Person) RETURN count(n) AS c"
-
-// driveLoad connects a neo4j-go-driver client to the server at addr and fires
-// cfg.queries instances of the fixed count query, spread across cfg.sessions
-// concurrent sessions. It records every successful query's latency, verifies
-// each returns the known :Person count, and reports throughput plus a
-// p50/p95/p99 latency distribution. The driver, every session, and every
-// worker goroutine are torn down before driveLoad returns, so it leaks no
-// goroutine. It honours ctx cancellation.
-func driveLoad(ctx context.Context, addr string, cfg config) (loadReport, error) {
-	driver, err := neo4j.NewDriverWithContext("bolt://"+addr, neo4j.NoAuth())
-	if err != nil {
-		return loadReport{}, fmt.Errorf("driver: %w", err)
-	}
-	defer driver.Close(ctx) //nolint:errcheck // best-effort close on teardown
-
-	// Verify connectivity once up front so a connection failure is reported
-	// here rather than as a confusing per-query error storm.
-	if err := driver.VerifyConnectivity(ctx); err != nil {
-		return loadReport{}, fmt.Errorf("verify connectivity: %w", err)
-	}
-
-	// Spread cfg.queries as evenly as possible across cfg.sessions workers.
-	perWorker := splitWork(cfg.queries, cfg.sessions)
-
-	var (
-		mu        sync.Mutex      // guards latencies and the first worker error
-		latencies []time.Duration // one entry per successful query
-		firstErr  error
-		okCount   atomic.Int64
-		want      = int64(cfg.nodes) // the deterministic expected :Person count
-	)
-	latencies = make([]time.Duration, 0, cfg.queries)
-
-	start := time.Now()
-	var wg sync.WaitGroup
-	for _, n := range perWorker {
-		if n == 0 {
-			continue
-		}
-		wg.Add(1)
-		go func(count int) {
-			defer wg.Done()
-			local, ok, err := runWorker(ctx, driver, count, want)
-			mu.Lock()
-			latencies = append(latencies, local...)
-			if err != nil && firstErr == nil {
-				firstErr = err
-			}
-			mu.Unlock()
-			okCount.Add(int64(ok))
-		}(n)
-	}
-	wg.Wait()
-	elapsed := time.Since(start)
-
-	if firstErr != nil {
-		return loadReport{}, firstErr
-	}
-
-	p50, p95, p99 := percentiles(latencies)
-	return loadReport{
-		countPerson: want,
-		ok:          int(okCount.Load()),
-		elapsed:     elapsed,
-		p50:         p50,
-		p95:         p95,
-		p99:         p99,
-	}, nil
-}
-
-// runWorker opens one driver session and runs the fixed count query count
-// times over it, returning the per-query latencies and how many returned the
-// expected count. It stops early on the first error (including ctx
-// cancellation) and always closes its session before returning. Reusing a
-// single session for the whole worker keeps the connection hot, which is what
-// a real client pool does.
-func runWorker(ctx context.Context, driver neo4j.DriverWithContext, count int, want int64) ([]time.Duration, int, error) {
-	sess := driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
-	defer sess.Close(ctx) //nolint:errcheck // best-effort close on teardown
-
-	latencies := make([]time.Duration, 0, count)
-	ok := 0
-	for i := 0; i < count; i++ {
-		if err := ctx.Err(); err != nil {
-			return latencies, ok, err
-		}
-		qStart := time.Now()
-		got, err := queryCount(ctx, sess)
-		if err != nil {
-			return latencies, ok, fmt.Errorf("query %d: %w", i, err)
-		}
-		latencies = append(latencies, time.Since(qStart))
-		if got != want {
-			return latencies, ok, fmt.Errorf("query %d: count=%d, want %d", i, got, want)
-		}
-		ok++
-	}
-	return latencies, ok, nil
-}
-
-// queryCount runs the fixed count query over sess and returns the single
-// integer it yields.
-func queryCount(ctx context.Context, sess neo4j.SessionWithContext) (int64, error) {
-	result, err := sess.Run(ctx, countPersonQuery, nil)
-	if err != nil {
-		return 0, fmt.Errorf("run: %w", err)
-	}
-	rec, err := result.Single(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("single: %w", err)
-	}
-	v, ok := rec.Get("c")
-	if !ok {
-		return 0, fmt.Errorf("column 'c' missing")
-	}
-	n, ok := v.(int64)
-	if !ok {
-		return 0, fmt.Errorf("column 'c': expected int64, got %T", v)
-	}
-	return n, nil
-}
-
-// splitWork divides total into parts buckets as evenly as possible: the first
-// total%parts buckets get one extra unit. It is used to spread the query load
-// across the session workers.
-func splitWork(total, parts int) []int {
-	out := make([]int, parts)
-	base, extra := total/parts, total%parts
-	for i := range out {
-		out[i] = base
-		if i < extra {
-			out[i]++
-		}
-	}
-	return out
-}
-
-// percentiles returns the p50, p95, and p99 of the given latencies. It sorts a
-// copy so the caller's slice is left untouched; an empty input yields zeros.
-func percentiles(latencies []time.Duration) (p50, p95, p99 time.Duration) {
-	if len(latencies) == 0 {
-		return 0, 0, 0
-	}
-	sorted := make([]time.Duration, len(latencies))
-	copy(sorted, latencies)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
-	return quantile(sorted, 0.50), quantile(sorted, 0.95), quantile(sorted, 0.99)
-}
-
-// quantile returns the q-quantile (0 <= q <= 1) of an already-sorted,
-// non-empty slice using the nearest-rank method.
-func quantile(sorted []time.Duration, q float64) time.Duration {
-	idx := int(q * float64(len(sorted)-1))
-	if idx < 0 {
-		idx = 0
-	}
-	if idx >= len(sorted) {
-		idx = len(sorted) - 1
-	}
-	return sorted[idx]
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Telemetry helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -597,15 +540,6 @@ func readMem() runtime.MemStats {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 	return m
-}
-
-// rate returns count/elapsed in units per second, or 0 for a zero-length
-// interval.
-func rate(count int, elapsed time.Duration) float64 {
-	if elapsed <= 0 {
-		return 0
-	}
-	return float64(count) / elapsed.Seconds()
 }
 
 // humanBytes formats a byte count with a binary (KiB/MiB/GiB) suffix.
