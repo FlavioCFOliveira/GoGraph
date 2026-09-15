@@ -542,10 +542,29 @@ type Options struct {
 	// open (not yet fully PULL'd) and already-drained cursors
 	// accumulated in tx.results since BEGIN; auto-commit cursors are
 	// not counted (the Bolt v5 state machine already prevents two
-	// concurrent auto-commit streams). The cap surfaces as a typed
-	// Bolt FAILURE with code
-	// "Neo.TransientError.Transaction.MaximumTransactionLimitReached" — TRANSIENT, so a
-	// driver retries, and the session stays in READY so it can (rmp #2561).
+	// concurrent auto-commit streams).
+	//
+	// The cap surfaces as a typed Bolt FAILURE with code
+	// "Neo.ClientError.General.LimitExceeded", and the session moves to FAILED —
+	// both at the inFlightCount branch of the RUN handler in session.go, which
+	// calls enterFailed before returning the FAILURE so the now-doomed transaction
+	// is rolled back at once rather than held until the client's RESET (#1309,
+	// #1312).
+	//
+	// THE CLASSIFICATION IS NOT RETRIABLE, and that is the part a driver acts on:
+	// neo4j-go-driver v5.28.4 retries only on classification "TransientError"
+	// (IsRetriableTransient, neo4j/db/errors.go) — the second of the code's four
+	// dot-separated parts — so a ClientError is never retried. That is the correct
+	// answer for this cap: it counts cursors accumulated inside ONE explicit
+	// transaction, so re-issuing the same RUN on the same transaction meets the
+	// same cap. The client must COMMIT or ROLLBACK, or PULL/DISCARD an open
+	// cursor, before issuing more queries.
+	//
+	// rmp #2561 moved the PER-PRINCIPAL open-transaction cap
+	// ([Options.MaxOpenTxPerPrincipal]) to a transient code and deliberately left
+	// this one on LimitExceeded, because that cap frees itself as soon as a peer
+	// transaction closes and this one does not. See [txQuotaRefusalCode] in
+	// errors.go for that split.
 	MaxInFlightPerConnection int
 
 	// ConnTimeout is the per-connection idle read deadline applied throughout

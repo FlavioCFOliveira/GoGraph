@@ -78,8 +78,10 @@ func TestBoltMessageHistograms_PopulateOverTheWire(t *testing.T) {
 	c.goodbye(t)
 
 	// GOODBYE gets no response, so the observation may still be in flight when
-	// the assertion runs. Wait for it rather than sleeping a fixed amount.
-	text := waitForSeries(t, reg, msgSeries("goodbye")+"_count")
+	// the assertion runs. Wait for the OBSERVATION rather than sleeping a fixed
+	// amount — and rather than for the series name, which appears first (rmp
+	// #2821; see waitForObservation).
+	text := waitForObservation(t, reg, msgSeries("goodbye"))
 
 	for _, kind := range []string{"hello", "run", "pull", "begin", "commit",
 		"rollback", "discard", "route", "reset", "goodbye"} {
@@ -213,22 +215,44 @@ func seriesCount(t *testing.T, text, name string) int {
 	return 0
 }
 
-// waitForSeries polls the exposition until want appears, and returns the
-// exposition text that contained it. GOODBYE is answered with no response, so
-// the server-side observation can lag the client's send; polling makes the test
-// wait for the event rather than for a fixed duration that would be either
-// flaky or slow.
-func waitForSeries(t *testing.T, reg *promreg.Registry, want string) string {
+// waitForObservation polls the exposition until name has recorded at least one
+// observation, and returns the exposition text that carried it. GOODBYE is
+// answered with no response, so the server-side observation can lag the client's
+// send; polling makes the test wait for the event rather than for a fixed
+// duration that would be either flaky or slow.
+//
+// # It waits for the COUNT, not for the NAME, and that is the whole fix (rmp #2821)
+//
+// A histogram becomes visible to a scrape the moment it is INTERNED, not the
+// moment it is observed: Registry.ObserveLatency calls getOrCreateHistogram,
+// which stores the new histogram in r.hists, and only then calls observe
+// (internal/metrics/prometheus/prometheus.go). Between those two steps
+// Registry.WriteText already emits the series in full, including a complete
+// "<name>_count 0" line. The predicate here used to be
+// strings.Contains(text, name+"_count"), which that very line satisfies, so the
+// wait returned as soon as the series EXISTED and the assertion below then read
+// the zero it had raced — a failure about one run in seven of the package, and
+// never in isolation, because the window is a few instructions wide and only a
+// preemption inside it is long enough to lose.
+//
+// Measured rather than reasoned: with that window widened by 150 ms under
+// go test -overlay (production untouched), the old predicate failed 5 runs out
+// of 5 with exactly the message seen in the wild, and this one passes.
+//
+// Timing out is still a FAILURE, so a GOODBYE that genuinely records nothing
+// fails the test here instead of passing quietly.
+func waitForObservation(t *testing.T, reg *promreg.Registry, name string) string {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	var text string
 	for {
 		text = msgScrapeText(t, reg)
-		if strings.Contains(text, want) {
+		if seriesCount(t, text, name) > 0 {
 			return text
 		}
 		if time.Now().After(deadline) {
-			t.Errorf("timed out waiting for %q in the exposition\n%s", want, boltHistLines(text))
+			t.Errorf("timed out waiting for a non-zero %s_count in the exposition\n%s",
+				name, boltHistLines(text))
 			return text
 		}
 		time.Sleep(2 * time.Millisecond)

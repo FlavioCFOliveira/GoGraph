@@ -214,6 +214,38 @@ func TestFailureCode(t *testing.T) {
 			want: "Neo.ClientError.Request.Invalid",
 		},
 		{
+			// rmp #2819: a field too long for the durable formats. Wrapped as
+			// the engine's commit path wraps it.
+			name: "txn.ErrFieldTooLong wrapped",
+			err:  fmt.Errorf("%w: node label is 65536 bytes, maximum 65535", txn.ErrFieldTooLong),
+			want: "Neo.ClientError.Statement.ArgumentError",
+		},
+		{
+			// rmp #2819: a constraint violation carrying the SENTINEL only and
+			// no typed error, exactly as cypher/api.go validatePreExisting
+			// builds its NOT NULL refusal. The typed-error row above this table
+			// covers the UNIQUE arm; this one covers the arm errors.As misses.
+			name: "exec.ErrConstraintViolation sentinel-only",
+			err: fmt.Errorf("cypher: cannot create NOT NULL constraint on (:Q).p: %w: "+
+				"pre-existing node has a null value", exec.ErrConstraintViolation),
+			want: "Neo.ClientError.Schema.ConstraintValidationFailed",
+		},
+		{
+			// rmp #2819: any refusal from the hand-written DDL parser, wrapped
+			// as cypher.Engine.runDDL wraps it.
+			name: "DDL parse refusal",
+			err: fmt.Errorf("cypher: DDL parse: %w", fmt.Errorf(
+				`ir: CREATE INDEX "ci": composite indexes (multiple properties) are not supported; index a single property`)),
+			want: "Neo.ClientError.Statement.SyntaxError",
+		},
+		{
+			// The DDL prefix must not swallow an error that merely mentions DDL.
+			// The rule matches the WRAP cypher/api.go produces, nothing else.
+			name: "a message that merely mentions DDL is not classified",
+			err:  fmt.Errorf("bolt: the DDL parse cache could not be reached"),
+			want: "Neo.DatabaseError.General.UnknownError",
+		},
+		{
 			name: "unknown error",
 			err:  fmt.Errorf("something went wrong"),
 			want: "Neo.DatabaseError.General.UnknownError",
