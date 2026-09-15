@@ -70,9 +70,10 @@ exit 0: **124 packages, 2586.6 s summed**, eleven over the 60 s soft budget, two
 over the 240 s hard ceiling.
 
 **The budget is only meaningful with the pass named, and the difference is a
-factor of 2.62.** `make ci` runs the suite twice: `test-short` under `-race`, and
-`scripts/cover_gate.sh` under `-coverpkg=./... -covermode=atomic` with **no**
-`-race`. The same tree, measured the same day:
+factor of 2.62.** When this was measured, `make ci` ran the suite **twice**:
+`test-short` under `-race`, and `scripts/cover_gate.sh` under
+`-coverpkg=./... -covermode=atomic` with **no** `-race`. The same tree, measured
+the same day:
 
 | Pass | Total | Packages over 60 s |
 |---|---|---|
@@ -81,6 +82,13 @@ factor of 2.62.** `make ci` runs the suite twice: `test-short` under `-race`, an
 
 So every figure in this section is **under `-race`**, which is the stricter of the
 two and the one the budget gates.
+
+**Since 2026-09-15 the gate runs the suite ONCE.** `cover-gate` is no longer a
+member of `make ci` (see [The `ci` gate: order, and why](#the-ci-gate-order-and-why)),
+so the second, differently-instrumented whole-suite pass no longer happens
+automatically. The table above is kept because it is the evidence that the budget
+figures in this section are `-race` figures, and it stays the reference point if
+`make cover-gate` is run deliberately.
 
 #### The known exceptions
 
@@ -580,6 +588,7 @@ discipline is enforced by tooling, not folklore.
 |---|---|---|
 | `make test-short` | short | `GOGRAPH_PARALLEL_SUITE=1 go test -race -count=1 -timeout=$(SHORT_TIMEOUT) ./... \| bash scripts/pkg_time_budget.sh` |
 | `make test-timing` | short (serial phase) | `go test -race -count=1 -p 1 -timeout=$(TIMING_TIMEOUT) -run '$(TIMING_RUN)' $(TIMING_PKGS)` |
+| `make test-uninstrumented` | short (uninstrumented phase) | `go test -count=1 -p 1 -timeout=$(UNINSTR_TIMEOUT) $(UNINSTR_PKGS)` |
 | `make test-soak` | soak | `go test -race -count=1 -timeout=$(SOAK_TIMEOUT) -tags=soak ./...` |
 | `make test-nightly` | nightly | `go test -race -count=1 -timeout=$(NIGHTLY_TIMEOUT) -tags=nightly ./...` |
 
@@ -588,6 +597,15 @@ serially for the subset of tests whose assertion is a duration, a rate, or a
 ratio of them — the phase in which that measurement is valid. `make ci`,
 `make ci-soak` and `make ci-nightly` all invoke it, so those assertions gate
 every push. See [`RequireQuietMachine` and the `test-timing` phase](#requirequietmachine-and-the-test-timing-phase).
+
+`test-uninstrumented` is not a fourth layer either. It is the **same** short layer
+re-run for the packages whose assertions are defeated by *either* instrumentation
+the project applies — the race detector and coverage counters — so it applies
+neither. Since 2026-09-15 it is also the only phase built **without** `-race`,
+which makes it the only phase in which the repository's `//go:build !race` files
+compile at all; its package list is chosen on that basis and the Makefile records
+the measurement. Cost: **50 s** for the seven packages listed today (2026-09-15,
+reference host).
 
 ### Why every layer passes an explicit `-timeout`
 
@@ -604,9 +622,9 @@ budget the suite is expected to approach.
 | `NIGHTLY_CI_TIMEOUT` | `4h` | `test-nightly-ci` |
 
 All four are overridable on the command line, so a slower or faster host needs
-no edit to the Makefile. `scripts/cover_gate.sh` — the *second* whole-suite pass
-inside `make ci` — carries its own hard-coded `-timeout=20m` for the same
-reason.
+no edit to the Makefile. `scripts/cover_gate.sh` carries its own hard-coded
+`-timeout=20m` for the same reason; it was `make ci`'s *second* whole-suite pass
+until 2026-09-15 and is now run deliberately, via `make cover-gate`.
 
 **A `-timeout` is not a cost budget.** The per-package *cost* budget is a
 separate concern with its own instrument, `scripts/pkg_time_budget.sh`, which
@@ -636,14 +654,13 @@ The variance alone (+33% on an untouched package) exceeds the headroom, so this
 is a **headroom** problem, not an attribution problem: no amount of care in
 apportioning the cost would make a 600 s ceiling survive it.
 
-`make race` carries the same variable. It is not a gate — `ci` is
-`shell-guard tidy fmt vet build vulncheck test-short test-timing
-test-uninstrumented lint cover-gate ci-kg-verify` — but it runs the same corpus
-under the same detector, so it has the same exposure.
+`make race` carries the same variable. It is not a gate — it is absent from
+`CI_STAGES` — but it runs the same corpus under the same detector, so it has the
+same exposure.
 
 **Why 30m.** It is **3.05×** the slowest package measured that actually
-completed (`cypher`, 589.5 s) and **1.5×** the `-timeout=20m` the coverage pass
-of the same `make ci` gate already applies. That margin is what makes a machine
+completed (`cypher`, 589.5 s) and **1.5×** the `-timeout=20m` that
+`scripts/cover_gate.sh` applies to its own instrumented run. That margin is what makes a machine
 under sustained competing load reach the same verdict as an idle one, while
 still failing a genuinely hung package in bounded time. Check growth against
 the measurements above: a package approaching 30m is a cost regression to
@@ -680,14 +697,18 @@ packages have not been measured to completion under `-race`.
 > definition should change. Moving a test between layers changes what each gate
 > means, so it is recorded here rather than settled unilaterally.
 
-Three composite pipeline targets wrap these:
+Composite pipeline targets wrap these:
 
 | Target | Purpose |
 |---|---|
-| `make ci` | Full local gate: shell-guard + tidy + fmt + vet + build + vulncheck + **test-short** + test-timing + test-uninstrumented + lint + cover-gate + **ci-kg-verify** |
-| `make ci-soak` | Like `ci` but runs **test-soak** instead of test-short — **and omits `ci-kg-verify`** |
-| `make ci-nightly` | Like `ci` but runs **test-nightly** instead of test-short — **and omits `ci-kg-verify`** |
+| `make ci` | The local gate: the eight cheap checks, then test-uninstrumented + test-timing + **test-short**. See [The `ci` gate: order, and why](#the-ci-gate-order-and-why) |
+| `make ci-resume` | `ci`, skipping only stages already green against **this exact tree** |
+| `make ci-from STAGE=<stage>` | `ci` from `<stage>` onwards — an **unverified** shortcut |
+| `make ci-stages` | Print the ordered stage list |
+| `make ci-soak` | The cheap checks, then test-uninstrumented + test-timing + **test-soak** + cover-gate — **still omits `ci-kg-verify`** |
+| `make ci-nightly` | The same with **test-nightly** — **still omits `ci-kg-verify`** |
 | `make kg-verify` | The knowledge-graph fidelity gate with **nothing** excluded (`cmd/kgverify`) |
+| `make cover-gate` | The coverage gate (aggregate ≥ 85 %, per-package ≥ 75 %) — run **deliberately**; not a member of `make ci` since 2026-09-15 |
 
 **`ci-kg-verify` joined `make ci` in `v0.14.1`** (rmp #2677, #2796) and is the one
 member that needs something outside the repository: it reaches the knowledge graph
@@ -700,6 +721,108 @@ length — and both stay measured and printed. `make kg-verify` excludes neither
 
 Note that `ci-soak` and `ci-nightly` do **not** carry `ci-kg-verify`, so "like `ci`
 but runs test-soak" is now true only of the test layer, not of the member list.
+
+## The `ci` gate: order, and why
+
+`make ci` runs an **ordered** list of stages, stops at the first failure, and
+prints each stage's wall clock. The order is the single definition in the
+`Makefile`'s `CI_STAGES`, consumed by `ci`, `ci-resume` and `ci-from` alike, so
+the three cannot drift apart. `make ci-stages` prints it.
+
+| # | Stage | Measured cost | What it is |
+|---|---|---|---|
+| 1 | `shell-guard` | 0.4 s | asserts the recipe shell really carries `-e -u -o pipefail` (rmp #2672) |
+| 2 | `tidy` | 0.5 s | `go mod tidy` |
+| 3 | `fmt` | 7.0 s | `go fmt` + `goimports -w` |
+| 4 | `vet` | 1.1 s | `go vet ./...` |
+| 5 | `build` | 8.2 s | `go build ./...` |
+| 6 | `ci-kg-verify` | 1.9 s | knowledge-graph fidelity (needs `rmp graph serve -r gograph`) |
+| 7 | `vulncheck` | 2.7 s | `govulncheck` over the module (needs the network) |
+| 8 | `lint` | 2.0 s warm / **252 s cold** | `golangci-lint run ./...` |
+| 9 | `test-uninstrumented` | 50 s | neither `-race` nor coverage — the only phase that compiles `//go:build !race` files |
+| 10 | `test-timing` | ~100 s | the wall-clock gates, serial, on a quiet machine |
+| 11 | `test-short` | ~25 min | `go test -race -count=1 ./...` — the whole module suite, **once** |
+
+Costs measured 2026-09-15 on the reference host (Apple M4, 10 cores, 32 GB,
+`darwin/arm64`, go1.27.1, golangci-lint 2.13.2), each with the host's load
+average recorded.
+
+**Why the order is what it is.** Until v0.14.2 the list read
+`shell-guard tidy fmt vet build vulncheck test-short test-timing
+test-uninstrumented lint cover-gate ci-kg-verify`, so `lint` ran **tenth** — after
+the ~25-minute race suite — and `ci-kg-verify`, whose commonest failure is "the
+graph server is not running", ran **last**. Publishing v0.14.2 paid for both: one
+`revive: context-as-argument` violation failed the gate *after* the suite had run,
+and the two stages behind it never executed. Everything that can conclude in
+seconds now concludes first; **~24 s of checks** stand between `make ci` and the
+first full-suite run.
+
+`lint` is last of the cheap stages because it has the block's largest worst case:
+2.0 s with a warm golangci-lint analysis cache, 252 s with an empty one. `fmt`
+stays ahead of `vet`, `build` and `lint` because it **rewrites** sources and the
+analysers must see the final text.
+
+**The module suite runs exactly once.** `cover-gate` — which ran
+`go test -coverpkg=./... -covermode=atomic ./...`, the whole corpus a second time
+under different instrumentation — is no longer a member (user decision,
+2026-09-15). Coverage is a quality metric, not a correctness gate. The `cover` and
+`cover-gate` targets and `scripts/cover_gate.sh` are unchanged, thresholds
+included; run `make cover-gate` when a coverage question is being asked.
+
+**What left with it, and where it went.** That pass was the only phase of `ci`
+built without `-race`, so it was the only one in which the `//go:build !race`
+files compiled. Diffing `go test -list '.*'` against `go test -race -list '.*'`
+across the seven packages carrying such a file measured **seven** tests present
+only in the non-race build; six of them ran in no other stage. Two bound the
+allocation a forged length prefix can provoke — security assertions — and three
+pin the production form of the barrier guard. Their packages therefore joined
+`UNINSTR_PKGS`, which is what takes `test-uninstrumented` from 1 s to 50 s. That
+is a strengthening, not a like-for-like move: under `cover-gate` those allocation
+assertions ran with coverage counters active, and coverage counters allocate on
+their own account.
+
+### Resuming after a correction
+
+Each stage that passes is stamped with a **key** for the tree it passed against,
+under `build/ci/`. `make ci-resume` skips a stage only when its stamp matches the
+key **exactly**.
+
+The key is a SHA-256 over the content of every file git does not ignore
+(`git ls-files --cached --others --exclude-standard`, 4374 files here, 0.23–0.31 s
+to compute), folded together with `go version` and `golangci-lint version`. The
+invalidation rule is deliberately blunt:
+
+> **Any change to any non-ignored file, or to either toolchain, invalidates every
+> stamp.**
+
+There is no per-stage reasoning about which files a stage "cares about", because
+that is where a stamp comes to wrongly survive — and a stamp that wrongly survives
+**silently skips a gate**, which is far worse than one that wrongly expires and
+merely costs time. Every stage here reads Go sources, so no honest narrower rule
+exists: edit a `.go` file and the race suite genuinely has to run again.
+
+Two stages are **never** stamped and always re-run: `vulncheck`, because
+<https://vuln.go.dev> can publish an advisory without any file changing, and
+`ci-kg-verify`, because the knowledge graph and `rmp` move independently of the
+code. Together they cost 4.6 s.
+
+A stage is stamped with the key as it stands when **that stage finishes**, not
+when the gate started, because `tidy` and `fmt` rewrite the tree; stages that ran
+before such a rewrite are correctly invalidated rather than silently trusted.
+
+So what `ci-resume` buys is **not** "skip the suite after a code fix". It is the
+case where the tree did not change: the graph server was not running, the network
+was down, the gate was interrupted, the fix was outside the tree. For a fix that
+edits a file, everything re-runs — and the **ordering** is what makes that cheap,
+because the failure now happens in the first minutes instead of after the suite.
+
+`make ci-from STAGE=<stage>` is the escape hatch for the case `ci-resume` cannot
+certify: it skips every earlier stage on **your** assertion that they are
+unaffected. The gate cannot verify that assertion, it says so in its output, and
+it is never what `ci-resume` does.
+
+`make clean` removes `build/`, and with it every stamp — deliberately: a stamp
+surviving a clean would be a stamp wrongly surviving.
 
 ## What the soak layer asserts — and what it does not
 

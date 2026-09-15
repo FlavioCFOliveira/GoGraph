@@ -49,35 +49,52 @@ func makeRecipeFor(makefile, target string) (string, bool) {
 //
 // GitHub Actions runs ONLY the release workflow
 // (.github/workflows/release.yml) — the per-push ci.yml/tck.yml/crash.yml
-// workflows were removed. Correctness, coverage, TCK, and crash gating are no
-// longer enforced by GitHub; they run LOCALLY via `make release-preflight`
-// (and `make ci` before every push), which a developer MUST run before
-// tagging. The two release paths are therefore:
+// workflows were removed. Correctness, TCK, and crash gating are no longer
+// enforced by GitHub; they run LOCALLY via `make release-preflight` (and
+// `make ci` before every push), which a developer MUST run before tagging.
+// The two release paths are therefore:
 //
 //   - Tag-push path (.github/workflows/release.yml): runs only the Phase-A
 //     release-accuracy gate (release-doc consistency) and then goreleaser. It
 //     re-runs none of the heavy correctness gates; it relies on the developer
 //     having run `make release-preflight` locally before pushing the tag.
 //   - Local path (`make release`): depends on release-preflight, which folds
-//     in release-accuracy, the headline bench, and — as the correctness AND
-//     coverage gate — `make ci`. `make ci` is
-//     `tidy fmt vet build test-short lint cover-gate`, where `test-short`
-//     runs the race detector over every package (`go test -race ./...`) and
-//     the openCypher TCK execution baseline (TestTCKExecution) runs inside
-//     that pass.
+//     in release-accuracy and — as the correctness gate — `make ci`. The
+//     gate's membership and its ORDER are the Makefile's CI_STAGES:
+//     `shell-guard tidy fmt vet build ci-kg-verify vulncheck lint
+//     test-uninstrumented test-timing test-short`, where `test-short` runs
+//     the race detector over every package (`go test -race ./...`) and the
+//     openCypher TCK execution baseline (TestTCKExecution) runs inside that
+//     pass.
 //
 // The correctness gate therefore lives in `make ci`, not in
 // scripts/pre-release.sh: since the release-gate de-duplication (commit
 // af8eefc) release-preflight invokes `make ci`, and scripts/pre-release.sh is
-// a standalone, no-coverage convenience gate that is NOT on the release path.
+// a standalone convenience gate that is NOT on the release path.
+//
+// WHAT CHANGED ON 2026-09-15, and why this test changed with it. By the user's
+// decision the release path runs CORRECTNESS GATES ONLY: benchmarks left it in
+// v0.14.2 and `cover-gate` left it here. This test previously required
+// `cover-gate` to be a member, which encoded the older mandate; re-stating it
+// is part of that decision, not a relaxation of this guard. Coverage is a
+// quality metric, not a correctness gate — scripts/cover_gate.sh and its
+// thresholds are untouched and are run deliberately via `make cover-gate`.
+//
+// The guard did not merely shrink. It gained the two properties the reorder
+// exists to create, neither of which was asserted before: the module suite
+// must appear EXACTLY ONCE (it ran twice — test-short under -race and
+// cover-gate under coverage), and every seconds-scale check must PRECEDE every
+// suite phase (`lint` ran tenth, so one revive:context-as-argument violation
+// failed the gate after the ~11-minute race suite; measured at HEAD, the same
+// violation now fails it at 18.0 s).
 //
 // The assertions are static (file content), not a live release run, so the
 // gate is cheap and deterministic. Because no per-push CI stands behind the
 // tag-push path any more, the local `make release-preflight` gate is the sole
 // line of defence — so this test asserts its completeness. If a future change
 // drops release-accuracy from the tag-push path, or removes release-preflight
-// or the `make ci` correctness/coverage gate from the local path, this test
-// fails, flagging the reintroduced bypass (#1444).
+// or the `make ci` correctness gate from the local path, this test fails,
+// flagging the reintroduced bypass (#1444).
 func TestReleasePathsConverge(t *testing.T) {
 	// 1. Tag-push path runs the Phase-A release-accuracy gate.
 	releaseYML := readRepoFile(t, ".github/workflows/release.yml")
@@ -114,25 +131,85 @@ func TestReleasePathsConverge(t *testing.T) {
 	//    prerequisites and this fails, naming it — while allowing the pipeline to
 	//    grow.
 	mandated := []string{
-		"tidy",        // module hygiene
-		"fmt",         // formatting
-		"vet",         // static analysis
-		"build",       // compiles
-		"test-short",  // the race pass, in which the openCypher TCK baseline runs
+		"shell-guard",         // the -e -u -o pipefail regime the whole gate rests on (rmp #2672)
+		"tidy",                // module hygiene
+		"fmt",                 // formatting
+		"vet",                 // static analysis
+		"build",               // compiles
+		"lint",                // golangci-lint
+		"vulncheck",           // govulncheck, asserting analysis happened (rmp #2722)
+		"ci-kg-verify",        // knowledge-graph fidelity (rmp #2677, #2796)
+		"test-uninstrumented", // neither -race nor coverage: the ONLY phase that compiles
+		//                        the //go:build !race files, six of whose tests run in no
+		//                        other stage — two of them bounding the allocation a forged
+		//                        length prefix can provoke (rmp #2709)
 		"test-timing", // the serial phase in which the wall-clock gates assert (rmp #2517)
-		"lint",        // golangci-lint
-		"cover-gate",  // coverage floors
+		"test-short",  // the race pass, in which the openCypher TCK baseline runs
 	}
-	ciLine := makefileTargetPrereqs(makefile, "ci")
+	// `cover-gate` is DELIBERATELY ABSENT — see this function's docstring.
+	ciLine := ciStages(makefile)
 	if ciLine == "" {
-		t.Errorf("could not find a `ci:` target in the Makefile at all; the release path " +
-			"has no canonical gate (#1444)")
+		t.Errorf("could not find a CI_STAGES assignment in the Makefile; `make ci` has no " +
+			"readable stage list, so the release path has no canonical gate (#1444)")
 	}
 	for _, gate := range mandated {
 		if !prereqPresent(ciLine, gate) {
-			t.Errorf("the `ci` target no longer runs %q; a mandated correctness or coverage "+
-				"gate would be skipped on the release path (#1444). Current prerequisites: %q",
-				gate, ciLine)
+			t.Errorf("CI_STAGES no longer runs %q; a mandated correctness gate would be "+
+				"skipped on the release path (#1444). Current stages: %q", gate, ciLine)
+		}
+	}
+
+	// 3a. The whole-module suite must appear EXACTLY ONCE.
+	//
+	// This is the user's requirement stated as an assertion: when no correction
+	// is needed, the tests run once. Until 2026-09-15 they ran TWICE on every
+	// green gate — `test-short` under `-race` and `cover-gate` under
+	// `-coverpkg=./... -covermode=atomic` — the same corpus, differently
+	// instrumented. A requirement that lives only in a decision decays the
+	// moment someone adds a second whole-suite stage for a good local reason;
+	// asserted here, it cannot.
+	suiteStages := 0
+	for _, s := range strings.Fields(ciLine) {
+		if wholeModuleSuiteStage(s) {
+			suiteStages++
+		}
+	}
+	if suiteStages != 1 {
+		t.Errorf("CI_STAGES runs the whole-module suite %d times, want exactly 1; the gate "+
+			"must execute the corpus ONCE when no correction is needed. Stages: %q",
+			suiteStages, ciLine)
+	}
+
+	// 3b. FAIL CHEAP: every seconds-scale check must precede every test phase.
+	//
+	// This is the property the 2026-09-15 reordering exists to create, and it is
+	// the one that decays silently — a stage appended to the end of the list
+	// looks harmless and is not. Measured on the reference host: the cheap block
+	// costs ~20 s in total, `test-short` alone 682.6 s. Until the reorder `lint`
+	// ran TENTH, so a single `revive: context-as-argument` violation in one file
+	// failed the gate AFTER the race suite and two further stages never ran at
+	// all; that is what publishing v0.14.2 paid for. The same violation, injected
+	// at HEAD, now fails the gate at 18.0 s.
+	stages := strings.Fields(ciLine)
+	firstTest := -1
+	for i, s := range stages {
+		if testPhaseStage(s) {
+			firstTest = i
+			break
+		}
+	}
+	if firstTest < 0 {
+		t.Errorf("CI_STAGES contains no test phase at all; the gate would publish without "+
+			"running a single test (#1444). Stages: %q", ciLine)
+	} else {
+		for i, s := range stages {
+			if i > firstTest && !testPhaseStage(s) {
+				t.Errorf("CI_STAGES runs the seconds-scale check %q at position %d, AFTER the "+
+					"first test phase %q at position %d. The gate must fail cheap: every check "+
+					"that concludes in seconds precedes every suite phase, so a lint or vet "+
+					"failure costs seconds and not the whole suite. Stages: %q",
+					s, i, stages[firstTest], firstTest, ciLine)
+			}
 		}
 	}
 
@@ -186,34 +263,68 @@ func TestReleasePathsConverge(t *testing.T) {
 	}
 }
 
-// makefileTargetPrereqs returns the prerequisite list of the named Make target —
-// the text between `name:` and either the end of the line or the `##` help
-// comment — or "" when the target is absent.
+// ciStages returns the ordered `make ci` stage list: the value of the Makefile's
+// CI_STAGES assignment, which is where the gate's membership AND its order are
+// written down. The `ci:` target itself is a recipe that hands that list to
+// scripts/ci_stages.sh, so it carries no prerequisites to read.
 //
-// It matches at the start of a line so a target NAME cannot be confused with a
-// mention of it in another target's prerequisites, which is how `ci` would
-// otherwise match `ci-soak`'s line.
-func makefileTargetPrereqs(makefile, name string) string {
+// The comment strip matters: CI_STAGES is assigned with `?=` and the line may
+// carry a trailing `# …`, which would otherwise be parsed as stage names.
+func ciStages(makefile string) string {
 	for _, line := range strings.Split(makefile, "\n") {
-		rest, ok := strings.CutPrefix(line, name+":")
+		rest, ok := strings.CutPrefix(line, "CI_STAGES")
 		if !ok {
 			continue
 		}
-		// A target line, not a variable assignment like `ci := …`.
-		if strings.HasPrefix(rest, "=") {
-			continue
+		rest = strings.TrimLeft(rest, " \t")
+		for _, op := range []string{"?=", ":=", "="} {
+			after, found := strings.CutPrefix(rest, op)
+			if !found {
+				continue
+			}
+			if i := strings.Index(after, "#"); i >= 0 {
+				after = after[:i]
+			}
+			return strings.TrimSpace(after)
 		}
-		if i := strings.Index(rest, "##"); i >= 0 {
-			rest = rest[:i]
-		}
-		return strings.TrimSpace(rest)
 	}
 	return ""
 }
 
-// prereqPresent reports whether gate appears as a WHOLE prerequisite in the
+// wholeModuleSuiteStage reports whether a stage runs `go test` over the WHOLE
+// module (`./...`), as opposed to a named subset.
+//
+// Named explicitly rather than pattern-matched on "test-": `test-timing` and
+// `test-uninstrumented` are subset runs that exist for measurement-validity
+// reasons (a quiet machine; neither instrumentation), and counting them as
+// whole-suite passes would make the exactly-once assertion fire on a correct
+// gate. Any future whole-suite stage must be added here, which is the point —
+// adding one is exactly the change this assertion exists to notice.
+func wholeModuleSuiteStage(stage string) bool {
+	switch stage {
+	case "test-short", "test-soak", "test-nightly", "test-nightly-ci", "cover-gate", "race", "test":
+		return true
+	}
+	return false
+}
+
+// testPhaseStage reports whether a stage runs tests at all, as opposed to being
+// a static check that concludes in seconds. Used by the fail-cheap ordering
+// assertion.
+func testPhaseStage(stage string) bool {
+	return wholeModuleSuiteStage(stage) || strings.HasPrefix(stage, "test-")
+}
+
+// makefileTargetPrereqs was removed on 2026-09-15. It read the prerequisite
+// list of a named Make target, and its only caller read `ci:`. `ci` is now a
+// recipe target that hands CI_STAGES to scripts/ci_stages.sh and carries no
+// prerequisites, so the helper had no remaining caller and `unused` — enabled
+// in .golangci.yml — would have failed the gate on it. ciStages above replaces
+// it for the one job that survives.
+
+// prereqPresent reports whether gate appears as a WHOLE entry in the
 // space-separated list, so `test-short` is not satisfied by `test-shortcut` and
-// `ci` is not satisfied by `ci-soak`.
+// `ci` is not satisfied by `ci-soak`. Used against CI_STAGES.
 func prereqPresent(prereqs, gate string) bool {
 	for _, f := range strings.Fields(prereqs) {
 		if f == gate {

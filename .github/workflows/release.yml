@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     # The job runs the fast Phase-A release-accuracy checks and THEN goreleaser
     # cross-compiles four platforms with SBOM generation. The heavy
-    # correctness/coverage/TCK gates are not part of this job — they are
+    # correctness/TCK gates are not part of this job — they are
     # enforced LOCALLY by `make release-preflight` before the tag is pushed —
     # so 45m is now a generous ceiling dominated by the goreleaser build.
     timeout-minutes: 45
@@ -43,14 +43,16 @@ jobs:
       # README current-release, SECURITY.md version table. Benchmark execution is
       # NOT part of the release path and no benchmark report is required to exist.
       #
-      # Correctness (vet/build/`go test -race ./...`/golangci-lint), the coverage
-      # gate, the full TCK execution and the crash-injection battery are NOT run
-      # by this job. They are enforced LOCALLY by the `make release-preflight`
-      # gate (release-accuracy + `make ci`) which the releaser
-      # runs before pushing the tag. `make ci` runs the correctness+coverage
-      # suite exactly once (vet/build/test-short[-race]/lint/cover-gate; the TCK
-      # =100% baseline runs inside the -race and coverage passes). This job
-      # therefore only checks release accuracy, then publishes via goreleaser.
+      # Correctness (vet/build/`go test -race ./...`/golangci-lint), the full
+      # TCK execution and the crash-injection battery are NOT run by this job.
+      # They are enforced LOCALLY by the `make release-preflight` gate
+      # (release-accuracy + `make ci`) which the releaser runs before pushing
+      # the tag. Since 2026-09-15 `make ci` is CORRECTNESS GATES ONLY — no
+      # benchmark and no coverage gate — and it runs the module suite exactly
+      # ONCE, in test-short (`go test -race -count=1 ./...`), which is where the
+      # TCK =100% execution baseline is enforced. Coverage is run deliberately
+      # with `make cover-gate`, thresholds unchanged. This job therefore only
+      # checks release accuracy, then publishes via goreleaser.
       - name: "Release-accuracy gate (Phase A: release-doc consistency)"
         run: VERSION="${GITHUB_REF_NAME}" make release-accuracy
       - name: Install cyclonedx-gomod (SBOM generator)

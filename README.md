@@ -347,12 +347,22 @@ push, and runs from the `Makefile` `ci` target:
 make ci
 ```
 
-The pipeline runs `go mod tidy`, `gofmt`, `go vet`, `go build`, the
-short test layer under the race detector (`go test -race`),
-`golangci-lint run`, and the coverage gate (`cover-gate`), which
-enforces **≥ 85 % aggregate** and **≥ 75 % per-package** statement
-coverage. It must be green before a sprint is closed and before
-anything is pushed.
+The pipeline runs, in this order, `go mod tidy`, `gofmt`, `go vet`,
+`go build`, the knowledge-graph fidelity gate, `govulncheck`,
+`golangci-lint run`, and then the three test phases — the
+uninstrumented phase, the serial timing phase, and the short test
+layer under the race detector (`go test -race ./...`). The order is
+deliberate: every check that concludes in seconds runs before any test
+phase, so a lint or vet failure costs seconds rather than the whole
+suite, and the module suite runs **exactly once**. It must be green
+before a sprint is closed and before anything is pushed.
+
+**Coverage is measured, not gated automatically.** The coverage gate
+(`cover-gate`) enforces **≥ 85 % aggregate** and **≥ 75 % per-package**
+statement coverage, unchanged, but it is no longer a member of
+`make ci` — run `make cover-gate` when coverage is the question. It
+ran the whole module suite a second time, and a release is gated on
+correctness, never on a quality metric.
 
 ## Performance
 
