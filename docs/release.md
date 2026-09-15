@@ -15,10 +15,10 @@ Before tagging a new release:
 
    `make release-preflight` **subsumes** `make ci` — it runs the
    release-accuracy checks, then the full `make ci` correctness+coverage
-   gate exactly once, then the headline benchmark. Do **not** run `make ci`
-   separately as well; that would execute the whole `go test -race ./...`
-   and coverage suite a second time for no added assurance. Run `make ci`
-   on its own only for day-to-day iteration between releases.
+   gate exactly once. Do **not** run `make ci` separately as well; that
+   would execute the whole `go test -race ./...` and coverage suite a
+   second time for no added assurance. Run `make ci` on its own only for
+   day-to-day iteration between releases.
 
 2. Dependency integrity holds:
 
@@ -272,12 +272,10 @@ in order, BEFORE goreleaser is invoked:
 3. release-notes/VERSION.md exists.
 4. README.md "Current release" names `VERSION`.
 5. SECURITY.md supported-versions table names `VERSION`'s `vX.Y.x` line.
-6. docs/benchmarks/VERSION.md exists (per-release benchmark/load-test
-   numbers).
 
 **Correctness + coverage** (`make ci`, run exactly once):
 
-7. `make ci` is green. Its members, in the order the target lists them, are
+6. `make ci` is green. Its members, in the order the target lists them, are
    `shell-guard`, `tidy` (`go mod tidy`), `fmt` (`gofmt`/`goimports`),
    `vet` (`go vet ./...`), `build` (`go build ./...`), `vulncheck`
    (`govulncheck`), `test-short` (`go test -race ./...`, which includes the
@@ -302,12 +300,27 @@ in order, BEFORE goreleaser is invoked:
    length. Both stay measured and printed. `make kg-verify` runs the full gate
    with nothing excluded.
 
-**Performance** (informational on a release tag):
+**Performance** (measured, but not gated):
 
-8. `scripts/run_headline_bench.sh` exits zero when present (informational
-   per-tag run; the benchstat comparison gate `scripts/bench_gate.sh` is
-   run locally before a change lands, comparing the candidate against its
-   baseline).
+**Benchmark execution is not part of the release path.** Neither
+`release-accuracy` nor `release-preflight` runs a benchmark, and no
+release requires a `docs/benchmarks/VERSION.md` to exist. A release is
+gated on correctness, and never on a performance number.
+
+That is a change of *gate*, not a change of *standard*. Measurement still
+decides every performance question in this project — a performance claim
+that rests on anything but evidence gathered in GoGraph itself is not a
+claim — and `scripts/bench_gate.sh` still compares a candidate against
+its baseline with `benchstat` **locally, before a change lands**, which is
+where a regression is cheap to find and cheap to attribute. What stopped
+is producing a per-release campaign as a *precondition for tagging*. A
+release campaign is run **when the project chooses to run one** — because
+the window changed something worth measuring, or because a number is
+wanted for the record — and its report is published under
+`docs/benchmarks/` as a standalone measured record rather than as a gate
+artefact. `scripts/release_body.sh` links that report when the file
+exists and omits the link when it does not, so either outcome publishes a
+correct release body.
 
 Each failure exits non-zero with a one-line explanation of what is
 missing. Run `make release-preflight` on its own to dry-run the gates

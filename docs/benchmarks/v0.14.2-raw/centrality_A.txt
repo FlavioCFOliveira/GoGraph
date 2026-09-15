@@ -1,0 +1,6 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/search/centrality
+cpu: Apple M4
+BenchmarkBrandes_RandomGraph-10    	     151	   7915730 ns/op	   62244 B/op	      10 allocs/op
+PASS

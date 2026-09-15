@@ -1,0 +1,64 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/bolt/server
+cpu: Apple M4
+BenchmarkMsgObserve_NoopBackend-10                       	22538755	        48.69 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMsgObserve_RealBackend-10                       	16521074	        72.47 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMsgObserve_RealBackendParallel-10               	122581542	        11.01 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMsgKindOf-10                                    	1000000000	         0.8352 ns/op	       0 B/op	       0 allocs/op
+BenchmarkNodeReturnToPackstream-10                       	    6978	    165671 ns/op	  293315 B/op	    7790 allocs/op
+BenchmarkBoltRecordEncode/baseline-10                    	17031966	        70.12 ns/op	      48 B/op	       4 allocs/op
+BenchmarkBoltRecordEncode/fast-10                        	39127881	        30.21 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBoltRecordEncodePage/baseline-10                	     285	   4185318 ns/op	 2880025 B/op	  240000 allocs/op
+BenchmarkBoltRecordEncodePage/fast-10                    	     651	   1816624 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBoltRecordEncodeParallel/baseline-10            	61041132	        20.02 ns/op	      48 B/op	       4 allocs/op
+BenchmarkBoltRecordEncodeParallel/fast-10                	235471258	         5.162 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRequestDecode_Pooled-10                         	 3304333	       359.7 ns/op	     963 B/op	      17 allocs/op
+BenchmarkRequestDecode_Fresh-10                          	 1739322	       702.0 ns/op	    5267 B/op	      21 allocs/op
+BenchmarkSendResponse_Record-10                          	16277650	        73.72 ns/op	      26 B/op	       2 allocs/op
+BenchmarkSendResponse_Success-10                         	11926334	       101.3 ns/op	       2 B/op	       1 allocs/op
+BenchmarkCertReloader_ReloadUnchanged-10                 	   57022	     20970 ns/op	    2000 B/op	      10 allocs/op
+BenchmarkCertReloader_ParseCostAvoidedBySkip-10          	   31173	     38011 ns/op	    9391 B/op	     122 allocs/op
+BenchmarkTxBookkeeping_RegistryUpdate-10                 	1000000000	         0.6266 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTxBookkeeping_RegistryUpdateNewQuery-10         	158734777	         7.338 ns/op	      32 B/op	       1 allocs/op
+BenchmarkTxBookkeeping_RegistryUpdateUnchanged-10        	1000000000	         0.4228 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTxBookkeeping_RegistryUpdateLegacy-10           	15149529	        80.08 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTxBookkeeping_RegistryUpdatePerEntryMutex-10    	1000000000	         0.7278 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTxBookkeeping_LadderFloor-10                    	1000000000	         0.1402 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTxBookkeeping_RegistryChurn-10                  	 2670160	       466.0 ns/op	     197 B/op	       5 allocs/op
+BenchmarkTxBookkeeping_QuotaEnabled-10                   	 5882217	       216.6 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTxBookkeeping_QuotaDisabled-10                  	1000000000	         0.3682 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTxBookkeeping_QuotaDistinctPrincipals-10        	 6162148	       203.2 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/bolt/server
+cpu: Apple M4
+BenchmarkMsgObserve_NoopBackend-10                       	25308646	        48.02 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMsgObserve_RealBackend-10                       	16969285	        70.86 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMsgObserve_RealBackendParallel-10               	100000000	        11.17 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMsgKindOf-10                                    	1000000000	         0.8390 ns/op	       0 B/op	       0 allocs/op
+BenchmarkNodeReturnToPackstream-10                       	    6996	    167401 ns/op	  293316 B/op	    7790 allocs/op
+BenchmarkBoltRecordEncode/baseline-10                    	17078649	        68.93 ns/op	      48 B/op	       4 allocs/op
+BenchmarkBoltRecordEncode/fast-10                        	39793956	        29.85 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBoltRecordEncodePage/baseline-10                	     294	   4054730 ns/op	 2880005 B/op	  240000 allocs/op
+BenchmarkBoltRecordEncodePage/fast-10                    	     675	   1777294 ns/op	       0 B/op	       0 allocs/op
+BenchmarkBoltRecordEncodeParallel/baseline-10            	63259165	        19.82 ns/op	      48 B/op	       4 allocs/op
+BenchmarkBoltRecordEncodeParallel/fast-10                	244260244	         5.028 ns/op	       0 B/op	       0 allocs/op
+BenchmarkRequestDecode_Pooled-10                         	 3367209	       359.2 ns/op	     963 B/op	      17 allocs/op
+BenchmarkRequestDecode_Fresh-10                          	 1739290	       693.3 ns/op	    5267 B/op	      21 allocs/op
+BenchmarkSendResponse_Record-10                          	16072934	        73.99 ns/op	      26 B/op	       2 allocs/op
+BenchmarkSendResponse_Success-10                         	11833156	       101.2 ns/op	       2 B/op	       1 allocs/op
+BenchmarkCertReloader_ReloadUnchanged-10                 	   59131	     20199 ns/op	    2000 B/op	      10 allocs/op
+BenchmarkCertReloader_ParseCostAvoidedBySkip-10          	   31651	     37777 ns/op	    9392 B/op	     122 allocs/op
+BenchmarkTxBookkeeping_RegistryUpdate-10                 	1000000000	         0.6181 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTxBookkeeping_RegistryUpdateNewQuery-10         	162782955	         7.367 ns/op	      32 B/op	       1 allocs/op
+BenchmarkTxBookkeeping_RegistryUpdateUnchanged-10        	1000000000	         0.4057 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTxBookkeeping_RegistryUpdateLegacy-10           	14888460	        80.22 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTxBookkeeping_RegistryUpdatePerEntryMutex-10    	1000000000	         0.7311 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTxBookkeeping_LadderFloor-10                    	1000000000	         0.1574 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTxBookkeeping_RegistryChurn-10                  	 2581081	       457.0 ns/op	     197 B/op	       5 allocs/op
+BenchmarkTxBookkeeping_QuotaEnabled-10                   	 5895313	       202.9 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTxBookkeeping_QuotaDisabled-10                  	1000000000	         0.3484 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTxBookkeeping_QuotaDistinctPrincipals-10        	 6057835	       193.9 ns/op	       0 B/op	       0 allocs/op
+PASS

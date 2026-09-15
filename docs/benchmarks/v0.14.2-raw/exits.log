@@ -1,0 +1,40 @@
+START 2026-09-15T19:11:03Z rounds=6 gate=2.5 sample=2s go=go version go1.27.1 darwin/arm64
+PRE-CAMPAIGN load1=2.36 hot=[/System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer:28,2 /Applications/Firefox.app/Contents/MacOS/firefox:24,1 /Applications/WhatsApp.app/Contents/MacOS/WhatsApp:15,7 osascript:14,3 /Applications/iTerm.app/Contents/MacOS/iTerm2:13,4 osascript:10,7 /Applications/Firefox.app/Contents/MacOS/gpu-helper.app/Contents/MacOS/Firefox:10,2 /System/Library/PrivateFrameworks/TextInputU]
+ROUND 1 GATE_OPEN load1=2.36 waited=0s hot=[/System/Library/CoreServices/talagentd:34,3 /Applications/Firefox.app/Contents/MacOS/firefox:32,4 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer:30,5 system_profiler:18,4 /Applications/Firefox.app/Contents/MacOS/gpu-helper.app/Contents/MacOS/Firefox:14,4 osascript:13,0 /Applications/WhatsApp.app/Contents/MacOS/WhatsApp:12,8 /Applications/iTerm.app/Contents/MacOS/iTerm2] 2026-09-15T19:11:03Z
+round=1 block=harness arm=A EXIT=0 SECONDS=15 T0=1789499463.628 T1=1789499478.560
+round=1 block=harness arm=B EXIT=0 SECONDS=15 T0=1789499478.656 T1=1789499493.702
+round=1 block=harness arm=B2 EXIT=0 SECONDS=16 T0=1789499493.791 T1=1789499509.177
+round=1 block=exec arm=A EXIT=0 SECONDS=97 T0=1789499509.263 T1=1789499606.698
+round=1 block=exec arm=B EXIT=0 SECONDS=97 T0=1789499606.780 T1=1789499703.678
+round=1 block=exec arm=B2 EXIT=0 SECONDS=96 T0=1789499703.762 T1=1789499799.780
+round=1 block=cy arm=A EXIT=0 SECONDS=208 T0=1789499799.863 T1=1789500007.598
+round=1 block=cy arm=B EXIT=0 SECONDS=204 T0=1789500007.684 T1=1789500211.877
+round=1 block=cy arm=B2 EXIT=0 SECONDS=204 T0=1789500211.962 T1=1789500415.515
+round=1 block=bolt arm=A EXIT=0 SECONDS=34 T0=1789500415.604 T1=1789500449.311
+round=1 block=bolt arm=B EXIT=0 SECONDS=34 T0=1789500449.397 T1=1789500483.555
+round=1 block=bolt arm=B2 EXIT=0 SECONDS=35 T0=1789500483.640 T1=1789500518.331
+round=1 block=search arm=A EXIT=0 SECONDS=69 T0=1789500518.417 T1=1789500587.075
+round=1 block=search arm=B EXIT=0 SECONDS=67 T0=1789500587.157 T1=1789500654.183
+round=1 block=search arm=B2 EXIT=0 SECONDS=68 T0=1789500654.266 T1=1789500722.865
+round=1 block=centrality arm=A EXIT=0 SECONDS=3 T0=1789500722.948 T1=1789500725.374
+round=1 block=centrality arm=B EXIT=0 SECONDS=2 T0=1789500725.456 T1=1789500727.467
+round=1 block=centrality arm=B2 EXIT=0 SECONDS=2 T0=1789500727.548 T1=1789500729.845
+round=1 block=cnt arm=A EXIT=0 SECONDS=14 T0=1789500729.929 T1=1789500743.787
+round=1 block=cnt arm=B EXIT=0 SECONDS=14 T0=1789500743.871 T1=1789500757.493
+round=1 block=cnt arm=B2 EXIT=0 SECONDS=14 T0=1789500757.577 T1=1789500771.296
+ROUND 1 COMPLETE 2026-09-15T19:32:51Z load=[5,48 5,55 4,55]
+ROUND 2 GATE_OPEN load1=2.21 waited=100s hot=[osascript:18,5 /Applications/iTerm.app/Contents/MacOS/iTerm2:14,0 osascript:11,4 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer:9,7 system_profiler:6,6 /usr/sbin/system_profiler:5,4 ] 2026-09-15T19:34:31Z
+round=2 block=harness arm=B EXIT=0 SECONDS=15 T0=1789500871.681 T1=1789500886.656
+round=2 block=harness arm=B2 EXIT=0 SECONDS=15 T0=1789500886.741 T1=1789500901.654
+round=2 block=harness arm=A EXIT=0 SECONDS=15 T0=1789500901.739 T1=1789500916.662
+round=2 block=exec arm=B EXIT=0 SECONDS=96 T0=1789500916.744 T1=1789501012.797
+round=2 block=exec arm=B2 EXIT=0 SECONDS=96 T0=1789501012.878 T1=1789501108.697
+round=2 block=exec arm=A EXIT=0 SECONDS=94 T0=1789501108.780 T1=1789501202.566
+round=2 block=cy arm=B EXIT=0 SECONDS=204 T0=1789501202.648 T1=1789501406.433
+round=2 block=cy arm=B2 EXIT=0 SECONDS=207 T0=1789501406.514 T1=1789501613.120
+round=2 block=cy arm=A EXIT=0 SECONDS=205 T0=1789501613.203 T1=1789501818.409
+round=2 block=bolt arm=B EXIT=0 SECONDS=34 T0=1789501818.495 T1=1789501852.613
+round=2 block=bolt arm=B2 EXIT=0 SECONDS=33 T0=1789501852.697 T1=1789501885.618
+round=2 block=bolt arm=A EXIT=0 SECONDS=33 T0=1789501885.703 T1=1789501918.741
+round=2 block=search arm=B EXIT=0 SECONDS=72 T0=1789501918.829 T1=1789501990.654
+round=2 block=search arm=B2 EXIT=0 SECONDS=73 T0=1789501990.740 T1=1789502063.526

@@ -1,0 +1,54 @@
+load samples total: 1310
+invocations       : 35   non-zero exits: 0
+
+block        invocations     min     max    mean
+harness                6    2.04    2.49    2.26
+exec                   6    1.98    3.78    2.92
+cy                     6    2.68    5.13    3.72
+bolt                   6    3.68    6.79    5.19
+cnt                    3    5.19    6.37    5.71
+centrality             3    6.02    6.37    6.14
+search                 5    5.14   13.51    8.17
+CAMPAIGN              35    1.98   13.51    4.26
+
+round        min     max    mean
+1           2.04    8.42    4.18
+2           1.98   13.51    4.35
+
+per-invocation detail
+rnd  block       arm   exit   secs  load min  load max  load mean  samples
+1    bolt        A        0     34      3.68      4.33       3.98       17
+1    bolt        B        0     34      4.07      5.81       4.46       17
+1    bolt        B2       0     35      4.77      5.85       5.33       17
+1    centrality  A        0      3      6.37      6.37       6.37        1
+1    centrality  B        0      2      6.02      6.02       6.02        1
+1    centrality  B2       0      2      6.02      6.02       6.02        1
+1    cnt         A        0     14      5.20      6.02       5.58        7
+1    cnt         B        0     14      5.19      6.37       5.69        7
+1    cnt         B2       0     14      5.52      6.34       5.87        7
+1    cy          A        0    208      2.79      5.13       3.96      103
+1    cy          B        0    204      2.91      4.63       3.63      102
+1    cy          B2       0    204      2.99      4.85       3.68      102
+1    exec        A        0     97      2.04      3.16       2.68       49
+1    exec        B        0     97      2.29      3.10       2.78       49
+1    exec        B2       0     96      2.91      3.51       3.15       48
+1    harness     A        0     15      2.36      2.49       2.44        7
+1    harness     B        0     15      2.28      2.42       2.32        8
+1    harness     B2       0     16      2.04      2.34       2.18        7
+1    search      A        0     69      5.63      7.83       7.03       34
+1    search      B        0     67      6.16      8.42       7.36       33
+1    search      B2       0     68      6.36      8.36       7.07       35
+2    bolt        A        0     33      5.14      6.79       5.81       17
+2    bolt        B        0     34      3.72      6.02       5.44       17
+2    bolt        B2       0     33      5.52      6.79       6.17       16
+2    cy          A        0    205      3.02      4.74       3.74      103
+2    cy          B        0    204      2.68      4.72       3.37      102
+2    cy          B2       0    207      3.31      4.52       3.91      103
+2    exec        A        0     94      2.85      3.75       3.34       47
+2    exec        B        0     96      1.98      3.09       2.38       48
+2    exec        B2       0     96      2.75      3.78       3.18       48
+2    harness     A        0     15      2.17      2.24       2.19        7
+2    harness     B        0     15      2.12      2.27       2.19        7
+2    harness     B2       0     15      2.23      2.29       2.26        8
+2    search      B        0     72      5.14     13.51       9.03       36
+2    search      B2       0     73      8.71     11.15      10.22       36
