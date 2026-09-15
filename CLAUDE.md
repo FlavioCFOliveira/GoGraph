@@ -72,7 +72,7 @@ When asking for clarification:
 
 **Exactly one sub-agent runs at a time.** Use as many sub-agents as the objective needs — in series, never in parallel: each one finishes before the next starts.
 
-**The only exception is the user's explicit prior authorisation**, granted for a named piece of work and revoked automatically when that work ends; even then, never more than two at a time. The full contract is in [Sub-Agents (Specialists)](#sub-agents-specialists).
+**The only exception is the user's explicit prior authorisation**, granted for a named piece of work and revoked automatically when that work ends; it never carries over to the next piece of work. The full contract is in [Sub-Agents (Specialists)](#sub-agents-specialists).
 
 ### Language
 
@@ -120,10 +120,8 @@ are met.
 tasks share a scope — the same component, the same kind of change, the same body of
 knowledge to be brought to bear — carry them through **one** iteration together, as
 though they were a single task: one analysis, one bulk pass of code, one test pass
-over the whole of it. Seek this actively at every opportunity: two related tasks
-handled as one spare an entire redundant round of analysis, context loading and
-validation, and being maximally efficient at writing the code and testing it is
-precisely the point.
+over the whole of it. This is [Work synergy policy](#work-synergy-policy) applied
+to tasks; seek it actively at every opportunity.
 
 **A batch is delegated to exactly ONE specialist sub-agent** — the one whose
 expertise best matches the objectives and requirements of the tasks being batched.
@@ -281,6 +279,39 @@ Correctness outranks security, and security outranks speed: never trade a higher
 
 ---
 
+## Work synergy policy
+
+**Seek synergy constantly, in every form of work.** Work that belongs together is
+carried as one effort; splitting it pays for the same analysis, context loading,
+and validation twice.
+
+**Across work items.** Whenever open work items — tasks in `rmp`, and any work in
+hand that is not tracked as a task — are substantially close functionally or
+technically, join them into a **single development effort**, and maximise what
+that one effort delivers across all of them. The batching rule in
+[Development workflow](#development-workflow) and the unit of work in
+[Execution](#execution) are this principle applied to tasks.
+
+**Inside a single piece of work.** By default and by strategy, seek the same
+synergy within one piece of work:
+
+- **Code and tests** — write all the code in one pass and test it in one pass,
+  never small fragments each tested in isolation.
+- **Documentation** — treat all of it in one pass; when the scope is too large for
+  one pass, identify blocks and treat each block as a whole.
+
+**Every form of work.** The principle is not confined to code, tests, and
+documentation: it governs analysis, planning, evaluation, audit, and every other
+form of work in this project, at all times.
+
+**It never overrides a bound.** Synergy joins work that is already in scope; it is
+never a reason to start work that was not requested (see
+[Volunteering and proactivity](#volunteering-and-proactivity)), to widen a task
+beyond its stated objectives, or to deliver any part of it less than completely
+(see [Self-contained development](#self-contained-development)).
+
+---
+
 ## Token Economy
 
 ### Principle of action
@@ -354,8 +385,10 @@ If the answer to any of these is "no" or "I do not know", the cheap alternative 
   the crash/recovery battery when `store/` changed). Name in the task's closing
   record exactly what was run **and what was left unverified until sprint close**;
   never imply the full gate passed when it was not run.
-- While iterating within a task, narrow further still: run the single test under
-  change, not its whole package.
+- When an iteration re-tests one failing behaviour, narrow further still: run that
+  single test, not its whole package. This narrows a run's **extent**; it never
+  licenses a trickle of small edits each followed by its own run (see
+  [Work synergy policy](#work-synergy-policy)).
 - **This relaxes no gate, it relocates one.** `make ci` — `go test -race ./...`,
   the TCK regression gate, `goleak`, and the lint pass — still runs in full, and
   every [Compliance Mandate](#compliance-mandates) and
@@ -371,7 +404,7 @@ If the answer to any of these is "no" or "I do not know", the cheap alternative 
 
 - Match the model and the reasoning-effort level to the real difficulty of each operation (see [Execution](#execution)): simple, mechanical operations do not justify the most expensive model or the highest effort.
 - Group tool calls that are independent of one another into a single message, instead of issuing them one at a time. Two exceptions: every `git` command runs alone, never grouped or chained with another command (see [Git command execution](#git-command-execution)); and a sub-agent is never grouped with anything, because exactly one sub-agent runs at a time (see [Delegation to sub-agents](#delegation-to-sub-agents)).
-- Respect the one-sub-agent-at-a-time rule, and the ceiling of two even once the user has authorised concurrency (see [Execution](#execution)): excessive parallelism multiplies cost without accelerating the result.
+- Respect the one-sub-agent-at-a-time rule (see [Execution](#execution)): excessive parallelism multiplies cost without accelerating the result.
 
 ### Safeguard
 
@@ -413,21 +446,21 @@ Use the **Knowledge Graph** to identify the **foundational and highest-leverage 
 
 ### Execution
 
-Task execution is the natural continuation of planning. A **unit of work** is a single task, or a batch of similar-scope tasks carried together as one (see [Development workflow](#development-workflow)). For each unit of work, follow this sequence, using `rmp` through `roadmap-manager`:
+Task execution is the natural continuation of planning. A **unit of work** is a single task, or a batch of similar-scope tasks carried together as one, as [Work synergy policy](#work-synergy-policy) and [Development workflow](#development-workflow) require. For each unit of work, follow this sequence, using `rmp` through `roadmap-manager`:
 
 1. Check whether any open task is already in progress and, if so, continue it.
-2. Identify the next task to start, and the open tasks of similar scope that should be batched with it into the same iteration.
+2. Identify the next task to start, and the open tasks whose functional or technical proximity to it is substantial, and batch them into the same iteration (see [Work synergy policy](#work-synergy-policy)).
 3. Read and fully understand every task in the unit — its objective, functional and technical requirements, and acceptance criteria — consulting the **Knowledge Graph** to gauge its scope and impact.
 4. Determine the single most appropriate sub-agent for the whole unit of work and delegate its execution to that specialist, under the rule in [Every task is developed under a specialist sub-agent](#every-task-is-developed-under-a-specialist-sub-agent).
 5. Implement the unit of work through the [Development workflow](#development-workflow) loop — analyse, write all its code in bulk, test those changes — then verify that **all** acceptance criteria of **every** task in it are satisfied before considering it done.
 6. Close each task in the unit with a concise summary of what was done.
-7. Create the **git commit(s)** for the unit of work, in conventional-commit format, before moving to the next unit. One commit per task when the changes separate cleanly by file; when the tasks' changes interleave inside the same file, one commit for the batch whose footer names every task it closes (`Refs #<id>, #<id>`), and that single hash is the one recorded at the close of each of those tasks. Never split a hunk merely to manufacture per-task commits, and never write down a hash you have not read with `git rev-parse HEAD`.
-8. Update the **Knowledge Graph** to reflect the change (see [Knowledge Graph](#knowledge-graph)), stamping the affected nodes and edges with the commit hash and date.
+7. Create the **git commit(s)** for the unit of work through the `gitflow` skill, in conventional-commit format, before moving to the next unit. One commit per task when the changes separate cleanly by file; when the tasks' changes interleave inside the same file, one commit for the batch whose footer names every task it closes (`Refs #<id>, #<id>`), and that single hash is the one recorded at the close of each of those tasks. Never split a hunk merely to manufacture per-task commits, and never write down a hash you have not read with `git rev-parse HEAD`.
+8. Update the **Knowledge Graph** through the `knowledge-authority` skill to reflect the change (see [Knowledge Graph](#knowledge-graph)), stamping the affected nodes and edges with the commit hash and date.
 
 **Sequencing rules:**
 - **Execution is strictly sequential: one unit of work at a time.** Sprints run one at a time, and within a sprint one unit of work at a time. Two units never overlap and two sub-agents never work different tasks concurrently, however independent they appear. **Batching is not overlapping:** a batch is *one* unit — analysed once, coded once, tested once, under one specialist — and that is the efficient route, not an exception to sequencing.
 - **Sub-agents run one at a time, evaluations and audits included.** Concurrent execution **always requires the user's explicit prior authorisation** for a named piece of work, and that authorisation is revoked automatically when that work ends (see [Sub-Agents (Specialists)](#sub-agents-specialists)).
-- **Never run more than two (2) sub-agents at once**, even once authorised. Plan the full set up front, then execute them at most two at a time, starting the next only as one finishes, so the limit of two concurrent is never exceeded.
+- **Plan up front the full set of sub-agents the work needs**, then run them in series, starting the next only as one finishes.
 
 **Model and effort.** Wherever possible, match the model and its reasoning-effort level to the demands of each individual operation within the unit of work.
 
@@ -672,8 +705,7 @@ series, never in parallel**: each one finishes before the next starts.
 
 **The only exception is the user's explicit prior authorisation**, granted for a
 named piece of work. That authorisation is **automatically revoked when that work
-ends**, and never carries over to the next piece of work. Even once authorised,
-**never more than two sub-agents at a time**.
+ends**, and never carries over to the next piece of work.
 
 **Choosing the specialist.** Pick the available sub-agent whose expertise matches
 the work the task actually consists of. That match is read from **two** sources,
@@ -703,7 +735,9 @@ splitting the delegation.
 - reading the task and the sprint, and writing the specialist's brief;
 - **verifying the specialist's claims against independent evidence** — a
   specialist's report is a finding to check, not a result to relay;
-- the git commits, the `rmp` state transitions, and the task's closing record;
+- the git commits, the `rmp` state transitions, and the task's closing record, each
+  through its owning skill (see
+  [Skills that own an operation](#skills-that-own-an-operation));
 - every decision reserved to the user by [Decision autonomy](#decision-autonomy).
 
 **One specialist per iteration, whether it carries one task or a batch.** When
@@ -716,17 +750,17 @@ code → test loop over the batch as though it were one task.
 **Boundaries.** One unit of work at a time, as [Execution](#execution) requires:
 two sub-agents never work two different tasks concurrently. Specialists run
 concurrently only under the user's explicit prior authorisation for a named piece
-of work, capped at two at a time and lapsing when that work ends. When two
-authorised specialists could touch the same files, say so in each brief and scope
-them apart; concurrent edits to one file by two agents produce a result neither of
-them validated.
+of work, and that authorisation lapses when that work ends. When two authorised
+specialists could touch the same files, say so in each brief and scope them apart;
+concurrent edits to one file by two agents produce a result neither of them
+validated.
 
 ### Mandatory consultation rules
 
 - **`graph-theory-expert` must be consulted** before finalising the representation of any graph type and before selecting any search or traversal algorithm.
 - **`go-developer` must validate** all Go code for idiom conformance before a task is closed.
 - **Specialists are consulted in series, never in parallel** — one returns before the next is invoked, however independent their inputs appear. Consulting `graph-theory-expert` on algorithm choice and `go-developer` on the Go implementation are two consecutive invocations, never two concurrent ones.
-- **Evaluations and audits obey the same rule**: one at a time. Concurrent execution requires the user's **explicit prior authorisation** for a named piece of work, is capped at **two** at a time, and lapses automatically when that work ends. Plan every evaluation or audit the work needs, then run them within that cap, starting the next only as one finishes.
+- **Evaluations and audits obey the same rule**: one at a time. Concurrent execution requires the user's **explicit prior authorisation** for a named piece of work, and that authorisation lapses automatically when that work ends. Plan every evaluation or audit the work needs, then run them in series, starting the next only as one finishes.
 - Findings from specialists must be summarised in the task description or in a code comment when they influence a non-obvious design decision.
 
 ---
