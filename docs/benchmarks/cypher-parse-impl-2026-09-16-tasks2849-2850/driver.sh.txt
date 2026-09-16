@@ -1,0 +1,93 @@
+#!/bin/bash
+# Before/after driver for rmp #2849 (StripLiterals ASCII fold) and #2850
+# (two-stage parsing), sprint 362.
+#
+# Method is the #2846 spike's, unchanged: ONE PROCESS PER ARM, because the
+# generated parser's decisionToDFA is process-wide, interleaved arm-by-arm
+# across REPS repetitions. Build flags: none (no -race, no -tags), matching the
+# spike whose ceilings these numbers are compared against.
+set -u
+
+ROOT=/Users/flaviocfo/dev/xumiga/GoGraph
+OUT="$ROOT/docs/benchmarks/cypher-parse-impl-2026-09-16-tasks2849-2850"
+BENCHSTAT=/Users/flaviocfo/.local/bin/benchstat
+REPS=${REPS:-10}
+STRIP_BENCHTIME=${STRIP_BENCHTIME:-200ms}
+PARSE_BENCHTIME=${PARSE_BENCHTIME:-300ms}
+BIN=/tmp/claude-501/-Users-flaviocfo-dev-xumiga-GoGraph/d392be6b-440a-4370-be6b-810c6bb3ae8c/scratchpad/parser.impl.test
+
+mkdir -p "$OUT"
+cd "$ROOT" || exit 1
+
+# Wait for the host to settle: the race gate that preceded this run left load
+# above the envelope. Bounded at 20 minutes; the loadavg is recorded either way.
+for _ in $(seq 1 20); do
+  la=$(uptime | sed -E 's/.*load averages?: *//' | awk '{print $1}' | tr ',' '.')
+  ok=$(awk -v l="$la" 'BEGIN{print (l<=2.6)?1:0}')
+  [ "$ok" = "1" ] && break
+  sleep 60
+done
+
+{
+  echo "date_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "commit=$(git rev-parse HEAD)"
+  echo "branch=$(git rev-parse --abbrev-ref HEAD)"
+  echo "working_tree=DIRTY (the change under measurement; Before arms are verbatim copies of the pre-change code in the harness)"
+  echo "go_version=$(go version)"
+  echo "num_cpu=$(sysctl -n hw.ncpu)"
+  echo "os=$(uname -sr) $(uname -m)"
+  echo "hw=$(sysctl -n machdep.cpu.brand_string)"
+  echo "build_flags=none (no -race, no -tags)"
+  echo "gomaxprocs_env=${GOMAXPROCS:-unset}"
+  echo "reps=$REPS"
+  echo "strip_benchtime=$STRIP_BENCHTIME"
+  echo "parse_benchtime=$PARSE_BENCHTIME"
+  echo "corpus=cypher/parser/testdata/examples-corpus.json"
+  echo "harness=cypher/parser/zz_measure_test.go (THROWAWAY, deleted after this run)"
+} > "$OUT/env.txt"
+
+uptime > "$OUT/loadavg-before.txt"
+
+go test -c -o "$BIN" ./cypher/parser/ > "$OUT/build.log" 2>&1
+echo "build_exit=$?" >> "$OUT/build.log"
+
+run_arm() {  # $1=bench regex  $2=benchtime  $3=output file  $4=sed expr
+  (cd "$ROOT/cypher/parser" && "$BIN" -test.run='^$' \
+      -test.bench="$1" -test.benchmem -test.benchtime="$2" -test.count=1) 2>&1 \
+    | sed -E "$4" >> "$3"
+}
+
+: > "$OUT/strip.Before.txt"; : > "$OUT/strip.After.txt"
+: > "$OUT/striphoist.Before.txt"; : > "$OUT/striphoist.After.txt"
+for rep in $(seq 1 "$REPS"); do
+  for arm in Before After; do
+    run_arm "^BenchmarkImplStrip\$/^${arm}\$" "$STRIP_BENCHTIME" \
+            "$OUT/strip.${arm}.txt" "s|BenchmarkImplStrip/${arm}-|BenchmarkImplStrip-|"
+    run_arm "^BenchmarkImplStripHoisters\$/^${arm}\$" "$STRIP_BENCHTIME" \
+            "$OUT/striphoist.${arm}.txt" "s|BenchmarkImplStripHoisters/${arm}-|BenchmarkImplStripHoisters-|"
+  done
+done
+
+uptime > "$OUT/loadavg-mid.txt"
+
+: > "$OUT/parse.Before.txt"; : > "$OUT/parse.After.txt"
+: > "$OUT/parseerr.Before.txt"; : > "$OUT/parseerr.After.txt"
+for rep in $(seq 1 "$REPS"); do
+  for arm in Before After; do
+    run_arm "^BenchmarkImplParse\$/^${arm}\$" "$PARSE_BENCHTIME" \
+            "$OUT/parse.${arm}.txt" "s|BenchmarkImplParse/${arm}-|BenchmarkImplParse-|"
+    run_arm "^BenchmarkImplParseErrors\$/^${arm}\$" "$PARSE_BENCHTIME" \
+            "$OUT/parseerr.${arm}.txt" "s|BenchmarkImplParseErrors/${arm}-|BenchmarkImplParseErrors-|"
+  done
+done
+
+uptime > "$OUT/loadavg-after.txt"
+
+for pair in strip striphoist parse parseerr; do
+  "$BENCHSTAT" "Before=$OUT/${pair}.Before.txt" "After=$OUT/${pair}.After.txt" \
+    > "$OUT/${pair}.benchstat.txt" 2>&1
+  echo "benchstat_exit=$?" >> "$OUT/${pair}.benchstat.txt"
+done
+
+rm -f "$BIN"
+echo "DRIVER DONE"

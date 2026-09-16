@@ -1,0 +1,442 @@
+package parser
+
+// zz_measure_test.go — THROWAWAY before/after harness for rmp #2849 and #2850
+// (sprint 362). Deleted after the run; the driver and the results are archived
+// under docs/benchmarks/. It carries, for each task, a VERBATIM copy of the
+// pre-change code as the "Before" arm and calls the shipped code as the "After"
+// arm, so the two arms differ in exactly the change under measurement.
+
+import (
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/antlr4-go/antlr/v4"
+
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen"
+)
+
+// ---------------------------------------------------------------------------
+// #2849 — StripLiterals before the ASCII fold
+// ---------------------------------------------------------------------------
+
+// stripLiteralsBefore is StripLiterals exactly as it stood at 49cc8bb5: the
+// keyword test is `switch strings.ToUpper(query[start:i])`. Everything else is
+// byte-for-byte the shipped function.
+func stripLiteralsBefore(query string) (stripped string, params map[string]string, ok bool) {
+	type repl struct {
+		start, end int
+		name       string
+	}
+	if strings.IndexByte(query, '\'') < 0 && strings.IndexByte(query, '"') < 0 {
+		return query, nil, false
+	}
+
+	var repls []repl
+	hoistable := false
+
+	i, n := 0, len(query)
+	for i < n {
+		c := query[i]
+		switch {
+		case c == '/' && i+1 < n && query[i+1] == '/':
+			for i < n && query[i] != '\n' {
+				i++
+			}
+		case c == '/' && i+1 < n && query[i+1] == '*':
+			i += 2
+			for i+1 < n && (query[i] != '*' || query[i+1] != '/') {
+				i++
+			}
+			i = min(i+2, n)
+		case c == '`':
+			i++
+			for i < n {
+				if query[i] == '`' {
+					if i+1 < n && query[i+1] == '`' {
+						i += 2
+						continue
+					}
+					i++
+					break
+				}
+				i++
+			}
+		case c == '\'' || c == '"':
+			start := i
+			quote := c
+			i++
+			closed := false
+			for i < n {
+				if query[i] == '\\' {
+					i += 2
+					continue
+				}
+				if query[i] == quote {
+					i++
+					closed = true
+					break
+				}
+				i++
+			}
+			if !closed {
+				return query, nil, false
+			}
+			if !hoistable {
+				continue
+			}
+			repls = append(repls, repl{start: start, end: i, name: AutoParamPrefix + strconv.Itoa(len(repls))})
+		case isIdentStart(c):
+			start := i
+			for i < n && isIdentChar(query[i]) {
+				i++
+			}
+			switch strings.ToUpper(query[start:i]) {
+			case "MATCH", "WHERE":
+				hoistable = true
+			case "RETURN", "WITH", "CREATE", "MERGE", "DELETE", "DETACH", "SET",
+				"REMOVE", "UNWIND", "CALL", "YIELD", "FOREACH", "OPTIONAL",
+				"UNION", "ON", "ORDER", "SKIP", "LIMIT", "FOR", "ADD", "DROP":
+				hoistable = false
+			}
+		default:
+			i++
+		}
+	}
+
+	if len(repls) == 0 {
+		return query, nil, false
+	}
+
+	params = make(map[string]string, len(repls))
+	var b strings.Builder
+	b.Grow(len(query) + len(repls)*(len(AutoParamPrefix)+6))
+	prev := 0
+	for _, r := range repls {
+		params[r.name] = unquoteString(query[r.start:r.end])
+		b.WriteString(query[prev:r.start])
+		b.WriteString("$`")
+		b.WriteString(r.name)
+		b.WriteString("`")
+		prev = r.end
+	}
+	b.WriteString(query[prev:])
+	return b.String(), params, true
+}
+
+var mStripArms = []struct {
+	name string
+	run  func(string) (string, map[string]string, bool)
+}{
+	{"Before", stripLiteralsBefore},
+	{"After", StripLiterals},
+}
+
+// TestMeasureStripEquivalence gates the harness: both arms must agree on every
+// corpus statement, or the delta below is not the change but a defect.
+func TestMeasureStripEquivalence(t *testing.T) {
+	for _, s := range loadCorpus(t) {
+		wantS, wantP, wantOK := stripLiteralsBefore(s.Text)
+		gotS, gotP, gotOK := StripLiterals(s.Text)
+		if wantS != gotS || wantOK != gotOK || len(wantP) != len(gotP) {
+			t.Fatalf("%s: arms disagree", s.ID)
+		}
+		for k, v := range wantP {
+			if gotP[k] != v {
+				t.Fatalf("%s: param %q differs", s.ID, k)
+			}
+		}
+	}
+}
+
+// BenchmarkImplStrip measures StripLiterals over the WHOLE corpus, one arm per
+// sub-benchmark. One op = all 83 statements, matching the #2846 spike.
+func BenchmarkImplStrip(b *testing.B) {
+	corpus := loadCorpus(b)
+	for _, a := range mStripArms {
+		b.Run(a.name, func(b *testing.B) {
+			for _, s := range corpus {
+				sinkString, sinkMap, sinkBool = a.run(s.Text)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				for _, s := range corpus {
+					sinkString, sinkMap, sinkBool = a.run(s.Text)
+				}
+			}
+		})
+	}
+}
+
+// BenchmarkImplStripHoisters measures only the corpus statements that carry a
+// quote, i.e. the ones the fast reject does not answer.
+func BenchmarkImplStripHoisters(b *testing.B) {
+	var quoted []corpusStatement
+	for _, s := range loadCorpus(b) {
+		if strings.IndexByte(s.Text, '\'') >= 0 || strings.IndexByte(s.Text, '"') >= 0 {
+			quoted = append(quoted, s)
+		}
+	}
+	if len(quoted) == 0 {
+		b.Fatal("no quoted statement in the corpus")
+	}
+	for _, a := range mStripArms {
+		b.Run(a.name, func(b *testing.B) {
+			for _, s := range quoted {
+				sinkString, sinkMap, sinkBool = a.run(s.Text)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				for _, s := range quoted {
+					sinkString, sinkMap, sinkBool = a.run(s.Text)
+				}
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// #2850 — ParseStatement before two-stage parsing
+// ---------------------------------------------------------------------------
+
+// parseStatementBefore is ParseStatement exactly as it stood at 49cc8bb5: one
+// pass, DefaultErrorStrategy from the first token.
+func parseStatementBefore(query string) (ast.Query, PlanMode, error) {
+	if err := guardInput(query); err != nil {
+		return nil, PlanModeNone, err
+	}
+	if err := validateUnicodeEscapes(query); err != nil {
+		return nil, PlanModeNone, err
+	}
+	query, spMarkers := rewriteShortestPath(query)
+	query = applyNormalizers(query)
+
+	lexErrListener := &errorListener{}
+	input := antlr.NewInputStream(query)
+	lexer := gen.NewCypherLexer(input)
+	lexer.RemoveErrorListeners()
+	lexer.AddErrorListener(lexErrListener)
+
+	parseErrListener := &errorListener{}
+	stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+	stream.Fill()
+	collectErrCharErrors(lexErrListener, stream)
+	if len(lexErrListener.errs) > 0 {
+		return nil, PlanModeNone, lexErrListener.errs[0]
+	}
+
+	p := gen.NewCypherParser(stream)
+	p.RemoveErrorListeners()
+	p.AddErrorListener(parseErrListener)
+	p.BuildParseTrees = true
+
+	tree, panicErr := recoverParseScript(p)
+	if panicErr != nil {
+		return nil, PlanModeNone, panicErr
+	}
+	if len(lexErrListener.errs) > 0 {
+		return nil, PlanModeNone, lexErrListener.errs[0]
+	}
+	if len(parseErrListener.errs) > 0 {
+		return nil, PlanModeNone, parseErrListener.errs[0]
+	}
+
+	v := newVisitor()
+	result := v.visit(tree)
+	if se, ok := result.(*SemaError); ok {
+		return nil, PlanModeNone, se
+	}
+	if q, ok := result.(ast.Query); ok {
+		applyShortestMarkers(q, spMarkers)
+		return q, v.planMode, nil
+	}
+	if sq, ok := result.(*ast.SingleQuery); ok {
+		applyShortestMarkers(sq, spMarkers)
+		return sq, v.planMode, nil
+	}
+	return nil, PlanModeNone, &ParseError{Message: "visitor produced no AST node"}
+}
+
+var mParseArms = []struct {
+	name string
+	run  func(string) (ast.Query, PlanMode, error)
+}{
+	{"Before", parseStatementBefore},
+	{"After", ParseStatement},
+}
+
+// BenchmarkImplParse measures the WHOLE front end over the whole corpus, one
+// arm per sub-benchmark. One op = all 83 statements, matching the #2846 spike.
+// The generated parser's decisionToDFA is process-wide, so the driver runs ONE
+// PROCESS PER ARM and interleaves them.
+func BenchmarkImplParse(b *testing.B) {
+	corpus := loadCorpus(b)
+	for _, a := range mParseArms {
+		b.Run(a.name, func(b *testing.B) {
+			for i := 0; i < 3; i++ {
+				for _, s := range corpus {
+					q, _, err := a.run(s.Text)
+					if err != nil {
+						b.Fatalf("%s: %v", s.ID, err)
+					}
+					sinkAny = q
+				}
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				for _, s := range corpus {
+					sinkAny, _, sinkErr = a.run(s.Text)
+				}
+			}
+		})
+	}
+}
+
+// BenchmarkImplParseErrors measures the ERROR path, one arm per sub-benchmark,
+// over the invalid statements the permanent benchmark uses. This is what the
+// two-stage change COSTS.
+func BenchmarkImplParseErrors(b *testing.B) {
+	for _, a := range mParseArms {
+		b.Run(a.name, func(b *testing.B) {
+			for i := 0; i < 3; i++ {
+				for _, s := range benchInvalidStatements {
+					sinkAny, _, sinkErr = a.run(s.query)
+				}
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				for _, s := range benchInvalidStatements {
+					sinkAny, _, sinkErr = a.run(s.query)
+				}
+			}
+		})
+	}
+}
+
+// TestMeasureStripPerStatementAllocs discharges #2849's acceptance criterion
+// statement by statement: 0 allocs/op on every corpus statement that does not
+// hoist, and strictly fewer on every one that does.
+func TestMeasureStripPerStatementAllocs(t *testing.T) {
+	corpus := loadCorpus(t)
+	hoisting, flat := 0, 0
+	t.Logf("%-34s %6s %8s %8s %8s", "id", "bytes", "hoisted", "before", "after")
+	for _, s := range corpus {
+		q := s.Text
+		_, params, ok := StripLiterals(q)
+		before := testing.AllocsPerRun(200, func() {
+			sinkString, sinkMap, sinkBool = stripLiteralsBefore(q)
+		})
+		after := testing.AllocsPerRun(200, func() {
+			sinkString, sinkMap, sinkBool = StripLiterals(q)
+		})
+		t.Logf("%-34s %6d %8d %8.0f %8.0f", s.ID, len(q), len(params), before, after)
+		if !ok {
+			flat++
+			if after != 0 {
+				t.Errorf("%s does not hoist but allocated %v times, want 0", s.ID, after)
+			}
+			continue
+		}
+		hoisting++
+		if after >= before {
+			t.Errorf("%s hoists %d literal(s): after=%v allocations, before=%v — not strictly fewer",
+				s.ID, len(params), after, before)
+		}
+	}
+	t.Logf("corpus: %d statements, %d hoist, %d do not", len(corpus), hoisting, flat)
+	if hoisting == 0 || flat == 0 {
+		t.Fatalf("the corpus no longer covers both cases (%d hoist, %d do not)", hoisting, flat)
+	}
+}
+
+// TestMeasureFuzzCorpusTiming replays the fuzz cache corpus through BOTH arms
+// and reports the slowest inputs for each. It exists to answer one question:
+// did two-stage parsing introduce an input that is materially slower than it
+// was, now that BailErrorStrategy's anti-livelock failsafe is not in force on
+// the first stage?
+func TestMeasureFuzzCorpusTiming(t *testing.T) {
+	root := os.Getenv("FUZZ_CORPUS")
+	if root == "" {
+		t.Skip("FUZZ_CORPUS not set")
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("read %s: %v", root, err)
+	}
+	type row struct {
+		name          string
+		input         string
+		before, after time.Duration
+	}
+	var rows []row
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(root, e.Name()))
+		if err != nil {
+			t.Fatalf("read %s: %v", e.Name(), err)
+		}
+		lines := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
+		if len(lines) < 2 || !strings.HasPrefix(lines[1], "string(") {
+			continue
+		}
+		in, err := strconv.Unquote(strings.TrimSuffix(strings.TrimPrefix(lines[1], "string("), ")"))
+		if err != nil {
+			continue
+		}
+		// Warm both arms once so neither pays a first-touch DFA cost.
+		_, _, _ = parseStatementBefore(in)
+		_, _, _ = ParseStatement(in)
+		// 100 repetitions per arm, interleaved in blocks, so a per-input ratio
+		// is not a single-shot timing at microsecond resolution.
+		const reps = 100
+		var db, da time.Duration
+		for pass := 0; pass < 2; pass++ {
+			t0 := time.Now()
+			for i := 0; i < reps; i++ {
+				_, _, _ = parseStatementBefore(in)
+			}
+			db += time.Since(t0)
+			t1 := time.Now()
+			for i := 0; i < reps; i++ {
+				_, _, _ = ParseStatement(in)
+			}
+			da += time.Since(t1)
+		}
+		rows = append(rows, row{e.Name(), in, db / (2 * reps), da / (2 * reps)})
+	}
+	if len(rows) == 0 {
+		t.Fatalf("no corpus entry decoded from %s", root)
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].after > rows[j].after })
+	t.Logf("decoded %d fuzz corpus entries", len(rows))
+	t.Logf("%-12s %-12s %6s  %s", "before", "after", "bytes", "input")
+	for i, r := range rows {
+		if i >= 15 {
+			break
+		}
+		t.Logf("%-12s %-12s %6d  %q", r.before, r.after, len(r.input), r.input)
+	}
+	var worstRatio float64
+	var worst row
+	for _, r := range rows {
+		if r.before <= 0 {
+			continue
+		}
+		if ratio := float64(r.after) / float64(r.before); ratio > worstRatio {
+			worstRatio, worst = ratio, r
+		}
+	}
+	t.Logf("worst after/before ratio %.2fx on %q (before=%s after=%s)",
+		worstRatio, worst.input, worst.before, worst.after)
+}

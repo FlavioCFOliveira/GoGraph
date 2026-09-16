@@ -1,0 +1,60 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/parser
+cpu: Apple M4
+BenchmarkImplParse-10         	     210	   1682308 ns/op	 1748804 B/op	   27174 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/parser
+cpu: Apple M4
+BenchmarkImplParse-10         	     206	   1688071 ns/op	 1748829 B/op	   27174 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/parser
+cpu: Apple M4
+BenchmarkImplParse-10         	     205	   1696609 ns/op	 1748853 B/op	   27174 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/parser
+cpu: Apple M4
+BenchmarkImplParse-10         	     211	   1704153 ns/op	 1748739 B/op	   27174 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/parser
+cpu: Apple M4
+BenchmarkImplParse-10         	     205	   1697048 ns/op	 1748711 B/op	   27174 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/parser
+cpu: Apple M4
+BenchmarkImplParse-10         	     208	   1682726 ns/op	 1748682 B/op	   27174 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/parser
+cpu: Apple M4
+BenchmarkImplParse-10         	     206	   1691534 ns/op	 1748814 B/op	   27174 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/parser
+cpu: Apple M4
+BenchmarkImplParse-10         	     207	   1682815 ns/op	 1748818 B/op	   27174 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/parser
+cpu: Apple M4
+BenchmarkImplParse-10         	     204	   1691655 ns/op	 1748827 B/op	   27174 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/parser
+cpu: Apple M4
+BenchmarkImplParse-10         	     206	   1688333 ns/op	 1748795 B/op	   27174 allocs/op
+PASS
