@@ -43,18 +43,25 @@
 //
 // The default capacity is [DefaultPlanCacheCapacity] (1024 entries). Configure
 // a different bound via [EngineOptions.PlanCacheCapacity] and the [NewEngineWithOptions]
-// constructor. Eviction is least-recently-used and emits the
-// cypher.plan_cache.evictions counter on the global metrics surface; hits and
-// misses are reported under cypher.plan_cache.hits and
+// constructor. Eviction is least-recently-used WITHIN EACH SHARD of the
+// sharded cache — there is no single global recency order, so the entry
+// dropped at capacity is the least-recently-used one of the shard the new key
+// hashes to, which may be more recently used than an entry in another shard.
+// The declared capacity remains an exact bound on the TOTAL number of entries.
+// Eviction emits the cypher.plan_cache.evictions counter on the global metrics
+// surface; hits and misses are reported under cypher.plan_cache.hits and
 // cypher.plan_cache.misses.
 //
 // # Concurrency
 //
 // Engine is safe for concurrent use. Each Run call creates an independent
-// physical operator tree. The plan cache itself serialises its structural
-// updates on a single sync.Mutex; the cached *planCacheEntry is immutable
-// once published, so callers operate on the returned pointer without further
-// synchronisation.
+// physical operator tree. The plan cache is SHARDED: each shard owns its own
+// mutex, LRU list and map, so lookups of query texts that hash to different
+// shards proceed concurrently and only same-shard lookups serialise. Every
+// field of the cached *planCacheEntry that the cache itself publishes is
+// written before it is installed and never again, so callers operate on the
+// returned pointer without further synchronisation; the two memos lazily
+// filled on it afterwards (scalarUse, countVarRewrite) carry their own.
 //
 // Write queries DO NOT serialise. Concurrency control is MVCC and nothing else
 // (rmp #2306): independent writers run concurrently on both wirings, and a

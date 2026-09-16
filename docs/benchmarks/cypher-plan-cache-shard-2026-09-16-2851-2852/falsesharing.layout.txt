@@ -1,0 +1,7 @@
+LAYOUT shards=16 rep=0 sizeof=128 stride=128 base_mod_64=8 base_mod_128=8 hot0_line=764948614564 hot1_line=764948614566 same_64B_line=false array_bytes=2048
+LAYOUT shards=16 rep=1 sizeof=128 stride=128 base_mod_64=8 base_mod_128=8 hot0_line=764948614600 hot1_line=764948614602 same_64B_line=false array_bytes=2048
+LAYOUT shards=16 rep=2 sizeof=128 stride=128 base_mod_64=8 base_mod_128=8 hot0_line=764948614636 hot1_line=764948614638 same_64B_line=false array_bytes=2048
+LAYOUT shards=256 rep=0 sizeof=128 stride=128 base_mod_64=0 base_mod_128=0 hot0_line=764948646144 hot1_line=764948646146 same_64B_line=false array_bytes=32768
+LAYOUT shards=256 rep=1 sizeof=128 stride=128 base_mod_64=0 base_mod_128=0 hot0_line=764948646784 hot1_line=764948646786 same_64B_line=false array_bytes=32768
+LAYOUT shards=256 rep=2 sizeof=128 stride=128 base_mod_64=0 base_mod_128=0 hot0_line=764948647808 hot1_line=764948647810 same_64B_line=false array_bytes=32768
+ok  	github.com/FlavioCFOliveira/GoGraph/cypher	0.581s

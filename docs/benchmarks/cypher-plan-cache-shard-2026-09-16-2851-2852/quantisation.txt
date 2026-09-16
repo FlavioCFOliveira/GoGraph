@@ -1,0 +1,55 @@
+QUANT load=100% keys=1024 shards=   1 per_shard_cap=1024 steady_hit_pct=100.00
+QUANT load=100% keys=1024 shards=   2 per_shard_cap= 512 steady_hit_pct= 48.93
+QUANT load=100% keys=1024 shards=   4 per_shard_cap= 256 steady_hit_pct= 49.65
+QUANT load=100% keys=1024 shards=   8 per_shard_cap= 128 steady_hit_pct= 48.69
+QUANT load=100% keys=1024 shards=  16 per_shard_cap=  64 steady_hit_pct= 52.55
+QUANT load=100% keys=1024 shards=  32 per_shard_cap=  32 steady_hit_pct= 48.13
+QUANT load=100% keys=1024 shards=  64 per_shard_cap=  16 steady_hit_pct= 46.07
+QUANT load=100% keys=1024 shards= 128 per_shard_cap=   8 steady_hit_pct= 45.39
+QUANT load=100% keys=1024 shards= 256 per_shard_cap=   4 steady_hit_pct= 43.82
+QUANT load=100% keys=1024 shards= 512 per_shard_cap=   2 steady_hit_pct= 40.30
+QUANT load=100% keys=1024 shards=1024 per_shard_cap=   1 steady_hit_pct= 36.58
+QUANT load= 75% keys= 768 shards=   1 per_shard_cap=1024 steady_hit_pct=100.00
+QUANT load= 75% keys= 768 shards=   2 per_shard_cap= 512 steady_hit_pct=100.00
+QUANT load= 75% keys= 768 shards=   4 per_shard_cap= 256 steady_hit_pct=100.00
+QUANT load= 75% keys= 768 shards=   8 per_shard_cap= 128 steady_hit_pct=100.00
+QUANT load= 75% keys= 768 shards=  16 per_shard_cap=  64 steady_hit_pct= 99.47
+QUANT load= 75% keys= 768 shards=  32 per_shard_cap=  32 steady_hit_pct= 95.68
+QUANT load= 75% keys= 768 shards=  64 per_shard_cap=  16 steady_hit_pct= 87.19
+QUANT load= 75% keys= 768 shards= 128 per_shard_cap=   8 steady_hit_pct= 78.52
+QUANT load= 75% keys= 768 shards= 256 per_shard_cap=   4 steady_hit_pct= 66.01
+QUANT load= 75% keys= 768 shards= 512 per_shard_cap=   2 steady_hit_pct= 57.80
+QUANT load= 75% keys= 768 shards=1024 per_shard_cap=   1 steady_hit_pct= 49.48
+QUANT load= 50% keys= 512 shards=   1 per_shard_cap=1024 steady_hit_pct=100.00
+QUANT load= 50% keys= 512 shards=   2 per_shard_cap= 512 steady_hit_pct=100.00
+QUANT load= 50% keys= 512 shards=   4 per_shard_cap= 256 steady_hit_pct=100.00
+QUANT load= 50% keys= 512 shards=   8 per_shard_cap= 128 steady_hit_pct=100.00
+QUANT load= 50% keys= 512 shards=  16 per_shard_cap=  64 steady_hit_pct=100.00
+QUANT load= 50% keys= 512 shards=  32 per_shard_cap=  32 steady_hit_pct=100.00
+QUANT load= 50% keys= 512 shards=  64 per_shard_cap=  16 steady_hit_pct=100.00
+QUANT load= 50% keys= 512 shards= 128 per_shard_cap=   8 steady_hit_pct= 95.91
+QUANT load= 50% keys= 512 shards= 256 per_shard_cap=   4 steady_hit_pct= 85.10
+QUANT load= 50% keys= 512 shards= 512 per_shard_cap=   2 steady_hit_pct= 76.77
+QUANT load= 50% keys= 512 shards=1024 per_shard_cap=   1 steady_hit_pct= 61.68
+QUANT load= 25% keys= 256 shards=   1 per_shard_cap=1024 steady_hit_pct=100.00
+QUANT load= 25% keys= 256 shards=   2 per_shard_cap= 512 steady_hit_pct=100.00
+QUANT load= 25% keys= 256 shards=   4 per_shard_cap= 256 steady_hit_pct=100.00
+QUANT load= 25% keys= 256 shards=   8 per_shard_cap= 128 steady_hit_pct=100.00
+QUANT load= 25% keys= 256 shards=  16 per_shard_cap=  64 steady_hit_pct=100.00
+QUANT load= 25% keys= 256 shards=  32 per_shard_cap=  32 steady_hit_pct=100.00
+QUANT load= 25% keys= 256 shards=  64 per_shard_cap=  16 steady_hit_pct=100.00
+QUANT load= 25% keys= 256 shards= 128 per_shard_cap=   8 steady_hit_pct=100.00
+QUANT load= 25% keys= 256 shards= 256 per_shard_cap=   4 steady_hit_pct= 99.15
+QUANT load= 25% keys= 256 shards= 512 per_shard_cap=   2 steady_hit_pct= 92.80
+QUANT load= 25% keys= 256 shards=1024 per_shard_cap=   1 steady_hit_pct= 80.13
+QUANT load= 10% keys= 102 shards=   1 per_shard_cap=1024 steady_hit_pct=100.00
+QUANT load= 10% keys= 102 shards=   2 per_shard_cap= 512 steady_hit_pct=100.00
+QUANT load= 10% keys= 102 shards=   4 per_shard_cap= 256 steady_hit_pct=100.00
+QUANT load= 10% keys= 102 shards=   8 per_shard_cap= 128 steady_hit_pct=100.00
+QUANT load= 10% keys= 102 shards=  16 per_shard_cap=  64 steady_hit_pct=100.00
+QUANT load= 10% keys= 102 shards=  32 per_shard_cap=  32 steady_hit_pct=100.00
+QUANT load= 10% keys= 102 shards=  64 per_shard_cap=  16 steady_hit_pct=100.00
+QUANT load= 10% keys= 102 shards= 128 per_shard_cap=   8 steady_hit_pct=100.00
+QUANT load= 10% keys= 102 shards= 256 per_shard_cap=   4 steady_hit_pct=100.00
+QUANT load= 10% keys= 102 shards= 512 per_shard_cap=   2 steady_hit_pct= 99.08
+QUANT load= 10% keys= 102 shards=1024 per_shard_cap=   1 steady_hit_pct= 92.71

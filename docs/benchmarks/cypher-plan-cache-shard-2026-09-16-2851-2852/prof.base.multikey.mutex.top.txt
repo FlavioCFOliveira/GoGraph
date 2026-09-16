@@ -1,0 +1,17 @@
+File: cypher.base.test
+Type: delay
+Time: 2026-09-16 16:00:36 WEST
+Showing nodes accounting for 22262.98ms, 100% of 22266.30ms total
+Dropped 71 nodes (cum <= 111.33ms)
+Showing top 10 nodes out of 18
+      flat  flat%   sum%        cum   cum%
+20195.63ms 90.70% 90.70% 21045.86ms 94.52%  sync.(*Mutex).Unlock
+ 2067.36ms  9.28%   100%  2067.36ms  9.28%  runtime.unlock (inline)
+         0     0%   100% 21772.18ms 97.78%  github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).parseAndAnalyse
+         0     0%   100% 21772.18ms 97.78%  github.com/FlavioCFOliveira/GoGraph/cypher.(*planCache).get
+         0     0%   100% 21772.18ms 97.78%  github.com/FlavioCFOliveira/GoGraph/cypher.BenchmarkSpikeWarmPrepareMultiKey.func1
+         0     0%   100%   727.20ms  3.27%  internal/sync.(*Mutex).Lock (inline)
+         0     0%   100%   850.23ms  3.82%  internal/sync.(*Mutex).Unlock (inline)
+         0     0%   100%   727.20ms  3.27%  internal/sync.(*Mutex).lockSlow
+         0     0%   100%   850.23ms  3.82%  internal/sync.(*Mutex).unlockSlow
+         0     0%   100%   727.20ms  3.27%  internal/sync.runtime_SemacquireMutex

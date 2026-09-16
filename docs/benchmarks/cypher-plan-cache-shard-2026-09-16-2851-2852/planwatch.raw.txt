@@ -1,0 +1,54 @@
+=== RUN   TestZZPlanWatch19
+PLANWATCH label=19_pattern_query/default before.hits=0 before.misses=0 before.evictions=0 before.invalidations=0 after.hits=85 after.misses=4 after.evictions=0 after.invalidations=2 delta.hits=85 delta.misses=4 delta.evictions=0 delta.invalidations=2 lookups=89 hit_over_miss=21.2500 hit_pct=95.51
+--- PASS: TestZZPlanWatch19 (0.04s)
+PASS
+exit_19=0
+=== RUN   TestZZPlanWatch22
+PLANWATCH label=22_cypher/default before.hits=0 before.misses=0 before.evictions=0 before.invalidations=0 after.hits=14 after.misses=17 after.evictions=0 after.invalidations=0 delta.hits=14 delta.misses=17 delta.evictions=0 delta.invalidations=0 lookups=31 hit_over_miss=0.8235 hit_pct=45.16
+--- PASS: TestZZPlanWatch22 (0.02s)
+PASS
+exit_22=0
+=== RUN   TestZZPlanWatch24
+{"data_dir":"/private/tmp/claude-501/-Users-flaviocfo-dev-xumiga-GoGraph/d392be6b-440a-4370-be6b-810c6bb3ae8c/scratchpad/data/social","status":"ok"}
+PLANWATCH label=24_social_network_cli/init before.hits=0 before.misses=0 before.evictions=0 before.invalidations=0 after.hits=0 after.misses=0 after.evictions=0 after.invalidations=0 delta.hits=0 delta.misses=0 delta.evictions=0 delta.invalidations=0 lookups=0 hit_over_miss=0.0000 hit_pct=0.00
+--- PASS: TestZZPlanWatch24 (0.04s)
+PASS
+exit_24_init=0
+=== RUN   TestZZPlanWatch24
+{"seeded":true,"status":"ok"}
+PLANWATCH label=24_social_network_cli/seed before.hits=0 before.misses=0 before.evictions=0 before.invalidations=0 after.hits=0 after.misses=0 after.evictions=0 after.invalidations=0 delta.hits=0 delta.misses=0 delta.evictions=0 delta.invalidations=0 lookups=0 hit_over_miss=0.0000 hit_pct=0.00
+--- PASS: TestZZPlanWatch24 (0.01s)
+PASS
+exit_24_seed=0
+=== RUN   TestZZPlanWatch24
+{"authored":8,"comments":5,"follows":8,"likes":7,"on":5,"posts":3,"replies":2,"users":5}
+PLANWATCH label=24_social_network_cli/stats before.hits=0 before.misses=0 before.evictions=0 before.invalidations=0 after.hits=0 after.misses=8 after.evictions=0 after.invalidations=0 delta.hits=0 delta.misses=8 delta.evictions=0 delta.invalidations=0 lookups=8 hit_over_miss=0.0000 hit_pct=0.00
+--- PASS: TestZZPlanWatch24 (0.01s)
+PASS
+exit_24_stats=0
+=== RUN   TestZZPlanWatch24
+{"username":"alice"}
+{"username":"bob"}
+{"username":"carol"}
+{"username":"dave"}
+{"username":"erin"}
+PLANWATCH label=24_social_network_cli/query before.hits=0 before.misses=0 before.evictions=0 before.invalidations=0 after.hits=0 after.misses=1 after.evictions=0 after.invalidations=0 delta.hits=0 delta.misses=1 delta.evictions=0 delta.invalidations=0 lookups=1 hit_over_miss=0.0000 hit_pct=0.00
+--- PASS: TestZZPlanWatch24 (0.01s)
+PASS
+exit_24_query=0
+=== RUN   TestZZPlanWatch24
+{"snapshot_dir":"/private/tmp/claude-501/-Users-flaviocfo-dev-xumiga-GoGraph/d392be6b-440a-4370-be6b-810c6bb3ae8c/scratchpad/data/social/snapshot","status":"ok"}
+PLANWATCH label=24_social_network_cli/snapshot before.hits=0 before.misses=0 before.evictions=0 before.invalidations=0 after.hits=0 after.misses=0 after.evictions=0 after.invalidations=0 delta.hits=0 delta.misses=0 delta.evictions=0 delta.invalidations=0 lookups=0 hit_over_miss=0.0000 hit_pct=0.00
+--- PASS: TestZZPlanWatch24 (0.03s)
+PASS
+exit_24_snapshot=0
+=== RUN   TestZZPlanWatch25
+PLANWATCH label=25_software_house_api/startup before.hits=0 before.misses=0 before.evictions=0 before.invalidations=0 after.hits=0 after.misses=0 after.evictions=0 after.invalidations=0 delta.hits=0 delta.misses=0 delta.evictions=0 delta.invalidations=0 lookups=0 hit_over_miss=0.0000 hit_pct=0.00
+--- PASS: TestZZPlanWatch25 (0.03s)
+PASS
+exit_25_startup=0
+=== RUN   TestZZPlanWatch25
+PLANWATCH label=25_software_house_api/session before.hits=0 before.misses=0 before.evictions=0 before.invalidations=0 after.hits=0 after.misses=34 after.evictions=0 after.invalidations=2 delta.hits=0 delta.misses=34 delta.evictions=0 delta.invalidations=2 lookups=34 hit_over_miss=0.0000 hit_pct=0.00
+--- PASS: TestZZPlanWatch25 (0.06s)
+PASS
+exit_25_session=0

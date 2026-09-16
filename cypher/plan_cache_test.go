@@ -9,9 +9,19 @@ import (
 
 func newTestEntry(tag string) *planCacheEntry { return &planCacheEntry{plan: nil, semaErr: nil} } // tag aids future debugging
 
+// TestPlanCache_HitMissEviction pins the hit / miss / eviction contract of ONE
+// shard.
+//
+// DELIBERATE CHANGE (rmp #2852): the cache is sharded, so there is no longer a
+// single global LRU order and "the least recently used entry" is only defined
+// WITHIN a shard. The three-key eviction order this test asserts is therefore
+// driven through an explicitly single-shard cache, which is exactly the scope
+// the contract now has. The cross-shard invariants that replaced the global
+// ones — an exact total bound, a clamped shard count, per-shard recency — are
+// asserted in plan_cache_shard_test.go.
 func TestPlanCache_HitMissEviction(t *testing.T) {
 	t.Parallel()
-	c := newPlanCache(3)
+	c := newPlanCacheWithShards(3, 1)
 
 	// Miss → store → hit.
 	if _, ok := c.get("a"); ok {
@@ -91,7 +101,12 @@ func TestPlanCache_BoundedUnderChurn(t *testing.T) {
 	c := newPlanCache(cap)
 	for i := 0; i < distinct; i++ {
 		c.loadOrStore(fmt.Sprintf("q-%d", i), newTestEntry("x"))
+		if got := c.Len(); got > cap {
+			t.Fatalf("insert %d: Len = %d exceeds the declared total bound %d", i, got, cap)
+		}
 	}
+	// distinct is three orders of magnitude above cap, so every shard has been
+	// offered far more keys than its own bound and the cache is saturated.
 	if c.Len() != cap {
 		t.Fatalf("after %d distinct inserts Len = %d; want exactly %d",
 			distinct, c.Len(), cap)

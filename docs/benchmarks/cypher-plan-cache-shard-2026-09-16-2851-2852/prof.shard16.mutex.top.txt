@@ -1,0 +1,19 @@
+File: cypher.shard16.test
+Type: delay
+Time: 2026-09-16 16:00:11 WEST
+Showing nodes accounting for 45918.55ms, 100% of 45927.71ms total
+Dropped 160 nodes (cum <= 229.64ms)
+Showing top 12 nodes out of 26
+      flat  flat%   sum%        cum   cum%
+43161.29ms 93.98% 93.98% 44182.07ms 96.20%  sync.(*Mutex).Unlock (inline)
+ 2757.26ms  6.00%   100%  2757.26ms  6.00%  runtime.unlock (inline)
+         0     0%   100% 44743.74ms 97.42%  github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).parseAndAnalyse
+         0     0%   100% 44723.03ms 97.38%  github.com/FlavioCFOliveira/GoGraph/cypher.(*planCache).get
+         0     0%   100% 14029.47ms 30.55%  github.com/FlavioCFOliveira/GoGraph/cypher.BenchmarkSpikeWarmPrepareMultiKey.func1
+         0     0%   100% 30714.27ms 66.88%  github.com/FlavioCFOliveira/GoGraph/cypher.BenchmarkSpikeWarmPrepareParallel.func1.1
+         0     0%   100%   542.72ms  1.18%  internal/sync.(*Mutex).Lock (inline)
+         0     0%   100%  1020.78ms  2.22%  internal/sync.(*Mutex).Unlock (inline)
+         0     0%   100%   542.72ms  1.18%  internal/sync.(*Mutex).lockSlow
+         0     0%   100%  1020.78ms  2.22%  internal/sync.(*Mutex).unlockSlow
+         0     0%   100%   542.72ms  1.18%  internal/sync.runtime_SemacquireMutex
+         0     0%   100%  1020.78ms  2.22%  internal/sync.runtime_Semrelease
