@@ -141,6 +141,7 @@ the run for a minute before reporting the refusal.
 | `-label` | `benchstat` sub-name for the run | `conn=<n>` / `pooled` |
 | `-mutex-fraction` | `runtime.SetMutexProfileFraction` for the profiled window (`0` disables) | `1` |
 | `-block-rate` | `runtime.SetBlockProfileRate` in ns for the profiled window (`0` disables) | `1` |
+| `-fd-sampling` | sample the open-descriptor count during a window; its own cost is one syscall per open descriptor per sample, so it is linear in the connection count (measured: 0.62% of process CPU at 64 connections, 2.32% at 256, 5.78% at 1024). `false` drops `max_open_fds` to `0` and leaves `peak_open_fds` intact | `true` |
 | `-server-log` | logger given to `bolt/server` `Options.Logger`: `default` \| `discard` \| `error` | `default` |
 | `-ladder` | sweep the ladder, one child process per rung (requires `-artifact-dir`) | `false` |
 | `-ladder-levels` | comma-separated ladder | `1,8,64,256,1024` |

@@ -111,6 +111,7 @@ type configJSON struct {
 	BlockRate        int    `json:"block_profile_rate_ns"`
 	ServerLog        string `json:"server_log"`
 	ExpectRejections bool   `json:"expect_rejections"`
+	FDSampling       bool   `json:"fd_sampling"`
 }
 
 // runMetrics is one rung's complete record: what was asked for, what the host
@@ -408,7 +409,7 @@ func measureWindow(ctx context.Context, addr string, cfg *config, sink *counterS
 	before := sink.snapshot()
 	baseLive := liveConnections(before)
 
-	smp := startSampler(samplerInterval)
+	smp := startSampler(samplerInterval, cfg.fdSampling)
 	var peakGoroutines, peakFDs int
 	st, err := driveOnce(ctx, addr, cfg, func() {
 		peakGoroutines = runtime.NumGoroutine()
@@ -564,7 +565,7 @@ type sampler struct {
 
 // startSampler begins sampling every interval. Call finish to stop it and read
 // what it saw; the goroutine is always joined, so it can leak none.
-func startSampler(interval time.Duration) *sampler {
+func startSampler(interval time.Duration, sampleFDs bool) *sampler {
 	s := &sampler{stop: make(chan struct{}), done: make(chan struct{})}
 	go func() {
 		defer close(s.done)
@@ -578,8 +579,10 @@ func startSampler(interval time.Duration) *sampler {
 				if n := runtime.NumGoroutine(); n > s.maxGoroutines {
 					s.maxGoroutines = n
 				}
-				if n, ok := openFDs(); ok && n > s.maxOpenFDs {
-					s.maxOpenFDs = n
+				if sampleFDs {
+					if n, ok := openFDs(); ok && n > s.maxOpenFDs {
+						s.maxOpenFDs = n
+					}
 				}
 			}
 		}
@@ -857,6 +860,7 @@ func childArgs(cfg *config, spec rungSpec, dir string) []string {
 		"-connect-timeout", cfg.dialTimeout().String(),
 		"-mutex-fraction", strconv.Itoa(cfg.mutexFraction),
 		"-block-rate", strconv.Itoa(cfg.blockRate),
+		"-fd-sampling=" + strconv.FormatBool(cfg.fdSampling),
 		"-server-log", cfg.serverLogMode(),
 		"-label", spec.name,
 		"-artifact-dir", dir,

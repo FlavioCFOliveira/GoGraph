@@ -158,6 +158,19 @@ type config struct {
 	mutexFraction int
 	blockRate     int
 
+	// fdSampling keeps the window sampler's descriptor count switched on. The
+	// sampler lists the kernel's per-process descriptor directory every
+	// samplerInterval, and on darwin os.ReadDir lstats every entry, so the walk
+	// costs one syscall per OPEN DESCRIPTOR per sample: at 1024 connections
+	// that is ~2056 syscalls 40 times a second, inside the measurement window.
+	// Measured on this host it is 0.62% of process CPU at 64 connections, 2.32%
+	// at 256 and 5.78% at 1024 — a cost linear in the connection count, which
+	// is exactly the axis the ladder measures. The knob exists so that cost can
+	// be measured by A/B rather than assumed away. Default true, which is the
+	// behaviour every published rung was measured with; false drops max_open_fds
+	// to 0 and leaves peak_open_fds, sampled once per window, intact.
+	fdSampling bool
+
 	// serverLog selects the logger handed to bolt/server Options.Logger. It
 	// exists so the cost of the server's own logging can be measured rather
 	// than assumed: the accept loop logs a WARN for every connection the
@@ -269,6 +282,7 @@ func defaultConfig() config {
 		connectTimeout: 5 * time.Second,
 		mutexFraction:  1,
 		blockRate:      1,
+		fdSampling:     true,
 		serverLog:      serverLogDefault,
 		ladderLevels:   defaultLadderLevels,
 		satOffer:       256,
@@ -383,6 +397,7 @@ func (c *config) asJSON() configJSON {
 		BlockRate:        c.blockRate,
 		ServerLog:        c.serverLogMode(),
 		ExpectRejections: c.expectRejections(),
+		FDSampling:       c.fdSampling,
 	}
 }
 
@@ -416,6 +431,8 @@ func bindFlags(fs *flag.FlagSet, cfg *config) *exprof.Config {
 		"runtime.SetMutexProfileFraction for the profiled window (0 disables)")
 	fs.IntVar(&cfg.blockRate, "block-rate", cfg.blockRate,
 		"runtime.SetBlockProfileRate in ns for the profiled window (0 disables)")
+	fs.BoolVar(&cfg.fdSampling, "fd-sampling", cfg.fdSampling,
+		"sample the open-descriptor count during a window (its own cost is linear in the connection count)")
 	fs.StringVar(&cfg.serverLog, "server-log", cfg.serverLog,
 		"logger handed to bolt/server Options.Logger: "+strings.Join(serverLogModes[:], " | "))
 	fs.StringVar(&cfg.artifactDir, "artifact-dir", cfg.artifactDir,
