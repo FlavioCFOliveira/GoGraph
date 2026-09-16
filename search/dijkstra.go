@@ -239,7 +239,7 @@ func DijkstraInto[W Weight](
 		metrics.IncCounter("search.DijkstraInto.errors", 1)
 		return err
 	}
-	h := acquireDijkHeap[W]()
+	h := acquireDijkHeap[W](maxID)
 	defer releaseDijkHeap(h)
 	err := dijkstraCore[W](ctx, c, src, dist[:maxID], parent[:maxID], found[:maxID], h)
 	if err != nil {
@@ -428,18 +428,44 @@ func dijkstraCoreWithWeights[W Weight](
 	return nil
 }
 
+// reachedSpan returns one past the highest index of found that is set,
+// or 0 when the traversal reached nothing. A single backwards scan over
+// a []bool costs one iteration in the common case where the highest
+// node id was reached, and at most len(found) byte comparisons when it
+// was not — orders of magnitude cheaper than the three maxID-sized
+// allocations it lets [newDistancesCopy] shrink.
+func reachedSpan(found []bool) uint64 {
+	for i := len(found) - 1; i >= 0; i-- {
+		if found[i] {
+			return uint64(i) + 1
+		}
+	}
+	return 0
+}
+
 // newDistancesCopy materialises a stable Distances value, copying the
 // pooled state so the caller is decoupled from the pool's lifecycle.
+//
+// Only the span the traversal actually reached is copied: the arrays are
+// sized to [reachedSpan] rather than to maxID, so a query that touches a
+// small component of a large graph pays for its own reach instead of for
+// the whole node space (rmp #2862). This is not observable through
+// [Distances]: every accessor already treats an id at or beyond
+// len(found) as unreached and returns the same (zero, false) / nil it
+// returned for a false found[id], and a parent chain walked by
+// [Distances.Path] only ever visits reached nodes, all of which lie
+// inside the span.
 func newDistancesCopy[W Weight](st *dijkstraState[W], src graph.NodeID, maxID uint64) *Distances[W] {
 	out := &Distances[W]{
 		src: src,
 	}
-	out.dist = make([]W, maxID)
-	copy(out.dist, st.dist[:maxID])
-	out.parent = make([]graph.NodeID, maxID)
-	copy(out.parent, st.parent[:maxID])
-	out.found = make([]bool, maxID)
-	copy(out.found, st.found[:maxID])
+	n := reachedSpan(st.found[:maxID])
+	out.dist = make([]W, n)
+	copy(out.dist, st.dist[:n])
+	out.parent = make([]graph.NodeID, n)
+	copy(out.parent, st.parent[:n])
+	out.found = make([]bool, n)
+	copy(out.found, st.found[:n])
 	return out
 }
 
@@ -468,7 +494,14 @@ func acquireDijkstra[W Weight](maxID uint64) *dijkstraState[W] {
 	// per-op bytes, without changing traversal semantics. Denser graphs
 	// whose live heap exceeds maxID grow once more via append (rare) and
 	// retain the larger backing thereafter — maxID is a hint, not a bound.
-	if cap(st.heap.items) == 0 {
+	//
+	// The test is on capacity rather than on emptiness (rmp #2862): a
+	// pooled state carrying a backing sized for an earlier, smaller graph
+	// is not empty, so the emptiness form left it to climb to maxID
+	// through the doubling chain it exists to avoid. Sizing from the
+	// pooled state covers both the GC-cleared and the too-small case, and
+	// never shrinks a backing that grew past maxID.
+	if uint64(cap(st.heap.items)) < maxID {
 		st.heap.items = make([]dijkItem[W], 0, maxID)
 	}
 	st.heap.items = st.heap.items[:0]
@@ -628,10 +661,24 @@ func dijkHeapPoolReflect[W Weight]() *sync.Pool {
 	return actual.(*sync.Pool) //nolint:forcetypeassert // LoadOrStore returns the value already in dijkHeapPools, which only ever stores *sync.Pool
 }
 
-func acquireDijkHeap[W Weight]() *dijkHeap[W] {
+// acquireDijkHeap returns a reset [dijkHeap] whose backing holds at
+// least sizeHint items. sizeHint is a hint, not a bound: a traversal
+// that pushes more than sizeHint items still grows by append and retains
+// the larger backing thereafter.
+//
+// The hint exists because the pool's own New returns a zero-capacity
+// heap, and sync.Pool drops its contents on GC — so under a high
+// allocation rate the *Into entrypoints were climbing from capacity 0 to
+// the node count through a doubling chain on most calls, and the chain
+// costs several times the right-sized allocation it replaces (rmp
+// #2862). Callers pass c.MaxNodeID().
+func acquireDijkHeap[W Weight](sizeHint uint64) *dijkHeap[W] {
 	h, _ := dijkHeapPool[W]().Get().(*dijkHeap[W])
 	if h == nil {
 		h = &dijkHeap[W]{}
+	}
+	if uint64(cap(h.items)) < sizeHint {
+		h.items = make([]dijkItem[W], 0, sizeHint)
 	}
 	h.items = h.items[:0]
 	return h

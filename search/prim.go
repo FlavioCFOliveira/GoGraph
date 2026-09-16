@@ -58,7 +58,7 @@ func PrimMSTCtx[W Weight](ctx context.Context, c *csr.CSR[W], src graph.NodeID) 
 	// minEdge[v] is the weight of the cheapest known edge connecting
 	// v to a tree node; meaningful only when found[v] is true.
 	minEdge := make([]W, maxID)
-	h := acquireDijkHeap[W]()
+	h := acquireDijkHeap[W](maxID)
 	defer releaseDijkHeap(h)
 	var zero W
 	parent[uint64(src)] = src
