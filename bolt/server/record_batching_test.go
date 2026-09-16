@@ -18,11 +18,20 @@ import (
 type countingConn struct {
 	net.Conn
 	writes atomic.Int64
+	reads  atomic.Int64
 }
 
 func (c *countingConn) Write(p []byte) (int, error) {
 	c.writes.Add(1)
 	return c.Conn.Write(p)
+}
+
+// Read counts the server's read(2) calls on this connection, the read-side
+// counterpart of the write counter above. It is what lets a test state the
+// server's syscall cost per query in both directions.
+func (c *countingConn) Read(p []byte) (int, error) {
+	c.reads.Add(1)
+	return c.Conn.Read(p)
 }
 
 // countingListener hands out countingConns and keeps the most recent one, so a
