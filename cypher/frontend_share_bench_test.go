@@ -202,7 +202,7 @@ var shareQueries = []shareQuery{
 // runShareQuery executes q end to end through [Engine.Run] and returns the row
 // count, so every timed iteration carries its own oracle: a query that silently
 // stopped matching cannot be reported as a latency.
-func runShareQuery(e *Engine, ctx context.Context, q shareQuery) (int, error) {
+func runShareQuery(ctx context.Context, e *Engine, q shareQuery) (int, error) {
 	res, err := e.Run(ctx, q.text, q.params)
 	if err != nil {
 		return 0, err
@@ -218,10 +218,7 @@ func runShareQuery(e *Engine, ctx context.Context, q shareQuery) (int, error) {
 }
 
 // Sinks, so the compiler cannot delete the front-end arm's work.
-var (
-	shareSinkParams map[string]expr.Value
-	shareSinkErr    error
-)
+var shareSinkParams map[string]expr.Value
 
 // BenchmarkFrontEndShare reports the front end and the whole query for every
 // share query under both cache states, plus the cache-clear control the miss
@@ -234,7 +231,7 @@ func BenchmarkFrontEndShare(b *testing.B) {
 				b.Run(cache, func(b *testing.B) {
 					b.Run("1parse", func(b *testing.B) {
 						eng := newShareRig(b)
-						if rows, err := runShareQuery(eng, ctx, q); err != nil || rows != q.wantRows {
+						if rows, err := runShareQuery(ctx, eng, q); err != nil || rows != q.wantRows {
 							b.Fatalf("warm %s: rows=%d err=%v", q.name, rows, err)
 						}
 						b.ReportAllocs()
@@ -256,7 +253,7 @@ func BenchmarkFrontEndShare(b *testing.B) {
 					})
 					b.Run("2full", func(b *testing.B) {
 						eng := newShareRig(b)
-						if rows, err := runShareQuery(eng, ctx, q); err != nil || rows != q.wantRows {
+						if rows, err := runShareQuery(ctx, eng, q); err != nil || rows != q.wantRows {
 							b.Fatalf("warm %s: rows=%d err=%v", q.name, rows, err)
 						}
 						b.ReportAllocs()
@@ -265,7 +262,7 @@ func BenchmarkFrontEndShare(b *testing.B) {
 							if cache == "miss" {
 								eng.cache.clear()
 							}
-							rows, err := runShareQuery(eng, ctx, q)
+							rows, err := runShareQuery(ctx, eng, q)
 							if err != nil {
 								b.Fatalf("%s: %v", q.name, err)
 							}
@@ -283,7 +280,7 @@ func BenchmarkFrontEndShare(b *testing.B) {
 	b.Run("control/cacheclear", func(b *testing.B) {
 		eng := newShareRig(b)
 		q := shareQueries[0]
-		if rows, err := runShareQuery(eng, ctx, q); err != nil || rows != q.wantRows {
+		if rows, err := runShareQuery(ctx, eng, q); err != nil || rows != q.wantRows {
 			b.Fatalf("warm: rows=%d err=%v", rows, err)
 		}
 		b.ReportAllocs()
