@@ -1,0 +1,60 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/parser
+cpu: Apple M4
+BenchmarkSpikeSLL-10         	     205	   1668418 ns/op	 1751369 B/op	   27257 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/parser
+cpu: Apple M4
+BenchmarkSpikeSLL-10         	     201	   1720792 ns/op	 1751475 B/op	   27257 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/parser
+cpu: Apple M4
+BenchmarkSpikeSLL-10         	     204	   1714130 ns/op	 1751399 B/op	   27257 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/parser
+cpu: Apple M4
+BenchmarkSpikeSLL-10         	     202	   1723665 ns/op	 1751462 B/op	   27257 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/parser
+cpu: Apple M4
+BenchmarkSpikeSLL-10         	     204	   1718238 ns/op	 1751420 B/op	   27257 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/parser
+cpu: Apple M4
+BenchmarkSpikeSLL-10         	     201	   1740416 ns/op	 1751475 B/op	   27257 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/parser
+cpu: Apple M4
+BenchmarkSpikeSLL-10         	     206	   1720677 ns/op	 1751444 B/op	   27257 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/parser
+cpu: Apple M4
+BenchmarkSpikeSLL-10         	     208	   1708418 ns/op	 1751536 B/op	   27257 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/parser
+cpu: Apple M4
+BenchmarkSpikeSLL-10         	     196	   1726344 ns/op	 1751410 B/op	   27257 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/parser
+cpu: Apple M4
+BenchmarkSpikeSLL-10         	     204	   1727582 ns/op	 1751463 B/op	   27257 allocs/op
+PASS

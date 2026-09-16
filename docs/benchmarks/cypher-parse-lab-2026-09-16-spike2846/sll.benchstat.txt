@@ -1,0 +1,17 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/parser
+cpu: Apple M4
+            │     LL      │              SLL              │              SLLBail               │               LLBail               │
+            │   sec/op    │   sec/op     vs base          │   sec/op     vs base               │   sec/op     vs base               │
+SpikeSLL-10   1.830m ± 1%   1.821m ± 2%  ~ (p=0.529 n=10)   1.721m ± 1%  -5.98% (p=0.000 n=10)   1.712m ± 2%  -6.46% (p=0.000 n=10)
+
+            │      LL      │              SLL               │               SLLBail               │               LLBail                │
+            │     B/op     │     B/op      vs base          │     B/op      vs base               │     B/op      vs base               │
+SpikeSLL-10   1.668Mi ± 0%   1.668Mi ± 0%  ~ (p=0.393 n=10)   1.670Mi ± 0%  +0.15% (p=0.000 n=10)   1.670Mi ± 0%  +0.15% (p=0.000 n=10)
+
+            │     LL      │               SLL               │              SLLBail               │               LLBail               │
+            │  allocs/op  │  allocs/op   vs base            │  allocs/op   vs base               │  allocs/op   vs base               │
+SpikeSLL-10   27.09k ± 0%   27.09k ± 0%  ~ (p=1.000 n=10) ¹   27.26k ± 0%  +0.61% (p=0.000 n=10)   27.26k ± 0%  +0.61% (p=0.000 n=10)
+¹ all samples are equal
+benchstat_exit=0

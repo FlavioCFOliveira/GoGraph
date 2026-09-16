@@ -1,0 +1,583 @@
+package parser
+
+// zz_spike2846_test.go — THROWAWAY measurement harness for rmp #2846 (sprint 362).
+//
+// This file exists to put a NUMBER on two candidate ceilings that the round-1
+// profile (rmp #2844) could not give, because a profile cannot attribute a
+// delta. It lands nothing: the candidates here are measurement instruments, not
+// proposed code. The file is deleted once the numbers are recorded.
+//
+//	Spike A (candidate C1) — ANTLR prediction mode.
+//	  cypher/parser/parse.go never touches the prediction mode, so the parser
+//	  runs antlr4-go v4.13.1's default, PredictionModeLL. Three arms of the WHOLE
+//	  front end, identical in every other respect:
+//	    LL      — exactly what ParseStatement does today (the control)
+//	    SLL     — + Interpreter.SetPredictionMode(PredictionModeSLL)
+//	    SLLBail — + SetErrorHandler(NewBailErrorStrategy())
+//	  The generated parser's decisionToDFA is process-wide, so the arms MUST be
+//	  run in separate processes or one arm warms the other's cache. The driver
+//	  script does that; this file only provides the arms.
+//
+//	Spike B (candidate C2) — the keyword test at strip.go:155.
+//	  StripLiterals calls strings.ToUpper on every identifier token. Two arms:
+//	    ToUpper — StripLiterals as it stands (the control)
+//	    ASCII   — a byte-identical copy whose only difference is an
+//	              allocation-free ASCII fold in place of strings.ToUpper.
+//	  Equivalence is asserted, not assumed: TestSpikeStripEquivalence.
+
+import (
+	"reflect"
+	"strconv"
+	"strings"
+	"testing"
+
+	"github.com/antlr4-go/antlr/v4"
+
+	"github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen"
+)
+
+// ---------------------------------------------------------------------------
+// Spike A — prediction mode
+// ---------------------------------------------------------------------------
+
+const (
+	armLL = iota
+	armSLL
+	armSLLBail
+	armLLBail
+)
+
+// spikeFull reproduces ParseStatement verbatim, with one knob: the arm.
+func spikeFull(query string, arm int) (any, error) {
+	if err := guardInput(query); err != nil {
+		return nil, err
+	}
+	if err := validateUnicodeEscapes(query); err != nil {
+		return nil, err
+	}
+	query, spMarkers := rewriteShortestPath(query)
+	query = applyNormalizers(query)
+
+	lexErrListener := &errorListener{}
+	input := antlr.NewInputStream(query)
+	lexer := gen.NewCypherLexer(input)
+	lexer.RemoveErrorListeners()
+	lexer.AddErrorListener(lexErrListener)
+
+	parseErrListener := &errorListener{}
+	stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+	stream.Fill()
+	collectErrCharErrors(lexErrListener, stream)
+	if len(lexErrListener.errs) > 0 {
+		return nil, lexErrListener.errs[0]
+	}
+
+	p := gen.NewCypherParser(stream)
+	p.RemoveErrorListeners()
+	p.AddErrorListener(parseErrListener)
+	p.BuildParseTrees = true
+	switch arm {
+	case armSLL:
+		p.Interpreter.SetPredictionMode(antlr.PredictionModeSLL)
+	case armSLLBail:
+		p.Interpreter.SetPredictionMode(antlr.PredictionModeSLL)
+		p.SetErrorHandler(antlr.NewBailErrorStrategy())
+	case armLLBail:
+		p.SetErrorHandler(antlr.NewBailErrorStrategy())
+	}
+
+	tree, panicErr := recoverParseScript(p)
+	if panicErr != nil {
+		return nil, panicErr
+	}
+	if len(lexErrListener.errs) > 0 {
+		return nil, lexErrListener.errs[0]
+	}
+	if len(parseErrListener.errs) > 0 {
+		return nil, parseErrListener.errs[0]
+	}
+
+	v := newVisitor()
+	result := v.visit(tree)
+	if se, ok := result.(*SemaError); ok {
+		return nil, se
+	}
+	_ = spMarkers
+	return result, nil
+}
+
+// spikeTree returns the CST's string form under an arm. Prediction mode changes
+// which alternative the parser picks, so the CST is the direct object of the
+// equivalence question — a stronger check than comparing the built AST.
+func spikeTree(t *testing.T, query string, arm int) string {
+	t.Helper()
+	if err := guardInput(query); err != nil {
+		t.Fatalf("guard: %v", err)
+	}
+	if err := validateUnicodeEscapes(query); err != nil {
+		t.Fatalf("escapes: %v", err)
+	}
+	query, _ = rewriteShortestPath(query)
+	query = applyNormalizers(query)
+
+	lexErrListener := &errorListener{}
+	input := antlr.NewInputStream(query)
+	lexer := gen.NewCypherLexer(input)
+	lexer.RemoveErrorListeners()
+	lexer.AddErrorListener(lexErrListener)
+
+	parseErrListener := &errorListener{}
+	stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+	stream.Fill()
+	collectErrCharErrors(lexErrListener, stream)
+
+	p := gen.NewCypherParser(stream)
+	p.RemoveErrorListeners()
+	p.AddErrorListener(parseErrListener)
+	p.BuildParseTrees = true
+	switch arm {
+	case armSLL:
+		p.Interpreter.SetPredictionMode(antlr.PredictionModeSLL)
+	case armSLLBail:
+		p.Interpreter.SetPredictionMode(antlr.PredictionModeSLL)
+		p.SetErrorHandler(antlr.NewBailErrorStrategy())
+	case armLLBail:
+		p.SetErrorHandler(antlr.NewBailErrorStrategy())
+	}
+	tree, panicErr := recoverParseScript(p)
+	if panicErr != nil {
+		t.Fatalf("arm %d panicked: %v", arm, panicErr)
+	}
+	if n := len(lexErrListener.errs) + len(parseErrListener.errs); n > 0 {
+		t.Fatalf("arm %d reported %d error(s), first=%v", arm, n, append(lexErrListener.errs, parseErrListener.errs...)[0])
+	}
+	return antlr.TreesStringTree(tree, p.RuleNames, p)
+}
+
+// TestSpikeSLLEquivalence asserts that every corpus statement produces a
+// BYTE-IDENTICAL concrete syntax tree under all three arms. Each arm runs in the
+// same process here, which is acceptable for an equivalence check (the DFA is a
+// cache, not a decision) and not acceptable for the benchmark.
+func TestSpikeSLLEquivalence(t *testing.T) {
+	for _, s := range loadCorpus(t) {
+		t.Run(benchName(s.ID), func(t *testing.T) {
+			ll := spikeTree(t, s.Text, armLL)
+			for _, arm := range []int{armSLL, armSLLBail, armLLBail} {
+				if got := spikeTree(t, s.Text, arm); got != ll {
+					t.Fatalf("arm %d CST differs from LL\nLL : %s\ngot: %s", arm, ll, got)
+				}
+			}
+			// The whole front end must also agree, AST included.
+			a, err := spikeFull(s.Text, armLL)
+			if err != nil {
+				t.Fatalf("LL: %v", err)
+			}
+			for _, arm := range []int{armSLL, armSLLBail, armLLBail} {
+				b, err := spikeFull(s.Text, arm)
+				if err != nil {
+					t.Fatalf("arm %d: %v", arm, err)
+				}
+				if !reflect.DeepEqual(a, b) {
+					t.Fatalf("arm %d AST differs from LL", arm)
+				}
+			}
+		})
+	}
+}
+
+// BenchmarkSpikeSLL measures the WHOLE front end over the whole corpus, one arm
+// per sub-benchmark. One op = all 83 statements, so the reported number is the
+// corpus, not a statement: a per-statement split would multiply the process
+// count by 83 for no gain in what the ceiling question asks.
+func BenchmarkSpikeSLL(b *testing.B) {
+	corpus := loadCorpus(b)
+	arms := []struct {
+		name string
+		arm  int
+	}{
+		{"LL", armLL},
+		{"SLL", armSLL},
+		{"SLLBail", armSLLBail},
+		{"LLBail", armLLBail},
+	}
+	for _, a := range arms {
+		b.Run(a.name, func(b *testing.B) {
+			// Warm the shared ATN/DFA for every statement before timing.
+			for i := 0; i < 3; i++ {
+				for _, s := range corpus {
+					if _, err := spikeFull(s.Text, a.arm); err != nil {
+						b.Fatalf("%s: %v", s.ID, err)
+					}
+				}
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				for _, s := range corpus {
+					sinkAny, sinkErr = spikeFull(s.Text, a.arm)
+				}
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Spike B — the keyword test at strip.go:155
+// ---------------------------------------------------------------------------
+
+const (
+	kwNone = iota
+	kwHoistOn
+	kwHoistOff
+)
+
+// eqFoldASCII reports whether s equals the all-uppercase ASCII literal kw,
+// folding s's bytes with |0x20 -> &^0x20. It allocates nothing.
+func eqFoldASCII(s, kw string) bool {
+	if len(s) != len(kw) {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i]&^0x20 != kw[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// stripKeywordASCII is the allocation-free equivalent of
+//
+//	switch strings.ToUpper(tok) { case "MATCH", "WHERE": ...; case ...: ... }
+//
+// at strip.go:155. Correct only because isIdentStart/isIdentChar accept ASCII
+// bytes exclusively, so the token can never carry a rune whose Unicode
+// uppercase differs from its ASCII one.
+//
+// NOTE the &^0x20 fold maps '_' (0x5F) to 0x5F and digits 0x30-0x39 to
+// 0x10-0x19, neither of which collides with 'A'-'Z', so a token containing them
+// cannot be mistaken for a keyword. Length is checked first, then every byte.
+func stripKeywordASCII(s string) int {
+	if len(s) < 2 || len(s) > 8 {
+		return kwNone
+	}
+	switch s[0] &^ 0x20 {
+	case 'M':
+		if eqFoldASCII(s, "MATCH") {
+			return kwHoistOn
+		}
+		if eqFoldASCII(s, "MERGE") {
+			return kwHoistOff
+		}
+	case 'W':
+		if eqFoldASCII(s, "WHERE") {
+			return kwHoistOn
+		}
+		if eqFoldASCII(s, "WITH") {
+			return kwHoistOff
+		}
+	case 'R':
+		if eqFoldASCII(s, "RETURN") || eqFoldASCII(s, "REMOVE") {
+			return kwHoistOff
+		}
+	case 'C':
+		if eqFoldASCII(s, "CREATE") || eqFoldASCII(s, "CALL") {
+			return kwHoistOff
+		}
+	case 'D':
+		if eqFoldASCII(s, "DELETE") || eqFoldASCII(s, "DETACH") || eqFoldASCII(s, "DROP") {
+			return kwHoistOff
+		}
+	case 'S':
+		if eqFoldASCII(s, "SET") || eqFoldASCII(s, "SKIP") {
+			return kwHoistOff
+		}
+	case 'U':
+		if eqFoldASCII(s, "UNWIND") || eqFoldASCII(s, "UNION") {
+			return kwHoistOff
+		}
+	case 'Y':
+		if eqFoldASCII(s, "YIELD") {
+			return kwHoistOff
+		}
+	case 'F':
+		if eqFoldASCII(s, "FOREACH") || eqFoldASCII(s, "FOR") {
+			return kwHoistOff
+		}
+	case 'O':
+		if eqFoldASCII(s, "OPTIONAL") || eqFoldASCII(s, "ON") || eqFoldASCII(s, "ORDER") {
+			return kwHoistOff
+		}
+	case 'L':
+		if eqFoldASCII(s, "LIMIT") {
+			return kwHoistOff
+		}
+	case 'A':
+		if eqFoldASCII(s, "ADD") {
+			return kwHoistOff
+		}
+	}
+	return kwNone
+}
+
+// stripLiteralsASCII is a byte-for-byte copy of StripLiterals whose ONLY
+// difference is the keyword test. Everything else — the fast reject, the clause
+// state machine, the comment and backtick handling, the replacement builder —
+// is identical, so a measured delta between the two is the keyword test and
+// nothing else.
+func stripLiteralsASCII(query string) (stripped string, params map[string]string, ok bool) {
+	type repl struct {
+		start, end int
+		name       string
+	}
+	if strings.IndexByte(query, '\'') < 0 && strings.IndexByte(query, '"') < 0 {
+		return query, nil, false
+	}
+
+	var repls []repl
+	hoistable := false
+
+	i, n := 0, len(query)
+	for i < n {
+		c := query[i]
+		switch {
+		case c == '/' && i+1 < n && query[i+1] == '/':
+			for i < n && query[i] != '\n' {
+				i++
+			}
+		case c == '/' && i+1 < n && query[i+1] == '*':
+			i += 2
+			for i+1 < n && (query[i] != '*' || query[i+1] != '/') {
+				i++
+			}
+			i = min(i+2, n)
+		case c == '`':
+			i++
+			for i < n {
+				if query[i] == '`' {
+					if i+1 < n && query[i+1] == '`' {
+						i += 2
+						continue
+					}
+					i++
+					break
+				}
+				i++
+			}
+		case c == '\'' || c == '"':
+			start := i
+			quote := c
+			i++
+			closed := false
+			for i < n {
+				if query[i] == '\\' {
+					i += 2
+					continue
+				}
+				if query[i] == quote {
+					i++
+					closed = true
+					break
+				}
+				i++
+			}
+			if !closed {
+				return query, nil, false
+			}
+			if !hoistable {
+				continue
+			}
+			repls = append(repls, repl{start: start, end: i, name: AutoParamPrefix + strconv.Itoa(len(repls))})
+		case isIdentStart(c):
+			start := i
+			for i < n && isIdentChar(query[i]) {
+				i++
+			}
+			switch stripKeywordASCII(query[start:i]) {
+			case kwHoistOn:
+				hoistable = true
+			case kwHoistOff:
+				hoistable = false
+			}
+		default:
+			i++
+		}
+	}
+
+	if len(repls) == 0 {
+		return query, nil, false
+	}
+
+	params = make(map[string]string, len(repls))
+	var b strings.Builder
+	b.Grow(len(query) + len(repls)*(len(AutoParamPrefix)+6))
+	prev := 0
+	for _, r := range repls {
+		params[r.name] = unquoteString(query[r.start:r.end])
+		b.WriteString(query[prev:r.start])
+		b.WriteString("$`")
+		b.WriteString(r.name)
+		b.WriteString("`")
+		prev = r.end
+	}
+	b.WriteString(query[prev:])
+	return b.String(), params, true
+}
+
+// stripKeywordControl is the CURRENT test, expressed as the same classifier, so
+// the two can be compared exhaustively rather than only over the corpus.
+func stripKeywordControl(s string) int {
+	switch strings.ToUpper(s) {
+	case "MATCH", "WHERE":
+		return kwHoistOn
+	case "RETURN", "WITH", "CREATE", "MERGE", "DELETE", "DETACH", "SET",
+		"REMOVE", "UNWIND", "CALL", "YIELD", "FOREACH", "OPTIONAL",
+		"UNION", "ON", "ORDER", "SKIP", "LIMIT", "FOR", "ADD", "DROP":
+		return kwHoistOff
+	}
+	return kwNone
+}
+
+// TestSpikeStripEquivalence proves the candidate is equivalent, on three
+// independent routes: the corpus, an exhaustive sweep of every ASCII identifier
+// up to length 3 (the whole alphabet the scanner can produce, at the lengths an
+// exhaustive sweep can reach), and every case permutation of every keyword.
+func TestSpikeStripEquivalence(t *testing.T) {
+	// Route 1 — the corpus.
+	for _, s := range loadCorpus(t) {
+		wantS, wantP, wantOK := StripLiterals(s.Text)
+		gotS, gotP, gotOK := stripLiteralsASCII(s.Text)
+		if wantS != gotS || wantOK != gotOK || !reflect.DeepEqual(wantP, gotP) {
+			t.Fatalf("%s: strip differs\nwant %q %v %v\ngot  %q %v %v",
+				s.ID, wantS, wantP, wantOK, gotS, gotP, gotOK)
+		}
+	}
+
+	// Route 2 — every identifier the scanner can build, lengths 1..3, over the
+	// exact byte alphabet isIdentStart/isIdentChar accept.
+	const startBytes = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_"
+	const contBytes = startBytes + "0123456789"
+	checked := 0
+	var buf []byte
+	for _, a := range []byte(startBytes) {
+		buf = append(buf[:0], a)
+		if stripKeywordASCII(string(buf)) != stripKeywordControl(string(buf)) {
+			t.Fatalf("mismatch on %q", buf)
+		}
+		checked++
+		for _, b2 := range []byte(contBytes) {
+			buf = append(buf[:1], b2)
+			if stripKeywordASCII(string(buf)) != stripKeywordControl(string(buf)) {
+				t.Fatalf("mismatch on %q", buf)
+			}
+			checked++
+			for _, c := range []byte(contBytes) {
+				buf = append(buf[:2], c)
+				if stripKeywordASCII(string(buf)) != stripKeywordControl(string(buf)) {
+					t.Fatalf("mismatch on %q", buf)
+				}
+				checked++
+			}
+		}
+	}
+
+	// Route 3 — every case permutation of every keyword, plus each keyword with
+	// one byte appended and one byte removed (the boundary the length check and
+	// the whole-token comparison must not blur).
+	kws := []string{"MATCH", "WHERE", "RETURN", "WITH", "CREATE", "MERGE",
+		"DELETE", "DETACH", "SET", "REMOVE", "UNWIND", "CALL", "YIELD",
+		"FOREACH", "OPTIONAL", "UNION", "ON", "ORDER", "SKIP", "LIMIT",
+		"FOR", "ADD", "DROP"}
+	for _, kw := range kws {
+		for mask := 0; mask < 1<<len(kw); mask++ {
+			p := []byte(kw)
+			for i := range p {
+				if mask&(1<<i) != 0 {
+					p[i] |= 0x20
+				}
+			}
+			s := string(p)
+			if stripKeywordASCII(s) != stripKeywordControl(s) {
+				t.Fatalf("case permutation mismatch on %q", s)
+			}
+			checked++
+		}
+		for _, suf := range []string{"S", "s", "_", "0", "es", "ing"} {
+			s := kw + suf
+			if stripKeywordASCII(s) != stripKeywordControl(s) {
+				t.Fatalf("suffixed mismatch on %q", s)
+			}
+			checked++
+		}
+		s := kw[:len(kw)-1]
+		if stripKeywordASCII(s) != stripKeywordControl(s) {
+			t.Fatalf("truncated mismatch on %q", s)
+		}
+		checked++
+	}
+	t.Logf("equivalence checked on %d distinct identifiers plus the %d-statement corpus", checked, len(loadCorpus(t)))
+}
+
+// BenchmarkSpikeStrip measures StripLiterals over the whole corpus, one arm per
+// sub-benchmark. One op = all 83 statements.
+func BenchmarkSpikeStrip(b *testing.B) {
+	corpus := loadCorpus(b)
+	arms := []struct {
+		name string
+		run  func(string) (string, map[string]string, bool)
+	}{
+		{"ToUpper", StripLiterals},
+		{"ASCII", stripLiteralsASCII},
+	}
+	for _, a := range arms {
+		b.Run(a.name, func(b *testing.B) {
+			for _, s := range corpus {
+				sinkString, sinkMap, sinkBool = a.run(s.Text)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				for _, s := range corpus {
+					sinkString, sinkMap, sinkBool = a.run(s.Text)
+				}
+			}
+		})
+	}
+}
+
+// BenchmarkSpikeStripHoisters measures only the 12 corpus statements that carry
+// a quote, i.e. the ones the fast reject does not answer. This is the workload
+// the candidate actually applies to; the corpus-wide number above dilutes it
+// with 71 statements that never reach the keyword test.
+func BenchmarkSpikeStripHoisters(b *testing.B) {
+	var quoted []corpusStatement
+	for _, s := range loadCorpus(b) {
+		if strings.IndexByte(s.Text, '\'') >= 0 || strings.IndexByte(s.Text, '"') >= 0 {
+			quoted = append(quoted, s)
+		}
+	}
+	if len(quoted) == 0 {
+		b.Fatal("no quoted statement in the corpus")
+	}
+	b.Logf("quoted statements: %d of the corpus", len(quoted))
+	arms := []struct {
+		name string
+		run  func(string) (string, map[string]string, bool)
+	}{
+		{"ToUpper", StripLiterals},
+		{"ASCII", stripLiteralsASCII},
+	}
+	for _, a := range arms {
+		b.Run(a.name, func(b *testing.B) {
+			for _, s := range quoted {
+				sinkString, sinkMap, sinkBool = a.run(s.Text)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				for _, s := range quoted {
+					sinkString, sinkMap, sinkBool = a.run(s.Text)
+				}
+			}
+		})
+	}
+}

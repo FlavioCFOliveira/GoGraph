@@ -1,0 +1,38 @@
+rmp #2846, sprint 362 — bounded spikes run to put a NUMBER on two candidate
+ceilings the round-1 profile could not give, plus the warm-path scaling question
+the laboratory had not asked.
+
+HARNESSES ARE THROWAWAY. They were deleted from the working tree after the run;
+their source is archived here so every number can be regenerated:
+  harness-parser.go.txt       -> cypher/parser/zz_spike2846_test.go
+  harness-cypher-warm.go.txt  -> cypher/zz_spike2846_warm_test.go
+  driver.sh.txt               -> the driver (REPS=10)
+
+Spike A — ANTLR prediction mode and error strategy (candidate C1).
+  Arms LL (control) / SLL / SLLBail / LLBail over the WHOLE front end, 83
+  statements per op. ONE PROCESS PER ARM, interleaved arm-by-arm over 10 reps,
+  because the generated parser's decisionToDFA is process-wide.
+  Equivalence gate: TestSpikeSLLEquivalence — byte-identical CST and
+  reflect.DeepEqual AST across all four arms for all 83 statements. PASS.
+  Result: sll.benchstat.txt
+
+Spike B — the keyword test at strip.go:155 (candidate C2).
+  Arms ToUpper (control, StripLiterals as it stands) / ASCII (identical copy,
+  allocation-free ASCII fold in place of strings.ToUpper). Same interleaving.
+  Equivalence gate: TestSpikeStripEquivalence — 214,994 distinct identifiers
+  (exhaustive to length 3 over the scanner's byte alphabet, every case
+  permutation of all 23 keywords, suffixed and truncated boundaries) plus the
+  83-statement corpus. PASS.
+  Results: strip.benchstat.txt (all 83), striphoist.benchstat.txt (the 12
+  statements that carry a quote — the workload the candidate applies to).
+
+Spike C — warm statement preparation under concurrency.
+  Engine.parseAndAnalyse on a warm plan cache under b.RunParallel,
+  -cpu=1,2,4,8,10.
+  warm.benchstat.txt          one key, two shapes (quote-free, literal)
+  warm.multikey.benchstat.txt 32 distinct warm keys, no shared LRU node
+  warm.mutex.top.txt          mutex profile, -cpu=10, benchtime=3s
+  warm.block.top.txt          block profile, same run
+
+Host: loadavg recorded before and after every phase (loadavg-*.txt,
+warm.*loadavg-*.txt). Build: no -race, no tags. See env.txt.
