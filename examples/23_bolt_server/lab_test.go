@@ -273,6 +273,12 @@ func TestChildArgsRoundTrip(t *testing.T) {
 	parent.repetitions = 7
 	parent.connectTimeout = 3 * time.Second
 	parent.artifactDir = "/tmp/parent"
+	// The workload dimension must survive the fork too: a child that inherited
+	// the DEFAULT shape would run a whole ladder against the wrong workload and
+	// say nothing about it.
+	parent.workload = workloadRecords
+	parent.rows = 37
+	parent.writeSlots = 2048
 
 	spec := rungSpec{name: "conn=64", connections: 64, maxConnections: 68}
 	args := childArgs(&parent, spec, "/tmp/parent/conn=64")
@@ -303,6 +309,9 @@ func TestChildArgsRoundTrip(t *testing.T) {
 		{"mutex-fraction", child.mutexFraction, parent.mutexFraction},
 		{"block-rate", child.blockRate, parent.blockRate},
 		{"server-log", child.serverLog, parent.serverLogMode()},
+		{"workload", child.workload, parent.workloadKind()},
+		{"rows", child.rows, parent.rowsPerQuery()},
+		{"write-slots", child.writeSlots, parent.writeSlots},
 		{"label", child.label, spec.name},
 		{"artifact-dir", child.artifactDir, "/tmp/parent/conn=64"},
 	}
@@ -676,5 +685,296 @@ func assertBenchmarkLine(t *testing.T, line string) {
 	}
 	if len(fields)%2 != 0 {
 		t.Errorf("benchmark record %q has a dangling field: values and units must pair up", line)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Workload shapes
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestRunWorkloadShapes drives every shape end to end over real sockets and
+// asserts what each one claims about the server, not merely that it completed.
+//
+// The three claims are the ones the round-3 campaign rests on, so a regression
+// in any of them would silently invalidate a whole sweep rather than fail it:
+// the RECORD-heavy shape must return EXACTLY the rows it asked for, the two
+// explicit shapes must make bolt.server.tx.opened non-zero and balanced against
+// tx.closed, and the write shape's committed effect must be readable back.
+func TestRunWorkloadShapes(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		workload     string
+		rows         int
+		wantRecords  int   // total RECORDs the run must report, 0 = queries
+		wantTxOpened bool  // bolt.server.tx.opened must be > 0
+		wantCount    int64 // q.count_person, 0 = not reported
+	}{
+		{name: "count", workload: workloadCount, wantTxOpened: false, wantCount: 300},
+		{name: "records", workload: workloadRecords, rows: 25, wantRecords: 240 * 25},
+		{name: "txread", workload: workloadTxRead, wantTxOpened: true, wantCount: 300},
+		{name: "txwrite", workload: workloadTxWrite, wantTxOpened: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := labConfig()
+			cfg.workload = tc.workload
+			cfg.rows = tc.rows
+			var out bytes.Buffer
+			if err := run(context.Background(), &out, cfg); err != nil {
+				t.Fatalf("run %s: %v\n%s", tc.workload, err, out.String())
+			}
+			got := out.String()
+
+			mustLine(t, got, "config.workload="+tc.workload)
+			mustLine(t, got, "queries.ok="+strconv.Itoa(cfg.queries))
+
+			if tc.wantCount > 0 {
+				mustLine(t, got, "q.count_person="+strconv.FormatInt(tc.wantCount, 10))
+			}
+			if tc.wantRecords > 0 {
+				mustLine(t, got, "records.ok="+strconv.Itoa(tc.wantRecords))
+			}
+			if tc.workload == workloadTxWrite {
+				// The committed effect: one increment per successful unit,
+				// read back through the engine and not over the wire.
+				mustLine(t, got, "write.committed_delta="+strconv.Itoa(cfg.queries))
+				mustLine(t, got, "nodes.counter="+strconv.Itoa(writeSlots))
+			}
+
+			// bolt.server.tx.opened is the evidence the transaction path ran.
+			// A zero here on an explicit shape would make every claim about the
+			// registry a non-observation dressed up as an exoneration.
+			openedLine := "# counters.bolt.server.tx.opened=" + strconv.Itoa(cfg.queries)
+			if tc.wantTxOpened {
+				mustLine(t, got, openedLine)
+				mustLine(t, got, "# counters.bolt.server.tx.closed="+strconv.Itoa(cfg.queries))
+			} else if strings.Contains(got, "# counters.bolt.server.tx.opened=") {
+				t.Errorf("auto-commit shape %s opened an explicit transaction:\n%s", tc.workload, got)
+			}
+
+			// Every shape must still leave the connection accounting balanced.
+			mustLine(t, got, "# counters.bolt.server.conn.accepted="+strconv.Itoa(cfg.connections))
+			mustLine(t, got, "# counters.bolt.server.conn.closed="+strconv.Itoa(cfg.connections))
+			mustLine(t, got, "# counters.bolt.server.conn.panics=0")
+			mustLine(t, got, "# server shut down cleanly")
+		})
+	}
+}
+
+// mustLine fails the test unless got contains want as a whole line.
+func mustLine(t *testing.T, got, want string) {
+	t.Helper()
+	for _, line := range strings.Split(got, "\n") {
+		if line == want {
+			return
+		}
+	}
+	t.Errorf("missing line %q in:\n%s", want, got)
+}
+
+// TestCheckWindowRejectsAWindowThatDidNotRun pins the per-shape correctness
+// gate itself. It is the check that turns "the transaction path was never
+// exercised" from a silent non-observation into a failed run, so a regression
+// in it would not fail anything else.
+func TestCheckWindowRejectsAWindowThatDidNotRun(t *testing.T) {
+	opened := func(n uint64) map[string]uint64 {
+		return map[string]uint64{metricNameTxOpened: n, metricNameTxClosed: n}
+	}
+	for _, tc := range []struct {
+		name    string
+		cfg     config
+		st      repStats
+		wantErr string
+	}{
+		{
+			name:    "no query completed",
+			cfg:     config{workload: workloadCount},
+			st:      repStats{QueriesOK: 0},
+			wantErr: "no query",
+		},
+		{
+			name:    "record shortfall",
+			cfg:     config{workload: workloadRecords, nodes: 100, rows: 10},
+			st:      repStats{QueriesOK: 5, RecordsOK: 49},
+			wantErr: "records: consumed 49, want 50",
+		},
+		{
+			name:    "write reported success but committed nothing",
+			cfg:     config{workload: workloadTxWrite},
+			st:      repStats{QueriesOK: 7, WriteDelta: 0, WriteExpected: 7, Counters: opened(7)},
+			wantErr: "committed effect",
+		},
+		{
+			name:    "explicit shape opened no transaction",
+			cfg:     config{workload: workloadTxRead},
+			st:      repStats{QueriesOK: 7, Counters: map[string]uint64{}},
+			wantErr: "opened no explicit transaction",
+		},
+		{
+			name:    "one BEGIN per unit was expected",
+			cfg:     config{workload: workloadTxRead},
+			st:      repStats{QueriesOK: 7, Counters: opened(6)},
+			wantErr: "for 7 successful units",
+		},
+		{
+			name: "a transaction was left open",
+			cfg:  config{workload: workloadTxRead},
+			st: repStats{QueriesOK: 7, Counters: map[string]uint64{
+				metricNameTxOpened: 7, metricNameTxClosed: 6}},
+			wantErr: "left open",
+		},
+		{
+			name: "a transaction was abandoned",
+			cfg:  config{workload: workloadTxRead},
+			st: repStats{QueriesOK: 7, Counters: map[string]uint64{
+				metricNameTxOpened: 7, metricNameTxClosed: 7, metricNameTxAbandoned: 1}},
+			wantErr: "still open when its connection tore down",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkWindow(&tc.cfg, &tc.st)
+			if err == nil {
+				t.Fatalf("checkWindow accepted a window it should reject")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("checkWindow error = %q, want it to mention %q", err, tc.wantErr)
+			}
+		})
+	}
+
+	// And the happy paths must pass, or the gate would reject every run.
+	for _, ok := range []struct {
+		name string
+		cfg  config
+		st   repStats
+	}{
+		{"auto-commit read", config{workload: workloadCount}, repStats{QueriesOK: 7}},
+		{"records exact", config{workload: workloadRecords, nodes: 100, rows: 10},
+			repStats{QueriesOK: 5, RecordsOK: 50}},
+		{"explicit read", config{workload: workloadTxRead}, repStats{QueriesOK: 7, Counters: opened(7)}},
+		{"explicit write", config{workload: workloadTxWrite},
+			repStats{QueriesOK: 7, WriteDelta: 7, WriteExpected: 7, Counters: opened(7)}},
+	} {
+		if err := checkWindow(&ok.cfg, &ok.st); err != nil {
+			t.Errorf("checkWindow(%s) = %v, want nil", ok.name, err)
+		}
+	}
+}
+
+// TestWorkloadSpecDerivations pins the shape resolution: which statement each
+// shape runs, which access mode it opens its session with, and whether it is
+// explicit. The access mode is load-bearing rather than cosmetic — the server
+// treats BEGIN's mode field as a capability restriction and refuses a write
+// inside a read-only transaction.
+func TestWorkloadSpecDerivations(t *testing.T) {
+	base := func(kind string) config {
+		c := defaultConfig()
+		c.workload = kind
+		return c
+	}
+	for _, tc := range []struct {
+		kind         string
+		wantExplicit bool
+		wantWrites   bool
+		wantRows     int
+		wantQuery    string
+	}{
+		{workloadCount, false, false, 1, countPersonQuery},
+		{workloadRecords, false, false, defaultRows, ""},
+		{workloadTxRead, true, false, 1, countPersonQuery},
+		{workloadTxWrite, true, true, 1, incCounterQuery},
+	} {
+		t.Run(tc.kind, func(t *testing.T) {
+			c := base(tc.kind)
+			w := c.workloadSpec()
+			if w.kind != tc.kind {
+				t.Errorf("kind = %q, want %q", w.kind, tc.kind)
+			}
+			if w.explicit != tc.wantExplicit {
+				t.Errorf("explicit = %v, want %v", w.explicit, tc.wantExplicit)
+			}
+			if c.explicitTx() != tc.wantExplicit {
+				t.Errorf("config.explicitTx() = %v, want %v", c.explicitTx(), tc.wantExplicit)
+			}
+			if c.writesGraph() != tc.wantWrites {
+				t.Errorf("config.writesGraph() = %v, want %v", c.writesGraph(), tc.wantWrites)
+			}
+			if w.rows != tc.wantRows {
+				t.Errorf("rows = %d, want %d", w.rows, tc.wantRows)
+			}
+			if tc.wantQuery != "" && w.query != tc.wantQuery {
+				t.Errorf("query = %q, want %q", w.query, tc.wantQuery)
+			}
+			// Only the write shape seeds counters, so every read shape's graph
+			// stays byte-identical to the one earlier rungs measured.
+			if got, want := c.writeSlotCount(), 0; !tc.wantWrites && got != want {
+				t.Errorf("writeSlotCount() = %d, want %d for a read shape", got, want)
+			}
+			if tc.wantWrites {
+				if got := c.writeSlotCount(); got != writeSlots {
+					t.Errorf("writeSlotCount() = %d, want %d", got, writeSlots)
+				}
+				// Distinct slots must map to distinct counters, or two
+				// connections would collide on one node and the shape would
+				// measure conflict resolution instead of the transaction path.
+				a := w.params(0)[paramSlot]
+				b := w.params(1)[paramSlot]
+				if a == b {
+					t.Errorf("slots 0 and 1 both map to counter %v", a)
+				}
+				if got := w.params(writeSlots)[paramSlot]; got != a {
+					t.Errorf("slot %d maps to %v, want it to wrap to %v", writeSlots, got, a)
+				}
+			} else if w.params(3) != nil {
+				t.Errorf("read shape bound parameters: %v", w.params(3))
+			}
+		})
+	}
+
+	// The RECORD-heavy shape's row count reaches the statement, and a zero
+	// resolves to the documented default rather than to a failure.
+	c := base(workloadRecords)
+	c.rows = 7
+	if got := c.workloadSpec().query; !strings.HasSuffix(got, "LIMIT 7") {
+		t.Errorf("records query = %q, want it to end in LIMIT 7", got)
+	}
+	c.rows = 0
+	if got := c.rowsPerQuery(); got != defaultRows {
+		t.Errorf("rowsPerQuery() with rows unset = %d, want %d", got, defaultRows)
+	}
+}
+
+// TestValidateRejectsWorkloadConfigs pins the configurations that would produce
+// a whole wasted sweep rather than an error.
+func TestValidateRejectsWorkloadConfigs(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mut  func(*config)
+		want string
+	}{
+		{"unknown shape", func(c *config) { c.workload = "nosuch" }, "workload"},
+		{"negative rows", func(c *config) { c.rows = -1 }, "rows"},
+		{"more rows than nodes", func(c *config) {
+			c.workload = workloadRecords
+			c.nodes = 50
+			c.rows = 51
+		}, "exceeds nodes"},
+		{"negative write slots", func(c *config) { c.writeSlots = -1 }, "write-slots"},
+		{"fewer counters than connections", func(c *config) {
+			c.workload = workloadTxWrite
+			c.connections = 64
+			c.writeSlots = 8
+		}, "share a counter"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := defaultConfig()
+			tc.mut(&cfg)
+			err := cfg.validate()
+			if err == nil {
+				t.Fatalf("validate accepted %s", tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("validate error = %q, want it to mention %q", err, tc.want)
+			}
+		})
 	}
 }

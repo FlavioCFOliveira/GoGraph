@@ -7,6 +7,17 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
 
+// The three transaction counters the per-window correctness check reads by
+// name. They are named constants rather than literals because a typo in a
+// literal would silently read zero from the delta map, and a zero there is
+// exactly the value [checkWindow] treats as a failure — so the check would
+// report a transaction path that never ran, for every shape, for ever.
+const (
+	metricNameTxOpened    = "bolt.server.tx.opened"
+	metricNameTxClosed    = "bolt.server.tx.closed"
+	metricNameTxAbandoned = "bolt.server.tx.abandoned"
+)
+
 // serverCounters are the bolt.server.* counter names the laboratory records.
 // They are the ones bolt/server/metrics.go emits; the list is fixed at compile
 // time so the sink's map is read-only once built and IncCounter needs no lock
@@ -16,16 +27,17 @@ import (
 // is the ONLY evidence that the MaxConnections semaphore refused a connection —
 // a rejected connection never becomes live, so neither the accepted/closed
 // derivation nor any client-side count can reveal it. The transaction seven are
-// carried because they cost nothing to collect and a saturation run that also
-// leaks transactions should not need a second experiment to show it.
+// no longer carried merely because they are cheap: the two explicit workload
+// shapes drive them, and bolt.server.tx.opened is the evidence that the
+// transaction path ran at all.
 var serverCounters = [...]string{
 	"bolt.server.conn.accepted",
 	"bolt.server.conn.rejected",
 	"bolt.server.conn.closed",
 	"bolt.server.conn.panics",
-	"bolt.server.tx.opened",
-	"bolt.server.tx.closed",
-	"bolt.server.tx.abandoned",
+	metricNameTxOpened,
+	metricNameTxClosed,
+	metricNameTxAbandoned,
 	"bolt.server.tx.timedout",
 	"bolt.server.tx.idlereaped",
 	"bolt.server.tx.quotarejected",

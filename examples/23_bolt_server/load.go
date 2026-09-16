@@ -12,11 +12,6 @@ import (
 	driverconfig "github.com/neo4j/neo4j-go-driver/v5/neo4j/config"
 )
 
-// countPersonQuery is the fixed query every load worker runs. Its result — the
-// count of :Person nodes — is deterministic over the seeded data (it equals
-// cfg.nodes), which makes it the regression baseline the test pins.
-const countPersonQuery = "MATCH (n:Person) RETURN count(n) AS c"
-
 // repStats is one measurement window: the outcome of driving the configured
 // load against the served listener exactly once.
 //
@@ -35,6 +30,24 @@ type repStats struct {
 	CountPerson   int64 `json:"count_person"`
 	QueriesOK     int   `json:"queries_ok"`
 	QueriesFailed int   `json:"queries_failed"`
+
+	// Workload names the shape this window drove and RowsPerQuery how many
+	// RECORDs one reply carried, so a record can never be read back without
+	// knowing what it measured. RecordsOK is the total number of RECORDs the
+	// window consumed and verified; for every shape but the RECORD-heavy one it
+	// equals QueriesOK.
+	Workload     string `json:"workload"`
+	RowsPerQuery int    `json:"rows_per_query"`
+	RecordsOK    int64  `json:"records_ok"`
+
+	// WriteDelta and WriteExpected are the write shape's committed-effect
+	// check: the amount the summed :Counter total actually moved across this
+	// window, read back through the engine, against the number of units that
+	// reported success. They are equal or the run fails; they are recorded
+	// rather than merely asserted so the evidence travels with the measurement.
+	// Both are zero for every read shape.
+	WriteDelta    int64 `json:"write_delta"`
+	WriteExpected int64 `json:"write_expected"`
 
 	// ConnectNS is the wall-clock of the establish phase — from the first dial
 	// to the moment every offered connection has either handshaken or failed.
@@ -138,25 +151,30 @@ func drivePooled(ctx context.Context, addr string, cfg *config, atPeak func()) (
 	// Spread cfg.queries as evenly as possible across cfg.sessions workers.
 	perWorker := splitWork(cfg.queries, cfg.sessions)
 
+	// The shape is resolved ONCE and shared read-only by every worker, so no
+	// worker pays for parsing a flag and every worker drives the same
+	// statement.
+	wl := cfg.workloadSpec()
+
 	var (
 		mu        sync.Mutex      // guards latencies and the first worker error
 		latencies []time.Duration // one entry per successful query
 		firstErr  error
 		okCount   atomic.Int64
-		want      = int64(cfg.nodes) // the deterministic expected :Person count
+		recCount  atomic.Int64
 	)
 	latencies = make([]time.Duration, 0, cfg.queries)
 
 	start := time.Now()
 	var wg sync.WaitGroup
-	for _, n := range perWorker {
+	for slot, n := range perWorker {
 		if n == 0 {
 			continue
 		}
 		wg.Add(1)
-		go func(count int) {
+		go func(count, slot int) {
 			defer wg.Done()
-			local, ok, err := runWorker(ctx, driver, count, want)
+			local, ok, recs, err := runWorker(ctx, driver, count, wl, slot)
 			mu.Lock()
 			latencies = append(latencies, local...)
 			if err != nil && firstErr == nil {
@@ -164,7 +182,8 @@ func drivePooled(ctx context.Context, addr string, cfg *config, atPeak func()) (
 			}
 			mu.Unlock()
 			okCount.Add(int64(ok))
-		}(n)
+			recCount.Add(recs)
+		}(n, slot)
 	}
 
 	// Every worker is running: this is the window's live peak.
@@ -178,10 +197,13 @@ func drivePooled(ctx context.Context, addr string, cfg *config, atPeak func()) (
 	}
 
 	stats := repStats{
-		CountPerson: want,
-		QueriesOK:   int(okCount.Load()),
-		ConnectNS:   connectNS,
-		LoadNS:      elapsed.Nanoseconds(),
+		CountPerson:  wl.wantCount,
+		QueriesOK:    int(okCount.Load()),
+		RecordsOK:    recCount.Load(),
+		Workload:     wl.kind,
+		RowsPerQuery: wl.rows,
+		ConnectNS:    connectNS,
+		LoadNS:       elapsed.Nanoseconds(),
 	}
 	stats.finish(latencies)
 	return stats, nil
@@ -222,7 +244,7 @@ func drivePooled(ctx context.Context, addr string, cfg *config, atPeak func()) (
 func driveConnections(ctx context.Context, addr string, cfg *config, atPeak func()) (repStats, error) {
 	n := cfg.connections
 	share := splitWork(cfg.queries, n)
-	want := int64(cfg.nodes)
+	wl := cfg.workloadSpec()
 	tolerate := cfg.expectRejections()
 
 	var (
@@ -234,6 +256,7 @@ func driveConnections(ctx context.Context, addr string, cfg *config, atPeak func
 		failed      atomic.Int64
 		okCount     atomic.Int64
 		failedQ     atomic.Int64
+		recCount    atomic.Int64
 	)
 	record := func(local []time.Duration, err error) {
 		mu.Lock()
@@ -266,6 +289,10 @@ func driveConnections(ctx context.Context, addr string, cfg *config, atPeak func
 	var wg sync.WaitGroup
 	for i := 0; i < n; i++ {
 		count := share[i]
+		// Each connection owns one write slot, so no two explicit write
+		// transactions ever touch the same :Counter node and the shape measures
+		// the transaction path rather than MVCC conflict resolution.
+		slot := i
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -310,9 +337,10 @@ func driveConnections(ctx context.Context, addr string, cfg *config, atPeak func
 				if chunk == 0 {
 					continue
 				}
-				lat, ok, err := runWorker(ctx, driver, chunk, want)
+				lat, ok, recs, err := runWorker(ctx, driver, chunk, wl, slot)
 				local = append(local, lat...)
 				okCount.Add(int64(ok))
+				recCount.Add(recs)
 				if err != nil {
 					failedQ.Add(int64(chunk - ok))
 					record(local, err)
@@ -339,9 +367,12 @@ func driveConnections(ctx context.Context, addr string, cfg *config, atPeak func
 		ConnOffered:     n,
 		ConnEstablished: int(established.Load()),
 		ConnFailed:      int(failed.Load()),
-		CountPerson:     want,
+		CountPerson:     wl.wantCount,
 		QueriesOK:       int(okCount.Load()),
 		QueriesFailed:   int(failedQ.Load()),
+		RecordsOK:       recCount.Load(),
+		Workload:        wl.kind,
+		RowsPerQuery:    wl.rows,
 		ConnectNS:       connectNS,
 		LoadNS:          loadNS,
 	}
@@ -380,56 +411,46 @@ func newConnDriver(addr string, cfg *config) (neo4j.DriverWithContext, error) {
 // Shared workers and statistics
 // ─────────────────────────────────────────────────────────────────────────────
 
-// runWorker opens one driver session and runs the fixed count query count
-// times over it, returning the per-query latencies and how many returned the
-// expected count. It stops early on the first error (including ctx
-// cancellation) and always closes its session before returning. Reusing a
-// single session for the whole worker keeps the connection hot, which is what
-// a real client pool does.
-func runWorker(ctx context.Context, driver neo4j.DriverWithContext, count int, want int64) ([]time.Duration, int, error) {
-	sess := driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
+// runWorker opens one driver session and drives count units of w over it,
+// returning the per-query latencies, how many units succeeded, and how many
+// RECORDs they consumed in total. It stops early on the first error (including
+// ctx cancellation) and always closes its session before returning. Reusing a
+// single session for the whole worker keeps the connection hot, which is what a
+// real client pool does.
+//
+// slot is the worker's write slot, used by the explicit-write shape alone and
+// ignored by every other.
+//
+// The session's access mode comes from the shape, not from a constant: an
+// explicit WRITE transaction opened on a read-mode session is refused by the
+// server, which treats BEGIN's mode field as a capability restriction rather
+// than as a routing hint (bolt/server/session.go, handleBegin).
+func runWorker(ctx context.Context, driver neo4j.DriverWithContext, count int, w *workload, slot int) ([]time.Duration, int, int64, error) {
+	sess := driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: w.mode})
 	defer sess.Close(ctx) //nolint:errcheck // best-effort close on teardown
+
+	// Built once per worker, not once per unit: the driver serialises the map
+	// into the outbound message and retains no reference to it, and the client
+	// shares this process's cores with the server it is measuring.
+	params := w.params(slot)
 
 	latencies := make([]time.Duration, 0, count)
 	ok := 0
+	var records int64
 	for i := 0; i < count; i++ {
 		if err := ctx.Err(); err != nil {
-			return latencies, ok, err
+			return latencies, ok, records, err
 		}
 		qStart := time.Now()
-		got, err := queryCount(ctx, sess)
+		n, err := runUnit(ctx, sess, w, params)
 		if err != nil {
-			return latencies, ok, fmt.Errorf("query %d: %w", i, err)
+			return latencies, ok, records, fmt.Errorf("query %d: %w", i, err)
 		}
 		latencies = append(latencies, time.Since(qStart))
-		if got != want {
-			return latencies, ok, fmt.Errorf("query %d: count=%d, want %d", i, got, want)
-		}
+		records += int64(n)
 		ok++
 	}
-	return latencies, ok, nil
-}
-
-// queryCount runs the fixed count query over sess and returns the single
-// integer it yields.
-func queryCount(ctx context.Context, sess neo4j.SessionWithContext) (int64, error) {
-	result, err := sess.Run(ctx, countPersonQuery, nil)
-	if err != nil {
-		return 0, fmt.Errorf("run: %w", err)
-	}
-	rec, err := result.Single(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("single: %w", err)
-	}
-	v, ok := rec.Get("c")
-	if !ok {
-		return 0, fmt.Errorf("column 'c' missing")
-	}
-	n, ok := v.(int64)
-	if !ok {
-		return 0, fmt.Errorf("column 'c': expected int64, got %T", v)
-	}
-	return n, nil
+	return latencies, ok, records, nil
 }
 
 // finish fills the derived fields of a window — throughput, the latency

@@ -19,6 +19,7 @@ import (
 
 	"github.com/FlavioCFOliveira/GoGraph/bolt/server"
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/examples/internal/exprof"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
@@ -112,6 +113,9 @@ type configJSON struct {
 	ServerLog        string `json:"server_log"`
 	ExpectRejections bool   `json:"expect_rejections"`
 	FDSampling       bool   `json:"fd_sampling"`
+	Workload         string `json:"workload"`
+	RowsPerQuery     int    `json:"rows_per_query"`
+	WriteSlots       int    `json:"write_slots"`
 }
 
 // runMetrics is one rung's complete record: what was asked for, what the host
@@ -200,6 +204,8 @@ func runRung(ctx context.Context, w io.Writer, cfg *config) error {
 	fmt.Fprintf(w, "config.connections=%d\n", cfg.connections)
 	fmt.Fprintf(w, "config.max_connections=%d\n", cfg.effectiveMaxConnections())
 	fmt.Fprintf(w, "config.repetitions=%d\n", cfg.reps())
+	fmt.Fprintf(w, "config.workload=%s\n", cfg.workloadKind())
+	fmt.Fprintf(w, "config.rows_per_query=%d\n", cfg.rowsPerQuery())
 
 	// Engine over an in-memory labelled property graph, seeded from cfg.
 	// Directed + Multigraph are required for openCypher semantics — relationships
@@ -215,6 +221,9 @@ func runRung(ctx context.Context, w io.Writer, cfg *config) error {
 	}
 	fmt.Fprintf(w, "nodes.person=%d\n", stats.persons)
 	fmt.Fprintf(w, "edges.knows=%d\n", stats.knowsEdges)
+	if stats.counters > 0 {
+		fmt.Fprintf(w, "nodes.counter=%d\n", stats.counters)
+	}
 
 	// Bolt v5 server with a per-connection idle timeout. The explicit
 	// NoAuthHandler{} value is the opt-in that lets this development example
@@ -256,12 +265,21 @@ func runRung(ctx context.Context, w io.Writer, cfg *config) error {
 	sink := newCounterSink()
 	restoreSink := installCounterSink(sink)
 
+	// committed reads the write shape's committed effect back through the
+	// engine, in process and off the wire, so verifying a window costs the
+	// server no connection and the measurement no time. It is nil for every
+	// read shape, which is what switches the check off.
+	var committed func() (int64, error)
+	if cfg.writesGraph() {
+		committed = func() (int64, error) { return counterTotal(ctx, eng) }
+	}
+
 	host := newHostInfo()
 	effect := make([]repStats, 0, cfg.reps())
 	var probe *repStats
 	loadErr := func() error {
 		for i := 0; i < cfg.reps(); i++ {
-			st, err := measureWindow(ctx, addr, cfg, sink, nil)
+			st, err := measureWindow(ctx, addr, cfg, sink, nil, committed)
 			if err != nil {
 				return fmt.Errorf("repetition %d/%d: %w", i+1, cfg.reps(), err)
 			}
@@ -270,7 +288,7 @@ func runRung(ctx context.Context, w io.Writer, cfg *config) error {
 		if cfg.artifactDir == "" {
 			return nil
 		}
-		st, err := captureProbe(ctx, w, addr, cfg, sink)
+		st, err := captureProbe(ctx, w, addr, cfg, sink, committed)
 		if err != nil {
 			return fmt.Errorf("probe window: %w", err)
 		}
@@ -313,8 +331,16 @@ func runRung(ctx context.Context, w io.Writer, cfg *config) error {
 	// Deterministic facts: the fixed query's result over the seeded data (the
 	// label-scan count equals the known node count) and how many of the fired
 	// queries succeeded, both from the final unprofiled repetition.
-	fmt.Fprintf(w, "q.count_person=%d\n", last.CountPerson)
+	if last.CountPerson > 0 {
+		fmt.Fprintf(w, "q.count_person=%d\n", last.CountPerson)
+	}
 	fmt.Fprintf(w, "queries.ok=%d\n", last.QueriesOK)
+	if cfg.workloadKind() == workloadRecords {
+		fmt.Fprintf(w, "records.ok=%d\n", last.RecordsOK)
+	}
+	if cfg.writesGraph() {
+		fmt.Fprintf(w, "write.committed_delta=%d\n", last.WriteDelta)
+	}
 
 	reportWindow(w, "load", &last)
 	reportHost(w, &host)
@@ -371,6 +397,10 @@ func reportWindow(w io.Writer, prefix string, s *repStats) {
 	fmt.Fprintf(w, "# runtime.open_fds_peak=%d\n", s.PeakOpenFDs)
 	fmt.Fprintf(w, "# runtime.open_fds_max=%d\n", s.MaxOpenFDs)
 	fmt.Fprintf(w, "# mem.heap_alloc=%s\n", humanBytes(s.HeapAllocBytes))
+	fmt.Fprintf(w, "# %s.workload=%s rows=%d records_ok=%d\n", prefix, s.Workload, s.RowsPerQuery, s.RecordsOK)
+	if s.WriteExpected > 0 {
+		fmt.Fprintf(w, "# %s.write_committed=%d/%d\n", prefix, s.WriteDelta, s.WriteExpected)
+	}
 	if s.FirstError != "" {
 		fmt.Fprintf(w, "# load.first_error=%s\n", strings.ReplaceAll(s.FirstError, "\n", " "))
 	}
@@ -405,9 +435,19 @@ func reportHost(w io.Writer, h *hostInfo) {
 // atPeak, when non-nil, is called at the window's peak, after this function's
 // own peak reading, and is where the profiled window writes its goroutine
 // profile.
-func measureWindow(ctx context.Context, addr string, cfg *config, sink *counterSink, atPeak func()) (repStats, error) {
+func measureWindow(ctx context.Context, addr string, cfg *config, sink *counterSink, atPeak func(), committed func() (int64, error)) (repStats, error) {
 	before := sink.snapshot()
 	baseLive := liveConnections(before)
+
+	// The committed total BEFORE the window. Read while the server is idle
+	// between windows, so it is exact.
+	var writeBefore int64
+	if committed != nil {
+		var cerr error
+		if writeBefore, cerr = committed(); cerr != nil {
+			return repStats{}, cerr
+		}
+	}
 
 	smp := startSampler(samplerInterval, cfg.fdSampling)
 	var peakGoroutines, peakFDs int
@@ -429,7 +469,76 @@ func measureWindow(ctx context.Context, addr string, cfg *config, sink *counterS
 	st.MaxGoroutines, st.MaxOpenFDs = maxGoroutines, maxFDs
 	st.CountersSettled = quiesceConnections(sink, baseLive)
 	st.Counters = diffCounters(before, sink.snapshot())
+
+	if committed != nil {
+		writeAfter, cerr := committed()
+		if cerr != nil {
+			return st, cerr
+		}
+		st.WriteDelta = writeAfter - writeBefore
+		st.WriteExpected = int64(st.QueriesOK)
+	}
+	if err := checkWindow(cfg, &st); err != nil {
+		return st, err
+	}
 	return st, nil
+}
+
+// checkWindow enforces the per-shape correctness contract on a finished window.
+// It is a hard failure and not a warning: a window that reported a throughput
+// while returning the wrong rows, committing nothing, or never opening the
+// transaction it was supposed to open has measured nothing worth publishing,
+// and the campaign's own stopping condition depends on the workload having
+// actually run.
+//
+// The checks are on the WINDOW, complementing the per-unit checks the client
+// already made (see [workload.consume]): this is where a discrepancy that only
+// shows up in aggregate — a commit that returned success without moving the
+// graph, or a transaction path that never opened a transaction at all — is
+// caught.
+func checkWindow(cfg *config, st *repStats) error {
+	if st.QueriesOK <= 0 {
+		return fmt.Errorf("window completed no query")
+	}
+
+	if cfg.workloadKind() == workloadRecords {
+		want := int64(st.QueriesOK) * int64(cfg.rowsPerQuery())
+		if st.RecordsOK != want {
+			return fmt.Errorf("records: consumed %d, want %d (%d queries x %d rows)",
+				st.RecordsOK, want, st.QueriesOK, cfg.rowsPerQuery())
+		}
+	}
+
+	if cfg.writesGraph() && st.WriteDelta != st.WriteExpected {
+		return fmt.Errorf("committed effect: the :Counter total moved by %d, want %d "+
+			"(one increment per successful write transaction)", st.WriteDelta, st.WriteExpected)
+	}
+
+	if !cfg.explicitTx() {
+		return nil
+	}
+	// An explicit shape that leaves tx.opened at zero has not driven the
+	// transaction path, and every conclusion about the registry drawn from such
+	// a window would be a non-observation dressed up as an exoneration. That is
+	// exactly the gap this dimension exists to close, so it fails the run.
+	opened := st.Counters[metricNameTxOpened]
+	closed := st.Counters[metricNameTxClosed]
+	abandoned := st.Counters[metricNameTxAbandoned]
+	switch {
+	case opened == 0:
+		return fmt.Errorf("workload %s opened no explicit transaction: %s is 0 for the window",
+			cfg.workloadKind(), metricNameTxOpened)
+	case opened != uint64(st.QueriesOK):
+		return fmt.Errorf("%s=%d for %d successful units: one BEGIN per unit was expected",
+			metricNameTxOpened, opened, st.QueriesOK)
+	case closed != opened:
+		return fmt.Errorf("%s=%d but %s=%d: a transaction was left open",
+			metricNameTxOpened, opened, metricNameTxClosed, closed)
+	case abandoned != 0:
+		return fmt.Errorf("%s=%d: a transaction was still open when its connection tore down",
+			metricNameTxAbandoned, abandoned)
+	}
+	return nil
 }
 
 // captureProbe runs one extra window with every profiler enabled and writes the
@@ -443,7 +552,7 @@ func measureWindow(ctx context.Context, addr string, cfg *config, sink *counterS
 //   - the goroutine profile is written AT the window's peak, not after it. A
 //     goroutine profile taken once the clients have gone shows an idle server
 //     and answers nothing about a connection flood.
-func captureProbe(ctx context.Context, w io.Writer, addr string, cfg *config, sink *counterSink) (repStats, error) {
+func captureProbe(ctx context.Context, w io.Writer, addr string, cfg *config, sink *counterSink, committed func() (int64, error)) (repStats, error) {
 	dir := cfg.artifactDir
 	if err := os.MkdirAll(dir, artefactDirPerm); err != nil {
 		return repStats{}, fmt.Errorf("artefact dir %q: %w", dir, err)
@@ -467,7 +576,7 @@ func captureProbe(ctx context.Context, w io.Writer, addr string, cfg *config, si
 	var peakErr error
 	st, runErr := measureWindow(ctx, addr, cfg, sink, func() {
 		peakErr = writeProfile(dir, goroutineProfileName, "goroutine")
-	})
+	}, committed)
 
 	// Finish stops the CPU profile and the trace, collects, and writes the heap
 	// profile. It is called whether or not the window failed, so a failed probe
@@ -490,6 +599,52 @@ func captureProbe(ctx context.Context, w io.Writer, addr string, cfg *config, si
 		fmt.Fprintf(w, "# pprof.goroutine=%s\n", filepath.Join(dir, goroutineProfileName))
 	}
 	return st, errors.Join(runErr, finErr, peakErr, contErr)
+}
+
+// counterTotal reads the committed :Counter hit total straight out of the
+// engine, in this process, with no Bolt connection involved.
+//
+// Reading it over the wire would need a connection of its own, which would
+// change the very quantity the ladder varies: a rung that offered 256
+// connections would hold 257. Reading it in process costs the server nothing
+// and is taken between windows, while the server is idle, so the value is
+// exact rather than a moving target.
+//
+// It is the engine's own view of committed state, which is the right authority
+// for the question being asked — whether the transactions that reported success
+// over the wire really committed.
+func counterTotal(ctx context.Context, eng *cypher.Engine) (int64, error) {
+	res, err := eng.RunAny(ctx, counterSumQuery, nil)
+	if err != nil {
+		return 0, fmt.Errorf("counter total: %w", err)
+	}
+	defer func() { _ = res.Close() }() // best-effort close; the read error below is the one that matters
+
+	var total int64
+	for res.Next() {
+		v, ok := res.Record()["t"]
+		if !ok {
+			return 0, fmt.Errorf("counter total: column 't' missing")
+		}
+		// The in-process result carries the engine's own value types, and an
+		// aggregate yields expr.IntegerValue rather than a bare int64. Both
+		// forms are accepted rather than one being assumed: the shape of an
+		// engine result is not this example's contract to fix, and a type
+		// assertion that silently stopped matching would turn the write check
+		// into a run that always fails.
+		switch n := v.(type) {
+		case expr.IntegerValue:
+			total = int64(n)
+		case int64:
+			total = n
+		default:
+			return 0, fmt.Errorf("counter total: column 't': expected an integer, got %T", v)
+		}
+	}
+	if err := res.Err(); err != nil {
+		return 0, fmt.Errorf("counter total: %w", err)
+	}
+	return total, nil
 }
 
 // writeProfile writes the named runtime profile into dir under file.
@@ -862,6 +1017,9 @@ func childArgs(cfg *config, spec rungSpec, dir string) []string {
 		"-block-rate", strconv.Itoa(cfg.blockRate),
 		"-fd-sampling=" + strconv.FormatBool(cfg.fdSampling),
 		"-server-log", cfg.serverLogMode(),
+		"-workload", cfg.workloadKind(),
+		"-rows", strconv.Itoa(cfg.rowsPerQuery()),
+		"-write-slots", strconv.Itoa(cfg.writeSlots),
 		"-label", spec.name,
 		"-artifact-dir", dir,
 	}

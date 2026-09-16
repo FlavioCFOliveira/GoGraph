@@ -60,6 +60,66 @@ would finish their share and release their semaphore slots while the late ones
 were still dialling, the server would never hold N connections at once, and a
 saturation run would quietly admit every connection it was meant to refuse.
 
+## The workload dimension — what each connection sends
+
+`-connections` decides **how many** clients talk to the server; `-workload`
+decides **what they say**. The two are independent, and both matter: a server
+certified on one shape of work is certified on one shape of work.
+
+| `-workload` | One unit is | Rows per reply | Server syscalls per unit |
+|---|---|---|---|
+| `count` *(default)* | one auto-commit `RUN` of `MATCH (n:Person) RETURN count(n) AS c` | 1 | 1 write, 2 read |
+| `records` | the same, returning `-rows` rows of `(id, name)` | `-rows` | 1 write per ~4 KB, 2 read |
+| `txread` | `BEGIN` / `RUN` / `PULL` / `COMMIT` around the **same** count query | 1 | 3 write, 6 read |
+| `txwrite` | `BEGIN` / `RUN` / `PULL` / `COMMIT` around an increment of this connection's own `:Counter` | 1 | 3 write, 6 read |
+
+The shapes are **nested so that consecutive pairs differ by one thing**, which
+is what lets a difference between two ladders be attributed rather than merely
+observed:
+
+- `count` → `txread` differ **only** by `BEGIN`/`COMMIT`. Same statement, same
+  result, same row count. This is the pair that isolates the cost of an explicit
+  transaction, and it is what puts `bolt/server/txregistry.go` and
+  `bolt/server/txquota.go` on the measured path at all — under `count` they are
+  never reached and `bolt.server.tx.opened` is 0 in every window.
+- `count` → `records` differ **only** by how many `RECORD`s one reply carries.
+  This is the pair that measures response batching: the server disables
+  auto-flush on the connection writer, so a K-row reply should cost
+  `O(bytes/bufsize)` writes rather than K.
+- `txread` → `txwrite` differ by the statement being a write.
+
+### Correctness is part of the measurement, not a side check
+
+Every window is verified before its numbers are kept, and a window that fails
+**fails the run**:
+
+- `records` must consume **exactly** `-rows` rows per query, each carrying two
+  columns whose `id` is a 24-character `:Person` id;
+- an explicit shape must leave `bolt.server.tx.opened` equal to the number of
+  successful units, `tx.closed` equal to `tx.opened`, and `tx.abandoned` at
+  zero — **a zero `tx.opened` is a failed run**, because it would make any claim
+  about the registry a non-observation dressed up as an exoneration;
+- `txwrite` must move the committed `:Counter` total by exactly one per
+  successful unit. That total is read back **through the engine, in process**,
+  between windows: reading it over the wire would need a connection of its own
+  and would change the very quantity the ladder varies.
+
+### The `:Counter` model, and why its size is fixed
+
+`txwrite` seeds a fixed **1024** `(:Counter {slot, hits})` nodes — not one per
+connection. Seeding one per connection would make the statement's label scan
+linear in the connection count, and the write shape's per-query cost would then
+grow with N because of the instrument rather than because of the server, on the
+very axis the ladder measures. Connection *i* owns counter *i*, so no two
+connections ever touch the same node and no transaction ever collides with
+another.
+
+`-write-slots` overrides that count, and exists for **one** experiment:
+separating "many written nodes" from "many concurrent writers". Raising it at a
+fixed connection count multiplies the nodes without changing the writers. It
+also lengthens the label scan, so absolute throughput is not comparable across
+two slot counts — only each arm's own ladder is.
+
 ## Saturation — the reject branch
 
 Offering more connections than the semaphore admits drives the reject branch of
@@ -96,6 +156,14 @@ go run ./examples/23_bolt_server
 go run ./examples/23_bolt_server -connections 256 -queries 20000 -sessions 1 \
     -repetitions 10 -artifact-dir /tmp/boltlab/conn256
 
+# an explicit-transaction rung: BEGIN/RUN/PULL/COMMIT over 256 connections
+go run ./examples/23_bolt_server -workload txread -connections 256 -queries 20000 \
+    -sessions 1 -repetitions 10 -fd-sampling=false
+
+# a RECORD-heavy rung: 1000 rows per reply
+go run ./examples/23_bolt_server -workload records -rows 1000 -connections 256 \
+    -queries 5000 -sessions 1 -repetitions 10 -fd-sampling=false
+
 # the whole ladder plus the saturation rung, in one invocation
 go run ./examples/23_bolt_server -ladder -artifact-dir /tmp/boltlab \
     -queries 20000 -sessions 1 -repetitions 10
@@ -119,6 +187,9 @@ Use **`-repetitions 10` or more** for any run whose numbers will be compared:
 | `-queries` | read queries fired over the wire, in total | `2000` | `50000` |
 | `-sessions` | concurrent sessions (pooled mode) / sessions per connection | `4` | `16` |
 | `-seed` | RNG seed (fixes the deterministic data shape) | `42` | any `int64` |
+| `-workload` | what each connection sends: `count` \| `records` \| `txread` \| `txwrite` | `count` | any of the four |
+| `-rows` | `RECORD`s per reply under `-workload records`; ignored by every other shape | `100` | `1000` |
+| `-write-slots` | `:Counter` nodes under `-workload txwrite`; `0` takes the default 1024, and the value must be at least `-connections` | `0` | `4096` |
 
 ### Concurrency
 
@@ -250,7 +321,9 @@ rung therefore runs `-repetitions` **unprofiled** windows and then one
   be silently charged to throughput.
 - **Server counters** (`# counters.bolt.server.*`) — the accepted / rejected /
   closed connection triple and the seven transaction counters, reported as the
-  **delta** across each window. The window waits for the server's live-connection
+  **delta** across each window. Under an explicit shape `bolt.server.tx.opened`
+  is the evidence that the transaction path ran at all, and the run fails if it
+  is zero. The window waits for the server's live-connection
   derivation (`accepted − closed`) to settle before reading the delta, and
   records `counters_settled: false` if it did not.
 - **Live process** (`# runtime.goroutines_peak`, `# runtime.open_fds_peak`, and
@@ -286,6 +359,8 @@ config.seed=42
 config.connections=0
 config.max_connections=8
 config.repetitions=1
+config.workload=count
+config.rows_per_query=1
 nodes.person=2000
 edges.knows=13012
 q.count_person=2000
@@ -309,6 +384,7 @@ queries.ok=2000
 # runtime.open_fds_peak=8
 # runtime.open_fds_max=14
 # mem.heap_alloc=3.84 MiB
+# load.workload=count rows=1 records_ok=2000
 # host.cores=10
 # host.gomaxprocs=10
 # host.loadavg_before=1.76 2.04 2.00
@@ -320,6 +396,13 @@ queries.ok=2000
 # counters.total.bolt.server.conn.closed=4
 # server shut down cleanly
 ```
+
+The other shapes add their own deterministic facts to that block, and drop the
+ones they do not verify: `records` prints `records.ok` and no `q.count_person`;
+`txwrite` prints `nodes.counter` and `write.committed_delta` and no
+`q.count_person`; both explicit shapes add
+`# counters.bolt.server.tx.opened` and `.tx.closed`, which are absent under an
+auto-commit shape because no explicit transaction is ever opened.
 
 `edges.knows` is the realised sum of the random per-person out-degrees: it is
 fixed for `-seed 42` but changes with a different seed. Every `# ` line above is
@@ -345,6 +428,8 @@ assume otherwise.
 - [`bolt/server`](../../bolt/server) — the Bolt v5 server package documentation
 - [`bolt/server/serve.go`](../../bolt/server/serve.go) — the accept loop and the `MaxConnections` semaphore this example saturates
 - [`bolt/server/metrics.go`](../../bolt/server/metrics.go) — what each `bolt.server.*` counter means
+- [`bolt/server/txregistry.go`](../../bolt/server/txregistry.go) — the open-transaction registry the two explicit shapes drive
+- [docs/profile-bolt-concurrency-round3-2026-09-16.md](../../docs/profile-bolt-concurrency-round3-2026-09-16.md) — the four-shape ladder measured with this binary
 - [`bench/contention/observatory.go`](../../bench/contention/observatory.go) — the in-repo precedent for the two-window, one-process-per-window profiling discipline
 - [`cypher`](../../cypher) — the Cypher query engine the server executes against
 - [Example 22 — Cypher engine](../22_cypher) — running Cypher in process without the Bolt wire layer

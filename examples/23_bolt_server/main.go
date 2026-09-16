@@ -145,6 +145,29 @@ type config struct {
 	// maxConnections is bolt/server Options.MaxConnections verbatim; 0 derives
 	// it from the offered load (see effectiveMaxConnections).
 	maxConnections int
+
+	// workload selects WHAT each connection sends, independently of how many
+	// connections send it. It is the dimension that decides which server paths
+	// a rung reaches at all: only the two explicit shapes make
+	// bolt.server.tx.opened non-zero, and therefore only they put
+	// bolt/server/txregistry.go and bolt/server/txquota.go on the measured
+	// path. See workload.go for the four shapes and why they are nested so that
+	// consecutive pairs differ by one thing. The empty string means the
+	// default, workloadCount — the one-row auto-commit read every rung
+	// published before this dimension existed was measured with.
+	workload string
+	// writeSlots is how many :Counter nodes the explicit-write shape seeds; 0
+	// takes the default. It is a knob for ONE experiment — separating "many
+	// written nodes" from "many concurrent writers" — and every published rung
+	// leaves it at the default. See [writeSlots].
+	writeSlots int
+	// rows is how many RECORDs one reply carries under the RECORD-heavy shape,
+	// and is ignored by every other. It is what turns response batching into a
+	// measurable quantity: bolt/server disables auto-flush on the connection's
+	// writer, so a K-row reply is meant to cost O(bytes/bufsize) writes rather
+	// than K, and sweeping this value is the only way to check that law holds
+	// at concurrency rather than on one connection in a unit test.
+	rows int
 	// repetitions is how many UNPROFILED measurement windows a rung runs, so
 	// benchstat has a spread to compare. 0 means one.
 	repetitions int
@@ -278,6 +301,9 @@ func defaultConfig() config {
 		seed:           42,
 		connections:    0,
 		maxConnections: 0,
+		workload:       workloadCount,
+		rows:           defaultRows,
+		writeSlots:     writeSlots,
 		repetitions:    1,
 		connectTimeout: 5 * time.Second,
 		mutexFraction:  1,
@@ -320,6 +346,25 @@ func (c *config) validate() error {
 		return fmt.Errorf("block-rate must be >= 0, got %d", c.blockRate)
 	case !validServerLog(c.serverLog):
 		return fmt.Errorf("server-log %q: want one of %s", c.serverLog, strings.Join(serverLogModes[:], ", "))
+	case !validWorkload(c.workload):
+		return fmt.Errorf("workload %q: want one of %s", c.workload, strings.Join(workloadKinds[:], ", "))
+	case c.rows < 0:
+		return fmt.Errorf("rows must be >= 0, got %d", c.rows)
+	case c.writeSlots < 0:
+		return fmt.Errorf("write-slots must be >= 0, got %d", c.writeSlots)
+	case c.writesGraph() && c.writeSlotCount() < c.connections:
+		// Fewer counters than connections would put two connections on one
+		// node, and the shape would then measure MVCC conflict resolution
+		// rather than the transaction path. Refusing here turns a whole wasted
+		// sweep into one clear error.
+		return fmt.Errorf("write-slots (%d) is below connections (%d): two connections would share a counter",
+			c.writeSlotCount(), c.connections)
+	case c.workloadKind() == workloadRecords && c.rowsPerQuery() > c.nodes:
+		// LIMIT k over fewer than k :Person nodes yields fewer than k rows, and
+		// the shape would then fail its own exact-cardinality check on every
+		// query. Refusing here turns a whole wasted sweep into one clear error.
+		return fmt.Errorf("rows (%d) exceeds nodes (%d): a %d-row result is not available",
+			c.rowsPerQuery(), c.nodes, c.rowsPerQuery())
 	case c.satOffer < 0 || c.satAdmit < 0:
 		return fmt.Errorf("saturation offer/admit must be >= 0, got %d/%d", c.satOffer, c.satAdmit)
 	case c.ladder && c.artifactDir == "":
@@ -398,6 +443,9 @@ func (c *config) asJSON() configJSON {
 		ServerLog:        c.serverLogMode(),
 		ExpectRejections: c.expectRejections(),
 		FDSampling:       c.fdSampling,
+		Workload:         c.workloadKind(),
+		RowsPerQuery:     c.rowsPerQuery(),
+		WriteSlots:       c.writeSlotCount(),
 	}
 }
 
@@ -435,6 +483,12 @@ func bindFlags(fs *flag.FlagSet, cfg *config) *exprof.Config {
 		"sample the open-descriptor count during a window (its own cost is linear in the connection count)")
 	fs.StringVar(&cfg.serverLog, "server-log", cfg.serverLog,
 		"logger handed to bolt/server Options.Logger: "+strings.Join(serverLogModes[:], " | "))
+	fs.StringVar(&cfg.workload, "workload", cfg.workload,
+		"what each connection sends: "+workloadList())
+	fs.IntVar(&cfg.rows, "rows", cfg.rows,
+		"RECORDs per reply for -workload records (ignored by every other shape)")
+	fs.IntVar(&cfg.writeSlots, "write-slots", cfg.writeSlots,
+		"number of :Counter nodes for -workload txwrite (0 = the default; must be >= -connections)")
 	fs.StringVar(&cfg.artifactDir, "artifact-dir", cfg.artifactDir,
 		"if set, write this run's full artefact set here (five profiles, trace, metrics.json, host.json, bench.txt)")
 	fs.StringVar(&cfg.label, "label", cfg.label,
@@ -493,6 +547,9 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 type seedStats struct {
 	persons    int
 	knowsEdges int
+	// counters is how many :Counter nodes were seeded for the explicit-write
+	// shape, and is zero for every other shape.
+	counters int
 }
 
 // seed materialises the social network described by cfg into g via the
@@ -550,7 +607,40 @@ func seed(ctx context.Context, g *lpg.Graph[string, float64], cfg *config) (seed
 		}
 	}
 
-	return seedStats{persons: cfg.nodes, knowsEdges: knowsEdges}, nil
+	// Counters, for the explicit-write shape alone. A fixed count, independent
+	// of the connection count: see [writeSlots].
+	counters := 0
+	for i := 0; i < cfg.writeSlotCount(); i++ {
+		if err := addCounter(g, i); err != nil {
+			return seedStats{}, err
+		}
+		counters++
+	}
+
+	return seedStats{persons: cfg.nodes, knowsEdges: knowsEdges, counters: counters}, nil
+}
+
+// counterID is the node key of the :Counter node owning write slot i. It is
+// prefixed so it can never collide with a 24-char hex :Person id.
+func counterID(i int) string { return "counter-" + strconv.Itoa(i) }
+
+// addCounter adds one :Counter node owning write slot i, with its hit total
+// started at zero so the first increment reads an integer and not a null.
+func addCounter(g *lpg.Graph[string, float64], i int) error {
+	id := counterID(i)
+	if err := g.AddNode(id); err != nil {
+		return fmt.Errorf("AddNode %s: %w", id, err)
+	}
+	if err := g.SetNodeLabel(id, labelCounter); err != nil {
+		return fmt.Errorf("SetNodeLabel %s: %w", id, err)
+	}
+	if err := g.SetNodeProperty(id, propSlot, lpg.Int64Value(int64(i))); err != nil {
+		return fmt.Errorf("SetNodeProperty %s %s: %w", propSlot, id, err)
+	}
+	if err := g.SetNodeProperty(id, propHits, lpg.Int64Value(0)); err != nil {
+		return fmt.Errorf("SetNodeProperty %s %s: %w", propHits, id, err)
+	}
+	return nil
 }
 
 // checkEvery bounds how often the seed loop polls ctx for cancellation: often
