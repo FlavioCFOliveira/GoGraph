@@ -9,6 +9,7 @@ here from `go tool pprof -traces`, which needs nothing but the Go toolchain.
 
 Usage:
     scripts/parse_lab_flamegraph.py PROFILE OUT_PREFIX [--sample=IDX] [--focus=RE]
+                                    [--buckets=parse|module]
 
 --focus is passed straight to `go tool pprof -focus`, which keeps only the
 samples whose stack contains a matching frame. Use it to restrict the split to
@@ -32,6 +33,16 @@ question is how much of the parse is the ANTLR runtime rather than GoGraph:
     blue    cypher/parser (hand-written)        GoGraph's own front-end code
     green   other GoGraph packages
     grey    runtime, standard library, everything else
+
+--buckets=module switches to the split a WHOLE-MODULE sweep needs (rmp #2857):
+GoGraph's own code, the Go runtime, the standard library, and EVERY third-party
+module separately rather than ANTLR alone. The default `parse` set is left
+exactly as it was, so the parsing campaign's artefacts reproduce byte for byte.
+
+The reason the module set exists at all is that the default one is WRONG outside
+the front end: it buckets roaring, mmap-go, klauspost/compress and the Neo4j
+driver — all of which the examples drive — into "runtime-stdlib-other" together
+with the Go runtime, which would make a third-party cost read as a runtime cost.
 """
 
 import html
@@ -62,6 +73,32 @@ BUCKETS = [
 ]
 OTHER = ("runtime-stdlib-other", "#9e9e9e")
 
+# The whole-module split. Order matters: the GoGraph prefix must be tested
+# before the bare-path stdlib fallback, and "runtime." before anything else,
+# because a Go CPU profile's largest single owner is frequently the runtime.
+MODULE_BUCKETS = [
+    ("gograph", GOGRAPH, "#2ca02c"),
+    ("go-runtime", "runtime.", "#9e9e9e"),
+    ("go-runtime", "internal/runtime", "#9e9e9e"),
+    ("third-party-antlr", ANTLR, "#d62728"),
+    ("third-party-roaring", "github.com/RoaringBitmap/", "#d62728"),
+    ("third-party-bitset", "github.com/bits-and-blooms/", "#d62728"),
+    ("third-party-compress", "github.com/klauspost/", "#e377c2"),
+    ("third-party-mmap", "github.com/edsrzf/", "#e377c2"),
+    ("third-party-neo4j-driver", "github.com/neo4j/", "#ff7f0e"),
+    ("third-party-other", "github.com/", "#8c564b"),
+    ("third-party-other", "golang.org/x/", "#8c564b"),
+    ("third-party-other", "pgregory.net/", "#8c564b"),
+]
+MODULE_OTHER = ("go-stdlib", "#1f77b4")
+
+# Selected by --buckets; the default preserves the parsing campaign exactly.
+BUCKET_SETS = {
+    "parse": (BUCKETS, OTHER),
+    "module": (MODULE_BUCKETS, MODULE_OTHER),
+}
+_active = "parse"
+
 
 def parse_value(num, unit):
     """Return the sample value in its base unit (ns, bytes, or a count)."""
@@ -74,10 +111,11 @@ def parse_value(num, unit):
 
 
 def bucket(frame):
-    for name, prefix, colour in BUCKETS:
+    buckets, other = BUCKET_SETS[_active]
+    for name, prefix, colour in buckets:
         if frame.startswith(prefix):
             return name, colour
-    return OTHER
+    return other
 
 
 def fold(traces_text):
@@ -235,6 +273,7 @@ def render(root, title, unit, width=1400):
 def main():
     if len(sys.argv) < 3:
         sys.exit(__doc__)
+    global _active
     profile, prefix = sys.argv[1], sys.argv[2]
     sample, focus = "", ""
     for arg in sys.argv[3:]:
@@ -242,6 +281,10 @@ def main():
             sample = arg.split("=", 1)[1]
         elif arg.startswith("--focus="):
             focus = arg.split("=", 1)[1]
+        elif arg.startswith("--buckets="):
+            _active = arg.split("=", 1)[1]
+            if _active not in BUCKET_SETS:
+                sys.exit(f"unknown bucket set {_active!r}; want one of {sorted(BUCKET_SETS)}")
         else:
             sys.exit(f"unknown argument {arg!r}")
 
@@ -279,9 +322,15 @@ def main():
     topres = subprocess.run(topcmd, capture_output=True, text=True, check=False)
     ttotals, ttotal = self_by_bucket_from_top(topres.stdout if topres.returncode == 0 else "")
 
-    order = [b[0] for b in BUCKETS] + [OTHER[0]]
+    buckets, other = BUCKET_SETS[_active]
+    order = []
+    for b in buckets:
+        if b[0] not in order:
+            order.append(b[0])
+    order.append(other[0])
     with open(prefix + ".pkg.txt", "w") as f:
         f.write(f"profile={profile}\nsample_index={sample or 'default'}\n")
+        f.write(f"bucket_set={_active}\n")
         f.write(f"focus={focus or 'none'}\nunit={unit}\n")
         f.write(f"total_self_folded={total:.0f}\ntotal_self_top={ttotal:.0f}\n")
         f.write(f"stacks={len(stacks)}\n\n")
