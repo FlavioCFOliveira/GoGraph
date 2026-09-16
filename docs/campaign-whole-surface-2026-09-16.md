@@ -119,8 +119,27 @@ neither returned nor retained, and BFS order is unchanged, so results stay bit-i
 
 **Validation plan.** `go test ./search/...`; `go test -bench=. -benchmem -count=5
 ./search/...` compared with `benchstat`; re-run `11_social_network` at
-`-live 100000` and compare `diameter.allocs`, `diameter.elapsed` and the runtime bucket
+`-users 100000` and compare `diameter.allocs`, `diameter.elapsed` and the runtime bucket
 share, interleaved A/B, never all of one arm then all of the other.
+
+**Outcome — the causal hypothesis HELD.** The queue was threaded through as caller-owned
+scratch and the example re-run interleaved, `-users 100000`, three rounds per arm, A and B
+alternating within each round, every exit status read from inside its own `run.log`
+(`run_exit=0`, 6 of 6):
+
+| measurement | before (8affe124) | after | delta |
+|---|---|---|---|
+| `diameter.allocs` (telemetry) | 2 026 768 / 2 026 659 / 2 026 592 | **433 / 431 / 428** | −99.98% |
+| `diameter.elapsed` | 28.92 / 28.80 / 28.79 s | **19.98 / 19.98 / 20.00 s** | −30.8% |
+| total profile CPU | 221.18 / 222.31 / 221.02 s | **145.72 / 143.34 / 143.55 s** | −34.1% on round 1, **−34.9%** on the means |
+| `go-runtime` bucket | 146.76 s = 66.35% | **6.58 s = 4.52%** | −95.5% |
+| bucket two-route delta | 0 | 0 | exact in all six runs |
+
+The allocation rate was the cause of the runtime CPU, not a correlate of it: removing 293 GiB
+of per-source queue allocation removed **140.18 s of `go-runtime` CPU** — 96% of that bucket —
+and the profile's stack count fell from 361/351/355 to 47/55/63. What remains of the runtime
+bucket is 4.52%, in line with the rest of the sweep. The attribution is now **established**,
+not hypothesised.
 
 **Backlog.** No existing task. **Filed as rmp #2861.**
 
@@ -181,6 +200,64 @@ returned structure's length semantics and must not change any observable result.
 **Validation plan.** `go test ./search/... ./search/centrality/...`; `benchstat` over
 `-benchmem -count=5`; re-run `20_concurrent_reads` in both passes and compare the allocation
 table above.
+
+**Outcome — rmp #2862: what the change delivered, and a criterion that cannot be met.**
+
+Two changes were made to `search/dijkstra.go`: `newDistancesCopy` now sizes its three arrays
+from `reachedSpan(found)` instead of from `maxID`, and `acquireDijkstra`'s heap pre-size test
+became `cap(st.heap.items) < maxID` instead of `cap(...) == 0`.
+
+*What it delivered*, from the interleaved A/B (5 samples per arm, A bracketing B in every
+round, noise floor A against a byte-identical A2: sec/op geomean +0.11%, B/op −0.06%, every
+row `~`):
+
+| benchmark | B/op before | B/op after | delta | sec/op delta |
+|---|---|---|---|---|
+| `SSSP_RepeatedFrom` | 43 739 | **104** | **−99.76%** (p=0.008 n=5) | −31.29% |
+| `Dijkstra_RepeatedRevalidate` | 43 826 | **123** | **−99.72%** (p=0.008 n=5) | ~ |
+| `Dijkstra_Small` | 4 338 | 3 790 | −12.63% | −4.52% |
+
+That is the reached-span truncation working exactly as designed on a query whose reach is a
+small part of the node space. Which of the two changes carries it is read from the code — only
+the truncation can change a returned `Distances`' byte count — and was **not** put to a
+single-variable split, so that attribution is hypothesised, not established.
+
+*The acceptance criterion is NOT met, and rests on a false premise.* The criterion — the
+"four sites under 15%" — is arithmetically unreachable from these two changes at this
+workload. Measured on `20_concurrent_reads -nodes 60000 -iterations 200`, three interleaved
+rounds per arm, `alloc_space` flat share of the whole process:
+
+| site | before (3 rounds) | after (3 rounds) | touched by the change? |
+|---|---|---|---|
+| `search.BFSCtx` | 13.54 / 13.83 / 13.86% | 14.08 / 13.84 / 13.76% | **no** |
+| `search.acquireDijkstra` | 13.20 / 12.92 / 12.97% | 13.12 / 13.39 / 13.59% | yes |
+| `search.newDistancesCopy` | 8.51 / 8.62 / 8.53% | 8.40 / 8.43 / 8.39% | yes |
+| `search.(*dijkHeap).push` | 8.10 / 7.96 / 7.83% | 8.07 / 8.11 / 8.03% | **no** |
+| **four sites together** | **43.35 / 43.33 / 43.19%** | **43.67 / 43.77 / 43.77%** | |
+
+The group share did not fall — it moved from a 43.29% mean to a 43.74% mean, inside the
+round-to-round spread. Two independent reasons, each measured:
+
+- **`reachedSpan == maxID` here.** The example's graph is connected, so the backwards scan
+  finds `found[maxID-1]` set and the truncation is a no-op. `newDistancesCopy`'s bytes went
+  2 973.56 MB → 2 929.75 MB (−1.47%), and `-list` shows why: its three `make` lines went
+  1.35 GB / 1.36 GB / 195.21 MB → 1.33 GB / 1.35 GB / 184.57 MB. The 99.76% win above is
+  real; this workload simply never exercises it.
+- **The heap backing was already pre-sized.** `-peek` charges **100%** of
+  `dijkHeap.push`'s allocation to `dijkstraCore`, in both arms (2 829.71 MB → 2 814.31 MB),
+  and `acquireDijkstra`'s own `make([]dijkItem[W], 0, maxID)` line is 2.16 GB → 2.15 GB. The
+  growth `push` pays for is the backing climbing *past* `maxID` inside the traversal, which a
+  `maxID` hint cannot prevent — `acquireDijkstra`'s comment says so itself.
+
+The arithmetic is decisive. Even if both touched sites were driven to **zero**, the two the
+changes never touch — `BFSCtx` at 13.54% and `dijkHeap.push` at 8.10% — sum to **21.64%**,
+which still exceeds 15%. No execution of these two changes could have satisfied the criterion.
+It is unmet, with a measured reason; it is not partially met.
+
+*Two follow-ups identified and NOT implemented*, both put to the user rather than acted on:
+fusing the pooled working set with the returned result (so the copy disappears instead of
+shrinking), and replacing the `sync.Pool` with a bounded structure — the second changes the
+module's memory-retention contract and is the user's decision.
 
 **Backlog.** **#2382 SUPPORTED, and larger than recorded** (see the reconciliation table).
 The four non-PageRank sites: **filed as rmp #2862.**
@@ -532,6 +609,17 @@ the inner loop and caching `dw := dist[w]` are integer operations and exact. Rep
 `sigma[v] / sw` with a precomputed reciprocal is **not** bit-identical, and the function's own
 comment states the accumulation order must stay bit-identical — so that one is a
 behaviour-affecting change requiring the user's decision, not an optimisation.
+
+**Outcome (rmp #2868): the `dv1` hoist shipped; caching `dw` was tried, measured and
+DROPPED.** Both are exact, so the choice between them was settled by measurement alone. A
+single-variable split over 7 samples showed the `dw` cache carried the whole of the arm's
+sparse-graph regression: with both changes `Betweenness_Serial` measured **+1.99%** and
+`Brandes_RandomGraph` **+0.77%**, while the `dv1` hoist alone left them at **+0.20%** and
+**+0.38%** for the same geomean win. On the shipped arm's own re-run ladder both rows are
+**`~`** — the residual was noise — with `2k_deg16` at **−2.01%** (p=0.001), `5k_deg16` at
+**−3.52%** (p=0.001) and a full-ladder geomean of **−0.70%**, against a noise control of
+−0.02% in which every row is `~`. **Do not re-propose the `dw` cache as an open lead:** it is
+a measured-and-rejected option, not an untried one.
 
 The 5.90% in `asyncPreempt` is the measured cost of a long non-yielding loop, against the
 module's own rule that long operations should yield or chunk.
