@@ -141,6 +141,7 @@ the run for a minute before reporting the refusal.
 | `-label` | `benchstat` sub-name for the run | `conn=<n>` / `pooled` |
 | `-mutex-fraction` | `runtime.SetMutexProfileFraction` for the profiled window (`0` disables) | `1` |
 | `-block-rate` | `runtime.SetBlockProfileRate` in ns for the profiled window (`0` disables) | `1` |
+| `-server-log` | logger given to `bolt/server` `Options.Logger`: `default` \| `discard` \| `error` | `default` |
 | `-ladder` | sweep the ladder, one child process per rung (requires `-artifact-dir`) | `false` |
 | `-ladder-levels` | comma-separated ladder | `1,8,64,256,1024` |
 | `-saturation-offer` | connections offered by the saturation rung (`0` drops it) | `256` |
@@ -149,6 +150,21 @@ the run for a minute before reporting the refusal.
 `-artifact-dir` owns every profile of an instrumented run, so it may not be
 combined with `exprof`'s `-profile-dir` or `-trace`; the run refuses to start
 rather than writing a truncated CPU profile somewhere unexpected.
+
+`-server-log` exists to make the server's own logging measurable instead of
+assumed. The accept loop writes a `WARN` for every connection the
+`MaxConnections` semaphore refuses, and that emission sits on the accept
+goroutine between one `Accept` and the next. The three modes remove one layer
+each, so the difference between two runs is the layer named:
+
+| Mode | `Options.Logger` | What it still pays |
+|---|---|---|
+| `default` | `nil` — the server uses `slog.Default()` | formats the record and writes it to stderr |
+| `discard` | a `TextHandler` at `LevelInfo` over `io.Discard` | formats the record; writes nothing |
+| `error` | a `TextHandler` at `LevelError` over `io.Discard` | returns before building the record |
+
+No mode removes the cost of **evaluating the call's arguments**, which the
+language performs before the call in every one of them.
 
 ## Artefact layout
 

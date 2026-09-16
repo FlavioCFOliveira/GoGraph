@@ -95,10 +95,12 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"math/rand"
 	"os"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/examples/internal/exprof"
@@ -156,6 +158,29 @@ type config struct {
 	mutexFraction int
 	blockRate     int
 
+	// serverLog selects the logger handed to bolt/server Options.Logger. It
+	// exists so the cost of the server's own logging can be measured rather
+	// than assumed: the accept loop logs a WARN for every connection the
+	// MaxConnections semaphore refuses, and that emission sits on the accept
+	// goroutine, between one Accept and the next.
+	//
+	// The three values decompose that cost into its parts, and only the parts
+	// differ between them:
+	//
+	//   - "default" — Options.Logger nil, so the server uses slog.Default(),
+	//     which formats the record and writes it to stderr. This is what an
+	//     embedder that configures nothing actually runs.
+	//   - "discard" — the same handler at the same level over io.Discard: the
+	//     record is still formatted, and nothing is written. The difference
+	//     from "default" is the write syscall alone.
+	//   - "error"   — the same handler at LevelError, so Logger.Warn returns
+	//     before building the record. The difference from "discard" is slog's
+	//     own formatting.
+	//
+	// No arm can remove the cost of EVALUATING the log call's arguments, which
+	// the language performs before the call in every arm.
+	serverLog string
+
 	// artifactDir, when set, turns the run into an instrumented one: the full
 	// artefact set is written there.
 	artifactDir string
@@ -171,6 +196,58 @@ type config struct {
 	// drops the rung.
 	satOffer int
 	satAdmit int
+}
+
+// Server-logger modes for -server-log. See config.serverLog for what each one
+// removes and why the difference between them is the measurement.
+const (
+	serverLogDefault = "default"
+	serverLogDiscard = "discard"
+	serverLogError   = "error"
+)
+
+// serverLogModes is the accepted set, in the order the decomposition reads:
+// each mode removes one more layer than the one before it.
+var serverLogModes = [...]string{serverLogDefault, serverLogDiscard, serverLogError}
+
+// validServerLog reports whether mode is one of serverLogModes. The empty
+// string is accepted and means the default, so a config built by hand in a test
+// need not name this dimension.
+func validServerLog(mode string) bool {
+	if mode == "" {
+		return true
+	}
+	for _, m := range serverLogModes {
+		if m == mode {
+			return true
+		}
+	}
+	return false
+}
+
+// serverLogMode is the configured mode with the empty string resolved to the
+// default, so the machine-readable record never carries an ambiguous value.
+func (c *config) serverLogMode() string {
+	if c.serverLog == "" {
+		return serverLogDefault
+	}
+	return c.serverLog
+}
+
+// serverLogger builds the logger for bolt/server Options.Logger.
+//
+// A nil return is the documented way to ask the server for slog.Default(); the
+// other two arms build a handler over the same writer shape so that the only
+// difference between the three is the layer named in config.serverLog.
+func (c *config) serverLogger() *slog.Logger {
+	switch c.serverLogMode() {
+	case serverLogDiscard:
+		return slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	case serverLogError:
+		return slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
+	default:
+		return nil
+	}
 }
 
 // defaultConfig returns a small, deterministic default: a 2000-person graph
@@ -192,6 +269,7 @@ func defaultConfig() config {
 		connectTimeout: 5 * time.Second,
 		mutexFraction:  1,
 		blockRate:      1,
+		serverLog:      serverLogDefault,
 		ladderLevels:   defaultLadderLevels,
 		satOffer:       256,
 		satAdmit:       128,
@@ -226,6 +304,8 @@ func (c *config) validate() error {
 		return fmt.Errorf("mutex-fraction must be >= 0, got %d", c.mutexFraction)
 	case c.blockRate < 0:
 		return fmt.Errorf("block-rate must be >= 0, got %d", c.blockRate)
+	case !validServerLog(c.serverLog):
+		return fmt.Errorf("server-log %q: want one of %s", c.serverLog, strings.Join(serverLogModes[:], ", "))
 	case c.satOffer < 0 || c.satAdmit < 0:
 		return fmt.Errorf("saturation offer/admit must be >= 0, got %d/%d", c.satOffer, c.satAdmit)
 	case c.ladder && c.artifactDir == "":
@@ -301,6 +381,7 @@ func (c *config) asJSON() configJSON {
 		ConnectTimeout:   c.dialTimeout().String(),
 		MutexFraction:    c.mutexFraction,
 		BlockRate:        c.blockRate,
+		ServerLog:        c.serverLogMode(),
 		ExpectRejections: c.expectRejections(),
 	}
 }
@@ -335,6 +416,8 @@ func bindFlags(fs *flag.FlagSet, cfg *config) *exprof.Config {
 		"runtime.SetMutexProfileFraction for the profiled window (0 disables)")
 	fs.IntVar(&cfg.blockRate, "block-rate", cfg.blockRate,
 		"runtime.SetBlockProfileRate in ns for the profiled window (0 disables)")
+	fs.StringVar(&cfg.serverLog, "server-log", cfg.serverLog,
+		"logger handed to bolt/server Options.Logger: "+strings.Join(serverLogModes[:], " | "))
 	fs.StringVar(&cfg.artifactDir, "artifact-dir", cfg.artifactDir,
 		"if set, write this run's full artefact set here (five profiles, trace, metrics.json, host.json, bench.txt)")
 	fs.StringVar(&cfg.label, "label", cfg.label,

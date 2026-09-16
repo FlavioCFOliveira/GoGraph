@@ -109,6 +109,7 @@ type configJSON struct {
 	ConnectTimeout   string `json:"connect_timeout"`
 	MutexFraction    int    `json:"mutex_profile_fraction"`
 	BlockRate        int    `json:"block_profile_rate_ns"`
+	ServerLog        string `json:"server_log"`
 	ExpectRejections bool   `json:"expect_rejections"`
 }
 
@@ -224,6 +225,10 @@ func runRung(ctx context.Context, w io.Writer, cfg *config) error {
 		MaxConnections: cfg.effectiveMaxConnections(),
 		ConnTimeout:    connIdleTimeout,
 		Auth:           server.NoAuthHandler{},
+		// A nil Logger is the shipped default (slog.Default()); -server-log
+		// replaces it so the cost of the server's own logging on the accept
+		// path can be measured rather than assumed. See config.serverLog.
+		Logger: cfg.serverLogger(),
 	})
 	if err != nil {
 		return fmt.Errorf("new server: %w", err)
@@ -852,6 +857,7 @@ func childArgs(cfg *config, spec rungSpec, dir string) []string {
 		"-connect-timeout", cfg.dialTimeout().String(),
 		"-mutex-fraction", strconv.Itoa(cfg.mutexFraction),
 		"-block-rate", strconv.Itoa(cfg.blockRate),
+		"-server-log", cfg.serverLogMode(),
 		"-label", spec.name,
 		"-artifact-dir", dir,
 	}

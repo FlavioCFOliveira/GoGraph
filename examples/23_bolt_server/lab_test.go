@@ -302,6 +302,7 @@ func TestChildArgsRoundTrip(t *testing.T) {
 		{"connect-timeout", child.connectTimeout, parent.dialTimeout()},
 		{"mutex-fraction", child.mutexFraction, parent.mutexFraction},
 		{"block-rate", child.blockRate, parent.blockRate},
+		{"server-log", child.serverLog, parent.serverLogMode()},
 		{"label", child.label, spec.name},
 		{"artifact-dir", child.artifactDir, "/tmp/parent/conn=64"},
 	}
