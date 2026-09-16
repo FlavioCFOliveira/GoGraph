@@ -32,9 +32,27 @@ exactly the rows that were retried in `out2`/`out3` (`out/elevated`'s `04_persis
 `14_routing_alternatives`, `17_transactional_log`, `21_typed_recovery`,
 `36_mvcc_snapshot_topology`; `out2/elevated`'s `17_transactional_log`; `out/contention`'s
 `36_mvcc_snapshot_topology`). There are **113 heap profiles** and **59 each** of mutex, block
-and goroutine (42 in `out/default`, 17 in `out/contention`). A further 41 of each sit in the
-superseded directory. *A figure of "143 CPU profiles" circulated with this campaign; the
-correct live count is 120, of which 113 can be read.*
+and goroutine in the live passes (42 in `out/default`, 17 in `out/contention`). A further 41 of
+each sit in the superseded directory, so **the sweep holds 100 mutex profiles on disk, not 60** —
+a figure of 60 (42 + 18) circulated with this campaign and is wrong twice: the contention pass
+has 17, not 18, and the count omits the 41 superseded ones. *A figure of "143 CPU profiles" also
+circulated; the correct live count is 120, of which 113 can be read.*
+
+**Three inventory facts that a reader must have before quoting any artefact:**
+
+* **`out/contention/` contains no row-36 mutex profile.** That pass's
+  `36_mvcc_snapshot_topology` produced a **zero-length `cpu.pprof` and no companion files at
+  all** — the directory holds only `cpu.pprof` (0 bytes), `probe.txt`, `run.log` and the two
+  loadavg files. Row 36's only mutex profiles are `out/default`'s and the superseded copy. Any
+  statement of the form "row 36 under contention shows …" for a mutex, heap, block or goroutine
+  quantity has no artefact behind it.
+* **Every `probe.txt` under `out/default-preorder-artefact/` records paths pointing at
+  `out/default/…`** — all 42 of them, with not one naming its own directory. **The numbers in
+  those files are that pass's own; only the path strings are wrong.** A reader who trusts the
+  paths will attribute one pass's figures to another.
+* The superseded directory is a **distinct measurement pass**, not a copy: its row-37 mutex
+  profile totals 212 033 µs against `out/default`'s 275 412 µs. It is excluded from the live
+  counts and is quoted in this document only where a criterion demands every profile on disk.
 
 **Two allocation quantities must not be conflated.** The manifest's `heap_alloc_b` is the
 heap profile's cumulative `alloc_space` — every byte ever allocated. An example's own
@@ -321,6 +339,87 @@ changes that contract, and `correctBitmapOver` mutates in place.
 
 **Backlog.** **Filed as rmp #2863.** Related to **#2391**, whose own numbers this refutes.
 
+#### Outcome — implemented as rmp #2863, measured
+
+**What shipped.** `label.Index.BitmapShared` (`graph/index/label/index.go`) returns a
+**memoised immutable image** of one label's node set in place of a per-read clone. The image is
+built once under the entry write lock, published on `entry.image`, and **dropped — never edited —
+by `Index.mutate`** before the set changes, so a reader still holding the old pointer keeps the
+instant it acquired. `mutate` is the single funnel for all four mutators (`Add`, `Remove`,
+`AddRange`, `RemoveRange`); `Deserialize` builds its entries fresh, so their image is nil by
+construction; and `reap` detaches an entry only after the mutation that emptied it has already
+dropped the image, so no stale image can outlive its entry. `Intersect` is
+**untouched** and keeps its caller-owned contract — which is precisely why the fix is a new
+method rather than a change to the old one, and why the *Risk* recorded above did not
+materialise. `labelBitmapAsOfFiltered`'s `clone func() *roaring64.Bitmap` became
+`acquire func() (*roaring64.Bitmap, bool)`, and the private copy is now taken **only** on the
+branch that reaches `correctBitmapOver`.
+
+**Why the spanning property survives** — the load-bearing point this finding flagged. `acquire()`
+is called at exactly the position `clone()` occupied, between the two suspect samples, so **the
+instant does not move**. Deferring the *copy* past the second sample is sound because a published
+image is written once and never again: a write to the label replaces the image rather than editing
+it, so the later `Clone()` reproduces the image **as it was at acquire**, not as the index is by
+then. The recommendation above — "a copy-on-write handle across the two samples, materialising
+only on entry to `correctBitmapOver`" — is what was built. Pinned by
+`TestLabelBitmapAsOf_CorrectsWhenTheSweepLandsDuringTheClone`
+(`graph/lpg/mvcc_suspects_test.go:33`), which lands a sweep inside that window.
+
+**Evidence** — `35_mvcc_mixed_workload`, 10 interleaved A/B/A2 rounds, same host, `A2 = A`
+byte-identical as the noise control:
+
+| phase | base sec/op | fixed sec/op | delta |
+|---|---|---|---|
+| `baseline` | 2.044 µs ± 1% | 1.417 µs ± 2% | **−30.68%** (p=0.000, n=10) |
+| `analytics_only` | 2.561 µs ± 3% | 1.878 µs ± 3% | **−26.66%** (p=0.000, n=10) |
+| `writer_only` | 2.106 µs ± 2% | 1.441 µs ± 3% | **−31.56%** (p=0.000, n=10) |
+| `analytics_and_writer` | 2.623 µs ± 3% | 1.948 µs ± 3% | **−25.75%** (p=0.000, n=10) |
+| **geomean** | 2.319 µs | 1.653 µs | **−28.71%** |
+
+**The noise control returns zero significant rows** (every phase `~`, p = 0.393–0.796, geomean
+−0.35%), so the four deltas above sit far outside the floor.
+
+Allocation, `alloc_space` over one profiled run of each arm: **15 223.14 MB → 9 741.67 MB**
+(**−36.0%**) **while doing 1.431× the operations** (summed phase throughput
+1 820 327 → 2 605 416 ops/s over identical 3.21 s phases), i.e. **−55.3% per operation**.
+openCypher TCK **3897/3897**, measured by #2863 on this tree; corroborated here by
+`go test -count=1 ./cypher/...` passing, whose gate constant `tckExecutionBaseline` is 3897.
+
+**AC-1 — MET, at 0.00%.** The criterion asked for the roaring clone chain under 10% of
+allocation. In the base arm it is `roaring64.(*Bitmap).Clone` 53.47% cum and
+`(*arrayContainer).clone` **50.50% flat**; in the fixed arm, at `-nodefraction=0`, **no clone
+frame survives anywhere in the profile** — the chain is gone, not merely reduced.
+
+**AC-2 — NOT MET, and the threshold's premise is wrong.** The criterion asked for the runtime
+bucket below 80%. Measured: **94.07% → 93.36%** (two-route delta 0 in both arms). This is
+recorded as **unmet with a measured reason**; it is **not** "partially met", and it must never be
+softened into that — a criterion reported that way is a false statement a later reader acts on.
+
+The measured reason: this workload is **fixed-duration** (3.21 s per arm) on a **10-core** host,
+and roughly **half of its profiled CPU is the runtime idle or parking** — in the fixed arm
+`usleep` 24.43%, `pthread_cond_wait` 13.27%, `pthread_cond_signal` 7.39% and `procyieldAsm`
+4.30%, **49.39% together** (47.94% in the base arm). Removing allocation therefore returns
+capacity to **idle**, not to GoGraph, and **no allocation fix can move that share**. The 80%
+threshold was set against a bucket that is mostly parking, so it measures the wrong thing for
+this row.
+
+What *did* move is exactly what the finding named:
+
+| frame | base | fixed |
+|---|---|---|
+| `runtime.gcDrain` cum | 9.68% | **6.49%** |
+| `runtime.gcBgMarkWorker` cum | 7.05% | **3.77%** |
+| GoGraph's own bucket | 2.10% (0.28 s) | **3.24%** (0.43 s) |
+| `runtime.madvise` flat | 10.88% | **15.69%** |
+| `runtime.sysUsed` → `sysUsedOS` cum | 10.43% | **15.61%** |
+
+The total profiled CPU is essentially unchanged — **13.33 s → 13.26 s of samples over the same
+3.21 s** — while the run performs 1.431× the operations; GoGraph's share rises because the module
+is doing more work inside the same window. Against that, **`madvise`/`sysUsed` rose** (page
+re-commit) and **partly cancelled the marking win inside the CPU profile**, which is why the
+throughput gain is visible in the A/B and only partly visible in the bucket table.
+
+
 ---
 
 ### R4 — `exec.Expand` discards the stored-direction bit; the hydrator recovers it per row with an O(deg) probe
@@ -571,14 +670,49 @@ optimisation. It is there for a correctness reason the code records with measure
 (rmp #2378: pinning alone 2/100 failures, dropping the global counter alone 3/100, both
 together 0/300), so it must not simply be deleted.
 
-**Attribution.** Allocation established. The lock's *contention* cost is **not measured** —
-the mutex profiles exist for 42 default rows and 18 contention rows and only one has ever been
-read. Naming that gap is part of this finding.
+**Attribution.** Allocation established. The lock's *contention* cost was **not measured** when
+this finding was written — the mutex profiles exist for 42 `out/default` rows and **17**
+`out/contention` rows (not 18), **59 live**, and only one had ever been read. It has since been
+measured; see the outcome below.
 
 **Owner.** `graph/lpg`.
 
 **Backlog.** **Filed as rmp #2867.** Design options in the prior-art document: Option A
 retires the need for pinning rather than optimising the pin.
+
+#### Outcome — rmp #2867's first criterion measured: the contention is not there
+
+The criterion is *"the mutex delay attributable to `Snapshot.visible` is reported for both rows
+named above, read from the profiles on disk"*. Read, on every mutex profile that holds either row:
+
+| profile | total mutex delay | `Snapshot.visible` cum | share |
+|---|---|---|---|
+| `37_mvcc_write_contention`, `out/contention` | 1 397 703 µs | 646.64 µs | **0.046%** |
+| `37_mvcc_write_contention`, `out/default` | 275 412 µs | 74.33 µs | **0.027%** |
+| `37_mvcc_write_contention`, `out/default-preorder-artefact` (superseded) | 212 033 µs | 414.70 µs | **0.196%** |
+| `36_mvcc_snapshot_topology`, `out/default` | 11 815 µs | — | **does not appear** |
+| `36_mvcc_snapshot_topology`, `out/contention` | — | — | **no mutex profile exists** (see the method section) |
+
+**The contention this task was filed for is not present.** The third row is quoted only because
+the criterion asks for every profile on disk; it is the superseded pass this document otherwise
+does not quote, and it agrees with the two live ones.
+
+**None of what little there is belongs to the `sync.Mutex` the task names.** `Snapshot.visible`'s own
+**flat delay is zero** in all three row-37 profiles. Its only children are
+`runtime.mapassign_fast64ptr` (**93.64%**) and `runtime.makemap_small` (**6.36%**) in the
+contention pass — `mapassign_fast64ptr` at 100% in the other two. That is the runtime's own heap
+lock inside the map insert: **the allocation the memo causes, not the lock guarding it.** Its
+sole caller is `propBagAsOfLockedSnap`, at 100% in all three.
+
+**What row 37's mutex delay actually is.** `sync.(*RWMutex).Unlock` is **75.63% cum**, reached
+90.82% from `setNodePropertyInfo` and 8.96% from `withdrawAbortedProps` — the versioned
+property-write path. That is a **different finding**, and it is not #2867's.
+
+**Conclusion to carry forward.** If a change is ever made at `Snapshot.visible` it must be
+justified **on allocation** — the 31.14% / 27.11% / 12.47% shares established above — and
+**never on contention**, which is measured at under 0.2% of mutex delay everywhere it appears.
+And the memo **must not simply be deleted**: rmp #2378 measured pinning alone at 2/100 failures,
+dropping the global counter alone at 3/100, and both together at **0/300**.
 
 ---
 
@@ -783,10 +917,12 @@ CPU and under 100 MB of allocation are excluded for lack of resolution.
    blocking, GC pause distribution and syscall latency over the workload timeline are
    therefore unmeasured, and every GC-frequency claim above is inferred from CPU profiles
    rather than observed.
-2. **Mutex and block profiles exist for 59 rows each and exactly one has been read.** R8's
-   lock is ranked on its allocation, not its contention. Worse for R7 and R8: mutex, block and
+2. **Mutex and block profiles exist for 59 live rows each (100 on disk counting the superseded
+   pass), and only R8's four have been read.** Every other row's mutex and block profile is still
+   unread, so no contention claim is made for any of them. Worse for R7 and R8: mutex, block and
    goroutine profiles were captured **only** in `out/default` (42) and `out/contention` (17) —
-   **none at elevated scale**, which is where every heavy row lives.
+   **none at elevated scale**, which is where every heavy row lives. R8's contention is therefore
+   measured at default scale only, and row 36 has no contention-pass mutex profile at all.
 3. **No hardware counters.** The claim that the chain walk in R7 is memory-stall-bound rather
    than branch-bound is the most load-bearing unverified statement in this document. IPC,
    cache-miss and branch-mispredict counters would settle it; collecting them is outside this
