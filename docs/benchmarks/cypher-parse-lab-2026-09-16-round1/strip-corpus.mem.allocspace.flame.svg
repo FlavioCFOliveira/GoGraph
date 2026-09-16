@@ -1,0 +1,175 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="380" viewBox="0 0 1400 380" font-family="Menlo,monospace" font-size="11">
+<rect width="1400" height="380" fill="#ffffff"/>
+<text x="700" y="20" text-anchor="middle" font-size="14">strip-corpus.mem.allocspace.flame [alloc_space] [focus BenchmarkStripCorpus]</text>
+<text x="700" y="36" text-anchor="middle" font-size="10" fill="#555">total 103.921 MB — red=antlr runtime, orange=generated parser, blue=hand-written parser, green=other GoGraph, grey=runtime/stdlib</text>
+<g><title>all — 103.921 MB (100.00%)</title><rect x="10.00" y="48" width="1379.50" height="15" fill="#cccccc" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="59" fill="#000">all</text>
+</g>
+<g><title>testing.(*B).launch — 103.215 MB (99.32%)</title><rect x="10.00" y="64" width="1370.13" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="75" fill="#000">testing.(*B).launch</text>
+</g>
+<g><title>testing.(*B).runN — 103.215 MB (99.32%)</title><rect x="10.00" y="80" width="1370.13" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="91" fill="#000">testing.(*B).runN</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/parser.BenchmarkStripCorpus.func1 — 103.215 MB (99.32%)</title><rect x="10.00" y="96" width="1370.13" height="15" fill="#1f77b4" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="107" fill="#000">parser.BenchmarkStripCorpus.func1</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/parser.StripLiterals — 103.215 MB (99.32%)</title><rect x="10.00" y="112" width="1370.13" height="15" fill="#1f77b4" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="123" fill="#000">parser.StripLiterals</text>
+</g>
+<g><title>strings.ToUpper — 37.771 MB (36.35%)</title><rect x="10.00" y="128" width="501.08" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="139" fill="#000">strings.ToUpper</text>
+</g>
+<g><title>strings.(*Builder).Grow — 37.771 MB (36.35%)</title><rect x="10.00" y="144" width="501.08" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="155" fill="#000">strings.(*Builder).Grow</text>
+</g>
+<g><title>strings.(*Builder).grow — 37.771 MB (36.35%)</title><rect x="10.00" y="160" width="501.08" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="171" fill="#000">strings.(*Builder).grow</text>
+</g>
+<g><title>internal/bytealg.MakeNoZero — 37.771 MB (36.35%)</title><rect x="10.00" y="176" width="501.08" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="187" fill="#000">bytealg.MakeNoZero</text>
+</g>
+<g><title>strings.(*Builder).Grow — 16.475 MB (15.85%)</title><rect x="511.58" y="128" width="218.28" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="514.58" y="139" fill="#000">strings.(*Builder).Grow</text>
+</g>
+<g><title>strings.(*Builder).grow — 16.475 MB (15.85%)</title><rect x="511.58" y="144" width="218.28" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="514.58" y="155" fill="#000">strings.(*Builder).grow</text>
+</g>
+<g><title>internal/bytealg.MakeNoZero — 16.475 MB (15.85%)</title><rect x="511.58" y="160" width="218.28" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="514.58" y="171" fill="#000">bytealg.MakeNoZero</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/parser.unquoteString — 1.267 MB (1.22%)</title><rect x="730.36" y="128" width="16.33" height="15" fill="#1f77b4" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>strings.(*Builder).Grow — 1.267 MB (1.22%)</title><rect x="730.36" y="144" width="16.33" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>strings.(*Builder).grow — 1.267 MB (1.22%)</title><rect x="730.36" y="160" width="16.33" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/bytealg.MakeNoZero — 1.267 MB (1.22%)</title><rect x="730.36" y="176" width="16.33" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>testing.(*B).run1.func1 — 0.706 MB (0.68%)</title><rect x="1380.63" y="64" width="8.87" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>testing.(*B).runN — 0.706 MB (0.68%)</title><rect x="1380.63" y="80" width="8.87" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/parser.BenchmarkStripCorpus — 0.702 MB (0.68%)</title><rect x="1380.63" y="96" width="8.82" height="15" fill="#1f77b4" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>testing.(*B).Run — 0.566 MB (0.54%)</title><rect x="1380.63" y="112" width="7.02" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>testing.(*B).run — 0.315 MB (0.30%)</title><rect x="1380.63" y="128" width="3.69" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>testing.(*benchState).processBench — 0.314 MB (0.30%)</title><rect x="1380.63" y="144" width="3.66" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>testing.BenchmarkResult.String — 0.148 MB (0.14%)</title><rect x="1380.63" y="160" width="1.47" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>fmt.Fprintf — 0.136 MB (0.13%)</title><rect x="1380.63" y="176" width="1.30" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>fmt.newPrinter — 0.129 MB (0.12%)</title><rect x="1380.63" y="192" width="1.21" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>sync.(*Pool).Get — 0.129 MB (0.12%)</title><rect x="1380.63" y="208" width="1.21" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>sync.(*Pool).pin — 0.115 MB (0.11%)</title><rect x="1380.63" y="224" width="1.02" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>sync.(*Pool).pinSlow — 0.115 MB (0.11%)</title><rect x="1380.63" y="240" width="1.02" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>fmt.init.func1 — 0.014 MB (0.01%)</title><rect x="1382.15" y="224" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>testing.benchmarkName (inline) — 0.132 MB (0.13%)</title><rect x="1382.60" y="160" width="1.26" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>fmt.Sprintf — 0.131 MB (0.13%)</title><rect x="1382.60" y="176" width="1.24" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>fmt.newPrinter — 0.124 MB (0.12%)</title><rect x="1382.60" y="192" width="1.15" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>sync.(*Pool).Get — 0.124 MB (0.12%)</title><rect x="1382.60" y="208" width="1.15" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>sync.(*Pool).pin — 0.113 MB (0.11%)</title><rect x="1382.60" y="224" width="1.01" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>sync.(*Pool).pinSlow — 0.113 MB (0.11%)</title><rect x="1382.60" y="240" width="1.01" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>fmt.init.func1 — 0.011 MB (0.01%)</title><rect x="1384.10" y="224" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>fmt.Fprintln — 0.010 MB (0.01%)</title><rect x="1384.35" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>fmt.(*pp).doPrintln — 0.010 MB (0.01%)</title><rect x="1384.35" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>fmt.(*pp).printArg — 0.010 MB (0.01%)</title><rect x="1384.35" y="192" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>fmt.(*pp).fmtString — 0.010 MB (0.01%)</title><rect x="1384.35" y="208" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>fmt.(*fmt).fmtS — 0.010 MB (0.01%)</title><rect x="1384.35" y="224" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>fmt.(*fmt).padString — 0.010 MB (0.01%)</title><rect x="1384.35" y="240" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>fmt.(*buffer).writeString (inline) — 0.010 MB (0.01%)</title><rect x="1384.35" y="256" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>testing.(*matcher).fullName — 0.142 MB (0.14%)</title><rect x="1384.81" y="128" width="1.38" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>testing.simpleMatch.matches — 0.123 MB (0.12%)</title><rect x="1384.81" y="144" width="1.14" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>testing/internal/testdeps.TestDeps.MatchString — 0.123 MB (0.12%)</title><rect x="1384.81" y="160" width="1.14" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>regexp.(*Regexp).MatchString (inline) — 0.123 MB (0.12%)</title><rect x="1384.81" y="176" width="1.14" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>regexp.(*Regexp).doMatch (inline) — 0.123 MB (0.12%)</title><rect x="1384.81" y="192" width="1.14" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>regexp.(*Regexp).find — 0.123 MB (0.12%)</title><rect x="1384.81" y="208" width="1.14" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>regexp.(*Regexp).doOnePass — 0.123 MB (0.12%)</title><rect x="1384.81" y="224" width="1.14" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>regexp.newOnePassMachine (inline) — 0.123 MB (0.12%)</title><rect x="1384.81" y="240" width="1.14" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>sync.(*Pool).Get — 0.115 MB (0.11%)</title><rect x="1384.81" y="256" width="1.03" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>sync.(*Pool).pin — 0.115 MB (0.11%)</title><rect x="1384.81" y="272" width="1.03" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>sync.(*Pool).pinSlow — 0.115 MB (0.11%)</title><rect x="1384.81" y="288" width="1.03" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>testing.(*matcher).unique — 0.011 MB (0.01%)</title><rect x="1386.45" y="144" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/parser.loadCorpus — 0.132 MB (0.13%)</title><rect x="1388.14" y="112" width="1.26" height="15" fill="#1f77b4" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/parser.readCorpus — 0.132 MB (0.13%)</title><rect x="1388.14" y="128" width="1.25" height="15" fill="#1f77b4" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>encoding/json.Unmarshal (inline) — 0.100 MB (0.10%)</title><rect x="1388.14" y="144" width="0.82" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>encoding/json/v2.Unmarshal — 0.100 MB (0.10%)</title><rect x="1388.14" y="160" width="0.82" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>encoding/json/v2.unmarshalDecode — 0.098 MB (0.09%)</title><rect x="1388.14" y="176" width="0.80" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>encoding/json/v2.makeStructArshaler.func3 — 0.097 MB (0.09%)</title><rect x="1388.14" y="192" width="0.79" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>encoding/json/v2.makeSliceArshaler.func3 — 0.060 MB (0.06%)</title><rect x="1388.14" y="208" width="0.30" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>reflect.Value.Grow — 0.032 MB (0.03%)</title><rect x="1388.14" y="224" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>reflect.Value.grow — 0.032 MB (0.03%)</title><rect x="1388.14" y="240" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>reflect.growslice — 0.032 MB (0.03%)</title><rect x="1388.14" y="256" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>encoding/json/v2.makeStructArshaler.func3 — 0.027 MB (0.03%)</title><rect x="1388.57" y="224" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>encoding/json/v2.makeStringArshaler.func2 — 0.015 MB (0.01%)</title><rect x="1388.57" y="240" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>encoding/json/v2.makeString — 0.013 MB (0.01%)</title><rect x="1388.57" y="256" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>sync.(*Once).Do — 0.032 MB (0.03%)</title><rect x="1388.94" y="208" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>sync.(*Once).doSlow — 0.032 MB (0.03%)</title><rect x="1388.94" y="224" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>encoding/json/v2.makeStructArshaler.func1 — 0.032 MB (0.03%)</title><rect x="1388.94" y="240" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>encoding/json/v2.makeStructFields — 0.032 MB (0.03%)</title><rect x="1388.94" y="256" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>encoding/json/v2.makeStructFields.func3 — 0.031 MB (0.03%)</title><rect x="1388.94" y="272" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>reflect.PointerTo (inline) — 0.028 MB (0.03%)</title><rect x="1388.94" y="288" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>reflect.(*rtype).ptrTo — 0.028 MB (0.03%)</title><rect x="1388.94" y="304" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>reflect.typesByString — 0.027 MB (0.03%)</title><rect x="1388.94" y="320" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>reflect.compiledTypelinks — 0.027 MB (0.03%)</title><rect x="1388.94" y="336" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>os.ReadFile — 0.032 MB (0.03%)</title><rect x="1389.47" y="144" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>os.readFileContents — 0.032 MB (0.03%)</title><rect x="1389.47" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+</svg>

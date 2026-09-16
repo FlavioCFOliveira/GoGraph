@@ -1,0 +1,18 @@
+File: parser.test
+Type: alloc_space
+Time: 2026-09-16 13:05:07 WEST
+Showing nodes accounting for 105744.38kB, 99.27% of 106518.19kB total
+Dropped 223 nodes (cum <= 532.59kB)
+      flat  flat%   sum%        cum   cum%
+56822.57kB 53.35% 53.35% 56822.57kB 53.35%  internal/bytealg.MakeNoZero
+48813.28kB 45.83% 99.17% 105634.05kB 99.17%  github.com/FlavioCFOliveira/GoGraph/cypher/parser.StripLiterals
+  106.31kB   0.1% 99.27%   568.87kB  0.53%  testing.(*B).Run
+    1.95kB 0.0018% 99.27%   701.61kB  0.66%  github.com/FlavioCFOliveira/GoGraph/cypher/parser.BenchmarkStripCorpus
+    0.27kB 0.00025% 99.27% 106458.77kB 99.94%  testing.(*B).runN
+         0     0% 99.27% 105634.05kB 99.17%  github.com/FlavioCFOliveira/GoGraph/cypher/parser.BenchmarkStripCorpus.func1
+         0     0% 99.27%  1267.25kB  1.19%  github.com/FlavioCFOliveira/GoGraph/cypher/parser.unquoteString
+         0     0% 99.27% 56822.57kB 53.35%  strings.(*Builder).Grow
+         0     0% 99.27% 56822.57kB 53.35%  strings.(*Builder).grow
+         0     0% 99.27% 38679.69kB 36.31%  strings.ToUpper
+         0     0% 99.27% 105660.64kB 99.19%  testing.(*B).launch
+         0     0% 99.27%   793.89kB  0.75%  testing.(*B).run1.func1

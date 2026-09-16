@@ -1,0 +1,21 @@
+File: parser.test
+Type: cpu
+Time: 2026-09-16 12:58:09 WEST
+Duration: 144.99s, Total samples = 133.68s (92.20%)
+Active filters:
+   focus=BenchmarkStripCorpus
+Showing nodes accounting for 114.15s, 85.39% of 133.68s total
+Dropped 83 nodes (cum <= 0.67s)
+      flat  flat%   sum%        cum   cum%
+         0     0%     0%    115.73s 86.57%  testing.(*B).runN
+    24.46s 18.30% 18.30%    115.70s 86.55%  github.com/FlavioCFOliveira/GoGraph/cypher/parser.BenchmarkStripCorpus.func1
+         0     0% 18.30%    115.70s 86.55%  testing.(*B).launch
+    18.06s 13.51% 31.81%     91.21s 68.23%  github.com/FlavioCFOliveira/GoGraph/cypher/parser.StripLiterals
+     0.09s 0.067% 31.87%     70.29s 52.58%  strings.IndexByte (inline)
+     0.06s 0.045% 31.92%     70.20s 52.51%  internal/stringslite.IndexByte (inline)
+    70.14s 52.47% 84.39%     70.14s 52.47%  internal/bytealg.IndexByteString
+     0.98s  0.73% 85.12%      2.51s  1.88%  strings.ToUpper
+     0.06s 0.045% 85.17%      1.11s  0.83%  strings.(*Builder).Grow
+     0.14s   0.1% 85.27%      0.98s  0.73%  strings.(*Builder).grow
+     0.08s  0.06% 85.33%      0.78s  0.58%  internal/bytealg.MakeNoZero
+     0.08s  0.06% 85.39%      0.60s  0.45%  runtime.mallocgc

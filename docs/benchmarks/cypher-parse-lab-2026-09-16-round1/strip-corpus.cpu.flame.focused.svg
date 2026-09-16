@@ -1,0 +1,149 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="396" viewBox="0 0 1400 396" font-family="Menlo,monospace" font-size="11">
+<rect width="1400" height="396" fill="#ffffff"/>
+<text x="700" y="20" text-anchor="middle" font-size="14">strip-corpus.cpu.flame.focused [focus BenchmarkStripCorpus]</text>
+<text x="700" y="36" text-anchor="middle" font-size="10" fill="#555">total 115730.00 ms — red=antlr runtime, orange=generated parser, blue=hand-written parser, green=other GoGraph, grey=runtime/stdlib</text>
+<g><title>all — 115730.00 ms (100.00%)</title><rect x="10.00" y="48" width="1379.50" height="15" fill="#cccccc" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="59" fill="#000">all</text>
+</g>
+<g><title>testing.(*B).launch — 115700.00 ms (99.97%)</title><rect x="10.00" y="64" width="1379.14" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="75" fill="#000">testing.(*B).launch</text>
+</g>
+<g><title>testing.(*B).runN — 115700.00 ms (99.97%)</title><rect x="10.00" y="80" width="1379.14" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="91" fill="#000">testing.(*B).runN</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/parser.BenchmarkStripCorpus.func1 — 115700.00 ms (99.97%)</title><rect x="10.00" y="96" width="1379.14" height="15" fill="#1f77b4" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="107" fill="#000">parser.BenchmarkStripCorpus.func1</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/parser.StripLiterals — 91210.00 ms (78.81%)</title><rect x="10.00" y="112" width="1087.12" height="15" fill="#1f77b4" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="123" fill="#000">parser.StripLiterals</text>
+</g>
+<g><title>strings.IndexByte (inline) — 70290.00 ms (60.74%)</title><rect x="10.00" y="128" width="837.66" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="139" fill="#000">strings.IndexByte (inline)</text>
+</g>
+<g><title>internal/stringslite.IndexByte (inline) — 70200.00 ms (60.66%)</title><rect x="10.00" y="144" width="836.59" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="155" fill="#000">stringslite.IndexByte (inline)</text>
+</g>
+<g><title>internal/bytealg.IndexByteString — 70140.00 ms (60.61%)</title><rect x="10.00" y="160" width="835.87" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="171" fill="#000">bytealg.IndexByteString</text>
+</g>
+<g><title>strings.ToUpper — 2510.00 ms (2.17%)</title><rect x="848.16" y="128" width="29.43" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>strings.(*Builder).Grow — 1100.00 ms (0.95%)</title><rect x="848.16" y="144" width="12.62" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>strings.(*Builder).grow — 970.00 ms (0.84%)</title><rect x="848.16" y="160" width="11.07" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/bytealg.MakeNoZero — 770.00 ms (0.67%)</title><rect x="848.16" y="176" width="8.68" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgc — 560.00 ms (0.48%)</title><rect x="848.16" y="192" width="6.18" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgcTinySC2 — 440.00 ms (0.38%)</title><rect x="848.16" y="208" width="4.75" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mcache).nextFree — 50.00 ms (0.04%)</title><rect x="848.16" y="224" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mcache).refill — 20.00 ms (0.02%)</title><rect x="848.16" y="240" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mcentral).cacheSpan — 20.00 ms (0.02%)</title><rect x="848.16" y="256" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mcentral).grow — 20.00 ms (0.02%)</title><rect x="848.16" y="272" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mheap).alloc — 20.00 ms (0.02%)</title><rect x="848.16" y="288" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.systemstack — 20.00 ms (0.02%)</title><rect x="848.16" y="304" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mheap).alloc.func1 — 20.00 ms (0.02%)</title><rect x="848.16" y="320" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mheap).allocSpan — 20.00 ms (0.02%)</title><rect x="848.16" y="336" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mheap).initSpan — 20.00 ms (0.02%)</title><rect x="848.16" y="352" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.releasem (inline) — 50.00 ms (0.04%)</title><rect x="848.76" y="224" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.getMCache (inline) — 50.00 ms (0.04%)</title><rect x="849.35" y="224" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgcSmallNoScanSC2 — 60.00 ms (0.05%)</title><rect x="853.41" y="208" width="0.22" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.releasem (inline) — 20.00 ms (0.02%)</title><rect x="853.41" y="224" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.roundupsize (inline) — 130.00 ms (0.11%)</title><rect x="854.84" y="192" width="1.05" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.memmove — 50.00 ms (0.04%)</title><rect x="857.34" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>strings.(*Builder).copyCheck (inline) — 70.00 ms (0.06%)</title><rect x="859.73" y="160" width="0.33" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>strings.(*Builder).WriteByte (inline) — 300.00 ms (0.26%)</title><rect x="861.28" y="144" width="3.08" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>strings.(*Builder).copyCheck (inline) — 90.00 ms (0.08%)</title><rect x="861.28" y="160" width="0.57" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>strings.(*Builder).WriteString (inline) — 120.00 ms (0.10%)</title><rect x="864.85" y="144" width="0.93" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.memmove — 80.00 ms (0.07%)</title><rect x="864.85" y="160" width="0.45" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>strings.(*Builder).copyCheck (inline) — 30.00 ms (0.03%)</title><rect x="865.81" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/parser.isIdentChar (inline) — 130.00 ms (0.11%)</title><rect x="878.09" y="128" width="1.05" height="15" fill="#1f77b4" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/parser.isIdentStart (inline) — 80.00 ms (0.07%)</title><rect x="878.09" y="144" width="0.45" height="15" fill="#1f77b4" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/parser.isIdentStart (inline) — 80.00 ms (0.07%)</title><rect x="879.64" y="128" width="0.45" height="15" fill="#1f77b4" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mapassign_faststr — 30.00 ms (0.03%)</title><rect x="880.59" y="128" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/runtime/maps.(*Map).growToSmall — 20.00 ms (0.02%)</title><rect x="880.59" y="144" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/runtime/maps.newGroups (inline) — 20.00 ms (0.02%)</title><rect x="880.59" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/runtime/maps.newarray — 20.00 ms (0.02%)</title><rect x="880.59" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.newarray — 20.00 ms (0.02%)</title><rect x="880.59" y="192" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgc — 20.00 ms (0.02%)</title><rect x="880.59" y="208" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgcSmallScanNoHeader — 20.00 ms (0.02%)</title><rect x="880.59" y="224" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.concatstring2 — 30.00 ms (0.03%)</title><rect x="880.95" y="128" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.concatstrings — 30.00 ms (0.03%)</title><rect x="880.95" y="144" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/parser.unquoteString — 20.00 ms (0.02%)</title><rect x="881.31" y="128" width="0.10" height="15" fill="#1f77b4" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>strings.(*Builder).WriteString (inline) — 20.00 ms (0.02%)</title><rect x="881.55" y="128" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.makemap — 20.00 ms (0.02%)</title><rect x="881.79" y="128" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/runtime/maps.NewMap — 20.00 ms (0.02%)</title><rect x="881.79" y="144" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.asyncPreempt — 20.00 ms (0.02%)</title><rect x="1097.62" y="112" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>testing.(*B).run1.func1 — 30.00 ms (0.03%)</title><rect x="1389.64" y="64" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>testing.(*B).runN — 30.00 ms (0.03%)</title><rect x="1389.64" y="80" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/parser.BenchmarkStripCorpus — 30.00 ms (0.03%)</title><rect x="1389.64" y="96" width="0.10" height="15" fill="#1f77b4" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>testing.(*B).Run — 30.00 ms (0.03%)</title><rect x="1389.64" y="112" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>testing.(*B).run — 30.00 ms (0.03%)</title><rect x="1389.64" y="128" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>testing.(*benchState).processBench — 30.00 ms (0.03%)</title><rect x="1389.64" y="144" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>fmt.Fprintln — 20.00 ms (0.02%)</title><rect x="1389.64" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>os.(*File).Write — 20.00 ms (0.02%)</title><rect x="1389.64" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>os.(*File).write (inline) — 20.00 ms (0.02%)</title><rect x="1389.64" y="192" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/poll.(*FD).Write — 20.00 ms (0.02%)</title><rect x="1389.64" y="208" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/poll.ignoringEINTRIO (inline) — 20.00 ms (0.02%)</title><rect x="1389.64" y="224" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>syscall.Write (inline) — 20.00 ms (0.02%)</title><rect x="1389.64" y="240" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>syscall.write — 20.00 ms (0.02%)</title><rect x="1389.64" y="256" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>syscall.syscall — 20.00 ms (0.02%)</title><rect x="1389.64" y="272" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>syscall.syscalln — 20.00 ms (0.02%)</title><rect x="1389.64" y="288" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>syscall.rawsyscalln — 20.00 ms (0.02%)</title><rect x="1389.64" y="304" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+</svg>

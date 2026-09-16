@@ -1,0 +1,87 @@
+File: parser.test
+Type: inuse_space
+Time: 2026-09-16 13:05:07 WEST
+Showing nodes accounting for 78.66kB, 97.09% of 81.02kB total
+Dropped 70 nodes (cum <= 0.40kB)
+      flat  flat%   sum%        cum   cum%
+   41.50kB 51.22% 51.22%    41.57kB 51.31%  runtime.mallocgc
+   26.95kB 33.27% 84.49%    26.95kB 33.27%  reflect.compiledTypelinks
+    2.25kB  2.78% 87.26%    30.95kB 38.19%  encoding/json/v2.makeStructFields.func3
+    1.80kB  2.22% 89.48%     1.80kB  2.22%  regexp.onePassCopy
+    1.51kB  1.86% 91.34%    32.66kB 40.30%  encoding/json/v2.makeStructFields
+    1.38kB  1.71% 93.05%     1.38kB  1.71%  sync.(*Pool).pinSlow
+    1.38kB  1.70% 94.74%     1.38kB  1.70%  regexp/syntax.(*compiler).inst (inline)
+    0.62kB  0.77% 95.52%     0.62kB  0.77%  internal/sync.newIndirectNode[go.shape.interface {},go.shape.interface {}] (inline)
+    0.56kB  0.69% 96.21%     0.56kB  0.69%  encoding/json/v2.makeStructArshaler (inline)
+    0.41kB   0.5% 96.71%     0.45kB  0.56%  encoding/json/v2.makeSliceArshaler
+    0.18kB  0.22% 96.93%     3.59kB  4.43%  regexp.compile
+    0.12kB  0.15% 97.09%    27.75kB 34.25%  reflect.(*rtype).ptrTo
+         0     0% 97.09%    33.53kB 41.38%  encoding/json.Unmarshal (inline)
+         0     0% 97.09%    33.53kB 41.38%  encoding/json/v2.Unmarshal
+         0     0% 97.09%     1.76kB  2.17%  encoding/json/v2.lookupArshaler
+         0     0% 97.09%     1.16kB  1.44%  encoding/json/v2.makeDefaultArshaler
+         0     0% 97.09%     2.38kB  2.94%  encoding/json/v2.makeSliceArshaler.func3
+         0     0% 97.09%    32.66kB 40.30%  encoding/json/v2.makeStructArshaler.func1
+         0     0% 97.09%    33.05kB 40.79%  encoding/json/v2.makeStructArshaler.func3
+         0     0% 97.09%    33.53kB 41.38%  encoding/json/v2.unmarshalDecode
+         0     0% 97.09%     1.57kB  1.94%  fmt.Fprintf
+         0     0% 97.09%     1.55kB  1.92%  fmt.newPrinter
+         0     0% 97.09%    35.34kB 43.61%  github.com/FlavioCFOliveira/GoGraph/cypher/parser.BenchmarkStripCorpus
+         0     0% 97.09%    33.53kB 41.38%  github.com/FlavioCFOliveira/GoGraph/cypher/parser.loadCorpus
+         0     0% 97.09%    33.53kB 41.38%  github.com/FlavioCFOliveira/GoGraph/cypher/parser.readCorpus
+         0     0% 97.09%     0.53kB  0.66%  internal/sync.(*HashTrieMap[go.shape.interface {},go.shape.interface {}]).LoadOrStore
+         0     0% 97.09%     0.47kB  0.58%  internal/sync.(*HashTrieMap[go.shape.interface {},go.shape.interface {}]).init (inline)
+         0     0% 97.09%     0.47kB  0.58%  internal/sync.(*HashTrieMap[go.shape.interface {},go.shape.interface {}]).initSlow
+         0     0% 97.09%     4.12kB  5.08%  main.main
+         0     0% 97.09%    27.75kB 34.25%  reflect.PointerTo (inline)
+         0     0% 97.09%    26.95kB 33.27%  reflect.typesByString
+         0     0% 97.09%     3.59kB  4.43%  regexp.Compile (inline)
+         0     0% 97.09%     1.81kB  2.24%  regexp.compileOnePass
+         0     0% 97.09%     1.38kB  1.70%  regexp/syntax.(*compiler).compile
+         0     0% 97.09%     1.38kB  1.70%  regexp/syntax.(*compiler).rune
+         0     0% 97.09%     1.42kB  1.75%  regexp/syntax.Compile
+         0     0% 97.09%     2.62kB  3.24%  runtime.acquireSudog
+         0     0% 97.09%    27.98kB 34.53%  runtime.allocm
+         0     0% 97.09%     7.62kB  9.41%  runtime.gcBgMarkWorker
+         0     0% 97.09%     2.62kB  3.24%  runtime.gcMarkDone
+         0     0% 97.09%    15.59kB 19.24%  runtime.gcStart.func4
+         0     0% 97.09%    11.25kB 13.88%  runtime.mProfStackInit (inline)
+         0     0% 97.09%     4.12kB  5.08%  runtime.main
+         0     0% 97.09%    11.25kB 13.88%  runtime.makeProfStackFP (inline)
+         0     0% 97.09%    11.25kB 13.88%  runtime.makeslice
+         0     0% 97.09%    10.31kB 12.73%  runtime.malg
+         0     0% 97.09%    10.39kB 12.82%  runtime.mcall
+         0     0% 97.09%    13.63kB 16.83%  runtime.mcommoninit
+         0     0% 97.09%     2.34kB  2.89%  runtime.mpreinit
+         0     0% 97.09%        2kB  2.47%  runtime.mstart
+         0     0% 97.09%        2kB  2.47%  runtime.mstart0
+         0     0% 97.09%        2kB  2.47%  runtime.mstart1
+         0     0% 97.09%    27.98kB 34.53%  runtime.newm
+         0     0% 97.09%    29.98kB 37.00%  runtime.newobject
+         0     0% 97.09%     5.88kB  7.25%  runtime.newproc.func1
+         0     0% 97.09%     5.88kB  7.25%  runtime.newproc1
+         0     0% 97.09%    10.39kB 12.82%  runtime.park_m
+         0     0% 97.09%    12.39kB 15.29%  runtime.resetspinning
+         0     0% 97.09%    12.39kB 15.29%  runtime.schedule
+         0     0% 97.09%     2.62kB  3.24%  runtime.semacquire (inline)
+         0     0% 97.09%     2.62kB  3.24%  runtime.semacquire1
+         0     0% 97.09%    15.59kB 19.24%  runtime.startTheWorldWithSema
+         0     0% 97.09%    22.78kB 28.12%  runtime.startm
+         0     0% 97.09%    21.46kB 26.49%  runtime.systemstack
+         0     0% 97.09%    22.78kB 28.12%  runtime.wakep
+         0     0% 97.09%     0.53kB  0.66%  sync.(*Map).LoadOrStore (inline)
+         0     0% 97.09%    33.10kB 40.85%  sync.(*Once).Do (partial-inline)
+         0     0% 97.09%    33.10kB 40.85%  sync.(*Once).doSlow
+         0     0% 97.09%     1.55kB  1.92%  sync.(*Pool).Get
+         0     0% 97.09%     1.38kB  1.71%  sync.(*Pool).pin
+         0     0% 97.09%     1.91kB  2.36%  testing.(*B).Run
+         0     0% 97.09%     1.70kB  2.09%  testing.(*B).run
+         0     0% 97.09%    35.34kB 43.61%  testing.(*B).run1.func1
+         0     0% 97.09%    35.45kB 43.75%  testing.(*B).runN
+         0     0% 97.09%     4.12kB  5.08%  testing.(*M).Run
+         0     0% 97.09%     1.68kB  2.07%  testing.(*benchState).processBench
+         0     0% 97.09%     1.55kB  1.92%  testing.BenchmarkResult.String
+         0     0% 97.09%     3.61kB  4.45%  testing.newMatcher
+         0     0% 97.09%     3.72kB  4.59%  testing.runBenchmarks
+         0     0% 97.09%     3.61kB  4.45%  testing.simpleMatch.verify
+         0     0% 97.09%     3.59kB  4.43%  testing/internal/testdeps.TestDeps.MatchString

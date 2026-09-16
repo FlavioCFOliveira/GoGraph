@@ -1,0 +1,1556 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="764" viewBox="0 0 1400 764" font-family="Menlo,monospace" font-size="11">
+<rect width="1400" height="764" fill="#ffffff"/>
+<text x="700" y="20" text-anchor="middle" font-size="14">example22.cpu.flame</text>
+<text x="700" y="36" text-anchor="middle" font-size="10" fill="#555">total 2960.00 ms — red=antlr runtime, orange=generated parser, blue=hand-written parser, green=other GoGraph, grey=runtime/stdlib</text>
+<g><title>all — 2960.00 ms (100.00%)</title><rect x="10.00" y="48" width="1379.50" height="15" fill="#cccccc" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="59" fill="#000">all</text>
+</g>
+<g><title>runtime.main — 1140.00 ms (38.51%)</title><rect x="10.00" y="64" width="530.99" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="75" fill="#000">runtime.main</text>
+</g>
+<g><title>main.main — 1140.00 ms (38.51%)</title><rect x="10.00" y="80" width="530.99" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="91" fill="#000">main.main</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/examples/internal/exprof.(*Config).Run — 1140.00 ms (38.51%)</title><rect x="10.00" y="96" width="530.99" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="107" fill="#000">exprof.(*Config).Run</text>
+</g>
+<g><title>main.main.func1 — 1140.00 ms (38.51%)</title><rect x="10.00" y="112" width="530.99" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="123" fill="#000">main.main.func1</text>
+</g>
+<g><title>main.run — 1140.00 ms (38.51%)</title><rect x="10.00" y="128" width="530.99" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="139" fill="#000">main.run</text>
+</g>
+<g><title>main.runQueries — 1000.00 ms (33.78%)</title><rect x="10.00" y="144" width="465.72" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="155" fill="#000">main.runQueries</text>
+</g>
+<g><title>main.queryWrites — 570.00 ms (19.26%)</title><rect x="10.00" y="160" width="265.24" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="171" fill="#000">main.queryWrites</text>
+</g>
+<g><title>main.queryWrites.func2 (inline) — 400.00 ms (13.51%)</title><rect x="10.00" y="176" width="185.99" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="187" fill="#000">main.queryWrites.func2 (inlin…</text>
+</g>
+<g><title>main.scalarCount — 400.00 ms (13.51%)</title><rect x="10.00" y="192" width="185.99" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="203" fill="#000">main.scalarCount</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).Run (inline) — 400.00 ms (13.51%)</title><rect x="10.00" y="208" width="185.99" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="219" fill="#000">cypher.(*Engine).Run (inline)</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).runRead — 400.00 ms (13.51%)</title><rect x="10.00" y="224" width="185.99" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="235" fill="#000">cypher.(*Engine).runRead</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).runRead.func2 (inline) — 400.00 ms (13.51%)</title><rect x="10.00" y="240" width="185.99" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="251" fill="#000">cypher.(*Engine).runRead.func…</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.Run — 320.00 ms (10.81%)</title><rect x="10.00" y="256" width="148.69" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="267" fill="#000">exec.Run</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Project).Init — 320.00 ms (10.81%)</title><rect x="10.00" y="272" width="148.69" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="283" fill="#000">exec.(*Project).Init</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*CountRows).Init — 320.00 ms (10.81%)</title><rect x="10.00" y="288" width="148.69" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="299" fill="#000">exec.(*CountRows).Init</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Expand).Init — 320.00 ms (10.81%)</title><rect x="10.00" y="304" width="148.69" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="315" fill="#000">exec.(*Expand).Init</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.expandAdjacencySource.func2 — 320.00 ms (10.81%)</title><rect x="10.00" y="320" width="148.69" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="331" fill="#000">cypher.expandAdjacency…</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.csrPairAndColumnCachedFor — 320.00 ms (10.81%)</title><rect x="10.00" y="336" width="148.69" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="347" fill="#000">cypher.csrPairAndColum…</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.buildRelTypeColumn — 260.00 ms (8.78%)</title><rect x="10.00" y="352" width="120.72" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="363" fill="#000">cypher.buildRelTyp…</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.forEachResolvedSlotType — 240.00 ms (8.11%)</title><rect x="10.00" y="368" width="111.39" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="379" fill="#000">cypher.forEachRe…</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.fillSlotLabs — 110.00 ms (3.72%)</title><rect x="10.00" y="384" width="50.78" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="395" fill="#000">cypher…</text>
+</g>
+<g><title>runtime.mapaccess1_fast64 — 30.00 ms (1.01%)</title><rect x="10.00" y="400" width="13.49" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mapaccess2_fast64 — 30.00 ms (1.01%)</title><rect x="10.00" y="416" width="13.49" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/runtime/maps.ctrlGroup.matchEmpty (inline) — 10.00 ms (0.34%)</title><rect x="10.00" y="432" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/runtime/maps.ctrlGroupMatchEmpty (inline) — 10.00 ms (0.34%)</title><rect x="10.00" y="448" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mapdelete_fast64 — 20.00 ms (0.68%)</title><rect x="23.99" y="400" width="8.82" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/runtime/maps.(*Map).Delete — 20.00 ms (0.68%)</title><rect x="23.99" y="416" width="8.82" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/runtime/maps.(*Map).deleteSmall — 10.00 ms (0.34%)</title><rect x="23.99" y="432" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.memequal64 — 10.00 ms (0.34%)</title><rect x="23.99" y="448" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mapassign_fast64 — 10.00 ms (0.34%)</title><rect x="33.31" y="400" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*ReadView[go.shape.string,go.shape.float64]).HasEdgeHandleLabelRecordByID (inline) — 10.00 ms (0.34%)</title><rect x="37.97" y="400" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*Graph[go.shape.string,go.shape.float64]).HasEdgeHandleLabelRecordByIDAsOf — 10.00 ms (0.34%)</title><rect x="37.97" y="416" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*Graph[go.shape.string,go.shape.float64]).handleLabelBagAsOf — 10.00 ms (0.34%)</title><rect x="37.97" y="432" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.growslice — 10.00 ms (0.34%)</title><rect x="42.64" y="400" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgc — 10.00 ms (0.34%)</title><rect x="42.64" y="416" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgcTinySC2 — 10.00 ms (0.34%)</title><rect x="42.64" y="432" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*ReadView[go.shape.string,go.shape.float64]).EdgeLabelsByHandle (inline) — 90.00 ms (3.04%)</title><rect x="61.28" y="384" width="41.46" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="64.28" y="395" fill="#000">lpg.…</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*Graph[go.shape.string,go.shape.float64]).EdgeLabelsByHandleAsOf — 90.00 ms (3.04%)</title><rect x="61.28" y="400" width="41.46" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="64.28" y="411" fill="#000">lpg.…</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph.(*Mapper[go.shape.string]).Lookup — 80.00 ms (2.70%)</title><rect x="61.28" y="416" width="36.80" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mapaccess2_faststr — 60.00 ms (2.03%)</title><rect x="61.28" y="432" width="27.47" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/runtime/maps.h2 (inline) — 10.00 ms (0.34%)</title><rect x="61.28" y="448" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/runtime/maps.ctrlGroup.matchEmpty (inline) — 10.00 ms (0.34%)</title><rect x="65.95" y="448" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/runtime/maps.ctrlGroupMatchEmpty (inline) — 10.00 ms (0.34%)</title><rect x="65.95" y="464" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph.(*Mapper[go.shape.string]).shardFor — 20.00 ms (0.68%)</title><rect x="89.26" y="432" width="8.82" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph.fnv1aString (inline) — 20.00 ms (0.68%)</title><rect x="89.26" y="448" width="8.82" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*Graph[go.shape.string,go.shape.float64]).EdgeLabelsByHandleIDAsOf — 10.00 ms (0.34%)</title><rect x="98.58" y="416" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*Graph[go.shape.string,go.shape.float64]).edgeHandleLabelShardFor (inline) — 10.00 ms (0.34%)</title><rect x="98.58" y="432" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mapaccess1_fast64 — 20.00 ms (0.68%)</title><rect x="103.24" y="384" width="8.82" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mapaccess2_fast64 — 20.00 ms (0.68%)</title><rect x="103.24" y="400" width="8.82" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph.(*Mapper[go.shape.string]).Resolve — 10.00 ms (0.34%)</title><rect x="112.57" y="384" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mapassign_fast64 — 10.00 ms (0.34%)</title><rect x="117.23" y="384" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.NewRelTypeColumnFor — 20.00 ms (0.68%)</title><rect x="121.89" y="368" width="8.82" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.projectFwdToRevByTranspose — 20.00 ms (0.68%)</title><rect x="121.89" y="384" width="8.82" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.csrPairFromGraphAt — 60.00 ms (2.03%)</title><rect x="131.22" y="352" width="27.47" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/csr.BuildFromAdjListAsOf[go.shape.string,go.shape.float64] (inline) — 40.00 ms (1.35%)</title><rect x="131.22" y="368" width="18.15" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/csr.buildFromAdjList[go.shape.string,go.shape.float64] — 40.00 ms (1.35%)</title><rect x="131.22" y="384" width="18.15" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.makeslice — 10.00 ms (0.34%)</title><rect x="131.22" y="400" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgc — 10.00 ms (0.34%)</title><rect x="131.22" y="416" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgcLarge — 10.00 ms (0.34%)</title><rect x="131.22" y="432" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.profilealloc — 10.00 ms (0.34%)</title><rect x="131.22" y="448" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mProf_Malloc — 10.00 ms (0.34%)</title><rect x="131.22" y="464" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.stkbucket — 10.00 ms (0.34%)</title><rect x="131.22" y="480" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/runtime/atomic.(*UnsafePointer).Load (inline) — 10.00 ms (0.34%)</title><rect x="131.22" y="496" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*ReadView[go.shape.string,go.shape.float64]).LiveNodeFilter.func1 — 10.00 ms (0.34%)</title><rect x="135.88" y="400" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/csr.(*CSR[go.shape.float64]).BuildReverse — 20.00 ms (0.68%)</title><rect x="149.86" y="368" width="8.82" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Result).materialize — 80.00 ms (2.70%)</title><rect x="159.19" y="256" width="36.80" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*ResultSet).Next — 80.00 ms (2.70%)</title><rect x="159.19" y="272" width="36.80" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Project).Next — 80.00 ms (2.70%)</title><rect x="159.19" y="288" width="36.80" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*CountRows).Next — 80.00 ms (2.70%)</title><rect x="159.19" y="304" width="36.80" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*CountRows).drain — 80.00 ms (2.70%)</title><rect x="159.19" y="320" width="36.80" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*CountRows).drainChunk — 80.00 ms (2.70%)</title><rect x="159.19" y="336" width="36.80" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.columnarExpand.FillChunk — 80.00 ms (2.70%)</title><rect x="159.19" y="352" width="36.80" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Expand).fillChunk — 80.00 ms (2.70%)</title><rect x="159.19" y="368" width="36.80" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Expand).fillOneChunkRow — 80.00 ms (2.70%)</title><rect x="159.19" y="384" width="36.80" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Expand).dstAdmitted (inline) — 60.00 ms (2.03%)</title><rect x="159.19" y="400" width="27.47" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.makeExpandDstLabelAdmit.func1 — 60.00 ms (2.03%)</title><rect x="159.19" y="416" width="27.47" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*ReadView[go.shape.string,go.shape.float64]).HasNodeLabelByID — 60.00 ms (2.03%)</title><rect x="159.19" y="432" width="27.47" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*Graph[go.shape.string,go.shape.float64]).HasNodeLabelByIDAsOf — 60.00 ms (2.03%)</title><rect x="159.19" y="448" width="27.47" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mapaccess1_fast64 — 40.00 ms (1.35%)</title><rect x="159.19" y="464" width="18.15" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mapaccess2_fast64 — 40.00 ms (1.35%)</title><rect x="159.19" y="480" width="18.15" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*LabelRegistry).Lookup (inline) — 20.00 ms (0.68%)</title><rect x="177.84" y="464" width="8.82" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mapaccess2_faststr — 20.00 ms (0.68%)</title><rect x="177.84" y="480" width="8.82" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/runtime/maps.(*Map).getWithoutKeySmallFastStr — 10.00 ms (0.34%)</title><rect x="177.84" y="496" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/runtime/maps.memHashAES — 10.00 ms (0.34%)</title><rect x="177.84" y="512" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Expand).appendChunkRow — 20.00 ms (0.68%)</title><rect x="187.16" y="400" width="8.82" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Chunk).AppendInt64 — 10.00 ms (0.34%)</title><rect x="187.16" y="416" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Chunk).pushI64 — 10.00 ms (0.34%)</title><rect x="187.16" y="432" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.growTo[go.shape.int64] (inline) — 10.00 ms (0.34%)</title><rect x="187.16" y="448" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Chunk).CopyCellTo — 10.00 ms (0.34%)</title><rect x="191.82" y="416" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Chunk).PutInt64 — 10.00 ms (0.34%)</title><rect x="191.82" y="432" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Chunk).pushI64 — 10.00 ms (0.34%)</title><rect x="191.82" y="448" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>main.queryWrites.func3 — 140.00 ms (4.73%)</title><rect x="196.49" y="176" width="64.77" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="199.49" y="187" fill="#000">main.que…</text>
+</g>
+<g><title>main.execWrite — 140.00 ms (4.73%)</title><rect x="196.49" y="192" width="64.77" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="199.49" y="203" fill="#000">main.exe…</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).RunInTx (inline) — 140.00 ms (4.73%)</title><rect x="196.49" y="208" width="64.77" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="199.49" y="219" fill="#000">cypher.(…</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).runInTxSession — 140.00 ms (4.73%)</title><rect x="196.49" y="224" width="64.77" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="199.49" y="235" fill="#000">cypher.(…</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).execUnderBarrier (inline) — 140.00 ms (4.73%)</title><rect x="196.49" y="240" width="64.77" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="199.49" y="251" fill="#000">cypher.(…</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).runInTxSession.func2 (inline) — 140.00 ms (4.73%)</title><rect x="196.49" y="256" width="64.77" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="199.49" y="267" fill="#000">cypher.(…</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*Graph[go.shape.string,go.shape.float64]).ApplyVersionedCtx (inline) — 140.00 ms (4.73%)</title><rect x="196.49" y="272" width="64.77" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="199.49" y="283" fill="#000">lpg.(*Gr…</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*Graph[go.shape.string,go.shape.float64]).applyVersionedInstant — 140.00 ms (4.73%)</title><rect x="196.49" y="288" width="64.77" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="199.49" y="299" fill="#000">lpg.(*Gr…</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).execUnderBarrier.func1 — 140.00 ms (4.73%)</title><rect x="196.49" y="304" width="64.77" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="199.49" y="315" fill="#000">cypher.(…</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.Run — 80.00 ms (2.70%)</title><rect x="196.49" y="320" width="36.80" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*DeleteNode).Init — 80.00 ms (2.70%)</title><rect x="196.49" y="336" width="36.80" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Filter).Init — 80.00 ms (2.70%)</title><rect x="196.49" y="352" width="36.80" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Filter).Init — 80.00 ms (2.70%)</title><rect x="196.49" y="368" width="36.80" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Expand).Init — 80.00 ms (2.70%)</title><rect x="196.49" y="384" width="36.80" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.expandAdjacencySource.func2 — 80.00 ms (2.70%)</title><rect x="196.49" y="400" width="36.80" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.csrPairAndColumnCachedFor — 80.00 ms (2.70%)</title><rect x="196.49" y="416" width="36.80" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.buildRelTypeColumn — 60.00 ms (2.03%)</title><rect x="196.49" y="432" width="27.47" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.forEachResolvedSlotType — 60.00 ms (2.03%)</title><rect x="196.49" y="448" width="27.47" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.fillSlotLabs — 40.00 ms (1.35%)</title><rect x="196.49" y="464" width="18.15" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mapaccess1_fast64 — 20.00 ms (0.68%)</title><rect x="196.49" y="480" width="8.82" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mapaccess2_fast64 — 20.00 ms (0.68%)</title><rect x="196.49" y="496" width="8.82" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mapassign_fast64 — 10.00 ms (0.34%)</title><rect x="205.81" y="480" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*ReadView[go.shape.string,go.shape.float64]).HasEdgeHandleLabelRecordByID (inline) — 10.00 ms (0.34%)</title><rect x="210.47" y="480" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*Graph[go.shape.string,go.shape.float64]).HasEdgeHandleLabelRecordByIDAsOf — 10.00 ms (0.34%)</title><rect x="210.47" y="496" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*Graph[go.shape.string,go.shape.float64]).handleLabelBagAsOf — 10.00 ms (0.34%)</title><rect x="210.47" y="512" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*ReadView[go.shape.string,go.shape.float64]).EdgeLabelsByHandle (inline) — 10.00 ms (0.34%)</title><rect x="215.14" y="464" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*Graph[go.shape.string,go.shape.float64]).EdgeLabelsByHandleAsOf — 10.00 ms (0.34%)</title><rect x="215.14" y="480" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph.(*Mapper[go.shape.string]).Lookup — 10.00 ms (0.34%)</title><rect x="215.14" y="496" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mapaccess2_faststr — 10.00 ms (0.34%)</title><rect x="215.14" y="512" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*ReadView[go.shape.string,go.shape.float64]).ForEachSlotRelTypeByID (inline) — 10.00 ms (0.34%)</title><rect x="219.80" y="464" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*Graph[go.shape.string,go.shape.float64]).ForEachSlotRelTypeByIDAsOf — 10.00 ms (0.34%)</title><rect x="219.80" y="480" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.csrPairFromGraphAt — 20.00 ms (0.68%)</title><rect x="224.46" y="432" width="8.82" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/csr.BuildFromAdjListAsOf[go.shape.string,go.shape.float64] (inline) — 10.00 ms (0.34%)</title><rect x="224.46" y="448" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/csr.buildFromAdjList[go.shape.string,go.shape.float64] — 10.00 ms (0.34%)</title><rect x="224.46" y="464" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*ReadView[go.shape.string,go.shape.float64]).LiveNodeFilter.func1 — 10.00 ms (0.34%)</title><rect x="224.46" y="480" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*Graph[go.shape.string,go.shape.float64]).NodeExistsAsOf — 10.00 ms (0.34%)</title><rect x="224.46" y="496" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*Graph[go.shape.string,go.shape.float64]).IsTombstoned — 10.00 ms (0.34%)</title><rect x="224.46" y="512" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/csr.(*CSR[go.shape.float64]).BuildReverse — 10.00 ms (0.34%)</title><rect x="229.12" y="448" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.makeslice — 10.00 ms (0.34%)</title><rect x="229.12" y="464" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgc — 10.00 ms (0.34%)</title><rect x="229.12" y="480" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgcLarge — 10.00 ms (0.34%)</title><rect x="229.12" y="496" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.memclrNoHeapPointersChunked — 10.00 ms (0.34%)</title><rect x="229.12" y="512" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.memclrNoHeapPointers — 10.00 ms (0.34%)</title><rect x="229.12" y="528" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.newWriteResult — 60.00 ms (2.03%)</title><rect x="233.78" y="320" width="27.47" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.newResultWithLimit — 60.00 ms (2.03%)</title><rect x="233.78" y="336" width="27.47" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*ResultSet).Next — 60.00 ms (2.03%)</title><rect x="233.78" y="352" width="27.47" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Merge).Next — 20.00 ms (0.68%)</title><rect x="233.78" y="368" width="8.82" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Merge).runMergeForChild — 20.00 ms (0.68%)</title><rect x="233.78" y="384" width="8.82" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.NewMergeSearchFnFromPattern.func1 — 20.00 ms (0.68%)</title><rect x="233.78" y="400" width="8.82" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.walkMergeCandidates — 20.00 ms (0.68%)</title><rect x="233.78" y="416" width="8.82" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.NewMergeSearchFnFromPattern.func1.1 — 20.00 ms (0.68%)</title><rect x="233.78" y="432" width="8.82" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.labelsInTx — 10.00 ms (0.34%)</title><rect x="233.78" y="448" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*lpgMutatorAdapter).NodeLabelsInTx — 10.00 ms (0.34%)</title><rect x="233.78" y="464" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*ReadView[go.shape.string,go.shape.float64]).NodeLabels (inline) — 10.00 ms (0.34%)</title><rect x="233.78" y="480" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*Graph[go.shape.string,go.shape.float64]).NodeLabelsAsOf — 10.00 ms (0.34%)</title><rect x="233.78" y="496" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph.(*Mapper[go.shape.string]).Lookup — 10.00 ms (0.34%)</title><rect x="233.78" y="512" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.nodeMatchesAllPropertiesInTx — 10.00 ms (0.34%)</title><rect x="238.45" y="448" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*CreateRelationship).Next — 10.00 ms (0.34%)</title><rect x="243.11" y="368" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*CreateNode).Next — 10.00 ms (0.34%)</title><rect x="243.11" y="384" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*CreateRelationship).Next — 10.00 ms (0.34%)</title><rect x="243.11" y="400" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*CreateNode).Next — 10.00 ms (0.34%)</title><rect x="243.11" y="416" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Filter).Next — 10.00 ms (0.34%)</title><rect x="243.11" y="432" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.newRowPredicate.func1 — 10.00 ms (0.34%)</title><rect x="243.11" y="448" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.evalRowPooled — 10.00 ms (0.34%)</title><rect x="243.11" y="464" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.evalRow — 10.00 ms (0.34%)</title><rect x="243.11" y="480" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/expr.EvalWith — 10.00 ms (0.34%)</title><rect x="243.11" y="496" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/expr.evalExpr — 10.00 ms (0.34%)</title><rect x="243.11" y="512" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/expr.evalBinaryOp — 10.00 ms (0.34%)</title><rect x="243.11" y="528" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/expr.evalExpr — 10.00 ms (0.34%)</title><rect x="243.11" y="544" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/expr.evalProperty — 10.00 ms (0.34%)</title><rect x="243.11" y="560" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/expr.(*LazyNodeValue).Property — 10.00 ms (0.34%)</title><rect x="243.11" y="576" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.lazyNodeResolver.NodeProperty — 10.00 ms (0.34%)</title><rect x="243.11" y="592" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*ReadView[go.shape.string,go.shape.float64]).NodePropertyByID (inline) — 10.00 ms (0.34%)</title><rect x="243.11" y="608" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*Graph[go.shape.string,go.shape.float64]).NodePropertyByIDAsOf — 10.00 ms (0.34%)</title><rect x="243.11" y="624" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*propBag).get — 10.00 ms (0.34%)</title><rect x="243.11" y="640" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.bagKeyAt — 10.00 ms (0.34%)</title><rect x="243.11" y="656" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*SetProperty).Next — 10.00 ms (0.34%)</title><rect x="247.77" y="368" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Filter).Next — 10.00 ms (0.34%)</title><rect x="247.77" y="384" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.newRowPredicate.func1 — 10.00 ms (0.34%)</title><rect x="247.77" y="400" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.evalRowPooled — 10.00 ms (0.34%)</title><rect x="247.77" y="416" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.evalRow — 10.00 ms (0.34%)</title><rect x="247.77" y="432" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/expr.EvalWith — 10.00 ms (0.34%)</title><rect x="247.77" y="448" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/expr.evalExpr — 10.00 ms (0.34%)</title><rect x="247.77" y="464" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/expr.evalBinaryOp — 10.00 ms (0.34%)</title><rect x="247.77" y="480" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/expr.evalExpr — 10.00 ms (0.34%)</title><rect x="247.77" y="496" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/expr.evalProperty — 10.00 ms (0.34%)</title><rect x="247.77" y="512" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/expr.(*LazyNodeValue).Property — 10.00 ms (0.34%)</title><rect x="247.77" y="528" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.lazyNodeResolver.NodeProperty — 10.00 ms (0.34%)</title><rect x="247.77" y="544" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.lpgPropToExpr — 10.00 ms (0.34%)</title><rect x="247.77" y="560" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.convTstring — 10.00 ms (0.34%)</title><rect x="247.77" y="576" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgc — 10.00 ms (0.34%)</title><rect x="247.77" y="592" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgcSmallScanNoHeaderSC2 — 10.00 ms (0.34%)</title><rect x="247.77" y="608" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mcache).nextFree — 10.00 ms (0.34%)</title><rect x="247.77" y="624" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mcache).refill — 10.00 ms (0.34%)</title><rect x="247.77" y="640" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*gcControllerState).update — 10.00 ms (0.34%)</title><rect x="247.77" y="656" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.traceLocker.HeapAlloc — 10.00 ms (0.34%)</title><rect x="247.77" y="672" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.traceEventWriter.event — 10.00 ms (0.34%)</title><rect x="247.77" y="688" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.traceWriter.event — 10.00 ms (0.34%)</title><rect x="247.77" y="704" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*traceBuf).varint (inline) — 10.00 ms (0.34%)</title><rect x="247.77" y="720" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*DeleteNode).Next — 10.00 ms (0.34%)</title><rect x="252.43" y="368" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Filter).Next — 10.00 ms (0.34%)</title><rect x="252.43" y="384" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Filter).Next — 10.00 ms (0.34%)</title><rect x="252.43" y="400" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Expand).Next — 10.00 ms (0.34%)</title><rect x="252.43" y="416" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Expand).advanceInput — 10.00 ms (0.34%)</title><rect x="252.43" y="432" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Filter).Next — 10.00 ms (0.34%)</title><rect x="252.43" y="448" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.newRowPredicate.func1 — 10.00 ms (0.34%)</title><rect x="252.43" y="464" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.evalRowPooled — 10.00 ms (0.34%)</title><rect x="252.43" y="480" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.evalRow — 10.00 ms (0.34%)</title><rect x="252.43" y="496" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/expr.EvalWith — 10.00 ms (0.34%)</title><rect x="252.43" y="512" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/expr.evalExpr — 10.00 ms (0.34%)</title><rect x="252.43" y="528" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/expr.evalBinaryOp — 10.00 ms (0.34%)</title><rect x="252.43" y="544" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/expr.evalExpr — 10.00 ms (0.34%)</title><rect x="252.43" y="560" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/expr.evalProperty — 10.00 ms (0.34%)</title><rect x="252.43" y="576" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/expr.(*LazyNodeValue).Property — 10.00 ms (0.34%)</title><rect x="252.43" y="592" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.lazyNodeResolver.NodeProperty — 10.00 ms (0.34%)</title><rect x="252.43" y="608" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*ReadView[go.shape.string,go.shape.float64]).NodePropertyByID (inline) — 10.00 ms (0.34%)</title><rect x="252.43" y="624" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*Graph[go.shape.string,go.shape.float64]).NodePropertyByIDAsOf — 10.00 ms (0.34%)</title><rect x="252.43" y="640" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*PropertyKeyRegistry).Lookup (inline) — 10.00 ms (0.34%)</title><rect x="252.43" y="656" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mapaccess2_faststr — 10.00 ms (0.34%)</title><rect x="252.43" y="672" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/runtime/maps.(*Map).getWithoutKeySmallFastStr — 10.00 ms (0.34%)</title><rect x="252.43" y="688" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*DetachDelete).Next — 10.00 ms (0.34%)</title><rect x="257.09" y="368" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Filter).Next — 10.00 ms (0.34%)</title><rect x="257.09" y="384" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.newRowPredicate.func1 — 10.00 ms (0.34%)</title><rect x="257.09" y="400" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.evalRowPooled — 10.00 ms (0.34%)</title><rect x="257.09" y="416" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.evalRow — 10.00 ms (0.34%)</title><rect x="257.09" y="432" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/expr.EvalWith — 10.00 ms (0.34%)</title><rect x="257.09" y="448" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/expr.evalExpr — 10.00 ms (0.34%)</title><rect x="257.09" y="464" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/expr.evalBinaryOp — 10.00 ms (0.34%)</title><rect x="257.09" y="480" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/expr.evalExpr — 10.00 ms (0.34%)</title><rect x="257.09" y="496" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/expr.evalProperty — 10.00 ms (0.34%)</title><rect x="257.09" y="512" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/expr.(*LazyNodeValue).Property — 10.00 ms (0.34%)</title><rect x="257.09" y="528" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.lazyNodeResolver.NodeProperty — 10.00 ms (0.34%)</title><rect x="257.09" y="544" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*ReadView[go.shape.string,go.shape.float64]).NodePropertyByID (inline) — 10.00 ms (0.34%)</title><rect x="257.09" y="560" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*Graph[go.shape.string,go.shape.float64]).NodePropertyByIDAsOf — 10.00 ms (0.34%)</title><rect x="257.09" y="576" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*propBag).get — 10.00 ms (0.34%)</title><rect x="257.09" y="592" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.bagKeyAt — 10.00 ms (0.34%)</title><rect x="257.09" y="608" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>main.queryWrites.func5 (inline) — 10.00 ms (0.34%)</title><rect x="261.76" y="176" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>main.scalarStringOrNull — 10.00 ms (0.34%)</title><rect x="261.76" y="192" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).Run (inline) — 10.00 ms (0.34%)</title><rect x="261.76" y="208" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).runRead — 10.00 ms (0.34%)</title><rect x="261.76" y="224" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).runRead.func2 (inline) — 10.00 ms (0.34%)</title><rect x="261.76" y="240" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Result).materialize — 10.00 ms (0.34%)</title><rect x="261.76" y="256" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Result).materializeColumnar — 10.00 ms (0.34%)</title><rect x="261.76" y="272" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*ColumnarProject).FillChunk — 10.00 ms (0.34%)</title><rect x="261.76" y="288" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*ColumnarProject).fillChunkFromChunk — 10.00 ms (0.34%)</title><rect x="261.76" y="304" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*ColumnarFilter).FillChunk — 10.00 ms (0.34%)</title><rect x="261.76" y="320" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.makeColumnarComparePredicate.func1 — 10.00 ms (0.34%)</title><rect x="261.76" y="336" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Chunk).Int64 — 10.00 ms (0.34%)</title><rect x="261.76" y="352" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.isValid (inline) — 10.00 ms (0.34%)</title><rect x="261.76" y="368" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>main.queryWrites.func4 (inline) — 10.00 ms (0.34%)</title><rect x="266.42" y="176" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>main.scalarCount — 10.00 ms (0.34%)</title><rect x="266.42" y="192" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).Run (inline) — 10.00 ms (0.34%)</title><rect x="266.42" y="208" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).runRead — 10.00 ms (0.34%)</title><rect x="266.42" y="224" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).runRead.func2 (inline) — 10.00 ms (0.34%)</title><rect x="266.42" y="240" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Result).materialize — 10.00 ms (0.34%)</title><rect x="266.42" y="256" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Result).materializeColumnar — 10.00 ms (0.34%)</title><rect x="266.42" y="272" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*ColumnarProject).FillChunk — 10.00 ms (0.34%)</title><rect x="266.42" y="288" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*ColumnarProject).fillChunkFromChunk — 10.00 ms (0.34%)</title><rect x="266.42" y="304" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*ColumnarFilter).FillChunk — 10.00 ms (0.34%)</title><rect x="266.42" y="320" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.makeColumnarComparePredicate.func1 — 10.00 ms (0.34%)</title><rect x="266.42" y="336" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Chunk).Int64 — 10.00 ms (0.34%)</title><rect x="266.42" y="352" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>main.scalarCount — 10.00 ms (0.34%)</title><rect x="271.08" y="176" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).Run (inline) — 10.00 ms (0.34%)</title><rect x="271.08" y="192" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).runRead — 10.00 ms (0.34%)</title><rect x="271.08" y="208" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).runRead.func2 (inline) — 10.00 ms (0.34%)</title><rect x="271.08" y="224" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Result).materialize — 10.00 ms (0.34%)</title><rect x="271.08" y="240" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*ResultSet).Next — 10.00 ms (0.34%)</title><rect x="271.08" y="256" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Project).Next — 10.00 ms (0.34%)</title><rect x="271.08" y="272" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*CountRows).Next — 10.00 ms (0.34%)</title><rect x="271.08" y="288" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*CountRows).drain — 10.00 ms (0.34%)</title><rect x="271.08" y="304" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Filter).Next — 10.00 ms (0.34%)</title><rect x="271.08" y="320" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Filter).Next — 10.00 ms (0.34%)</title><rect x="271.08" y="336" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.newRowPredicate.func1 — 10.00 ms (0.34%)</title><rect x="271.08" y="352" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.evalRowPooled — 10.00 ms (0.34%)</title><rect x="271.08" y="368" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.evalRow — 10.00 ms (0.34%)</title><rect x="271.08" y="384" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/expr.EvalWith — 10.00 ms (0.34%)</title><rect x="271.08" y="400" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/expr.evalExpr — 10.00 ms (0.34%)</title><rect x="271.08" y="416" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/expr.evalBinaryOp — 10.00 ms (0.34%)</title><rect x="271.08" y="432" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/expr.evalExpr — 10.00 ms (0.34%)</title><rect x="271.08" y="448" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/expr.evalProperty — 10.00 ms (0.34%)</title><rect x="271.08" y="464" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/expr.(*LazyNodeValue).Property — 10.00 ms (0.34%)</title><rect x="271.08" y="480" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.lazyNodeResolver.NodeProperty — 10.00 ms (0.34%)</title><rect x="271.08" y="496" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.lpgPropToExpr — 10.00 ms (0.34%)</title><rect x="271.08" y="512" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.convTstring — 10.00 ms (0.34%)</title><rect x="271.08" y="528" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgc — 10.00 ms (0.34%)</title><rect x="271.08" y="544" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>main.queryShortestPaths — 300.00 ms (10.14%)</title><rect x="275.74" y="160" width="139.36" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="278.74" y="171" fill="#000">main.queryShortestPat…</text>
+</g>
+<g><title>main.buildUndirectedKnows — 180.00 ms (6.08%)</title><rect x="275.74" y="176" width="83.42" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="278.74" y="187" fill="#000">main.buildU…</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph.(*Mapper[go.shape.string]).Walk — 180.00 ms (6.08%)</title><rect x="275.74" y="192" width="83.42" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="278.74" y="203" fill="#000">graph.(*Map…</text>
+</g>
+<g><title>main.buildUndirectedKnows.func1 — 180.00 ms (6.08%)</title><rect x="275.74" y="208" width="83.42" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="278.74" y="219" fill="#000">main.buildU…</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/adjlist.(*AdjList[go.shape.string,go.shape.float64]).AddEdge (inline) — 170.00 ms (5.74%)</title><rect x="275.74" y="224" width="78.76" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="278.74" y="235" fill="#000">adjlist.(*A…</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/adjlist.(*AdjList[go.shape.string,go.shape.float64]).addEdge — 170.00 ms (5.74%)</title><rect x="275.74" y="240" width="78.76" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="278.74" y="251" fill="#000">adjlist.(*A…</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/adjlist.(*AdjList[go.shape.string,go.shape.float64]).upsertEdgeLocked — 150.00 ms (5.07%)</title><rect x="275.74" y="256" width="69.43" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="278.74" y="267" fill="#000">adjlist.(…</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/adjlist.(*AdjList[go.shape.string,go.shape.float64]).upsertEdgeSlotLocked — 140.00 ms (4.73%)</title><rect x="275.74" y="272" width="64.77" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="278.74" y="283" fill="#000">adjlist.…</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/adjlist.(*AdjList[go.shape.string,go.shape.float64]).storeEntry — 80.00 ms (2.70%)</title><rect x="275.74" y="288" width="36.80" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.typedslicecopy — 40.00 ms (1.35%)</title><rect x="275.74" y="304" width="18.15" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.memmove — 30.00 ms (1.01%)</title><rect x="275.74" y="320" width="13.49" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.bulkBarrierPreWrite — 10.00 ms (0.34%)</title><rect x="289.73" y="320" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*wbBuf).get2 (inline) — 10.00 ms (0.34%)</title><rect x="289.73" y="336" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.wbBufFlush — 10.00 ms (0.34%)</title><rect x="289.73" y="352" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.systemstack — 10.00 ms (0.34%)</title><rect x="289.73" y="368" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.wbBufFlush.func1 — 10.00 ms (0.34%)</title><rect x="289.73" y="384" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.wbBufFlush1 — 10.00 ms (0.34%)</title><rect x="289.73" y="400" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.tryDeferToSpanScan — 10.00 ms (0.34%)</title><rect x="289.73" y="416" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*spanInlineMarkBits).tryAcquire — 10.00 ms (0.34%)</title><rect x="289.73" y="432" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*spanScanOwnership).or (inline) — 10.00 ms (0.34%)</title><rect x="289.73" y="448" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.makeslice — 30.00 ms (1.01%)</title><rect x="294.39" y="304" width="13.49" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgc — 30.00 ms (1.01%)</title><rect x="294.39" y="320" width="13.49" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgcSmallScanHeader — 30.00 ms (1.01%)</title><rect x="294.39" y="336" width="13.49" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.memclrNoHeapPointers — 20.00 ms (0.68%)</title><rect x="294.39" y="352" width="8.82" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mcache).nextFree — 10.00 ms (0.34%)</title><rect x="303.72" y="352" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mcache).refill — 10.00 ms (0.34%)</title><rect x="303.72" y="368" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mcentral).cacheSpan — 10.00 ms (0.34%)</title><rect x="303.72" y="384" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mcentral).grow — 10.00 ms (0.34%)</title><rect x="303.72" y="400" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mheap).alloc — 10.00 ms (0.34%)</title><rect x="303.72" y="416" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.systemstack — 10.00 ms (0.34%)</title><rect x="303.72" y="432" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mheap).alloc.func1 — 10.00 ms (0.34%)</title><rect x="303.72" y="448" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mheap).allocSpan — 10.00 ms (0.34%)</title><rect x="303.72" y="464" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*pageAlloc).alloc — 10.00 ms (0.34%)</title><rect x="303.72" y="480" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*pageAlloc).allocRange — 10.00 ms (0.34%)</title><rect x="303.72" y="496" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*pageAlloc).update — 10.00 ms (0.34%)</title><rect x="303.72" y="512" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*pallocBits).summarize — 10.00 ms (0.34%)</title><rect x="303.72" y="528" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgcSmallScanNoHeaderSC3 — 10.00 ms (0.34%)</title><rect x="308.38" y="304" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.acquirem (inline) — 10.00 ms (0.34%)</title><rect x="308.38" y="320" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.newobject — 30.00 ms (1.01%)</title><rect x="313.04" y="288" width="13.49" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgc — 30.00 ms (1.01%)</title><rect x="313.04" y="304" width="13.49" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgcSmallScanNoHeader — 30.00 ms (1.01%)</title><rect x="313.04" y="320" width="13.49" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.profilealloc — 10.00 ms (0.34%)</title><rect x="313.04" y="336" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mProf_Malloc — 10.00 ms (0.34%)</title><rect x="313.04" y="352" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.stkbucket — 10.00 ms (0.34%)</title><rect x="313.04" y="368" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.newBucket — 10.00 ms (0.34%)</title><rect x="313.04" y="384" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.memclrNoHeapPointers — 10.00 ms (0.34%)</title><rect x="317.70" y="336" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.heapSetTypeNoHeader (inline) — 10.00 ms (0.34%)</title><rect x="322.36" y="336" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mspan).writeHeapBitsSmall — 10.00 ms (0.34%)</title><rect x="322.36" y="352" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/adjlist.(*revIndex).add — 10.00 ms (0.34%)</title><rect x="341.01" y="272" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>sync.(*RWMutex).Unlock — 10.00 ms (0.34%)</title><rect x="341.01" y="288" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph.(*Mapper[go.shape.string]).Intern — 20.00 ms (0.68%)</title><rect x="345.68" y="256" width="8.82" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph.(*Mapper[go.shape.string]).InternNew (inline) — 20.00 ms (0.68%)</title><rect x="345.68" y="272" width="8.82" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph.(*Mapper[go.shape.string]).InternNewHook — 20.00 ms (0.68%)</title><rect x="345.68" y="288" width="8.82" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mapaccess2_faststr — 10.00 ms (0.34%)</title><rect x="345.68" y="304" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph.(*Mapper[go.shape.string]).shardFor — 10.00 ms (0.34%)</title><rect x="350.34" y="304" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph.fnv1aString (inline) — 10.00 ms (0.34%)</title><rect x="350.34" y="320" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph.(*Mapper[go.shape.string]).Resolve — 10.00 ms (0.34%)</title><rect x="355.00" y="224" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/search.BiBFSCtx[go.shape.float64] — 40.00 ms (1.35%)</title><rect x="359.66" y="176" width="18.15" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/csr.(*CSR[go.shape.float64]).IsSymmetric — 40.00 ms (1.35%)</title><rect x="359.66" y="192" width="18.15" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mapaccess2 — 20.00 ms (0.68%)</title><rect x="359.66" y="208" width="8.82" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.memequal128 — 10.00 ms (0.34%)</title><rect x="359.66" y="224" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mapassign — 10.00 ms (0.34%)</title><rect x="368.99" y="208" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>main.collectLens — 40.00 ms (1.35%)</title><rect x="378.31" y="176" width="18.15" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).Run (inline) — 40.00 ms (1.35%)</title><rect x="378.31" y="192" width="18.15" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).runRead — 40.00 ms (1.35%)</title><rect x="378.31" y="208" width="18.15" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).runRead.func2 (inline) — 30.00 ms (1.01%)</title><rect x="378.31" y="224" width="13.49" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Result).materialize — 30.00 ms (1.01%)</title><rect x="378.31" y="240" width="13.49" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*ResultSet).Next — 30.00 ms (1.01%)</title><rect x="378.31" y="256" width="13.49" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Project).Next — 30.00 ms (1.01%)</title><rect x="378.31" y="272" width="13.49" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*CorrelatedApply).Next — 30.00 ms (1.01%)</title><rect x="378.31" y="288" width="13.49" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*AllShortestPaths).Next — 20.00 ms (0.68%)</title><rect x="378.31" y="304" width="8.82" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*AllShortestPaths).bfsAllShortest — 20.00 ms (0.68%)</title><rect x="378.31" y="320" width="8.82" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*AllShortestPaths).aspExpand — 20.00 ms (0.68%)</title><rect x="378.31" y="336" width="8.82" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mapassign_fast64 — 10.00 ms (0.34%)</title><rect x="378.31" y="352" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/runtime/maps.(*table).rehash — 10.00 ms (0.34%)</title><rect x="378.31" y="368" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/runtime/maps.(*table).split — 10.00 ms (0.34%)</title><rect x="378.31" y="384" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.memhash64 — 10.00 ms (0.34%)</title><rect x="378.31" y="400" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*AllShortestPaths).passesTypeFilter — 10.00 ms (0.34%)</title><rect x="382.97" y="352" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*RelTypeAdmit).Fwd — 10.00 ms (0.34%)</title><rect x="382.97" y="368" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Apply).Next — 10.00 ms (0.34%)</title><rect x="387.64" y="304" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Filter).Next — 10.00 ms (0.34%)</title><rect x="387.64" y="320" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.newRowPredicate.func1 — 10.00 ms (0.34%)</title><rect x="387.64" y="336" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.evalRowPooled — 10.00 ms (0.34%)</title><rect x="387.64" y="352" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.evalRow — 10.00 ms (0.34%)</title><rect x="387.64" y="368" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/expr.EvalWith — 10.00 ms (0.34%)</title><rect x="387.64" y="384" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/expr.evalExpr — 10.00 ms (0.34%)</title><rect x="387.64" y="400" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/expr.evalBinaryOp — 10.00 ms (0.34%)</title><rect x="387.64" y="416" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/expr.evalExpr — 10.00 ms (0.34%)</title><rect x="387.64" y="432" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mapaccess2_faststr — 10.00 ms (0.34%)</title><rect x="387.64" y="448" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/runtime/maps.(*Map).getWithoutKeySmallFastStr — 10.00 ms (0.34%)</title><rect x="387.64" y="464" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.memequal — 10.00 ms (0.34%)</title><rect x="387.64" y="480" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).parseAndAnalyse — 10.00 ms (0.34%)</title><rect x="392.30" y="224" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).buildPlanCacheEntry (inline) — 10.00 ms (0.34%)</title><rect x="392.30" y="240" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*planBuildGroup).do — 10.00 ms (0.34%)</title><rect x="392.30" y="256" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).compilePlanCacheEntry — 10.00 ms (0.34%)</title><rect x="392.30" y="272" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/parser.ParseStatement — 10.00 ms (0.34%)</title><rect x="392.30" y="288" width="4.16" height="15" fill="#1f77b4" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/parser.guardInput — 10.00 ms (0.34%)</title><rect x="392.30" y="304" width="4.16" height="15" fill="#1f77b4" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/parser.countBinaryOpTokens — 10.00 ms (0.34%)</title><rect x="392.30" y="320" width="4.16" height="15" fill="#1f77b4" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/parser.countBinaryOpNormal — 10.00 ms (0.34%)</title><rect x="392.30" y="336" width="4.16" height="15" fill="#1f77b4" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>main.scalarLen — 20.00 ms (0.68%)</title><rect x="396.96" y="176" width="8.82" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).Run (inline) — 20.00 ms (0.68%)</title><rect x="396.96" y="192" width="8.82" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).runRead — 20.00 ms (0.68%)</title><rect x="396.96" y="208" width="8.82" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).runRead.func2 (inline) — 20.00 ms (0.68%)</title><rect x="396.96" y="224" width="8.82" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Result).materialize — 20.00 ms (0.68%)</title><rect x="396.96" y="240" width="8.82" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*ResultSet).Next — 20.00 ms (0.68%)</title><rect x="396.96" y="256" width="8.82" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Project).Next — 20.00 ms (0.68%)</title><rect x="396.96" y="272" width="8.82" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*CorrelatedApply).Next — 20.00 ms (0.68%)</title><rect x="396.96" y="288" width="8.82" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*ShortestPath).Init — 10.00 ms (0.34%)</title><rect x="396.96" y="304" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.buildRevToFwd — 10.00 ms (0.34%)</title><rect x="396.96" y="320" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Apply).Next — 10.00 ms (0.34%)</title><rect x="401.62" y="304" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Filter).Next — 10.00 ms (0.34%)</title><rect x="401.62" y="320" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.newRowPredicate.func1 — 10.00 ms (0.34%)</title><rect x="401.62" y="336" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.evalRowPooled — 10.00 ms (0.34%)</title><rect x="401.62" y="352" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.evalRow — 10.00 ms (0.34%)</title><rect x="401.62" y="368" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/expr.EvalWith — 10.00 ms (0.34%)</title><rect x="401.62" y="384" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/expr.evalExpr — 10.00 ms (0.34%)</title><rect x="401.62" y="400" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/expr.evalBinaryOp — 10.00 ms (0.34%)</title><rect x="401.62" y="416" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/csr.BuildFromAdjList[go.shape.string,go.shape.float64] (inline) — 10.00 ms (0.34%)</title><rect x="406.28" y="176" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/csr.BuildFromAdjListLive[go.shape.string,go.shape.float64] (inline) — 10.00 ms (0.34%)</title><rect x="406.28" y="192" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/csr.buildFromAdjList[go.shape.string,go.shape.float64] — 10.00 ms (0.34%)</title><rect x="406.28" y="208" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/csr.buildFromAdjListRaw[go.shape.string,go.shape.float64] — 10.00 ms (0.34%)</title><rect x="406.28" y="224" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.memmove — 10.00 ms (0.34%)</title><rect x="406.28" y="240" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>main.bfsDistances — 10.00 ms (0.34%)</title><rect x="410.95" y="176" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/csr.(*CSR[go.shape.float64]).NeighboursByID.func1 (inline) — 10.00 ms (0.34%)</title><rect x="410.95" y="192" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>main.bfsDistances-range1 (inline) — 10.00 ms (0.34%)</title><rect x="410.95" y="208" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>main.queryKnows — 110.00 ms (3.72%)</title><rect x="415.61" y="160" width="50.78" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="418.61" y="171" fill="#000">main.q…</text>
+</g>
+<g><title>main.scalarCount — 90.00 ms (3.04%)</title><rect x="415.61" y="176" width="41.46" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="418.61" y="187" fill="#000">main…</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).Run (inline) — 90.00 ms (3.04%)</title><rect x="415.61" y="192" width="41.46" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="418.61" y="203" fill="#000">cyph…</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).runRead — 90.00 ms (3.04%)</title><rect x="415.61" y="208" width="41.46" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="418.61" y="219" fill="#000">cyph…</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).runRead.func2 (inline) — 90.00 ms (3.04%)</title><rect x="415.61" y="224" width="41.46" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="418.61" y="235" fill="#000">cyph…</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.Run — 80.00 ms (2.70%)</title><rect x="415.61" y="240" width="36.80" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Project).Init — 80.00 ms (2.70%)</title><rect x="415.61" y="256" width="36.80" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*CountRows).Init — 80.00 ms (2.70%)</title><rect x="415.61" y="272" width="36.80" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Expand).Init — 80.00 ms (2.70%)</title><rect x="415.61" y="288" width="36.80" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.expandAdjacencySource.func2 — 80.00 ms (2.70%)</title><rect x="415.61" y="304" width="36.80" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.csrPairAndColumnCachedFor — 80.00 ms (2.70%)</title><rect x="415.61" y="320" width="36.80" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.buildRelTypeColumn — 70.00 ms (2.36%)</title><rect x="415.61" y="336" width="32.14" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.forEachResolvedSlotType — 70.00 ms (2.36%)</title><rect x="415.61" y="352" width="32.14" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.buildRelTypeColumn.func1 — 30.00 ms (1.01%)</title><rect x="415.61" y="368" width="13.49" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.fillSlotLabs — 20.00 ms (0.68%)</title><rect x="429.59" y="368" width="8.82" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mapaccess1_fast64 — 10.00 ms (0.34%)</title><rect x="429.59" y="384" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mapaccess2_fast64 — 10.00 ms (0.34%)</title><rect x="429.59" y="400" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mapassign_fast64 — 10.00 ms (0.34%)</title><rect x="434.26" y="384" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mapassign_fast64 — 10.00 ms (0.34%)</title><rect x="438.92" y="368" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/runtime/maps.(*Map).putSlotSmallFast64 — 10.00 ms (0.34%)</title><rect x="438.92" y="384" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.csrPairFromGraphAt — 10.00 ms (0.34%)</title><rect x="448.24" y="336" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/csr.BuildFromAdjListAsOf[go.shape.string,go.shape.float64] (inline) — 10.00 ms (0.34%)</title><rect x="448.24" y="352" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/csr.buildFromAdjList[go.shape.string,go.shape.float64] — 10.00 ms (0.34%)</title><rect x="448.24" y="368" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Result).materialize — 10.00 ms (0.34%)</title><rect x="452.91" y="240" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*ResultSet).Next — 10.00 ms (0.34%)</title><rect x="452.91" y="256" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Project).Next — 10.00 ms (0.34%)</title><rect x="452.91" y="272" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*CountRows).Next — 10.00 ms (0.34%)</title><rect x="452.91" y="288" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*CountRows).drain — 10.00 ms (0.34%)</title><rect x="452.91" y="304" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*CountRows).drainChunk — 10.00 ms (0.34%)</title><rect x="452.91" y="320" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.columnarExpand.FillChunk — 10.00 ms (0.34%)</title><rect x="452.91" y="336" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Expand).fillChunk — 10.00 ms (0.34%)</title><rect x="452.91" y="352" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Expand).fillOneChunkRow — 10.00 ms (0.34%)</title><rect x="452.91" y="368" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Expand).advanceFwdEdge — 10.00 ms (0.34%)</title><rect x="452.91" y="384" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>fmt.Fprintf — 20.00 ms (0.68%)</title><rect x="457.57" y="176" width="8.82" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>os.(*File).Write — 20.00 ms (0.68%)</title><rect x="457.57" y="192" width="8.82" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>os.(*File).write (inline) — 20.00 ms (0.68%)</title><rect x="457.57" y="208" width="8.82" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/poll.(*FD).Write — 20.00 ms (0.68%)</title><rect x="457.57" y="224" width="8.82" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/poll.ignoringEINTRIO (inline) — 20.00 ms (0.68%)</title><rect x="457.57" y="240" width="8.82" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>syscall.Write (inline) — 20.00 ms (0.68%)</title><rect x="457.57" y="256" width="8.82" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>syscall.write — 20.00 ms (0.68%)</title><rect x="457.57" y="272" width="8.82" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>syscall.syscall — 20.00 ms (0.68%)</title><rect x="457.57" y="288" width="8.82" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>syscall.syscalln — 20.00 ms (0.68%)</title><rect x="457.57" y="304" width="8.82" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>syscall.rawsyscalln — 20.00 ms (0.68%)</title><rect x="457.57" y="320" width="8.82" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>main.queryOldestUsers — 10.00 ms (0.34%)</title><rect x="466.89" y="160" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).Run (inline) — 10.00 ms (0.34%)</title><rect x="466.89" y="176" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).runRead — 10.00 ms (0.34%)</title><rect x="466.89" y="192" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).runRead.func2 (inline) — 10.00 ms (0.34%)</title><rect x="466.89" y="208" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Result).materialize — 10.00 ms (0.34%)</title><rect x="466.89" y="224" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*ResultSet).Next — 10.00 ms (0.34%)</title><rect x="466.89" y="240" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Top).Next — 10.00 ms (0.34%)</title><rect x="466.89" y="256" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Top).consumeAndFinish — 10.00 ms (0.34%)</title><rect x="466.89" y="272" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Project).Next — 10.00 ms (0.34%)</title><rect x="466.89" y="288" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.newProjRowBinder.func1 — 10.00 ms (0.34%)</title><rect x="466.89" y="304" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.evalRow — 10.00 ms (0.34%)</title><rect x="466.89" y="320" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/expr.EvalWith — 10.00 ms (0.34%)</title><rect x="466.89" y="336" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/expr.evalExpr — 10.00 ms (0.34%)</title><rect x="466.89" y="352" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/expr.evalProperty — 10.00 ms (0.34%)</title><rect x="466.89" y="368" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/expr.(*LazyNodeValue).Property — 10.00 ms (0.34%)</title><rect x="466.89" y="384" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.lazyNodeResolver.NodeProperty — 10.00 ms (0.34%)</title><rect x="466.89" y="400" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.lpgPropToExpr — 10.00 ms (0.34%)</title><rect x="466.89" y="416" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.convTstring — 10.00 ms (0.34%)</title><rect x="466.89" y="432" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>main.queryOlderThanCount — 10.00 ms (0.34%)</title><rect x="471.55" y="160" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>main.scalarCount — 10.00 ms (0.34%)</title><rect x="471.55" y="176" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).Run (inline) — 10.00 ms (0.34%)</title><rect x="471.55" y="192" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).runRead — 10.00 ms (0.34%)</title><rect x="471.55" y="208" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).runRead.func2 (inline) — 10.00 ms (0.34%)</title><rect x="471.55" y="224" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Result).materialize — 10.00 ms (0.34%)</title><rect x="471.55" y="240" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*ResultSet).Next — 10.00 ms (0.34%)</title><rect x="471.55" y="256" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Project).Next — 10.00 ms (0.34%)</title><rect x="471.55" y="272" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*CountRows).Next — 10.00 ms (0.34%)</title><rect x="471.55" y="288" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*CountRows).drain — 10.00 ms (0.34%)</title><rect x="471.55" y="304" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*CountRows).drainChunk — 10.00 ms (0.34%)</title><rect x="471.55" y="320" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*ColumnarFilter).FillChunk — 10.00 ms (0.34%)</title><rect x="471.55" y="336" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>main.build — 110.00 ms (3.72%)</title><rect x="476.22" y="144" width="50.78" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="479.22" y="155" fill="#000">main.b…</text>
+</g>
+<g><title>main.addKnows — 100.00 ms (3.38%)</title><rect x="476.22" y="160" width="46.12" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="479.22" y="171" fill="#000">main.…</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*Graph[go.shape.string,go.shape.float64]).AddEdgeLabeled — 50.00 ms (1.69%)</title><rect x="476.22" y="176" width="22.81" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/adjlist.(*AdjList[go.shape.string,go.shape.float64]).AddEdgeLabeled (inline) — 50.00 ms (1.69%)</title><rect x="476.22" y="192" width="22.81" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/adjlist.(*AdjList[go.shape.string,go.shape.float64]).addEdge — 50.00 ms (1.69%)</title><rect x="476.22" y="208" width="22.81" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/adjlist.(*AdjList[go.shape.string,go.shape.float64]).upsertEdge — 50.00 ms (1.69%)</title><rect x="476.22" y="224" width="22.81" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/adjlist.(*AdjList[go.shape.string,go.shape.float64]).upsertEdgeLocked — 40.00 ms (1.35%)</title><rect x="476.22" y="240" width="18.15" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/adjlist.(*AdjList[go.shape.string,go.shape.float64]).upsertEdgeSlotLocked — 40.00 ms (1.35%)</title><rect x="476.22" y="256" width="18.15" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/adjlist.(*AdjList[go.shape.string,go.shape.float64]).storeEntry — 20.00 ms (0.68%)</title><rect x="476.22" y="272" width="8.82" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.makeslice — 10.00 ms (0.34%)</title><rect x="476.22" y="288" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgc — 10.00 ms (0.34%)</title><rect x="476.22" y="304" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgcSmallScanHeader — 10.00 ms (0.34%)</title><rect x="476.22" y="320" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mcache).nextFree — 10.00 ms (0.34%)</title><rect x="476.22" y="336" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mcache).refill — 10.00 ms (0.34%)</title><rect x="476.22" y="352" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mcentral).cacheSpan — 10.00 ms (0.34%)</title><rect x="476.22" y="368" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mcentral).grow — 10.00 ms (0.34%)</title><rect x="476.22" y="384" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mheap).alloc — 10.00 ms (0.34%)</title><rect x="476.22" y="400" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.systemstack — 10.00 ms (0.34%)</title><rect x="476.22" y="416" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mheap).alloc.func1 — 10.00 ms (0.34%)</title><rect x="476.22" y="432" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mheap).allocSpan — 10.00 ms (0.34%)</title><rect x="476.22" y="448" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*sysMemStat).add — 10.00 ms (0.34%)</title><rect x="476.22" y="464" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.typedslicecopy — 10.00 ms (0.34%)</title><rect x="480.88" y="288" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.memmove — 10.00 ms (0.34%)</title><rect x="480.88" y="304" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.newobject — 10.00 ms (0.34%)</title><rect x="485.54" y="272" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgc — 10.00 ms (0.34%)</title><rect x="485.54" y="288" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgcSmallScanNoHeader — 10.00 ms (0.34%)</title><rect x="485.54" y="304" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>sync.(*Mutex).Unlock — 10.00 ms (0.34%)</title><rect x="494.86" y="240" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/sync.(*Mutex).Unlock (inline) — 10.00 ms (0.34%)</title><rect x="494.86" y="256" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/sync.(*Mutex).unlockSlow — 10.00 ms (0.34%)</title><rect x="494.86" y="272" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/sync.runtime_Semrelease — 10.00 ms (0.34%)</title><rect x="494.86" y="288" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.semrelease1 — 10.00 ms (0.34%)</title><rect x="494.86" y="304" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.readyWithTime — 10.00 ms (0.34%)</title><rect x="494.86" y="320" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.goready (inline) — 10.00 ms (0.34%)</title><rect x="494.86" y="336" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.systemstack — 10.00 ms (0.34%)</title><rect x="494.86" y="352" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>_.goready.func1 — 10.00 ms (0.34%)</title><rect x="494.86" y="368" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.ready — 10.00 ms (0.34%)</title><rect x="494.86" y="384" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.traceLocker.GoUnpark — 10.00 ms (0.34%)</title><rect x="494.86" y="400" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.traceEventWriter.event — 10.00 ms (0.34%)</title><rect x="494.86" y="416" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.traceWriter.event — 10.00 ms (0.34%)</title><rect x="494.86" y="432" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*traceBuf).varint (inline) — 10.00 ms (0.34%)</title><rect x="494.86" y="448" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*Graph[go.shape.string,go.shape.float64]).SetEdgeProperty (inline) — 50.00 ms (1.69%)</title><rect x="499.53" y="176" width="22.81" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*Graph[go.shape.string,go.shape.float64]).setEdgePropertyInfo — 50.00 ms (1.69%)</title><rect x="499.53" y="192" width="22.81" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/adjlist.Writer[go.shape.string,go.shape.float64].UpdateEntryAux (inline) — 50.00 ms (1.69%)</title><rect x="499.53" y="208" width="22.81" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/adjlist.(*AdjList[go.shape.string,go.shape.float64]).updateEntryAuxTx — 50.00 ms (1.69%)</title><rect x="499.53" y="224" width="22.81" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/adjlist.(*AdjList[go.shape.string,go.shape.float64]).storeEntry — 30.00 ms (1.01%)</title><rect x="499.53" y="240" width="13.49" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.typedslicecopy — 20.00 ms (0.68%)</title><rect x="499.53" y="256" width="8.82" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.bulkBarrierPreWrite — 20.00 ms (0.68%)</title><rect x="499.53" y="272" width="8.82" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.makeslice — 10.00 ms (0.34%)</title><rect x="508.85" y="256" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgc — 10.00 ms (0.34%)</title><rect x="508.85" y="272" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgcSmallScanHeader — 10.00 ms (0.34%)</title><rect x="508.85" y="288" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mcache).nextFree — 10.00 ms (0.34%)</title><rect x="508.85" y="304" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mcache).refill — 10.00 ms (0.34%)</title><rect x="508.85" y="320" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mcentral).cacheSpan — 10.00 ms (0.34%)</title><rect x="508.85" y="336" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mcentral).grow — 10.00 ms (0.34%)</title><rect x="508.85" y="352" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mheap).alloc — 10.00 ms (0.34%)</title><rect x="508.85" y="368" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.systemstack — 10.00 ms (0.34%)</title><rect x="508.85" y="384" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mheap).alloc.func1 — 10.00 ms (0.34%)</title><rect x="508.85" y="400" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mheap).allocSpan — 10.00 ms (0.34%)</title><rect x="508.85" y="416" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mheap).initSpan — 10.00 ms (0.34%)</title><rect x="508.85" y="432" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mspan).init — 10.00 ms (0.34%)</title><rect x="508.85" y="448" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*Graph[go.shape.string,go.shape.float64]).setEdgePropertyInfo.func1 — 10.00 ms (0.34%)</title><rect x="513.51" y="240" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*edgePropCols).set — 10.00 ms (0.34%)</title><rect x="513.51" y="256" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*edgePropCols).clone — 10.00 ms (0.34%)</title><rect x="513.51" y="272" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.makeslice — 10.00 ms (0.34%)</title><rect x="513.51" y="288" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgc — 10.00 ms (0.34%)</title><rect x="513.51" y="304" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgcSmallScanNoHeader — 10.00 ms (0.34%)</title><rect x="513.51" y="320" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.memclrNoHeapPointers — 10.00 ms (0.34%)</title><rect x="513.51" y="336" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.newobject — 10.00 ms (0.34%)</title><rect x="518.18" y="240" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgc — 10.00 ms (0.34%)</title><rect x="518.18" y="256" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgcSmallScanNoHeader — 10.00 ms (0.34%)</title><rect x="518.18" y="272" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>main.addUser — 10.00 ms (0.34%)</title><rect x="522.84" y="160" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*Graph[go.shape.string,go.shape.float64]).SetNodeProperty — 10.00 ms (0.34%)</title><rect x="522.84" y="176" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*Graph[go.shape.string,go.shape.float64]).setNodePropertyInfo — 10.00 ms (0.34%)</title><rect x="522.84" y="192" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*propBag).set — 10.00 ms (0.34%)</title><rect x="522.84" y="208" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.makeslice — 10.00 ms (0.34%)</title><rect x="522.84" y="224" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgc — 10.00 ms (0.34%)</title><rect x="522.84" y="240" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgcSmallNoScanSC4 — 10.00 ms (0.34%)</title><rect x="522.84" y="256" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mcache).nextFree — 10.00 ms (0.34%)</title><rect x="522.84" y="272" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mcache).refill — 10.00 ms (0.34%)</title><rect x="522.84" y="288" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mcentral).uncacheSpan — 10.00 ms (0.34%)</title><rect x="522.84" y="304" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*spanSet).push — 10.00 ms (0.34%)</title><rect x="522.84" y="320" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/runtime/atomic.(*Pointer[go.shape.struct { runtime.spanSetBlockHeader2 — 10.00 ms (0.34%)</title><rect x="522.84" y="336" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title> runtime.spans [512]runtime.atomicMSpanPointer }]).StoreNoWB (inline) — 10.00 ms (0.34%)</title><rect x="522.84" y="352" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/runtime/atomic.(*UnsafePointer).StoreNoWB (inline) — 10.00 ms (0.34%)</title><rect x="522.84" y="368" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.NewEngine (inline) — 30.00 ms (1.01%)</title><rect x="527.50" y="144" width="13.49" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.NewEngineWithOptions — 30.00 ms (1.01%)</title><rect x="527.50" y="160" width="13.49" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).recomputeCountStore — 30.00 ms (1.01%)</title><rect x="527.50" y="176" width="13.49" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph.(*Mapper[go.shape.string]).Walk — 30.00 ms (1.01%)</title><rect x="527.50" y="192" width="13.49" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).recomputeCountStore.func1 — 30.00 ms (1.01%)</title><rect x="527.50" y="208" width="13.49" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*CountBuffer).Commit — 20.00 ms (0.68%)</title><rect x="527.50" y="224" width="8.82" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/index/count.(*Store).Apply — 20.00 ms (0.68%)</title><rect x="527.50" y="240" width="8.82" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.appendNodeLabelIDs — 10.00 ms (0.34%)</title><rect x="536.82" y="224" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*Graph[go.shape.string,go.shape.float64]).ForEachNodeLabelByID (inline) — 10.00 ms (0.34%)</title><rect x="536.82" y="240" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*Graph[go.shape.string,go.shape.float64]).ForEachNodeLabelByIDAsOf — 10.00 ms (0.34%)</title><rect x="536.82" y="256" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*Graph[go.shape.string,go.shape.float64]).withLabelBag — 10.00 ms (0.34%)</title><rect x="536.82" y="272" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*Graph[go.shape.string,go.shape.float64]).ForEachNodeLabelByIDAsOf.func1 — 10.00 ms (0.34%)</title><rect x="536.82" y="288" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*labelBag).forEach — 10.00 ms (0.34%)</title><rect x="536.82" y="304" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*Graph[go.shape.string,go.shape.float64]).ForEachNodeLabelByIDAsOf.func1.1 — 10.00 ms (0.34%)</title><rect x="536.82" y="320" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.appendNodeLabelIDs.func1 — 10.00 ms (0.34%)</title><rect x="536.82" y="336" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*LabelRegistry).Lookup (inline) — 10.00 ms (0.34%)</title><rect x="536.82" y="352" width="4.16" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mapaccess2_faststr — 10.00 ms (0.34%)</title><rect x="536.82" y="368" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/runtime/maps.(*Map).getWithoutKeySmallFastStr — 10.00 ms (0.34%)</title><rect x="536.82" y="384" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mcall — 720.00 ms (24.32%)</title><rect x="541.49" y="64" width="335.18" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="544.49" y="75" fill="#000">runtime.mcall</text>
+</g>
+<g><title>runtime.park_m — 560.00 ms (18.92%)</title><rect x="541.49" y="80" width="260.58" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="544.49" y="91" fill="#000">runtime.park_m</text>
+</g>
+<g><title>runtime.schedule — 560.00 ms (18.92%)</title><rect x="541.49" y="96" width="260.58" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="544.49" y="107" fill="#000">runtime.schedule</text>
+</g>
+<g><title>runtime.findRunnable — 550.00 ms (18.58%)</title><rect x="541.49" y="112" width="255.92" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="544.49" y="123" fill="#000">runtime.findRunnable</text>
+</g>
+<g><title>runtime.stealWork — 300.00 ms (10.14%)</title><rect x="541.49" y="128" width="139.36" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="544.49" y="139" fill="#000">runtime.stealWork</text>
+</g>
+<g><title>runtime.runqsteal — 290.00 ms (9.80%)</title><rect x="541.49" y="144" width="134.70" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="544.49" y="155" fill="#000">runtime.runqsteal</text>
+</g>
+<g><title>runtime.runqgrab — 290.00 ms (9.80%)</title><rect x="541.49" y="160" width="134.70" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="544.49" y="171" fill="#000">runtime.runqgrab</text>
+</g>
+<g><title>runtime.usleep — 290.00 ms (9.80%)</title><rect x="541.49" y="176" width="134.70" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="544.49" y="187" fill="#000">runtime.usleep</text>
+</g>
+<g><title>runtime.(*timers).check — 10.00 ms (0.34%)</title><rect x="676.69" y="144" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*timers).run — 10.00 ms (0.34%)</title><rect x="676.69" y="160" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*timer).unlockAndRun — 10.00 ms (0.34%)</title><rect x="676.69" y="176" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>time.sendTime — 10.00 ms (0.34%)</title><rect x="676.69" y="192" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.stopm — 210.00 ms (7.09%)</title><rect x="681.35" y="128" width="97.41" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="684.35" y="139" fill="#000">runtime.stopm</text>
+</g>
+<g><title>runtime.mPark (inline) — 210.00 ms (7.09%)</title><rect x="681.35" y="144" width="97.41" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="684.35" y="155" fill="#000">runtime.mPark …</text>
+</g>
+<g><title>runtime.notesleep — 210.00 ms (7.09%)</title><rect x="681.35" y="160" width="97.41" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="684.35" y="171" fill="#000">runtime.notesl…</text>
+</g>
+<g><title>runtime.semasleep — 210.00 ms (7.09%)</title><rect x="681.35" y="176" width="97.41" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="684.35" y="187" fill="#000">runtime.semasl…</text>
+</g>
+<g><title>runtime.pthread_cond_wait — 210.00 ms (7.09%)</title><rect x="681.35" y="192" width="97.41" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="684.35" y="203" fill="#000">runtime.pthrea…</text>
+</g>
+<g><title>runtime.lock (inline) — 20.00 ms (0.68%)</title><rect x="779.26" y="128" width="8.82" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.lockWithRank (inline) — 20.00 ms (0.68%)</title><rect x="779.26" y="144" width="8.82" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.lock2 — 20.00 ms (0.68%)</title><rect x="779.26" y="160" width="8.82" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.semasleep — 10.00 ms (0.34%)</title><rect x="779.26" y="176" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.pthread_cond_wait — 10.00 ms (0.34%)</title><rect x="779.26" y="192" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.osyield (inline) — 10.00 ms (0.34%)</title><rect x="783.92" y="176" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.usleep — 10.00 ms (0.34%)</title><rect x="783.92" y="192" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*gcControllerState).findRunnableGCWorker — 10.00 ms (0.34%)</title><rect x="788.58" y="128" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.traceLocker.GoUnpark — 10.00 ms (0.34%)</title><rect x="788.58" y="144" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.traceEventWriter.event — 10.00 ms (0.34%)</title><rect x="788.58" y="160" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.traceWriter.event — 10.00 ms (0.34%)</title><rect x="788.58" y="176" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.traceClockNow (inline) — 10.00 ms (0.34%)</title><rect x="788.58" y="192" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.nanotime (inline) — 10.00 ms (0.34%)</title><rect x="788.58" y="208" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.nanotime1 — 10.00 ms (0.34%)</title><rect x="788.58" y="224" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.checkTimersNoP — 10.00 ms (0.34%)</title><rect x="793.24" y="128" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*timers).wakeTime (inline) — 10.00 ms (0.34%)</title><rect x="793.24" y="144" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.wakep — 10.00 ms (0.34%)</title><rect x="797.91" y="112" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.startm — 10.00 ms (0.34%)</title><rect x="797.91" y="128" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.notewakeup — 10.00 ms (0.34%)</title><rect x="797.91" y="144" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.semawakeup — 10.00 ms (0.34%)</title><rect x="797.91" y="160" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.pthread_cond_signal — 10.00 ms (0.34%)</title><rect x="797.91" y="176" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.gosched_m — 160.00 ms (5.41%)</title><rect x="802.57" y="80" width="74.09" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="805.57" y="91" fill="#000">runtime.go…</text>
+</g>
+<g><title>runtime.goschedImpl — 160.00 ms (5.41%)</title><rect x="802.57" y="96" width="74.09" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="805.57" y="107" fill="#000">runtime.go…</text>
+</g>
+<g><title>runtime.wakep — 150.00 ms (5.07%)</title><rect x="802.57" y="112" width="69.43" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="805.57" y="123" fill="#000">runtime.w…</text>
+</g>
+<g><title>runtime.startm — 150.00 ms (5.07%)</title><rect x="802.57" y="128" width="69.43" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="805.57" y="139" fill="#000">runtime.s…</text>
+</g>
+<g><title>runtime.notewakeup — 150.00 ms (5.07%)</title><rect x="802.57" y="144" width="69.43" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="805.57" y="155" fill="#000">runtime.n…</text>
+</g>
+<g><title>runtime.semawakeup — 150.00 ms (5.07%)</title><rect x="802.57" y="160" width="69.43" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="805.57" y="171" fill="#000">runtime.s…</text>
+</g>
+<g><title>runtime.pthread_cond_signal — 150.00 ms (5.07%)</title><rect x="802.57" y="176" width="69.43" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="805.57" y="187" fill="#000">runtime.p…</text>
+</g>
+<g><title>runtime.schedule — 10.00 ms (0.34%)</title><rect x="872.50" y="112" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.findRunnable — 10.00 ms (0.34%)</title><rect x="872.50" y="128" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.stealWork — 10.00 ms (0.34%)</title><rect x="872.50" y="144" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.runqsteal — 10.00 ms (0.34%)</title><rect x="872.50" y="160" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.runqgrab — 10.00 ms (0.34%)</title><rect x="872.50" y="176" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.usleep — 10.00 ms (0.34%)</title><rect x="872.50" y="192" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.gcBgMarkWorker — 630.00 ms (21.28%)</title><rect x="877.16" y="64" width="293.22" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="880.16" y="75" fill="#000">runtime.gcBgMarkWorker</text>
+</g>
+<g><title>runtime.systemstack — 630.00 ms (21.28%)</title><rect x="877.16" y="80" width="293.22" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="880.16" y="91" fill="#000">runtime.systemstack</text>
+</g>
+<g><title>runtime.gcBgMarkWorker.func2 — 630.00 ms (21.28%)</title><rect x="877.16" y="96" width="293.22" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="880.16" y="107" fill="#000">runtime.gcBgMarkWorker.func2</text>
+</g>
+<g><title>runtime.gcDrainMarkWorkerIdle (inline) — 400.00 ms (13.51%)</title><rect x="877.16" y="112" width="185.99" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="880.16" y="123" fill="#000">runtime.gcDrainMarkWorkerIdle…</text>
+</g>
+<g><title>runtime.gcDrain — 400.00 ms (13.51%)</title><rect x="877.16" y="128" width="185.99" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="880.16" y="139" fill="#000">runtime.gcDrain</text>
+</g>
+<g><title>runtime.scanSpan — 270.00 ms (9.12%)</title><rect x="877.16" y="144" width="125.38" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="880.16" y="155" fill="#000">runtime.scanSpan</text>
+</g>
+<g><title>runtime.scanObjectsSmall — 180.00 ms (6.08%)</title><rect x="877.16" y="160" width="83.42" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="880.16" y="171" fill="#000">runtime.sca…</text>
+</g>
+<g><title>runtime.tryDeferToSpanScan — 90.00 ms (3.04%)</title><rect x="877.16" y="176" width="41.46" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="880.16" y="187" fill="#000">runt…</text>
+</g>
+<g><title>runtime.(*spanInlineMarkBits).tryAcquire — 50.00 ms (1.69%)</title><rect x="877.16" y="192" width="22.81" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*spanScanOwnership).or (inline) — 40.00 ms (1.35%)</title><rect x="877.16" y="208" width="18.15" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.heapArenaOf (inline) — 10.00 ms (0.34%)</title><rect x="900.47" y="192" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.arenaIndex (inline) — 10.00 ms (0.34%)</title><rect x="900.47" y="208" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.extractHeapBitsSmall — 20.00 ms (0.68%)</title><rect x="919.12" y="176" width="8.82" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.scanObjectSmall — 50.00 ms (1.69%)</title><rect x="961.08" y="160" width="22.81" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.tryDeferToSpanScan — 20.00 ms (0.68%)</title><rect x="961.08" y="176" width="8.82" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.alignDown (inline) — 10.00 ms (0.34%)</title><rect x="961.08" y="192" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.spanSetScans — 20.00 ms (0.68%)</title><rect x="984.39" y="160" width="8.82" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.scanObject — 100.00 ms (3.38%)</title><rect x="1003.04" y="144" width="46.12" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="1006.04" y="155" fill="#000">runti…</text>
+</g>
+<g><title>runtime.tryDeferToSpanScan — 30.00 ms (1.01%)</title><rect x="1003.04" y="160" width="13.49" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.typePointers.next — 20.00 ms (0.68%)</title><rect x="1017.03" y="160" width="8.82" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.typePointers.nextFast (inline) — 10.00 ms (0.34%)</title><rect x="1026.35" y="160" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mspan).typePointersOfUnchecked — 10.00 ms (0.34%)</title><rect x="1031.01" y="160" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*gcWork).tryGetSpanFast (inline) — 10.00 ms (0.34%)</title><rect x="1049.66" y="144" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*spanQueue).tryGetFast (inline) — 10.00 ms (0.34%)</title><rect x="1049.66" y="160" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.gcDrainMarkWorkerDedicated (inline) — 230.00 ms (7.77%)</title><rect x="1063.65" y="112" width="106.73" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="1066.65" y="123" fill="#000">runtime.gcDrain…</text>
+</g>
+<g><title>runtime.gcDrain — 230.00 ms (7.77%)</title><rect x="1063.65" y="128" width="106.73" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="1066.65" y="139" fill="#000">runtime.gcDrain</text>
+</g>
+<g><title>runtime.scanSpan — 160.00 ms (5.41%)</title><rect x="1063.65" y="144" width="74.09" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="1066.65" y="155" fill="#000">runtime.sc…</text>
+</g>
+<g><title>runtime.scanObjectsSmall — 80.00 ms (2.70%)</title><rect x="1063.65" y="160" width="36.80" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.tryDeferToSpanScan — 40.00 ms (1.35%)</title><rect x="1063.65" y="176" width="18.15" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.heapArenaOf (inline) — 10.00 ms (0.34%)</title><rect x="1063.65" y="192" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.arenaIndex (inline) — 10.00 ms (0.34%)</title><rect x="1063.65" y="208" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*spanInlineMarkBits).tryAcquire — 10.00 ms (0.34%)</title><rect x="1068.31" y="192" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.findObject — 10.00 ms (0.34%)</title><rect x="1082.30" y="176" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mSpanStateBox).get (inline) — 10.00 ms (0.34%)</title><rect x="1082.30" y="192" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/runtime/atomic.(*Uint8).Load (inline) — 10.00 ms (0.34%)</title><rect x="1082.30" y="208" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.spanSetScans — 30.00 ms (1.01%)</title><rect x="1100.95" y="160" width="13.49" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.scanObjectSmall — 30.00 ms (1.01%)</title><rect x="1114.93" y="160" width="13.49" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.tryDeferToSpanScan — 10.00 ms (0.34%)</title><rect x="1114.93" y="176" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*spanInlineMarkBits).release (inline) — 10.00 ms (0.34%)</title><rect x="1128.92" y="160" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.scanObject — 50.00 ms (1.69%)</title><rect x="1138.24" y="144" width="22.81" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.tryDeferToSpanScan — 20.00 ms (0.68%)</title><rect x="1138.24" y="160" width="8.82" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.typePointers.next — 10.00 ms (0.34%)</title><rect x="1147.57" y="160" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*gcWork).tryGetObjFast (inline) — 10.00 ms (0.34%)</title><rect x="1161.55" y="144" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.systemstack — 420.00 ms (14.19%)</title><rect x="1170.88" y="64" width="195.31" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="1173.88" y="75" fill="#000">runtime.systemstack</text>
+</g>
+<g><title>runtime.(*mheap).alloc.func1 — 220.00 ms (7.43%)</title><rect x="1170.88" y="80" width="102.07" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="1173.88" y="91" fill="#000">runtime.(*mheap…</text>
+</g>
+<g><title>runtime.(*mheap).allocSpan — 220.00 ms (7.43%)</title><rect x="1170.88" y="96" width="102.07" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="1173.88" y="107" fill="#000">runtime.(*mheap…</text>
+</g>
+<g><title>runtime.sysUsed (inline) — 200.00 ms (6.76%)</title><rect x="1170.88" y="112" width="92.74" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="1173.88" y="123" fill="#000">runtime.sysUs…</text>
+</g>
+<g><title>runtime.sysUsedOS (inline) — 200.00 ms (6.76%)</title><rect x="1170.88" y="128" width="92.74" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="1173.88" y="139" fill="#000">runtime.sysUs…</text>
+</g>
+<g><title>runtime.madvise — 200.00 ms (6.76%)</title><rect x="1170.88" y="144" width="92.74" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="1173.88" y="155" fill="#000">runtime.madvi…</text>
+</g>
+<g><title>runtime.(*mheap).grow — 20.00 ms (0.68%)</title><rect x="1264.12" y="112" width="8.82" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.sysMap — 20.00 ms (0.68%)</title><rect x="1264.12" y="128" width="8.82" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.sysMapOS — 20.00 ms (0.68%)</title><rect x="1264.12" y="144" width="8.82" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mmap — 20.00 ms (0.68%)</title><rect x="1264.12" y="160" width="8.82" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>_.goready.func1 — 140.00 ms (4.73%)</title><rect x="1273.45" y="80" width="64.77" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="1276.45" y="91" fill="#000">_.goread…</text>
+</g>
+<g><title>runtime.ready — 140.00 ms (4.73%)</title><rect x="1273.45" y="96" width="64.77" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="1276.45" y="107" fill="#000">runtime.…</text>
+</g>
+<g><title>runtime.wakep — 140.00 ms (4.73%)</title><rect x="1273.45" y="112" width="64.77" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="1276.45" y="123" fill="#000">runtime.…</text>
+</g>
+<g><title>runtime.startm — 140.00 ms (4.73%)</title><rect x="1273.45" y="128" width="64.77" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="1276.45" y="139" fill="#000">runtime.…</text>
+</g>
+<g><title>runtime.notewakeup — 140.00 ms (4.73%)</title><rect x="1273.45" y="144" width="64.77" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="1276.45" y="155" fill="#000">runtime.…</text>
+</g>
+<g><title>runtime.semawakeup — 140.00 ms (4.73%)</title><rect x="1273.45" y="160" width="64.77" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="1276.45" y="171" fill="#000">runtime.…</text>
+</g>
+<g><title>runtime.pthread_cond_signal — 140.00 ms (4.73%)</title><rect x="1273.45" y="176" width="64.77" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="1276.45" y="187" fill="#000">runtime.…</text>
+</g>
+<g><title>runtime.gcBgMarkWorker.func2 — 40.00 ms (1.35%)</title><rect x="1338.72" y="80" width="18.15" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.gcDrainMarkWorkerIdle (inline) — 40.00 ms (1.35%)</title><rect x="1338.72" y="96" width="18.15" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.gcDrain — 40.00 ms (1.35%)</title><rect x="1338.72" y="112" width="18.15" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*gcControllerState).enlistWorker — 40.00 ms (1.35%)</title><rect x="1338.72" y="128" width="18.15" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.preemptone — 40.00 ms (1.35%)</title><rect x="1338.72" y="144" width="18.15" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.preemptM — 40.00 ms (1.35%)</title><rect x="1338.72" y="160" width="18.15" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.signalM (inline) — 40.00 ms (1.35%)</title><rect x="1338.72" y="176" width="18.15" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.pthread_kill — 40.00 ms (1.35%)</title><rect x="1338.72" y="192" width="18.15" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.gcStart.func4 — 10.00 ms (0.34%)</title><rect x="1357.36" y="80" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.startTheWorldWithSema — 10.00 ms (0.34%)</title><rect x="1357.36" y="96" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.netpoll — 10.00 ms (0.34%)</title><rect x="1357.36" y="112" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.kevent — 10.00 ms (0.34%)</title><rect x="1357.36" y="128" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.newproc.func1 — 10.00 ms (0.34%)</title><rect x="1362.03" y="80" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.wakep — 10.00 ms (0.34%)</title><rect x="1362.03" y="96" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.startm — 10.00 ms (0.34%)</title><rect x="1362.03" y="112" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.notewakeup — 10.00 ms (0.34%)</title><rect x="1362.03" y="128" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.semawakeup — 10.00 ms (0.34%)</title><rect x="1362.03" y="144" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.pthread_cond_signal — 10.00 ms (0.34%)</title><rect x="1362.03" y="160" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.bgsweep — 30.00 ms (1.01%)</title><rect x="1366.69" y="64" width="13.49" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.sweepone — 30.00 ms (1.01%)</title><rect x="1366.69" y="80" width="13.49" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*sweepLocked).sweep — 20.00 ms (0.68%)</title><rect x="1366.69" y="96" width="8.82" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mspan).moveInlineMarks — 10.00 ms (0.34%)</title><rect x="1366.69" y="112" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*sweepLocker).tryAcquire — 10.00 ms (0.34%)</title><rect x="1376.01" y="96" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.morestack — 20.00 ms (0.68%)</title><rect x="1380.68" y="64" width="8.82" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.newstack — 20.00 ms (0.68%)</title><rect x="1380.68" y="80" width="8.82" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.gopreempt_m (inline) — 20.00 ms (0.68%)</title><rect x="1380.68" y="96" width="8.82" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.goschedImpl — 20.00 ms (0.68%)</title><rect x="1380.68" y="112" width="8.82" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.schedule — 20.00 ms (0.68%)</title><rect x="1380.68" y="128" width="8.82" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.findRunnable — 10.00 ms (0.34%)</title><rect x="1380.68" y="144" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.runSafePointFn — 10.00 ms (0.34%)</title><rect x="1380.68" y="160" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.lock (inline) — 10.00 ms (0.34%)</title><rect x="1380.68" y="176" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.lockWithRank (inline) — 10.00 ms (0.34%)</title><rect x="1380.68" y="192" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.lock2 — 10.00 ms (0.34%)</title><rect x="1380.68" y="208" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.osyield (inline) — 10.00 ms (0.34%)</title><rect x="1380.68" y="224" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.usleep — 10.00 ms (0.34%)</title><rect x="1380.68" y="240" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.resetspinning — 10.00 ms (0.34%)</title><rect x="1385.34" y="144" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.wakep — 10.00 ms (0.34%)</title><rect x="1385.34" y="160" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.startm — 10.00 ms (0.34%)</title><rect x="1385.34" y="176" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.notewakeup — 10.00 ms (0.34%)</title><rect x="1385.34" y="192" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.semawakeup — 10.00 ms (0.34%)</title><rect x="1385.34" y="208" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.pthread_cond_signal — 10.00 ms (0.34%)</title><rect x="1385.34" y="224" width="4.16" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+</svg>

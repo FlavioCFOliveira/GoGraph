@@ -1,0 +1,38 @@
+Each line is 'Showing nodes accounting for A, B% of C total' where
+A is the CUMULATIVE value of every sample whose stack contains the subject
+and C is the whole profile. The baseline below is the same figure for the
+benchmark's own stack, which is what A should be read against.
+
+### baseline focus=BenchmarkStripCorpus
+Duration: 144.99s, Total samples = 133.68s (92.20%)
+Showing nodes accounting for 114.15s, 85.39% of 133.68s total
+
+### subject=github\.com/antlr4-go/antlr
+Showing nodes accounting for 0, 0% of 133.68s total
+
+### subject=cypher/parser/gen\.
+Showing nodes accounting for 0, 0% of 133.68s total
+
+### subject=GoGraph/cypher/parser\.
+Showing nodes accounting for 114.15s, 85.39% of 133.68s total
+
+### subject=runtime\.mallocgc
+Showing nodes accounting for 0.60s, 0.45% of 133.68s total
+
+### subject=runtime\.gcDrain|runtime\.gcBgMarkWorker|runtime\.scanobject
+Showing nodes accounting for 0.59s, 0.44% of 133.68s total
+
+### subject=runtime\.growslice
+Showing nodes accounting for 0, 0% of 133.68s total
+
+### subject=runtime\.mapassign|runtime\.mapaccess
+Showing nodes accounting for 0.03s, 0.022% of 133.68s total
+
+### subject=strings\.ToUpper
+Showing nodes accounting for 2.45s, 1.83% of 133.68s total
+
+### subject=parser\.StripLiterals
+Showing nodes accounting for 89.69s, 67.09% of 133.68s total
+
+### subject=runtime\.mProf_Malloc|runtime\.profilealloc
+Showing nodes accounting for 0.02s, 0.015% of 133.68s total

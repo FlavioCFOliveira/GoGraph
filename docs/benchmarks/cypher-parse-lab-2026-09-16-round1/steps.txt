@@ -1,0 +1,14 @@
+frontend-full cpu: exit=0 lines=83
+strip-corpus cpu: exit=0 lines=83
+prepare-cold cpu: exit=0 lines=83
+prepare-warm cpu: exit=0 lines=83
+frontend-full mem: exit=0
+strip-corpus mem: exit=0
+prepare-cold mem: exit=0
+prepare-warm mem: exit=0
+gctrace: exit=0 gc_lines=9276
+frontend-share series: exit=1 lines=130
+strip-shape series: exit=0 lines=230
+stage ladder at count=10 via scripts/parse-lab.sh
+lab: 0
+example22: exit=0

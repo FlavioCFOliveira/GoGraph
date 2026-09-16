@@ -1,0 +1,151 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkFrontEndShare/q06_indexed_point_lookup/hit/1parse-10         	  935246	       128.8 ns/op	      48 B/op	       1 allocs/op
+BenchmarkFrontEndShare/q06_indexed_point_lookup/hit/1parse-10         	  931044	       132.4 ns/op	      48 B/op	       1 allocs/op
+BenchmarkFrontEndShare/q06_indexed_point_lookup/hit/1parse-10         	  924884	       128.3 ns/op	      48 B/op	       1 allocs/op
+BenchmarkFrontEndShare/q06_indexed_point_lookup/hit/1parse-10         	  937225	       129.4 ns/op	      48 B/op	       1 allocs/op
+BenchmarkFrontEndShare/q06_indexed_point_lookup/hit/1parse-10         	  935520	       129.8 ns/op	      48 B/op	       1 allocs/op
+BenchmarkFrontEndShare/q06_indexed_point_lookup/hit/1parse-10         	  957860	       128.6 ns/op	      48 B/op	       1 allocs/op
+BenchmarkFrontEndShare/q06_indexed_point_lookup/hit/1parse-10         	  931435	       129.0 ns/op	      48 B/op	       1 allocs/op
+BenchmarkFrontEndShare/q06_indexed_point_lookup/hit/1parse-10         	  904635	       128.3 ns/op	      48 B/op	       1 allocs/op
+BenchmarkFrontEndShare/q06_indexed_point_lookup/hit/1parse-10         	  927386	       129.0 ns/op	      48 B/op	       1 allocs/op
+BenchmarkFrontEndShare/q06_indexed_point_lookup/hit/1parse-10         	  908402	       128.4 ns/op	      48 B/op	       1 allocs/op
+BenchmarkFrontEndShare/q06_indexed_point_lookup/hit/2full-10          	   46072	      2559 ns/op	    3960 B/op	      48 allocs/op
+BenchmarkFrontEndShare/q06_indexed_point_lookup/hit/2full-10          	   45649	      2547 ns/op	    3960 B/op	      48 allocs/op
+BenchmarkFrontEndShare/q06_indexed_point_lookup/hit/2full-10          	   44626	      2607 ns/op	    3960 B/op	      48 allocs/op
+BenchmarkFrontEndShare/q06_indexed_point_lookup/hit/2full-10          	   43890	      2571 ns/op	    3960 B/op	      48 allocs/op
+BenchmarkFrontEndShare/q06_indexed_point_lookup/hit/2full-10          	   44422	      2607 ns/op	    3960 B/op	      48 allocs/op
+BenchmarkFrontEndShare/q06_indexed_point_lookup/hit/2full-10          	   45673	      2666 ns/op	    3960 B/op	      48 allocs/op
+BenchmarkFrontEndShare/q06_indexed_point_lookup/hit/2full-10          	   44445	      2579 ns/op	    3960 B/op	      48 allocs/op
+BenchmarkFrontEndShare/q06_indexed_point_lookup/hit/2full-10          	   43580	      2583 ns/op	    3960 B/op	      48 allocs/op
+BenchmarkFrontEndShare/q06_indexed_point_lookup/hit/2full-10          	   43588	      2573 ns/op	    3960 B/op	      48 allocs/op
+BenchmarkFrontEndShare/q06_indexed_point_lookup/hit/2full-10          	   44103	      2622 ns/op	    3960 B/op	      48 allocs/op
+BenchmarkFrontEndShare/q06_indexed_point_lookup/miss/1parse-10        	    5911	     18212 ns/op	   19106 B/op	     335 allocs/op
+BenchmarkFrontEndShare/q06_indexed_point_lookup/miss/1parse-10        	    6931	     17768 ns/op	   19102 B/op	     335 allocs/op
+BenchmarkFrontEndShare/q06_indexed_point_lookup/miss/1parse-10        	    7339	     17321 ns/op	   19102 B/op	     335 allocs/op
+BenchmarkFrontEndShare/q06_indexed_point_lookup/miss/1parse-10        	    7100	     17243 ns/op	   19102 B/op	     335 allocs/op
+BenchmarkFrontEndShare/q06_indexed_point_lookup/miss/1parse-10        	    7124	     17700 ns/op	   19102 B/op	     335 allocs/op
+BenchmarkFrontEndShare/q06_indexed_point_lookup/miss/1parse-10        	    7077	     17291 ns/op	   19101 B/op	     335 allocs/op
+BenchmarkFrontEndShare/q06_indexed_point_lookup/miss/1parse-10        	    6798	     17226 ns/op	   19101 B/op	     335 allocs/op
+BenchmarkFrontEndShare/q06_indexed_point_lookup/miss/1parse-10        	    7106	     17134 ns/op	   19102 B/op	     335 allocs/op
+BenchmarkFrontEndShare/q06_indexed_point_lookup/miss/1parse-10        	    7027	     17233 ns/op	   19103 B/op	     335 allocs/op
+BenchmarkFrontEndShare/q06_indexed_point_lookup/miss/1parse-10        	    7340	     16902 ns/op	   19101 B/op	     335 allocs/op
+BenchmarkFrontEndShare/q06_indexed_point_lookup/miss/2full-10         	    5713	     21198 ns/op	   23877 B/op	     391 allocs/op
+BenchmarkFrontEndShare/q06_indexed_point_lookup/miss/2full-10         	    6080	     20696 ns/op	   23878 B/op	     391 allocs/op
+BenchmarkFrontEndShare/q06_indexed_point_lookup/miss/2full-10         	    6237	     20562 ns/op	   23877 B/op	     391 allocs/op
+BenchmarkFrontEndShare/q06_indexed_point_lookup/miss/2full-10         	    6159	     20730 ns/op	   23877 B/op	     391 allocs/op
+BenchmarkFrontEndShare/q06_indexed_point_lookup/miss/2full-10         	    5832	     20663 ns/op	   23878 B/op	     391 allocs/op
+BenchmarkFrontEndShare/q06_indexed_point_lookup/miss/2full-10         	    6236	     20953 ns/op	   23877 B/op	     391 allocs/op
+BenchmarkFrontEndShare/q06_indexed_point_lookup/miss/2full-10         	    6027	     20808 ns/op	   23877 B/op	     391 allocs/op
+BenchmarkFrontEndShare/q06_indexed_point_lookup/miss/2full-10         	    6032	     20683 ns/op	   23877 B/op	     391 allocs/op
+BenchmarkFrontEndShare/q06_indexed_point_lookup/miss/2full-10         	    6036	     20657 ns/op	   23877 B/op	     391 allocs/op
+BenchmarkFrontEndShare/q06_indexed_point_lookup/miss/2full-10         	    6038	     20864 ns/op	   23877 B/op	     391 allocs/op
+BenchmarkFrontEndShare/q02_scan_filter_count/hit/1parse-10            	 1635655	        72.68 ns/op	      48 B/op	       1 allocs/op
+BenchmarkFrontEndShare/q02_scan_filter_count/hit/1parse-10            	 1647061	        72.24 ns/op	      48 B/op	       1 allocs/op
+BenchmarkFrontEndShare/q02_scan_filter_count/hit/1parse-10            	 1634354	        73.31 ns/op	      48 B/op	       1 allocs/op
+BenchmarkFrontEndShare/q02_scan_filter_count/hit/1parse-10            	 1566664	        73.35 ns/op	      48 B/op	       1 allocs/op
+BenchmarkFrontEndShare/q02_scan_filter_count/hit/1parse-10            	 1624324	        73.19 ns/op	      48 B/op	       1 allocs/op
+BenchmarkFrontEndShare/q02_scan_filter_count/hit/1parse-10            	 1620128	        73.29 ns/op	      48 B/op	       1 allocs/op
+BenchmarkFrontEndShare/q02_scan_filter_count/hit/1parse-10            	 1635116	        72.34 ns/op	      48 B/op	       1 allocs/op
+BenchmarkFrontEndShare/q02_scan_filter_count/hit/1parse-10            	 1652131	        72.44 ns/op	      48 B/op	       1 allocs/op
+BenchmarkFrontEndShare/q02_scan_filter_count/hit/1parse-10            	 1643875	        72.43 ns/op	      48 B/op	       1 allocs/op
+BenchmarkFrontEndShare/q02_scan_filter_count/hit/1parse-10            	 1654296	        72.30 ns/op	      48 B/op	       1 allocs/op
+BenchmarkFrontEndShare/q02_scan_filter_count/hit/2full-10             	     312	    375726 ns/op	   78282 B/op	      62 allocs/op
+BenchmarkFrontEndShare/q02_scan_filter_count/hit/2full-10             	     309	    383075 ns/op	   78284 B/op	      62 allocs/op
+BenchmarkFrontEndShare/q02_scan_filter_count/hit/2full-10             	     321	    383891 ns/op	   78281 B/op	      62 allocs/op
+BenchmarkFrontEndShare/q02_scan_filter_count/hit/2full-10             	     309	    372547 ns/op	   78290 B/op	      62 allocs/op
+BenchmarkFrontEndShare/q02_scan_filter_count/hit/2full-10             	     325	    381057 ns/op	   78282 B/op	      62 allocs/op
+BenchmarkFrontEndShare/q02_scan_filter_count/hit/2full-10             	     320	    375011 ns/op	   78284 B/op	      62 allocs/op
+BenchmarkFrontEndShare/q02_scan_filter_count/hit/2full-10             	     328	    385114 ns/op	   78282 B/op	      62 allocs/op
+BenchmarkFrontEndShare/q02_scan_filter_count/hit/2full-10             	     312	    375924 ns/op	   78282 B/op	      62 allocs/op
+BenchmarkFrontEndShare/q02_scan_filter_count/hit/2full-10             	     315	    378927 ns/op	   78287 B/op	      62 allocs/op
+BenchmarkFrontEndShare/q02_scan_filter_count/hit/2full-10             	     312	    371762 ns/op	   78288 B/op	      62 allocs/op
+BenchmarkFrontEndShare/q02_scan_filter_count/miss/1parse-10           	    5761	     21282 ns/op	   23401 B/op	     398 allocs/op
+BenchmarkFrontEndShare/q02_scan_filter_count/miss/1parse-10           	    5781	     21007 ns/op	   23400 B/op	     398 allocs/op
+BenchmarkFrontEndShare/q02_scan_filter_count/miss/1parse-10           	    5997	     20648 ns/op	   23400 B/op	     398 allocs/op
+BenchmarkFrontEndShare/q02_scan_filter_count/miss/1parse-10           	    6076	     20781 ns/op	   23401 B/op	     398 allocs/op
+BenchmarkFrontEndShare/q02_scan_filter_count/miss/1parse-10           	    5931	     20927 ns/op	   23401 B/op	     398 allocs/op
+BenchmarkFrontEndShare/q02_scan_filter_count/miss/1parse-10           	    6076	     20853 ns/op	   23400 B/op	     398 allocs/op
+BenchmarkFrontEndShare/q02_scan_filter_count/miss/1parse-10           	    5840	     20821 ns/op	   23400 B/op	     398 allocs/op
+BenchmarkFrontEndShare/q02_scan_filter_count/miss/1parse-10           	    5899	     21085 ns/op	   23400 B/op	     398 allocs/op
+BenchmarkFrontEndShare/q02_scan_filter_count/miss/1parse-10           	    5784	     20790 ns/op	   23400 B/op	     398 allocs/op
+BenchmarkFrontEndShare/q02_scan_filter_count/miss/1parse-10           	    5691	     20811 ns/op	   23400 B/op	     398 allocs/op
+BenchmarkFrontEndShare/q02_scan_filter_count/miss/2full-10            	     295	    401931 ns/op	  102912 B/op	     473 allocs/op
+BenchmarkFrontEndShare/q02_scan_filter_count/miss/2full-10            	     294	    396677 ns/op	  102915 B/op	     473 allocs/op
+BenchmarkFrontEndShare/q02_scan_filter_count/miss/2full-10            	     297	    399412 ns/op	  102913 B/op	     473 allocs/op
+BenchmarkFrontEndShare/q02_scan_filter_count/miss/2full-10            	     295	    408326 ns/op	  102913 B/op	     473 allocs/op
+BenchmarkFrontEndShare/q02_scan_filter_count/miss/2full-10            	     291	    398359 ns/op	  102913 B/op	     473 allocs/op
+BenchmarkFrontEndShare/q02_scan_filter_count/miss/2full-10            	     304	    401610 ns/op	  102912 B/op	     473 allocs/op
+BenchmarkFrontEndShare/q02_scan_filter_count/miss/2full-10            	     300	    395918 ns/op	  102913 B/op	     473 allocs/op
+BenchmarkFrontEndShare/q02_scan_filter_count/miss/2full-10            	     300	    396501 ns/op	  102914 B/op	     473 allocs/op
+BenchmarkFrontEndShare/q02_scan_filter_count/miss/2full-10            	     297	    398509 ns/op	  102913 B/op	     473 allocs/op
+BenchmarkFrontEndShare/q02_scan_filter_count/miss/2full-10            	     307	    410878 ns/op	  102912 B/op	     473 allocs/op
+BenchmarkFrontEndShare/q16_scan_sort_limit/hit/1parse-10              	 2067085	        58.75 ns/op	      48 B/op	       1 allocs/op
+BenchmarkFrontEndShare/q16_scan_sort_limit/hit/1parse-10              	 2045578	        57.62 ns/op	      48 B/op	       1 allocs/op
+BenchmarkFrontEndShare/q16_scan_sort_limit/hit/1parse-10              	 2065802	        57.52 ns/op	      48 B/op	       1 allocs/op
+BenchmarkFrontEndShare/q16_scan_sort_limit/hit/1parse-10              	 2048640	        57.81 ns/op	      48 B/op	       1 allocs/op
+BenchmarkFrontEndShare/q16_scan_sort_limit/hit/1parse-10              	 2053569	        57.43 ns/op	      48 B/op	       1 allocs/op
+BenchmarkFrontEndShare/q16_scan_sort_limit/hit/1parse-10              	 2066617	        57.63 ns/op	      48 B/op	       1 allocs/op
+BenchmarkFrontEndShare/q16_scan_sort_limit/hit/1parse-10              	 2072044	        58.44 ns/op	      48 B/op	       1 allocs/op
+BenchmarkFrontEndShare/q16_scan_sort_limit/hit/1parse-10              	 2036005	        58.90 ns/op	      48 B/op	       1 allocs/op
+BenchmarkFrontEndShare/q16_scan_sort_limit/hit/1parse-10              	 2031292	        58.77 ns/op	      48 B/op	       1 allocs/op
+BenchmarkFrontEndShare/q16_scan_sort_limit/hit/1parse-10              	 2037290	        58.69 ns/op	      48 B/op	       1 allocs/op
+BenchmarkFrontEndShare/q16_scan_sort_limit/hit/2full-10               	     100	   1089213 ns/op	  214548 B/op	   14851 allocs/op
+BenchmarkFrontEndShare/q16_scan_sort_limit/hit/2full-10               	     100	   1074944 ns/op	  214560 B/op	   14851 allocs/op
+BenchmarkFrontEndShare/q16_scan_sort_limit/hit/2full-10               	     100	   1069024 ns/op	  214550 B/op	   14851 allocs/op
+BenchmarkFrontEndShare/q16_scan_sort_limit/hit/2full-10               	     112	   1076856 ns/op	  214562 B/op	   14851 allocs/op
+BenchmarkFrontEndShare/q16_scan_sort_limit/hit/2full-10               	     100	   1080195 ns/op	  214574 B/op	   14851 allocs/op
+BenchmarkFrontEndShare/q16_scan_sort_limit/hit/2full-10               	     100	   1069566 ns/op	  214554 B/op	   14851 allocs/op
+BenchmarkFrontEndShare/q16_scan_sort_limit/hit/2full-10               	     100	   1095464 ns/op	  214570 B/op	   14851 allocs/op
+BenchmarkFrontEndShare/q16_scan_sort_limit/hit/2full-10               	     100	   1068445 ns/op	  214575 B/op	   14851 allocs/op
+BenchmarkFrontEndShare/q16_scan_sort_limit/hit/2full-10               	     100	   1084370 ns/op	  214556 B/op	   14851 allocs/op
+BenchmarkFrontEndShare/q16_scan_sort_limit/hit/2full-10               	     100	   1082475 ns/op	  214548 B/op	   14851 allocs/op
+BenchmarkFrontEndShare/q16_scan_sort_limit/miss/1parse-10             	    4548	     25582 ns/op	   29970 B/op	     480 allocs/op
+BenchmarkFrontEndShare/q16_scan_sort_limit/miss/1parse-10             	    4890	     25553 ns/op	   29969 B/op	     480 allocs/op
+BenchmarkFrontEndShare/q16_scan_sort_limit/miss/1parse-10             	    4881	     25614 ns/op	   29969 B/op	     480 allocs/op
+BenchmarkFrontEndShare/q16_scan_sort_limit/miss/1parse-10             	    4711	     25452 ns/op	   29969 B/op	     480 allocs/op
+BenchmarkFrontEndShare/q16_scan_sort_limit/miss/1parse-10             	    4870	     25215 ns/op	   29968 B/op	     480 allocs/op
+BenchmarkFrontEndShare/q16_scan_sort_limit/miss/1parse-10             	    4843	     25387 ns/op	   29969 B/op	     480 allocs/op
+BenchmarkFrontEndShare/q16_scan_sort_limit/miss/1parse-10             	    4773	     25498 ns/op	   29968 B/op	     480 allocs/op
+BenchmarkFrontEndShare/q16_scan_sort_limit/miss/1parse-10             	    4693	     25502 ns/op	   29969 B/op	     480 allocs/op
+BenchmarkFrontEndShare/q16_scan_sort_limit/miss/1parse-10             	    4698	     25622 ns/op	   29969 B/op	     480 allocs/op
+BenchmarkFrontEndShare/q16_scan_sort_limit/miss/1parse-10             	    4726	     25906 ns/op	   29968 B/op	     480 allocs/op
+BenchmarkFrontEndShare/q16_scan_sort_limit/miss/2full-10              	     100	   1109738 ns/op	  246066 B/op	   15347 allocs/op
+BenchmarkFrontEndShare/q16_scan_sort_limit/miss/2full-10              	     100	   1105316 ns/op	  246077 B/op	   15347 allocs/op
+BenchmarkFrontEndShare/q16_scan_sort_limit/miss/2full-10              	     100	   1119905 ns/op	  246091 B/op	   15347 allocs/op
+BenchmarkFrontEndShare/q16_scan_sort_limit/miss/2full-10              	     100	   1108799 ns/op	  246074 B/op	   15347 allocs/op
+BenchmarkFrontEndShare/q16_scan_sort_limit/miss/2full-10              	     100	   1121725 ns/op	  246114 B/op	   15347 allocs/op
+BenchmarkFrontEndShare/q16_scan_sort_limit/miss/2full-10              	     100	   1122895 ns/op	  246086 B/op	   15347 allocs/op
+BenchmarkFrontEndShare/q16_scan_sort_limit/miss/2full-10              	     100	   1135414 ns/op	  246095 B/op	   15347 allocs/op
+BenchmarkFrontEndShare/q16_scan_sort_limit/miss/2full-10              	     100	   1119735 ns/op	  246074 B/op	   15347 allocs/op
+BenchmarkFrontEndShare/q16_scan_sort_limit/miss/2full-10              	     100	   1113202 ns/op	  246086 B/op	   15347 allocs/op
+BenchmarkFrontEndShare/q16_scan_sort_limit/miss/2full-10              	     100	   1125652 ns/op	  246083 B/op	   15347 allocs/op
+--- FAIL: BenchmarkFrontEndShare/qLit_scan_strliteral/hit/1parse
+    frontend_share_bench_test.go:206: warm qLit_scan_strliteral: cypher: ParameterMissing: MissingParameter: expected parameter $  auto_0
+--- FAIL: BenchmarkFrontEndShare/qLit_scan_strliteral/hit/2full
+    frontend_share_bench_test.go:206: warm qLit_scan_strliteral: cypher: ParameterMissing: MissingParameter: expected parameter $  auto_0
+--- FAIL: BenchmarkFrontEndShare/qLit_scan_strliteral/hit
+--- FAIL: BenchmarkFrontEndShare/qLit_scan_strliteral/miss/1parse
+    frontend_share_bench_test.go:206: warm qLit_scan_strliteral: cypher: ParameterMissing: MissingParameter: expected parameter $  auto_0
+--- FAIL: BenchmarkFrontEndShare/qLit_scan_strliteral/miss/2full
+    frontend_share_bench_test.go:206: warm qLit_scan_strliteral: cypher: ParameterMissing: MissingParameter: expected parameter $  auto_0
+--- FAIL: BenchmarkFrontEndShare/qLit_scan_strliteral/miss
+--- FAIL: BenchmarkFrontEndShare/qLit_scan_strliteral
+BenchmarkFrontEndShare/control/cacheclear-10                          	23627469	         5.361 ns/op	       0 B/op	       0 allocs/op
+BenchmarkFrontEndShare/control/cacheclear-10                          	23405691	         5.260 ns/op	       0 B/op	       0 allocs/op
+BenchmarkFrontEndShare/control/cacheclear-10                          	22805558	         5.218 ns/op	       0 B/op	       0 allocs/op
+BenchmarkFrontEndShare/control/cacheclear-10                          	23902196	         5.286 ns/op	       0 B/op	       0 allocs/op
+BenchmarkFrontEndShare/control/cacheclear-10                          	22689134	         5.107 ns/op	       0 B/op	       0 allocs/op
+BenchmarkFrontEndShare/control/cacheclear-10                          	23867340	         5.277 ns/op	       0 B/op	       0 allocs/op
+BenchmarkFrontEndShare/control/cacheclear-10                          	23814049	         5.290 ns/op	       0 B/op	       0 allocs/op
+BenchmarkFrontEndShare/control/cacheclear-10                          	22592487	         5.174 ns/op	       0 B/op	       0 allocs/op
+BenchmarkFrontEndShare/control/cacheclear-10                          	23734764	         5.235 ns/op	       0 B/op	       0 allocs/op
+BenchmarkFrontEndShare/control/cacheclear-10                          	24013605	         5.058 ns/op	       0 B/op	       0 allocs/op
+--- FAIL: BenchmarkFrontEndShare
+FAIL
+exit status 1
+FAIL	github.com/FlavioCFOliveira/GoGraph/cypher	27.229s
+FAIL
+go_test_exit=1

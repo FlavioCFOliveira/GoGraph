@@ -1,0 +1,244 @@
+File: 22_cypher
+Type: cpu
+Time: 2026-09-16 13:26:47 WEST
+Duration: 2.01s, Total samples = 2.96s (147.12%)
+Showing nodes accounting for 2.54s, 85.81% of 2.96s total
+Dropped 143 nodes (cum <= 0.01s)
+      flat  flat%   sum%        cum   cum%
+     0.32s 10.81% 10.81%      0.32s 10.81%  runtime.pthread_cond_signal
+     0.32s 10.81% 21.62%      0.32s 10.81%  runtime.usleep
+     0.22s  7.43% 29.05%      0.22s  7.43%  runtime.pthread_cond_wait
+     0.20s  6.76% 35.81%      0.20s  6.76%  runtime.madvise
+     0.12s  4.05% 39.86%      0.22s  7.43%  runtime.tryDeferToSpanScan
+     0.11s  3.72% 43.58%      0.12s  4.05%  runtime.mapaccess2_fast64
+     0.10s  3.38% 46.96%      0.26s  8.78%  runtime.scanObjectsSmall
+     0.07s  2.36% 49.32%      0.13s  4.39%  runtime.mapaccess2_faststr
+     0.05s  1.69% 51.01%      0.05s  1.69%  runtime.(*spanScanOwnership).or (inline)
+     0.05s  1.69% 52.70%      0.05s  1.69%  runtime.memclrNoHeapPointers
+     0.05s  1.69% 54.39%      0.05s  1.69%  runtime.memmove
+     0.05s  1.69% 56.08%      0.15s  5.07%  runtime.scanObject
+     0.05s  1.69% 57.77%      0.08s  2.70%  runtime.scanObjectSmall
+     0.05s  1.69% 59.46%      0.05s  1.69%  runtime.spanSetScans
+     0.04s  1.35% 60.81%      0.18s  6.08%  github.com/FlavioCFOliveira/GoGraph/graph/adjlist.(*AdjList[go.shape.string,go.shape.float64]).upsertEdgeSlotLocked
+     0.04s  1.35% 62.16%      0.06s  2.03%  runtime.mapassign_fast64
+     0.04s  1.35% 63.51%      0.04s  1.35%  runtime.pthread_kill
+     0.03s  1.01% 64.53%      0.03s  1.01%  github.com/FlavioCFOliveira/GoGraph/cypher.buildRelTypeColumn.func1
+     0.03s  1.01% 65.54%      0.17s  5.74%  github.com/FlavioCFOliveira/GoGraph/cypher.fillSlotLabs
+     0.03s  1.01% 66.55%      0.03s  1.01%  github.com/FlavioCFOliveira/GoGraph/graph.fnv1aString (inline)
+     0.03s  1.01% 67.57%      0.07s  2.36%  github.com/FlavioCFOliveira/GoGraph/graph/csr.buildFromAdjList[go.shape.string,go.shape.float64]
+     0.03s  1.01% 68.58%      0.67s 22.64%  runtime.gcDrain
+     0.03s  1.01% 69.59%      0.43s 14.53%  runtime.scanSpan
+     0.03s  1.01% 70.61%      0.03s  1.01%  runtime.typePointers.next
+     0.02s  0.68% 71.28%      0.02s  0.68%  github.com/FlavioCFOliveira/GoGraph/cypher/exec.projectFwdToRevByTranspose
+     0.02s  0.68% 71.96%      0.02s  0.68%  github.com/FlavioCFOliveira/GoGraph/graph.(*Mapper[go.shape.string]).Resolve
+     0.02s  0.68% 72.64%      0.03s  1.01%  github.com/FlavioCFOliveira/GoGraph/graph/csr.(*CSR[go.shape.float64]).BuildReverse
+     0.02s  0.68% 73.31%      0.02s  0.68%  github.com/FlavioCFOliveira/GoGraph/graph/index/count.(*Store).Apply
+     0.02s  0.68% 73.99%      0.02s  0.68%  github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*Graph[go.shape.string,go.shape.float64]).handleLabelBagAsOf
+     0.02s  0.68% 74.66%      0.02s  0.68%  github.com/FlavioCFOliveira/GoGraph/graph/lpg.bagKeyAt
+     0.02s  0.68% 75.34%      0.04s  1.35%  internal/runtime/maps.(*Map).getWithoutKeySmallFastStr
+     0.02s  0.68% 76.01%      0.02s  0.68%  internal/runtime/maps.ctrlGroupMatchEmpty (inline)
+     0.02s  0.68% 76.69%      0.07s  2.36%  runtime.(*spanInlineMarkBits).tryAcquire
+     0.02s  0.68% 77.36%      0.02s  0.68%  runtime.(*traceBuf).varint (inline)
+     0.02s  0.68% 78.04%      0.02s  0.68%  runtime.arenaIndex (inline)
+     0.02s  0.68% 78.72%      0.03s  1.01%  runtime.bulkBarrierPreWrite
+     0.02s  0.68% 79.39%      0.02s  0.68%  runtime.extractHeapBitsSmall
+     0.02s  0.68% 80.07%      0.06s  2.03%  runtime.mallocgcSmallScanNoHeader
+     0.02s  0.68% 80.74%      0.02s  0.68%  runtime.mmap
+     0.02s  0.68% 81.42%      0.02s  0.68%  syscall.rawsyscalln
+     0.01s  0.34% 81.76%      0.37s 12.50%  github.com/FlavioCFOliveira/GoGraph/cypher.forEachResolvedSlotType
+     0.01s  0.34% 82.09%      0.02s  0.68%  github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Chunk).Int64
+     0.01s  0.34% 82.43%      0.02s  0.68%  github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Chunk).pushI64
+     0.01s  0.34% 82.77%      0.03s  1.01%  github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*ColumnarFilter).FillChunk
+     0.01s  0.34% 83.11%      0.07s  2.36%  github.com/FlavioCFOliveira/GoGraph/cypher/expr.evalBinaryOp
+     0.01s  0.34% 83.45%      0.10s  3.38%  github.com/FlavioCFOliveira/GoGraph/graph.(*Mapper[go.shape.string]).Lookup
+     0.01s  0.34% 83.78%      0.04s  1.35%  github.com/FlavioCFOliveira/GoGraph/graph/csr.(*CSR[go.shape.float64]).IsSymmetric
+     0.01s  0.34% 84.12%      0.02s  0.68%  github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*ReadView[go.shape.string,go.shape.float64]).LiveNodeFilter.func1
+     0.01s  0.34% 84.46%      0.02s  0.68%  internal/runtime/maps.(*Map).Delete
+     0.01s  0.34% 84.80%      0.02s  0.68%  runtime.(*sweepLocked).sweep
+     0.01s  0.34% 85.14%      0.03s  1.01%  runtime.convTstring
+     0.01s  0.34% 85.47%      0.17s  5.74%  runtime.mallocgc
+     0.01s  0.34% 85.81%      0.02s  0.68%  runtime.mapaccess2
+         0     0% 85.81%      0.15s  5.07%  _.goready.func1
+         0     0% 85.81%      0.02s  0.68%  fmt.Fprintf
+         0     0% 85.81%      0.60s 20.27%  github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).Run (inline)
+         0     0% 85.81%      0.14s  4.73%  github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).RunInTx (inline)
+         0     0% 85.81%      0.14s  4.73%  github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).execUnderBarrier (inline)
+         0     0% 85.81%      0.14s  4.73%  github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).execUnderBarrier.func1
+         0     0% 85.81%      0.03s  1.01%  github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).recomputeCountStore
+         0     0% 85.81%      0.03s  1.01%  github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).recomputeCountStore.func1
+         0     0% 85.81%      0.14s  4.73%  github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).runInTxSession
+         0     0% 85.81%      0.14s  4.73%  github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).runInTxSession.func2 (inline)
+         0     0% 85.81%      0.60s 20.27%  github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).runRead
+         0     0% 85.81%      0.59s 19.93%  github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).runRead.func2 (inline)
+         0     0% 85.81%      0.19s  6.42%  github.com/FlavioCFOliveira/GoGraph/cypher.(*Result).materialize
+         0     0% 85.81%      0.02s  0.68%  github.com/FlavioCFOliveira/GoGraph/cypher.(*Result).materializeColumnar
+         0     0% 85.81%      0.03s  1.01%  github.com/FlavioCFOliveira/GoGraph/cypher.NewEngine (inline)
+         0     0% 85.81%      0.03s  1.01%  github.com/FlavioCFOliveira/GoGraph/cypher.NewEngineWithOptions
+         0     0% 85.81%      0.39s 13.18%  github.com/FlavioCFOliveira/GoGraph/cypher.buildRelTypeColumn
+         0     0% 85.81%      0.48s 16.22%  github.com/FlavioCFOliveira/GoGraph/cypher.csrPairAndColumnCachedFor
+         0     0% 85.81%      0.09s  3.04%  github.com/FlavioCFOliveira/GoGraph/cypher.csrPairFromGraphAt
+         0     0% 85.81%      0.08s  2.70%  github.com/FlavioCFOliveira/GoGraph/cypher.evalRow
+         0     0% 85.81%      0.07s  2.36%  github.com/FlavioCFOliveira/GoGraph/cypher.evalRowPooled
+         0     0% 85.81%      0.48s 16.22%  github.com/FlavioCFOliveira/GoGraph/cypher.expandAdjacencySource.func2
+         0     0% 85.81%      0.06s  2.03%  github.com/FlavioCFOliveira/GoGraph/cypher.lazyNodeResolver.NodeProperty
+         0     0% 85.81%      0.03s  1.01%  github.com/FlavioCFOliveira/GoGraph/cypher.lpgPropToExpr
+         0     0% 85.81%      0.02s  0.68%  github.com/FlavioCFOliveira/GoGraph/cypher.makeColumnarComparePredicate.func1
+         0     0% 85.81%      0.06s  2.03%  github.com/FlavioCFOliveira/GoGraph/cypher.makeExpandDstLabelAdmit.func1
+         0     0% 85.81%      0.06s  2.03%  github.com/FlavioCFOliveira/GoGraph/cypher.newResultWithLimit
+         0     0% 85.81%      0.07s  2.36%  github.com/FlavioCFOliveira/GoGraph/cypher.newRowPredicate.func1
+         0     0% 85.81%      0.06s  2.03%  github.com/FlavioCFOliveira/GoGraph/cypher.newWriteResult
+         0     0% 85.81%      0.02s  0.68%  github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*AllShortestPaths).Next
+         0     0% 85.81%      0.02s  0.68%  github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*AllShortestPaths).aspExpand
+         0     0% 85.81%      0.02s  0.68%  github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*AllShortestPaths).bfsAllShortest
+         0     0% 85.81%      0.02s  0.68%  github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Apply).Next
+         0     0% 85.81%      0.02s  0.68%  github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*ColumnarProject).FillChunk
+         0     0% 85.81%      0.02s  0.68%  github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*ColumnarProject).fillChunkFromChunk
+         0     0% 85.81%      0.05s  1.69%  github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*CorrelatedApply).Next
+         0     0% 85.81%      0.02s  0.68%  github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*CountBuffer).Commit
+         0     0% 85.81%      0.40s 13.51%  github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*CountRows).Init
+         0     0% 85.81%      0.11s  3.72%  github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*CountRows).Next
+         0     0% 85.81%      0.11s  3.72%  github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*CountRows).drain
+         0     0% 85.81%      0.10s  3.38%  github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*CountRows).drainChunk
+         0     0% 85.81%      0.08s  2.70%  github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*DeleteNode).Init
+         0     0% 85.81%      0.48s 16.22%  github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Expand).Init
+         0     0% 85.81%      0.02s  0.68%  github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Expand).appendChunkRow
+         0     0% 85.81%      0.06s  2.03%  github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Expand).dstAdmitted (inline)
+         0     0% 85.81%      0.09s  3.04%  github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Expand).fillChunk
+         0     0% 85.81%      0.09s  3.04%  github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Expand).fillOneChunkRow
+         0     0% 85.81%      0.08s  2.70%  github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Filter).Init
+         0     0% 85.81%      0.07s  2.36%  github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Filter).Next
+         0     0% 85.81%      0.02s  0.68%  github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Merge).Next
+         0     0% 85.81%      0.02s  0.68%  github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Merge).runMergeForChild
+         0     0% 85.81%      0.40s 13.51%  github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Project).Init
+         0     0% 85.81%      0.17s  5.74%  github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*Project).Next
+         0     0% 85.81%      0.23s  7.77%  github.com/FlavioCFOliveira/GoGraph/cypher/exec.(*ResultSet).Next
+         0     0% 85.81%      0.02s  0.68%  github.com/FlavioCFOliveira/GoGraph/cypher/exec.NewMergeSearchFnFromPattern.func1
+         0     0% 85.81%      0.02s  0.68%  github.com/FlavioCFOliveira/GoGraph/cypher/exec.NewMergeSearchFnFromPattern.func1.1
+         0     0% 85.81%      0.02s  0.68%  github.com/FlavioCFOliveira/GoGraph/cypher/exec.NewRelTypeColumnFor
+         0     0% 85.81%      0.48s 16.22%  github.com/FlavioCFOliveira/GoGraph/cypher/exec.Run
+         0     0% 85.81%      0.09s  3.04%  github.com/FlavioCFOliveira/GoGraph/cypher/exec.columnarExpand.FillChunk
+         0     0% 85.81%      0.02s  0.68%  github.com/FlavioCFOliveira/GoGraph/cypher/exec.walkMergeCandidates
+         0     0% 85.81%      0.06s  2.03%  github.com/FlavioCFOliveira/GoGraph/cypher/expr.(*LazyNodeValue).Property
+         0     0% 85.81%      0.08s  2.70%  github.com/FlavioCFOliveira/GoGraph/cypher/expr.EvalWith
+         0     0% 85.81%      0.08s  2.70%  github.com/FlavioCFOliveira/GoGraph/cypher/expr.evalExpr
+         0     0% 85.81%      0.06s  2.03%  github.com/FlavioCFOliveira/GoGraph/cypher/expr.evalProperty
+         0     0% 85.81%      1.14s 38.51%  github.com/FlavioCFOliveira/GoGraph/examples/internal/exprof.(*Config).Run
+         0     0% 85.81%      0.02s  0.68%  github.com/FlavioCFOliveira/GoGraph/graph.(*Mapper[go.shape.string]).Intern
+         0     0% 85.81%      0.02s  0.68%  github.com/FlavioCFOliveira/GoGraph/graph.(*Mapper[go.shape.string]).InternNew (inline)
+         0     0% 85.81%      0.02s  0.68%  github.com/FlavioCFOliveira/GoGraph/graph.(*Mapper[go.shape.string]).InternNewHook
+         0     0% 85.81%      0.21s  7.09%  github.com/FlavioCFOliveira/GoGraph/graph.(*Mapper[go.shape.string]).Walk
+         0     0% 85.81%      0.03s  1.01%  github.com/FlavioCFOliveira/GoGraph/graph.(*Mapper[go.shape.string]).shardFor
+         0     0% 85.81%      0.17s  5.74%  github.com/FlavioCFOliveira/GoGraph/graph/adjlist.(*AdjList[go.shape.string,go.shape.float64]).AddEdge (inline)
+         0     0% 85.81%      0.05s  1.69%  github.com/FlavioCFOliveira/GoGraph/graph/adjlist.(*AdjList[go.shape.string,go.shape.float64]).AddEdgeLabeled (inline)
+         0     0% 85.81%      0.22s  7.43%  github.com/FlavioCFOliveira/GoGraph/graph/adjlist.(*AdjList[go.shape.string,go.shape.float64]).addEdge
+         0     0% 85.81%      0.13s  4.39%  github.com/FlavioCFOliveira/GoGraph/graph/adjlist.(*AdjList[go.shape.string,go.shape.float64]).storeEntry
+         0     0% 85.81%      0.05s  1.69%  github.com/FlavioCFOliveira/GoGraph/graph/adjlist.(*AdjList[go.shape.string,go.shape.float64]).updateEntryAuxTx
+         0     0% 85.81%      0.05s  1.69%  github.com/FlavioCFOliveira/GoGraph/graph/adjlist.(*AdjList[go.shape.string,go.shape.float64]).upsertEdge
+         0     0% 85.81%      0.19s  6.42%  github.com/FlavioCFOliveira/GoGraph/graph/adjlist.(*AdjList[go.shape.string,go.shape.float64]).upsertEdgeLocked
+         0     0% 85.81%      0.05s  1.69%  github.com/FlavioCFOliveira/GoGraph/graph/adjlist.Writer[go.shape.string,go.shape.float64].UpdateEntryAux (inline)
+         0     0% 85.81%      0.06s  2.03%  github.com/FlavioCFOliveira/GoGraph/graph/csr.BuildFromAdjListAsOf[go.shape.string,go.shape.float64] (inline)
+         0     0% 85.81%      0.05s  1.69%  github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*Graph[go.shape.string,go.shape.float64]).AddEdgeLabeled
+         0     0% 85.81%      0.14s  4.73%  github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*Graph[go.shape.string,go.shape.float64]).ApplyVersionedCtx (inline)
+         0     0% 85.81%      0.10s  3.38%  github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*Graph[go.shape.string,go.shape.float64]).EdgeLabelsByHandleAsOf
+         0     0% 85.81%      0.02s  0.68%  github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*Graph[go.shape.string,go.shape.float64]).HasEdgeHandleLabelRecordByIDAsOf
+         0     0% 85.81%      0.06s  2.03%  github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*Graph[go.shape.string,go.shape.float64]).HasNodeLabelByIDAsOf
+         0     0% 85.81%      0.03s  1.01%  github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*Graph[go.shape.string,go.shape.float64]).NodePropertyByIDAsOf
+         0     0% 85.81%      0.05s  1.69%  github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*Graph[go.shape.string,go.shape.float64]).SetEdgeProperty (inline)
+         0     0% 85.81%      0.14s  4.73%  github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*Graph[go.shape.string,go.shape.float64]).applyVersionedInstant
+         0     0% 85.81%      0.05s  1.69%  github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*Graph[go.shape.string,go.shape.float64]).setEdgePropertyInfo
+         0     0% 85.81%      0.03s  1.01%  github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*LabelRegistry).Lookup (inline)
+         0     0% 85.81%      0.10s  3.38%  github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*ReadView[go.shape.string,go.shape.float64]).EdgeLabelsByHandle (inline)
+         0     0% 85.81%      0.02s  0.68%  github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*ReadView[go.shape.string,go.shape.float64]).HasEdgeHandleLabelRecordByID (inline)
+         0     0% 85.81%      0.06s  2.03%  github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*ReadView[go.shape.string,go.shape.float64]).HasNodeLabelByID
+         0     0% 85.81%      0.03s  1.01%  github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*ReadView[go.shape.string,go.shape.float64]).NodePropertyByID (inline)
+         0     0% 85.81%      0.02s  0.68%  github.com/FlavioCFOliveira/GoGraph/graph/lpg.(*propBag).get
+         0     0% 85.81%      0.04s  1.35%  github.com/FlavioCFOliveira/GoGraph/search.BiBFSCtx[go.shape.float64]
+         0     0% 85.81%      0.02s  0.68%  internal/poll.(*FD).Write
+         0     0% 85.81%      0.02s  0.68%  internal/poll.ignoringEINTRIO (inline)
+         0     0% 85.81%      0.02s  0.68%  internal/runtime/maps.ctrlGroup.matchEmpty (inline)
+         0     0% 85.81%      0.10s  3.38%  main.addKnows
+         0     0% 85.81%      0.11s  3.72%  main.build
+         0     0% 85.81%      0.18s  6.08%  main.buildUndirectedKnows
+         0     0% 85.81%      0.18s  6.08%  main.buildUndirectedKnows.func1
+         0     0% 85.81%      0.04s  1.35%  main.collectLens
+         0     0% 85.81%      0.14s  4.73%  main.execWrite
+         0     0% 85.81%      1.14s 38.51%  main.main
+         0     0% 85.81%      1.14s 38.51%  main.main.func1
+         0     0% 85.81%      0.11s  3.72%  main.queryKnows
+         0     0% 85.81%      0.30s 10.14%  main.queryShortestPaths
+         0     0% 85.81%      0.57s 19.26%  main.queryWrites
+         0     0% 85.81%      0.40s 13.51%  main.queryWrites.func2 (inline)
+         0     0% 85.81%      0.14s  4.73%  main.queryWrites.func3
+         0     0% 85.81%      1.14s 38.51%  main.run
+         0     0% 85.81%         1s 33.78%  main.runQueries
+         0     0% 85.81%      0.52s 17.57%  main.scalarCount
+         0     0% 85.81%      0.02s  0.68%  main.scalarLen
+         0     0% 85.81%      0.02s  0.68%  os.(*File).Write
+         0     0% 85.81%      0.02s  0.68%  os.(*File).write (inline)
+         0     0% 85.81%      0.04s  1.35%  runtime.(*gcControllerState).enlistWorker
+         0     0% 85.81%      0.05s  1.69%  runtime.(*mcache).nextFree
+         0     0% 85.81%      0.05s  1.69%  runtime.(*mcache).refill
+         0     0% 85.81%      0.03s  1.01%  runtime.(*mcentral).cacheSpan
+         0     0% 85.81%      0.03s  1.01%  runtime.(*mcentral).grow
+         0     0% 85.81%      0.03s  1.01%  runtime.(*mheap).alloc
+         0     0% 85.81%      0.25s  8.45%  runtime.(*mheap).alloc.func1
+         0     0% 85.81%      0.25s  8.45%  runtime.(*mheap).allocSpan
+         0     0% 85.81%      0.02s  0.68%  runtime.(*mheap).grow
+         0     0% 85.81%      0.03s  1.01%  runtime.bgsweep
+         0     0% 85.81%      0.57s 19.26%  runtime.findRunnable
+         0     0% 85.81%      0.63s 21.28%  runtime.gcBgMarkWorker
+         0     0% 85.81%      0.67s 22.64%  runtime.gcBgMarkWorker.func2
+         0     0% 85.81%      0.23s  7.77%  runtime.gcDrainMarkWorkerDedicated (inline)
+         0     0% 85.81%      0.44s 14.86%  runtime.gcDrainMarkWorkerIdle (inline)
+         0     0% 85.81%      0.02s  0.68%  runtime.gopreempt_m (inline)
+         0     0% 85.81%      0.18s  6.08%  runtime.goschedImpl
+         0     0% 85.81%      0.16s  5.41%  runtime.gosched_m
+         0     0% 85.81%      0.02s  0.68%  runtime.heapArenaOf (inline)
+         0     0% 85.81%      0.03s  1.01%  runtime.lock (inline)
+         0     0% 85.81%      0.03s  1.01%  runtime.lock2
+         0     0% 85.81%      0.03s  1.01%  runtime.lockWithRank (inline)
+         0     0% 85.81%      0.21s  7.09%  runtime.mPark (inline)
+         0     0% 85.81%      0.02s  0.68%  runtime.mProf_Malloc
+         0     0% 85.81%      1.14s 38.51%  runtime.main
+         0     0% 85.81%      0.09s  3.04%  runtime.makeslice
+         0     0% 85.81%      0.02s  0.68%  runtime.mallocgcLarge
+         0     0% 85.81%      0.05s  1.69%  runtime.mallocgcSmallScanHeader
+         0     0% 85.81%      0.12s  4.05%  runtime.mapaccess1_fast64
+         0     0% 85.81%      0.02s  0.68%  runtime.mapdelete_fast64
+         0     0% 85.81%      0.72s 24.32%  runtime.mcall
+         0     0% 85.81%      0.02s  0.68%  runtime.morestack
+         0     0% 85.81%      0.05s  1.69%  runtime.newobject
+         0     0% 85.81%      0.02s  0.68%  runtime.newstack
+         0     0% 85.81%      0.21s  7.09%  runtime.notesleep
+         0     0% 85.81%      0.32s 10.81%  runtime.notewakeup
+         0     0% 85.81%      0.02s  0.68%  runtime.osyield (inline)
+         0     0% 85.81%      0.56s 18.92%  runtime.park_m
+         0     0% 85.81%      0.04s  1.35%  runtime.preemptM
+         0     0% 85.81%      0.04s  1.35%  runtime.preemptone
+         0     0% 85.81%      0.02s  0.68%  runtime.profilealloc
+         0     0% 85.81%      0.15s  5.07%  runtime.ready
+         0     0% 85.81%      0.30s 10.14%  runtime.runqgrab
+         0     0% 85.81%      0.30s 10.14%  runtime.runqsteal
+         0     0% 85.81%      0.59s 19.93%  runtime.schedule
+         0     0% 85.81%      0.22s  7.43%  runtime.semasleep
+         0     0% 85.81%      0.32s 10.81%  runtime.semawakeup
+         0     0% 85.81%      0.04s  1.35%  runtime.signalM (inline)
+         0     0% 85.81%      0.32s 10.81%  runtime.startm
+         0     0% 85.81%      0.31s 10.47%  runtime.stealWork
+         0     0% 85.81%      0.02s  0.68%  runtime.stkbucket
+         0     0% 85.81%      0.21s  7.09%  runtime.stopm
+         0     0% 85.81%      0.03s  1.01%  runtime.sweepone
+         0     0% 85.81%      0.02s  0.68%  runtime.sysMap
+         0     0% 85.81%      0.02s  0.68%  runtime.sysMapOS
+         0     0% 85.81%      0.20s  6.76%  runtime.sysUsed (inline)
+         0     0% 85.81%      0.20s  6.76%  runtime.sysUsedOS (inline)
+         0     0% 85.81%      1.10s 37.16%  runtime.systemstack
+         0     0% 85.81%      0.03s  1.01%  runtime.traceEventWriter.event
+         0     0% 85.81%      0.02s  0.68%  runtime.traceLocker.GoUnpark
+         0     0% 85.81%      0.03s  1.01%  runtime.traceWriter.event
+         0     0% 85.81%      0.07s  2.36%  runtime.typedslicecopy
+         0     0% 85.81%      0.32s 10.81%  runtime.wakep
+         0     0% 85.81%      0.02s  0.68%  syscall.Write (inline)
+         0     0% 85.81%      0.02s  0.68%  syscall.syscall
+         0     0% 85.81%      0.02s  0.68%  syscall.syscalln
+         0     0% 85.81%      0.02s  0.68%  syscall.write

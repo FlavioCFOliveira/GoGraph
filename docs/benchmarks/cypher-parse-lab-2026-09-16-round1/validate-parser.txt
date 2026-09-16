@@ -1,0 +1,263 @@
+=== RUN   TestCorpusParses
+=== RUN   TestCorpusParses/22_cypher-01
+=== RUN   TestCorpusParses/22_cypher-02
+=== RUN   TestCorpusParses/22_cypher-03
+=== RUN   TestCorpusParses/22_cypher-04
+=== RUN   TestCorpusParses/22_cypher-05
+=== RUN   TestCorpusParses/22_cypher-06
+=== RUN   TestCorpusParses/22_cypher-07
+=== RUN   TestCorpusParses/22_cypher-08
+=== RUN   TestCorpusParses/22_cypher-09
+=== RUN   TestCorpusParses/22_cypher-10
+=== RUN   TestCorpusParses/22_cypher-11
+=== RUN   TestCorpusParses/22_cypher-12
+=== RUN   TestCorpusParses/22_cypher-13
+=== RUN   TestCorpusParses/22_cypher-14
+=== RUN   TestCorpusParses/22_cypher-15
+=== RUN   TestCorpusParses/22_cypher-16
+=== RUN   TestCorpusParses/22_cypher-17
+=== RUN   TestCorpusParses/22_cypher-18
+=== RUN   TestCorpusParses/19_pattern_query-01
+=== RUN   TestCorpusParses/19_pattern_query-02
+=== RUN   TestCorpusParses/19_pattern_query-03
+=== RUN   TestCorpusParses/25_software_house_api-01
+=== RUN   TestCorpusParses/25_software_house_api-02
+=== RUN   TestCorpusParses/25_software_house_api-03
+=== RUN   TestCorpusParses/25_software_house_api-04
+=== RUN   TestCorpusParses/25_software_house_api-05
+=== RUN   TestCorpusParses/25_software_house_api-06
+=== RUN   TestCorpusParses/25_software_house_api-07
+=== RUN   TestCorpusParses/25_software_house_api-08
+=== RUN   TestCorpusParses/25_software_house_api-09
+=== RUN   TestCorpusParses/25_software_house_api-10
+=== RUN   TestCorpusParses/25_software_house_api-11
+=== RUN   TestCorpusParses/25_software_house_api-12
+=== RUN   TestCorpusParses/25_software_house_api-13
+=== RUN   TestCorpusParses/25_software_house_api-14
+=== RUN   TestCorpusParses/25_software_house_api-15
+=== RUN   TestCorpusParses/25_software_house_api-16
+=== RUN   TestCorpusParses/25_software_house_api-17
+=== RUN   TestCorpusParses/25_software_house_api-18
+=== RUN   TestCorpusParses/25_software_house_api-19
+=== RUN   TestCorpusParses/25_software_house_api-20
+=== RUN   TestCorpusParses/25_software_house_api-21
+=== RUN   TestCorpusParses/25_software_house_api-22
+=== RUN   TestCorpusParses/25_software_house_api-23
+=== RUN   TestCorpusParses/25_software_house_api-24
+=== RUN   TestCorpusParses/25_software_house_api-25
+=== RUN   TestCorpusParses/25_software_house_api-26
+=== RUN   TestCorpusParses/25_software_house_api-27
+=== RUN   TestCorpusParses/25_software_house_api-28
+=== RUN   TestCorpusParses/25_software_house_api-29
+=== RUN   TestCorpusParses/25_software_house_api-30
+=== RUN   TestCorpusParses/25_software_house_api-31
+=== RUN   TestCorpusParses/25_software_house_api-32
+=== RUN   TestCorpusParses/24_social_network_cli-01
+=== RUN   TestCorpusParses/24_social_network_cli-02
+=== RUN   TestCorpusParses/24_social_network_cli-03
+=== RUN   TestCorpusParses/24_social_network_cli-04
+=== RUN   TestCorpusParses/24_social_network_cli-05
+=== RUN   TestCorpusParses/24_social_network_cli-06
+=== RUN   TestCorpusParses/24_social_network_cli-07
+=== RUN   TestCorpusParses/24_social_network_cli-08
+=== RUN   TestCorpusParses/24_social_network_cli-09
+=== RUN   TestCorpusParses/24_social_network_cli-10
+=== RUN   TestCorpusParses/24_social_network_cli-11
+=== RUN   TestCorpusParses/24_social_network_cli-12
+=== RUN   TestCorpusParses/24_social_network_cli-13
+=== RUN   TestCorpusParses/24_social_network_cli-14
+=== RUN   TestCorpusParses/24_social_network_cli-15
+=== RUN   TestCorpusParses/24_social_network_cli-16
+=== RUN   TestCorpusParses/24_social_network_cli-17
+=== RUN   TestCorpusParses/24_social_network_cli-18
+=== RUN   TestCorpusParses/24_social_network_cli-19
+=== RUN   TestCorpusParses/24_social_network_cli-20
+=== RUN   TestCorpusParses/24_social_network_cli-21
+=== RUN   TestCorpusParses/24_social_network_cli-22
+=== RUN   TestCorpusParses/24_social_network_cli-23
+=== RUN   TestCorpusParses/24_social_network_cli-24
+=== RUN   TestCorpusParses/24_social_network_cli-25
+=== RUN   TestCorpusParses/24_social_network_cli-26
+=== RUN   TestCorpusParses/24_social_network_cli-27
+=== RUN   TestCorpusParses/24_social_network_cli-28
+=== RUN   TestCorpusParses/24_social_network_cli-29
+=== RUN   TestCorpusParses/24_social_network_cli-30
+--- PASS: TestCorpusParses (0.02s)
+    --- PASS: TestCorpusParses/22_cypher-01 (0.00s)
+    --- PASS: TestCorpusParses/22_cypher-02 (0.00s)
+    --- PASS: TestCorpusParses/22_cypher-03 (0.00s)
+    --- PASS: TestCorpusParses/22_cypher-04 (0.00s)
+    --- PASS: TestCorpusParses/22_cypher-05 (0.00s)
+    --- PASS: TestCorpusParses/22_cypher-06 (0.00s)
+    --- PASS: TestCorpusParses/22_cypher-07 (0.00s)
+    --- PASS: TestCorpusParses/22_cypher-08 (0.00s)
+    --- PASS: TestCorpusParses/22_cypher-09 (0.00s)
+    --- PASS: TestCorpusParses/22_cypher-10 (0.00s)
+    --- PASS: TestCorpusParses/22_cypher-11 (0.00s)
+    --- PASS: TestCorpusParses/22_cypher-12 (0.00s)
+    --- PASS: TestCorpusParses/22_cypher-13 (0.00s)
+    --- PASS: TestCorpusParses/22_cypher-14 (0.00s)
+    --- PASS: TestCorpusParses/22_cypher-15 (0.00s)
+    --- PASS: TestCorpusParses/22_cypher-16 (0.00s)
+    --- PASS: TestCorpusParses/22_cypher-17 (0.00s)
+    --- PASS: TestCorpusParses/22_cypher-18 (0.00s)
+    --- PASS: TestCorpusParses/19_pattern_query-01 (0.00s)
+    --- PASS: TestCorpusParses/19_pattern_query-02 (0.00s)
+    --- PASS: TestCorpusParses/19_pattern_query-03 (0.00s)
+    --- PASS: TestCorpusParses/25_software_house_api-01 (0.00s)
+    --- PASS: TestCorpusParses/25_software_house_api-02 (0.00s)
+    --- PASS: TestCorpusParses/25_software_house_api-03 (0.00s)
+    --- PASS: TestCorpusParses/25_software_house_api-04 (0.00s)
+    --- PASS: TestCorpusParses/25_software_house_api-05 (0.00s)
+    --- PASS: TestCorpusParses/25_software_house_api-06 (0.00s)
+    --- PASS: TestCorpusParses/25_software_house_api-07 (0.00s)
+    --- PASS: TestCorpusParses/25_software_house_api-08 (0.00s)
+    --- PASS: TestCorpusParses/25_software_house_api-09 (0.00s)
+    --- PASS: TestCorpusParses/25_software_house_api-10 (0.00s)
+    --- PASS: TestCorpusParses/25_software_house_api-11 (0.00s)
+    --- PASS: TestCorpusParses/25_software_house_api-12 (0.00s)
+    --- PASS: TestCorpusParses/25_software_house_api-13 (0.00s)
+    --- PASS: TestCorpusParses/25_software_house_api-14 (0.00s)
+    --- PASS: TestCorpusParses/25_software_house_api-15 (0.00s)
+    --- PASS: TestCorpusParses/25_software_house_api-16 (0.00s)
+    --- PASS: TestCorpusParses/25_software_house_api-17 (0.00s)
+    --- PASS: TestCorpusParses/25_software_house_api-18 (0.00s)
+    --- PASS: TestCorpusParses/25_software_house_api-19 (0.00s)
+    --- PASS: TestCorpusParses/25_software_house_api-20 (0.00s)
+    --- PASS: TestCorpusParses/25_software_house_api-21 (0.00s)
+    --- PASS: TestCorpusParses/25_software_house_api-22 (0.00s)
+    --- PASS: TestCorpusParses/25_software_house_api-23 (0.00s)
+    --- PASS: TestCorpusParses/25_software_house_api-24 (0.00s)
+    --- PASS: TestCorpusParses/25_software_house_api-25 (0.00s)
+    --- PASS: TestCorpusParses/25_software_house_api-26 (0.00s)
+    --- PASS: TestCorpusParses/25_software_house_api-27 (0.00s)
+    --- PASS: TestCorpusParses/25_software_house_api-28 (0.00s)
+    --- PASS: TestCorpusParses/25_software_house_api-29 (0.00s)
+    --- PASS: TestCorpusParses/25_software_house_api-30 (0.00s)
+    --- PASS: TestCorpusParses/25_software_house_api-31 (0.00s)
+    --- PASS: TestCorpusParses/25_software_house_api-32 (0.00s)
+    --- PASS: TestCorpusParses/24_social_network_cli-01 (0.00s)
+    --- PASS: TestCorpusParses/24_social_network_cli-02 (0.00s)
+    --- PASS: TestCorpusParses/24_social_network_cli-03 (0.00s)
+    --- PASS: TestCorpusParses/24_social_network_cli-04 (0.00s)
+    --- PASS: TestCorpusParses/24_social_network_cli-05 (0.00s)
+    --- PASS: TestCorpusParses/24_social_network_cli-06 (0.00s)
+    --- PASS: TestCorpusParses/24_social_network_cli-07 (0.00s)
+    --- PASS: TestCorpusParses/24_social_network_cli-08 (0.00s)
+    --- PASS: TestCorpusParses/24_social_network_cli-09 (0.00s)
+    --- PASS: TestCorpusParses/24_social_network_cli-10 (0.00s)
+    --- PASS: TestCorpusParses/24_social_network_cli-11 (0.00s)
+    --- PASS: TestCorpusParses/24_social_network_cli-12 (0.00s)
+    --- PASS: TestCorpusParses/24_social_network_cli-13 (0.00s)
+    --- PASS: TestCorpusParses/24_social_network_cli-14 (0.00s)
+    --- PASS: TestCorpusParses/24_social_network_cli-15 (0.00s)
+    --- PASS: TestCorpusParses/24_social_network_cli-16 (0.00s)
+    --- PASS: TestCorpusParses/24_social_network_cli-17 (0.00s)
+    --- PASS: TestCorpusParses/24_social_network_cli-18 (0.00s)
+    --- PASS: TestCorpusParses/24_social_network_cli-19 (0.00s)
+    --- PASS: TestCorpusParses/24_social_network_cli-20 (0.00s)
+    --- PASS: TestCorpusParses/24_social_network_cli-21 (0.00s)
+    --- PASS: TestCorpusParses/24_social_network_cli-22 (0.00s)
+    --- PASS: TestCorpusParses/24_social_network_cli-23 (0.00s)
+    --- PASS: TestCorpusParses/24_social_network_cli-24 (0.00s)
+    --- PASS: TestCorpusParses/24_social_network_cli-25 (0.00s)
+    --- PASS: TestCorpusParses/24_social_network_cli-26 (0.00s)
+    --- PASS: TestCorpusParses/24_social_network_cli-27 (0.00s)
+    --- PASS: TestCorpusParses/24_social_network_cli-28 (0.00s)
+    --- PASS: TestCorpusParses/24_social_network_cli-29 (0.00s)
+    --- PASS: TestCorpusParses/24_social_network_cli-30 (0.00s)
+=== RUN   TestCorpusTraceable
+--- PASS: TestCorpusTraceable (0.00s)
+=== RUN   TestStripShapesParse
+--- PASS: TestStripShapesParse (0.00s)
+=== RUN   TestStripShapeControlIsQuoteFree
+--- PASS: TestStripShapeControlIsQuoteFree (0.00s)
+=== RUN   TestStripAllocationTable
+    strip_attribution_bench_test.go:234: id                                bytes  hoisted    allocs
+    strip_attribution_bench_test.go:245: 22_cypher/01                         50        0         0
+    strip_attribution_bench_test.go:245: 22_cypher/02                         54        0         0
+    strip_attribution_bench_test.go:245: 22_cypher/03                         52        0         0
+    strip_attribution_bench_test.go:245: 22_cypher/04                        128        0         0
+    strip_attribution_bench_test.go:245: 22_cypher/05                         35        0         0
+    strip_attribution_bench_test.go:245: 22_cypher/06                         41        0         0
+    strip_attribution_bench_test.go:245: 22_cypher/07                         46        0         0
+    strip_attribution_bench_test.go:245: 22_cypher/08                        195        0         0
+    strip_attribution_bench_test.go:245: 22_cypher/09                         93        0         0
+    strip_attribution_bench_test.go:245: 22_cypher/10                        119        0        13
+    strip_attribution_bench_test.go:245: 22_cypher/11                         39        0         0
+    strip_attribution_bench_test.go:245: 22_cypher/12                         42        0         0
+    strip_attribution_bench_test.go:245: 22_cypher/13                         70        0         0
+    strip_attribution_bench_test.go:245: 22_cypher/14                         61        0         0
+    strip_attribution_bench_test.go:245: 22_cypher/15                         40        0         0
+    strip_attribution_bench_test.go:245: 22_cypher/16                         86        0         0
+    strip_attribution_bench_test.go:245: 22_cypher/17                        113        0         0
+    strip_attribution_bench_test.go:245: 22_cypher/18                        117        0         0
+    strip_attribution_bench_test.go:245: 19_pattern_query/01                  96        0         9
+    strip_attribution_bench_test.go:245: 19_pattern_query/02                  92        1        15
+    strip_attribution_bench_test.go:245: 19_pattern_query/03                  93        0         9
+    strip_attribution_bench_test.go:245: 25_software_house_api/01             58        0         0
+    strip_attribution_bench_test.go:245: 25_software_house_api/02             57        0         0
+    strip_attribution_bench_test.go:245: 25_software_house_api/03             28        0         0
+    strip_attribution_bench_test.go:245: 25_software_house_api/04             55        0         5
+    strip_attribution_bench_test.go:245: 25_software_house_api/05             16        0         0
+    strip_attribution_bench_test.go:245: 25_software_house_api/06             27        0         0
+    strip_attribution_bench_test.go:245: 25_software_house_api/07             22        0         0
+    strip_attribution_bench_test.go:245: 25_software_house_api/08             17        0         0
+    strip_attribution_bench_test.go:245: 25_software_house_api/09             21        0         0
+    strip_attribution_bench_test.go:245: 25_software_house_api/10             65        1        13
+    strip_attribution_bench_test.go:245: 25_software_house_api/11             88        0         0
+    strip_attribution_bench_test.go:245: 25_software_house_api/12            316        0         0
+    strip_attribution_bench_test.go:245: 25_software_house_api/13            183        0         0
+    strip_attribution_bench_test.go:245: 25_software_house_api/14            233        0         0
+    strip_attribution_bench_test.go:245: 25_software_house_api/15            225        2        35
+    strip_attribution_bench_test.go:245: 25_software_house_api/16            158        1        23
+    strip_attribution_bench_test.go:245: 25_software_house_api/17            144        0         0
+    strip_attribution_bench_test.go:245: 25_software_house_api/18            110        0         0
+    strip_attribution_bench_test.go:245: 25_software_house_api/19            204        0         0
+    strip_attribution_bench_test.go:245: 25_software_house_api/20             57        0         4
+    strip_attribution_bench_test.go:245: 25_software_house_api/21             28        0         0
+    strip_attribution_bench_test.go:245: 25_software_house_api/22             23        0         0
+    strip_attribution_bench_test.go:245: 25_software_house_api/23             28        0         0
+    strip_attribution_bench_test.go:245: 25_software_house_api/24             35        0         0
+    strip_attribution_bench_test.go:245: 25_software_house_api/25             35        0         0
+    strip_attribution_bench_test.go:245: 25_software_house_api/26             35        0         0
+    strip_attribution_bench_test.go:245: 25_software_house_api/27             61        0         0
+    strip_attribution_bench_test.go:245: 25_software_house_api/28             96        0         0
+    strip_attribution_bench_test.go:245: 25_software_house_api/29            127        0         0
+    strip_attribution_bench_test.go:245: 25_software_house_api/30             53        0         0
+    strip_attribution_bench_test.go:245: 25_software_house_api/31             48        0         0
+    strip_attribution_bench_test.go:245: 25_software_house_api/32             49        0         4
+    strip_attribution_bench_test.go:245: 24_social_network_cli/01             94        0         0
+    strip_attribution_bench_test.go:245: 24_social_network_cli/02             70        0         0
+    strip_attribution_bench_test.go:245: 24_social_network_cli/03             52        0         0
+    strip_attribution_bench_test.go:245: 24_social_network_cli/04             78        0         0
+    strip_attribution_bench_test.go:245: 24_social_network_cli/05            101        0         0
+    strip_attribution_bench_test.go:245: 24_social_network_cli/06             67        0         0
+    strip_attribution_bench_test.go:245: 24_social_network_cli/07             34        0         0
+    strip_attribution_bench_test.go:245: 24_social_network_cli/08             34        0         0
+    strip_attribution_bench_test.go:245: 24_social_network_cli/09             37        0         0
+    strip_attribution_bench_test.go:245: 24_social_network_cli/10             38        0         0
+    strip_attribution_bench_test.go:245: 24_social_network_cli/11             54        0         0
+    strip_attribution_bench_test.go:245: 24_social_network_cli/12             71        0         0
+    strip_attribution_bench_test.go:245: 24_social_network_cli/13             71        0         0
+    strip_attribution_bench_test.go:245: 24_social_network_cli/14             82        0         0
+    strip_attribution_bench_test.go:245: 24_social_network_cli/15             45        0         0
+    strip_attribution_bench_test.go:245: 24_social_network_cli/16             54        0         0
+    strip_attribution_bench_test.go:245: 24_social_network_cli/17             54        0         0
+    strip_attribution_bench_test.go:245: 24_social_network_cli/18             18        0         0
+    strip_attribution_bench_test.go:245: 24_social_network_cli/19             35        0         3
+    strip_attribution_bench_test.go:245: 24_social_network_cli/20             44        0         0
+    strip_attribution_bench_test.go:245: 24_social_network_cli/21             35        0         0
+    strip_attribution_bench_test.go:245: 24_social_network_cli/22             35        0         0
+    strip_attribution_bench_test.go:245: 24_social_network_cli/23             38        0         0
+    strip_attribution_bench_test.go:245: 24_social_network_cli/24             45        0         0
+    strip_attribution_bench_test.go:245: 24_social_network_cli/25             46        0         0
+    strip_attribution_bench_test.go:245: 24_social_network_cli/26             40        0         0
+    strip_attribution_bench_test.go:245: 24_social_network_cli/27             46        0         0
+    strip_attribution_bench_test.go:245: 24_social_network_cli/28             43        0         0
+    strip_attribution_bench_test.go:245: 24_social_network_cli/29            113        1        15
+    strip_attribution_bench_test.go:245: 24_social_network_cli/30             57        0         0
+--- PASS: TestStripAllocationTable (0.01s)
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/cypher/parser	0.418s
+go_test_exit=0
