@@ -1,0 +1,38 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+                                      │   onemutex   │            shard16final            │
+                                      │    sec/op    │   sec/op     vs base               │
+SpikeWarmPrepareParallel/quotefree       15.35n ± 2%   17.91n ± 2%  +16.72% (p=0.000 n=8)
+SpikeWarmPrepareParallel/quotefree-10    90.68n ± 3%   95.86n ± 2%   +5.71% (p=0.000 n=8)
+SpikeWarmPrepareParallel/literal         332.9n ± 2%   341.4n ± 2%   +2.52% (p=0.023 n=8)
+SpikeWarmPrepareParallel/literal-10      177.3n ± 2%   161.3n ± 2%   -9.05% (p=0.000 n=8)
+SpikeWarmPrepareMultiKey                 21.17n ± 3%   31.07n ± 6%  +46.80% (p=0.000 n=8)
+SpikeWarmPrepareMultiKey-10             119.10n ± 1%   39.97n ± 9%  -66.44% (p=0.000 n=8)
+geomean                                  76.92n        69.98n        -9.03%
+
+                                      │   onemutex   │            shard16final            │
+                                      │     B/op     │    B/op     vs base                │
+SpikeWarmPrepareParallel/quotefree      0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=8) ¹
+SpikeWarmPrepareParallel/quotefree-10   0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=8) ¹
+SpikeWarmPrepareParallel/literal        464.0 ± 0%     464.0 ± 0%       ~ (p=1.000 n=8) ¹
+SpikeWarmPrepareParallel/literal-10     464.0 ± 0%     464.0 ± 0%       ~ (p=1.000 n=8) ¹
+SpikeWarmPrepareMultiKey                0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=8) ¹
+SpikeWarmPrepareMultiKey-10             0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=8) ¹
+geomean                                            ²               +0.00%               ²
+¹ all samples are equal
+² summaries must be >0 to compute geomean
+
+                                      │   onemutex   │            shard16final            │
+                                      │  allocs/op   │ allocs/op   vs base                │
+SpikeWarmPrepareParallel/quotefree      0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=8) ¹
+SpikeWarmPrepareParallel/quotefree-10   0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=8) ¹
+SpikeWarmPrepareParallel/literal        6.000 ± 0%     6.000 ± 0%       ~ (p=1.000 n=8) ¹
+SpikeWarmPrepareParallel/literal-10     6.000 ± 0%     6.000 ± 0%       ~ (p=1.000 n=8) ¹
+SpikeWarmPrepareMultiKey                0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=8) ¹
+SpikeWarmPrepareMultiKey-10             0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=8) ¹
+geomean                                            ²               +0.00%               ²
+¹ all samples are equal
+² summaries must be >0 to compute geomean
+benchstat_exit=0

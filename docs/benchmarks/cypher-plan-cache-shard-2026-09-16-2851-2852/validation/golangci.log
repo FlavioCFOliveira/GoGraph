@@ -1,0 +1,10 @@
+cypher/frontend_share_bench_test.go:205:31: context-as-argument: context.Context should be the first parameter of a function (revive)
+func runShareQuery(e *Engine, ctx context.Context, q shareQuery) (int, error) {
+                              ^
+cypher/frontend_share_bench_test.go:223:2: var shareSinkErr is unused (unused)
+	shareSinkErr    error
+	^
+2 issues:
+* revive: 1
+* unused: 1
+lint_exit=1

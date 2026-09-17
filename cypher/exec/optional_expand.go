@@ -55,6 +55,11 @@ type OptionalExpand struct {
 	pendingInput bool // true when inputRow is loaded but child has not been drained
 	emittedAny   bool // true when at least one row has been emitted from child for this input
 	childEOS     bool // true when outer input is exhausted
+	// emitStoredDir mirrors [ExpandConfig.EmitStoredDir]: the NULL-extension
+	// row must be exactly as wide as the rows the inner Expand emits, or the
+	// stream is ragged and every column index below this operator is wrong for
+	// the unmatched rows only — the hardest shape of that defect to notice.
+	emitStoredDir bool
 }
 
 // singleRow is a minimal operator that emits exactly one pre-loaded row.
@@ -97,10 +102,11 @@ func NewOptionalExpand(input Operator, src AdjacencySource, cfg ExpandConfig) *O
 	sr := &singleRow{}
 	child := NewExpand(sr, src, cfg)
 	return &OptionalExpand{
-		child:     child,
-		singleArg: sr,
-		input:     input,
-		inputCol:  cfg.InputCol,
+		child:         child,
+		singleArg:     sr,
+		input:         input,
+		inputCol:      cfg.InputCol,
+		emitStoredDir: cfg.EmitStoredDir,
 	}
 }
 
@@ -194,11 +200,17 @@ func (op *OptionalExpand) buildNullRow(inputRow Row) Row {
 		srcID = inputRow[op.inputCol]
 	}
 	need := len(inputRow) + 3
+	if op.emitStoredDir {
+		need++ // the inner Expand appends a stored-direction cell too
+	}
 	buf := make([]expr.Value, need)
 	copy(buf, inputRow)
 	buf[len(inputRow)] = srcID
 	buf[len(inputRow)+1] = expr.Null
 	buf[len(inputRow)+2] = expr.Null
+	if op.emitStoredDir {
+		buf[len(inputRow)+3] = expr.Null
+	}
 	return buf
 }
 

@@ -1,0 +1,72 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+                                 │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/cypher-plan-cache-shard-2026-09-16-2851-2852/ladder.all.txt │
+                                 │                                                     sec/op                                                      │
+ShardLadderMultiKey/shards001-10                                                                                                       125.9n ± 1%
+ShardLadderMultiKey/shards002-10                                                                                                       97.51n ± 2%
+ShardLadderMultiKey/shards004-10                                                                                                       75.43n ± 1%
+ShardLadderMultiKey/shards008-10                                                                                                       55.82n ± 3%
+ShardLadderMultiKey/shards016-10                                                                                                       42.39n ± 4%
+ShardLadderMultiKey/shards032-10                                                                                                       33.34n ± 7%
+ShardLadderMultiKey/shards064-10                                                                                                       26.27n ± 7%
+ShardLadderMultiKey/shards128-10                                                                                                       20.46n ± 4%
+ShardLadderMultiKey/shards256-10                                                                                                       18.95n ± 5%
+ShardLadderOneKey/shards001-10                                                                                                         95.36n ± 1%
+ShardLadderOneKey/shards002-10                                                                                                         95.42n ± 1%
+ShardLadderOneKey/shards004-10                                                                                                         95.96n ± 1%
+ShardLadderOneKey/shards008-10                                                                                                         96.40n ± 1%
+ShardLadderOneKey/shards016-10                                                                                                         95.50n ± 1%
+ShardLadderOneKey/shards032-10                                                                                                         96.03n ± 1%
+ShardLadderOneKey/shards064-10                                                                                                         95.90n ± 1%
+ShardLadderOneKey/shards128-10                                                                                                         98.35n ± 1%
+ShardLadderOneKey/shards256-10                                                                                                         98.20n ± 0%
+geomean                                                                                                                                65.78n
+
+                                 │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/cypher-plan-cache-shard-2026-09-16-2851-2852/ladder.all.txt │
+                                 │                                                      B/op                                                       │
+ShardLadderMultiKey/shards001-10                                                                                                      0.000 ± 0%
+ShardLadderMultiKey/shards002-10                                                                                                      0.000 ± 0%
+ShardLadderMultiKey/shards004-10                                                                                                      0.000 ± 0%
+ShardLadderMultiKey/shards008-10                                                                                                      0.000 ± 0%
+ShardLadderMultiKey/shards016-10                                                                                                      0.000 ± 0%
+ShardLadderMultiKey/shards032-10                                                                                                      0.000 ± 0%
+ShardLadderMultiKey/shards064-10                                                                                                      0.000 ± 0%
+ShardLadderMultiKey/shards128-10                                                                                                      0.000 ± 0%
+ShardLadderMultiKey/shards256-10                                                                                                      0.000 ± 0%
+ShardLadderOneKey/shards001-10                                                                                                        0.000 ± 0%
+ShardLadderOneKey/shards002-10                                                                                                        0.000 ± 0%
+ShardLadderOneKey/shards004-10                                                                                                        0.000 ± 0%
+ShardLadderOneKey/shards008-10                                                                                                        0.000 ± 0%
+ShardLadderOneKey/shards016-10                                                                                                        0.000 ± 0%
+ShardLadderOneKey/shards032-10                                                                                                        0.000 ± 0%
+ShardLadderOneKey/shards064-10                                                                                                        0.000 ± 0%
+ShardLadderOneKey/shards128-10                                                                                                        0.000 ± 0%
+ShardLadderOneKey/shards256-10                                                                                                        0.000 ± 0%
+geomean                                                                                                                                          ¹
+¹ summaries must be >0 to compute geomean
+
+                                 │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/cypher-plan-cache-shard-2026-09-16-2851-2852/ladder.all.txt │
+                                 │                                                    allocs/op                                                    │
+ShardLadderMultiKey/shards001-10                                                                                                      0.000 ± 0%
+ShardLadderMultiKey/shards002-10                                                                                                      0.000 ± 0%
+ShardLadderMultiKey/shards004-10                                                                                                      0.000 ± 0%
+ShardLadderMultiKey/shards008-10                                                                                                      0.000 ± 0%
+ShardLadderMultiKey/shards016-10                                                                                                      0.000 ± 0%
+ShardLadderMultiKey/shards032-10                                                                                                      0.000 ± 0%
+ShardLadderMultiKey/shards064-10                                                                                                      0.000 ± 0%
+ShardLadderMultiKey/shards128-10                                                                                                      0.000 ± 0%
+ShardLadderMultiKey/shards256-10                                                                                                      0.000 ± 0%
+ShardLadderOneKey/shards001-10                                                                                                        0.000 ± 0%
+ShardLadderOneKey/shards002-10                                                                                                        0.000 ± 0%
+ShardLadderOneKey/shards004-10                                                                                                        0.000 ± 0%
+ShardLadderOneKey/shards008-10                                                                                                        0.000 ± 0%
+ShardLadderOneKey/shards016-10                                                                                                        0.000 ± 0%
+ShardLadderOneKey/shards032-10                                                                                                        0.000 ± 0%
+ShardLadderOneKey/shards064-10                                                                                                        0.000 ± 0%
+ShardLadderOneKey/shards128-10                                                                                                        0.000 ± 0%
+ShardLadderOneKey/shards256-10                                                                                                        0.000 ± 0%
+geomean                                                                                                                                          ¹
+¹ summaries must be >0 to compute geomean
+benchstat_exit=0

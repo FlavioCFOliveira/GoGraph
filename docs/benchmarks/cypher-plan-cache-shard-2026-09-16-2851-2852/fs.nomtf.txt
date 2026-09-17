@@ -1,0 +1,110 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkSpikeWarmPrepareParallel/quotefree            	20759649	        17.39 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/quotefree-10         	 3656593	        98.69 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal              	 1009474	       337.7 ns/op	     464 B/op	       6 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal-10           	 2329465	       155.8 ns/op	     464 B/op	       6 allocs/op
+BenchmarkSpikeWarmPrepareMultiKey                      	16125238	        21.66 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareMultiKey-10                   	16128184	        26.79 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkSpikeWarmPrepareParallel/quotefree            	20840268	        17.42 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/quotefree-10         	 3740943	        96.20 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal              	  964252	       344.7 ns/op	     464 B/op	       6 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal-10           	 2258282	       158.3 ns/op	     464 B/op	       6 allocs/op
+BenchmarkSpikeWarmPrepareMultiKey                      	16126141	        21.82 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareMultiKey-10                   	16288486	        26.30 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkSpikeWarmPrepareParallel/quotefree            	20195126	        17.53 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/quotefree-10         	 3763902	        97.65 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal              	 1037708	       337.4 ns/op	     464 B/op	       6 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal-10           	 2261256	       156.3 ns/op	     464 B/op	       6 allocs/op
+BenchmarkSpikeWarmPrepareMultiKey                      	16208154	        21.63 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareMultiKey-10                   	17246965	        21.04 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkSpikeWarmPrepareParallel/quotefree            	19882590	        17.45 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/quotefree-10         	 3822693	        96.66 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal              	 1007210	       338.0 ns/op	     464 B/op	       6 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal-10           	 2290860	       156.1 ns/op	     464 B/op	       6 allocs/op
+BenchmarkSpikeWarmPrepareMultiKey                      	16609443	        22.31 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareMultiKey-10                   	15952908	        22.45 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkSpikeWarmPrepareParallel/quotefree            	20833734	        17.63 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/quotefree-10         	 3761689	        96.91 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal              	 1037776	       336.4 ns/op	     464 B/op	       6 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal-10           	 2276749	       156.6 ns/op	     464 B/op	       6 allocs/op
+BenchmarkSpikeWarmPrepareMultiKey                      	16473615	        21.20 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareMultiKey-10                   	17715771	        23.61 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkSpikeWarmPrepareParallel/quotefree            	20434178	        17.43 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/quotefree-10         	 3741270	        96.34 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal              	 1013166	       337.3 ns/op	     464 B/op	       6 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal-10           	 2257350	       157.9 ns/op	     464 B/op	       6 allocs/op
+BenchmarkSpikeWarmPrepareMultiKey                      	16639447	        21.60 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareMultiKey-10                   	15569614	        22.21 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkSpikeWarmPrepareParallel/quotefree            	20425242	        17.39 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/quotefree-10         	 3505755	        95.53 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal              	 1018989	       325.4 ns/op	     464 B/op	       6 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal-10           	 2182839	       165.6 ns/op	     464 B/op	       6 allocs/op
+BenchmarkSpikeWarmPrepareMultiKey                      	16245182	        21.31 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareMultiKey-10                   	15949492	        21.83 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkSpikeWarmPrepareParallel/quotefree            	20071551	        17.66 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/quotefree-10         	 3685059	        96.07 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal              	  994012	       336.0 ns/op	     464 B/op	       6 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal-10           	 2259488	       159.2 ns/op	     464 B/op	       6 allocs/op
+BenchmarkSpikeWarmPrepareMultiKey                      	15766308	        21.63 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareMultiKey-10                   	13832210	        22.74 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkSpikeWarmPrepareParallel/quotefree            	20917716	        17.41 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/quotefree-10         	 3725526	        95.49 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal              	 1010071	       342.3 ns/op	     464 B/op	       6 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal-10           	 2255925	       161.4 ns/op	     464 B/op	       6 allocs/op
+BenchmarkSpikeWarmPrepareMultiKey                      	16420017	        21.30 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareMultiKey-10                   	16092291	        23.06 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkSpikeWarmPrepareParallel/quotefree            	20932209	        17.36 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/quotefree-10         	 3770697	        96.20 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal              	 1014534	       337.0 ns/op	     464 B/op	       6 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal-10           	 2256897	       156.2 ns/op	     464 B/op	       6 allocs/op
+BenchmarkSpikeWarmPrepareMultiKey                      	16332177	        21.37 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareMultiKey-10                   	16201558	        23.16 ns/op	       0 B/op	       0 allocs/op
+PASS

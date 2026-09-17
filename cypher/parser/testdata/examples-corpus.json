@@ -1,0 +1,1024 @@
+{
+  "schema": 1,
+  "harvested_at_commit": "d29360cebc5af5c2c0bcb59de8122ab53713d18d",
+  "examples_scanned": [
+    "22_cypher",
+    "19_pattern_query",
+    "25_software_house_api",
+    "24_social_network_cli",
+    "11_social_network"
+  ],
+  "how": "Every statement is a Cypher string the named example issues. Harvested by walking each example's Go source with go/ast, reducing string literals, package-level string constants and their concatenations to their static text, and keeping only the results cypher/parser accepts. `source` is the file and line of the expression the text came from. `materialised` is set when the example builds the statement at run time and the placeholder was filled here with the example's own value; it records exactly what was substituted and from where. No example was modified. examples/11_social_network contributes nothing: it does not import cypher and issues no Cypher statement. DDL (CREATE INDEX / CREATE CONSTRAINT) is absent by construction: cypher.Engine.Run diverts DDL at ir.IsDDL before parseAndAnalyse, so DDL never reaches cypher/parser.",
+  "statements": [
+    {
+      "id": "22_cypher/01",
+      "example": "22_cypher",
+      "source": "examples/22_cypher/main.go:463",
+      "shape": [
+        "match"
+      ],
+      "bytes": 50,
+      "text": "MATCH (u:USER) RETURN u.name AS name, u.age AS age"
+    },
+    {
+      "id": "22_cypher/02",
+      "example": "22_cypher",
+      "source": "examples/22_cypher/main.go:504",
+      "shape": [
+        "match",
+        "where",
+        "aggregate",
+        "param"
+      ],
+      "bytes": 54,
+      "text": "MATCH (u:USER) WHERE u.age > $min RETURN count(u) AS c"
+    },
+    {
+      "id": "22_cypher/03",
+      "example": "22_cypher",
+      "source": "examples/22_cypher/main.go:520",
+      "shape": [
+        "match",
+        "aggregate",
+        "list"
+      ],
+      "bytes": 52,
+      "text": "MATCH (:USER)-[:KNOWS]->(:USER) RETURN count(*) AS c"
+    },
+    {
+      "id": "22_cypher/04",
+      "example": "22_cypher",
+      "source": "examples/22_cypher/main.go:528",
+      "shape": [
+        "match",
+        "orderby",
+        "limit",
+        "param",
+        "list"
+      ],
+      "bytes": 128,
+      "text": "MATCH (a:USER {name:$name})-[r:KNOWS]->(b:USER) RETURN b.name AS friend, r.since AS since ORDER BY since ASC, friend ASC LIMIT 1"
+    },
+    {
+      "id": "22_cypher/05",
+      "example": "22_cypher",
+      "source": "examples/22_cypher/main.go:842",
+      "shape": [
+        "match",
+        "aggregate"
+      ],
+      "bytes": 35,
+      "text": "MATCH (u:USER) RETURN count(u) AS c"
+    },
+    {
+      "id": "22_cypher/06",
+      "example": "22_cypher",
+      "source": "examples/22_cypher/main.go:870",
+      "shape": [
+        "match",
+        "param"
+      ],
+      "bytes": 41,
+      "text": "MATCH (u:USER {id:$id}) RETURN u.age AS c"
+    },
+    {
+      "id": "22_cypher/07",
+      "example": "22_cypher",
+      "source": "examples/22_cypher/main.go:881",
+      "shape": [
+        "match",
+        "param"
+      ],
+      "bytes": 46,
+      "text": "MATCH (u:USER {id:$id}) RETURN u.mergeTag AS v"
+    },
+    {
+      "id": "22_cypher/08",
+      "example": "22_cypher",
+      "source": "examples/22_cypher/main.go:894",
+      "shape": [
+        "match",
+        "create",
+        "param",
+        "list"
+      ],
+      "bytes": 195,
+      "text": "MATCH (a:USER {id:$aid}) CREATE (a)-[:KNOWS {since:$since}]->(b:USER {id:$bid, name:$bname, age:$bage, city:$city})-[:KNOWS {since:$since}]->(c:USER {id:$cid, name:$cname, age:$cage, city:$city})"
+    },
+    {
+      "id": "22_cypher/09",
+      "example": "22_cypher",
+      "source": "examples/22_cypher/main.go:917",
+      "shape": [
+        "create",
+        "unwind",
+        "param"
+      ],
+      "bytes": 93,
+      "text": "UNWIND $rows AS row CREATE (:USER {id: row.id, name: row.name, age: row.age, city: row.city})"
+    },
+    {
+      "id": "22_cypher/10",
+      "example": "22_cypher",
+      "source": "examples/22_cypher/main.go:922",
+      "shape": [
+        "match",
+        "create",
+        "merge",
+        "set",
+        "param",
+        "strliteral"
+      ],
+      "bytes": 119,
+      "text": "MERGE (u:USER {id:$mid}) ON CREATE SET u.name=$name, u.age=$age, u.mergeTag='created' ON MATCH SET u.mergeTag='matched'"
+    },
+    {
+      "id": "22_cypher/11",
+      "example": "22_cypher",
+      "source": "examples/22_cypher/main.go:940",
+      "shape": [
+        "match",
+        "set",
+        "param"
+      ],
+      "bytes": 39,
+      "text": "MATCH (u:USER {id:$mid}) SET u.age=$age"
+    },
+    {
+      "id": "22_cypher/12",
+      "example": "22_cypher",
+      "source": "examples/22_cypher/main.go:946",
+      "shape": [
+        "match",
+        "remove",
+        "param"
+      ],
+      "bytes": 42,
+      "text": "MATCH (u:USER {id:$mid}) REMOVE u.mergeTag"
+    },
+    {
+      "id": "22_cypher/13",
+      "example": "22_cypher",
+      "source": "examples/22_cypher/main.go:951",
+      "shape": [
+        "match",
+        "where",
+        "aggregate",
+        "param"
+      ],
+      "bytes": 70,
+      "text": "MATCH (u:USER {id:$mid}) WHERE u.mergeTag IS NULL RETURN count(u) AS c"
+    },
+    {
+      "id": "22_cypher/14",
+      "example": "22_cypher",
+      "source": "examples/22_cypher/main.go:958",
+      "shape": [
+        "match",
+        "delete",
+        "param",
+        "list"
+      ],
+      "bytes": 61,
+      "text": "MATCH (:USER {id:$bid})-[r:KNOWS]->(:USER {id:$cid}) DELETE r"
+    },
+    {
+      "id": "22_cypher/15",
+      "example": "22_cypher",
+      "source": "examples/22_cypher/main.go:965",
+      "shape": [
+        "match",
+        "delete",
+        "param"
+      ],
+      "bytes": 40,
+      "text": "MATCH (u:USER {id:$bid}) DETACH DELETE u"
+    },
+    {
+      "id": "22_cypher/16",
+      "example": "22_cypher",
+      "source": "examples/22_cypher/main.go:462",
+      "shape": [
+        "match",
+        "orderby",
+        "limit"
+      ],
+      "bytes": 86,
+      "materialised": "fmt.Sprintf template; %d filled with cfg.top default 5 (examples/22_cypher/main.go:139)",
+      "text": "MATCH (u:USER) RETURN u.name AS name, u.age AS age ORDER BY age DESC, name ASC LIMIT 5"
+    },
+    {
+      "id": "22_cypher/17",
+      "example": "22_cypher",
+      "source": "examples/22_cypher/main.go:618",
+      "shape": [
+        "match",
+        "varlen",
+        "shortestpath",
+        "param"
+      ],
+      "bytes": 113,
+      "materialised": "fmt.Sprintf template; %d filled with cfg.maxHops default 10 (examples/22_cypher/main.go:141)",
+      "text": "MATCH (a:USER {id:$aid}),(b:USER {id:$bid}) MATCH p = shortestPath((a)-[:KNOWS*..10]-(b)) RETURN length(p) AS len"
+    },
+    {
+      "id": "22_cypher/18",
+      "example": "22_cypher",
+      "source": "examples/22_cypher/main.go:632",
+      "shape": [
+        "match",
+        "varlen",
+        "shortestpath",
+        "param"
+      ],
+      "bytes": 117,
+      "materialised": "fmt.Sprintf template; %d filled with cfg.maxHops default 10 (examples/22_cypher/main.go:141)",
+      "text": "MATCH (a:USER {id:$aid}),(b:USER {id:$bid}) MATCH p = allShortestPaths((a)-[:KNOWS*..10]-(b)) RETURN length(p) AS len"
+    },
+    {
+      "id": "19_pattern_query/01",
+      "example": "19_pattern_query",
+      "source": "examples/19_pattern_query/registry_search.go:108",
+      "shape": [
+        "match",
+        "with",
+        "where",
+        "orderby",
+        "strliteral"
+      ],
+      "bytes": 96,
+      "text": "MATCH (p:RegistryPackage) WHERE p.name STARTS WITH \"core-\" RETURN p.name AS name ORDER BY p.name"
+    },
+    {
+      "id": "19_pattern_query/02",
+      "example": "19_pattern_query",
+      "source": "examples/19_pattern_query/registry_search.go:186",
+      "shape": [
+        "match",
+        "where",
+        "orderby",
+        "strliteral"
+      ],
+      "bytes": 92,
+      "materialised": "built from labelRegistryPackage and word = strings.TrimSuffix(searchPrefix, \"-\") = \"core\" (registry_search.go:55,70,175)",
+      "text": "MATCH (p:RegistryPackage) WHERE p.name CONTAINS \"core\" RETURN p.name AS name ORDER BY p.name"
+    },
+    {
+      "id": "19_pattern_query/03",
+      "example": "19_pattern_query",
+      "source": "examples/19_pattern_query/registry_search.go:190",
+      "shape": [
+        "match",
+        "with",
+        "where",
+        "orderby",
+        "strliteral"
+      ],
+      "bytes": 93,
+      "materialised": "built from labelRegistryPackage and word = strings.TrimSuffix(searchPrefix, \"-\") = \"core\" (registry_search.go:55,70,175)",
+      "text": "MATCH (p:RegistryPackage) WHERE p.name ENDS WITH \"core\" RETURN p.name AS name ORDER BY p.name"
+    },
+    {
+      "id": "25_software_house_api/01",
+      "example": "25_software_house_api",
+      "source": "examples/25_software_house_api/bitmap_intersect.go:67",
+      "shape": [
+        "match",
+        "aggregate",
+        "multiline"
+      ],
+      "bytes": 58,
+      "text": "MATCH (n:Component:NeedsReview)\nRETURN count(n) AS pending"
+    },
+    {
+      "id": "25_software_house_api/02",
+      "example": "25_software_house_api",
+      "source": "examples/25_software_house_api/bitmap_intersect.go:73",
+      "shape": [
+        "match",
+        "aggregate",
+        "multiline"
+      ],
+      "bytes": 57,
+      "text": "MATCH (n:Code:Repository)\nRETURN count(n) AS repositories"
+    },
+    {
+      "id": "25_software_house_api/03",
+      "example": "25_software_house_api",
+      "source": "examples/25_software_house_api/close_quiesce_test.go:61",
+      "shape": [
+        "match"
+      ],
+      "bytes": 28,
+      "text": "MATCH (n:Developer) RETURN n"
+    },
+    {
+      "id": "25_software_house_api/04",
+      "example": "25_software_house_api",
+      "source": "examples/25_software_house_api/close_quiesce_test.go:97",
+      "shape": [
+        "create",
+        "strliteral"
+      ],
+      "bytes": 55,
+      "text": "CREATE (d:Developer:People {key:'dev:zoe', name:'Zoe'})"
+    },
+    {
+      "id": "25_software_house_api/05",
+      "example": "25_software_house_api",
+      "source": "examples/25_software_house_api/handlers.go:355",
+      "shape": [
+        "call"
+      ],
+      "bytes": 16,
+      "text": "CALL db.labels()"
+    },
+    {
+      "id": "25_software_house_api/06",
+      "example": "25_software_house_api",
+      "source": "examples/25_software_house_api/handlers.go:360",
+      "shape": [
+        "call"
+      ],
+      "bytes": 27,
+      "text": "CALL db.relationshipTypes()"
+    },
+    {
+      "id": "25_software_house_api/07",
+      "example": "25_software_house_api",
+      "source": "examples/25_software_house_api/handlers.go:365",
+      "shape": [
+        "call"
+      ],
+      "bytes": 22,
+      "text": "CALL db.propertyKeys()"
+    },
+    {
+      "id": "25_software_house_api/08",
+      "example": "25_software_house_api",
+      "source": "examples/25_software_house_api/handlers.go:413",
+      "shape": [
+        "call"
+      ],
+      "bytes": 17,
+      "text": "CALL db.indexes()"
+    },
+    {
+      "id": "25_software_house_api/09",
+      "example": "25_software_house_api",
+      "source": "examples/25_software_house_api/handlers.go:432",
+      "shape": [
+        "call"
+      ],
+      "bytes": 21,
+      "text": "CALL db.constraints()"
+    },
+    {
+      "id": "25_software_house_api/10",
+      "example": "25_software_house_api",
+      "source": "examples/25_software_house_api/main.go:172",
+      "shape": [
+        "match",
+        "where",
+        "strliteral"
+      ],
+      "bytes": 65,
+      "text": "MATCH (d:Developer) WHERE d.key = 'dev:alice' RETURN d.key AS key"
+    },
+    {
+      "id": "25_software_house_api/11",
+      "example": "25_software_house_api",
+      "source": "examples/25_software_house_api/min_label_scan.go:54",
+      "shape": [
+        "match",
+        "orderby",
+        "multiline"
+      ],
+      "bytes": 88,
+      "text": "MATCH (r:Code:Repository)\nRETURN r.key AS repository, r.name AS name\nORDER BY repository"
+    },
+    {
+      "id": "25_software_house_api/12",
+      "example": "25_software_house_api",
+      "source": "examples/25_software_house_api/queries.go:22",
+      "shape": [
+        "match",
+        "optional",
+        "aggregate",
+        "orderby",
+        "distinct",
+        "varlen",
+        "param",
+        "list",
+        "multiline"
+      ],
+      "bytes": 316,
+      "text": "MATCH (x:Component {key:$k})\nMATCH (affected:Component)-[:DEPENDS_ON*0..]->(x)\nOPTIONAL MATCH (dev:Developer)-[:ASSIGNED_TO]->(t:Task)-[:TOUCHES]->(affected)\nRETURN affected.key AS component,\n       collect(DISTINCT t.key)   AS impactedTasks,\n       collect(DISTINCT dev.key) AS impactedDevelopers\nORDER BY component"
+    },
+    {
+      "id": "25_software_house_api/13",
+      "example": "25_software_house_api",
+      "source": "examples/25_software_house_api/queries.go:34",
+      "shape": [
+        "match",
+        "aggregate",
+        "orderby",
+        "param",
+        "list",
+        "multiline"
+      ],
+      "bytes": 183,
+      "text": "MATCH (dev:Developer)-[:ASSIGNED_TO]->(:Task)-[r:TOUCHES]->(c:Component {key:$k})\nRETURN dev.key AS developer, count(r) AS touches, sum(r.churn) AS totalChurn\nORDER BY totalChurn DESC"
+    },
+    {
+      "id": "25_software_house_api/14",
+      "example": "25_software_house_api",
+      "source": "examples/25_software_house_api/queries.go:41",
+      "shape": [
+        "match",
+        "with",
+        "where",
+        "aggregate",
+        "orderby",
+        "distinct",
+        "list",
+        "multiline"
+      ],
+      "bytes": 233,
+      "text": "MATCH (dev:Developer)-[:ASSIGNED_TO]->(:Task)-[:TOUCHES]->(c:Component)\nWITH c, count(DISTINCT dev) AS busFactor, collect(DISTINCT dev.key) AS owners\nWHERE busFactor = 1\nRETURN c.key AS component, busFactor, owners\nORDER BY component"
+    },
+    {
+      "id": "25_software_house_api/15",
+      "example": "25_software_house_api",
+      "source": "examples/25_software_house_api/queries.go:51",
+      "shape": [
+        "match",
+        "where",
+        "orderby",
+        "param",
+        "strliteral",
+        "list",
+        "multiline"
+      ],
+      "bytes": 225,
+      "text": "MATCH (d:Developer {key:$dev})-[a:ASSIGNED_TO]->(t:Task)\nWHERE t.status <> 'done' AND a.state <> 'done'\nRETURN t.key AS task, t.title AS title, t.status AS status, t.priority AS priority, a.role AS role\nORDER BY priority DESC"
+    },
+    {
+      "id": "25_software_house_api/16",
+      "example": "25_software_house_api",
+      "source": "examples/25_software_house_api/queries.go:60",
+      "shape": [
+        "match",
+        "where",
+        "orderby",
+        "varlen",
+        "param",
+        "strliteral",
+        "list",
+        "multiline"
+      ],
+      "bytes": 158,
+      "text": "MATCH path = (root:Task)-[:BLOCKS*1..]->(t:Task {key:$task})\nWHERE root.status <> 'done'\nRETURN [n IN nodes(path) | n.key] AS chain\nORDER BY length(path) DESC"
+    },
+    {
+      "id": "25_software_house_api/17",
+      "example": "25_software_house_api",
+      "source": "examples/25_software_house_api/queries.go:68",
+      "shape": [
+        "match",
+        "aggregate",
+        "orderby",
+        "limit",
+        "list",
+        "multiline"
+      ],
+      "bytes": 144,
+      "text": "MATCH (c:Component)<-[:DEPENDS_ON]-(dependent:Component)\nRETURN c.key AS component, count(dependent) AS inDegree\nORDER BY inDegree DESC\nLIMIT 10"
+    },
+    {
+      "id": "25_software_house_api/18",
+      "example": "25_software_house_api",
+      "source": "examples/25_software_house_api/queries.go:76",
+      "shape": [
+        "match",
+        "orderby",
+        "distinct",
+        "varlen",
+        "multiline"
+      ],
+      "bytes": 110,
+      "text": "MATCH (c:Component)-[:DEPENDS_ON*1..]->(c)\nRETURN DISTINCT c.key AS componentOnCycle\nORDER BY componentOnCycle"
+    },
+    {
+      "id": "25_software_house_api/19",
+      "example": "25_software_house_api",
+      "source": "examples/25_software_house_api/queries.go:84",
+      "shape": [
+        "match",
+        "orderby",
+        "param",
+        "list",
+        "multiline"
+      ],
+      "bytes": 204,
+      "text": "MATCH (dev:Developer)-[:ASSIGNED_TO]->(t:Task)-[r:TOUCHES]->(c:Component {key:$k})\nRETURN dev.key AS developer, t.key AS task,\n       r.change_type AS change, r.churn AS churn, r.at AS at\nORDER BY at DESC"
+    },
+    {
+      "id": "25_software_house_api/20",
+      "example": "25_software_house_api",
+      "source": "examples/25_software_house_api/schema_test.go:183",
+      "shape": [
+        "create",
+        "strliteral"
+      ],
+      "bytes": 57,
+      "text": "CREATE (c:Component:Code {key:'comp:platform/config.go'})"
+    },
+    {
+      "id": "25_software_house_api/21",
+      "example": "25_software_house_api",
+      "source": "examples/25_software_house_api/synth_test.go:113",
+      "shape": [
+        "match"
+      ],
+      "bytes": 28,
+      "text": "MATCH (c:Component) RETURN c"
+    },
+    {
+      "id": "25_software_house_api/22",
+      "example": "25_software_house_api",
+      "source": "examples/25_software_house_api/synth_test.go:116",
+      "shape": [
+        "match"
+      ],
+      "bytes": 23,
+      "text": "MATCH (t:Task) RETURN t"
+    },
+    {
+      "id": "25_software_house_api/23",
+      "example": "25_software_house_api",
+      "source": "examples/25_software_house_api/synth_test.go:119",
+      "shape": [
+        "match"
+      ],
+      "bytes": 28,
+      "text": "MATCH (d:Developer) RETURN d"
+    },
+    {
+      "id": "25_software_house_api/24",
+      "example": "25_software_house_api",
+      "source": "examples/25_software_house_api/synth_test.go:125",
+      "shape": [
+        "match",
+        "list"
+      ],
+      "bytes": 35,
+      "text": "MATCH ()-[r:HAS_STATE]->() RETURN r"
+    },
+    {
+      "id": "25_software_house_api/25",
+      "example": "25_software_house_api",
+      "source": "examples/25_software_house_api/synth_test.go:128",
+      "shape": [
+        "match",
+        "list"
+      ],
+      "bytes": 35,
+      "text": "MATCH ()-[r:IN_SPRINT]->() RETURN r"
+    },
+    {
+      "id": "25_software_house_api/26",
+      "example": "25_software_house_api",
+      "source": "examples/25_software_house_api/synth_test.go:132",
+      "shape": [
+        "match",
+        "list"
+      ],
+      "bytes": 35,
+      "text": "MATCH ()-[r:MEMBER_OF]->() RETURN r"
+    },
+    {
+      "id": "25_software_house_api/27",
+      "example": "25_software_house_api",
+      "source": "examples/25_software_house_api/synth_test.go:153",
+      "shape": [
+        "match",
+        "distinct",
+        "varlen"
+      ],
+      "bytes": 61,
+      "text": "MATCH (c:Component)-[:DEPENDS_ON*1..6]->(c) RETURN DISTINCT c"
+    },
+    {
+      "id": "25_software_house_api/28",
+      "example": "25_software_house_api",
+      "source": "examples/25_software_house_api/synth_test.go:159",
+      "shape": [
+        "match",
+        "with",
+        "where",
+        "aggregate",
+        "list"
+      ],
+      "bytes": 96,
+      "text": "MATCH (c:Component)<-[:DEPENDS_ON]-(d:Component) WITH c, count(d) AS deg WHERE deg >= 5 RETURN c"
+    },
+    {
+      "id": "25_software_house_api/29",
+      "example": "25_software_house_api",
+      "source": "examples/25_software_house_api/synth_test.go:165",
+      "shape": [
+        "match",
+        "with",
+        "where",
+        "aggregate",
+        "distinct",
+        "list"
+      ],
+      "bytes": 127,
+      "text": "MATCH (dev:Developer)-[:ASSIGNED_TO]->(:Task)-[:TOUCHES]->(c:Component) WITH c, count(DISTINCT dev) AS bf WHERE bf = 1 RETURN c"
+    },
+    {
+      "id": "25_software_house_api/30",
+      "example": "25_software_house_api",
+      "source": "examples/25_software_house_api/synth_test.go:173",
+      "shape": [
+        "match",
+        "varlen"
+      ],
+      "bytes": 53,
+      "text": "MATCH (root:Task)-[:BLOCKS*1..7]->(:Task) RETURN root"
+    },
+    {
+      "id": "25_software_house_api/31",
+      "example": "25_software_house_api",
+      "source": "examples/25_software_house_api/handlers.go:260",
+      "shape": [
+        "match",
+        "aggregate",
+        "list"
+      ],
+      "bytes": 48,
+      "materialised": "loop over relTypes; rt filled with relDependsOn = DEPENDS_ON (examples/25_software_house_api/schema.go:31,50)",
+      "text": "MATCH ()-[r:DEPENDS_ON]->() RETURN count(r) AS n"
+    },
+    {
+      "id": "25_software_house_api/32",
+      "example": "25_software_house_api",
+      "source": "examples/25_software_house_api/close_quiesce_test.go:158",
+      "shape": [
+        "create",
+        "strliteral"
+      ],
+      "bytes": 49,
+      "materialised": "fmt.Sprintf template; %s filled with a representative key",
+      "text": "CREATE (d:Developer:People {key:'dev:quiesce-0'})"
+    },
+    {
+      "id": "24_social_network_cli/01",
+      "example": "24_social_network_cli",
+      "source": "examples/24_social_network_cli/cli_test.go:55",
+      "shape": [
+        "match",
+        "orderby"
+      ],
+      "bytes": 94,
+      "text": "MATCH (u:User) RETURN u.username AS username, u.display_name AS display_name ORDER BY username"
+    },
+    {
+      "id": "24_social_network_cli/02",
+      "example": "24_social_network_cli",
+      "source": "examples/24_social_network_cli/cmd_plandiff.go:122",
+      "shape": [
+        "match",
+        "list"
+      ],
+      "bytes": 70,
+      "text": "MATCH (p:Post)<-[:ON]-(c:Comment) RETURN c.id AS comment, p.id AS post"
+    },
+    {
+      "id": "24_social_network_cli/03",
+      "example": "24_social_network_cli",
+      "source": "examples/24_social_network_cli/cmd_plandiff.go:123",
+      "shape": [
+        "match",
+        "aggregate"
+      ],
+      "bytes": 52,
+      "text": "MATCH (u:User), (c:Comment) RETURN count(*) AS pairs"
+    },
+    {
+      "id": "24_social_network_cli/04",
+      "example": "24_social_network_cli",
+      "source": "examples/24_social_network_cli/cmd_plandiff.go:130",
+      "shape": [
+        "match",
+        "aggregate",
+        "list"
+      ],
+      "bytes": 78,
+      "text": "MATCH (a:User)-[:FOLLOWS]->(b:User)-[:FOLLOWS]->(a) RETURN count(*) AS mutuals"
+    },
+    {
+      "id": "24_social_network_cli/05",
+      "example": "24_social_network_cli",
+      "source": "examples/24_social_network_cli/cmd_plandiff.go:141",
+      "shape": [
+        "match",
+        "aggregate",
+        "list"
+      ],
+      "bytes": 101,
+      "text": "MATCH (a:Seed)-[:FOLLOWS]->(b:User)-[:FOLLOWS]->(c:User)-[:FOLLOWS]->(a) RETURN count(*) AS triangles"
+    },
+    {
+      "id": "24_social_network_cli/06",
+      "example": "24_social_network_cli",
+      "source": "examples/24_social_network_cli/cmd_plandiff.go:146",
+      "shape": [
+        "match",
+        "list"
+      ],
+      "bytes": 67,
+      "text": "MATCH (f:Firehose)-[:FOLLOWS]->(v:Verified) RETURN v.id AS verified"
+    },
+    {
+      "id": "24_social_network_cli/07",
+      "example": "24_social_network_cli",
+      "source": "examples/24_social_network_cli/cmd_plandiff.go:214",
+      "shape": [
+        "match",
+        "aggregate"
+      ],
+      "bytes": 34,
+      "text": "MATCH (:User) RETURN count(*) AS c"
+    },
+    {
+      "id": "24_social_network_cli/08",
+      "example": "24_social_network_cli",
+      "source": "examples/24_social_network_cli/cmd_plandiff.go:218",
+      "shape": [
+        "match",
+        "aggregate"
+      ],
+      "bytes": 34,
+      "text": "MATCH (:Post) RETURN count(*) AS c"
+    },
+    {
+      "id": "24_social_network_cli/09",
+      "example": "24_social_network_cli",
+      "source": "examples/24_social_network_cli/cmd_plandiff.go:222",
+      "shape": [
+        "match",
+        "aggregate"
+      ],
+      "bytes": 37,
+      "text": "MATCH (:Comment) RETURN count(*) AS c"
+    },
+    {
+      "id": "24_social_network_cli/10",
+      "example": "24_social_network_cli",
+      "source": "examples/24_social_network_cli/cmd_plandiff.go:315",
+      "shape": [
+        "match",
+        "aggregate"
+      ],
+      "bytes": 38,
+      "text": "MATCH (:Verified) RETURN count(*) AS c"
+    },
+    {
+      "id": "24_social_network_cli/11",
+      "example": "24_social_network_cli",
+      "source": "examples/24_social_network_cli/cmd_plandiff.go:319",
+      "shape": [
+        "match",
+        "aggregate",
+        "list"
+      ],
+      "bytes": 54,
+      "text": "MATCH (:Firehose)-[r:FOLLOWS]->() RETURN count(r) AS c"
+    },
+    {
+      "id": "24_social_network_cli/12",
+      "example": "24_social_network_cli",
+      "source": "examples/24_social_network_cli/cmd_plandiff.go:526",
+      "shape": [
+        "match",
+        "with",
+        "aggregate",
+        "list"
+      ],
+      "bytes": 71,
+      "text": "MATCH (u:User)-[r:FOLLOWS]->() WITH u, count(r) AS d RETURN max(d) AS c"
+    },
+    {
+      "id": "24_social_network_cli/13",
+      "example": "24_social_network_cli",
+      "source": "examples/24_social_network_cli/cmd_plandiff.go:528",
+      "shape": [
+        "match",
+        "with",
+        "aggregate",
+        "list"
+      ],
+      "bytes": 71,
+      "text": "MATCH (u:User)-[r:FOLLOWS]->() WITH u, count(r) AS d RETURN min(d) AS c"
+    },
+    {
+      "id": "24_social_network_cli/14",
+      "example": "24_social_network_cli",
+      "source": "examples/24_social_network_cli/cmd_plandiff.go:530",
+      "shape": [
+        "match",
+        "with",
+        "aggregate",
+        "list"
+      ],
+      "bytes": 82,
+      "text": "MATCH (u:User)-[r:FOLLOWS]->() WITH u, count(r) AS d RETURN toInteger(avg(d)) AS c"
+    },
+    {
+      "id": "24_social_network_cli/15",
+      "example": "24_social_network_cli",
+      "source": "examples/24_social_network_cli/cmd_plandiff.go:531",
+      "shape": [
+        "match",
+        "aggregate",
+        "list"
+      ],
+      "bytes": 45,
+      "text": "MATCH ()-[r:FOLLOWS]->() RETURN count(r) AS c"
+    },
+    {
+      "id": "24_social_network_cli/16",
+      "example": "24_social_network_cli",
+      "source": "examples/24_social_network_cli/cmd_plandiff.go:532",
+      "shape": [
+        "match",
+        "aggregate",
+        "distinct",
+        "list"
+      ],
+      "bytes": 54,
+      "text": "MATCH (u)-[:FOLLOWS]->() RETURN count(DISTINCT u) AS c"
+    },
+    {
+      "id": "24_social_network_cli/17",
+      "example": "24_social_network_cli",
+      "source": "examples/24_social_network_cli/cmd_plandiff.go:534",
+      "shape": [
+        "match",
+        "aggregate",
+        "list"
+      ],
+      "bytes": 54,
+      "text": "MATCH ()-[r:FOLLOWS]->(:Verified) RETURN count(r) AS c"
+    },
+    {
+      "id": "24_social_network_cli/18",
+      "example": "24_social_network_cli",
+      "source": "examples/24_social_network_cli/cmd_query_test.go:14",
+      "shape": [
+        "match"
+      ],
+      "bytes": 18,
+      "text": "MATCH (n) RETURN n"
+    },
+    {
+      "id": "24_social_network_cli/19",
+      "example": "24_social_network_cli",
+      "source": "examples/24_social_network_cli/cmd_query_test.go:126",
+      "shape": [
+        "create",
+        "strliteral"
+      ],
+      "bytes": 35,
+      "text": "CREATE (n:User {username: \"alice\"})"
+    },
+    {
+      "id": "24_social_network_cli/20",
+      "example": "24_social_network_cli",
+      "source": "examples/24_social_network_cli/cmd_query_test.go:137",
+      "shape": [
+        "match"
+      ],
+      "bytes": 44,
+      "text": "MATCH (u:User) RETURN u.username AS username"
+    },
+    {
+      "id": "24_social_network_cli/21",
+      "example": "24_social_network_cli",
+      "source": "examples/24_social_network_cli/cmd_stats.go:124",
+      "shape": [
+        "match",
+        "aggregate"
+      ],
+      "bytes": 35,
+      "text": "MATCH (n:User) RETURN count(n) AS n"
+    },
+    {
+      "id": "24_social_network_cli/22",
+      "example": "24_social_network_cli",
+      "source": "examples/24_social_network_cli/cmd_stats.go:125",
+      "shape": [
+        "match",
+        "aggregate"
+      ],
+      "bytes": 35,
+      "text": "MATCH (n:Post) RETURN count(n) AS n"
+    },
+    {
+      "id": "24_social_network_cli/23",
+      "example": "24_social_network_cli",
+      "source": "examples/24_social_network_cli/cmd_stats.go:126",
+      "shape": [
+        "match",
+        "aggregate"
+      ],
+      "bytes": 38,
+      "text": "MATCH (n:Comment) RETURN count(n) AS n"
+    },
+    {
+      "id": "24_social_network_cli/24",
+      "example": "24_social_network_cli",
+      "source": "examples/24_social_network_cli/cmd_stats.go:127",
+      "shape": [
+        "match",
+        "aggregate",
+        "list"
+      ],
+      "bytes": 45,
+      "text": "MATCH ()-[r:FOLLOWS]->() RETURN count(r) AS n"
+    },
+    {
+      "id": "24_social_network_cli/25",
+      "example": "24_social_network_cli",
+      "source": "examples/24_social_network_cli/cmd_stats.go:128",
+      "shape": [
+        "match",
+        "aggregate",
+        "list"
+      ],
+      "bytes": 46,
+      "text": "MATCH ()-[r:AUTHORED]->() RETURN count(r) AS n"
+    },
+    {
+      "id": "24_social_network_cli/26",
+      "example": "24_social_network_cli",
+      "source": "examples/24_social_network_cli/cmd_stats.go:129",
+      "shape": [
+        "match",
+        "aggregate",
+        "list"
+      ],
+      "bytes": 40,
+      "text": "MATCH ()-[r:ON]->() RETURN count(r) AS n"
+    },
+    {
+      "id": "24_social_network_cli/27",
+      "example": "24_social_network_cli",
+      "source": "examples/24_social_network_cli/cmd_stats.go:130",
+      "shape": [
+        "match",
+        "aggregate",
+        "list"
+      ],
+      "bytes": 46,
+      "text": "MATCH ()-[r:REPLY_OF]->() RETURN count(r) AS n"
+    },
+    {
+      "id": "24_social_network_cli/28",
+      "example": "24_social_network_cli",
+      "source": "examples/24_social_network_cli/cmd_stats.go:131",
+      "shape": [
+        "match",
+        "aggregate",
+        "list"
+      ],
+      "bytes": 43,
+      "text": "MATCH ()-[r:LIKED]->() RETURN count(r) AS n"
+    },
+    {
+      "id": "24_social_network_cli/29",
+      "example": "24_social_network_cli",
+      "source": "examples/24_social_network_cli/cross_process_e2e_test.go:86",
+      "shape": [
+        "match",
+        "strliteral",
+        "list"
+      ],
+      "bytes": 113,
+      "text": "MATCH (alice:User {username: 'alice'})-[:FOLLOWS]->(:User)-[:FOLLOWS]->(fof:User) RETURN fof.username AS username"
+    },
+    {
+      "id": "24_social_network_cli/30",
+      "example": "24_social_network_cli",
+      "source": "examples/24_social_network_cli/cross_process_test.go:165",
+      "shape": [
+        "match"
+      ],
+      "bytes": 57,
+      "text": "MATCH (u:User) RETURN u.username AS username, ID(u) AS id"
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+=== RUN   TestFrontEndShareRigValid
+--- PASS: TestFrontEndShareRigValid (0.02s)
+=== RUN   TestPrepareLabCorpusCompiles
+--- PASS: TestPrepareLabCorpusCompiles (0.01s)
+=== RUN   TestReadPhasePrefixMatchesRunRead
+=== RUN   TestReadPhasePrefixMatchesRunRead/point_lookup_(the_benchmark's_reader)
+=== RUN   TestReadPhasePrefixMatchesRunRead/label_scan_count
+--- PASS: TestReadPhasePrefixMatchesRunRead (0.00s)
+    --- PASS: TestReadPhasePrefixMatchesRunRead/point_lookup_(the_benchmark's_reader) (0.00s)
+    --- PASS: TestReadPhasePrefixMatchesRunRead/label_scan_count (0.00s)
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/cypher	0.579s
+go_test_exit=0

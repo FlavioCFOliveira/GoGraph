@@ -174,13 +174,45 @@ func brandesSource(s, maxID int, verts []uint64, edges []graph.NodeID, sigma []f
 	for qh := 0; qh < len(queue); qh++ {
 		v := queue[qh]
 		stack = append(stack, v)
+		// dist[v]+1 is invariant across the inner loop and was recomputed
+		// per edge (rmp #2868). v is dequeued, so dist[v] is already >= 0
+		// and the dist[w] < 0 arm can never write dist[v] — not even
+		// through a self-loop — so hoisting the sum out of the loop is
+		// exact. It is an integer operation, so sigma and the predecessor
+		// insertion order, and therefore the dependency sums, stay
+		// bit-identical; TestBrandesDistanceHoist_BitIdentical asserts that
+		// against the unchanged legacy reference.
+		//
+		// Measured, never assumed — interleaved A/B/A2 against 8affe124's
+		// brandes.go in the otherwise-current tree, 7 samples, go1.27.1
+		// darwin/arm64, noise floor (A against the byte-identical A2)
+		// geomean -0.02% with every row ~: -3.52% on Brandes_Scale/5k_deg16,
+		// -2.01% on 2k_deg16, ~ on every other row of the ladder including
+		// the two small sparse rows (Betweenness_Serial,
+		// Brandes_RandomGraph), 8-row geomean -0.70%, allocations
+		// unchanged. The gain is degree-dependent: below roughly six
+		// neighbours per vertex the per-vertex setup is not repaid per edge.
+		//
+		// Caching the neighbour's distance in a second local alongside the
+		// hoist — read dist[w] once, refresh that local in the discovered
+		// arm, and drop the reload in the equal-distance test — was tried,
+		// measured in a 7-sample single-variable split, and DROPPED. It is
+		// equally bit-identical, but in that split it bought only
+		// -2.73%/-0.63% on the two deg16 rows against the hoist's
+		// -4.41%/-2.08%, and it carried essentially the whole sparse-row
+		// cost: the two together measured +1.52%/+1.35% on
+		// Betweenness_Serial and Brandes_RandomGraph for a 4-row geomean of
+		// -1.54%, the hoist alone +0.20%/+0.38% for -1.50%. Same win, and
+		// the shipped arm's own re-run leaves both sparse rows at ~, so the
+		// second dist[w] load stays.
+		dv1 := dist[v] + 1
 		for k := verts[v]; k < verts[v+1]; k++ {
 			w := int(edges[k])
 			if dist[w] < 0 {
-				dist[w] = dist[v] + 1
+				dist[w] = dv1
 				queue = append(queue, w)
 			}
-			if dist[w] == dist[v]+1 {
+			if dist[w] == dv1 {
 				sigma[w] += sigma[v]
 				pred.add(w, v)
 			}

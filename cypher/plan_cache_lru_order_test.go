@@ -5,8 +5,15 @@ import (
 )
 
 // TestPlanCache_LRUEviction_AccessOrderMatters verifies that the
-// eviction victim is always the least-recently-used entry, where
-// "recently used" is updated by every successful get call.
+// eviction victim is always the least-recently-used entry OF ITS SHARD,
+// where "recently used" is updated by every successful get call.
+//
+// DELIBERATE CHANGE (rmp #2852): the cache is sharded and its LRU order is
+// per shard, so this test now drives an explicitly single-shard cache — the
+// scope in which "the least-recently-used entry" is defined at all. It is not
+// a relaxation: the assertions are unchanged, only their scope is now stated.
+// TestPlanCache_PerShardLRUOrder in plan_cache_shard_test.go asserts the same
+// order holds inside one shard of a genuinely multi-shard cache.
 //
 // Scenario (capacity = 3):
 //
@@ -17,7 +24,7 @@ import (
 //  5. Insert e       → c evicted; b and d survive.
 func TestPlanCache_LRUEviction_AccessOrderMatters(t *testing.T) {
 	t.Parallel()
-	c := newPlanCache(3)
+	c := newPlanCacheWithShards(3, 1)
 
 	// Step 1: fill to capacity.
 	for _, k := range []string{"a", "b", "c"} {
@@ -68,9 +75,15 @@ func TestPlanCache_LRUEviction_AccessOrderMatters(t *testing.T) {
 // TestPlanCache_LRUEviction_FreshInsert_IsNotEvicted verifies that a
 // freshly inserted entry is never immediately evicted when the cache
 // is at capacity — only a pre-existing entry is evicted.
+//
+// DELIBERATE CHANGE (rmp #2852): driven through a single-shard cache for the
+// same reason as the test above — with two shards the Len assertion would
+// depend on which shard each of the three keys hashed to. The sharded form of
+// the same guarantee (a fresh insert survives whatever the distribution) is
+// asserted by TestPlanCache_FreshInsertSurvives_AnyShard.
 func TestPlanCache_LRUEviction_FreshInsert_IsNotEvicted(t *testing.T) {
 	t.Parallel()
-	c := newPlanCache(2)
+	c := newPlanCacheWithShards(2, 1)
 
 	c.loadOrStore("x", newTestEntry("x"))
 	c.loadOrStore("y", newTestEntry("y"))

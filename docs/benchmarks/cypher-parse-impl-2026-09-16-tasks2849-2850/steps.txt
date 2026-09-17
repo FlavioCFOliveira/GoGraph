@@ -1,0 +1,53 @@
+rmp #2849 and #2850, sprint 362 — the BEFORE/AFTER measurement of the two
+changes landed in cypher/parser.
+
+HARNESS IS THROWAWAY. It was deleted from the working tree after this run; its
+source is archived here so every number can be regenerated:
+  harness-measure.go.txt -> cypher/parser/zz_measure_test.go
+  driver.sh.txt          -> the driver (REPS=10)
+
+Method is the #2846 spike's, unchanged: ONE PROCESS PER ARM, because the
+generated parser's decisionToDFA is process-wide, interleaved arm-by-arm across
+10 repetitions. Build: no -race, no tags — the same build the spike's ceilings
+were measured under, because allocs/op is not build-invariant.
+
+Each task's "Before" arm is a VERBATIM copy of the pre-change code carried in
+the harness (stripLiteralsBefore, parseStatementBefore), and its "After" arm
+calls the shipped function, so the two arms differ in exactly the change under
+measurement. TestMeasureStripEquivalence gates the strip pair over the corpus.
+
+#2849 — the keyword test in StripLiterals: strings.ToUpper replaced by an
+allocation-free ASCII fold applied during the comparison.
+  strip.benchstat.txt              all 83 corpus statements
+  striphoist.benchstat.txt         the 12 that carry a quote
+  strip.per-statement-allocs.txt   allocs/op per statement, both arms, from
+                                   TestMeasureStripPerStatementAllocs
+
+#2850 — two-stage parsing: antlr.BailErrorStrategy on the accepting path, a
+full DefaultErrorStrategy pass on retry. PredictionModeLL is unchanged; SLL was
+refuted by the #2846 spike and is NOT enabled.
+  parse.benchstat.txt      the accepting path, all 83 statements
+  parseerr.benchstat.txt   the ERROR path, 6 invalid statements — what the
+                           change costs, not what it saves
+
+Host: loadavg recorded before, between and after the phases (loadavg-*.txt).
+See env.txt.
+
+Also in the harness, run separately rather than by the driver:
+
+  TestMeasureStripPerStatementAllocs  the per-statement allocation table above
+  TestMeasureFuzzCorpusTiming         replays the 501-entry FuzzParse cache
+                                      corpus through both parse arms, 100
+                                      repetitions each, interleaved. Run as
+                                        FUZZ_CORPUS="$(go env GOCACHE)/fuzz/\
+                                          github.com/FlavioCFOliveira/GoGraph/\
+                                          cypher/parser/FuzzParse" \
+                                        go test -run TestMeasureFuzzCorpusTiming -v ./cypher/parser/
+                                      It exists because BailErrorStrategy does
+                                      not carry DefaultErrorStrategy's
+                                      anti-livelock failsafe, so the first stage
+                                      has no bound of its own beyond guardInput.
+                                      Result: no input is slow (worst 583 us,
+                                      against 581 us before); the worst RATIO is
+                                      3.58x on "E/0", a 3-byte invalid input
+                                      whose whole cost is the retry.

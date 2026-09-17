@@ -1,0 +1,114 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/parser
+cpu: Apple M4
+                                                   │ docs/benchmarks/cypher-parse-lab-2026-09-16-round1/strip-shape.series.txt │
+                                                   │                                  sec/op                                   │
+StripShape/identsWithOneLiteral/k0000_bytes0037-10                                                                238.3n ±  1%
+StripShape/identsWithOneLiteral/k0002_bytes0069-10                                                                425.4n ±  3%
+StripShape/identsWithOneLiteral/k0004_bytes0101-10                                                                589.7n ±  1%
+StripShape/identsWithOneLiteral/k0008_bytes0165-10                                                                904.2n ±  0%
+StripShape/identsWithOneLiteral/k0016_bytes0307-10                                                                1.616µ ±  1%
+StripShape/identsWithOneLiteral/k0032_bytes0595-10                                                                3.011µ ±  1%
+StripShape/identsQuoteFree/k0000_bytes0036-10                                                                     5.287n ±  7%
+StripShape/identsQuoteFree/k0002_bytes0068-10                                                                     5.405n ± 15%
+StripShape/identsQuoteFree/k0004_bytes0100-10                                                                     6.755n ±  6%
+StripShape/identsQuoteFree/k0008_bytes0164-10                                                                     7.734n ±  6%
+StripShape/identsQuoteFree/k0016_bytes0306-10                                                                     9.239n ±  8%
+StripShape/identsQuoteFree/k0032_bytes0594-10                                                                     15.23n ±  6%
+StripShape/literals/k0000_bytes0040-10                                                                            234.4n ±  1%
+StripShape/literals/k0002_bytes0050-10                                                                            347.9n ±  1%
+StripShape/literals/k0004_bytes0060-10                                                                            469.0n ±  1%
+StripShape/literals/k0008_bytes0080-10                                                                            725.3n ±  0%
+StripShape/literals/k0016_bytes0127-10                                                                            1.258µ ±  1%
+StripShape/literals/k0032_bytes0223-10                                                                            2.048µ ±  2%
+StripShape/commentBytes/k0000_bytes0040-10                                                                        240.6n ±  4%
+StripShape/commentBytes/k0064_bytes0104-10                                                                        259.8n ±  1%
+StripShape/commentBytes/k0256_bytes0296-10                                                                        335.9n ±  2%
+StripShape/commentBytes/k1024_bytes1064-10                                                                        592.4n ±  1%
+StripShape/commentBytes/k4096_bytes4136-10                                                                        1.561µ ±  1%
+geomean                                                                                                           199.2n
+
+                                                   │ docs/benchmarks/cypher-parse-lab-2026-09-16-round1/strip-shape.series.txt │
+                                                   │                                    B/s                                    │
+StripShape/identsWithOneLiteral/k0000_bytes0037-10                                                               148.0Mi ±  1%
+StripShape/identsWithOneLiteral/k0002_bytes0069-10                                                               154.7Mi ±  3%
+StripShape/identsWithOneLiteral/k0004_bytes0101-10                                                               163.3Mi ±  1%
+StripShape/identsWithOneLiteral/k0008_bytes0165-10                                                               174.0Mi ±  0%
+StripShape/identsWithOneLiteral/k0016_bytes0307-10                                                               181.2Mi ±  1%
+StripShape/identsWithOneLiteral/k0032_bytes0595-10                                                               188.5Mi ±  1%
+StripShape/identsQuoteFree/k0000_bytes0036-10                                                                    6.342Gi ±  7%
+StripShape/identsQuoteFree/k0002_bytes0068-10                                                                    11.72Gi ± 13%
+StripShape/identsQuoteFree/k0004_bytes0100-10                                                                    13.79Gi ±  6%
+StripShape/identsQuoteFree/k0008_bytes0164-10                                                                    19.75Gi ±  5%
+StripShape/identsQuoteFree/k0016_bytes0306-10                                                                    30.86Gi ±  9%
+StripShape/identsQuoteFree/k0032_bytes0594-10                                                                    36.33Gi ±  6%
+StripShape/literals/k0000_bytes0040-10                                                                           162.7Mi ±  1%
+StripShape/literals/k0002_bytes0050-10                                                                           137.1Mi ±  1%
+StripShape/literals/k0004_bytes0060-10                                                                           122.0Mi ±  1%
+StripShape/literals/k0008_bytes0080-10                                                                           105.2Mi ±  0%
+StripShape/literals/k0016_bytes0127-10                                                                           96.33Mi ±  1%
+StripShape/literals/k0032_bytes0223-10                                                                           103.9Mi ±  2%
+StripShape/commentBytes/k0000_bytes0040-10                                                                       158.5Mi ±  3%
+StripShape/commentBytes/k0064_bytes0104-10                                                                       381.8Mi ±  1%
+StripShape/commentBytes/k0256_bytes0296-10                                                                       840.5Mi ±  2%
+StripShape/commentBytes/k1024_bytes1064-10                                                                       1.673Gi ±  1%
+StripShape/commentBytes/k4096_bytes4136-10                                                                       2.468Gi ±  1%
+geomean                                                                                                          709.0Mi
+
+                                                   │ docs/benchmarks/cypher-parse-lab-2026-09-16-round1/strip-shape.series.txt │
+                                                   │                                   B/op                                    │
+StripShape/identsWithOneLiteral/k0000_bytes0037-10                                                                480.0 ± 0%
+StripShape/identsWithOneLiteral/k0002_bytes0069-10                                                                576.0 ± 0%
+StripShape/identsWithOneLiteral/k0004_bytes0101-10                                                                672.0 ± 0%
+StripShape/identsWithOneLiteral/k0008_bytes0165-10                                                                864.0 ± 0%
+StripShape/identsWithOneLiteral/k0016_bytes0307-10                                                              1.219Ki ± 0%
+StripShape/identsWithOneLiteral/k0032_bytes0595-10                                                              2.031Ki ± 0%
+StripShape/identsQuoteFree/k0000_bytes0036-10                                                                     0.000 ± 0%
+StripShape/identsQuoteFree/k0002_bytes0068-10                                                                     0.000 ± 0%
+StripShape/identsQuoteFree/k0004_bytes0100-10                                                                     0.000 ± 0%
+StripShape/identsQuoteFree/k0008_bytes0164-10                                                                     0.000 ± 0%
+StripShape/identsQuoteFree/k0016_bytes0306-10                                                                     0.000 ± 0%
+StripShape/identsQuoteFree/k0032_bytes0594-10                                                                     0.000 ± 0%
+StripShape/literals/k0000_bytes0040-10                                                                            480.0 ± 0%
+StripShape/literals/k0002_bytes0050-10                                                                            704.0 ± 0%
+StripShape/literals/k0004_bytes0060-10                                                                          1.000Ki ± 0%
+StripShape/literals/k0008_bytes0080-10                                                                          1.961Ki ± 0%
+StripShape/literals/k0016_bytes0127-10                                                                          3.969Ki ± 0%
+StripShape/literals/k0032_bytes0223-10                                                                          5.812Ki ± 0%
+StripShape/commentBytes/k0000_bytes0040-10                                                                        480.0 ± 0%
+StripShape/commentBytes/k0064_bytes0104-10                                                                        544.0 ± 0%
+StripShape/commentBytes/k0256_bytes0296-10                                                                        736.0 ± 0%
+StripShape/commentBytes/k1024_bytes1064-10                                                                      1.531Ki ± 0%
+StripShape/commentBytes/k4096_bytes4136-10                                                                      5.156Ki ± 0%
+geomean                                                                                                                      ¹
+¹ summaries must be >0 to compute geomean
+
+                                                   │ docs/benchmarks/cypher-parse-lab-2026-09-16-round1/strip-shape.series.txt │
+                                                   │                                 allocs/op                                 │
+StripShape/identsWithOneLiteral/k0000_bytes0037-10                                                                10.00 ± 0%
+StripShape/identsWithOneLiteral/k0002_bytes0069-10                                                                18.00 ± 0%
+StripShape/identsWithOneLiteral/k0004_bytes0101-10                                                                26.00 ± 0%
+StripShape/identsWithOneLiteral/k0008_bytes0165-10                                                                42.00 ± 0%
+StripShape/identsWithOneLiteral/k0016_bytes0307-10                                                                74.00 ± 0%
+StripShape/identsWithOneLiteral/k0032_bytes0595-10                                                                138.0 ± 0%
+StripShape/identsQuoteFree/k0000_bytes0036-10                                                                     0.000 ± 0%
+StripShape/identsQuoteFree/k0002_bytes0068-10                                                                     0.000 ± 0%
+StripShape/identsQuoteFree/k0004_bytes0100-10                                                                     0.000 ± 0%
+StripShape/identsQuoteFree/k0008_bytes0164-10                                                                     0.000 ± 0%
+StripShape/identsQuoteFree/k0016_bytes0306-10                                                                     0.000 ± 0%
+StripShape/identsQuoteFree/k0032_bytes0594-10                                                                     0.000 ± 0%
+StripShape/literals/k0000_bytes0040-10                                                                            10.00 ± 0%
+StripShape/literals/k0002_bytes0050-10                                                                            15.00 ± 0%
+StripShape/literals/k0004_bytes0060-10                                                                            20.00 ± 0%
+StripShape/literals/k0008_bytes0080-10                                                                            31.00 ± 0%
+StripShape/literals/k0016_bytes0127-10                                                                            48.00 ± 0%
+StripShape/literals/k0032_bytes0223-10                                                                            80.00 ± 0%
+StripShape/commentBytes/k0000_bytes0040-10                                                                        10.00 ± 0%
+StripShape/commentBytes/k0064_bytes0104-10                                                                        10.00 ± 0%
+StripShape/commentBytes/k0256_bytes0296-10                                                                        10.00 ± 0%
+StripShape/commentBytes/k1024_bytes1064-10                                                                        10.00 ± 0%
+StripShape/commentBytes/k4096_bytes4136-10                                                                        10.00 ± 0%
+geomean                                                                                                                      ¹
+¹ summaries must be >0 to compute geomean
+benchstat_exit=0

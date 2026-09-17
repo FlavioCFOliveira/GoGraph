@@ -939,7 +939,7 @@ func TestNewProjRowBinderDeclinesBelowTwoItems(t *testing.T) {
 // evaluation falls back to building its own instead of reading a map that may
 // already have been recycled into another row.
 func TestProjRowBinderContextDoesNotOutliveItsRow(t *testing.T) {
-	b := &projRowBinder{rs: newRowSchema(map[string]int{})}
+	b := &projRowBinder{bp: newRowBindPlan(newRowSchema(map[string]int{}), nil, nil, nil)}
 	if b.bound {
 		t.Fatal("a fresh binder reports a bound row")
 	}

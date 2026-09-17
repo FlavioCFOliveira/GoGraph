@@ -6,6 +6,379 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.15.0] — 2026-09-17
+
+**33 commits** — 21 `perf`, 8 `docs`, 1 `fix`, 1 `build` and 2 merges. Counted at `19138042`,
+the `develop` tip before release preparation; the release-preparation commits that carry this
+entry are necessarily not in their own count. **One sprint delivered this window — 362,
+*performance laboratory 20260915* — and all 33 of its tasks closed.** 468 files changed,
+238 586 insertions, 963 deletions (`git diff --shortstat v0.14.2..19138042`).
+
+**Sprint 361 is not in this window.** Its twelve tasks closed at `a7f06ec3`, `df0b1866` and
+`02c08e44`, and all three are ancestors of `v0.14.2` — verified with
+`git merge-base --is-ancestor`. It shipped in `v0.14.2` and is recorded in that entry.
+
+**238 586 insertions is not 238 586 lines of engine, and the difference is larger here than in
+any previous release.** Bucketed by path from `git diff --numstat v0.14.2..19138042`:
+
+| bucket | files | insertions | deletions |
+|---|---:|---:|---:|
+| `docs/benchmarks/` (raw measurement artefacts) | 373 | 217 756 | 0 |
+| `*_test.go` + `testdata/` | 33 | 7 648 | 21 |
+| `examples/` (exercise harnesses) | 13 | 4 739 | 440 |
+| `docs/` (prose) | 10 | 3 605 | 38 |
+| **engine `*.go` (non-test, shipped)** | **24** | **2 270** | **381** |
+| `scripts/` (laboratory drivers) | 9 | 2 150 | 0 |
+| build/CI (`Makefile`, `.github/`) | 2 | 219 | 30 |
+| `internal/` (not shipped API) | 1 | 154 | 43 |
+| root Markdown + misc | 3 | 45 | 10 |
+| **total** | **468** | **238 586** | **963** |
+
+**91.3 % of the insertions are measurement data.** The raw benchstat series, profiles and host
+telemetry under `docs/benchmarks/` are reproduction input for the three campaign records, not
+code and not documentation; goreleaser excludes them from the release tarballs by design.
+
+**The exported API gained exactly two identifiers and lost none.** Measured by parsing every
+non-test Go file outside `internal/`, `examples/`, `cmd/` and any `gen/` or `tck/` directory at
+both `v0.14.2` and `19138042`, and diffing the rendered declarations: 4 820 exported
+declarations before, 4 822 after, with **two additions and zero removals, renames or
+re-signings**. That file set is a **superset** of the API surface
+[docs/semver.md](docs/semver.md) defines — it retains all of `bench/`, of which the policy
+counts only `bench/ldbc`, `bench/dimacs9` and `bench/rmat` — so it cannot miss a change inside
+the surface. No `bench/` file changed in this window, so the two-addition result is the same
+under either reading. Under [docs/semver.md](docs/semver.md) a new exported identifier is the MINOR
+trigger, so **`0.15.0` is a MINOR by the rule** rather than by decision — unlike `v0.14.1`,
+where a MINOR surface shipped as a PATCH deliberately.
+
+**No change is breaking.** `cypher/exec.ExpandConfig.EmitStoredDir` defaults to `false`, so
+every existing caller's row width and chunk schema are unchanged; `graph/index/label`'s
+`Intersect` and `Union` keep their caller-owned-result contract, and a test deliberately
+mutates a single-label `Intersect` result to assert it. No on-disk format changed — no file
+under `store/` was modified in this window.
+
+**`go.mod` and `go.sum` are byte-identical to `v0.14.2`** — same pinned `toolchain go1.27.0`,
+same `go 1.26` directive, same dependency set at the same versions
+(`git diff v0.14.2..19138042 -- go.mod go.sum` is empty). Nothing in the supply chain moved.
+
+**The openCypher TCK gate is unchanged at 3 897/3 897.** `const tckExecutionBaseline = 3897`
+in `cypher/tck/runner_test.go` is untouched and **no `.feature` file changed in this window**,
+so the scenario population is the one `v0.14.2` was measured against. Every campaign re-ran it
+and it held throughout.
+
+**Every performance claim below rests on an interleaved A/B against a byte-identical noise
+control measured in the same session.** That discipline is not decoration: on this host a
+same-versus-same arm has produced 22 of 36 flat-by-construction rows as statistically
+significant, so an uncontrolled comparison on it means nothing. Where a figure is a share of a
+profile rather than an absolute, it is labelled as such.
+
+**Seven premises were refuted on measurement and shipped no code**, including two float
+reassociations that were built in full, validated, measured and then discarded. They are
+itemised under *Notes* rather than dropped, because a refuted premise is a result.
+
+**All 33 commits in this window are unsigned** (`git log --format=%G?` returns `N` for every
+one). [docs/release.md](docs/release.md) asks for this to be re-measured per release rather
+than assumed; this is that measurement, and it has not changed.
+
+### Added
+
+- **`graph/index/label.(*Index).BitmapShared(label uint32) *roaring64.Bitmap`** — returns the
+  memoised, immutable label bitmap image **without copying it**. The caller must not mutate the
+  result. It exists because `Intersect` and `Union` promise a caller-owned result and that
+  promise is kept: the new method is the opt-in way to read the shared image on a scan path that
+  does not mutate. `*roaring64.Bitmap` was already in this package's exported signatures
+  (`Intersect`, `Union`), so no new third-party type enters the public API (#2863).
+- **`cypher/exec.ExpandConfig.EmitStoredDir bool`** — opt-in, defaulting to `false`. When set,
+  `Expand` appends a **fourth column** to every emitted row carrying the edge's stored
+  orientation relative to the emitted traversal orientation: `false` for a row the forward pass
+  produced, `true` for one the reverse pass produced. It is meaningful only for `DirBoth`, the
+  one direction under which the orientation varies row by row; a `DirOut` or `DirIn` hop's
+  orientation is a property of the hop and is resolved at plan time. **A caller that sets it
+  owns registering the fourth schema column**, or the row and `schemaWidth` disagree. The cell
+  is an `expr.BoolValue`, read by type assertion, so a coordinate gone stale across a
+  projection falls back to the old ladder instead of reading a node id as a direction (#2864).
+- **Two counters, `cypher.csr_pair_cache.bypasses_no_cache` and
+  `cypher.csr_pair_cache.bypasses_own_writes`.** Together with the pre-existing `hits` and
+  `misses` they form an exact partition of every cache consultation, which is what makes a
+  measured hit rate readable at all. Both are documented in
+  [docs/metrics.md](docs/metrics.md) (#2866).
+- **`-contention` flag on `examples/internal/exprof`**, writing mutex, block and goroutine
+  profiles, off by default. `examples/` is explicitly outside the public API in
+  [docs/semver.md](docs/semver.md) — the module neither imports nor depends on it — so this is
+  recorded for completeness and is not API surface (#2856).
+- **Three campaign records and three profiling reports** under `docs/`, plus two prior-art
+  studies read from Neo4j, Memgraph and PostgreSQL source at pinned tags:
+  `campaign-bolt-extreme-concurrency-2026-09-16.md`, `campaign-cypher-parsing-2026-09-16.md`,
+  `campaign-whole-surface-2026-09-16.md`, `profile-bolt-concurrency-2026-09-16.md` and its
+  round-2 and round-3 successors, `prior-art-cypher-parsing-2026-09-16.md` and
+  `prior-art-mvcc-visibility-2026-09-16.md`.
+
+### Changed
+
+- **The Bolt server's per-rejection log is bounded to one line per second, and its argument is
+  lazy** (#2835). Refusing 500 connections now produces **1 log line** where it produced 500;
+  `bolt.server.conn.rejected` still counts **exactly 500**, so the operator keeps the signal
+  and loses only the storm. `RemoteAddr` is resolved **0** times at `LevelError` and **1** time
+  at `LevelWarn` across 100 refusals. The bound is on **time, not a one-in-N sample**: a
+  count-based sample still grows linearly with the flood's rate, which is the property that had
+  to go. `rejectLogInterval` is a fixed one-second package constant following the
+  `handshakeTimeout` precedent, deliberately **not** an `Options` field, so the change does not
+  widen the public API. **If you parse or alert on this log line's volume, read this entry.**
+  Admission, the semaphore and its capacity are byte-identical.
+- **The Bolt server writes one response per query instead of two** (#2834). `sendResponse` no
+  longer flushes; the session loop carries one obligation instead — the response buffer is
+  drained before the goroutine can block waiting for the client, and before teardown —
+  discharged in exactly two named places. Teardown flushes **under a fixed deadline**, so a peer
+  that has stopped reading can no longer pin a handler goroutine and its semaphore slot. RECORD
+  batching is unchanged and its three regression tests are untouched. Protocol bytes are
+  unchanged; what changed is how many `write(2)` calls deliver them.
+- **`propMapShards` moves from 64 to 256** (#2839), and the cost is recorded rather than
+  hidden: **an empty graph grows 91 KiB and `New` takes 57 % longer**, because `New` eagerly
+  allocates one map per stripe in three of the nine shard arrays. **This is a level shift, not
+  a change of scaling behaviour** — the collapse from 64 to 1 024 connections moves only 0.660
+  to 0.698 of peak. 4 096 shards was rejected on measurement for penalising the
+  single-threaded scan (+43.8 %) and write (+41.7 %); a full-scan read at 256 stays
+  indistinguishable from 64, so the read path the 16→64 widening bought is not surrendered.
+- **`make ci` runs the module suite exactly once and fails cheap first** (`cd5cee02`). The
+  coverage gate leaves the automatic gate by user decision, as benchmarks did in `v0.14.2`;
+  `make cover-gate`, `scripts/cover_gate.sh` and their thresholds are untouched and are run
+  deliberately. `CI_STAGES` now carries membership **and** order — `shell-guard tidy fmt vet
+  build ci-kg-verify vulncheck lint test-uninstrumented test-timing test-short` — driven by the
+  new `scripts/ci_stages.sh`, which stops at the first failure, times each stage and stamps the
+  ones that pass. `vulncheck` and `ci-kg-verify` are never stamped, their verdicts depending on
+  state outside the tree. Because `cover-gate` was the only phase built without `-race`, and so
+  the only one that compiled the `//go:build !race` files, six tests that ran nowhere else moved
+  into `UNINSTR_PKGS` — two of them bounding the allocation a forged length prefix can provoke.
+  A green run measured 941.9 s → 821.2 s; the real saving is on a red one, where the `v0.14.2`
+  lint violation now fails at 18.0 s instead of after ~815 s of test phases.
+
+### Fixed
+
+- **The Cypher plan cache's read path did not scale with the cores given to it** (#2852) —
+  filed and worked as a **defect** rather than a missed optimisation, because a hot path that
+  serialises every caller on one lock is a defect under this project's concurrency mandate.
+  A single mutex, LRU list and map carried **98.46 % of all mutex delay**, and a lookup cost
+  **15.04 ns at one core against 92.14 ns at ten**. The cache is now sharded 16 ways, each shard
+  with its own mutex, LRU list and map, padded to a cache line: **32 keys at ten cores fall
+  119.10 ns → 42.42 ns (−64.38 %)** with no allocation added on any row. **16 shards, not the
+  256 that reaches the −83.7 % headline ceiling**, because a second ladder priced the
+  difference: at 75 % load the hit rate falls from **99.5 % at 16 to 66.0 % at 256**, and one
+  lost point costs about 18 ns per lookup against a measured 1.8 µs miss. The ceiling is missed
+  at the shipped count and that is stated rather than smoothed — it was derived from the
+  one-key case, which sharding provably cannot address.
+- **The lint gate on the `cypher` frontend-share benchmark was restored** (`2944b184`), red on
+  the working branch since `3ab42f2b`. Test-only; no shipped code path is affected.
+
+### Performance
+
+Twelve further measured improvements, each with interleaved A/B evidence against a
+byte-identical noise control. Full method, artefact paths and refuted alternatives are in the
+three campaign records under `docs/`.
+
+**Bolt server, at the 1/8/64/256/1024-connection ladder plus saturation**
+(`docs/campaign-bolt-extreme-concurrency-2026-09-16.md`):
+
+- **Response writes coalesced to one per query** (#2834). Write syscalls per query fall
+  **2.000 → 1.001** at 64 connections, 1.002 at 256 and 1.005 at 1 024, counted from
+  `runtime/trace`. Throughput **+20.66 %** at 64, **+19.61 %** at 256, **+19.71 %** at
+  saturation and **+16.99 %** at 1 024, against a same-versus-same noise floor of 0.57 %;
+  p99 **−17.84 %** at 64. Verified independently at 256 connections: **192 540 q/s** against a
+  161 283 q/s baseline. Round 2 re-measured the gains at HEAD as +20.19 / +19.45 / +19.94 /
+  +16.80 %, with the noise floor re-derived as 1.08 % — a faster server has a wider floor.
+- **The per-rejection log costs 93.6 % less** (#2835): **547.3 ns and 80 B / 4 allocs →
+  34.9 ns and 0 B / 0 allocs**, measured with all arms in one binary so the comparison is
+  interleaved by construction, and reproduced at `-count=5` (unbounded 546.6–550.1 ns, bounded
+  34.47–35.09 ns). With the level off, 4.5 ns.
+- **Concurrent property writes contend on 256 stripes instead of 64** (#2839): throughput
+  **+7.0 %** at 64 connections and **+13.3 %** at 1 024, n=8 interleaved order-rotated runs per
+  arm with **no overlap at all** between treatment and control at either rung, against a noise
+  floor set by two byte-identical binaries that stayed indistinguishable (p=0.93 at 64, p=0.17
+  at 1 024). p99 **−16.1 %**, p999 **−14.8 %**; one reader contending with one writer
+  **−36.5 %**. Verified independently at +6.1 % and +12.9 %, on a host at loadavg 12.19 against
+  2.19 for the baselines — the busier arm was the faster one.
+
+**Cypher statement parsing, over an 83-statement corpus harvested from four examples**
+(`docs/campaign-cypher-parsing-2026-09-16.md`):
+
+- **`StripLiterals` classifies clause keywords without allocating** (#2849). It called
+  `strings.ToUpper` on every identifier token — **78.6 % of all objects it allocated**, on every
+  execution including plan-cache hits. An ASCII fold applied during comparison replaces it:
+  corpus **5.449 µs → 2.843 µs (−47.83 %)**, allocations **148 → 32**, the twelve quoted
+  statements **−52.02 %**, and all 78 non-hoisting statements now allocate **nothing**.
+  Equivalence is proven over **213 749 exhaustive identifiers** plus every case permutation of
+  all 23 keywords, and a second test walks all 256 byte values to pin the ASCII premise, so a
+  future widening of the alphabet fails there rather than silently invalidating the fold.
+- **Two-stage parsing: a bailing stage first, the full error strategy only on retry** (#2850).
+  Accepting path **1.798 ms → 1.690 ms (−6.01 %)**, allocations +0.31 %. **The error path costs
+  +57.4 %, and that price is measured rather than assumed.** Prediction mode stays **LL**:
+  `PredictionModeSLL` — the prior art's most promising lever — was refuted at −0.49 %, p=0.529,
+  below the 1.05 % noise floor and on two independent runs. Error fidelity is fenced by 21
+  statements compared field-for-field against literals captured before the change; the two
+  stages agree over **5 912 corpus prefixes**; fuzzing ran **1 035 449 executions** with no hang
+  or panic.
+- **The plan-cache hit rate was measured for the first time in this project** (#2851): the four
+  corpus examples hit at **95.51 %, 45.16 %, 0.00 % and 0.00 %**, with zero evictions
+  everywhere, measured by test overlay with no example modified and bit-identical before and
+  after the sharding. **It refutes the campaign's own ranking rationale**, which had put the
+  keyword fold ahead of two-stage parsing on a 97.62 % break-even that **no example reaches**.
+  Both had already landed, so nothing needed undoing; what is refuted is the reasoning.
+
+**Search, centrality and the Cypher execution row path**
+(`docs/campaign-whole-surface-2026-09-16.md`):
+
+- **The BFS frontier queue is caller-owned scratch** (#2861) — the largest single result of the
+  window, and an allocation defect rather than a CPU one. `bfsFarthest` built its queue inside
+  the function at capacity one and grew it once per source. Pre-sized to `n` (a hard bound,
+  since a BFS enqueues each vertex once) and threaded through both 2-sweep calls and the level
+  walk, with a private queue per worker on the parallel arm: on `11_social_network -users
+  100000` over three interleaved rounds, **`diameter.allocs` 2 026 768 → 433 (4 681×)**, total
+  allocation **−99.49 %**, profile CPU **221.18 s → 145.72 s (−34.1 %)**, and the Go-runtime
+  bucket **146.76 s (66.35 %) → 6.58 s (4.52 %)**. Benchmarks **−25.64 %** and **−38.10 %**
+  sec/op on the two diameter rows. **Traversal order is unchanged, so results are
+  bit-identical.**
+- **The label bitmap is shared as an immutable memoised image instead of cloned per scan**
+  (#2863). Each label entry memoises an image published under its existing lock and dropped by
+  the four mutators through the single `Index.mutate` funnel; the warm path takes a read lock,
+  returns the pointer and **allocates nothing**. **−28.71 % geomean** over 10 interleaved
+  rounds, all four phases at p=0.000, against a noise control with **zero** significant rows;
+  the roaring clone chain leaves the allocation profile **entirely** (0.00 % at
+  `-nodefraction=0`); allocation **15 223 → 9 742 MB at 1.431× the operations**. All 36
+  `Intersect` call sites were resolved.
+- **The stored direction is carried on the expand triplet instead of recovered per row by an
+  O(deg) topology probe** (#2864). Direction is resolved at plan time for `DirOut`/`DirIn` — no
+  probe, no column — and carried as a bool cell only for `DirBoth`. **Geomean −27.02 %** over 8
+  shapes, all p=0.000, n=12, four arms in one binary interleaved per repetition against a
+  same-arm control at +0.11 %; allocs/op +0.00 %. The `DirBoth` column pays for itself:
+  **−16.68 % to −41.44 %** on undirected shapes, p=0.64–0.98 (flat) on directed ones.
+  `relStoredInverted` and `slotHoldsHandle` leave the profile entirely; the surviving
+  `relStoredInvertedForHop` is **0.032 %** against a 1 % target, and the reference benchmark
+  falls **118.05 s → 95.19 s** of CPU.
+- **The per-row binding facts are resolved once instead of per row** (#2865). `rowBindPlan`
+  resolves under a `sync.Once`, with the kind held as a **bitmask rather than an enum** because
+  the original ladder falls through rather than branching. `mapaccess2_faststr` attributable to
+  `populateRowCtx` went from a **8.37 s mean** (7.57–9.69 s over seven baseline runs) to
+  **absent from the caller list entirely** at `-nodefraction=0` — and the absence is not the
+  loop having stopped, because the function is still 22.28 s cum (26.22 %) of the profile.
+  Collateral over 5 interleaved repetitions with complete separation, p=0.0079 by exact
+  permutation: total CPU **96.76 s → 85.77 s (−11.35 %)**, wall **−13.29 %**, and **all 79
+  result lines identical in all five**. Only ~8.4 s is attributed to the removed probes; **the
+  rest is stated as unattributed** rather than claimed.
+- **The Dijkstra working set is sized to the span the query reached** (#2862).
+  `newDistancesCopy` sizes its three arrays to the reached span and `acquireDijkHeap` takes a
+  size hint, so the pooled backing is pre-sized rather than climbing from zero. Delivered where
+  reach is much smaller than the id span: **`SSSP_RepeatedFrom` −31.29 % sec/op and −99.76 %
+  B/op**, `Dijkstra_RepeatedRevalidate` **−99.72 % B/op**, `Dijkstra_Small` −4.52 % / −12.63 %,
+  with **no ns/op regression anywhere**. The call sites in `search/astar.go` and
+  `search/prim.go` pass the same hint.
+- **PageRank's residual sign branch became `math.Abs`** (#2869). `runRange`'s flat share falls
+  **36.72 / 37.35 / 35.21 % → 28.69 / 29.34 / 28.87 %** and its absolute flat CPU **−30.3 %**;
+  `PageRanker_PowerLaw50K_Repeated` **−17.55 %** and `PageRank_PowerLaw50K` **−9.90 %**, both
+  p=0.008, with `PageRank_Cycle1K` flat as the reachability control. A premise was corrected in
+  passing: **`math.Abs` is not universally bit-identical** — it differs on `-0.0` and on NaN —
+  but neither is reachable here, and all three facts are now asserted over 220 000 bit
+  patterns. An end-to-end digest pin over 3 200 scores at fixed iterations holds at
+  `GOMAXPROCS` 2, 3, 4, 7 and 10.
+- **Brandes's loop-invariant distance is hoisted out of the neighbour loop** (#2868):
+  geomean **−0.70 %**, `2k_deg16` **−2.01 %** and `5k_deg16` **−3.52 %**, both p=0.001, against
+  a noise control at −0.02 % where every row is flat. **The `dw` cache the task also mandated
+  was tried, measured and dropped** — a single-variable split showed it carried the whole
+  sparse-graph regression. Bit-identity is asserted against `betweennessLegacy` over five
+  risk-chosen shapes plus a 24-graph fuzz, on both call sites.
+- **An 80-byte binding is passed by pointer** (#2866), repairing three `gocritic hugeParam`
+  findings that would have turned the sprint-close gate red, with a two-sided mutation gate.
+
+### Notes
+
+**Seven premises were refuted on measurement, and the code written to test four of them was
+discarded.** Each is recorded because a refuted premise is a result:
+
+- **Two non-bit-reproducible reassociations of Betweenness and PageRank were built in full,
+  validated, measured and then discarded** (#2870). Two independent realisations, 7 interleaved
+  samples each with rotated arm order: **every row flat**, geomean +0.24 % and +0.22 %, against
+  a byte-identical control reading +0.81 % at p=0.017 — the noise floor is wider than the effect
+  sought, on rows proven able to resolve 2–3.5 %. From the assembly: the removed division
+  **hides behind** the `delta[v]` read-modify-write and the `sigma[v]` gather, and PageRank's
+  pull loop is bound by **two random gathers**, not by the arithmetic between them. **The 8.89 s
+  and 1.87 s that motivated the work were self-time on instructions off the critical path.** An
+  entry point named for speed that is not faster would have cost +4.85 % B/op and
+  bit-reproducibility for nothing measured. **No default numeric result moved in this release.**
+- **`Snapshot.visible`'s contention does not exist** (#2867). It accounts for **0.046 % /
+  0.027 % / 0.196 %** of `37_mvcc_write_contention`'s mutex delay across three passes and does
+  not appear at all in `36_mvcc_snapshot_topology`. None of it is the `sync.Mutex` the report
+  named: the children are `runtime.mapassign_fast64ptr` (93.64 %) and `makemap_small` — the
+  runtime heap lock inside the map insert, which is the **allocation** the memo causes, not the
+  lock guarding it. The allocation cost is real and is filed as #2873.
+- **Throttling the MVCC vacuum cannot help** (#2840). A ceiling probe ran with
+  `reclaimPropVersions` **disabled entirely**, not throttled: **12 543 q/s against a base of
+  12 669 — −1.0 %, exactly the noise floor** — although it held **21.0 % of all Go-mutex delay**
+  at 1 024 connections. That bounds every possible scheduling fix from above, and it corrects the
+  premise the task was written on: **mutex delay is not a cost function**, because delay counts
+  time goroutines spent waiting rather than time the workload lost. The campaign's ranked tables
+  were re-read against this and no other row depended on the mistaken reading.
+- **Removing Bolt's per-chunk reassembly allocation is not worth its regression risk** (#2836).
+  The weight reproduces at HEAD — 1.18 KB and 25.9 objects per query, 1.42 % of allocated bytes
+  — but GC mark CPU is only 0.62 / 0.92 / 1.06 % of process CPU at 64 / 256 / 1 024 connections,
+  so the gain has a ceiling of roughly **0.015 % of process CPU, about 70× below the noise
+  floor**, on a path guarded by the size-budget and length-bound tests.
+- **The Bolt 256→1024 throughput knee is a measurement artefact, not a defect**: varying only
+  the measurement window gives −14.90 % at 20 k queries, −6.89 % at 100 k and −4.40 % at 400 k,
+  a fixed 24–31 µs per-connection start-up amortised over fewer queries. **Half of the remainder
+  was the laboratory's own `/dev/fd` descriptor walk**, which `os.ReadDir` lstat-ed 40×/s for
+  0.62 / 2.32 / 5.78 % of CPU at 64 / 256 / 1 024.
+- **The second `read(2)` per query is the Go runtime's own EAGAIN retry in `internal/poll`**,
+  not a protocol read, and is **unreachable from module code**: an AF_UNIX control differing
+  only in blocking mode measures 2.0004 reads per logical `Read` through the poller against
+  1.0002 blocking.
+- **Two standing backlog items were refuted on their own numbers** (#2859): #2661
+  (`canonicalRelTypesKey` has zero occurrences at HEAD) and #2391 (`buildReadPhysical` 25.61 %
+  not 59.56 %, `ResolveLabelBitmap` 52.75 % not 10.42 %, which inverts its own priority
+  ordering). Seven of the thirteen reconciled items were supported and one was refined.
+
+**The MVCC visibility direction was closed by prior art rather than opened by it** (#2860).
+GoGraph's predicate tests a contiguous frontier where PostgreSQL (`REL_17_5`) and Neo4j
+(`5.26.0`) both test a high-water mark **plus an exception array** — there is no array to
+search, so the predicate was never the problem. Four options are costed in
+`docs/prior-art-mvcc-visibility-2026-09-16.md`; **the decision is left to the user.**
+
+**The CSR pair cache's hit rate was measured and no new key was implemented** (#2866):
+read-only **99.98 %**; the topology row **19.5 %** at `-spokes 400` and **8.5 %** at 4 000.
+Three candidate keys are stated with their soundness and rebuild cost, four are rejected — one
+on measurement rather than argument — and the recommendation is to **implement none yet**,
+because the ceiling of two of the three is a quantity no row measured here supplies.
+
+**The example sweep's coverage of the module was measured for the first time** (#2858):
+**54.8 % of statements, reaching 55 of 99 module packages**, proven non-empty by 79 counter
+files merged into 54 148 lines. Of the 44 unreached, 41 are explained by structure (20
+`bench/*`, 6 `cmd/*`, 15 `internal/*` test-infrastructure packages, and `cypher/tck`).
+**`graph/io` and `store/bulkimport` are the only substantive production packages the sweep
+never reaches, and neither has a named exercising harness** — recorded as unattributed.
+
+**One commit in this window closes no roadmap task.** `cd5cee02`, the `make ci` stage
+reordering described under *Changed*, has no `rmp` task behind it: a search of 500
+`TASK_STATUS_COMPLETED` audit rows returns no transition carrying that hash. The change is
+described by its own commit message, which is detailed; what is missing is the planning record,
+not the rationale.
+
+**The measured record for this release is [`docs/benchmarks/v0.15.0.md`](docs/benchmarks/v0.15.0.md),
+and it is required.** Benchmark *execution* left the release path in `v0.14.2` — neither
+`make release-accuracy` nor `make release-preflight` runs a benchmark — but the *report* did
+not: `internal/docscheck`'s `TestPerReleaseBenchmarkReportExists` runs inside `make ci` and
+fails the gate when `docs/benchmarks/<version>.md` is absent, guarding rmp #1398 on the rule
+that "each release must record its benchmark/load-test numbers". The gate derives the version
+from the newest `release-notes/*.md`, so it flips the moment the release notes are written. It
+did exactly that while this release was being prepared, and the entry it produced is this one.
+
+**What that report does and does not contain, stated here because it bears on every figure
+above.** No release-time campaign was run: every number is a development-time A/B measured by
+the task that shipped the change, against that task's own byte-identical control. **No
+whole-release delta is claimed and the thirteen rows are not additive.** Raw series for the
+Cypher-parsing and plan-cache work are in this repository under `docs/benchmarks/`; the Bolt and
+whole-surface campaigns wrote theirs outside it, so those figures are attributed to the task
+closing summaries and campaign documents and are marked as such. **No load test at the published
+1/8/64/256/1024 concurrency ladder was run for this release** — the Bolt campaign drove that
+ladder as campaign evidence at its own commits, and the report records the absence explicitly.
+
+[0.15.0]: https://github.com/FlavioCFOliveira/GoGraph/releases/tag/v0.15.0
+
 ## [0.14.2] — 2026-09-15
 
 **9 commits** — 3 fixes, 4 documentation changes and 2 merges. Counted at `92c47fda`, the

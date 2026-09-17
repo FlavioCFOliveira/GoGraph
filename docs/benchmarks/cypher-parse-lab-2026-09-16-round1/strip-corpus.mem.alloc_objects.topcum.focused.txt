@@ -1,0 +1,17 @@
+File: parser.test
+Type: alloc_objects
+Time: 2026-09-16 13:05:07 WEST
+Active filters:
+   focus=BenchmarkStripCorpus
+Showing nodes accounting for 3150248, 99.83% of 3155685 total
+Dropped 128 nodes (cum <= 15778)
+      flat  flat%   sum%        cum   cum%
+         0     0%     0%    3154162   100%  testing.(*B).runN
+         0     0%     0%    3150165 99.83%  github.com/FlavioCFOliveira/GoGraph/cypher/parser.BenchmarkStripCorpus.func1
+    461388 14.62% 14.62%    3150165 99.83%  github.com/FlavioCFOliveira/GoGraph/cypher/parser.StripLiterals
+         0     0% 14.62%    3150073 99.82%  testing.(*B).launch
+   2688860 85.21% 99.83%    2688860 85.21%  internal/bytealg.MakeNoZero
+         0     0% 99.83%    2688860 85.21%  strings.(*Builder).Grow
+         0     0% 99.83%    2688860 85.21%  strings.(*Builder).grow
+         0     0% 99.83%    2475500 78.45%  strings.ToUpper
+         0     0% 99.83%      81104  2.57%  github.com/FlavioCFOliveira/GoGraph/cypher/parser.unquoteString

@@ -1,0 +1,112 @@
+package main
+
+// zz_planwatch_test.go — THROWAWAY observation harness for rmp #2851.
+//
+// It never touches the example. It is injected with `go test -overlay`, so the
+// example's own directory is not written to at all: the file exists only inside
+// the build. It installs a counting metrics backend, BRACKETS the workload
+// between a before-and-after read of cypher.plan_cache.{hits,misses,evictions,
+// invalidations}, runs the example at its own documented default, and prints
+// the absolute counter values on both sides of the bracket.
+
+import (
+	"fmt"
+	"os"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
+)
+
+type planWatch struct {
+	hits, misses, evictions, invalidations atomic.Uint64
+}
+
+func (p *planWatch) IncCounter(name string, d uint64) {
+	switch name {
+	case "cypher.plan_cache.hits":
+		p.hits.Add(d)
+	case "cypher.plan_cache.misses":
+		p.misses.Add(d)
+	case "cypher.plan_cache.evictions":
+		p.evictions.Add(d)
+	case "cypher.plan_cache.invalidations":
+		p.invalidations.Add(d)
+	}
+}
+
+func (p *planWatch) ObserveLatency(string, time.Duration) {}
+func (p *planWatch) SetGauge(string, float64)             {}
+
+type planWatchSample struct {
+	hits, misses, evictions, invalidations uint64
+}
+
+func (p *planWatch) sample() planWatchSample {
+	return planWatchSample{p.hits.Load(), p.misses.Load(), p.evictions.Load(), p.invalidations.Load()}
+}
+
+func planWatchReport(label string, before, after planWatchSample) {
+	dh := after.hits - before.hits
+	dm := after.misses - before.misses
+	de := after.evictions - before.evictions
+	di := after.invalidations - before.invalidations
+	total := dh + dm
+	var ratio, pct float64
+	if dm > 0 {
+		ratio = float64(dh) / float64(dm)
+	}
+	if total > 0 {
+		pct = 100 * float64(dh) / float64(total)
+	}
+	fmt.Fprintf(os.Stderr,
+		"PLANWATCH label=%s before.hits=%d before.misses=%d before.evictions=%d before.invalidations=%d "+
+			"after.hits=%d after.misses=%d after.evictions=%d after.invalidations=%d "+
+			"delta.hits=%d delta.misses=%d delta.evictions=%d delta.invalidations=%d "+
+			"lookups=%d hit_over_miss=%.4f hit_pct=%.2f\n",
+		label,
+		before.hits, before.misses, before.evictions, before.invalidations,
+		after.hits, after.misses, after.evictions, after.invalidations,
+		dh, dm, de, di, total, ratio, pct)
+}
+
+// TestZZPlanWatch24 runs ONE step of example 24's documented End-to-end session
+// (README "End-to-end session"). The README runs each subcommand as its OWN
+// `go run` PROCESS, so each step gets a fresh Engine and a cold plan cache;
+// the driver therefore invokes this test once per step, in a separate process,
+// selected by GG_PLANWATCH_STEP.
+func TestZZPlanWatch24(t *testing.T) {
+	step := os.Getenv("GG_PLANWATCH_STEP")
+	dir := os.Getenv("GG_PLANWATCH_DIR")
+	if step == "" || dir == "" {
+		t.Skip("GG_PLANWATCH_STEP / GG_PLANWATCH_DIR not set")
+	}
+
+	p := &planWatch{}
+	metrics.SetBackend(p)
+	defer metrics.SetBackend(nil)
+
+	before := p.sample()
+	var err error
+	switch step {
+	case "init":
+		err = cmdInit([]string{"-d", dir})
+	case "seed":
+		err = cmdSeed([]string{"-d", dir})
+	case "stats":
+		err = cmdStats([]string{"-d", dir})
+	case "query":
+		err = cmdQuery([]string{"-d", dir,
+			"MATCH (u:User) RETURN u.username AS username ORDER BY username"})
+	case "snapshot":
+		err = cmdSnapshot([]string{"-d", dir})
+	default:
+		t.Fatalf("unknown step %q", step)
+	}
+	if err != nil {
+		t.Fatalf("step %s: %v", step, err)
+	}
+	after := p.sample()
+	planWatchReport("24_social_network_cli/"+step, before, after)
+}

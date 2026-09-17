@@ -64,11 +64,36 @@ func TestResolveLabelCountAsOf_AnswersWhereTheExactCountDeclines(t *testing.T) {
 		t.Errorf("ResolveLabelCountAsOf allocated %.2f objects while the churn was on another "+
 			"label, want 0. The clone it replaced cost 12.", n)
 	}
-	// The control: the route it replaced still costs what the finding says it does,
-	// so the comparison above is against a live number and not a remembered one.
-	if n := testing.AllocsPerRun(200, func() { _ = src.ResolveLabelBitmap("N") }); n == 0 {
-		t.Error("ResolveLabelBitmap now allocates nothing either, so this pair no longer " +
-			"demonstrates a difference and the zero above proves nothing")
+	// The control, and the only thing that keeps the zero above from being
+	// vacuous: a route that must hand the caller a bitmap IT OWNS still pays for
+	// the copy, so that zero is a property of this method and not of a seam where
+	// everything has become free.
+	//
+	// It watched ResolveLabelBitmap until rmp #2863. That change made the
+	// single-label bitmap resolve free too — it now returns
+	// label.Index.BitmapShared's memoised immutable image and clones nothing — so
+	// the old pairing's premise expired and this control fired, which is exactly
+	// what it was built to do.
+	//
+	// The new pairing is not arbitrary. It is the nearest route that still clones
+	// BY DESIGN: ResolveLabelsBitmap goes through label.Index.Intersect, which
+	// keeps its caller-owned contract because it ANDs the rest of the conjunction
+	// into the first label's bitmap IN PLACE. That contract is precisely why #2863
+	// added a new method rather than relaxing Intersect.
+	//
+	// Measured on this rig rather than remembered: 12 allocations for the
+	// resolver route, the same number label.Index.Intersect costs on its own — so
+	// every one of them is the clone and nothing stacked above it contributes. If
+	// Intersect is ever made to share an image as well, this falls to zero and
+	// this control fails, which is its whole job.
+	labels := []string{"N"}
+	if n := testing.AllocsPerRun(200, func() { _ = src.ResolveLabelsBitmap(labels) }); n == 0 {
+		t.Error("the caller-owned bitmap route (ResolveLabelsBitmap through " +
+			"label.Index.Intersect) now allocates nothing either, so no route at this " +
+			"seam still pays for a copy and the zero asserted above no longer " +
+			"distinguishes ResolveLabelCountAsOf from anything. Re-point this control at " +
+			"a route that still clones, or retire the assertion above with it — do not " +
+			"delete this guard to get green.")
 	}
 }
 

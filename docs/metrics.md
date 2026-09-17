@@ -27,6 +27,17 @@ public blocking API".
 > been reviewed and described, not as the complete emission surface; read
 > the emission surface from the source.
 
+> **Addendum (2026-09-17, `v0.15.0`).** The `cypher.csr_pair_cache` family —
+> six counters, two of them added in `v0.15.0` — is now documented below.
+> **The four figures in the correction above were NOT re-derived**, and this
+> addendum deliberately does not adjust them. A scan of literal metric-name
+> arguments over the same file set at this release's commit counts **527
+> distinct names collapsing to 362 families**, which does not reproduce the
+> 555/390 recorded above; the two counts were taken by different methods and
+> the discrepancy has not been attributed. Read the emission surface from the
+> source, exactly as the correction says, and treat every count on this page —
+> the ones above and this one — as needing re-derivation before it is quoted.
+
 The metrics are emitted through the [`metrics.Backend`][pubmetrics]
 interface, exposed by the public `github.com/FlavioCFOliveira/GoGraph/metrics`
 package. The default backend is a no-op; the cost of an
@@ -384,6 +395,43 @@ Plan-cache event counters (no latency dimension; incremented as raw counters):
 | `cypher.plan_cache.misses`          | Cache miss — plan compiled from scratch.         |
 | `cypher.plan_cache.evictions`       | Entry evicted from the bounded LRU plan cache.   |
 | `cypher.plan_cache.invalidations`   | Entry invalidated by a schema change (DDL).      |
+
+CSR pair-cache events (`cypher/csr_pair_cache.go`). The cache holds derived
+adjacency pairs keyed by the snapshot they were built at, so a consultation
+either reaches the map or is **bypassed** before the map is read.
+
+**The first four counters partition every consultation exactly.** `hits` and
+`misses` are incremented inside the map lookup; the two `bypasses_*` counters
+cover the paths that never reach it. That partition is what makes a measured hit
+rate readable at all — without it, a workload in which every consultation was
+bypassed reads 100 %. The identity
+`misses + bypasses == Δ csrPairUncachedBuildCount` holds over any drive and is
+pinned by `TestCSRPairCache_ConsultationsPartitionExactly`. The two `bypasses_*`
+counters were added in `v0.15.0` (rmp #2866).
+
+The last two counters are on the **put** path and are not part of that
+partition.
+
+| Counter                                      | Description                                                                                                                       |
+| -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `cypher.csr_pair_cache.hits`                 | Consultation that reached the map and found a usable entry.                                                                        |
+| `cypher.csr_pair_cache.misses`               | Consultation that reached the map and found none.                                                                                  |
+| `cypher.csr_pair_cache.bypasses_no_cache`    | Consultation short-circuited because there was no cache to consult (`cache == nil`).                                               |
+| `cypher.csr_pair_cache.bypasses_own_writes`  | Consultation short-circuited because the view resolves through a write transaction and therefore sees its own uncommitted writes, which must neither be served from nor stored into a cache shared across transactions (rmp #2446). |
+| `cypher.csr_pair_cache.replacements`         | Entry replaced at a superseded state — the equivalent of an eviction, and the signal that the graph is being written often enough that the cache is not paying for itself. |
+| `cypher.csr_pair_cache.stale_puts_dropped`   | Put discarded because the cache already holds a key newer than the one offered.                                                     |
+
+**The guard has three conditions and only two buckets, deliberately.** It is
+`cache == nil || g == nil || viewCarriesOwnWrites(g)`, but a nil view falls
+through to a dereference and panics before any reader could observe its bucket.
+A third bucket was written, found impossible to move in a surviving process, and
+removed rather than shipped as a counter that cannot increment.
+
+Measured bypass behaviour at `v0.15.0` (rmp #2866): a read-only workload hits
+**99.98 %**; a topology-mutating workload hits **19.5 %** at `-spokes 400` and
+**8.5 %** at 4 000, because the snapshot in the key moves under it. **No new key
+was implemented** — see
+[`docs/campaign-whole-surface-2026-09-16.md`](campaign-whole-surface-2026-09-16.md).
 
 Relationship count-store events (`cypher/count_metrics.go`, task #2087, design
 `docs/count-store-design.md`). The store is derived and non-durable; it is

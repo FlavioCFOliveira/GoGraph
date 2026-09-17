@@ -765,14 +765,16 @@ func (e *pageRankEngine) runRange(w int) {
 	revVerts, revEdges := e.revVerts, e.revEdges
 	baseShare, damping := e.baseShare, e.damping
 	var localDelta float64
+	// Both delta contributions take the magnitude through math.Abs rather
+	// than a sign branch (rmp #2869). math.Abs is a compiler intrinsic on
+	// arm64 and amd64 — it clears the sign bit — so the accumulated value
+	// is bit-identical to the branch for every float64, including -0.0,
+	// the infinities and NaN, while removing a per-node, per-iteration
+	// branch the predictor cannot learn from the data.
 	for v := lo; v < hi; v++ {
 		if !isLive[v] {
 			// next[v] becomes 0; its delta contribution is |0 - cur[v]|.
-			d := cur[v]
-			if d < 0 {
-				d = -d
-			}
-			localDelta += d
+			localDelta += math.Abs(cur[v])
 			next[v] = 0
 			continue
 		}
@@ -782,11 +784,7 @@ func (e *pageRankEngine) runRange(w int) {
 			sum += damping * cur[u] / float64(outdeg[u])
 		}
 		next[v] = sum
-		d := sum - cur[v]
-		if d < 0 {
-			d = -d
-		}
-		localDelta += d
+		localDelta += math.Abs(sum - cur[v])
 	}
 	e.deltas[w] = localDelta
 }

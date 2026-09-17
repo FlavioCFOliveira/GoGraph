@@ -1,0 +1,90 @@
+package main
+
+// zz_planwatch_test.go — THROWAWAY observation harness for rmp #2851.
+//
+// It never touches the example. It is injected with `go test -overlay`, so the
+// example's own directory is not written to at all: the file exists only inside
+// the build. It installs a counting metrics backend, BRACKETS the workload
+// between a before-and-after read of cypher.plan_cache.{hits,misses,evictions,
+// invalidations}, runs the example at its own documented default, and prints
+// the absolute counter values on both sides of the bracket.
+
+import (
+	"fmt"
+	"io"
+	"os"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
+)
+
+type planWatch struct {
+	hits, misses, evictions, invalidations atomic.Uint64
+}
+
+func (p *planWatch) IncCounter(name string, d uint64) {
+	switch name {
+	case "cypher.plan_cache.hits":
+		p.hits.Add(d)
+	case "cypher.plan_cache.misses":
+		p.misses.Add(d)
+	case "cypher.plan_cache.evictions":
+		p.evictions.Add(d)
+	case "cypher.plan_cache.invalidations":
+		p.invalidations.Add(d)
+	}
+}
+
+func (p *planWatch) ObserveLatency(string, time.Duration) {}
+func (p *planWatch) SetGauge(string, float64)             {}
+
+type planWatchSample struct {
+	hits, misses, evictions, invalidations uint64
+}
+
+func (p *planWatch) sample() planWatchSample {
+	return planWatchSample{p.hits.Load(), p.misses.Load(), p.evictions.Load(), p.invalidations.Load()}
+}
+
+// planWatchReport writes the bracketed observation to stderr, tagged so the
+// driver can collate it. label names the process-level unit of work.
+func planWatchReport(label string, before, after planWatchSample) {
+	dh := after.hits - before.hits
+	dm := after.misses - before.misses
+	de := after.evictions - before.evictions
+	di := after.invalidations - before.invalidations
+	total := dh + dm
+	var ratio, pct float64
+	if dm > 0 {
+		ratio = float64(dh) / float64(dm)
+	}
+	if total > 0 {
+		pct = 100 * float64(dh) / float64(total)
+	}
+	fmt.Fprintf(os.Stderr,
+		"PLANWATCH label=%s before.hits=%d before.misses=%d before.evictions=%d before.invalidations=%d "+
+			"after.hits=%d after.misses=%d after.evictions=%d after.invalidations=%d "+
+			"delta.hits=%d delta.misses=%d delta.evictions=%d delta.invalidations=%d "+
+			"lookups=%d hit_over_miss=%.4f hit_pct=%.2f\n",
+		label,
+		before.hits, before.misses, before.evictions, before.invalidations,
+		after.hits, after.misses, after.evictions, after.invalidations,
+		dh, dm, de, di, total, ratio, pct)
+}
+
+// TestZZPlanWatch22 runs example 22_cypher at its documented default:
+// `go run ./examples/22_cypher` with no flags.
+func TestZZPlanWatch22(t *testing.T) {
+	p := &planWatch{}
+	metrics.SetBackend(p)
+	defer metrics.SetBackend(nil)
+
+	before := p.sample()
+	if err := run(t.Context(), io.Discard, defaultConfig()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	after := p.sample()
+	planWatchReport("22_cypher/default", before, after)
+}

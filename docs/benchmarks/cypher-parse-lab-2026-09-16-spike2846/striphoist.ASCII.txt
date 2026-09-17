@@ -1,0 +1,60 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/parser
+cpu: Apple M4
+BenchmarkSpikeStripHoisters-10         	   99493	      2354 ns/op	    2728 B/op	      32 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/parser
+cpu: Apple M4
+BenchmarkSpikeStripHoisters-10         	   97392	      2433 ns/op	    2728 B/op	      32 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/parser
+cpu: Apple M4
+BenchmarkSpikeStripHoisters-10         	   94113	      2538 ns/op	    2728 B/op	      32 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/parser
+cpu: Apple M4
+BenchmarkSpikeStripHoisters-10         	   93993	      2487 ns/op	    2728 B/op	      32 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/parser
+cpu: Apple M4
+BenchmarkSpikeStripHoisters-10         	   99471	      2362 ns/op	    2728 B/op	      32 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/parser
+cpu: Apple M4
+BenchmarkSpikeStripHoisters-10         	   97756	      2372 ns/op	    2728 B/op	      32 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/parser
+cpu: Apple M4
+BenchmarkSpikeStripHoisters-10         	   97968	      2434 ns/op	    2728 B/op	      32 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/parser
+cpu: Apple M4
+BenchmarkSpikeStripHoisters-10         	   95781	      2501 ns/op	    2728 B/op	      32 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/parser
+cpu: Apple M4
+BenchmarkSpikeStripHoisters-10         	   96285	      2396 ns/op	    2728 B/op	      32 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/parser
+cpu: Apple M4
+BenchmarkSpikeStripHoisters-10         	   97653	      2412 ns/op	    2728 B/op	      32 allocs/op
+PASS

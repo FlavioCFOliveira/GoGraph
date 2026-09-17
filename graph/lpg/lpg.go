@@ -195,22 +195,52 @@ type edgeKey struct {
 	src, dst graph.NodeID
 }
 
-// propMapShards is the number of independent locks striping the
-// per-vertex and per-edge property maps. It MUST stay a power of two (the
-// shard index is NodeID & (propMapShards-1)). It is a runtime-only
-// concurrency-striping constant — no on-disk format or snapshot depends on
-// it, so it can change freely between versions.
+// propMapShards is the number of independent locks striping the per-vertex and
+// per-edge property, label and lifecycle maps — nine shard arrays in all. It
+// MUST stay a power of two (the shard index is NodeID & (propMapShards-1), or
+// the src endpoint for the edge arrays). It is a runtime-only
+// concurrency-striping constant: snapshot capture walks interned node ids
+// through the Mapper, never shard order, so no on-disk format or snapshot
+// depends on it and it can change freely between versions.
 //
-// The 2026-06-24 performance audit measured that per-row property reads
-// (NodePropertyByID, hit once per scanned row per reader) ARE hot under
+// 64 was set by the 2026-06-24 audit, which measured that per-row property
+// reads (NodePropertyByID, hit once per scanned row per reader) ARE hot under
 // concurrent full-table scans: at high core counts the per-shard RWMutex
-// reader-count atomic bounces its cache line. Widening from 16 to 64 spreads
-// those reader-count atomics across 4x more cache lines, so a full scan's
-// readers collide on a given shard far less often. (The fully lock-free
-// per-shard read remains the deferred F3/#1671 COW epic; this widening is the
-// cheap, ACID-neutral mitigation.) 64 is still well below adjlist's 256; the
-// extra empty shards cost only a few KB per graph.
-const propMapShards = 64
+// reader-count atomic bounces its cache line, and widening 16 to 64 spread
+// those atomics across 4x more cache lines.
+//
+// 256 was chosen on 2026-09-16 (rmp #2839), measured on an Apple M4 (10 cores,
+// go1.27.1) against a noise floor of two byte-identical binaries that stayed
+// indistinguishable (p=0.93 at 64 connections, p=0.17 at 1024). The whole
+// trade:
+//
+//   - It BUYS a level shift under concurrency. On the Bolt txwrite ladder
+//     (examples/23_bolt_server) aggregate throughput rose 7.0% at 64
+//     connections and 13.3% at 1024 — n=8 interleaved, order-rotated runs per
+//     arm, with no overlap at all between the treatment runs and the 16 control
+//     runs at either rung — and tail latency fell 16.1% at p99 and 14.8% at
+//     p999. One reader contending with one writer costs 36.5% less
+//     (165.3ns to 104.9ns).
+//   - It does NOT change the scaling behaviour. The collapse from 64 to 1024
+//     connections moves only 0.660 to 0.698 of peak: four times the shards buy
+//     a better constant, not a better curve. What remains is the map work under
+//     the lock, which striping cannot reach.
+//   - It COSTS small-graph resources, because New eagerly allocates one map per
+//     stripe in three of the nine arrays. An empty graph grows 237.6 to
+//     328.6 KiB (+38.3%, 466 to 1042 allocations), New 18.6 to 29.2us (+57.3%),
+//     a ten-node graph's whole life 24.4 to 36.3us (+48.4%), and an idle
+//     reclamation sweep — which takes every shard lock however little there is
+//     to reclaim — 29.9 to 37.9us (+26.8%). A process holding many graphs pays
+//     this per graph.
+//   - It costs little single-threaded. A spread property write costs 5.5% more
+//     (159.0 to 167.6ns); a full scan read is indistinguishable from 64
+//     (60.0 vs 64.8ns, p=0.114), so the read path that 16 to 64 bought is not
+//     surrendered. That is what separates 256 from 4096, which #2839 rejected
+//     for penalising both.
+//
+// The fully lock-free per-shard read remains the deferred F3/#1671 COW epic;
+// this striping is the cheap, ACID-neutral mitigation.
+const propMapShards = 256
 
 // nodePropShard is one stripe of the per-vertex property map. The inner
 // per-node bag is a compact tiered [propBag] (sprint 207, #1587) stored by
@@ -230,7 +260,7 @@ type nodePropShard struct {
 
 // nodeLabelShard is one stripe of the node-label bag. The mutex
 // serialises mutations on this shard only; readers hold an RLock
-// for HasNodeLabel / NodeLabels. Splitting the bag into 64 shards
+// for HasNodeLabel / NodeLabels. Splitting the bag into propMapShards stripes
 // removes the global nodeMu contention point that previously
 // serialised every Set/Remove/Has across all NodeIDs in the graph.
 type nodeLabelShard struct {

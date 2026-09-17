@@ -48,7 +48,7 @@ package lpg
 //
 // Memgraph hangs the delta pointer off the Vertex struct, which is free because
 // a Vertex is already a struct. GoGraph has no per-node struct: node labels
-// live in `map[graph.NodeID]labelBag` across 64 shards, so a pointer field on
+// live in `map[graph.NodeID]labelBag` across propMapShards stripes, so a pointer field on
 // labelBag would grow the map's value for EVERY labelled node — a permanent
 // memory cost paid by graphs that never write.
 //

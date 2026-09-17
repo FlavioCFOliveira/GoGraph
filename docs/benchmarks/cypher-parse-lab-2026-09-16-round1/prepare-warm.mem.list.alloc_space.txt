@@ -1,0 +1,142 @@
+Total: 323.81MB
+ROUTINE ======================== github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).parseAndAnalyse in /Users/flaviocfo/dev/xumiga/GoGraph/cypher/api.go
+         0   114.13MB (flat, cum) 35.25% of Total
+         .          .   5633:func (e *Engine) parseAndAnalyse(query string) (*planCacheEntry, map[string]string, error) {
+         .          .   5634:	// The cache is keyed on query text, so a query that inlines a rotating
+         .          .   5635:	// string literal would miss on every execution and pay a full parse —
+         .          .   5636:	// measured at 65% more CPU per query than the same query written with a
+         .          .   5637:	// parameter (docs/cpu-vs-neo4j-memgraph-2026-08-11.md §6). Hoisting the
+         .          .   5638:	// literal onto a parameter collapses every spelling onto one entry.
+         .          .   5639:	//
+         .          .   5640:	// The key is resolved BEFORE the cache is consulted, so each call performs
+         .          .   5641:	// exactly one counted lookup. Probing the raw text first and the rewritten
+         .          .   5642:	// text second would be cheaper by a hair and would report a permanent extra
+         .          .   5643:	// MISS for every hoisted query — a miss that can never become a hit, which
+         .          .   5644:	// makes the hit ratio lie. StripLiterals rejects a quote-free query in a
+         .          .   5645:	// single IndexByte pass, so a fully parameterised query pays almost nothing
+         .          .   5646:	// for the attempt.
+         .          .   5647:	key, auto := query, map[string]string(nil)
+         .       97MB   5648:	if stripped, hoisted, ok := parser.StripLiterals(query); ok {
+         .          .   5649:		key, auto = stripped, hoisted
+         .          .   5650:	}
+         .          .   5651:	if v, ok := e.cache.get(key); ok {
+         .          .   5652:		return v, auto, nil
+         .          .   5653:	}
+         .    17.14MB   5654:	entry, err := e.buildPlanCacheEntry(key)
+         .          .   5655:	if err != nil && key != query {
+         .          .   5656:		// The rewrite does not parse. Abandon it and use the original: the
+         .          .   5657:		// scanner may forgo an optimisation, never turn a working query into a
+         .          .   5658:		// failing one.
+         .          .   5659:		entry, err = e.buildPlanCacheEntry(query)
+ROUTINE ======================== github.com/FlavioCFOliveira/GoGraph/cypher/parser.StripLiterals in /Users/flaviocfo/dev/xumiga/GoGraph/cypher/parser/strip.go
+   45.19MB       97MB (flat, cum) 29.95% of Total
+         .          .     73:func StripLiterals(query string) (stripped string, params map[string]string, ok bool) {
+         .          .     74:	type repl struct {
+         .          .     75:		start, end int // byte offsets, end exclusive
+         .          .     76:		name       string
+         .          .     77:	}
+         .          .     78:	// Fast reject. A query with no quote byte anywhere cannot contain a string
+         .          .     79:	// literal, so there is nothing to hoist and the scan below would walk the
+         .          .     80:	// whole text to conclude that. This matters because StripLiterals runs on
+         .          .     81:	// every cache miss, including the fully parameterised queries that have
+         .          .     82:	// nothing to gain from it: a quote-free query resolves in one IndexByte pass
+         .          .     83:	// instead of a full scan.
+         .          .     84:	if strings.IndexByte(query, '\'') < 0 && strings.IndexByte(query, '"') < 0 {
+         .          .     85:		return query, nil, false
+         .          .     86:	}
+         .          .     87:
+         .          .     88:	var repls []repl
+         .          .     89:
+         .          .     90:	// hoistable is true only while the scan is inside a MATCH pattern or a
+         .          .     91:	// WHERE predicate. It is a clause state machine over the byte stream, not a
+         .          .     92:	// parse, so it can only make the scanner more conservative.
+         .          .     93:	hoistable := false
+         .          .     94:
+         .          .     95:	i, n := 0, len(query)
+         .          .     96:	for i < n {
+         .          .     97:		c := query[i]
+         .          .     98:		switch {
+         .          .     99:		case c == '/' && i+1 < n && query[i+1] == '/':
+         .          .    100:			for i < n && query[i] != '\n' {
+         .          .    101:				i++
+         .          .    102:			}
+         .          .    103:		case c == '/' && i+1 < n && query[i+1] == '*':
+         .          .    104:			i += 2
+         .          .    105:			for i+1 < n && (query[i] != '*' || query[i+1] != '/') {
+         .          .    106:				i++
+         .          .    107:			}
+         .          .    108:			i = min(i+2, n)
+         .          .    109:		case c == '`':
+         .          .    110:			// A backtick-quoted identifier. Its contents are not Cypher, and a
+         .          .    111:			// doubled backtick is an escaped one.
+         .          .    112:			i++
+         .          .    113:			for i < n {
+         .          .    114:				if query[i] == '`' {
+         .          .    115:					if i+1 < n && query[i+1] == '`' {
+         .          .    116:						i += 2
+         .          .    117:						continue
+         .          .    118:					}
+         .          .    119:					i++
+         .          .    120:					break
+         .          .    121:				}
+         .          .    122:				i++
+         .          .    123:			}
+         .          .    124:		case c == '\'' || c == '"':
+         .          .    125:			start := i
+         .          .    126:			quote := c
+         .          .    127:			i++
+         .          .    128:			closed := false
+         .          .    129:			for i < n {
+         .          .    130:				if query[i] == '\\' {
+         .          .    131:					i += 2
+         .          .    132:					continue
+         .          .    133:				}
+         .          .    134:				if query[i] == quote {
+         .          .    135:					i++
+         .          .    136:					closed = true
+         .          .    137:					break
+         .          .    138:				}
+         .          .    139:				i++
+         .          .    140:			}
+         .          .    141:			if !closed {
+         .          .    142:				// An unterminated string: the query will not parse anyway, and
+         .          .    143:				// the scanner has no idea where the literal ends. Refuse.
+         .          .    144:				return query, nil, false
+         .          .    145:			}
+         .          .    146:			if !hoistable {
+         .          .    147:				continue
+         .          .    148:			}
+    1.61MB     1.61MB    149:			repls = append(repls, repl{start: start, end: i, name: AutoParamPrefix + strconv.Itoa(len(repls))})
+         .          .    150:		case isIdentStart(c):
+         .          .    151:			start := i
+         .          .    152:			for i < n && isIdentChar(query[i]) {
+         .          .    153:				i++
+         .          .    154:			}
+         .    34.93MB    155:			switch strings.ToUpper(query[start:i]) {
+         .          .    156:			case "MATCH", "WHERE":
+         .          .    157:				hoistable = true
+         .          .    158:			case "RETURN", "WITH", "CREATE", "MERGE", "DELETE", "DETACH", "SET",
+         .          .    159:				"REMOVE", "UNWIND", "CALL", "YIELD", "FOREACH", "OPTIONAL",
+         .          .    160:				"UNION", "ON", "ORDER", "SKIP", "LIMIT", "FOR", "ADD", "DROP":
+         .          .    161:				hoistable = false
+         .          .    162:			}
+         .          .    163:		default:
+         .          .    164:			i++
+         .          .    165:		}
+         .          .    166:	}
+         .          .    167:
+         .          .    168:	if len(repls) == 0 {
+         .          .    169:		return query, nil, false
+         .          .    170:	}
+         .          .    171:
+    5.72MB     5.72MB    172:	params = make(map[string]string, len(repls))
+         .          .    173:	var b strings.Builder
+         .    15.59MB    174:	b.Grow(len(query) + len(repls)*(len(AutoParamPrefix)+6))
+         .          .    175:	prev := 0
+    3.54MB     3.54MB    176:	for _, r := range repls {
+   34.32MB    35.61MB    177:		params[r.name] = unquoteString(query[r.start:r.end])
+         .          .    178:		b.WriteString(query[prev:r.start])
+         .          .    179:		b.WriteString("$`")
+         .          .    180:		b.WriteString(r.name)
+         .          .    181:		b.WriteString("`")
+         .          .    182:		prev = r.end

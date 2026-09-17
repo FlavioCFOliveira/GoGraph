@@ -1,0 +1,51 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+                               │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/cypher-plan-cache-shard-2026-09-16-2851-2852/ladder1cpu.all.txt │
+                               │                                                       sec/op                                                        │
+ShardLadderMultiKey/shards001                                                                                                          27.14n ±   4%
+ShardLadderMultiKey/shards002                                                                                                          27.54n ±   8%
+ShardLadderMultiKey/shards004                                                                                                          29.54n ±   6%
+ShardLadderMultiKey/shards008                                                                                                          30.33n ±   3%
+ShardLadderMultiKey/shards016                                                                                                          31.27n ±   3%
+ShardLadderMultiKey/shards032                                                                                                          32.27n ±   3%
+ShardLadderMultiKey/shards064                                                                                                          28.40n ±   6%
+ShardLadderMultiKey/shards128                                                                                                          21.05n ±   3%
+ShardLadderMultiKey/shards256                                                                                                          19.42n ±   6%
+ShardLadderMultiKey/shards512                                                                                                          18.92n ±   3%
+ShardLadderMultiKey/shards1024                                                                                                         629.3n ± 100%
+geomean                                                                                                                                34.89n
+
+                               │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/cypher-plan-cache-shard-2026-09-16-2851-2852/ladder1cpu.all.txt │
+                               │                                                        B/op                                                         │
+ShardLadderMultiKey/shards001                                                                                                           0.000 ± 0%
+ShardLadderMultiKey/shards002                                                                                                           0.000 ± 0%
+ShardLadderMultiKey/shards004                                                                                                           0.000 ± 0%
+ShardLadderMultiKey/shards008                                                                                                           0.000 ± 0%
+ShardLadderMultiKey/shards016                                                                                                           0.000 ± 0%
+ShardLadderMultiKey/shards032                                                                                                           0.000 ± 0%
+ShardLadderMultiKey/shards064                                                                                                           0.000 ± 0%
+ShardLadderMultiKey/shards128                                                                                                           0.000 ± 0%
+ShardLadderMultiKey/shards256                                                                                                           0.000 ± 0%
+ShardLadderMultiKey/shards512                                                                                                           0.000 ± 0%
+ShardLadderMultiKey/shards1024                                                                                                          595.5 ±  ?
+geomean                                                                                                                                            ¹
+¹ summaries must be >0 to compute geomean
+
+                               │ /Users/flaviocfo/dev/xumiga/GoGraph/docs/benchmarks/cypher-plan-cache-shard-2026-09-16-2851-2852/ladder1cpu.all.txt │
+                               │                                                      allocs/op                                                      │
+ShardLadderMultiKey/shards001                                                                                                           0.000 ± 0%
+ShardLadderMultiKey/shards002                                                                                                           0.000 ± 0%
+ShardLadderMultiKey/shards004                                                                                                           0.000 ± 0%
+ShardLadderMultiKey/shards008                                                                                                           0.000 ± 0%
+ShardLadderMultiKey/shards016                                                                                                           0.000 ± 0%
+ShardLadderMultiKey/shards032                                                                                                           0.000 ± 0%
+ShardLadderMultiKey/shards064                                                                                                           0.000 ± 0%
+ShardLadderMultiKey/shards128                                                                                                           0.000 ± 0%
+ShardLadderMultiKey/shards256                                                                                                           0.000 ± 0%
+ShardLadderMultiKey/shards512                                                                                                           0.000 ± 0%
+ShardLadderMultiKey/shards1024                                                                                                          10.00 ±  ?
+geomean                                                                                                                                            ¹
+¹ summaries must be >0 to compute geomean
+benchstat_exit=0

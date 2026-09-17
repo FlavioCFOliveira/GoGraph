@@ -1,0 +1,21 @@
+profile=docs/benchmarks/cypher-parse-lab-2026-09-16-round1/strip-corpus.mem.pb.gz
+sample_index=alloc_space
+focus=BenchmarkStripCorpus
+unit=MB
+total_self_folded=103921270
+total_self_top=105742850
+stacks=93
+
+SELF (flat) value per owning package, by two independent routes:
+  folded = `pprof -traces`, each sample charged to its leaf frame
+  top    = `pprof -top -nodecount=100000`, pprof's own flat column
+They must agree. A non-zero delta is a bucketing error, not a finding.
+
+bucket                                 folded    share            top    share       delta
+antlr-runtime                               0    0.00%              0    0.00%           0
+gograph-parser-gen                          0    0.00%              0    0.00%           0
+gograph-parser-handwritten           47705254   45.91%       48815230   46.16%     1109976
+gograph-other                               0    0.00%              0    0.00%           0
+runtime-stdlib-other                 56216016   54.09%       56927620   53.84%      711604
+
+TOTAL                               103921270               105742850

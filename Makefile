@@ -92,11 +92,10 @@ build: ## Build all packages
 test: ## Run unit tests
 	$(GO) test $(GOFLAGS) $(PACKAGES)
 
-# `race` is an ad-hoc developer convenience, not a gate — it is absent from `ci`'s
-# dependency list (tidy fmt vet build test-short lint cover-gate), so this flag
-# cannot alter any gate outcome. It carries SHORT_TIMEOUT because it runs the same
-# corpus under the same detector as test-short and so has the same exposure to
-# Go's 10-minute default (rmp #2584).
+# `race` is an ad-hoc developer convenience, not a gate — it is absent from
+# CI_STAGES, so this flag cannot alter any gate outcome. It carries SHORT_TIMEOUT
+# because it runs the same corpus under the same detector as test-short and so has
+# the same exposure to Go's 10-minute default (rmp #2584).
 .PHONY: race
 race: ## Run unit tests with the race detector (SHORT_TIMEOUT overridable)
 	$(GO) test $(GOFLAGS) $(RACE_FLAGS) -timeout=$(SHORT_TIMEOUT) $(PACKAGES)
@@ -132,9 +131,11 @@ race: ## Run unit tests with the race detector (SHORT_TIMEOUT overridable)
 # chosen so the timeout is NOT the binding constraint — a backstop against a
 # genuinely hung package, never a budget the suite is expected to approach:
 # 30m is 3.05x the slowest package measured that actually completed (cypher,
-# 589.5 s) and 1.5x the `-timeout=20m` the coverage pass of this same `make ci`
-# gate already applies (scripts/cover_gate.sh), so a machine under sustained
-# competing load reaches the same verdict as an idle one.
+# 589.5 s) and 1.5x the `-timeout=20m` that scripts/cover_gate.sh applies to its
+# own instrumented run, so a machine under sustained competing load reaches the
+# same verdict as an idle one. (That coverage run was a member of `make ci` until
+# 2026-09-15; it is now invoked deliberately via `make cover-gate`, and the 20m
+# figure is quoted here only as the calibrated comparison it always was.)
 #
 # This is not a relaxation of the per-package COST budget. That budget is a
 # separate concern with its own instrument — `make test-short-timings`, 60 s
@@ -280,6 +281,10 @@ test-short-timings: ## [layer: short] Alias for test-short, kept as the named en
 #   cover-gate   -covermode=atomic    → compiled in, then skipped by the test's own
 #                                       testing.CoverMode() guard
 #
+# (cover-gate left the gate on 2026-09-15, so that third row is now history: the
+# race detector is the ONLY instrumentation `ci` applies to the module suite, and
+# this phase is the only one that applies none. See the note above UNINSTR_PKGS.)
+#
 # Each of those three guards is individually correct, and each is documented at
 # its site. Their INTERSECTION was the defect: two locally-sound decisions that
 # between them left a security invariant asserting nowhere. Neither guard can be
@@ -291,15 +296,53 @@ test-short-timings: ## [layer: short] Alias for test-short, kept as the named en
 # added to one of them is picked up without editing this file. Adding a package
 # here costs a full uninstrumented run of it: bolt/packstream measures 0.39-0.53 s
 # (Apple M4, darwin/arm64, go1.26.6, 2026-09-03, host at loadavg 6.45), which is
-# why the whole package runs rather than a single -run filter.
+# why the whole package runs rather than a single -run filter. The seven packages
+# listed today cost 50 s in total (2026-09-15; per-package figures below).
 #
 # -p 1 serialises the package test binaries. runtime.MemStats is per-PROCESS, so
 # a second package cannot pollute the subject's counters directly; what -p 1
 # removes is CPU and memory CONTENTION between concurrently running binaries
-# while one of them is measuring. With a single package in the list today it is
-# a no-op that costs nothing and stops the list growing into a measurement
+# while one of them is measuring. With seven packages in the list it is what keeps
+# each one's runtime.MemStats reading free of the contention a parallel run adds
 # hazard.
-UNINSTR_PKGS = ./bolt/packstream
+# THE LIST GREW ON 2026-09-15, when `cover-gate` left `make ci`. That stage ran
+# the module suite WITHOUT the race detector, and was therefore the only phase in
+# which the repository's `//go:build !race` files compiled at all. Diffing
+# `go test -list '.*'` against `go test -race -list '.*'` across the seven
+# packages that carry such a file measured exactly seven tests present in the
+# non-race build and absent from the race build. One (bolt/packstream's
+# TestDecoder_ChargeUpperBoundsGoAllocation) was already held here. The other six
+# would have run in NO stage of the gate:
+#
+#   ./cypher          TestColumnarAggArgument_UnboxedPathEngaged
+#   ./graph/lpg       TestBarrierGuard_ZeroSizedInProductionBuild
+#   ./graph/lpg       TestBarrierGuard_ApplyAtomicallyAllocatesNothing
+#   ./graph/lpg       TestBarrierGuard_ConcurrentReadersAndWriterUnaffected
+#   ./store/snapshot  TestReadLenPrefixedValue_ForgedLengthBoundedAlloc
+#   ./store/wal       TestDecode_ForgedLargePlen_BoundedAlloc
+#
+# Two of them bound the allocation a FORGED length prefix can provoke — security
+# assertions — and three pin the production, non-enforcing form of the barrier
+# guard, which is the form compiled into every released binary. Letting them
+# lapse would have re-created #2709 in the same shape it was fixed in.
+#
+# bolt/proto, cypher/explain and store/snapshot additionally carry a per-build
+# CONSTANT (wantMsgAllocs 1 vs 2, raceEnabled, secStoreRaceEnabled) whose strict
+# value holds only in the non-race build, so their tests ASSERT MORE here than
+# they can under -race. bolt/proto and cypher/explain are listed for that reason
+# alone.
+#
+# This is a strengthening, not a like-for-like move: under cover-gate those
+# allocation assertions ran with coverage counters active, and coverage counters
+# allocate on their own account. Here neither instrumentation is applied, which
+# is the whole point of the phase.
+#
+# MEASURED COST of the seven packages, serially (-p 1), uninstrumented, on the
+# reference host on 2026-09-15: 50 s in total — cypher 29.8 s, store/snapshot
+# 11.1 s, graph/lpg 6.2 s, store/wal 1.1 s, bolt/packstream 0.37 s, bolt/proto
+# 0.36 s, cypher/explain 0.36 s. That is what preserving the assurance of a
+# ~20-minute second full-suite run costs.
+UNINSTR_PKGS = ./bolt/packstream ./bolt/proto ./cypher ./cypher/explain ./graph/lpg ./store/snapshot ./store/wal
 
 UNINSTR_TIMEOUT ?= 5m
 
@@ -398,13 +441,24 @@ check-soak-build: ## Verify soak- AND nightly-tagged files compile and vet clean
 	$(GO) build -tags=soak,nightly $(PACKAGES)
 	$(GO) vet -tags=soak,nightly $(PACKAGES)
 
+# ── Coverage: measured deliberately, NOT gated automatically ───────
+# Neither target is a member of `ci` any more (user decision, 2026-09-15), for
+# the same reason benchmarks left the release path in v0.14.2: coverage is a
+# quality metric, not a correctness gate, and cover-gate's run was the module
+# suite executed a SECOND time. The thresholds are unchanged and still bind when
+# the target is run — aggregate >= 85 %, per-package >= 75 %, enforced by
+# scripts/cover_gate.sh, which is untouched. Run `make cover-gate` when a
+# coverage question is being asked; nothing runs it for you.
+#
+# What cover-gate's non-race run uniquely EXECUTED, rather than measured, did not
+# lapse with it: see the note above UNINSTR_PKGS.
 .PHONY: cover
-cover: ## Run tests with coverage
+cover: ## Run tests with coverage (measured on demand — NOT part of `make ci`)
 	$(GO) test $(GOFLAGS) -coverprofile=$(COVER_PROFILE) -covermode=atomic $(PACKAGES)
 	$(GO) tool cover -func=$(COVER_PROFILE) | tail -1
 
 .PHONY: cover-gate
-cover-gate: ## Enforce aggregate (>=85%) and per-package (>=75%) coverage gates
+cover-gate: ## Enforce aggregate (>=85%) and per-package (>=75%) coverage gates — run deliberately; NOT part of `make ci` since 2026-09-15
 	GOGRAPH_PARALLEL_SUITE=1 GO=$(GO) MIN_TOTAL=85.0 MIN_PER_PKG=75.0 bash scripts/cover_gate.sh
 
 .PHONY: kg-verify
@@ -497,14 +551,140 @@ lint: ## Run golangci-lint (auto-install if missing)
 	fi
 	golangci-lint run $(PACKAGES)
 
-.PHONY: ci
-ci: shell-guard tidy fmt vet build vulncheck test-short test-timing test-uninstrumented lint cover-gate ci-kg-verify ## Full CI pipeline: tidy + fmt + vet + build + vulncheck + test-short + test-timing + test-uninstrumented + lint + cover-gate + kg-verify
+# ── The gate ───────────────────────────────────────────────────────
+# CI_STAGES is the ORDERED list of `make ci` stages, and the single place the
+# order is written down. `ci`, `ci-resume` and `ci-from` all consume it through
+# scripts/ci_stages.sh, so the three cannot drift apart.
+#
+# THE ORDER IS FAIL-CHEAP, AND IT IS JUSTIFIED BY MEASUREMENT, NOT BY INTUITION.
+# Every stage below was timed individually on the reference host (Apple M4,
+# 10 cores, 32 GB, darwin/arm64, go1.27.1, golangci-lint 2.13.2) on 2026-09-15,
+# with the host's load average recorded before each stage:
+#
+#     shell-guard            0.4 s
+#     tidy                   0.5 s
+#     fmt                    7.0 s
+#     vet                    1.1 s
+#     build                  8.2 s
+#     ci-kg-verify           1.9 s
+#     vulncheck              2.7 s
+#     lint                   2.0 s warm  /  252.0 s cold (empty analysis cache)
+#     ----------------------------------- everything above: ~24 s warm
+#     test-uninstrumented   50.0 s
+#     test-timing          ~100   s
+#     test-short           ~25    min
+#
+# WHY THE ORDER CHANGED. Until v0.14.2 the list read
+#
+#     shell-guard tidy fmt vet build vulncheck test-short test-timing \
+#     test-uninstrumented lint cover-gate ci-kg-verify
+#
+# so `lint` ran TENTH — after the ~25-minute `-race ./...` suite — and
+# `ci-kg-verify`, whose commonest failure is "the graph server is not running",
+# ran LAST. Publishing v0.14.2 paid for both: one `revive: context-as-argument`
+# violation in one file failed the gate AFTER the suite had run, and the two
+# stages behind it never executed at all. A gate that can fail in 24 seconds has
+# no business spending 25 minutes first.
+#
+# WHY lint IS LAST OF THE CHEAP STAGES. Warm it is 2.0 s, but with an empty
+# golangci-lint analysis cache it is 252 s — two orders of magnitude, and the
+# largest worst case in the block. Placing it after the other seven costs
+# nothing in the common case and, in the cold case, lets ~24 s of checks
+# conclude first. `fmt` stays ahead of `vet`/`build`/`lint` because it REWRITES
+# sources and the analysers must see the final text.
+#
+# WHY test-uninstrumented AND test-timing PRECEDE test-short. They are subset
+# runs — 50 s and ~100 s against ~25 min — and both exist for measurement-validity
+# reasons, not for coverage of extra code. Cheapest first, inside the test block
+# exactly as inside the static block.
+#
+# WHY cover-gate IS NOT HERE. It ran `go test -coverpkg=./... -covermode=atomic
+# ./...` — the WHOLE module suite a SECOND time, differently instrumented — so a
+# green gate executed the entire corpus twice. Coverage is a quality metric, not
+# a correctness gate, and by the user's decision of 2026-09-15 it leaves the
+# automatic gate exactly as benchmarks did in v0.14.2. The `cover` and
+# `cover-gate` targets are UNCHANGED and remain available to run deliberately,
+# with their thresholds untouched (aggregate >= 85 %, per-package >= 75 %); what
+# changed is that nothing runs them for you. The module suite now executes
+# exactly ONCE per gate, in `test-short`.
+#
+# THE ASSURANCE cover-gate UNIQUELY CARRIED IS NOT DROPPED — IT MOVED. Its run
+# was the only phase of `ci` built WITHOUT `-race`, so it was the only phase in
+# which the seven `//go:build !race` tests compiled at all. Measured by diffing
+# `go test -list` against `go test -race -list` across the seven packages that
+# carry such files, six of them ran in no other stage:
+#
+#     ./cypher         TestColumnarAggArgument_UnboxedPathEngaged
+#     ./graph/lpg      TestBarrierGuard_ZeroSizedInProductionBuild
+#     ./graph/lpg      TestBarrierGuard_ApplyAtomicallyAllocatesNothing
+#     ./graph/lpg      TestBarrierGuard_ConcurrentReadersAndWriterUnaffected
+#     ./store/snapshot TestReadLenPrefixedValue_ForgedLengthBoundedAlloc
+#     ./store/wal      TestDecode_ForgedLargePlen_BoundedAlloc
+#
+# (the seventh, bolt/packstream's TestDecoder_ChargeUpperBoundsGoAllocation, was
+# already held by test-uninstrumented — that is rmp #2709.) Two of the six are
+# SECURITY tests: they bound the allocation a forged length prefix can provoke.
+# Three pin the production, non-enforcing form of the barrier guard — the form
+# compiled into every released binary. Dropping cover-gate without moving them
+# would have re-created #2709 exactly, so the packages holding them joined
+# UNINSTR_PKGS instead. That costs 49 s and is a STRENGTHENING: under cover-gate
+# those allocation assertions ran with coverage counters active, which allocate
+# on their own account; test-uninstrumented is the phase that applies neither
+# instrumentation.
+CI_STAGES ?= shell-guard tidy fmt vet build ci-kg-verify vulncheck lint test-uninstrumented test-timing test-short
 
+# Where per-stage logs and completion stamps live. Under build/, which .gitignore
+# already covers — that matters, because the stamp key is computed over exactly
+# the files git does NOT ignore, so the stamps cannot perturb their own key.
+CI_STAMP_DIR ?= build/ci
+
+# Stages that are NEVER stamped, and therefore always re-run on `ci-resume`.
+# Both reach state OUTSIDE the working tree, so a stamp could wrongly survive a
+# change the key cannot see — and a stamp that wrongly survives silently skips a
+# gate. `vulncheck` consults https://vuln.go.dev, where a new advisory can land
+# without any file changing; `ci-kg-verify` reads the knowledge graph and rmp,
+# both of which move independently of the code. They cost 2.7 s and 1.9 s, so
+# always re-running them is close to free.
+CI_NEVER_STAMP ?= vulncheck ci-kg-verify
+
+# Environment overrides that change what a stage DOES without changing a file,
+# folded into the stamp key so an override invalidates the stamps. Changes to the
+# defaults live in this Makefile, which the key already covers by content.
+CI_KEY_EXTRA ?= SHORT_TIMEOUT=$(SHORT_TIMEOUT) SOFT_BUDGET=$(SOFT_BUDGET) HARD_BUDGET=$(HARD_BUDGET) OVERRIDES=$(PKG_HARD_BUDGET_OVERRIDES) TIMING_RUN=$(TIMING_RUN) TIMING_PKGS=$(TIMING_PKGS) UNINSTR_PKGS=$(UNINSTR_PKGS) GOFLAGS=$(GOFLAGS) GO=$(GO)
+
+CI_DRIVER = CI_STAGES='$(CI_STAGES)' CI_STAMP_DIR='$(CI_STAMP_DIR)' \
+            CI_NEVER_STAMP='$(CI_NEVER_STAMP)' CI_KEY_EXTRA='$(CI_KEY_EXTRA)' \
+            MAKE='$(MAKE)' bash scripts/ci_stages.sh
+
+.PHONY: ci
+ci: ## Full CI gate, fail-cheap order, module suite ONCE: shell-guard, tidy, fmt, vet, build, ci-kg-verify, vulncheck, lint, test-uninstrumented, test-timing, test-short
+	@CI_MODE=fresh $(CI_DRIVER)
+
+.PHONY: ci-resume
+ci-resume: ## Re-run `ci`, skipping only stages already green against THIS EXACT tree (any file edit invalidates every stamp; vulncheck/ci-kg-verify always re-run)
+	@CI_MODE=resume $(CI_DRIVER)
+
+.PHONY: ci-from
+ci-from: ## UNVERIFIED shortcut — run `ci` from STAGE onwards, skipping earlier stages on your assertion that they are unaffected. Usage: make ci-from STAGE=lint
+	@CI_MODE=from CI_FROM='$(STAGE)' $(CI_DRIVER)
+
+.PHONY: ci-stages
+ci-stages: ## Print the ordered `ci` stage list (the names `ci-from STAGE=` accepts)
+	@printf '%s\n' $(CI_STAGES)
+
+# ci-soak and ci-nightly are the DEFERRED-LAYER gates, not the release gate, and
+# they are listed here as explicit member lists rather than through CI_STAGES
+# because their suite stage differs. ONLY their ORDER changed on 2026-09-15: the
+# same fail-cheap argument applies and the change is mechanical. Their MEMBERSHIP
+# is untouched — they keep cover-gate (the decision that day was about the release
+# path, and a 20-minute coverage run is noise beside a 4- to 12-hour soak) and they
+# still omit ci-kg-verify, exactly as before. Their help text no longer says
+# "like ci", which stopped being true when `ci` dropped cover-gate.
 .PHONY: ci-soak
-ci-soak: shell-guard tidy fmt vet build vulncheck test-soak test-timing test-uninstrumented lint cover-gate ## CI pipeline with soak layer: like ci but runs test-soak
+ci-soak: shell-guard tidy fmt vet build vulncheck lint test-uninstrumented test-timing test-soak cover-gate ## Deferred-layer gate (soak): the cheap checks, then test-uninstrumented + test-timing + test-soak + cover-gate (no ci-kg-verify, as before)
 
 .PHONY: ci-nightly
-ci-nightly: shell-guard tidy fmt vet build vulncheck test-nightly test-timing test-uninstrumented lint cover-gate ## CI pipeline with nightly layer: like ci but runs test-nightly
+ci-nightly: shell-guard tidy fmt vet build vulncheck lint test-uninstrumented test-timing test-nightly cover-gate ## Deferred-layer gate (nightly): the cheap checks, then test-uninstrumented + test-timing + test-nightly + cover-gate (no ci-kg-verify, as before)
 
 .PHONY: smoke
 smoke: ## Quick PR pre-flight: tidy + fmt + vet + build + short unit tests (no race, no lint, no cover-gate)
@@ -562,10 +742,14 @@ release-accuracy: ## Release-accuracy checks only (Phase A): CHANGELOG/release-n
 	  || { echo "release-accuracy: SECURITY.md supported-versions table does not mention $$minor_line — update the table"; exit 1; }
 	@echo "release-accuracy: all accuracy checks passed"
 
+# release-preflight is release-accuracy + `make ci`, and NOTHING else. It runs no
+# benchmark (they left the release path in v0.14.2) and, since 2026-09-15, no
+# coverage gate: the release path is CORRECTNESS GATES ONLY. `make ci` executes
+# the module suite exactly ONCE, in test-short.
 .PHONY: release-preflight
-release-preflight: ## Canonical LOCAL release gate (`make release` calls this) — release-accuracy + the full `make ci` correctness+coverage gate. `make ci` runs the suite ONCE (tidy/fmt/vet/build/vulncheck/test-short[-race,./...]/lint/cover-gate; the TCK =100% baseline in TestTCKExecution runs inside the -race and coverage passes), so release-preflight SUBSUMES `make ci` — do not run both. The release.yml CI job runs only `release-accuracy`.
+release-preflight: ## Canonical LOCAL release gate (`make release` calls this) — release-accuracy + `make ci`, correctness gates only. `make ci` runs the module suite ONCE (test-short, -race ./..., which carries the TCK =100% baseline in TestTCKExecution), so release-preflight SUBSUMES `make ci` — do not run both. No benchmark and no coverage gate run here. The release.yml CI job runs only `release-accuracy`.
 	@$(MAKE) release-accuracy
-	@echo "release-preflight: running the full correctness + coverage gate (make ci: tidy/fmt/vet/build/vulncheck/test-short[-race]/lint/cover-gate; TCK =100% baseline enforced inside)…"
+	@echo "release-preflight: running the correctness gate (make ci, fail-cheap order: shell-guard/tidy/fmt/vet/build/ci-kg-verify/vulncheck/lint, then test-uninstrumented/test-timing/test-short[-race ./...]; the TCK =100% baseline is enforced inside test-short)…"
 	@$(MAKE) ci
 	@echo "release-preflight: all checks passed"
 
@@ -627,7 +811,10 @@ generate-cypher-parser: ## Regenerate cypher/parser/gen/ from ANTLR grammar (req
 # The patterns name the TEMPORARIES only. cover.out.failed.*.log is deliberately
 # NOT matched: it is preserved failure evidence (rmp #2347), and a re-run chasing
 # a rare failure must not destroy the record of it.
-clean: ## Remove build artefacts, including coverage temporaries stranded by a cancelled gate
+# `rm -rf build` also discards $(CI_STAMP_DIR) — the gate's per-stage completion
+# stamps and logs. That is deliberate: `make clean` means "start from nothing",
+# and a stamp surviving a clean would be a stamp wrongly surviving.
+clean: ## Remove build artefacts, the gate's stage stamps, and coverage temporaries stranded by a cancelled gate
 	rm -f $(COVER_PROFILE) coverage.html cover.out cover.lib.out
 	rm -f cover.out.tmp.* cover.out.testlog.tmp.* cover.lib.out.tmp.* \
 	      cover.out.pub.* cover.lib.out.pub.*

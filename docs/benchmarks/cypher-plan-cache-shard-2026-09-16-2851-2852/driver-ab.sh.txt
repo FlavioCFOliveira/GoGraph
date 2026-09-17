@@ -1,0 +1,72 @@
+#!/bin/bash
+# Interleaved A/B driver for rmp #2852.
+#
+# Arm A = the plan cache as it stood at HEAD 1630e9f6 (ONE mutex), compiled into
+#         cypher.base.test BEFORE plan_cache.go was touched.
+# Arm B = the sharded plan cache, compiled into cypher.shard.test.
+#
+# Both binaries contain the SAME warm harness (zz_2852_warm_test.go), restored
+# verbatim from the archived spike #2846 harness, so the benchmark names match
+# and benchstat can also place either series beside the archived
+# warm.series.txt. The two binaries differ in plan_cache.go and nothing else.
+#
+# Interleaving: every rep runs A, then B, then A again. The two A series give
+# the NOISE FLOOR (same binary, same workload, different moment); the pooled A
+# against B gives the A/B. Never all of A and then all of B.
+set -u
+
+ROOT=/Users/flaviocfo/dev/xumiga/GoGraph
+SCRATCH=/private/tmp/claude-501/-Users-flaviocfo-dev-xumiga-GoGraph/d392be6b-440a-4370-be6b-810c6bb3ae8c/scratchpad
+OUT="$ROOT/docs/benchmarks/cypher-plan-cache-shard-2026-09-16-2851-2852"
+BENCHSTAT=/Users/flaviocfo/.local/bin/benchstat
+REPS=${REPS:-10}
+BENCHTIME=${BENCHTIME:-300ms}
+
+mkdir -p "$OUT"
+uptime > "$OUT/ab.loadavg-before.txt"
+
+: > "$OUT/ab.base1.txt"; : > "$OUT/ab.base2.txt"
+: > "$OUT/ab.shard16.txt"; : > "$OUT/ab.shard256.txt"
+
+run_arm() { # $1 = binary, $2 = output file
+  ( cd "$ROOT/cypher" && "$1" -test.run '^$' \
+      -test.bench '^BenchmarkSpikeWarmPrepare(Parallel|MultiKey)$' \
+      -test.benchmem -test.benchtime="$BENCHTIME" \
+      -test.cpu=1,2,4,8,10 -test.count=1 ) >> "$2" 2>&1
+}
+
+for rep in $(seq 1 "$REPS"); do
+  run_arm "$SCRATCH/bin/cypher.base.test"      "$OUT/ab.base1.txt"
+  run_arm "$SCRATCH/bin/cypher.shard16.test"  "$OUT/ab.shard16.txt"
+  run_arm "$SCRATCH/bin/cypher.shard256.test" "$OUT/ab.shard256.txt"
+  run_arm "$SCRATCH/bin/cypher.base.test"      "$OUT/ab.base2.txt"
+  echo "ab rep $rep done" >&2
+done
+
+uptime > "$OUT/ab.loadavg-after.txt"
+
+cat "$OUT/ab.base1.txt" "$OUT/ab.base2.txt" > "$OUT/ab.base.txt"
+
+# Noise floor: arm A against itself.
+{ "$BENCHSTAT" "A1=$OUT/ab.base1.txt" "A2=$OUT/ab.base2.txt"; echo "benchstat_exit=$?"; } \
+  > "$OUT/ab.noisefloor.benchstat.txt" 2>&1
+
+# The A/B.
+{ "$BENCHSTAT" "onemutex=$OUT/ab.base.txt" "shard16=$OUT/ab.shard16.txt" "shard256=$OUT/ab.shard256.txt"; echo "benchstat_exit=$?"; } \
+  > "$OUT/ab.benchstat.txt" 2>&1
+
+# The sharded series against the ARCHIVED spike #2846 baseline, as the task's
+# acceptance criterion asks. Recorded separately because that baseline was taken
+# at commit be5019f4, two landed optimisations earlier, so it is NOT a
+# single-variable comparison — ab.benchstat.txt is.
+{ "$BENCHSTAT" \
+    "spike2846=$ROOT/docs/benchmarks/cypher-parse-lab-2026-09-16-spike2846/warm.series.txt" \
+    "shard16=$OUT/ab.shard16.txt"; echo "benchstat_exit=$?"; } \
+  > "$OUT/ab.vs-spike2846.benchstat.txt" 2>&1
+
+{ "$BENCHSTAT" \
+    "spike2846=$ROOT/docs/benchmarks/cypher-parse-lab-2026-09-16-spike2846/warm.multikey.series.txt" \
+    "shard16=$OUT/ab.shard16.txt"; echo "benchstat_exit=$?"; } \
+  > "$OUT/ab.vs-spike2846.multikey.benchstat.txt" 2>&1
+
+echo "AB DRIVER DONE"

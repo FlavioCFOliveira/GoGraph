@@ -1,0 +1,103 @@
+File: parser.test
+Type: cpu
+Time: 2026-09-16 12:58:09 WEST
+Duration: 144.99s, Total samples = 133.68s (92.20%)
+Active filters:
+   focus=BenchmarkStripCorpus
+Showing nodes accounting for 115.73s, 86.57% of 133.68s total
+      flat  flat%   sum%        cum   cum%
+    70.14s 52.47% 52.47%     70.14s 52.47%  internal/bytealg.IndexByteString
+    24.46s 18.30% 70.77%    115.70s 86.55%  github.com/FlavioCFOliveira/GoGraph/cypher/parser.BenchmarkStripCorpus.func1
+    18.06s 13.51% 84.28%     91.21s 68.23%  github.com/FlavioCFOliveira/GoGraph/cypher/parser.StripLiterals
+     0.98s  0.73% 85.01%      2.51s  1.88%  strings.ToUpper
+     0.27s   0.2% 85.21%      0.44s  0.33%  runtime.mallocgcTinySC2
+     0.21s  0.16% 85.37%      0.30s  0.22%  strings.(*Builder).WriteByte (inline)
+     0.18s  0.13% 85.50%      0.19s  0.14%  strings.(*Builder).copyCheck
+     0.16s  0.12% 85.62%      0.16s  0.12%  github.com/FlavioCFOliveira/GoGraph/cypher/parser.isIdentStart
+     0.15s  0.11% 85.73%      0.15s  0.11%  runtime.memmove
+     0.14s   0.1% 85.84%      0.98s  0.73%  strings.(*Builder).grow
+     0.13s 0.097% 85.94%      0.13s 0.097%  runtime.roundupsize (inline)
+     0.09s 0.067% 86.00%     70.29s 52.58%  strings.IndexByte (inline)
+     0.08s  0.06% 86.06%      0.78s  0.58%  internal/bytealg.MakeNoZero
+     0.08s  0.06% 86.12%      0.60s  0.45%  runtime.mallocgc
+     0.07s 0.052% 86.18%      0.07s 0.052%  runtime.releasem
+     0.06s 0.045% 86.22%     70.20s 52.51%  internal/stringslite.IndexByte (inline)
+     0.06s 0.045% 86.27%      1.11s  0.83%  strings.(*Builder).Grow
+     0.05s 0.037% 86.30%      0.13s 0.097%  github.com/FlavioCFOliveira/GoGraph/cypher/parser.isIdentChar (inline)
+     0.05s 0.037% 86.34%      0.05s 0.037%  runtime.getMCache
+     0.03s 0.022% 86.36%      0.05s 0.037%  runtime.(*mcache).nextFree
+     0.03s 0.022% 86.39%      0.06s 0.045%  runtime.mallocgcSmallNoScanSC2
+     0.03s 0.022% 86.41%      0.03s 0.022%  syscall.rawsyscalln
+     0.02s 0.015% 86.42%      0.02s 0.015%  runtime.asyncPreempt
+     0.02s 0.015% 86.44%      0.03s 0.022%  runtime.concatstrings
+     0.02s 0.015% 86.45%      0.02s 0.015%  runtime.mallocgcSmallScanNoHeader
+     0.02s 0.015% 86.47%      0.02s 0.015%  runtime.tryDeferToSpanScan
+     0.02s 0.015% 86.48%      0.14s   0.1%  strings.(*Builder).WriteString (inline)
+     0.01s 0.0075% 86.49%      0.02s 0.015%  github.com/FlavioCFOliveira/GoGraph/cypher/parser.unquoteString
+     0.01s 0.0075% 86.50%      0.01s 0.0075%  internal/runtime/atomic.(*UnsafePointer).Load
+     0.01s 0.0075% 86.51%      0.01s 0.0075%  internal/runtime/maps.(*Map).putSlotSmallFastStr
+     0.01s 0.0075% 86.51%      0.02s 0.015%  runtime.(*mheap).initSpan
+     0.01s 0.0075% 86.52%      0.01s 0.0075%  runtime.(*mspan).init
+     0.01s 0.0075% 86.53%      0.01s 0.0075%  runtime.casgstatus
+     0.01s 0.0075% 86.54%      0.01s 0.0075%  runtime.moveSliceNoCap
+     0.01s 0.0075% 86.54%      0.01s 0.0075%  runtime.pcvalue
+     0.01s 0.0075% 86.55%      0.01s 0.0075%  runtime.rand
+     0.01s 0.0075% 86.56%      0.01s 0.0075%  runtime.taggedPointerPack
+     0.01s 0.0075% 86.56%      0.03s 0.022%  runtime.wbBufFlush1
+     0.01s 0.0075% 86.57%      0.01s 0.0075%  strings.(*Builder).String
+         0     0% 86.57%      0.01s 0.0075%  fmt.Fprintf
+         0     0% 86.57%      0.02s 0.015%  fmt.Fprintln
+         0     0% 86.57%      0.03s 0.022%  gcWriteBarrier
+         0     0% 86.57%      0.03s 0.022%  github.com/FlavioCFOliveira/GoGraph/cypher/parser.BenchmarkStripCorpus
+         0     0% 86.57%      0.03s 0.022%  internal/poll.(*FD).Write
+         0     0% 86.57%      0.03s 0.022%  internal/poll.ignoringEINTRIO
+         0     0% 86.57%      0.02s 0.015%  internal/runtime/maps.(*Map).growToSmall
+         0     0% 86.57%      0.02s 0.015%  internal/runtime/maps.NewMap
+         0     0% 86.57%      0.02s 0.015%  internal/runtime/maps.newGroups
+         0     0% 86.57%      0.02s 0.015%  internal/runtime/maps.newarray
+         0     0% 86.57%      0.01s 0.0075%  internal/runtime/maps.rand
+         0     0% 86.57%      0.03s 0.022%  os.(*File).Write
+         0     0% 86.57%      0.03s 0.022%  os.(*File).write
+         0     0% 86.57%      0.01s 0.0075%  runtime.(*inlineUnwinder).resolveInternal
+         0     0% 86.57%      0.01s 0.0075%  runtime.(*lfstack).push
+         0     0% 86.57%      0.02s 0.015%  runtime.(*mcache).refill
+         0     0% 86.57%      0.02s 0.015%  runtime.(*mcentral).cacheSpan
+         0     0% 86.57%      0.02s 0.015%  runtime.(*mcentral).grow
+         0     0% 86.57%      0.02s 0.015%  runtime.(*mheap).alloc
+         0     0% 86.57%      0.02s 0.015%  runtime.(*mheap).alloc.func1
+         0     0% 86.57%      0.02s 0.015%  runtime.(*mheap).allocSpan
+         0     0% 86.57%      0.01s 0.0075%  runtime.(*spanSet).reset
+         0     0% 86.57%      0.01s 0.0075%  runtime.(*spanSetBlockAlloc).free
+         0     0% 86.57%      0.01s 0.0075%  runtime.callers
+         0     0% 86.57%      0.01s 0.0075%  runtime.callers.func1
+         0     0% 86.57%      0.03s 0.022%  runtime.concatstring2
+         0     0% 86.57%      0.01s 0.0075%  runtime.finishsweep_m
+         0     0% 86.57%      0.01s 0.0075%  runtime.gcStart
+         0     0% 86.57%      0.01s 0.0075%  runtime.gcStart.func3
+         0     0% 86.57%      0.01s 0.0075%  runtime.gopreempt_m
+         0     0% 86.57%      0.01s 0.0075%  runtime.goschedImpl
+         0     0% 86.57%      0.01s 0.0075%  runtime.lfstackPack
+         0     0% 86.57%      0.02s 0.015%  runtime.mProf_Malloc
+         0     0% 86.57%      0.02s 0.015%  runtime.makemap
+         0     0% 86.57%      0.03s 0.022%  runtime.mapassign_faststr
+         0     0% 86.57%      0.01s 0.0075%  runtime.newInlineUnwinder
+         0     0% 86.57%      0.02s 0.015%  runtime.newarray
+         0     0% 86.57%      0.01s 0.0075%  runtime.newobject
+         0     0% 86.57%      0.01s 0.0075%  runtime.newstack
+         0     0% 86.57%      0.01s 0.0075%  runtime.pcdatavalue1
+         0     0% 86.57%      0.02s 0.015%  runtime.profilealloc
+         0     0% 86.57%      0.01s 0.0075%  runtime.stkbucket
+         0     0% 86.57%      0.07s 0.052%  runtime.systemstack
+         0     0% 86.57%      0.01s 0.0075%  runtime.tracebackPCs
+         0     0% 86.57%      0.03s 0.022%  runtime.wbBufFlush
+         0     0% 86.57%      0.03s 0.022%  runtime.wbBufFlush.func1
+         0     0% 86.57%      0.03s 0.022%  syscall.Write
+         0     0% 86.57%      0.03s 0.022%  syscall.syscall
+         0     0% 86.57%      0.03s 0.022%  syscall.syscalln
+         0     0% 86.57%      0.03s 0.022%  syscall.write
+         0     0% 86.57%      0.03s 0.022%  testing.(*B).Run
+         0     0% 86.57%    115.70s 86.55%  testing.(*B).launch
+         0     0% 86.57%      0.03s 0.022%  testing.(*B).run
+         0     0% 86.57%      0.03s 0.022%  testing.(*B).run1.func1
+         0     0% 86.57%    115.73s 86.57%  testing.(*B).runN
+         0     0% 86.57%      0.03s 0.022%  testing.(*benchState).processBench

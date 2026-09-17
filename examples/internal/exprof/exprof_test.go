@@ -8,9 +8,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"runtime/pprof"
 	"runtime/trace"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -398,5 +400,275 @@ func TestBind(t *testing.T) {
 	}
 	if !cfg.Enabled() {
 		t.Error("parsed Config reports not Enabled")
+	}
+}
+
+// contendMutex produces real mutex contention and real blocking, so the mutex
+// and block profiles have something to record. Without actual contention both
+// profiles are legitimately empty, and a test that accepted an empty profile
+// would pass against a Finish that wrote nothing at all.
+//
+// It is kept deliberately small — a few thousand short critical sections rather
+// than a sustained load — because the oracle needs only that the profiles are
+// non-empty, and this package sits in the short layer where every second is
+// charged to the gate.
+func contendMutex(t *testing.T) {
+	t.Helper()
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 5_000 {
+				mu.Lock()
+				// A short spin inside the lock: long enough that the other three
+				// goroutines actually queue behind it, short enough to be free.
+				x := 0
+				for i := range 200 {
+					x += i % 7
+				}
+				_ = x
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// sampleCount decodes a protobuf pprof artefact and returns the number of
+// samples in it, so a test can distinguish "a profile exists" from "a profile
+// with something in it". It parses only the two protobuf fields it needs —
+// message 2 is Sample — rather than pulling in a profile library.
+func sampleCount(t *testing.T, path string) int {
+	t.Helper()
+	raw := gunzip(t, path)
+	n, i := 0, 0
+	for i < len(raw) {
+		key, w := protoVarint(raw[i:])
+		if w == 0 {
+			t.Fatalf("%s: malformed protobuf at offset %d", path, i)
+		}
+		i += w
+		field, wire := key>>3, key&7
+		switch wire {
+		case 0: // varint
+			_, w := protoVarint(raw[i:])
+			if w == 0 {
+				t.Fatalf("%s: malformed varint at %d", path, i)
+			}
+			i += w
+		case 2: // length-delimited
+			ln, w := protoVarint(raw[i:])
+			if w == 0 || i+w+int(ln) > len(raw) {
+				t.Fatalf("%s: malformed length-delimited field at %d", path, i)
+			}
+			if field == 2 {
+				n++
+			}
+			i += w + int(ln)
+		case 5:
+			i += 4
+		case 1:
+			i += 8
+		default:
+			t.Fatalf("%s: unsupported wire type %d at %d", path, wire, i)
+		}
+	}
+	return n
+}
+
+func protoVarint(b []byte) (uint64, int) {
+	var v uint64
+	for i := 0; i < len(b) && i < 10; i++ {
+		v |= uint64(b[i]&0x7f) << (7 * i)
+		if b[i]&0x80 == 0 {
+			return v, i + 1
+		}
+	}
+	return 0, 0
+}
+
+// TestContentionInertByDefault is the half of the contract the examples'
+// regression tests depend on: -profile-dir alone must buy CPU and heap and
+// nothing else, and must not touch either process-global sampling rate.
+func TestContentionInertByDefault(t *testing.T) {
+	// Establish the rates this test must leave untouched. SetMutexProfileFraction
+	// with a negative argument is documented to report the current value without
+	// changing it, which is the only getter the runtime offers.
+	before := runtime.SetMutexProfileFraction(-1)
+
+	dir := t.TempDir()
+	cfg := &Config{Dir: dir}
+	if cfg.Contention != 0 {
+		t.Fatalf("zero Config has Contention=%d", cfg.Contention)
+	}
+	var buf bytes.Buffer
+	if err := cfg.Run(&buf, func() error { contendMutex(t); return nil }); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	for _, name := range []string{MutexProfileName, BlockProfileName, GoroutineProfileName} {
+		if _, err := os.Stat(filepath.Join(dir, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s exists without -contention (stat err %v)", name, err)
+		}
+	}
+	for _, key := range []string{"pprof.mutex", "pprof.block", "pprof.goroutine"} {
+		if strings.Contains(buf.String(), key) {
+			t.Errorf("telemetry mentions %s without -contention: %q", key, buf.String())
+		}
+	}
+	if got := runtime.SetMutexProfileFraction(-1); got != before {
+		t.Errorf("mutex profile fraction moved from %d to %d without -contention", before, got)
+	}
+}
+
+// TestContentionProfiles asserts the three artefacts are real, non-empty
+// profiles and that both sampling rates are put back afterwards.
+func TestContentionProfiles(t *testing.T) {
+	before := runtime.SetMutexProfileFraction(-1)
+	dir := t.TempDir()
+	cfg := &Config{Dir: dir, Contention: 1}
+	if !cfg.Enabled() {
+		t.Fatal("Config with Contention set reports not Enabled")
+	}
+
+	var buf bytes.Buffer
+	if err := cfg.Run(&buf, func() error {
+		// Assert the rate is actually live DURING the workload, not merely set
+		// and cleared around it.
+		if got := runtime.SetMutexProfileFraction(-1); got != 1 {
+			t.Errorf("mutex fraction during the workload is %d, want 1", got)
+		}
+		contendMutex(t)
+		return nil
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// This checks the artefacts are REAL profiles. It deliberately does not
+	// claim more, and the reason is worth recording, because it is the trap this
+	// test fell into first.
+	//
+	// The mutex and block profiles are process-global and CUMULATIVE: nothing
+	// ever clears them, so every WriteTo dumps every event the process has
+	// recorded since any rate was first raised. Measured on this host, a
+	// contention-FREE run under -contention=1 already writes 1 mutex and 1 block
+	// sample from Finish's own forced GC, and once an earlier test in this binary
+	// has contended, its frames appear in every later profile too. So neither
+	// "the profile is non-empty" nor "the profile names the contending function"
+	// can distinguish a live session from a dead one in-process.
+	//
+	// What DOES establish the mechanism is the pair of rate assertions around
+	// this block: the mutex fraction is 1 while the workload runs, and both rates
+	// are off once Finish returns. A profiler live across the workload is exactly
+	// what those two prove. In the sweep the stronger claim holds by
+	// construction, because each example is one process with one session.
+	for _, name := range []string{MutexProfileName, BlockProfileName, GoroutineProfileName} {
+		if n := sampleCount(t, filepath.Join(dir, name)); n == 0 {
+			t.Errorf("%s decoded to zero samples", name)
+		}
+	}
+	for _, key := range []string{"pprof.mutex=", "pprof.block=", "pprof.goroutine="} {
+		if !strings.Contains(buf.String(), key) {
+			t.Errorf("telemetry omits %s: %q", key, buf.String())
+		}
+	}
+	if got := runtime.SetMutexProfileFraction(-1); got != before {
+		t.Errorf("mutex fraction left at %d, want it restored to %d", got, before)
+	}
+	// The runtime has no getter for the block rate, so the oracle is indirect:
+	// after Finish a fresh block profile must not grow, which it would if the
+	// rate were still live. Verified non-vacuous on this host — with the rate
+	// left on by hand the same workload grew the record count from 12 441 to
+	// 13 257, and with it off the count did not move at all.
+	n1 := len(profileRecords(t, "block"))
+	contendMutex(t)
+	if n2 := len(profileRecords(t, "block")); n2 != n1 {
+		t.Errorf("block profile grew from %d to %d records after Finish: the rate was not reset", n1, n2)
+	}
+}
+
+func profileRecords(t *testing.T, name string) []byte {
+	t.Helper()
+	p := pprof.Lookup(name)
+	if p == nil {
+		t.Fatalf("pprof.Lookup(%q) returned nil", name)
+	}
+	var b bytes.Buffer
+	if err := p.WriteTo(&b, 1); err != nil {
+		t.Fatalf("write %s profile: %v", name, err)
+	}
+	return b.Bytes()
+}
+
+// TestContentionWithoutProfileDirIsASetupError pins the fail-fast choice: an
+// operator who asks for contention profiles with nowhere to write them is told
+// so before the workload runs, not left with a run and no artefacts.
+func TestContentionWithoutProfileDirIsASetupError(t *testing.T) {
+	before := runtime.SetMutexProfileFraction(-1)
+	cfg := &Config{Contention: 1}
+	ran := false
+	err := cfg.Run(io.Discard, func() error { ran = true; return nil })
+	if err == nil {
+		t.Fatal("Run succeeded with -contention and no -profile-dir")
+	}
+	if ran {
+		t.Error("the workload ran despite the setup error")
+	}
+	if !strings.Contains(err.Error(), "profile-dir") {
+		t.Errorf("error does not name the missing flag: %v", err)
+	}
+	if got := runtime.SetMutexProfileFraction(-1); got != before {
+		t.Errorf("a rejected setup moved the mutex fraction to %d, want %d", got, before)
+	}
+}
+
+// TestNegativeContentionIsRejected guards the one value that would otherwise
+// reach SetMutexProfileFraction as its "report, do not change" sentinel.
+func TestNegativeContentionIsRejected(t *testing.T) {
+	cfg := &Config{Dir: t.TempDir(), Contention: -1}
+	if err := cfg.Run(io.Discard, func() error { return nil }); err == nil {
+		t.Fatal("Run accepted a negative contention rate")
+	}
+}
+
+// TestStartRestoresTheRatesWhenTheTraceFails covers the setup path that raises
+// the rates and then fails afterwards.
+func TestStartRestoresTheRatesWhenTheTraceFails(t *testing.T) {
+	before := runtime.SetMutexProfileFraction(-1)
+	cfg := &Config{Dir: t.TempDir(), Trace: filepath.Join(t.TempDir(), "nonexistent-dir", "t.trace"), Contention: 1}
+	if _, err := cfg.Start(); err == nil {
+		t.Fatal("Start succeeded with an unwritable -trace path")
+	}
+	if got := runtime.SetMutexProfileFraction(-1); got != before {
+		t.Errorf("a failed Start left the mutex fraction at %d, want %d", got, before)
+	}
+	if cpuProfilerBusy() {
+		t.Error("a failed Start left the CPU profiler running")
+	}
+}
+
+// TestBindContention pins the third flag's name and its inert default.
+func TestBindContention(t *testing.T) {
+	fs := flag.NewFlagSet("example", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	cfg := Bind(fs)
+
+	f := fs.Lookup("contention")
+	if f == nil {
+		t.Fatal("Bind did not register -contention")
+	}
+	if f.DefValue != "0" {
+		t.Errorf("-contention defaults to %q; must default to inert", f.DefValue)
+	}
+	if f.Usage == "" {
+		t.Error("-contention has no usage text")
+	}
+	if err := fs.Parse([]string{"-contention", "7"}); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if cfg.Contention != 7 {
+		t.Fatalf("Bind filled Contention=%d, want 7", cfg.Contention)
 	}
 }

@@ -1,0 +1,320 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkShardLadderMultiKey/shards001         	 8455268	        28.35 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards002         	 7870680	        30.38 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards004         	 8563362	        31.03 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards008         	 8303097	        30.52 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards016         	 7423665	        32.47 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards032         	 7342929	        32.95 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards064         	 8653872	        30.73 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards128         	10909936	        19.98 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards256         	13157593	        19.06 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards512         	12587714	        19.34 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards1024        	13090491	        18.20 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkShardLadderMultiKey/shards001         	 9146558	        28.42 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards002         	 8149012	        30.36 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards004         	 7881556	        30.51 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards008         	 7570699	        30.35 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards016         	 7568350	        30.46 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards032         	 8126904	        33.14 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards064         	10137213	        26.64 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards128         	11760573	        23.54 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards256         	12344673	        19.46 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards512         	12127566	        19.45 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards1024        	  187050	      1283 ns/op	    1191 B/op	      20 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkShardLadderMultiKey/shards001         	 8806449	        26.39 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards002         	 7725621	        27.20 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards004         	 8948253	        29.98 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards008         	 7800312	        30.37 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards016         	 7730454	        31.78 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards032         	 7504953	        33.33 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards064         	 8312443	        28.09 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards128         	11708410	        20.48 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards256         	11343807	        21.57 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards512         	13189711	        18.40 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards1024        	 1000000	      1245 ns/op	    1191 B/op	      20 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkShardLadderMultiKey/shards001         	 8067147	        27.38 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards002         	 7607184	        31.09 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards004         	 7660755	        31.04 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards008         	 7576204	        30.89 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards016         	 7211546	        32.39 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards032         	 7033180	        32.95 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards064         	 8465595	        28.47 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards128         	10992366	        20.28 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards256         	13284898	        18.15 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards512         	12661538	        19.14 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards1024        	  181249	      3832 ns/op	    3583 B/op	      63 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkShardLadderMultiKey/shards001         	 9232026	        26.23 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards002         	 7871390	        27.95 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards004         	 8931727	        30.47 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards008         	 8691925	        28.21 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards016         	 8116848	        31.73 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards032         	 7238180	        34.53 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards064         	 8729613	        27.05 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards128         	12972417	        22.86 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards256         	10383279	        20.54 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards512         	11585247	        18.41 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards1024        	13279508	        18.35 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkShardLadderMultiKey/shards001         	 8878338	        28.71 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards002         	 8563119	        27.69 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards004         	 8814130	        30.33 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards008         	 8436828	        29.46 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards016         	 7395916	        32.90 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards032         	 7579335	        32.09 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards064         	 8311124	        26.92 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards128         	12679347	        21.47 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards256         	12332170	        18.36 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards512         	12380998	        18.27 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards1024        	12727972	      1248 ns/op	    1194 B/op	      21 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkShardLadderMultiKey/shards001         	 9098174	        26.22 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards002         	 8857503	        27.07 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards004         	 8921407	        27.23 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards008         	 8878105	        28.06 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards016         	 7880371	        30.12 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards032         	 7403103	        32.44 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards064         	 7967476	        25.15 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards128         	10526046	        21.04 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards256         	11246440	        18.35 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards512         	12800910	        19.60 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards1024        	13403078	        18.42 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkShardLadderMultiKey/shards001         	 9224884	        25.96 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards002         	 8014737	        30.55 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards004         	 8510034	        26.98 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards008         	 7863705	        30.63 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards016         	 8480589	        30.70 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards032         	 7673410	        28.74 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards064         	 8767830	        28.33 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards128         	10395778	        20.82 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards256         	11723925	        18.57 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards512         	12892221	        19.75 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards1024        	12504444	        18.23 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkShardLadderMultiKey/shards001         	 8407249	        28.02 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards002         	 8826232	        30.57 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards004         	 7788772	        30.71 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards008         	 8309241	        29.96 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards016         	 7646253	        30.82 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards032         	 7231683	        30.37 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards064         	 8500840	        31.16 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards128         	11766988	        21.14 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards256         	12451414	        19.41 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards512         	13375191	        20.19 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards1024        	 1000000	      1271 ns/op	    1191 B/op	      20 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkShardLadderMultiKey/shards001         	 8423466	        29.44 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards002         	 8708403	        26.97 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards004         	 7891999	        28.68 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards008         	 8549329	        28.08 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards016         	 8244931	        30.03 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards032         	 7756332	        31.96 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards064         	10352356	        30.45 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards128         	11136610	        21.52 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards256         	11179320	        21.44 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards512         	12343006	        18.31 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards1024        	13155340	        18.24 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkShardLadderMultiKey/shards001         	 8527938	        25.80 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards002         	 7866896	        29.51 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards004         	 7890194	        30.62 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards008         	 7796341	        31.31 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards016         	 7456840	        32.10 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards032         	 7066816	        33.70 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards064         	 8172321	        30.02 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards128         	10446495	        20.07 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards256         	13365446	        19.43 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards512         	13249176	        17.99 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards1024        	 1000000	      1257 ns/op	    1191 B/op	      20 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkShardLadderMultiKey/shards001         	 8282954	        26.42 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards002         	 8712553	        27.09 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards004         	 7882387	        28.25 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards008         	 7901581	        30.31 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards016         	 7522252	        30.17 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards032         	 7526125	        34.03 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards064         	 8380204	        25.76 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards128         	11683000	        22.25 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards256         	11385762	        20.70 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards512         	12446974	        18.18 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards1024        	13310624	      2446 ns/op	    2383 B/op	      41 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkShardLadderMultiKey/shards001         	 8416240	        28.09 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards002         	 8781838	        28.98 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards004         	 8055414	        28.38 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards008         	 7700318	        30.39 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards016         	 7441783	        33.57 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards032         	 6955538	        30.03 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards064         	 8032060	        31.50 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards128         	10538409	        19.40 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards256         	12114404	        18.51 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards512         	12257718	        18.67 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards1024        	12869552	        18.58 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkShardLadderMultiKey/shards001         	 9170746	        26.40 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards002         	 8705785	        27.39 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards004         	 8860284	        27.12 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards008         	 8878885	        27.66 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards016         	 7715883	        33.09 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards032         	 7217719	        33.07 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards064         	 9008374	        29.86 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards128         	12386910	        20.82 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards256         	11406211	        19.21 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards512         	12445980	        19.31 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards1024        	13329753	        18.16 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkShardLadderMultiKey/shards001         	 8562495	        28.09 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards002         	 8919016	        26.80 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards004         	 8933638	        27.67 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards008         	 7955008	        31.72 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards016         	 8062506	        30.78 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards032         	 7312177	        33.87 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards064         	 9356632	        29.60 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards128         	12633193	        19.41 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards256         	11494023	        19.39 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards512         	12450554	        18.33 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards1024        	12345675	        18.20 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkShardLadderMultiKey/shards001         	 9206542	        25.95 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards002         	 8918341	        26.97 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards004         	 8948684	        26.85 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards008         	 8431035	        28.13 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards016         	 7640503	        32.17 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards032         	 7509356	        31.31 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards064         	 9979027	        28.00 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards128         	12116520	        21.99 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards256         	12899324	        25.03 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards512         	11951100	        18.70 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards1024        	 1000000	      1276 ns/op	    1191 B/op	      20 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkShardLadderMultiKey/shards001         	 8180481	        27.82 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards002         	 8861360	        27.33 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards004         	 8828424	        27.19 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards008         	 8502170	        30.15 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards016         	 8380338	        29.88 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards032         	 7708252	        31.02 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards064         	 8170873	        29.27 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards128         	11516130	        20.90 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards256         	12416281	        19.99 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards512         	13216737	        19.17 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards1024        	13206040	        18.32 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkShardLadderMultiKey/shards001         	 8939420	        26.90 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards002         	 8891262	        27.13 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards004         	 8827504	        29.25 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards008         	 8445103	        30.73 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards016         	 7776385	        29.28 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards032         	 7539108	        30.86 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards064         	 8388796	        28.00 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards128         	11983248	        21.57 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards256         	12306534	        18.20 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards512         	12346419	        20.54 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards1024        	13250211	      1250 ns/op	    1194 B/op	      21 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkShardLadderMultiKey/shards001         	 9331576	        25.75 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards002         	 7899392	        26.97 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards004         	 7894281	        30.33 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards008         	 7869496	        29.47 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards016         	 7714405	        32.08 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards032         	 7868776	        31.50 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards064         	 7935042	        30.09 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards128         	11580589	        21.06 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards256         	12849770	        20.60 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards512         	13071420	        19.49 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards1024        	13328088	      1240 ns/op	    1191 B/op	      20 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkShardLadderMultiKey/shards001         	 9127629	        27.42 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards002         	 8123671	        29.64 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards004         	 8542267	        29.82 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards008         	 7907025	        30.57 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards016         	 7397522	        30.62 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards032         	 7593684	        31.37 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards064         	 9266274	        23.24 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards128         	11302804	        22.04 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards256         	13266661	        23.45 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards512         	13178064	        18.33 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards1024        	13086900	        18.09 ns/op	       0 B/op	       0 allocs/op
+PASS

@@ -1,0 +1,65 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+                                      │   onemutex    │                 shard16                  │                shard256                 │
+                                      │    sec/op     │    sec/op      vs base                   │    sec/op     vs base                   │
+SpikeWarmPrepareParallel/quotefree        15.49n ± 1%    18.34n ±  1%  +18.44% (p=0.000 n=20+10)   18.49n ±  1%  +19.41% (p=0.000 n=20+10)
+SpikeWarmPrepareParallel/quotefree-2      40.44n ± 1%    36.91n ± 34%   -8.71% (p=0.007 n=20+10)   34.86n ±  5%  -13.79% (p=0.000 n=20+10)
+SpikeWarmPrepareParallel/quotefree-4      86.47n ± 2%    80.22n ±  3%   -7.22% (p=0.000 n=20+10)   68.33n ±  7%  -20.98% (p=0.000 n=20+10)
+SpikeWarmPrepareParallel/quotefree-8      86.15n ± 2%    92.64n ±  2%   +7.54% (p=0.000 n=20+10)   95.83n ±  1%  +11.24% (p=0.000 n=20+10)
+SpikeWarmPrepareParallel/quotefree-10     89.38n ± 1%    96.64n ±  2%   +8.12% (p=0.000 n=20+10)   97.67n ±  1%   +9.28% (p=0.000 n=20+10)
+SpikeWarmPrepareParallel/literal          334.1n ± 2%    337.4n ±  2%   +0.97% (p=0.018 n=20+10)   330.9n ±  2%        ~ (p=0.368 n=20+10)
+SpikeWarmPrepareParallel/literal-2        172.1n ± 1%    177.0n ±  1%   +2.88% (p=0.000 n=20+10)   176.3n ±  2%   +2.47% (p=0.000 n=20+10)
+SpikeWarmPrepareParallel/literal-4        106.8n ± 1%    106.1n ±  1%        ~ (p=0.172 n=20+10)   108.4n ±  3%        ~ (p=0.146 n=20+10)
+SpikeWarmPrepareParallel/literal-8        160.3n ± 1%    150.2n ±  3%   -6.30% (p=0.000 n=20+10)   145.1n ±  2%   -9.51% (p=0.000 n=20+10)
+SpikeWarmPrepareParallel/literal-10       175.9n ± 1%    158.3n ±  3%  -10.01% (n=20+10)           152.5n ±  1%  -13.30% (n=20+10)
+SpikeWarmPrepareMultiKey                  21.09n ± 1%    31.96n ±  3%  +51.54% (p=0.000 n=20+10)   21.87n ±  3%   +3.67% (p=0.000 n=20+10)
+SpikeWarmPrepareMultiKey-2                54.15n ± 1%    27.66n ±  3%  -48.91% (p=0.000 n=20+10)   16.12n ±  7%  -70.23% (p=0.000 n=20+10)
+SpikeWarmPrepareMultiKey-4              121.300n ± 1%   24.845n ± 11%  -79.52% (p=0.000 n=20+10)   9.680n ± 72%  -92.02% (p=0.000 n=20+10)
+SpikeWarmPrepareMultiKey-8               113.45n ± 1%    37.85n ±  8%  -66.64% (p=0.000 n=20+10)   18.57n ± 11%  -83.63% (p=0.000 n=20+10)
+SpikeWarmPrepareMultiKey-10              119.10n ± 1%    42.42n ±  5%  -64.38% (p=0.000 n=20+10)   19.33n ± 16%  -83.77% (p=0.000 n=20+10)
+geomean                                   87.51n         67.22n        -23.19%                     52.87n        -39.58%
+
+                                      │   onemutex   │                shard16                 │                shard256                │
+                                      │     B/op     │    B/op     vs base                    │    B/op     vs base                    │
+SpikeWarmPrepareParallel/quotefree      0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=20+10) ¹   0.000 ± 0%       ~ (p=1.000 n=20+10) ¹
+SpikeWarmPrepareParallel/quotefree-2    0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=20+10) ¹   0.000 ± 0%       ~ (p=1.000 n=20+10) ¹
+SpikeWarmPrepareParallel/quotefree-4    0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=20+10) ¹   0.000 ± 0%       ~ (p=1.000 n=20+10) ¹
+SpikeWarmPrepareParallel/quotefree-8    0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=20+10) ¹   0.000 ± 0%       ~ (p=1.000 n=20+10) ¹
+SpikeWarmPrepareParallel/quotefree-10   0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=20+10) ¹   0.000 ± 0%       ~ (p=1.000 n=20+10) ¹
+SpikeWarmPrepareParallel/literal        464.0 ± 0%     464.0 ± 0%       ~ (p=1.000 n=20+10) ¹   464.0 ± 0%       ~ (p=1.000 n=20+10) ¹
+SpikeWarmPrepareParallel/literal-2      464.0 ± 0%     464.0 ± 0%       ~ (p=1.000 n=20+10) ¹   464.0 ± 0%       ~ (p=1.000 n=20+10) ¹
+SpikeWarmPrepareParallel/literal-4      464.0 ± 0%     464.0 ± 0%       ~ (p=1.000 n=20+10) ¹   464.0 ± 0%       ~ (p=1.000 n=20+10) ¹
+SpikeWarmPrepareParallel/literal-8      464.0 ± 0%     464.0 ± 0%       ~ (p=1.000 n=20+10) ¹   464.0 ± 0%       ~ (p=1.000 n=20+10) ¹
+SpikeWarmPrepareParallel/literal-10     464.0 ± 0%     464.0 ± 0%       ~ (p=1.000 n=20+10) ¹   464.0 ± 0%       ~ (p=1.000 n=20+10) ¹
+SpikeWarmPrepareMultiKey                0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=20+10) ¹   0.000 ± 0%       ~ (p=1.000 n=20+10) ¹
+SpikeWarmPrepareMultiKey-2              0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=20+10) ¹   0.000 ± 0%       ~ (p=1.000 n=20+10) ¹
+SpikeWarmPrepareMultiKey-4              0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=20+10) ¹   0.000 ± 0%       ~ (p=1.000 n=20+10) ¹
+SpikeWarmPrepareMultiKey-8              0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=20+10) ¹   0.000 ± 0%       ~ (p=1.000 n=20+10) ¹
+SpikeWarmPrepareMultiKey-10             0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=20+10) ¹   0.000 ± 0%       ~ (p=1.000 n=20+10) ¹
+geomean                                            ²               +0.00%                   ²               +0.00%                   ²
+¹ all samples are equal
+² summaries must be >0 to compute geomean
+
+                                      │   onemutex   │                shard16                 │                shard256                │
+                                      │  allocs/op   │ allocs/op   vs base                    │ allocs/op   vs base                    │
+SpikeWarmPrepareParallel/quotefree      0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=20+10) ¹   0.000 ± 0%       ~ (p=1.000 n=20+10) ¹
+SpikeWarmPrepareParallel/quotefree-2    0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=20+10) ¹   0.000 ± 0%       ~ (p=1.000 n=20+10) ¹
+SpikeWarmPrepareParallel/quotefree-4    0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=20+10) ¹   0.000 ± 0%       ~ (p=1.000 n=20+10) ¹
+SpikeWarmPrepareParallel/quotefree-8    0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=20+10) ¹   0.000 ± 0%       ~ (p=1.000 n=20+10) ¹
+SpikeWarmPrepareParallel/quotefree-10   0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=20+10) ¹   0.000 ± 0%       ~ (p=1.000 n=20+10) ¹
+SpikeWarmPrepareParallel/literal        6.000 ± 0%     6.000 ± 0%       ~ (p=1.000 n=20+10) ¹   6.000 ± 0%       ~ (p=1.000 n=20+10) ¹
+SpikeWarmPrepareParallel/literal-2      6.000 ± 0%     6.000 ± 0%       ~ (p=1.000 n=20+10) ¹   6.000 ± 0%       ~ (p=1.000 n=20+10) ¹
+SpikeWarmPrepareParallel/literal-4      6.000 ± 0%     6.000 ± 0%       ~ (p=1.000 n=20+10) ¹   6.000 ± 0%       ~ (p=1.000 n=20+10) ¹
+SpikeWarmPrepareParallel/literal-8      6.000 ± 0%     6.000 ± 0%       ~ (p=1.000 n=20+10) ¹   6.000 ± 0%       ~ (p=1.000 n=20+10) ¹
+SpikeWarmPrepareParallel/literal-10     6.000 ± 0%     6.000 ± 0%       ~ (p=1.000 n=20+10) ¹   6.000 ± 0%       ~ (p=1.000 n=20+10) ¹
+SpikeWarmPrepareMultiKey                0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=20+10) ¹   0.000 ± 0%       ~ (p=1.000 n=20+10) ¹
+SpikeWarmPrepareMultiKey-2              0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=20+10) ¹   0.000 ± 0%       ~ (p=1.000 n=20+10) ¹
+SpikeWarmPrepareMultiKey-4              0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=20+10) ¹   0.000 ± 0%       ~ (p=1.000 n=20+10) ¹
+SpikeWarmPrepareMultiKey-8              0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=20+10) ¹   0.000 ± 0%       ~ (p=1.000 n=20+10) ¹
+SpikeWarmPrepareMultiKey-10             0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=20+10) ¹   0.000 ± 0%       ~ (p=1.000 n=20+10) ¹
+geomean                                            ²               +0.00%                   ²               +0.00%                   ²
+¹ all samples are equal
+² summaries must be >0 to compute geomean
+benchstat_exit=0

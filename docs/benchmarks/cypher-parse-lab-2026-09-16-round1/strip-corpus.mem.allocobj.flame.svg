@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="268" viewBox="0 0 1400 268" font-family="Menlo,monospace" font-size="11">
+<rect width="1400" height="268" fill="#ffffff"/>
+<text x="700" y="20" text-anchor="middle" font-size="14">strip-corpus.mem.allocobj.flame [alloc_objects] [focus BenchmarkStripCorpus]</text>
+<text x="700" y="36" text-anchor="middle" font-size="10" fill="#555">total 3154162 — red=antlr runtime, orange=generated parser, blue=hand-written parser, green=other GoGraph, grey=runtime/stdlib</text>
+<g><title>all — 3154162 (100.00%)</title><rect x="10.00" y="48" width="1379.50" height="15" fill="#cccccc" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="59" fill="#000">all</text>
+</g>
+<g><title>testing.(*B).launch — 3150073 (99.87%)</title><rect x="10.00" y="64" width="1377.71" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="75" fill="#000">testing.(*B).launch</text>
+</g>
+<g><title>testing.(*B).runN — 3150073 (99.87%)</title><rect x="10.00" y="80" width="1377.71" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="91" fill="#000">testing.(*B).runN</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/parser.BenchmarkStripCorpus.func1 — 3150073 (99.87%)</title><rect x="10.00" y="96" width="1377.71" height="15" fill="#1f77b4" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="107" fill="#000">parser.BenchmarkStripCorpus.func1</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/parser.StripLiterals — 3150073 (99.87%)</title><rect x="10.00" y="112" width="1377.71" height="15" fill="#1f77b4" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="123" fill="#000">parser.StripLiterals</text>
+</g>
+<g><title>strings.ToUpper — 2475433 (78.48%)</title><rect x="10.00" y="128" width="1082.54" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="139" fill="#000">strings.ToUpper</text>
+</g>
+<g><title>strings.(*Builder).Grow — 2475433 (78.48%)</title><rect x="10.00" y="144" width="1082.54" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="155" fill="#000">strings.(*Builder).Grow</text>
+</g>
+<g><title>strings.(*Builder).grow — 2475433 (78.48%)</title><rect x="10.00" y="160" width="1082.54" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="171" fill="#000">strings.(*Builder).grow</text>
+</g>
+<g><title>internal/bytealg.MakeNoZero — 2475433 (78.48%)</title><rect x="10.00" y="176" width="1082.54" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="187" fill="#000">bytealg.MakeNoZero</text>
+</g>
+<g><title>strings.(*Builder).Grow — 132168 (4.19%)</title><rect x="1093.04" y="128" width="57.33" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="1096.04" y="139" fill="#000">strings…</text>
+</g>
+<g><title>strings.(*Builder).grow — 132168 (4.19%)</title><rect x="1093.04" y="144" width="57.33" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="1096.04" y="155" fill="#000">strings…</text>
+</g>
+<g><title>internal/bytealg.MakeNoZero — 132168 (4.19%)</title><rect x="1093.04" y="160" width="57.33" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="1096.04" y="171" fill="#000">bytealg…</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/parser.unquoteString — 81100 (2.57%)</title><rect x="1150.87" y="128" width="34.98" height="15" fill="#1f77b4" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>strings.(*Builder).Grow — 81100 (2.57%)</title><rect x="1150.87" y="144" width="34.98" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>strings.(*Builder).grow — 81100 (2.57%)</title><rect x="1150.87" y="160" width="34.98" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/bytealg.MakeNoZero — 81100 (2.57%)</title><rect x="1150.87" y="176" width="34.98" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>testing.(*B).run1.func1 — 4089 (0.13%)</title><rect x="1388.21" y="64" width="1.29" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>testing.(*B).runN — 4089 (0.13%)</title><rect x="1388.21" y="80" width="1.29" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/parser.BenchmarkStripCorpus — 3997 (0.13%)</title><rect x="1388.21" y="96" width="1.25" height="15" fill="#1f77b4" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>testing.(*B).Run — 3173 (0.10%)</title><rect x="1388.21" y="112" width="0.89" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>testing.(*B).run — 2093 (0.07%)</title><rect x="1388.21" y="128" width="0.42" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>testing.(*benchState).processBench — 2083 (0.07%)</title><rect x="1388.21" y="144" width="0.41" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>testing.BenchmarkResult.String — 996 (0.03%)</title><rect x="1388.21" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>fmt.Fprintf — 415 (0.01%)</title><rect x="1388.21" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>testing.benchmarkName (inline) — 454 (0.01%)</title><rect x="1388.65" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>fmt.Sprintf — 371 (0.01%)</title><rect x="1388.65" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>testing.(*matcher).fullName — 664 (0.02%)</title><rect x="1389.13" y="128" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/parser.loadCorpus — 658 (0.02%)</title><rect x="1389.60" y="112" width="0.10" height="15" fill="#1f77b4" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/parser.readCorpus — 656 (0.02%)</title><rect x="1389.60" y="128" width="0.10" height="15" fill="#1f77b4" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>encoding/json.Unmarshal (inline) — 650 (0.02%)</title><rect x="1389.60" y="144" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>encoding/json/v2.Unmarshal — 650 (0.02%)</title><rect x="1389.60" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>encoding/json/v2.unmarshalDecode — 647 (0.02%)</title><rect x="1389.60" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>encoding/json/v2.makeStructArshaler.func3 — 638 (0.02%)</title><rect x="1389.60" y="192" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>encoding/json/v2.makeSliceArshaler.func3 — 568 (0.02%)</title><rect x="1389.60" y="208" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>encoding/json/v2.makeStructArshaler.func3 — 542 (0.02%)</title><rect x="1389.60" y="224" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+</svg>

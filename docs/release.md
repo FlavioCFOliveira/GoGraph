@@ -14,11 +14,22 @@ Before tagging a new release:
    ```
 
    `make release-preflight` **subsumes** `make ci` — it runs the
-   release-accuracy checks, then the full `make ci` correctness+coverage
-   gate exactly once. Do **not** run `make ci` separately as well; that
-   would execute the whole `go test -race ./...` and coverage suite a
-   second time for no added assurance. Run `make ci` on its own only for
-   day-to-day iteration between releases.
+   release-accuracy checks, then the `make ci` correctness gate exactly
+   once. Do **not** run `make ci` separately as well; that would execute
+   the whole `go test -race ./...` suite a second time for no added
+   assurance. Run `make ci` on its own only for day-to-day iteration
+   between releases.
+
+   **The release path runs correctness gates only.** Benchmarks left it in
+   `v0.14.2`; the coverage gate left it on 2026-09-15. `make ci` executes
+   the module suite **exactly once**, in `test-short`. Coverage remains
+   available and unchanged as a deliberate measurement —
+   `make cover-gate`, aggregate ≥ 85 %, per-package ≥ 75 % — and nothing
+   runs it for you.
+
+   **Start `rmp graph serve -r gograph` first.** `ci-kg-verify` needs it,
+   and since the reordering it is stage 6 of 11, so a missing server now
+   fails the gate about fifteen seconds in rather than forty minutes in.
 
 2. Dependency integrity holds:
 
@@ -100,11 +111,14 @@ workflow is `.github/workflows/release.yml`, which runs on a `v*` tag
 push and executes the release-accuracy gate plus goreleaser; it does
 not re-run the correctness gates. Every correctness and compliance
 gate (`go vet`, `go build`, `go test -race ./...`, `golangci-lint`,
-the openCypher TCK execution + conformance gate, the coverage gate,
-the crash-injection battery, `govulncheck`, and `go mod tidy`) runs
-**locally** before a developer pushes or tags — via `make ci` for
-day-to-day work and the canonical `make release-preflight` gate before
-tagging a release.
+the openCypher TCK execution + conformance gate, `govulncheck`,
+`go mod tidy` and the knowledge-graph fidelity gate) runs **locally**
+before a developer pushes or tags — via `make ci` for day-to-day work
+and the canonical `make release-preflight` gate before tagging a
+release. The **coverage** gate and the **crash-injection battery** are
+not members of `make ci`: coverage is run deliberately with
+`make cover-gate` (thresholds unchanged), and the crash battery with
+`make test-crashinject`.
 
 This is the one control that is real, and it is verified per release:
 `make release-preflight` exits non-zero on any failing gate, and the
@@ -246,7 +260,8 @@ The workflow deliberately does **not** re-run the correctness gates.
 Before pushing the tag, the releaser must run the canonical
 `VERSION=<tag> make release-preflight` gate locally (see the gate list
 below); that gate — not GitHub — is what guarantees the tagged commit
-passes vet/build/-race/lint/TCK/coverage before it is published.
+passes vet/build/-race/lint/TCK before it is published. It does not
+gate on coverage and it does not run a benchmark.
 
 ## Local fallback
 
@@ -273,19 +288,79 @@ in order, BEFORE goreleaser is invoked:
 4. README.md "Current release" names `VERSION`.
 5. SECURITY.md supported-versions table names `VERSION`'s `vX.Y.x` line.
 
-**Correctness + coverage** (`make ci`, run exactly once):
+**Correctness** (`make ci`, run exactly once — no coverage, no benchmarks):
 
-6. `make ci` is green. Its members, in the order the target lists them, are
-   `shell-guard`, `tidy` (`go mod tidy`), `fmt` (`gofmt`/`goimports`),
-   `vet` (`go vet ./...`), `build` (`go build ./...`), `vulncheck`
-   (`govulncheck`), `test-short` (`go test -race ./...`, which includes the
-   `cypher/tck` `TestTCKExecution` =100 % execution baseline, so a TCK
-   regression fails this gate), `test-timing`, `test-uninstrumented`,
-   `lint` (`golangci-lint run ./...`), `cover-gate` (aggregate ≥ 85 %,
-   per-package ≥ 75 %) and `ci-kg-verify`. The suite runs once here — the
-   gate does not re-run it. (`scripts/pre-release.sh` is a separate
+6. `make ci` is green. Its members, **in the order it runs them**, with the
+   wall clock each cost. **The figures below were measured on the `v0.15.0`
+   release tree** — commit `19138042`, 2026-09-17, Apple M4, 10 cores,
+   `darwin/arm64`, go1.27.1 — read from the per-stage table
+   `scripts/ci_stages.sh` prints at the end of its own run log. They supersede
+   the 2026-09-15 measurement this table previously carried, which was taken
+   before sprint 362 added its tests:
+
+   | # | Stage | Cost | What it does |
+   |---|---|---|---|
+   | 1 | `shell-guard` | 0.5 s | asserts the recipe shell carries `-e -u -o pipefail` (rmp #2672) |
+   | 2 | `tidy` | 0.5 s | `go mod tidy` |
+   | 3 | `fmt` | 7.2 s | `gofmt` / `goimports -w` |
+   | 4 | `vet` | 1.2 s | `go vet ./...` |
+   | 5 | `build` | 8.0 s | `go build ./...` |
+   | 6 | `ci-kg-verify` | 1.9 s | knowledge-graph fidelity — **needs `rmp graph serve -r gograph`** |
+   | 7 | `vulncheck` | 2.8 s | `govulncheck` over the module — needs the network |
+   | 8 | `lint` | 1.8 s warm / 252 s cold | `golangci-lint run ./...` |
+   | 9 | `test-uninstrumented` | 54.7 s | seven packages with neither `-race` nor coverage |
+   | 10 | `test-timing` | 81.0 s | the wall-clock gates, serially, on a quiet machine |
+   | 11 | `test-short` | 774.7 s (12.9 min) | `go test -race -count=1 ./...` — the module suite, **once** |
+   | | **total** | **941.3 s (15.7 min)** | 11 of 11 green, 130 distinct packages `ok`, 0 cached |
+
+   **Only the cold-`lint` figure is inherited rather than re-measured.** The
+   252 s worst case is a property of an empty `golangci-lint` analysis cache,
+   which the release run did not have; every other number in the table comes
+   from that run.
+
+   `test-short` carries the `cypher/tck` `TestTCKExecution` = 100 % execution
+   baseline, so a TCK regression fails this gate. The suite runs once here —
+   the gate does not re-run it. (`scripts/pre-release.sh` is a separate
    standalone convenience gate that runs vet/build/-race/lint without
    coverage; it is **not** invoked by `release-preflight`.)
+
+   **The order is fail-cheap, and the ordering is what the measurement is
+   for.** Publishing `v0.14.2` cost roughly 70 minutes of gate time because
+   `lint` was then **tenth** — after the ~25-minute race suite — so a single
+   `revive: context-as-argument` violation in one file failed the gate after
+   the suite had run, and `cover-gate` and `ci-kg-verify` never executed at
+   all. Everything that can conclude in seconds now runs first: **~24 s of
+   checks** stand between `make ci` and the first full-suite run. `lint` sits
+   last of the cheap stages because it has the block's largest worst case
+   (252 s on an empty analysis cache against 2 s warm); `fmt` stays ahead of
+   the analysers because it rewrites sources.
+
+   **Coverage is not a member.** `cover-gate` ran
+   `go test -coverpkg=./... -covermode=atomic ./...` — the whole corpus a
+   second time — so a green gate executed the module suite twice. By the
+   user's decision of 2026-09-15 it leaves the automatic gate exactly as
+   benchmarks did in `v0.14.2`. `scripts/cover_gate.sh` and its thresholds
+   are untouched; run `make cover-gate` deliberately when coverage is the
+   question.
+
+   **What only that non-race pass executed did not lapse.** It was the only
+   phase of `ci` built without `-race`, so it was the only one that compiled
+   the repository's `//go:build !race` files. Diffing `go test -list '.*'`
+   against `go test -race -list '.*'` measured seven such tests, six of which
+   ran in no other stage — two of them bounding the allocation a forged
+   length prefix can provoke. Their packages joined `UNINSTR_PKGS`, which is
+   why `test-uninstrumented` now costs 54.7 s instead of 1 s.
+
+7. **After a failure, `make ci-resume`.** Each passing stage is stamped with
+   a key covering every non-ignored file plus the Go and golangci-lint
+   versions; `ci-resume` skips only stages whose stamp still matches
+   **exactly**, and `vulncheck` and `ci-kg-verify` are never stamped because
+   their verdict depends on state outside the tree. Any file edit invalidates
+   every stamp — deliberately, because a stamp that wrongly survives silently
+   skips a gate. `make ci-from STAGE=<stage>` is the unverified shortcut for
+   when you are asserting that the earlier stages are unaffected.
+   `make ci-stages` prints the list. See
+   [`docs/test-layers.md`](test-layers.md#the-ci-gate-order-and-why).
 
    **`ci-kg-verify` needs a running knowledge-graph server.** It joined
    `make ci` in `v0.14.1` (rmp #2677, #2796) and runs `cmd/kgverify`, which
@@ -302,10 +377,29 @@ in order, BEFORE goreleaser is invoked:
 
 **Performance** (measured, but not gated):
 
-**Benchmark execution is not part of the release path.** Neither
-`release-accuracy` nor `release-preflight` runs a benchmark, and no
-release requires a `docs/benchmarks/VERSION.md` to exist. A release is
-gated on correctness, and never on a performance number.
+**Benchmark execution is not part of the release path, but the report
+still is.** Neither `release-accuracy` nor `release-preflight` runs a
+benchmark, and a release is gated on correctness, never on a performance
+number — no threshold has to be met and no campaign has to be run.
+
+**Every release does, however, require `docs/benchmarks/VERSION.md` to
+exist.** `TestPerReleaseBenchmarkReportExists`
+(`internal/docscheck/docscheck_test.go`) enforces it, guarding rmp #1398
+with the words *"each release must record its benchmark/load-test
+numbers"*, and it runs inside `test-short` — so a missing report turns
+`make ci`, and therefore `release-preflight`, **red**. The gate reads the
+version from the newest `release-notes/*.md`, so it starts failing the
+moment those notes are written and keeps failing until the report is
+added.
+
+*Corrected 2026-09-17 (`v0.15.0`).* This passage previously said that no
+release requires the file. That was false, and it cost a red gate: the
+sentence was trusted over the gate, and the release reached
+`release-preflight` without a report. **The gate is the authority, never
+the prose about the gate** — including this prose. What execution
+gating's removal changed is that the numbers may be development-time
+measurements already recorded by the tasks that shipped them, rather than
+a campaign run for the tag.
 
 That is a change of *gate*, not a change of *standard*. Measurement still
 decides every performance question in this project — a performance claim
@@ -357,15 +451,73 @@ files instead, and the `v0.13.0` changelog then claimed those documents
 archives.
 
 **So verify packaging per release by extraction, never by reading the
-config:**
+config.**
+
+**The command this section used to give does not run**, and that was found
+the only way it could be — by running it while preparing `v0.15.0`. Plain
 
 ```bash
 goreleaser release --snapshot --clean --skip=publish,before,validate
-tar tzf dist/gograph-*-darwin-arm64.tar.gz | grep -c '^docs/[^/]*\.md$'
-tar tzf dist/gograph-*-darwin-arm64.tar.gz | grep -cE '\.(txt|log|meta|sh)$'
+```
+
+exits **1** with
+
+```
+⨯ release failed after 13s   error=failed to find files to archive: globbing
+  failed for pattern gograph.cdx.json: matching "./gograph.cdx.json": file does
+  not exist
+```
+
+The cause is that `gograph.cdx.json` is an `archives.files:` entry, and the
+**only** thing that produces it is the `cyclonedx-gomod` `before:` hook —
+which `--skip=before` skips. The four per-platform `soak` binaries build
+fine; the run then dies at the archive step. A verification recipe that
+cannot execute is worse than none, because the `docs/**/*` defect above
+stood for a whole release precisely by not being extracted.
+
+**Use this instead. It was run to completion on the `v0.15.0` tree**
+(commit `19138042`, goreleaser exit 0), and it is the route to prefer when
+`cyclonedx-gomod` is not installed locally:
+
+```bash
+# `--skip=before` skips the hook that generates the SBOM, and the archive step
+# then hard-fails on the missing file. Stand a placeholder in for it:
+# gograph.cdx.json is gitignored, so this does not dirty the working tree.
+printf '{"bomFormat":"CycloneDX","specVersion":"1.5","version":1,"components":[]}\n' > gograph.cdx.json
+goreleaser release --snapshot --clean --skip=publish,before,validate
+for a in dist/gograph-*.tar.gz; do
+  echo "$a"
+  tar tzf "$a" | grep -c '^docs/[^/]*\.md$'
+  tar tzf "$a" | grep -cE '\.(txt|log|meta|sh)$'
+done
+rm -f gograph.cdx.json
+rm -rf dist
 ```
 
 The first count must equal `ls docs/*.md | wc -l`; the second must be 0.
+**Check every archive, not just one** — the defect this guards against was
+identical across all four, but a per-archive `files:` divergence would not
+be. Measured at `v0.15.0`: **122 of 122** top-level documents and **0** raw
+files in each of the four tarballs.
+
+**This route verifies the documentation glob, not the SBOM.** The
+placeholder is not a real bill of materials; it exists only so the archive
+assembles. To verify the real SBOM as well, install the pinned generator
+and let the hook run:
+
+```bash
+go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.12.0
+goreleaser release --snapshot --clean --skip=publish,validate   # note: no `before`
+```
+
+That second form was **not** exercised at `v0.15.0` — `cyclonedx-gomod` was
+not installed on the release workstation — so it is recorded as the
+documented alternative rather than as a verified one. The release workflow
+installs the same pinned version and runs the hook for real, so the SBOM
+that ships is generated there.
+
+**The same broken command is duplicated in `.goreleaser.yaml`'s
+`archives.files:` comment** and has not been corrected there.
 
 Note also that this file's `builds:` stanza declares **one** binary,
 `soak`. `.goreleaser.yaml`'s own header comment claims the config "also

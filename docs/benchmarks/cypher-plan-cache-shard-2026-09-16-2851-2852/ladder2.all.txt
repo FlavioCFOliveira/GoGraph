@@ -1,0 +1,760 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkShardLadderMultiKey/shards001-10         	 1909543	       124.8 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards002-10         	 2387337	        98.60 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards004-10         	 3178514	        78.30 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards008-10         	 4034991	        52.98 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards016-10         	 6355602	        39.01 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards032-10         	 7355024	        35.07 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards064-10         	10076746	        27.44 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards128-10         	12635901	        18.05 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards256-10         	15296853	        16.21 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards512-10         	15193197	        16.04 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards1024-10        	15459517	       235.2 ns/op	     240 B/op	       4 allocs/op
+BenchmarkShardLadderManyKeys/shards001-10         	 1736506	       140.8 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderManyKeys/shards002-10         	  242889	       977.2 ns/op	     995 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards004-10         	  217588	       971.4 ns/op	     984 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards008-10         	  297404	       761.7 ns/op	     768 B/op	      13 allocs/op
+BenchmarkShardLadderManyKeys/shards016-10         	  196011	      1049 ns/op	    1047 B/op	      18 allocs/op
+BenchmarkShardLadderManyKeys/shards032-10         	  291954	       917.0 ns/op	     913 B/op	      16 allocs/op
+BenchmarkShardLadderManyKeys/shards064-10         	  249337	       925.7 ns/op	     928 B/op	      16 allocs/op
+BenchmarkShardLadderManyKeys/shards128-10         	  220330	      1098 ns/op	    1088 B/op	      19 allocs/op
+BenchmarkShardLadderManyKeys/shards256-10         	  231325	      1085 ns/op	    1079 B/op	      18 allocs/op
+BenchmarkShardLadderManyKeys/shards512-10         	  216717	      1164 ns/op	    1168 B/op	      20 allocs/op
+BenchmarkShardLadderManyKeys/shards1024-10        	  192178	      1197 ns/op	    1192 B/op	      20 allocs/op
+BenchmarkShardLadderOneKey/shards001-10           	 2544459	        96.27 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards002-10           	 2524044	        95.33 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards004-10           	 2543926	        95.16 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards008-10           	 2494167	        97.48 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards016-10           	 2521420	        95.79 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards032-10           	 2447740	        95.51 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards064-10           	 2452860	        95.77 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards128-10           	 2435012	        97.44 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards256-10           	 2487015	       100.1 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards512-10           	 2509143	        98.17 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards1024-10          	 2434026	        95.66 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkShardLadderMultiKey/shards001-10         	 1898084	       125.8 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards002-10         	 2422494	        95.53 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards004-10         	 3500534	        75.49 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards008-10         	 4244985	        64.88 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards016-10         	 5688904	        41.49 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards032-10         	 7105093	        36.44 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards064-10         	 8207500	        26.60 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards128-10         	10257651	        20.24 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards256-10         	14123046	        20.26 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards512-10         	13196601	        18.61 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards1024-10        	15412896	        15.96 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderManyKeys/shards001-10         	 1745311	       137.7 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderManyKeys/shards002-10         	  230508	      1023 ns/op	    1005 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards004-10         	  228904	      1004 ns/op	     980 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards008-10         	  452013	       536.1 ns/op	     530 B/op	       9 allocs/op
+BenchmarkShardLadderManyKeys/shards016-10         	  328747	       964.4 ns/op	     952 B/op	      16 allocs/op
+BenchmarkShardLadderManyKeys/shards032-10         	  250765	      1045 ns/op	    1049 B/op	      18 allocs/op
+BenchmarkShardLadderManyKeys/shards064-10         	  242707	      1077 ns/op	    1086 B/op	      19 allocs/op
+BenchmarkShardLadderManyKeys/shards128-10         	  233365	      1080 ns/op	    1090 B/op	      19 allocs/op
+BenchmarkShardLadderManyKeys/shards256-10         	  223072	      1007 ns/op	    1017 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards512-10         	  204792	      1060 ns/op	    1072 B/op	      18 allocs/op
+BenchmarkShardLadderManyKeys/shards1024-10        	  195176	      1176 ns/op	    1200 B/op	      21 allocs/op
+BenchmarkShardLadderOneKey/shards001-10           	 2551046	        94.61 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards002-10           	 2526303	        94.84 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards004-10           	 2508570	        96.74 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards008-10           	 2477947	        95.82 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards016-10           	 2509646	        94.23 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards032-10           	 2532588	        94.69 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards064-10           	 2506753	        95.15 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards128-10           	 2473946	        98.37 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards256-10           	 2393038	        97.97 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards512-10           	 2423810	        98.26 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards1024-10          	 2460115	       100.2 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkShardLadderMultiKey/shards001-10         	 1883964	       126.2 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards002-10         	 2428840	        95.28 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards004-10         	 3218833	        81.29 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards008-10         	 4425696	        57.16 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards016-10         	 5702997	        40.20 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards032-10         	 7308512	        35.93 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards064-10         	 9794635	        23.50 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards128-10         	11403049	        21.88 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards256-10         	12021764	        19.78 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards512-10         	14781966	        15.71 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards1024-10        	 1953156	       240.3 ns/op	     239 B/op	       4 allocs/op
+BenchmarkShardLadderManyKeys/shards001-10         	 1689421	       142.1 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderManyKeys/shards002-10         	  228912	       961.6 ns/op	     966 B/op	      16 allocs/op
+BenchmarkShardLadderManyKeys/shards004-10         	  235352	      1034 ns/op	    1045 B/op	      18 allocs/op
+BenchmarkShardLadderManyKeys/shards008-10         	  280926	      1049 ns/op	    1052 B/op	      18 allocs/op
+BenchmarkShardLadderManyKeys/shards016-10         	  309314	      1051 ns/op	    1039 B/op	      18 allocs/op
+BenchmarkShardLadderManyKeys/shards032-10         	  207188	      1053 ns/op	    1045 B/op	      18 allocs/op
+BenchmarkShardLadderManyKeys/shards064-10         	  203050	      1058 ns/op	    1049 B/op	      18 allocs/op
+BenchmarkShardLadderManyKeys/shards128-10         	  242534	       952.5 ns/op	     949 B/op	      16 allocs/op
+BenchmarkShardLadderManyKeys/shards256-10         	  211279	       966.5 ns/op	     961 B/op	      16 allocs/op
+BenchmarkShardLadderManyKeys/shards512-10         	  189570	      1129 ns/op	    1125 B/op	      19 allocs/op
+BenchmarkShardLadderManyKeys/shards1024-10        	  191353	      1170 ns/op	    1167 B/op	      20 allocs/op
+BenchmarkShardLadderOneKey/shards001-10           	 2544312	        95.54 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards002-10           	 2561728	        94.88 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards004-10           	 2527071	        96.57 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards008-10           	 2551177	        95.45 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards016-10           	 2491498	        95.01 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards032-10           	 2472636	        98.45 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards064-10           	 2479227	        98.00 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards128-10           	 2419161	        97.74 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards256-10           	 2438506	        97.49 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards512-10           	 2480811	        98.76 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards1024-10          	 2508056	        98.37 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkShardLadderMultiKey/shards001-10         	 1914746	       124.3 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards002-10         	 2542342	        97.85 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards004-10         	 3225231	        81.51 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards008-10         	 4077962	        60.10 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards016-10         	 5929798	        40.34 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards032-10         	 8184840	        33.61 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards064-10         	10633819	        24.67 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards128-10         	13164630	        18.94 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards256-10         	12647887	        19.40 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards512-10         	13245458	        19.24 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards1024-10        	14683838	       118.5 ns/op	     119 B/op	       2 allocs/op
+BenchmarkShardLadderManyKeys/shards001-10         	 1746734	       140.3 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderManyKeys/shards002-10         	  235428	       961.8 ns/op	     961 B/op	      16 allocs/op
+BenchmarkShardLadderManyKeys/shards004-10         	  235143	      1003 ns/op	     995 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards008-10         	  231610	      1263 ns/op	    1259 B/op	      22 allocs/op
+BenchmarkShardLadderManyKeys/shards016-10         	  258162	      1406 ns/op	    1400 B/op	      24 allocs/op
+BenchmarkShardLadderManyKeys/shards032-10         	  241114	      1172 ns/op	    1185 B/op	      20 allocs/op
+BenchmarkShardLadderManyKeys/shards064-10         	  225310	       898.0 ns/op	     907 B/op	      15 allocs/op
+BenchmarkShardLadderManyKeys/shards128-10         	  238270	      1003 ns/op	    1016 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards256-10         	  236704	      1043 ns/op	    1056 B/op	      18 allocs/op
+BenchmarkShardLadderManyKeys/shards512-10         	  214777	      1086 ns/op	    1097 B/op	      19 allocs/op
+BenchmarkShardLadderManyKeys/shards1024-10        	  196309	      1185 ns/op	    1196 B/op	      21 allocs/op
+BenchmarkShardLadderOneKey/shards001-10           	 2516060	        94.69 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards002-10           	 2455108	        96.33 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards004-10           	 2530893	        95.90 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards008-10           	 2529117	        94.66 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards016-10           	 2529422	        95.79 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards032-10           	 2551245	        94.49 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards064-10           	 2515812	        96.52 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards128-10           	 2443395	        99.34 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards256-10           	 2442424	        98.69 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards512-10           	 2473410	        97.60 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards1024-10          	 2427298	        99.94 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkShardLadderMultiKey/shards001-10         	 1892814	       128.2 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards002-10         	 2565672	        95.27 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards004-10         	 3331327	        79.89 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards008-10         	 4522108	        54.23 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards016-10         	 5940594	        44.15 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards032-10         	 7688949	        37.31 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards064-10         	10118274	        28.40 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards128-10         	10726416	        28.82 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards256-10         	12979345	        18.93 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards512-10         	12429838	        20.94 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards1024-10        	15780914	        15.76 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderManyKeys/shards001-10         	 1745511	       138.6 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderManyKeys/shards002-10         	  231813	      1003 ns/op	     999 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards004-10         	  229951	       989.9 ns/op	     993 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards008-10         	  472639	      1265 ns/op	    1276 B/op	      22 allocs/op
+BenchmarkShardLadderManyKeys/shards016-10         	  279223	       895.3 ns/op	     903 B/op	      15 allocs/op
+BenchmarkShardLadderManyKeys/shards032-10         	  297483	      1082 ns/op	    1078 B/op	      18 allocs/op
+BenchmarkShardLadderManyKeys/shards064-10         	  241927	      1019 ns/op	    1009 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards128-10         	  222703	      1102 ns/op	    1100 B/op	      19 allocs/op
+BenchmarkShardLadderManyKeys/shards256-10         	  226484	       973.5 ns/op	     964 B/op	      16 allocs/op
+BenchmarkShardLadderManyKeys/shards512-10         	  200246	      1168 ns/op	    1159 B/op	      20 allocs/op
+BenchmarkShardLadderManyKeys/shards1024-10        	  190122	      1203 ns/op	    1199 B/op	      21 allocs/op
+BenchmarkShardLadderOneKey/shards001-10           	 2524730	        95.84 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards002-10           	 2542492	        96.70 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards004-10           	 2483706	        94.58 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards008-10           	 2544838	        95.68 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards016-10           	 2490346	        97.86 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards032-10           	 2508128	        96.95 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards064-10           	 2457356	        97.64 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards128-10           	 2323968	        98.55 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards256-10           	 2441070	        99.46 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards512-10           	 2463066	        97.76 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards1024-10          	 2423463	        98.36 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkShardLadderMultiKey/shards001-10         	 1869546	       129.7 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards002-10         	 2330706	       102.9 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards004-10         	 3213636	        78.52 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards008-10         	 4647574	        55.84 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards016-10         	 5725947	        40.89 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards032-10         	 8562811	        29.34 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards064-10         	10298702	        28.21 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards128-10         	11043177	        24.78 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards256-10         	15075810	        15.93 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards512-10         	11834052	        18.23 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards1024-10        	14914706	        15.83 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderManyKeys/shards001-10         	 1739288	       139.0 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderManyKeys/shards002-10         	  212524	       997.4 ns/op	     973 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards004-10         	  232117	      1001 ns/op	     991 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards008-10         	  439552	      1024 ns/op	    1015 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards016-10         	  291960	       793.9 ns/op	     779 B/op	      13 allocs/op
+BenchmarkShardLadderManyKeys/shards032-10         	  203038	      1016 ns/op	    1055 B/op	      18 allocs/op
+BenchmarkShardLadderManyKeys/shards064-10         	  272792	       966.3 ns/op	     974 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards128-10         	  218868	       990.2 ns/op	     981 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards256-10         	  215788	      1018 ns/op	    1013 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards512-10         	  199474	      1156 ns/op	    1147 B/op	      20 allocs/op
+BenchmarkShardLadderManyKeys/shards1024-10        	  207535	      1228 ns/op	    1219 B/op	      21 allocs/op
+BenchmarkShardLadderOneKey/shards001-10           	 2527110	        95.80 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards002-10           	 2510290	        95.12 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards004-10           	 2526495	        95.04 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards008-10           	 2528358	        95.47 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards016-10           	 2492551	        95.37 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards032-10           	 2518892	        94.50 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards064-10           	 2547258	        94.88 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards128-10           	 2447818	        99.34 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards256-10           	 2426313	        97.97 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards512-10           	 2475976	       100.4 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards1024-10          	 2405134	        99.58 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkShardLadderMultiKey/shards001-10         	 1836588	       125.8 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards002-10         	 2532832	        99.24 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards004-10         	 3111250	        74.61 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards008-10         	 4194914	        59.22 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards016-10         	 5629364	        42.66 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards032-10         	 7567018	        30.71 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards064-10         	 9859147	        28.00 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards128-10         	11434990	        21.11 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards256-10         	15039517	        20.37 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards512-10         	13530306	        20.01 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards1024-10        	14609277	       118.4 ns/op	     120 B/op	       2 allocs/op
+BenchmarkShardLadderManyKeys/shards001-10         	 1719691	       140.0 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderManyKeys/shards002-10         	  226713	       974.8 ns/op	     970 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards004-10         	  401390	       975.2 ns/op	     976 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards008-10         	  231146	      1039 ns/op	    1029 B/op	      18 allocs/op
+BenchmarkShardLadderManyKeys/shards016-10         	  256660	      1030 ns/op	    1021 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards032-10         	  231799	      1037 ns/op	    1031 B/op	      18 allocs/op
+BenchmarkShardLadderManyKeys/shards064-10         	  263485	      1140 ns/op	    1130 B/op	      19 allocs/op
+BenchmarkShardLadderManyKeys/shards128-10         	  208310	      1042 ns/op	    1054 B/op	      18 allocs/op
+BenchmarkShardLadderManyKeys/shards256-10         	  231058	       956.8 ns/op	     963 B/op	      16 allocs/op
+BenchmarkShardLadderManyKeys/shards512-10         	  227856	      1044 ns/op	    1062 B/op	      18 allocs/op
+BenchmarkShardLadderManyKeys/shards1024-10        	  215991	      1173 ns/op	    1192 B/op	      20 allocs/op
+BenchmarkShardLadderOneKey/shards001-10           	 2479768	        96.51 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards002-10           	 2496069	        95.04 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards004-10           	 2550750	        95.60 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards008-10           	 2468133	        94.50 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards016-10           	 2521328	        96.18 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards032-10           	 2524947	        96.28 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards064-10           	 2511391	        95.46 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards128-10           	 2448548	        97.86 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards256-10           	 2454522	        98.83 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards512-10           	 2446156	        96.33 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards1024-10          	 2430199	        96.85 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkShardLadderMultiKey/shards001-10         	 1900012	       127.7 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards002-10         	 2348097	       101.7 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards004-10         	 3221420	        71.90 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards008-10         	 4633538	        59.33 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards016-10         	 5335150	        40.23 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards032-10         	 8670976	        33.65 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards064-10         	 7999033	        25.16 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards128-10         	10929831	        18.71 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards256-10         	12955989	        18.24 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards512-10         	14598354	        20.15 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards1024-10        	14924096	        15.92 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderManyKeys/shards001-10         	 1781235	       134.5 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderManyKeys/shards002-10         	  232114	       991.7 ns/op	     966 B/op	      16 allocs/op
+BenchmarkShardLadderManyKeys/shards004-10         	  215980	      1464 ns/op	    1452 B/op	      25 allocs/op
+BenchmarkShardLadderManyKeys/shards008-10         	  307870	      1282 ns/op	    1287 B/op	      22 allocs/op
+BenchmarkShardLadderManyKeys/shards016-10         	  234921	       932.5 ns/op	     925 B/op	      16 allocs/op
+BenchmarkShardLadderManyKeys/shards032-10         	  207169	      1063 ns/op	    1077 B/op	      18 allocs/op
+BenchmarkShardLadderManyKeys/shards064-10         	  220795	       989.2 ns/op	     998 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards128-10         	  227736	       903.2 ns/op	     913 B/op	      16 allocs/op
+BenchmarkShardLadderManyKeys/shards256-10         	  223750	      1056 ns/op	    1052 B/op	      18 allocs/op
+BenchmarkShardLadderManyKeys/shards512-10         	  208902	      1155 ns/op	    1159 B/op	      20 allocs/op
+BenchmarkShardLadderManyKeys/shards1024-10        	  178994	      1129 ns/op	    1130 B/op	      19 allocs/op
+BenchmarkShardLadderOneKey/shards001-10           	 2523908	        95.84 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards002-10           	 2558955	        95.23 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards004-10           	 2515424	        94.98 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards008-10           	 2518270	        95.55 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards016-10           	 2530740	        96.08 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards032-10           	 2534880	        94.52 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards064-10           	 2526300	        95.21 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards128-10           	 2445066	        98.89 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards256-10           	 2460433	        99.91 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards512-10           	 2440597	        99.56 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards1024-10          	 2454634	        99.51 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkShardLadderMultiKey/shards001-10         	 1892996	       125.8 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards002-10         	 2319421	        99.07 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards004-10         	 3195667	        79.43 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards008-10         	 4284432	        62.29 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards016-10         	 6233212	        42.93 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards032-10         	 6461404	        34.65 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards064-10         	10188108	        22.32 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards128-10         	 9820150	        22.07 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards256-10         	13142776	        17.45 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards512-10         	15128275	        16.03 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards1024-10        	 1000000	       245.4 ns/op	     243 B/op	       4 allocs/op
+BenchmarkShardLadderManyKeys/shards001-10         	 1721671	       137.0 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderManyKeys/shards002-10         	  230214	       973.4 ns/op	     963 B/op	      16 allocs/op
+BenchmarkShardLadderManyKeys/shards004-10         	  229315	       985.8 ns/op	     973 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards008-10         	  292714	      1007 ns/op	     996 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards016-10         	  339996	       918.6 ns/op	     914 B/op	      16 allocs/op
+BenchmarkShardLadderManyKeys/shards032-10         	  271671	      1099 ns/op	    1116 B/op	      19 allocs/op
+BenchmarkShardLadderManyKeys/shards064-10         	  231090	      1005 ns/op	    1000 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards128-10         	  217300	      1081 ns/op	    1078 B/op	      18 allocs/op
+BenchmarkShardLadderManyKeys/shards256-10         	  245332	       974.3 ns/op	     984 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards512-10         	  214350	      1162 ns/op	    1173 B/op	      20 allocs/op
+BenchmarkShardLadderManyKeys/shards1024-10        	  211041	      1162 ns/op	    1174 B/op	      20 allocs/op
+BenchmarkShardLadderOneKey/shards001-10           	 2480155	        95.56 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards002-10           	 2517254	        97.23 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards004-10           	 2519024	        97.72 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards008-10           	 2503482	        96.12 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards016-10           	 2453774	        94.80 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards032-10           	 2559642	        96.53 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards064-10           	 2515644	        96.10 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards128-10           	 2445423	        97.53 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards256-10           	 2417733	        99.20 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards512-10           	 2446370	        96.89 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards1024-10          	 2453395	        96.08 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkShardLadderMultiKey/shards001-10         	 1898103	       129.1 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards002-10         	 2365897	        98.25 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards004-10         	 3176125	        77.17 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards008-10         	 4754346	        57.40 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards016-10         	 5503340	        40.70 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards032-10         	 7684917	        31.81 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards064-10         	10170460	        23.98 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards128-10         	11321866	        21.68 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards256-10         	14273181	        16.08 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards512-10         	12818857	        19.14 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards1024-10        	15332931	        15.44 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderManyKeys/shards001-10         	 1726006	       138.3 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderManyKeys/shards002-10         	  230341	       994.0 ns/op	     973 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards004-10         	  233943	      1001 ns/op	     991 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards008-10         	  220818	       967.5 ns/op	     970 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards016-10         	  311599	       809.5 ns/op	     818 B/op	      14 allocs/op
+BenchmarkShardLadderManyKeys/shards032-10         	  221917	      1068 ns/op	    1079 B/op	      18 allocs/op
+BenchmarkShardLadderManyKeys/shards064-10         	  245139	      1030 ns/op	    1041 B/op	      18 allocs/op
+BenchmarkShardLadderManyKeys/shards128-10         	  227499	      1012 ns/op	    1018 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards256-10         	  219540	       983.3 ns/op	     989 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards512-10         	  211816	      1111 ns/op	    1099 B/op	      19 allocs/op
+BenchmarkShardLadderManyKeys/shards1024-10        	  211141	      1229 ns/op	    1224 B/op	      21 allocs/op
+BenchmarkShardLadderOneKey/shards001-10           	 2523354	        95.10 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards002-10           	 2505056	        96.34 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards004-10           	 2495240	        94.87 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards008-10           	 2511753	        96.14 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards016-10           	 2528264	        95.94 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards032-10           	 2495446	        96.84 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards064-10           	 2537572	        94.53 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards128-10           	 2463537	        99.45 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards256-10           	 2375554	        98.33 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards512-10           	 2439702	        98.43 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards1024-10          	 2305125	        99.77 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkShardLadderMultiKey/shards001-10         	 1917751	       127.1 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards002-10         	 2562416	        99.05 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards004-10         	 3191395	        75.29 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards008-10         	 4345064	        55.21 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards016-10         	 6157713	        39.38 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards032-10         	 6722272	        33.32 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards064-10         	10383016	        27.02 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards128-10         	13489872	        21.47 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards256-10         	14375238	        16.32 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards512-10         	15294864	        18.19 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards1024-10        	 1910865	       118.5 ns/op	     119 B/op	       2 allocs/op
+BenchmarkShardLadderManyKeys/shards001-10         	 1646498	       139.0 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderManyKeys/shards002-10         	  229267	      1002 ns/op	     981 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards004-10         	  463664	       986.3 ns/op	     976 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards008-10         	  229591	      1272 ns/op	    1248 B/op	      21 allocs/op
+BenchmarkShardLadderManyKeys/shards016-10         	  244734	      1175 ns/op	    1161 B/op	      20 allocs/op
+BenchmarkShardLadderManyKeys/shards032-10         	  275780	      1038 ns/op	    1027 B/op	      18 allocs/op
+BenchmarkShardLadderManyKeys/shards064-10         	  256178	       944.5 ns/op	     948 B/op	      16 allocs/op
+BenchmarkShardLadderManyKeys/shards128-10         	  229315	       971.2 ns/op	     965 B/op	      16 allocs/op
+BenchmarkShardLadderManyKeys/shards256-10         	  207099	      1154 ns/op	    1148 B/op	      20 allocs/op
+BenchmarkShardLadderManyKeys/shards512-10         	  195148	      1105 ns/op	    1123 B/op	      19 allocs/op
+BenchmarkShardLadderManyKeys/shards1024-10        	  201531	      1190 ns/op	    1213 B/op	      21 allocs/op
+BenchmarkShardLadderOneKey/shards001-10           	 2519190	        95.59 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards002-10           	 2445081	        96.59 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards004-10           	 2503509	        95.61 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards008-10           	 2460458	        95.40 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards016-10           	 2520800	        97.38 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards032-10           	 2545832	        94.73 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards064-10           	 2546072	        94.19 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards128-10           	 2448745	        97.15 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards256-10           	 2488908	        97.13 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards512-10           	 2448487	        97.09 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards1024-10          	 2488357	        97.09 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkShardLadderMultiKey/shards001-10         	 1863331	       128.3 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards002-10         	 2420733	        97.28 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards004-10         	 3280730	        76.10 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards008-10         	 4358534	        53.10 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards016-10         	 6218260	        41.90 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards032-10         	 7109311	        32.67 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards064-10         	 8608166	        26.68 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards128-10         	10859236	        22.42 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards256-10         	14452316	        19.62 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards512-10         	11088566	        18.27 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards1024-10        	14406014	        16.39 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderManyKeys/shards001-10         	 1722033	       138.7 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderManyKeys/shards002-10         	  237967	       996.1 ns/op	     972 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards004-10         	  239715	      1001 ns/op	     985 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards008-10         	  227034	      1232 ns/op	    1223 B/op	      21 allocs/op
+BenchmarkShardLadderManyKeys/shards016-10         	  250119	       802.0 ns/op	     803 B/op	      14 allocs/op
+BenchmarkShardLadderManyKeys/shards032-10         	  309249	       972.6 ns/op	     975 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards064-10         	  225789	      1204 ns/op	    1209 B/op	      21 allocs/op
+BenchmarkShardLadderManyKeys/shards128-10         	  241371	      1143 ns/op	    1127 B/op	      19 allocs/op
+BenchmarkShardLadderManyKeys/shards256-10         	  210979	      1013 ns/op	    1002 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards512-10         	  231133	      1148 ns/op	    1150 B/op	      20 allocs/op
+BenchmarkShardLadderManyKeys/shards1024-10        	  203976	      1146 ns/op	    1145 B/op	      20 allocs/op
+BenchmarkShardLadderOneKey/shards001-10           	 2499582	        96.51 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards002-10           	 2377053	        95.53 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards004-10           	 2452712	        97.32 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards008-10           	 2495283	        97.51 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards016-10           	 2503951	        97.89 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards032-10           	 2491497	        95.60 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards064-10           	 2452725	        95.89 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards128-10           	 2409409	        98.69 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards256-10           	 2444059	        98.84 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards512-10           	 2409362	        98.62 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards1024-10          	 2458932	        98.10 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkShardLadderMultiKey/shards001-10         	 1896543	       126.7 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards002-10         	 2569694	        99.33 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards004-10         	 3098470	        71.31 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards008-10         	 4676983	        60.95 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards016-10         	 5359704	        42.88 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards032-10         	 7520239	        32.92 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards064-10         	 8023837	        27.49 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards128-10         	11865939	        18.71 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards256-10         	13299714	        22.40 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards512-10         	14268374	        17.89 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards1024-10        	13989027	        16.92 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderManyKeys/shards001-10         	 1692386	       141.8 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderManyKeys/shards002-10         	  220530	      1016 ns/op	     979 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards004-10         	  217365	      1526 ns/op	    1486 B/op	      26 allocs/op
+BenchmarkShardLadderManyKeys/shards008-10         	  311994	      1021 ns/op	    1009 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards016-10         	  254634	       934.1 ns/op	     926 B/op	      16 allocs/op
+BenchmarkShardLadderManyKeys/shards032-10         	  248917	      1046 ns/op	    1038 B/op	      18 allocs/op
+BenchmarkShardLadderManyKeys/shards064-10         	  227247	      1082 ns/op	    1070 B/op	      18 allocs/op
+BenchmarkShardLadderManyKeys/shards128-10         	  222830	      1020 ns/op	    1011 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards256-10         	  225644	       976.8 ns/op	     968 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards512-10         	  201900	      1119 ns/op	    1120 B/op	      19 allocs/op
+BenchmarkShardLadderManyKeys/shards1024-10        	  199560	      1200 ns/op	    1193 B/op	      20 allocs/op
+BenchmarkShardLadderOneKey/shards001-10           	 2493550	        94.95 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards002-10           	 2509177	        96.04 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards004-10           	 2358904	        96.68 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards008-10           	 2455143	        96.38 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards016-10           	 2477974	        96.97 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards032-10           	 2448646	        95.43 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards064-10           	 2481568	        95.93 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards128-10           	 2518894	        97.48 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards256-10           	 2448955	        97.41 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards512-10           	 2473855	        97.60 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards1024-10          	 2426860	        97.41 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkShardLadderMultiKey/shards001-10         	 1905848	       127.7 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards002-10         	 2399110	        97.74 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards004-10         	 3023300	        78.77 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards008-10         	 4709252	        56.85 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards016-10         	 5634584	        42.93 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards032-10         	 7678740	        29.03 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards064-10         	11649471	        26.38 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards128-10         	12961324	        20.32 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards256-10         	12951706	        16.17 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards512-10         	14291668	        16.18 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards1024-10        	15230389	        15.74 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderManyKeys/shards001-10         	 1644972	       138.5 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderManyKeys/shards002-10         	  237996	      1026 ns/op	    1000 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards004-10         	  212466	      1004 ns/op	     983 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards008-10         	  304850	       748.0 ns/op	     745 B/op	      13 allocs/op
+BenchmarkShardLadderManyKeys/shards016-10         	  256150	       823.4 ns/op	     830 B/op	      14 allocs/op
+BenchmarkShardLadderManyKeys/shards032-10         	  231675	       902.2 ns/op	     909 B/op	      15 allocs/op
+BenchmarkShardLadderManyKeys/shards064-10         	  236191	       928.3 ns/op	     931 B/op	      16 allocs/op
+BenchmarkShardLadderManyKeys/shards128-10         	  216512	       978.0 ns/op	     989 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards256-10         	  221449	      1064 ns/op	    1057 B/op	      18 allocs/op
+BenchmarkShardLadderManyKeys/shards512-10         	  200542	      1111 ns/op	    1107 B/op	      19 allocs/op
+BenchmarkShardLadderManyKeys/shards1024-10        	  185856	      1223 ns/op	    1220 B/op	      21 allocs/op
+BenchmarkShardLadderOneKey/shards001-10           	 2528962	        95.93 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards002-10           	 2545084	        94.29 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards004-10           	 2564950	        94.69 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards008-10           	 2538180	        94.79 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards016-10           	 2561512	        96.44 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards032-10           	 2518672	        96.58 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards064-10           	 2572222	        96.15 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards128-10           	 2452735	        98.37 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards256-10           	 2442650	        97.19 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards512-10           	 2425519	       100.4 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards1024-10          	 2425695	        99.40 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkShardLadderMultiKey/shards001-10         	 1913781	       126.1 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards002-10         	 2538543	        93.11 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards004-10         	 3220508	        78.52 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards008-10         	 4548103	        62.00 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards016-10         	 6077616	        44.39 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards032-10         	 7829362	        38.50 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards064-10         	 9677727	        21.45 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards128-10         	14870732	        17.90 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards256-10         	15195090	        20.14 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards512-10         	13085466	        16.09 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards1024-10        	14286596	       117.6 ns/op	     119 B/op	       2 allocs/op
+BenchmarkShardLadderManyKeys/shards001-10         	 1746298	       137.3 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderManyKeys/shards002-10         	  226238	       964.0 ns/op	     957 B/op	      16 allocs/op
+BenchmarkShardLadderManyKeys/shards004-10         	  435538	      1000 ns/op	    1003 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards008-10         	  317295	      1250 ns/op	    1246 B/op	      21 allocs/op
+BenchmarkShardLadderManyKeys/shards016-10         	  229327	      1147 ns/op	    1136 B/op	      19 allocs/op
+BenchmarkShardLadderManyKeys/shards032-10         	  258284	      1014 ns/op	    1011 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards064-10         	  252608	      1089 ns/op	    1101 B/op	      19 allocs/op
+BenchmarkShardLadderManyKeys/shards128-10         	  233936	       903.5 ns/op	     912 B/op	      16 allocs/op
+BenchmarkShardLadderManyKeys/shards256-10         	  218511	       983.5 ns/op	     997 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards512-10         	  209844	      1156 ns/op	    1173 B/op	      20 allocs/op
+BenchmarkShardLadderManyKeys/shards1024-10        	  193437	      1175 ns/op	    1186 B/op	      20 allocs/op
+BenchmarkShardLadderOneKey/shards001-10           	 2498349	        94.98 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards002-10           	 2557818	        94.37 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards004-10           	 2500444	        96.59 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards008-10           	 2565742	        93.41 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards016-10           	 2539358	        94.54 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards032-10           	 2519853	        94.46 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards064-10           	 2517121	        95.60 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards128-10           	 2460037	        97.59 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards256-10           	 2422087	        96.94 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards512-10           	 2361931	       103.2 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards1024-10          	 2505841	        96.65 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkShardLadderMultiKey/shards001-10         	 1870219	       125.6 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards002-10         	 2471176	        97.98 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards004-10         	 3138391	        72.17 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards008-10         	 4085290	        56.79 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards016-10         	 5904645	        41.59 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards032-10         	 9298375	        28.78 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards064-10         	 8264094	        29.04 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards128-10         	12151641	        18.47 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards256-10         	11758556	        18.20 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards512-10         	15323148	        16.39 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards1024-10        	15312469	        15.76 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderManyKeys/shards001-10         	 1696098	       141.5 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderManyKeys/shards002-10         	  235189	       968.5 ns/op	     965 B/op	      16 allocs/op
+BenchmarkShardLadderManyKeys/shards004-10         	  232921	       983.3 ns/op	     980 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards008-10         	  315596	      1259 ns/op	    1271 B/op	      22 allocs/op
+BenchmarkShardLadderManyKeys/shards016-10         	  276856	      1183 ns/op	    1174 B/op	      20 allocs/op
+BenchmarkShardLadderManyKeys/shards032-10         	  272234	       921.5 ns/op	     913 B/op	      16 allocs/op
+BenchmarkShardLadderManyKeys/shards064-10         	  271311	      1101 ns/op	    1094 B/op	      19 allocs/op
+BenchmarkShardLadderManyKeys/shards128-10         	  221034	      1034 ns/op	    1025 B/op	      18 allocs/op
+BenchmarkShardLadderManyKeys/shards256-10         	  231954	      1047 ns/op	    1043 B/op	      18 allocs/op
+BenchmarkShardLadderManyKeys/shards512-10         	  206322	      1045 ns/op	    1042 B/op	      18 allocs/op
+BenchmarkShardLadderManyKeys/shards1024-10        	  208066	      1176 ns/op	    1178 B/op	      20 allocs/op
+BenchmarkShardLadderOneKey/shards001-10           	 2522232	        94.64 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards002-10           	 2526159	        94.40 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards004-10           	 2526241	        94.66 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards008-10           	 2575170	        96.10 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards016-10           	 2506545	        95.73 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards032-10           	 2446142	        97.02 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards064-10           	 2480206	        96.66 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards128-10           	 2390547	        98.05 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards256-10           	 2420464	        96.81 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards512-10           	 2462287	        96.58 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards1024-10          	 2465749	        96.22 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkShardLadderMultiKey/shards001-10         	 1894462	       127.6 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards002-10         	 2476064	        97.72 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards004-10         	 3150613	        77.14 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards008-10         	 4654322	        64.45 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards016-10         	 6008292	        45.67 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards032-10         	 7661346	        37.69 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards064-10         	 9334632	        28.27 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards128-10         	12039001	        22.62 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards256-10         	12802076	        21.77 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards512-10         	15270250	        15.68 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards1024-10        	15195924	        16.62 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderManyKeys/shards001-10         	 1720262	       136.3 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderManyKeys/shards002-10         	  237628	      1024 ns/op	     998 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards004-10         	  235665	      1021 ns/op	    1005 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards008-10         	  213392	      1054 ns/op	    1034 B/op	      18 allocs/op
+BenchmarkShardLadderManyKeys/shards016-10         	  286054	      1309 ns/op	    1291 B/op	      22 allocs/op
+BenchmarkShardLadderManyKeys/shards032-10         	  292285	       941.6 ns/op	     939 B/op	      16 allocs/op
+BenchmarkShardLadderManyKeys/shards064-10         	  226185	      1084 ns/op	    1090 B/op	      19 allocs/op
+BenchmarkShardLadderManyKeys/shards128-10         	  226346	       993.9 ns/op	    1003 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards256-10         	  227506	      1114 ns/op	    1125 B/op	      19 allocs/op
+BenchmarkShardLadderManyKeys/shards512-10         	  211298	      1183 ns/op	    1186 B/op	      20 allocs/op
+BenchmarkShardLadderManyKeys/shards1024-10        	  173679	      1242 ns/op	    1233 B/op	      21 allocs/op
+BenchmarkShardLadderOneKey/shards001-10           	 2482738	        94.33 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards002-10           	 2537547	        93.90 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards004-10           	 2506490	        94.09 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards008-10           	 2497951	        95.38 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards016-10           	 2501136	        94.19 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards032-10           	 2441631	        95.21 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards064-10           	 2490328	        94.90 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards128-10           	 2476092	        96.73 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards256-10           	 2470262	        98.15 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards512-10           	 2464113	        97.09 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards1024-10          	 2400357	        99.03 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkShardLadderMultiKey/shards001-10         	 1873888	       128.6 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards002-10         	 2302327	       101.3 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards004-10         	 3098496	        76.71 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards008-10         	 4272068	        57.92 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards016-10         	 5995165	        50.80 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards032-10         	 6274071	        32.03 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards064-10         	 8416437	        23.94 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards128-10         	11736346	        25.35 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards256-10         	10725337	        19.32 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards512-10         	15026134	        16.18 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards1024-10        	14867392	       117.8 ns/op	     119 B/op	       2 allocs/op
+BenchmarkShardLadderManyKeys/shards001-10         	 1732130	       139.8 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderManyKeys/shards002-10         	  226857	       969.7 ns/op	     960 B/op	      16 allocs/op
+BenchmarkShardLadderManyKeys/shards004-10         	  154270	      1449 ns/op	    1447 B/op	      25 allocs/op
+BenchmarkShardLadderManyKeys/shards008-10         	  429176	      1052 ns/op	    1024 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards016-10         	  265414	       940.4 ns/op	     944 B/op	      16 allocs/op
+BenchmarkShardLadderManyKeys/shards032-10         	  180952	      1161 ns/op	    1169 B/op	      20 allocs/op
+BenchmarkShardLadderManyKeys/shards064-10         	  268218	       961.0 ns/op	     967 B/op	      16 allocs/op
+BenchmarkShardLadderManyKeys/shards128-10         	  261286	       979.4 ns/op	     958 B/op	      16 allocs/op
+BenchmarkShardLadderManyKeys/shards256-10         	  227205	      1085 ns/op	    1065 B/op	      18 allocs/op
+BenchmarkShardLadderManyKeys/shards512-10         	  208395	      1170 ns/op	    1144 B/op	      20 allocs/op
+BenchmarkShardLadderManyKeys/shards1024-10        	  185935	      1279 ns/op	    1245 B/op	      21 allocs/op
+BenchmarkShardLadderOneKey/shards001-10           	 2475930	        97.75 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards002-10           	 2490552	        97.06 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards004-10           	 2477092	        97.44 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards008-10           	 2450512	       100.3 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards016-10           	 2477116	        97.55 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards032-10           	 2491317	        95.70 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards064-10           	 2507016	        95.23 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards128-10           	 2421877	        98.18 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards256-10           	 2515587	        97.15 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards512-10           	 2438997	        97.57 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards1024-10          	 2484344	        96.92 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkShardLadderMultiKey/shards001-10         	 1909024	       124.6 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards002-10         	 2349476	       103.1 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards004-10         	 3066600	        77.24 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards008-10         	 4138662	        63.06 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards016-10         	 5956898	        44.26 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards032-10         	 7599375	        31.04 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards064-10         	11281839	        30.60 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards128-10         	11705936	        25.49 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards256-10         	11077753	        20.48 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards512-10         	12341604	        19.24 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards1024-10        	 1887411	       121.5 ns/op	     120 B/op	       2 allocs/op
+BenchmarkShardLadderManyKeys/shards001-10         	 1745134	       141.3 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderManyKeys/shards002-10         	  254809	      1002 ns/op	     985 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards004-10         	  151588	      1484 ns/op	    1461 B/op	      25 allocs/op
+BenchmarkShardLadderManyKeys/shards008-10         	  309770	       780.6 ns/op	     771 B/op	      13 allocs/op
+BenchmarkShardLadderManyKeys/shards016-10         	  284613	       813.5 ns/op	     808 B/op	      14 allocs/op
+BenchmarkShardLadderManyKeys/shards032-10         	  248520	       953.9 ns/op	     962 B/op	      16 allocs/op
+BenchmarkShardLadderManyKeys/shards064-10         	  247015	       881.1 ns/op	     890 B/op	      15 allocs/op
+BenchmarkShardLadderManyKeys/shards128-10         	  234104	      1059 ns/op	    1070 B/op	      18 allocs/op
+BenchmarkShardLadderManyKeys/shards256-10         	  238934	      1074 ns/op	    1089 B/op	      19 allocs/op
+BenchmarkShardLadderManyKeys/shards512-10         	  218796	      1116 ns/op	    1140 B/op	      20 allocs/op
+BenchmarkShardLadderManyKeys/shards1024-10        	  192084	      1190 ns/op	    1199 B/op	      21 allocs/op
+BenchmarkShardLadderOneKey/shards001-10           	 2543708	        95.21 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards002-10           	 2538558	        95.36 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards004-10           	 2488099	        94.82 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards008-10           	 2511021	        94.81 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards016-10           	 2545141	        95.05 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards032-10           	 2550009	        95.32 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards064-10           	 2556650	        96.96 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards128-10           	 2481374	        97.20 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards256-10           	 2462439	        98.69 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards512-10           	 2469456	        99.50 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards1024-10          	 2418235	        98.17 ns/op	       0 B/op	       0 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkShardLadderMultiKey/shards001-10         	 1881396	       132.0 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards002-10         	 2424960	        92.93 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards004-10         	 3252964	        75.75 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards008-10         	 4261650	        57.89 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards016-10         	 5748226	        43.43 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards032-10         	 7562776	        29.61 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards064-10         	 9833428	        27.05 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards128-10         	11664853	        26.59 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards256-10         	14829116	        18.31 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards512-10         	12112952	        20.58 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderMultiKey/shards1024-10        	15095367	       117.5 ns/op	     119 B/op	       2 allocs/op
+BenchmarkShardLadderManyKeys/shards001-10         	 1683126	       138.0 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderManyKeys/shards002-10         	  239988	       988.8 ns/op	     988 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards004-10         	  461641	      1017 ns/op	     992 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards008-10         	  229959	      1046 ns/op	    1018 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards016-10         	  252502	       808.8 ns/op	     786 B/op	      13 allocs/op
+BenchmarkShardLadderManyKeys/shards032-10         	  220228	      1049 ns/op	    1018 B/op	      17 allocs/op
+BenchmarkShardLadderManyKeys/shards064-10         	  224786	       981.4 ns/op	     951 B/op	      16 allocs/op
+BenchmarkShardLadderManyKeys/shards128-10         	  222222	      1097 ns/op	    1068 B/op	      18 allocs/op
+BenchmarkShardLadderManyKeys/shards256-10         	  228556	       965.0 ns/op	     942 B/op	      16 allocs/op
+BenchmarkShardLadderManyKeys/shards512-10         	  187368	      1180 ns/op	    1149 B/op	      20 allocs/op
+BenchmarkShardLadderManyKeys/shards1024-10        	  191238	      1228 ns/op	    1200 B/op	      21 allocs/op
+BenchmarkShardLadderOneKey/shards001-10           	 2487890	        96.66 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards002-10           	 2508610	        96.19 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards004-10           	 2438076	        97.47 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards008-10           	 2479719	        97.07 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards016-10           	 2371381	        96.39 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards032-10           	 2493202	        95.36 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards064-10           	 2524952	        94.28 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards128-10           	 2429874	        99.62 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards256-10           	 2415558	        98.80 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards512-10           	 2464938	        97.59 ns/op	       0 B/op	       0 allocs/op
+BenchmarkShardLadderOneKey/shards1024-10          	 2473796	        97.67 ns/op	       0 B/op	       0 allocs/op
+PASS

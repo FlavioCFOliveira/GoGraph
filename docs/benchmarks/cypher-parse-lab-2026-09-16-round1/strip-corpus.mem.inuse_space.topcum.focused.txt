@@ -1,0 +1,52 @@
+File: parser.test
+Type: inuse_space
+Time: 2026-09-16 13:05:07 WEST
+Active filters:
+   focus=BenchmarkStripCorpus
+Showing nodes accounting for 34.53kB, 42.62% of 81.02kB total
+Dropped 21 nodes (cum <= 0.40kB)
+      flat  flat%   sum%        cum   cum%
+         0     0%     0%    35.34kB 43.61%  github.com/FlavioCFOliveira/GoGraph/cypher/parser.BenchmarkStripCorpus
+         0     0%     0%    35.34kB 43.61%  testing.(*B).run1.func1
+         0     0%     0%    35.34kB 43.61%  testing.(*B).runN
+         0     0%     0%    33.53kB 41.38%  encoding/json.Unmarshal (inline)
+         0     0%     0%    33.53kB 41.38%  encoding/json/v2.Unmarshal
+         0     0%     0%    33.53kB 41.38%  encoding/json/v2.unmarshalDecode
+         0     0%     0%    33.53kB 41.38%  github.com/FlavioCFOliveira/GoGraph/cypher/parser.loadCorpus
+         0     0%     0%    33.53kB 41.38%  github.com/FlavioCFOliveira/GoGraph/cypher/parser.readCorpus
+         0     0%     0%    33.05kB 40.79%  encoding/json/v2.makeStructArshaler.func3
+         0     0%     0%       33kB 40.73%  sync.(*Once).Do (partial-inline)
+         0     0%     0%       33kB 40.73%  sync.(*Once).doSlow
+         0     0%     0%    32.66kB 40.30%  encoding/json/v2.makeStructArshaler.func1
+    1.51kB  1.86%  1.86%    32.66kB 40.30%  encoding/json/v2.makeStructFields
+    2.25kB  2.78%  4.64%    30.95kB 38.19%  encoding/json/v2.makeStructFields.func3
+    0.12kB  0.15%  4.79%    27.75kB 34.25%  reflect.(*rtype).ptrTo
+         0     0%  4.79%    27.75kB 34.25%  reflect.PointerTo (inline)
+   26.95kB 33.27% 38.06%    26.95kB 33.27%  reflect.compiledTypelinks
+         0     0% 38.06%    26.95kB 33.27%  reflect.typesByString
+         0     0% 38.06%     2.38kB  2.94%  encoding/json/v2.makeSliceArshaler.func3
+         0     0% 38.06%     1.80kB  2.23%  testing.(*B).Run
+         0     0% 38.06%     1.76kB  2.17%  encoding/json/v2.lookupArshaler
+         0     0% 38.06%     1.70kB  2.09%  testing.(*B).run
+         0     0% 38.06%     1.68kB  2.07%  testing.(*benchState).processBench
+         0     0% 38.06%     1.57kB  1.94%  fmt.Fprintf
+         0     0% 38.06%     1.55kB  1.92%  fmt.newPrinter
+         0     0% 38.06%     1.55kB  1.92%  sync.(*Pool).Get
+         0     0% 38.06%     1.55kB  1.92%  testing.BenchmarkResult.String
+         0     0% 38.06%     1.38kB  1.71%  sync.(*Pool).pin
+    1.38kB  1.71% 39.76%     1.38kB  1.71%  sync.(*Pool).pinSlow
+         0     0% 39.76%     1.16kB  1.44%  encoding/json/v2.makeDefaultArshaler
+    0.56kB  0.69% 40.46%     0.56kB  0.69%  encoding/json/v2.makeStructArshaler (inline)
+         0     0% 40.46%     0.53kB  0.66%  internal/sync.(*HashTrieMap[go.shape.interface {},go.shape.interface {}]).LoadOrStore
+         0     0% 40.46%     0.53kB  0.66%  sync.(*Map).LoadOrStore (inline)
+    0.47kB  0.58% 41.04%     0.47kB  0.58%  internal/sync.newIndirectNode[go.shape.interface {},go.shape.interface {}] (inline)
+    0.41kB   0.5% 41.54%     0.45kB  0.56%  encoding/json/v2.makeSliceArshaler
+    0.38kB  0.46% 42.00%     0.38kB  0.46%  internal/sync.newEntryNode[go.shape.interface {},go.shape.interface {}] (inline)
+    0.38kB  0.46% 42.46%     0.38kB  0.46%  reflect.addReflectOff
+         0     0% 42.46%     0.38kB  0.46%  reflect.resolveReflectName (inline)
+         0     0% 42.46%     0.33kB   0.4%  encoding/json/v2.makeSliceArshaler.func1
+         0     0% 42.46%     0.31kB  0.39%  internal/sync.(*HashTrieMap[go.shape.interface {},go.shape.interface {}]).Load
+         0     0% 42.46%     0.31kB  0.39%  internal/sync.(*HashTrieMap[go.shape.interface {},go.shape.interface {}]).init (inline)
+         0     0% 42.46%     0.31kB  0.39%  internal/sync.(*HashTrieMap[go.shape.interface {},go.shape.interface {}]).initSlow
+         0     0% 42.46%     0.31kB  0.39%  sync.(*Map).Load (inline)
+    0.12kB  0.15% 42.62%     0.20kB  0.25%  encoding/json/v2.parseFieldOptions

@@ -215,12 +215,15 @@ func tryBuildHashJoin(
 	innerKeyExpr := key.innerKey
 	outerKeyExpr := key.outerKey
 
+	buildKeyPlan := newRowBindPlan(buildKeySchema, bopts, g, nil)
+	probeKeyPlan := newRowBindPlan(probeKeySchema, bopts, g, nil)
+
 	buildFn := func(row exec.Row) (expr.Value, error) {
-		rc := buildRowCtx(row, buildKeySchema, g, bopts)
+		rc := buildRowCtx(row, buildKeyPlan)
 		return evalRow(bopts, innerKeyExpr, rc, params, reg)
 	}
 	probeFn := func(row exec.Row) (expr.Value, error) {
-		rc := buildRowCtx(row, probeKeySchema, g, bopts)
+		rc := buildRowCtx(row, probeKeyPlan)
 		return evalRow(bopts, outerKeyExpr, rc, params, reg)
 	}
 
@@ -279,9 +282,9 @@ func buildResidualFilter(
 	bopts *buildOpts,
 ) exec.Operator {
 	exprs := residual
-	rs := newRowSchema(schema)
+	bp := newRowBindPlan(newRowSchema(schema), bopts, g, nil)
 	return exec.NewFilter(child, func(row exec.Row) (expr.Value, error) {
-		rc := buildRowCtx(row, rs, g, bopts)
+		rc := buildRowCtx(row, bp)
 		for _, e := range exprs {
 			v, err := evalRow(bopts, e, rc, params, reg)
 			if err != nil {
@@ -446,6 +449,9 @@ func shiftApplyMetaColumns(
 		info.srcCol += outerWidth
 		info.edgeCol += outerWidth
 		info.dstCol += outerWidth
+		if info.dirCol >= 0 {
+			info.dirCol += outerWidth // -1 means "no column", not column -1
+		}
 		bopts.edgeVarMeta[name] = info
 	}
 	for name, info := range bopts.pathVarChain {

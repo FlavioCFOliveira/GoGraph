@@ -1,0 +1,119 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+                                  │       A        │                  B                   │
+                                  │     sec/op     │    sec/op      vs base               │
+ShardLadderMultiKey/shards001-10     126.0n ±   2%    127.3n ±  1%       ~ (p=0.541 n=10)
+ShardLadderMultiKey/shards002-10     98.42n ±   3%    97.86n ±  5%       ~ (p=0.739 n=10)
+ShardLadderMultiKey/shards004-10     78.41n ±   5%    76.41n ±  6%       ~ (p=0.149 n=10)
+ShardLadderMultiKey/shards008-10     58.31n ±   7%    57.91n ±  9%       ~ (p=0.853 n=10)
+ShardLadderMultiKey/shards016-10     40.80n ±   5%    43.18n ±  6%  +5.85% (p=0.020 n=10)
+ShardLadderMultiKey/shards032-10     34.15n ±  10%    32.35n ± 17%       ~ (p=0.280 n=10)
+ShardLadderMultiKey/shards064-10     25.88n ±   9%    27.04n ± 11%       ~ (p=0.436 n=10)
+ShardLadderMultiKey/shards128-10     21.39n ±  16%    21.95n ± 16%       ~ (p=0.755 n=10)
+ShardLadderMultiKey/shards256-10     18.59n ±  13%    19.47n ± 16%       ~ (p=0.280 n=10)
+ShardLadderMultiKey/shards512-10     18.88n ±  15%    17.14n ± 12%       ~ (p=0.362 n=10)
+ShardLadderMultiKey/shards1024-10    67.18n ± 258%    67.21n ± 77%       ~ (p=0.782 n=10)
+ShardLadderManyKeys/shards001-10     138.8n ±   1%    138.8n ±  2%       ~ (p=0.811 n=10)
+ShardLadderManyKeys/shards002-10     984.5n ±   2%    999.1n ±  3%       ~ (p=0.342 n=10)
+ShardLadderManyKeys/shards004-10     1.001µ ±   3%    1.010µ ± 47%       ~ (p=0.224 n=10)
+ShardLadderManyKeys/shards008-10     1.032µ ±  26%    1.053µ ± 26%       ~ (p=0.631 n=10)
+ShardLadderManyKeys/shards016-10     948.4n ±  15%    937.2n ± 26%       ~ (p=0.912 n=10)
+ShardLadderManyKeys/shards032-10    1058.0n ±   4%    993.3n ±  7%       ~ (p=0.063 n=10)
+ShardLadderManyKeys/shards064-10     1.012µ ±   9%    1.032µ ± 10%       ~ (p=0.739 n=10)
+ShardLadderManyKeys/shards128-10     1.027µ ±   7%    1.007µ ±  9%       ~ (p=0.684 n=10)
+ShardLadderManyKeys/shards256-10     995.2n ±   6%   1055.5n ±  7%       ~ (p=0.109 n=10)
+ShardLadderManyKeys/shards512-10     1.142µ ±   7%    1.134µ ±  4%       ~ (p=0.617 n=10)
+ShardLadderManyKeys/shards1024-10    1.181µ ±   4%    1.195µ ±  4%       ~ (p=0.271 n=10)
+ShardLadderOneKey/shards001-10       95.68n ±   1%    95.40n ±  1%       ~ (p=0.985 n=10)
+ShardLadderOneKey/shards002-10       95.28n ±   1%    95.44n ±  1%       ~ (p=0.529 n=10)
+ShardLadderOneKey/shards004-10       95.38n ±   1%    96.10n ±  1%       ~ (p=0.912 n=10)
+ShardLadderOneKey/shards008-10       95.61n ±   1%    95.75n ±  2%       ~ (p=0.853 n=10)
+ShardLadderOneKey/shards016-10       95.79n ±   1%    96.42n ±  2%       ~ (p=0.342 n=10)
+ShardLadderOneKey/shards032-10       95.90n ±   1%    95.40n ±  1%       ~ (p=0.796 n=10)
+ShardLadderOneKey/shards064-10       95.61n ±   2%    95.74n ±  2%       ~ (p=0.796 n=10)
+ShardLadderOneKey/shards128-10       98.46n ±   1%    97.82n ±  1%       ~ (p=0.171 n=10)
+ShardLadderOneKey/shards256-10       98.76n ±   1%    97.30n ±  2%  -1.48% (p=0.016 n=10)
+ShardLadderOneKey/shards512-10       98.22n ±   1%    97.59n ±  3%       ~ (p=0.781 n=10)
+ShardLadderOneKey/shards1024-10      98.94n ±   3%    97.54n ±  2%       ~ (p=0.190 n=10)
+geomean                              153.6n           153.5n        -0.01%
+
+                                  │        A        │                   B                    │
+                                  │      B/op       │     B/op       vs base                 │
+ShardLadderMultiKey/shards001-10      0.000 ±  0%       0.000 ±  0%       ~ (p=1.000 n=10) ¹
+ShardLadderMultiKey/shards002-10      0.000 ±  0%       0.000 ±  0%       ~ (p=1.000 n=10) ¹
+ShardLadderMultiKey/shards004-10      0.000 ±  0%       0.000 ±  0%       ~ (p=1.000 n=10) ¹
+ShardLadderMultiKey/shards008-10      0.000 ±  0%       0.000 ±  0%       ~ (p=1.000 n=10) ¹
+ShardLadderMultiKey/shards016-10      0.000 ±  0%       0.000 ±  0%       ~ (p=1.000 n=10) ¹
+ShardLadderMultiKey/shards032-10      0.000 ±  0%       0.000 ±  0%       ~ (p=1.000 n=10) ¹
+ShardLadderMultiKey/shards064-10      0.000 ±  0%       0.000 ±  0%       ~ (p=1.000 n=10) ¹
+ShardLadderMultiKey/shards128-10      0.000 ±  0%       0.000 ±  0%       ~ (p=1.000 n=10) ¹
+ShardLadderMultiKey/shards256-10      0.000 ±  0%       0.000 ±  0%       ~ (p=1.000 n=10) ¹
+ShardLadderMultiKey/shards512-10      0.000 ±  0%       0.000 ±  0%       ~ (p=1.000 n=10) ¹
+ShardLadderMultiKey/shards1024-10     59.50 ±   ?       59.50 ±   ?       ~ (p=0.516 n=10)
+ShardLadderManyKeys/shards001-10      0.000 ±  0%       0.000 ±  0%       ~ (p=1.000 n=10) ¹
+ShardLadderManyKeys/shards002-10      971.5 ±  3%       980.0 ±  2%       ~ (p=0.897 n=10)
+ShardLadderManyKeys/shards004-10      991.0 ±  5%       997.5 ± 46%       ~ (p=0.382 n=10)
+ShardLadderManyKeys/shards008-10     1022.0 ± 25%      1029.0 ± 25%       ~ (p=0.912 n=10)
+ShardLadderManyKeys/shards016-10      938.5 ± 13%       935.0 ± 26%       ~ (p=0.971 n=10)
+ShardLadderManyKeys/shards032-10     1066.0 ±  5%       993.0 ±  8%  -6.85% (p=0.012 n=10)
+ShardLadderManyKeys/shards064-10     1004.5 ±  8%      1018.5 ±  9%       ~ (p=0.853 n=10)
+ShardLadderManyKeys/shards128-10     1036.0 ±  8%      1007.0 ±  6%       ~ (p=0.481 n=10)
+ShardLadderManyKeys/shards256-10     1001.0 ±  5%      1050.0 ±  8%       ~ (p=0.190 n=10)
+ShardLadderManyKeys/shards512-10    1.109Ki ±  6%     1.115Ki ±  3%       ~ (p=0.809 n=10)
+ShardLadderManyKeys/shards1024-10   1.166Ki ±  2%     1.171Ki ±  3%       ~ (p=0.342 n=10)
+ShardLadderOneKey/shards001-10        0.000 ±  0%       0.000 ±  0%       ~ (p=1.000 n=10) ¹
+ShardLadderOneKey/shards002-10        0.000 ±  0%       0.000 ±  0%       ~ (p=1.000 n=10) ¹
+ShardLadderOneKey/shards004-10        0.000 ±  0%       0.000 ±  0%       ~ (p=1.000 n=10) ¹
+ShardLadderOneKey/shards008-10        0.000 ±  0%       0.000 ±  0%       ~ (p=1.000 n=10) ¹
+ShardLadderOneKey/shards016-10        0.000 ±  0%       0.000 ±  0%       ~ (p=1.000 n=10) ¹
+ShardLadderOneKey/shards032-10        0.000 ±  0%       0.000 ±  0%       ~ (p=1.000 n=10) ¹
+ShardLadderOneKey/shards064-10        0.000 ±  0%       0.000 ±  0%       ~ (p=1.000 n=10) ¹
+ShardLadderOneKey/shards128-10        0.000 ±  0%       0.000 ±  0%       ~ (p=1.000 n=10) ¹
+ShardLadderOneKey/shards256-10        0.000 ±  0%       0.000 ±  0%       ~ (p=1.000 n=10) ¹
+ShardLadderOneKey/shards512-10        0.000 ±  0%       0.000 ±  0%       ~ (p=1.000 n=10) ¹
+ShardLadderOneKey/shards1024-10       0.000 ±  0%       0.000 ±  0%       ~ (p=1.000 n=10) ¹
+geomean                                           ²                  -0.03%                ²
+¹ all samples are equal
+² summaries must be >0 to compute geomean
+
+                                  │       A       │                  B                   │
+                                  │   allocs/op   │  allocs/op   vs base                 │
+ShardLadderMultiKey/shards001-10    0.000 ±  0%     0.000 ±  0%       ~ (p=1.000 n=10) ¹
+ShardLadderMultiKey/shards002-10    0.000 ±  0%     0.000 ±  0%       ~ (p=1.000 n=10) ¹
+ShardLadderMultiKey/shards004-10    0.000 ±  0%     0.000 ±  0%       ~ (p=1.000 n=10) ¹
+ShardLadderMultiKey/shards008-10    0.000 ±  0%     0.000 ±  0%       ~ (p=1.000 n=10) ¹
+ShardLadderMultiKey/shards016-10    0.000 ±  0%     0.000 ±  0%       ~ (p=1.000 n=10) ¹
+ShardLadderMultiKey/shards032-10    0.000 ±  0%     0.000 ±  0%       ~ (p=1.000 n=10) ¹
+ShardLadderMultiKey/shards064-10    0.000 ±  0%     0.000 ±  0%       ~ (p=1.000 n=10) ¹
+ShardLadderMultiKey/shards128-10    0.000 ±  0%     0.000 ±  0%       ~ (p=1.000 n=10) ¹
+ShardLadderMultiKey/shards256-10    0.000 ±  0%     0.000 ±  0%       ~ (p=1.000 n=10) ¹
+ShardLadderMultiKey/shards512-10    0.000 ±  0%     0.000 ±  0%       ~ (p=1.000 n=10) ¹
+ShardLadderMultiKey/shards1024-10   1.000 ±   ?     1.000 ±   ?       ~ (p=0.554 n=10)
+ShardLadderManyKeys/shards001-10    0.000 ±  0%     0.000 ±  0%       ~ (p=1.000 n=10) ¹
+ShardLadderManyKeys/shards002-10    17.00 ±  6%     17.00 ±  6%       ~ (p=1.000 n=10)
+ShardLadderManyKeys/shards004-10    17.00 ±  6%     17.00 ± 47%       ~ (p=0.512 n=10)
+ShardLadderManyKeys/shards008-10    17.50 ± 26%     17.50 ± 26%       ~ (p=0.929 n=10)
+ShardLadderManyKeys/shards016-10    16.00 ± 12%     16.00 ± 25%       ~ (p=1.000 n=10)
+ShardLadderManyKeys/shards032-10    18.00 ±  6%     17.00 ±  6%  -5.56% (p=0.037 n=10)
+ShardLadderManyKeys/shards064-10    17.00 ± 12%     17.00 ± 12%       ~ (p=1.000 n=10)
+ShardLadderManyKeys/shards128-10    17.50 ±  9%     17.00 ±  6%       ~ (p=0.535 n=10)
+ShardLadderManyKeys/shards256-10    17.00 ±  6%     18.00 ±  6%       ~ (p=0.111 n=10)
+ShardLadderManyKeys/shards512-10    19.50 ±  8%     20.00 ±  5%       ~ (p=0.741 n=10)
+ShardLadderManyKeys/shards1024-10   20.50 ±  2%     21.00 ±  5%       ~ (p=0.720 n=10)
+ShardLadderOneKey/shards001-10      0.000 ±  0%     0.000 ±  0%       ~ (p=1.000 n=10) ¹
+ShardLadderOneKey/shards002-10      0.000 ±  0%     0.000 ±  0%       ~ (p=1.000 n=10) ¹
+ShardLadderOneKey/shards004-10      0.000 ±  0%     0.000 ±  0%       ~ (p=1.000 n=10) ¹
+ShardLadderOneKey/shards008-10      0.000 ±  0%     0.000 ±  0%       ~ (p=1.000 n=10) ¹
+ShardLadderOneKey/shards016-10      0.000 ±  0%     0.000 ±  0%       ~ (p=1.000 n=10) ¹
+ShardLadderOneKey/shards032-10      0.000 ±  0%     0.000 ±  0%       ~ (p=1.000 n=10) ¹
+ShardLadderOneKey/shards064-10      0.000 ±  0%     0.000 ±  0%       ~ (p=1.000 n=10) ¹
+ShardLadderOneKey/shards128-10      0.000 ±  0%     0.000 ±  0%       ~ (p=1.000 n=10) ¹
+ShardLadderOneKey/shards256-10      0.000 ±  0%     0.000 ±  0%       ~ (p=1.000 n=10) ¹
+ShardLadderOneKey/shards512-10      0.000 ±  0%     0.000 ±  0%       ~ (p=1.000 n=10) ¹
+ShardLadderOneKey/shards1024-10     0.000 ±  0%     0.000 ±  0%       ~ (p=1.000 n=10) ¹
+geomean                                         ²                +0.06%                ²
+¹ all samples are equal
+² summaries must be >0 to compute geomean
+benchstat_exit=0

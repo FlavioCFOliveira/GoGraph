@@ -248,6 +248,223 @@ func recoverParseScript(p *gen.CypherParser) (tree gen.IScriptContext, err error
 	return p.Script(), nil
 }
 
+// ---------------------------------------------------------------------------
+// Two-stage parsing (rmp #2850)
+// ---------------------------------------------------------------------------
+
+// bailErrorStrategy is antlr's [antlr.BailErrorStrategy] — the strategy the
+// ANTLR runtime documents for the first stage of a two-stage parse — carrying
+// its own sentinel and one override.
+//
+// # Why the first stage bails
+//
+// [antlr.DefaultErrorStrategy.Sync] runs at every decision point of every rule,
+// on the ACCEPTING path as much as on an erroneous one, computing the
+// recovery set it would need if the next token were wrong. The bail strategy's
+// Sync is empty, so a statement that parses pays none of it. Measured over the
+// examples corpus that is the whole of the −6.46% this change buys
+// (docs/benchmarks/cypher-parse-lab-2026-09-16-spike2846/sll.benchstat.txt).
+//
+// The prediction mode is deliberately NOT changed. [antlr.PredictionModeSLL]
+// was measured in the same spike at −0.49% (p=0.529, n=10), below the 1.05%
+// noise floor, and was refuted: LL is full-power prediction, so the second
+// stage below only ever has to reproduce a MESSAGE, never to rescue a valid
+// statement the first stage wrongly rejected.
+//
+// # What "bail" means in antlr4-go v4.13.1, and why bailed is a field
+//
+// It does not mean the parse stops. Go has no exception to throw, so
+// [antlr.BailErrorStrategy.Recover] only records a
+// [antlr.ParseCancellationException] with SetError, and the generated rule's
+// errorExit clears it on the very next line (`p.SetError(nil)`,
+// cypher/parser/gen/cypher_parser.go). The first stage therefore returns to its
+// caller and parses on to EOF, with no recovery and no further reporting.
+//
+// That is why the abort has to be latched here rather than read back from the
+// parser, and why it is latched in THREE methods: ReportError, Recover and
+// RecoverInline are the only entry points a parse can reach once it has left
+// the accepting path. Sync is the fourth such entry point in the default
+// strategy — it reports an unwanted token directly, touching none of the other
+// three — and it is empty in BailErrorStrategy, which is what makes the set of
+// three complete.
+//
+// Reading the abort from a recovered panic instead would not work either: the
+// recovered value's text cannot distinguish an antlr abort from the GENUINE
+// antlr4-go panic [recoverParseScript] exists to catch. The flag removes the
+// question.
+//
+// # The override
+//
+// [antlr.DefaultErrorStrategy.ReportError], which BailErrorStrategy inherits,
+// has no case for ParseCancellationException. It therefore falls to its default
+// branch, which writes "unknown recognition error type: " to STDOUT and then
+// calls the exception's GetMessage — a v4.13.1 stub whose body is
+// panic("implement me"). A library must not write to stdout, so ReportError is
+// overridden to record the abort and return. Nothing is lost: the first stage's
+// diagnostics are discarded in every case, because they are not the ones
+// [ParseStatement] reports — the second stage's are.
+//
+// # What the bail gives up
+//
+// [antlr.DefaultErrorStrategy] carries a failsafe that guarantees at least one
+// token is consumed between two errors, which bounds recovery on malformed
+// input. BailErrorStrategy has none, so nothing bounds the first stage's
+// iteration on malformed input except [guardInput], which caps the input's
+// length and nesting depth before any of this runs. No unbounded input has been
+// observed — the corpus, every one-byte prefix of it, the TCK and FuzzParse all
+// terminate — but the guarantee itself is gone, and that is a property of
+// ANTLR's strategy, not of this file.
+type bailErrorStrategy struct {
+	*antlr.BailErrorStrategy
+
+	// bailed reports that the parse left the accepting path. It is the ONLY
+	// signal the caller acts on; the value recovered from a panic is never
+	// inspected.
+	bailed bool
+}
+
+// antlr.ErrorStrategy carries an unexported method, so bailErrorStrategy can
+// only satisfy it by promotion from the embedded runtime type. Assert it where
+// the embed is written rather than leaving SetErrorHandler to discover it.
+var _ antlr.ErrorStrategy = (*bailErrorStrategy)(nil)
+
+// ReportError records the abort and reports nothing. See [bailErrorStrategy].
+func (b *bailErrorStrategy) ReportError(_ antlr.Parser, _ antlr.RecognitionException) {
+	b.bailed = true
+}
+
+// Recover records the abort, then delegates to [antlr.BailErrorStrategy].
+func (b *bailErrorStrategy) Recover(recognizer antlr.Parser, e antlr.RecognitionException) {
+	b.bailed = true
+	b.BailErrorStrategy.Recover(recognizer, e)
+}
+
+// RecoverInline records the abort, then delegates to [antlr.BailErrorStrategy].
+// The embedded method calls the embedded Recover, not this type's, which is why
+// the flag is set here as well.
+func (b *bailErrorStrategy) RecoverInline(recognizer antlr.Parser) antlr.Token {
+	b.bailed = true
+	return b.BailErrorStrategy.RecoverInline(recognizer)
+}
+
+// lexNormalized lexes already-normalized text into a filled token stream and
+// returns the lexical diagnostics, ERRCHAR promotions included.
+//
+// It is the lexing block of [ParseStatement] verbatim, factored out so that the
+// two stages below run identical code and differ in exactly one input: the
+// parser's error strategy.
+func lexNormalized(normalized string) (*antlr.CommonTokenStream, *errorListener) {
+	lexErrListener := &errorListener{}
+	input := antlr.NewInputStream(normalized)
+	lexer := gen.NewCypherLexer(input)
+	lexer.RemoveErrorListeners()
+	lexer.AddErrorListener(lexErrListener)
+
+	stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+
+	// Lex the whole input before parsing so that the catch-all ERRCHAR rule can
+	// be promoted to a syntax error instead of silently deleting a character.
+	// See [collectErrCharErrors]. `script` is anchored at EOF, so an accepted
+	// query consumes every token regardless: this fetches them eagerly rather
+	// than adding work. Fill leaves the read index on the first
+	// default-channel token, which is exactly where the parser expects it.
+	stream.Fill()
+	collectErrCharErrors(lexErrListener, stream)
+	return stream, lexErrListener
+}
+
+// errParserBailed reports that the first stage did not accept, and nothing
+// more. It is never returned to a caller of this package: [ParseStatement]
+// answers it by running [parseDiagnostic], whose diagnostic is the one the
+// caller sees.
+var errParserBailed = errors.New("parser: first stage did not accept")
+
+// parseAccepting is the FIRST stage: it lexes normalized and parses it under
+// [bailErrorStrategy].
+//
+// It returns the parse tree when the statement parsed with no diagnostic at all
+// — the fast path, which never constructs the default strategy, never re-lexes
+// and never runs the second stage. Otherwise it returns either a lexical
+// diagnostic, which the bail cannot affect because the whole input is lexed
+// before the parser is created, or [errParserBailed], which says only that the
+// caller must ask [parseDiagnostic] what went wrong.
+//
+// A parse that did not accept returns no tree. It leaves one, with exceptions
+// stamped on its contexts, and it is never walked.
+func parseAccepting(normalized string) (gen.IScriptContext, error) {
+	stream, lexErrListener := lexNormalized(normalized)
+	if len(lexErrListener.errs) > 0 {
+		return nil, lexErrListener.errs[0]
+	}
+
+	p := gen.NewCypherParser(stream)
+	// No parse-error listener is attached: the first stage's diagnostics are
+	// discarded in every case, and RemoveErrorListeners is still required to
+	// drop the runtime's own console listener.
+	p.RemoveErrorListeners()
+	p.BuildParseTrees = true
+
+	handler := &bailErrorStrategy{BailErrorStrategy: antlr.NewBailErrorStrategy()}
+	p.SetErrorHandler(handler)
+
+	// The recovered panic VALUE is deliberately discarded: its text cannot tell
+	// an antlr abort from a genuine antlr4-go v4.13.1 panic (see
+	// [bailErrorStrategy]), and the first stage does not need to know. Both mean
+	// the same thing and take the same action — [parseDiagnostic] reproduces
+	// whichever it was, because it is the unchanged pre-change code running over
+	// the same text.
+	tree, panicErr := recoverParseScript(p)
+	if panicErr != nil || handler.bailed {
+		return nil, errParserBailed
+	}
+	return tree, nil
+}
+
+// parseDiagnostic is the SECOND stage: the front end exactly as it stood before
+// two-stage parsing, from a FRESH input stream, lexer and token stream.
+//
+// The stream is rebuilt rather than rewound. The first stage's parser consumed
+// from it, so it cannot simply be handed over; antlr4-go's
+// CommonTokenStream.Seek(0) would rewind it exactly — lazyInit is a no-op once
+// the stream is initialised, and adjustSeekIndex(0) reproduces what Fill's setup
+// left — so this is a CHOICE, not a necessity. It is made because a fresh stream
+// makes this function literally the pre-change code, which is what the
+// byte-identical-diagnostics obligation rests on. Reusing the filled stream
+// would delete one input stream, one lexer, one lex and one ERRCHAR pass per
+// failing statement, and is recorded as a follow-up rather than folded in here.
+//
+// It runs only when [parseAccepting] did not accept, so every diagnostic
+// [ParseStatement] returns — its type, Message, Line, Column, OffendingToken
+// and Expected set, and the order the three sources are checked in — is
+// produced by this function, which is the unchanged code. The error path costs
+// one extra lex and one extra parse; the accepting path costs neither.
+func parseDiagnostic(normalized string) (gen.IScriptContext, error) {
+	stream, lexErrListener := lexNormalized(normalized)
+	if len(lexErrListener.errs) > 0 {
+		return nil, lexErrListener.errs[0]
+	}
+
+	parseErrListener := &errorListener{}
+	p := gen.NewCypherParser(stream)
+	p.RemoveErrorListeners()
+	p.AddErrorListener(parseErrListener)
+	p.BuildParseTrees = true
+
+	tree, panicErr := recoverParseScript(p)
+	if panicErr != nil {
+		return nil, panicErr
+	}
+
+	// Report lex errors first.
+	if len(lexErrListener.errs) > 0 {
+		return nil, lexErrListener.errs[0]
+	}
+	if len(parseErrListener.errs) > 0 {
+		return nil, parseErrListener.errs[0]
+	}
+	return tree, nil
+}
+
 // Parse lexes and parses a Cypher query string and converts the resulting
 // parse tree into a typed AST node. It returns the first error encountered.
 //
@@ -305,45 +522,21 @@ func ParseStatement(query string) (ast.Query, PlanMode, error) {
 
 	query = applyNormalizers(query)
 
-	// Lex.
-	lexErrListener := &errorListener{}
-	input := antlr.NewInputStream(query)
-	lexer := gen.NewCypherLexer(input)
-	lexer.RemoveErrorListeners()
-	lexer.AddErrorListener(lexErrListener)
-
-	// Parse.
-	parseErrListener := &errorListener{}
-	stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
-
-	// Lex the whole input before parsing so that the catch-all ERRCHAR rule can
-	// be promoted to a syntax error instead of silently deleting a character.
-	// See [collectErrCharErrors]. `script` is anchored at EOF, so an accepted
-	// query consumes every token regardless: this fetches them eagerly rather
-	// than adding work. Fill leaves the read index on the first
-	// default-channel token, which is exactly where the parser expects it.
-	stream.Fill()
-	collectErrCharErrors(lexErrListener, stream)
-	if len(lexErrListener.errs) > 0 {
-		return nil, PlanModeNone, lexErrListener.errs[0]
+	// Two-stage parse. The first stage bails at the first sign of trouble and
+	// so pays nothing for the recovery machinery a statement that parses never
+	// needs; the second reproduces every diagnostic by re-parsing under the
+	// default strategy. See [bailErrorStrategy], [parseAccepting] and
+	// [parseDiagnostic].
+	tree, err := parseAccepting(query)
+	if errors.Is(err, errParserBailed) {
+		// The first stage rejected the statement but says nothing about why.
+		// Everything the caller sees from here — including the case where the
+		// full pass finds no diagnostic at all and its tree is walked, exactly
+		// as the pre-change code walked it — comes from the second stage.
+		tree, err = parseDiagnostic(query)
 	}
-
-	p := gen.NewCypherParser(stream)
-	p.RemoveErrorListeners()
-	p.AddErrorListener(parseErrListener)
-	p.BuildParseTrees = true
-
-	tree, panicErr := recoverParseScript(p)
-	if panicErr != nil {
-		return nil, PlanModeNone, panicErr
-	}
-
-	// Report lex errors first.
-	if len(lexErrListener.errs) > 0 {
-		return nil, PlanModeNone, lexErrListener.errs[0]
-	}
-	if len(parseErrListener.errs) > 0 {
-		return nil, PlanModeNone, parseErrListener.errs[0]
+	if err != nil {
+		return nil, PlanModeNone, err
 	}
 
 	// Walk the parse tree.
@@ -406,6 +599,14 @@ func ParseStrict(query string) (ast.Query, []error) {
 	parseErrListener := &errorListener{}
 	stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
 
+	// ParseStrict keeps the DefaultErrorStrategy unconditionally, and does NOT
+	// use the two-stage path [ParseStatement] takes. Its contract is the FULL
+	// error set: a bailing first stage stops at the first diagnostic, so every
+	// input with more than one error would have to be parsed twice to satisfy
+	// it, and every input with none is already served by [ParseStatement]. The
+	// bail would therefore cost on the multi-error path and save on no path
+	// this function is called for — it is tooling, not the execution path.
+	//
 	// See [Parse] for why the stream is filled before parsing. ParseStrict
 	// reports the full error set, so parsing continues after an ERRCHAR has
 	// been recorded rather than short-circuiting on the first one.

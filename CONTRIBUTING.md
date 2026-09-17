@@ -61,16 +61,40 @@ body of a memory-mapped region.
 
 ## Validation pipeline
 
-Every change must pass `make ci`, which runs:
+Every change must pass `make ci`, which runs these stages **in this
+order**, stopping at the first failure:
 
+- `shell-guard` (asserts the recipe shell carries `-e -u -o pipefail`)
 - `go mod tidy` (fails on `go.mod` / `go.sum` drift)
 - `gofmt`
 - `go vet ./...`
 - `go build ./...`
-- the short test layer under the race detector (`go test -race ./...`)
+- `ci-kg-verify` (knowledge-graph fidelity; needs `rmp graph serve -r gograph`)
+- `govulncheck` over the module
 - `golangci-lint run ./...`
-- the coverage gate (`cover-gate`): **≥ 85 % aggregate** and
-  **≥ 75 % per-package** statement coverage
+- `test-uninstrumented`: the packages whose assertions are defeated by
+  either instrumentation, run with neither
+- `test-timing`: the wall-clock gates, serially, on a quiet machine
+- the short test layer under the race detector (`go test -race ./...`)
+
+The order is **fail cheap**: every check that concludes in seconds
+precedes every test phase, so a lint or vet failure costs seconds
+instead of the whole suite. The module suite runs **exactly once**.
+Both properties are asserted by `internal/scriptgate`, so neither can
+decay unnoticed. `make ci-stages` prints the list.
+
+After a failure, `make ci-resume` re-runs only what the fix
+invalidated; any edit to a non-ignored file invalidates every stage,
+deliberately. `make ci-from STAGE=<stage>` is the unverified shortcut
+for when you are asserting the earlier stages are unaffected.
+
+**Coverage is measured deliberately, not gated automatically.** The
+coverage gate (`cover-gate`) still enforces **≥ 85 % aggregate** and
+**≥ 75 % per-package** statement coverage, with `scripts/cover_gate.sh`
+and its thresholds unchanged — but it is not a member of `make ci`,
+because it ran the whole module suite a second time and coverage is a
+quality metric rather than a correctness gate. Run `make cover-gate`
+when coverage is the question.
 
 In addition, the deferred test layers must be compiled via
 `make check-soak-build` (build + `go vet` under `-tags=soak` and

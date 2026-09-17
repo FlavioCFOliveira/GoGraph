@@ -1,0 +1,60 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/parser
+cpu: Apple M4
+BenchmarkImplStripHoisters-10         	   47510	      5035 ns/op	    3720 B/op	     148 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/parser
+cpu: Apple M4
+BenchmarkImplStripHoisters-10         	   48874	      4820 ns/op	    3720 B/op	     148 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/parser
+cpu: Apple M4
+BenchmarkImplStripHoisters-10         	   46574	      5177 ns/op	    3720 B/op	     148 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/parser
+cpu: Apple M4
+BenchmarkImplStripHoisters-10         	   47691	      4979 ns/op	    3720 B/op	     148 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/parser
+cpu: Apple M4
+BenchmarkImplStripHoisters-10         	   49363	      4798 ns/op	    3720 B/op	     148 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/parser
+cpu: Apple M4
+BenchmarkImplStripHoisters-10         	   49953	      4797 ns/op	    3720 B/op	     148 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/parser
+cpu: Apple M4
+BenchmarkImplStripHoisters-10         	   49564	      4865 ns/op	    3720 B/op	     148 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/parser
+cpu: Apple M4
+BenchmarkImplStripHoisters-10         	   48519	      4865 ns/op	    3720 B/op	     148 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/parser
+cpu: Apple M4
+BenchmarkImplStripHoisters-10         	   49088	      4881 ns/op	    3720 B/op	     148 allocs/op
+PASS
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/parser
+cpu: Apple M4
+BenchmarkImplStripHoisters-10         	   49464	      4983 ns/op	    3720 B/op	     148 allocs/op
+PASS
