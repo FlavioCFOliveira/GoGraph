@@ -793,6 +793,39 @@ is a larger prize on line 782 but is **not** bit-identical and needs a decision.
 
 **Backlog.** **Filed as rmp #2869.**
 
+#### Outcome — the two non-bit-identical reassociations were built, measured, and DISCARDED
+
+The bit-identical halves of R9 and R10 shipped in `b11bb77a` and `1cde7dab`. The two
+remaining prizes — a precomputed reciprocal in `brandesSource` (1.87 s of self-time) and a
+precomputed `damping / float64(outdeg[u])` in `runRange` (8.89 s) — were **implemented as
+opt-in entry points under rmp #2870 and then discarded, because neither is faster.**
+
+Two independent realisations were measured, seven samples each, interleaved with the arm
+order rotated per round: a fused-multiply-add form and a `ROUNDED` form that deliberately
+keeps the multiply off the accumulator's dependency chain. **Every row of both is `~`** —
+geomean +0.24 % and +0.22 % — while the same-versus-same noise control on byte-identical
+code read **+0.81 % at p=0.017**. The noise floor is wider than the effect being sought, and
+the two `deg16` rows are not blind to an effect of that size: they resolved R9's own distance
+hoist at −3.52 % and −2.01 %.
+
+**Why, from the assembly.** The Brandes fast arm removes exactly one `FDIVD` per
+predecessor, and at roughly 19 cycles per iteration that division hides behind the `delta[v]`
+read-modify-write and the `sigma[v]` gather. The PageRank pull loop is bound by its **two
+random gathers**, not by the `SCVTFD`/`FMULD`/`FDIVD` between them.
+
+**The generalisable lesson, and it applies to every row in this document: a profile charges
+self-time to an instruction, which is not the same as saying the work would be saved by
+removing it.** Both figures were real measurements of real instructions, and both were off
+the critical path. Where a ranked row rests on self-time alone, its gain remains a
+hypothesis until an interleaved A/B says otherwise — exactly as R1's did until `391e61e1`
+confirmed it.
+
+Discarded rather than shipped: an entry point named for speed that is not faster costs
++4.85 % B/op on PageRank for the scale vector, costs bit-reproducibility, and widens the API
+for nothing measured. The real bottleneck the measurement names — one of the two random
+gathers per in-edge, removable by writing `next[v]*scale[v]` as a sequential store — is
+filed separately.
+
 ---
 
 ## Runtime-dominated profiles: the cause, not the symptom
