@@ -204,12 +204,13 @@ type fusableProjItem struct {
 // regression on a path this change is not even trying to improve. Building on
 // first use makes an unused bracket cost two field writes.
 type projRowBinder struct {
-	bopts  *buildOpts
-	g      *lpg.ReadView[string, float64]
+	// bp carries the row schema, the buildOpts, the graph view and the UNION
+	// analysis this struct used to hold as four fields, with every name-keyed
+	// question about them resolved once (see cypher/rowbind.go). bp.gated is the
+	// `use != nil` test the two arms of contextFor branch on.
+	bp     *rowBindPlan
 	pooled *pooledRowCtx
 	ctx    expr.RowContext
-	use    map[string]*nodeScalarUse
-	rs     rowSchema
 	bound  bool
 }
 
@@ -244,14 +245,14 @@ func (b *projRowBinder) contextFor(row exec.Row) expr.RowContext {
 		return b.ctx
 	}
 	countProjRowCtxBuild()
-	if b.use == nil {
-		b.ctx = make(expr.RowContext, b.rs.width)
-		populateRowCtx(b.ctx, row, b.rs.walk, b.g, b.bopts, nil, nil)
+	if !b.bp.gated {
+		b.ctx = make(expr.RowContext, b.bp.rs.width)
+		populateRowCtx(b.ctx, row, b.bp, nil)
 		return b.ctx
 	}
-	b.pooled = acquireRowCtx(b.rs.width)
+	b.pooled = acquireRowCtx(b.bp.rs.width)
 	b.ctx = b.pooled.ctx
-	populateRowCtx(b.ctx, row, b.rs.walk, b.g, b.bopts, b.use, b.pooled)
+	populateRowCtx(b.ctx, row, b.bp, b.pooled)
 	return b.ctx
 }
 
@@ -420,11 +421,14 @@ func newProjRowBinder(
 	if !ok || !fusionPreservesEveryItem(union, items) {
 		return nil, nil
 	}
-	b := &projRowBinder{bopts: bopts, g: g, rs: rs, use: union}
+	b := &projRowBinder{bp: newRowBindPlan(rs, bopts, g, union)}
 	fns := make([]func(exec.Row) (expr.Value, error), len(items))
 	for i := range items {
 		capturedExpr := items[i].expr
-		capturedUse := items[i].use
+		// The item's OWN plan, for the unbracketed fallback below: it carries the
+		// item's own analysis, not the fusion union, exactly as the fallback used
+		// to pass items[i].use to evalRowPooled.
+		itemPlan := newRowBindPlan(rs, bopts, g, items[i].use)
 		fns[i] = func(row exec.Row) (expr.Value, error) {
 			if b.bound {
 				return evalRow(bopts, capturedExpr, b.contextFor(row), params, reg)
@@ -434,7 +438,7 @@ func newProjRowBinder(
 			// optimisation. See [projFusedItemUnboundCount].
 			projFusedItemUnboundCount.Add(1)
 			countProjRowCtxBuild()
-			return evalRowPooled(bopts, capturedExpr, row, rs, g, params, reg, capturedUse)
+			return evalRowPooled(capturedExpr, row, itemPlan, params, reg)
 		}
 	}
 	return b, fns
