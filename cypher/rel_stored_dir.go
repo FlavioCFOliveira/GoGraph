@@ -165,15 +165,32 @@ func resolveHopStoredDir(d exec.Direction) exec.Direction {
 	}
 }
 
-// demoteRelDirOnDisagreement returns info with its resolved direction cleared
-// when prev — an entry already registered for the SAME relationship variable
-// name in this build — resolved to a different one.
+// demoteRelDirOnDisagreement returns a COPY of *info with its resolved direction
+// cleared when prev — an entry already registered for the SAME relationship
+// variable name in this build — resolved to a different one.
 //
 // See this file's header for why one name can be registered twice and why the
 // last writer's direction cannot simply be trusted.
-func demoteRelDirOnDisagreement(info, prev edgeVarInfo) edgeVarInfo {
-	if prev.dir != info.dir {
-		info.dir = relDirUnresolved
+//
+// # Both parameters are READ-ONLY, and the copy is what enforces it
+//
+// The two edgeVarInfo are taken by pointer because the struct is 80 bytes and
+// gocritic's hugeParam refuses the by-value form. A pointer parameter can be
+// written through, and writing through THIS one would corrupt a wrong-answer
+// path: *info is the caller's local, *prev aliases nothing the caller expects to
+// change, and a silent in-place demotion would make the registration depend on
+// whether the caller re-read the map afterwards.
+//
+// So the demotion is applied to `out`, a copy taken before any field is touched,
+// and delivered ONLY through the return value. Neither *info nor *prev is
+// assigned anywhere in this function, which also makes the aliasing case
+// (info == prev) behave exactly as the by-value form did: a struct cannot
+// disagree with itself, so nothing is demoted.
+// TestRelStoredDir_DemotionLeavesCallerStructsUnchanged pins both properties.
+func demoteRelDirOnDisagreement(info, prev *edgeVarInfo) edgeVarInfo {
+	out := *info
+	if prev.dir != out.dir {
+		out.dir = relDirUnresolved
 	}
 	// The COLUMN coordinate needs the same treatment and for the same reason:
 	// the surviving entry serves the rows of BOTH hops, so a coordinate only
@@ -181,10 +198,10 @@ func demoteRelDirOnDisagreement(info, prev edgeVarInfo) edgeVarInfo {
 	// whatever happens to sit there. The BoolValue assertion would refuse an
 	// integer cell, but it cannot tell one hop's direction column from
 	// another's, so a disagreeing pair is demoted rather than assumed.
-	if prev.dirCol != info.dirCol {
-		info.dirCol = -1
+	if prev.dirCol != out.dirCol {
+		out.dirCol = -1
 	}
-	return info
+	return out
 }
 
 // relDirColDisabled turns the undirected hop's fourth stored-direction COLUMN
@@ -235,9 +252,16 @@ func relStoredDirFromRow(row exec.Row, dirCol int) (inverted, ok bool) {
 // TestRelStoredDir_DifferentialAgainstLadder pins over a corpus, and what the
 // full openCypher TCK pins over 3897 scenarios, since a wrong answer here moves
 // a rendered StartID/EndID.
+//
+// meta is taken by pointer, and is READ-ONLY: the struct is 80 bytes and this is
+// a PER-ROW call, so the by-value form copied it once per bound relationship.
+// Nothing in this function assigns through the pointer, and nothing may: the
+// entry it points at is shared by every row of the hop (bopts.edgeVarMeta is
+// keyed by name and read per row), so an in-place write here would change the
+// orientation every LATER row resolves. Must be non-nil.
 func relStoredInvertedForHop(
 	row exec.Row,
-	meta edgeVarInfo,
+	meta *edgeVarInfo,
 	g *lpg.ReadView[string, float64],
 	srcID, dstID graph.NodeID,
 	srcKey, dstKey string,

@@ -10500,7 +10500,7 @@ func buildOperatorRec(
 			// binding the same name serves the first hop's rows too. A resolved
 			// direction is therefore asserted only while every hop agrees.
 			if prev, registered := bopts.edgeVarMeta[p.RelVar]; registered {
-				info = demoteRelDirOnDisagreement(info, prev)
+				info = demoteRelDirOnDisagreement(&info, &prev)
 			}
 			bopts.edgeVarMeta[p.RelVar] = info
 		}
@@ -15448,7 +15448,7 @@ func populateRowCtx(ctx expr.RowContext, row exec.Row, bp *rowBindPlan, arena *p
 				// fetch be replaced by a kind-gated EdgeHasProperty presence
 				// check. It is nil on every ungated plan, which keeps that build
 				// byte-identical (C5).
-				if rv, ok := buildRelationshipValueFromRow(row, b.meta.edge, g, bopts, b.use); ok {
+				if rv, ok := buildRelationshipValueFromRow(row, &b.meta.edge, g, bopts, b.use); ok {
 					ctx[b.name] = rv
 					continue
 				}
@@ -15677,7 +15677,7 @@ func slotHoldsHandle(g *lpg.ReadView[string, float64], srcID, dstID graph.NodeID
 // all. Allocating one small immutable struct also keeps the value free of the
 // single-goroutine ownership contract a reused struct would carry. See the
 // #2388 measurement record.
-func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.ReadView[string, float64], bopts *buildOpts, relUse *nodeScalarUse) (expr.Value, bool) {
+func buildRelationshipValueFromRow(row exec.Row, meta *edgeVarInfo, g *lpg.ReadView[string, float64], bopts *buildOpts, relUse *nodeScalarUse) (expr.Value, bool) {
 	// The oracle for "the relationship is resolved once per row" (#2658): one count
 	// per mapper-resolution + [relStoredInverted] + by-handle-routing pass. Gated,
 	// so it costs a predicted branch when off — see [projFusionCountersOn].
@@ -16810,7 +16810,7 @@ func buildIRProjection(
 									// the bound edge's own handle instead, which is the
 									// only thing that separates the two.
 									propSrc, propDst := srcKey, dstKey
-									if relStoredInvertedForHop(row, capturedMeta, capturedG,
+									if relStoredInvertedForHop(row, &capturedMeta, capturedG,
 										graph.NodeID(srcID), graph.NodeID(dstID),
 										srcKey, dstKey, edgeID) {
 										propSrc, propDst = dstKey, srcKey

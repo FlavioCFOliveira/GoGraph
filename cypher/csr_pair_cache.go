@@ -257,6 +257,7 @@ func csrPairCachedAt(
 	cache *csrPairCache, g *lpg.ReadView[string, float64],
 ) (fwd, rev *csr.CSR[float64], at csrPairKey) {
 	if cache == nil || g == nil || viewCarriesOwnWrites(g) {
+		countCSRPairBypass(cache, g)
 		if cache == nil {
 			csrPairAbsentCacheBuildCount.Add(1)
 		}
@@ -270,6 +271,63 @@ func csrPairCachedAt(
 	f, r, built := csrPairFromGraphAt(g)
 	cache.put(built, f, r)
 	return f, r, built
+}
+
+// countCSRPairBypass records ONE consultation of the engine-scoped pair cache
+// that never reached it, and says WHY.
+//
+// # What it completes, and why the hit rate was unmeasurable without it
+//
+// [csrPairCache.getWithColumn] already emits `cypher.csr_pair_cache.hits` and
+// `…misses` for every consultation that reaches the map. It emits nothing for a
+// consultation that is turned away BEFORE the lookup — no cache, no view, or the
+// rmp #2446 own-writes exclusion — so the two existing counters partition only the
+// consultations that could hit. A hit rate computed from them alone therefore
+// silently omits its own denominator's third arm, and reads 100% for a workload
+// in which every single consultation was bypassed.
+//
+// With this counter the partition is exact:
+//
+//	hits + misses + bypasses_{no_cache,own_writes} = every consultation
+//
+// # Why it is non-vacuous
+//
+// It observes the NON-matching event — a consultation that did not reach the
+// cache — so an over-counting bug reads differently from a correct one rather than
+// inflating a rate in the same direction as a hit. And it is cross-checkable
+// against a counter maintained independently of it: every bypass and every miss
+// builds a pair through [csrPairFromGraphAt], so
+//
+//	misses + bypasses == Δ csrPairUncachedBuildCount
+//
+// must hold over any drive, and production reaches no other route into a build
+// ([csrPairFromGraph] is called from tests only). TestCSRPairCache_ConsultationsPartitionExactly
+// pins both identities.
+//
+// # Cost
+//
+// One [metrics.IncCounter] on a path that already carries two of them, taken only
+// on the branch that is about to do an O(V+E) build. Against the no-op backend
+// that is an atomic pointer load and an inlined empty call, which is why it is
+// ungated where the per-ROW counters in rel_stored_dir.go are not.
+//
+// # Why the guard's three conditions become two buckets
+//
+// The guard is `cache == nil || g == nil || viewCarriesOwnWrites(g)`, but only two
+// of those reasons can be OBSERVED. A nil view falls through to
+// [csrPairFromGraphAt], which dereferences it (`g.AdjList()`), so a consultation
+// bypassed for that reason panics before any reader could see its bucket —
+// measured, not reasoned: the third bucket this function first carried could not
+// be made to increment in a surviving process. A bucket nothing can move is
+// exactly the vacuous counter this file's gate exists to refuse, so it is not
+// emitted. The nil-view arm of the guard protects nothing and is recorded as a
+// finding rather than changed here (rmp #2866 is a SPIKE).
+func countCSRPairBypass(cache *csrPairCache, _ *lpg.ReadView[string, float64]) {
+	if cache == nil {
+		metrics.IncCounter("cypher.csr_pair_cache.bypasses_no_cache", 1)
+		return
+	}
+	metrics.IncCounter("cypher.csr_pair_cache.bypasses_own_writes", 1)
 }
 
 // viewCarriesOwnWrites reports whether g resolves through a WRITE
@@ -314,6 +372,7 @@ func csrPairCachedForAt(
 	bopts *buildOpts, g *lpg.ReadView[string, float64],
 ) (fwd, rev *csr.CSR[float64], at csrPairKey) {
 	if bopts == nil {
+		countCSRPairBypass(nil, g)
 		csrPairAbsentCacheBuildCount.Add(1)
 		return csrPairFromGraphAt(g)
 	}
@@ -364,6 +423,7 @@ func csrPairAndColumnCachedFor(
 	// column is position-keyed, so a reader served a private pair's column would
 	// have committed edges mistyped rather than merely missing.
 	if cache == nil || g == nil || viewCarriesOwnWrites(g) {
+		countCSRPairBypass(cache, g)
 		if cache == nil {
 			csrPairAbsentCacheBuildCount.Add(1)
 		}

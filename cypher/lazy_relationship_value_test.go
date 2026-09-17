@@ -252,7 +252,7 @@ func buildRelValueWithUse(t *testing.T, c lazyRelCoords, use *nodeScalarUse) exp
 	t.Helper()
 	row := exec.Row{expr.IntegerValue(c.srcID), expr.IntegerValue(c.handle), expr.IntegerValue(c.dstID)}
 	meta := edgeVarInfo{edgeType: "R", acceptedTypes: []string{"R"}, srcCol: 0, edgeCol: 1, dstCol: 2}
-	v, ok := buildRelationshipValueFromRow(row, meta, c.view, nil, use)
+	v, ok := buildRelationshipValueFromRow(row, &meta, c.view, nil, use)
 	if !ok {
 		t.Fatal("buildRelationshipValueFromRow refused the synthesised row")
 	}

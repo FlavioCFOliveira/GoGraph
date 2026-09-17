@@ -19,6 +19,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -717,7 +718,7 @@ func TestRelStoredDir_DemotionIsMonotone(t *testing.T) {
 			for i, d := range tc.seq {
 				next := edgeVarInfo{dir: d}
 				if i > 0 {
-					next = demoteRelDirOnDisagreement(next, live)
+					next = demoteRelDirOnDisagreement(&next, &live)
 				}
 				live = next
 			}
@@ -769,12 +770,87 @@ func TestRelStoredDir_DemotionClearsTheColumnCoordinate(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			got := demoteRelDirOnDisagreement(
-				edgeVarInfo{dir: exec.DirBoth, dirCol: tc.next},
-				edgeVarInfo{dir: exec.DirBoth, dirCol: tc.prev})
+				&edgeVarInfo{dir: exec.DirBoth, dirCol: tc.next},
+				&edgeVarInfo{dir: exec.DirBoth, dirCol: tc.prev})
 			if got.dirCol != tc.wantAfterDem {
 				t.Fatalf("dirCol = %d, want %d", got.dirCol, tc.wantAfterDem)
 			}
 		})
+	}
+}
+
+// TestRelStoredDir_DemotionLeavesCallerStructsUnchanged is the ALIASING gate for
+// [demoteRelDirOnDisagreement]'s pointer parameters.
+//
+// The function took its two edgeVarInfo by VALUE until the struct reached 80
+// bytes and gocritic's hugeParam refused that form. By value, non-mutation was a
+// property of the language; by pointer it is a property of the BODY, and the
+// body is one `out := *info` away from writing the demotion straight into the
+// caller's registration. That would be a wrong-answer path: the caller holds
+// `prev` from bopts.edgeVarMeta and re-files the RETURN value, so an in-place
+// demotion of *prev would silently demote an entry the caller never re-read, and
+// an in-place demotion of *info would make the result depend on evaluation order.
+//
+// The test is a mutation gate, not an assertion of the obvious: it fails on an
+// implementation that mutates through either pointer, and its first two checks
+// prove the call was not a no-op, so an implementation that demotes NOTHING
+// cannot pass it either.
+func TestRelStoredDir_DemotionLeavesCallerStructsUnchanged(t *testing.T) {
+	t.Parallel()
+
+	info := edgeVarInfo{edgeType: "T", acceptedTypes: []string{"T"},
+		srcCol: 0, edgeCol: 1, dstCol: 2, dir: exec.DirOut, dirCol: 3}
+	prev := edgeVarInfo{edgeType: "T", acceptedTypes: []string{"T"},
+		srcCol: 4, edgeCol: 5, dstCol: 6, dir: exec.DirIn, dirCol: 7}
+	infoGolden, prevGolden := info, prev
+
+	got := demoteRelDirOnDisagreement(&info, &prev)
+
+	// Non-vacuity: the inputs disagree on BOTH fields, so a correct call must
+	// demote both. Without these two the test would pass on a function body that
+	// returns its first argument untouched.
+	if got.dir != relDirUnresolved {
+		t.Fatalf("returned dir = %v, want the unresolved sentinel: the disagreeing "+
+			"pair was not demoted, so this test proves nothing about mutation", got.dir)
+	}
+	if got.dirCol != -1 {
+		t.Fatalf("returned dirCol = %d, want -1", got.dirCol)
+	}
+	// The columns the demotion does not touch must survive into the return, or
+	// the copy is not a copy.
+	if got.srcCol != infoGolden.srcCol || got.edgeCol != infoGolden.edgeCol ||
+		got.dstCol != infoGolden.dstCol || got.edgeType != infoGolden.edgeType {
+		t.Fatalf("returned coordinates = %+v, want info's %+v", got, infoGolden)
+	}
+
+	if !reflect.DeepEqual(info, infoGolden) {
+		t.Errorf("*info was MUTATED: %+v, want the caller's %+v — the demotion "+
+			"must reach the caller only through the return value", info, infoGolden)
+	}
+	if !reflect.DeepEqual(prev, prevGolden) {
+		t.Errorf("*prev was MUTATED: %+v, want the caller's %+v — prev is the "+
+			"already-registered entry and this function may not touch it", prev, prevGolden)
+	}
+	// DeepEqual compares the slice CONTENTS, so it would forgive a body that
+	// reallocated acceptedTypes while keeping the same elements. The backing array
+	// must be the caller's too — a copy handed back is not the same object, and a
+	// future reader comparing identity would be misled.
+	if &info.acceptedTypes[0] != &infoGolden.acceptedTypes[0] {
+		t.Error("*info.acceptedTypes was REALLOCATED: the backing array is no longer the caller's")
+	}
+	if &prev.acceptedTypes[0] != &prevGolden.acceptedTypes[0] {
+		t.Error("*prev.acceptedTypes was REALLOCATED: the backing array is no longer the caller's")
+	}
+
+	// The aliasing case the by-value form handled for free: one struct cannot
+	// disagree with itself, so nothing is demoted and nothing is written.
+	self := edgeVarInfo{dir: exec.DirOut, dirCol: 3}
+	selfGolden := self
+	if aliased := demoteRelDirOnDisagreement(&self, &self); !reflect.DeepEqual(aliased, selfGolden) {
+		t.Errorf("aliased call returned %+v, want the input %+v unchanged", aliased, selfGolden)
+	}
+	if !reflect.DeepEqual(self, selfGolden) {
+		t.Errorf("aliased call MUTATED its argument: %+v, want %+v", self, selfGolden)
 	}
 }
 
@@ -827,7 +903,7 @@ func TestRelStoredDir_MutationEachGuardCanFail(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			got := relStoredInvertedForHop(
-				exec.Row{}, edgeVarInfo{dir: tc.dir, dirCol: -1}, view,
+				exec.Row{}, &edgeVarInfo{dir: tc.dir, dirCol: -1}, view,
 				graph.NodeID(aID), graph.NodeID(bID), "a", "b", 0)
 			if got != tc.want {
 				t.Fatalf("relStoredInvertedForHop(dir=%v) = %v, want %v", tc.dir, got, tc.want)
@@ -903,7 +979,7 @@ func TestRelStoredDir_ColumnValueIsLoadBearing(t *testing.T) {
 			row := exec.Row{expr.IntegerValue(aID), expr.IntegerValue(0),
 				expr.IntegerValue(bID), expr.BoolValue(cell)}
 			got := relStoredInvertedForHop(row,
-				edgeVarInfo{dir: relDirUnresolved, srcCol: 0, edgeCol: 1, dstCol: 2, dirCol: 3},
+				&edgeVarInfo{dir: relDirUnresolved, srcCol: 0, edgeCol: 1, dstCol: 2, dirCol: 3},
 				view, graph.NodeID(aID), graph.NodeID(bID), "a", "b", 0)
 			if got != cell {
 				t.Fatalf("the answer was %v with a %v cell — the column is not being read", got, cell)
@@ -941,7 +1017,7 @@ func TestRelStoredDir_ZeroValueMetaIsSlowNotWrong(t *testing.T) {
 	bID, _ := view.AdjList().Mapper().Lookup("b")
 
 	// Traversal a -> b, stored b -> a: the ladder must find it inverted.
-	if got := relStoredInvertedForHop(exec.Row{}, edgeVarInfo{}, view,
+	if got := relStoredInvertedForHop(exec.Row{}, &edgeVarInfo{}, view,
 		graph.NodeID(aID), graph.NodeID(bID), "a", "b", 0); !got {
 		t.Error("the zero-value meta did not resolve the inverted storage through the ladder")
 	}
