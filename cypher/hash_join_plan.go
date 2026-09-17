@@ -446,6 +446,9 @@ func shiftApplyMetaColumns(
 		info.srcCol += outerWidth
 		info.edgeCol += outerWidth
 		info.dstCol += outerWidth
+		if info.dirCol >= 0 {
+			info.dirCol += outerWidth // -1 means "no column", not column -1
+		}
 		bopts.edgeVarMeta[name] = info
 	}
 	for name, info := range bopts.pathVarChain {

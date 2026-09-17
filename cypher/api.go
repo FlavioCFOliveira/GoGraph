@@ -172,6 +172,24 @@ type edgeVarInfo struct {
 	srcCol  int
 	edgeCol int
 	dstCol  int
+	// dir is the TRAVERSAL direction of the Expand hop that binds this
+	// variable, when that direction decides the relationship's STORED
+	// orientation outright (DirOut: never inverted; DirIn: always inverted),
+	// and [relDirUnresolved] — the zero value — when it does not. See
+	// rel_stored_dir.go for what it replaces, why DirBoth is excluded, and why
+	// a name registered twice with disagreeing directions is demoted back to
+	// the sentinel instead of trusting the last writer.
+	dir exec.Direction
+	// dirCol is the schema column of the per-row stored-direction cell an
+	// UNDIRECTED hop emits ([exec.ExpandConfig.EmitStoredDir]), or -1 when the
+	// hop emits none — which is every directed hop, every anonymous
+	// relationship, and every entry a disagreeing re-registration demoted.
+	//
+	// It is NOT the zero value, deliberately: 0 is a valid column index, so a
+	// zero-value edgeVarInfo would point at the row's first cell. The
+	// consumer's BoolValue assertion would still refuse it, but a sentinel
+	// that is also a legal value is one guard away from a wrong answer.
+	dirCol int
 }
 
 // pathVarInfo records the schema column that holds the flat alternating path
@@ -10410,6 +10428,20 @@ func buildOperatorRec(
 		}
 		schema[toKey] = schemaBase + 2
 
+		// An UNDIRECTED hop's stored orientation varies row by row, so the plan
+		// cannot record it; when the hop binds a NAMED relationship variable
+		// the operator carries it in a fourth column instead (rmp #2864). The
+		// key is anonymous and unique per hop, and it exists so schemaWidth
+		// keeps tracking the ACTUAL row width — an operator emitting four
+		// columns under a schema that advanced by three puts every later
+		// column one slot out.
+		hopDir := irDirToExec(p.Direction)
+		dirCol := -1
+		if p.RelVar != "" && relDirColumnAdmits(hopDir) {
+			dirCol = schemaBase + 3
+			schema[fmt.Sprintf("__anon_reldir_%d", dirCol)] = dirCol
+		}
+
 		// Record the triplet in chain order so a *ir.NamedPath wrapper above
 		// this subtree can map its IR chain elements to the slots emitted by
 		// this Expand. Done for both named and anonymous relationships — the
@@ -10449,10 +10481,23 @@ func buildOperatorRec(
 				srcCol:  schemaBase,     // srcID dup column
 				edgeCol: schemaBase + 1, // edgeID column (= schema[relKey])
 				dstCol:  schemaBase + 2, // dstID column  (= schema[toKey])
+				// The hop's own direction, taken from the IR node rather than
+				// from the query text — mirrorAnchorSite re-roots a
+				// written-forward hop as a NEW ir.Expand with the reversed
+				// direction, so the node is the only place the executed
+				// direction is true (rmp #2864).
+				dir:    resolveHopStoredDir(hopDir),
+				dirCol: dirCol,
 			}
 			if len(p.RelTypes) > 0 {
 				info.edgeType = p.RelTypes[0]
 				info.acceptedTypes = append([]string(nil), p.RelTypes...)
+			}
+			// edgeVarMeta is read PER ROW and keyed by NAME, so a second hop
+			// binding the same name serves the first hop's rows too. A resolved
+			// direction is therefore asserted only while every hop agrees.
+			if prev, registered := bopts.edgeVarMeta[p.RelVar]; registered {
+				info = demoteRelDirOnDisagreement(info, prev)
 			}
 			bopts.edgeVarMeta[p.RelVar] = info
 		}
@@ -10467,11 +10512,12 @@ func buildOperatorRec(
 			return child, nil
 		}
 
-		dir := irDirToExec(p.Direction)
+		dir := hopDir
 
 		cfg := exec.ExpandConfig{
-			Direction: dir,
-			InputCol:  fromCol,
+			Direction:     dir,
+			InputCol:      fromCol,
+			EmitStoredDir: dirCol >= 0,
 		}
 		if len(p.RelTypes) > 0 {
 			cfg.EdgeType = p.RelTypes[0]
@@ -10589,6 +10635,9 @@ func buildOperatorRec(
 				info.srcCol += outerWidth
 				info.edgeCol += outerWidth
 				info.dstCol += outerWidth
+				if info.dirCol >= 0 {
+					info.dirCol += outerWidth // -1 means "no column", not column -1
+				}
 				bopts.edgeVarMeta[name] = info
 			}
 			for name, info := range bopts.pathVarChain {
@@ -15499,6 +15548,15 @@ func decodeVLEHops(lv expr.ListValue, g *lpg.ReadView[string, float64], bopts *b
 // (srcID -> dstID). The caller swaps the storage pair — and the emitted
 // StartID/EndID — when it says so.
 //
+// # It is the FALLBACK, not the first answer (rmp #2864)
+//
+// Since rmp #2864 this is reached only through [relStoredInvertedForHop], and
+// only for a row whose orientation the PLAN could not decide: an undirected
+// (DirBoth) hop, whose orientation is genuinely per row, or a relationship
+// variable whose name is bound by two hops that disagree about the direction.
+// A DirOut or DirIn hop answers from [edgeVarInfo.dir] and reaches none of the
+// questions below. See rel_stored_dir.go.
+//
 // [exec.Expand] emits (src, edge, dst) in traversal order and keeps no
 // direction flag, so the hydrator has to recover the stored direction itself.
 // It is asked three questions in order, each strictly more informative than
@@ -15662,7 +15720,7 @@ func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.ReadVi
 			// The row's edge id IS the stable handle since rmp #2317, so it is
 			// recovered BEFORE the orientation decision below, which consults it.
 			fwdHandle := uint64(edgeIDVal)
-			if relStoredInverted(g, graph.NodeID(srcID), graph.NodeID(dstID), srcKey, dstKey, fwdHandle) {
+			if relStoredInvertedForHop(row, meta, g, graph.NodeID(srcID), graph.NodeID(dstID), srcKey, dstKey, fwdHandle) {
 				storageStart, storageEnd = dstID, srcID
 				stKey, enKey = dstKey, srcKey
 			}
@@ -16749,7 +16807,8 @@ func buildIRProjection(
 									// the bound edge's own handle instead, which is the
 									// only thing that separates the two.
 									propSrc, propDst := srcKey, dstKey
-									if relStoredInverted(capturedG, graph.NodeID(srcID), graph.NodeID(dstID),
+									if relStoredInvertedForHop(row, capturedMeta, capturedG,
+										graph.NodeID(srcID), graph.NodeID(dstID),
 										srcKey, dstKey, edgeID) {
 										propSrc, propDst = dstKey, srcKey
 										storageStart, storageEnd = dstID, srcID
