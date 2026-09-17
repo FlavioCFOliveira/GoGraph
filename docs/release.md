@@ -291,22 +291,32 @@ in order, BEFORE goreleaser is invoked:
 **Correctness** (`make ci`, run exactly once — no coverage, no benchmarks):
 
 6. `make ci` is green. Its members, **in the order it runs them**, with the
-   wall clock each cost when measured on 2026-09-15 (Apple M4, 10 cores,
-   `darwin/arm64`, go1.27.1):
+   wall clock each cost. **The figures below were measured on the `v0.15.0`
+   release tree** — commit `19138042`, 2026-09-17, Apple M4, 10 cores,
+   `darwin/arm64`, go1.27.1 — read from the per-stage table
+   `scripts/ci_stages.sh` prints at the end of its own run log. They supersede
+   the 2026-09-15 measurement this table previously carried, which was taken
+   before sprint 362 added its tests:
 
    | # | Stage | Cost | What it does |
    |---|---|---|---|
-   | 1 | `shell-guard` | 0.4 s | asserts the recipe shell carries `-e -u -o pipefail` (rmp #2672) |
+   | 1 | `shell-guard` | 0.5 s | asserts the recipe shell carries `-e -u -o pipefail` (rmp #2672) |
    | 2 | `tidy` | 0.5 s | `go mod tidy` |
-   | 3 | `fmt` | 7.0 s | `gofmt` / `goimports -w` |
-   | 4 | `vet` | 1.1 s | `go vet ./...` |
-   | 5 | `build` | 8.2 s | `go build ./...` |
+   | 3 | `fmt` | 7.2 s | `gofmt` / `goimports -w` |
+   | 4 | `vet` | 1.2 s | `go vet ./...` |
+   | 5 | `build` | 8.0 s | `go build ./...` |
    | 6 | `ci-kg-verify` | 1.9 s | knowledge-graph fidelity — **needs `rmp graph serve -r gograph`** |
-   | 7 | `vulncheck` | 2.7 s | `govulncheck` over the module — needs the network |
-   | 8 | `lint` | 2.0 s warm / 252 s cold | `golangci-lint run ./...` |
-   | 9 | `test-uninstrumented` | 50 s | seven packages with neither `-race` nor coverage |
-   | 10 | `test-timing` | ~100 s | the wall-clock gates, serially, on a quiet machine |
-   | 11 | `test-short` | ~25 min | `go test -race -count=1 ./...` — the module suite, **once** |
+   | 7 | `vulncheck` | 2.8 s | `govulncheck` over the module — needs the network |
+   | 8 | `lint` | 1.8 s warm / 252 s cold | `golangci-lint run ./...` |
+   | 9 | `test-uninstrumented` | 54.7 s | seven packages with neither `-race` nor coverage |
+   | 10 | `test-timing` | 81.0 s | the wall-clock gates, serially, on a quiet machine |
+   | 11 | `test-short` | 774.7 s (12.9 min) | `go test -race -count=1 ./...` — the module suite, **once** |
+   | | **total** | **941.3 s (15.7 min)** | 11 of 11 green, 130 distinct packages `ok`, 0 cached |
+
+   **Only the cold-`lint` figure is inherited rather than re-measured.** The
+   252 s worst case is a property of an empty `golangci-lint` analysis cache,
+   which the release run did not have; every other number in the table comes
+   from that run.
 
    `test-short` carries the `cypher/tck` `TestTCKExecution` = 100 % execution
    baseline, so a TCK regression fails this gate. The suite runs once here —
@@ -339,7 +349,7 @@ in order, BEFORE goreleaser is invoked:
    against `go test -race -list '.*'` measured seven such tests, six of which
    ran in no other stage — two of them bounding the allocation a forged
    length prefix can provoke. Their packages joined `UNINSTR_PKGS`, which is
-   why `test-uninstrumented` now costs 50 s instead of 1 s.
+   why `test-uninstrumented` now costs 54.7 s instead of 1 s.
 
 7. **After a failure, `make ci-resume`.** Each passing stage is stamped with
    a key covering every non-ignored file plus the Go and golangci-lint
@@ -367,10 +377,29 @@ in order, BEFORE goreleaser is invoked:
 
 **Performance** (measured, but not gated):
 
-**Benchmark execution is not part of the release path.** Neither
-`release-accuracy` nor `release-preflight` runs a benchmark, and no
-release requires a `docs/benchmarks/VERSION.md` to exist. A release is
-gated on correctness, and never on a performance number.
+**Benchmark execution is not part of the release path, but the report
+still is.** Neither `release-accuracy` nor `release-preflight` runs a
+benchmark, and a release is gated on correctness, never on a performance
+number — no threshold has to be met and no campaign has to be run.
+
+**Every release does, however, require `docs/benchmarks/VERSION.md` to
+exist.** `TestPerReleaseBenchmarkReportExists`
+(`internal/docscheck/docscheck_test.go`) enforces it, guarding rmp #1398
+with the words *"each release must record its benchmark/load-test
+numbers"*, and it runs inside `test-short` — so a missing report turns
+`make ci`, and therefore `release-preflight`, **red**. The gate reads the
+version from the newest `release-notes/*.md`, so it starts failing the
+moment those notes are written and keeps failing until the report is
+added.
+
+*Corrected 2026-09-17 (`v0.15.0`).* This passage previously said that no
+release requires the file. That was false, and it cost a red gate: the
+sentence was trusted over the gate, and the release reached
+`release-preflight` without a report. **The gate is the authority, never
+the prose about the gate** — including this prose. What execution
+gating's removal changed is that the numbers may be development-time
+measurements already recorded by the tasks that shipped them, rather than
+a campaign run for the tag.
 
 That is a change of *gate*, not a change of *standard*. Measurement still
 decides every performance question in this project — a performance claim
@@ -422,15 +451,73 @@ files instead, and the `v0.13.0` changelog then claimed those documents
 archives.
 
 **So verify packaging per release by extraction, never by reading the
-config:**
+config.**
+
+**The command this section used to give does not run**, and that was found
+the only way it could be — by running it while preparing `v0.15.0`. Plain
 
 ```bash
 goreleaser release --snapshot --clean --skip=publish,before,validate
-tar tzf dist/gograph-*-darwin-arm64.tar.gz | grep -c '^docs/[^/]*\.md$'
-tar tzf dist/gograph-*-darwin-arm64.tar.gz | grep -cE '\.(txt|log|meta|sh)$'
+```
+
+exits **1** with
+
+```
+⨯ release failed after 13s   error=failed to find files to archive: globbing
+  failed for pattern gograph.cdx.json: matching "./gograph.cdx.json": file does
+  not exist
+```
+
+The cause is that `gograph.cdx.json` is an `archives.files:` entry, and the
+**only** thing that produces it is the `cyclonedx-gomod` `before:` hook —
+which `--skip=before` skips. The four per-platform `soak` binaries build
+fine; the run then dies at the archive step. A verification recipe that
+cannot execute is worse than none, because the `docs/**/*` defect above
+stood for a whole release precisely by not being extracted.
+
+**Use this instead. It was run to completion on the `v0.15.0` tree**
+(commit `19138042`, goreleaser exit 0), and it is the route to prefer when
+`cyclonedx-gomod` is not installed locally:
+
+```bash
+# `--skip=before` skips the hook that generates the SBOM, and the archive step
+# then hard-fails on the missing file. Stand a placeholder in for it:
+# gograph.cdx.json is gitignored, so this does not dirty the working tree.
+printf '{"bomFormat":"CycloneDX","specVersion":"1.5","version":1,"components":[]}\n' > gograph.cdx.json
+goreleaser release --snapshot --clean --skip=publish,before,validate
+for a in dist/gograph-*.tar.gz; do
+  echo "$a"
+  tar tzf "$a" | grep -c '^docs/[^/]*\.md$'
+  tar tzf "$a" | grep -cE '\.(txt|log|meta|sh)$'
+done
+rm -f gograph.cdx.json
+rm -rf dist
 ```
 
 The first count must equal `ls docs/*.md | wc -l`; the second must be 0.
+**Check every archive, not just one** — the defect this guards against was
+identical across all four, but a per-archive `files:` divergence would not
+be. Measured at `v0.15.0`: **122 of 122** top-level documents and **0** raw
+files in each of the four tarballs.
+
+**This route verifies the documentation glob, not the SBOM.** The
+placeholder is not a real bill of materials; it exists only so the archive
+assembles. To verify the real SBOM as well, install the pinned generator
+and let the hook run:
+
+```bash
+go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.12.0
+goreleaser release --snapshot --clean --skip=publish,validate   # note: no `before`
+```
+
+That second form was **not** exercised at `v0.15.0` — `cyclonedx-gomod` was
+not installed on the release workstation — so it is recorded as the
+documented alternative rather than as a verified one. The release workflow
+installs the same pinned version and runs the hook for real, so the SBOM
+that ships is generated there.
+
+**The same broken command is duplicated in `.goreleaser.yaml`'s
+`archives.files:` comment** and has not been corrected there.
 
 Note also that this file's `builds:` stanza declares **one** binary,
 `soak`. `.goreleaser.yaml`'s own header comment claims the config "also

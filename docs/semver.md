@@ -159,11 +159,23 @@ baseline when **all** of the following conditions are met:
    These figures coincide with the ones the sprint-350 close gate recorded at commit
    `1b7d7c7f`, but they are **no longer inherited from it**: that run predated both the
    toolchain bump and the dependency refresh, so it could not have spoken for this tree.
-   The `govulncheck` half of this gate carries a stated limitation rather than a clean
-   claim — see the CVE-scan step in
-   [CONTRIBUTING.md](../CONTRIBUTING.md#dependency-policy): module-level scanning reports
-   no vulnerabilities, and symbol-level reachability scanning is unavailable under the
-   pinned toolchain.
+   **The `govulncheck` half of this gate carried a stated limitation at `v0.12.0`, and
+   that limitation is now lifted.** At `v0.12.0` the scan ran at module level, because no
+   upstream `govulncheck` release was built for the pinned Go minor and a binary built
+   against an older minor **exits 0 while performing no analysis at all**. Both traps are
+   closed by `make vulncheck` (rmp #2722), and the CVE-scan step in
+   [CONTRIBUTING.md](../CONTRIBUTING.md#dependency-policy) records the earlier
+   `-scan=module` guidance as **superseded**: `govulncheck@v1.7.0` is the release built
+   for the pinned minor, the gate asserts `scan_level=symbol` so a module-level run
+   cannot pass as full reachability analysis, and it asserts that every package
+   `go list ./...` reports was actually scanned.
+
+   **Measured at `v0.15.0`** (2026-09-17, commit `19138042`, read from the `make ci`
+   log rather than from a wrapper): `scanner=govulncheck@v1.7.0`, `go=go1.27.1`,
+   `scan=source/symbol`, **137 packages across 11 modules analysed, 0 vulnerabilities**,
+   against a vulnerability database last modified 2026-09-15. This is full symbol-level
+   reachability analysis, not the module-level fallback, so the gate is now a clean
+   claim.
 
 3. **All T-series tasks closed — MET.** Every task prefixed `T-` in
    `docs/tck/DIVERGENCES.md` must be marked resolved. T-series tasks
