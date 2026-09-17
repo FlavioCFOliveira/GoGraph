@@ -808,6 +808,11 @@ type Server struct {
 	eng      *cypher.Engine
 	sem      chan struct{} // capacity == MaxConnections
 	log      *slog.Logger
+	// rejectLog bounds how often the accept loop's reject branch writes its
+	// WARN, so a connection flood cannot become an unbounded log stream on the
+	// goroutine the flood already contends for. Per-Server state, never package
+	// state; safe for concurrent use.
+	rejectLog rejectLogLimiter
 	// txReg tracks the explicit transactions currently open across every
 	// connection, backing [Server.Transactions] and
 	// [Server.TerminateTransaction]. Shared by every session; safe for concurrent
@@ -1039,7 +1044,34 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) (err error) {
 			// operator can correlate a connection flood: a rejected connection never
 			// becomes live, so the accepted/closed gauge alone cannot reveal it.
 			incCounter(metricConnRejected)
-			s.log.Warn("bolt: max connections reached, rejecting", slog.String("remote", conn.RemoteAddr().String()))
+			// The COUNTER is exact and unsampled: it is the operator's ground
+			// truth for how many connections were refused, and nothing below
+			// touches it.
+			//
+			// The LOG LINE is bounded, because it must be. A flood refuses
+			// connections as fast as the kernel can hand them over, and
+			// formatting one 89-byte WARN per refusal costs 1.670 µs on THIS
+			// goroutine — the accept loop, the single thing the flood is already
+			// contending for — so an unbounded log turns an operational signal
+			// into part of the attack, and writes 89 bytes of disk per refusal
+			// while it does (rmp #2835). One line per rejectLogInterval survives,
+			// carrying the number of refusals it stands for, so what is lost is
+			// the per-connection detail and nothing else.
+			//
+			// Enabled is tested FIRST, for two distinct reasons. It makes
+			// conn.RemoteAddr().String() — 45 ns, 32 B, 3 allocations, paid
+			// eagerly by the old call site even when the record was discarded —
+			// unreachable when the level is off. And it leaves the limiter
+			// untouched in that case, so its suppressed tally is not silently
+			// reset by a line that was never written.
+			if s.log.Enabled(acceptCtx, slog.LevelWarn) {
+				if emit, suppressed := s.rejectLog.allow(time.Now().UnixNano(), rejectLogInterval); emit {
+					s.log.Warn("bolt: max connections reached, rejecting (log rate-limited)",
+						slog.String("remote", conn.RemoteAddr().String()),
+						slog.Uint64("suppressed_since_last_line", suppressed),
+						slog.Duration("log_interval", rejectLogInterval))
+				}
+			}
 			_ = conn.Close() // best-effort close on rejection path
 			continue
 		}
@@ -1264,11 +1296,9 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	// budget (the default when no GOMEMLIMIT is set) detaches the accounting.
 	cr.SetInboundBudget(s.inbound)
 	cw := proto.NewChunkedWriter(conn)
-	// RECORD frames accumulate in the writer's buffer instead of each costing a
-	// write syscall of its own; sendResponse flushes on every other message
-	// type. Every run of RECORDs is terminated by SUCCESS, FAILURE or IGNORED,
-	// so the client still has every record in hand before this loop goes back to
-	// waiting for its next request. See sendResponse for the full argument.
+	// Every response frame accumulates in the writer's buffer instead of costing
+	// a write syscall of its own. Delivery is this function's responsibility from
+	// here on; see "The flush obligation" at the message loop below.
 	cw.SetAutoFlush(false)
 	// Pass the listener address so ROUTE responses can populate the routing table.
 	localAddr := ""
@@ -1317,10 +1347,19 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	connCtx, cancelConn := context.WithCancel(ctx)
 
 	// The reader goroutine owns the connection read side and reports each framed
-	// message (or the terminal read error) to the message loop. msgCh is
-	// unbuffered, so the reader runs at most one message ahead of processing;
-	// readerDone is closed when it exits.
-	msgCh := make(chan readResultT)
+	// message (or the terminal read error) to the message loop; readerDone is
+	// closed when it exits.
+	//
+	// msgCh holds ONE message, which is what lets the message loop tell "the
+	// client has already sent more" from "the client is waiting for me" without
+	// reaching across the goroutine boundary into the reader's buffer. With an
+	// unbuffered channel the reader must be scheduled at exactly the right
+	// instant for a pipelined pair to be visible as a pair; with one slot it can
+	// deposit the second message and move on, so a steady pipeline keeps a
+	// request in hand whenever one has arrived. The bound stays tight: at most
+	// two framed messages are in flight per connection (one buffered, one in the
+	// reader's hand), each already capped by MaxMessageBytes.
+	msgCh := make(chan readResultT, 1)
 	readerDone := make(chan struct{})
 
 	// Tear the connection down on EVERY exit path — clean GOODBYE, client
@@ -1338,6 +1377,21 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 		<-readerDone
 		sess.Close()
 	}()
+
+	// The second half of the flush obligation: drain the buffer before the
+	// connection is torn down. A FAILURE written on a path that then returns —
+	// a decode error that defuncts the session, a handler error, a terminal
+	// state transition — is still in the writer's buffer when the loop exits,
+	// and this is the only thing that delivers it. Registered AFTER the teardown
+	// defer above so it runs BEFORE it, while the socket is still open.
+	//
+	// It carries its own deadline rather than Options.ConnTimeout, which
+	// defaults to zero and therefore to NO deadline: a peer that has stopped
+	// reading must not be able to pin this goroutine, and its semaphore slot,
+	// on a teardown path where delivery is already best effort. A failure here
+	// is not actionable — the connection is going away either way — so it is
+	// logged at Debug and nowhere else.
+	defer s.flushOnTeardown(cw, conn, remote)
 
 	go func() {
 		// close(readerDone) is the FIRST deferred call so it ALWAYS runs — even
@@ -1470,7 +1524,41 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 		}
 	}
 
+	// ── The flush obligation ─────────────────────────────────────────────
+	//
+	// cw has auto-flush disabled, so a response reaches the client only when
+	// this loop flushes. That buys one write(2) per exchange instead of one per
+	// message, and it places one obligation on this goroutine, which is
+	// absolute:
+	//
+	//	THE RESPONSE BUFFER MUST BE DRAINED BEFORE THIS GOROUTINE CAN BLOCK
+	//	WAITING FOR THE CLIENT, AND BEFORE THE CONNECTION IS TORN DOWN.
+	//
+	// A buffered reply that reaches a blocking receive is not a slow reply. It
+	// is a deadlock: the client waits for bytes the server is holding, and the
+	// server waits for a request the client will not send until it has them.
+	// Neither side times out, because neither side is idle by its own reckoning.
+	//
+	// The obligation is discharged in exactly two places and nowhere else:
+	// flushUnlessRequestPending, called immediately below and guarding the ONLY
+	// point in this loop that can block on the client, and flushOnTeardown,
+	// deferred above, which covers every return. Both are named, both are next
+	// to writeResponse, and nothing else in the server flushes this writer.
+	//
+	// This is Memgraph's rule, reimplemented for a design that reads on a
+	// separate goroutine. Memgraph drains every decodable inbound chunk, then
+	// flushes once, and only then arms the next read (session.hpp:124/167,
+	// v2/session.hpp:383 at f8ab137e), so a session can never await the client
+	// with finalized bytes buffered. Reading on its own goroutine means GoGraph
+	// cannot inspect the decode buffer directly, so "input exhausted" is
+	// approximated by "nothing in hand" — the approximation costs a syscall
+	// when it is wrong and cannot cost correctness. PostgreSQL's alternative,
+	// coalescing until the client's Sync (postgres.c:5140 at 04c4c1c3), has no
+	// counterpart in Bolt, which defines no such landmark.
 	for {
+		if !s.flushUnlessRequestPending(cw, msgCh, remote) {
+			return
+		}
 		select {
 		case <-connCtx.Done():
 			// Server shutdown or teardown: stop serving. The reader observes the
@@ -1696,6 +1784,55 @@ func readDeadlineAt(d time.Duration) time.Time {
 	return time.Now().Add(d)
 }
 
+// flushUnlessRequestPending is the FIRST of the two places that discharge the
+// flush obligation stated in handleConn's message loop, and the only one that
+// covers the loop going to sleep. It reports whether the connection may
+// continue; false means the write side is broken and the caller must tear down.
+//
+// It flushes unless a request is already in hand. len(msgCh) > 0 is positive
+// proof that the loop's receive cannot block — the loop is that channel's only
+// receiver, so a buffered value cannot be taken by anyone else — and therefore
+// that the client is not waiting on bytes this server is holding. Reading zero
+// costs one flush, which is exactly the behaviour before rmp #2834; the test is
+// conservative in the safe direction and cannot deadlock.
+//
+// No write deadline is armed here. The buffer can only be dirty because a
+// response was written during this iteration, and every response goes through
+// writeResponse, which arms it. On the iterations that wrote nothing the buffer
+// is empty and Flush is a no-op.
+func (s *Server) flushUnlessRequestPending(cw *proto.ChunkedWriter, msgCh <-chan readResultT, remote string) bool {
+	if len(msgCh) > 0 {
+		return true
+	}
+	if err := cw.Flush(); err != nil {
+		s.log.Warn("bolt: write error",
+			slog.String("remote", remote),
+			slog.String("err", err.Error()))
+		return false
+	}
+	return true
+}
+
+// flushOnTeardown is the SECOND of the two places that discharge the flush
+// obligation, and the only one that covers a return out of the message loop. A
+// FAILURE written on a path that then tears the connection down — a decode
+// error, a handler error, a terminal state transition — is still in the
+// writer's buffer when the loop exits, and this is what delivers it.
+//
+// It carries its own deadline rather than Options.ConnTimeout, which defaults to
+// zero and therefore to NO socket deadline: a peer that has stopped reading must
+// not be able to pin this goroutine, and its MaxConnections semaphore slot, on a
+// path where delivery is already best effort. A failure here is not actionable —
+// the connection is going away either way — so it is logged at Debug.
+func (s *Server) flushOnTeardown(cw *proto.ChunkedWriter, conn net.Conn, remote string) {
+	_ = conn.SetWriteDeadline(time.Now().Add(teardownFlushTimeout))
+	if err := cw.Flush(); err != nil && !isConnClosed(err) {
+		s.log.Debug("bolt: final response flush failed on teardown",
+			slog.String("remote", remote),
+			slog.String("err", err.Error()))
+	}
+}
+
 // writeResponse sets the per-message write deadline (idle ConnTimeout) and
 // writes one response, logging and returning false on a write error so the
 // caller tears the connection down. It centralises the write-deadline handling
@@ -1799,22 +1936,20 @@ func sendResponse(cw *proto.ChunkedWriter, msg any) error {
 	if err := cw.WriteMessage(rb.buf.Bytes()); err != nil {
 		return fmt.Errorf("bolt: write response %T: %w", msg, err)
 	}
-	// The connection's writer has auto-flush disabled (see handleConn), so a
-	// RECORD costs no syscall of its own and a K-row result is delivered in
-	// O(bytes/bufsize) writes rather than K. Flushing on every message that is
-	// NOT a RECORD is what keeps that safe: the Bolt protocol terminates every
-	// run of RECORDs with a SUCCESS, FAILURE or IGNORED summary, and the server
-	// only ever waits for the client after sending one. So the buffer is always
-	// drained before the exchange can block, and a client that is streaming
-	// still sees each batch as soon as its summary lands.
+	// sendResponse ENCODES; it does not deliver. The connection's writer has
+	// auto-flush disabled (see handleConn), so every message — RECORD or summary
+	// — accumulates in the writer's buffer, and the message loop drains it at the
+	// one point where this goroutine could otherwise block waiting for the
+	// client. See "The flush obligation" in handleConn for the invariant and the
+	// argument that it holds.
 	//
-	// Flushing per RECORD instead measured 70% of all server CPU in write(2)
-	// under a row-returning query (docs/cpu-vs-neo4j-memgraph-2026-08-11.md §4).
-	if _, isRecord := msg.(*proto.Record); !isRecord {
-		if err := cw.Flush(); err != nil {
-			return fmt.Errorf("bolt: flush response %T: %w", msg, err)
-		}
-	}
+	// That division is what makes both savings possible at once. A K-row result
+	// costs O(bytes/bufsize) writes instead of K — flushing per RECORD measured
+	// 70% of all server CPU in write(2) under a row-returning query
+	// (docs/cpu-vs-neo4j-memgraph-2026-08-11.md §4) — and a pipelined RUN+PULL,
+	// which the client delivers in ONE write, is answered in one write instead of
+	// two (rmp #2834). bufio's own full-buffer flush remains the hard ceiling
+	// underneath both, exactly as it was.
 	return nil
 }
 

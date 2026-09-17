@@ -1,0 +1,32 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+                            │ docs/benchmarks/cypher-parse-lab-2026-09-16-spike2846/warm.multikey.series.txt │
+                            │                                     sec/op                                     │
+SpikeWarmPrepareMultiKey                                                                         20.96n ± 7%
+SpikeWarmPrepareMultiKey-2                                                                       54.92n ± 2%
+SpikeWarmPrepareMultiKey-4                                                                       120.7n ± 2%
+SpikeWarmPrepareMultiKey-8                                                                       113.5n ± 3%
+SpikeWarmPrepareMultiKey-10                                                                      117.0n ± 1%
+geomean                                                                                          71.32n
+
+                            │ docs/benchmarks/cypher-parse-lab-2026-09-16-spike2846/warm.multikey.series.txt │
+                            │                                      B/op                                      │
+SpikeWarmPrepareMultiKey                                                                        0.000 ± 0%
+SpikeWarmPrepareMultiKey-2                                                                      0.000 ± 0%
+SpikeWarmPrepareMultiKey-4                                                                      0.000 ± 0%
+SpikeWarmPrepareMultiKey-8                                                                      0.000 ± 0%
+SpikeWarmPrepareMultiKey-10                                                                     0.000 ± 0%
+geomean                                                                                                    ¹
+¹ summaries must be >0 to compute geomean
+
+                            │ docs/benchmarks/cypher-parse-lab-2026-09-16-spike2846/warm.multikey.series.txt │
+                            │                                   allocs/op                                    │
+SpikeWarmPrepareMultiKey                                                                        0.000 ± 0%
+SpikeWarmPrepareMultiKey-2                                                                      0.000 ± 0%
+SpikeWarmPrepareMultiKey-4                                                                      0.000 ± 0%
+SpikeWarmPrepareMultiKey-8                                                                      0.000 ± 0%
+SpikeWarmPrepareMultiKey-10                                                                     0.000 ± 0%
+geomean                                                                                                    ¹
+¹ summaries must be >0 to compute geomean

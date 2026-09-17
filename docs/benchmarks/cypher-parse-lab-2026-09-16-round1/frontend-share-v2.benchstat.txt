@@ -1,0 +1,69 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+                                                      │ docs/benchmarks/cypher-parse-lab-2026-09-16-round1/frontend-share-v2.series.txt │
+                                                      │                                     sec/op                                      │
+FrontEndShare/q06_indexed_point_lookup/hit/1parse-10                                                                        15.93n ± 1%
+FrontEndShare/q06_indexed_point_lookup/hit/2full-10                                                                         2.377µ ± 1%
+FrontEndShare/q06_indexed_point_lookup/miss/1parse-10                                                                       16.97µ ± 3%
+FrontEndShare/q06_indexed_point_lookup/miss/2full-10                                                                        20.68µ ± 1%
+FrontEndShare/q02_scan_filter_count/hit/1parse-10                                                                           16.34n ± 1%
+FrontEndShare/q02_scan_filter_count/hit/2full-10                                                                            379.1µ ± 1%
+FrontEndShare/q02_scan_filter_count/miss/1parse-10                                                                          20.90µ ± 1%
+FrontEndShare/q02_scan_filter_count/miss/2full-10                                                                           404.7µ ± 1%
+FrontEndShare/q16_scan_sort_limit/hit/1parse-10                                                                             17.77n ± 0%
+FrontEndShare/q16_scan_sort_limit/hit/2full-10                                                                              1.100m ± 1%
+FrontEndShare/q16_scan_sort_limit/miss/1parse-10                                                                            25.43µ ± 2%
+FrontEndShare/q16_scan_sort_limit/miss/2full-10                                                                             1.117m ± 1%
+FrontEndShare/qLit_scan_strliteral/hit/1parse-10                                                                            501.4n ± 1%
+FrontEndShare/qLit_scan_strliteral/hit/2full-10                                                                             414.7µ ± 2%
+FrontEndShare/qLit_scan_strliteral/miss/1parse-10                                                                           22.51µ ± 1%
+FrontEndShare/qLit_scan_strliteral/miss/2full-10                                                                            437.0µ ± 1%
+FrontEndShare/control/cacheclear-10                                                                                         5.028n ± 0%
+geomean                                                                                                                     8.272µ
+
+                                                      │ docs/benchmarks/cypher-parse-lab-2026-09-16-round1/frontend-share-v2.series.txt │
+                                                      │                                      B/op                                       │
+FrontEndShare/q06_indexed_point_lookup/hit/1parse-10                                                                       0.000 ± 0%
+FrontEndShare/q06_indexed_point_lookup/hit/2full-10                                                                      3.523Ki ± 0%
+FrontEndShare/q06_indexed_point_lookup/miss/1parse-10                                                                    18.61Ki ± 0%
+FrontEndShare/q06_indexed_point_lookup/miss/2full-10                                                                     22.97Ki ± 0%
+FrontEndShare/q02_scan_filter_count/hit/1parse-10                                                                          0.000 ± 0%
+FrontEndShare/q02_scan_filter_count/hit/2full-10                                                                         76.13Ki ± 0%
+FrontEndShare/q02_scan_filter_count/miss/1parse-10                                                                       22.80Ki ± 0%
+FrontEndShare/q02_scan_filter_count/miss/2full-10                                                                        100.2Ki ± 0%
+FrontEndShare/q16_scan_sort_limit/hit/1parse-10                                                                            0.000 ± 0%
+FrontEndShare/q16_scan_sort_limit/hit/2full-10                                                                           209.2Ki ± 0%
+FrontEndShare/q16_scan_sort_limit/miss/1parse-10                                                                         29.22Ki ± 0%
+FrontEndShare/q16_scan_sort_limit/miss/2full-10                                                                          240.0Ki ± 0%
+FrontEndShare/qLit_scan_strliteral/hit/1parse-10                                                                           864.0 ± 0%
+FrontEndShare/qLit_scan_strliteral/hit/2full-10                                                                          155.4Ki ± 0%
+FrontEndShare/qLit_scan_strliteral/miss/1parse-10                                                                        24.05Ki ± 0%
+FrontEndShare/qLit_scan_strliteral/miss/2full-10                                                                         179.8Ki ± 0%
+FrontEndShare/control/cacheclear-10                                                                                        0.000 ± 0%
+geomean                                                                                                                               ¹
+¹ summaries must be >0 to compute geomean
+
+                                                      │ docs/benchmarks/cypher-parse-lab-2026-09-16-round1/frontend-share-v2.series.txt │
+                                                      │                                    allocs/op                                    │
+FrontEndShare/q06_indexed_point_lookup/hit/1parse-10                                                                       0.000 ± 0%
+FrontEndShare/q06_indexed_point_lookup/hit/2full-10                                                                        45.00 ± 0%
+FrontEndShare/q06_indexed_point_lookup/miss/1parse-10                                                                      334.0 ± 0%
+FrontEndShare/q06_indexed_point_lookup/miss/2full-10                                                                       388.0 ± 0%
+FrontEndShare/q02_scan_filter_count/hit/1parse-10                                                                          0.000 ± 0%
+FrontEndShare/q02_scan_filter_count/hit/2full-10                                                                           60.00 ± 0%
+FrontEndShare/q02_scan_filter_count/miss/1parse-10                                                                         397.0 ± 0%
+FrontEndShare/q02_scan_filter_count/miss/2full-10                                                                          471.0 ± 0%
+FrontEndShare/q16_scan_sort_limit/hit/1parse-10                                                                            0.000 ± 0%
+FrontEndShare/q16_scan_sort_limit/hit/2full-10                                                                            14.85k ± 0%
+FrontEndShare/q16_scan_sort_limit/miss/1parse-10                                                                           479.0 ± 0%
+FrontEndShare/q16_scan_sort_limit/miss/2full-10                                                                           15.35k ± 0%
+FrontEndShare/qLit_scan_strliteral/hit/1parse-10                                                                           15.00 ± 0%
+FrontEndShare/qLit_scan_strliteral/hit/2full-10                                                                           5.086k ± 0%
+FrontEndShare/qLit_scan_strliteral/miss/1parse-10                                                                          421.0 ± 0%
+FrontEndShare/qLit_scan_strliteral/miss/2full-10                                                                          5.506k ± 0%
+FrontEndShare/control/cacheclear-10                                                                                        0.000 ± 0%
+geomean                                                                                                                               ¹
+¹ summaries must be >0 to compute geomean
+benchstat_exit=0

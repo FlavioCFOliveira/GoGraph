@@ -1,0 +1,16 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/parser
+cpu: Apple M4
+                     │   Before    │                After                │
+                     │   sec/op    │   sec/op     vs base                │
+ImplStripHoisters-10   4.873µ ± 3%   2.338µ ± 4%  -52.02% (p=0.000 n=10)
+
+                     │    Before    │                After                 │
+                     │     B/op     │     B/op      vs base                │
+ImplStripHoisters-10   3.633Ki ± 0%   2.664Ki ± 0%  -26.67% (p=0.000 n=10)
+
+                     │   Before    │               After                │
+                     │  allocs/op  │ allocs/op   vs base                │
+ImplStripHoisters-10   148.00 ± 0%   32.00 ± 0%  -78.38% (p=0.000 n=10)
+benchstat_exit=0

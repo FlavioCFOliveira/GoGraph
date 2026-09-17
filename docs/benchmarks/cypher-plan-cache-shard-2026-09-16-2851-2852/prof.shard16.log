@@ -1,0 +1,9 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkSpikeWarmPrepareParallel/quotefree-10         	47744248	        74.98 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal-10           	22396688	       160.9 ns/op	     464 B/op	       6 allocs/op
+BenchmarkSpikeWarmPrepareMultiKey-10                   	95620069	        45.92 ns/op	       0 B/op	       0 allocs/op
+PASS
+prof_shard16_exit=0

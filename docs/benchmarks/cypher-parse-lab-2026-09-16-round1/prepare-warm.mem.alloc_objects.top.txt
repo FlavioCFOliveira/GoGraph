@@ -1,0 +1,78 @@
+File: cypher.test
+Type: alloc_objects
+Time: 2026-09-16 13:06:01 WEST
+Showing nodes accounting for 3853930, 94.17% of 4092677 total
+Dropped 1004 nodes (cum <= 20463)
+      flat  flat%   sum%        cum   cum%
+   2499085 61.06% 61.06%    2499085 61.06%  internal/bytealg.MakeNoZero
+    444250 10.85% 71.92%    2942656 71.90%  github.com/FlavioCFOliveira/GoGraph/cypher/parser.StripLiterals
+    309540  7.56% 79.48%     418884 10.23%  github.com/FlavioCFOliveira/GoGraph/graph/lpg.New[go.shape.string,go.shape.float64]
+    205824  5.03% 84.51%     205824  5.03%  github.com/FlavioCFOliveira/GoGraph/graph/index/count.(*table[go.shape.uint64]).init (inline)
+    103314  2.52% 87.03%     103314  2.52%  github.com/FlavioCFOliveira/GoGraph/graph.NewMapper[go.shape.string] (inline)
+    102912  2.51% 89.55%     102912  2.51%  github.com/FlavioCFOliveira/GoGraph/graph/index/count.(*table[go.shape.struct { github.com/FlavioCFOliveira/GoGraph/graph/index/count.a uint32; github.com/FlavioCFOliveira/GoGraph/graph/index/count.rt uint32; github.com/FlavioCFOliveira/GoGraph/graph/index/count.b uint32 }]).init (inline)
+    102912  2.51% 92.06%     102912  2.51%  github.com/FlavioCFOliveira/GoGraph/graph/index/count.(*table[go.shape.uint32]).init (inline)
+     27976  0.68% 92.75%      27976  0.68%  github.com/antlr4-go/antlr/v4.(*BaseParserRuleContext).AddChild
+     25728  0.63% 93.38%      25728  0.63%  github.com/FlavioCFOliveira/GoGraph/graph/index/count.newRBMutex (inline)
+     21786  0.53% 93.91%      21786  0.53%  github.com/antlr4-go/antlr/v4.NewATNConfig (inline)
+      3216 0.079% 93.99%     467129 11.41%  github.com/FlavioCFOliveira/GoGraph/cypher.NewEngineWithOptions
+      2504 0.061% 94.05%      32208  0.79%  github.com/antlr4-go/antlr/v4.(*CommonTokenStream).fetch
+      2010 0.049% 94.10%     233562  5.71%  github.com/FlavioCFOliveira/GoGraph/graph/index/count.New
+      1206 0.029% 94.13%     255620  6.25%  github.com/FlavioCFOliveira/GoGraph/cypher.(*planBuildGroup).do
+       805  0.02% 94.15%     223722  5.47%  github.com/FlavioCFOliveira/GoGraph/cypher/parser.ParseStatement
+       407 0.0099% 94.16%     254423  6.22%  github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).compilePlanCacheEntry
+       402 0.0098% 94.17%     103716  2.53%  github.com/FlavioCFOliveira/GoGraph/graph/adjlist.New[go.shape.string,go.shape.float64]
+        11 0.00027% 94.17%      28004  0.68%  github.com/antlr4-go/antlr/v4.(*BaseParser).addContextToParseTree
+        11 0.00027% 94.17%    4088790 99.91%  testing.(*B).runN
+         6 0.00015% 94.17%      37666  0.92%  github.com/antlr4-go/antlr/v4.(*ParserATNSimulator).closureCheckingStopState
+         2 4.9e-05% 94.17%      41571  1.02%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).AddSubExpression
+         2 4.9e-05% 94.17%      47028  1.15%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).AndExpression
+         2 4.9e-05% 94.17%      26964  0.66%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).Atom
+         2 4.9e-05% 94.17%      50409  1.23%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).Expression
+         2 4.9e-05% 94.17%     154776  3.78%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).Query
+         2 4.9e-05% 94.17%      48734  1.19%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).XorExpression
+         1 2.4e-05% 94.17%      34370  0.84%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).AtomicExpression
+         1 2.4e-05% 94.17%      43391  1.06%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).ComparisonExpression
+         1 2.4e-05% 94.17%      29289  0.72%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).MatchSt
+         1 2.4e-05% 94.17%      39797  0.97%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).MultDivExpression
+         1 2.4e-05% 94.17%      45341  1.11%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).NotExpression
+         1 2.4e-05% 94.17%      29943  0.73%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).Pattern
+         1 2.4e-05% 94.17%      28421  0.69%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).PatternElem
+         1 2.4e-05% 94.17%      38079  0.93%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).PowerExpression
+         1 2.4e-05% 94.17%      30591  0.75%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).PropertyExpression
+         1 2.4e-05% 94.17%      32279  0.79%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).PropertyOrLabelExpression
+         1 2.4e-05% 94.17%      42856  1.05%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).ReturnSt
+         1 2.4e-05% 94.17%     150166  3.67%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).SingleQuery
+         1 2.4e-05% 94.17%      36302  0.89%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).UnaryAddSubExpression
+         0     0% 94.17%     255573  6.24%  github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).buildPlanCacheEntry (inline)
+         0     0% 94.17%    3198229 78.15%  github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).parseAndAnalyse
+         0     0% 94.17%     205825  5.03%  github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).recomputeCountStore
+         0     0% 94.17%    4084192 99.79%  github.com/FlavioCFOliveira/GoGraph/cypher.BenchmarkPrepareWarm.func1
+         0     0% 94.17%     467129 11.41%  github.com/FlavioCFOliveira/GoGraph/cypher.NewEngine (inline)
+         0     0% 94.17%     886013 21.65%  github.com/FlavioCFOliveira/GoGraph/cypher.newLabEngine
+         0     0% 94.17%     156246  3.82%  github.com/FlavioCFOliveira/GoGraph/cypher/parser.recoverParseScript
+         0     0% 94.17%      84640  2.07%  github.com/FlavioCFOliveira/GoGraph/cypher/parser.unquoteString
+         0     0% 94.17%      29382  0.72%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).PatternPart
+         0     0% 94.17%      27774  0.68%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).PatternWhere
+         0     0% 94.17%      45593  1.11%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).ProjectionBody
+         0     0% 94.17%      39152  0.96%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).ProjectionItem
+         0     0% 94.17%      40403  0.99%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).ProjectionItems
+         0     0% 94.17%      30303  0.74%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).ReadingStatement
+         0     0% 94.17%     150924  3.69%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).RegularQuery
+         0     0% 94.17%     156294  3.82%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).Script
+         0     0% 94.17%      81530  1.99%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).SinglePartQ
+         0     0% 94.17%     205824  5.03%  github.com/FlavioCFOliveira/GoGraph/graph/index/count.(*Store).RecomputeReset
+         0     0% 94.17%      29704  0.73%  github.com/antlr4-go/antlr/v4.(*BaseLexer).NextToken
+         0     0% 94.17%      28004  0.68%  github.com/antlr4-go/antlr/v4.(*BaseParser).EnterRule
+         0     0% 94.17%      32208  0.79%  github.com/antlr4-go/antlr/v4.(*CommonTokenStream).Fill
+         0     0% 94.17%      73563  1.80%  github.com/antlr4-go/antlr/v4.(*ParserATNSimulator).AdaptivePredict
+         0     0% 94.17%      37646  0.92%  github.com/antlr4-go/antlr/v4.(*ParserATNSimulator).closure (inline)
+         0     0% 94.17%      37666  0.92%  github.com/antlr4-go/antlr/v4.(*ParserATNSimulator).closureWork
+         0     0% 94.17%      40686  0.99%  github.com/antlr4-go/antlr/v4.(*ParserATNSimulator).computeReachSet
+         0     0% 94.17%      72325  1.77%  github.com/antlr4-go/antlr/v4.(*ParserATNSimulator).computeTargetState
+         0     0% 94.17%      72295  1.77%  github.com/antlr4-go/antlr/v4.(*ParserATNSimulator).execATN
+         0     0% 94.17%      25842  0.63%  github.com/antlr4-go/antlr/v4.(*ParserATNSimulator).getEpsilonTarget
+         0     0% 94.17%    2499085 61.06%  strings.(*Builder).Grow
+         0     0% 94.17%    2499085 61.06%  strings.(*Builder).grow
+         0     0% 94.17%    2288852 55.93%  strings.ToUpper
+         0     0% 94.17%    3769471 92.10%  testing.(*B).launch
+         0     0% 94.17%     319242  7.80%  testing.(*B).run1.func1

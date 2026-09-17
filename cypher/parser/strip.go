@@ -152,13 +152,28 @@ func StripLiterals(query string) (stripped string, params map[string]string, ok 
 			for i < n && isIdentChar(query[i]) {
 				i++
 			}
-			switch strings.ToUpper(query[start:i]) {
-			case "MATCH", "WHERE":
+			// The keyword test folds case DURING the comparison instead of
+			// materialising an upper-cased copy of the token. The copy was the
+			// scanner's whole allocation cost: `strings.ToUpper` returns a new
+			// string for every identifier whose token is not already upper
+			// case, once per identifier in the statement, only to compare it
+			// against 23 ASCII literals and throw it away.
+			//
+			// The fold is EXACTLY equivalent, not nearly. `isIdentStart` and
+			// `isIdentChar` (shortestpath.go) accept ASCII bytes and nothing
+			// else, so any non-ASCII byte terminates the identifier scan above
+			// before this test is reached: every token that arrives here is
+			// pure ASCII, and on pure ASCII an ASCII fold and Unicode
+			// upper-casing agree by definition. `strings.ToUpper`'s Unicode
+			// branch — the special-casing that makes it more than an ASCII
+			// fold — is unreachable from this call site.
+			switch classifyClauseKeyword(query[start:i]) {
+			case clauseHoistOn:
 				hoistable = true
-			case "RETURN", "WITH", "CREATE", "MERGE", "DELETE", "DETACH", "SET",
-				"REMOVE", "UNWIND", "CALL", "YIELD", "FOREACH", "OPTIONAL",
-				"UNION", "ON", "ORDER", "SKIP", "LIMIT", "FOR", "ADD", "DROP":
+			case clauseHoistOff:
 				hoistable = false
+			case clauseOther:
+				// Not a clause keyword: the region is unchanged.
 			}
 		default:
 			i++
@@ -183,4 +198,145 @@ func StripLiterals(query string) (stripped string, params map[string]string, ok 
 	}
 	b.WriteString(query[prev:])
 	return b.String(), params, true
+}
+
+// clauseKind classifies an identifier token the [StripLiterals] scanner found,
+// against the clause keywords that open and close a hoistable region.
+type clauseKind uint8
+
+const (
+	// clauseOther is every identifier that is not one of the 23 keywords.
+	clauseOther clauseKind = iota
+	// clauseHoistOn is MATCH or WHERE: the two clauses whose literals may be
+	// hoisted.
+	clauseHoistOn
+	// clauseHoistOff is every other clause keyword: it ends a hoistable region.
+	clauseHoistOff
+)
+
+// The 23 classified keywords span 2 bytes (ON) to 8 (OPTIONAL). A token outside
+// that range cannot be one of them, so it is rejected before any byte of it is
+// read.
+const (
+	clauseKeywordMinLen = 2
+	clauseKeywordMaxLen = 8
+)
+
+// classifyClauseKeyword is the allocation-free equivalent of
+//
+//	switch strings.ToUpper(tok) {
+//	case "MATCH", "WHERE":  return clauseHoistOn
+//	case "RETURN", ...:     return clauseHoistOff
+//	}
+//
+// It is correct only for a pure-ASCII tok; see the reasoning at its one call
+// site in [StripLiterals], which is the only place a token reaches it.
+//
+// The order of the tests is length, then first byte, then the whole token:
+//
+//   - length first, because it rejects most identifiers without reading a byte
+//     of them, and because a keyword and a longer word starting with it —
+//     `set` and `setting`, `for` and `forall`, `match` and `matches`, `order`
+//     and `ordering`, `set` and `sets` — must never be confused. Length is
+//     re-checked inside [eqFoldUpperASCII] for the same reason: the comparison
+//     is of the WHOLE token, never of a prefix.
+//   - first byte next, folded, so the 23 candidates collapse to at most three.
+//   - then the whole token, folded byte by byte.
+func classifyClauseKeyword(tok string) clauseKind {
+	if len(tok) < clauseKeywordMinLen || len(tok) > clauseKeywordMaxLen {
+		return clauseOther
+	}
+	switch tok[0] &^ asciiCaseBit {
+	case 'M':
+		if eqFoldUpperASCII(tok, "MATCH") {
+			return clauseHoistOn
+		}
+		if eqFoldUpperASCII(tok, "MERGE") {
+			return clauseHoistOff
+		}
+	case 'W':
+		if eqFoldUpperASCII(tok, "WHERE") {
+			return clauseHoistOn
+		}
+		if eqFoldUpperASCII(tok, "WITH") {
+			return clauseHoistOff
+		}
+	case 'R':
+		if eqFoldUpperASCII(tok, "RETURN") || eqFoldUpperASCII(tok, "REMOVE") {
+			return clauseHoistOff
+		}
+	case 'C':
+		if eqFoldUpperASCII(tok, "CREATE") || eqFoldUpperASCII(tok, "CALL") {
+			return clauseHoistOff
+		}
+	case 'D':
+		if eqFoldUpperASCII(tok, "DELETE") || eqFoldUpperASCII(tok, "DETACH") ||
+			eqFoldUpperASCII(tok, "DROP") {
+			return clauseHoistOff
+		}
+	case 'S':
+		if eqFoldUpperASCII(tok, "SET") || eqFoldUpperASCII(tok, "SKIP") {
+			return clauseHoistOff
+		}
+	case 'U':
+		if eqFoldUpperASCII(tok, "UNWIND") || eqFoldUpperASCII(tok, "UNION") {
+			return clauseHoistOff
+		}
+	case 'Y':
+		if eqFoldUpperASCII(tok, "YIELD") {
+			return clauseHoistOff
+		}
+	case 'F':
+		if eqFoldUpperASCII(tok, "FOREACH") || eqFoldUpperASCII(tok, "FOR") {
+			return clauseHoistOff
+		}
+	case 'O':
+		if eqFoldUpperASCII(tok, "OPTIONAL") || eqFoldUpperASCII(tok, "ON") ||
+			eqFoldUpperASCII(tok, "ORDER") {
+			return clauseHoistOff
+		}
+	case 'L':
+		if eqFoldUpperASCII(tok, "LIMIT") {
+			return clauseHoistOff
+		}
+	case 'A':
+		if eqFoldUpperASCII(tok, "ADD") {
+			return clauseHoistOff
+		}
+	}
+	return clauseOther
+}
+
+// asciiCaseBit is the bit that separates an ASCII letter's two cases: clearing
+// it upper-cases a letter and leaves an already-upper-case one alone.
+const asciiCaseBit = byte(0x20)
+
+// eqFoldUpperASCII reports whether tok equals the ALL-UPPERCASE ASCII literal
+// kw, case-insensitively, without allocating.
+//
+// Only tok is folded, and only by clearing [asciiCaseBit], because kw is known
+// upper case at every call site: that is one operation per byte, where a
+// two-sided fold such as [eqFold] costs two branches per byte. [eqFold] is kept
+// as it is — it serves shortestpath.go, whose literals are lower case.
+//
+// Clearing the bit is safe for every byte the scanner can put in tok, not only
+// for letters:
+//
+//	'a'-'z' (0x61-0x7A) -> 'A'-'Z' (0x41-0x5A)   the fold itself
+//	'A'-'Z'                                       already clear, unchanged
+//	'_'     (0x5F)      -> 0x5F                   bit already clear
+//	'0'-'9' (0x30-0x39) -> 0x10-0x19              outside 'A'-'Z'
+//
+// so neither an underscore nor a digit can be folded onto a letter of kw, and
+// no identifier containing one can be mistaken for a keyword.
+func eqFoldUpperASCII(tok, kw string) bool {
+	if len(tok) != len(kw) {
+		return false
+	}
+	for i := 0; i < len(tok); i++ {
+		if tok[i]&^asciiCaseBit != kw[i] {
+			return false
+		}
+	}
+	return true
 }

@@ -69,16 +69,24 @@ func DiameterCtx[W any](ctx context.Context, c *csr.CSR[W]) (lo, hi int, exact b
 	// be corrupted after the first iteration. distInner is the scratch
 	// used exclusively by the per-vertex eccentricity sweeps.
 	scratch := make([]int, n)
+	// One caller-owned BFS frontier queue, threaded through every sweep
+	// below exactly as scratch is. A BFS enqueues each vertex at most
+	// once, so capacity n is a hard bound and the append inside
+	// bfsFarthest never reallocates; without this the queue was rebuilt
+	// from capacity 1 and regrown to n once per BFS source, which on a
+	// 100k-vertex social graph was 293 GiB of the run's 294 GiB of total
+	// allocation (rmp #2861).
+	queue := make([]graph.NodeID, 0, n)
 	if err := ctx.Err(); err != nil {
 		metrics.IncCounter("search.DiameterCtx.errors", 1)
 		return 0, 0, false, err
 	}
-	farU, _ := bfsFarthest(verts, edges, graph.NodeID(seed), scratch)
+	farU, _, queue := bfsFarthest(verts, edges, graph.NodeID(seed), scratch, queue)
 	if err := ctx.Err(); err != nil {
 		metrics.IncCounter("search.DiameterCtx.errors", 1)
 		return 0, 0, false, err
 	}
-	farW, _ := bfsFarthest(verts, edges, farU, scratch)
+	farW, _, queue := bfsFarthest(verts, edges, farU, scratch, queue)
 	distFromU := make([]int, n)
 	copy(distFromU, scratch)
 	lo = distFromU[farW]
@@ -127,7 +135,8 @@ func DiameterCtx[W any](ctx context.Context, c *csr.CSR[W]) (lo, hi int, exact b
 				levelVerts = append(levelVerts, v)
 			}
 		}
-		maxEcc, err := levelMaxEccentricity(ctx, verts, edges, levelVerts, n, numWorkers, distInner)
+		maxEcc, q, err := levelMaxEccentricity(ctx, verts, edges, levelVerts, n, numWorkers, distInner, queue)
+		queue = q
 		if err != nil {
 			metrics.IncCounter("search.DiameterCtx.errors", 1)
 			return lo, hi, false, err
@@ -163,17 +172,20 @@ const diameterParallelMinLevel = 8
 // in parallel, each worker holding private scratch, and reduces by integer max;
 // the result is identical to the serial walk regardless of worker count or
 // scheduling, so DiameterCtx's refined bound stays bit-identical. The serial
-// path reuses the caller's serialScratch; the parallel path allocates private
-// per-worker scratch (only for wide levels, where the O(V+E) sweeps dwarf it).
+// path reuses the caller's serialScratch and serialQueue, returning the (possibly
+// grown) queue header so the caller keeps the capacity across levels; the
+// parallel path allocates private per-worker scratch and queue (only for wide
+// levels, where the O(V+E) sweeps dwarf them).
 // ctx is polled before every sweep so cancellation latency is one inner BFS.
-func levelMaxEccentricity(ctx context.Context, verts []uint64, edges []graph.NodeID, levelVerts []int, n, numWorkers int, serialScratch []int) (int, error) {
+func levelMaxEccentricity(ctx context.Context, verts []uint64, edges []graph.NodeID, levelVerts []int, n, numWorkers int, serialScratch []int, serialQueue []graph.NodeID) (int, []graph.NodeID, error) {
 	if numWorkers <= 1 || len(levelVerts) < diameterParallelMinLevel {
 		maxEcc := 0
 		for _, v := range levelVerts {
 			if err := ctx.Err(); err != nil {
-				return 0, err
+				return 0, serialQueue, err
 			}
-			_, distV := bfsFarthest(verts, edges, graph.NodeID(v), serialScratch)
+			var distV []int
+			_, distV, serialQueue = bfsFarthest(verts, edges, graph.NodeID(v), serialScratch, serialQueue)
 			ecc := 0
 			for _, d := range distV {
 				if d > ecc {
@@ -184,7 +196,7 @@ func levelMaxEccentricity(ctx context.Context, verts []uint64, edges []graph.Nod
 				maxEcc = ecc
 			}
 		}
-		return maxEcc, nil
+		return maxEcc, serialQueue, nil
 	}
 	if numWorkers > len(levelVerts) {
 		numWorkers = len(levelVerts)
@@ -196,14 +208,16 @@ func levelMaxEccentricity(ctx context.Context, verts []uint64, edges []graph.Nod
 		wg.Add(1)
 		go func(w int) {
 			defer wg.Done()
-			dist := make([]int, n) // private per-worker scratch
+			dist := make([]int, n)          // private per-worker scratch
+			q := make([]graph.NodeID, 0, n) // private per-worker BFS frontier
 			m := 0
 			for i := w; i < len(levelVerts); i += numWorkers {
 				if err := ctx.Err(); err != nil {
 					localErr[w] = err
 					return
 				}
-				_, distV := bfsFarthest(verts, edges, graph.NodeID(levelVerts[i]), dist)
+				var distV []int
+				_, distV, q = bfsFarthest(verts, edges, graph.NodeID(levelVerts[i]), dist, q)
 				ecc := 0
 				for _, d := range distV {
 					if d > ecc {
@@ -229,20 +243,30 @@ func levelMaxEccentricity(ctx context.Context, verts []uint64, edges []graph.Nod
 		}
 	}
 	if firstErr != nil {
-		return 0, firstErr
+		return 0, serialQueue, firstErr
 	}
-	return maxEcc, nil
+	return maxEcc, serialQueue, nil
 }
 
 // bfsFarthest runs a single BFS from src and returns the farthest
 // vertex (smallest NodeID on tie) along with the per-vertex distance
-// slice. dist is the caller-provided scratch (resized in place).
-func bfsFarthest(verts []uint64, edges []graph.NodeID, src graph.NodeID, dist []int) (farthest graph.NodeID, distOut []int) {
+// slice. dist and queue are caller-provided scratch: dist is rewritten
+// in place, and queue is truncated to zero length before use and
+// returned as its (possibly grown) header so the caller keeps the
+// capacity across sources — the same contract
+// search/centrality.brandesSource uses for its queue and stack. Passing
+// a queue with capacity len(dist) makes the traversal allocation-free,
+// because a BFS enqueues each vertex at most once.
+//
+// Traversal order is unchanged by the threading: the frontier is still
+// consumed head-first in enqueue order, so (farthest, dist) are
+// bit-identical to the per-call-queue form.
+func bfsFarthest(verts []uint64, edges []graph.NodeID, src graph.NodeID, dist []int, queue []graph.NodeID) (farthest graph.NodeID, distOut []int, queueOut []graph.NodeID) {
 	for i := range dist {
 		dist[i] = -1
 	}
 	dist[uint64(src)] = 0
-	queue := []graph.NodeID{src}
+	queue = append(queue[:0], src)
 	farthest = src
 	for qh := 0; qh < len(queue); qh++ {
 		v := queue[qh]
@@ -259,5 +283,5 @@ func bfsFarthest(verts []uint64, edges []graph.NodeID, src graph.NodeID, dist []
 			}
 		}
 	}
-	return farthest, dist
+	return farthest, dist, queue
 }

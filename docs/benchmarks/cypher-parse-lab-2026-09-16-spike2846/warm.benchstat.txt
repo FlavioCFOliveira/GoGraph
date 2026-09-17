@@ -1,0 +1,48 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+                                      │ docs/benchmarks/cypher-parse-lab-2026-09-16-spike2846/warm.series.txt │
+                                      │                                sec/op                                 │
+SpikeWarmPrepareParallel/quotefree                                                                15.04n ± 3%
+SpikeWarmPrepareParallel/quotefree-2                                                              41.03n ± 4%
+SpikeWarmPrepareParallel/quotefree-4                                                              85.71n ± 3%
+SpikeWarmPrepareParallel/quotefree-8                                                              89.01n ± 1%
+SpikeWarmPrepareParallel/quotefree-10                                                             92.14n ± 2%
+SpikeWarmPrepareParallel/literal                                                                  496.1n ± 1%
+SpikeWarmPrepareParallel/literal-2                                                                239.6n ± 1%
+SpikeWarmPrepareParallel/literal-4                                                                144.3n ± 2%
+SpikeWarmPrepareParallel/literal-8                                                                189.6n ± 7%
+SpikeWarmPrepareParallel/literal-10                                                               203.5n ± 7%
+geomean                                                                                           111.1n
+
+                                      │ docs/benchmarks/cypher-parse-lab-2026-09-16-spike2846/warm.series.txt │
+                                      │                                 B/op                                  │
+SpikeWarmPrepareParallel/quotefree                                                               0.000 ± 0%
+SpikeWarmPrepareParallel/quotefree-2                                                             0.000 ± 0%
+SpikeWarmPrepareParallel/quotefree-4                                                             0.000 ± 0%
+SpikeWarmPrepareParallel/quotefree-8                                                             0.000 ± 0%
+SpikeWarmPrepareParallel/quotefree-10                                                            0.000 ± 0%
+SpikeWarmPrepareParallel/literal                                                                 512.0 ± 0%
+SpikeWarmPrepareParallel/literal-2                                                               512.0 ± 0%
+SpikeWarmPrepareParallel/literal-4                                                               512.0 ± 0%
+SpikeWarmPrepareParallel/literal-8                                                               512.0 ± 0%
+SpikeWarmPrepareParallel/literal-10                                                              512.0 ± 0%
+geomean                                                                                                     ¹
+¹ summaries must be >0 to compute geomean
+
+                                      │ docs/benchmarks/cypher-parse-lab-2026-09-16-spike2846/warm.series.txt │
+                                      │                               allocs/op                               │
+SpikeWarmPrepareParallel/quotefree                                                               0.000 ± 0%
+SpikeWarmPrepareParallel/quotefree-2                                                             0.000 ± 0%
+SpikeWarmPrepareParallel/quotefree-4                                                             0.000 ± 0%
+SpikeWarmPrepareParallel/quotefree-8                                                             0.000 ± 0%
+SpikeWarmPrepareParallel/quotefree-10                                                            0.000 ± 0%
+SpikeWarmPrepareParallel/literal                                                                 12.00 ± 0%
+SpikeWarmPrepareParallel/literal-2                                                               12.00 ± 0%
+SpikeWarmPrepareParallel/literal-4                                                               12.00 ± 0%
+SpikeWarmPrepareParallel/literal-8                                                               12.00 ± 0%
+SpikeWarmPrepareParallel/literal-10                                                              12.00 ± 0%
+geomean                                                                                                     ¹
+¹ summaries must be >0 to compute geomean
+benchstat_exit=0

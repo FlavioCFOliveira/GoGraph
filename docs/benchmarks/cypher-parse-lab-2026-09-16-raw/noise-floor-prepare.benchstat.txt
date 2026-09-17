@@ -1,0 +1,767 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+                                        │  baseline   │              replica               │
+                                        │   sec/op    │    sec/op     vs base              │
+PrepareCold/22_cypher-01-10               14.76µ ± 2%   14.82µ ±  1%       ~ (p=0.442 n=8)
+PrepareCold/22_cypher-02-10               19.74µ ± 2%   19.99µ ±  1%       ~ (p=0.083 n=8)
+PrepareCold/22_cypher-03-10               14.81µ ± 1%   14.77µ ±  1%       ~ (p=0.382 n=8)
+PrepareCold/22_cypher-04-10               35.86µ ± 1%   35.65µ ±  1%       ~ (p=0.279 n=8)
+PrepareCold/22_cypher-05-10               13.42µ ± 3%   13.32µ ±  2%       ~ (p=0.442 n=8)
+PrepareCold/22_cypher-06-10               15.70µ ± 1%   15.69µ ±  1%       ~ (p=0.574 n=8)
+PrepareCold/22_cypher-07-10               15.91µ ± 1%   15.75µ ±  0%  -1.04% (p=0.000 n=8)
+PrepareCold/22_cypher-08-10               55.81µ ± 2%   55.78µ ±  3%       ~ (p=0.798 n=8)
+PrepareCold/22_cypher-09-10               25.87µ ± 1%   25.80µ ±  1%       ~ (p=0.524 n=8)
+PrepareCold/22_cypher-10-10               30.29µ ± 2%   30.20µ ±  2%       ~ (p=0.382 n=8)
+PrepareCold/22_cypher-11-10               15.25µ ± 0%   15.25µ ±  1%       ~ (p=0.798 n=8)
+PrepareCold/22_cypher-12-10               13.43µ ± 0%   13.52µ ±  1%       ~ (p=0.105 n=8)
+PrepareCold/22_cypher-13-10               23.65µ ± 2%   23.75µ ±  3%       ~ (p=0.505 n=8)
+PrepareCold/22_cypher-14-10               22.11µ ± 1%   21.89µ ±  1%  -0.99% (p=0.007 n=8)
+PrepareCold/22_cypher-15-10               13.83µ ± 3%   13.80µ ±  2%       ~ (p=1.000 n=8)
+PrepareCold/22_cypher-16-10               24.78µ ± 0%   24.82µ ±  2%       ~ (p=0.878 n=8)
+PrepareCold/22_cypher-17-10               37.17µ ± 1%   37.24µ ±  1%       ~ (p=0.959 n=8)
+PrepareCold/22_cypher-18-10               36.73µ ± 1%   37.24µ ±  3%       ~ (p=0.161 n=8)
+PrepareCold/19_pattern_query-01-10        22.95µ ± 1%   22.88µ ±  1%       ~ (p=0.574 n=8)
+PrepareCold/19_pattern_query-02-10        22.91µ ± 2%   22.91µ ±  0%       ~ (p=0.798 n=8)
+PrepareCold/19_pattern_query-03-10        22.63µ ± 3%   22.52µ ±  3%       ~ (p=0.505 n=8)
+PrepareCold/25_software_house_api-01-10   14.96µ ± 0%   15.00µ ±  1%       ~ (p=0.959 n=8)
+PrepareCold/25_software_house_api-02-10   14.86µ ± 2%   14.93µ ±  1%       ~ (p=0.645 n=8)
+PrepareCold/25_software_house_api-03-10   9.169µ ± 1%   9.044µ ±  1%  -1.37% (p=0.000 n=8)
+PrepareCold/25_software_house_api-04-10   13.73µ ± 3%   13.46µ ±  1%       ~ (p=0.065 n=8)
+PrepareCold/25_software_house_api-05-10   2.965µ ± 0%   2.978µ ±  1%       ~ (p=0.312 n=8)
+PrepareCold/25_software_house_api-06-10   3.247µ ± 3%   3.236µ ±  1%       ~ (p=0.397 n=8)
+PrepareCold/25_software_house_api-07-10   3.097µ ± 1%   3.097µ ±  2%       ~ (p=1.000 n=8)
+PrepareCold/25_software_house_api-08-10   2.996µ ± 3%   2.979µ ±  3%       ~ (p=0.204 n=8)
+PrepareCold/25_software_house_api-09-10   3.095µ ± 1%   3.081µ ±  2%       ~ (p=0.060 n=8)
+PrepareCold/25_software_house_api-10-10   18.68µ ± 1%   18.59µ ±  2%       ~ (p=0.314 n=8)
+PrepareCold/25_software_house_api-11-10   20.17µ ± 2%   20.13µ ±  3%       ~ (p=0.959 n=8)
+PrepareCold/25_software_house_api-12-10   64.11µ ± 1%   63.84µ ±  1%       ~ (p=0.328 n=8)
+PrepareCold/25_software_house_api-13-10   46.53µ ± 2%   46.33µ ±  1%       ~ (p=0.721 n=8)
+PrepareCold/25_software_house_api-14-10   57.99µ ± 1%   57.45µ ±  3%  -0.93% (p=0.010 n=8)
+PrepareCold/25_software_house_api-15-10   57.15µ ± 1%   57.00µ ±  0%       ~ (p=0.138 n=8)
+PrepareCold/25_software_house_api-16-10   48.05µ ± 2%   48.66µ ±  3%       ~ (p=0.195 n=8)
+PrepareCold/25_software_house_api-17-10   32.60µ ± 1%   32.62µ ±  1%       ~ (p=0.699 n=8)
+PrepareCold/25_software_house_api-18-10   22.45µ ± 2%   22.38µ ±  1%       ~ (p=0.721 n=8)
+PrepareCold/25_software_house_api-19-10   49.12µ ± 1%   48.64µ ±  2%  -0.96% (p=0.000 n=8)
+PrepareCold/25_software_house_api-20-10   10.90µ ± 0%   10.75µ ±  0%  -1.37% (p=0.000 n=8)
+PrepareCold/25_software_house_api-21-10   9.186µ ± 1%   9.119µ ±  3%       ~ (p=0.053 n=8)
+PrepareCold/25_software_house_api-22-10   8.946µ ± 2%   8.946µ ±  2%       ~ (p=0.556 n=8)
+PrepareCold/25_software_house_api-23-10   9.224µ ± 1%   9.200µ ±  3%       ~ (p=0.721 n=8)
+PrepareCold/25_software_house_api-24-10   11.96µ ± 4%   11.91µ ±  1%       ~ (p=0.524 n=8)
+PrepareCold/25_software_house_api-25-10   11.83µ ± 0%   11.83µ ±  2%       ~ (p=0.938 n=8)
+PrepareCold/25_software_house_api-26-10   11.78µ ± 1%   11.82µ ±  1%       ~ (p=0.777 n=8)
+PrepareCold/25_software_house_api-27-10   15.89µ ± 2%   15.82µ ±  2%       ~ (p=0.505 n=8)
+PrepareCold/25_software_house_api-28-10   31.91µ ± 1%   31.84µ ±  3%       ~ (p=0.205 n=8)
+PrepareCold/25_software_house_api-29-10   36.89µ ± 1%   36.80µ ±  3%       ~ (p=0.878 n=8)
+PrepareCold/25_software_house_api-30-10   15.73µ ± 1%   15.84µ ±  2%       ~ (p=0.161 n=8)
+PrepareCold/25_software_house_api-31-10   16.31µ ± 1%   16.34µ ±  1%       ~ (p=0.820 n=8)
+PrepareCold/25_software_house_api-32-10   10.64µ ± 1%   10.46µ ±  2%  -1.70% (p=0.028 n=8)
+PrepareCold/24_social_network_cli-01-10   19.79µ ± 1%   19.84µ ±  1%       ~ (p=0.185 n=8)
+PrepareCold/24_social_network_cli-02-10   20.50µ ± 1%   20.57µ ±  1%       ~ (p=0.442 n=8)
+PrepareCold/24_social_network_cli-03-10   14.28µ ± 2%   14.36µ ±  2%       ~ (p=0.279 n=8)
+PrepareCold/24_social_network_cli-04-10   20.10µ ± 1%   20.10µ ±  0%       ~ (p=0.981 n=8)
+PrepareCold/24_social_network_cli-05-10   24.61µ ± 2%   24.73µ ±  2%       ~ (p=0.169 n=8)
+PrepareCold/24_social_network_cli-06-10   16.58µ ± 1%   16.69µ ±  1%       ~ (p=0.505 n=8)
+PrepareCold/24_social_network_cli-07-10   10.56µ ± 1%   10.52µ ±  1%       ~ (p=0.314 n=8)
+PrepareCold/24_social_network_cli-08-10   10.56µ ± 3%   10.53µ ±  1%       ~ (p=0.698 n=8)
+PrepareCold/24_social_network_cli-09-10   10.59µ ± 1%   10.57µ ±  2%       ~ (p=0.700 n=8)
+PrepareCold/24_social_network_cli-10-10   10.62µ ± 1%   10.58µ ±  1%       ~ (p=0.105 n=8)
+PrepareCold/24_social_network_cli-11-10   17.32µ ± 3%   17.22µ ±  1%       ~ (p=0.645 n=8)
+PrepareCold/24_social_network_cli-12-10   28.84µ ± 1%   28.79µ ±  3%       ~ (p=0.130 n=8)
+PrepareCold/24_social_network_cli-13-10   28.82µ ± 0%   28.85µ ±  2%       ~ (p=0.798 n=8)
+PrepareCold/24_social_network_cli-14-10   32.56µ ± 2%   32.82µ ±  2%       ~ (p=0.328 n=8)
+PrepareCold/24_social_network_cli-15-10   16.27µ ± 1%   16.27µ ±  1%       ~ (p=0.878 n=8)
+PrepareCold/24_social_network_cli-16-10   17.02µ ± 2%   17.04µ ±  2%       ~ (p=0.959 n=8)
+PrepareCold/24_social_network_cli-17-10   17.56µ ± 1%   17.53µ ±  1%       ~ (p=0.721 n=8)
+PrepareCold/24_social_network_cli-18-10   8.216µ ± 3%   8.197µ ±  1%       ~ (p=0.425 n=8)
+PrepareCold/24_social_network_cli-19-10   9.555µ ± 1%   9.396µ ±  2%  -1.66% (p=0.002 n=8)
+PrepareCold/24_social_network_cli-20-10   11.18µ ± 2%   11.31µ ±  2%       ~ (p=0.328 n=8)
+PrepareCold/24_social_network_cli-21-10   13.50µ ± 1%   13.45µ ±  2%       ~ (p=0.195 n=8)
+PrepareCold/24_social_network_cli-22-10   13.47µ ± 0%   13.49µ ±  1%       ~ (p=0.854 n=8)
+PrepareCold/24_social_network_cli-23-10   13.53µ ± 2%   13.53µ ±  2%       ~ (p=0.798 n=8)
+PrepareCold/24_social_network_cli-24-10   16.17µ ± 1%   16.26µ ±  1%       ~ (p=0.204 n=8)
+PrepareCold/24_social_network_cli-25-10   16.12µ ± 2%   16.24µ ±  2%       ~ (p=0.721 n=8)
+PrepareCold/24_social_network_cli-26-10   16.16µ ± 1%   16.11µ ±  3%       ~ (p=0.328 n=8)
+PrepareCold/24_social_network_cli-27-10   16.41µ ± 1%   16.37µ ±  1%       ~ (p=0.442 n=8)
+PrepareCold/24_social_network_cli-28-10   16.02µ ± 2%   16.03µ ±  3%       ~ (p=0.959 n=8)
+PrepareCold/24_social_network_cli-29-10   27.74µ ± 0%   27.71µ ±  1%       ~ (p=0.741 n=8)
+PrepareCold/24_social_network_cli-30-10   17.92µ ± 2%   18.06µ ±  3%       ~ (p=0.721 n=8)
+PrepareWarm/22_cypher-01-10               14.92n ± 0%   15.02n ±  1%  +0.67% (p=0.001 n=8)
+PrepareWarm/22_cypher-02-10               15.06n ± 1%   15.11n ±  1%       ~ (p=0.193 n=8)
+PrepareWarm/22_cypher-03-10               15.11n ± 1%   15.10n ±  0%       ~ (p=0.900 n=8)
+PrepareWarm/22_cypher-04-10               18.64n ± 6%   18.39n ±  5%       ~ (p=0.442 n=8)
+PrepareWarm/22_cypher-05-10               15.12n ± 1%   15.14n ±  1%       ~ (p=0.593 n=8)
+PrepareWarm/22_cypher-06-10               14.99n ± 0%   15.04n ±  0%       ~ (p=0.060 n=8)
+PrepareWarm/22_cypher-07-10               14.92n ± 1%   15.11n ±  0%  +1.34% (p=0.000 n=8)
+PrepareWarm/22_cypher-08-10               20.82n ± 2%   20.75n ±  1%       ~ (p=0.138 n=8)
+PrepareWarm/22_cypher-09-10               17.14n ± 1%   17.26n ±  1%       ~ (p=0.341 n=8)
+PrepareWarm/22_cypher-10-10               431.4n ± 1%   431.3n ±  1%       ~ (p=0.959 n=8)
+PrepareWarm/22_cypher-11-10               14.99n ± 1%   15.07n ±  0%  +0.60% (p=0.002 n=8)
+PrepareWarm/22_cypher-12-10               14.96n ± 1%   15.04n ±  1%  +0.60% (p=0.030 n=8)
+PrepareWarm/22_cypher-13-10               17.10n ± 1%   17.20n ±  2%       ~ (p=0.856 n=8)
+PrepareWarm/22_cypher-14-10               15.10n ± 1%   15.23n ±  0%  +0.83% (p=0.002 n=8)
+PrepareWarm/22_cypher-15-10               15.08n ± 0%   15.05n ±  1%       ~ (p=0.268 n=8)
+PrepareWarm/22_cypher-16-10               17.06n ± 1%   16.92n ±  1%       ~ (p=0.224 n=8)
+PrepareWarm/22_cypher-17-10               17.83n ± 2%   18.00n ±  3%       ~ (p=0.981 n=8)
+PrepareWarm/22_cypher-18-10               17.69n ± 4%   17.95n ±  2%       ~ (p=0.368 n=8)
+PrepareWarm/19_pattern_query-01-10        344.1n ± 2%   339.0n ±  2%       ~ (p=0.099 n=8)
+PrepareWarm/19_pattern_query-02-10        471.7n ± 1%   473.1n ±  1%       ~ (p=0.367 n=8)
+PrepareWarm/19_pattern_query-03-10        344.9n ± 2%   341.6n ±  2%       ~ (p=0.105 n=8)
+PrepareWarm/25_software_house_api-01-10   15.00n ± 1%   15.14n ±  1%  +0.93% (p=0.022 n=8)
+PrepareWarm/25_software_house_api-02-10   15.12n ± 0%   15.31n ±  1%  +1.19% (p=0.001 n=8)
+PrepareWarm/25_software_house_api-03-10   14.45n ± 1%   14.50n ±  1%       ~ (p=0.645 n=8)
+PrepareWarm/25_software_house_api-04-10   173.4n ± 2%   173.7n ±  1%       ~ (p=0.665 n=8)
+PrepareWarm/25_software_house_api-05-10   14.24n ± 1%   13.96n ±  1%  -2.00% (p=0.000 n=8)
+PrepareWarm/25_software_house_api-06-10   14.32n ± 1%   14.33n ± 59%       ~ (p=0.817 n=8)
+PrepareWarm/25_software_house_api-07-10   14.83n ± 0%   14.79n ±  0%       ~ (p=0.286 n=8)
+PrepareWarm/25_software_house_api-08-10   14.48n ± 1%   14.37n ±  1%       ~ (p=0.168 n=8)
+PrepareWarm/25_software_house_api-09-10   14.61n ± 0%   14.64n ±  0%  +0.17% (p=0.040 n=8)
+PrepareWarm/25_software_house_api-10-10   385.0n ± 3%   379.4n ±  1%       ~ (p=0.123 n=8)
+PrepareWarm/25_software_house_api-11-10   17.23n ± 1%   17.07n ±  1%       ~ (p=0.246 n=8)
+PrepareWarm/25_software_house_api-12-10   23.98n ± 1%   23.97n ±  1%       ~ (p=0.625 n=8)
+PrepareWarm/25_software_house_api-13-10   20.11n ± 1%   20.29n ±  2%       ~ (p=0.342 n=8)
+PrepareWarm/25_software_house_api-14-10   21.10n ± 1%   21.21n ±  1%       ~ (p=0.267 n=8)
+PrepareWarm/25_software_house_api-15-10   1.047µ ± 1%   1.052µ ±  1%       ~ (p=0.186 n=8)
+PrepareWarm/25_software_house_api-16-10   723.2n ± 2%   745.1n ±  1%  +3.04% (p=0.001 n=8)
+PrepareWarm/25_software_house_api-17-10   20.18n ± 4%   19.99n ±  2%       ~ (p=0.878 n=8)
+PrepareWarm/25_software_house_api-18-10   17.73n ± 2%   17.74n ±  2%       ~ (p=0.981 n=8)
+PrepareWarm/25_software_house_api-19-10   20.77n ± 1%   20.76n ±  1%       ~ (p=0.798 n=8)
+PrepareWarm/25_software_house_api-20-10   153.3n ± 1%   153.5n ±  2%       ~ (p=0.523 n=8)
+PrepareWarm/25_software_house_api-21-10   14.48n ± 0%   14.46n ±  1%       ~ (p=0.519 n=8)
+PrepareWarm/25_software_house_api-22-10   14.41n ± 2%   14.50n ±  1%       ~ (p=0.186 n=8)
+PrepareWarm/25_software_house_api-23-10   14.33n ± 0%   14.38n ±  1%       ~ (p=0.338 n=8)
+PrepareWarm/25_software_house_api-24-10   15.02n ± 1%   15.04n ±  2%       ~ (p=0.625 n=8)
+PrepareWarm/25_software_house_api-25-10   14.98n ± 1%   15.06n ±  1%       ~ (p=0.267 n=8)
+PrepareWarm/25_software_house_api-26-10   15.19n ± 1%   15.25n ±  0%       ~ (p=0.068 n=8)
+PrepareWarm/25_software_house_api-27-10   15.00n ± 1%   15.16n ±  1%  +1.07% (p=0.016 n=8)
+PrepareWarm/25_software_house_api-28-10   17.56n ± 4%   17.54n ±  1%       ~ (p=0.959 n=8)
+PrepareWarm/25_software_house_api-29-10   17.84n ± 3%   17.94n ±  3%       ~ (p=0.878 n=8)
+PrepareWarm/25_software_house_api-30-10   15.07n ± 1%   15.06n ±  1%       ~ (p=0.555 n=8)
+PrepareWarm/25_software_house_api-31-10   15.45n ± 1%   15.53n ±  1%  +0.52% (p=0.046 n=8)
+PrepareWarm/25_software_house_api-32-10   154.8n ± 3%   152.7n ±  2%       ~ (p=0.721 n=8)
+PrepareWarm/24_social_network_cli-01-10   17.17n ± 2%   17.14n ±  1%       ~ (p=0.959 n=8)
+PrepareWarm/24_social_network_cli-02-10   17.13n ± 2%   17.07n ±  2%       ~ (p=0.898 n=8)
+PrepareWarm/24_social_network_cli-03-10   15.08n ± 0%   15.07n ±  1%       ~ (p=0.661 n=8)
+PrepareWarm/24_social_network_cli-04-10   17.05n ± 1%   17.04n ±  1%       ~ (p=0.737 n=8)
+PrepareWarm/24_social_network_cli-05-10   17.46n ± 1%   17.56n ±  1%       ~ (p=0.456 n=8)
+PrepareWarm/24_social_network_cli-06-10   17.10n ± 1%   17.00n ±  2%       ~ (p=0.123 n=8)
+PrepareWarm/24_social_network_cli-07-10   14.96n ± 1%   15.05n ±  1%  +0.67% (p=0.001 n=8)
+PrepareWarm/24_social_network_cli-08-10   15.14n ± 1%   15.24n ±  2%       ~ (p=0.488 n=8)
+PrepareWarm/24_social_network_cli-09-10   15.18n ± 1%   15.28n ±  1%       ~ (p=0.224 n=8)
+PrepareWarm/24_social_network_cli-10-10   14.99n ± 1%   15.18n ±  1%  +1.23% (p=0.004 n=8)
+PrepareWarm/24_social_network_cli-11-10   15.07n ± 1%   15.14n ±  1%  +0.53% (p=0.047 n=8)
+PrepareWarm/24_social_network_cli-12-10   16.91n ± 1%   16.88n ±  1%       ~ (p=0.941 n=8)
+PrepareWarm/24_social_network_cli-13-10   17.32n ± 1%   17.20n ±  2%       ~ (p=0.112 n=8)
+PrepareWarm/24_social_network_cli-14-10   17.20n ± 2%   17.30n ±  1%       ~ (p=0.245 n=8)
+PrepareWarm/24_social_network_cli-15-10   15.00n ± 1%   15.11n ±  1%       ~ (p=0.060 n=8)
+PrepareWarm/24_social_network_cli-16-10   14.97n ± 1%   15.04n ±  1%       ~ (p=0.124 n=8)
+PrepareWarm/24_social_network_cli-17-10   15.12n ± 1%   15.09n ±  0%       ~ (p=0.860 n=8)
+PrepareWarm/24_social_network_cli-18-10   14.81n ± 1%   14.84n ±  1%       ~ (p=0.702 n=8)
+PrepareWarm/24_social_network_cli-19-10   113.7n ± 2%   121.2n ±  3%  +6.55% (p=0.001 n=8)
+PrepareWarm/24_social_network_cli-20-10   15.01n ± 1%   15.11n ±  1%  +0.70% (p=0.002 n=8)
+PrepareWarm/24_social_network_cli-21-10   15.06n ± 1%   15.07n ±  1%       ~ (p=0.857 n=8)
+PrepareWarm/24_social_network_cli-22-10   15.18n ± 1%   15.12n ±  1%       ~ (p=0.456 n=8)
+PrepareWarm/24_social_network_cli-23-10   15.24n ± 1%   15.29n ±  1%       ~ (p=0.315 n=8)
+PrepareWarm/24_social_network_cli-24-10   15.12n ± 1%   15.13n ±  1%       ~ (p=0.368 n=8)
+PrepareWarm/24_social_network_cli-25-10   15.04n ± 0%   15.07n ±  1%       ~ (p=0.555 n=8)
+PrepareWarm/24_social_network_cli-26-10   15.10n ± 1%   15.12n ±  1%       ~ (p=0.663 n=8)
+PrepareWarm/24_social_network_cli-27-10   15.18n ± 0%   15.17n ±  1%       ~ (p=0.857 n=8)
+PrepareWarm/24_social_network_cli-28-10   15.17n ± 0%   15.25n ±  1%  +0.56% (p=0.019 n=8)
+PrepareWarm/24_social_network_cli-29-10   487.2n ± 2%   505.0n ±  1%  +3.64% (p=0.000 n=8)
+PrepareWarm/24_social_network_cli-30-10   14.98n ± 1%   15.07n ±  1%  +0.63% (p=0.001 n=8)
+StageSema/22_cypher-01-10                 305.2n ± 1%   305.2n ±  1%       ~ (p=0.798 n=8)
+StageSema/22_cypher-02-10                 425.4n ± 1%   420.6n ±  1%  -1.15% (p=0.001 n=8)
+StageSema/22_cypher-03-10                 275.2n ± 3%   274.4n ±  1%       ~ (p=0.721 n=8)
+StageSema/22_cypher-04-10                 473.0n ± 1%   476.0n ±  1%       ~ (p=0.184 n=8)
+StageSema/22_cypher-05-10                 336.6n ± 0%   342.2n ±  1%  +1.69% (p=0.000 n=8)
+StageSema/22_cypher-06-10                 274.1n ± 1%   273.2n ±  0%  -0.35% (p=0.041 n=8)
+StageSema/22_cypher-07-10                 275.2n ± 2%   273.3n ±  1%       ~ (p=0.087 n=8)
+StageSema/22_cypher-08-10                 859.5n ± 1%   851.8n ±  1%  -0.90% (p=0.001 n=8)
+StageSema/22_cypher-09-10                 295.4n ± 1%   297.0n ±  1%       ~ (p=0.314 n=8)
+StageSema/22_cypher-10-10                 322.4n ± 1%   322.5n ±  1%       ~ (p=0.741 n=8)
+StageSema/22_cypher-11-10                 250.7n ± 0%   250.6n ±  2%       ~ (p=0.592 n=8)
+StageSema/22_cypher-12-10                 235.4n ± 2%   233.3n ±  2%  -0.89% (p=0.050 n=8)
+StageSema/22_cypher-13-10                 418.2n ± 0%   422.4n ±  1%  +1.00% (p=0.002 n=8)
+StageSema/22_cypher-14-10                 259.3n ± 1%   260.1n ±  1%       ~ (p=0.267 n=8)
+StageSema/22_cypher-15-10                 226.8n ± 0%   226.8n ±  2%       ~ (p=0.818 n=8)
+StageSema/22_cypher-16-10                 342.6n ± 2%   348.4n ±  1%  +1.69% (p=0.001 n=8)
+StageSema/22_cypher-17-10                 516.0n ± 1%   516.7n ±  0%       ~ (p=0.820 n=8)
+StageSema/22_cypher-18-10                 519.1n ± 0%   522.7n ±  2%       ~ (p=0.152 n=8)
+StageSema/19_pattern_query-01-10          288.4n ± 2%   292.2n ±  2%       ~ (p=0.246 n=8)
+StageSema/19_pattern_query-02-10          284.2n ± 2%   285.0n ±  2%       ~ (p=0.593 n=8)
+StageSema/19_pattern_query-03-10          285.2n ± 0%   285.3n ±  1%       ~ (p=0.931 n=8)
+StageSema/25_software_house_api-01-10     339.1n ± 2%   337.4n ±  1%       ~ (p=0.314 n=8)
+StageSema/25_software_house_api-02-10     342.3n ± 2%   338.7n ±  1%       ~ (p=0.161 n=8)
+StageSema/25_software_house_api-03-10     187.1n ± 1%   186.8n ±  0%       ~ (p=0.224 n=8)
+StageSema/25_software_house_api-04-10     167.6n ± 2%   167.0n ±  1%       ~ (p=0.701 n=8)
+StageSema/25_software_house_api-05-10     62.01n ± 1%   61.09n ±  1%  -1.48% (p=0.001 n=8)
+StageSema/25_software_house_api-06-10     61.55n ± 1%   61.33n ±  1%       ~ (p=0.290 n=8)
+StageSema/25_software_house_api-07-10     61.76n ± 1%   61.38n ±  0%       ~ (p=0.053 n=8)
+StageSema/25_software_house_api-08-10     61.69n ± 1%   61.22n ±  1%  -0.78% (p=0.050 n=8)
+StageSema/25_software_house_api-09-10     61.60n ± 2%   61.45n ±  1%       ~ (p=0.458 n=8)
+StageSema/25_software_house_api-10-10     251.7n ± 0%   253.0n ±  2%       ~ (p=0.122 n=8)
+StageSema/25_software_house_api-11-10     325.5n ± 1%   325.2n ±  1%       ~ (p=0.424 n=8)
+StageSema/25_software_house_api-12-10     1.088µ ± 1%   1.109µ ±  3%  +1.98% (p=0.022 n=8)
+StageSema/25_software_house_api-13-10     916.0n ± 0%   925.9n ±  1%  +1.09% (p=0.002 n=8)
+StageSema/25_software_house_api-14-10     1.022µ ± 1%   1.044µ ±  1%  +2.25% (p=0.000 n=8)
+StageSema/25_software_house_api-15-10     796.5n ± 0%   801.3n ±  0%  +0.60% (p=0.002 n=8)
+StageSema/25_software_house_api-16-10     698.7n ± 1%   716.9n ±  1%  +2.60% (p=0.000 n=8)
+StageSema/25_software_house_api-17-10     595.7n ± 1%   606.5n ±  1%  +1.80% (p=0.000 n=8)
+StageSema/25_software_house_api-18-10     336.7n ± 1%   332.0n ±  1%  -1.38% (p=0.000 n=8)
+StageSema/25_software_house_api-19-10     952.7n ± 1%   948.7n ±  1%       ~ (p=0.152 n=8)
+StageSema/25_software_house_api-20-10     166.0n ± 2%   164.9n ±  1%       ~ (p=0.098 n=8)
+StageSema/25_software_house_api-21-10     187.7n ± 0%   186.8n ±  1%  -0.45% (p=0.022 n=8)
+StageSema/25_software_house_api-22-10     187.1n ± 2%   185.4n ±  3%       ~ (p=0.204 n=8)
+StageSema/25_software_house_api-23-10     186.9n ± 1%   184.8n ±  1%  -1.10% (p=0.002 n=8)
+StageSema/25_software_house_api-24-10     201.5n ± 0%   200.2n ±  1%  -0.60% (p=0.001 n=8)
+StageSema/25_software_house_api-25-10     201.2n ± 1%   199.5n ±  2%  -0.84% (p=0.004 n=8)
+StageSema/25_software_house_api-26-10     201.5n ± 0%   201.3n ±  1%       ~ (p=0.489 n=8)
+StageSema/25_software_house_api-27-10     218.3n ± 2%   219.7n ±  1%       ~ (p=0.382 n=8)
+StageSema/25_software_house_api-28-10     621.1n ± 0%   623.2n ±  3%       ~ (p=0.553 n=8)
+StageSema/25_software_house_api-29-10     628.2n ± 0%   628.8n ±  0%       ~ (p=0.169 n=8)
+StageSema/25_software_house_api-30-10     193.7n ± 2%   192.6n ±  1%       ~ (p=0.574 n=8)
+StageSema/25_software_house_api-31-10     349.8n ± 3%   357.1n ±  1%       ~ (p=0.266 n=8)
+StageSema/25_software_house_api-32-10     165.1n ± 2%   165.7n ±  1%       ~ (p=0.341 n=8)
+StageSema/24_social_network_cli-01-10     326.9n ± 1%   323.2n ±  1%  -1.13% (p=0.006 n=8)
+StageSema/24_social_network_cli-02-10     348.4n ± 0%   347.3n ±  0%  -0.32% (p=0.018 n=8)
+StageSema/24_social_network_cli-03-10     344.4n ± 1%   342.0n ±  1%  -0.68% (p=0.050 n=8)
+StageSema/24_social_network_cli-04-10     354.8n ± 1%   355.4n ±  2%       ~ (p=0.368 n=8)
+StageSema/24_social_network_cli-05-10     397.4n ± 0%   398.9n ±  1%       ~ (p=0.053 n=8)
+StageSema/24_social_network_cli-06-10     262.2n ± 2%   262.8n ±  1%       ~ (p=0.878 n=8)
+StageSema/24_social_network_cli-07-10     265.2n ± 0%   267.4n ±  1%  +0.81% (p=0.046 n=8)
+StageSema/24_social_network_cli-08-10     264.8n ± 1%   268.0n ±  1%  +1.21% (p=0.003 n=8)
+StageSema/24_social_network_cli-09-10     265.2n ± 1%   265.2n ±  1%       ~ (p=0.899 n=8)
+StageSema/24_social_network_cli-10-10     266.1n ± 1%   266.6n ±  1%       ~ (p=0.382 n=8)
+StageSema/24_social_network_cli-11-10     352.6n ± 2%   352.5n ±  1%       ~ (p=0.741 n=8)
+StageSema/24_social_network_cli-12-10     748.0n ± 0%   750.7n ±  1%  +0.35% (p=0.028 n=8)
+StageSema/24_social_network_cli-13-10     747.5n ± 1%   753.0n ±  1%  +0.74% (p=0.000 n=8)
+StageSema/24_social_network_cli-14-10     1.144µ ± 1%   1.146µ ±  1%       ~ (p=0.899 n=8)
+StageSema/24_social_network_cli-15-10     362.3n ± 1%   360.6n ±  1%  -0.48% (p=0.001 n=8)
+StageSema/24_social_network_cli-16-10     344.0n ± 2%   343.9n ±  1%       ~ (p=0.742 n=8)
+StageSema/24_social_network_cli-17-10     354.5n ± 0%   353.2n ±  1%       ~ (p=0.267 n=8)
+StageSema/24_social_network_cli-18-10     187.0n ± 1%   184.8n ±  1%  -1.12% (p=0.002 n=8)
+StageSema/24_social_network_cli-19-10     165.8n ± 1%   164.1n ±  1%  -1.00% (p=0.040 n=8)
+StageSema/24_social_network_cli-20-10     227.1n ± 0%   225.0n ±  1%  -0.90% (p=0.012 n=8)
+StageSema/24_social_network_cli-21-10     310.2n ± 2%   317.4n ±  1%  +2.30% (p=0.000 n=8)
+StageSema/24_social_network_cli-22-10     307.8n ± 1%   314.5n ±  2%  +2.19% (p=0.000 n=8)
+StageSema/24_social_network_cli-23-10     308.9n ± 1%   316.3n ±  1%  +2.38% (p=0.000 n=8)
+StageSema/24_social_network_cli-24-10     353.4n ± 1%   358.8n ±  2%  +1.51% (p=0.005 n=8)
+StageSema/24_social_network_cli-25-10     352.0n ± 1%   351.9n ±  1%       ~ (p=0.457 n=8)
+StageSema/24_social_network_cli-26-10     352.1n ± 1%   353.4n ±  0%       ~ (p=0.203 n=8)
+StageSema/24_social_network_cli-27-10     350.1n ± 1%   352.3n ±  1%       ~ (p=0.062 n=8)
+StageSema/24_social_network_cli-28-10     351.5n ± 1%   352.6n ±  0%       ~ (p=0.088 n=8)
+StageSema/24_social_network_cli-29-10     273.5n ± 0%   272.1n ±  1%  -0.49% (p=0.010 n=8)
+StageSema/24_social_network_cli-30-10     450.5n ± 2%   446.2n ±  2%  -0.97% (p=0.028 n=8)
+geomean                                   504.4n        504.9n        +0.10%
+
+                                        │    baseline    │               replica                │
+                                        │      B/op      │     B/op      vs base                │
+PrepareCold/22_cypher-01-10               18.00Ki ± 0%     18.00Ki ± 0%       ~ (p=0.869 n=8)
+PrepareCold/22_cypher-02-10               22.59Ki ± 0%     22.59Ki ± 0%       ~ (p=0.543 n=8)
+PrepareCold/22_cypher-03-10               18.17Ki ± 0%     18.17Ki ± 0%       ~ (p=1.000 n=8)
+PrepareCold/22_cypher-04-10               40.32Ki ± 0%     40.32Ki ± 0%       ~ (p=0.412 n=8)
+PrepareCold/22_cypher-05-10               15.94Ki ± 0%     15.94Ki ± 0%       ~ (p=0.467 n=8)
+PrepareCold/22_cypher-06-10               18.17Ki ± 0%     18.17Ki ± 0%       ~ (p=0.674 n=8)
+PrepareCold/22_cypher-07-10               18.25Ki ± 0%     18.25Ki ± 0%       ~ (p=1.000 n=8)
+PrepareCold/22_cypher-08-10               69.46Ki ± 0%     69.46Ki ± 0%       ~ (p=0.534 n=8)
+PrepareCold/22_cypher-09-10               31.02Ki ± 0%     31.02Ki ± 0%       ~ (p=0.072 n=8)
+PrepareCold/22_cypher-10-10               34.18Ki ± 0%     34.18Ki ± 0%       ~ (p=0.671 n=8)
+PrepareCold/22_cypher-11-10               17.71Ki ± 0%     17.71Ki ± 0%       ~ (p=0.085 n=8)
+PrepareCold/22_cypher-12-10               15.14Ki ± 0%     15.14Ki ± 0%       ~ (p=0.267 n=8)
+PrepareCold/22_cypher-13-10               26.91Ki ± 0%     26.91Ki ± 0%       ~ (p=1.000 n=8)
+PrepareCold/22_cypher-14-10               26.23Ki ± 0%     26.23Ki ± 0%       ~ (p=0.390 n=8)
+PrepareCold/22_cypher-15-10               16.04Ki ± 0%     16.04Ki ± 0%       ~ (p=0.695 n=8)
+PrepareCold/22_cypher-16-10               29.01Ki ± 0%     29.01Ki ± 0%       ~ (p=1.000 n=8)
+PrepareCold/22_cypher-17-10               42.06Ki ± 0%     42.05Ki ± 0%  -0.00% (p=0.003 n=8)
+PrepareCold/22_cypher-18-10               42.06Ki ± 0%     42.06Ki ± 0%       ~ (p=1.000 n=8)
+PrepareCold/19_pattern_query-01-10        25.73Ki ± 0%     25.73Ki ± 0%       ~ (p=0.467 n=8)
+PrepareCold/19_pattern_query-02-10        26.14Ki ± 0%     26.14Ki ± 0%       ~ (p=1.000 n=8)
+PrepareCold/19_pattern_query-03-10        25.32Ki ± 0%     25.32Ki ± 0%       ~ (p=0.467 n=8)
+PrepareCold/25_software_house_api-01-10   17.30Ki ± 0%     17.30Ki ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/25_software_house_api-02-10   17.30Ki ± 0%     17.30Ki ± 0%       ~ (p=1.000 n=8)
+PrepareCold/25_software_house_api-03-10   11.05Ki ± 0%     11.05Ki ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/25_software_house_api-04-10   16.34Ki ± 0%     16.34Ki ± 0%       ~ (p=0.119 n=8)
+PrepareCold/25_software_house_api-05-10   4.945Ki ± 0%     4.945Ki ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/25_software_house_api-06-10   5.047Ki ± 0%     5.047Ki ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/25_software_house_api-07-10   5.000Ki ± 0%     5.000Ki ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/25_software_house_api-08-10   4.984Ki ± 0%     4.984Ki ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/25_software_house_api-09-10   4.977Ki ± 0%     4.977Ki ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/25_software_house_api-10-10   20.73Ki ± 0%     20.73Ki ± 0%       ~ (p=0.223 n=8)
+PrepareCold/25_software_house_api-11-10   24.10Ki ± 0%     24.10Ki ± 0%       ~ (p=0.282 n=8)
+PrepareCold/25_software_house_api-12-10   72.84Ki ± 0%     72.85Ki ± 0%       ~ (p=0.385 n=8)
+PrepareCold/25_software_house_api-13-10   53.97Ki ± 0%     53.97Ki ± 0%       ~ (p=0.569 n=8)
+PrepareCold/25_software_house_api-14-10   66.76Ki ± 0%     66.76Ki ± 0%       ~ (p=0.154 n=8)
+PrepareCold/25_software_house_api-15-10   66.16Ki ± 0%     66.16Ki ± 0%       ~ (p=0.481 n=8)
+PrepareCold/25_software_house_api-16-10   54.43Ki ± 0%     54.43Ki ± 0%       ~ (p=0.197 n=8)
+PrepareCold/25_software_house_api-17-10   35.98Ki ± 0%     35.98Ki ± 0%       ~ (p=1.000 n=8)
+PrepareCold/25_software_house_api-18-10   25.52Ki ± 0%     25.52Ki ± 0%       ~ (p=0.497 n=8)
+PrepareCold/25_software_house_api-19-10   59.58Ki ± 0%     59.58Ki ± 0%       ~ (p=0.883 n=8)
+PrepareCold/25_software_house_api-20-10   12.49Ki ± 0%     12.49Ki ± 0%       ~ (p=0.533 n=8)
+PrepareCold/25_software_house_api-21-10   11.05Ki ± 0%     11.05Ki ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/25_software_house_api-22-10   11.02Ki ± 0%     11.02Ki ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/25_software_house_api-23-10   11.05Ki ± 0%     11.05Ki ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/25_software_house_api-24-10   14.40Ki ± 0%     14.40Ki ± 0%       ~ (p=1.000 n=8)
+PrepareCold/25_software_house_api-25-10   14.40Ki ± 0%     14.40Ki ± 0%       ~ (p=1.000 n=8)
+PrepareCold/25_software_house_api-26-10   14.40Ki ± 0%     14.40Ki ± 0%       ~ (p=1.000 n=8)
+PrepareCold/25_software_house_api-27-10   18.52Ki ± 0%     18.52Ki ± 0%       ~ (p=1.000 n=8)
+PrepareCold/25_software_house_api-28-10   36.52Ki ± 0%     36.52Ki ± 0%       ~ (p=0.323 n=8)
+PrepareCold/25_software_house_api-29-10   42.44Ki ± 0%     42.44Ki ± 0%       ~ (p=0.497 n=8)
+PrepareCold/25_software_house_api-30-10   18.52Ki ± 0%     18.52Ki ± 0%       ~ (p=0.733 n=8)
+PrepareCold/25_software_house_api-31-10   18.91Ki ± 0%     18.91Ki ± 0%       ~ (p=0.569 n=8)
+PrepareCold/25_software_house_api-32-10   12.64Ki ± 0%     12.64Ki ± 0%       ~ (p=0.254 n=8)
+PrepareCold/24_social_network_cli-01-10   23.07Ki ± 0%     23.07Ki ± 0%       ~ (p=0.200 n=8)
+PrepareCold/24_social_network_cli-02-10   24.91Ki ± 0%     24.91Ki ± 0%       ~ (p=0.445 n=8)
+PrepareCold/24_social_network_cli-03-10   17.95Ki ± 0%     17.95Ki ± 0%       ~ (p=1.000 n=8)
+PrepareCold/24_social_network_cli-04-10   24.57Ki ± 0%     24.57Ki ± 0%       ~ (p=1.000 n=8)
+PrepareCold/24_social_network_cli-05-10   29.94Ki ± 0%     29.94Ki ± 0%       ~ (p=0.733 n=8)
+PrepareCold/24_social_network_cli-06-10   19.35Ki ± 0%     19.35Ki ± 0%       ~ (p=0.200 n=8)
+PrepareCold/24_social_network_cli-07-10   13.14Ki ± 0%     13.14Ki ± 0%       ~ (p=1.000 n=8)
+PrepareCold/24_social_network_cli-08-10   13.14Ki ± 0%     13.14Ki ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/24_social_network_cli-09-10   13.16Ki ± 0%     13.16Ki ± 0%       ~ (p=1.000 n=8)
+PrepareCold/24_social_network_cli-10-10   13.16Ki ± 0%     13.16Ki ± 0%       ~ (p=1.000 n=8)
+PrepareCold/24_social_network_cli-11-10   19.84Ki ± 0%     19.84Ki ± 0%       ~ (p=0.569 n=8)
+PrepareCold/24_social_network_cli-12-10   33.79Ki ± 0%     33.79Ki ± 0%       ~ (p=0.569 n=8)
+PrepareCold/24_social_network_cli-13-10   33.79Ki ± 0%     33.79Ki ± 0%       ~ (p=0.765 n=8)
+PrepareCold/24_social_network_cli-14-10   37.88Ki ± 0%     37.88Ki ± 0%       ~ (p=0.765 n=8)
+PrepareCold/24_social_network_cli-15-10   18.91Ki ± 0%     18.91Ki ± 0%       ~ (p=0.446 n=8)
+PrepareCold/24_social_network_cli-16-10   19.63Ki ± 0%     19.63Ki ± 0%       ~ (p=1.000 n=8)
+PrepareCold/24_social_network_cli-17-10   20.12Ki ± 0%     20.12Ki ± 0%       ~ (p=0.467 n=8)
+PrepareCold/24_social_network_cli-18-10   10.24Ki ± 0%     10.24Ki ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/24_social_network_cli-19-10   11.40Ki ± 0%     11.40Ki ± 0%       ~ (p=0.200 n=8)
+PrepareCold/24_social_network_cli-20-10   13.46Ki ± 0%     13.46Ki ± 0%       ~ (p=1.000 n=8)
+PrepareCold/24_social_network_cli-21-10   15.89Ki ± 0%     15.89Ki ± 0%       ~ (p=1.000 n=8)
+PrepareCold/24_social_network_cli-22-10   15.89Ki ± 0%     15.89Ki ± 0%       ~ (p=1.000 n=8)
+PrepareCold/24_social_network_cli-23-10   15.91Ki ± 0%     15.91Ki ± 0%       ~ (p=1.000 n=8)
+PrepareCold/24_social_network_cli-24-10   18.91Ki ± 0%     18.91Ki ± 0%       ~ (p=1.000 n=8)
+PrepareCold/24_social_network_cli-25-10   18.91Ki ± 0%     18.91Ki ± 0%       ~ (p=1.000 n=8)
+PrepareCold/24_social_network_cli-26-10   18.82Ki ± 0%     18.82Ki ± 0%       ~ (p=0.569 n=8)
+PrepareCold/24_social_network_cli-27-10   18.91Ki ± 0%     18.91Ki ± 0%       ~ (p=1.000 n=8)
+PrepareCold/24_social_network_cli-28-10   18.85Ki ± 0%     18.85Ki ± 0%       ~ (p=1.000 n=8)
+PrepareCold/24_social_network_cli-29-10   31.56Ki ± 0%     31.55Ki ± 0%       ~ (p=1.000 n=8)
+PrepareCold/24_social_network_cli-30-10   20.48Ki ± 0%     20.48Ki ± 0%       ~ (p=1.000 n=8)
+PrepareWarm/22_cypher-01-10                 0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/22_cypher-02-10                 0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/22_cypher-03-10                 0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/22_cypher-04-10                 0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/22_cypher-05-10                 0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/22_cypher-06-10                 0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/22_cypher-07-10                 0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/22_cypher-08-10                 0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/22_cypher-09-10                 0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/22_cypher-10-10                 104.0 ± 0%       104.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/22_cypher-11-10                 0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/22_cypher-12-10                 0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/22_cypher-13-10                 0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/22_cypher-14-10                 0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/22_cypher-15-10                 0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/22_cypher-16-10                 0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/22_cypher-17-10                 0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/22_cypher-18-10                 0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/19_pattern_query-01-10          80.00 ± 0%       80.00 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/19_pattern_query-02-10          576.0 ± 0%       576.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/19_pattern_query-03-10          80.00 ± 0%       80.00 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-01-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-02-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-03-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-04-10     48.00 ± 0%       48.00 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-05-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-06-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-07-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-08-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-09-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-10-10     536.0 ± 0%       536.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-11-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-12-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-13-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-14-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-15-10     912.0 ± 0%       912.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-16-10     696.0 ± 0%       696.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-17-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-18-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-19-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-20-10     40.00 ± 0%       40.00 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-21-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-22-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-23-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-24-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-25-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-26-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-27-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-28-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-29-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-30-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-31-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-32-10     40.00 ± 0%       40.00 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-01-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-02-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-03-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-04-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-05-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-06-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-07-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-08-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-09-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-10-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-11-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-12-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-13-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-14-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-15-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-16-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-17-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-18-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-19-10     24.00 ± 0%       24.00 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-20-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-21-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-22-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-23-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-24-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-25-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-26-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-27-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-28-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-29-10     584.0 ± 0%       584.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-30-10     0.000 ± 0%       0.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/22_cypher-01-10                   456.0 ± 0%       456.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/22_cypher-02-10                   432.0 ± 0%       432.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/22_cypher-03-10                   368.0 ± 0%       368.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/22_cypher-04-10                   568.0 ± 0%       568.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/22_cypher-05-10                   416.0 ± 0%       416.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/22_cypher-06-10                   424.0 ± 0%       424.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/22_cypher-07-10                   424.0 ± 0%       424.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/22_cypher-08-10                 1.109Ki ± 0%     1.109Ki ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/22_cypher-09-10                   456.0 ± 0%       456.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/22_cypher-10-10                   408.0 ± 0%       408.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/22_cypher-11-10                   472.0 ± 0%       472.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/22_cypher-12-10                   456.0 ± 0%       456.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/22_cypher-13-10                   432.0 ± 0%       432.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/22_cypher-14-10                   472.0 ± 0%       472.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/22_cypher-15-10                   456.0 ± 0%       456.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/22_cypher-16-10                   456.0 ± 0%       456.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/22_cypher-17-10                   616.0 ± 0%       616.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/22_cypher-18-10                   616.0 ± 0%       616.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/19_pattern_query-01-10            408.0 ± 0%       408.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/19_pattern_query-02-10            408.0 ± 0%       408.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/19_pattern_query-03-10            408.0 ± 0%       408.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-01-10       416.0 ± 0%       416.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-02-10       416.0 ± 0%       416.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-03-10       360.0 ± 0%       360.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-04-10       360.0 ± 0%       360.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-05-10       104.0 ± 0%       104.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-06-10       104.0 ± 0%       104.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-07-10       104.0 ± 0%       104.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-08-10       104.0 ± 0%       104.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-09-10       104.0 ± 0%       104.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-10-10       408.0 ± 0%       408.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-11-10       456.0 ± 0%       456.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-12-10       880.0 ± 0%       880.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-13-10       680.0 ± 0%       680.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-14-10     1.195Ki ± 0%     1.195Ki ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-15-10       712.0 ± 0%       712.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-16-10       840.0 ± 0%       840.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-17-10       546.0 ± 0%       546.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-18-10       429.0 ± 0%       429.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-19-10     1.188Ki ± 0%     1.188Ki ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-20-10       360.0 ± 0%       360.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-21-10       360.0 ± 0%       360.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-22-10       360.0 ± 0%       360.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-23-10       360.0 ± 0%       360.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-24-10       360.0 ± 0%       360.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-25-10       360.0 ± 0%       360.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-26-10       360.0 ± 0%       360.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-27-10       360.0 ± 0%       360.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-28-10       976.0 ± 0%       976.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-29-10       992.0 ± 0%       992.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-30-10       360.0 ± 0%       360.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-31-10       416.0 ± 0%       416.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-32-10       360.0 ± 0%       360.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-01-10       456.0 ± 0%       456.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-02-10       504.0 ± 0%       504.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-03-10       464.0 ± 0%       464.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-04-10       464.0 ± 0%       464.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-05-10       512.0 ± 0%       512.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-06-10       456.0 ± 0%       456.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-07-10       368.0 ± 0%       368.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-08-10       368.0 ± 0%       368.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-09-10       368.0 ± 0%       368.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-10-10       368.0 ± 0%       368.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-11-10       416.0 ± 0%       416.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-12-10     1.008Ki ± 0%     1.008Ki ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-13-10     1.008Ki ± 0%     1.008Ki ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-14-10     1.203Ki ± 0%     1.203Ki ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-15-10       416.0 ± 0%       416.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-16-10       432.0 ± 0%       432.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-17-10       416.0 ± 0%       416.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-18-10       360.0 ± 0%       360.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-19-10       360.0 ± 0%       360.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-20-10       408.0 ± 0%       408.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-21-10       368.0 ± 0%       368.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-22-10       368.0 ± 0%       368.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-23-10       368.0 ± 0%       368.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-24-10       416.0 ± 0%       416.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-25-10       416.0 ± 0%       416.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-26-10       416.0 ± 0%       416.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-27-10       416.0 ± 0%       416.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-28-10       416.0 ± 0%       416.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-29-10       456.0 ± 0%       456.0 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-30-10       512.0 ± 0%       512.0 ± 0%       ~ (p=1.000 n=8) ¹
+geomean                                                ²                 -0.00%               ²
+¹ all samples are equal
+² summaries must be >0 to compute geomean
+
+                                        │   baseline    │               replica               │
+                                        │   allocs/op   │  allocs/op   vs base                │
+PrepareCold/22_cypher-01-10                315.0 ± 0%      315.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/22_cypher-02-10                393.0 ± 0%      393.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/22_cypher-03-10                319.0 ± 0%      319.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/22_cypher-04-10                679.0 ± 0%      679.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/22_cypher-05-10                275.0 ± 0%      275.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/22_cypher-06-10                328.0 ± 0%      328.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/22_cypher-07-10                328.0 ± 0%      328.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/22_cypher-08-10               1.098k ± 0%     1.098k ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/22_cypher-09-10                502.0 ± 0%      502.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/22_cypher-10-10                557.0 ± 0%      557.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/22_cypher-11-10                306.0 ± 0%      306.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/22_cypher-12-10                268.0 ± 0%      268.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/22_cypher-13-10                452.0 ± 0%      452.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/22_cypher-14-10                441.0 ± 0%      441.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/22_cypher-15-10                276.0 ± 0%      276.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/22_cypher-16-10                475.0 ± 0%      475.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/22_cypher-17-10                734.0 ± 0%      734.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/22_cypher-18-10                734.0 ± 0%      734.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/19_pattern_query-01-10         437.0 ± 0%      437.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/19_pattern_query-02-10         445.0 ± 0%      445.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/19_pattern_query-03-10         433.0 ± 0%      433.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/25_software_house_api-01-10    297.0 ± 0%      297.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/25_software_house_api-02-10    297.0 ± 0%      297.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/25_software_house_api-03-10    201.0 ± 0%      201.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/25_software_house_api-04-10    269.0 ± 0%      269.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/25_software_house_api-05-10    86.00 ± 0%      86.00 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/25_software_house_api-06-10    86.00 ± 0%      86.00 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/25_software_house_api-07-10    86.00 ± 0%      86.00 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/25_software_house_api-08-10    86.00 ± 0%      86.00 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/25_software_house_api-09-10    85.00 ± 0%      85.00 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/25_software_house_api-10-10    373.0 ± 0%      373.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/25_software_house_api-11-10    400.0 ± 0%      400.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/25_software_house_api-12-10   1.187k ± 0%     1.187k ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/25_software_house_api-13-10    871.0 ± 0%      871.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/25_software_house_api-14-10   1.055k ± 0%     1.055k ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/25_software_house_api-15-10   1.063k ± 0%     1.063k ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/25_software_house_api-16-10    871.0 ± 0%      871.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/25_software_house_api-17-10    592.0 ± 0%      592.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/25_software_house_api-18-10    425.0 ± 0%      425.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/25_software_house_api-19-10    940.0 ± 0%      940.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/25_software_house_api-20-10    208.0 ± 0%      208.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/25_software_house_api-21-10    201.0 ± 0%      201.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/25_software_house_api-22-10    201.0 ± 0%      201.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/25_software_house_api-23-10    201.0 ± 0%      201.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/25_software_house_api-24-10    256.0 ± 0%      256.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/25_software_house_api-25-10    256.0 ± 0%      256.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/25_software_house_api-26-10    256.0 ± 0%      256.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/25_software_house_api-27-10    336.0 ± 0%      336.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/25_software_house_api-28-10    622.0 ± 0%      622.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/25_software_house_api-29-10    721.0 ± 0%      721.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/25_software_house_api-30-10    336.0 ± 0%      336.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/25_software_house_api-31-10    326.0 ± 0%      326.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/25_software_house_api-32-10    212.0 ± 0%      212.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/24_social_network_cli-01-10    376.0 ± 0%      376.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/24_social_network_cli-02-10    423.0 ± 0%      423.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/24_social_network_cli-03-10    302.0 ± 0%      302.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/24_social_network_cli-04-10    413.0 ± 0%      413.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/24_social_network_cli-05-10    505.0 ± 0%      505.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/24_social_network_cli-06-10    344.0 ± 0%      344.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/24_social_network_cli-07-10    224.0 ± 0%      224.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/24_social_network_cli-08-10    224.0 ± 0%      224.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/24_social_network_cli-09-10    224.0 ± 0%      224.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/24_social_network_cli-10-10    224.0 ± 0%      224.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/24_social_network_cli-11-10    341.0 ± 0%      341.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/24_social_network_cli-12-10    565.0 ± 0%      565.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/24_social_network_cli-13-10    565.0 ± 0%      565.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/24_social_network_cli-14-10    643.0 ± 0%      643.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/24_social_network_cli-15-10    326.0 ± 0%      326.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/24_social_network_cli-16-10    335.0 ± 0%      335.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/24_social_network_cli-17-10    352.0 ± 0%      352.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/24_social_network_cli-18-10    187.0 ± 0%      187.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/24_social_network_cli-19-10    194.0 ± 0%      194.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/24_social_network_cli-20-10    237.0 ± 0%      237.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/24_social_network_cli-21-10    274.0 ± 0%      274.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/24_social_network_cli-22-10    274.0 ± 0%      274.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/24_social_network_cli-23-10    274.0 ± 0%      274.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/24_social_network_cli-24-10    326.0 ± 0%      326.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/24_social_network_cli-25-10    326.0 ± 0%      326.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/24_social_network_cli-26-10    326.0 ± 0%      326.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/24_social_network_cli-27-10    326.0 ± 0%      326.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/24_social_network_cli-28-10    326.0 ± 0%      326.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/24_social_network_cli-29-10    549.0 ± 0%      549.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareCold/24_social_network_cli-30-10    359.0 ± 0%      359.0 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/22_cypher-01-10                0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/22_cypher-02-10                0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/22_cypher-03-10                0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/22_cypher-04-10                0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/22_cypher-05-10                0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/22_cypher-06-10                0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/22_cypher-07-10                0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/22_cypher-08-10                0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/22_cypher-09-10                0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/22_cypher-10-10                13.00 ± 0%      13.00 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/22_cypher-11-10                0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/22_cypher-12-10                0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/22_cypher-13-10                0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/22_cypher-14-10                0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/22_cypher-15-10                0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/22_cypher-16-10                0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/22_cypher-17-10                0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/22_cypher-18-10                0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/19_pattern_query-01-10         9.000 ± 0%      9.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/19_pattern_query-02-10         15.00 ± 0%      15.00 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/19_pattern_query-03-10         9.000 ± 0%      9.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-01-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-02-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-03-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-04-10    5.000 ± 0%      5.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-05-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-06-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-07-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-08-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-09-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-10-10    13.00 ± 0%      13.00 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-11-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-12-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-13-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-14-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-15-10    35.00 ± 0%      35.00 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-16-10    23.00 ± 0%      23.00 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-17-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-18-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-19-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-20-10    4.000 ± 0%      4.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-21-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-22-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-23-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-24-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-25-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-26-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-27-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-28-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-29-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-30-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-31-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/25_software_house_api-32-10    4.000 ± 0%      4.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-01-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-02-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-03-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-04-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-05-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-06-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-07-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-08-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-09-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-10-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-11-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-12-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-13-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-14-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-15-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-16-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-17-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-18-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-19-10    3.000 ± 0%      3.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-20-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-21-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-22-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-23-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-24-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-25-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-26-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-27-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-28-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-29-10    15.00 ± 0%      15.00 ± 0%       ~ (p=1.000 n=8) ¹
+PrepareWarm/24_social_network_cli-30-10    0.000 ± 0%      0.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/22_cypher-01-10                  8.000 ± 0%      8.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/22_cypher-02-10                  9.000 ± 0%      9.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/22_cypher-03-10                  7.000 ± 0%      7.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/22_cypher-04-10                  11.00 ± 0%      11.00 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/22_cypher-05-10                  8.000 ± 0%      8.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/22_cypher-06-10                  8.000 ± 0%      8.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/22_cypher-07-10                  8.000 ± 0%      8.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/22_cypher-08-10                  14.00 ± 0%      14.00 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/22_cypher-09-10                  9.000 ± 0%      9.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/22_cypher-10-10                  7.000 ± 0%      7.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/22_cypher-11-10                  9.000 ± 0%      9.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/22_cypher-12-10                  9.000 ± 0%      9.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/22_cypher-13-10                  9.000 ± 0%      9.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/22_cypher-14-10                  9.000 ± 0%      9.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/22_cypher-15-10                  9.000 ± 0%      9.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/22_cypher-16-10                  8.000 ± 0%      8.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/22_cypher-17-10                  12.00 ± 0%      12.00 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/22_cypher-18-10                  12.00 ± 0%      12.00 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/19_pattern_query-01-10           7.000 ± 0%      7.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/19_pattern_query-02-10           7.000 ± 0%      7.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/19_pattern_query-03-10           7.000 ± 0%      7.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-01-10      8.000 ± 0%      8.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-02-10      8.000 ± 0%      8.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-03-10      6.000 ± 0%      6.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-04-10      6.000 ± 0%      6.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-05-10      4.000 ± 0%      4.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-06-10      4.000 ± 0%      4.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-07-10      4.000 ± 0%      4.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-08-10      4.000 ± 0%      4.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-09-10      4.000 ± 0%      4.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-10-10      7.000 ± 0%      7.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-11-10      8.000 ± 0%      8.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-12-10      22.00 ± 0%      22.00 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-13-10      18.00 ± 0%      18.00 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-14-10      21.00 ± 0%      21.00 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-15-10      14.00 ± 0%      14.00 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-16-10      14.00 ± 0%      14.00 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-17-10      13.00 ± 0%      13.00 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-18-10      9.000 ± 0%      9.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-19-10      18.00 ± 0%      18.00 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-20-10      6.000 ± 0%      6.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-21-10      6.000 ± 0%      6.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-22-10      6.000 ± 0%      6.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-23-10      6.000 ± 0%      6.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-24-10      6.000 ± 0%      6.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-25-10      6.000 ± 0%      6.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-26-10      6.000 ± 0%      6.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-27-10      6.000 ± 0%      6.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-28-10      16.00 ± 0%      16.00 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-29-10      16.00 ± 0%      16.00 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-30-10      6.000 ± 0%      6.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-31-10      8.000 ± 0%      8.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/25_software_house_api-32-10      6.000 ± 0%      6.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-01-10      8.000 ± 0%      8.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-02-10      9.000 ± 0%      9.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-03-10      9.000 ± 0%      9.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-04-10      9.000 ± 0%      9.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-05-10      10.00 ± 0%      10.00 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-06-10      8.000 ± 0%      8.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-07-10      7.000 ± 0%      7.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-08-10      7.000 ± 0%      7.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-09-10      7.000 ± 0%      7.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-10-10      7.000 ± 0%      7.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-11-10      8.000 ± 0%      8.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-12-10      18.00 ± 0%      18.00 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-13-10      18.00 ± 0%      18.00 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-14-10      30.00 ± 0%      30.00 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-15-10      8.000 ± 0%      8.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-16-10      8.000 ± 0%      8.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-17-10      8.000 ± 0%      8.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-18-10      6.000 ± 0%      6.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-19-10      6.000 ± 0%      6.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-20-10      7.000 ± 0%      7.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-21-10      7.000 ± 0%      7.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-22-10      7.000 ± 0%      7.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-23-10      7.000 ± 0%      7.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-24-10      8.000 ± 0%      8.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-25-10      8.000 ± 0%      8.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-26-10      8.000 ± 0%      8.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-27-10      8.000 ± 0%      8.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-28-10      8.000 ± 0%      8.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-29-10      8.000 ± 0%      8.000 ± 0%       ~ (p=1.000 n=8) ¹
+StageSema/24_social_network_cli-30-10      15.00 ± 0%      15.00 ± 0%       ~ (p=1.000 n=8) ¹
+geomean                                               ²                +0.00%               ²
+¹ all samples are equal
+² summaries must be >0 to compute geomean
+bs2=0

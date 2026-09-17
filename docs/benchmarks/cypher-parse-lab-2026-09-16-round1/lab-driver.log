@@ -1,0 +1,5 @@
+--- stage: 5810 benchmark lines, go_test_exit=0
+--- prepare: 2490 benchmark lines, go_test_exit=0
+stages.csv and stages.md written for 83 statements; 0 without a Full measurement
+artefacts in docs/benchmarks/cypher-parse-lab-2026-09-16-round1/lab
+parse_lab_exit=0

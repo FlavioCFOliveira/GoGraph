@@ -1,0 +1,46 @@
+File: parser.test
+Type: cpu
+Time: 2026-09-16 12:58:09 WEST
+Duration: 144.99s, Total samples = 133.68s (92.20%)
+Showing nodes accounting for 130.86s, 97.89% of 133.68s total
+Dropped 175 nodes (cum <= 0.67s)
+      flat  flat%   sum%        cum   cum%
+    70.14s 52.47% 52.47%     70.14s 52.47%  internal/bytealg.IndexByteString
+    24.46s 18.30% 70.77%    115.70s 86.55%  github.com/FlavioCFOliveira/GoGraph/cypher/parser.BenchmarkStripCorpus.func1
+    18.06s 13.51% 84.28%     91.21s 68.23%  github.com/FlavioCFOliveira/GoGraph/cypher/parser.StripLiterals
+     9.28s  6.94% 91.22%      9.28s  6.94%  runtime.kevent
+     4.10s  3.07% 94.28%      4.10s  3.07%  runtime.pthread_cond_signal
+     2.63s  1.97% 96.25%      2.63s  1.97%  runtime.madvise
+     0.98s  0.73% 96.99%      2.51s  1.88%  strings.ToUpper
+     0.67s   0.5% 97.49%      0.67s   0.5%  runtime.pthread_cond_wait
+     0.14s   0.1% 97.59%      0.98s  0.73%  strings.(*Builder).grow
+     0.09s 0.067% 97.66%     70.29s 52.58%  strings.IndexByte (inline)
+     0.08s  0.06% 97.72%      0.78s  0.58%  internal/bytealg.MakeNoZero
+     0.06s 0.045% 97.76%     70.20s 52.51%  internal/stringslite.IndexByte (inline)
+     0.06s 0.045% 97.81%      1.11s  0.83%  strings.(*Builder).Grow
+     0.05s 0.037% 97.85%      4.20s  3.14%  runtime.semawakeup
+     0.05s 0.037% 97.88%      4.30s  3.22%  runtime.startm
+     0.01s 0.0075% 97.89%      4.21s  3.15%  runtime.notewakeup
+         0     0% 97.89%      2.63s  1.97%  runtime.(*mheap).alloc.func1
+         0     0% 97.89%      2.64s  1.97%  runtime.(*mheap).allocSpan
+         0     0% 97.89%      0.95s  0.71%  runtime.findRunnable
+         0     0% 97.89%      8.91s  6.67%  runtime.gcStart.func4
+         0     0% 97.89%      4.27s  3.19%  runtime.gopreempt_m (inline)
+         0     0% 97.89%      4.28s  3.20%  runtime.goschedImpl
+         0     0% 97.89%      0.67s   0.5%  runtime.mPark (inline)
+         0     0% 97.89%      0.96s  0.72%  runtime.mcall
+         0     0% 97.89%      4.28s  3.20%  runtime.morestack
+         0     0% 97.89%      9.28s  6.94%  runtime.netpoll
+         0     0% 97.89%      4.29s  3.21%  runtime.newstack
+         0     0% 97.89%      0.67s   0.5%  runtime.notesleep
+         0     0% 97.89%      0.95s  0.71%  runtime.park_m
+         0     0% 97.89%         1s  0.75%  runtime.schedule
+         0     0% 97.89%      0.73s  0.55%  runtime.semasleep
+         0     0% 97.89%      9.33s  6.98%  runtime.startTheWorldWithSema
+         0     0% 97.89%      0.68s  0.51%  runtime.stopm
+         0     0% 97.89%      2.62s  1.96%  runtime.sysUsed (inline)
+         0     0% 97.89%      2.62s  1.96%  runtime.sysUsedOS (inline)
+         0     0% 97.89%     12.73s  9.52%  runtime.systemstack
+         0     0% 97.89%      4.38s  3.28%  runtime.wakep
+         0     0% 97.89%    115.70s 86.55%  testing.(*B).launch
+         0     0% 97.89%    115.73s 86.57%  testing.(*B).runN

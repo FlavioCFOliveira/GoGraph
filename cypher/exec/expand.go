@@ -257,6 +257,22 @@ type Expand struct {
 	// column or a pushed far-endpoint predicate. Derived state, never configured
 	// directly — see [Expand.refreshDstGated].
 	dstGated bool
+	// emitStoredDir is [ExpandConfig.EmitStoredDir]. It is appended here for
+	// the same reason the two fields above are, and it costs no bytes at all:
+	// it shares the word dstGated already occupies, so every existing field
+	// offset is unchanged.
+	emitStoredDir bool
+	// cPendInv is the cached columnar triplet's stored orientation, replayed by
+	// the CREATE-multiplicity path. It lives down here beside emitStoredDir,
+	// not beside the cPend* fields it belongs with, for the reason the block
+	// above gives: placed there it pushed the four bools that follow
+	// cPendRemaining one byte along. That moved no field across a cache-line
+	// boundary and left unsafe.Sizeof(Expand{}) at 576 either way, but the
+	// measured sensitivity of this struct's layout makes a free zero-shift
+	// placement the right one. Here both bools land in the word dstGated
+	// already occupies and EVERY existing offset is byte-identical to HEAD's
+	// (verified: dstAdmit 560, dir 552, slotsRejected 496, size 576).
+	cPendInv bool
 }
 
 // ExpandConfig carries the optional configuration for [NewExpand].
@@ -292,6 +308,24 @@ type ExpandConfig struct {
 	InputCol int
 	// Direction to follow. Defaults to DirOut when zero.
 	Direction Direction
+	// EmitStoredDir appends a FOURTH column to every emitted row carrying the
+	// edge's STORED orientation relative to the emitted traversal orientation:
+	// false for a row the FORWARD pass produced (stored src -> dst) and true
+	// for one the REVERSE pass produced (stored dst -> src).
+	//
+	// It is meaningful only for [DirBoth], the one direction under which the
+	// orientation varies row by row; a DirOut or DirIn hop's orientation is a
+	// property of the hop, which its consumer reads from the plan (rmp #2864).
+	//
+	// Positive polarity: off by default, so every existing caller's row width
+	// and chunk schema are unchanged. The caller that sets it owns registering
+	// the fourth schema column, or the row and schemaWidth disagree.
+	//
+	// The cell is an [expr.BoolValue] and not an integer marker because the
+	// consumer reads it through a TYPE ASSERTION: a coordinate that has gone
+	// stale across a projection then lands on a non-Bool and falls back,
+	// instead of reading a node id as a direction.
+	EmitStoredDir bool
 }
 
 // AdjacencySource yields the adjacency a traversal expands over, RESOLVED AT THE
@@ -386,13 +420,14 @@ func NewExpand(input Operator, src AdjacencySource, cfg ExpandConfig) *Expand {
 		dir = DirOut
 	}
 	return &Expand{
-		input:        input,
-		src:          src,
-		dir:          dir,
-		edgeType:     cfg.EdgeType,
-		inputCol:     cfg.InputCol,
-		relCols:      cfg.RelCols,
-		multiplicity: cfg.MultiplicityFn,
+		input:         input,
+		src:           src,
+		dir:           dir,
+		edgeType:      cfg.EdgeType,
+		inputCol:      cfg.InputCol,
+		relCols:       cfg.RelCols,
+		multiplicity:  cfg.MultiplicityFn,
+		emitStoredDir: cfg.EmitStoredDir,
 		// Expand-into is off unless the planner opts in via WithExpandInto (#2206).
 		intoCol: -1,
 		// The seek is on by default, so opting into expand-into gets the O(log d)
@@ -529,14 +564,28 @@ func (op *Expand) Next(out *Row) (bool, error) {
 // fresh copy of the buffer so subsequent buildRow calls (which reuse
 // outBuf) do not corrupt the queued data.
 func (op *Expand) maybeQueueMultiplicity(emitted Row) {
-	if op.multiplicity == nil || len(emitted) < 3 {
+	if op.multiplicity == nil {
 		return
 	}
+	// The nil check comes FIRST, and that ordering is measured, not stylistic:
+	// this function runs once per emitted row and the overwhelming majority of
+	// hops carry no multiplicity fn at all. Computing the width before the
+	// early-out cost +3.54%/+6.98% on BenchmarkExpandDir_InVsOut_Baseline,
+	// which records no multiplicity and never reaches the body below.
+	w := op.tripletWidth()
+	if len(emitted) < w {
+		return
+	}
+	// The appended columns are the LAST w, and w is 4 when a stored-direction
+	// cell trails the triplet — so the endpoints are read from the triplet's
+	// BASE rather than backwards from the end of the row, which would pick up
+	// the direction cell as the destination.
+	base := len(emitted) - w
 	srcVal, dstVal := uint64(0), uint64(0)
-	if iv, ok := emitted[len(emitted)-3].(expr.IntegerValue); ok {
+	if iv, ok := emitted[base].(expr.IntegerValue); ok {
 		srcVal = uint64(iv)
 	}
-	if iv, ok := emitted[len(emitted)-1].(expr.IntegerValue); ok {
+	if iv, ok := emitted[base+2].(expr.IntegerValue); ok {
 		dstVal = uint64(iv)
 	}
 	mult := op.multiplicity(srcVal, dstVal)
@@ -579,7 +628,15 @@ func (op *Expand) tryFwdEdge(out *Row) (emitted, handled bool) {
 			op.slotsRejected++
 			return false, true // a destination gate refused this slot — skip
 		}
-		op.buildRow(out, src, edge, dst)
+		// The two builders are dispatched HERE rather than behind one helper:
+		// a wrapper is itself too large to inline, so it would turn what the
+		// compiler inlines today into a real call per emitted row — which is
+		// the cost [Expand.buildRow] documents.
+		if op.emitStoredDir {
+			op.buildRowStoredDir(out, src, edge, dst, false) // forward: stored src -> dst
+		} else {
+			op.buildRow(out, src, edge, dst)
+		}
 		return true, true
 	}
 }
@@ -601,7 +658,11 @@ func (op *Expand) tryRevEdge(out *Row) (emitted, handled bool) {
 			op.slotsRejected++
 			return false, true // a destination gate refused this slot — skip
 		}
-		op.buildRow(out, src, edge, dst)
+		if op.emitStoredDir {
+			op.buildRowStoredDir(out, src, edge, dst, true) // reverse: stored dst -> src
+		} else {
+			op.buildRow(out, src, edge, dst)
+		}
 		return true, true
 	}
 }
@@ -1134,6 +1195,21 @@ func (op *Expand) lookupFwdEdgePos(src, dst uint64) (uint64, bool) {
 }
 
 // buildRow writes (inputRow... || srcID || edgeID || dstID) into out.
+//
+// # Its body is byte-identical to the pre-#2864 one, deliberately
+//
+// This function runs once per emitted row and the compiler INLINES it. rmp
+// #2864 first added the fourth stored-direction cell here, behind an
+// `if op.emitStoredDir`, and that one extra parameter and one extra store
+// pushed it past the inlining budget: `can inline (*Expand).buildRow`
+// disappeared from `go build -gcflags=-m`, and a two-binary interleaved A/B on
+// BenchmarkExpandDir_InVsOut_Baseline measured +3.54% (OUT) and +6.98% (IN),
+// n=14, p=0.000, against a +0.11% same-binary control — on a benchmark that
+// emits NO direction column at all.
+//
+// So the fourth cell lives in [Expand.buildRowStoredDir] instead, and this one
+// keeps its shape. Do not add a parameter or a statement here without checking
+// that `can inline (*Expand).buildRow` survives.
 func (op *Expand) buildRow(out *Row, srcID, edgeID, dstID int64) {
 	need := len(op.inputRow) + 3
 	if cap(op.outBuf) < need {
@@ -1145,6 +1221,33 @@ func (op *Expand) buildRow(out *Row, srcID, edgeID, dstID int64) {
 	op.outBuf[len(op.inputRow)+1] = expr.IntegerValue(edgeID)
 	op.outBuf[len(op.inputRow)+2] = expr.IntegerValue(dstID)
 	*out = op.outBuf
+}
+
+// buildRowStoredDir is [Expand.buildRow] plus the fourth stored-direction cell,
+// reached only by a hop that emits one. Keeping it separate is what leaves
+// buildRow inlinable for every hop that does not — see that function for the
+// measurement.
+func (op *Expand) buildRowStoredDir(out *Row, srcID, edgeID, dstID int64, storedInverted bool) {
+	need := len(op.inputRow) + 4
+	if cap(op.outBuf) < need {
+		op.outBuf = make([]expr.Value, need)
+	}
+	op.outBuf = op.outBuf[:need]
+	copy(op.outBuf, op.inputRow)
+	op.outBuf[len(op.inputRow)] = expr.IntegerValue(srcID)
+	op.outBuf[len(op.inputRow)+1] = expr.IntegerValue(edgeID)
+	op.outBuf[len(op.inputRow)+2] = expr.IntegerValue(dstID)
+	op.outBuf[len(op.inputRow)+3] = expr.BoolValue(storedInverted)
+	*out = op.outBuf
+}
+
+// tripletWidth is how many columns this operator appends per row: the
+// (src, edge, dst) triplet, plus the stored-direction cell when it emits one.
+func (op *Expand) tripletWidth() int {
+	if op.emitStoredDir {
+		return 4
+	}
+	return 3
 }
 
 // closeSlotWindow banks the slots consumed since the current source's walk began
@@ -1423,13 +1526,16 @@ func (c columnarExpand) nodeIDColumnProducer() {}
 func (op *Expand) columnarOutputChunk(capacity int) *Chunk {
 	template := op.chunkChild.NewOutputChunk(1)
 	p := template.NumCols()
-	kinds := make([]expr.Kind, p+3)
+	kinds := make([]expr.Kind, p+op.tripletWidth())
 	for j := 0; j < p; j++ {
 		kinds[j] = template.ColKind(j)
 	}
 	kinds[p] = expr.KindInteger   // srcID
 	kinds[p+1] = expr.KindInteger // edgeID
 	kinds[p+2] = expr.KindInteger // dstID
+	if op.emitStoredDir {
+		kinds[p+3] = expr.KindBool // storedInverted
+	}
 	return NewChunk(capacity, kinds...)
 }
 
@@ -1478,14 +1584,14 @@ func (op *Expand) fillChunk(dst *Chunk, maxRows int) (int, error) {
 func (op *Expand) fillOneChunkRow(dst *Chunk) (appended, done bool, err error) {
 	for {
 		if op.cPendRemaining > 0 {
-			op.appendChunkRow(dst, op.cRow, op.cPendSrc, op.cPendEdge, op.cPendDst)
+			op.appendChunkRow(dst, op.cRow, op.cPendSrc, op.cPendEdge, op.cPendDst, op.cPendInv)
 			op.cPendRemaining--
 			return true, false, nil
 		}
 		if src, edge, d, st := op.advanceFwdEdge(); st != edgeNone {
 			if st == edgeEmit && op.dstAdmitted(d) {
-				op.appendChunkRow(dst, op.cRow, src, edge, d)
-				op.maybeQueueMultiplicityChunk(src, edge, d)
+				op.appendChunkRow(dst, op.cRow, src, edge, d, false)
+				op.maybeQueueMultiplicityChunk(src, edge, d, false)
 				return true, false, nil
 			}
 			op.slotsRejected++
@@ -1493,8 +1599,8 @@ func (op *Expand) fillOneChunkRow(dst *Chunk) (appended, done bool, err error) {
 		}
 		if src, edge, d, st := op.advanceRevEdge(); st != edgeNone {
 			if st == edgeEmit && op.dstAdmitted(d) {
-				op.appendChunkRow(dst, op.cRow, src, edge, d)
-				op.maybeQueueMultiplicityChunk(src, edge, d)
+				op.appendChunkRow(dst, op.cRow, src, edge, d, true)
+				op.maybeQueueMultiplicityChunk(src, edge, d, true)
 				return true, false, nil
 			}
 			op.slotsRejected++
@@ -1580,7 +1686,7 @@ func (op *Expand) chunkSrcID(r int) (int64, bool) {
 // cell-for-cell (unboxed for a scalar) from cScratch row srcRow, then the three
 // int64 columns srcID, edgeID, dstID. All p+3 columns advance by one, keeping dst
 // rectangular.
-func (op *Expand) appendChunkRow(dst *Chunk, srcRow int, src, edge, dstID int64) {
+func (op *Expand) appendChunkRow(dst *Chunk, srcRow int, src, edge, dstID int64, storedInverted bool) {
 	p := op.cScratch.NumCols()
 	for j := 0; j < p; j++ {
 		op.cScratch.CopyCellTo(j, srcRow, dst, j)
@@ -1588,14 +1694,40 @@ func (op *Expand) appendChunkRow(dst *Chunk, srcRow int, src, edge, dstID int64)
 	dst.AppendInt64(p, src)
 	dst.AppendInt64(p+1, edge)
 	dst.AppendInt64(p+2, dstID)
+	if op.emitStoredDir {
+		dst.AppendBool(p+3, storedInverted)
+	}
 }
+
+// The stored-direction chunk cell above is WRITE-ONLY on every shape reachable
+// today, and that is measured rather than assumed (rmp #2864):
+//
+//   - It is REACHED. Replacing the AppendBool with a panic fired on 11 tests in
+//     package cypher and on 1 TCK scenario, so chunk plans really do emit it.
+//   - Its VALUE is not read. Inverting it changed no answer anywhere: all 3897
+//     TCK scenarios still passed, as did package cypher and package exec.
+//
+// The two hold together because the shapes are disjoint. A plan that drives the
+// CHUNK path is an aggregate or a filter that does not hydrate the relationship
+// (count(*) and count(r) take ZERO orientation decisions, verified with the
+// per-arm counters), and a plan that DOES hydrate it — sum(r.w) over the same
+// undirected hop — resolves the row in row mode and reads the cell
+// [Expand.buildRowStoredDir] wrote instead.
+//
+// It is kept, and kept correct, for two reasons. The column itself is not
+// optional: a chunk whose width disagrees with the schema the planner advanced
+// is a silent column shift, and removing it fails 9 TCK scenarios. And once the
+// column exists, writing the true value costs exactly what writing a wrong one
+// costs, while a future consumer that boxes a chunk row and hydrates the
+// relationship would read it. What is NOT claimed is that any test verifies this
+// value; nothing does, and that is why this note exists.
 
 // maybeQueueMultiplicityChunk mirrors [Expand.maybeQueueMultiplicity] for the
 // columnar path: when the CREATE-multiplicity recorded for (src, dst) is greater
 // than one, it caches the triplet and stages the remaining copies for re-emission
 // (the passthrough is re-read from the still-current cScratch row cRow, which does
 // not advance while re-emissions are owed).
-func (op *Expand) maybeQueueMultiplicityChunk(src, edge, dst int64) {
+func (op *Expand) maybeQueueMultiplicityChunk(src, edge, dst int64, storedInverted bool) {
 	if op.multiplicity == nil {
 		return
 	}
@@ -1604,6 +1736,7 @@ func (op *Expand) maybeQueueMultiplicityChunk(src, edge, dst int64) {
 		return
 	}
 	op.cPendSrc, op.cPendEdge, op.cPendDst = src, edge, dst
+	op.cPendInv = storedInverted
 	op.cPendRemaining = mult - 1
 }
 

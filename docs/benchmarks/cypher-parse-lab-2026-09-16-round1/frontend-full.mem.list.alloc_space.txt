@@ -1,0 +1,89 @@
+Total: 588.43MB
+ROUTINE ======================== github.com/FlavioCFOliveira/GoGraph/cypher/parser.ParseStatement in /Users/flaviocfo/dev/xumiga/GoGraph/cypher/parser/parse.go
+    2.61MB   586.55MB (flat, cum) 99.68% of Total
+         .          .    282:func ParseStatement(query string) (ast.Query, PlanMode, error) {
+         .          .    283:	// Reject over-length or excessively nested input before any lexing or
+         .          .    284:	// parsing. Deep bracket nesting drives unbounded parser/visitor recursion
+         .          .    285:	// into a fatal Go stack overflow that recover() cannot catch, so the guard
+         .          .    286:	// must run first — once the stack has overflowed there is no recovery path.
+         .          .    287:	// See guard.go.
+         .          .    288:	if err := guardInput(query); err != nil {
+         .          .    289:		return nil, PlanModeNone, err
+         .          .    290:	}
+         .          .    291:
+         .          .    292:	// Validate string-literal escape sequences before any rewriting so that
+         .          .    293:	// `normalizeSingleQuotes` does not silently hide a malformed `\u…`
+         .          .    294:	// escape under a benign-looking double-quoted form.
+         .          .    295:	if err := validateUnicodeEscapes(query); err != nil {
+         .          .    296:		return nil, PlanModeNone, err
+         .          .    297:	}
+         .          .    298:
+         .          .    299:	// Strip shortestPath()/allShortestPaths() wrappers from named MATCH path
+         .          .    300:	// bindings into the plain patterns they wrap, recording each as a marker to
+         .          .    301:	// stamp back onto the AST after the build (rmp #1690). Runs before the other
+         .          .    302:	// normalizers so the unwrapped inner pattern's variable-length bounds are
+         .          .    303:	// normalized as usual. A query with no such wrapper is returned untouched.
+         .   141.35kB    304:	query, spMarkers := rewriteShortestPath(query)
+         .          .    305:
+         .    16.81MB    306:	query = applyNormalizers(query)
+         .          .    307:
+         .          .    308:	// Lex.
+    1.31MB     1.31MB    309:	lexErrListener := &errorListener{}
+         .    10.78MB    310:	input := antlr.NewInputStream(query)
+         .    25.69MB    311:	lexer := gen.NewCypherLexer(input)
+         .          .    312:	lexer.RemoveErrorListeners()
+         .   668.62kB    313:	lexer.AddErrorListener(lexErrListener)
+         .          .    314:
+         .          .    315:	// Parse.
+    1.31MB     1.31MB    316:	parseErrListener := &errorListener{}
+         .     2.61MB    317:	stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
+         .          .    318:
+         .          .    319:	// Lex the whole input before parsing so that the catch-all ERRCHAR rule can
+         .          .    320:	// be promoted to a syntax error instead of silently deleting a character.
+         .          .    321:	// See [collectErrCharErrors]. `script` is anchored at EOF, so an accepted
+         .          .    322:	// query consumes every token regardless: this fetches them eagerly rather
+         .          .    323:	// than adding work. Fill leaves the read index on the first
+         .          .    324:	// default-channel token, which is exactly where the parser expects it.
+         .   137.16MB    325:	stream.Fill()
+         .          .    326:	collectErrCharErrors(lexErrListener, stream)
+         .          .    327:	if len(lexErrListener.errs) > 0 {
+         .          .    328:		return nil, PlanModeNone, lexErrListener.errs[0]
+         .          .    329:	}
+         .          .    330:
+         .    19.87MB    331:	p := gen.NewCypherParser(stream)
+         .          .    332:	p.RemoveErrorListeners()
+         .   668.62kB    333:	p.AddErrorListener(parseErrListener)
+         .          .    334:	p.BuildParseTrees = true
+         .          .    335:
+         .   326.37MB    336:	tree, panicErr := recoverParseScript(p)
+         .          .    337:	if panicErr != nil {
+         .          .    338:		return nil, PlanModeNone, panicErr
+         .          .    339:	}
+         .          .    340:
+         .          .    341:	// Report lex errors first.
+         .          .    342:	if len(lexErrListener.errs) > 0 {
+         .          .    343:		return nil, PlanModeNone, lexErrListener.errs[0]
+         .          .    344:	}
+         .          .    345:	if len(parseErrListener.errs) > 0 {
+         .          .    346:		return nil, PlanModeNone, parseErrListener.errs[0]
+         .          .    347:	}
+         .          .    348:
+         .          .    349:	// Walk the parse tree.
+         .   668.62kB    350:	v := newVisitor()
+       48B    42.54MB    351:	result := v.visit(tree)
+         .          .    352:
+         .          .    353:	if se, ok := result.(*SemaError); ok {
+         .          .    354:		return nil, PlanModeNone, se
+         .          .    355:	}
+         .          .    356:
+         .          .    357:	// The arithmetic visitors (VisitAddSubExpression / VisitMultDivExpression
+         .          .    358:	// / VisitPowerExpression) lift list/string predicates (IN, CONTAINS,
+         .          .    359:	// STARTS WITH, ENDS WITH) above each arithmetic level as the tree is
+         .          .    360:	// built, so no post-pass is required here. See cypher/parser/rebalance.go
+         .          .    361:	// for the rationale.
+       48B        48B    362:	if q, ok := result.(ast.Query); ok {
+         .          .    363:		applyShortestMarkers(q, spMarkers)
+         .          .    364:		return q, v.planMode, nil
+         .          .    365:	}
+         .          .    366:	if sq, ok := result.(*ast.SingleQuery); ok {
+         .          .    367:		applyShortestMarkers(sq, spMarkers)

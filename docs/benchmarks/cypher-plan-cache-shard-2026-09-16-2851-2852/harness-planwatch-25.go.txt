@@ -1,0 +1,155 @@
+package main
+
+// zz_planwatch_test.go — THROWAWAY observation harness for rmp #2851.
+//
+// It never touches the example. It is injected with `go test -overlay`, so the
+// example's own directory is not written to at all: the file exists only inside
+// the build. It installs a counting metrics backend, BRACKETS the workload
+// between a before-and-after read of cypher.plan_cache.{hits,misses,evictions,
+// invalidations}, runs the example at its own documented default, and prints
+// the absolute counter values on both sides of the bracket.
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	ggmetrics "github.com/FlavioCFOliveira/GoGraph/internal/metrics"
+)
+
+type planWatch struct {
+	hits, misses, evictions, invalidations atomic.Uint64
+}
+
+func (p *planWatch) IncCounter(name string, d uint64) {
+	switch name {
+	case "cypher.plan_cache.hits":
+		p.hits.Add(d)
+	case "cypher.plan_cache.misses":
+		p.misses.Add(d)
+	case "cypher.plan_cache.evictions":
+		p.evictions.Add(d)
+	case "cypher.plan_cache.invalidations":
+		p.invalidations.Add(d)
+	}
+}
+
+func (p *planWatch) ObserveLatency(string, time.Duration) {}
+func (p *planWatch) SetGauge(string, float64)             {}
+
+type planWatchSample struct {
+	hits, misses, evictions, invalidations uint64
+}
+
+func (p *planWatch) sample() planWatchSample {
+	return planWatchSample{p.hits.Load(), p.misses.Load(), p.evictions.Load(), p.invalidations.Load()}
+}
+
+func planWatchReport(label string, before, after planWatchSample) {
+	dh := after.hits - before.hits
+	dm := after.misses - before.misses
+	de := after.evictions - before.evictions
+	di := after.invalidations - before.invalidations
+	total := dh + dm
+	var ratio, pct float64
+	if dm > 0 {
+		ratio = float64(dh) / float64(dm)
+	}
+	if total > 0 {
+		pct = 100 * float64(dh) / float64(total)
+	}
+	fmt.Fprintf(os.Stderr,
+		"PLANWATCH label=%s before.hits=%d before.misses=%d before.evictions=%d before.invalidations=%d "+
+			"after.hits=%d after.misses=%d after.evictions=%d after.invalidations=%d "+
+			"delta.hits=%d delta.misses=%d delta.evictions=%d delta.invalidations=%d "+
+			"lookups=%d hit_over_miss=%.4f hit_pct=%.2f\n",
+		label,
+		before.hits, before.misses, before.evictions, before.invalidations,
+		after.hits, after.misses, after.evictions, after.invalidations,
+		dh, dm, de, di, total, ratio, pct)
+}
+
+// TestZZPlanWatch25 drives example 25's documented session. The example is a
+// server, so "its documented default" has two readings and BOTH are recorded,
+// each in its own process (GG_PLANWATCH_STEP):
+//
+//	startup — `go run ./examples/25_software_house_api -d <dir> -addr :8080`
+//	          with no scale flags and no request: the store open and recovery
+//	          alone, exactly what the documented default invocation executes
+//	          before the first client connects.
+//	session — the same startup followed by the documented request sequence from
+//	          README.md: POST /seed, GET /stats, GET /schema, POST /explain, the
+//	          documented POST /query read, and every entry of the example's own
+//	          maintenanceCatalogue (Q1..Q9) with its documented sample params.
+//
+// The requests are dispatched into the very handler mux newServer wires, so the
+// Cypher work is the example's own; only the TCP transport is bypassed.
+func TestZZPlanWatch25(t *testing.T) {
+	step := os.Getenv("GG_PLANWATCH_STEP")
+	dir := os.Getenv("GG_PLANWATCH_DIR")
+	if step == "" || dir == "" {
+		t.Skip("GG_PLANWATCH_STEP / GG_PLANWATCH_DIR not set")
+	}
+
+	p := &planWatch{}
+	ggmetrics.SetBackend(p)
+	defer ggmetrics.SetBackend(nil)
+
+	before := p.sample()
+
+	ctx := t.Context()
+	ds, err := openStore(ctx, dir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	srv := newServer(ds, "127.0.0.1:0")
+	h := srv.http.Handler
+
+	post := func(path, body string) {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code >= 500 {
+			t.Fatalf("POST %s -> %d: %s", path, rec.Code, rec.Body.String())
+		}
+	}
+	get := func(path string) {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code >= 500 {
+			t.Fatalf("GET %s -> %d: %s", path, rec.Code, rec.Body.String())
+		}
+	}
+
+	if step == "session" {
+		post("/seed", "")
+		get("/stats")
+		get("/schema")
+		post("/explain", `{"query":"MATCH (c:Component) WHERE c.key = $k RETURN c","params":{"k":"comp:platform/config.go"}}`)
+		post("/query", `{"query":"MATCH (u:Developer) RETURN u.key AS dev ORDER BY dev"}`)
+		for _, q := range maintenanceCatalogue {
+			body := map[string]any{"query": q.Cypher}
+			if q.Example != nil {
+				body["params"] = q.Example
+			}
+			raw, merr := json.Marshal(body)
+			if merr != nil {
+				t.Fatalf("marshal %s: %v", q.Name, merr)
+			}
+			post("/query", string(raw))
+		}
+	}
+
+	if cerr := ds.Close(); cerr != nil {
+		t.Fatalf("close: %v", cerr)
+	}
+	after := p.sample()
+	planWatchReport("25_software_house_api/"+step, before, after)
+}

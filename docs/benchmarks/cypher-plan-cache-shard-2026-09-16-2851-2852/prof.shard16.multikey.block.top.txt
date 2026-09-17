@@ -1,0 +1,17 @@
+File: cypher.shard16.test
+Type: delay
+Time: 2026-09-16 16:00:40 WEST
+Showing nodes accounting for 20.89s, 99.81% of 20.93s total
+Dropped 27 nodes (cum <= 0.10s)
+Showing top 10 nodes out of 23
+      flat  flat%   sum%        cum   cum%
+    13.36s 63.81% 63.81%     13.36s 63.81%  sync.(*Mutex).Lock (inline)
+     3.82s 18.23% 82.04%      3.82s 18.23%  runtime.chanrecv1
+     3.72s 17.77% 99.81%      3.72s 17.77%  sync.(*WaitGroup).Wait
+         0     0% 99.81%     13.36s 63.80%  github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).parseAndAnalyse
+         0     0% 99.81%     13.36s 63.80%  github.com/FlavioCFOliveira/GoGraph/cypher.(*planCache).get
+         0     0% 99.81%      3.72s 17.77%  github.com/FlavioCFOliveira/GoGraph/cypher.BenchmarkSpikeWarmPrepareMultiKey
+         0     0% 99.81%     13.36s 63.80%  github.com/FlavioCFOliveira/GoGraph/cypher.BenchmarkSpikeWarmPrepareMultiKey.func1
+         0     0% 99.81%      3.82s 18.23%  github.com/FlavioCFOliveira/GoGraph/cypher_test.TestMain
+         0     0% 99.81%      3.82s 18.23%  go.uber.org/goleak.VerifyTestMain
+         0     0% 99.81%      3.82s 18.23%  main.main

@@ -1,0 +1,94 @@
+#!/bin/bash
+# Bounded spike driver for rmp #2846 (sprint 362).
+#
+# Spike A (C1): whole front end, arms LL / SLL / SLLBail, ONE PROCESS PER ARM
+#   because the generated parser's decisionToDFA is process-wide, interleaved
+#   arm-by-arm across REPS repetitions.
+# Spike B (C2): StripLiterals, arms ToUpper / ASCII, same interleaving.
+#
+# Every arm's runs are collated into one file whose benchmark names are
+# normalised so benchstat can compare them as columns.
+set -u
+
+ROOT=/Users/flaviocfo/dev/xumiga/GoGraph
+OUT="$ROOT/docs/benchmarks/cypher-parse-lab-2026-09-16-spike2846"
+BENCHSTAT=/Users/flaviocfo/.local/bin/benchstat
+REPS=${REPS:-10}
+SLL_BENCHTIME=${SLL_BENCHTIME:-300ms}
+STRIP_BENCHTIME=${STRIP_BENCHTIME:-200ms}
+
+mkdir -p "$OUT"
+cd "$ROOT" || exit 1
+
+{
+  echo "date_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "commit=$(git rev-parse HEAD)"
+  echo "branch=$(git rev-parse --abbrev-ref HEAD)"
+  echo "go_version=$(go version)"
+  echo "num_cpu=$(sysctl -n hw.ncpu)"
+  echo "os=$(uname -sr) $(uname -m)"
+  echo "hw=$(sysctl -n machdep.cpu.brand_string)"
+  echo "mem_bytes=$(sysctl -n hw.memsize)"
+  echo "build_flags=none (no -race, no -tags)"
+  echo "gomaxprocs_env=${GOMAXPROCS:-unset}"
+  echo "reps=$REPS"
+  echo "sll_benchtime=$SLL_BENCHTIME"
+  echo "strip_benchtime=$STRIP_BENCHTIME"
+  echo "corpus=cypher/parser/testdata/examples-corpus.json"
+  echo "antlr_module=$(grep antlr go.mod | head -1 | tr -s ' ')"
+  echo "harness=cypher/parser/zz_spike2846_test.go (THROWAWAY, deleted after this run)"
+} > "$OUT/env.txt"
+
+uptime > "$OUT/loadavg-before.txt"
+
+# Build the test binary once so the arms share one binary and process startup
+# is not part of any arm's measurement asymmetry.
+go test -c -o "$OUT/parser.spike.test" ./cypher/parser/ > "$OUT/build.log" 2>&1
+echo "build_exit=$?" >> "$OUT/build.log"
+
+run_arm() {  # $1=bench regex  $2=benchtime  $3=output file  $4=name-normalising sed expr
+  (cd "$ROOT/cypher/parser" && "$OUT/parser.spike.test" -test.run='^$' \
+      -test.bench="$1" -test.benchmem -test.benchtime="$2" -test.count=1) 2>&1 \
+    | sed -E "$4" >> "$3"
+}
+
+# ---- Spike A: prediction mode -------------------------------------------
+: > "$OUT/sll.LL.txt"; : > "$OUT/sll.SLL.txt"; : > "$OUT/sll.SLLBail.txt"; : > "$OUT/sll.LLBail.txt"
+for rep in $(seq 1 "$REPS"); do
+  for arm in LL SLL SLLBail LLBail; do
+    run_arm "^BenchmarkSpikeSLL\$/^${arm}\$" "$SLL_BENCHTIME" \
+            "$OUT/sll.${arm}.txt" "s|BenchmarkSpikeSLL/${arm}-|BenchmarkSpikeSLL-|"
+  done
+  echo "rep $rep done" >&2
+done
+
+uptime > "$OUT/loadavg-mid.txt"
+
+# ---- Spike B: the keyword test ------------------------------------------
+: > "$OUT/strip.ToUpper.txt"; : > "$OUT/strip.ASCII.txt"
+: > "$OUT/striphoist.ToUpper.txt"; : > "$OUT/striphoist.ASCII.txt"
+for rep in $(seq 1 "$REPS"); do
+  for arm in ToUpper ASCII; do
+    run_arm "^BenchmarkSpikeStrip\$/^${arm}\$" "$STRIP_BENCHTIME" \
+            "$OUT/strip.${arm}.txt" "s|BenchmarkSpikeStrip/${arm}-|BenchmarkSpikeStrip-|"
+    run_arm "^BenchmarkSpikeStripHoisters\$/^${arm}\$" "$STRIP_BENCHTIME" \
+            "$OUT/striphoist.${arm}.txt" "s|BenchmarkSpikeStripHoisters/${arm}-|BenchmarkSpikeStripHoisters-|"
+  done
+done
+
+uptime > "$OUT/loadavg-after.txt"
+
+"$BENCHSTAT" "LL=$OUT/sll.LL.txt" "SLL=$OUT/sll.SLL.txt" "SLLBail=$OUT/sll.SLLBail.txt" "LLBail=$OUT/sll.LLBail.txt" \
+  > "$OUT/sll.benchstat.txt" 2>&1
+echo "benchstat_exit=$?" >> "$OUT/sll.benchstat.txt"
+
+"$BENCHSTAT" "ToUpper=$OUT/strip.ToUpper.txt" "ASCII=$OUT/strip.ASCII.txt" \
+  > "$OUT/strip.benchstat.txt" 2>&1
+echo "benchstat_exit=$?" >> "$OUT/strip.benchstat.txt"
+
+"$BENCHSTAT" "ToUpper=$OUT/striphoist.ToUpper.txt" "ASCII=$OUT/striphoist.ASCII.txt" \
+  > "$OUT/striphoist.benchstat.txt" 2>&1
+echo "benchstat_exit=$?" >> "$OUT/striphoist.benchstat.txt"
+
+rm -f "$OUT/parser.spike.test"
+echo "DRIVER DONE"

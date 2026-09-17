@@ -226,12 +226,15 @@ func tryBuildIndexNestedLoopJoin(
 	innerKeyExpr := key.innerKey
 	outerKeyExpr := key.outerKey
 
+	probeKeyPlan := newRowBindPlan(probeKeySchema, bopts, g, nil)
+	buildKeyPlan := newRowBindPlan(buildKeySchema, bopts, g, nil)
+
 	outerKeyFn := func(row exec.Row) (expr.Value, error) {
-		rc := buildRowCtx(row, probeKeySchema, g, bopts)
+		rc := buildRowCtx(row, probeKeyPlan)
 		return evalRow(bopts, outerKeyExpr, rc, params, reg)
 	}
 	innerKeyFn := func(row exec.Row) (expr.Value, error) {
-		rc := buildRowCtx(row, buildKeySchema, g, bopts)
+		rc := buildRowCtx(row, buildKeyPlan)
 		return evalRow(bopts, innerKeyExpr, rc, params, reg)
 	}
 

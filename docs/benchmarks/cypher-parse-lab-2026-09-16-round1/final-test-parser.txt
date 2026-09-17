@@ -1,0 +1,3 @@
+ok  	github.com/FlavioCFOliveira/GoGraph/cypher/parser	0.418s
+?   	github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen	[no test files]
+go_test_exit=0

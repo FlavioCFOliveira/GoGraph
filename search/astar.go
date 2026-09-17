@@ -107,7 +107,7 @@ func AStarInto[W Weight](
 		metrics.IncCounter("search.AStarInto.errors", 1)
 		return zero, ErrBufferTooSmall
 	}
-	heap := acquireDijkHeap[W]()
+	heap := acquireDijkHeap[W](maxID)
 	defer releaseDijkHeap(heap)
 	cost, err := aStarCore[W](ctx, c, src, dst, h, dist[:maxID], parent[:maxID], found[:maxID], heap, path)
 	if err != nil {

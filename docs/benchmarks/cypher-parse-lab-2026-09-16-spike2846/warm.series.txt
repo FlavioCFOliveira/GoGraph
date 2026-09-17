@@ -1,0 +1,67 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+BenchmarkSpikeWarmPrepareParallel/quotefree            	16376616	        15.02 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/quotefree            	15908253	        14.93 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/quotefree            	15969189	        15.00 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/quotefree            	13265868	        15.27 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/quotefree            	15666442	        15.05 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/quotefree            	13049505	        15.47 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/quotefree-2          	 5711372	        39.22 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/quotefree-2          	 5730088	        42.14 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/quotefree-2          	 5904820	        41.02 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/quotefree-2          	 5904494	        41.15 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/quotefree-2          	 5933348	        40.72 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/quotefree-2          	 5827174	        41.04 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/quotefree-4          	 2850879	        87.88 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/quotefree-4          	 2864284	        85.72 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/quotefree-4          	 2806286	        88.25 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/quotefree-4          	 2886579	        85.69 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/quotefree-4          	 2845929	        84.68 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/quotefree-4          	 2873049	        84.06 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/quotefree-8          	 2670162	        88.74 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/quotefree-8          	 2699538	        89.59 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/quotefree-8          	 2790819	        89.47 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/quotefree-8          	 2789910	        89.11 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/quotefree-8          	 2719120	        88.82 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/quotefree-8          	 2699995	        88.91 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/quotefree-10         	 2701693	        92.26 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/quotefree-10         	 2626158	        91.03 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/quotefree-10         	 2627226	        90.66 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/quotefree-10         	 2665828	        93.49 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/quotefree-10         	 2687670	        92.01 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/quotefree-10         	 2671898	        93.10 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal              	  451311	       497.0 ns/op	     512 B/op	      12 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal              	  587724	       495.6 ns/op	     512 B/op	      12 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal              	  579820	       496.7 ns/op	     512 B/op	      12 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal              	  601899	       495.0 ns/op	     512 B/op	      12 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal              	  468868	       491.5 ns/op	     512 B/op	      12 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal              	  480748	       496.5 ns/op	     512 B/op	      12 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal-2            	  845367	       239.4 ns/op	     512 B/op	      12 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal-2            	  978344	       240.8 ns/op	     512 B/op	      12 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal-2            	 1000000	       238.8 ns/op	     512 B/op	      12 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal-2            	 1000000	       239.8 ns/op	     512 B/op	      12 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal-2            	  996447	       241.0 ns/op	     512 B/op	      12 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal-2            	 1000000	       238.4 ns/op	     512 B/op	      12 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal-4            	 1607529	       147.5 ns/op	     512 B/op	      12 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal-4            	 1636814	       146.9 ns/op	     512 B/op	      12 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal-4            	 1606656	       142.5 ns/op	     512 B/op	      12 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal-4            	 1672652	       143.0 ns/op	     512 B/op	      12 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal-4            	 1621930	       145.3 ns/op	     512 B/op	      12 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal-4            	 1699174	       143.3 ns/op	     512 B/op	      12 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal-8            	 1285675	       186.5 ns/op	     512 B/op	      12 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal-8            	 1312052	       183.6 ns/op	     512 B/op	      12 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal-8            	 1302771	       188.9 ns/op	     512 B/op	      12 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal-8            	 1000000	       202.7 ns/op	     512 B/op	      12 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal-8            	 1000000	       202.4 ns/op	     512 B/op	      12 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal-8            	 1238049	       190.3 ns/op	     512 B/op	      12 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal-10           	 1000000	       205.7 ns/op	     512 B/op	      12 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal-10           	 1000000	       217.2 ns/op	     512 B/op	      12 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal-10           	 1000000	       203.5 ns/op	     512 B/op	      12 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal-10           	 1203602	       201.9 ns/op	     512 B/op	      12 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal-10           	 1000000	       203.6 ns/op	     512 B/op	      12 allocs/op
+BenchmarkSpikeWarmPrepareParallel/literal-10           	 1208649	       197.2 ns/op	     512 B/op	      12 allocs/op
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/cypher	26.047s
+exit=0

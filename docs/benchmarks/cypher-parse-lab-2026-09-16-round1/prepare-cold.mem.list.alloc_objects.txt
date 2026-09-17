@@ -1,0 +1,88 @@
+Total: 10806257
+ROUTINE ======================== github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).compilePlanCacheEntry in /Users/flaviocfo/dev/xumiga/GoGraph/cypher/api.go
+     39092   10245188 (flat, cum) 94.81% of Total
+         .          .   5689:func (e *Engine) compilePlanCacheEntry(query string) (*planCacheEntry, error) {
+         .    8342154   5690:	astNode, planMode, err := parser.ParseStatement(query)
+         .          .   5691:	if err != nil {
+         .          .   5692:		return nil, fmt.Errorf("cypher: parse: %w", err)
+         .          .   5693:	}
+         .     261983   5694:	semaErr := sema.MapToBolt(sema.Analyse(astNode))
+         .       5780   5695:	paramRefs := sema.CollectParamNames(astNode)
+         .     836324   5696:	plan, err := ir.FromAST(astNode)
+         .          .   5697:	if err != nil {
+         .          .   5698:		return nil, fmt.Errorf("cypher: translate: %w", err)
+         .          .   5699:	}
+         .          .   5700:	// Push a constant-bound key equality into the inner arm of an Apply so a key
+         .          .   5701:	// written as a bound variable — WITH 'x' AS k MATCH (n:L {p: k}) — reaches the
+         .          .   5702:	// index instead of a full label scan (#2182). Done here, once per cached plan,
+         .          .   5703:	// and params-independent by construction: the pass moves the *ast.Parameter
+         .          .   5704:	// node rather than its value, so one cached plan stays correct for every
+         .          .   5705:	// invocation's parameters. See correlated_seek_plan.go.
+         .     102297   5706:	pushedSeekHints := foldBoundSeekKeys(plan)
+         .          .   5707:	// Plan-time advisories: a disconnected Cartesian product is surfaced as a
+         .          .   5708:	// notification so an embedder or Bolt driver can warn the user that the
+         .          .   5709:	// query may stream Nᵏ intermediate tuples (#1483). Notifications are out of
+         .          .   5710:	// band and never change the result rows.
+         .          .   5711:	var notifications []Notification
+         .      78238   5712:	if note := analyseCartesianProductQuery(astNode); note != nil {
+       456        456   5713:		notifications = []Notification{*note}
+         .          .   5714:	}
+         .          .   5715:	// Memoise the computations the execution path otherwise repeats on every Run:
+         .          .   5716:	// the reorder/anchor-swap candidate sets and, for parameterised queries,
+         .          .   5717:	// InferParamTypes. All are pure functions of the plan (paramTypes additionally
+         .          .   5718:	// of the index schema). The entry is immutable after loadOrStore, so this is
+         .          .   5719:	// safe for concurrent cache readers; paramTypes is invalidated with the entry
+         .          .   5720:	// by ClearPlanCache on any schema-changing DDL. Skipped for
+         .          .   5721:	// semantically-invalid entries, which never reach execution.
+         .          .   5722:	//
+         .          .   5723:	// The hash join's order-safety walk used to be memoised here too. It is gone
+         .          .   5724:	// rather than cached: rmp #2234 proved the substitution order-preserving, so
+         .          .   5725:	// there was nothing left for the walk to decide (#1719 had made it cheap; #2234
+         .          .   5726:	// made it unnecessary).
+         .          .   5727:	var reorderCandidates []*ir.Apply
+         .          .   5728:	var anchorSwapCandidates []anchorSite
+         .          .   5729:	var paramTypes map[string]expr.Kind
+         .          .   5730:	if semaErr == nil {
+         .          .   5731:		// Disjoint-component reorder candidates (#2091): the structurally-
+         .          .   5732:		// qualifying, order-safe reorder points. Pure function of the plan, so
+         .          .   5733:		// memoised here; the live cardinality gate runs per query at build time.
+         .     216374   5734:		reorderCandidates = collectReorderCandidates(plan)
+         .          .   5735:		// Single-edge anchor-swap candidates (#2090): the structurally-qualifying,
+         .          .   5736:		// order-safe single-edge sites. Pure function of the plan, so memoised
+         .          .   5737:		// here; the live count-store cost gate runs per query at build time.
+         .     218011   5738:		anchorSwapCandidates = collectAnchorSwapCandidates(plan)
+         .          .   5739:		if len(paramRefs) > 0 {
+         .          .   5740:			idxMgr := e.g.IndexManager()
+         .          .   5741:			resolve := func(label, property string) (expr.Kind, bool) {
+         .          .   5742:				return indexedPropKind(idxMgr, label, property)
+         .          .   5743:			}
+         .      49132   5744:			paramTypes = sema.InferParamTypesWithResolver(plan, resolve)
+         .          .   5745:		}
+         .          .   5746:	}
+     38636      38636   5747:	entry := &planCacheEntry{
+         .          .   5748:		plan: plan, semaErr: semaErr, paramRefs: paramRefs, notifications: notifications,
+         .          .   5749:		planMode:             planMode,
+         .          .   5750:		reorderCandidates:    reorderCandidates,
+         .          .   5751:		anchorSwapCandidates: anchorSwapCandidates, paramTypes: paramTypes,
+         .          .   5752:		pushedSeekHints: pushedSeekHints,
+         .          .   5753:		// Computed OUTSIDE the semaErr == nil guard above, unlike its neighbours: a
+         .          .   5754:		// semantically-invalid entry never reaches execution today, but a memo whose
+         .          .   5755:		// validity depends on a caller's check order is a trap, and this one costs a
+         .          .   5756:		// single plan walk on a cache miss. See [planCacheEntry.containsWrite].
+         .      95321   5757:		containsWrite: ir.ContainsWrite(plan),
+         .          .   5758:	}
+         .        482   5759:	actual, _ := e.cache.loadOrStore(query, entry)
+         .          .   5760:	return actual, nil
+         .          .   5761:}
+         .          .   5762:
+         .          .   5763:// ─────────────────────────────────────────────────────────────────────────────
+         .          .   5764:// Result
+ROUTINE ======================== github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).compilePlanCacheEntry.func1 in /Users/flaviocfo/dev/xumiga/GoGraph/cypher/api.go
+         0      20960 (flat, cum)  0.19% of Total
+         .          .   5741:			resolve := func(label, property string) (expr.Kind, bool) {
+         .      20960   5742:				return indexedPropKind(idxMgr, label, property)
+         .          .   5743:			}
+         .          .   5744:			paramTypes = sema.InferParamTypesWithResolver(plan, resolve)
+         .          .   5745:		}
+         .          .   5746:	}
+         .          .   5747:	entry := &planCacheEntry{

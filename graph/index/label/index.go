@@ -83,7 +83,7 @@ const cacheLine = 128
 // test gate if sync.RWMutex or [index.NodeSet] ever changes size — the padding
 // is a measured performance property, not a decoration, so it is checked rather
 // than assumed.
-const entryPad = 80
+const entryPad = 72
 
 // entry is one label's node set behind its own lock. Splitting the lock per
 // label is the whole point of the geometry: a writer touching label A does not
@@ -94,7 +94,8 @@ const entryPad = 80
 //
 // Every field is guarded by mu. set is read under RLock and mutated under Lock.
 // dead is written only by [Index.reap] and [Index.Deserialize], both under Lock,
-// and read by [Index.mutate] under Lock.
+// and read by [Index.mutate] under Lock. image is read under RLock and written
+// under Lock, by [Index.BitmapShared] and [Index.mutate] alone.
 type entry struct {
 	mu sync.RWMutex
 	// dead marks an entry that has been detached from the spine — reaped
@@ -115,7 +116,22 @@ type entry struct {
 	// deadlocks. See [Index] for the lock order this replaced it with.
 	dead bool
 	set  index.NodeSet
-	_    [entryPad]byte
+	// image is the IMMUTABLE bitmap image of set most recently published by
+	// [Index.BitmapShared], or nil when no image is current.
+	//
+	// The object it points at is written exactly once — when it is built — and
+	// never again. [Index.mutate] does not update it; it drops it, so a reader
+	// still holding the old pointer keeps reading the instant it acquired, and
+	// the next reader builds a fresh one. That is the whole copy-on-write
+	// contract, and it is what lets a reader hold the pointer with no lock for
+	// as long as it likes.
+	//
+	// It is therefore at most ONE retained copy per label, replacing the one
+	// copy PER READ that [Index.Intersect] makes. Under concurrency that is a
+	// reduction in live bytes as well as in allocation: k concurrent scans of
+	// one label used to hold k clones at once and now share this one.
+	image *roaring64.Bitmap
+	_     [entryPad]byte
 }
 
 // Index maps label identifiers (uint32) to the set of NodeIDs that
@@ -262,6 +278,8 @@ func (i *Index) mutate(label uint32, create bool, fn func(*entry)) bool {
 				e.mu.Lock()
 				i.spine[label] = e
 				i.mu.Unlock()
+				// No image to drop: the entry was built on the line above and
+				// has never been published to a reader.
 				fn(e)
 				e.mu.Unlock()
 				return true
@@ -270,6 +288,12 @@ func (i *Index) mutate(label uint32, create bool, fn func(*entry)) bool {
 		}
 		e.mu.Lock()
 		if !e.dead {
+			// DROP the published image before the set changes, never after and
+			// never in place. A reader that already took the pointer keeps the
+			// instant it acquired, which is what makes the image safe to read
+			// without a lock; the next reader finds nil and builds a fresh one.
+			// See [entry.image].
+			e.image = nil
 			fn(e)
 			e.mu.Unlock()
 			return true
@@ -485,6 +509,84 @@ func (i *Index) IntersectCardinality(labels ...uint32) (uint64, bool) {
 	}
 	first.mu.RUnlock()
 	return n, true
+}
+
+// BitmapShared returns the NodeIDs carrying label as a bitmap the caller MUST
+// NOT MUTATE, and MUST NOT assume is its own.
+//
+// It is the single-label read that [Index.Intersect] pays a clone for. Intersect
+// hands back a caller-owned bitmap, so it copies the live one on every call; this
+// returns a SHARED IMMUTABLE IMAGE instead, built once and reused by every reader
+// until the label is next written.
+//
+// # The contract, stated as sharply as it can be
+//
+// Mutating the result corrupts what every other concurrent reader of this label
+// sees, silently and without a race report, because the object is shared BY
+// DESIGN and no lock guards it. A caller that needs to mutate must Clone first,
+// or call [Index.Intersect], which never shares.
+//
+// Reading it, by contrast, needs no lock and no coordination at all, for as long
+// as the caller likes: the image is written exactly once, when it is built, and
+// is never written again — a later write to the label REPLACES the entry's image
+// rather than editing it ([Index.mutate] drops it; see [entry.image]).
+//
+// # What it costs, and what it stops costing
+//
+// One image per label is retained until the label is next written, instead of one
+// clone per read that lives until the reader drops it. Under concurrency that is
+// fewer live bytes, not more: k simultaneous scans of one label used to hold k
+// clones and now share one image.
+//
+// The cold path — the first read of a label, and the first after each write —
+// still builds an image, so a workload that alternates read and write on the SAME
+// label pays what Intersect paid. A read-mostly label pays it once.
+//
+// # It is an image of ONE INSTANT, and the caller may rely on that
+//
+// The image is fixed at the moment this call observes the entry, and nothing
+// moves it afterwards. A caller that needs its answer pinned between two other
+// observations — graph/lpg's snapshot correction samples the churn set on both
+// sides of exactly this instant — gets the same guarantee the clone gave it, and
+// may Clone the image later without the copy drifting: the object cannot have
+// changed in between.
+//
+// An unknown label yields a fresh empty bitmap, matching [Index.Intersect].
+//
+// Safe for concurrent use.
+func (i *Index) BitmapShared(label uint32) *roaring64.Bitmap {
+	e, ok := i.lookup(label)
+	if !ok {
+		return roaring64.New()
+	}
+	// WARM PATH — the common one, and it allocates nothing. An image observed
+	// under the read lock is current by construction: the only thing that can
+	// invalidate it is a mutation, and a mutation drops it under the WRITE lock,
+	// which cannot be held while this read lock is.
+	e.mu.RLock()
+	img := e.image
+	e.mu.RUnlock()
+	if img != nil {
+		return img
+	}
+	// COLD PATH. The write lock, not the read lock, so that two readers arriving
+	// together publish ONE image rather than racing to store two — the second
+	// finds the first's and copies nothing. It blocks writers for the length of a
+	// clone, which is exactly what Intersect's read lock already did.
+	e.mu.Lock()
+	if e.image == nil {
+		// Bitmap() hands back the LIVE bitmap when the set is on the bitmap tier
+		// (shared), and a freshly materialised one otherwise. Only the former can
+		// still be written, so only the former is copied.
+		bm, shared := e.set.Bitmap()
+		if shared {
+			bm = bm.Clone()
+		}
+		e.image = bm
+	}
+	img = e.image
+	e.mu.Unlock()
+	return img
 }
 
 // Intersect returns a fresh Roaring bitmap containing the NodeIDs

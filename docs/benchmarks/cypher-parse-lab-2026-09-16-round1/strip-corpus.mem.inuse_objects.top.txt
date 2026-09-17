@@ -1,0 +1,156 @@
+File: parser.test
+Type: inuse_objects
+Time: 2026-09-16 13:05:07 WEST
+Showing nodes accounting for 207, 100% of 207 total
+      flat  flat%   sum%        cum   cum%
+        77 37.20% 37.20%         84 40.58%  runtime.mallocgc
+        28 13.53% 50.72%         81 39.13%  encoding/json/v2.makeStructFields
+        14  6.76% 57.49%         14  6.76%  encoding/json/v2.makeStructArshaler (inline)
+        12  5.80% 63.29%         14  6.76%  encoding/json/v2.makeSliceArshaler
+         8  3.86% 67.15%          8  3.86%  internal/sync.newEntryNode[go.shape.interface {},go.shape.interface {}] (inline)
+         7  3.38% 70.53%         12  5.80%  encoding/json/v2.parseFieldOptions
+         5  2.42% 72.95%          5  2.42%  runtime.mallocgcSmallScanNoHeaderSC1
+         5  2.42% 75.36%          5  2.42%  slices.Grow[go.shape.[]uint8,go.shape.uint8] (inline)
+         4  1.93% 77.29%          4  1.93%  internal/sync.newIndirectNode[go.shape.interface {},go.shape.interface {}] (inline)
+         4  1.93% 79.23%          4  1.93%  reflect.addReflectOff
+         3  1.45% 80.68%          3  1.45%  encoding/json/v2.makeIntArshaler
+         3  1.45% 82.13%          3  1.45%  encoding/json/v2.makeStringArshaler (inline)
+         3  1.45% 83.57%          3  1.45%  reflect.compiledTypelinks
+         2  0.97% 84.54%         41 19.81%  encoding/json/v2.makeStructFields.func3
+         2  0.97% 85.51%          2  0.97%  fmt.(*buffer).writeString (inline)
+         2  0.97% 86.47%          2  0.97%  internal/abi.NewName
+         2  0.97% 87.44%          2  0.97%  os.newFile
+         2  0.97% 88.41%         14  6.76%  reflect.(*rtype).ptrTo
+         2  0.97% 89.37%          2  0.97%  reflect.MakeSlice
+         2  0.97% 90.34%         10  4.83%  regexp.compile
+         2  0.97% 91.30%          2  0.97%  regexp.onePassCopy
+         2  0.97% 92.27%          2  0.97%  runtime.mallocgcSmallScanNoHeaderSC2
+         2  0.97% 93.24%          2  0.97%  sync.(*Pool).pinSlow
+         2  0.97% 94.20%          2  0.97%  testing.(*B).run1
+         2  0.97% 95.17%          2  0.97%  time.newTimer
+         1  0.48% 95.65%          1  0.48%  encoding/json/v2.makeString
+         1  0.48% 96.14%          1  0.48%  fmt.init.func1
+         1  0.48% 96.62%          1  0.48%  regexp.makeOnePass.func1
+         1  0.48% 97.10%          1  0.48%  regexp/syntax.(*Regexp).CapNames
+         1  0.48% 97.58%          1  0.48%  regexp/syntax.(*compiler).init (inline)
+         1  0.48% 98.07%          1  0.48%  regexp/syntax.(*compiler).inst (inline)
+         1  0.48% 98.55%          1  0.48%  regexp/syntax.(*parser).maybeConcat
+         1  0.48% 99.03%          3  1.45%  testing.(*M).startAlarm
+         1  0.48% 99.52%          1  0.48%  testing.rewrite
+         1  0.48%   100%          1  0.48%  unicode/utf8.AppendRune (inline)
+         0     0%   100%         99 47.83%  encoding/json.Unmarshal (inline)
+         0     0%   100%          5  2.42%  encoding/json/internal/jsonwire.AppendQuote
+         0     0%   100%         99 47.83%  encoding/json/v2.Unmarshal
+         0     0%   100%         42 20.29%  encoding/json/v2.lookupArshaler
+         0     0%   100%         34 16.43%  encoding/json/v2.makeDefaultArshaler
+         0     0%   100%          8  3.86%  encoding/json/v2.makeSliceArshaler.func1
+         0     0%   100%         32 15.46%  encoding/json/v2.makeSliceArshaler.func3
+         0     0%   100%          1  0.48%  encoding/json/v2.makeStringArshaler.func2
+         0     0%   100%         81 39.13%  encoding/json/v2.makeStructArshaler.func1
+         0     0%   100%         90 43.48%  encoding/json/v2.makeStructArshaler.func3
+         0     0%   100%         99 47.83%  encoding/json/v2.unmarshalDecode
+         0     0%   100%          1  0.48%  fmt.(*fmt).fmtS
+         0     0%   100%          1  0.48%  fmt.(*fmt).padString
+         0     0%   100%          1  0.48%  fmt.(*pp).doPrintf
+         0     0%   100%          1  0.48%  fmt.(*pp).doPrintln
+         0     0%   100%          1  0.48%  fmt.(*pp).fmtString
+         0     0%   100%          1  0.48%  fmt.(*pp).printArg
+         0     0%   100%          4  1.93%  fmt.Fprintf
+         0     0%   100%          1  0.48%  fmt.Fprintln
+         0     0%   100%          3  1.45%  fmt.newPrinter
+         0     0%   100%        105 50.72%  github.com/FlavioCFOliveira/GoGraph/cypher/parser.BenchmarkStripCorpus
+         0     0%   100%         99 47.83%  github.com/FlavioCFOliveira/GoGraph/cypher/parser.loadCorpus
+         0     0%   100%         99 47.83%  github.com/FlavioCFOliveira/GoGraph/cypher/parser.readCorpus
+         0     0%   100%          1  0.48%  internal/sync.(*HashTrieMap[go.shape.interface {},go.shape.interface {}]).Delete (inline)
+         0     0%   100%          2  0.97%  internal/sync.(*HashTrieMap[go.shape.interface {},go.shape.interface {}]).Load
+         0     0%   100%          1  0.48%  internal/sync.(*HashTrieMap[go.shape.interface {},go.shape.interface {}]).LoadAndDelete
+         0     0%   100%          9  4.35%  internal/sync.(*HashTrieMap[go.shape.interface {},go.shape.interface {}]).LoadOrStore
+         0     0%   100%          1  0.48%  internal/sync.(*HashTrieMap[go.shape.interface {},go.shape.interface {}]).expand
+         0     0%   100%          3  1.45%  internal/sync.(*HashTrieMap[go.shape.interface {},go.shape.interface {}]).init (inline)
+         0     0%   100%          3  1.45%  internal/sync.(*HashTrieMap[go.shape.interface {},go.shape.interface {}]).initSlow
+         0     0%   100%         18  8.70%  main.main
+         0     0%   100%          2  0.97%  os.Create (inline)
+         0     0%   100%          2  0.97%  os.OpenFile
+         0     0%   100%          2  0.97%  os.openFileNolog
+         0     0%   100%         14  6.76%  reflect.PointerTo (inline)
+         0     0%   100%          2  0.97%  reflect.newName (inline)
+         0     0%   100%          4  1.93%  reflect.resolveReflectName (inline)
+         0     0%   100%          3  1.45%  reflect.typesByString
+         0     0%   100%         10  4.83%  regexp.Compile (inline)
+         0     0%   100%          3  1.45%  regexp.compileOnePass
+         0     0%   100%          1  0.48%  regexp.makeOnePass
+         0     0%   100%          1  0.48%  regexp.onePassPrefix
+         0     0%   100%          1  0.48%  regexp/syntax.(*compiler).compile
+         0     0%   100%          1  0.48%  regexp/syntax.(*compiler).rune
+         0     0%   100%          1  0.48%  regexp/syntax.(*parser).literal
+         0     0%   100%          1  0.48%  regexp/syntax.(*parser).push
+         0     0%   100%          2  0.97%  regexp/syntax.Compile
+         0     0%   100%          1  0.48%  regexp/syntax.Parse (inline)
+         0     0%   100%          1  0.48%  regexp/syntax.parse
+         0     0%   100%          6  2.90%  runtime.(*scavengerState).sleep
+         0     0%   100%          6  2.90%  runtime.(*timer).maybeAdd
+         0     0%   100%          6  2.90%  runtime.(*timer).modify
+         0     0%   100%          6  2.90%  runtime.(*timer).reset (inline)
+         0     0%   100%          6  2.90%  runtime.(*timers).addHeap
+         0     0%   100%         24 11.59%  runtime.acquireSudog
+         0     0%   100%          1  0.48%  runtime.allgadd
+         0     0%   100%         31 14.98%  runtime.allocm
+         0     0%   100%          6  2.90%  runtime.bgscavenge
+         0     0%   100%         34 16.43%  runtime.gcBgMarkWorker
+         0     0%   100%         24 11.59%  runtime.gcMarkDone
+         0     0%   100%         18  8.70%  runtime.gcStart.func4
+         0     0%   100%          7  3.38%  runtime.growslice
+         0     0%   100%         10  4.83%  runtime.mProfStackInit (inline)
+         0     0%   100%         18  8.70%  runtime.main
+         0     0%   100%         10  4.83%  runtime.makeProfStackFP (inline)
+         0     0%   100%         10  4.83%  runtime.makeslice
+         0     0%   100%         22 10.63%  runtime.malg
+         0     0%   100%         12  5.80%  runtime.mcall
+         0     0%   100%         20  9.66%  runtime.mcommoninit
+         0     0%   100%          5  2.42%  runtime.mpreinit
+         0     0%   100%          1  0.48%  runtime.mstart
+         0     0%   100%          1  0.48%  runtime.mstart0
+         0     0%   100%          1  0.48%  runtime.mstart1
+         0     0%   100%          5  2.42%  runtime.newMWeakPointer (inline)
+         0     0%   100%         31 14.98%  runtime.newm
+         0     0%   100%         67 32.37%  runtime.newobject
+         0     0%   100%         13  6.28%  runtime.newproc.func1
+         0     0%   100%         13  6.28%  runtime.newproc1
+         0     0%   100%         12  5.80%  runtime.park_m
+         0     0%   100%         13  6.28%  runtime.resetspinning
+         0     0%   100%         13  6.28%  runtime.schedule
+         0     0%   100%         24 11.59%  runtime.semacquire (inline)
+         0     0%   100%         24 11.59%  runtime.semacquire1
+         0     0%   100%         18  8.70%  runtime.startTheWorldWithSema
+         0     0%   100%         25 12.08%  runtime.startm
+         0     0%   100%         31 14.98%  runtime.systemstack
+         0     0%   100%         25 12.08%  runtime.wakep
+         0     0%   100%          1  0.48%  strings.(*Builder).WriteRune
+         0     0%   100%          1  0.48%  sync.(*Map).Delete (inline)
+         0     0%   100%          2  0.97%  sync.(*Map).Load (inline)
+         0     0%   100%          9  4.35%  sync.(*Map).LoadOrStore (inline)
+         0     0%   100%         92 44.44%  sync.(*Once).Do (partial-inline)
+         0     0%   100%         92 44.44%  sync.(*Once).doSlow
+         0     0%   100%          3  1.45%  sync.(*Pool).Get
+         0     0%   100%          2  0.97%  sync.(*Pool).pin
+         0     0%   100%          7  3.38%  testing.(*B).Run
+         0     0%   100%          5  2.42%  testing.(*B).run
+         0     0%   100%          1  0.48%  testing.(*B).run.func1
+         0     0%   100%        105 50.72%  testing.(*B).run1.func1
+         0     0%   100%        106 51.21%  testing.(*B).runN
+         0     0%   100%         18  8.70%  testing.(*M).Run
+         0     0%   100%          2  0.97%  testing.(*M).after
+         0     0%   100%          2  0.97%  testing.(*M).after.func1
+         0     0%   100%          2  0.97%  testing.(*M).writeProfiles
+         0     0%   100%          4  1.93%  testing.(*benchState).processBench
+         0     0%   100%          3  1.45%  testing.BenchmarkResult.String
+         0     0%   100%         11  5.31%  testing.newMatcher
+         0     0%   100%         12  5.80%  testing.runBenchmarks
+         0     0%   100%          1  0.48%  testing.runBenchmarks.func1
+         0     0%   100%          1  0.48%  testing.runTests
+         0     0%   100%         11  5.31%  testing.simpleMatch.verify
+         0     0%   100%          1  0.48%  testing.tRunner
+         0     0%   100%          1  0.48%  testing.tRunner.func1
+         0     0%   100%          1  0.48%  testing.tRunner.func1.1
+         0     0%   100%         10  4.83%  testing/internal/testdeps.TestDeps.MatchString
+         0     0%   100%          2  0.97%  time.AfterFunc

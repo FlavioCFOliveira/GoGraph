@@ -1,0 +1,21 @@
+profile=docs/benchmarks/cypher-parse-lab-2026-09-16-round1/prepare-warm.mem.pb.gz
+sample_index=alloc_space
+focus=BenchmarkPrepareWarm
+unit=B
+total_self_folded=323355436
+total_self_top=313469900
+stacks=10012
+
+SELF (flat) value per owning package, by two independent routes:
+  folded = `pprof -traces`, each sample charged to its leaf frame
+  top    = `pprof -top -nodecount=100000`, pprof's own flat column
+They must agree. A non-zero delta is a bucketing error, not a finding.
+
+bucket                                 folded    share            top    share       delta
+antlr-runtime                        10036368    3.10%        2563000    0.82%    -7473368
+gograph-parser-gen                    3723406    1.15%              0    0.00%    -3723406
+gograph-parser-handwritten           45999082   14.23%       46295860   14.77%      296778
+gograph-other                       206719332   63.93%      211546610   67.49%     4827278
+runtime-stdlib-other                 56877248   17.59%       53064430   16.93%    -3812818
+
+TOTAL                               323355436               313469900

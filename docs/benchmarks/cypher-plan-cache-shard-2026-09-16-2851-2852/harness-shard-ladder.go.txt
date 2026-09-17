@@ -1,0 +1,151 @@
+package cypher
+
+// zz_2852_ladder_test.go — THROWAWAY shard-count ladder for rmp #2852.
+//
+// The shard count must be chosen on a measured ladder, not by analogy with any
+// other sharded structure in this module. This walks 1,2,4,…,256 shards over
+// the SAME warm lookup the finding was measured on, swapping only the cache
+// under one rig so the shard count is the single variable, and reports the
+// throughput of each rung. The chosen count is the knee: the smallest rung that
+// reaches the plateau.
+//
+// Deleted after the run; archived as harness-shard-ladder.go.txt.
+
+import (
+	"fmt"
+	"testing"
+)
+
+// ladderShardCounts is the rungs. A count above the core count is included so
+// the plateau is shown to be a plateau and not the top of the measured range.
+var ladderShardCounts = []int{1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024}
+
+// benchShardLadder drives nKeys distinct warm keys through Engine.parseAndAnalyse
+// under b.RunParallel, once per shard count. ONE rig is built and only its cache
+// is replaced between rungs, so the graph, the index and the query texts are
+// identical across the ladder.
+func benchShardLadder(b *testing.B, nKeys int) {
+	b.Helper()
+	eng := newShareRig(b)
+	texts := make([]string, nKeys)
+	for i := range texts {
+		texts[i] = fmt.Sprintf("MATCH (u:USER {id:$id}) RETURN u.age AS c%d", i)
+	}
+	for _, n := range ladderShardCounts {
+		b.Run(fmt.Sprintf("shards%03d", n), func(b *testing.B) {
+			eng.cache = newPlanCacheWithShards(DefaultPlanCacheCapacity, n)
+			if got := eng.cache.Shards(); got != n {
+				b.Fatalf("shard count = %d; want %d", got, n)
+			}
+			for i := range texts {
+				if _, _, err := eng.parseAndAnalyse(texts[i]); err != nil {
+					b.Fatalf("warm %d: %v", i, err)
+				}
+				if _, ok := eng.cache.get(texts[i]); !ok {
+					b.Fatalf("cache is not warm for key %d", i)
+				}
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			b.RunParallel(func(pb *testing.PB) {
+				i := 0
+				for pb.Next() {
+					if _, _, err := eng.parseAndAnalyse(texts[i%nKeys]); err != nil {
+						b.Fatal(err)
+					}
+					i++
+				}
+			})
+		})
+	}
+}
+
+// BenchmarkShardLadderMultiKey is the rung that decides the count: 32 distinct
+// warm keys, so the keys can actually hash apart.
+func BenchmarkShardLadderMultiKey(b *testing.B) { benchShardLadder(b, 32) }
+
+// BenchmarkShardLadderManyKeys re-runs the ladder at a key count that
+// saturates the default capacity, so the curve cannot be an artefact of the
+// 32-key set fitting neatly into a large shard array: with 1024 distinct keys
+// every rung below 1024 shards holds several keys per shard by construction.
+func BenchmarkShardLadderManyKeys(b *testing.B) { benchShardLadder(b, 1024) }
+
+// BenchmarkShardLadderOneKey is the control: ONE key, which by construction
+// lands in ONE shard whatever the shard count, so every rung must report the
+// same figure. A ladder that appeared to help here would be measuring
+// something other than the shard count.
+func BenchmarkShardLadderOneKey(b *testing.B) { benchShardLadder(b, 1) }
+
+// TestZZShardSpread reports, as evidence rather than as an assertion, how the
+// 32 ladder keys actually distribute over the shards at each rung. A ladder
+// whose keys all collide would show a plateau that is an artefact of the hash,
+// not of the shard count.
+func TestZZShardSpread(t *testing.T) {
+	texts := make([]string, 32)
+	for i := range texts {
+		texts[i] = fmt.Sprintf("MATCH (u:USER {id:$id}) RETURN u.age AS c%d", i)
+	}
+	for _, n := range ladderShardCounts {
+		c := newPlanCacheWithShards(DefaultPlanCacheCapacity, n)
+		occupied := make(map[*planCacheShard]int, n)
+		for _, s := range texts {
+			occupied[c.shardFor(s)]++
+		}
+		maxN := 0
+		for _, v := range occupied {
+			if v > maxN {
+				maxN = v
+			}
+		}
+		t.Logf("SHARDSPREAD shards=%d distinct_shards_used=%d max_keys_in_one_shard=%d", n, len(occupied), maxN)
+	}
+}
+
+// TestZZShardQuantisation measures the OTHER axis of the shard-count choice,
+// the one the throughput ladder cannot see: dividing one capacity bound into N
+// fixed per-shard bounds means a working set that fitted the whole cache no
+// longer fits, because the hash spreads keys unevenly while the per-shard
+// bounds are fixed. A shard that receives more keys than its own bound thrashes
+// under a cyclic scan — LRU's worst pattern — and every one of its keys misses.
+//
+// It measures that directly, as a steady-state miss rate over the cache alone:
+// no engine, no parser, no compile cost, so the number is the eviction effect
+// and nothing else. Reported as evidence, never asserted: the point is to price
+// the shard count, not to pin a value.
+func TestZZShardQuantisation(t *testing.T) {
+	const (
+		capacity = DefaultPlanCacheCapacity
+		trials   = 16 // independent caches, so independent hash seeds
+		passes   = 3  // warm pass plus two measured cyclic passes
+	)
+	for _, load := range []int{100, 75, 50, 25, 10} {
+		keys := capacity * load / 100
+		texts := make([]string, keys)
+		for i := range texts {
+			texts[i] = fmt.Sprintf("MATCH (u:USER {id:$id}) RETURN u.age AS c%d", i)
+		}
+		for _, n := range ladderShardCounts {
+			totalHits, totalLookups := 0, 0
+			for range trials {
+				c := newPlanCacheWithShards(capacity, n)
+				for p := range passes {
+					for _, k := range texts {
+						if _, ok := c.get(k); ok {
+							if p > 0 {
+								totalHits++
+							}
+						} else {
+							c.loadOrStore(k, newTestEntry(k))
+						}
+						if p > 0 {
+							totalLookups++
+						}
+					}
+				}
+			}
+			pct := 100 * float64(totalHits) / float64(totalLookups)
+			t.Logf("QUANT load=%3d%% keys=%4d shards=%4d per_shard_cap=%4d steady_hit_pct=%6.2f",
+				load, keys, n, capacity/n, pct)
+		}
+	}
+}

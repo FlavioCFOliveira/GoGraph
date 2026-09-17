@@ -1,0 +1,113 @@
+Total: 3155685
+ROUTINE ======================== github.com/FlavioCFOliveira/GoGraph/cypher/parser.StripLiterals in /Users/flaviocfo/dev/xumiga/GoGraph/cypher/parser/strip.go
+    461388    3150165 (flat, cum) 99.83% of Total
+         .          .     73:func StripLiterals(query string) (stripped string, params map[string]string, ok bool) {
+         .          .     74:	type repl struct {
+         .          .     75:		start, end int // byte offsets, end exclusive
+         .          .     76:		name       string
+         .          .     77:	}
+         .          .     78:	// Fast reject. A query with no quote byte anywhere cannot contain a string
+         .          .     79:	// literal, so there is nothing to hoist and the scan below would walk the
+         .          .     80:	// whole text to conclude that. This matters because StripLiterals runs on
+         .          .     81:	// every cache miss, including the fully parameterised queries that have
+         .          .     82:	// nothing to gain from it: a quote-free query resolves in one IndexByte pass
+         .          .     83:	// instead of a full scan.
+         .          .     84:	if strings.IndexByte(query, '\'') < 0 && strings.IndexByte(query, '"') < 0 {
+         .          .     85:		return query, nil, false
+         .          .     86:	}
+         .          .     87:
+         .          .     88:	var repls []repl
+         .          .     89:
+         .          .     90:	// hoistable is true only while the scan is inside a MATCH pattern or a
+         .          .     91:	// WHERE predicate. It is a clause state machine over the byte stream, not a
+         .          .     92:	// parse, so it can only make the scanner more conservative.
+         .          .     93:	hoistable := false
+         .          .     94:
+         .          .     95:	i, n := 0, len(query)
+         .          .     96:	for i < n {
+         .          .     97:		c := query[i]
+         .          .     98:		switch {
+         .          .     99:		case c == '/' && i+1 < n && query[i+1] == '/':
+         .          .    100:			for i < n && query[i] != '\n' {
+         .          .    101:				i++
+         .          .    102:			}
+         .          .    103:		case c == '/' && i+1 < n && query[i+1] == '*':
+         .          .    104:			i += 2
+         .          .    105:			for i+1 < n && (query[i] != '*' || query[i+1] != '/') {
+         .          .    106:				i++
+         .          .    107:			}
+         .          .    108:			i = min(i+2, n)
+         .          .    109:		case c == '`':
+         .          .    110:			// A backtick-quoted identifier. Its contents are not Cypher, and a
+         .          .    111:			// doubled backtick is an escaped one.
+         .          .    112:			i++
+         .          .    113:			for i < n {
+         .          .    114:				if query[i] == '`' {
+         .          .    115:					if i+1 < n && query[i+1] == '`' {
+         .          .    116:						i += 2
+         .          .    117:						continue
+         .          .    118:					}
+         .          .    119:					i++
+         .          .    120:					break
+         .          .    121:				}
+         .          .    122:				i++
+         .          .    123:			}
+         .          .    124:		case c == '\'' || c == '"':
+         .          .    125:			start := i
+         .          .    126:			quote := c
+         .          .    127:			i++
+         .          .    128:			closed := false
+         .          .    129:			for i < n {
+         .          .    130:				if query[i] == '\\' {
+         .          .    131:					i += 2
+         .          .    132:					continue
+         .          .    133:				}
+         .          .    134:				if query[i] == quote {
+         .          .    135:					i++
+         .          .    136:					closed = true
+         .          .    137:					break
+         .          .    138:				}
+         .          .    139:				i++
+         .          .    140:			}
+         .          .    141:			if !closed {
+         .          .    142:				// An unterminated string: the query will not parse anyway, and
+         .          .    143:				// the scanner has no idea where the literal ends. Refuse.
+         .          .    144:				return query, nil, false
+         .          .    145:			}
+         .          .    146:			if !hoistable {
+         .          .    147:				continue
+         .          .    148:			}
+     74470      74470    149:			repls = append(repls, repl{start: start, end: i, name: AutoParamPrefix + strconv.Itoa(len(repls))})
+         .          .    150:		case isIdentStart(c):
+         .          .    151:			start := i
+         .          .    152:			for i < n && isIdentChar(query[i]) {
+         .          .    153:				i++
+         .          .    154:			}
+         .    2475500    155:			switch strings.ToUpper(query[start:i]) {
+         .          .    156:			case "MATCH", "WHERE":
+         .          .    157:				hoistable = true
+         .          .    158:			case "RETURN", "WITH", "CREATE", "MERGE", "DELETE", "DETACH", "SET",
+         .          .    159:				"REMOVE", "UNWIND", "CALL", "YIELD", "FOREACH", "OPTIONAL",
+         .          .    160:				"UNION", "ON", "ORDER", "SKIP", "LIMIT", "FOR", "ADD", "DROP":
+         .          .    161:				hoistable = false
+         .          .    162:			}
+         .          .    163:		default:
+         .          .    164:			i++
+         .          .    165:		}
+         .          .    166:	}
+         .          .    167:
+         .          .    168:	if len(repls) == 0 {
+         .          .    169:		return query, nil, false
+         .          .    170:	}
+         .          .    171:
+    132173     132173    172:	params = make(map[string]string, len(repls))
+         .          .    173:	var b strings.Builder
+         .     132173    174:	b.Grow(len(query) + len(repls)*(len(AutoParamPrefix)+6))
+         .          .    175:	prev := 0
+    122572     122572    176:	for _, r := range repls {
+    132173     213277    177:		params[r.name] = unquoteString(query[r.start:r.end])
+         .          .    178:		b.WriteString(query[prev:r.start])
+         .          .    179:		b.WriteString("$`")
+         .          .    180:		b.WriteString(r.name)
+         .          .    181:		b.WriteString("`")
+         .          .    182:		prev = r.end

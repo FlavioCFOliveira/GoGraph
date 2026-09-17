@@ -1,0 +1,38 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher
+cpu: Apple M4
+                                      │   onemutex   │                pad000                │               pad096                │               pad224                │                nomtf                 │
+                                      │    sec/op    │    sec/op     vs base                │   sec/op     vs base                │   sec/op     vs base                │    sec/op     vs base                │
+SpikeWarmPrepareParallel/quotefree       15.39n ± 1%   19.01n ±  1%  +23.49% (p=0.000 n=10)   17.84n ± 1%  +15.92% (p=0.000 n=10)   17.74n ± 1%  +15.30% (p=0.000 n=10)   17.43n ±  1%  +13.22% (p=0.000 n=10)
+SpikeWarmPrepareParallel/quotefree-10    91.20n ± 3%   95.94n ±  9%   +5.19% (p=0.000 n=10)   95.52n ± 2%   +4.73% (p=0.000 n=10)   96.02n ± 1%   +5.28% (p=0.000 n=10)   96.27n ±  1%   +5.55% (p=0.000 n=10)
+SpikeWarmPrepareParallel/literal         333.0n ± 3%   339.2n ±  2%        ~ (p=0.101 n=10)   340.6n ± 2%        ~ (p=0.089 n=10)   339.9n ± 2%        ~ (p=0.078 n=10)   337.4n ±  1%        ~ (p=0.393 n=10)
+SpikeWarmPrepareParallel/literal-10      176.5n ± 3%   157.7n ±  4%  -10.65% (p=0.000 n=10)   158.3n ± 2%  -10.26% (p=0.000 n=10)   159.3n ± 2%   -9.72% (p=0.000 n=10)   157.2n ±  3%  -10.88% (p=0.000 n=10)
+SpikeWarmPrepareMultiKey                 21.19n ± 3%   30.90n ±  3%  +45.85% (p=0.000 n=10)   31.49n ± 2%  +48.61% (p=0.000 n=10)   30.95n ± 3%  +46.04% (p=0.000 n=10)   21.61n ±  1%        ~ (p=0.093 n=10)
+SpikeWarmPrepareMultiKey-10             118.70n ± 2%   51.38n ± 11%  -56.71% (p=0.000 n=10)   44.64n ± 8%  -62.39% (p=0.000 n=10)   44.78n ± 6%  -62.27% (p=0.000 n=10)   22.90n ± 15%  -80.71% (p=0.000 n=10)
+geomean                                  76.94n        73.28n         -4.76%                  71.10n        -7.59%                  70.98n        -7.75%                  59.43n        -22.76%
+
+                                      │   onemutex   │               pad000                │               pad096                │               pad224                │                nomtf                │
+                                      │     B/op     │    B/op     vs base                 │    B/op     vs base                 │    B/op     vs base                 │    B/op     vs base                 │
+SpikeWarmPrepareParallel/quotefree      0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=10) ¹   0.000 ± 0%       ~ (p=1.000 n=10) ¹   0.000 ± 0%       ~ (p=1.000 n=10) ¹   0.000 ± 0%       ~ (p=1.000 n=10) ¹
+SpikeWarmPrepareParallel/quotefree-10   0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=10) ¹   0.000 ± 0%       ~ (p=1.000 n=10) ¹   0.000 ± 0%       ~ (p=1.000 n=10) ¹   0.000 ± 0%       ~ (p=1.000 n=10) ¹
+SpikeWarmPrepareParallel/literal        464.0 ± 0%     464.0 ± 0%       ~ (p=1.000 n=10) ¹   464.0 ± 0%       ~ (p=1.000 n=10) ¹   464.0 ± 0%       ~ (p=1.000 n=10) ¹   464.0 ± 0%       ~ (p=1.000 n=10) ¹
+SpikeWarmPrepareParallel/literal-10     464.0 ± 0%     464.0 ± 0%       ~ (p=1.000 n=10) ¹   464.0 ± 0%       ~ (p=1.000 n=10) ¹   464.0 ± 0%       ~ (p=1.000 n=10) ¹   464.0 ± 0%       ~ (p=1.000 n=10) ¹
+SpikeWarmPrepareMultiKey                0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=10) ¹   0.000 ± 0%       ~ (p=1.000 n=10) ¹   0.000 ± 0%       ~ (p=1.000 n=10) ¹   0.000 ± 0%       ~ (p=1.000 n=10) ¹
+SpikeWarmPrepareMultiKey-10             0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=10) ¹   0.000 ± 0%       ~ (p=1.000 n=10) ¹   0.000 ± 0%       ~ (p=1.000 n=10) ¹   0.000 ± 0%       ~ (p=1.000 n=10) ¹
+geomean                                            ²               +0.00%                ²               +0.00%                ²               +0.00%                ²               +0.00%                ²
+¹ all samples are equal
+² summaries must be >0 to compute geomean
+
+                                      │   onemutex   │               pad000                │               pad096                │               pad224                │                nomtf                │
+                                      │  allocs/op   │ allocs/op   vs base                 │ allocs/op   vs base                 │ allocs/op   vs base                 │ allocs/op   vs base                 │
+SpikeWarmPrepareParallel/quotefree      0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=10) ¹   0.000 ± 0%       ~ (p=1.000 n=10) ¹   0.000 ± 0%       ~ (p=1.000 n=10) ¹   0.000 ± 0%       ~ (p=1.000 n=10) ¹
+SpikeWarmPrepareParallel/quotefree-10   0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=10) ¹   0.000 ± 0%       ~ (p=1.000 n=10) ¹   0.000 ± 0%       ~ (p=1.000 n=10) ¹   0.000 ± 0%       ~ (p=1.000 n=10) ¹
+SpikeWarmPrepareParallel/literal        6.000 ± 0%     6.000 ± 0%       ~ (p=1.000 n=10) ¹   6.000 ± 0%       ~ (p=1.000 n=10) ¹   6.000 ± 0%       ~ (p=1.000 n=10) ¹   6.000 ± 0%       ~ (p=1.000 n=10) ¹
+SpikeWarmPrepareParallel/literal-10     6.000 ± 0%     6.000 ± 0%       ~ (p=1.000 n=10) ¹   6.000 ± 0%       ~ (p=1.000 n=10) ¹   6.000 ± 0%       ~ (p=1.000 n=10) ¹   6.000 ± 0%       ~ (p=1.000 n=10) ¹
+SpikeWarmPrepareMultiKey                0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=10) ¹   0.000 ± 0%       ~ (p=1.000 n=10) ¹   0.000 ± 0%       ~ (p=1.000 n=10) ¹   0.000 ± 0%       ~ (p=1.000 n=10) ¹
+SpikeWarmPrepareMultiKey-10             0.000 ± 0%     0.000 ± 0%       ~ (p=1.000 n=10) ¹   0.000 ± 0%       ~ (p=1.000 n=10) ¹   0.000 ± 0%       ~ (p=1.000 n=10) ¹   0.000 ± 0%       ~ (p=1.000 n=10) ¹
+geomean                                            ²               +0.00%                ²               +0.00%                ²               +0.00%                ²               +0.00%                ²
+¹ all samples are equal
+² summaries must be >0 to compute geomean
+benchstat_exit=0

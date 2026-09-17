@@ -286,30 +286,64 @@ func (g *Graph[N, W]) applyDeferredIndexRemovals(watermark uint64) int {
 func (g *Graph[N, W]) IndexRemovalBacklog() int64 { return g.idxPendingActive.Load() }
 
 // LabelBitmapAsOf returns the members of lid's bitmap that carried the label at
-// s, as a bitmap the caller owns.
+// s, as a bitmap THE CALLER MUST NOT MUTATE.
 //
 // A nil snapshot, or a graph with nothing deferred and no live label or node
 // history, returns the index's own answer untouched — which is what every
-// read-only workload gets, and it costs one bitmap clone exactly as it did
-// before.
+// read-only workload gets, and it now costs NO COPY AT ALL rather than one
+// bitmap clone. The result is then [label.Index.BitmapShared]'s shared image,
+// which every concurrent reader of this label is reading too.
 //
 // Otherwise every member is re-checked against the versioned label bag and the
-// versioned existence record. That is O(members) once per SCAN, not per row.
+// versioned existence record. That is O(members) once per SCAN, not per row, and
+// it is done on a private copy, so the result is the caller's alone — but the
+// caller cannot tell the two apart and must treat BOTH as read-only.
+//
+// # Why the contract is read-only rather than caller-owned (rmp #2863)
+//
+// It used to be caller-owned, and the copy that made it so was measured PURE
+// WASTE for the workload that dominates: on 35_mvcc_mixed_workload the clone was
+// 52.75% of all allocation, 14.1 GB in 3.31 s, and the correction that is the
+// only thing entitled to mutate it allocated NOTHING — it never ran. The copy
+// existed solely to satisfy a promise no caller was using.
 //
 // Safe for concurrent use.
 func (g *Graph[N, W]) LabelBitmapAsOf(lid LabelID, s *Snapshot) *roaring64.Bitmap {
 	return g.labelBitmapAsOfFiltered(s, oneLabel(lid),
-		func() *roaring64.Bitmap { return g.nodeIdx.Intersect(uint32(lid)) },
+		func() (*roaring64.Bitmap, bool) { return g.nodeIdx.BitmapShared(uint32(lid)), false },
 		func(bag labelBag) bool { return bag.has(lid) })
 }
 
 // labelBitmapAsOfFiltered is the shared body of [Graph.LabelBitmapAsOf] and
-// [Graph.LabelsBitmapAsOf]: gate, clone, decide, correct.
+// [Graph.LabelsBitmapAsOf]: gate, acquire, decide, correct.
 //
-// It samples the suspect set BEFORE clone() as well as after, and corrects against
-// the DEDUPLICATED union of both. See [Graph.suspectNodes] for why one post-clone
+// It samples the suspect set BEFORE acquire() as well as after, and corrects against
+// the DEDUPLICATED union of both. See [Graph.suspectNodes] for why one post-acquire
 // sample is not enough and why widening the sample instead of dropping its gates is
 // the only sound direction.
+//
+// # acquire fixes the INSTANT; the copy is a separate question (rmp #2863)
+//
+// acquire returns the raw bitmap and whether it is already private. The two roles
+// the old unconditional clone played are now separated, and only the first of them
+// is load-bearing here:
+//
+//   - it FIXES THE INSTANT the answer describes, and that instant must lie between
+//     the two suspect samples. acquire() is called at exactly the point clone() was,
+//     so it still does;
+//   - it made the bitmap safe to MUTATE. Only [Graph.correctBitmapOver] mutates, so
+//     that copy is now made where and only where the correction is actually run.
+//
+// Deferring the copy past the second sample does NOT move the instant, and that is
+// the property the whole fix rests on. A shared image from
+// [label.Index.BitmapShared] is written once and never again — a write to the label
+// replaces it rather than editing it — so Clone() below reproduces the image as it
+// was at acquire(), not as the index is by then. The correction therefore still runs
+// against an image whose instant is bracketed by the two samples, exactly as it did
+// when the copy was taken eagerly.
+//
+// Pinned by TestLabelBitmapAsOf_CorrectsWhenTheSweepLandsDuringTheClone, which
+// lands a sweep in precisely that window.
 //
 // # The per-label gate comes first (rmp #2686)
 //
@@ -349,17 +383,17 @@ func (g *Graph[N, W]) LabelBitmapAsOf(lid LabelID, s *Snapshot) *roaring64.Bitma
 // costs a bitmap probe and, until the gate short-circuits it, two shard read locks.
 // The correction is idempotent so the duplicates were harmless; they were never
 // free.
-func (g *Graph[N, W]) labelBitmapAsOfFiltered(s *Snapshot, ls labelSet, clone func() *roaring64.Bitmap, want func(labelBag) bool) *roaring64.Bitmap {
+func (g *Graph[N, W]) labelBitmapAsOfFiltered(s *Snapshot, ls labelSet, acquire func() (*roaring64.Bitmap, bool), want func(labelBag) bool) *roaring64.Bitmap {
 	preLive := g.churnLive(ls)
 	var pre []graph.NodeID
 	if preLive {
 		pre = g.appendSuspects(nil)
 	}
-	bm := clone()
+	bm, owned := acquire()
 	postLive := g.churnLive(ls)
 	if !preLive && !postLive {
 		// No label this read concerns has a live suspect on either side of the
-		// clone, so no member of this bitmap can differ from what s should see.
+		// acquire, so no member of this bitmap can differ from what s should see.
 		return bm
 	}
 	if !g.labelBitmapNeedsFilter(s) && len(pre) == 0 {
@@ -368,6 +402,13 @@ func (g *Graph[N, W]) labelBitmapAsOfFiltered(s *Snapshot, ls labelSet, clone fu
 	sus := pre
 	if postLive {
 		sus = g.appendSuspects(sus)
+	}
+	if !owned {
+		// The correction mutates, so it needs a private copy — and only here.
+		// This reproduces the image acquire() fixed, NOT the index's present
+		// state: see the note above on why deferring the copy leaves the instant
+		// where it was.
+		bm = bm.Clone()
 	}
 	g.correctBitmapOver(bm, s, want, dedupSuspects(sus))
 	return bm
@@ -408,8 +449,12 @@ func dedupSuspects(ids []graph.NodeID) []graph.NodeID {
 // actually wrong. Everything else in the bitmap is correct by construction,
 // because a node with no live history looks the same at every instant.
 //
-// bm is mutated in place: [label.Index.Intersect] returns a bitmap the caller
-// owns, so there is nothing to clone.
+// bm is mutated in place, and the CALLER guarantees it is private. Since rmp
+// #2863 that is no longer automatic: [Graph.labelBitmapAsOfFiltered] may have
+// acquired a bitmap shared with every other reader of the label
+// ([label.Index.BitmapShared]), and it clones it before calling this precisely
+// because this mutates. Calling this with a shared bitmap corrupts the index's
+// published image for every concurrent reader, silently.
 func (g *Graph[N, W]) correctBitmapOver(bm *roaring64.Bitmap, s *Snapshot, want func(labelBag) bool, suspects []graph.NodeID) {
 	// Every shard lock is RELEASED before the first check runs; see
 	// [Graph.suspectNodes].
@@ -484,10 +529,16 @@ func (g *Graph[N, W]) correctBitmapOver(bm *roaring64.Bitmap, s *Snapshot, want 
 // sweep had just removed. For a scan that stale member is a superset a predicate can
 // reject; for a COUNT there is no predicate left and the wrong answer is final.
 //
-// So [Graph.labelBitmapAsOfFiltered] samples this BEFORE the clone as well as after
-// and corrects against the union: the pre-clone sample cannot have been drained by a
-// sweep that had not yet happened, and the post-clone sample catches churn that
-// arrived later. Both are gated, so a withdrawn delta is excluded from both.
+// So [Graph.labelBitmapAsOfFiltered] samples this BEFORE the acquire as well as
+// after and corrects against the union: the pre-acquire sample cannot have been
+// drained by a sweep that had not yet happened, and the post-acquire sample catches
+// churn that arrived later. Both are gated, so a withdrawn delta is excluded from
+// both.
+//
+// The ACQUIRE, not the copy, is the instant that must be bracketed. Since rmp #2863
+// the copy may be taken after the second sample, and that is sound precisely because
+// the copy reproduces the acquire instant rather than the present one; see
+// [Graph.labelBitmapAsOfFiltered].
 func (g *Graph[N, W]) suspectNodes() []graph.NodeID { return g.appendSuspects(nil) }
 
 // appendSuspects is [Graph.suspectNodes] appending into a slice the caller owns,
@@ -529,6 +580,11 @@ func (g *Graph[N, W]) appendSuspects(out []graph.NodeID) []graph.NodeID {
 
 // LabelsBitmapAsOf is [Graph.LabelBitmapAsOf] for a conjunction of labels.
 //
+// The result MUST NOT be mutated, for one contract across both methods. It is in
+// fact always private here — the k-way [label.Index.Intersect] builds a working
+// copy it must own in order to AND into — but a caller cannot tell the two apart
+// and must not have to.
+//
 // Safe for concurrent use.
 func (g *Graph[N, W]) LabelsBitmapAsOf(lids []LabelID, s *Snapshot) *roaring64.Bitmap {
 	raw := make([]uint32, len(lids))
@@ -536,7 +592,7 @@ func (g *Graph[N, W]) LabelsBitmapAsOf(lids []LabelID, s *Snapshot) *roaring64.B
 		raw[i] = uint32(l)
 	}
 	return g.labelBitmapAsOfFiltered(s, manyLabels(lids),
-		func() *roaring64.Bitmap { return g.nodeIdx.Intersect(raw...) },
+		func() (*roaring64.Bitmap, bool) { return g.nodeIdx.Intersect(raw...), true },
 		func(bag labelBag) bool {
 			for _, l := range lids {
 				if !bag.has(l) {

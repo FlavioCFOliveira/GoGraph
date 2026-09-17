@@ -43,18 +43,25 @@
 //
 // The default capacity is [DefaultPlanCacheCapacity] (1024 entries). Configure
 // a different bound via [EngineOptions.PlanCacheCapacity] and the [NewEngineWithOptions]
-// constructor. Eviction is least-recently-used and emits the
-// cypher.plan_cache.evictions counter on the global metrics surface; hits and
-// misses are reported under cypher.plan_cache.hits and
+// constructor. Eviction is least-recently-used WITHIN EACH SHARD of the
+// sharded cache — there is no single global recency order, so the entry
+// dropped at capacity is the least-recently-used one of the shard the new key
+// hashes to, which may be more recently used than an entry in another shard.
+// The declared capacity remains an exact bound on the TOTAL number of entries.
+// Eviction emits the cypher.plan_cache.evictions counter on the global metrics
+// surface; hits and misses are reported under cypher.plan_cache.hits and
 // cypher.plan_cache.misses.
 //
 // # Concurrency
 //
 // Engine is safe for concurrent use. Each Run call creates an independent
-// physical operator tree. The plan cache itself serialises its structural
-// updates on a single sync.Mutex; the cached *planCacheEntry is immutable
-// once published, so callers operate on the returned pointer without further
-// synchronisation.
+// physical operator tree. The plan cache is SHARDED: each shard owns its own
+// mutex, LRU list and map, so lookups of query texts that hash to different
+// shards proceed concurrently and only same-shard lookups serialise. Every
+// field of the cached *planCacheEntry that the cache itself publishes is
+// written before it is installed and never again, so callers operate on the
+// returned pointer without further synchronisation; the two memos lazily
+// filled on it afterwards (scalarUse, countVarRewrite) carry their own.
 //
 // Write queries DO NOT serialise. Concurrency control is MVCC and nothing else
 // (rmp #2306): independent writers run concurrently on both wirings, and a
@@ -165,6 +172,24 @@ type edgeVarInfo struct {
 	srcCol  int
 	edgeCol int
 	dstCol  int
+	// dir is the TRAVERSAL direction of the Expand hop that binds this
+	// variable, when that direction decides the relationship's STORED
+	// orientation outright (DirOut: never inverted; DirIn: always inverted),
+	// and [relDirUnresolved] — the zero value — when it does not. See
+	// rel_stored_dir.go for what it replaces, why DirBoth is excluded, and why
+	// a name registered twice with disagreeing directions is demoted back to
+	// the sentinel instead of trusting the last writer.
+	dir exec.Direction
+	// dirCol is the schema column of the per-row stored-direction cell an
+	// UNDIRECTED hop emits ([exec.ExpandConfig.EmitStoredDir]), or -1 when the
+	// hop emits none — which is every directed hop, every anonymous
+	// relationship, and every entry a disagreeing re-registration demoted.
+	//
+	// It is NOT the zero value, deliberately: 0 is a valid column index, so a
+	// zero-value edgeVarInfo would point at the row's first cell. The
+	// consumer's BoolValue assertion would still refuse it, but a sentinel
+	// that is also a legal value is one guard away from a wrong answer.
+	dirCol int
 }
 
 // pathVarInfo records the schema column that holds the flat alternating path
@@ -7999,8 +8024,9 @@ func buildOperatorWrite(
 			if lw, ok := walker.(*lpgNodeWalker); ok {
 				capturedG = lw.g
 			}
+			setValuePlan := newRowBindPlan(schemaSnap, capturedBopts, capturedG, nil)
 			sp.WithValueEvalFn(func(row exec.Row) (lpg.PropertyValue, bool, bool, error) {
-				rowCtx := buildRowCtx(row, schemaSnap, capturedG, capturedBopts)
+				rowCtx := buildRowCtx(row, setValuePlan)
 				v, evalErr := evalRow(capturedBopts, capturedExpr, rowCtx, capturedParams, capturedReg)
 				if evalErr != nil {
 					// Fail-stop: a runtime error evaluating the SET RHS (arithmetic,
@@ -8201,8 +8227,9 @@ func buildOperatorWrite(
 				if lw, ok := walker.(*lpgNodeWalker); ok {
 					capturedG = lw.g
 				}
+				delTargetPlan := newRowBindPlan(schemaSnap, capturedBopts, capturedG, nil)
 				dn.WithTargetEvalFn(func(row exec.Row) (expr.Value, error) {
-					rowCtx := buildRowCtx(row, schemaSnap, capturedG, capturedBopts)
+					rowCtx := buildRowCtx(row, delTargetPlan)
 					return evalRow(capturedBopts, capturedExpr, rowCtx, capturedParams, capturedReg)
 				})
 			}
@@ -8266,8 +8293,9 @@ func buildOperatorWrite(
 			if lw, ok := walker.(*lpgNodeWalker); ok {
 				capturedG = lw.g
 			}
+			ddTargetPlan := newRowBindPlan(schemaSnap, capturedBopts, capturedG, nil)
 			dd.WithTargetEvalFn(func(row exec.Row) (expr.Value, error) {
-				rowCtx := buildRowCtx(row, schemaSnap, capturedG, capturedBopts)
+				rowCtx := buildRowCtx(row, ddTargetPlan)
 				return evalRow(capturedBopts, capturedExpr, rowCtx, capturedParams, capturedReg)
 			})
 		}
@@ -10403,6 +10431,20 @@ func buildOperatorRec(
 		}
 		schema[toKey] = schemaBase + 2
 
+		// An UNDIRECTED hop's stored orientation varies row by row, so the plan
+		// cannot record it; when the hop binds a NAMED relationship variable
+		// the operator carries it in a fourth column instead (rmp #2864). The
+		// key is anonymous and unique per hop, and it exists so schemaWidth
+		// keeps tracking the ACTUAL row width — an operator emitting four
+		// columns under a schema that advanced by three puts every later
+		// column one slot out.
+		hopDir := irDirToExec(p.Direction)
+		dirCol := -1
+		if p.RelVar != "" && relDirColumnAdmits(hopDir) {
+			dirCol = schemaBase + 3
+			schema[fmt.Sprintf("__anon_reldir_%d", dirCol)] = dirCol
+		}
+
 		// Record the triplet in chain order so a *ir.NamedPath wrapper above
 		// this subtree can map its IR chain elements to the slots emitted by
 		// this Expand. Done for both named and anonymous relationships — the
@@ -10442,10 +10484,23 @@ func buildOperatorRec(
 				srcCol:  schemaBase,     // srcID dup column
 				edgeCol: schemaBase + 1, // edgeID column (= schema[relKey])
 				dstCol:  schemaBase + 2, // dstID column  (= schema[toKey])
+				// The hop's own direction, taken from the IR node rather than
+				// from the query text — mirrorAnchorSite re-roots a
+				// written-forward hop as a NEW ir.Expand with the reversed
+				// direction, so the node is the only place the executed
+				// direction is true (rmp #2864).
+				dir:    resolveHopStoredDir(hopDir),
+				dirCol: dirCol,
 			}
 			if len(p.RelTypes) > 0 {
 				info.edgeType = p.RelTypes[0]
 				info.acceptedTypes = append([]string(nil), p.RelTypes...)
+			}
+			// edgeVarMeta is read PER ROW and keyed by NAME, so a second hop
+			// binding the same name serves the first hop's rows too. A resolved
+			// direction is therefore asserted only while every hop agrees.
+			if prev, registered := bopts.edgeVarMeta[p.RelVar]; registered {
+				info = demoteRelDirOnDisagreement(&info, &prev)
 			}
 			bopts.edgeVarMeta[p.RelVar] = info
 		}
@@ -10460,11 +10515,12 @@ func buildOperatorRec(
 			return child, nil
 		}
 
-		dir := irDirToExec(p.Direction)
+		dir := hopDir
 
 		cfg := exec.ExpandConfig{
-			Direction: dir,
-			InputCol:  fromCol,
+			Direction:     dir,
+			InputCol:      fromCol,
+			EmitStoredDir: dirCol >= 0,
 		}
 		if len(p.RelTypes) > 0 {
 			cfg.EdgeType = p.RelTypes[0]
@@ -10582,6 +10638,9 @@ func buildOperatorRec(
 				info.srcCol += outerWidth
 				info.edgeCol += outerWidth
 				info.dstCol += outerWidth
+				if info.dirCol >= 0 {
+					info.dirCol += outerWidth // -1 means "no column", not column -1
+				}
 				bopts.edgeVarMeta[name] = info
 			}
 			for name, info := range bopts.pathVarChain {
@@ -12994,8 +13053,9 @@ func newAggregationEval(
 		if bail {
 			scalarUse = nil
 		}
+		bp := newRowBindPlan(rs, bopts, g, scalarUse)
 		return func(row exec.Row) (expr.Value, error) {
-			rowCtx := buildRowCtxWithUse(row, rs, g, bopts, scalarUse)
+			rowCtx := buildRowCtxWithUse(row, bp)
 			return evalRow(bopts, astExpr, rowCtx, params, reg)
 		}
 	}
@@ -13201,10 +13261,10 @@ func irSortKeys(
 			// [rowSchema] and the two paths cannot drift.
 			rs := newRowSchema(schemaCopy)
 			capturedExpr := si.Expr
-			capturedG := g
 			capturedParams := params
 			capturedReg := reg
-			capturedBopts := bopts
+			// scalarUse nil — see the comment on the Eval closure below.
+			sortKeyPlan := newRowBindPlan(rs, bopts, g, nil)
 			ascending := !si.Descending
 			keys = append(keys, exec.SortKey{
 				Ascending: ascending,
@@ -13218,10 +13278,7 @@ func irSortKeys(
 					// of evalRowPooled, which is byte-for-byte the historical
 					// buildRowCtx behaviour.
 					sortKeyEvalCount.Add(1)
-					return evalRowPooled(
-						capturedBopts, capturedExpr, row, rs,
-						capturedG, capturedParams, capturedReg, nil,
-					)
+					return evalRowPooled(capturedExpr, row, sortKeyPlan, capturedParams, capturedReg)
 				},
 			})
 			continue
@@ -14262,8 +14319,10 @@ func buildUnwindOperator(
 	capturedG := g
 	capturedBopts := bopts
 
+	unwindPlan := newRowBindPlan(schemaSnap, capturedBopts, capturedG, nil)
+
 	return exec.NewUnwind(child, func(row exec.Row) (expr.ListValue, error) {
-		rowCtx := buildRowCtx(row, schemaSnap, capturedG, capturedBopts)
+		rowCtx := buildRowCtx(row, unwindPlan)
 		v, err := evalRow(capturedBopts, listExpr, rowCtx, capturedParams, capturedReg)
 		if err != nil {
 			return nil, err
@@ -15124,8 +15183,14 @@ func buildPathValueFromVLEMeta(row exec.Row, pmeta pathVarInfo, g *lpg.ReadView[
 // `r[0].type` operate on the documented openCypher list-of-relationships
 // shape rather than on the raw alternating path encoding emitted by
 // VarLengthExpand.
-func buildRowCtx(row exec.Row, rs rowSchema, g *lpg.ReadView[string, float64], bopts *buildOpts) expr.RowContext {
-	return buildRowCtxWithUse(row, rs, g, bopts, nil)
+//
+// bp is the caller's [rowBindPlan], built once beside the closure that calls
+// this; it carries the row schema, the graph view and the buildOpts this
+// signature used to take one by one, with every name-keyed question about them
+// already answered (see cypher/rowbind.go). An UNGATED plan — one built with a
+// nil scalarUse — is what makes this the eager form.
+func buildRowCtx(row exec.Row, bp *rowBindPlan) expr.RowContext {
+	return buildRowCtxWithUse(row, bp)
 }
 
 // buildRowCtxWithUse is the lazy-aware core of [buildRowCtx]. When scalarUse is
@@ -15159,11 +15224,11 @@ func buildRowCtx(row exec.Row, rs rowSchema, g *lpg.ReadView[string, float64], b
 // partially-materialised relationship in a result row. Such a value would not
 // merely serialise a truncated property map: it also carries a reference to the
 // pinned ReadView past the query's visibility barrier.
-func buildRowCtxWithUse(row exec.Row, rs rowSchema, g *lpg.ReadView[string, float64], bopts *buildOpts, scalarUse map[string]*nodeScalarUse) expr.RowContext {
-	ctx := make(expr.RowContext, rs.width)
+func buildRowCtxWithUse(row exec.Row, bp *rowBindPlan) expr.RowContext {
+	ctx := make(expr.RowContext, bp.rs.width)
 	// arena nil: this path allocates a fresh map (escaping/eager callers) and so
 	// must allocate fresh lazy nodes too — no reuse, no pooled lifecycle.
-	populateRowCtx(ctx, row, rs.walk, g, bopts, scalarUse, nil)
+	populateRowCtx(ctx, row, bp, nil)
 	return ctx
 }
 
@@ -15287,103 +15352,105 @@ func releaseRowCtx(p *pooledRowCtx) {
 // scalarUse is nil it falls back to a freshly allocated RowContext (the
 // historical behaviour), preserving exact semantics. It is the shared body of
 // the non-escaping Filter-predicate and scalar-projection evaluation closures.
-func evalRowPooled(bopts *buildOpts, e ast.Expression, row exec.Row, rs rowSchema, g *lpg.ReadView[string, float64], params map[string]expr.Value, reg expr.FunctionRegistry, scalarUse map[string]*nodeScalarUse) (expr.Value, error) {
-	if scalarUse == nil {
-		ctx := make(expr.RowContext, rs.width)
-		populateRowCtx(ctx, row, rs.walk, g, bopts, nil, nil)
-		return evalRow(bopts, e, ctx, params, reg)
+func evalRowPooled(e ast.Expression, row exec.Row, bp *rowBindPlan, params map[string]expr.Value, reg expr.FunctionRegistry) (expr.Value, error) {
+	if !bp.gated {
+		ctx := make(expr.RowContext, bp.rs.width)
+		populateRowCtx(ctx, row, bp, nil)
+		return evalRow(bp.bopts, e, ctx, params, reg)
 	}
-	p := acquireRowCtx(rs.width)
+	p := acquireRowCtx(bp.rs.width)
 	defer releaseRowCtx(p)
-	populateRowCtx(p.ctx, row, rs.walk, g, bopts, scalarUse, p)
-	return evalRow(bopts, e, p.ctx, params, reg)
+	populateRowCtx(p.ctx, row, bp, p)
+	return evalRow(bp.bopts, e, p.ctx, params, reg)
 }
 
 // populateRowCtx fills ctx (which the caller sized/cleared) with the row's
 // variable bindings. It is the shared core of [buildRowCtxWithUse] and the
 // pooled non-escaping evaluation sites.
+//
+// bp is the caller's resolved binding ladder. It carries the walk, the graph
+// view, the buildOpts and the scalar-use analysis this function used to take as
+// four separate parameters, and it answers per VARIABLE what those four were
+// asked per NAME per ROW — see cypher/rowbind.go for the resolution, why it is
+// deferred to the first row, and why that is sound. The loop below performs no
+// name lookup: every `b.kind` test is a bit test on a value the plan resolved,
+// and the only string-keyed operation left is the WRITE into ctx, which is
+// rmp #2876 and out of scope here.
+//
 // arena, when non-nil, supplies reusable [expr.LazyNodeValue] structs from a
 // pooled-RowContext lifecycle so a node referenced only through scalar reads
 // does not allocate a fresh lazy node per row (#1697). It is non-nil ONLY on the
-// pooled non-escaping path (evalRowPooled with scalarUse != nil); every other
+// pooled non-escaping path (evalRowPooled on a gated plan); every other
 // caller passes nil and gets a freshly allocated lazy node per row, preserving
 // the exact prior behaviour and escape safety. A borrowed lazy node is valid
 // only until the arena's pooledRowCtx is released and must never escape the row.
-func populateRowCtx(ctx expr.RowContext, row exec.Row, walk schemaWalk, g *lpg.ReadView[string, float64], bopts *buildOpts, scalarUse map[string]*nodeScalarUse, arena *pooledRowCtx) {
-	for _, b := range walk {
-		varName, colIdx := b.name, b.col
+func populateRowCtx(ctx expr.RowContext, row exec.Row, bp *rowBindPlan, arena *pooledRowCtx) {
+	vars := bp.resolved()
+	bopts, g, gated := bp.bopts, bp.g, bp.gated
+	for i := range vars {
+		b := &vars[i]
+		colIdx := b.col
 		if colIdx >= len(row) || row[colIdx] == nil {
 			continue
 		}
-		if bopts != nil && bopts.pathVarChain != nil {
-			if cinfo, isChain := bopts.pathVarChain[varName]; isChain {
-				if pv, ok := buildPathValueFromChainInfo(row, cinfo, g, bopts); ok {
-					ctx[varName] = pv
+		if k := b.kind; k&bindEntityKinds != 0 {
+			// The four entity reconstructions, in the order the name-keyed
+			// ladder ran them. Each may FAIL — a column that is absent, of the
+			// wrong kind, or a path with no nodes — and a failure falls through
+			// to the kinds below exactly as it did before, which is why these
+			// are a mask and not a single kind.
+			if k&bindPathChain != 0 {
+				if pv, ok := buildPathValueFromChainInfo(row, b.meta.chain, g, bopts); ok {
+					ctx[b.name] = pv
 					continue
 				}
 			}
-		}
-		if bopts != nil && bopts.pathVarMeta != nil {
-			if pmeta, isVLE := bopts.pathVarMeta[varName]; isVLE {
-				if pv, ok := buildPathValueFromVLEMeta(row, pmeta, g, bopts); ok {
-					ctx[varName] = pv
+			if k&bindPathVLE != 0 {
+				if pv, ok := buildPathValueFromVLEMeta(row, b.meta.path, g, bopts); ok {
+					ctx[b.name] = pv
 					continue
 				}
 			}
-		}
-		if bopts != nil && bopts.vleRelMeta != nil {
-			if rmeta, isVLERel := bopts.vleRelMeta[varName]; isVLERel {
-				if rl, ok := buildVLERelListFromRow(row, rmeta, g, bopts); ok {
-					ctx[varName] = rl
+			if k&bindVLERel != 0 {
+				if rl, ok := buildVLERelListFromRow(row, b.meta.vleRel, g, bopts); ok {
+					ctx[b.name] = rl
 					continue
 				}
 			}
-		}
-		if bopts != nil && bopts.edgeVarMeta != nil {
-			if _, isEdge := bopts.edgeVarMeta[varName]; isEdge {
+			if k&bindEdge != 0 {
 				// Demand-gate (#1630): in the non-escaping scalarUse path an
 				// edge variable the expression never names needs no value at
 				// all — building one (and the EdgeProperties/EdgeLabels reads it
 				// entails) is pure waste. Leave it absent; evalExpr only reads
 				// variables the expression mentions. Mirrors the node skip below
-				// and is safe for exactly the same reason: scalarUse is set only
-				// for ctx-safe (non-escaping) expressions, never for a value
+				// and is safe for exactly the same reason: a gated plan is built
+				// only for ctx-safe (non-escaping) expressions, never for a value
 				// that escapes into a result row.
-				if scalarUse != nil {
-					if _, referenced := scalarUse[varName]; !referenced {
-						continue
-					}
-				}
-				// Post-projection forward: if the schema slot for varName
-				// already carries a RelationshipValue (an upstream
-				// projection emitted it into the column), use that
-				// directly. The edgeVarMeta triplet coordinates only
-				// apply to the original Expand-emitted shape; after a
-				// WITH the column holds a self-describing
-				// RelationshipValue, and the triplet slots now belong
-				// to other variables (Comparison1 [5] regression: after
-				// `WITH a` followed by a plain Apply, edgeVarMeta[a]'s
-				// triplet positions point at the Apply-side inner
-				// columns).
-				if rv, isRel := row[colIdx].(expr.RelationshipValue); isRel {
-					ctx[varName] = rv
+				if gated && k&bindScalarUsed == 0 {
 					continue
 				}
-				if meta, isEdge2 := bopts.edgeVarMeta[varName]; isEdge2 {
-					// Presence-only relationship keys (#1638): when scalarUse
-					// marks this edge variable's property reads as presence-only
-					// (r.k IS [NOT] NULL and no value use), pass the per-variable
-					// use so the value fetch can be replaced by a kind-gated
-					// EdgeHasProperty presence check. nil for every non-gated
-					// caller, which keeps the build byte-identical (C5).
-					var relUse *nodeScalarUse
-					if scalarUse != nil {
-						relUse = scalarUse[varName]
-					}
-					if rv, ok := buildRelationshipValueFromRow(row, meta, g, bopts, relUse); ok {
-						ctx[varName] = rv
-						continue
-					}
+				// Post-projection forward: if the schema slot for this variable
+				// already carries a RelationshipValue (an upstream projection
+				// emitted it into the column), use that directly. The
+				// edgeVarMeta triplet coordinates only apply to the original
+				// Expand-emitted shape; after a WITH the column holds a
+				// self-describing RelationshipValue, and the triplet slots now
+				// belong to other variables (Comparison1 [5] regression: after
+				// `WITH a` followed by a plain Apply, edgeVarMeta[a]'s triplet
+				// positions point at the Apply-side inner columns).
+				if rv, isRel := row[colIdx].(expr.RelationshipValue); isRel {
+					ctx[b.name] = rv
+					continue
+				}
+				// Presence-only relationship keys (#1638): when the analysis
+				// marks this edge variable's property reads as presence-only
+				// (r.k IS [NOT] NULL and no value use), b.use lets the value
+				// fetch be replaced by a kind-gated EdgeHasProperty presence
+				// check. It is nil on every ungated plan, which keeps that build
+				// byte-identical (C5).
+				if rv, ok := buildRelationshipValueFromRow(row, &b.meta.edge, g, bopts, b.use); ok {
+					ctx[b.name] = rv
+					continue
 				}
 			}
 		}
@@ -15396,26 +15463,18 @@ func populateRowCtx(ctx expr.RowContext, row exec.Row, walk schemaWalk, g *lpg.R
 		// existing internal node id — breaking downstream property
 		// writes, range() arguments, list indexing, and more (Match4
 		// [4] / Aggregation6 [5] setup queries / WithSkipLimit3 [3]).
-		if bopts != nil && bopts.scalarCols != nil {
-			if _, isScalar := bopts.scalarCols[varName]; isScalar {
-				ctx[varName] = row[colIdx]
-				continue
-			}
+		if b.kind&bindScalarPassThrough != 0 {
+			ctx[b.name] = row[colIdx]
+			continue
 		}
-		if bopts != nil && bopts.projAliasScalarCols != nil {
-			if _, isScalar := bopts.projAliasScalarCols[varName]; isScalar {
-				ctx[varName] = row[colIdx]
-				continue
-			}
-		}
-		if scalarUse != nil {
-			use, referenced := scalarUse[varName]
-			if !referenced {
+		if gated {
+			if b.kind&bindScalarUsed == 0 {
 				// The expression never names this variable: building a node
 				// value for it is pure waste. Leave it absent from the ctx —
 				// evalExpr only ever reads variables the expression mentions.
 				continue
 			}
+			use := b.use
 			// Node field-extractor (#1659: labels(n)/keys(n)/id(n)): the lazy
 			// value answers only on-demand scalar accesses (n.k, n:Label) and
 			// cannot enumerate labels or keys, and fnLabels/fnKeys/fnID
@@ -15423,14 +15482,14 @@ func populateRowCtx(ctx expr.RowContext, row exec.Row, walk schemaWalk, g *lpg.R
 			// NodeValue carrying exactly the requested fields instead.
 			if !use.needsWholeNode && use.hasScalarFnNeed() {
 				if pv, ok := buildPartialNodeValueForFn(row[colIdx], g, use); ok {
-					ctx[varName] = pv
+					ctx[b.name] = pv
 					continue
 				}
 			}
-			ctx[varName] = upgradeNodeIDToValuePartial(row[colIdx], g, use, bopts, arena)
+			ctx[b.name] = upgradeNodeIDToValuePartial(row[colIdx], g, use, bopts, arena)
 			continue
 		}
-		ctx[varName] = upgradeNodeIDToValue(row[colIdx], g)
+		ctx[b.name] = upgradeNodeIDToValue(row[colIdx], g)
 	}
 }
 
@@ -15491,6 +15550,15 @@ func decodeVLEHops(lv expr.ListValue, g *lpg.ReadView[string, float64], bopts *b
 // (dstID -> srcID) rather than in the row's TRAVERSAL orientation
 // (srcID -> dstID). The caller swaps the storage pair — and the emitted
 // StartID/EndID — when it says so.
+//
+// # It is the FALLBACK, not the first answer (rmp #2864)
+//
+// Since rmp #2864 this is reached only through [relStoredInvertedForHop], and
+// only for a row whose orientation the PLAN could not decide: an undirected
+// (DirBoth) hop, whose orientation is genuinely per row, or a relationship
+// variable whose name is bound by two hops that disagree about the direction.
+// A DirOut or DirIn hop answers from [edgeVarInfo.dir] and reaches none of the
+// questions below. See rel_stored_dir.go.
 //
 // [exec.Expand] emits (src, edge, dst) in traversal order and keeps no
 // direction flag, so the hydrator has to recover the stored direction itself.
@@ -15609,7 +15677,7 @@ func slotHoldsHandle(g *lpg.ReadView[string, float64], srcID, dstID graph.NodeID
 // all. Allocating one small immutable struct also keeps the value free of the
 // single-goroutine ownership contract a reused struct would carry. See the
 // #2388 measurement record.
-func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.ReadView[string, float64], bopts *buildOpts, relUse *nodeScalarUse) (expr.Value, bool) {
+func buildRelationshipValueFromRow(row exec.Row, meta *edgeVarInfo, g *lpg.ReadView[string, float64], bopts *buildOpts, relUse *nodeScalarUse) (expr.Value, bool) {
 	// The oracle for "the relationship is resolved once per row" (#2658): one count
 	// per mapper-resolution + [relStoredInverted] + by-handle-routing pass. Gated,
 	// so it costs a predicted branch when off — see [projFusionCountersOn].
@@ -15655,7 +15723,7 @@ func buildRelationshipValueFromRow(row exec.Row, meta edgeVarInfo, g *lpg.ReadVi
 			// The row's edge id IS the stable handle since rmp #2317, so it is
 			// recovered BEFORE the orientation decision below, which consults it.
 			fwdHandle := uint64(edgeIDVal)
-			if relStoredInverted(g, graph.NodeID(srcID), graph.NodeID(dstID), srcKey, dstKey, fwdHandle) {
+			if relStoredInvertedForHop(row, meta, g, graph.NodeID(srcID), graph.NodeID(dstID), srcKey, dstKey, fwdHandle) {
 				storageStart, storageEnd = dstID, srcID
 				stKey, enKey = dstKey, srcKey
 			}
@@ -16742,7 +16810,8 @@ func buildIRProjection(
 									// the bound edge's own handle instead, which is the
 									// only thing that separates the two.
 									propSrc, propDst := srcKey, dstKey
-									if relStoredInverted(capturedG, graph.NodeID(srcID), graph.NodeID(dstID),
+									if relStoredInvertedForHop(row, &capturedMeta, capturedG,
+										graph.NodeID(srcID), graph.NodeID(dstID),
 										srcKey, dstKey, edgeID) {
 										propSrc, propDst = dstKey, srcKey
 										storageStart, storageEnd = dstID, srcID
@@ -17032,9 +17101,10 @@ func buildIRProjection(
 				// closure hands populateRowCtx — which is what the fusion union
 				// must be built from (#2658).
 				fusable = append(fusable, fusableProjItem{idx: i, expr: capturedExpr, use: scalarUse})
+				itemPlan := newRowBindPlan(schemaSnap, capturedBopts, capturedG, scalarUse)
 				evalFn = func(row exec.Row) (expr.Value, error) {
 					countProjRowCtxBuild()
-					return evalRowPooled(capturedBopts, capturedExpr, row, schemaSnap, capturedG, capturedParams, capturedReg, scalarUse)
+					return evalRowPooled(capturedExpr, row, itemPlan, capturedParams, capturedReg)
 				}
 			}
 		} else if colIdx, ok := schema[exprStr]; ok {
@@ -18469,8 +18539,9 @@ func newRowPredicate(predExpr ast.Expression, schema map[string]int, g *lpg.Read
 	if bail {
 		scalarUse = nil
 	}
+	bp := newRowBindPlan(rs, bopts, g, scalarUse)
 	return func(row exec.Row) (expr.Value, error) {
-		return evalRowPooled(bopts, predExpr, row, rs, g, params, reg, scalarUse)
+		return evalRowPooled(predExpr, row, bp, params, reg)
 	}
 }
 
@@ -22777,9 +22848,9 @@ func buildShortestPathWithPred(
 	var pathPred func(exec.Row) (bool, error)
 	if predExpr != nil {
 		predSchema := newRowSchema(copySchema(schema))
-		capturedG := g
+		pathPredPlan := newRowBindPlan(predSchema, bopts, g, nil)
 		pathPred = func(out exec.Row) (bool, error) {
-			v, perr := evalRowPooled(bopts, predExpr, out, predSchema, capturedG, params, reg, nil)
+			v, perr := evalRowPooled(predExpr, out, pathPredPlan, params, reg)
 			if perr != nil {
 				return false, perr
 			}

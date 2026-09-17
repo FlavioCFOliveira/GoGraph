@@ -1,0 +1,6 @@
+{"Replace": {
+  "/Users/flaviocfo/dev/xumiga/GoGraph/examples/19_pattern_query/zz_planwatch_test.go": "/private/tmp/claude-501/-Users-flaviocfo-dev-xumiga-GoGraph/d392be6b-440a-4370-be6b-810c6bb3ae8c/scratchpad/overlay/zz_planwatch_19_test.go",
+  "/Users/flaviocfo/dev/xumiga/GoGraph/examples/22_cypher/zz_planwatch_test.go": "/private/tmp/claude-501/-Users-flaviocfo-dev-xumiga-GoGraph/d392be6b-440a-4370-be6b-810c6bb3ae8c/scratchpad/overlay/zz_planwatch_22_test.go",
+  "/Users/flaviocfo/dev/xumiga/GoGraph/examples/24_social_network_cli/zz_planwatch_test.go": "/private/tmp/claude-501/-Users-flaviocfo-dev-xumiga-GoGraph/d392be6b-440a-4370-be6b-810c6bb3ae8c/scratchpad/overlay/zz_planwatch_24_test.go",
+  "/Users/flaviocfo/dev/xumiga/GoGraph/examples/25_software_house_api/zz_planwatch_test.go": "/private/tmp/claude-501/-Users-flaviocfo-dev-xumiga-GoGraph/d392be6b-440a-4370-be6b-810c6bb3ae8c/scratchpad/overlay/zz_planwatch_25_test.go"
+}}

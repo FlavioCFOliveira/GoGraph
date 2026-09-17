@@ -1,0 +1,966 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="460" viewBox="0 0 1400 460" font-family="Menlo,monospace" font-size="11">
+<rect width="1400" height="460" fill="#ffffff"/>
+<text x="700" y="20" text-anchor="middle" font-size="14">prepare-warm.cpu.flame</text>
+<text x="700" y="36" text-anchor="middle" font-size="10" fill="#555">total 98800.00 ms — red=antlr runtime, orange=generated parser, blue=hand-written parser, green=other GoGraph, grey=runtime/stdlib</text>
+<g><title>all — 98800.00 ms (100.00%)</title><rect x="10.00" y="48" width="1379.50" height="15" fill="#cccccc" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="59" fill="#000">all</text>
+</g>
+<g><title>testing.(*B).launch — 86810.00 ms (87.86%)</title><rect x="10.00" y="64" width="1212.03" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="75" fill="#000">testing.(*B).launch</text>
+</g>
+<g><title>testing.(*B).runN — 86810.00 ms (87.86%)</title><rect x="10.00" y="80" width="1212.03" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="91" fill="#000">testing.(*B).runN</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.BenchmarkPrepareWarm.func1 — 86810.00 ms (87.86%)</title><rect x="10.00" y="96" width="1212.03" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="107" fill="#000">cypher.BenchmarkPrepareWarm.func1</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).parseAndAnalyse — 83040.00 ms (84.05%)</title><rect x="10.00" y="112" width="1159.37" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="123" fill="#000">cypher.(*Engine).parseAndAnalyse</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher.(*planCache).get — 52860.00 ms (53.50%)</title><rect x="10.00" y="128" width="737.83" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="139" fill="#000">cypher.(*planCache).get</text>
+</g>
+<g><title>runtime.mapaccess2_faststr — 26800.00 ms (27.13%)</title><rect x="10.00" y="144" width="373.83" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="155" fill="#000">runtime.mapaccess2_faststr</text>
+</g>
+<g><title>internal/runtime/maps.memHashAES — 8600.00 ms (8.70%)</title><rect x="10.00" y="160" width="119.62" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="13.00" y="171" fill="#000">maps.memHashAES</text>
+</g>
+<g><title>runtime.memequal — 1720.00 ms (1.74%)</title><rect x="130.12" y="160" width="23.52" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/runtime/maps.(*Map).directoryIndex (inline) — 1260.00 ms (1.28%)</title><rect x="154.15" y="160" width="17.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/runtime/maps.(*Map).Used (inline) — 1020.00 ms (1.03%)</title><rect x="171.74" y="160" width="13.75" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/runtime/maps.(*groupsReference).group (inline) — 170.00 ms (0.17%)</title><rect x="185.99" y="160" width="1.87" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/runtime/maps.ctrlGroup.matchH2 (inline) — 130.00 ms (0.13%)</title><rect x="188.37" y="160" width="1.32" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/runtime/maps.ctrlGroupMatchH2 (inline) — 130.00 ms (0.13%)</title><rect x="188.37" y="176" width="1.32" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/runtime/maps.(*groupReference).key (inline) — 90.00 ms (0.09%)</title><rect x="190.18" y="160" width="0.76" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/runtime/maps.h2 (inline) — 70.00 ms (0.07%)</title><rect x="191.44" y="160" width="0.48" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/runtime/maps.bitset.first (inline) — 10.00 ms (0.01%)</title><rect x="192.42" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/runtime/maps.bitsetFirst (inline) — 10.00 ms (0.01%)</title><rect x="192.42" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/internal/metrics.IncCounter — 9660.00 ms (9.78%)</title><rect x="384.33" y="144" width="134.43" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="387.33" y="155" fill="#000">metrics.IncCounter</text>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/internal/metrics.current — 2800.00 ms (2.83%)</title><rect x="384.33" y="160" width="38.61" height="15" fill="#2ca02c" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>sync/atomic.(*Pointer[go.shape.interface { IncCounter(string, uint64) — 40.00 ms (0.04%)</title><rect x="384.33" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title> ObserveLatency(string, time.Duration) — 40.00 ms (0.04%)</title><rect x="384.33" y="192" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title> SetGauge(string, float64) }]).Load (inline) — 40.00 ms (0.04%)</title><rect x="384.33" y="208" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>sync.(*Mutex).Lock (inline) — 3750.00 ms (3.80%)</title><rect x="519.26" y="144" width="51.88" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="522.26" y="155" fill="#000">sync.(…</text>
+</g>
+<g><title>internal/sync.(*Mutex).Lock (inline) — 3750.00 ms (3.80%)</title><rect x="519.26" y="160" width="51.88" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="522.26" y="171" fill="#000">sync.(…</text>
+</g>
+<g><title>sync.(*Mutex).Unlock — 2330.00 ms (2.36%)</title><rect x="571.64" y="144" width="32.04" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/sync.(*Mutex).Unlock (inline) — 2330.00 ms (2.36%)</title><rect x="571.64" y="160" width="32.04" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>container/list.(*List).MoveToFront (inline) — 1060.00 ms (1.07%)</title><rect x="604.18" y="144" width="14.31" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/parser.StripLiterals — 26580.00 ms (26.90%)</title><rect x="748.33" y="128" width="370.76" height="15" fill="#1f77b4" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="751.33" y="139" fill="#000">parser.StripLiterals</text>
+</g>
+<g><title>strings.IndexByte (inline) — 13640.00 ms (13.81%)</title><rect x="748.33" y="144" width="190.02" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="751.33" y="155" fill="#000">strings.IndexByte (inline)</text>
+</g>
+<g><title>internal/stringslite.IndexByte (inline) — 13640.00 ms (13.81%)</title><rect x="748.33" y="160" width="190.02" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="751.33" y="171" fill="#000">stringslite.IndexByte (inline)</text>
+</g>
+<g><title>internal/bytealg.IndexByteString — 13270.00 ms (13.43%)</title><rect x="748.33" y="176" width="184.85" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="751.33" y="187" fill="#000">bytealg.IndexByteString</text>
+</g>
+<g><title>strings.ToUpper — 5260.00 ms (5.32%)</title><rect x="938.85" y="144" width="72.97" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="941.85" y="155" fill="#000">strings.To…</text>
+</g>
+<g><title>strings.(*Builder).Grow — 2190.00 ms (2.22%)</title><rect x="938.85" y="160" width="30.09" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>strings.(*Builder).grow — 1960.00 ms (1.98%)</title><rect x="938.85" y="176" width="26.88" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/bytealg.MakeNoZero — 1620.00 ms (1.64%)</title><rect x="938.85" y="192" width="22.13" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgc — 1330.00 ms (1.35%)</title><rect x="938.85" y="208" width="18.08" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgcTinySC2 — 1040.00 ms (1.05%)</title><rect x="938.85" y="224" width="14.03" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.releasem (inline) — 150.00 ms (0.15%)</title><rect x="938.85" y="240" width="1.60" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.getMCache (inline) — 50.00 ms (0.05%)</title><rect x="940.94" y="240" width="0.20" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.acquirem (inline) — 50.00 ms (0.05%)</title><rect x="941.64" y="240" width="0.20" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mcache).nextFree — 40.00 ms (0.04%)</title><rect x="942.34" y="240" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mcache).refill — 20.00 ms (0.02%)</title><rect x="942.34" y="256" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mcentral).cacheSpan — 20.00 ms (0.02%)</title><rect x="942.34" y="272" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mcentral).grow — 20.00 ms (0.02%)</title><rect x="942.34" y="288" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mheap).alloc — 20.00 ms (0.02%)</title><rect x="942.34" y="304" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.systemstack — 20.00 ms (0.02%)</title><rect x="942.34" y="320" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mheap).alloc.func1 — 20.00 ms (0.02%)</title><rect x="942.34" y="336" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mheap).allocSpan — 20.00 ms (0.02%)</title><rect x="942.34" y="352" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mheap).initSpan — 20.00 ms (0.02%)</title><rect x="942.34" y="368" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mspan).init — 20.00 ms (0.02%)</title><rect x="942.34" y="384" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mspan).nextFreeIndex — 20.00 ms (0.02%)</title><rect x="942.62" y="256" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mspan).refillAllocCache — 20.00 ms (0.02%)</title><rect x="942.62" y="272" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgcTinySlowPath — 40.00 ms (0.04%)</title><rect x="942.90" y="240" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.gcmarknewobject — 10.00 ms (0.01%)</title><rect x="942.90" y="256" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.pageIndexOf (inline) — 10.00 ms (0.01%)</title><rect x="942.90" y="272" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mcache).nextFree — 10.00 ms (0.01%)</title><rect x="943.04" y="256" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mcache).refill — 10.00 ms (0.01%)</title><rect x="943.04" y="272" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mcentral).cacheSpan — 10.00 ms (0.01%)</title><rect x="943.04" y="288" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mcentral).grow — 10.00 ms (0.01%)</title><rect x="943.04" y="304" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mheap).alloc — 10.00 ms (0.01%)</title><rect x="943.04" y="320" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.systemstack — 10.00 ms (0.01%)</title><rect x="943.04" y="336" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mheap).alloc.func1 — 10.00 ms (0.01%)</title><rect x="943.04" y="352" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mheap).allocSpan — 10.00 ms (0.01%)</title><rect x="943.04" y="368" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mheap).initSpan — 10.00 ms (0.01%)</title><rect x="943.04" y="384" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.newMarkBits — 10.00 ms (0.01%)</title><rect x="943.04" y="400" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.newArenaMayUnlock — 10.00 ms (0.01%)</title><rect x="943.04" y="416" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.releasem (inline) — 10.00 ms (0.01%)</title><rect x="943.18" y="256" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.profilealloc — 10.00 ms (0.01%)</title><rect x="943.46" y="240" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mProf_Malloc — 10.00 ms (0.01%)</title><rect x="943.46" y="256" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.callers — 10.00 ms (0.01%)</title><rect x="943.46" y="272" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.systemstack — 10.00 ms (0.01%)</title><rect x="943.46" y="288" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.callers.func1 — 10.00 ms (0.01%)</title><rect x="943.46" y="304" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.tracebackPCs — 10.00 ms (0.01%)</title><rect x="943.46" y="320" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*unwinder).next — 10.00 ms (0.01%)</title><rect x="943.46" y="336" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*unwinder).resolveInternal — 10.00 ms (0.01%)</title><rect x="943.46" y="352" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.funcspdelta (inline) — 10.00 ms (0.01%)</title><rect x="943.46" y="368" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.pcvalue — 10.00 ms (0.01%)</title><rect x="943.46" y="384" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mspan).base (inline) — 10.00 ms (0.01%)</title><rect x="943.60" y="240" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgcSmallNoScanSC2 — 50.00 ms (0.05%)</title><rect x="953.37" y="224" width="0.20" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.acquirem (inline) — 20.00 ms (0.02%)</title><rect x="953.37" y="240" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.roundupsize (inline) — 120.00 ms (0.12%)</title><rect x="957.42" y="208" width="1.18" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.memmove — 100.00 ms (0.10%)</title><rect x="961.47" y="192" width="0.90" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>gcWriteBarrier — 10.00 ms (0.01%)</title><rect x="962.87" y="192" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.wbBufFlush — 10.00 ms (0.01%)</title><rect x="962.87" y="208" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.systemstack — 10.00 ms (0.01%)</title><rect x="962.87" y="224" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.wbBufFlush.func1 — 10.00 ms (0.01%)</title><rect x="962.87" y="240" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.wbBufFlush1 — 10.00 ms (0.01%)</title><rect x="962.87" y="256" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>strings.(*Builder).copyCheck (inline) — 120.00 ms (0.12%)</title><rect x="966.22" y="176" width="1.18" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>gcWriteBarrier — 10.00 ms (0.01%)</title><rect x="966.22" y="192" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>strings.(*Builder).WriteByte (inline) — 590.00 ms (0.60%)</title><rect x="969.44" y="160" width="7.74" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>strings.(*Builder).copyCheck (inline) — 220.00 ms (0.22%)</title><rect x="969.44" y="176" width="2.57" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>strings.(*Builder).WriteString (inline) — 130.00 ms (0.13%)</title><rect x="977.68" y="160" width="1.32" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.memmove — 90.00 ms (0.09%)</title><rect x="977.68" y="176" width="0.76" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>strings.(*Builder).copyCheck (inline) — 30.00 ms (0.03%)</title><rect x="978.93" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>strings.(*Builder).String (inline) — 50.00 ms (0.05%)</title><rect x="979.49" y="160" width="0.20" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.asyncPreempt — 20.00 ms (0.02%)</title><rect x="980.19" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/parser.isIdentStart (inline) — 280.00 ms (0.28%)</title><rect x="1012.32" y="144" width="3.41" height="15" fill="#1f77b4" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/parser.isIdentChar (inline) — 240.00 ms (0.24%)</title><rect x="1016.23" y="144" width="2.85" height="15" fill="#1f77b4" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/parser.isIdentStart (inline) — 150.00 ms (0.15%)</title><rect x="1016.23" y="160" width="1.60" height="15" fill="#1f77b4" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mapassign_faststr — 90.00 ms (0.09%)</title><rect x="1019.58" y="144" width="0.76" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/runtime/maps.(*Map).growToSmall — 90.00 ms (0.09%)</title><rect x="1019.58" y="160" width="0.76" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/runtime/maps.newGroups (inline) — 70.00 ms (0.07%)</title><rect x="1019.58" y="176" width="0.48" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/runtime/maps.newarray — 70.00 ms (0.07%)</title><rect x="1019.58" y="192" width="0.48" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.newarray — 70.00 ms (0.07%)</title><rect x="1019.58" y="208" width="0.48" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgc — 70.00 ms (0.07%)</title><rect x="1019.58" y="224" width="0.48" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgcSmallScanNoHeader — 60.00 ms (0.06%)</title><rect x="1019.58" y="240" width="0.34" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.memclrNoHeapPointers — 20.00 ms (0.02%)</title><rect x="1019.58" y="256" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mcache).nextFree — 20.00 ms (0.02%)</title><rect x="1019.86" y="256" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mcache).refill — 20.00 ms (0.02%)</title><rect x="1019.86" y="272" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mcentral).uncacheSpan — 20.00 ms (0.02%)</title><rect x="1019.86" y="288" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*spanSet).push — 20.00 ms (0.02%)</title><rect x="1019.86" y="304" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*atomicHeadTailIndex).incTail — 20.00 ms (0.02%)</title><rect x="1019.86" y="320" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/runtime/atomic.(*Uint64).Add (inline) — 10.00 ms (0.01%)</title><rect x="1019.86" y="336" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.releasem (inline) — 10.00 ms (0.01%)</title><rect x="1020.14" y="256" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.makemap — 90.00 ms (0.09%)</title><rect x="1020.84" y="144" width="0.76" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/runtime/maps.NewMap — 90.00 ms (0.09%)</title><rect x="1020.84" y="160" width="0.76" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.newobject — 40.00 ms (0.04%)</title><rect x="1020.84" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgc — 30.00 ms (0.03%)</title><rect x="1020.84" y="192" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgcSmallScanNoHeaderSC5 — 30.00 ms (0.03%)</title><rect x="1020.84" y="208" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.getMCache (inline) — 10.00 ms (0.01%)</title><rect x="1020.84" y="224" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/runtime/maps.rand — 30.00 ms (0.03%)</title><rect x="1021.39" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.rand — 20.00 ms (0.02%)</title><rect x="1021.39" y="192" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/chacha8rand.(*State).Next (inline) — 10.00 ms (0.01%)</title><rect x="1021.39" y="208" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.moveSliceNoCap — 70.00 ms (0.07%)</title><rect x="1022.09" y="144" width="0.48" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgc — 30.00 ms (0.03%)</title><rect x="1022.09" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgcSmallScanNoHeaderSC4 — 10.00 ms (0.01%)</title><rect x="1022.09" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>strings.(*Builder).Grow — 70.00 ms (0.07%)</title><rect x="1023.07" y="144" width="0.48" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>strings.(*Builder).grow — 70.00 ms (0.07%)</title><rect x="1023.07" y="160" width="0.48" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/bytealg.MakeNoZero — 60.00 ms (0.06%)</title><rect x="1023.07" y="176" width="0.34" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgc — 50.00 ms (0.05%)</title><rect x="1023.07" y="192" width="0.20" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgcSmallNoscan — 40.00 ms (0.04%)</title><rect x="1023.07" y="208" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.gcStart — 10.00 ms (0.01%)</title><rect x="1023.07" y="224" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.systemstack — 10.00 ms (0.01%)</title><rect x="1023.07" y="240" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.gcResetMarkState — 10.00 ms (0.01%)</title><rect x="1023.07" y="256" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.forEachG — 10.00 ms (0.01%)</title><rect x="1023.07" y="272" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.unlock (inline) — 10.00 ms (0.01%)</title><rect x="1023.07" y="288" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.unlockWithRank (inline) — 10.00 ms (0.01%)</title><rect x="1023.07" y="304" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.unlock2 — 10.00 ms (0.01%)</title><rect x="1023.07" y="320" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mcache).nextFree — 10.00 ms (0.01%)</title><rect x="1023.21" y="224" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mcache).refill — 10.00 ms (0.01%)</title><rect x="1023.21" y="240" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*consistentHeapStats).acquire — 10.00 ms (0.01%)</title><rect x="1023.21" y="256" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.memmove — 10.00 ms (0.01%)</title><rect x="1023.91" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>github.com/FlavioCFOliveira/GoGraph/cypher/parser.unquoteString — 50.00 ms (0.05%)</title><rect x="1024.05" y="144" width="0.20" height="15" fill="#1f77b4" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>strings.(*Builder).Grow — 40.00 ms (0.04%)</title><rect x="1024.05" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>strings.(*Builder).grow — 40.00 ms (0.04%)</title><rect x="1024.05" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/bytealg.MakeNoZero — 40.00 ms (0.04%)</title><rect x="1024.05" y="192" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgc — 30.00 ms (0.03%)</title><rect x="1024.05" y="208" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgcTinySC2 — 20.00 ms (0.02%)</title><rect x="1024.05" y="224" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.getMCache (inline) — 10.00 ms (0.01%)</title><rect x="1024.05" y="240" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgcSmallNoScanSC2 — 10.00 ms (0.01%)</title><rect x="1024.33" y="224" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mcache).nextFree — 10.00 ms (0.01%)</title><rect x="1024.33" y="240" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mspan).nextFreeIndex — 10.00 ms (0.01%)</title><rect x="1024.33" y="256" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.concatstring2 — 30.00 ms (0.03%)</title><rect x="1024.75" y="144" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.concatstrings — 30.00 ms (0.03%)</title><rect x="1024.75" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.rawstringtmp — 20.00 ms (0.02%)</title><rect x="1024.75" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.rawstring (inline) — 20.00 ms (0.02%)</title><rect x="1024.75" y="192" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgc — 20.00 ms (0.02%)</title><rect x="1024.75" y="208" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgcTinySC2 — 10.00 ms (0.01%)</title><rect x="1024.75" y="224" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mcache).nextFree — 10.00 ms (0.01%)</title><rect x="1024.75" y="240" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mcache).refill — 10.00 ms (0.01%)</title><rect x="1024.75" y="256" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mcentral).cacheSpan — 10.00 ms (0.01%)</title><rect x="1024.75" y="272" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mcentral).grow — 10.00 ms (0.01%)</title><rect x="1024.75" y="288" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mheap).alloc — 10.00 ms (0.01%)</title><rect x="1024.75" y="304" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.systemstack — 10.00 ms (0.01%)</title><rect x="1024.75" y="320" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mheap).alloc.func1 — 10.00 ms (0.01%)</title><rect x="1024.75" y="336" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mheap).allocSpan — 10.00 ms (0.01%)</title><rect x="1024.75" y="352" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*pageAlloc).allocToCache — 10.00 ms (0.01%)</title><rect x="1024.75" y="368" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*pageAlloc).update — 10.00 ms (0.01%)</title><rect x="1024.75" y="384" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*pallocBits).summarize — 10.00 ms (0.01%)</title><rect x="1024.75" y="400" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.memmove — 10.00 ms (0.01%)</title><rect x="1025.03" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>strings.(*Builder).WriteString (inline) — 30.00 ms (0.03%)</title><rect x="1025.17" y="144" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.memmove — 20.00 ms (0.02%)</title><rect x="1025.17" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.growslice — 10.00 ms (0.01%)</title><rect x="1025.59" y="144" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mallocgc — 10.00 ms (0.01%)</title><rect x="1025.59" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.asyncPreempt — 10.00 ms (0.01%)</title><rect x="1025.72" y="144" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.systemstack — 6770.00 ms (6.85%)</title><rect x="1222.53" y="64" width="94.06" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="1225.53" y="75" fill="#000">runtime.syste…</text>
+</g>
+<g><title>runtime.gcStart.func4 — 4830.00 ms (4.89%)</title><rect x="1222.53" y="80" width="66.96" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="1225.53" y="91" fill="#000">runtime.g…</text>
+</g>
+<g><title>runtime.startTheWorldWithSema — 4830.00 ms (4.89%)</title><rect x="1222.53" y="96" width="66.96" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="1225.53" y="107" fill="#000">runtime.s…</text>
+</g>
+<g><title>runtime.netpoll — 4810.00 ms (4.87%)</title><rect x="1222.53" y="112" width="66.68" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="1225.53" y="123" fill="#000">runtime.n…</text>
+</g>
+<g><title>runtime.kevent — 4810.00 ms (4.87%)</title><rect x="1222.53" y="128" width="66.68" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+<text x="1225.53" y="139" fill="#000">runtime.k…</text>
+</g>
+<g><title>runtime.notewakeup — 10.00 ms (0.01%)</title><rect x="1289.71" y="112" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.semawakeup — 10.00 ms (0.01%)</title><rect x="1289.71" y="128" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.pthread_cond_signal — 10.00 ms (0.01%)</title><rect x="1289.71" y="144" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.wakep — 10.00 ms (0.01%)</title><rect x="1289.85" y="112" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.startm — 10.00 ms (0.01%)</title><rect x="1289.85" y="128" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.notewakeup — 10.00 ms (0.01%)</title><rect x="1289.85" y="144" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.semawakeup — 10.00 ms (0.01%)</title><rect x="1289.85" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.pthread_cond_signal — 10.00 ms (0.01%)</title><rect x="1289.85" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mheap).alloc.func1 — 960.00 ms (0.97%)</title><rect x="1289.99" y="80" width="12.91" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mheap).allocSpan — 960.00 ms (0.97%)</title><rect x="1289.99" y="96" width="12.91" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.sysUsed (inline) — 950.00 ms (0.96%)</title><rect x="1289.99" y="112" width="12.77" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.sysUsedOS (inline) — 950.00 ms (0.96%)</title><rect x="1289.99" y="128" width="12.77" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.madvise — 950.00 ms (0.96%)</title><rect x="1289.99" y="144" width="12.77" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mheap).initSpan — 10.00 ms (0.01%)</title><rect x="1303.26" y="112" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.newMarkBits — 10.00 ms (0.01%)</title><rect x="1303.26" y="128" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.newArenaMayUnlock — 10.00 ms (0.01%)</title><rect x="1303.26" y="144" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.sysAlloc — 10.00 ms (0.01%)</title><rect x="1303.26" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.sysAllocOS (inline) — 10.00 ms (0.01%)</title><rect x="1303.26" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mmap — 10.00 ms (0.01%)</title><rect x="1303.26" y="192" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.gcBgMarkWorker.func2 — 740.00 ms (0.75%)</title><rect x="1303.40" y="80" width="9.84" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.gcDrainMarkWorkerDedicated (inline) — 540.00 ms (0.55%)</title><rect x="1303.40" y="96" width="7.04" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.gcDrain — 540.00 ms (0.55%)</title><rect x="1303.40" y="112" width="7.04" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*gcControllerState).enlistWorker — 490.00 ms (0.50%)</title><rect x="1303.40" y="128" width="6.34" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.wakep — 280.00 ms (0.28%)</title><rect x="1303.40" y="144" width="3.41" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.startm — 280.00 ms (0.28%)</title><rect x="1303.40" y="160" width="3.41" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.notewakeup — 280.00 ms (0.28%)</title><rect x="1303.40" y="176" width="3.41" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.semawakeup — 280.00 ms (0.28%)</title><rect x="1303.40" y="192" width="3.41" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.pthread_cond_signal — 280.00 ms (0.28%)</title><rect x="1303.40" y="208" width="3.41" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.preemptone — 210.00 ms (0.21%)</title><rect x="1307.31" y="144" width="2.43" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.preemptM — 210.00 ms (0.21%)</title><rect x="1307.31" y="160" width="2.43" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.signalM (inline) — 210.00 ms (0.21%)</title><rect x="1307.31" y="176" width="2.43" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.pthread_kill — 210.00 ms (0.21%)</title><rect x="1307.31" y="192" width="2.43" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.markroot — 30.00 ms (0.03%)</title><rect x="1310.24" y="128" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.markroot.func1 — 30.00 ms (0.03%)</title><rect x="1310.24" y="144" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.suspendG — 30.00 ms (0.03%)</title><rect x="1310.24" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.preemptM — 30.00 ms (0.03%)</title><rect x="1310.24" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.signalM (inline) — 30.00 ms (0.03%)</title><rect x="1310.24" y="192" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.pthread_kill — 30.00 ms (0.03%)</title><rect x="1310.24" y="208" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*gcWork).balance — 20.00 ms (0.02%)</title><rect x="1310.66" y="128" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.handoff — 20.00 ms (0.02%)</title><rect x="1310.66" y="144" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.getempty — 20.00 ms (0.02%)</title><rect x="1310.66" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.getempty.func1 — 20.00 ms (0.02%)</title><rect x="1310.66" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mheap).allocManual — 20.00 ms (0.02%)</title><rect x="1310.66" y="192" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mheap).allocSpan — 20.00 ms (0.02%)</title><rect x="1310.66" y="208" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.sysUsed (inline) — 20.00 ms (0.02%)</title><rect x="1310.66" y="224" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.sysUsedOS (inline) — 20.00 ms (0.02%)</title><rect x="1310.66" y="240" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.madvise — 20.00 ms (0.02%)</title><rect x="1310.66" y="256" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.gcDrainMarkWorkerIdle (inline) — 200.00 ms (0.20%)</title><rect x="1310.94" y="96" width="2.29" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.gcDrain — 200.00 ms (0.20%)</title><rect x="1310.94" y="112" width="2.29" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*gcControllerState).enlistWorker — 190.00 ms (0.19%)</title><rect x="1310.94" y="128" width="2.15" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.preemptone — 100.00 ms (0.10%)</title><rect x="1310.94" y="144" width="0.90" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.preemptM — 100.00 ms (0.10%)</title><rect x="1310.94" y="160" width="0.90" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.signalM (inline) — 100.00 ms (0.10%)</title><rect x="1310.94" y="176" width="0.90" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.pthread_kill — 100.00 ms (0.10%)</title><rect x="1310.94" y="192" width="0.90" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.wakep — 90.00 ms (0.09%)</title><rect x="1312.34" y="144" width="0.76" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.startm — 80.00 ms (0.08%)</title><rect x="1312.34" y="160" width="0.62" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.notewakeup — 80.00 ms (0.08%)</title><rect x="1312.34" y="176" width="0.62" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.semawakeup — 80.00 ms (0.08%)</title><rect x="1312.34" y="192" width="0.62" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.pthread_cond_signal — 80.00 ms (0.08%)</title><rect x="1312.34" y="208" width="0.62" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.lock (inline) — 10.00 ms (0.01%)</title><rect x="1313.46" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.lockWithRank (inline) — 10.00 ms (0.01%)</title><rect x="1313.46" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.lock2 — 10.00 ms (0.01%)</title><rect x="1313.46" y="192" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.osyield (inline) — 10.00 ms (0.01%)</title><rect x="1313.46" y="208" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.usleep — 10.00 ms (0.01%)</title><rect x="1313.46" y="224" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.scanObject — 10.00 ms (0.01%)</title><rect x="1313.60" y="128" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.greyobject — 10.00 ms (0.01%)</title><rect x="1313.60" y="144" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*gcWork).putObj — 10.00 ms (0.01%)</title><rect x="1313.60" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.getempty — 10.00 ms (0.01%)</title><rect x="1313.60" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.getempty.func1 — 10.00 ms (0.01%)</title><rect x="1313.60" y="192" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mheap).allocManual — 10.00 ms (0.01%)</title><rect x="1313.60" y="208" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mheap).allocSpan — 10.00 ms (0.01%)</title><rect x="1313.60" y="224" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.sysUsed (inline) — 10.00 ms (0.01%)</title><rect x="1313.60" y="240" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.sysUsedOS (inline) — 10.00 ms (0.01%)</title><rect x="1313.60" y="256" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.madvise — 10.00 ms (0.01%)</title><rect x="1313.60" y="272" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.startTheWorld.func1 — 160.00 ms (0.16%)</title><rect x="1313.74" y="80" width="1.73" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.startTheWorldWithSema — 160.00 ms (0.16%)</title><rect x="1313.74" y="96" width="1.73" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.netpoll — 160.00 ms (0.16%)</title><rect x="1313.74" y="112" width="1.73" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.kevent — 160.00 ms (0.16%)</title><rect x="1313.74" y="128" width="1.73" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.forEachP.func1 — 30.00 ms (0.03%)</title><rect x="1315.97" y="80" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.forEachPInternal — 30.00 ms (0.03%)</title><rect x="1315.97" y="96" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.notetsleep — 20.00 ms (0.02%)</title><rect x="1315.97" y="112" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.notetsleep_internal — 20.00 ms (0.02%)</title><rect x="1315.97" y="128" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.semasleep — 20.00 ms (0.02%)</title><rect x="1315.97" y="144" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.pthread_cond_timedwait_relative_np — 20.00 ms (0.02%)</title><rect x="1315.97" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.preemptall — 10.00 ms (0.01%)</title><rect x="1316.25" y="112" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.preemptone — 10.00 ms (0.01%)</title><rect x="1316.25" y="128" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.preemptM — 10.00 ms (0.01%)</title><rect x="1316.25" y="144" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.signalM (inline) — 10.00 ms (0.01%)</title><rect x="1316.25" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.pthread_kill — 10.00 ms (0.01%)</title><rect x="1316.25" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.gcMarkDone.func2 — 20.00 ms (0.02%)</title><rect x="1316.39" y="80" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.stopTheWorldWithSema — 20.00 ms (0.02%)</title><rect x="1316.39" y="96" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.preemptall — 10.00 ms (0.01%)</title><rect x="1316.39" y="112" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.preemptone — 10.00 ms (0.01%)</title><rect x="1316.39" y="128" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.preemptM — 10.00 ms (0.01%)</title><rect x="1316.39" y="144" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.signalM (inline) — 10.00 ms (0.01%)</title><rect x="1316.39" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.pthread_kill — 10.00 ms (0.01%)</title><rect x="1316.39" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.notetsleep — 10.00 ms (0.01%)</title><rect x="1316.53" y="112" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.notetsleep_internal — 10.00 ms (0.01%)</title><rect x="1316.53" y="128" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.semasleep — 10.00 ms (0.01%)</title><rect x="1316.53" y="144" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.pthread_cond_timedwait_relative_np — 10.00 ms (0.01%)</title><rect x="1316.53" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*pageAlloc).scavenge.func1 — 20.00 ms (0.02%)</title><rect x="1316.67" y="80" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*pageAlloc).scavengeOne — 20.00 ms (0.02%)</title><rect x="1316.67" y="96" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.sysUnused (inline) — 20.00 ms (0.02%)</title><rect x="1316.67" y="112" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.sysUnusedOS (inline) — 20.00 ms (0.02%)</title><rect x="1316.67" y="128" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.madvise — 20.00 ms (0.02%)</title><rect x="1316.67" y="144" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.stopTheWorld.func1 — 10.00 ms (0.01%)</title><rect x="1316.95" y="80" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.stopTheWorldWithSema — 10.00 ms (0.01%)</title><rect x="1316.95" y="96" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.notetsleep — 10.00 ms (0.01%)</title><rect x="1316.95" y="112" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.notetsleep_internal — 10.00 ms (0.01%)</title><rect x="1316.95" y="128" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.semasleep — 10.00 ms (0.01%)</title><rect x="1316.95" y="144" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.pthread_cond_timedwait_relative_np — 10.00 ms (0.01%)</title><rect x="1316.95" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.morestack — 2480.00 ms (2.51%)</title><rect x="1317.09" y="64" width="34.14" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.newstack — 2480.00 ms (2.51%)</title><rect x="1317.09" y="80" width="34.14" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.gopreempt_m (inline) — 2480.00 ms (2.51%)</title><rect x="1317.09" y="96" width="34.14" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.goschedImpl — 2480.00 ms (2.51%)</title><rect x="1317.09" y="112" width="34.14" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.wakep — 2300.00 ms (2.33%)</title><rect x="1317.09" y="128" width="31.63" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.startm — 2260.00 ms (2.29%)</title><rect x="1317.09" y="144" width="31.07" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.notewakeup — 2250.00 ms (2.28%)</title><rect x="1317.09" y="160" width="30.93" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.semawakeup — 2250.00 ms (2.28%)</title><rect x="1317.09" y="176" width="30.93" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.pthread_cond_signal — 2170.00 ms (2.20%)</title><rect x="1317.09" y="192" width="29.81" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.pthread_mutex_lock — 70.00 ms (0.07%)</title><rect x="1347.40" y="192" width="0.48" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.runqempty (inline) — 10.00 ms (0.01%)</title><rect x="1348.52" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.pidlegetSpinning — 20.00 ms (0.02%)</title><rect x="1348.66" y="144" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.pidleget — 20.00 ms (0.02%)</title><rect x="1348.66" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*limiterEvent).stop — 10.00 ms (0.01%)</title><rect x="1348.66" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.nanotime (inline) — 10.00 ms (0.01%)</title><rect x="1348.80" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.nanotime1 — 10.00 ms (0.01%)</title><rect x="1348.80" y="192" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.unlock (inline) — 10.00 ms (0.01%)</title><rect x="1348.94" y="144" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.unlockWithRank (inline) — 10.00 ms (0.01%)</title><rect x="1348.94" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.unlock2 — 10.00 ms (0.01%)</title><rect x="1348.94" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*mLockProfile).store (inline) — 10.00 ms (0.01%)</title><rect x="1348.94" y="192" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.lock (inline) — 10.00 ms (0.01%)</title><rect x="1349.07" y="144" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.lockWithRank (inline) — 10.00 ms (0.01%)</title><rect x="1349.07" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.lock2 — 10.00 ms (0.01%)</title><rect x="1349.07" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.osyield (inline) — 10.00 ms (0.01%)</title><rect x="1349.07" y="192" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.usleep — 10.00 ms (0.01%)</title><rect x="1349.07" y="208" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.lock (inline) — 130.00 ms (0.13%)</title><rect x="1349.21" y="128" width="1.32" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.lockWithRank (inline) — 130.00 ms (0.13%)</title><rect x="1349.21" y="144" width="1.32" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.lock2 — 130.00 ms (0.13%)</title><rect x="1349.21" y="160" width="1.32" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.osyield (inline) — 130.00 ms (0.13%)</title><rect x="1349.21" y="176" width="1.32" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.usleep — 130.00 ms (0.13%)</title><rect x="1349.21" y="192" width="1.32" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.schedule — 40.00 ms (0.04%)</title><rect x="1351.03" y="128" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.findRunnable — 30.00 ms (0.03%)</title><rect x="1351.03" y="144" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.stopm — 10.00 ms (0.01%)</title><rect x="1351.03" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mPark (inline) — 10.00 ms (0.01%)</title><rect x="1351.03" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.notesleep — 10.00 ms (0.01%)</title><rect x="1351.03" y="192" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.semasleep — 10.00 ms (0.01%)</title><rect x="1351.03" y="208" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.pthread_cond_wait — 10.00 ms (0.01%)</title><rect x="1351.03" y="224" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.lock (inline) — 10.00 ms (0.01%)</title><rect x="1351.17" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.lockWithRank (inline) — 10.00 ms (0.01%)</title><rect x="1351.17" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.lock2 — 10.00 ms (0.01%)</title><rect x="1351.17" y="192" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.osyield (inline) — 10.00 ms (0.01%)</title><rect x="1351.17" y="208" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.usleep — 10.00 ms (0.01%)</title><rect x="1351.17" y="224" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.globrunqput (inline) — 10.00 ms (0.01%)</title><rect x="1351.59" y="128" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*gQueue).pushBack (inline) — 10.00 ms (0.01%)</title><rect x="1351.59" y="144" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mcall — 1750.00 ms (1.77%)</title><rect x="1351.73" y="64" width="23.94" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.park_m — 1750.00 ms (1.77%)</title><rect x="1351.73" y="80" width="23.94" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.schedule — 1750.00 ms (1.77%)</title><rect x="1351.73" y="96" width="23.94" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.findRunnable — 1500.00 ms (1.52%)</title><rect x="1351.73" y="112" width="20.45" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.stopm — 1210.00 ms (1.22%)</title><rect x="1351.73" y="128" width="16.40" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.mPark (inline) — 1170.00 ms (1.18%)</title><rect x="1351.73" y="144" width="15.84" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.notesleep — 1170.00 ms (1.18%)</title><rect x="1351.73" y="160" width="15.84" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.semasleep — 1170.00 ms (1.18%)</title><rect x="1351.73" y="176" width="15.84" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.pthread_cond_wait — 1170.00 ms (1.18%)</title><rect x="1351.73" y="192" width="15.84" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.lock (inline) — 40.00 ms (0.04%)</title><rect x="1368.07" y="144" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.lockWithRank (inline) — 40.00 ms (0.04%)</title><rect x="1368.07" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.lock2 — 40.00 ms (0.04%)</title><rect x="1368.07" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.osyield (inline) — 40.00 ms (0.04%)</title><rect x="1368.07" y="192" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.usleep — 40.00 ms (0.04%)</title><rect x="1368.07" y="208" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.lock (inline) — 100.00 ms (0.10%)</title><rect x="1368.63" y="128" width="0.90" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.lockWithRank (inline) — 100.00 ms (0.10%)</title><rect x="1368.63" y="144" width="0.90" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.lock2 — 100.00 ms (0.10%)</title><rect x="1368.63" y="160" width="0.90" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.osyield (inline) — 80.00 ms (0.08%)</title><rect x="1368.63" y="176" width="0.62" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.usleep — 80.00 ms (0.08%)</title><rect x="1368.63" y="192" width="0.62" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.semasleep — 20.00 ms (0.02%)</title><rect x="1369.75" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.pthread_cond_wait — 20.00 ms (0.02%)</title><rect x="1369.75" y="192" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.netpoll — 50.00 ms (0.05%)</title><rect x="1370.03" y="128" width="0.20" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.kevent — 50.00 ms (0.05%)</title><rect x="1370.03" y="144" width="0.20" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.stealWork — 50.00 ms (0.05%)</title><rect x="1370.72" y="128" width="0.20" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.runqsteal — 30.00 ms (0.03%)</title><rect x="1370.72" y="144" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.runqgrab — 30.00 ms (0.03%)</title><rect x="1370.72" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.usleep — 30.00 ms (0.03%)</title><rect x="1370.72" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.pMask.read (inline) — 10.00 ms (0.01%)</title><rect x="1371.14" y="144" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*gcControllerState).findRunnableGCWorker — 30.00 ms (0.03%)</title><rect x="1371.42" y="128" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.nanotime (inline) — 20.00 ms (0.02%)</title><rect x="1371.42" y="144" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.nanotime1 — 20.00 ms (0.02%)</title><rect x="1371.42" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.libcCall — 10.00 ms (0.01%)</title><rect x="1371.42" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*gcControllerState).assignWaitingGCWorker — 10.00 ms (0.01%)</title><rect x="1371.70" y="144" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.gcShouldScheduleWorker — 10.00 ms (0.01%)</title><rect x="1371.70" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.gcMarkWorkAvailable (inline) — 10.00 ms (0.01%)</title><rect x="1371.70" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.pMask.any (inline) — 10.00 ms (0.01%)</title><rect x="1371.70" y="192" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.runSafePointFn — 10.00 ms (0.01%)</title><rect x="1371.84" y="128" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.notewakeup — 10.00 ms (0.01%)</title><rect x="1371.84" y="144" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.semawakeup — 10.00 ms (0.01%)</title><rect x="1371.84" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.pthread_cond_signal — 10.00 ms (0.01%)</title><rect x="1371.84" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.pidleput — 10.00 ms (0.01%)</title><rect x="1371.98" y="128" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.pMask.clear (inline) — 10.00 ms (0.01%)</title><rect x="1371.98" y="144" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.checkIdleGCNoP — 10.00 ms (0.01%)</title><rect x="1372.12" y="128" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.lock (inline) — 10.00 ms (0.01%)</title><rect x="1372.12" y="144" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.lockWithRank (inline) — 10.00 ms (0.01%)</title><rect x="1372.12" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.lock2 — 10.00 ms (0.01%)</title><rect x="1372.12" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.osyield (inline) — 10.00 ms (0.01%)</title><rect x="1372.12" y="192" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.usleep — 10.00 ms (0.01%)</title><rect x="1372.12" y="208" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.gcShouldScheduleWorker — 10.00 ms (0.01%)</title><rect x="1372.26" y="128" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*gcWork).empty — 10.00 ms (0.01%)</title><rect x="1372.26" y="144" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.checkTimersNoP — 10.00 ms (0.01%)</title><rect x="1372.40" y="128" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*m).becomeSpinning (inline) — 10.00 ms (0.01%)</title><rect x="1372.54" y="128" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.resetspinning — 250.00 ms (0.25%)</title><rect x="1372.68" y="112" width="2.99" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.wakep — 250.00 ms (0.25%)</title><rect x="1372.68" y="128" width="2.99" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.startm — 220.00 ms (0.22%)</title><rect x="1372.68" y="144" width="2.57" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.notewakeup — 220.00 ms (0.22%)</title><rect x="1372.68" y="160" width="2.57" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.semawakeup — 220.00 ms (0.22%)</title><rect x="1372.68" y="176" width="2.57" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.pthread_cond_signal — 220.00 ms (0.22%)</title><rect x="1372.68" y="192" width="2.57" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.lock (inline) — 30.00 ms (0.03%)</title><rect x="1375.75" y="144" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.lockWithRank (inline) — 30.00 ms (0.03%)</title><rect x="1375.75" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.lock2 — 30.00 ms (0.03%)</title><rect x="1375.75" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.osyield (inline) — 30.00 ms (0.03%)</title><rect x="1375.75" y="192" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.usleep — 30.00 ms (0.03%)</title><rect x="1375.75" y="208" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.gcBgMarkWorker — 960.00 ms (0.97%)</title><rect x="1376.17" y="64" width="12.91" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.systemstack — 920.00 ms (0.93%)</title><rect x="1376.17" y="80" width="12.35" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.gcBgMarkWorker.func2 — 920.00 ms (0.93%)</title><rect x="1376.17" y="96" width="12.35" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.gcDrainMarkWorkerDedicated (inline) — 520.00 ms (0.53%)</title><rect x="1376.17" y="112" width="6.76" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.gcDrain — 520.00 ms (0.53%)</title><rect x="1376.17" y="128" width="6.76" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.scanSpan — 220.00 ms (0.22%)</title><rect x="1376.17" y="144" width="2.57" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.scanObjectsSmall — 210.00 ms (0.21%)</title><rect x="1376.17" y="160" width="2.43" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.tryDeferToSpanScan — 100.00 ms (0.10%)</title><rect x="1376.17" y="176" width="0.90" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*spanInlineMarkBits).tryAcquire — 10.00 ms (0.01%)</title><rect x="1376.17" y="192" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*spanScanOwnership).or (inline) — 10.00 ms (0.01%)</title><rect x="1376.17" y="208" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.extractHeapBitsSmall — 20.00 ms (0.02%)</title><rect x="1377.57" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.findObject — 10.00 ms (0.01%)</title><rect x="1377.85" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.spanSetScans — 10.00 ms (0.01%)</title><rect x="1379.11" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.scanObject — 220.00 ms (0.22%)</title><rect x="1379.24" y="144" width="2.57" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.typePointers.next — 90.00 ms (0.09%)</title><rect x="1379.24" y="160" width="0.76" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.getGCMask (inline) — 20.00 ms (0.02%)</title><rect x="1379.24" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.typePointers.nextFast (inline) — 10.00 ms (0.01%)</title><rect x="1379.52" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.tryDeferToSpanScan — 60.00 ms (0.06%)</title><rect x="1380.50" y="160" width="0.34" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.heapArenaOf (inline) — 10.00 ms (0.01%)</title><rect x="1380.50" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.alignDown (inline) — 10.00 ms (0.01%)</title><rect x="1380.64" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.markroot — 40.00 ms (0.04%)</title><rect x="1382.32" y="144" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.markrootBlock — 30.00 ms (0.03%)</title><rect x="1382.32" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.scanblock — 30.00 ms (0.03%)</title><rect x="1382.32" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.findObject — 10.00 ms (0.01%)</title><rect x="1382.32" y="192" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.spanOf (inline) — 10.00 ms (0.01%)</title><rect x="1382.32" y="208" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.markroot.func1 — 10.00 ms (0.01%)</title><rect x="1382.74" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.scanstack — 10.00 ms (0.01%)</title><rect x="1382.74" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*unwinder).next — 10.00 ms (0.01%)</title><rect x="1382.74" y="192" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*unwinder).resolveInternal — 10.00 ms (0.01%)</title><rect x="1382.74" y="208" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.funcspdelta (inline) — 10.00 ms (0.01%)</title><rect x="1382.74" y="224" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.pcvalue — 10.00 ms (0.01%)</title><rect x="1382.74" y="240" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.funcInfo.entry (inline) — 10.00 ms (0.01%)</title><rect x="1382.74" y="256" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*moduledata).textAddr — 10.00 ms (0.01%)</title><rect x="1382.74" y="272" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.wbBufFlush — 30.00 ms (0.03%)</title><rect x="1382.88" y="144" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.wbBufFlush.func1 — 30.00 ms (0.03%)</title><rect x="1382.88" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.wbBufFlush1 — 30.00 ms (0.03%)</title><rect x="1382.88" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.findObject — 10.00 ms (0.01%)</title><rect x="1382.88" y="192" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.tryDeferToSpanScan — 10.00 ms (0.01%)</title><rect x="1383.02" y="192" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/runtime/atomic.(*Int64).Add (inline) — 10.00 ms (0.01%)</title><rect x="1383.30" y="144" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.gcDrainMarkWorkerIdle (inline) — 390.00 ms (0.39%)</title><rect x="1383.44" y="112" width="4.95" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.gcDrain — 390.00 ms (0.39%)</title><rect x="1383.44" y="128" width="4.95" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.scanSpan — 180.00 ms (0.18%)</title><rect x="1383.44" y="144" width="2.01" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.scanObjectsSmall — 170.00 ms (0.17%)</title><rect x="1383.44" y="160" width="1.87" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.tryDeferToSpanScan — 70.00 ms (0.07%)</title><rect x="1383.44" y="176" width="0.48" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*spanInlineMarkBits).tryAcquire — 20.00 ms (0.02%)</title><rect x="1383.44" y="192" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*spanScanOwnership).or (inline) — 10.00 ms (0.01%)</title><rect x="1383.44" y="208" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.alignDown (inline) — 10.00 ms (0.01%)</title><rect x="1383.71" y="192" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.greyobject — 10.00 ms (0.01%)</title><rect x="1384.41" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.findObject — 10.00 ms (0.01%)</title><rect x="1384.55" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.spanOf (inline) — 10.00 ms (0.01%)</title><rect x="1384.55" y="192" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.spanSetScans — 10.00 ms (0.01%)</title><rect x="1385.81" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.scanObject — 180.00 ms (0.18%)</title><rect x="1385.95" y="144" width="2.01" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.typePointers.next — 70.00 ms (0.07%)</title><rect x="1385.95" y="160" width="0.48" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.typePointers.nextFast (inline) — 50.00 ms (0.05%)</title><rect x="1386.93" y="160" width="0.20" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.findObject — 10.00 ms (0.01%)</title><rect x="1387.63" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.spanOf (inline) — 10.00 ms (0.01%)</title><rect x="1387.63" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*gcWork).balance — 10.00 ms (0.01%)</title><rect x="1388.46" y="144" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.handoff — 10.00 ms (0.01%)</title><rect x="1388.46" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.wbBufFlush — 10.00 ms (0.01%)</title><rect x="1388.60" y="144" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.wbBufFlush.func1 — 10.00 ms (0.01%)</title><rect x="1388.60" y="160" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.wbBufFlush1 — 10.00 ms (0.01%)</title><rect x="1388.60" y="176" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.tryDeferToSpanScan — 10.00 ms (0.01%)</title><rect x="1388.60" y="192" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.alignDown (inline) — 10.00 ms (0.01%)</title><rect x="1388.60" y="208" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.acquirem (inline) — 20.00 ms (0.02%)</title><rect x="1389.02" y="80" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.nanotime (inline) — 20.00 ms (0.02%)</title><rect x="1389.30" y="80" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.nanotime1 — 20.00 ms (0.02%)</title><rect x="1389.30" y="96" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>internal/chacha8rand.block — 20.00 ms (0.02%)</title><rect x="1389.58" y="64" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.bgsweep — 10.00 ms (0.01%)</title><rect x="1389.86" y="64" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.sweepone — 10.00 ms (0.01%)</title><rect x="1389.86" y="80" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.(*sweepLocked).sweep — 10.00 ms (0.01%)</title><rect x="1389.86" y="96" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+<g><title>runtime.newMarkBits — 10.00 ms (0.01%)</title><rect x="1389.86" y="112" width="0.10" height="15" fill="#9e9e9e" fill-opacity="0.85" stroke="#ffffff" stroke-width="0.3"/>
+</g>
+</svg>

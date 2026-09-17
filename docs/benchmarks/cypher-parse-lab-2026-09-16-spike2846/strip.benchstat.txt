@@ -1,0 +1,16 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/FlavioCFOliveira/GoGraph/cypher/parser
+cpu: Apple M4
+              │   ToUpper   │                ASCII                │
+              │   sec/op    │   sec/op     vs base                │
+SpikeStrip-10   5.405µ ± 3%   2.885µ ± 5%  -46.63% (p=0.000 n=10)
+
+              │   ToUpper    │                ASCII                 │
+              │     B/op     │     B/op      vs base                │
+SpikeStrip-10   3.633Ki ± 0%   2.664Ki ± 0%  -26.67% (p=0.000 n=10)
+
+              │   ToUpper   │               ASCII                │
+              │  allocs/op  │ allocs/op   vs base                │
+SpikeStrip-10   148.00 ± 0%   32.00 ± 0%  -78.38% (p=0.000 n=10)
+benchstat_exit=0

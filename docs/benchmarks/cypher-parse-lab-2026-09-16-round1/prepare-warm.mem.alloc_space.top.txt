@@ -1,0 +1,73 @@
+File: cypher.test
+Type: alloc_space
+Time: 2026-09-16 13:06:01 WEST
+Showing nodes accounting for 313546.95kB, 94.56% of 331580.28kB total
+Dropped 1009 nodes (cum <= 1657.90kB)
+      flat  flat%   sum%        cum   cum%
+  110952kB 33.46% 33.46% 132100.97kB 39.84%  github.com/FlavioCFOliveira/GoGraph/graph/lpg.New[go.shape.string,go.shape.float64]
+53064.43kB 16.00% 49.47% 53064.43kB 16.00%  internal/bytealg.MakeNoZero
+46270.69kB 13.95% 63.42% 99323.36kB 29.95%  github.com/FlavioCFOliveira/GoGraph/cypher/parser.StripLiterals
+   32160kB  9.70% 73.12%    32160kB  9.70%  github.com/FlavioCFOliveira/GoGraph/graph/index/count.newRBMutex (inline)
+21469.31kB  6.47% 79.59% 21488.16kB  6.48%  github.com/FlavioCFOliveira/GoGraph/cypher.newPlanCache (inline)
+   11256kB  3.39% 82.99%    11256kB  3.39%  github.com/FlavioCFOliveira/GoGraph/graph.NewMapper[go.shape.string] (inline)
+10778.62kB  3.25% 86.24% 48566.62kB 14.65%  github.com/FlavioCFOliveira/GoGraph/graph/index/count.New
+    9648kB  2.91% 89.15%    20904kB  6.30%  github.com/FlavioCFOliveira/GoGraph/graph/adjlist.New[go.shape.string,go.shape.float64]
+    5628kB  1.70% 90.85%     5628kB  1.70%  github.com/FlavioCFOliveira/GoGraph/graph/index/count.(*table[go.shape.uint64]).init (inline)
+ 3762.47kB  1.13% 91.98% 80547.80kB 24.29%  github.com/FlavioCFOliveira/GoGraph/cypher.NewEngineWithOptions
+    2814kB  0.85% 92.83%     2814kB  0.85%  github.com/FlavioCFOliveira/GoGraph/graph/index/count.(*table[go.shape.struct { github.com/FlavioCFOliveira/GoGraph/graph/index/count.a uint32; github.com/FlavioCFOliveira/GoGraph/graph/index/count.rt uint32; github.com/FlavioCFOliveira/GoGraph/graph/index/count.b uint32 }]).init (inline)
+    2814kB  0.85% 93.68%     2814kB  0.85%  github.com/FlavioCFOliveira/GoGraph/graph/index/count.(*table[go.shape.uint32]).init (inline)
+ 2042.44kB  0.62% 94.29%  2042.44kB  0.62%  github.com/antlr4-go/antlr/v4.NewATNConfig (inline)
+  595.84kB  0.18% 94.47%  3233.67kB  0.98%  github.com/antlr4-go/antlr/v4.(*CommonTokenStream).fetch
+  138.19kB 0.042% 94.52% 17561.22kB  5.30%  github.com/FlavioCFOliveira/GoGraph/cypher.(*planBuildGroup).do
+  126.02kB 0.038% 94.55% 17423.55kB  5.25%  github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).compilePlanCacheEntry
+   25.17kB 0.0076% 94.56% 15906.86kB  4.80%  github.com/FlavioCFOliveira/GoGraph/cypher/parser.ParseStatement
+    0.38kB 0.00011% 94.56%  3328.86kB  1.00%  github.com/antlr4-go/antlr/v4.(*ParserATNSimulator).closureCheckingStopState
+    0.27kB 8e-05% 94.56% 330253.56kB 99.60%  testing.(*B).runN
+    0.09kB 2.8e-05% 94.56%  2785.82kB  0.84%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).AddSubExpression
+    0.09kB 2.8e-05% 94.56%  3170.02kB  0.96%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).AndExpression
+    0.09kB 2.8e-05% 94.56%  1777.72kB  0.54%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).Atom
+    0.09kB 2.8e-05% 94.56%     3418kB  1.03%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).Expression
+    0.09kB 2.8e-05% 94.56% 10546.37kB  3.18%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).Query
+    0.09kB 2.8e-05% 94.56%  3289.27kB  0.99%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).XorExpression
+    0.05kB 1.4e-05% 94.56%  2269.78kB  0.68%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).AtomicExpression
+    0.05kB 1.4e-05% 94.56%  2910.58kB  0.88%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).ComparisonExpression
+    0.05kB 1.4e-05% 94.56%  1692.88kB  0.51%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).MatchSt
+    0.05kB 1.4e-05% 94.56%  2660.53kB   0.8%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).MultDivExpression
+    0.05kB 1.4e-05% 94.56%  3052.18kB  0.92%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).NotExpression
+    0.05kB 1.4e-05% 94.56%  1746.84kB  0.53%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).Pattern
+    0.05kB 1.4e-05% 94.56%  2537.45kB  0.77%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).PowerExpression
+    0.05kB 1.4e-05% 94.56%  2004.42kB   0.6%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).PropertyExpression
+    0.05kB 1.4e-05% 94.56%  2123.38kB  0.64%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).PropertyOrLabelExpression
+    0.05kB 1.4e-05% 94.56%  2882.90kB  0.87%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).ReturnSt
+    0.05kB 1.4e-05% 94.56% 10226.69kB  3.08%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).SingleQuery
+    0.05kB 1.4e-05% 94.56%  2413.17kB  0.73%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).UnaryAddSubExpression
+         0     0% 94.56% 17547.50kB  5.29%  github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).buildPlanCacheEntry (inline)
+         0     0% 94.56% 116870.86kB 35.25%  github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).parseAndAnalyse
+         0     0% 94.56%  5628.02kB  1.70%  github.com/FlavioCFOliveira/GoGraph/cypher.(*Engine).recomputeCountStore
+         0     0% 94.56% 329510.57kB 99.38%  github.com/FlavioCFOliveira/GoGraph/cypher.BenchmarkPrepareWarm.func1
+         0     0% 94.56% 80547.80kB 24.29%  github.com/FlavioCFOliveira/GoGraph/cypher.NewEngine (inline)
+         0     0% 94.56% 212648.77kB 64.13%  github.com/FlavioCFOliveira/GoGraph/cypher.newLabEngine
+         0     0% 94.56% 10652.33kB  3.21%  github.com/FlavioCFOliveira/GoGraph/cypher/parser.recoverParseScript
+         0     0% 94.56%  1706.05kB  0.51%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).PatternPart
+         0     0% 94.56%  3081.98kB  0.93%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).ProjectionBody
+         0     0% 94.56%  2653.95kB   0.8%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).ProjectionItem
+         0     0% 94.56%  2737.54kB  0.83%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).ProjectionItems
+         0     0% 94.56%  1762.82kB  0.53%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).ReadingStatement
+         0     0% 94.56% 10279.39kB  3.10%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).RegularQuery
+         0     0% 94.56% 10656.83kB  3.21%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).Script
+         0     0% 94.56%  5242.16kB  1.58%  github.com/FlavioCFOliveira/GoGraph/cypher/parser/gen.(*CypherParser).SinglePartQ
+         0     0% 94.56%     5628kB  1.70%  github.com/FlavioCFOliveira/GoGraph/graph/index/count.(*Store).RecomputeReset
+         0     0% 94.56%  2637.83kB   0.8%  github.com/antlr4-go/antlr/v4.(*BaseLexer).NextToken
+         0     0% 94.56%  3233.67kB  0.98%  github.com/antlr4-go/antlr/v4.(*CommonTokenStream).Fill
+         0     0% 94.56%  5451.40kB  1.64%  github.com/antlr4-go/antlr/v4.(*ParserATNSimulator).AdaptivePredict
+         0     0% 94.56%  3327.83kB  1.00%  github.com/antlr4-go/antlr/v4.(*ParserATNSimulator).closure (inline)
+         0     0% 94.56%  3328.86kB  1.00%  github.com/antlr4-go/antlr/v4.(*ParserATNSimulator).closureWork
+         0     0% 94.56%  3501.37kB  1.06%  github.com/antlr4-go/antlr/v4.(*ParserATNSimulator).computeReachSet
+         0     0% 94.56%  5359.04kB  1.62%  github.com/antlr4-go/antlr/v4.(*ParserATNSimulator).computeTargetState
+         0     0% 94.56%  5357.27kB  1.62%  github.com/antlr4-go/antlr/v4.(*ParserATNSimulator).execATN
+         0     0% 94.56%  2350.14kB  0.71%  github.com/antlr4-go/antlr/v4.(*ParserATNSimulator).getEpsilonTarget
+         0     0% 94.56% 53064.43kB 16.00%  strings.(*Builder).Grow
+         0     0% 94.56% 53064.43kB 16.00%  strings.(*Builder).grow
+         0     0% 94.56% 35763.31kB 10.79%  strings.ToUpper
+         0     0% 94.56% 275896.06kB 83.21%  testing.(*B).launch
+         0     0% 94.56% 54346.44kB 16.39%  testing.(*B).run1.func1

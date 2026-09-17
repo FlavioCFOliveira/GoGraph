@@ -1,0 +1,5 @@
+=== RUN   TestFrontEndShareRigValid
+--- PASS: TestFrontEndShareRigValid (0.03s)
+PASS
+ok  	github.com/FlavioCFOliveira/GoGraph/cypher	0.519s
+go_test_exit=0
