@@ -195,8 +195,11 @@ func TestWindowOwner_OneTransactionStillDedupes(t *testing.T) {
 }
 
 // TestWindowOwner_NoTransactionAlwaysClones pins the untransacted case: with no
-// transaction and no bulk window there is no owner, so every write clones, which
-// is the behaviour an unbracketed write has always had.
+// transaction and no bulk window there is no owner, so no write adopts a
+// builder. Until rmp #2882 every such write also cloned the whole slot array;
+// it now stores in place into the published array unless a Snapshot has pinned
+// that array, and then — only then — it clones, leaving the pinned version
+// unchanged.
 func TestWindowOwner_NoTransactionAlwaysClones(t *testing.T) {
 	a, _ := versionedList(t)
 	for _, n := range []string{"a", "b", "c"} {
@@ -215,8 +218,38 @@ func TestWindowOwner_NoTransactionAlwaysClones(t *testing.T) {
 		t.Fatalf("second write: %v", err)
 	}
 	_, second, _ := slotArrayOf(a, "a")
-	if second == first {
-		t.Fatal("an untransacted write mutated a published array in place")
+	if s.building != nil {
+		t.Fatal("an untransacted write adopted a builder: it has no transaction to own one")
+	}
+	if second != first {
+		t.Fatal("an untransacted write to an unpinned array cloned it: the copy-on-write " +
+			"rmp #2882 removed is back")
+	}
+	if !a.HasEdge("a", "c") {
+		t.Fatal("the in-place write is not visible")
+	}
+
+	// A pin freezes the published array, so the next write must clone and the
+	// pinned version must not observe it.
+	snap := a.PinSnapshot()
+	if err := a.AddEdge("a", "b", 9); err != nil {
+		t.Fatalf("post-pin write: %v", err)
+	}
+	if err := a.AddNode("d"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if err := a.AddEdge("a", "d", 3); err != nil {
+		t.Fatalf("post-pin write: %v", err)
+	}
+	_, third, _ := slotArrayOf(a, "a")
+	if third == second {
+		t.Fatal("an untransacted write mutated an array a Snapshot has pinned")
+	}
+	if snap.HasEdge("a", "d") {
+		t.Fatal("the pinned Snapshot observes a write made after the pin")
+	}
+	if !a.HasEdge("a", "d") {
+		t.Fatal("the post-pin write is not visible")
 	}
 }
 
@@ -246,16 +279,21 @@ func TestWindowOwner_BulkWindowDedupesWithoutATransaction(t *testing.T) {
 	}
 	a.EndCommit()
 
-	// After the window closes its token is retired, so the next write must
-	// clone rather than mutate the retired window's builder in place — which
-	// would publish into an array nothing points at.
+	// After the window closes its token is retired, so the next write must not
+	// reuse the retired builder: it must write into the array slotsRef
+	// publishes — in place since rmp #2882, because nothing has pinned it —
+	// never into an array nothing points at, and it must adopt no builder.
+	s, _, _ := slotArrayOf(a, "a")
 	if err := a.AddEdge("a", "d", 3); err != nil {
 		t.Fatalf("post-window write: %v", err)
 	}
 	_, third, _ := slotArrayOf(a, "a")
-	if third == second {
-		t.Fatal("a write after EndCommit mutated the closed window's builder in place: " +
-			"the window's token was not retired")
+	if s.building != nil {
+		t.Fatal("a write after EndCommit adopted a builder: the window's token was not retired")
+	}
+	if third != second {
+		t.Fatal("a write after EndCommit to an unpinned array cloned it: the copy-on-write " +
+			"rmp #2882 removed is back")
 	}
 	if !a.HasEdge("a", "d") {
 		t.Fatal("the post-window write is not visible")
