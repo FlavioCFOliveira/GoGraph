@@ -89,6 +89,14 @@ type patternEvaluator struct {
 	// call sites of [newPatternEvaluator] pass no Engine, and the zero value must
 	// leave them exactly as they were.
 	adjacencyCountsDisabled bool
+
+	// relTypeChecks counts [patternEvaluator.edgeMatchesRel] calls. Each call is
+	// a versioned pair lookup (HasEdge or EdgeLabels at this view's instant), so
+	// the count is the cost unit the bound-end guard in
+	// [patternEvaluator.matchOutgoing] and [patternEvaluator.matchIncoming] exists
+	// to bound (rmp #2894); the regression test reads it. A plain counter: the
+	// evaluator is single-goroutine by contract.
+	relTypeChecks uint64
 }
 
 // bind attaches the enclosing query's parameter map and subquery evaluator. It is
@@ -724,30 +732,97 @@ func (pe *patternEvaluator) matchSingleHop(ctx context.Context, srcID graph.Node
 	}
 }
 
+// boundEndID resolves the bound variable of a hop's end-node pattern ONCE per
+// hop evaluation, so the per-neighbour loops can reject a non-matching
+// neighbour with one integer comparison instead of a versioned edge-label
+// lookup (rmp #2894).
+//
+// bound reports whether np names a variable present in row; when it does, ok
+// reports whether that value denotes a node. bound && !ok means no neighbour can
+// satisfy the end node — exactly the verdict [patternEvaluator.checkEndNode]
+// returns for every candidate in that case.
+func (pe *patternEvaluator) boundEndID(np *ast.NodePattern, row expr.RowContext) (id graph.NodeID, bound, ok bool) {
+	if np == nil || np.Variable == nil {
+		return 0, false, false
+	}
+	v, present := row[*np.Variable]
+	if !present {
+		return 0, false, false
+	}
+	id, ok = nodeIDFromValue(v, pe.g.AdjList().Mapper())
+	return id, true, ok
+}
+
+// endNodePatternOK is [patternEvaluator.checkEndNode] minus the bound-variable
+// comparison, for callers that have already applied it through
+// [patternEvaluator.boundEndID].
+func (pe *patternEvaluator) endNodePatternOK(np *ast.NodePattern, dstID graph.NodeID) bool {
+	return np == nil || pe.checkNodePattern(np, dstID)
+}
+
 // matchOutgoing iterates the outgoing neighbours of srcID and recurses for
 // each neighbour that passes the edge-type and end-node filters.
+//
+// # Bound end node (rmp #2894)
+//
+// When the end node is bound — `WHERE NOT (h)-[:LINK]->(s)` with both h and s
+// in scope — only slots pointing at that one node can match, so a neighbour is
+// first compared by NodeID and only a matching slot pays for
+// [patternEvaluator.edgeMatchesRel]'s versioned label lookup. Before this, every
+// neighbour of a hub paid that lookup before the end-node check rejected it,
+// which made one predicate evaluation deg(h) label lookups.
+//
+// The reordering is sound because both filters are pure boolean functions of
+// (view, pair, row): edgeMatchesRel and the bound comparison raise no error and
+// write nothing, so their conjunction is the same in either order. The
+// neighbour list, edgeMatchesRel and checkNodePattern still read the same
+// snapshot-bound [lpg.ReadView] as before, so visibility is unchanged.
+//
+// The loop also stops after the FIRST slot pointing at the bound node: every
+// verdict below it — edgeMatchesRel (a per-PAIR existence question), the node
+// pattern, and the recursion from that same node with the same row — is a
+// function of the pair alone, so a parallel slot to the same node cannot
+// answer differently.
 func (pe *patternEvaluator) matchOutgoing(ctx context.Context, srcID graph.NodeID, srcKey string, s step, remaining []step, row expr.RowContext) (bool, error) {
+	endID, endBound, endOK := pe.boundEndID(s.node, row)
+	if endBound && !endOK {
+		return false, nil
+	}
 	mapper := pe.g.AdjList().Mapper()
 	neighbours := pe.g.EntryView(srcID).Neighbours
 	for _, dstID := range neighbours {
+		if endBound && dstID != endID {
+			continue
+		}
 		if err := ctx.Err(); err != nil {
 			return false, err
 		}
-		dstKey, dstOK := mapper.Resolve(dstID)
-		if !dstOK {
-			continue
-		}
-		if !pe.edgeMatchesRel(srcKey, dstKey, s.rel) {
-			continue
-		}
-		if !pe.checkEndNode(s.node, dstID, row) {
-			continue
-		}
-		if ok, err := pe.matchSteps(ctx, dstID, remaining, row); err != nil || ok {
+		ok, err := pe.outgoingHopMatches(ctx, srcKey, dstID, s, remaining, row, mapper)
+		if err != nil || ok {
 			return ok, err
+		}
+		if endBound {
+			return false, nil
 		}
 	}
 	return false, nil
+}
+
+// outgoingHopMatches applies the edge-type and end-node-pattern filters to the
+// slot srcKey → dstID and recurses into the remaining steps. The bound-variable
+// comparison is the caller's.
+func (pe *patternEvaluator) outgoingHopMatches(ctx context.Context, srcKey string, dstID graph.NodeID, s step, remaining []step, row expr.RowContext, mapper *graph.Mapper[string]) (bool, error) {
+	dstKey, dstOK := mapper.Resolve(dstID)
+	if !dstOK {
+		return false, nil
+	}
+	if !pe.edgeMatchesRel(srcKey, dstKey, s.rel) {
+		return false, nil
+	}
+	if !pe.endNodePatternOK(s.node, dstID) {
+		return false, nil
+	}
+	return pe.matchSteps(ctx, dstID, remaining, row)
 }
 
 // matchIncoming scans all nodes for those that have an outgoing edge to dstID
@@ -759,8 +834,42 @@ func (pe *patternEvaluator) matchOutgoing(ctx context.Context, srcID graph.NodeI
 // which is what both MATCH and EXISTS { } already answered. Skipping self here
 // made the existential predicate the lone dissenter (rmp #2505). The recursion
 // still terminates on a loop because each step consumes one entry of remaining.
+//
+// # Bound end node (rmp #2894)
+//
+// When the end node is bound, the only candidate the full scan could accept is
+// that node — [patternEvaluator.checkEndNode] rejects every other — so the scan
+// is replaced by a read of that one node's out-slots, through the same
+// snapshot-bound [lpg.ReadView.EntryView] the scan reads. The unversioned
+// in-edge index is deliberately NOT used. [graph.Mapper.Walk] visits exactly the
+// NodeIDs [graph.Mapper.Resolve] resolves, so a bound node the scan would never
+// have visited is rejected here by the failed Resolve.
 func (pe *patternEvaluator) matchIncoming(ctx context.Context, dstID graph.NodeID, dstKey string, s step, remaining []step, row expr.RowContext) (bool, error) {
 	mapper := pe.g.AdjList().Mapper()
+	if endID, endBound, endOK := pe.boundEndID(s.node, row); endBound {
+		if !endOK {
+			return false, nil
+		}
+		candidateKey, resolved := mapper.Resolve(endID)
+		if !resolved {
+			return false, nil
+		}
+		for _, nb := range pe.g.EntryView(endID).Neighbours {
+			if nb != dstID {
+				continue
+			}
+			if err := ctx.Err(); err != nil {
+				return false, err
+			}
+			// The first slot endID → dstID decides: every verdict below is a
+			// function of the pair (see [patternEvaluator.matchOutgoing]).
+			if !pe.edgeMatchesRel(candidateKey, dstKey, s.rel) || !pe.endNodePatternOK(s.node, endID) {
+				return false, nil
+			}
+			return pe.matchSteps(ctx, endID, remaining, row)
+		}
+		return false, nil
+	}
 	found := false
 	var walkErr error
 	mapper.Walk(func(candidateID graph.NodeID, candidateKey string) bool {
@@ -935,6 +1044,7 @@ func (pe *patternEvaluator) bfsExpandIncoming(mapper *graph.Mapper[string], dstI
 // the relationship pattern rel. When rel is nil or has no type constraints, all
 // edges match.
 func (pe *patternEvaluator) edgeMatchesRel(srcKey, dstKey string, rel *ast.RelationshipPattern) bool {
+	pe.relTypeChecks++
 	if rel == nil || len(rel.Types) == 0 {
 		// No type constraint — any edge matches (but the edge must exist AT THIS
 		// VIEW'S INSTANT; ReadView.HasEdge is the versioned form, rmp #2294).
