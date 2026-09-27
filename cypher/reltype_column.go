@@ -87,33 +87,7 @@ func buildRelTypeColumn(
 	fwdCodes := make([]uint32, len(fwd.EdgesSlice()))
 	var fwdExtra map[uint64][]uint32
 	forEachResolvedSlotType(g, fwd, func(pos uint64, types []string) {
-		if pos >= uint64(len(fwdCodes)) {
-			return
-		}
-		for _, name := range types {
-			lid, ok := reg.Lookup(name)
-			if !ok {
-				// A name the resolver produced always came from the registry, so this
-				// is unreachable in practice. Skipping is nonetheless the only safe
-				// answer: an unencodable name cannot be matched by any pattern's code
-				// set either, so it can admit nothing whichever way it is handled.
-				continue
-			}
-			code := lpg.EncodeSlotLabel(lid)
-			if fwdCodes[pos] == 0 {
-				fwdCodes[pos] = code
-				continue
-			}
-			if fwdCodes[pos] == code {
-				continue
-			}
-			if fwdExtra == nil {
-				fwdExtra = make(map[uint64][]uint32)
-			}
-			if !containsCode(fwdExtra[pos], code) {
-				fwdExtra[pos] = append(fwdExtra[pos], code)
-			}
-		}
+		fwdExtra = encodeSlotTypes(reg, fwdCodes, fwdExtra, pos, types)
 	})
 	// rev may be nil for a caller that holds only a forward CSR; the constructor
 	// reads that as "no reverse pairing", not as an error.
@@ -129,6 +103,46 @@ func buildRelTypeColumn(
 	// number rather than the formula.
 	metrics.SetGauge("cypher.reltype_column.bytes", float64(col.RelTypeColumnBytes()))
 	return col
+}
+
+// encodeSlotTypes records the resolved type names of the slot at pos into the
+// dense code array and, for a slot carrying more than one type, the patch list.
+// It is the ONE encoding both the whole-graph column and the live per-source runs
+// of a write transaction use (rmp #2883), so the two cannot disagree on a code.
+//
+// It returns the patch list, allocated on the first multi-type slot, so the
+// caller keeps passing back what it was given. pos must be within codes.
+func encodeSlotTypes(
+	reg *lpg.LabelRegistry, codes []uint32, extra map[uint64][]uint32, pos uint64, types []string,
+) map[uint64][]uint32 {
+	if pos >= uint64(len(codes)) {
+		return extra
+	}
+	for _, name := range types {
+		lid, ok := reg.Lookup(name)
+		if !ok {
+			// A name the resolver produced always came from the registry, so this
+			// is unreachable in practice. Skipping is nonetheless the only safe
+			// answer: an unencodable name cannot be matched by any pattern's code
+			// set either, so it can admit nothing whichever way it is handled.
+			continue
+		}
+		code := lpg.EncodeSlotLabel(lid)
+		if codes[pos] == 0 {
+			codes[pos] = code
+			continue
+		}
+		if codes[pos] == code {
+			continue
+		}
+		if extra == nil {
+			extra = make(map[uint64][]uint32)
+		}
+		if !containsCode(extra[pos], code) {
+			extra[pos] = append(extra[pos], code)
+		}
+	}
+	return extra
 }
 
 // containsCode reports whether codes already holds code. The patch list of a

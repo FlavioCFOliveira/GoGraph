@@ -18,6 +18,11 @@ import (
 // other cPend* fields precisely because sitting there pushed the four bools
 // after cPendRemaining one byte along.
 //
+// rmp #2883 appended ONE pointer, live, after every existing field: the size
+// grows from 576 to 584 and no existing offset moves. The two-binary interleaved
+// A/B on BenchmarkExpandDir_InVsOut_Baseline was run for it (4f733f9e against the
+// change); its result is recorded in the task.
+//
 // A failure is not necessarily a defect — a Go release may repack the struct —
 // but it does mean the layout moved, and the rule is that a layout move is
 // measured with the two-binary interleaved A/B on
@@ -29,7 +34,8 @@ func TestExpandLayoutUnchangedByStoredDir(t *testing.T) {
 		got  uintptr
 		want uintptr
 	}{
-		{"Sizeof(Expand)", unsafe.Sizeof(Expand{}), 576},
+		{"Sizeof(Expand)", unsafe.Sizeof(Expand{}), 584},
+		{"Offsetof(live)", unsafe.Offsetof(Expand{}.live), 576},
 		{"Offsetof(dstAdmit)", unsafe.Offsetof(Expand{}.dstAdmit), 560},
 		{"Offsetof(dir)", unsafe.Offsetof(Expand{}.dir), 552},
 		{"Offsetof(slotsRejected)", unsafe.Offsetof(Expand{}.slotsRejected), 496},

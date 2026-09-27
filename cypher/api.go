@@ -400,6 +400,12 @@ type buildOpts struct {
 	// nil on the public BuildPlanWithMutator path, which then builds uncached —
 	// correct, just unamortised, exactly as edgeTypeFilterCache behaves.
 	csrPairCache *csrPairCache
+	// liveTopo, when non-nil, is the statement's journal of its own adjacency
+	// writes, owned by the concrete mutator adapter the statement was built with
+	// (rmp #2883). Its presence is what lets [traversalAdjacencySource] serve a
+	// write transaction's forward traversal per source instead of building a
+	// whole-graph pair; nil keeps the whole-graph build.
+	liveTopo *liveTopoLog
 	// procReg is the Engine's procedure registry, carried here rather than as a
 	// parameter because the WRITE-path builder ([buildOperatorWrite]) needs it
 	// only to hand back to [buildOperator] at its fall-through branch, and
@@ -1435,6 +1441,11 @@ type Engine struct {
 	// suite cannot otherwise observe both answers for one query. No public setter
 	// exists and production never sets it.
 	disableIndexNestedLoopForTest bool
+	// disableLiveTraversalForTest keeps every write statement's forward traversal
+	// on the whole-graph CSR build (rmp #2883), so the differential tests can
+	// obtain the pre-#2883 answer for the same statement on the same engine
+	// shape. Test-only; nothing in the module sets it.
+	disableLiveTraversalForTest bool
 
 	// forceColumnarChainDeclineForTest makes all three columnar read-chain
 	// recognisers — the two shipping ones and [tryBuildColumnarAggSource] (#2655) —
@@ -7830,11 +7841,22 @@ func buildPlanWithMutatorFull(
 	// row carries the handle itself and no resolution happens, but the adapters still
 	// read bopts for the count store and the undo log. Only the concrete write
 	// adapters carry the field.
+	//
+	// The two concrete adapters are also the only mutators whose writes are
+	// journaled for live forward traversal (rmp #2883), so only they arm it. The
+	// journal belongs to the ADAPTER, not to this bopts: every plan built against
+	// one statement's adapter must share the one journal its writes feed.
 	switch m := mutator.(type) {
 	case *walMutatorAdapter:
 		m.bopts = bopts
+		if m.eng == nil || !m.eng.disableLiveTraversalForTest {
+			bopts.liveTopo = &m.liveTopo
+		}
 	case *lpgMutatorAdapter:
 		m.bopts = bopts
+		if m.eng == nil || !m.eng.disableLiveTraversalForTest {
+			bopts.liveTopo = &m.liveTopo
+		}
 	}
 
 	// When the IR root is a ProduceResults, use its declared columns; otherwise
@@ -10548,7 +10570,7 @@ func buildOperatorRec(
 		if fused := tryFuseCyclicIntersect(p, child, g, schema, bopts); fused != nil {
 			return fused, nil
 		}
-		exp := exec.NewExpand(child, expandAdjacencySource(bopts, g, p.RelTypes), cfg)
+		exp := exec.NewExpand(child, traversalAdjacencySource(bopts, g, p.RelTypes, dir), cfg)
 		// Expand-into (#2206): when this hop's destination is a variable the row
 		// already carries, filter to edges landing on it INSIDE the operator instead
 		// of emitting one row per neighbour for the equality Selection above to
@@ -11230,7 +11252,7 @@ func buildOperatorRec(
 			cfg.EdgeType = p.RelTypes[0]
 			// The filter travels with the adjacency; see the Expand case above.
 		}
-		return exec.NewOptionalExpand(child, expandAdjacencySource(bopts, g, p.RelTypes), cfg), nil
+		return exec.NewOptionalExpand(child, traversalAdjacencySource(bopts, g, p.RelTypes, dir), cfg), nil
 
 	case *ir.ShortestPath:
 		return buildShortestPath(p, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
@@ -11348,7 +11370,7 @@ func buildOperatorRec(
 		}
 		// The filter travels with the adjacency, both resolved at execution time; see
 		// [expandAdjacencySource].
-		return exec.NewVarLengthExpand(child, expandAdjacencySource(bopts, g, p.RelTypes), &cfg), nil
+		return exec.NewVarLengthExpand(child, traversalAdjacencySource(bopts, g, p.RelTypes, dir), &cfg), nil
 
 	case *ir.NamedPath:
 		// NamedPath is a pure pass-through: build the child, then register
@@ -12008,6 +12030,11 @@ func (b *buildOpts) forSubquery() *buildOpts {
 		// The adjacency cache (rmp #2646). Keyed to graph state, not to this
 		// scope — see "Why the adjacency cache IS carried" above.
 		csrPairCache: b.csrPairCache,
+		// The statement's live-traversal journal (rmp #2883). Scope-independent in
+		// the same way: it describes the statement's writes, and an inner forward
+		// traversal must see them journaled exactly as an outer one does. Absent,
+		// the inner traversal would merely keep the whole-graph build.
+		liveTopo: b.liveTopo,
 		// The labelled-count differential-test seam (rmp #2654). Carried because a
 		// control arm that stops being a control inside a subquery is not a control:
 		// the field's whole purpose is to hold for the WHOLE build, and it is
@@ -20022,6 +20049,10 @@ type lpgMutatorAdapter struct {
 	// when it gains an edge. Lazily allocated, so a pure node-create workload over
 	// an edgeless graph (the write benchmark) never allocates it.
 	fresh map[string]struct{}
+	// liveTopo journals this statement's adjacency-affecting writes for the live
+	// forward traversals it plans (rmp #2883). Held inline, so a statement pays
+	// nothing for it until a live traversal begins; see [liveTopoLog].
+	liveTopo liveTopoLog
 }
 
 // cs returns the engine's relationship count-store, or nil when the adapter has
@@ -20219,6 +20250,7 @@ func (a *lpgMutatorAdapter) resolveID(n string) graph.NodeID {
 
 // AddNode interns n and returns its stable NodeID.
 func (a *lpgMutatorAdapter) AddNode(n string) (graph.NodeID, error) {
+	defer a.liveTopo.nodePost(n, a.liveTopo.nodePre(n)) // rmp #2883
 	idBefore, existed := a.g.AdjList().Mapper().Lookup(n)
 	// Capture the tombstone state BEFORE AddNode: AddNode now revives a
 	// tombstoned node (clears its tombstone), so checking afterwards would
@@ -20251,6 +20283,10 @@ var ErrParallelEdgeInSimpleGraph = errors.New("cypher: cannot create a parallel 
 
 // AddEdge inserts a directed edge and returns the endpoint NodeIDs.
 func (a *lpgMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, graph.NodeID, error) {
+	// rmp #2883: journal both endpoints' liveness and src's run before the write.
+	defer a.liveTopo.nodePost(src, a.liveTopo.nodePre(src))
+	defer a.liveTopo.nodePost(dst, a.liveTopo.nodePre(dst))
+	a.liveTopo.beforeAdjWrite(src)
 	_, srcExisted := a.g.AdjList().Mapper().Lookup(src)
 	_, dstExisted := a.g.AdjList().Mapper().Lookup(dst)
 	edgeExisted := a.g.AdjList().HasEdge(src, dst)
@@ -20283,6 +20319,10 @@ func (a *lpgMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 // AddEdgeH mirrors [lpgMutatorAdapter.AddEdge] but allocates and returns a
 // stable per-edge handle (see [exec.GraphMutator.AddEdgeH]).
 func (a *lpgMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, graph.NodeID, uint64, error) {
+	// rmp #2883: journal both endpoints' liveness and src's run before the write.
+	defer a.liveTopo.nodePost(src, a.liveTopo.nodePre(src))
+	defer a.liveTopo.nodePost(dst, a.liveTopo.nodePre(dst))
+	a.liveTopo.beforeAdjWrite(src)
 	_, srcExisted := a.g.AdjList().Mapper().Lookup(src)
 	_, dstExisted := a.g.AdjList().Mapper().Lookup(dst)
 	edgeExisted := a.g.AdjList().HasEdge(src, dst)
@@ -20328,6 +20368,7 @@ func (a *lpgMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 // the bulk path took at rmp #2694 — this was the loop they both missed, the one
 // DETACH DELETE uses for the victim's INBOUND arcs.
 func (a *lpgMutatorAdapter) RemoveEdge(src, dst string) {
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	present := a.g.AdjList().HasEdge(src, dst)
 	r := a.rec()
 	var pre removedEdgePreimage
@@ -20395,6 +20436,7 @@ func orientHandleEndpoints(g *lpg.Graph[string, float64], src, dst string, handl
 }
 
 func (a *lpgMutatorAdapter) RemoveEdgeByHandle(src, dst string, handle uint64) {
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	src, dst = orientHandleEndpoints(a.g, src, dst, handle)
 	r := a.rec()
 	var pre removedEdgePreimage
@@ -20495,6 +20537,7 @@ func (a *lpgMutatorAdapter) RemoveNodeLabel(n, label string) {
 // removal changes so subscribed indexes drop every entry describing the node
 // (a deleted node must never be served by a NodeByIndexSeek, task #1340).
 func (a *lpgMutatorAdapter) RemoveNode(n string) {
+	a.liveTopo.beforeNodeRemove(n) // rmp #2883
 	id, ok := a.g.AdjList().Mapper().Lookup(n)
 	if !ok {
 		return
@@ -20662,6 +20705,7 @@ func (a *lpgMutatorAdapter) HasEdge(src, dst string) bool {
 
 // SetEdgeLabel attaches label to the directed edge (src, dst).
 func (a *lpgMutatorAdapter) SetEdgeLabel(src, dst, label string) {
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	r := a.rec()
 	hadLabel := r.active() && a.g.HasEdgeLabel(src, dst, label)
 	a.w().SetEdgeLabel(src, dst, label)
@@ -20766,6 +20810,7 @@ func (a *lpgMutatorAdapter) EdgeLabels(src, dst string) []string {
 // IncEdgeCreateCount, EdgeCreateCount, DecEdgeCreateCount delegate to
 // the underlying [lpg.Graph] CREATE-multiplicity counter.
 func (a *lpgMutatorAdapter) IncEdgeCreateCount(src, dst string) int64 {
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	n := a.g.IncEdgeCreateCount(src, dst)
 	a.rec().recordIncEdgeCreateCount(src, dst)
 	return n
@@ -20774,6 +20819,7 @@ func (a *lpgMutatorAdapter) EdgeCreateCount(src, dst string) int64 {
 	return a.g.EdgeCreateCount(src, dst)
 }
 func (a *lpgMutatorAdapter) DecEdgeCreateCount(src, dst string) {
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	r := a.rec()
 	had := r.active() && a.g.EdgeCreateCount(src, dst) > 0
 	a.g.DecEdgeCreateCount(src, dst)
@@ -20784,6 +20830,7 @@ func (a *lpgMutatorAdapter) DecEdgeCreateCount(src, dst string) {
 // RemoveEdgeInstance delegate to the per-instance metadata stores on
 // the underlying [lpg.Graph].
 func (a *lpgMutatorAdapter) SetEdgeLabelAt(src, dst string, idx int64, label string) {
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	a.w().SetEdgeLabelAt(src, dst, idx, label)
 }
 func (a *lpgMutatorAdapter) EdgeLabelsAt(src, dst string, idx int64) []string {
@@ -20796,6 +20843,7 @@ func (a *lpgMutatorAdapter) EdgePropertiesAt(src, dst string, idx int64) map[str
 	return a.g.EdgePropertiesAt(src, dst, idx)
 }
 func (a *lpgMutatorAdapter) RemoveEdgeInstance(src, dst string, idx int64) {
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	a.w().RemoveEdgeInstance(src, dst, idx)
 }
 
@@ -20809,6 +20857,7 @@ func (a *lpgMutatorAdapter) RemoveEdgeInstance(src, dst string, idx int64) {
 // there is on the CREATE path (#1686/#1282). The store-less engine has no WAL,
 // so these buffer no transaction op; their durability is the in-memory graph.
 func (a *lpgMutatorAdapter) SetEdgeLabelByHandle(src, dst string, handle uint64, label string) {
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	a.w().SetEdgeLabelByHandle(src, dst, handle, label)
 	// Count-store (#2082): SetEdgeLabelByHandle is the single authoritative
 	// once-per-edge typing hook (create_relationship.go also fires SetEdgeLabel and
@@ -20849,6 +20898,7 @@ func (a *lpgMutatorAdapter) EdgePropertiesByHandle(src, dst string, handle uint6
 	return a.g.EdgePropertiesByHandle(src, dst, handle)
 }
 func (a *lpgMutatorAdapter) RemoveEdgeInstanceByHandle(src, dst string, handle uint64) {
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	a.w().RemoveEdgeInstanceByHandle(src, dst, handle)
 }
 
@@ -20906,6 +20956,7 @@ func (a *lpgMutatorAdapter) InNeighbours(n string) []string {
 // Per-edge undo entries are recorded before the bulk removal so the undo log
 // can reverse the operation edge-by-edge on rollback.
 func (a *lpgMutatorAdapter) RemoveAllEdgesFrom(n string) {
+	a.liveTopo.beforeAdjWrite(n) // rmp #2883: journal the Init-instant run first
 	r := a.rec()
 	// Snapshot outgoing neighbours for undo recording and side-effect counting.
 	outgoing := a.OutNeighbours(n)
@@ -21069,6 +21120,10 @@ type walMutatorAdapter struct {
 	// (#2082), so initial CREATE labelling is not mistaken for a relabel; see the
 	// lpgMutatorAdapter twin.
 	fresh map[string]struct{}
+	// liveTopo journals this statement's adjacency-affecting writes for the live
+	// forward traversals it plans (rmp #2883). Held inline, so a statement pays
+	// nothing for it until a live traversal begins; see [liveTopoLog].
+	liveTopo liveTopoLog
 }
 
 // constraintReg mirrors [lpgMutatorAdapter.constraintReg].
@@ -21241,6 +21296,7 @@ func (a *walMutatorAdapter) resolveID(n string) graph.NodeID {
 
 // AddNode interns n and returns its stable NodeID.
 func (a *walMutatorAdapter) AddNode(n string) (graph.NodeID, error) {
+	defer a.liveTopo.nodePost(n, a.liveTopo.nodePre(n)) // rmp #2883
 	idBefore, existed := a.g.AdjList().Mapper().Lookup(n)
 	// Capture the tombstone state BEFORE AddNode: AddNode now revives a
 	// tombstoned node, so checking afterwards would always observe it live.
@@ -21274,6 +21330,10 @@ func (a *walMutatorAdapter) AddNode(n string) (graph.NodeID, error) {
 
 // AddEdge inserts a directed edge and returns the endpoint NodeIDs.
 func (a *walMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, graph.NodeID, error) {
+	// rmp #2883: journal both endpoints' liveness and src's run before the write.
+	defer a.liveTopo.nodePost(src, a.liveTopo.nodePre(src))
+	defer a.liveTopo.nodePost(dst, a.liveTopo.nodePre(dst))
+	a.liveTopo.beforeAdjWrite(src)
 	_, srcExisted := a.g.AdjList().Mapper().Lookup(src)
 	_, dstExisted := a.g.AdjList().Mapper().Lookup(dst)
 	edgeExisted := a.g.AdjList().HasEdge(src, dst)
@@ -21329,6 +21389,10 @@ func (a *walMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 // ([lpg.Graph.AddEdgeHIfAbsent]), so snapshot + full-WAL recovery does not
 // double the edge. See graph/lpg/edge_handle.go for the durability contract.
 func (a *walMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, graph.NodeID, uint64, error) {
+	// rmp #2883: journal both endpoints' liveness and src's run before the write.
+	defer a.liveTopo.nodePost(src, a.liveTopo.nodePre(src))
+	defer a.liveTopo.nodePost(dst, a.liveTopo.nodePre(dst))
+	a.liveTopo.beforeAdjWrite(src)
 	_, srcExisted := a.g.AdjList().Mapper().Lookup(src)
 	_, dstExisted := a.g.AdjList().Mapper().Lookup(dst)
 	edgeExisted := a.g.AdjList().HasEdge(src, dst)
@@ -21380,6 +21444,7 @@ func (a *walMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 // disconnected, so re-creating an edge between the same endpoints does not
 // resurrect the deleted relationship's type or properties.
 func (a *walMutatorAdapter) RemoveEdge(src, dst string) {
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	present := a.g.AdjList().HasEdge(src, dst)
 	r := a.rec()
 	var pre removedEdgePreimage
@@ -21460,6 +21525,7 @@ func (a *walMutatorAdapter) RemoveEdge(src, dst string) {
 // instance. The edges-removed counter, the durable frame and the undo record are
 // all gated on the actual removal result (rmp #2018, rmp #2734).
 func (a *walMutatorAdapter) RemoveEdgeByHandle(src, dst string, handle uint64) {
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	src, dst = orientHandleEndpoints(a.g, src, dst, handle)
 	r := a.rec()
 	var pre removedEdgePreimage
@@ -21616,6 +21682,7 @@ func (a *walMutatorAdapter) RemoveNodeLabel(n, label string) {
 // removal changes so subscribed indexes drop every entry describing the node
 // (a deleted node must never be served by a NodeByIndexSeek, task #1340).
 func (a *walMutatorAdapter) RemoveNode(n string) {
+	a.liveTopo.beforeNodeRemove(n) // rmp #2883
 	id, ok := a.g.AdjList().Mapper().Lookup(n)
 	if !ok {
 		return
@@ -21777,6 +21844,7 @@ func (a *walMutatorAdapter) HasEdge(src, dst string) bool {
 
 // SetEdgeLabel attaches label to the directed edge (src, dst).
 func (a *walMutatorAdapter) SetEdgeLabel(src, dst, label string) {
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	r := a.rec()
 	hadLabel := r.active() && a.g.HasEdgeLabel(src, dst, label)
 	a.w().SetEdgeLabel(src, dst, label)
@@ -21890,6 +21958,7 @@ func (a *walMutatorAdapter) EdgeLabels(src, dst string) []string {
 // IncEdgeCreateCount, EdgeCreateCount, DecEdgeCreateCount delegate to
 // the underlying [lpg.Graph] CREATE-multiplicity counter.
 func (a *walMutatorAdapter) IncEdgeCreateCount(src, dst string) int64 {
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	n := a.g.IncEdgeCreateCount(src, dst)
 	a.rec().recordIncEdgeCreateCount(src, dst)
 	return n
@@ -21898,6 +21967,7 @@ func (a *walMutatorAdapter) EdgeCreateCount(src, dst string) int64 {
 	return a.g.EdgeCreateCount(src, dst)
 }
 func (a *walMutatorAdapter) DecEdgeCreateCount(src, dst string) {
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	r := a.rec()
 	had := r.active() && a.g.EdgeCreateCount(src, dst) > 0
 	a.g.DecEdgeCreateCount(src, dst)
@@ -21921,6 +21991,7 @@ func (a *walMutatorAdapter) DecEdgeCreateCount(src, dst string) {
 // recordRemoveEdge re-adds the instance with that handle and restores them
 // (#1327).
 func (a *walMutatorAdapter) SetEdgeLabelAt(src, dst string, idx int64, label string) {
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	a.w().SetEdgeLabelAt(src, dst, idx, label)
 }
 func (a *walMutatorAdapter) EdgeLabelsAt(src, dst string, idx int64) []string {
@@ -21933,6 +22004,7 @@ func (a *walMutatorAdapter) EdgePropertiesAt(src, dst string, idx int64) map[str
 	return a.g.EdgePropertiesAt(src, dst, idx)
 }
 func (a *walMutatorAdapter) RemoveEdgeInstance(src, dst string, idx int64) {
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	a.w().RemoveEdgeInstance(src, dst, idx)
 }
 
@@ -21953,6 +22025,7 @@ func (a *walMutatorAdapter) RemoveEdgeInstance(src, dst string, idx int64) {
 // [lpg.Graph.ApplyAtomically] window and the one transaction the per-pair write
 // uses, so the per-pair and per-handle stores stay atomic together.
 func (a *walMutatorAdapter) SetEdgeLabelByHandle(src, dst string, handle uint64, label string) {
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	a.w().SetEdgeLabelByHandle(src, dst, handle, label)
 	_ = a.tx.SetEdgeLabelByHandle(src, dst, handle, label) // rmp #2747: [txn.Tx.SetEdgeLabelByHandle] returns ErrTxFinished (unreachable here) or ErrFieldTooLong on a label over 65535 bytes. The SECOND is reachable and is DISCARDED: [exec.GraphMutator.SetEdgeLabelByHandle] returns nothing; the encoder backstop refuses it at Commit.
 	// Count-store (#2082): the single authoritative once-per-edge typing hook.
@@ -22001,6 +22074,7 @@ func (a *walMutatorAdapter) EdgePropertiesByHandle(src, dst string, handle uint6
 	return a.g.EdgePropertiesByHandle(src, dst, handle)
 }
 func (a *walMutatorAdapter) RemoveEdgeInstanceByHandle(src, dst string, handle uint64) {
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	a.w().RemoveEdgeInstanceByHandle(src, dst, handle)
 	_ = a.tx.RemoveEdgeInstanceByHandle(src, dst, handle) // rmp #2747: [txn.Tx.RemoveEdgeInstanceByHandle] returns ErrTxFinished and nothing else, unreachable here; it stages no schema string. Discarded: [exec.GraphMutator.RemoveEdgeInstanceByHandle] returns nothing.
 }
@@ -22042,6 +22116,7 @@ func (a *walMutatorAdapter) InNeighbours(n string) []string {
 // Per-edge undo entries and WAL records are emitted before the bulk adjacency
 // removal, exactly mirroring what d sequential RemoveEdge calls would produce.
 func (a *walMutatorAdapter) RemoveAllEdgesFrom(n string) {
+	a.liveTopo.beforeAdjWrite(n) // rmp #2883: journal the Init-instant run first
 	r := a.rec()
 	// Snapshot outgoing neighbours for undo recording, WAL emission, and
 	// side-effect counting before the bulk removal clears the adjacency.
@@ -22360,31 +22435,9 @@ func forEachResolvedSlotType(
 	handles := fwdCSR.HandlesSlice()
 	mapper := adj.Mapper()
 
-	// slotTypes collects the relationship types of ONE adjacency slot for the
-	// per-slot resolution below, and appendSlotType is the visitor that fills it.
-	// Both are declared ONCE for the whole sweep — the buffer is truncated per slot
-	// rather than reallocated, and the closure is not rebuilt per CSR position — so
-	// the fallback costs one small buffer instead of a []string and a closure per
-	// edge. That is the cold-path allocation hot spot the profile attributed to
-	// EdgeLabelsByID (rmp #1877), and it applies to a closure declared inside the
-	// loop just as much as to a returned slice.
-	var slotTypes []string
-	appendSlotType := func(name string) { slotTypes = append(slotTypes, name) }
-
-	// slotLabs is the scratch behind that resolution: slotLabs[dst] is the ordered
-	// list of the adjacency label-column entries of that pair's COLUMN-TYPED slots —
-	// the slots whose relationship type is not recorded against a stable per-edge
-	// handle. slotFallbackSeen counts how many of each pair's CSR positions have
-	// already consumed one, so the next resolves against the next slot.
-	//
-	// All three are created on the FIRST source that actually needs them and then
-	// reused for every later source, reset through slotLabsTouched rather than
-	// reallocated or swept. A graph whose every slot resolves by handle — anything
-	// Cypher built — therefore allocates none of them, and a graph that does need
-	// them allocates each once for the whole O(V+E) sweep instead of once per source.
-	var slotLabs map[graph.NodeID][]uint32
-	var slotFallbackSeen map[graph.NodeID]int
-	var slotLabsTouched []graph.NodeID
+	// The per-slot scratch is created ONCE for the whole sweep and reused for every
+	// source; see [slotTypeScratch] for what it holds and why.
+	sc := newSlotTypeScratch()
 
 	// Bound the loop on the SNAPSHOT CSR, not the live graph. fwdCSR was
 	// built from a point-in-time copy of adj above; verts has a fixed length
@@ -22396,141 +22449,213 @@ func forEachResolvedSlotType(
 	for srcID := uint64(0); srcID < maxID; srcID++ {
 		start := verts[srcID]
 		end := verts[srcID+1]
-		srcStr, ok := mapper.Resolve(graph.NodeID(srcID))
+		// The handle column is sliced to this source's run only where it covers
+		// it, which keeps the per-slot "pos < len(handles)" test meaning exactly
+		// what it meant against the whole column.
+		var runHandles []uint64
+		switch {
+		case uint64(len(handles)) >= end:
+			runHandles = handles[start:end]
+		case uint64(len(handles)) > start:
+			runHandles = handles[start:]
+		}
+		resolveSourceSlotTypes(g, mapper, sc, graph.NodeID(srcID), edges[start:end], runHandles, start, visit)
+	}
+}
+
+// slotTypeScratch is the reusable state behind [resolveSourceSlotTypes], held
+// across sources so a sweep allocates it once.
+//
+// slotTypes collects the relationship types of ONE adjacency slot for the
+// per-slot resolution, and appendSlotType is the visitor that fills it. Both are
+// created ONCE — the buffer is truncated per slot rather than reallocated, and the
+// closure is not rebuilt per CSR position — so the fallback costs one small buffer
+// instead of a []string and a closure per edge. That is the cold-path allocation
+// hot spot the profile attributed to EdgeLabelsByID (rmp #1877), and it applies to
+// a closure declared inside the loop just as much as to a returned slice.
+//
+// slotLabs is the scratch behind that resolution: slotLabs[dst] is the ordered
+// list of the adjacency label-column entries of that pair's COLUMN-TYPED slots —
+// the slots whose relationship type is not recorded against a stable per-edge
+// handle. slotFallbackSeen counts how many of each pair's CSR positions have
+// already consumed one, so the next resolves against the next slot.
+//
+// All three are created on the FIRST source that actually needs them and then
+// reused for every later source, reset through slotLabsTouched rather than
+// reallocated or swept. A graph whose every slot resolves by handle — anything
+// Cypher built — therefore allocates none of them, and a graph that does need
+// them allocates each once for the whole O(V+E) sweep instead of once per source.
+//
+// NOT safe for concurrent use.
+type slotTypeScratch struct {
+	slotTypes        []string
+	appendSlotType   func(name string)
+	slotLabs         map[graph.NodeID][]uint32
+	slotFallbackSeen map[graph.NodeID]int
+	slotLabsTouched  []graph.NodeID
+}
+
+// newSlotTypeScratch returns an empty scratch whose visitor appends to its own
+// buffer.
+func newSlotTypeScratch() *slotTypeScratch {
+	sc := &slotTypeScratch{}
+	sc.appendSlotType = func(name string) { sc.slotTypes = append(sc.slotTypes, name) }
+	return sc
+}
+
+// resolveSourceSlotTypes is the per-source body of [forEachResolvedSlotType],
+// moved out verbatim so the live per-source runs of a write transaction resolve
+// their slots by exactly the same rules as the whole-graph column (rmp #2883). Read
+// [forEachResolvedSlotType] before changing it.
+//
+// edges is src's run in its FINAL order and handles the handle column aligned with
+// it (nil, or shorter than edges, exactly where the whole column did not cover a
+// slot). visit receives base+i for the run's i-th slot, which is the absolute
+// position for the whole-graph sweep and the run index for a live run.
+func resolveSourceSlotTypes(
+	g *lpg.ReadView[string, float64],
+	mapper *graph.Mapper[string],
+	sc *slotTypeScratch,
+	src graph.NodeID,
+	edges []graph.NodeID,
+	handles []uint64,
+	base uint64,
+	visit func(pos uint64, types []string),
+) {
+	srcStr, ok := mapper.Resolve(src)
+	if !ok {
+		return
+	}
+	// dstSeen drives only the positional fallback (handle-less /
+	// MERGE slots): it counts parallel CSR occurrences per dst so a
+	// fallback slot maps to its CREATE-instance idx. The
+	// handle-driven path below ignores it entirely. dstParallelTotal
+	// lets the fallback tell multigraph (N_csr == N_create) from
+	// simple-graph (N_csr < N_create) storage for each pair.
+	dstParallelTotal := make(map[graph.NodeID]int64, len(edges))
+	for _, d := range edges {
+		dstParallelTotal[d]++
+	}
+	dstSeen := make(map[graph.NodeID]int64, len(dstParallelTotal))
+	// slotLabsReady defers the adjacency read until a slot of THIS source
+	// actually needs it: a Cypher-built graph resolves every slot by handle and
+	// must not pay for a resolution it never reaches.
+	slotLabsReady := false
+	for pos := uint64(0); pos < uint64(len(edges)); pos++ {
+		dst := edges[pos]
+		dstStr, ok := mapper.Resolve(dst)
 		if !ok {
 			continue
 		}
-		// dstSeen drives only the positional fallback (handle-less /
-		// MERGE slots): it counts parallel CSR occurrences per dst so a
-		// fallback slot maps to its CREATE-instance idx. The
-		// handle-driven path below ignores it entirely. dstParallelTotal
-		// lets the fallback tell multigraph (N_csr == N_create) from
-		// simple-graph (N_csr < N_create) storage for each pair.
-		dstParallelTotal := make(map[graph.NodeID]int64, end-start)
-		for pos := start; pos < end; pos++ {
-			dstParallelTotal[edges[pos]]++
+		dstSeen[dst]++
+		var labels []string
+		// slotResolved records that this position was matched to a real
+		// column-typed adjacency slot below, so its type — including the absence
+		// of one — is settled and the positional inference must not guess.
+		slotResolved := false
+		if pos < uint64(len(handles)) && handles[pos] != 0 {
+			// Stable-handle path: resolve this slot's type by the
+			// explicit per-edge handle read directly from the CSR
+			// position. This is delete-stable — removing a parallel
+			// sibling compacts the neighbour slice but the surviving
+			// slot keeps its original handle, so the type no longer
+			// mis-maps the way the positional idx did (Match2 [6] /
+			// Match7 [29]).
+			labels = g.EdgeLabelsByHandle(srcStr, dstStr, handles[pos])
 		}
-		dstSeen := make(map[graph.NodeID]int64, len(dstParallelTotal))
-		// slotLabsReady defers the adjacency read until a slot of THIS source
-		// actually needs it: a Cypher-built graph resolves every slot by handle and
-		// must not pay for a resolution it never reaches.
-		slotLabsReady := false
-		for pos := start; pos < end; pos++ {
-			dst := edges[pos]
-			dstStr, ok := mapper.Resolve(dst)
-			if !ok {
-				continue
-			}
-			dstSeen[dst]++
-			var labels []string
-			// slotResolved records that this position was matched to a real
-			// column-typed adjacency slot below, so its type — including the absence
-			// of one — is settled and the positional inference must not guess.
-			slotResolved := false
-			if pos < uint64(len(handles)) && handles[pos] != 0 {
-				// Stable-handle path: resolve this slot's type by the
-				// explicit per-edge handle read directly from the CSR
-				// position. This is delete-stable — removing a parallel
-				// sibling compacts the neighbour slice but the surviving
-				// slot keeps its original handle, so the type no longer
-				// mis-maps the way the positional idx did (Match2 [6] /
-				// Match7 [29]).
-				labels = g.EdgeLabelsByHandle(srcStr, dstStr, handles[pos])
-			}
-			if len(labels) == 0 {
-				// PER-SLOT resolution, for a slot with no by-handle type record.
-				// This CSR position is the n-th of its pair to reach here, so it
-				// resolves against the n-th COLUMN-TYPED adjacency slot of that pair
-				// and asks lpg only what THAT slot carries — its own inline type plus
-				// the pair's overflow.
-				//
-				// The pair's derived union is deliberately NOT consulted. It reports
-				// every type any parallel slot of the pair carries, so on a pair
-				// holding one :K edge and one untyped edge it matched `[r:K]` twice
-				// where once is correct, and on a 12-slot self-loop with a single
-				// typed slot it matched twelve times where once is correct (rmp
-				// #2258). Resolving per slot is also what makes this agree with the
-				// typed-degree rewrite, which resolves per slot in
-				// [lpg.Graph.slotCarriesType]: the two now answer the same question
-				// from the same state, so a count and its enumeration cannot differ.
-				//
-				// It runs BEFORE the positional inference below, and that order is
-				// load-bearing. The positional index is a per-PAIR ordinal: on a
-				// multigraph pair mixing a Cypher-created slot with a Go-API slot it
-				// handed the Go-API slot the CREATE's per-instance type, so an
-				// untyped edge matched `[r:K]` and an edge typed :K by the Go API
-				// reported the sibling's :M. The column is the authoritative source
-				// for such a slot, so it decides first — and it decides even when the
-				// type it finds is NOT accepted, because "this slot is an :M" is an
-				// answer, not a failure to resolve.
-				//
-				// A position beyond the pair's column-typed slots (possible only
-				// against a snapshot the adjacency has since changed under) resolves
-				// as carrying no inline type, which the overflow half of
-				// ForEachSlotRelTypeByID may still qualify — never as inheriting a
-				// sibling's type.
-				if !slotLabsReady {
-					if slotLabs == nil {
-						slotLabs = make(map[graph.NodeID][]uint32)
-						slotFallbackSeen = make(map[graph.NodeID]int)
-					}
-					slotLabsTouched = fillSlotLabs(
-						g, graph.NodeID(srcID), slotLabs, slotFallbackSeen, slotLabsTouched)
-					slotLabsReady = true
-				}
-				var encoded uint32
-				// The counter is advanced only for a pair that HAS column-typed
-				// slots, which keeps slotFallbackSeen's key set inside
-				// slotLabsTouched and so resettable in O(touched).
-				if ls := slotLabs[dst]; len(ls) > 0 {
-					if k := slotFallbackSeen[dst]; k < len(ls) {
-						encoded = ls[k]
-						slotResolved = true
-					}
-					slotFallbackSeen[dst]++
-				}
-				slotTypes = slotTypes[:0]
-				g.ForEachSlotRelTypeByID(graph.NodeID(srcID), dst, encoded, appendSlotType)
-				labels = slotTypes
-			}
-			if len(labels) == 0 && !slotResolved {
-				// Positional inference, reached only when the position could not be
-				// matched to a column-typed adjacency slot at all — legacy pre-handle
-				// storage, and a CSR snapshot the adjacency has since changed under.
-				//
-				// A position that WAS matched to such a slot never gets here, and that
-				// is the point: the slot's own emptiness means the relationship has no
-				// type, and the per-PAIR ordinal would answer with a sibling CREATE's
-				// type instead. On a multigraph pair mixing a Cypher-created :K slot
-				// with an untyped Go-API slot that made the untyped edge match
-				// `[r:K]`, so a bare MATCH counted two where one was correct.
-				totalCreates := g.EdgeCreateCount(srcStr, dstStr)
-				parallel := dstParallelTotal[dst]
-				if parallel >= totalCreates && totalCreates > 0 {
-					// Multigraph: one CSR slot per CREATE. Use the
-					// per-instance label set for this specific slot.
-					labels = g.EdgeLabelsAt(srcStr, dstStr, dstSeen[dst])
-				} else {
-					// Simple-graph (or no per-instance store): merge every
-					// instance's labels with the per-pair union so a
-					// filter targeting any CREATE's label still matches.
-					labels = collectAllInstanceLabels(g, srcStr, dstStr, totalCreates)
-				}
-			}
-			if len(labels) == 0 {
-				// The slot carries no relationship type at all, so it matches no
-				// type filter and is not visited.
-				continue
-			}
-			// The ONLY step removed from the original [buildEdgeTypeFilter] is the
-			// accept-set filtering that used to happen here. Everything above is the
-			// resolution, verbatim, and the caller now decides what to do with the
-			// answer — which is what makes the result type-set INDEPENDENT.
+		if len(labels) == 0 {
+			// PER-SLOT resolution, for a slot with no by-handle type record.
+			// This CSR position is the n-th of its pair to reach here, so it
+			// resolves against the n-th COLUMN-TYPED adjacency slot of that pair
+			// and asks lpg only what THAT slot carries — its own inline type plus
+			// the pair's overflow.
 			//
-			// types aliases a buffer reused across slots (see slotTypes above), so a
-			// visitor that keeps it must copy.
-			visit(pos, labels)
+			// The pair's derived union is deliberately NOT consulted. It reports
+			// every type any parallel slot of the pair carries, so on a pair
+			// holding one :K edge and one untyped edge it matched `[r:K]` twice
+			// where once is correct, and on a 12-slot self-loop with a single
+			// typed slot it matched twelve times where once is correct (rmp
+			// #2258). Resolving per slot is also what makes this agree with the
+			// typed-degree rewrite, which resolves per slot in
+			// [lpg.Graph.slotCarriesType]: the two now answer the same question
+			// from the same state, so a count and its enumeration cannot differ.
+			//
+			// It runs BEFORE the positional inference below, and that order is
+			// load-bearing. The positional index is a per-PAIR ordinal: on a
+			// multigraph pair mixing a Cypher-created slot with a Go-API slot it
+			// handed the Go-API slot the CREATE's per-instance type, so an
+			// untyped edge matched `[r:K]` and an edge typed :K by the Go API
+			// reported the sibling's :M. The column is the authoritative source
+			// for such a slot, so it decides first — and it decides even when the
+			// type it finds is NOT accepted, because "this slot is an :M" is an
+			// answer, not a failure to resolve.
+			//
+			// A position beyond the pair's column-typed slots (possible only
+			// against a snapshot the adjacency has since changed under) resolves
+			// as carrying no inline type, which the overflow half of
+			// ForEachSlotRelTypeByID may still qualify — never as inheriting a
+			// sibling's type.
+			if !slotLabsReady {
+				if sc.slotLabs == nil {
+					sc.slotLabs = make(map[graph.NodeID][]uint32)
+					sc.slotFallbackSeen = make(map[graph.NodeID]int)
+				}
+				sc.slotLabsTouched = fillSlotLabs(
+					g, src, sc.slotLabs, sc.slotFallbackSeen, sc.slotLabsTouched)
+				slotLabsReady = true
+			}
+			var encoded uint32
+			// The counter is advanced only for a pair that HAS column-typed
+			// slots, which keeps sc.slotFallbackSeen's key set inside
+			// sc.slotLabsTouched and so resettable in O(touched).
+			if ls := sc.slotLabs[dst]; len(ls) > 0 {
+				if k := sc.slotFallbackSeen[dst]; k < len(ls) {
+					encoded = ls[k]
+					slotResolved = true
+				}
+				sc.slotFallbackSeen[dst]++
+			}
+			sc.slotTypes = sc.slotTypes[:0]
+			g.ForEachSlotRelTypeByID(src, dst, encoded, sc.appendSlotType)
+			labels = sc.slotTypes
 		}
+		if len(labels) == 0 && !slotResolved {
+			// Positional inference, reached only when the position could not be
+			// matched to a column-typed adjacency slot at all — legacy pre-handle
+			// storage, and a CSR snapshot the adjacency has since changed under.
+			//
+			// A position that WAS matched to such a slot never gets here, and that
+			// is the point: the slot's own emptiness means the relationship has no
+			// type, and the per-PAIR ordinal would answer with a sibling CREATE's
+			// type instead. On a multigraph pair mixing a Cypher-created :K slot
+			// with an untyped Go-API slot that made the untyped edge match
+			// `[r:K]`, so a bare MATCH counted two where one was correct.
+			totalCreates := g.EdgeCreateCount(srcStr, dstStr)
+			parallel := dstParallelTotal[dst]
+			if parallel >= totalCreates && totalCreates > 0 {
+				// Multigraph: one CSR slot per CREATE. Use the
+				// per-instance label set for this specific slot.
+				labels = g.EdgeLabelsAt(srcStr, dstStr, dstSeen[dst])
+			} else {
+				// Simple-graph (or no per-instance store): merge every
+				// instance's labels with the per-pair union so a
+				// filter targeting any CREATE's label still matches.
+				labels = collectAllInstanceLabels(g, srcStr, dstStr, totalCreates)
+			}
+		}
+		if len(labels) == 0 {
+			// The slot carries no relationship type at all, so it matches no
+			// type filter and is not visited.
+			continue
+		}
+		// The ONLY step removed from the original [buildEdgeTypeFilter] is the
+		// accept-set filtering that used to happen here. Everything above is the
+		// resolution, verbatim, and the caller now decides what to do with the
+		// answer — which is what makes the result type-set INDEPENDENT.
+		//
+		// types aliases a buffer reused across slots (see sc.slotTypes above), so a
+		// visitor that keeps it must copy.
+		visit(base+pos, labels)
 	}
 }
 
