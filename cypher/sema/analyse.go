@@ -888,7 +888,7 @@ func (a *analyser) checkLabelTargetIsNode(target ast.Expression, pos ast.Positio
 	if !ok {
 		return // undefined variable: reported separately by checkExpr
 	}
-	if sym.Type == "relationship" {
+	if isRelKind(sym.Type) {
 		a.error(labelOnNonNodeError(v.Name, "Relationship", pos))
 	}
 }
@@ -976,9 +976,12 @@ func (a *analyser) whereClause(w *ast.Where) {
 	// (Pattern1 [11] `WHERE (n)` where n is bound to a node).
 	if v, ok := w.Predicate.(*ast.Variable); ok {
 		if sym, ok := a.scope.Lookup(v.Name); ok {
-			switch sym.Type {
-			case "node", "relationship", "path":
-				a.error(invalidBooleanOperandError("WHERE", sym.Type+"-variable", v.Pos))
+			switch typ := sym.Type; typ {
+			case "node", "relationship", relListType, "path":
+				if typ == relListType {
+					typ = "relationship"
+				}
+				a.error(invalidBooleanOperandError("WHERE", typ+"-variable", v.Pos))
 			}
 		}
 	}
@@ -1171,7 +1174,31 @@ func (a *analyser) relPatternIntroduce(rp *ast.RelationshipPattern) {
 		}
 		return
 	}
-	a.error(a.scope.Define(name, rp.Pos, "relationship"))
+	a.error(a.scope.Define(name, rp.Pos, relVarType(rp)))
+}
+
+// relListType is the static type of a variable bound by a variable-length
+// relationship pattern (`[rs*]`): a List of relationships, not a relationship
+// (openCypher 9, "Variable-length pattern matching" — the variable is bound to
+// the list of relationships of the matched path; clauses/match/Match4.feature).
+// It is interchangeable with "relationship" in every check that predates it
+// (see [isRelKind]); only a check that must tell a list from a single
+// relationship reads it distinctly — [analyser.checkFunctionArgTypes] admits it
+// for size(), which is defined on lists (rmp #2912).
+const relListType = "relationship-list"
+
+// relVarType returns the static type a relationship pattern binds its variable
+// to: [relListType] for a variable-length pattern, "relationship" otherwise.
+func relVarType(rp *ast.RelationshipPattern) string {
+	if rp.Range != nil {
+		return relListType
+	}
+	return "relationship"
+}
+
+// isRelKind reports whether typ is "relationship" or [relListType].
+func isRelKind(typ string) bool {
+	return typ == "relationship" || typ == relListType
 }
 
 // pathPatternRefCheck walks a path pattern in pure-reference mode: every
@@ -1235,6 +1262,9 @@ func relVarConflicts(have string, rp *ast.RelationshipPattern) bool {
 // (used for projection aliases and YIELD items where the static type is
 // unknown). Identical kinds never conflict.
 func conflictsWith(have, want string) bool {
+	if isRelKind(have) && isRelKind(want) {
+		return false
+	}
 	if have == want || have == "" || have == "any" || want == "any" {
 		return false
 	}
@@ -2718,6 +2748,9 @@ func containsNonDetCall(e ast.Expression) (ast.Position, bool) {
 //   - length(x):              rejects node, relationship (length is path-only here)
 //   - size(x):                rejects node, relationship, path (size is for strings / lists)
 //
+// A variable-length relationship variable ([relListType]) is rejected wherever
+// a relationship is, except by size(): it holds a List (rmp #2912).
+//
 // The first failing argument surfaces InvalidArgumentType; subsequent
 // arguments are not re-reported for the same invocation.
 func (a *analyser) checkFunctionArgTypes(fn *ast.FunctionInvocation) {
@@ -2750,10 +2783,17 @@ func (a *analyser) checkFunctionArgTypes(fn *ast.FunctionInvocation) {
 	if !exists {
 		return
 	}
-	if !reject[sym.Type] {
+	typ := sym.Type
+	if typ == relListType {
+		if name == "size" {
+			return
+		}
+		typ = "relationship"
+	}
+	if !reject[typ] {
 		return
 	}
-	a.error(invalidBooleanOperandError(name, sym.Type, v.Pos))
+	a.error(invalidBooleanOperandError(name, typ, v.Pos))
 }
 
 // checkCreateRelationshipTypes flags every relationship pattern in pat

@@ -16945,13 +16945,19 @@ func buildIRProjection(
 										storageStart, storageEnd = dstID, srcID
 									}
 									ets := capturedG.EdgeLabelsByHandle(propSrc, propDst, edgeID)
-									if len(ets) == 0 {
+									hasByHandleEntry := len(ets) > 0
+									if !hasByHandleEntry {
 										ets = capturedG.EdgeLabels(propSrc, propDst)
 									}
 									if len(ets) > 0 {
 										edgeType = pickEdgeType(ets, capturedMeta.acceptedTypes)
 									}
-									edgeProps = edgePropsToExprMap(capturedG, propSrc, propDst)
+									// The properties follow the SAME per-instance routing
+									// as the type: the bound edge's own by-handle bag when
+									// it has one, the per-pair store otherwise. Reading the
+									// per-pair store unconditionally reported the coalesced
+									// value of a parallel sibling (rmp #2910).
+									edgeProps = buildEdgeProps(capturedG, propSrc, propDst, edgeID, hasByHandleEntry, nil)
 								}
 							}
 							return expr.RelationshipValue{
