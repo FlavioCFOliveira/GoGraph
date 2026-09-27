@@ -112,31 +112,29 @@ func puRows(t *testing.T, eng *cypher.Engine, query string, cols ...string) []st
 // "Fail on introducing unbounded variables in pattern"). twoEnds says whether b
 // occurs, and so whether the outer MATCH binds it.
 //
-// withParseFails marks the one pattern the WITH … WHERE route cannot run: the
-// parser panics on `WITH a, b, size([(a)-[]-(b)-[]-(a) | 1]) AS n` (an untyped
-// two-hop comprehension in a WITH projection), independently of this defect, so
-// that route is left to the other shapes for it.
+// two_hop_untyped_cycle once skipped the WITH … WHERE route because the parser
+// panicked on `WITH a, b, size([(a)-[]-(b)-[]-(a) | 1]) AS n`; rmp #2899 fixed
+// the parser, and every pattern now runs every route.
 var puPatterns = []struct {
-	name           string
-	pattern        string
-	twoEnds        bool
-	withParseFails bool
+	name    string
+	pattern string
+	twoEnds bool
 }{
-	{"one_hop_undirected", `(a)-[:R]-(b)`, true, false},
-	{"one_hop_self", `(a)-[:R]-(a)`, false, false},
-	{"one_hop_self_directed", `(a)-[:R]->(a)`, false, false},
-	{"two_hop_undirected_cycle", `(a)-[:R]-(b)-[:R]-(a)`, true, false},
-	{"two_hop_directed_cycle", `(a)-[:R]->(b)-[:R]->(a)`, true, false},
-	{"two_hop_parallel_out_in", `(a)-[:R]->(b)<-[:R]-(a)`, true, false},
-	{"two_hop_parallel_in_out", `(a)<-[:R]-(b)-[:R]->(a)`, true, false},
-	{"two_hop_anon_cycle", `(a)-[:R]-()-[:R]-(a)`, false, false},
-	{"two_hop_anon_open", `(a)-[:R]-()-[:R]-()`, false, false},
-	{"two_hop_self_twice", `(a)-[:R]-(a)-[:R]-(a)`, false, false},
-	{"two_hop_incoming_chain", `(a)<-[:R]-()<-[:R]-()`, false, false},
-	{"two_hop_untyped_cycle", `(a)-[]-(b)-[]-(a)`, true, true},
-	{"three_hop_anon_cycle", `(a)-[:R]-()-[:R]-()-[:R]-(a)`, false, false},
-	{"three_hop_directed_cycle", `(a)-[:R]->()-[:R]->()-[:R]->(a)`, false, false},
-	{"three_hop_bound", `(a)-[:R]-(b)-[:R]-()-[:R]-(a)`, true, false},
+	{"one_hop_undirected", `(a)-[:R]-(b)`, true},
+	{"one_hop_self", `(a)-[:R]-(a)`, false},
+	{"one_hop_self_directed", `(a)-[:R]->(a)`, false},
+	{"two_hop_undirected_cycle", `(a)-[:R]-(b)-[:R]-(a)`, true},
+	{"two_hop_directed_cycle", `(a)-[:R]->(b)-[:R]->(a)`, true},
+	{"two_hop_parallel_out_in", `(a)-[:R]->(b)<-[:R]-(a)`, true},
+	{"two_hop_parallel_in_out", `(a)<-[:R]-(b)-[:R]->(a)`, true},
+	{"two_hop_anon_cycle", `(a)-[:R]-()-[:R]-(a)`, false},
+	{"two_hop_anon_open", `(a)-[:R]-()-[:R]-()`, false},
+	{"two_hop_self_twice", `(a)-[:R]-(a)-[:R]-(a)`, false},
+	{"two_hop_incoming_chain", `(a)<-[:R]-()<-[:R]-()`, false},
+	{"two_hop_untyped_cycle", `(a)-[]-(b)-[]-(a)`, true},
+	{"three_hop_anon_cycle", `(a)-[:R]-()-[:R]-()-[:R]-(a)`, false},
+	{"three_hop_directed_cycle", `(a)-[:R]->()-[:R]->()-[:R]->(a)`, false},
+	{"three_hop_bound", `(a)-[:R]-(b)-[:R]-()-[:R]-(a)`, true},
 }
 
 // TestPatternPredicate_RelationshipUniqueness_MatchesMatch asserts, for every
@@ -180,9 +178,6 @@ func TestPatternPredicate_RelationshipUniqueness_MatchesMatch(t *testing.T) {
 							append(cols, "n"), counted},
 					}
 					for _, r := range routes {
-						if p.withParseFails && r.name == "comprehension_with_where" {
-							continue
-						}
 						got := puRows(t, eng, r.query, r.cols...)
 						if r.name == "comprehension_return" {
 							got = slices.DeleteFunc(got, func(s string) bool { return strings.HasSuffix(s, "|0") })

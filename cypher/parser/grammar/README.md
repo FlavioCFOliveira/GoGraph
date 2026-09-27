@@ -127,6 +127,15 @@ re-applied after any upstream refresh:
    - **Run `TestGenPatchBehaviours`** (`cypher/genpatch_behaviour_test.go`)
      after every regeneration. It pins each patched behaviour to a concrete
      result, which a compile check cannot do.
+   - **Run `TestHandWrittenRuleInvokingStates`**
+     (`cypher/parser/invoking_state_2899_test.go`) after every regeneration.
+     The hand-written rule bodies in the patch (`MultiPartQ`,
+     `ReduceExpression`, and the reduce alternative of `Atom`) call
+     `p.SetState(N)` before each sub-rule call, with `N` taken from the
+     generated code, because antlr4-go requires every context's invoking
+     state to be a rule-invocation state (rmp #2899). These are absolute
+     state numbers: if a grammar change shifts them, the test fails. Re-read
+     the numbers from the raw generator output and update the patch.
 
    To find the shift, compare state numbers between the pre-change generated
    file and the new one for a rule the patch touches; the delta is uniform for

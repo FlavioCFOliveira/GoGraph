@@ -1,5 +1,5 @@
 diff --git a/cypher/parser/gen/cypher_parser.go b/cypher/parser/gen/cypher_parser.go
-index 2a1811f..cd00b9b 100644
+index 2a1811f..b89915b 100644
 --- a/cypher/parser/gen/cypher_parser.go
 +++ b/cypher/parser/gen/cypher_parser.go
 @@ -4,6 +4,7 @@ package gen // CypherParser
@@ -34,7 +34,7 @@ index 2a1811f..cd00b9b 100644
  )
  
  // IScriptContext is an interface to support dynamic dispatch.
-@@ -3608,85 +3612,131 @@ func (s *MultiPartQContext) Accept(visitor antlr.ParseTreeVisitor) interface{} {
+@@ -3608,84 +3612,146 @@ func (s *MultiPartQContext) Accept(visitor antlr.ParseTreeVisitor) interface{} {
  	}
  }
  
@@ -87,6 +87,27 @@ index 2a1811f..cd00b9b 100644
 -	p.GetErrorHandler().Sync(p)
 -	if p.HasError() {
 -		goto errorExit
+-	}
+-	_la = p.GetTokenStream().LA(1)
+-
+-	for (int64(_la) & ^0x3f) == 0 && ((int64(1)<<_la)&577727389967056896) != 0 {
+-		{
+-			p.SetState(296)
+-			p.ReadingStatement()
+-		}
+ 
+-		p.SetState(301)
+-		p.GetErrorHandler().Sync(p)
++	// multiPartQInvokingStates (rmp #2899): every rule call below is preceded
++	// by p.SetState(N), where N is the ATN state at which the generated
++	// multiPartQ body invokes that rule. The callee's context records the
++	// current state as its invoking state, and full-context (LL) prediction
++	// and error recovery follow it through the context chain, asserting that
++	// the state's first transition is a RuleTransition (antlr4-go v4.13.1
++	// predictionContextFromRuleContext, DefaultErrorStrategy
++	// getErrorRecoverySet). Without it the callee inherited the rule's start
++	// state, and any LL fallback below a WITH panicked. The states are
++	// checked by TestHandWrittenRuleInvokingStates in cypher/parser.
 +
 +	// readingStatementMask is the set of token types that can start a
 +	// readingStatement: MATCH, OPTIONAL MATCH, UNWIND, and in-query CALL.
@@ -98,13 +119,8 @@ index 2a1811f..cd00b9b 100644
 +	// isReadingStart reports whether token type _la can start a readingStatement.
 +	isReadingStart := func(la int) bool {
 +		return (int64(la) & ^0x3f) == 0 && (int64(1)<<la)&readingStatementMask != 0
- 	}
--	_la = p.GetTokenStream().LA(1)
- 
--	for (int64(_la) & ^0x3f) == 0 && ((int64(1)<<_la)&577727389967056896) != 0 {
--		{
--			p.SetState(296)
--			p.ReadingStatement()
++	}
++
 +	// updatingStatementMask: CREATE, DELETE, DETACH, MERGE, REMOVE, SET.
 +	const updatingStatementMask = (int64(1) << CypherParserCREATE) |
 +		(int64(1) << CypherParserDELETE) |
@@ -118,15 +134,14 @@ index 2a1811f..cd00b9b 100644
 +		// check it explicitly (it is an updating statement, per the grammar).
 +		if la == CypherParserFOREACH {
 +			return true
- 		}
++		}
 +		return (int64(la) & ^0x3f) == 0 && (int64(1)<<la)&updatingStatementMask != 0
 +	}
- 
--		p.SetState(301)
--		p.GetErrorHandler().Sync(p)
++
 +	// Consume the initial readingStatement* before the first WITH.
 +	_la = p.GetTokenStream().LA(1)
 +	for isReadingStart(_la) {
++		p.SetState(296)
 +		p.ReadingStatement()
  		if p.HasError() {
  			goto errorExit
@@ -152,6 +167,7 @@ index 2a1811f..cd00b9b 100644
 +		// updatingStatement*
 +		_la = p.GetTokenStream().LA(1)
 +		for isUpdatingStart(_la) {
++			p.SetState(302)
 +			p.UpdatingStatement()
  			if p.HasError() {
  				goto errorExit
@@ -185,14 +201,11 @@ index 2a1811f..cd00b9b 100644
 -		p.GetErrorHandler().Sync(p)
 -		_alt = p.GetInterpreter().AdaptivePredict(p.BaseParser, p.GetTokenStream(), 24, p.GetParserRuleContext())
 +		// withSt (required)
++		p.SetState(308)
 +		p.WithSt()
  		if p.HasError() {
  			goto errorExit
  		}
--	}
--	{
--		p.SetState(313)
--		p.SinglePartQ()
 +
 +		// After the WITH, decide whether to loop: loop only if there is another
 +		// WITH before the next RETURN/EOF.
@@ -204,6 +217,7 @@ index 2a1811f..cd00b9b 100644
 +		// precedes the next updatingStatement*/withSt group.
 +		_la = p.GetTokenStream().LA(1)
 +		for isReadingStart(_la) {
++			p.SetState(296)
 +			p.ReadingStatement()
 +			if p.HasError() {
 +				goto errorExit
@@ -211,15 +225,19 @@ index 2a1811f..cd00b9b 100644
 +			_la = p.GetTokenStream().LA(1)
 +		}
  	}
- 
+-	{
+-		p.SetState(313)
+-		p.SinglePartQ()
+-	}
++
 +	// Terminal singlePartQ handles the final RETURN and any reading/updating
 +	// clauses that follow the last WITH.
++	p.SetState(313)
 +	p.SinglePartQ()
-+
+ 
  errorExit:
  	if p.HasError() {
- 		v := p.GetError()
-@@ -11255,6 +11305,7 @@ type IAtomContext interface {
+@@ -11255,6 +11321,7 @@ type IAtomContext interface {
  	ListComprehension() IListComprehensionContext
  	PatternComprehension() IPatternComprehensionContext
  	FilterWith() IFilterWithContext
@@ -227,7 +245,7 @@ index 2a1811f..cd00b9b 100644
  	RelationshipsChainPattern() IRelationshipsChainPatternContext
  	ParenthesizedExpression() IParenthesizedExpressionContext
  	FunctionInvocation() IFunctionInvocationContext
-@@ -11411,6 +11462,22 @@ func (s *AtomContext) FilterWith() IFilterWithContext {
+@@ -11411,6 +11478,22 @@ func (s *AtomContext) FilterWith() IFilterWithContext {
  	return t.(IFilterWithContext)
  }
  
@@ -250,7 +268,7 @@ index 2a1811f..cd00b9b 100644
  func (s *AtomContext) RelationshipsChainPattern() IRelationshipsChainPatternContext {
  	var t antlr.RuleContext
  	for _, ctx := range s.GetChildren() {
-@@ -11558,11 +11625,30 @@ func (p *CypherParser) Atom() (localctx IAtomContext) {
+@@ -11558,11 +11641,30 @@ func (p *CypherParser) Atom() (localctx IAtomContext) {
  	p.EnterRule(localctx, 116, CypherParserRULE_atom)
  	p.SetState(630)
  	p.GetErrorHandler().Sync(p)
@@ -283,7 +301,7 @@ index 2a1811f..cd00b9b 100644
  	case 1:
  		p.EnterOuterAlt(localctx, 1)
  		{
-@@ -11661,6 +11747,13 @@ func (p *CypherParser) Atom() (localctx IAtomContext) {
+@@ -11661,6 +11763,18 @@ func (p *CypherParser) Atom() (localctx IAtomContext) {
  			p.MapProjection()
  		}
  
@@ -291,13 +309,18 @@ index 2a1811f..cd00b9b 100644
 +		// atomReduceFix: hand-written alternative for reduce(acc = init, x IN list | expr).
 +		p.EnterOuterAlt(localctx, 100)
 +		{
++			// reduceExpression has no ATN state of its own, so it is invoked
++			// from the functionInvocation alternative's state (625): the
++			// follow state of that call is the end of atom, which is exactly
++			// what follows reduce(...). See ReduceExpression (rmp #2899).
++			p.SetState(625)
 +			p.ReduceExpression()
 +		}
 +
  	case antlr.ATNInvalidAltNumber:
  		goto errorExit
  	}
-@@ -14320,6 +14413,276 @@ errorExit:
+@@ -14320,6 +14434,294 @@ errorExit:
  	return localctx
  }
  
@@ -473,6 +496,20 @@ index 2a1811f..cd00b9b 100644
 +// standard expressionChain production. It is called from Atom() when the
 +// current token is an ID whose text is "reduce" (case-insensitive) followed by
 +// a LPAREN.
++//
++// Invoking states (rmp #2899): reduceExpression is not in the ATN, so each
++// sub-rule call is preceded by p.SetState(N) naming a generated state that
++// invokes the same rule and whose follow state admits the token that follows
++// the sub-rule here: symbol from lhs (657, followed by ASSIGN), the initial
++// value from the first expression of expressionChain (802, followed by COMMA
++// or the end of the chain), filterExpression from listComprehension (784,
++// followed by STICK or RBRACK) and the accumulation expression from
++// parenthesizedExpression (757, followed by RPAREN). A follow state is
++// consulted only by full-context prediction that looks past the end of a
++// sub-rule, so it approximates, and never replaces, the token sequence this
++// function matches. Without a RuleTransition state there, the first LL
++// fallback inside reduce() panicked in antlr4-go's
++// predictionContextFromRuleContext.
 +func (p *CypherParser) ReduceExpression() (localctx IReduceExpressionContext) {
 +	localctx = NewReduceExpressionContext(p, p.GetParserRuleContext(), p.GetState())
 +	p.EnterRule(localctx, 184, CypherParserRULE_reduceExpression)
@@ -496,6 +533,7 @@ index 2a1811f..cd00b9b 100644
 +
 +	// Symbol: accumulator variable name
 +	{
++		p.SetState(657)
 +		p.Symbol()
 +	}
 +
@@ -509,6 +547,7 @@ index 2a1811f..cd00b9b 100644
 +
 +	// Expression: initial value
 +	{
++		p.SetState(802)
 +		p.Expression()
 +	}
 +
@@ -522,6 +561,7 @@ index 2a1811f..cd00b9b 100644
 +
 +	// FilterExpression: "x IN list" (with optional WHERE)
 +	{
++		p.SetState(784)
 +		p.FilterExpression()
 +	}
 +
@@ -535,6 +575,7 @@ index 2a1811f..cd00b9b 100644
 +
 +	// Expression: the map/accumulation expression
 +	{
++		p.SetState(757)
 +		p.Expression()
 +	}
 +
@@ -574,7 +615,7 @@ index 2a1811f..cd00b9b 100644
  // IPatternComprehensionContext is an interface to support dynamic dispatch.
  type IPatternComprehensionContext interface {
  	antlr.ParserRuleContext
-@@ -16041,9 +16404,16 @@ func (p *CypherParser) Literal() (localctx ILiteralContext) {
+@@ -16041,9 +16443,16 @@ func (p *CypherParser) Literal() (localctx ILiteralContext) {
  	localctx = NewLiteralContext(p, p.GetParserRuleContext(), p.GetState())
  	p.EnterRule(localctx, 160, CypherParserRULE_literal)
  	p.SetState(841)
@@ -594,7 +635,7 @@ index 2a1811f..cd00b9b 100644
  	}
  
  	switch p.GetTokenStream().LA(1) {
-@@ -16061,6 +16431,21 @@ func (p *CypherParser) Literal() (localctx ILiteralContext) {
+@@ -16061,6 +16470,21 @@ func (p *CypherParser) Literal() (localctx ILiteralContext) {
  			p.NumLit()
  		}
  
@@ -616,7 +657,7 @@ index 2a1811f..cd00b9b 100644
  	case CypherParserNULL_W:
  		p.EnterOuterAlt(localctx, 3)
  		{
-@@ -16248,7 +16633,6 @@ func (s *RangeLitContext) Accept(visitor antlr.ParseTreeVisitor) interface{} {
+@@ -16248,7 +16672,6 @@ func (s *RangeLitContext) Accept(visitor antlr.ParseTreeVisitor) interface{} {
  func (p *CypherParser) RangeLit() (localctx IRangeLitContext) {
  	localctx = NewRangeLitContext(p, p.GetParserRuleContext(), p.GetState())
  	p.EnterRule(localctx, 162, CypherParserRULE_rangeLit)
@@ -624,7 +665,7 @@ index 2a1811f..cd00b9b 100644
  
  	p.EnterOuterAlt(localctx, 1)
  	{
-@@ -16259,28 +16643,19 @@ func (p *CypherParser) RangeLit() (localctx IRangeLitContext) {
+@@ -16259,28 +16682,19 @@ func (p *CypherParser) RangeLit() (localctx IRangeLitContext) {
  			goto errorExit
  		}
  	}
@@ -660,7 +701,7 @@ index 2a1811f..cd00b9b 100644
  		{
  			p.SetState(847)
  			p.Match(CypherParserRANGE)
-@@ -16289,20 +16664,13 @@ func (p *CypherParser) RangeLit() (localctx IRangeLitContext) {
+@@ -16289,20 +16703,13 @@ func (p *CypherParser) RangeLit() (localctx IRangeLitContext) {
  				goto errorExit
  			}
  		}
@@ -683,7 +724,7 @@ index 2a1811f..cd00b9b 100644
  
  	}
  
-@@ -16516,7 +16884,18 @@ func (p *CypherParser) NumLit() (localctx INumLitContext) {
+@@ -16516,7 +16923,18 @@ func (p *CypherParser) NumLit() (localctx INumLitContext) {
  	localctx = NewNumLitContext(p, p.GetParserRuleContext(), p.GetState())
  	p.EnterRule(localctx, 166, CypherParserRULE_numLit)
  	p.EnterOuterAlt(localctx, 1)
@@ -703,7 +744,7 @@ index 2a1811f..cd00b9b 100644
  		p.SetState(855)
  		p.Match(CypherParserDIGIT)
  		if p.HasError() {
-@@ -17933,6 +18312,70 @@ func (p *CypherParser) ReservedWord() (localctx IReservedWordContext) {
+@@ -17933,6 +18351,70 @@ func (p *CypherParser) ReservedWord() (localctx IReservedWordContext) {
  	return localctx
  }
  
