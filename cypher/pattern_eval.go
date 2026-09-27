@@ -256,6 +256,7 @@ func (pe *patternEvaluator) enumeratePatternMatches(ctx context.Context, pp *ast
 	}
 
 	steps := collectSteps(pp.Head)
+	used := newRelPath(steps)
 	for _, sid := range startIDs {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -267,7 +268,7 @@ func (pe *patternEvaluator) enumeratePatternMatches(ctx context.Context, pp *ast
 		if startNode != nil && startNode.Variable != nil {
 			base[*startNode.Variable] = nodeValueForID(pe.g, sid)
 		}
-		if err := pe.enumerateSteps(ctx, sid, steps, base, cb); err != nil {
+		if err := pe.enumerateSteps(ctx, sid, steps, base, used, cb); err != nil {
 			return err
 		}
 	}
@@ -277,7 +278,11 @@ func (pe *patternEvaluator) enumeratePatternMatches(ctx context.Context, pp *ast
 // enumerateSteps recursively walks the remaining hop list, extending
 // the running RowContext with each hop's bindings. When the list is
 // empty the callback is invoked with the accumulated row.
-func (pe *patternEvaluator) enumerateSteps(ctx context.Context, srcID graph.NodeID, steps []step, row expr.RowContext, cb func(expr.RowContext) error) error {
+//
+// used holds the relationships the path has crossed so far (see [relPath]); a
+// candidate already on it is skipped, which is openCypher's relationship
+// isomorphism (rmp #2895).
+func (pe *patternEvaluator) enumerateSteps(ctx context.Context, srcID graph.NodeID, steps []step, row expr.RowContext, used relPath, cb func(expr.RowContext) error) error {
 	if len(steps) == 0 {
 		return cb(row)
 	}
@@ -298,25 +303,35 @@ func (pe *patternEvaluator) enumerateSteps(ctx context.Context, srcID graph.Node
 		dir = s.rel.Direction
 	}
 
-	candidates := func() []candidateHop {
-		switch dir {
-		case ast.RelDirectionOutgoing:
-			return pe.collectOutgoingCandidates(srcID, srcKey, s)
-		case ast.RelDirectionIncoming:
-			// A self-loop IS an incoming edge and must be enumerated here.
-			return pe.collectIncomingCandidates(srcID, srcKey, s, true)
-		default:
-			// Undirected: the outgoing collector has already emitted every
-			// self-loop, and openCypher matches each relationship of an
-			// undirected pattern exactly ONCE, so the incoming leg must not
-			// emit it a second time.
-			out := pe.collectOutgoingCandidates(srcID, srcKey, s)
-			return append(out, pe.collectIncomingCandidates(srcID, srcKey, s, false)...)
+	var candidates []candidateHop
+	switch dir {
+	case ast.RelDirectionOutgoing:
+		candidates = pe.collectOutgoingCandidates(srcID, srcKey, s)
+	case ast.RelDirectionIncoming:
+		// A self-loop IS an incoming edge and must be enumerated here.
+		in, err := pe.collectIncomingCandidates(ctx, srcID, srcKey, s, true)
+		if err != nil {
+			return err
 		}
-	}()
+		candidates = in
+	default:
+		// Undirected: the outgoing collector has already emitted every
+		// self-loop, and openCypher matches each relationship of an
+		// undirected pattern exactly ONCE, so the incoming leg must not
+		// emit it a second time.
+		in, err := pe.collectIncomingCandidates(ctx, srcID, srcKey, s, false)
+		if err != nil {
+			return err
+		}
+		candidates = append(pe.collectOutgoingCandidates(srcID, srcKey, s), in...)
+	}
 	for _, c := range candidates {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		inst := c.instance()
+		if relUsed(used, inst) {
+			continue
 		}
 		// Advance to the TRAVERSAL destination, not to the hop's stored dstID.
 		// The two coincide on a forward leg but are opposite on the reverse leg
@@ -333,7 +348,7 @@ func (pe *patternEvaluator) enumerateSteps(ctx context.Context, srcID graph.Node
 		if s.rel != nil && s.rel.Variable != nil {
 			next[*s.rel.Variable] = relValueFromHop(pe.g, c, s.rel)
 		}
-		if err := pe.enumerateSteps(ctx, dstID, remaining, next, cb); err != nil {
+		if err := pe.enumerateSteps(ctx, dstID, remaining, next, pushRel(used, inst), cb); err != nil {
 			return err
 		}
 	}
@@ -358,12 +373,19 @@ func (pe *patternEvaluator) enumerateSteps(ctx context.Context, srcID graph.Node
 // off the hop with no orientation guesswork. The price is that consumers which
 // need the node the traversal ADVANCES to must ask for it: use
 // [candidateHop.traversalDst], never dstID (rmp #2505).
+//
+// slot is the position of this relationship in srcID's adjacency entry, so
+// (srcID, slot) is its identity in the view — see [relInstance].
 type candidateHop struct {
 	srcKey, dstKey string
 	srcID, dstID   graph.NodeID
 	handle         uint64
+	slot           int
 	forward        bool
 }
+
+// instance returns the identity of the relationship this hop crosses.
+func (c candidateHop) instance() relInstance { return relInstance{src: c.srcID, slot: c.slot} }
 
 // traversalDst returns the node this hop advances the traversal to. Because the
 // hop records STORAGE order, that is dstID on a forward leg and srcID on the
@@ -404,7 +426,7 @@ func (pe *patternEvaluator) collectOutgoingCandidates(srcID graph.NodeID, srcKey
 		if !pe.slotMatchesRelType(srcID, dstID, handle, s.rel) {
 			continue
 		}
-		out = append(out, candidateHop{srcID: srcID, dstID: dstID, srcKey: srcKey, dstKey: dstKey, handle: handle, forward: true})
+		out = append(out, candidateHop{srcID: srcID, dstID: dstID, srcKey: srcKey, dstKey: dstKey, handle: handle, slot: i, forward: true})
 	}
 	return out
 }
@@ -450,41 +472,156 @@ func (pe *patternEvaluator) slotMatchesRelType(srcID, dstID graph.NodeID, handle
 // comprehension must — but the undirected composition must not re-emit a loop
 // the outgoing collector has already produced, because openCypher matches each
 // relationship of an undirected pattern exactly once (rmp #2505).
-func (pe *patternEvaluator) collectIncomingCandidates(dstID graph.NodeID, dstKey string, s step, includeSelfLoop bool) []candidateHop {
-	mapper := pe.g.AdjList().Mapper()
+//
+// One candidate is emitted PER parallel slot pointing at dstID (not just the
+// first), each carrying its own handle, so an untyped `[r]` incoming hop over a
+// multi-type parallel pair enumerates every instance — mirroring the outgoing
+// path and the primary Expand path (rmp #2017). The slots are found by
+// [patternEvaluator.scanIncoming] and filtered only after its walk has returned
+// (rmp #2896).
+func (pe *patternEvaluator) collectIncomingCandidates(ctx context.Context, dstID graph.NodeID, dstKey string, s step, includeSelfLoop bool) ([]candidateHop, error) {
+	hits, err := pe.scanIncoming(ctx, dstID, includeSelfLoop, true, nil)
+	if err != nil {
+		return nil, err
+	}
 	var out []candidateHop
-	mapper.Walk(func(candidateID graph.NodeID, candidateKey string) bool {
-		if candidateID == dstID && !includeSelfLoop {
+	for _, h := range hits {
+		if !pe.edgeMatchesRel(h.key, dstKey, s.rel) {
+			continue
+		}
+		// The slot is stored h.id → dstID, so the per-instance type lookup uses
+		// that orientation even though the traversal crosses it backwards (see
+		// [candidateHop]'s orientation contract).
+		if !pe.slotMatchesRelType(h.id, dstID, h.handle, s.rel) {
+			continue
+		}
+		out = append(out, candidateHop{srcID: h.id, dstID: dstID, srcKey: h.key, dstKey: dstKey, handle: h.handle, slot: h.slot, forward: false})
+	}
+	return out, nil
+}
+
+// incomingSlot is one adjacency slot id → dst found by
+// [patternEvaluator.scanIncoming]. key is id's interned key, captured during the
+// walk so that no later step has to resolve it.
+type incomingSlot struct {
+	key    string
+	id     graph.NodeID
+	handle uint64
+	slot   int
+}
+
+// scanIncoming returns the adjacency slots pointing AT dstID, in
+// [graph.Mapper.Walk] order: every such slot when everySlot is set, otherwise
+// the first slot of each source. dstID's own loops are included only when
+// includeSelf is set, and a source in skip is not read at all.
+//
+// # The callback only collects (rmp #2896)
+//
+// Walk holds each shard's read lock for the whole of that shard's iteration,
+// and its contract forbids the callback from re-entering the Mapper while a
+// writer may run: once a concurrent Intern queues on the shard's write lock,
+// sync.RWMutex admits no new reader, so a nested read lock on the walked shard
+// blocks the callback, the writer, and every later operation on the shard. The
+// callers used to test the edge type inside the callback, and
+// [lpg.ReadView.EdgeLabels] / [lpg.ReadView.HasEdge] look the source key up in
+// the Mapper — on the very shard being walked, because that is the key's own
+// shard. So the callback now reads nothing but the source's adjacency entry,
+// which lives outside the Mapper, and every other test runs after Walk has
+// released its last lock. The walked set, the entries read and the snapshot they
+// are read at are the same as before, so what is visible is unchanged; keys are
+// interned once and never change, so the captured key is the one a later
+// Resolve would return.
+func (pe *patternEvaluator) scanIncoming(ctx context.Context, dstID graph.NodeID, includeSelf, everySlot bool, skip map[graph.NodeID]struct{}) ([]incomingSlot, error) {
+	var hits []incomingSlot
+	var err error
+	pe.g.AdjList().Mapper().Walk(func(id graph.NodeID, key string) bool {
+		if err = ctx.Err(); err != nil {
+			return false
+		}
+		if id == dstID && !includeSelf {
 			return true
 		}
-		// Emit one candidate PER parallel slot pointing at dstID (not just the
-		// first), each carrying its own handle, so an untyped `[r]` incoming hop
-		// over a multi-type parallel pair enumerates every instance — mirroring
-		// the outgoing path and the primary Expand path (rmp #2017).
-		candView := pe.g.EntryView(candidateID)
-		nbs, handles := candView.Neighbours, candView.Handles
-		for i, nb := range nbs {
+		if _, seen := skip[id]; seen {
+			return true
+		}
+		view := pe.g.EntryView(id)
+		for i, nb := range view.Neighbours {
 			if nb != dstID {
 				continue
 			}
-			if !pe.edgeMatchesRel(candidateKey, dstKey, s.rel) {
-				continue
+			hits = append(hits, incomingSlot{key: key, id: id, handle: handleAt(view.Handles, i), slot: i})
+			if !everySlot {
+				break
 			}
-			var handle uint64
-			if i < len(handles) {
-				handle = handles[i]
-			}
-			// The slot is stored candidateID → dstID, so the per-instance type
-			// lookup uses that orientation even though the traversal crosses it
-			// backwards (see [candidateHop]'s orientation contract).
-			if !pe.slotMatchesRelType(candidateID, dstID, handle, s.rel) {
-				continue
-			}
-			out = append(out, candidateHop{srcID: candidateID, dstID: dstID, srcKey: candidateKey, dstKey: dstKey, handle: handle, forward: false})
 		}
 		return true
 	})
-	return out
+	return hits, err
+}
+
+// handleAt returns slot i's stable handle, or 0 when the entry stores none.
+func handleAt(handles []uint64, i int) uint64 {
+	if i < len(handles) {
+		return handles[i]
+	}
+	return 0
+}
+
+// relInstance identifies one relationship of the view: its storage-order source
+// and the relationship's position in that source's adjacency entry. In a directed
+// adjacency every relationship occupies exactly one slot of exactly one entry,
+// and one evaluation reads every entry at one instant, so two slots are the same
+// relationship exactly when their instances are equal. The identity needs no
+// handle, so it holds equally on storage that stamps none.
+type relInstance struct {
+	src  graph.NodeID
+	slot int
+}
+
+// relPath is the stack of relationships a partial match has crossed, used to
+// enforce openCypher's relationship isomorphism: one relationship may fill at
+// most one relationship slot of a pattern (the TCK rejects a re-used
+// relationship variable with RelationshipUniquenessViolation, Match3 [29], and
+// relies on the rule inside a pattern predicate, Pattern1 [10] and [18]) — rmp
+// #2895.
+//
+// A pattern of one hop cannot re-use a relationship, so [newRelPath] returns nil
+// for it and the single-hop paths keep their pair-based shortcuts untouched. A
+// longer pattern gets a path pre-sized to its hop count, so [pushRel] never
+// allocates. Variable-length hops are matched by node reachability
+// ([patternEvaluator.matchVarLen]) and do not record the relationships they
+// cross.
+type relPath = []relInstance
+
+// newRelPath returns the path to thread through a match of steps: nil when the
+// pattern has fewer than two hops, else an empty path with room for every hop.
+func newRelPath(steps []step) relPath {
+	if len(steps) < 2 {
+		return nil
+	}
+	return make(relPath, 0, len(steps))
+}
+
+// relUsed reports whether r is already on used. Paths are a handful of hops, so
+// a linear scan beats any set.
+func relUsed(used relPath, r relInstance) bool {
+	for _, u := range used {
+		if u == r {
+			return true
+		}
+	}
+	return false
+}
+
+// pushRel returns used with r appended, or used unchanged when uniqueness is not
+// tracked (a nil path). A path sibling hops extend at the same depth shares one
+// backing array, which is sound because each extension is consumed by its
+// recursion before the next sibling overwrites it.
+func pushRel(used relPath, r relInstance) relPath {
+	if cap(used) == 0 {
+		return used
+	}
+	return append(used, r)
 }
 
 // cloneRow returns a shallow copy of row so the callback never mutates
@@ -648,6 +785,7 @@ func (pe *patternEvaluator) matchPattern(ctx context.Context, pp *ast.PathPatter
 		return len(startIDs) > 0, nil
 	}
 
+	used := newRelPath(steps)
 	for _, sid := range startIDs {
 		if err := ctx.Err(); err != nil {
 			return false, err
@@ -655,7 +793,7 @@ func (pe *patternEvaluator) matchPattern(ctx context.Context, pp *ast.PathPatter
 		if !pe.checkStartNode(startNode, sid, row) {
 			continue
 		}
-		ok, err := pe.matchSteps(ctx, sid, steps, row)
+		ok, err := pe.matchSteps(ctx, sid, steps, row, used)
 		if err != nil {
 			return false, err
 		}
@@ -689,7 +827,11 @@ func collectSteps(head *ast.PathElement) []step {
 
 // matchSteps recursively evaluates each hop in the step list starting from
 // srcID, returning true when all hops produce at least one complete path.
-func (pe *patternEvaluator) matchSteps(ctx context.Context, srcID graph.NodeID, steps []step, row expr.RowContext) (bool, error) {
+//
+// used is the [relPath] of the match so far: nil for a one-hop pattern, which
+// cannot re-use a relationship, and otherwise the relationships already crossed,
+// none of which a later hop may cross again (rmp #2895).
+func (pe *patternEvaluator) matchSteps(ctx context.Context, srcID graph.NodeID, steps []step, row expr.RowContext, used relPath) (bool, error) {
 	if len(steps) == 0 {
 		return true, nil
 	}
@@ -697,15 +839,15 @@ func (pe *patternEvaluator) matchSteps(ctx context.Context, srcID graph.NodeID, 
 	remaining := steps[1:]
 
 	if s.rel != nil && s.rel.Range != nil {
-		return pe.matchVarLen(ctx, srcID, s, remaining, row)
+		return pe.matchVarLen(ctx, srcID, s, remaining, row, used)
 	}
-	return pe.matchSingleHop(ctx, srcID, s, remaining, row)
+	return pe.matchSingleHop(ctx, srcID, s, remaining, row, used)
 }
 
 // matchSingleHop follows a single fixed-length hop and recurses.
 //
 // direction × filter × recursion branches; extracted helpers bring each below 15
-func (pe *patternEvaluator) matchSingleHop(ctx context.Context, srcID graph.NodeID, s step, remaining []step, row expr.RowContext) (bool, error) {
+func (pe *patternEvaluator) matchSingleHop(ctx context.Context, srcID graph.NodeID, s step, remaining []step, row expr.RowContext, used relPath) (bool, error) {
 	mapper := pe.g.AdjList().Mapper()
 
 	// Collect candidate destination node IDs based on direction.
@@ -721,14 +863,17 @@ func (pe *patternEvaluator) matchSingleHop(ctx context.Context, srcID graph.Node
 
 	switch dir {
 	case ast.RelDirectionOutgoing:
-		return pe.matchOutgoing(ctx, srcID, srcKey, s, remaining, row)
+		return pe.matchOutgoing(ctx, srcID, srcKey, s, remaining, row, used)
 	case ast.RelDirectionIncoming:
-		return pe.matchIncoming(ctx, srcID, srcKey, s, remaining, row)
+		return pe.matchIncoming(ctx, srcID, srcKey, s, remaining, row, used)
 	default: // undirected: check both out and in
-		if found, err := pe.matchOutgoing(ctx, srcID, srcKey, s, remaining, row); err != nil || found {
+		// A self-loop is reached by both legs under the SAME relInstance (its
+		// one slot in srcID's entry), so relationship isomorphism still sees it
+		// as one relationship.
+		if found, err := pe.matchOutgoing(ctx, srcID, srcKey, s, remaining, row, used); err != nil || found {
 			return found, err
 		}
-		return pe.matchIncoming(ctx, srcID, srcKey, s, remaining, row)
+		return pe.matchIncoming(ctx, srcID, srcKey, s, remaining, row, used)
 	}
 }
 
@@ -782,8 +927,13 @@ func (pe *patternEvaluator) endNodePatternOK(np *ast.NodePattern, dstID graph.No
 // verdict below it — edgeMatchesRel (a per-PAIR existence question), the node
 // pattern, and the recursion from that same node with the same row — is a
 // function of the pair alone, so a parallel slot to the same node cannot
-// answer differently.
-func (pe *patternEvaluator) matchOutgoing(ctx context.Context, srcID graph.NodeID, srcKey string, s step, remaining []step, row expr.RowContext) (bool, error) {
+// answer differently. That holds only while no relationship is tracked: with a
+// non-nil used the verdict also depends on WHICH slot the path crossed, so the
+// multi-hop form is [patternEvaluator.matchOutgoingUnique].
+func (pe *patternEvaluator) matchOutgoing(ctx context.Context, srcID graph.NodeID, srcKey string, s step, remaining []step, row expr.RowContext, used relPath) (bool, error) {
+	if used != nil {
+		return pe.matchOutgoingUnique(ctx, srcID, srcKey, s, remaining, row, used)
+	}
 	endID, endBound, endOK := pe.boundEndID(s.node, row)
 	if endBound && !endOK {
 		return false, nil
@@ -822,7 +972,50 @@ func (pe *patternEvaluator) outgoingHopMatches(ctx context.Context, srcKey strin
 	if !pe.endNodePatternOK(s.node, dstID) {
 		return false, nil
 	}
-	return pe.matchSteps(ctx, dstID, remaining, row)
+	return pe.matchSteps(ctx, dstID, remaining, row, nil)
+}
+
+// matchOutgoingUnique is [patternEvaluator.matchOutgoing] for a pattern of two
+// or more hops, where relationship isomorphism applies (rmp #2895). Each slot is
+// a distinct relationship, so a slot already on used is skipped, the type is
+// tested on THE SLOT ([patternEvaluator.slotMatchesRelType]) as well as on the
+// pair, and a parallel slot to the same node is still tried when the first one
+// cannot complete the path. The bound end node is still compared by NodeID before
+// any lookup.
+func (pe *patternEvaluator) matchOutgoingUnique(ctx context.Context, srcID graph.NodeID, srcKey string, s step, remaining []step, row expr.RowContext, used relPath) (bool, error) {
+	endID, endBound, endOK := pe.boundEndID(s.node, row)
+	if endBound && !endOK {
+		return false, nil
+	}
+	mapper := pe.g.AdjList().Mapper()
+	view := pe.g.EntryView(srcID)
+	for i, dstID := range view.Neighbours {
+		if endBound && dstID != endID {
+			continue
+		}
+		inst := relInstance{src: srcID, slot: i}
+		if relUsed(used, inst) {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		dstKey, ok := mapper.Resolve(dstID)
+		if !ok {
+			continue
+		}
+		if !pe.edgeMatchesRel(srcKey, dstKey, s.rel) || !pe.slotMatchesRelType(srcID, dstID, handleAt(view.Handles, i), s.rel) {
+			continue
+		}
+		if !pe.endNodePatternOK(s.node, dstID) {
+			continue
+		}
+		found, err := pe.matchSteps(ctx, dstID, remaining, row, pushRel(used, inst))
+		if err != nil || found {
+			return found, err
+		}
+	}
+	return false, nil
 }
 
 // matchIncoming scans all nodes for those that have an outgoing edge to dstID
@@ -844,7 +1037,18 @@ func (pe *patternEvaluator) outgoingHopMatches(ctx context.Context, srcKey strin
 // in-edge index is deliberately NOT used. [graph.Mapper.Walk] visits exactly the
 // NodeIDs [graph.Mapper.Resolve] resolves, so a bound node the scan would never
 // have visited is rejected here by the failed Resolve.
-func (pe *patternEvaluator) matchIncoming(ctx context.Context, dstID graph.NodeID, dstKey string, s step, remaining []step, row expr.RowContext) (bool, error) {
+//
+// # Unbound end node (rmp #2896)
+//
+// The scan used to be a [graph.Mapper.Walk] whose callback tested the edge type
+// by key and recursed, re-entering the Mapper on the shard it held — the
+// deadlock [patternEvaluator.scanIncoming] documents. It now iterates NodeIDs
+// below [graph.Mapper.MaxNodeID] with no Mapper lock held, reading each entry
+// through the same snapshot-bound [lpg.ReadView.EntryView], and resolves a key
+// only for a slot that points at dstID. Unlike collecting the slots first, this
+// keeps the early exit on the first match. Without tracked relationships the
+// first slot of each source decides, exactly as for the bound end node.
+func (pe *patternEvaluator) matchIncoming(ctx context.Context, dstID graph.NodeID, dstKey string, s step, remaining []step, row expr.RowContext, used relPath) (bool, error) {
 	mapper := pe.g.AdjList().Mapper()
 	if endID, endBound, endOK := pe.boundEndID(s.node, row); endBound {
 		if !endOK {
@@ -854,58 +1058,90 @@ func (pe *patternEvaluator) matchIncoming(ctx context.Context, dstID graph.NodeI
 		if !resolved {
 			return false, nil
 		}
-		for _, nb := range pe.g.EntryView(endID).Neighbours {
+		view := pe.g.EntryView(endID)
+		for i, nb := range view.Neighbours {
 			if nb != dstID {
 				continue
 			}
 			if err := ctx.Err(); err != nil {
 				return false, err
 			}
-			// The first slot endID → dstID decides: every verdict below is a
-			// function of the pair (see [patternEvaluator.matchOutgoing]).
-			if !pe.edgeMatchesRel(candidateKey, dstKey, s.rel) || !pe.endNodePatternOK(s.node, endID) {
-				return false, nil
+			if used == nil {
+				// The first slot endID → dstID decides: every verdict below is a
+				// function of the pair (see [patternEvaluator.matchOutgoing]).
+				if !pe.edgeMatchesRel(candidateKey, dstKey, s.rel) || !pe.endNodePatternOK(s.node, endID) {
+					return false, nil
+				}
+				return pe.matchSteps(ctx, endID, remaining, row, nil)
 			}
-			return pe.matchSteps(ctx, endID, remaining, row)
+			hit := incomingSlot{key: candidateKey, id: endID, handle: handleAt(view.Handles, i), slot: i}
+			found, err := pe.incomingSlotMatches(ctx, hit, dstID, dstKey, s, remaining, row, used)
+			if err != nil || found {
+				return found, err
+			}
 		}
 		return false, nil
 	}
-	found := false
-	var walkErr error
-	mapper.Walk(func(candidateID graph.NodeID, candidateKey string) bool {
+	// Every interned NodeID is below MaxNodeID, and an id that does not resolve
+	// is skipped, so the loop reads the same entries a Walk would — in NodeID
+	// order instead of shard order, which an existential verdict does not depend
+	// on. A node interned after MaxNodeID was read is not visited; its arcs
+	// would belong to a write concurrent with this read, which no ordering
+	// guarantee covers.
+	for id, maxID := graph.NodeID(0), mapper.MaxNodeID(); id < maxID; id++ {
 		if err := ctx.Err(); err != nil {
-			walkErr = err
-			return false
+			return false, err
 		}
-		nbs := pe.g.EntryView(candidateID).Neighbours
-		for _, nb := range nbs {
+		view := pe.g.EntryView(id)
+		for i, nb := range view.Neighbours {
 			if nb != dstID {
 				continue
 			}
-			if !pe.edgeMatchesRel(candidateKey, dstKey, s.rel) {
-				continue
+			key, resolved := mapper.Resolve(id)
+			if !resolved {
+				break
 			}
-			if !pe.checkEndNode(s.node, candidateID, row) {
-				continue
+			hit := incomingSlot{key: key, id: id, handle: handleAt(view.Handles, i), slot: i}
+			found, err := pe.incomingSlotMatches(ctx, hit, dstID, dstKey, s, remaining, row, used)
+			if err != nil || found {
+				return found, err
 			}
-			ok, err := pe.matchSteps(ctx, candidateID, remaining, row)
-			if err != nil {
-				walkErr = err
-				return false
-			}
-			if ok {
-				found = true
-				return false // early stop
+			if used == nil {
+				break // the first slot id → dstID decides: every verdict is the pair's
 			}
 		}
-		return true
-	})
-	return found, walkErr
+	}
+	return false, nil
+}
+
+// incomingSlotMatches applies the edge-type and end-node filters to the slot
+// hit.id → dstID and recurses into the remaining steps from hit.id. With a
+// non-nil used the slot must not already be on the path and its own type must
+// qualify (rmp #2895); without one the verdict is the pair's.
+func (pe *patternEvaluator) incomingSlotMatches(ctx context.Context, hit incomingSlot, dstID graph.NodeID, dstKey string, s step, remaining []step, row expr.RowContext, used relPath) (bool, error) {
+	inst := relInstance{src: hit.id, slot: hit.slot}
+	if relUsed(used, inst) {
+		return false, nil
+	}
+	if !pe.edgeMatchesRel(hit.key, dstKey, s.rel) {
+		return false, nil
+	}
+	if used != nil && !pe.slotMatchesRelType(hit.id, dstID, hit.handle, s.rel) {
+		return false, nil
+	}
+	if !pe.checkEndNode(s.node, hit.id, row) {
+		return false, nil
+	}
+	return pe.matchSteps(ctx, hit.id, remaining, row, pushRel(used, inst))
 }
 
 // matchVarLen evaluates a variable-length hop using BFS bounded by the
 // declared min/max depth from s.rel.Range.
-func (pe *patternEvaluator) matchVarLen(ctx context.Context, srcID graph.NodeID, s step, remaining []step, row expr.RowContext) (bool, error) {
+//
+// The relationships a variable-length hop crosses are not recorded on used: the
+// BFS answers reachability, not paths. used still carries the fixed hops before
+// it to the steps after it.
+func (pe *patternEvaluator) matchVarLen(ctx context.Context, srcID graph.NodeID, s step, remaining []step, row expr.RowContext, used relPath) (bool, error) {
 	minDepth, maxDepth := varLenBounds(s.rel)
 
 	// BFS: each frontier element is (nodeID, depth). We track visited nodes
@@ -928,7 +1164,7 @@ func (pe *patternEvaluator) matchVarLen(ctx context.Context, srcID graph.NodeID,
 		frontier = frontier[1:]
 
 		if cur.depth >= minDepth && cur.depth <= maxDepth {
-			if ok, err := pe.bfsCheckNode(ctx, cur.id, s.node, remaining, row); err != nil || ok {
+			if ok, err := pe.bfsCheckNode(ctx, cur.id, s.node, remaining, row, used); err != nil || ok {
 				return ok, err
 			}
 		}
@@ -940,7 +1176,9 @@ func (pe *patternEvaluator) matchVarLen(ctx context.Context, srcID graph.NodeID,
 		if !resolved {
 			continue
 		}
-		pe.bfsExpandStep(mapper, cur.id, curKey, s.rel, dir, visited, &frontier, cur.depth)
+		if err := pe.bfsExpandStep(ctx, mapper, cur.id, curKey, s.rel, dir, visited, &frontier, cur.depth); err != nil {
+			return false, err
+		}
 	}
 	return false, nil
 }
@@ -967,24 +1205,25 @@ func varLenBounds(rel *ast.RelationshipPattern) (minDepth, maxDepth int64) {
 
 // bfsCheckNode tests whether nodeID satisfies the end-node pattern and, if so,
 // recurses into the remaining steps. Returns (true, nil) on first full match.
-func (pe *patternEvaluator) bfsCheckNode(ctx context.Context, nodeID graph.NodeID, np *ast.NodePattern, remaining []step, row expr.RowContext) (bool, error) {
+func (pe *patternEvaluator) bfsCheckNode(ctx context.Context, nodeID graph.NodeID, np *ast.NodePattern, remaining []step, row expr.RowContext, used relPath) (bool, error) {
 	if !pe.checkEndNode(np, nodeID, row) {
 		return false, nil
 	}
-	return pe.matchSteps(ctx, nodeID, remaining, row)
+	return pe.matchSteps(ctx, nodeID, remaining, row, used)
 }
 
 // bfsExpandStep appends unvisited neighbours reachable in direction dir from
 // (curID, curKey) to frontier, respecting the edge-type filter in rel.
-func (pe *patternEvaluator) bfsExpandStep(mapper *graph.Mapper[string], curID graph.NodeID, curKey string, rel *ast.RelationshipPattern, dir ast.RelDirection, visited map[graph.NodeID]struct{}, frontier *[]patBFSNode, depth int64) {
+func (pe *patternEvaluator) bfsExpandStep(ctx context.Context, mapper *graph.Mapper[string], curID graph.NodeID, curKey string, rel *ast.RelationshipPattern, dir ast.RelDirection, visited map[graph.NodeID]struct{}, frontier *[]patBFSNode, depth int64) error {
 	switch dir {
 	case ast.RelDirectionOutgoing:
 		pe.bfsExpandOutgoing(mapper, curID, curKey, rel, visited, frontier, depth)
+		return nil
 	case ast.RelDirectionIncoming:
-		pe.bfsExpandIncoming(mapper, curID, curKey, rel, visited, frontier, depth)
+		return pe.bfsExpandIncoming(ctx, curID, curKey, rel, visited, frontier, depth)
 	default: // undirected
 		pe.bfsExpandOutgoing(mapper, curID, curKey, rel, visited, frontier, depth)
-		pe.bfsExpandIncoming(mapper, curID, curKey, rel, visited, frontier, depth)
+		return pe.bfsExpandIncoming(ctx, curID, curKey, rel, visited, frontier, depth)
 	}
 }
 
@@ -1020,24 +1259,22 @@ type patBFSNode struct {
 }
 
 // bfsExpandIncoming appends reverse-direction neighbours to frontier for BFS.
-func (pe *patternEvaluator) bfsExpandIncoming(mapper *graph.Mapper[string], dstID graph.NodeID, dstKey string, rel *ast.RelationshipPattern, visited map[graph.NodeID]struct{}, frontier *[]patBFSNode, depth int64) {
-	mapper.Walk(func(candidateID graph.NodeID, candidateKey string) bool {
-		if _, seen := visited[candidateID]; seen {
-			return true
+// The sources are found by [patternEvaluator.scanIncoming], which skips visited
+// nodes, and their edge type is tested only after its walk has returned
+// (rmp #2896).
+func (pe *patternEvaluator) bfsExpandIncoming(ctx context.Context, dstID graph.NodeID, dstKey string, rel *ast.RelationshipPattern, visited map[graph.NodeID]struct{}, frontier *[]patBFSNode, depth int64) error {
+	hits, err := pe.scanIncoming(ctx, dstID, true, false, visited)
+	if err != nil {
+		return err
+	}
+	for _, hit := range hits {
+		if !pe.edgeMatchesRel(hit.key, dstKey, rel) {
+			continue
 		}
-		nbs := pe.g.EntryView(candidateID).Neighbours
-		for _, nb := range nbs {
-			if nb == dstID {
-				if !pe.edgeMatchesRel(candidateKey, dstKey, rel) {
-					continue
-				}
-				visited[candidateID] = struct{}{}
-				*frontier = append(*frontier, patBFSNode{id: candidateID, depth: depth + 1})
-				break
-			}
-		}
-		return true
-	})
+		visited[hit.id] = struct{}{}
+		*frontier = append(*frontier, patBFSNode{id: hit.id, depth: depth + 1})
+	}
+	return nil
 }
 
 // edgeMatchesRel reports whether the directed edge (srcKey → dstKey) satisfies
