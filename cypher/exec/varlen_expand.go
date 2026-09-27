@@ -107,6 +107,17 @@ const defaultMaxEdgesTraversed = 1_000_000
 // graph far below this bound, so no conforming query trips it.
 const defaultMaxTotalEdgesTraversed = 100_000_000
 
+// DefaultVarLenMaxEdgesTraversed and DefaultVarLenMaxTotalEdgesTraversed export
+// [defaultMaxEdgesTraversed] and [defaultMaxTotalEdgesTraversed] so that every
+// other evaluator of a variable-length pattern — the cypher package's pattern
+// predicate and pattern comprehension evaluator — enforces the same per-row and
+// per-query traversal limits as this operator and reports exceeding them with the
+// same [ErrVarLenCapExceeded] (rmp #2898).
+const (
+	DefaultVarLenMaxEdgesTraversed      = defaultMaxEdgesTraversed
+	DefaultVarLenMaxTotalEdgesTraversed = defaultMaxTotalEdgesTraversed
+)
+
 // defaultMaxUnboundedHops is the default upper hop bound applied when a
 // variable-length pattern omits its upper bound (-[*]-, -[*1..]-, -[*..]-). The
 // IR encodes "unbounded" as math.MaxInt (see cypher/ir/match.go); leaving the

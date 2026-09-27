@@ -1371,6 +1371,36 @@ func lastSyntheticToFor(plan LogicalPlan, toVar string) string {
 	return toVar
 }
 
+// appendHopSiblings appends to siblings the relationship variables a hop just
+// translated into plan binds, for the cyphermorphism guard of the hops after it.
+// That is the hop's own variable, and — for a variable-length hop whose variable
+// was already bound (`WITH [r1, r2] AS rs MATCH (a)-[rs*]->(b)<-[:R]-(c)`) — also
+// the synthetic `__anon_N_rel_<var>` column the expansion wrote instead: the
+// outer binding is compared with it only by a Selection that may sit above the
+// scope of the later hops, so without the synthetic name a later fixed hop could
+// re-use a relationship of the list (rmp #2904). A fixed hop is unchanged.
+func appendHopSiblings(siblings []string, plan LogicalPlan, rp *ast.RelationshipPattern) []string {
+	siblings = append(siblings, *rp.Variable)
+	if rp.Range == nil {
+		return siblings
+	}
+	suffix := "_rel_" + *rp.Variable
+	for cur := plan; cur != nil; {
+		switch n := cur.(type) {
+		case *VarLengthExpand:
+			if strings.HasSuffix(n.RelVar, suffix) {
+				siblings = append(siblings, n.RelVar)
+			}
+			return siblings
+		case *Selection:
+			cur = n.Child
+		default:
+			return siblings
+		}
+	}
+	return siblings
+}
+
 // outputVarSet returns the variables exposed by plan as a set.
 func outputVarSet(plan LogicalPlan) map[string]struct{} {
 	if plan == nil {
@@ -1501,7 +1531,7 @@ func (t *translator) matchPathPattern(pp *ast.PathPattern, optional bool, shared
 			prevNodeVar = next
 			boundVars[*el.Node.Variable] = struct{}{}
 			boundVars[*el.Relationship.Variable] = struct{}{}
-			siblingRels = append(siblingRels, *el.Relationship.Variable)
+			siblingRels = appendHopSiblings(siblingRels, plan, el.Relationship)
 		}
 		el = el.Next
 	}
@@ -1605,7 +1635,7 @@ func (t *translator) matchPathPatternWithArg(pp *ast.PathPattern, optional bool,
 			prevNodeVar = next
 			boundVars[*el.Node.Variable] = struct{}{}
 			boundVars[*el.Relationship.Variable] = struct{}{}
-			siblingRels = append(siblingRels, *el.Relationship.Variable)
+			siblingRels = appendHopSiblings(siblingRels, plan, el.Relationship)
 		}
 		el = el.Next
 	}

@@ -19,8 +19,8 @@ package cypher
 //  2. Walks the PathElement linked list hop by hop.
 //  3. At each hop it follows edges in the declared direction (outgoing,
 //     incoming, or undirected) and filters by relationship type (if given).
-//  4. For variable-length hops it performs a BFS bounded by the declared
-//     min/max depth.
+//  4. For variable-length hops it enumerates relationship-isomorphic paths
+//     within the declared min/max depth (see pattern_eval_varlen.go).
 //  5. After all hops, checks that the final node satisfies the end-node
 //     pattern (labels + properties + bound variable).
 //  6. Returns BoolValue(true) on the first complete match found.
@@ -97,6 +97,22 @@ type patternEvaluator struct {
 	// to bound (rmp #2894); the regression test reads it. A plain counter: the
 	// evaluator is single-goroutine by contract.
 	relTypeChecks uint64
+
+	// Variable-length search state (rmp #2898; see pattern_eval_varlen.go).
+	//
+	// varLenRowTraversals and varLenTotalTraversals count the relationship slots
+	// the exact variable-length search has read in the current top-level
+	// evaluation and in the whole query, against the limits MATCH's
+	// [exec.VarLengthExpand] applies; evalNesting tells a top-level evaluation,
+	// which resets the per-row count and incomingCache, from a nested one.
+	// varLenBufs holds one reusable candidate buffer per live search frame, and
+	// varLenFrame is the number of live frames.
+	varLenRowTraversals   int
+	varLenTotalTraversals int
+	evalNesting           int
+	varLenFrame           int
+	varLenBufs            [][]candidateHop
+	incomingCache         map[graph.NodeID][]incomingSlot
 }
 
 // bind attaches the enclosing query's parameter map and subquery evaluator. It is
@@ -150,6 +166,8 @@ func (pe *patternEvaluator) EvalPattern(ctx context.Context, pp *ast.PathPattern
 	if pe.g == nil || pp == nil || pp.Head == nil {
 		return expr.BoolValue(false), nil
 	}
+	pe.beginEval()
+	defer pe.endEval()
 	// Labelled single hop (#2235): `WHERE (a)-[:K]->(:P)` asks only whether ONE
 	// qualifying neighbour exists, which is one adjacency walk that stops at the
 	// first match — not an enumeration of every candidate hop.
@@ -167,15 +185,14 @@ func (pe *patternEvaluator) EvalPattern(ctx context.Context, pp *ast.PathPattern
 // [expr.PatternEvaluator] for [ast.PatternComprehension] expressions.
 // It enumerates every match of pc.Pattern given the bindings in row,
 // evaluates pc.Predicate (when present) and pc.Projection per match,
-// and returns the collected list value. Currently handles single-hop
-// patterns of the form `(anchor)-[:T]->(other)` and undirected /
-// incoming variants, which covers Pattern2 [7] (`size([(x)-->(:Y) |
-// 1])`). Multi-hop and variable-length comprehensions fall back to an
-// empty list — these are not yet observed in the openCypher TCK.
+// and returns the collected list value. Fixed and variable-length hops, in any
+// number and direction, are enumerated under relationship isomorphism.
 func (pe *patternEvaluator) EvalPatternComp(ctx context.Context, pc *ast.PatternComprehension, row expr.RowContext, params map[string]expr.Value, reg expr.FunctionRegistry) (expr.Value, error) {
 	if pe.g == nil || pc == nil || pc.Pattern == nil || pc.Pattern.Head == nil {
 		return expr.ListValue{}, nil
 	}
+	pe.beginEval()
+	defer pe.endEval()
 	pp := pc.Pattern
 	results := expr.ListValue{}
 	appended := 0
@@ -229,11 +246,9 @@ func (pe *patternEvaluator) EvalPatternComp(ctx context.Context, pc *ast.Pattern
 
 // enumeratePatternMatches walks pp and invokes cb once per complete
 // match, passing an extended RowContext that binds every named variable
-// in pp (path / node / relationship variables) to its matched value.
-// Restricted to single-hop, fixed-length patterns — sufficient for
-// Pattern2 [7]. Multi-hop is handled by recursing through each
-// successive step; variable-length is not yet supported and is silently
-// treated as zero matches.
+// in pp (node / relationship variables) to its matched value, recursing
+// through each successive step. A variable-length hop binds its relationship
+// variable to the list of relationships it crossed (rmp #2898).
 func (pe *patternEvaluator) enumeratePatternMatches(ctx context.Context, pp *ast.PathPattern, row expr.RowContext, cb func(expr.RowContext) error) error {
 	adj := pe.g.AdjList()
 	mapper := adj.Mapper()
@@ -288,9 +303,8 @@ func (pe *patternEvaluator) enumerateSteps(ctx context.Context, srcID graph.Node
 	}
 	s := steps[0]
 	remaining := steps[1:]
-	if s.rel != nil && s.rel.Range != nil {
-		// Variable-length: not handled by the comprehension evaluator yet.
-		return nil
+	if s.isVarLen() {
+		return pe.enumerateVarLen(ctx, srcID, s, remaining, row, used, cb)
 	}
 
 	mapper := pe.g.AdjList().Mapper()
@@ -585,22 +599,48 @@ type relInstance struct {
 // relies on the rule inside a pattern predicate, Pattern1 [10] and [18]) — rmp
 // #2895.
 //
-// A pattern of one hop cannot re-use a relationship, so [newRelPath] returns nil
-// for it and the single-hop paths keep their pair-based shortcuts untouched. A
-// longer pattern gets a path pre-sized to its hop count, so [pushRel] never
-// allocates. Variable-length hops are matched by node reachability
-// ([patternEvaluator.matchVarLen]) and do not record the relationships they
-// cross.
+// A pattern of one fixed hop cannot re-use a relationship, so [newRelPath]
+// returns nil for it and the single-hop paths keep their pair-based shortcuts
+// untouched. Any longer pattern gets a path pre-sized to its fixed hops plus a
+// margin per variable-length hop. A variable-length hop records every
+// relationship it crosses — taking a path from [ensureRelPath] when it is the
+// whole pattern — so uniqueness holds between it and every other hop of the
+// pattern (rmp #2898).
 type relPath = []relInstance
 
 // newRelPath returns the path to thread through a match of steps: nil when the
-// pattern has fewer than two hops, else an empty path with room for every hop.
+// pattern is a single hop (or none), else an empty path with room for every fixed
+// hop and relPathVarLenReserve relationships per variable-length hop. A pattern
+// that is one variable-length hop gets its path from [ensureRelPath] only when it
+// needs the exact search, so the reachability fast path allocates none.
 func newRelPath(steps []step) relPath {
 	if len(steps) < 2 {
 		return nil
 	}
-	return make(relPath, 0, len(steps))
+	n := len(steps)
+	for _, s := range steps {
+		if s.isVarLen() {
+			n += relPathVarLenReserve
+		}
+	}
+	return make(relPath, 0, n)
 }
+
+// ensureRelPath returns used, or a fresh tracked path when used tracks nothing:
+// a variable-length hop must record the relationships it crosses even when it is
+// the whole pattern.
+func ensureRelPath(used relPath) relPath {
+	if cap(used) == 0 {
+		return make(relPath, 0, relPathVarLenReserve)
+	}
+	return used
+}
+
+// relPathVarLenReserve is the capacity [newRelPath] reserves per variable-length
+// hop, so that paths up to this length never grow the backing array. A longer path
+// grows it by append, which stays sound: each extension is consumed by its
+// recursion before a sibling can overwrite it.
+const relPathVarLenReserve = 8
 
 // relUsed reports whether r is already on used. Paths are a handful of hops, so
 // a linear scan beats any set.
@@ -838,7 +878,7 @@ func (pe *patternEvaluator) matchSteps(ctx context.Context, srcID graph.NodeID, 
 	s := steps[0]
 	remaining := steps[1:]
 
-	if s.rel != nil && s.rel.Range != nil {
+	if s.isVarLen() {
 		return pe.matchVarLen(ctx, srcID, s, remaining, row, used)
 	}
 	return pe.matchSingleHop(ctx, srcID, s, remaining, row, used)
@@ -1133,148 +1173,6 @@ func (pe *patternEvaluator) incomingSlotMatches(ctx context.Context, hit incomin
 		return false, nil
 	}
 	return pe.matchSteps(ctx, hit.id, remaining, row, pushRel(used, inst))
-}
-
-// matchVarLen evaluates a variable-length hop using BFS bounded by the
-// declared min/max depth from s.rel.Range.
-//
-// The relationships a variable-length hop crosses are not recorded on used: the
-// BFS answers reachability, not paths. used still carries the fixed hops before
-// it to the steps after it.
-func (pe *patternEvaluator) matchVarLen(ctx context.Context, srcID graph.NodeID, s step, remaining []step, row expr.RowContext, used relPath) (bool, error) {
-	minDepth, maxDepth := varLenBounds(s.rel)
-
-	// BFS: each frontier element is (nodeID, depth). We track visited nodes
-	// to avoid cycles.
-	frontier := []patBFSNode{{id: srcID, depth: 0}}
-	visited := make(map[graph.NodeID]struct{})
-	visited[srcID] = struct{}{}
-
-	mapper := pe.g.AdjList().Mapper()
-	dir := ast.RelDirectionOutgoing
-	if s.rel != nil {
-		dir = s.rel.Direction
-	}
-
-	for len(frontier) > 0 {
-		if err := ctx.Err(); err != nil {
-			return false, err
-		}
-		cur := frontier[0]
-		frontier = frontier[1:]
-
-		if cur.depth >= minDepth && cur.depth <= maxDepth {
-			if ok, err := pe.bfsCheckNode(ctx, cur.id, s.node, remaining, row, used); err != nil || ok {
-				return ok, err
-			}
-		}
-
-		if cur.depth >= maxDepth {
-			continue
-		}
-		curKey, resolved := mapper.Resolve(cur.id)
-		if !resolved {
-			continue
-		}
-		if err := pe.bfsExpandStep(ctx, mapper, cur.id, curKey, s.rel, dir, visited, &frontier, cur.depth); err != nil {
-			return false, err
-		}
-	}
-	return false, nil
-}
-
-// varLenBounds extracts min/max depth from a relationship pattern's range
-// quantifier, applying the openCypher defaults: *1.. when unspecified.
-func varLenBounds(rel *ast.RelationshipPattern) (minDepth, maxDepth int64) {
-	minDepth = 1
-	maxDepth = patternVarLenMaxDefault
-	if rel == nil || rel.Range == nil {
-		return
-	}
-	if rel.Range.Min != nil {
-		minDepth = *rel.Range.Min
-	}
-	if rel.Range.Max != nil {
-		maxDepth = *rel.Range.Max
-	}
-	if minDepth < 0 {
-		minDepth = 0
-	}
-	return
-}
-
-// bfsCheckNode tests whether nodeID satisfies the end-node pattern and, if so,
-// recurses into the remaining steps. Returns (true, nil) on first full match.
-func (pe *patternEvaluator) bfsCheckNode(ctx context.Context, nodeID graph.NodeID, np *ast.NodePattern, remaining []step, row expr.RowContext, used relPath) (bool, error) {
-	if !pe.checkEndNode(np, nodeID, row) {
-		return false, nil
-	}
-	return pe.matchSteps(ctx, nodeID, remaining, row, used)
-}
-
-// bfsExpandStep appends unvisited neighbours reachable in direction dir from
-// (curID, curKey) to frontier, respecting the edge-type filter in rel.
-func (pe *patternEvaluator) bfsExpandStep(ctx context.Context, mapper *graph.Mapper[string], curID graph.NodeID, curKey string, rel *ast.RelationshipPattern, dir ast.RelDirection, visited map[graph.NodeID]struct{}, frontier *[]patBFSNode, depth int64) error {
-	switch dir {
-	case ast.RelDirectionOutgoing:
-		pe.bfsExpandOutgoing(mapper, curID, curKey, rel, visited, frontier, depth)
-		return nil
-	case ast.RelDirectionIncoming:
-		return pe.bfsExpandIncoming(ctx, curID, curKey, rel, visited, frontier, depth)
-	default: // undirected
-		pe.bfsExpandOutgoing(mapper, curID, curKey, rel, visited, frontier, depth)
-		return pe.bfsExpandIncoming(ctx, curID, curKey, rel, visited, frontier, depth)
-	}
-}
-
-// bfsExpandOutgoing appends unvisited forward neighbours of curID to frontier.
-func (pe *patternEvaluator) bfsExpandOutgoing(mapper *graph.Mapper[string], curID graph.NodeID, curKey string, rel *ast.RelationshipPattern, visited map[graph.NodeID]struct{}, frontier *[]patBFSNode, depth int64) {
-	nbs := pe.g.EntryView(curID).Neighbours
-	for _, nbID := range nbs {
-		if _, seen := visited[nbID]; seen {
-			continue
-		}
-		nbKey, nbOK := mapper.Resolve(nbID)
-		if !nbOK {
-			continue
-		}
-		if !pe.edgeMatchesRel(curKey, nbKey, rel) {
-			continue
-		}
-		visited[nbID] = struct{}{}
-		*frontier = append(*frontier, patBFSNode{id: nbID, depth: depth + 1})
-	}
-}
-
-// patternVarLenMaxDefault caps BFS depth for unbounded variable-length
-// patterns (e.g. *). openCypher does not mandate a specific cap; we use 15
-// as a practical limit that handles most real-world graph shapes without
-// pathological runtime.
-const patternVarLenMaxDefault = 15
-
-// patBFSNode is a frontier element for the variable-length pattern BFS.
-type patBFSNode struct {
-	id    graph.NodeID
-	depth int64
-}
-
-// bfsExpandIncoming appends reverse-direction neighbours to frontier for BFS.
-// The sources are found by [patternEvaluator.scanIncoming], which skips visited
-// nodes, and their edge type is tested only after its walk has returned
-// (rmp #2896).
-func (pe *patternEvaluator) bfsExpandIncoming(ctx context.Context, dstID graph.NodeID, dstKey string, rel *ast.RelationshipPattern, visited map[graph.NodeID]struct{}, frontier *[]patBFSNode, depth int64) error {
-	hits, err := pe.scanIncoming(ctx, dstID, true, false, visited)
-	if err != nil {
-		return err
-	}
-	for _, hit := range hits {
-		if !pe.edgeMatchesRel(hit.key, dstKey, rel) {
-			continue
-		}
-		visited[hit.id] = struct{}{}
-		*frontier = append(*frontier, patBFSNode{id: hit.id, depth: depth + 1})
-	}
-	return nil
 }
 
 // edgeMatchesRel reports whether the directed edge (srcKey → dstKey) satisfies

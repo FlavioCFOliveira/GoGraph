@@ -305,10 +305,11 @@ type ExpandConfig struct {
 	// type label.
 	EdgeType string
 	// RelCols lists the input-row columns holding edge IDs already traversed
-	// by sibling Expand operators in the same MATCH pattern. Each emitted
-	// edge must NOT match any of these columns (openCypher 9 §3.2.2
-	// relationship-isomorphism / cyphermorphism). Empty disables the
-	// check.
+	// by sibling Expand operators in the same MATCH pattern, or the flat path
+	// list of a sibling [VarLengthExpand] (rmp #2904). Each emitted edge must
+	// NOT match any of these columns, nor any edge of such a list (openCypher 9
+	// §3.2.2 relationship-isomorphism / cyphermorphism; see [relColHolds]).
+	// Empty disables the check.
 	RelCols []int
 	// InputCol is the column index in each input row that holds the source
 	// NodeID (as expr.IntegerValue).  Defaults to 0.
@@ -1164,11 +1165,48 @@ func (op *Expand) passesRelMorphism(edgeID int64) bool {
 		if col < 0 || col >= len(op.inputRow) {
 			continue
 		}
-		if iv, ok := op.inputRow[col].(expr.IntegerValue); ok && int64(iv) == edgeID {
+		if relColHolds(op.inputRow[col], edgeID) {
 			return false
 		}
 	}
 	return true
+}
+
+// relColHolds reports whether the cyphermorphism column value v already carries
+// the relationship edgeID. A single-relationship sibling (a prior [Expand]) holds
+// its edge id as an [expr.IntegerValue]. A variable-length sibling holds either
+// the flat path list [VarLengthExpand] emits, [srcNode, edge0, dst0, dir0, edge1,
+// …], whose edge ids sit at index 1 + [VLEHopStride]*h, or — when its variable
+// was bound before the pattern (`WITH [r1, r2] AS rs MATCH (a)-[rs*]->(b)`) — a
+// list of [expr.RelationshipValue]. Both carry the identity
+// [Expand.emittedEdgeID] emits, and every relationship of either list is
+// excluded, so a fixed hop placed AFTER a variable-length hop cannot re-use a
+// relationship that hop crossed (openCypher relationship isomorphism, rmp #2904).
+// A sibling BEFORE a variable-length hop is excluded by
+// [VarLengthConfig.ExcludedRelCols] instead. Any other value excludes nothing, as
+// before.
+func relColHolds(v expr.Value, edgeID int64) bool {
+	switch t := v.(type) {
+	case expr.IntegerValue:
+		return int64(t) == edgeID
+	case expr.ListValue:
+		if len(t) > 0 {
+			if _, relList := t[0].(expr.RelationshipValue); relList {
+				for _, item := range t {
+					if rv, ok := item.(expr.RelationshipValue); ok && int64(rv.ID) == edgeID {
+						return true
+					}
+				}
+				return false
+			}
+		}
+		for i := 1; i < len(t); i += VLEHopStride {
+			if iv, ok := t[i].(expr.IntegerValue); ok && int64(iv) == edgeID {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // passesFilter reports whether the edge at absolute position pos (in the
@@ -1866,7 +1904,7 @@ func (op *Expand) passesRelMorphismChunk(edgeID int64) bool {
 			}
 			continue
 		}
-		if iv, ok := op.cScratch.BoxCell(col, op.cRow).(expr.IntegerValue); ok && int64(iv) == edgeID {
+		if relColHolds(op.cScratch.BoxCell(col, op.cRow), edgeID) {
 			return false
 		}
 	}

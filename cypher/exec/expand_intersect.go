@@ -468,7 +468,7 @@ func (op *ExpandIntersect) passesRelMorphism(edgeID int64) bool {
 		if col < 0 || col >= len(op.inputRow) {
 			continue
 		}
-		if iv, ok := op.inputRow[col].(expr.IntegerValue); ok && int64(iv) == edgeID {
+		if relColHolds(op.inputRow[col], edgeID) {
 			return false
 		}
 	}
