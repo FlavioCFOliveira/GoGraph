@@ -104,7 +104,8 @@ type Snapshot struct {
 
 // visible reports whether a change stamped by info — or by the raw ts when info
 // is nil — is visible to this snapshot, PINNING the answer for any record this
-// snapshot classifies more than once. See the verdict field.
+// snapshot first classifies while it is still in flight. A committed or aborted
+// record needs no pin: its stamp is final. See the verdict field.
 //
 // A nil snapshot, or a raw timestamp with no record, resolves straight through:
 // there is nothing mutable to pin. Safe for concurrent use, because a ReadView
@@ -118,11 +119,21 @@ func (s *Snapshot) visible(info *commitInfo, ts, startTS, txID uint64) bool {
 	if v, ok := s.verdict[info]; ok {
 		return v
 	}
-	v := mvcc.Visible(info.TS(), startTS, txID)
-	if s.verdict == nil {
-		s.verdict = make(map[*commitInfo]bool, 4)
+	cur := info.TS()
+	v := mvcc.Visible(cur, startTS, txID)
+	// Only an IN-FLIGHT record's verdict can move: committed and aborted are
+	// terminal states of [mvcc.CommitInfo], whose stamp is never written again,
+	// so re-deciding such a record gives the answer pinned here every time.
+	// Memoising it only grew the map — once per distinct committed transaction a
+	// read touched, which a 4000-slot run resolved per statement made the
+	// dominant cost of typing it (rmp #2888). The in-flight case, the one the
+	// pin exists for, is recorded exactly as before.
+	if cur >= mvcc.TxIDBase && cur != mvcc.AbortedTS {
+		if s.verdict == nil {
+			s.verdict = make(map[*commitInfo]bool, 4)
+		}
+		s.verdict[info] = v
 	}
-	s.verdict[info] = v
 	return v
 }
 

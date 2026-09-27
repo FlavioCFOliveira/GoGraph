@@ -22493,6 +22493,46 @@ type slotTypeScratch struct {
 	slotLabs         map[graph.NodeID][]uint32
 	slotFallbackSeen map[graph.NodeID]int
 	slotLabsTouched  []graph.NodeID
+
+	// dstParallelTotal and dstSeen are the positional inference's per-source
+	// counters: dstParallelTotal[dst] is how many slots of the source's run
+	// point at dst, and dstSeen[dst] how many of them the sweep has reached so
+	// far, the current slot included. They are built on the FIRST slot of a
+	// source that reaches the positional inference, and emptied by that
+	// source's own run before the next source, so a source that never reaches
+	// it — every source of a Cypher-built graph — touches neither (rmp #2889).
+	dstParallelTotal map[graph.NodeID]int64
+	dstSeen          map[graph.NodeID]int64
+}
+
+// startPositionalCounts builds the positional inference's counters for a source
+// whose run is edges, on reaching that inference at position pos. dstSeen must
+// then read exactly what counting every resolvable slot up to and including pos
+// would have given, so the slots before pos are counted here under the same
+// Resolve test the sweep applies, and every later slot is counted by the sweep.
+func (sc *slotTypeScratch) startPositionalCounts(mapper *graph.Mapper[string], edges []graph.NodeID, pos uint64) {
+	if sc.dstParallelTotal == nil {
+		sc.dstParallelTotal = make(map[graph.NodeID]int64, len(edges))
+		sc.dstSeen = make(map[graph.NodeID]int64, len(edges))
+	}
+	for _, d := range edges {
+		sc.dstParallelTotal[d]++
+	}
+	for _, d := range edges[:pos+1] {
+		if _, ok := mapper.Resolve(d); ok {
+			sc.dstSeen[d]++
+		}
+	}
+}
+
+// endPositionalCounts empties the counters [slotTypeScratch.startPositionalCounts]
+// built for a source whose run is edges. Deleting the run's own keys keeps the
+// reset O(run) however many keys the maps have held before.
+func (sc *slotTypeScratch) endPositionalCounts(edges []graph.NodeID) {
+	for _, d := range edges {
+		delete(sc.dstParallelTotal, d)
+		delete(sc.dstSeen, d)
+	}
 }
 
 // newSlotTypeScratch returns an empty scratch whose visitor appends to its own
@@ -22526,17 +22566,15 @@ func resolveSourceSlotTypes(
 	if !ok {
 		return
 	}
-	// dstSeen drives only the positional fallback (handle-less /
+	// sc.dstSeen drives only the positional fallback (handle-less /
 	// MERGE slots): it counts parallel CSR occurrences per dst so a
 	// fallback slot maps to its CREATE-instance idx. The
-	// handle-driven path below ignores it entirely. dstParallelTotal
+	// handle-driven path below ignores it entirely. sc.dstParallelTotal
 	// lets the fallback tell multigraph (N_csr == N_create) from
-	// simple-graph (N_csr < N_create) storage for each pair.
-	dstParallelTotal := make(map[graph.NodeID]int64, len(edges))
-	for _, d := range edges {
-		dstParallelTotal[d]++
-	}
-	dstSeen := make(map[graph.NodeID]int64, len(dstParallelTotal))
+	// simple-graph (N_csr < N_create) storage for each pair. Both are
+	// built only once a slot of this source reaches that fallback; see
+	// [slotTypeScratch.startPositionalCounts].
+	positionalReady := false
 	// slotLabsReady defers the adjacency read until a slot of THIS source
 	// actually needs it: a Cypher-built graph resolves every slot by handle and
 	// must not pay for a resolution it never reaches.
@@ -22547,7 +22585,9 @@ func resolveSourceSlotTypes(
 		if !ok {
 			continue
 		}
-		dstSeen[dst]++
+		if positionalReady {
+			sc.dstSeen[dst]++
+		}
 		var labels []string
 		// slotResolved records that this position was matched to a real
 		// column-typed adjacency slot below, so its type — including the absence
@@ -22561,7 +22601,11 @@ func resolveSourceSlotTypes(
 			// slot keeps its original handle, so the type no longer
 			// mis-maps the way the positional idx did (Match2 [6] /
 			// Match7 [29]).
-			labels = g.EdgeLabelsByHandle(srcStr, dstStr, handles[pos])
+			//
+			// It reads by NodeID: the Mapper is append-only and bijective, so
+			// src and dst are exactly what their resolved keys look up to,
+			// and the key round trip bought nothing (rmp #2888).
+			labels = g.EdgeLabelsByHandleID(src, dst, handles[pos])
 		}
 		if len(labels) == 0 {
 			// PER-SLOT resolution, for a slot with no by-handle type record.
@@ -22630,12 +22674,16 @@ func resolveSourceSlotTypes(
 			// type instead. On a multigraph pair mixing a Cypher-created :K slot
 			// with an untyped Go-API slot that made the untyped edge match
 			// `[r:K]`, so a bare MATCH counted two where one was correct.
+			if !positionalReady {
+				sc.startPositionalCounts(mapper, edges, pos)
+				positionalReady = true
+			}
 			totalCreates := g.EdgeCreateCount(srcStr, dstStr)
-			parallel := dstParallelTotal[dst]
+			parallel := sc.dstParallelTotal[dst]
 			if parallel >= totalCreates && totalCreates > 0 {
 				// Multigraph: one CSR slot per CREATE. Use the
 				// per-instance label set for this specific slot.
-				labels = g.EdgeLabelsAt(srcStr, dstStr, dstSeen[dst])
+				labels = g.EdgeLabelsAt(srcStr, dstStr, sc.dstSeen[dst])
 			} else {
 				// Simple-graph (or no per-instance store): merge every
 				// instance's labels with the per-pair union so a
@@ -22656,6 +22704,9 @@ func resolveSourceSlotTypes(
 		// types aliases a buffer reused across slots (see sc.slotTypes above), so a
 		// visitor that keeps it must copy.
 		visit(base+pos, labels)
+	}
+	if positionalReady {
+		sc.endPositionalCounts(edges)
 	}
 }
 
