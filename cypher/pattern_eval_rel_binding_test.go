@@ -123,35 +123,14 @@ func rbRows(t *testing.T, eng *cypher.Engine, query string, cols ...string) []st
 
 // rbCase is one pattern probed under one outer binding. outer binds every
 // variable the pattern names and ends in a clause a WHERE may follow; keys
-// projects those variables, and cols names the projected columns. baseline, when
-// set, is the pattern the MATCH baseline runs instead of pattern: the same path
-// spelled in reverse (see [rbReversed]); such a case asserts only the routes the
-// expression-level evaluator answers.
+// projects those variables, and cols names the projected columns.
 type rbCase struct {
-	name     string
-	outer    string
-	withVar  string
-	keys     string
-	cols     []string
-	pattern  string
-	baseline string
-}
-
-// rbReversed is rbBoundRel for a pattern whose bound relationship is its FIRST
-// hop and shares the pattern with another fixed hop. MATCH lets that other hop
-// re-use the bound relationship when the bound one comes first — on
-// parallel_diff_props `MATCH ()-[r]->() WITH r MATCH (a)-[r]->(b)<-[:R]-(a)`
-// returns four rows where relationship isomorphism allows two — while it
-// enforces isomorphism when the bound relationship comes second. So the
-// baseline is the same path spelled in reverse, which puts r second, and
-// [TestPatternPredicate_RelBindingAndProps_MatchBaselineAbsolute] pins that
-// spelling to the isomorphic answer. EXISTS { } and the hoisted comprehension run
-// MATCH's machinery and share its answer, so these cases assert only the
-// expression-level evaluator's routes.
-func rbReversed(name, pattern, reversed string) rbCase {
-	c := rbBoundRel(name, pattern)
-	c.baseline = reversed
-	return c
+	name    string
+	outer   string
+	withVar string
+	keys    string
+	cols    []string
+	pattern string
 }
 
 // rbBoundRel binds r to each relationship of the graph in turn, and a and b to
@@ -204,13 +183,17 @@ var rbCases = []rbCase{
 	rbBoundRel("with_props", `(a)-[r {w: 1}]->(b)`),
 	rbBoundRel("with_param_props", `(a)-[r {w: $w}]-(b)`),
 	rbBoundRel("hop_then", `(a)-[:R]->()-[r]->(b)`),
-	// Relationship isomorphism: the other hop may not re-use r.
+	// Relationship isomorphism: the other hop may not re-use r, whichever hop
+	// r fills (rmp #2909: MATCH, and so EXISTS { } and the hoisted comprehension,
+	// used to let a later hop re-use r when r was the FIRST hop).
 	rbBoundRel("cycle_bound_second", `(a)-[:R]-(b)-[r]-(a)`),
 	rbBoundRel("parallel_bound_second", `(a)-[:R]->(b)<-[r]-(a)`),
-	rbReversed("then_hop", `(a)-[r]->(b)-[:R]->()`, `()<-[:R]-(b)<-[r]-(a)`),
-	rbReversed("cycle_bound_first", `(a)-[r]-(b)-[:R]-(a)`, `(a)-[:R]-(b)-[r]-(a)`),
-	rbReversed("parallel_other_hop", `(a)-[r]->(b)<-[:R]-(a)`, `(a)-[:R]->(b)<-[r]-(a)`),
-	rbReversed("anon_middle", `(a)-[r]-()-[:R]-(b)`, `(b)-[:R]-()-[r]-(a)`),
+	rbBoundRel("then_hop", `(a)-[r]->(b)-[:R]->()`),
+	rbBoundRel("cycle_bound_first", `(a)-[r]-(b)-[:R]-(a)`),
+	rbBoundRel("parallel_other_hop", `(a)-[r]->(b)<-[:R]-(a)`),
+	rbBoundRel("parallel_untyped_other_hop", `(a)-[r]->(b)<--(a)`),
+	rbBoundRel("anon_middle", `(a)-[r]-()-[:R]-(b)`),
+	rbBoundRel("bound_middle", `(a)-[:R]-()-[r]-()-[:R]-(b)`),
 	rbBoundRel("then_varlen", `(a)-[r]->()-[:R*0..2]->(b)`),
 	rbBoundRel("varlen_then", `(a)-[:R*0..1]-()-[r]-(b)`),
 
@@ -263,12 +246,8 @@ func TestPatternPredicate_RelBindingAndProps_MatchesMatch(t *testing.T) {
 			eng := rbEngine(t, fx)
 			for _, c := range rbCases {
 				t.Run(c.name, func(t *testing.T) {
-					baseline := c.pattern
-					if c.baseline != "" {
-						baseline = c.baseline
-					}
-					distinct := rbRows(t, eng, c.outer+` MATCH `+baseline+` RETURN DISTINCT `+c.keys, c.cols...)
-					counted := rbRows(t, eng, c.outer+` MATCH `+baseline+` RETURN `+c.keys+`, count(*) AS n`, append(c.cols, "n")...)
+					distinct := rbRows(t, eng, c.outer+` MATCH `+c.pattern+` RETURN DISTINCT `+c.keys, c.cols...)
+					counted := rbRows(t, eng, c.outer+` MATCH `+c.pattern+` RETURN `+c.keys+`, count(*) AS n`, append(c.cols, "n")...)
 					for _, want := range [][]string{distinct, counted} {
 						if len(want) == 1 && strings.HasPrefix(want[0], "ERROR") {
 							t.Fatalf("MATCH baseline failed: %v", want)
@@ -291,9 +270,6 @@ func TestPatternPredicate_RelBindingAndProps_MatchesMatch(t *testing.T) {
 							append(c.cols, "n"), counted},
 					}
 					for _, r := range routes {
-						if c.baseline != "" && (r.name == "exists_subquery" || r.name == "comprehension_return") {
-							continue // MATCH's machinery; see rbReversed
-						}
 						got := rbRows(t, eng, r.query, r.cols...)
 						if r.name == "comprehension_return" {
 							got = slices.DeleteFunc(got, func(s string) bool { return strings.HasSuffix(s, "|0") })
@@ -381,9 +357,31 @@ func TestPatternPredicate_RelBindingAndProps_MatchBaselineAbsolute(t *testing.T)
 		{"parallel_diff_props", `MATCH ()-[r]->() WITH r MATCH (a:N), (b:N) MATCH (a)<-[r]-(b) RETURN a.k + b.k AS k`,
 			[]string{`"ba"`, `"ba"`}},
 		// Each parallel relationship completes the pair with the OTHER one, never
-		// with itself: the reversed spelling rbReversed uses as the baseline.
+		// with itself, whichever hop r fills and whether the other hop is in the
+		// same path or a later comma-separated one (rmp #2909: with r FIRST, MATCH
+		// answered four rows).
 		{"parallel_diff_props", `MATCH ()-[r]->() WITH r MATCH (a:N), (b:N) MATCH (a)-[:R]->(b)<-[r]-(a) RETURN a.k + b.k AS k`,
 			[]string{`"ab"`, `"ab"`}},
+		{"parallel_diff_props", `MATCH ()-[r]->() WITH r MATCH (a:N), (b:N) MATCH (a)-[r]->(b)<-[:R]-(a) RETURN a.k + b.k AS k`,
+			[]string{`"ab"`, `"ab"`}},
+		{"parallel_diff_props", `MATCH ()-[r]->() WITH r MATCH (a)-[r]->(b)<-[:R]-(a) RETURN a.k + b.k AS k`,
+			[]string{`"ab"`, `"ab"`}},
+		{"parallel_diff_props", `MATCH ()-[r]->() WITH r MATCH (a)-[r]->(b)<--(a) RETURN a.k + b.k AS k`,
+			[]string{`"ab"`, `"ab"`}},
+		{"parallel_diff_props", `MATCH ()-[r]->() WITH r OPTIONAL MATCH (a)-[r]->(b)<-[:R]-(a) RETURN a.k + b.k AS k`,
+			[]string{`"ab"`, `"ab"`}},
+		{"parallel_diff_props", `MATCH ()-[r]->() WITH r MATCH (a)-[r]->(b), (b)<-[:R]-(a) RETURN a.k + b.k AS k`,
+			[]string{`"ab"`, `"ab"`}},
+		{"parallel_diff_props", `MATCH ()-[r]->() WITH r MATCH (b)<-[:R]-(a), (a)-[r]->(b) RETURN a.k + b.k AS k`,
+			[]string{`"ab"`, `"ab"`}},
+		{"parallel_diff_props", `MATCH ()-[r]->() WITH r MATCH (a:N {k: 'a'}) MATCH (a)-[r]->(b)<-[:R]-(a) RETURN a.k + b.k AS k`,
+			[]string{`"ab"`, `"ab"`}},
+		{"parallel_diff_props", `MATCH ()-[r]->() WITH r MATCH p = (a)-[r]->(b)<-[:R]-(a) RETURN a.k + b.k AS k`,
+			[]string{`"ab"`, `"ab"`}},
+		{"single", `MATCH ()-[r]->() WITH r MATCH (a)-[r]->(b)<-[:R]-(a) RETURN a.k + b.k AS k`, nil},
+		{"two_cycle", `MATCH ()-[r]->() WITH r MATCH (a)-[r]-(b)-[:R]-(a) RETURN a.k + b.k AS k`,
+			[]string{`"ab"`, `"ab"`, `"ba"`, `"ba"`}},
+		{"self_loop", `MATCH ()-[r]->() WITH r MATCH (a)-[r]-(b)-[:R]-(a) RETURN a.k + b.k AS k`, nil},
 		{"two_cycle", `MATCH ()-[r]->() WITH r MATCH (a:N), (b:N) MATCH (a)-[:R]->(b)<-[r]-(a) RETURN a.k + b.k AS k`, nil},
 		{"self_loop", `MATCH ()-[r]->() WITH r MATCH (a:N), (b:N) MATCH ()<-[:R]-(b)<-[r]-(a) RETURN a.k + b.k AS k`, nil},
 		{"two_cycle", `MATCH ()-[r]->() WITH r MATCH (a:N), (b:N) MATCH (a)-[:R]-(b)-[r]-(a) RETURN a.k + b.k AS k`,

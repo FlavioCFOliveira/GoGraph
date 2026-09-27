@@ -1183,12 +1183,22 @@ func (op *Expand) passesRelMorphism(edgeID int64) bool {
 // excluded, so a fixed hop placed AFTER a variable-length hop cannot re-use a
 // relationship that hop crossed (openCypher relationship isomorphism, rmp #2904).
 // A sibling BEFORE a variable-length hop is excluded by
-// [VarLengthConfig.ExcludedRelCols] instead. Any other value excludes nothing, as
-// before.
+// [VarLengthConfig.ExcludedRelCols] instead.
+//
+// A relationship variable bound BEFORE the MATCH (`WITH r MATCH
+// (a)-[r]->(b)<-[:R]-(a)`) holds the relationship itself, an
+// [expr.RelationshipValue] or [*expr.LazyRelationshipValue] whose ID is that same
+// identity; it is excluded too, so a later hop — in the same path or in a later
+// comma-separated one — cannot re-use it (rmp #2909). Any other value excludes
+// nothing, as before.
 func relColHolds(v expr.Value, edgeID int64) bool {
 	switch t := v.(type) {
 	case expr.IntegerValue:
 		return int64(t) == edgeID
+	case expr.RelationshipValue:
+		return int64(t.ID) == edgeID
+	case *expr.LazyRelationshipValue:
+		return int64(t.ID()) == edgeID
 	case expr.ListValue:
 		if len(t) > 0 {
 			if _, relList := t[0].(expr.RelationshipValue); relList {

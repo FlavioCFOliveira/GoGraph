@@ -1425,30 +1425,34 @@ func lastSyntheticToFor(plan LogicalPlan, toVar string) string {
 
 // appendHopSiblings appends to siblings the relationship variables a hop just
 // translated into plan binds, for the cyphermorphism guard of the hops after it.
-// That is the hop's own variable, and — for a variable-length hop whose variable
-// was already bound (`WITH [r1, r2] AS rs MATCH (a)-[rs*]->(b)<-[:R]-(c)`) — also
-// the synthetic `__anon_N_rel_<var>` column the expansion wrote instead: the
-// outer binding is compared with it only by a Selection that may sit above the
-// scope of the later hops, so without the synthetic name a later fixed hop could
-// re-use a relationship of the list (rmp #2904). A fixed hop is unchanged.
+// That is the hop's own variable and, when that variable was already bound
+// (`WITH r MATCH (a)-[r]->(b)<-[:R]-(a)`, or `WITH [r1, r2] AS rs MATCH
+// (a)-[rs*]->(b)<-[:R]-(c)`), also the synthetic `__anon_N_rel_<var>` column the
+// expansion wrote instead. The outer binding is compared with that column only
+// by a Selection that may be hoisted above the scope of the later hops, where
+// the outer name resolves to no column, so without the synthetic name a later
+// hop could re-use the relationship the bound hop matched — for a fixed hop
+// (rmp #2909) as for a variable-length one (rmp #2904).
 func appendHopSiblings(siblings []string, plan LogicalPlan, rp *ast.RelationshipPattern) []string {
 	siblings = append(siblings, *rp.Variable)
-	if rp.Range == nil {
-		return siblings
-	}
 	suffix := "_rel_" + *rp.Variable
 	for cur := plan; cur != nil; {
+		relVar := ""
 		switch n := cur.(type) {
-		case *VarLengthExpand:
-			if strings.HasSuffix(n.RelVar, suffix) {
-				siblings = append(siblings, n.RelVar)
-			}
-			return siblings
 		case *Selection:
 			cur = n.Child
-		default:
-			return siblings
+			continue
+		case *VarLengthExpand:
+			relVar = n.RelVar
+		case *Expand:
+			relVar = n.RelVar
+		case *OptionalExpand:
+			relVar = n.RelVar
 		}
+		if relVar != *rp.Variable && strings.HasSuffix(relVar, suffix) {
+			siblings = append(siblings, relVar)
+		}
+		return siblings
 	}
 	return siblings
 }

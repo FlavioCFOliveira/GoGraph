@@ -1166,10 +1166,7 @@ func (a *analyser) relPatternIntroduce(rp *ast.RelationshipPattern) {
 	// allows `WITH [r1, r2] AS rs MATCH (a)-[rs*]->(b)` so the var-length
 	// match is restricted to the supplied relationship list.
 	if sym, ok := a.scope.Lookup(name); ok {
-		if rp.Range != nil && (sym.Type == "value" || sym.Type == "list") {
-			return
-		}
-		if conflictsWith(sym.Type, "relationship") {
+		if relVarConflicts(sym.Type, rp) {
 			a.error(redeclarationError(name, rp.Pos))
 		}
 		return
@@ -1181,6 +1178,16 @@ func (a *analyser) relPatternIntroduce(rp *ast.RelationshipPattern) {
 // named node and relationship variable must already be in scope, otherwise
 // KindUndefinedVar is reported. Used for bare WHERE pattern predicates
 // (existential checks) where openCypher forbids variable introduction.
+//
+// A variable that is in scope must also be usable in the position it fills,
+// exactly as [analyser.nodePatternIntroduce] and [analyser.relPatternIntroduce]
+// require of MATCH and of a pattern comprehension: a name statically known to
+// hold something else raises VariableTypeConflict (clauses/match/Match2.feature
+// [13] for a relationship variable bound to a value, Match1.feature [11] for a
+// node variable). Without this, `WITH 123 AS r MATCH (a), (b) WHERE
+// (a)-[r]->(b)` compiled and answered false while the comprehension over the same
+// pattern was rejected (rmp #2911). A name whose static type is unknown ("any"),
+// such as NULL or a parameter, is left to the runtime, as MATCH leaves it.
 func (a *analyser) pathPatternRefCheck(pp *ast.PathPattern) {
 	if pp == nil {
 		return
@@ -1191,17 +1198,36 @@ func (a *analyser) pathPatternRefCheck(pp *ast.PathPattern) {
 		}
 	}
 	for el := pp.Head; el != nil; el = el.Next {
-		if el.Node != nil && el.Node.Variable != nil {
-			if _, ok := a.scope.Lookup(*el.Node.Variable); !ok {
-				a.error(undefinedVarError(*el.Node.Variable, el.Node.Pos))
+		if np := el.Node; np != nil && np.Variable != nil {
+			sym, ok := a.scope.Lookup(*np.Variable)
+			switch {
+			case !ok:
+				a.error(undefinedVarError(*np.Variable, np.Pos))
+			case conflictsWith(sym.Type, "node"):
+				a.error(redeclarationError(*np.Variable, np.Pos))
 			}
 		}
-		if el.Relationship != nil && el.Relationship.Variable != nil {
-			if _, ok := a.scope.Lookup(*el.Relationship.Variable); !ok {
-				a.error(undefinedVarError(*el.Relationship.Variable, el.Relationship.Pos))
+		if rp := el.Relationship; rp != nil && rp.Variable != nil {
+			sym, ok := a.scope.Lookup(*rp.Variable)
+			switch {
+			case !ok:
+				a.error(undefinedVarError(*rp.Variable, rp.Pos))
+			case relVarConflicts(sym.Type, rp):
+				a.error(redeclarationError(*rp.Variable, rp.Pos))
 			}
 		}
 	}
+}
+
+// relVarConflicts reports whether a variable of static type have cannot fill the
+// relationship pattern rp. A variable-length pattern (`[rs*]`) also accepts a
+// "value" or "list" binding, the relationship list it is constrained to (`WITH
+// [r1, r2] AS rs MATCH (a)-[rs*]->(b)`).
+func relVarConflicts(have string, rp *ast.RelationshipPattern) bool {
+	if rp.Range != nil && (have == "value" || have == "list") {
+		return false
+	}
+	return conflictsWith(have, "relationship")
 }
 
 // conflictsWith reports whether an existing symbol of kind have can be

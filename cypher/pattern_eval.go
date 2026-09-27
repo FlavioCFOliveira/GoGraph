@@ -62,6 +62,12 @@ type patternEvaluator struct {
 	// outer row. Lazily created: most patterns never reach the recogniser.
 	labelledHop map[*ast.PathPattern]*labelledHopShape
 
+	// constNodeProps caches, per node-pattern occurrence, a property map whose
+	// every value is a literal or a parameter ([constantPropMap]), so
+	// [patternEvaluator.resolveNodeProps] evaluates and allocates it once per
+	// query run rather than once per outer row. Lazily created.
+	constNodeProps map[*ast.NodePattern]*nodePropValues
+
 	// params is the enclosing query's fully-resolved parameter map (rmp #2507).
 	//
 	// [patternEvaluator.checkNodePattern] evaluates an inline property map itself
@@ -81,10 +87,14 @@ type patternEvaluator struct {
 	// such a subquery answered false / 0 instead of being evaluated.
 	subEval expr.SubqueryEvaluator
 
-	// reg is the function registry of the comprehension being evaluated, for the
-	// relationship property maps [patternEvaluator.resolveStep] evaluates. It is
-	// set for the duration of [patternEvaluator.EvalPatternComp]; a bare pattern
-	// predicate receives no registry, so it is nil there.
+	// reg is the function registry the node and relationship property maps
+	// [patternEvaluator.resolveStep] and [patternEvaluator.resolveNodeProps]
+	// evaluate are called with. The build scaffolds set it to the query's registry
+	// ([readBuildScaffold.init], [writeEvalScaffold.init]), because a bare pattern
+	// predicate reaches [patternEvaluator.EvalPattern] with none: without it
+	// `WHERE (a)-[:R {w: toInteger(x)}]->()` failed with "no function registry"
+	// (rmp #2913). [patternEvaluator.EvalPatternComp] installs the comprehension's
+	// own registry for its duration.
 	reg expr.FunctionRegistry
 
 	// adjacencyCountsDisabled forbids both adjacency-answered rewrites this
@@ -282,13 +292,17 @@ func (pe *patternEvaluator) enumeratePatternMatches(ctx context.Context, pp *ast
 		startIDs = allNodeIDs(mapper)
 	}
 
+	startProps, ok, err := pe.resolveNodeProps(ctx, startNode, row)
+	if err != nil || !ok {
+		return err
+	}
 	steps := collectSteps(pp.Head)
 	used := newRelPath(steps)
 	for _, sid := range startIDs {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if !pe.checkStartNode(startNode, sid, row) {
+		if !pe.checkStartNode(startNode, startProps, sid, row) {
 			continue
 		}
 		base := cloneRow(row)
@@ -314,7 +328,7 @@ func (pe *patternEvaluator) enumerateSteps(ctx context.Context, srcID graph.Node
 		return cb(row)
 	}
 	s := steps[0]
-	if s.hasRelProps() {
+	if s.hasProps() {
 		var ok bool
 		var err error
 		if s, ok, err = pe.resolveStep(ctx, s, row); err != nil || !ok {
@@ -329,7 +343,7 @@ func (pe *patternEvaluator) enumerateSteps(ctx context.Context, srcID graph.Node
 		if c, bound, found := pe.boundRelHop(srcID, s, row); bound {
 			inst := c.instance()
 			dstID := c.traversalDst()
-			if !found || relUsed(used, inst) || !pe.checkEndNode(s.node, dstID, row) {
+			if !found || relUsed(used, inst) || !pe.checkEndNode(s, dstID, row) {
 				return nil
 			}
 			next := cloneRow(row)
@@ -385,7 +399,7 @@ func (pe *patternEvaluator) enumerateSteps(ctx context.Context, srcID graph.Node
 		// of an incoming / undirected hop, where the anchor is the stored dstID
 		// and the neighbour we are walking to is the stored srcID (rmp #2505).
 		dstID := c.traversalDst()
-		if !pe.checkEndNode(s.node, dstID, row) {
+		if !pe.checkEndNode(s, dstID, row) {
 			continue
 		}
 		next := cloneRow(row)
@@ -858,11 +872,16 @@ func (pe *patternEvaluator) matchPattern(ctx context.Context, pp *ast.PathPatter
 		return len(startIDs) > 0, nil
 	}
 
-	// The existential walk never extends row, so each hop's relationship
-	// property map is evaluated once here rather than once per partial match.
-	// steps is this call's own slice, so it is resolved in place.
+	// The existential walk never extends row, so each hop's node and
+	// relationship property maps are evaluated once here, against the outer row,
+	// rather than once per partial match. steps is this call's own slice, so it
+	// is resolved in place.
+	startProps, ok, err := pe.resolveNodeProps(ctx, startNode, row)
+	if err != nil || !ok {
+		return false, err
+	}
 	for i := range steps {
-		if !steps[i].hasRelProps() {
+		if !steps[i].hasProps() {
 			continue
 		}
 		s, ok, err := pe.resolveStep(ctx, steps[i], row)
@@ -876,7 +895,7 @@ func (pe *patternEvaluator) matchPattern(ctx context.Context, pp *ast.PathPatter
 		if err := ctx.Err(); err != nil {
 			return false, err
 		}
-		if !pe.checkStartNode(startNode, sid, row) {
+		if !pe.checkStartNode(startNode, startProps, sid, row) {
 			continue
 		}
 		ok, err := pe.matchSteps(ctx, sid, steps, row, used)
@@ -897,15 +916,24 @@ func (pe *patternEvaluator) matchPattern(ctx context.Context, pp *ast.PathPatter
 // pattern declares none. A non-nil props makes every verdict of the hop a
 // per-SLOT one, because parallel relationships between one pair may carry
 // different properties (rmp #2908).
+//
+// nodeProps holds the values of the destination node's property map, aligned
+// with its map-literal keys and evaluated against the same row
+// ([patternEvaluator.resolveNodeProps]; rmp #2913); it is nil when the node
+// pattern declares none.
 type step struct {
-	rel   *ast.RelationshipPattern
-	node  *ast.NodePattern
-	props expr.MapValue
+	rel       *ast.RelationshipPattern
+	node      *ast.NodePattern
+	props     expr.MapValue
+	nodeProps *nodePropValues
 }
 
-// hasRelProps reports whether the hop declares a relationship property map. It
-// is the inlinable guard in front of [patternEvaluator.resolveStep].
-func (s step) hasRelProps() bool { return s.rel != nil && s.rel.Properties != nil }
+// hasProps reports whether the hop declares a relationship or a destination-node
+// property map. It is the inlinable guard in front of
+// [patternEvaluator.resolveStep].
+func (s step) hasProps() bool {
+	return (s.rel != nil && s.rel.Properties != nil) || (s.node != nil && s.node.Properties != nil)
+}
 
 // hasRelVar reports whether the hop names its relationship at all. It is the
 // inlinable guard in front of [patternEvaluator.boundRelHop].
@@ -915,7 +943,18 @@ func (s step) hasRelVar() bool { return s.rel != nil && s.rel.Variable != nil }
 // PathElement linked list, starting at el.Next (skipping the head node which
 // is handled separately).
 func collectSteps(head *ast.PathElement) []step {
-	var steps []step
+	// Pre-sized: one allocation whatever the step size, rather than append's
+	// growth sequence.
+	n := 0
+	for el := head.Next; el != nil; el = el.Next {
+		if el.Relationship != nil {
+			n++
+		}
+	}
+	if n == 0 {
+		return nil
+	}
+	steps := make([]step, 0, n)
 	el := head.Next
 	for el != nil {
 		if el.Relationship != nil {
@@ -954,7 +993,7 @@ func (pe *patternEvaluator) matchSingleHop(ctx context.Context, srcID graph.Node
 	}
 	if c, bound, found := pe.boundRelHop(srcID, s, row); bound {
 		inst := c.instance()
-		if !found || relUsed(used, inst) || !pe.checkEndNode(s.node, c.traversalDst(), row) {
+		if !found || relUsed(used, inst) || !pe.checkEndNode(s, c.traversalDst(), row) {
 			return false, nil
 		}
 		return pe.matchSteps(ctx, c.traversalDst(), remaining, row, pushRel(used, inst))
@@ -1018,8 +1057,8 @@ func (pe *patternEvaluator) boundEndID(np *ast.NodePattern, row expr.RowContext)
 // endNodePatternOK is [patternEvaluator.checkEndNode] minus the bound-variable
 // comparison, for callers that have already applied it through
 // [patternEvaluator.boundEndID].
-func (pe *patternEvaluator) endNodePatternOK(np *ast.NodePattern, dstID graph.NodeID) bool {
-	return np == nil || pe.checkNodePattern(np, dstID)
+func (pe *patternEvaluator) endNodePatternOK(s step, dstID graph.NodeID) bool {
+	return s.node == nil || pe.checkNodePattern(s.node, s.nodeProps, dstID)
 }
 
 // matchOutgoing iterates the outgoing neighbours of srcID and recurses for
@@ -1088,7 +1127,7 @@ func (pe *patternEvaluator) outgoingHopMatches(ctx context.Context, srcKey strin
 	if !pe.edgeMatchesRel(srcKey, dstKey, s.rel) {
 		return false, nil
 	}
-	if !pe.endNodePatternOK(s.node, dstID) {
+	if !pe.endNodePatternOK(s, dstID) {
 		return false, nil
 	}
 	return pe.matchSteps(ctx, dstID, remaining, row, nil)
@@ -1127,7 +1166,7 @@ func (pe *patternEvaluator) matchOutgoingUnique(ctx context.Context, srcID graph
 		if !pe.edgeMatchesRel(srcKey, dstKey, s.rel) || !pe.slotQualifies(srcID, dstID, srcKey, dstKey, handleAt(view.Handles, i), s) {
 			continue
 		}
-		if !pe.endNodePatternOK(s.node, dstID) {
+		if !pe.endNodePatternOK(s, dstID) {
 			continue
 		}
 		found, err := pe.matchSteps(ctx, dstID, remaining, row, pushRel(used, inst))
@@ -1189,7 +1228,7 @@ func (pe *patternEvaluator) matchIncoming(ctx context.Context, dstID graph.NodeI
 			if used == nil && s.props == nil {
 				// The first slot endID → dstID decides: every verdict below is a
 				// function of the pair (see [patternEvaluator.matchOutgoing]).
-				if !pe.edgeMatchesRel(candidateKey, dstKey, s.rel) || !pe.endNodePatternOK(s.node, endID) {
+				if !pe.edgeMatchesRel(candidateKey, dstKey, s.rel) || !pe.endNodePatternOK(s, endID) {
 					return false, nil
 				}
 				return pe.matchSteps(ctx, endID, remaining, row, nil)
@@ -1250,7 +1289,7 @@ func (pe *patternEvaluator) incomingSlotMatches(ctx context.Context, hit incomin
 	if (used != nil || s.props != nil) && !pe.slotQualifies(hit.id, dstID, hit.key, dstKey, hit.handle, s) {
 		return false, nil
 	}
-	if !pe.checkEndNode(s.node, hit.id, row) {
+	if !pe.checkEndNode(s, hit.id, row) {
 		return false, nil
 	}
 	return pe.matchSteps(ctx, hit.id, remaining, row, pushRel(used, inst))
@@ -1300,6 +1339,11 @@ func (pe *patternEvaluator) edgeMatchesRel(srcKey, dstKey string, rel *ast.Relat
 // comparison. A NULL value is kept: it equals nothing, so the hop matches no
 // relationship, which is what MATCH answers for `[:R {w: null}]`.
 func (pe *patternEvaluator) resolveStep(ctx context.Context, s step, row expr.RowContext) (step, bool, error) {
+	nodeProps, ok, err := pe.resolveNodeProps(ctx, s.node, row)
+	if err != nil || !ok {
+		return s, false, err
+	}
+	s.nodeProps = nodeProps
 	if s.rel == nil || s.rel.Properties == nil {
 		return s, true, nil
 	}
@@ -1453,7 +1497,10 @@ func relIdentity(v expr.Value) (id uint64, start, end graph.NodeID, ok bool) {
 
 // checkStartNode validates that the start node (at srcID) satisfies the
 // optional labels/properties in np and is consistent with any bound variable.
-func (pe *patternEvaluator) checkStartNode(np *ast.NodePattern, srcID graph.NodeID, row expr.RowContext) bool {
+//
+// props holds np's property-map values as [patternEvaluator.resolveNodeProps]
+// evaluated them.
+func (pe *patternEvaluator) checkStartNode(np *ast.NodePattern, props *nodePropValues, srcID graph.NodeID, row expr.RowContext) bool {
 	if np == nil {
 		return true
 	}
@@ -1468,12 +1515,15 @@ func (pe *patternEvaluator) checkStartNode(np *ast.NodePattern, srcID graph.Node
 			}
 		}
 	}
-	return pe.checkNodePattern(np, srcID)
+	return pe.checkNodePattern(np, props, srcID)
 }
 
 // checkEndNode validates that the candidate destination node satisfies the
-// optional labels/properties in np and any bound variable constraint.
-func (pe *patternEvaluator) checkEndNode(np *ast.NodePattern, dstID graph.NodeID, row expr.RowContext) bool {
+// optional labels/properties of the hop's node pattern and any bound variable
+// constraint. s must have passed through [patternEvaluator.resolveStep] when it
+// declares a property map.
+func (pe *patternEvaluator) checkEndNode(s step, dstID graph.NodeID, row expr.RowContext) bool {
+	np := s.node
 	if np == nil {
 		return true
 	}
@@ -1487,13 +1537,84 @@ func (pe *patternEvaluator) checkEndNode(np *ast.NodePattern, dstID graph.NodeID
 			}
 		}
 	}
-	return pe.checkNodePattern(np, dstID)
+	return pe.checkNodePattern(np, s.nodeProps, dstID)
 }
 
-// checkNodePattern validates that nodeID satisfies the label and property
-// constraints declared in np.
-func (pe *patternEvaluator) checkNodePattern(np *ast.NodePattern, nodeID graph.NodeID) bool {
-	if len(np.Labels) == 0 && np.Properties == nil {
+// resolveNodeProps evaluates the property map of np against row, the row the
+// node is matched under, with the query's parameters, function registry and
+// subquery evaluator — as MATCH's planned Filter does. ok is false when the map
+// can match no node: a value that raises no error but compares as NULL is kept,
+// because it equals nothing and [patternEvaluator.checkNodePattern] then rejects
+// every node, which is what MATCH answers for `(:N {k: null})`.
+//
+// It used to be evaluated inside checkNodePattern against an EMPTY row and no
+// registry, so a value that read an outer variable — `WHERE (a)-->(:N {k:
+// x.k})` — was NULL and matched nothing, and a function call failed and was
+// swallowed as a non-match (rmp #2913).
+//
+// A map that is not a literal (a parameter) constrains nothing, as before, and
+// an empty literal constrains nothing either; both yield nil. The values are
+// returned in the order of the map literal's keys.
+func (pe *patternEvaluator) resolveNodeProps(ctx context.Context, np *ast.NodePattern, row expr.RowContext) (*nodePropValues, bool, error) {
+	if np == nil || np.Properties == nil {
+		return nil, true, nil
+	}
+	ml, isLit := np.Properties.(*ast.MapLiteral)
+	if !isLit || len(ml.Keys) == 0 {
+		return nil, true, nil
+	}
+	constant := constantPropMap(ml)
+	if constant {
+		if props, ok := pe.constNodeProps[np]; ok {
+			return props, true, nil
+		}
+	}
+	props := &nodePropValues{keys: ml.Keys, vals: make([]expr.Value, len(ml.Values))}
+	for i, e := range ml.Values {
+		// pe.params (rmp #2507): StripLiterals hoists a string literal inside a
+		// WHERE onto an auto-parameter, and a pattern predicate is a WHERE.
+		v, err := expr.EvalWith(ctx, e, row, pe.params, pe.reg, pe.subEval, pe)
+		if err != nil {
+			return nil, false, err
+		}
+		props.vals[i] = v
+	}
+	if constant {
+		if pe.constNodeProps == nil {
+			pe.constNodeProps = make(map[*ast.NodePattern]*nodePropValues, 1)
+		}
+		pe.constNodeProps[np] = props
+	}
+	return props, true, nil
+}
+
+// nodePropValues holds the values of a node pattern's property map, aligned with
+// the keys of its map literal. It is held by pointer so that [step], which is
+// copied at every hop of the recursive match, stays four words.
+type nodePropValues struct {
+	keys []string // the map literal's keys; shared, never written
+	vals []expr.Value
+}
+
+// constantPropMap reports whether every value of ml is a literal scalar or a
+// parameter, so the map evaluates to the same value on every row of a query run.
+func constantPropMap(ml *ast.MapLiteral) bool {
+	for _, v := range ml.Values {
+		switch v.(type) {
+		case *ast.IntLiteral, *ast.FloatLiteral, *ast.StringLiteral, *ast.BoolLiteral,
+			*ast.NullLiteral, *ast.Parameter:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// checkNodePattern validates that nodeID satisfies the label constraints
+// declared in np and its property map, whose values props holds as
+// [patternEvaluator.resolveNodeProps] evaluated them.
+func (pe *patternEvaluator) checkNodePattern(np *ast.NodePattern, props *nodePropValues, nodeID graph.NodeID) bool {
+	if len(np.Labels) == 0 && props == nil {
 		return true
 	}
 	mapper := pe.g.AdjList().Mapper()
@@ -1515,28 +1636,14 @@ func (pe *patternEvaluator) checkNodePattern(np *ast.NodePattern, nodeID graph.N
 		}
 	}
 	// Property check: every declared property must match.
-	if np.Properties != nil {
-		ml, ok := np.Properties.(*ast.MapLiteral)
-		if !ok {
-			return true // non-literal property filter — skip (conservative accept)
-		}
+	if props != nil {
 		rawProps := pe.g.NodeProperties(key)
-		for i, k := range ml.Keys {
-			// pe.params, not nil (rmp #2507). The value is very often a PARAMETER
-			// even when the query text spells a literal, because StripLiterals
-			// hoists a string literal inside a WHERE — and a pattern predicate is a
-			// WHERE. Passing nil made every such reference NULL and the whole
-			// predicate reject its row.
-			want, err := expr.Eval(ml.Values[i], expr.RowContext{}, pe.params, nil)
-			if err != nil {
-				return false
-			}
-			have, ok := rawProps[k]
+		for i, want := range props.vals {
+			have, ok := rawProps[props.keys[i]]
 			if !ok {
 				return false
 			}
-			havePV := lpgPropToExpr(have)
-			if !expr.IsTruthy(havePV.Equal(want)) {
+			if !expr.IsTruthy(lpgPropToExpr(have).Equal(want)) {
 				return false
 			}
 		}

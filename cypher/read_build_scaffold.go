@@ -82,6 +82,9 @@ func (sc *readBuildScaffold) init(
 	sc.labelSrc.eng = e
 	sc.subEval.init(&sc.walker, &sc.labelSrc, queryReg, rv)
 	sc.patEval.init(rv, e.maxCollectItems)
+	// A bare pattern predicate reaches EvalPattern with no registry, so the
+	// property maps it evaluates use the query's (rmp #2913).
+	sc.patEval.reg = queryReg
 	sc.bopts.subEval = &sc.subEval
 	sc.bopts.patEval = &sc.patEval
 	sc.bopts.queryCtx = ctx

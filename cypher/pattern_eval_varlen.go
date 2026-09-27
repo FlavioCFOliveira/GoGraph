@@ -113,9 +113,9 @@ func (vs *varLenSearch) accepts(pe *patternEvaluator, id graph.NodeID) bool {
 		return id == vs.target
 	}
 	if vs.targetBound {
-		return id == vs.target && pe.endNodePatternOK(vs.s.node, id)
+		return id == vs.target && pe.endNodePatternOK(vs.s, id)
 	}
-	return pe.checkEndNode(vs.s.node, id, vs.row)
+	return pe.checkEndNode(vs.s, id, vs.row)
 }
 
 // varLenBounds extracts min/max depth from a relationship pattern's range
@@ -293,7 +293,7 @@ func (pe *patternEvaluator) matchVarLen(ctx context.Context, srcID graph.NodeID,
 	from := srcID
 	if len(remaining) == 0 && len(used) == 0 {
 		if vs.targetBound && vs.dir == ast.RelDirectionIncoming {
-			if !pe.endNodePatternOK(s.node, vs.target) {
+			if !pe.endNodePatternOK(s, vs.target) {
 				return false, nil
 			}
 			from, vs.target, vs.swapped, vs.dir = vs.target, srcID, true, ast.RelDirectionOutgoing
@@ -519,7 +519,7 @@ func (pe *patternEvaluator) walkBoundRelList(ctx context.Context, srcID graph.No
 			return 0, used, false, nil
 		}
 	}
-	if !pe.checkEndNode(s.node, cur, row) {
+	if !pe.checkEndNode(s, cur, row) {
 		return 0, used, false, nil
 	}
 	return cur, used, true, nil
