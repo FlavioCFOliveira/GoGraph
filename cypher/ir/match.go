@@ -319,36 +319,32 @@ func (t *translator) firstOptionalPath(
 	return plan, nil
 }
 
-// peelOuterDestRebinding strips Selection nodes from the top of p whose
-// PredicateExpr is an equality comparing an inner-only synthetic variable
-// with an outer-bound variable (the canonical destRebinding equality).
-// The returned body is p with those Selections removed; hoisted carries
-// the removed nodes in top-to-bottom order so the caller can re-apply
-// them on the outer plan.
-//
-// The walker stops at the first non-Selection (or non-matching-Selection)
-// node so destRebinding equalities deeper in the tree — added at an
-// inner Expand step — are not mis-peeled.
+// peelOuterDestRebinding strips from p every Selection whose predicate reads
+// an outer-bound variable: the destRebinding equality comparing an inner-only
+// synthetic variable with an outer one, and an inline property map whose value
+// is an expression over an outer variable — `x.k = p[0]` for `(x {k: p[0]})`,
+// or the `all(… WHERE el.k = p[0])` form of a variable-length relationship's map
+// (rmp #2907). p is the inner arm of a plain Apply, built against a fresh
+// schema, so no such predicate can hold where it stands. The returned body is p
+// with those Selections removed; hoisted carries the removed nodes in
+// top-to-bottom order so the caller can re-apply them on the outer plan, where
+// the combined outer||inner row carries every column they read. Moving a
+// Selection above the operators of a single path pattern is result-identical:
+// each of them only adds columns to the rows it keeps.
 func peelOuterDestRebinding(p LogicalPlan, outerVars map[string]struct{}) (LogicalPlan, []*Selection) {
 	var hoisted []*Selection
 	// Phase 1: peel from the very top of p (top-of-Selection-chain stripping).
 	for {
 		sel, ok := p.(*Selection)
-		if !ok || sel.PredicateExpr == nil {
-			break
-		}
-		bin, ok := sel.PredicateExpr.(*ast.BinaryOp)
-		if !ok || bin.Operator != "=" {
-			break
-		}
-		if !referencesOuterVar(bin.Left, outerVars) && !referencesOuterVar(bin.Right, outerVars) {
+		if !ok || !selectionReadsOuterVar(sel, outerVars) {
 			break
 		}
 		hoisted = append(hoisted, sel)
 		p = sel.Child
 	}
-	// Phase 2: deep peel — when the inner subtree contains a rel-rebinding
-	// or dest-rebinding equality Selection BURIED below other operators
+	// Phase 2: deep peel — when the inner subtree contains such a Selection
+	// (a rel-rebinding or dest-rebinding equality, or an inline property map
+	// on a later element of the path) BURIED below other operators
 	// (e.g. inside a chained VLE+Expand pattern: the outer `r` is bound,
 	// the inner Expand emits `__anon_rel_r`, the Selection `r =
 	// __anon_rel_r` sits between the Expand and a subsequent VLE step),
@@ -363,8 +359,8 @@ func peelOuterDestRebinding(p LogicalPlan, outerVars map[string]struct{}) (Logic
 }
 
 // deepPeelOuterRebindings recursively walks p and replaces every
-// equality Selection whose predicate references an outer-bound variable
-// with its child, appending the Selection to *hoisted in document
+// Selection whose predicate references an outer-bound variable (see
+// [selectionReadsOuterVar]) with its child, appending the Selection to *hoisted in document
 // order (top-most first). The walker stops at operators that introduce
 // a fresh schema scope (Projection / EagerAggregation) because peeling
 // across such a boundary would lift a Selection above the projection
@@ -379,13 +375,9 @@ func deepPeelOuterRebindings(p LogicalPlan, outerVars map[string]struct{}, hoist
 	if _, isAgg := p.(*EagerAggregation); isAgg {
 		return p
 	}
-	if sel, ok := p.(*Selection); ok && sel.PredicateExpr != nil {
-		if bin, isBin := sel.PredicateExpr.(*ast.BinaryOp); isBin && bin.Operator == "=" {
-			if referencesOuterVar(bin.Left, outerVars) || referencesOuterVar(bin.Right, outerVars) {
-				*hoisted = append(*hoisted, sel)
-				return deepPeelOuterRebindings(sel.Child, outerVars, hoisted)
-			}
-		}
+	if sel, ok := p.(*Selection); ok && selectionReadsOuterVar(sel, outerVars) {
+		*hoisted = append(*hoisted, sel)
+		return deepPeelOuterRebindings(sel.Child, outerVars, hoisted)
 	}
 	children := p.Children()
 	if len(children) == 0 {
@@ -494,31 +486,91 @@ func deepPeelOuterRebindings(p LogicalPlan, outerVars map[string]struct{}, hoist
 	return p
 }
 
-// referencesOuterVar reports whether e contains any reference to a variable
-// in outerVars. Recognised shapes:
+// selectionReadsOuterVar reports whether sel carries a parsed predicate that
+// may read a variable in outerVars. A Selection with no parsed predicate is a
+// pass-through and is never hoisted.
+func selectionReadsOuterVar(sel *Selection, outerVars map[string]struct{}) bool {
+	return sel.PredicateExpr != nil && referencesOuterVar(sel.PredicateExpr, outerVars)
+}
+
+// referencesOuterVar reports whether e may read a variable in outerVars. It
+// decides whether an equality Selection built inside the inner arm of a plain
+// Apply must be hoisted above the Apply: that arm is built against a fresh
+// schema, so an outer variable read in place evaluates to null and the equality
+// rejects every row. An inline property map whose value is any expression over
+// an outer variable is such a Selection — `(x {k: p})`, `(x {k: p.q})`,
+// `(x {k: p[0]})`, `(x {k: toLower(p)})`, `(x {k: p + 1})` (rmp #2907).
 //
-//   - A bare *ast.Variable whose name is in outerVars.
-//   - A *ast.Property whose receiver chain bottoms out at such a Variable
-//     (e.g. `event.year` when `event` is outer-bound).
-//
-// The walker is deliberately conservative: it stops at the first matching
-// reference and does not descend into sub-expressions of arithmetic / list
-// constructors. The destRebinding equality shapes (`v = u`, `a.k = b.k`)
-// that peelOuterDestRebinding cares about always present at one of these
-// two top-level shapes, so a deep walker would only mis-peel selections
-// that happen to mention an outer variable inside a function call.
+// The walk descends every sub-expression. The two answers are not symmetric in
+// cost: a false "no" leaves a predicate that can never hold where it cannot see
+// its operand, while a false "yes" only moves a correct predicate above the
+// Apply, where the combined outer||inner row carries every column it reads and
+// the result is identical. So an expression shape the walk does not model — a
+// pattern or subquery expression, or an expression type added to the AST later
+// — answers "yes", and a variable a comprehension or reduce binds locally is not
+// told apart from an outer variable of the same name.
 func referencesOuterVar(e ast.Expression, outerVars map[string]struct{}) bool {
-	for {
-		switch n := e.(type) {
-		case *ast.Variable:
-			_, isOuter := outerVars[n.Name]
-			return isOuter
-		case *ast.Property:
-			e = n.Receiver
-			continue
-		default:
-			return false
+	anyRefs := func(es ...ast.Expression) bool {
+		for _, x := range es {
+			if referencesOuterVar(x, outerVars) {
+				return true
+			}
 		}
+		return false
+	}
+	switch n := e.(type) {
+	case nil:
+		return false
+	case *ast.Variable:
+		_, isOuter := outerVars[n.Name]
+		return isOuter
+	case *ast.Parameter, *ast.IntLiteral, *ast.FloatLiteral, *ast.StringLiteral,
+		*ast.BoolLiteral, *ast.OverflowIntLit, *ast.NullLiteral, *ast.StarLiteral:
+		return false
+	case *ast.Property:
+		return anyRefs(n.Receiver)
+	case *ast.LabelPredicate:
+		return anyRefs(n.Receiver)
+	case *ast.SubscriptExpr:
+		return anyRefs(n.Expr, n.Index)
+	case *ast.SliceExpr:
+		return anyRefs(n.Expr, n.From, n.To)
+	case *ast.BinaryOp:
+		return anyRefs(n.Left, n.Right)
+	case *ast.UnaryOp:
+		return anyRefs(n.Operand)
+	case *ast.FunctionInvocation:
+		return anyRefs(n.Args...)
+	case *ast.ListLiteral:
+		return anyRefs(n.Elements...)
+	case *ast.MapLiteral:
+		return anyRefs(n.Values...)
+	case *ast.ListComprehension:
+		return anyRefs(n.Source, n.Predicate, n.Projection)
+	case *ast.ReduceExpr:
+		return anyRefs(n.Init, n.Source, n.Projection)
+	case *ast.CaseExpression:
+		if anyRefs(n.Subject, n.ElseExpr) {
+			return true
+		}
+		for _, alt := range n.Alternatives {
+			if alt != nil && anyRefs(alt.Condition, alt.Consequent) {
+				return true
+			}
+		}
+		return false
+	case *ast.MapProjection:
+		if anyRefs(n.Subject) {
+			return true
+		}
+		for _, it := range n.Items {
+			if it != nil && anyRefs(it.Value) {
+				return true
+			}
+		}
+		return false
+	default:
+		return true
 	}
 }
 

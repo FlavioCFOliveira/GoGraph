@@ -367,6 +367,13 @@ type buildOpts struct {
 	// mis-upgrading a count result into a graph node. buildEagerAggregation
 	// populates this set for every aggregate output name it registers in the schema.
 	scalarCols map[string]struct{}
+	// innerArmDepth counts the plain-Apply inner arms (see [beginInnerArm])
+	// whose build is in progress, and innerArmPlans collects every
+	// [rowBindPlan] made while at least one is, so [endInnerArm] can resolve
+	// them before the arm's metadata columns are rebased. Both are build-time
+	// state of one goroutine; forWorker clears them.
+	innerArmDepth int
+	innerArmPlans []*rowBindPlan
 	// projAliasScalarCols mirrors scalarCols for the BUILDROWCTX / Variable
 	// fast-path upgrade-bypass only. Distinct from scalarCols so the
 	// colliding-alias guard in buildIRProjection still routes a
@@ -10645,10 +10652,12 @@ func buildOperatorRec(
 			preTripletLen = len(bopts.expandTripletSeq)
 		}
 		arg := exec.NewArgument()
+		armMark := bopts.beginInnerArm()
 		inner, err := buildOperator(innerNode, walker, labelSrc, reg, params, innerSchema, idxMgr, procReg, argByTag, bopts)
 		if err != nil {
 			return nil, err
 		}
+		bopts.endInnerArm(armMark)
 		for k, v := range innerSchema {
 			schema[k] = v + outerWidth
 		}
@@ -11892,6 +11901,11 @@ func (b *buildOpts) forWorker() *buildOpts {
 	cp.pathVarChain = nil
 	cp.vleRelMeta = nil
 	cp.expandTripletSeq = nil
+	// Inner-arm bind-plan log: a worker builds its subtree at execution time,
+	// after every arm of the plan was resolved, and must not append to the
+	// shared log's backing array.
+	cp.innerArmDepth = 0
+	cp.innerArmPlans = nil
 	// SHARED INSTRUMENTATION. The profiler is a POINTER, so a value copy hands
 	// every worker the same *exec.Profiler and each one mutates it while building
 	// its sub-plan — the data race at cypher/exec/profile.go:93 (rmp #2664).

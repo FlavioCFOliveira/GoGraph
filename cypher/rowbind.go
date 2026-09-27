@@ -180,7 +180,53 @@ type rowBindPlan struct {
 func newRowBindPlan(rs rowSchema, bopts *buildOpts, g *lpg.ReadView[string, float64], scalarUse map[string]*nodeScalarUse) *rowBindPlan {
 	p := &rowBindPlan{rs: rs, bopts: bopts, g: g, scalarUse: scalarUse, gated: scalarUse != nil}
 	p.resolveOnce = p.resolve
+	if bopts != nil && bopts.innerArmDepth > 0 {
+		bopts.innerArmPlans = append(bopts.innerArmPlans, p)
+	}
 	return p
+}
+
+// beginInnerArm marks the start of the build of a plain-Apply inner arm — the
+// *ir.Apply case of buildOperator, [tryBuildHashJoin] and
+// [tryBuildIndexNestedLoopJoin] — and returns the mark [endInnerArm] takes.
+//
+// Such an arm is built against a fresh schema and runs on inner-only rows, and
+// once it is built the metadata columns it registered are rebased by the outer
+// width, so that the operators built ABOVE the join address them in the
+// combined outer||inner row. A plan made inside the arm must not see that
+// rebase: resolved lazily at its first row it read the shifted columns against
+// its inner-only row, so `WITH 1 AS one MATCH (a)-[r {s: 'a'}]->(b)` — whose
+// relationship property Filter is inside the arm — reconstructed r from the
+// wrong slot and matched nothing (rmp #2907). Every plan made between the two
+// calls is therefore resolved by endInnerArm, before the rebase.
+func (b *buildOpts) beginInnerArm() int {
+	if b == nil {
+		return 0
+	}
+	b.innerArmDepth++
+	return len(b.innerArmPlans)
+}
+
+// endInnerArm resolves every [rowBindPlan] made since the matching
+// [beginInnerArm], and drops them from the log. It must be called after the
+// arm's build and before its metadata columns are rebased. A nested arm has
+// already resolved and dropped its own plans, so each plan is resolved against
+// the metadata of the innermost arm that contains it.
+//
+// Resolving here rather than at the first row is sound for the reason the file
+// comment gives for deferring at all: the only later write to the maps a plan
+// resolves from is the rebase, and the rebase is for the operators above the
+// arm.
+func (b *buildOpts) endInnerArm(mark int) {
+	if b == nil {
+		return
+	}
+	for _, p := range b.innerArmPlans[mark:] {
+		p.resolved()
+	}
+	clear(b.innerArmPlans[mark:])
+	b.innerArmPlans = b.innerArmPlans[:mark]
+	b.innerArmDepth--
 }
 
 // resolved returns the resolved walk, resolving it on the first call.
