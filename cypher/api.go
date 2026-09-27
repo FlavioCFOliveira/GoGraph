@@ -13064,10 +13064,11 @@ func newAggregationEval(
 		// 46.8% was buildEdgeProps alone.
 		//
 		// analyseNodeScalarUse runs ONCE at build time and a bailout restores the
-		// previous eager path exactly. The context is built through
-		// buildRowCtxWithUse, whose arena is nil, so every value handed to the
-		// expression is independently allocated and may escape into the projected
-		// row — the property populateRowCtx documents for that path. The gate
+		// previous eager path exactly. The context is populated with a nil arena
+		// (evalRowPooledOwned on a gated plan, buildRowCtxWithUse otherwise), so
+		// every value handed to the expression is independently allocated and may
+		// escape into the projected row — the property populateRowCtx documents
+		// for that path. The gate
 		// therefore only ever OMITS variables the expression never names, and a
 		// variable it never names cannot appear in its result.
 		//
@@ -13081,6 +13082,27 @@ func newAggregationEval(
 			scalarUse = nil
 		}
 		bp := newRowBindPlan(rs, bopts, g, scalarUse)
+		if bp.gated {
+			// RECYCLE THE MAP CONTAINER (rmp #2890). A heap profile of
+			// examples/26_social_scale_bench at 127c012b attributed 22.2 GiB (44.4%
+			// of the run) to this closure, ~14 GiB of it the per-row RowContext map:
+			// its make, and the group Go allocates on the first insert.
+			//
+			// evalRowPooledOwned draws the map from rowCtxPool but passes a NIL lazy
+			// arena to populateRowCtx, so every VALUE placed in the map is allocated
+			// exactly as before — independently owned. That split is what makes the
+			// recycling sound on a path whose result flows into a group key or a
+			// collect() buffer: what escapes is the evaluator's result, and the
+			// result can be a value the map holds (a pass-through column, a lazy
+			// node) but never the map itself — expr.RowContext is not an
+			// expr.Value. A gated plan exists only when analyseNodeScalarUse did
+			// not bail, i.e. the expression has no subquery, comprehension,
+			// pattern, reduce or map projection, the only kinds whose evaluator
+			// could keep a reference to the RowContext past the call.
+			return func(row exec.Row) (expr.Value, error) {
+				return evalRowPooledOwned(astExpr, row, bp, params, reg)
+			}
+		}
 		return func(row exec.Row) (expr.Value, error) {
 			rowCtx := buildRowCtxWithUse(row, bp)
 			return evalRow(bopts, astExpr, rowCtx, params, reg)
@@ -15277,7 +15299,9 @@ type pooledRowCtx struct {
 
 // rowCtxPool recycles per-row [pooledRowCtx] units for the non-escaping
 // evaluation sites (the WHERE-predicate and scalar-projection closures), where
-// the map is built, passed to one [evalRow], and discarded. Reusing the outer
+// the map is built, passed to one [evalRow], and discarded. The aggregation
+// pre-projection recycles the map alone, without the arena
+// ([evalRowPooledOwned], rmp #2890), because its result may escape. Reusing the outer
 // map container removes the per-row map allocation that a heap profile of
 // `RETURN count(r)` flagged as a top allocator (#1575); reusing the co-located
 // lazy-node arena removes the per-row [expr.LazyNodeValue] allocation that a
@@ -15389,6 +15413,23 @@ func evalRowPooled(e ast.Expression, row exec.Row, bp *rowBindPlan, params map[s
 	defer releaseRowCtx(p)
 	populateRowCtx(p.ctx, row, bp, p)
 	return evalRow(bp.bopts, e, p.ctx, params, reg)
+}
+
+// evalRowPooledOwned is [evalRowPooled] for a GATED plan whose result may
+// escape into a result row — the aggregation pre-projection (rmp #2890). It
+// recycles only the map container: populateRowCtx receives a nil arena, so no
+// lazy node is borrowed and every value the map holds is independently
+// allocated, exactly as [buildRowCtxWithUse] allocates it. The map itself never
+// escapes (see [newAggregationEval] for the argument), so returning it to the
+// pool after the evaluation cannot recycle anything the result references.
+//
+// bp must be gated; an ungated plan has no non-escape guarantee for the map.
+func evalRowPooledOwned(e ast.Expression, row exec.Row, bp *rowBindPlan, params map[string]expr.Value, reg expr.FunctionRegistry) (expr.Value, error) {
+	p := acquireRowCtx(bp.rs.width)
+	populateRowCtx(p.ctx, row, bp, nil)
+	v, err := evalRow(bp.bopts, e, p.ctx, params, reg)
+	releaseRowCtx(p)
+	return v, err
 }
 
 // populateRowCtx fills ctx (which the caller sized/cleared) with the row's
@@ -18567,6 +18608,19 @@ func newRowPredicate(predExpr ast.Expression, schema map[string]int, g *lpg.Read
 		scalarUse = nil
 	}
 	bp := newRowBindPlan(rs, bopts, g, scalarUse)
+	// Typed fast path (rmp #2892): a predicate in the columnar grammar — a node
+	// property compared with a constant, a label test, an IN over constants, or
+	// a conjunction of those — is decided per row without a RowContext, a lazy
+	// node or a boxed operand; an undecided row falls back to the boxed path
+	// below. See [rowTypedPredicate] for why the two are result-identical.
+	if rp, ok := newRowTypedPredicate(predExpr, bp, params, reg); ok {
+		return func(row exec.Row) (expr.Value, error) {
+			if v, decided := rp.eval(row); decided {
+				return v, nil
+			}
+			return evalRowPooled(predExpr, row, bp, params, reg)
+		}
+	}
 	return func(row exec.Row) (expr.Value, error) {
 		return evalRowPooled(predExpr, row, bp, params, reg)
 	}
@@ -18597,7 +18651,7 @@ func newRowPredicate(predExpr ast.Expression, schema map[string]int, g *lpg.Read
 // CIP2016-06-14 and the openCypher TCK).
 // Beyond the bare comparison it also accepts a CONJUNCTION of accepted shapes, a
 // LABEL test and an IN over a scalar literal list — see
-// [buildColumnarConjunction], [makeColumnarLabelPredicate] and
+// [parseTypedConjunction], [makeColumnarLabelPredicate] and
 // [makeColumnarInPredicate] (#2186). Each of those recurses through this function
 // (via the col0 resolver) so the accepted-shape set stays a single definition.
 func buildColumnarPredicate(predExpr ast.Expression, schema map[string]int, g *lpg.ReadView[string, float64], params map[string]expr.Value, reg expr.FunctionRegistry, bopts *buildOpts) (exec.ChunkPredicate, bool) {
@@ -18610,6 +18664,11 @@ func buildColumnarPredicate(predExpr ast.Expression, schema map[string]int, g *l
 // receiver may be a bound node at ANY chunk column, the row shape a traversal
 // produces). Keeping one implementation is what guarantees the two entry points
 // accept exactly the same predicate grammar — the round-3 audit found them drifting.
+//
+// The grammar itself is [parseTypedPredicate]; this function only turns the parsed
+// tree into its chunk evaluator. The row-at-a-time evaluator of rmp #2892
+// ([newRowTypedPredicate]) is built from the SAME parse, so the two cannot drift
+// either.
 func buildColumnarPredicateAt(
 	predExpr ast.Expression,
 	schema map[string]int,
@@ -18619,30 +18678,99 @@ func buildColumnarPredicateAt(
 	bopts *buildOpts,
 	anyCol bool,
 ) (exec.ChunkPredicate, bool) {
-	// resolve reports whether e is `node.prop` on an eligible bound NODE variable and
-	// returns the property key and the variable's chunk column.
-	resolve := func(e ast.Expression) (propName string, nodeCol int, ok bool) {
-		if anyCol {
-			return nodePropAtAnyCol(e, schema, bopts)
-		}
-		p, isProp := nodePropAtCol0(e, schema, bopts)
-		return p, 0, isProp
+	tp, ok := parseTypedPredicate(predExpr, schema, params, reg, bopts, anyCol)
+	if !ok {
+		return nil, false
 	}
-	// resolveNodeCol reports whether e is a bare bound NODE variable and returns its
-	// chunk column — the receiver shape a label test needs.
-	resolveNodeCol := func(e ast.Expression) (nodeCol int, ok bool) {
+	return tp.chunkPredicate(g), true
+}
+
+// typedPredKind is the node kind of a [typedPred].
+type typedPredKind uint8
+
+const (
+	// typedPredCompare is `node.prop op const`, op one of <, <=, >, >=, =, <>.
+	typedPredCompare typedPredKind = iota
+	// typedPredLabel is the conjunctive label test `node:A:B`.
+	typedPredLabel
+	// typedPredIn is `node.prop IN [const, …]`.
+	typedPredIn
+	// typedPredAnd is an n-way conjunction of the other kinds, never of itself.
+	typedPredAnd
+)
+
+// typedPred is a WHERE predicate parsed into the typed grammar the unboxed
+// evaluators decide: a comparison of a node property with a scalar constant, a
+// label test, an IN over scalar constants, or a flattened conjunction of those.
+// It is built once per plan and read-only afterwards, so the evaluators built from
+// it are safe for concurrent use.
+type typedPred struct {
+	kind typedPredKind
+	// varName and col are the receiver node variable and its row-schema column —
+	// under the columnar chain's alignment also its chunk column. Leaf kinds only.
+	varName string
+	col     int
+	// walkIdx is the receiver's index in the row walk; set by
+	// [typedPred.bindWalk] for the row evaluator only.
+	walkIdx int
+	op      string       // typedPredCompare
+	prop    string       // typedPredCompare, typedPredIn
+	cv      expr.Value   // typedPredCompare: the pre-evaluated constant
+	vals    []expr.Value // typedPredIn: the pre-evaluated constants
+	labels  []string     // typedPredLabel: a private copy of the AST's labels
+	kids    []typedPred  // typedPredAnd
+}
+
+// parseTypedPredicate parses predExpr into the typed grammar described on
+// [buildColumnarPredicate], or reports false. anyCol selects the receiver rule of
+// [buildColumnarPredicateAt].
+func parseTypedPredicate(
+	predExpr ast.Expression,
+	schema map[string]int,
+	params map[string]expr.Value,
+	reg expr.FunctionRegistry,
+	bopts *buildOpts,
+	anyCol bool,
+) (typedPred, bool) {
+	// resolve reports whether e is `node.prop` on an eligible bound NODE variable and
+	// returns the property key, the variable and its column.
+	resolve := func(e ast.Expression) (propName, varName string, nodeCol int, ok bool) {
+		var p string
+		var col int
+		if anyCol {
+			p, col, ok = nodePropAtAnyCol(e, schema, bopts)
+		} else {
+			p, ok = nodePropAtCol0(e, schema, bopts)
+		}
+		if !ok {
+			return "", "", 0, false
+		}
+		// Both helpers accept only an *ast.Property over an *ast.Variable.
+		prop, isProp := e.(*ast.Property)
+		if !isProp {
+			return "", "", 0, false
+		}
+		recv, isVar := prop.Receiver.(*ast.Variable)
+		if !isVar {
+			return "", "", 0, false
+		}
+		return p, recv.Name, col, true
+	}
+	// resolveNodeCol reports whether e is a bare bound NODE variable and returns it
+	// and its column — the receiver shape a label test needs.
+	resolveNodeCol := func(e ast.Expression) (varName string, nodeCol int, ok bool) {
 		v, isVar := e.(*ast.Variable)
 		if !isVar {
-			return 0, false
+			return "", 0, false
 		}
 		col, inSchema := schema[v.Name]
 		if !inSchema || isNonNodeVar(v.Name, bopts) {
-			return 0, false
+			return "", 0, false
 		}
 		if !anyCol && col != 0 {
-			return 0, false
+			return "", 0, false
 		}
-		return col, true
+		return v.Name, col, true
 	}
 
 	switch e := predExpr.(type) {
@@ -18650,47 +18778,50 @@ func buildColumnarPredicateAt(
 		// `n:A:B` — a conjunctive label test, decided by a per-label roaring-bitmap
 		// membership check on the raw NodeID. Cheaper unboxed than boxed, and it is
 		// what an added pattern label becomes once the stacked Selections are fused.
-		nodeCol, ok := resolveNodeCol(e.Receiver)
+		varName, nodeCol, ok := resolveNodeCol(e.Receiver)
 		if !ok || len(e.Labels) == 0 {
-			return nil, false
+			return typedPred{}, false
 		}
-		return makeColumnarLabelPredicate(e.Labels, nodeCol, g), true
+		// Copy so a later mutation of the AST slice cannot change the built predicate.
+		labels := make([]string, len(e.Labels))
+		copy(labels, e.Labels)
+		return typedPred{kind: typedPredLabel, varName: varName, col: nodeCol, labels: labels}, true
 
 	case *ast.BinaryOp:
 		switch e.Operator {
 		case "AND":
-			return buildColumnarConjunction(e, schema, g, params, reg, bopts, anyCol)
+			return parseTypedConjunction(e, schema, params, reg, bopts, anyCol)
 		case "IN":
-			propName, nodeCol, isProp := resolve(e.Left)
+			propName, varName, nodeCol, isProp := resolve(e.Left)
 			if !isProp {
-				return nil, false
+				return typedPred{}, false
 			}
 			vals, isConstList := columnarConstList(e.Right, params, reg)
 			if !isConstList {
-				return nil, false
+				return typedPred{}, false
 			}
-			return makeColumnarInPredicate(propName, vals, nodeCol, g), true
+			return typedPred{kind: typedPredIn, varName: varName, col: nodeCol, prop: propName, vals: vals}, true
 		case "<", "<=", ">", ">=", "=", "<>":
-			if propName, nodeCol, isProp := resolve(e.Left); isProp {
+			if propName, varName, nodeCol, isProp := resolve(e.Left); isProp {
 				if cv, isConst := columnarConstValue(e.Right, params, reg); isConst {
-					return makeColumnarComparePredicate(e.Operator, propName, cv, nodeCol, g), true
+					return typedPred{kind: typedPredCompare, varName: varName, col: nodeCol, op: e.Operator, prop: propName, cv: cv}, true
 				}
 			}
-			if propName, nodeCol, isProp := resolve(e.Right); isProp {
+			if propName, varName, nodeCol, isProp := resolve(e.Right); isProp {
 				if cv, isConst := columnarConstValue(e.Left, params, reg); isConst {
-					return makeColumnarComparePredicate(flipComparisonOp(e.Operator), propName, cv, nodeCol, g), true
+					return typedPred{kind: typedPredCompare, varName: varName, col: nodeCol, op: flipComparisonOp(e.Operator), prop: propName, cv: cv}, true
 				}
 			}
-			return nil, false
+			return typedPred{}, false
 		default:
-			return nil, false
+			return typedPred{}, false
 		}
 	}
-	return nil, false
+	return typedPred{}, false
 }
 
-// buildColumnarConjunction combines the two operands of an `AND` into a single
-// [exec.ChunkPredicate] (#2186).
+// parseTypedConjunction parses the two operands of an `AND` into one flattened
+// conjunction (#2186).
 //
 // The combination rule follows directly from openCypher three-valued logic under a
 // WHERE: a row survives iff the conjunction evaluates to TRUE, which requires EVERY
@@ -18701,8 +18832,8 @@ func buildColumnarPredicateAt(
 // undecided, and the [exec.ColumnarFilter] falls back to the boxed row predicate for
 // that row, which is byte-identical by construction.
 //
-// EVERY conjunct must be a shape this builder recognises; one it does not decays the
-// whole conjunction to (nil, false), keeping the plain boxed predicate. That
+// EVERY conjunct must be a shape this parser recognises; one it does not decays the
+// whole conjunction to (zero, false), keeping the plain boxed predicate. That
 // restriction is what makes the identity argument complete rather than merely
 // plausible. Every recognised leaf is error-free by construction — a property read
 // plus a same-kind scalar comparison, a roaring-bitmap label membership test, or a
@@ -18711,38 +18842,237 @@ func buildColumnarPredicateAt(
 // boxed path would have raised. Admitting an arbitrary unrecognised conjunct as an
 // always-undecided leaf would forfeit that: the sibling's decided drop could
 // short-circuit past a conjunct whose boxed evaluation raises.
-func buildColumnarConjunction(
+func parseTypedConjunction(
 	bo *ast.BinaryOp,
 	schema map[string]int,
-	g *lpg.ReadView[string, float64],
 	params map[string]expr.Value,
 	reg expr.FunctionRegistry,
 	bopts *buildOpts,
 	anyCol bool,
-) (exec.ChunkPredicate, bool) {
+) (typedPred, bool) {
 	// Flatten the conjunction so an n-way AND costs one predicate slice, not a tree
 	// of closures.
-	var leaves []exec.ChunkPredicate
+	var kids []typedPred
 	var flatten func(e ast.Expression) bool
 	flatten = func(e ast.Expression) bool {
 		if inner, isBO := e.(*ast.BinaryOp); isBO && inner.Operator == "AND" {
 			return flatten(inner.Left) && flatten(inner.Right)
 		}
-		cp, ok := buildColumnarPredicateAt(e, schema, g, params, reg, bopts, anyCol)
+		kid, ok := parseTypedPredicate(e, schema, params, reg, bopts, anyCol)
 		if !ok {
 			return false
 		}
-		leaves = append(leaves, cp)
+		kids = append(kids, kid)
 		return true
 	}
 	if !flatten(bo.Left) || !flatten(bo.Right) {
+		return typedPred{}, false
+	}
+	return typedPred{kind: typedPredAnd, kids: kids}, true
+}
+
+// chunkPredicate builds tp's [exec.ChunkPredicate] over g.
+func (tp *typedPred) chunkPredicate(g *lpg.ReadView[string, float64]) exec.ChunkPredicate {
+	switch tp.kind {
+	case typedPredLabel:
+		return makeColumnarLabelPredicate(tp.labels, tp.col, g)
+	case typedPredIn:
+		return makeColumnarInPredicate(tp.prop, tp.vals, tp.col, g)
+	case typedPredAnd:
+		leaves := make([]exec.ChunkPredicate, len(tp.kids))
+		for i := range tp.kids {
+			leaves[i] = tp.kids[i].chunkPredicate(g)
+		}
+		return makeColumnarConjunctionPredicate(leaves)
+	default: // typedPredCompare
+		return makeColumnarComparePredicate(tp.op, tp.prop, tp.cv, tp.col, g)
+	}
+}
+
+// triState is a typed-predicate verdict for one row: undecided, or one of the
+// three openCypher truth values.
+type triState uint8
+
+const (
+	// triUndecided defers the row to the boxed predicate.
+	triUndecided triState = iota
+	triFalse
+	triTrue
+	triNull
+)
+
+// rowTypedPredicate is the row-at-a-time evaluator of a [typedPred] (rmp #2892):
+// it decides a Filter predicate over the boxed row WITHOUT building a
+// RowContext, a lazy node or a boxed operand, and defers every row it cannot
+// decide to the boxed predicate.
+//
+// # Why it is result-identical
+//
+// It reads the same inputs, through the same calls, as the boxed path it
+// short-cuts. The boxed path binds a node variable by [populateRowCtx] — the
+// cell must be an [expr.IntegerValue] that [lpg.ReadView]'s mapper resolves,
+// and the variable must be bound as a plain node, which [rowBindPlan] records —
+// and then reads the property through [lpg.ReadView.NodePropertyByID] or tests
+// the label through [lpg.ReadView.HasNodeLabelByID] on the same view. The row
+// evaluator applies the same binding test to the same resolved plan and calls
+// the same two reads; any row where the test fails is undecided. The
+// comparison is [compareStoredScalar], the certified core of the columnar
+// filter (#1824), which decides only same-kind scalar pairs.
+//
+// The verdict is the exact openCypher value, not merely its truthiness: an
+// absent property is NULL, a conjunction is Kleene AND, and IN is TRUE on an
+// equal element, otherwise FALSE (a present property against non-null
+// constants never yields NULL). A conjunction is decided only when EVERY
+// conjunct is: an undecided conjunct defers the whole predicate, so a decided
+// FALSE can never short-circuit past a conjunct whose boxed evaluation would
+// raise (a cell holding a deleted-entity value, for instance).
+type rowTypedPredicate struct {
+	tp typedPred
+	bp *rowBindPlan
+}
+
+// newRowTypedPredicate parses predExpr into the typed grammar against bp's frozen
+// schema and binds every receiver to its row-walk entry, or reports false.
+func newRowTypedPredicate(predExpr ast.Expression, bp *rowBindPlan, params map[string]expr.Value, reg expr.FunctionRegistry) (*rowTypedPredicate, bool) {
+	if bp.g == nil {
 		return nil, false
 	}
-	return makeColumnarConjunctionPredicate(leaves), true
+	tp, ok := parseTypedPredicate(predExpr, bp.rs.cols, params, reg, bp.bopts, true)
+	if !ok || !tp.bindWalk(bp.rs.walk) {
+		return nil, false
+	}
+	return &rowTypedPredicate{tp: tp, bp: bp}, true
+}
+
+// bindWalk sets every leaf's walkIdx to its receiver's entry in walk, reporting
+// false when a receiver has no entry at the column the parse resolved.
+func (tp *typedPred) bindWalk(walk schemaWalk) bool {
+	if tp.kind == typedPredAnd {
+		for i := range tp.kids {
+			if !tp.kids[i].bindWalk(walk) {
+				return false
+			}
+		}
+		return true
+	}
+	for i, w := range walk {
+		if w.name == tp.varName && w.col == tp.col {
+			tp.walkIdx = i
+			return true
+		}
+	}
+	return false
+}
+
+// eval decides the predicate for row. decided is false when the boxed predicate
+// must evaluate the row.
+func (rp *rowTypedPredicate) eval(row exec.Row) (v expr.Value, decided bool) {
+	switch rp.tp.evalRow(row, rp.bp.resolved(), rp.bp) {
+	case triTrue:
+		return expr.BoolValue(true), true
+	case triFalse:
+		return expr.BoolValue(false), true
+	case triNull:
+		return expr.Null, true
+	}
+	return nil, false
+}
+
+// evalRow is the per-node evaluation behind [rowTypedPredicate.eval].
+func (tp *typedPred) evalRow(row exec.Row, vars []boundVar, bp *rowBindPlan) triState {
+	if tp.kind == typedPredAnd {
+		verdict := triTrue
+		for i := range tp.kids {
+			switch tp.kids[i].evalRow(row, vars, bp) {
+			case triUndecided:
+				return triUndecided
+			case triFalse:
+				verdict = triFalse
+			case triNull:
+				if verdict == triTrue {
+					verdict = triNull
+				}
+			}
+		}
+		return verdict
+	}
+	id, ok := rowNodeID(row, &vars[tp.walkIdx], bp)
+	if !ok {
+		return triUndecided
+	}
+	g := bp.g
+	switch tp.kind {
+	case typedPredLabel:
+		for _, name := range tp.labels {
+			if !g.HasNodeLabelByID(id, name) {
+				return triFalse
+			}
+		}
+		return triTrue
+	case typedPredIn:
+		pv, present := g.NodePropertyByID(id, tp.prop)
+		if !present {
+			return triNull // NULL IN [non-empty list] is NULL
+		}
+		verdict := triFalse
+		for _, c := range tp.vals {
+			keep, decided := compareStoredScalar("=", pv, c)
+			if !decided {
+				verdict = triUndecided
+				continue
+			}
+			if keep {
+				return triTrue
+			}
+		}
+		return verdict
+	default: // typedPredCompare
+		pv, present := g.NodePropertyByID(id, tp.prop)
+		if !present {
+			return triNull
+		}
+		keep, decided := compareStoredScalar(tp.op, pv, tp.cv)
+		if !decided {
+			return triUndecided
+		}
+		if keep {
+			return triTrue
+		}
+		return triFalse
+	}
+}
+
+// rowNodeID returns the NodeID bound to b in row when [populateRowCtx] would bind
+// b as a plain node read through bp.g — the precondition of every typed row leaf —
+// and reports false otherwise.
+func rowNodeID(row exec.Row, b *boundVar, bp *rowBindPlan) (graph.NodeID, bool) {
+	// An entity kind (relationship, path, VLE list) or a scalar pass-through
+	// column is not bound as a node; a gated plan leaves a variable its
+	// expression never names out of the context altogether.
+	if b.kind&(bindEntityKinds|bindScalarPassThrough) != 0 {
+		return 0, false
+	}
+	if bp.gated && b.kind&bindScalarUsed == 0 {
+		return 0, false
+	}
+	if b.col >= len(row) {
+		return 0, false
+	}
+	iv, ok := row[b.col].(expr.IntegerValue)
+	if !ok {
+		return 0, false
+	}
+	id := graph.NodeID(iv)
+	// The identity gate both node upgrades apply: an unresolved integer stays an
+	// integer in the boxed path, which the typed leaves do not model.
+	if _, resolved := bp.g.AdjList().Mapper().Resolve(id); !resolved {
+		return 0, false
+	}
+	return id, true
 }
 
 // makeColumnarConjunctionPredicate folds leaves into the single [exec.ChunkPredicate]
-// described on [buildColumnarConjunction]: a decided drop from any leaf decides the
+// described on [parseTypedConjunction]: a decided drop from any leaf decides the
 // conjunction FALSE-or-NULL; all leaves decided TRUE decides it TRUE; anything else
 // is undecided and defers to the boxed predicate.
 func makeColumnarConjunctionPredicate(leaves []exec.ChunkPredicate) exec.ChunkPredicate {
@@ -18997,51 +19327,62 @@ func makeColumnarComparePredicate(op, propName string, cv expr.Value, nodeCol in
 			// for every comparison operator.
 			return false, true
 		}
-		switch c := cv.(type) {
-		case expr.IntegerValue:
-			if pv.Kind() != lpg.PropInt64 {
-				return false, false
-			}
-			a, aok := pv.Int64()
-			if !aok {
-				return false, false
-			}
-			return cmpKeepOrdered(op, a, int64(c)), true
-		case expr.FloatValue:
-			if pv.Kind() != lpg.PropFloat64 {
-				return false, false
-			}
-			a, aok := pv.Float64()
-			if !aok {
-				return false, false
-			}
-			return cmpKeepOrdered(op, a, float64(c)), true
-		case expr.StringValue:
-			if pv.Kind() != lpg.PropString {
-				return false, false
-			}
-			s, sok := pv.String()
-			if !sok {
-				return false, false
-			}
-			// A property physically stored as a SOH-tagged string is a temporal, not
-			// text: the boxed path compares it as a temporal, so fall back.
-			if _, isTemporal := decodeTemporalString(s); isTemporal {
-				return false, false
-			}
-			return cmpKeepOrdered(op, s, string(c)), true
-		case expr.BoolValue:
-			if pv.Kind() != lpg.PropBool {
-				return false, false
-			}
-			b, bok := pv.Bool()
-			if !bok {
-				return false, false
-			}
-			return cmpKeepOrdered(op, boolToInt64(b), boolToInt64(bool(c))), true
-		}
-		return false, false
+		return compareStoredScalar(op, pv, cv)
 	}
+}
+
+// compareStoredScalar decides `stored op cv` for a PRESENT stored property pv and
+// a constant cv that [columnarConstValue] accepted. It decides only when both
+// share the same primitive kind, reproducing the openCypher comparison with Go's
+// native operators; every other pairing — cross-type numeric included, which the
+// boxed path resolves with lossy promotion, and a temporal stored as a SOH-tagged
+// string — is reported undecided. It is the single comparison core of the chunk
+// ([makeColumnarComparePredicate]) and row ([typedPred.evalRow]) evaluators.
+func compareStoredScalar(op string, pv lpg.PropertyValue, cv expr.Value) (keep, decided bool) {
+	switch c := cv.(type) {
+	case expr.IntegerValue:
+		if pv.Kind() != lpg.PropInt64 {
+			return false, false
+		}
+		a, aok := pv.Int64()
+		if !aok {
+			return false, false
+		}
+		return cmpKeepOrdered(op, a, int64(c)), true
+	case expr.FloatValue:
+		if pv.Kind() != lpg.PropFloat64 {
+			return false, false
+		}
+		a, aok := pv.Float64()
+		if !aok {
+			return false, false
+		}
+		return cmpKeepOrdered(op, a, float64(c)), true
+	case expr.StringValue:
+		if pv.Kind() != lpg.PropString {
+			return false, false
+		}
+		s, sok := pv.String()
+		if !sok {
+			return false, false
+		}
+		// A property physically stored as a SOH-tagged string is a temporal, not
+		// text: the boxed path compares it as a temporal, so fall back.
+		if _, isTemporal := decodeTemporalString(s); isTemporal {
+			return false, false
+		}
+		return cmpKeepOrdered(op, s, string(c)), true
+	case expr.BoolValue:
+		if pv.Kind() != lpg.PropBool {
+			return false, false
+		}
+		b, bok := pv.Bool()
+		if !bok {
+			return false, false
+		}
+		return cmpKeepOrdered(op, boolToInt64(b), boolToInt64(bool(c))), true
+	}
+	return false, false
 }
 
 // cmpKeepOrdered returns whether `a op b` holds for the openCypher comparison op,
