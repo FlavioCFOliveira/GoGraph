@@ -213,11 +213,13 @@ func (pe *patternEvaluator) incomingSlotsOf(ctx context.Context, id graph.NodeID
 	return hits, nil
 }
 
-// varLenCandidates appends to buf every relationship slot the hop may cross from
-// cur in direction dir: of an accepted type, per slot as well as per pair, and not
-// already on used. An undirected hop reads a self-loop once, from the outgoing
+// varLenCandidates appends to buf every relationship slot the hop s may cross
+// from cur in direction dir: of an accepted type, per slot as well as per pair,
+// carrying the hop's relationship property map (rmp #2908), and not already on
+// used. An undirected hop reads a self-loop once, from the outgoing
 // leg, as [patternEvaluator.enumerateSteps] does. Every slot read is charged.
-func (pe *patternEvaluator) varLenCandidates(ctx context.Context, cur graph.NodeID, rel *ast.RelationshipPattern, dir ast.RelDirection, used relPath, buf []candidateHop) ([]candidateHop, error) {
+func (pe *patternEvaluator) varLenCandidates(ctx context.Context, cur graph.NodeID, s step, dir ast.RelDirection, used relPath, buf []candidateHop) ([]candidateHop, error) {
+	rel := s.rel
 	mapper := pe.g.AdjList().Mapper()
 	curKey, ok := mapper.Resolve(cur)
 	if !ok {
@@ -238,7 +240,7 @@ func (pe *patternEvaluator) varLenCandidates(ctx context.Context, cur graph.Node
 				continue
 			}
 			handle := handleAt(view.Handles, i)
-			if !pe.edgeMatchesRel(curKey, dstKey, rel) || !pe.slotMatchesRelType(cur, dstID, handle, rel) {
+			if !pe.edgeMatchesRel(curKey, dstKey, rel) || !pe.slotQualifies(cur, dstID, curKey, dstKey, handle, s) {
 				continue
 			}
 			buf = append(buf, candidateHop{srcID: cur, dstID: dstID, srcKey: curKey, dstKey: dstKey, handle: handle, slot: i, forward: true})
@@ -260,7 +262,7 @@ func (pe *patternEvaluator) varLenCandidates(ctx context.Context, cur graph.Node
 			if relUsed(used, inst) {
 				continue
 			}
-			if !pe.edgeMatchesRel(h.key, curKey, rel) || !pe.slotMatchesRelType(h.id, cur, h.handle, rel) {
+			if !pe.edgeMatchesRel(h.key, curKey, rel) || !pe.slotQualifies(h.id, cur, h.key, curKey, h.handle, s) {
 				continue
 			}
 			buf = append(buf, candidateHop{srcID: h.id, dstID: cur, srcKey: h.key, dstKey: curKey, handle: h.handle, slot: h.slot, forward: false})
@@ -323,7 +325,7 @@ func (pe *patternEvaluator) varLenExists(ctx context.Context, vs *varLenSearch, 
 	if depth >= vs.maxDepth {
 		return false, nil
 	}
-	cands, err := pe.varLenCandidates(ctx, cur, vs.s.rel, vs.dir, used, pe.frameBuffer())
+	cands, err := pe.varLenCandidates(ctx, cur, vs.s, vs.dir, used, pe.frameBuffer())
 	pe.varLenBufs[pe.varLenFrame] = cands
 	if err != nil {
 		return false, err
@@ -368,23 +370,44 @@ func (pe *patternEvaluator) varLenReach(ctx context.Context, vs *varLenSearch, f
 		if !resolved {
 			continue
 		}
-		if cycle && fromOK && pe.closesCycle(curKey, fromKey, vs) {
+		if cycle && fromOK && pe.closesCycle(cur.id, from, curKey, fromKey, vs) {
 			return true, nil
 		}
-		if err := pe.bfsExpandStep(ctx, mapper, cur.id, curKey, vs.s.rel, vs.dir, visited, &frontier, cur.depth); err != nil {
+		if err := pe.bfsExpandStep(ctx, mapper, cur.id, curKey, vs.s, vs.dir, visited, &frontier, cur.depth); err != nil {
 			return false, err
 		}
 	}
 	return false, nil
 }
 
-// closesCycle reports whether the node keyed curKey carries a relationship of the
-// hop's type back to the start node keyed fromKey, in the hop's direction.
-func (pe *patternEvaluator) closesCycle(curKey, fromKey string, vs *varLenSearch) bool {
+// closesCycle reports whether the node cur (keyed curKey) carries a relationship
+// the hop may cross back to the start node from (keyed fromKey), in the hop's
+// direction.
+func (pe *patternEvaluator) closesCycle(cur, from graph.NodeID, curKey, fromKey string, vs *varLenSearch) bool {
 	if vs.dir == ast.RelDirectionIncoming {
-		return pe.edgeMatchesRel(fromKey, curKey, vs.s.rel)
+		return pe.pairQualifies(from, cur, fromKey, curKey, vs.s)
 	}
-	return pe.edgeMatchesRel(curKey, fromKey, vs.s.rel)
+	return pe.pairQualifies(cur, from, curKey, fromKey, vs.s)
+}
+
+// pairQualifies reports whether the stored pair srcID → dstID carries at least
+// one relationship the hop s may cross. Without a relationship property map that
+// is the per-pair type verdict; with one it needs a slot whose own type and
+// properties qualify (rmp #2908), because parallel relationships may differ.
+func (pe *patternEvaluator) pairQualifies(srcID, dstID graph.NodeID, srcKey, dstKey string, s step) bool {
+	if !pe.edgeMatchesRel(srcKey, dstKey, s.rel) {
+		return false
+	}
+	if s.props == nil {
+		return true
+	}
+	view := pe.g.EntryView(srcID)
+	for i, nb := range view.Neighbours {
+		if nb == dstID && pe.slotQualifies(srcID, dstID, srcKey, dstKey, handleAt(view.Handles, i), s) {
+			return true
+		}
+	}
+	return false
 }
 
 // enumerateVarLen is [patternEvaluator.enumerateSteps] for a variable-length hop:
@@ -432,7 +455,7 @@ func (pe *patternEvaluator) varLenEnum(ctx context.Context, vs *varLenSearch, cu
 	if depth >= vs.maxDepth {
 		return nil
 	}
-	cands, err := pe.varLenCandidates(ctx, cur, vs.s.rel, vs.dir, used, pe.frameBuffer())
+	cands, err := pe.varLenCandidates(ctx, cur, vs.s, vs.dir, used, pe.frameBuffer())
 	pe.varLenBufs[pe.varLenFrame] = cands
 	if err != nil {
 		return err
@@ -478,7 +501,7 @@ func (pe *patternEvaluator) walkBoundRelList(ctx context.Context, srcID graph.No
 		if !ok {
 			return 0, used, false, nil
 		}
-		cands, err := pe.varLenCandidates(ctx, cur, s.rel, dir, used, pe.frameBuffer())
+		cands, err := pe.varLenCandidates(ctx, cur, s, dir, used, pe.frameBuffer())
 		pe.varLenBufs[pe.varLenFrame] = cands
 		if err != nil {
 			return 0, used, false, err
@@ -503,24 +526,29 @@ func (pe *patternEvaluator) walkBoundRelList(ctx context.Context, srcID graph.No
 }
 
 // bfsExpandStep appends unvisited neighbours reachable in direction dir from
-// (curID, curKey) to frontier, respecting the edge-type filter in rel.
-func (pe *patternEvaluator) bfsExpandStep(ctx context.Context, mapper *graph.Mapper[string], curID graph.NodeID, curKey string, rel *ast.RelationshipPattern, dir ast.RelDirection, visited map[graph.NodeID]struct{}, frontier *[]patBFSNode, depth int64) error {
+// (curID, curKey) to frontier, respecting the hop's type filter and relationship
+// property map. The node-visited search stays exact under a property map: it
+// explores the subgraph of the relationships the hop may cross, and the
+// shortest-walk argument of the file comment holds in any subgraph.
+func (pe *patternEvaluator) bfsExpandStep(ctx context.Context, mapper *graph.Mapper[string], curID graph.NodeID, curKey string, s step, dir ast.RelDirection, visited map[graph.NodeID]struct{}, frontier *[]patBFSNode, depth int64) error {
 	switch dir {
 	case ast.RelDirectionOutgoing:
-		pe.bfsExpandOutgoing(mapper, curID, curKey, rel, visited, frontier, depth)
+		pe.bfsExpandOutgoing(mapper, curID, curKey, s, visited, frontier, depth)
 		return nil
 	case ast.RelDirectionIncoming:
-		return pe.bfsExpandIncoming(ctx, curID, curKey, rel, visited, frontier, depth)
+		return pe.bfsExpandIncoming(ctx, curID, curKey, s, visited, frontier, depth)
 	default: // undirected
-		pe.bfsExpandOutgoing(mapper, curID, curKey, rel, visited, frontier, depth)
-		return pe.bfsExpandIncoming(ctx, curID, curKey, rel, visited, frontier, depth)
+		pe.bfsExpandOutgoing(mapper, curID, curKey, s, visited, frontier, depth)
+		return pe.bfsExpandIncoming(ctx, curID, curKey, s, visited, frontier, depth)
 	}
 }
 
 // bfsExpandOutgoing appends unvisited forward neighbours of curID to frontier.
-func (pe *patternEvaluator) bfsExpandOutgoing(mapper *graph.Mapper[string], curID graph.NodeID, curKey string, rel *ast.RelationshipPattern, visited map[graph.NodeID]struct{}, frontier *[]patBFSNode, depth int64) {
-	nbs := pe.g.EntryView(curID).Neighbours
-	for _, nbID := range nbs {
+// With a relationship property map each slot is tested on its own, and a
+// neighbour is reached through the first slot that qualifies (rmp #2908).
+func (pe *patternEvaluator) bfsExpandOutgoing(mapper *graph.Mapper[string], curID graph.NodeID, curKey string, s step, visited map[graph.NodeID]struct{}, frontier *[]patBFSNode, depth int64) {
+	view := pe.g.EntryView(curID)
+	for i, nbID := range view.Neighbours {
 		if _, seen := visited[nbID]; seen {
 			continue
 		}
@@ -528,7 +556,10 @@ func (pe *patternEvaluator) bfsExpandOutgoing(mapper *graph.Mapper[string], curI
 		if !nbOK {
 			continue
 		}
-		if !pe.edgeMatchesRel(curKey, nbKey, rel) {
+		if !pe.edgeMatchesRel(curKey, nbKey, s.rel) {
+			continue
+		}
+		if s.props != nil && !pe.slotQualifies(curID, nbID, curKey, nbKey, handleAt(view.Handles, i), s) {
 			continue
 		}
 		visited[nbID] = struct{}{}
@@ -545,14 +576,21 @@ type patBFSNode struct {
 // bfsExpandIncoming appends reverse-direction neighbours to frontier for BFS.
 // The sources are found by [patternEvaluator.scanIncoming], which skips visited
 // nodes, and their edge type is tested only after its walk has returned
-// (rmp #2896).
-func (pe *patternEvaluator) bfsExpandIncoming(ctx context.Context, dstID graph.NodeID, dstKey string, rel *ast.RelationshipPattern, visited map[graph.NodeID]struct{}, frontier *[]patBFSNode, depth int64) error {
-	hits, err := pe.scanIncoming(ctx, dstID, true, false, visited)
+// (rmp #2896). Without a relationship property map the first slot of each
+// source decides; with one every slot is read and tested on its own (rmp #2908).
+func (pe *patternEvaluator) bfsExpandIncoming(ctx context.Context, dstID graph.NodeID, dstKey string, s step, visited map[graph.NodeID]struct{}, frontier *[]patBFSNode, depth int64) error {
+	hits, err := pe.scanIncoming(ctx, dstID, true, s.props != nil, visited)
 	if err != nil {
 		return err
 	}
 	for _, hit := range hits {
-		if !pe.edgeMatchesRel(hit.key, dstKey, rel) {
+		if _, seen := visited[hit.id]; seen {
+			continue // an earlier slot of the same source already qualified
+		}
+		if !pe.edgeMatchesRel(hit.key, dstKey, s.rel) {
+			continue
+		}
+		if s.props != nil && !pe.slotQualifies(hit.id, dstID, hit.key, dstKey, hit.handle, s) {
 			continue
 		}
 		visited[hit.id] = struct{}{}

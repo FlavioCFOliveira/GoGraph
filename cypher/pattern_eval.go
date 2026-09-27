@@ -18,7 +18,9 @@ package cypher
 //     (or treats the node as unbound, meaning "any node").
 //  2. Walks the PathElement linked list hop by hop.
 //  3. At each hop it follows edges in the declared direction (outgoing,
-//     incoming, or undirected) and filters by relationship type (if given).
+//     incoming, or undirected) and filters each relationship by type and by
+//     its own property map (if given). A relationship variable already bound
+//     on the row restricts a fixed hop to that one relationship.
 //  4. For variable-length hops it enumerates relationship-isomorphic paths
 //     within the declared min/max depth (see pattern_eval_varlen.go).
 //  5. After all hops, checks that the final node satisfies the end-node
@@ -37,6 +39,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/funcs"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ir"
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	lpg "github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
@@ -77,6 +80,12 @@ type patternEvaluator struct {
 	// both [expr.EvalWith] call sites in [patternEvaluator.EvalPatternComp], so
 	// such a subquery answered false / 0 instead of being evaluated.
 	subEval expr.SubqueryEvaluator
+
+	// reg is the function registry of the comprehension being evaluated, for the
+	// relationship property maps [patternEvaluator.resolveStep] evaluates. It is
+	// set for the duration of [patternEvaluator.EvalPatternComp]; a bare pattern
+	// predicate receives no registry, so it is nil there.
+	reg expr.FunctionRegistry
 
 	// adjacencyCountsDisabled forbids both adjacency-answered rewrites this
 	// evaluator can take — the degree count behind `size([ … ])`
@@ -193,6 +202,9 @@ func (pe *patternEvaluator) EvalPatternComp(ctx context.Context, pc *ast.Pattern
 	}
 	pe.beginEval()
 	defer pe.endEval()
+	prevReg := pe.reg
+	pe.reg = reg
+	defer func() { pe.reg = prevReg }()
 	pp := pc.Pattern
 	results := expr.ListValue{}
 	appended := 0
@@ -302,9 +314,30 @@ func (pe *patternEvaluator) enumerateSteps(ctx context.Context, srcID graph.Node
 		return cb(row)
 	}
 	s := steps[0]
+	if s.hasRelProps() {
+		var ok bool
+		var err error
+		if s, ok, err = pe.resolveStep(ctx, s, row); err != nil || !ok {
+			return err
+		}
+	}
 	remaining := steps[1:]
 	if s.isVarLen() {
 		return pe.enumerateVarLen(ctx, srcID, s, remaining, row, used, cb)
+	}
+	if s.hasRelVar() {
+		if c, bound, found := pe.boundRelHop(srcID, s, row); bound {
+			inst := c.instance()
+			dstID := c.traversalDst()
+			if !found || relUsed(used, inst) || !pe.checkEndNode(s.node, dstID, row) {
+				return nil
+			}
+			next := cloneRow(row)
+			if s.node != nil && s.node.Variable != nil {
+				next[*s.node.Variable] = nodeValueForID(pe.g, dstID)
+			}
+			return pe.enumerateSteps(ctx, dstID, remaining, next, pushRel(used, inst), cb)
+		}
 	}
 
 	mapper := pe.g.AdjList().Mapper()
@@ -437,7 +470,7 @@ func (pe *patternEvaluator) collectOutgoingCandidates(srcID graph.NodeID, srcKey
 		if i < len(handles) {
 			handle = handles[i]
 		}
-		if !pe.slotMatchesRelType(srcID, dstID, handle, s.rel) {
+		if !pe.slotQualifies(srcID, dstID, srcKey, dstKey, handle, s) {
 			continue
 		}
 		out = append(out, candidateHop{srcID: srcID, dstID: dstID, srcKey: srcKey, dstKey: dstKey, handle: handle, slot: i, forward: true})
@@ -506,7 +539,7 @@ func (pe *patternEvaluator) collectIncomingCandidates(ctx context.Context, dstID
 		// The slot is stored h.id → dstID, so the per-instance type lookup uses
 		// that orientation even though the traversal crosses it backwards (see
 		// [candidateHop]'s orientation contract).
-		if !pe.slotMatchesRelType(h.id, dstID, h.handle, s.rel) {
+		if !pe.slotQualifies(h.id, dstID, h.key, dstKey, h.handle, s) {
 			continue
 		}
 		out = append(out, candidateHop{srcID: h.id, dstID: dstID, srcKey: h.key, dstKey: dstKey, handle: h.handle, slot: h.slot, forward: false})
@@ -825,6 +858,19 @@ func (pe *patternEvaluator) matchPattern(ctx context.Context, pp *ast.PathPatter
 		return len(startIDs) > 0, nil
 	}
 
+	// The existential walk never extends row, so each hop's relationship
+	// property map is evaluated once here rather than once per partial match.
+	// steps is this call's own slice, so it is resolved in place.
+	for i := range steps {
+		if !steps[i].hasRelProps() {
+			continue
+		}
+		s, ok, err := pe.resolveStep(ctx, steps[i], row)
+		if err != nil || !ok {
+			return false, err
+		}
+		steps[i] = s
+	}
 	used := newRelPath(steps)
 	for _, sid := range startIDs {
 		if err := ctx.Err(); err != nil {
@@ -845,10 +891,25 @@ func (pe *patternEvaluator) matchPattern(ctx context.Context, pp *ast.PathPatter
 }
 
 // step bundles a single (relationship, destination-node) hop.
+//
+// props is the hop's relationship property map evaluated against the row the
+// hop is matched under ([patternEvaluator.resolveStep]); it is nil when the
+// pattern declares none. A non-nil props makes every verdict of the hop a
+// per-SLOT one, because parallel relationships between one pair may carry
+// different properties (rmp #2908).
 type step struct {
-	rel  *ast.RelationshipPattern
-	node *ast.NodePattern
+	rel   *ast.RelationshipPattern
+	node  *ast.NodePattern
+	props expr.MapValue
 }
+
+// hasRelProps reports whether the hop declares a relationship property map. It
+// is the inlinable guard in front of [patternEvaluator.resolveStep].
+func (s step) hasRelProps() bool { return s.rel != nil && s.rel.Properties != nil }
+
+// hasRelVar reports whether the hop names its relationship at all. It is the
+// inlinable guard in front of [patternEvaluator.boundRelHop].
+func (s step) hasRelVar() bool { return s.rel != nil && s.rel.Variable != nil }
 
 // collectSteps builds the ordered slice of (rel, node) steps from the
 // PathElement linked list, starting at el.Next (skipping the head node which
@@ -888,6 +949,22 @@ func (pe *patternEvaluator) matchSteps(ctx context.Context, srcID graph.NodeID, 
 //
 // direction × filter × recursion branches; extracted helpers bring each below 15
 func (pe *patternEvaluator) matchSingleHop(ctx context.Context, srcID graph.NodeID, s step, remaining []step, row expr.RowContext, used relPath) (bool, error) {
+	if !s.hasRelVar() {
+		return pe.matchUnboundHop(ctx, srcID, s, remaining, row, used)
+	}
+	if c, bound, found := pe.boundRelHop(srcID, s, row); bound {
+		inst := c.instance()
+		if !found || relUsed(used, inst) || !pe.checkEndNode(s.node, c.traversalDst(), row) {
+			return false, nil
+		}
+		return pe.matchSteps(ctx, c.traversalDst(), remaining, row, pushRel(used, inst))
+	}
+	return pe.matchUnboundHop(ctx, srcID, s, remaining, row, used)
+}
+
+// matchUnboundHop is [patternEvaluator.matchSingleHop] for a hop whose
+// relationship variable, if any, is not bound on the row.
+func (pe *patternEvaluator) matchUnboundHop(ctx context.Context, srcID graph.NodeID, s step, remaining []step, row expr.RowContext, used relPath) (bool, error) {
 	mapper := pe.g.AdjList().Mapper()
 
 	// Collect candidate destination node IDs based on direction.
@@ -969,9 +1046,11 @@ func (pe *patternEvaluator) endNodePatternOK(np *ast.NodePattern, dstID graph.No
 // function of the pair alone, so a parallel slot to the same node cannot
 // answer differently. That holds only while no relationship is tracked: with a
 // non-nil used the verdict also depends on WHICH slot the path crossed, so the
-// multi-hop form is [patternEvaluator.matchOutgoingUnique].
+// multi-hop form is [patternEvaluator.matchOutgoingUnique]. Nor does it hold for
+// a hop with a relationship property map, whose verdict is the slot's own
+// (rmp #2908), so that hop takes the per-slot form too.
 func (pe *patternEvaluator) matchOutgoing(ctx context.Context, srcID graph.NodeID, srcKey string, s step, remaining []step, row expr.RowContext, used relPath) (bool, error) {
-	if used != nil {
+	if used != nil || s.props != nil {
 		return pe.matchOutgoingUnique(ctx, srcID, srcKey, s, remaining, row, used)
 	}
 	endID, endBound, endOK := pe.boundEndID(s.node, row)
@@ -1016,12 +1095,13 @@ func (pe *patternEvaluator) outgoingHopMatches(ctx context.Context, srcKey strin
 }
 
 // matchOutgoingUnique is [patternEvaluator.matchOutgoing] for a pattern of two
-// or more hops, where relationship isomorphism applies (rmp #2895). Each slot is
-// a distinct relationship, so a slot already on used is skipped, the type is
-// tested on THE SLOT ([patternEvaluator.slotMatchesRelType]) as well as on the
-// pair, and a parallel slot to the same node is still tried when the first one
-// cannot complete the path. The bound end node is still compared by NodeID before
-// any lookup.
+// or more hops, where relationship isomorphism applies (rmp #2895), and for a hop
+// with a relationship property map (rmp #2908; used may then be nil). Each slot
+// is a distinct relationship, so a slot already on used is skipped, the type and
+// the property map are tested on THE SLOT ([patternEvaluator.slotQualifies]) as
+// well as the type on the pair, and a parallel slot to the same node is still
+// tried when the first one cannot complete the path. The bound end node is still
+// compared by NodeID before any lookup.
 func (pe *patternEvaluator) matchOutgoingUnique(ctx context.Context, srcID graph.NodeID, srcKey string, s step, remaining []step, row expr.RowContext, used relPath) (bool, error) {
 	endID, endBound, endOK := pe.boundEndID(s.node, row)
 	if endBound && !endOK {
@@ -1044,7 +1124,7 @@ func (pe *patternEvaluator) matchOutgoingUnique(ctx context.Context, srcID graph
 		if !ok {
 			continue
 		}
-		if !pe.edgeMatchesRel(srcKey, dstKey, s.rel) || !pe.slotMatchesRelType(srcID, dstID, handleAt(view.Handles, i), s.rel) {
+		if !pe.edgeMatchesRel(srcKey, dstKey, s.rel) || !pe.slotQualifies(srcID, dstID, srcKey, dstKey, handleAt(view.Handles, i), s) {
 			continue
 		}
 		if !pe.endNodePatternOK(s.node, dstID) {
@@ -1106,7 +1186,7 @@ func (pe *patternEvaluator) matchIncoming(ctx context.Context, dstID graph.NodeI
 			if err := ctx.Err(); err != nil {
 				return false, err
 			}
-			if used == nil {
+			if used == nil && s.props == nil {
 				// The first slot endID → dstID decides: every verdict below is a
 				// function of the pair (see [patternEvaluator.matchOutgoing]).
 				if !pe.edgeMatchesRel(candidateKey, dstKey, s.rel) || !pe.endNodePatternOK(s.node, endID) {
@@ -1146,7 +1226,7 @@ func (pe *patternEvaluator) matchIncoming(ctx context.Context, dstID graph.NodeI
 			if err != nil || found {
 				return found, err
 			}
-			if used == nil {
+			if used == nil && s.props == nil {
 				break // the first slot id → dstID decides: every verdict is the pair's
 			}
 		}
@@ -1157,7 +1237,8 @@ func (pe *patternEvaluator) matchIncoming(ctx context.Context, dstID graph.NodeI
 // incomingSlotMatches applies the edge-type and end-node filters to the slot
 // hit.id → dstID and recurses into the remaining steps from hit.id. With a
 // non-nil used the slot must not already be on the path and its own type must
-// qualify (rmp #2895); without one the verdict is the pair's.
+// qualify (rmp #2895); with a relationship property map its type and properties
+// must (rmp #2908); without either the verdict is the pair's.
 func (pe *patternEvaluator) incomingSlotMatches(ctx context.Context, hit incomingSlot, dstID graph.NodeID, dstKey string, s step, remaining []step, row expr.RowContext, used relPath) (bool, error) {
 	inst := relInstance{src: hit.id, slot: hit.slot}
 	if relUsed(used, inst) {
@@ -1166,7 +1247,7 @@ func (pe *patternEvaluator) incomingSlotMatches(ctx context.Context, hit incomin
 	if !pe.edgeMatchesRel(hit.key, dstKey, s.rel) {
 		return false, nil
 	}
-	if used != nil && !pe.slotMatchesRelType(hit.id, dstID, hit.handle, s.rel) {
+	if (used != nil || s.props != nil) && !pe.slotQualifies(hit.id, dstID, hit.key, dstKey, hit.handle, s) {
 		return false, nil
 	}
 	if !pe.checkEndNode(s.node, hit.id, row) {
@@ -1206,6 +1287,168 @@ func (pe *patternEvaluator) edgeMatchesRel(srcKey, dstKey string, rel *ast.Relat
 		}
 	}
 	return false
+}
+
+// resolveStep evaluates the relationship property map of s against row, the row
+// the hop is matched under, and returns s carrying it (rmp #2908). ok is false
+// when the map cannot be satisfied by any relationship: a map expression that
+// does not evaluate to a map (a NULL parameter included). An empty map
+// constrains nothing, so s is returned unchanged for it as for no map at all.
+//
+// Each value is evaluated once per hop evaluation, not once per candidate slot,
+// so the per-slot test in [patternEvaluator.slotPropsMatch] is a plain
+// comparison. A NULL value is kept: it equals nothing, so the hop matches no
+// relationship, which is what MATCH answers for `[:R {w: null}]`.
+func (pe *patternEvaluator) resolveStep(ctx context.Context, s step, row expr.RowContext) (step, bool, error) {
+	if s.rel == nil || s.rel.Properties == nil {
+		return s, true, nil
+	}
+	if ml, isLit := s.rel.Properties.(*ast.MapLiteral); isLit {
+		if len(ml.Keys) == 0 {
+			return s, true, nil
+		}
+		props := make(expr.MapValue, len(ml.Keys))
+		for i, k := range ml.Keys {
+			v, err := expr.EvalWith(ctx, ml.Values[i], row, pe.params, pe.reg, pe.subEval, pe)
+			if err != nil {
+				return s, false, err
+			}
+			props[k] = v
+		}
+		s.props = props
+		return s, true, nil
+	}
+	v, err := expr.EvalWith(ctx, s.rel.Properties, row, pe.params, pe.reg, pe.subEval, pe)
+	if err != nil {
+		return s, false, err
+	}
+	m, isMap := v.(expr.MapValue)
+	if !isMap {
+		return s, false, nil
+	}
+	if len(m) > 0 {
+		s.props = m
+	}
+	return s, true, nil
+}
+
+// slotQualifies reports whether the ONE relationship stored in slot handle of
+// srcID → dstID satisfies the hop's type filter ([patternEvaluator.slotMatchesRelType])
+// and its relationship property map ([patternEvaluator.slotPropsMatch]). The
+// caller has already established the per-pair type verdict.
+func (pe *patternEvaluator) slotQualifies(srcID, dstID graph.NodeID, srcKey, dstKey string, handle uint64, s step) bool {
+	return pe.slotMatchesRelType(srcID, dstID, handle, s.rel) && pe.slotPropsMatch(srcID, dstID, srcKey, dstKey, handle, s.props)
+}
+
+// slotPropsMatch reports whether the relationship in slot handle of the stored
+// pair srcID → dstID carries every property of props with an equal value
+// (rmp #2908). It is a per-INSTANCE test: two parallel relationships between one
+// pair may carry different properties, and only the one the slot holds counts.
+//
+// The store it reads is the one [relPropsFromHop] reads for the same slot — the
+// by-handle bag when the instance has one, the per-pair store otherwise — so a
+// hop's property map filters exactly the properties `r.k` reports for the
+// relationship the hop binds. Values are compared with openCypher equality, so
+// a missing property or a NULL wanted value never matches.
+func (pe *patternEvaluator) slotPropsMatch(srcID, dstID graph.NodeID, srcKey, dstKey string, handle uint64, props expr.MapValue) bool {
+	if len(props) == 0 {
+		return true
+	}
+	byHandle := false
+	if handle != 0 {
+		byHandle = len(pe.g.EdgeLabelsByHandleID(srcID, dstID, handle)) > 0 ||
+			(pe.g.AnyEdgeHandlePropertyEverWritten() && len(pe.g.EdgePropertiesByHandle(srcKey, dstKey, handle)) > 0)
+	}
+	for k, want := range props {
+		var (
+			pv    lpg.PropertyValue
+			found bool
+		)
+		if byHandle {
+			pv, found = pe.g.EdgePropertyByHandle(srcKey, dstKey, handle, k)
+		} else {
+			pv, found = pe.g.GetEdgeProperty(srcKey, dstKey, k)
+		}
+		if !found || !expr.IsTruthy(lpgPropToExpr(pv).Equal(want)) {
+			return false
+		}
+	}
+	return true
+}
+
+// boundRelHop resolves a fixed hop whose relationship variable is already bound
+// on row (rmp #2905). A bound variable denotes ONE relationship, so the hop may
+// cross that relationship and no other: `WITH r … WHERE (a)-[r]->(b)` holds only
+// when r itself runs from a to b, exactly as `MATCH (a)-[r]->(b)` with r bound.
+//
+// bound reports whether the variable is bound; when it is, found reports whether
+// the relationship can fill this hop from cur, and c is it. It can when the value
+// is a relationship, the hop's direction allows crossing it from cur (outgoing:
+// cur is its start; incoming: its end; undirected: either, a self-loop once), it
+// is still stored in the view, and its type and properties satisfy the hop. Any
+// other value — NULL, or a value that is not a relationship — fills no hop.
+//
+// The relationship is located by its identity — the stable handle and the stored
+// endpoints the value carries, the triple [patternEvaluator.walkBoundRelList]
+// matches on — in its start node's adjacency entry, so the slot, and with it the
+// [relInstance] relationship isomorphism tracks, is the one every other hop of
+// the pattern sees. The lookup reads one entry, where the unbound incoming hop
+// scans the graph.
+func (pe *patternEvaluator) boundRelHop(cur graph.NodeID, s step, row expr.RowContext) (c candidateHop, bound, found bool) {
+	// A synthetic name was minted for an anonymous relationship, which binds
+	// nothing; skipping it also spares the row lookup on every anonymous hop.
+	if s.rel == nil || !ir.UserNamed(s.rel.Variable) {
+		return c, false, false
+	}
+	v, present := row[*s.rel.Variable]
+	if !present {
+		return c, false, false
+	}
+	id, start, end, isRel := relIdentity(v)
+	if !isRel {
+		return c, true, false
+	}
+	dir := hopDirection(s.rel)
+	switch {
+	case start == cur && dir != ast.RelDirectionIncoming:
+		c.forward = true
+	case end == cur && dir != ast.RelDirectionOutgoing:
+		c.forward = false
+	default:
+		return c, true, false
+	}
+	mapper := pe.g.AdjList().Mapper()
+	srcKey, srcOK := mapper.Resolve(start)
+	dstKey, dstOK := mapper.Resolve(end)
+	if !srcOK || !dstOK {
+		return c, true, false
+	}
+	view := pe.g.EntryView(start)
+	for i, nb := range view.Neighbours {
+		handle := handleAt(view.Handles, i)
+		if nb != end || handle != id {
+			continue
+		}
+		if !pe.edgeMatchesRel(srcKey, dstKey, s.rel) || !pe.slotQualifies(start, end, srcKey, dstKey, handle, s) {
+			return c, true, false
+		}
+		c.srcID, c.dstID, c.srcKey, c.dstKey, c.handle, c.slot = start, end, srcKey, dstKey, handle, i
+		return c, true, true
+	}
+	return c, true, false
+}
+
+// relIdentity extracts the identity of a relationship value — its stable handle
+// and its stored start and end nodes — from either representation a row may
+// carry. ok is false for every other value, NULL included.
+func relIdentity(v expr.Value) (id uint64, start, end graph.NodeID, ok bool) {
+	switch r := v.(type) {
+	case expr.RelationshipValue:
+		return r.ID, graph.NodeID(r.StartID), graph.NodeID(r.EndID), true
+	case *expr.LazyRelationshipValue:
+		return r.ID(), graph.NodeID(r.StartID()), graph.NodeID(r.EndID()), true
+	}
+	return 0, 0, 0, false
 }
 
 // checkStartNode validates that the start node (at srcID) satisfies the
