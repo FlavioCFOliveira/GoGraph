@@ -634,22 +634,24 @@ func assertRelDirRows(t *testing.T, got, want []string) {
 // 4. The name-collision demotion
 // ─────────────────────────────────────────────────────────────────────────────
 
-// TestRelStoredDir_CollisionFallsBackToLadder is the regression test for the
-// hazard that makes [demoteRelDirOnDisagreement] necessary, and it is written so
-// it FAILS on a build that omits the demotion.
+// TestRelStoredDir_UnionBranchesDoNotCollide pins what became of the hazard
+// that made [demoteRelDirOnDisagreement] necessary.
 //
-// `... -[r:T]-> ... UNION ALL ... <-[r:T]- ...` registers the name `r` TWICE in
-// one build, with opposite directions and the SAME triplet columns; the second
-// registration wins, and because edgeVarMeta is read per row, both branches then
-// read it. Trusting the last writer returned one row where two are required —
-// measured, on exactly this fixture.
+// `... -[r:T]-> ... UNION ALL ... <-[r:T]- ...` binds the name `r` in both
+// branches, with opposite directions and the SAME triplet columns. While the
+// per-variable facts were query-wide the second registration overwrote the first
+// and both branches read it; trusting the last writer returned one row where two
+// are required, so the disagreeing registration was demoted to the per-row
+// ladder. Since rmp #2906 each UNION branch is a scope of its own: the right
+// branch is built after the left branch's facts are put back to the pre-branch
+// state, and each branch's plans are resolved against its own registration.
 //
-// Two assertions, and both are needed: the ROWS (a wrong direction loses or
-// swaps one) and the COUNTERS (the ladder must have answered, which is what
-// proves the demotion fired rather than the rows being right by luck).
+// Two assertions: the ROWS (a wrong direction loses or swaps one) and the
+// COUNTERS — no decision falls to the ladder, which proves each branch's
+// direction was asserted from its own registration rather than demoted.
 //
 // Not parallel: process-wide counters.
-func TestRelStoredDir_CollisionFallsBackToLadder(t *testing.T) {
+func TestRelStoredDir_UnionBranchesDoNotCollide(t *testing.T) {
 	relDirPlanDisabled.Store(false)
 	for _, fx := range relDirFixtures {
 		t.Run(fx.name, func(t *testing.T) {
@@ -679,10 +681,9 @@ func TestRelStoredDir_CollisionFallsBackToLadder(t *testing.T) {
 					arms := relDirCounts(t, eng, tc.q)
 					got := relDirRunRows(t, eng, tc.q)
 					assertRelDirRows(t, got, tc.want)
-					if arms.ladder != arms.total() || arms.total() == 0 {
-						t.Errorf("want every decision on the ladder, got %s: the disagreeing "+
-							"registration was NOT fully demoted, so these rows are right "+
-							"only by coincidence", arms)
+					if arms.ladder != 0 || arms.total() == 0 {
+						t.Errorf("want every decision on the plan or the column, got %s: a "+
+							"branch read the other branch's registration of r", arms)
 					}
 				})
 			}

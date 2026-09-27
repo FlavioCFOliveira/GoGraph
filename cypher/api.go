@@ -367,13 +367,11 @@ type buildOpts struct {
 	// mis-upgrading a count result into a graph node. buildEagerAggregation
 	// populates this set for every aggregate output name it registers in the schema.
 	scalarCols map[string]struct{}
-	// innerArmDepth counts the plain-Apply inner arms (see [beginInnerArm])
-	// whose build is in progress, and innerArmPlans collects every
-	// [rowBindPlan] made while at least one is, so [endInnerArm] can resolve
-	// them before the arm's metadata columns are rebased. Both are build-time
-	// state of one goroutine; forWorker clears them.
-	innerArmDepth int
-	innerArmPlans []*rowBindPlan
+	// pendingBindPlans logs every [rowBindPlan] made since the last scope
+	// boundary, so [buildOpts.flushBindPlans] can resolve them before the
+	// boundary rewrites the maps they resolve from (see rowbind.go). Build-time
+	// state of one goroutine; forWorker clears it.
+	pendingBindPlans []*rowBindPlan
 	// projAliasScalarCols mirrors scalarCols for the BUILDROWCTX / Variable
 	// fast-path upgrade-bypass only. Distinct from scalarCols so the
 	// colliding-alias guard in buildIRProjection still routes a
@@ -8676,6 +8674,7 @@ func buildOperatorWrite(
 		for k := range schema {
 			preKeys[k] = struct{}{}
 		}
+		outerFacts := bopts.snapshotScopeFacts()
 		arg := exec.NewArgument()
 		if argByTag != nil {
 			argByTag[p.ArgTag] = arg
@@ -8694,6 +8693,7 @@ func buildOperatorWrite(
 				delete(schema, k)
 			}
 		}
+		bopts.restoreScopeFacts(outerFacts)
 		return exec.NewForeach(outer, inner, arg), nil
 
 	default:
@@ -9926,10 +9926,14 @@ func buildPlanEngine(
 	// returned as the union's output schema — openCypher requires every
 	// branch of a UNION to expose the same column names in the same order.
 	if u, ok := plan.(*ir.UnionAll); ok {
+		// Each branch is a scope of its own: the right one must not inherit the
+		// facts of the left one's variables (see rowbind.go).
+		preFacts := bopts.snapshotScopeFacts()
 		leftOp, leftCols, lerr := buildPlanEngine(u.Left, walker, labelSrc, reg, params, idxMgr, procReg, bopts)
 		if lerr != nil {
 			return nil, nil, lerr
 		}
+		bopts.restoreScopeFacts(preFacts)
 		rightOp, _, rerr := buildPlanEngine(u.Right, walker, labelSrc, reg, params, idxMgr, procReg, bopts)
 		if rerr != nil {
 			return nil, nil, rerr
@@ -9942,10 +9946,14 @@ func buildPlanEngine(
 		return profileIntermediate(bopts, exec.NewUnionAll(leftOp, rightOp)), leftCols, nil
 	}
 	if u, ok := plan.(*ir.Union); ok {
+		// Each branch is a scope of its own: the right one must not inherit the
+		// facts of the left one's variables (see rowbind.go).
+		preFacts := bopts.snapshotScopeFacts()
 		leftOp, leftCols, lerr := buildPlanEngine(u.Left, walker, labelSrc, reg, params, idxMgr, procReg, bopts)
 		if lerr != nil {
 			return nil, nil, lerr
 		}
+		bopts.restoreScopeFacts(preFacts)
 		rightOp, _, rerr := buildPlanEngine(u.Right, walker, labelSrc, reg, params, idxMgr, procReg, bopts)
 		if rerr != nil {
 			return nil, nil, rerr
@@ -10086,6 +10094,9 @@ func buildOperator(
 	bopts *buildOpts,
 ) (exec.Operator, error) {
 	op, err := buildOperatorRec(plan, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
+	if err == nil && bopts != nil {
+		endScopeAt(plan, bopts)
+	}
 	// ONE early-out for the ordinary query, which has neither an estimate collector
 	// nor a profiler. Keeping the common case on a single short-circuit chain is not
 	// cosmetic: this function runs once per operator of every query, and splitting
@@ -10109,6 +10120,37 @@ func buildOperator(
 		return op, err
 	}
 	return bopts.profiler.Wrap(op), nil
+}
+
+// endScopeAt closes the variable scope plan ends, when it ends one: a Projection
+// (WITH / RETURN) carries only its item aliases into the next scope, and an
+// EagerAggregation only its grouping keys and aggregate outputs, exactly as the
+// schema reset each one performs. Every other node is a no-op. See
+// [buildOpts.endScope] and rowbind.go.
+func endScopeAt(plan ir.LogicalPlan, bopts *buildOpts) {
+	switch p := plan.(type) {
+	case *ir.Projection:
+		bopts.endScope(func(name string) bool {
+			for i := range p.Items {
+				if p.Items[i].Name == name {
+					return true
+				}
+			}
+			return false
+		})
+	case *ir.EagerAggregation:
+		bopts.endScope(func(name string) bool {
+			if slices.Contains(p.GroupBy, name) {
+				return true
+			}
+			for i := range p.Aggregates {
+				if p.Aggregates[i].OutputName == name {
+					return true
+				}
+			}
+			return false
+		})
+	}
 }
 
 // profileIntermediate instruments an operator that [buildOperator]'s single wrap
@@ -10652,12 +10694,12 @@ func buildOperatorRec(
 			preTripletLen = len(bopts.expandTripletSeq)
 		}
 		arg := exec.NewArgument()
-		armMark := bopts.beginInnerArm()
 		inner, err := buildOperator(innerNode, walker, labelSrc, reg, params, innerSchema, idxMgr, procReg, argByTag, bopts)
 		if err != nil {
 			return nil, err
 		}
-		bopts.endInnerArm(armMark)
+		// Resolve the arm's plans before the rebase below (see rowbind.go).
+		bopts.flushBindPlans()
 		for k, v := range innerSchema {
 			schema[k] = v + outerWidth
 		}
@@ -10805,6 +10847,7 @@ func buildOperatorRec(
 		// introduced in an <ExistentialSubquery> are not available outside the
 		// subquery context".
 		outerSchemaSnap := copySchema(schema)
+		outerFacts := bopts.snapshotScopeFacts()
 		// Pre-allocate the exec.Argument and register it under the IR
 		// SemiApply's ArgTag so the inner subtree's matching Argument leaf
 		// resolves to this instance and receives the outer row per iteration.
@@ -10820,6 +10863,7 @@ func buildOperatorRec(
 			delete(argByTag, p.ArgTag)
 		}
 		restoreSchema(schema, outerSchemaSnap)
+		bopts.restoreScopeFacts(outerFacts)
 		return exec.NewSemiApply(outer, inner, arg), nil
 
 	case *ir.AntiSemiApply:
@@ -10831,6 +10875,7 @@ func buildOperatorRec(
 		// and for the same two reasons — [exec.AntiSemiApply] likewise forwards the
 		// outer row unchanged and discards the inner one. See that case's comment.
 		outerSchemaSnap := copySchema(schema)
+		outerFacts := bopts.snapshotScopeFacts()
 		arg := exec.NewArgument()
 		if argByTag != nil {
 			argByTag[p.ArgTag] = arg
@@ -10843,6 +10888,7 @@ func buildOperatorRec(
 			delete(argByTag, p.ArgTag)
 		}
 		restoreSchema(schema, outerSchemaSnap)
+		bopts.restoreScopeFacts(outerFacts)
 		return exec.NewAntiSemiApply(outer, inner, arg), nil
 
 	case *ir.RollUpApply:
@@ -10861,6 +10907,7 @@ func buildOperatorRec(
 		// name. Without this snapshot, downstream lookups for outer
 		// variables (n, b, …) miss the schema and return NULL.
 		outerSchemaSnap := copySchema(schema)
+		outerFacts := bopts.snapshotScopeFacts()
 		outerWidth := schemaWidth(schema)
 		// Pre-allocate the exec.Argument and register it under the IR
 		// RollUpApply's ArgTag so the inner subtree's matching
@@ -10889,6 +10936,7 @@ func buildOperatorRec(
 		for k, v := range outerSchemaSnap {
 			schema[k] = v
 		}
+		bopts.restoreScopeFacts(outerFacts)
 		schema[p.CollectVar] = outerWidth
 		// listEval is left nil — the inner subplan ends with a
 		// Projection that puts the comprehension's projected value at
@@ -11901,11 +11949,9 @@ func (b *buildOpts) forWorker() *buildOpts {
 	cp.pathVarChain = nil
 	cp.vleRelMeta = nil
 	cp.expandTripletSeq = nil
-	// Inner-arm bind-plan log: a worker builds its subtree at execution time,
-	// after every arm of the plan was resolved, and must not append to the
-	// shared log's backing array.
-	cp.innerArmDepth = 0
-	cp.innerArmPlans = nil
+	// Bind-plan log: a worker builds its subtree at execution time and must not
+	// append to the shared log's backing array; it keeps a log of its own.
+	cp.pendingBindPlans = nil
 	// SHARED INSTRUMENTATION. The profiler is a POINTER, so a value copy hands
 	// every worker the same *exec.Profiler and each one mutates it while building
 	// its sub-plan — the data race at cypher/exec/profile.go:93 (rmp #2664).
@@ -17017,99 +17063,32 @@ func buildIRProjection(
 				if bopts != nil && bopts.edgeVarMeta != nil {
 					_, aliasIsBoundRel = bopts.edgeVarMeta[name]
 				}
-				// Narrow soundness guard: when the item is a property
-				// access whose alias EXACTLY equals the property's
-				// receiver name (e.g. `RETURN a.id AS a`, where
-				// schema[a] still holds the bound node), bypass the
-				// fast path so general eval computes the property
-				// value. Other Property shapes keep the fast path
-				// because they reuse the same alias name and the
-				// schema slot already carries the projected value.
-				//
-				// Map-literal extension: a projection item whose
-				// expression is a *ast.MapLiteral and whose alias
-				// collides with a pre-existing schema entry that
-				// holds a bound node (`WITH {first: m.id} AS m`) is
-				// the same shape — the schema-name fast path would
-				// return the original bound node, not the freshly
-				// constructed map.
+				// Colliding-alias guard: an item `<expr> AS name` whose
+				// name is already bound in the INPUT schema must read the
+				// slot only when that slot already holds THIS item's value.
+				// That is the case when an earlier projection projected the
+				// same item — it registered the expression string as a
+				// secondary key on the alias's column, so both keys name one
+				// column — or when the slot is precomputed for it: a grouping
+				// key of an EagerAggregation (preprojectedCols) or an
+				// aggregate output (the expression contains an aggregate,
+				// which general eval would re-run as a scalar function).
+				// Otherwise the slot holds the value of a DIFFERENT variable
+				// of that name, and reading it returned that variable: `RETURN
+				// a.id AS a` returned the node, and `MATCH (x) RETURN 1 AS x`
+				// returned x instead of 1 (rmp #2914) — the literal and
+				// parameter shapes were once exempted here on the claim that
+				// their value matches the slot, which holds only for the
+				// re-projection of the same item.
 				skipForCollidingAlias := false
-				// Preprojected schema slots already carry the projection-
-				// equivalent value (e.g. an EagerAggregation grouping key)
-				// — the fast path is sound and skipColliding must not fire.
 				isPreprojSlot := false
 				if bopts != nil && bopts.preprojectedCols != nil {
 					_, isPreprojSlot = bopts.preprojectedCols[name]
 				}
-				if prop, isProp := item.Expr.(*ast.Property); isProp && exprStr != name && !isPreprojSlot {
-					if recv, recvIsVar := prop.Receiver.(*ast.Variable); recvIsVar && recv.Name == name {
-						skipForCollidingAlias = true
-					}
-				} else if _, isMap := item.Expr.(*ast.MapLiteral); isMap && exprStr != name {
-					if _, exists := schema[name]; exists {
-						skipForCollidingAlias = true
-					}
-				} else if exprStr != name {
-					// Generalised colliding-alias guard: when the projection
-					// expression renames a value (`<expr> AS x`) and `x`
-					// already exists in the INPUT schema (typically because a
-					// prior WITH x... is being shadowed), the schema-name
-					// fast path would silently return the upstream value
-					// instead of computing the new expression. Route
-					// through the general eval path so the new value is
-					// projected.
-					//
-					// Aggregations are exempt: count/sum/avg/etc. are
-					// precomputed by EagerAggregation upstream and the
-					// schema slot already carries their evaluated value.
-					// Falling through to evalRow would re-evaluate them
-					// as scalar functions and return the per-row count
-					// (always 1) instead of the group's aggregate.
-					//
-					// Preprojected columns are also exempt: an
-					// EagerAggregation grouping key already carries the
-					// pre-evaluated grouping expression value in the row
-					// slot. The fast path returns that value directly;
-					// routing through general eval would re-interpret the
-					// variable as its pre-aggregation form.
-					//
-					// Only the BinaryOp / UnaryOp / arithmetic shapes are
-					// flagged here. A bare-Variable expression (`WITH x AS
-					// x`) takes the same value either way; a Property/
-					// MapLiteral has its own dedicated branch above.
-					isPreproj := false
-					if bopts != nil && bopts.preprojectedCols != nil {
-						_, isPreproj = bopts.preprojectedCols[name]
-					}
-					isScalar := false
-					if bopts != nil && bopts.scalarCols != nil {
-						_, isScalar = bopts.scalarCols[name]
-					}
-					if _, exists := schema[name]; exists && !isPreproj && !isScalar {
-						// Case A: the expression references the alias name —
-						// the fast path would return the OLD value, but the
-						// expression intends to read the OLD value as input
-						// and produce a NEW transformed value. Route to
-						// general eval (already covered by exprReferencesVarName).
-						if exprReferencesVarName(item.Expr, name) && !exprContainsAggregate(item.Expr) {
+				if exprStr != name && !isPreprojSlot && !exprContainsAggregate(item.Expr) {
+					if col, exists := schema[name]; exists {
+						if exprCol, same := schema[exprStr]; !same || exprCol != col {
 							skipForCollidingAlias = true
-						}
-						// Case B: the expression does NOT reference the alias
-						// name but still produces a new value (a WITH cascade
-						// of two projections that both bind `x`, where the
-						// second projection computes a fresh expression that
-						// happens to be independent of x). Route to general
-						// eval for any computed expression shape; bare
-						// Variable / Literal / Parameter projections keep the
-						// fast path because their value matches the slot.
-						if !skipForCollidingAlias && !exprContainsAggregate(item.Expr) {
-							switch item.Expr.(type) {
-							case *ast.BinaryOp, *ast.UnaryOp, *ast.FunctionInvocation,
-								*ast.SubscriptExpr, *ast.SliceExpr, *ast.CaseExpression,
-								*ast.ListComprehension, *ast.PatternComprehension,
-								*ast.ListLiteral, *ast.LabelPredicate:
-								skipForCollidingAlias = true
-							}
 						}
 					}
 				}

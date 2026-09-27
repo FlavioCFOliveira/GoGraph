@@ -194,12 +194,12 @@ func tryBuildHashJoin(
 	// with outer data — it emits a single empty row per Init (Cartesian). The
 	// inner build allocates its own fresh exec.Argument for that leaf, so the
 	// build arm drains fully and independently. No correlation wiring is needed.
-	armMark := bopts.beginInnerArm()
 	innerOp, err := buildOperator(apply.Inner, walker, labelSrc, reg, params, innerSchema, idxMgr, procReg, argByTag, bopts)
 	if err != nil {
 		return nil, false, err
 	}
-	bopts.endInnerArm(armMark)
+	// Resolve the arm's plans before the rebase below (see rowbind.go).
+	bopts.flushBindPlans()
 	for k, v := range innerSchema {
 		schema[k] = v + outerWidth
 	}

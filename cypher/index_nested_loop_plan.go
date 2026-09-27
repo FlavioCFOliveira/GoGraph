@@ -213,12 +213,12 @@ func tryBuildIndexNestedLoopJoin(
 	// the operator's FALLBACK path. A plain Apply's inner arm is uncorrelated, so
 	// re-Init'ing it per fallback row restarts it independently — the same contract
 	// tryBuildHashJoin relies on for its build drain.
-	armMark := bopts.beginInnerArm()
 	innerOp, err := buildOperator(apply.Inner, walker, labelSrc, reg, params, innerSchema, idxMgr, procReg, argByTag, bopts)
 	if err != nil {
 		return nil, false, err
 	}
-	bopts.endInnerArm(armMark)
+	// Resolve the arm's plans before the rebase below (see rowbind.go).
+	bopts.flushBindPlans()
 	for k, v := range innerSchema {
 		schema[k] = v + outerWidth
 	}

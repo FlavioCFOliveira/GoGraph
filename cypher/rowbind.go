@@ -26,47 +26,69 @@ import (
 // populateRowCtx alone was 9.04 s — 63.62 % of every mapaccess2_faststr sample in
 // the process. See docs/benchmarks/ for the raw artefacts.
 //
-// # Why the resolution is LAZY rather than taken when the walk is frozen
+// # When the resolution is taken
 //
-// It cannot be taken in [newRowSchema]. The maps this reads are still being
-// WRITTEN after a walk is frozen: the Apply / hash-join rebase
-// ([shiftApplyMetaColumns] and the inline form in buildOperator's *ir.Apply case)
-// re-writes every edgeVarMeta / pathVarChain / pathVarMeta / vleRelMeta entry the
-// inner subtree registered, shifting its columns by the outer width, AFTER that
-// subtree — and the row schemas its closures captured — has been built. That
-// rebase exists because Match8 [3] returned NULL without it, so it is not
-// optional and it cannot be reordered.
+// A plan is resolved once the subtree whose rows it reads is complete, and no
+// earlier: at the next SCOPE BOUNDARY of the build, or at its first row when no
+// boundary follows it. Every plan made is logged on [buildOpts.pendingBindPlans],
+// and [buildOpts.flushBindPlans] resolves the log at each boundary:
 //
-// Deferring to the first ROW is what makes the resolution sound, and the argument
-// is exact rather than approximate: the per-row read and the resolution consult
-// THE SAME map, and every write to those maps is inside a builder
-// ([buildOperator], [buildIRProjection], [tryBuildHashJoin],
-// [tryBuildIndexNestedLoopJoin] and their callees), all of which complete before
-// any operator produces a row. The two builders that DO run at execution time —
-// the morsel-parallel scan/project factory and the parallel pre-aggregation
-// factory — build against [buildOpts.forWorker], which nils every one of these
-// maps so each worker populates its own; and subquery bodies build against
-// [buildOpts.forSubquery], which carries none of them. So no map this resolves
-// from can change between the first row and the last, and the resolved answer is
-// therefore the answer the per-row probe WOULD have returned, for every row.
+//   - the end of a plain-Apply inner arm — the *ir.Apply case of buildOperator,
+//     [tryBuildHashJoin] and [tryBuildIndexNestedLoopJoin] — before the arm's
+//     metadata columns are rebased by the outer width;
+//   - the end of a Projection or EagerAggregation, before the facts of the names
+//     that leave scope are dropped ([buildOpts.endScope]);
+//   - the end of a SemiApply, AntiSemiApply, RollUpApply or FOREACH body, and of
+//     a UNION branch, before the facts of the enclosing scope are restored
+//     ([buildOpts.restoreScopeFacts]).
 //
-// # The name-collision exposure, and why freezing does not widen it
+// It cannot be taken EARLIER, in [newRowSchema], because a plan is made while the
+// subtree it sits in is still being built. It must not be taken LATER, because
+// each boundary rewrites the maps it resolves from for the benefit of the
+// operators built after it, never before it:
 //
-// Four of these maps are keyed by variable NAME and are query-scoped, so two
-// binders of one name collide and the later registration overwrites the earlier
-// (rmp #2864 found this in edgeVarMeta, where it returned one row where two were
-// required). That collapse happens in the MAP, at build time, before any row
-// exists — so the per-row probe was already reading the last writer's value on
-// every row of every binder. Resolving from the same map at the first row
-// inherits that behaviour exactly: it neither introduces the collision nor cures
-// it. The cure, where one is needed, stays where it was — the direction fact is
-// demoted to [relDirUnresolved] by [demoteRelDirOnDisagreement] at registration
-// time, so a disagreeing pair is never asserted in the first place.
+//   - The rebase shifts the metadata an inner arm registered so that operators
+//     ABOVE the join address it in the combined outer||inner row. A plan made
+//     INSIDE the arm runs on inner-only rows, so resolving it after the rebase
+//     reconstructed its relationships from the wrong slot:
+//     `WITH 1 AS one MATCH (a)-[r {s: 'a'}]->(b)` matched nothing (rmp #2907).
+//     The rebase itself is not optional — Match8 [3] returned NULL without it —
+//     it is simply for the other side.
+//   - Four of these maps are keyed by variable NAME, and one query may bind the
+//     same name in two scopes: WITH ends the scope of every variable it does not
+//     project, and a later clause may introduce the name afresh (openCypher 9,
+//     WITH). A plan resolved after the later binding read the later variable's
+//     facts: `MATCH (x:N {k: 'a'}) WITH 1 AS one … UNWIND [1] AS x` tagged the
+//     earlier x as a scalar, so the `x.k = 'a'` filter below the WITH stopped
+//     reading x as a node and matched nothing (rmp #2906). In the other
+//     direction a fact that outlived its scope was inherited by the next binder
+//     of the name — `MATCH ()-[x]->() WITH 1 AS one UNWIND [1] AS x RETURN x`
+//     reconstructed the integer 1 as a relationship and returned null. The facts
+//     are therefore scoped exactly as the schema is: dropped where their names
+//     leave scope, restored where the schema is restored, and read by each plan
+//     while they still describe its own binding.
+//
+// rmp #2864 found the collision between the two branches of a UNION, in
+// edgeVarMeta: both branches bound `r` with opposite directions, the later
+// registration overwrote the earlier, and one row came back where two were
+// required. Each UNION branch is now a scope of its own, so that shape no longer
+// collides. A re-registration of one name inside ONE scope would still
+// overwrite; for the relationship direction it stays guarded where the #2864 cure
+// put it: the direction fact is demoted to [relDirUnresolved] by
+// [demoteRelDirOnDisagreement] at registration time, so a disagreeing pair is
+// never asserted in the first place.
+//
+// The two builders that run at execution time — the morsel-parallel scan/project
+// factory and the parallel pre-aggregation factory — build against
+// [buildOpts.forWorker], which nils every one of these maps and the log, so each
+// worker populates and resolves its own; subquery bodies build against
+// [buildOpts.forSubquery], which carries none of them.
 //
 // # Concurrency
 //
 // A plan is resolved at most once, under a [sync.Once], and is READ-ONLY
-// afterwards. That is what makes it safe for the closure holding it to be called
+// afterwards. It is normally resolved on the building goroutine, at a boundary;
+// a plan no boundary follows is resolved by its first row. That is what makes it safe for the closure holding it to be called
 // from several goroutines at once — which the parallel scan/project tier and the
 // parallel hash join both do.
 
@@ -172,68 +194,137 @@ type rowBindPlan struct {
 }
 
 // newRowBindPlan freezes the inputs of one row-context-building closure into a
-// plan. It resolves NOTHING: the maps it will read are still being written when
-// this is called (see the file comment), so the first row resolves them.
+// plan and logs it on bopts. It resolves NOTHING: the subtree it sits in is still
+// being built when this is called, so the next scope boundary — or, failing one,
+// the first row — resolves it (see the file comment).
 //
 // rs, bopts, g and scalarUse are exactly the four values the closure used to
 // carry separately and hand to populateRowCtx on every row.
 func newRowBindPlan(rs rowSchema, bopts *buildOpts, g *lpg.ReadView[string, float64], scalarUse map[string]*nodeScalarUse) *rowBindPlan {
 	p := &rowBindPlan{rs: rs, bopts: bopts, g: g, scalarUse: scalarUse, gated: scalarUse != nil}
 	p.resolveOnce = p.resolve
-	if bopts != nil && bopts.innerArmDepth > 0 {
-		bopts.innerArmPlans = append(bopts.innerArmPlans, p)
+	if bopts != nil {
+		bopts.pendingBindPlans = append(bopts.pendingBindPlans, p)
 	}
 	return p
 }
 
-// beginInnerArm marks the start of the build of a plain-Apply inner arm — the
-// *ir.Apply case of buildOperator, [tryBuildHashJoin] and
-// [tryBuildIndexNestedLoopJoin] — and returns the mark [endInnerArm] takes.
-//
-// Such an arm is built against a fresh schema and runs on inner-only rows, and
-// once it is built the metadata columns it registered are rebased by the outer
-// width, so that the operators built ABOVE the join address them in the
-// combined outer||inner row. A plan made inside the arm must not see that
-// rebase: resolved lazily at its first row it read the shifted columns against
-// its inner-only row, so `WITH 1 AS one MATCH (a)-[r {s: 'a'}]->(b)` — whose
-// relationship property Filter is inside the arm — reconstructed r from the
-// wrong slot and matched nothing (rmp #2907). Every plan made between the two
-// calls is therefore resolved by endInnerArm, before the rebase.
-func (b *buildOpts) beginInnerArm() int {
-	if b == nil {
-		return 0
-	}
-	b.innerArmDepth++
-	return len(b.innerArmPlans)
-}
-
-// endInnerArm resolves every [rowBindPlan] made since the matching
-// [beginInnerArm], and drops them from the log. It must be called after the
-// arm's build and before its metadata columns are rebased. A nested arm has
-// already resolved and dropped its own plans, so each plan is resolved against
-// the metadata of the innermost arm that contains it.
-//
-// Resolving here rather than at the first row is sound for the reason the file
-// comment gives for deferring at all: the only later write to the maps a plan
-// resolves from is the rebase, and the rebase is for the operators above the
-// arm.
-func (b *buildOpts) endInnerArm(mark int) {
+// flushBindPlans resolves every [rowBindPlan] made since the last flush and
+// empties the log. It is called at every scope boundary of the build — see the
+// file comment for the list and for why each one must resolve BEFORE it rewrites
+// the maps. A nil receiver is a no-op.
+func (b *buildOpts) flushBindPlans() {
 	if b == nil {
 		return
 	}
-	for _, p := range b.innerArmPlans[mark:] {
+	for _, p := range b.pendingBindPlans {
 		p.resolved()
 	}
-	clear(b.innerArmPlans[mark:])
-	b.innerArmPlans = b.innerArmPlans[:mark]
-	b.innerArmDepth--
+	clear(b.pendingBindPlans)
+	b.pendingBindPlans = b.pendingBindPlans[:0]
+}
+
+// scopeFacts is the name-keyed per-variable state of one scope: the three
+// scalar-column sets and the four entity-metadata maps [rowBindPlan.resolve] and
+// the builders read. It is what [buildOpts.snapshotScopeFacts] captures and
+// [buildOpts.restoreScopeFacts] puts back.
+type scopeFacts struct {
+	scalarCols          map[string]struct{}
+	projAliasScalarCols map[string]struct{}
+	aggKeyScalarCols    map[string]struct{}
+	edgeVarMeta         map[string]edgeVarInfo
+	pathVarMeta         map[string]pathVarInfo
+	pathVarChain        map[string]pathChainInfo
+	vleRelMeta          map[string]vleRelInfo
+}
+
+// snapshotScopeFacts copies the facts of the current scope. It is taken before
+// the build of a body whose bindings are private to it — a SemiApply,
+// AntiSemiApply or RollUpApply inner plan, a FOREACH body, a UNION branch — so
+// [buildOpts.restoreScopeFacts] can put the enclosing scope back afterwards, as
+// the schema is put back. A nil receiver yields the zero snapshot.
+func (b *buildOpts) snapshotScopeFacts() scopeFacts {
+	if b == nil {
+		return scopeFacts{}
+	}
+	return scopeFacts{
+		scalarCols:          copyMetaMap(b.scalarCols),
+		projAliasScalarCols: copyMetaMap(b.projAliasScalarCols),
+		aggKeyScalarCols:    copyMetaMap(b.aggKeyScalarCols),
+		edgeVarMeta:         copyMetaMap(b.edgeVarMeta),
+		pathVarMeta:         copyMetaMap(b.pathVarMeta),
+		pathVarChain:        copyMetaMap(b.pathVarChain),
+		vleRelMeta:          copyMetaMap(b.vleRelMeta),
+	}
+}
+
+// restoreScopeFacts resolves the plans the private body made, then puts the facts
+// back as s captured them: a body's own bindings are dropped, and a fact of the
+// enclosing scope the body shadowed or dropped at one of its own boundaries comes
+// back. The maps are restored in place. A nil receiver is a no-op.
+func (b *buildOpts) restoreScopeFacts(s scopeFacts) {
+	if b == nil {
+		return
+	}
+	b.flushBindPlans()
+	b.scalarCols = restoreFactMap(b.scalarCols, s.scalarCols)
+	b.projAliasScalarCols = restoreFactMap(b.projAliasScalarCols, s.projAliasScalarCols)
+	b.aggKeyScalarCols = restoreFactMap(b.aggKeyScalarCols, s.aggKeyScalarCols)
+	b.edgeVarMeta = restoreFactMap(b.edgeVarMeta, s.edgeVarMeta)
+	b.pathVarMeta = restoreFactMap(b.pathVarMeta, s.pathVarMeta)
+	b.pathVarChain = restoreFactMap(b.pathVarChain, s.pathVarChain)
+	b.vleRelMeta = restoreFactMap(b.vleRelMeta, s.vleRelMeta)
+}
+
+// restoreFactMap makes dst hold exactly src's entries and returns it. dst is
+// rewritten in place when it exists; a nil dst with a non-empty src yields a copy
+// of src.
+func restoreFactMap[V any](dst, src map[string]V) map[string]V {
+	if dst == nil {
+		if len(src) == 0 {
+			return nil
+		}
+		dst = make(map[string]V, len(src))
+	}
+	restoreMetaMap(dst, src)
+	return dst
+}
+
+// endScope closes the scope a Projection or an EagerAggregation ends: it resolves
+// the plans made so far, then drops the facts of every name the boundary does not
+// carry into the next scope. keep reports whether a name is carried — an item
+// alias of the projection, or a grouping key or aggregate output of the
+// aggregation. Dropping is what stops a later clause that introduces a name afresh
+// from inheriting the facts of the earlier variable of that name (rmp #2906). A
+// nil receiver is a no-op.
+func (b *buildOpts) endScope(keep func(string) bool) {
+	if b == nil {
+		return
+	}
+	b.flushBindPlans()
+	dropFacts(b.scalarCols, keep)
+	dropFacts(b.projAliasScalarCols, keep)
+	dropFacts(b.aggKeyScalarCols, keep)
+	dropFacts(b.edgeVarMeta, keep)
+	dropFacts(b.pathVarMeta, keep)
+	dropFacts(b.pathVarChain, keep)
+	dropFacts(b.vleRelMeta, keep)
+}
+
+// dropFacts deletes from m every name keep does not report.
+func dropFacts[V any](m map[string]V, keep func(string) bool) {
+	for name := range m {
+		if !keep(name) {
+			delete(m, name)
+		}
+	}
 }
 
 // resolved returns the resolved walk, resolving it on the first call.
 //
-// It is the ONLY route to [rowBindPlan.vars], and [populateRowCtx] is its only
-// caller, which is what keeps the resolution off the build path: a build-time
-// caller would freeze the pre-rebase state of the maps.
+// It is the ONLY route to [rowBindPlan.vars]. [populateRowCtx] calls it per row;
+// [buildOpts.flushBindPlans] calls it at the scope boundary that follows the
+// plan's subtree.
 func (p *rowBindPlan) resolved() []boundVar {
 	p.once.Do(p.resolveOnce)
 	return p.vars
