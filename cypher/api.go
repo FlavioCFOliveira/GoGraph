@@ -21341,14 +21341,77 @@ func (a *lpgMutatorAdapter) ResolveNodeLabel(id graph.NodeID) (string, bool) {
 	return a.g.AdjList().Mapper().Resolve(id)
 }
 
-// WalkNodeIDs calls fn for every interned, non-tombstoned node.
+// WalkNodeIDs calls fn for every interned, non-tombstoned node. fn may call
+// back into the adapter; see [walkMutatorNodeIDs].
 func (a *lpgMutatorAdapter) WalkNodeIDs(fn func(graph.NodeID) bool) {
-	a.g.AdjList().Mapper().Walk(func(id graph.NodeID, _ string) bool {
-		if a.g.IsTombstoned(id) {
-			return true
-		}
-		return fn(id)
+	walkMutatorNodeIDs(a.g, fn)
+}
+
+// walkMutatorNodeIDs is the shared body of both mutator adapters' WalkNodeIDs.
+//
+// It collects the interned ids first and calls fn only after [graph.Mapper.Walk]
+// has released its last shard lock (rmp #2897). Every consumer of WalkNodeIDs —
+// the label-less MERGE candidate walk and seedGlobalNodeCounter — resolves each id
+// back through the Mapper (ResolveNodeLabel, then labels and properties by key),
+// and Walk's contract forbids exactly that inside its callback while a writer may
+// run: the nested read lock on the walked shard deadlocks against a writer queued
+// on its write lock, and concurrent writers are the engine's normal mode since
+// rmp #2306. The walked set and the liveness test are the same as before; only the
+// point at which fn runs moves past the lock.
+//
+// The id buffer is pooled ([walkIDPool]), so the collection costs no allocation
+// in the steady state.
+func walkMutatorNodeIDs(g *lpg.Graph[string, float64], fn func(graph.NodeID) bool) {
+	mapper := g.AdjList().Mapper()
+	bp := getWalkIDs(mapper.Len())
+	defer putWalkIDs(bp)
+	ids := *bp
+	mapper.Walk(func(id graph.NodeID, _ string) bool {
+		ids = append(ids, id)
+		return true
 	})
+	*bp = ids
+	for _, id := range ids {
+		if g.IsTombstoned(id) {
+			continue
+		}
+		if !fn(id) {
+			return
+		}
+	}
+}
+
+// walkPoolMaxCap bounds the capacity of a buffer [putWalkIDs] and
+// [putStatsNodeRefs] return to their pools, in elements. A walk of a larger
+// graph still works — its buffer is simply left to the GC — so a pool never
+// pins more than walkPoolMaxCap elements per pooled buffer after one very large
+// walk. 1<<20 ids is 8 MiB; 1<<20 (key, id) pairs is 24 MiB.
+const walkPoolMaxCap = 1 << 20
+
+// walkIDPool recycles the NodeID buffers [walkMutatorNodeIDs] collects a Mapper
+// walk into. It holds *[]graph.NodeID so a Put does not allocate.
+var walkIDPool = sync.Pool{New: func() any { return new([]graph.NodeID) }}
+
+// getWalkIDs returns an empty pooled id buffer with capacity for at least n ids.
+func getWalkIDs(n int) *[]graph.NodeID {
+	bp, _ := walkIDPool.Get().(*[]graph.NodeID)
+	if bp == nil {
+		bp = new([]graph.NodeID)
+	}
+	if cap(*bp) < n {
+		*bp = make([]graph.NodeID, 0, n)
+	}
+	*bp = (*bp)[:0]
+	return bp
+}
+
+// putWalkIDs returns bp to the pool unless it outgrew [walkPoolMaxCap].
+func putWalkIDs(bp *[]graph.NodeID) {
+	if cap(*bp) > walkPoolMaxCap {
+		return
+	}
+	*bp = (*bp)[:0]
+	walkIDPool.Put(bp)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -22506,14 +22569,10 @@ func (a *walMutatorAdapter) ResolveNodeLabel(id graph.NodeID) (string, bool) {
 	return a.g.AdjList().Mapper().Resolve(id)
 }
 
-// WalkNodeIDs calls fn for every interned, non-tombstoned node.
+// WalkNodeIDs calls fn for every interned, non-tombstoned node. fn may call
+// back into the adapter; see [walkMutatorNodeIDs].
 func (a *walMutatorAdapter) WalkNodeIDs(fn func(graph.NodeID) bool) {
-	a.g.AdjList().Mapper().Walk(func(id graph.NodeID, _ string) bool {
-		if a.g.IsTombstoned(id) {
-			return true
-		}
-		return fn(id)
-	})
+	walkMutatorNodeIDs(a.g, fn)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

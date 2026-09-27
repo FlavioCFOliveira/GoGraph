@@ -237,5 +237,7 @@ type GraphMutator interface {
 	ResolveNodeLabel(id graph.NodeID) (string, bool)
 
 	// WalkNodeIDs calls fn for every node currently interned in the graph.
+	// fn may call back into the mutator (ResolveNodeLabel, label and property
+	// reads): no lock of the enumeration is held while fn runs (rmp #2897).
 	WalkNodeIDs(fn func(graph.NodeID) bool)
 }
