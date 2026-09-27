@@ -20274,7 +20274,7 @@ func (a *lpgMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 	// [walMutatorAdapter.AddEdge].
 	if edgeAdded := a.g.AdjList().Multigraph() || !edgeExisted; edgeAdded {
 		a.countRelCreated()
-		a.rec().recordAddEdge(src, dst, !srcExisted, !dstExisted)
+		a.rec().recordAddEdge(src, dst, 0, !srcExisted, !dstExisted)
 	}
 	a.countClearFresh(src, dst) // count-store (#2082): endpoints now carry an edge
 	return srcID, dstID, nil
@@ -20307,7 +20307,7 @@ func (a *lpgMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 	// [walMutatorAdapter.AddEdge].
 	if edgeAdded := a.g.AdjList().Multigraph() || !edgeExisted; edgeAdded {
 		a.countRelCreated()
-		a.rec().recordAddEdge(src, dst, !srcExisted, !dstExisted)
+		a.rec().recordAddEdge(src, dst, handle, !srcExisted, !dstExisted)
 	}
 	a.countClearFresh(src, dst) // count-store (#2082): endpoints now carry an edge
 	return srcID, dstID, handle, nil
@@ -21311,7 +21311,7 @@ func (a *walMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 	// line already implies !edgeExisted.
 	if edgeAdded := a.g.AdjList().Multigraph() || !edgeExisted; edgeAdded {
 		a.countRelCreated()
-		a.rec().recordAddEdge(src, dst, !srcExisted, !dstExisted)
+		a.rec().recordAddEdge(src, dst, 0, !srcExisted, !dstExisted)
 	}
 	a.countClearFresh(src, dst) // count-store (#2082): endpoints now carry an edge
 	if txErr != nil {
@@ -21366,7 +21366,7 @@ func (a *walMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 	// [lpgMutatorAdapter.AddEdge].
 	if edgeAdded := a.g.AdjList().Multigraph() || !edgeExisted; edgeAdded {
 		a.countRelCreated()
-		a.rec().recordAddEdge(src, dst, !srcExisted, !dstExisted)
+		a.rec().recordAddEdge(src, dst, handle, !srcExisted, !dstExisted)
 	}
 	a.countClearFresh(src, dst) // count-store (#2082): endpoints now carry an edge
 	if txErr != nil {
@@ -21911,9 +21911,10 @@ func (a *walMutatorAdapter) DecEdgeCreateCount(src, dst string) {
 // These per-instance / per-handle setters intentionally record NO separate undo
 // entry: CreateRelationship is their only caller and always invokes them on a
 // handle/instance it allocated via AddEdgeH in the SAME operator, so the matching
-// recordAddEdge inverse already removes that edge — and [Graph.RemoveEdge] →
-// clearEdgePairState drops the pair's per-handle and per-instance metadata once
-// the last edge between the endpoints is gone. The exotic case (a per-handle
+// recordAddEdge inverse already removes that edge by its handle —
+// [Graph.RemoveEdgeByHandle] drops the instance's per-handle metadata, and
+// clearEdgePairState drops the pair's per-instance metadata once the last edge
+// between the endpoints is gone (rmp #2885). The exotic case (a per-handle
 // metadata set on an edge that a later failed row removes while a parallel edge
 // survives) is handled by the edge-removal undo itself: captureRemovedEdge
 // snapshots the removed slot's handle and its per-handle labels/properties, and

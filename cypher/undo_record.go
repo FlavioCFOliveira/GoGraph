@@ -157,14 +157,26 @@ func (m mutationUndo) recordAddNode(n string, wasNew bool) {
 }
 
 // recordAddEdge records the inverse of an AddEdge/AddEdgeH between src and dst.
-// srcNew/dstNew report whether each endpoint was freshly created by the call
-// (so its node-creation is also undone). The inverse removes the edge and
+// handle is the stable handle AddEdgeH stamped on the new slot, or 0 for a plain
+// AddEdge. srcNew/dstNew report whether each endpoint was freshly created by the
+// call (so its node-creation is also undone). The inverse removes the edge and
 // decrements the edges-added counter; for each freshly created endpoint it also
 // tombstones the node and decrements the nodes-added counter. The endpoint
 // removals are recorded as part of THIS entry (not via recordAddNode) because
 // AddEdge interns endpoints itself without routing through the mutator's
 // AddNode.
-func (m mutationUndo) recordAddEdge(src, dst string, srcNew, dstNew bool) {
+//
+// # The inverse removes the CREATED instance, by handle (rmp #2885)
+//
+// On a multigraph the pair may already hold committed parallel edges when the
+// statement appends its own. [lpg.WriteView.RemoveEdge] removes the FIRST slot
+// for the pair — a committed sibling, not the appended one — so a rolled-back
+// `MATCH (a)-->(b) CREATE (a)-[:V]->(b)` deleted every pre-existing edge it was
+// parallel to and kept the rolled-back `:V` edge in its place. Removing by the
+// handle the append minted retires exactly the instance this entry inverts,
+// together with its per-handle metadata. A 0 handle has no identity to address
+// and degrades to the first-slot removal ([lpg.Graph.RemoveEdgeByHandle]).
+func (m mutationUndo) recordAddEdge(src, dst string, handle uint64, srcNew, dstNew bool) {
 	// An endpoint freshly created by AddEdge may carry a constrained label
 	// without the required property, so record each new endpoint for the
 	// commit-time existence check (#1754).
@@ -179,7 +191,7 @@ func (m mutationUndo) recordAddEdge(src, dst string, srcNew, dstNew bool) {
 	}
 	selfLoop := src == dst
 	m.undo.record(func() {
-		m.wv.RemoveEdge(src, dst)
+		m.wv.RemoveEdgeByHandle(src, dst, handle)
 		m.wv.Graph().DecrEdgesAdded()
 		if srcNew {
 			m.wv.RemoveNode(src)
@@ -576,12 +588,57 @@ func captureAllOutEdgePreimages(
 		return nil
 	}
 	pre := make([]removedEdgePreimage, len(outgoing))
+	if !r.active() {
+		for i, dst := range outgoing {
+			pre[i] = removedEdgePreimage{src: n, dst: dst, hadEdge: g.AdjList().HasEdge(n, dst)}
+		}
+		return pre
+	}
+	// Each entry of outgoing is ONE adjacency slot, so parallel edges to the same
+	// destination appear once per slot. Every slot must be captured under its OWN
+	// stable handle (rmp #2885): capturing each occurrence through
+	// [mutationUndo.captureRemovedEdge] resolved the FIRST slot's handle every
+	// time, so the inverses re-added that one handle repeatedly —
+	// [lpg.Graph.AddEdgeHIfAbsent] no-ops every repeat — and a rolled-back
+	// DETACH DELETE of a node with k parallel out-edges to one neighbour
+	// restored one of them and lost k-1 committed relationships.
+	//
+	// outgoing enumerates the entry in slot order (it is [adjlist.AdjList.Neighbours]
+	// over the same entry, skipping only unresolvable ids), so a single forward
+	// cursor over the entry aligns each occurrence with its slot in O(degree). A
+	// cursor that runs off the end — the entry no longer matches the snapshot —
+	// falls back to the first-slot capture, the pre-#2885 behaviour.
+	var (
+		nbs     []graph.NodeID
+		weights []float64
+		handles []uint64
+	)
+	if srcID, ok := g.AdjList().Mapper().Lookup(n); ok {
+		nbs, weights, handles = g.AdjList().LoadEntryH(srcID)
+	}
+	cur := 0
 	for i, dst := range outgoing {
-		if r.active() {
+		slot := -1
+		if dstID, ok := g.AdjList().Mapper().Lookup(dst); ok && handles != nil {
+			for ; cur < len(nbs); cur++ {
+				if nbs[cur] == dstID {
+					slot = cur
+					cur++
+					break
+				}
+			}
+		}
+		if slot < 0 || slot >= len(handles) {
+			// No per-slot identity to recover (simple graph, or storage without a
+			// handle column): parallel edges cannot carry distinct identities
+			// there, so the first slot stands for the slot.
 			pre[i] = r.captureRemovedEdge(n, dst)
 			continue
 		}
-		pre[i] = removedEdgePreimage{src: n, dst: dst, hadEdge: g.AdjList().HasEdge(n, dst)}
+		pre[i] = r.captureRemovedEdgeH(n, dst, handles[slot])
+		if pre[i].hadEdge && slot < len(weights) {
+			pre[i].weight = weights[slot]
+		}
 	}
 	return pre
 }
@@ -619,8 +676,3 @@ func journalAllOutEdgesRemoved(r mutationUndo, c relDeleteCounter, pre []removed
 		r.recordRemoveEdge(&pre[i], true)
 	}
 }
-
-// _ pins graph.NodeID into this file's imports so a future inverse that needs a
-// NodeID-keyed restore has the type in scope; the helpers above operate on node
-// keys, matching the adapter surface.
-var _ = graph.NodeID(0)
