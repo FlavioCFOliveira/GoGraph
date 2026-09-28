@@ -467,7 +467,7 @@ errors; their profiles are complete and are used below.
 | row | pass | error, read from `run.log` |
 |---|---|---|
 | `31_metrics_observability` | elevated | `run_exit=1`: the same `[staleTier]` planner-statistics assertion as before (rmp #2795, #2785). It now fails at 5 s instead of 25 s because the count-store phase before it fell from `countstore.write_elapsed=20.026335s` to `11.35ms` (F3, #2883). |
-| `36_mvcc_snapshot_topology` | elevated | `run_exit=1`: *"the self-contradiction query never ran"* (`reader.contradiction_checks=0`, `read_errors=0`, `snapshot_topology_invariant_holds=1`). Cause: finding G1 below. |
+| `36_mvcc_snapshot_topology` | elevated | `run_exit=1`: *"the self-contradiction query never ran"* (`reader.contradiction_checks=0`, `read_errors=0`, `snapshot_topology_invariant_holds=1`). Cause: finding G1 below. **Superseded (iteration 3):** since #2894 (`120bff89`) the row passes at HEAD `65a38f1a` (`run_exit=0`, `contradiction_checks=17`) and finishes its 60-cycle churn in 1.12 s; see "Iteration 3". |
 | 13 rows | default | `cpu-total-zero` (runs under the 10 ms sampling period). `05_out_of_core` now registers 10 ms and passes; `24_init` is also `cpu-total-zero` in `elevated`. |
 
 | row | default CPU s | default alloc | elevated CPU s | Δ | elevated alloc | Δ | elevated exit / elapsed s |
@@ -522,7 +522,7 @@ rows and are compared per unit:
 | row | before | after | per unit |
 |---|---|---|---|
 | `35_mvcc_mixed_workload` | ≈ 1.70 M reads (4 × 0.7 s at 699 490 / 531 814 / 686 947 / 513 540 ops/s) | ≈ 1.67 M reads (684 143 / 511 209 / 671 163 / 513 933 ops/s) | 7.6 → 7.9 µs CPU and 5.6 → 5.8 KiB per read: +3–4%, inside the noise band; no change claimed |
-| `36_mvcc_snapshot_topology` (writer) | `main.runWrite` 61.09 s CPU, `churn_deletes=25204` | 25.13 s, `churn_deletes=28841` | **2.42 → 0.87 ms CPU per churn delete (−64%)**; `runWrite` alloc 47 261 → 24 752 MiB |
+| `36_mvcc_snapshot_topology` (writer) | `main.runWrite` 61.09 s CPU, `churn_deletes=25204` | 25.13 s, `churn_deletes=28841` | **2.42 → 0.87 ms CPU per churn delete (−64%)**; `runWrite` alloc 47 261 → 24 752 MiB. **Superseded (iteration 3):** the 240 s, ≈ 28 800-cycle workload described here existed only because the contradiction check never completed. Since #2894 the row runs `-churn 60` cycles in 1.12 s, so its cost is no longer comparable per unit (rmp #2924). |
 | `17_transactional_log` | 530 checkpoints, 2.67 GiB | 492 checkpoints, 2.47 GiB | 5.2 MiB per checkpoint, unchanged; F6 is not yet fixed |
 
 **Iteration-1 fixes, confirmed by the rerun.** F1 (#2882): `storeEntry` no longer appears
@@ -616,6 +616,13 @@ CIKM 2011). This needs a spike; the iteration-1 midpoint-root hypothesis was ref
 oracle.
 
 #### G3 — residual live-adjacency cost of write transactions in row 36: 10.83 s CPU, ≈ 8.2 GiB
+
+**Superseded (iteration 3).** G3 and G4 below describe row 36's 240 s churn workload. That
+workload was an artefact of G1: the contradiction check never completed, so the churn phase ran
+to its `-duration` bound. After #2894, row 36 finishes its default 60-cycle churn in 1.12 s.
+At HEAD `65a38f1a`, `LiveOutRun` is 0.04 s and 11 MiB, and `upsertEdgeSlotLocked` is 86 MiB.
+rmp #2924 found both items immaterial at the default workload, and the user closed it with no
+change.
 
 **Call sites.** `cypher/live_adjacency.go:469` `LiveOutRun` → `liveTopoLog.resolveLocked`
 (`run.dsts = append(run.dsts[:0], …)` at `:331`, `run.handles` at `:333`, `run.codes = make`
@@ -776,4 +783,329 @@ go tool pprof -nodefraction=0 -list 'patternEvaluator..matchOutgoing' "$M/out/el
 go tool pprof -nodefraction=0 -sample_index=alloc_space -list upsertEdgeSlotLocked "$M/out/elevated/36_mvcc_snapshot_topology/heap.pprof"
 python3 "$M/agg.py" "$M/reconcile" cpu 0 45     # cross-row flat totals (cpu|alloc)
 bash "$M/cmp.sh"                                 # before/after figures per finding
+```
+
+## Iteration 3 — re-profile at `65a38f1a` and materiality (rmp #2925)
+
+Sprint 363, rmp #2925 (SPIKE). The same two passes, rerun at HEAD `65a38f1a` after the
+#2894 short circuit (`120bff89`) and the correctness fixes listed below. **No module code was
+changed.** "Iteration 1" is `$L` (`127c012b`), "iteration 2" is `$M` (`f6b96b15`), and every
+HEAD number comes from this run.
+
+Commits between `f6b96b15` and HEAD that can affect cost: `120bff89` (#2894),
+`b2260658`, `dbef3823`, `bd5f7fbe`, `789732a5`, `1075ceaa`, `79a50e41`, `3cef9714`,
+`dfa9187f`, `4af8739c` (includes #2910), `23b5b860`, `1f6aec45`, `65a38f1a`. Every non-test Go
+file they change lies in `cypher/…` or in `graph/io/graphml/writer_props.go`
+(`git diff --name-only f6b96b15 HEAD`). `search/`, `store/`, `graph/lpg` and `graph/adjlist`
+are byte-identical. `go list -deps` shows that only 12 examples (16 rows) import `cypher` or
+`graph/io/graphml`: `07`, `19`, `22`, `23`, `24_*`, `25`, `26`, `27`, `31`, `34`, `35`, `36`.
+The other 25 rows ran identical module code in both iterations. They are this sweep's
+same-code control.
+
+**Method.** Unchanged: `scripts/examples-lab.sh` run from the repository root, passes
+`default` then `elevated`, 37 fresh binaries (built in 10 s, outside every timed window),
+`go tool pprof -nodefraction=0` for every total, `alloc_space` for allocation. "Net" CPU is the
+profile total minus the cumulative time of `runtime.findRunnable` (runtime parking). The same
+script (`$N/cmp3.py`) reproduces iteration 2's published totals exactly: 1 488.2 and
+1 240.8 s net. Harness code (`package main`) is not ranked.
+
+**Environment.** Apple M4, 10 cores, 32 GiB, Darwin 25.6.0 arm64, Go 1.27.1, `GOMAXPROCS`
+unset. The working tree was dirty only in the project instructions file (`steps.txt`:
+`tree_dirty_files=1`). Before the start, load1 was 1.56–2.08, and the top processes were iTerm2
+(16% of one core), the agent CLI (10%) and Firefox (6%). No other workload ran. `default` ran
+09:56–10:02 and `elevated` 10:02–10:17 local time, 2026-09-28. Load1 across `elevated` rows
+was 1.43–5.74; iteration 2's was 1.46–5.23. The idle floor was therefore about 0.3–0.5 higher
+than in iteration 2, and the same-code control below shows its effect.
+
+**Artefact root** `$N` = the sibling `lab-2925/` of `$L`. It holds the manifests
+`$N/out/{default,elevated}/manifest.tsv`, the driver log `$N/driver.log`, the listings
+`$N/reconcile/<pass>.<row>.{cpu,alloc}.{top,cum}` (from `$N/reconcile.sh`), the three-way
+tables `$N/cmp3.out` (from `$N/cmp3.py`), the cross-row totals
+`$N/agg.{cpu,alloc}.flat`, and the A/B, `ab2925/` (`ab.sh`, `ab.summary`, `logs/`, and trees
+extracted from `git archive` of `f6b96b15` and `65a38f1a`).
+
+### Manifest across the three iterations
+
+| pass | rows | CPU s | CPU net of parking s | alloc | Σ elapsed s |
+|---|---|---|---|---|---|
+| `default` | 42 | 102.5 → 91.7 → **91.4** | 92.8 → 81.8 → **82.2** | 63.81 → 46.95 → **46.50 GiB** | 301 → 290 → **286** |
+| `elevated` | 42 | 1 687.7 → 1 472.4 → **647.7** | 1 488.2 → 1 240.8 → **605.0** | 387.65 → 175.87 → **152.99 GiB** | 1 185 → 1 106 → **892** |
+| `elevated` without row 36 | 41 | 719.4 → 623.1 → **641.9** | 672.0 → 582.4 → **601.3** | 339.6 → 150.8 → **150.5 GiB** | 940 → 860 → **887** |
+
+Since iteration 2, row 36 alone fell by 843.6 s of total CPU. That is more than the whole
+sweep's 824.7 s reduction: the other 41 rows rose by 18.8 s (+3.0%), which the regression check
+below attributes to host drift. Row 36's fall is not a like-for-like saving, because its
+**amount of work changed** (see "Work per unit" below).
+
+Per-row tables. Each cell is iteration 1 → iteration 2 → HEAD, and elapsed time is quantised
+to the driver's 5 s poll. Raw values: `$N/cmp3.out`.
+
+#### `elevated` pass
+
+| row | CPU s | net CPU s | alloc | exit / wall s | net CPU Δ `f6b96b15`→HEAD |
+|---|---|---|---|---|---|
+| `01_basic` | 4.18 → 1.31 → 1.41 | 3.50 → 1.29 → 1.41 | 16.21 GiB → 990.4 MiB → 1012.6 MiB | 0/5 → 0/5 → 0/5 | +9% |
+| `02_property_graph` | 2.60 → 1.70 → 1.78 | 2.16 → 1.36 → 1.46 | 2.67 GiB → 575.3 MiB → 574.7 MiB | 0/5 → 0/5 → 0/5 | +7% |
+| `03_advanced_algorithms` | 44.22 → 45.28 → 44.97 | 44.06 → 45.25 → 44.95 | 274.1 MiB → 66.1 MiB → 76.3 MiB | 0/50 → 0/50 → 0/50 | -1% |
+| `04_persistence` | 12.09 → 11.85 → 11.17 | 11.03 → 11.30 → 10.70 | 3.18 GiB → 1.63 GiB → 1.63 GiB | 0/165 → 0/150 → 0/156 | -5% |
+| `05_out_of_core` | 3.28 → 0.37 → 0.41 | 2.68 → 0.35 → 0.39 | 8.63 GiB → 263.1 MiB → 273.3 MiB | 0/5 → 0/5 → 0/5 | +11% |
+| `06_csv_import` | 4.18 → 1.65 → 1.76 | 3.82 → 1.58 → 1.74 | 14.52 GiB → 1.39 GiB → 1.41 GiB | 0/5 → 0/5 → 0/5 | +10% |
+| `07_graphml_roundtrip` | 3.52 → 2.23 → 2.26 | 3.12 → 2.14 → 2.17 | 5.95 GiB → 1.77 GiB → 1.76 GiB | 0/5 → 0/5 → 0/5 | +1% |
+| `08_pagerank` | 11.31 → 6.14 → 6.14 | 10.27 → 5.92 → 5.85 | 15.49 GiB → 656.6 MiB → 679.6 MiB | 0/5 → 0/5 → 0/5 | -1% |
+| `09_leiden` | 8.64 → 5.85 → 5.95 | 8.12 → 5.77 → 5.85 | 21.63 GiB → 3.74 GiB → 3.73 GiB | 0/10 → 0/10 → 0/10 | +1% |
+| `10_dimacs9_routing` | 5.61 → 2.70 → 2.83 | 5.05 → 2.68 → 2.83 | 11.76 GiB → 1.28 GiB → 1.30 GiB | 0/5 → 0/5 → 0/5 | +6% |
+| `11_social_network` | 131.75 → 124.87 → 132.23 | 131.29 → 124.72 → 132.11 | 1.41 GiB → 469.1 MiB → 469.7 MiB | 0/20 → 0/20 → 0/20 | +6% |
+| `12_build_dependency` | 5.40 → 0.64 → 0.63 | 4.64 → 0.61 → 0.61 | 9.91 GiB → 340.6 MiB → 358.2 MiB | 0/5 → 0/5 → 0/5 | +0% |
+| `13_network_reliability` | 2.88 → 2.88 → 2.81 | 2.88 → 2.88 → 2.81 | 76.3 MiB → 72.7 MiB → 74.6 MiB | 0/5 → 0/5 → 0/5 | -2% |
+| `14_routing_alternatives` | 40.09 → 40.18 → 40.91 | 39.72 → 39.90 → 40.59 | 5.96 GiB → 5.93 GiB → 5.93 GiB | 0/45 → 0/45 → 0/45 | +2% |
+| `15_task_assignment` | 3.37 → 3.41 → 3.39 | 3.37 → 3.41 → 3.39 | 438.2 MiB → 277.5 MiB → 281.5 MiB | 0/5 → 0/5 → 0/5 | -1% |
+| `16_centrality_analytics` | 8.82 → 9.04 → 9.05 | 8.79 → 9.03 → 9.03 | 305.6 MiB → 163.0 MiB → 160.8 MiB | 0/10 → 0/10 → 0/10 | +0% |
+| `17_transactional_log` | 7.74 → 8.45 → 10.66 | 7.21 → 8.00 → 9.91 | 2.67 GiB → 2.47 GiB → 2.49 GiB | 0/55 → 0/50 → 0/55 | +24% |
+| `18_oocore_pipeline` | 7.89 → 1.47 → 1.53 | 7.04 → 1.44 → 1.50 | 19.78 GiB → 792.7 MiB → 799.3 MiB | 0/5 → 0/5 → 0/5 | +4% |
+| `19_pattern_query` | 11.83 → 10.38 → 10.61 | 10.54 → 9.37 → 9.48 | 7.57 GiB → 3.63 GiB → 3.70 GiB | 0/5 → 0/5 → 0/5 | +1% |
+| `20_concurrent_reads` | 115.70 → 111.39 → 117.21 | 102.50 → 96.41 → 102.56 | 32.71 GiB → 31.96 GiB → 31.75 GiB | 0/25 → 0/25 → 0/25 | +6% |
+| `21_typed_recovery` | 39.56 → 41.90 → 44.15 | 38.54 → 41.17 → 43.41 | 4.04 GiB → 1.91 GiB → 1.89 GiB | 0/225 → 0/215 → 0/235 | +5% |
+| `22_cypher` | 12.96 → 4.78 → 5.08 | 11.58 → 4.29 → 4.40 | 16.09 GiB → 1.67 GiB → 1.69 GiB | 0/10 → 0/5 → 0/5 | +3% |
+| `23_bolt_server` | 3.23 → 3.07 → 3.06 | 2.04 → 1.80 → 1.94 | 844.7 MiB → 597.3 MiB → 617.8 MiB | 0/5 → 0/5 → 0/5 | +8% |
+| `24_init` | 0.00 → 0.00 → 0.00 | 0.00 → 0.00 → 0.00 | 6.1 MiB → 7.8 MiB → 8.4 MiB | 0/5 → 0/5 → 0/5 | — |
+| `24_seed` | 2.54 → 2.43 → 2.59 | 2.49 → 2.36 → 2.58 | 3.39 GiB → 3.42 GiB → 3.42 GiB | 0/5 → 0/5 → 0/5 | +9% |
+| `24_stats` | 8.45 → 5.69 → 5.99 | 7.57 → 4.70 → 4.78 | 4.10 GiB → 3.26 GiB → 3.29 GiB | 0/10 → 0/5 → 0/5 | +2% |
+| `24_query` | 5.28 → 4.40 → 4.65 | 4.37 → 3.44 → 3.57 | 3.29 GiB → 3.08 GiB → 3.04 GiB | 0/5 → 0/5 → 0/5 | +4% |
+| `24_plandiff` | 19.35 → 16.18 → 16.76 | 18.10 → 14.96 → 15.48 | 13.34 GiB → 10.89 GiB → 10.95 GiB | 0/20 → 0/15 → 0/15 | +3% |
+| `24_snapshot` | 4.88 → 4.98 → 5.08 | 3.80 → 4.06 → 4.26 | 3.69 GiB → 3.68 GiB → 3.71 GiB | 0/5 → 0/5 → 0/5 | +5% |
+| `25_software_house_api` | 28.67 → 25.79 → 25.57 | 25.86 → 23.04 → 22.81 | 11.32 GiB → 11.36 GiB → 11.36 GiB | 0/35 → 0/30 → 0/30 | -1% |
+| `26_social_scale_bench` | 85.19 → 73.99 → 72.92 | 78.35 → 67.08 → 66.18 | 47.60 GiB → 30.50 GiB → 30.16 GiB | 0/90 → 0/80 → 0/75 | -1% |
+| `27_concurrent_txn` | 6.40 → 6.13 → 6.43 | 5.70 → 5.19 → 5.63 | 1.11 GiB → 1.17 GiB → 1.21 GiB | 0/5 → 0/5 → 0/6 | +8% |
+| `28_negative_weights` | 9.69 → 9.55 → 9.45 | 9.68 → 9.55 → 9.44 | 1.31 GiB → 1.30 GiB → 1.30 GiB | 0/15 → 0/15 → 0/15 | -1% |
+| `29_all_pairs` | 2.90 → 2.86 → 2.92 | 2.27 → 2.21 → 2.30 | 156.2 MiB → 162.5 MiB → 163.9 MiB | 0/5 → 0/5 → 0/5 | +4% |
+| `30_min_spanning_tree` | 2.99 → 0.51 → 0.53 | 2.55 → 0.49 → 0.49 | 10.22 GiB → 522.6 MiB → 524.7 MiB | 0/5 → 0/5 → 0/5 | +0% |
+| `31_metrics_observability` | 23.18 → 1.33 → 1.34 | 22.04 → 1.09 → 1.04 | 9.70 GiB → 688.0 MiB → 704.4 MiB | 1/25 → 1/5 → 1/5 | -5% |
+| `32_euler` | 5.43 → 4.69 → 4.78 | 5.42 → 4.68 → 4.78 | 13.83 GiB → 6.73 GiB → 6.74 GiB | 0/10 → 0/10 → 0/10 | +2% |
+| `33_generation_swap` | 6.26 → 5.29 → 5.36 | 6.13 → 5.22 → 5.29 | 4.54 GiB → 1.23 GiB → 1.22 GiB | 0/5 → 0/5 → 0/5 | +1% |
+| `34_bolt_transactions` | 2.03 → 2.06 → 2.06 | 1.76 → 1.63 → 1.70 | 967.6 MiB → 957.2 MiB → 943.8 MiB | 0/5 → 0/5 → 0/5 | +4% |
+| `35_mvcc_mixed_workload` | 13.01 → 13.08 → 13.08 | 10.55 → 10.51 → 10.30 | 8.83 GiB → 9.14 GiB → 9.12 GiB | 0/5 → 0/5 → 0/5 | -2% |
+| `36_mvcc_snapshot_topology` | 968.33 → 849.35 → 5.80 | 816.25 → 658.41 → 3.74 | 48.02 GiB → 25.12 GiB → 2.49 GiB | 1/245 → 1/246 → 0/5 | -99% |
+| `37_mvcc_write_contention` | 2.25 → 2.52 → 2.42 | 1.34 → 1.52 → 1.55 | 203.4 MiB → 160.5 MiB → 154.2 MiB | 0/5 → 0/5 → 0/5 | +2% |
+| **total** | 1687.7 → 1472.4 → 647.7 | 1488.2 → 1240.8 → 605.0 | 387.65 GiB → 175.87 GiB → 152.99 GiB | Σwall 1185 → 1106 → 892 | |
+
+#### `default` pass
+
+| row | CPU s | net CPU s | alloc | exit / wall s | net CPU Δ `f6b96b15`→HEAD |
+|---|---|---|---|---|---|
+| `01_basic` | 0.03 → 0.02 → 0.03 | 0.03 → 0.02 → 0.03 | 50.4 MiB → 36.0 MiB → 32.3 MiB | 0/5 → 0/5 → 0/5 | — |
+| `02_property_graph` | 0.01 → 0.01 → 0.01 | 0.01 → 0.01 → 0.01 | 9.5 MiB → 8.9 MiB → 8.3 MiB | 0/5 → 0/5 → 0/5 | — |
+| `03_advanced_algorithms` | 0.00 → 0.00 → 0.00 | 0.00 → 0.00 → 0.00 | 6.6 MiB → 4.1 MiB → 3.7 MiB | 0/5 → 0/5 → 0/6 | — |
+| `04_persistence` | 0.11 → 0.11 → 0.07 | 0.10 → 0.10 → 0.07 | 20.5 MiB → 23.9 MiB → 21.1 MiB | 0/5 → 0/5 → 0/5 | -30% |
+| `05_out_of_core` | 0.00 → 0.01 → 0.01 | 0.00 → 0.01 → 0.01 | 13.8 MiB → 9.2 MiB → 13.8 MiB | 0/5 → 0/5 → 0/5 | — |
+| `06_csv_import` | 0.01 → 0.01 → 0.01 | 0.01 → 0.01 → 0.01 | 15.0 MiB → 11.3 MiB → 11.7 MiB | 0/5 → 0/5 → 0/5 | — |
+| `07_graphml_roundtrip` | 0.00 → 0.00 → 0.01 | 0.00 → 0.00 → 0.01 | 8.4 MiB → 9.3 MiB → 7.1 MiB | 0/5 → 0/5 → 0/5 | — |
+| `08_pagerank` | 0.01 → 0.01 → 0.01 | 0.01 → 0.00 → 0.01 | 7.9 MiB → 6.2 MiB → 6.3 MiB | 0/5 → 0/5 → 0/5 | — |
+| `09_leiden` | 0.00 → 0.00 → 0.00 | 0.00 → 0.00 → 0.00 | 5.4 MiB → 5.4 MiB → 4.3 MiB | 0/5 → 0/5 → 0/5 | — |
+| `10_dimacs9_routing` | 0.03 → 0.03 → 0.03 | 0.03 → 0.03 → 0.03 | 20.0 MiB → 14.1 MiB → 15.2 MiB | 0/5 → 0/5 → 0/5 | — |
+| `11_social_network` | 0.00 → 0.00 → 0.01 | 0.00 → 0.00 → 0.01 | 7.9 MiB → 8.3 MiB → 9.4 MiB | 0/5 → 0/5 → 0/5 | — |
+| `12_build_dependency` | 0.00 → 0.00 → 0.01 | 0.00 → 0.00 → 0.01 | 10.5 MiB → 9.8 MiB → 9.0 MiB | 0/5 → 0/5 → 0/5 | — |
+| `13_network_reliability` | 0.00 → 0.00 → 0.00 | 0.00 → 0.00 → 0.00 | 5.8 MiB → 4.9 MiB → 5.0 MiB | 0/5 → 0/5 → 0/5 | — |
+| `14_routing_alternatives` | 0.02 → 0.02 → 0.02 | 0.02 → 0.01 → 0.02 | 10.6 MiB → 7.9 MiB → 12.3 MiB | 0/5 → 0/5 → 0/5 | — |
+| `15_task_assignment` | 0.01 → 0.01 → 0.00 | 0.01 → 0.01 → 0.00 | 9.9 MiB → 6.4 MiB → 6.7 MiB | 0/5 → 0/5 → 0/5 | — |
+| `16_centrality_analytics` | 0.02 → 0.01 → 0.02 | 0.02 → 0.01 → 0.02 | 8.3 MiB → 8.8 MiB → 8.3 MiB | 0/5 → 0/5 → 0/5 | — |
+| `17_transactional_log` | 0.36 → 0.41 → 0.31 | 0.31 → 0.40 → 0.28 | 156.6 MiB → 149.9 MiB → 168.7 MiB | 0/5 → 0/5 → 0/5 | -30% |
+| `18_oocore_pipeline` | 0.02 → 0.02 → 0.01 | 0.02 → 0.02 → 0.01 | 27.0 MiB → 22.2 MiB → 16.4 MiB | 0/5 → 0/5 → 0/5 | — |
+| `19_pattern_query` | 0.06 → 0.06 → 0.05 | 0.05 → 0.05 → 0.04 | 25.8 MiB → 32.9 MiB → 29.3 MiB | 0/5 → 0/5 → 0/5 | — |
+| `20_concurrent_reads` | 0.76 → 0.74 → 0.76 | 0.59 → 0.57 → 0.64 | 206.6 MiB → 180.0 MiB → 171.9 MiB | 0/5 → 0/5 → 0/5 | +12% |
+| `21_typed_recovery` | 0.08 → 0.09 → 0.07 | 0.07 → 0.08 → 0.07 | 23.9 MiB → 20.2 MiB → 19.6 MiB | 0/5 → 0/5 → 0/5 | -12% |
+| `22_cypher` | 0.01 → 0.01 → 0.01 | 0.01 → 0.01 → 0.00 | 16.8 MiB → 14.2 MiB → 11.7 MiB | 0/5 → 0/5 → 0/5 | — |
+| `23_bolt_server` | 0.12 → 0.12 → 0.11 | 0.05 → 0.08 → 0.08 | 36.4 MiB → 32.0 MiB → 36.6 MiB | 0/5 → 0/5 → 0/5 | +0% |
+| `24_init` | 0.00 → 0.00 → 0.01 | 0.00 → 0.00 → 0.01 | 8.2 MiB → 10.5 MiB → 9.4 MiB | 0/5 → 0/5 → 0/5 | — |
+| `24_seed` | 0.00 → 0.00 → 0.00 | 0.00 → 0.00 → 0.00 | 7.3 MiB → 9.3 MiB → 9.5 MiB | 0/5 → 0/5 → 0/5 | — |
+| `24_stats` | 0.00 → 0.00 → 0.00 | 0.00 → 0.00 → 0.00 | 7.4 MiB → 5.8 MiB → 9.1 MiB | 0/5 → 0/5 → 0/5 | — |
+| `24_query` | 0.00 → 0.00 → 0.00 | 0.00 → 0.00 → 0.00 | 9.0 MiB → 10.0 MiB → 8.8 MiB | 0/5 → 0/5 → 0/5 | — |
+| `24_plandiff` | 0.40 → 0.36 → 0.35 | 0.36 → 0.33 → 0.32 | 359.8 MiB → 306.9 MiB → 309.8 MiB | 0/5 → 0/5 → 0/5 | -3% |
+| `24_snapshot` | 0.11 → 0.11 → 0.11 | 0.10 → 0.11 → 0.11 | 129.9 MiB → 132.4 MiB → 132.4 MiB | 0/5 → 0/5 → 0/5 | +0% |
+| `25_software_house_api` | 0.65 → 0.64 → 0.64 | 0.51 → 0.39 → 0.36 | 58.8 MiB → 61.3 MiB → 55.1 MiB | 0/10 → 0/10 → 0/10 | -8% |
+| `26_social_scale_bench` | 84.52 → 73.97 → 73.64 | 78.48 → 67.54 → 68.21 | 47.56 GiB → 30.44 GiB → 30.43 GiB | 0/91 → 0/80 → 0/75 | +1% |
+| `27_concurrent_txn` | 1.42 → 1.32 → 1.45 | 1.22 → 1.00 → 1.18 | 6.00 GiB → 6.07 GiB → 5.69 GiB | 0/5 → 0/5 → 0/5 | +18% |
+| `28_negative_weights` | 0.00 → 0.00 → 0.00 | 0.00 → 0.00 → 0.00 | 4.5 MiB → 5.1 MiB → 7.9 MiB | 0/5 → 0/5 → 0/5 | — |
+| `29_all_pairs` | 0.02 → 0.02 → 0.02 | 0.02 → 0.02 → 0.01 | 9.9 MiB → 12.0 MiB → 12.7 MiB | 0/5 → 0/5 → 0/5 | — |
+| `30_min_spanning_tree` | 0.00 → 0.00 → 0.00 | 0.00 → 0.00 → 0.00 | 4.9 MiB → 4.8 MiB → 7.8 MiB | 0/5 → 0/5 → 0/5 | — |
+| `31_metrics_observability` | 0.07 → 0.03 → 0.03 | 0.05 → 0.02 → 0.03 | 55.7 MiB → 44.9 MiB → 41.0 MiB | 0/5 → 0/5 → 0/5 | — |
+| `32_euler` | 0.00 → 0.00 → 0.00 | 0.00 → 0.00 → 0.00 | 3.8 MiB → 4.2 MiB → 3.9 MiB | 0/5 → 0/5 → 0/5 | — |
+| `33_generation_swap` | 0.04 → 0.05 → 0.04 | 0.03 → 0.05 → 0.04 | 18.9 MiB → 12.2 MiB → 11.9 MiB | 0/5 → 0/5 → 0/5 | — |
+| `34_bolt_transactions` | 0.01 → 0.01 → 0.01 | 0.01 → 0.01 → 0.01 | 8.2 MiB → 13.2 MiB → 10.5 MiB | 0/5 → 0/5 → 0/5 | — |
+| `35_mvcc_mixed_workload` | 13.06 → 12.98 → 12.99 | 10.45 → 10.51 → 10.23 | 8.81 GiB → 9.15 GiB → 9.08 GiB | 0/5 → 0/5 → 0/5 | -3% |
+| `36_mvcc_snapshot_topology` | 0.12 → 0.09 → 0.10 | 0.06 → 0.07 → 0.08 | 42.6 MiB → 33.7 MiB → 46.5 MiB | 0/5 → 0/5 → 0/5 | +14% |
+| `37_mvcc_write_contention` | 0.41 → 0.44 → 0.45 | 0.20 → 0.30 → 0.23 | 39.6 MiB → 25.3 MiB → 32.2 MiB | 0/5 → 0/5 → 0/5 | -23% |
+| **total** | 102.5 → 91.7 → 91.4 | 92.8 → 81.8 → 82.2 | 63.81 GiB → 46.95 GiB → 46.50 GiB | Σwall 301 → 290 → 286 | |
+
+**Failures at HEAD.** Only one row failed, with an example assertion rather than a module
+error, and its profiles are complete.
+
+| row | pass | error, read from `run.log` |
+|---|---|---|
+| `31_metrics_observability` | elevated | `run_exit=1`: the same `[staleTier]` planner-statistics assertion as in iterations 1 and 2 (rmp #2795, #2785). |
+| `36_mvcc_snapshot_topology` | elevated | **Now passes**: `run_exit=0`, `reader.contradiction_checks=17`, `read_errors=0`, `snapshot_topology_invariant_holds=1`. |
+| 10 rows | default | `cpu-total-zero` (a run shorter than the 10 ms sampling period): `03`, `09`, `13`, `15`, `24_seed`, `24_stats`, `24_query`, `28`, `30`, `32`. `24_init` is also `cpu-total-zero` in `elevated`. |
+
+### Work per unit, for the rows bounded by time, checks or work
+
+| row | iteration 1 | iteration 2 | HEAD | per unit |
+|---|---|---|---|---|
+| `36_mvcc_snapshot_topology` | 245 s, `churn_deletes=25204`, `contradiction_checks=0`, `observations=2709` | 246 s, `churn_deletes=28841`, `contradiction_checks=0`, `observations=1861` | **1.12 s** (`run.elapsed=1.120847s`), `churn_deletes=60`, `contradiction_checks=17`, `observations=1887` | **Not comparable.** The churn loop runs while `i < cfg.churn || checksRun < cfg.minChecks` (`examples/36_mvcc_snapshot_topology/main.go:460`), bounded by `-duration`. Before #2894, no check ever completed, so the phase ran to its 4-minute `-duration` bound. At HEAD it runs the configured 60 cycles. HEAD's row does about 1/480 of iteration 2's churn and different reader work, so its 5.80 s and 2.49 GiB are the cost of a different, much smaller workload. The `churn_deletes` values (25 204 → 28 841 → 60) are the evidence. |
+| `35_mvcc_mixed_workload` | ≈ 1.70 M reads | ≈ 1.67 M reads | ≈ 1.60 M reads (4 × 0.7 s at 662 247 / 504 811 / 640 707 / 481 686 ops/s) | 7.85 → **8.16 µs CPU per read (+4%)**, net 6.31 → 6.43 µs (+2%); 5.75 → 5.97 KiB per read (+4%). Inside the same-code band below; no change is claimed. |
+| `17_transactional_log` | 9 000 transfers, 530 checkpoints | 9 000 transfers, 492 checkpoints | 9 000 transfers, 489 checkpoints | 5.2 MiB per checkpoint, unchanged (G8 is still open). CPU +26% on identical module code (see the regression check). |
+| `20_concurrent_reads` | — | — | 3 000 reads (`scale.workers_*.reads`) | Fixed work; net CPU 96.41 → 102.56 s (+6%) on identical module code. |
+
+### Regression check, `f6b96b15` → HEAD
+
+**Verdict: no row's cost per unit of work rose because of a module change.** The evidence
+comes from three independent sources.
+
+1. **The same-code control.** The 25 rows that cannot reach any changed file (see above) rose
+   by **+4.3% net CPU** (426.74 → 444.95 s) and +4.0% total CPU. The 16 rows that can reach
+   the changed code (excluding row 36, whose work changed) rose by only **+0.4% net**
+   (155.66 → 156.32 s) and +0.5% total. A module regression would show the reverse pattern.
+   Per row, the same-code rows moved from −5% (`04`) to +24% (`17`); `11`, whose
+   `search/diameter.go` is unchanged, moved +6% (124.72 → 132.11 s). This is the effective noise
+   band of a single-run sweep on this host. No reachable row is outside it: the largest are
+   `23` (+8%), `27` (+8%) and `24_seed` (+9%).
+2. **The interleaved A/B** (`ab2925/`). Each arm was built from its own tree, extracted from
+   `git archive` of `f6b96b15` and of `65a38f1a` into separate directories. The runs used ABBA
+   order under `/usr/bin/time -l`, with the elevated argv, and every run exited 0. Load1 was
+   1.9–2.4 throughout.
+
+   | row | n per arm | CPU s, median [min–max] base → head | Δ median | paired head/base median [range] | wall Δ | max RSS Δ |
+   |---|---|---|---|---|---|---|
+   | `23_bolt_server` (reachable) | 8 | 3.330 [3.250–3.390] → 3.345 [3.280–3.420] | +0.5% | 1.009 [0.985–1.030] | −0.5% | +0.0% |
+   | `27_concurrent_txn` (reachable) | 8 | 7.020 [6.860–7.090] → 7.025 [6.950–7.120] | +0.1% | 1.004 [0.987–1.028] | +0.5% | −0.5% |
+   | `17_transactional_log` (same-code control) | 3 | 11.280 [8.430–11.490] → 11.310 [9.370–11.700] | +0.3% | 1.018 [1.003–1.112] | −2.1% | −1.9% |
+
+   The +8% sweep deltas of `23` and `27` do not reproduce: every paired range straddles 1. Row
+   17's +26% sweep delta is explained by its own spread, which is 36% within the base arm
+   alone (8.43–11.49 s).
+3. **The differential profile of row 17** (`-diff_base` iteration 2 → HEAD, +2.21 s). The
+   delta lies in `runtime.pthread_cond_signal` (+0.43 s), `syscall.rawsyscalln` (+0.42 s),
+   `pthread_cond_wait` (+0.29 s), `pthread_kill` (+0.17 s), `runtime.wakep`/`startm`, and
+   `os.removeAllFrom`, all of them scheduler and file-system time. No module frame has more than
+   +0.05 s flat. A profile cannot attribute a delta. Here the attribution rests on (1) and (2):
+   row 17's module code is byte-identical and its A/B is flat.
+
+**Known micro-regressions, below this sweep's resolution.** `bd5f7fbe` (`*2` var-length
++9.7%), #2910 (per-edge properties after `WITH`, +20% on that route) and `65a38f1a` (parse
++0.7%) were each measured by their own benchmarks. None of them is visible at row level: the
+reachable rows sum to +0.4%. `b2260658`'s slower unbound incoming predicates (accepted by the
+user) are reached by no sweep row. `matchIncoming` appears in none of the 42 `elevated` CPU
+profiles.
+
+### Ranked findings at HEAD — biggest and simplest first
+
+Denominators: `elevated` CPU **647.7 s** in total, **605.0 s net of parking**
+(`findRunnable` 42.7 s); allocation **152.99 GiB**. Figures are flat unless marked cumulative.
+"Removable" is an expectation, not a measurement. Every premise was re-read in the source at
+HEAD. Iteration 2's G1 (#2894) is closed. G3 and G4 are **immaterial at HEAD's workload**:
+row 36 now shows `LiveOutRun` at 0.04 s and 11 MiB cumulative, `upsertEdgeSlotLocked` at
+86 MiB and `compactEntry` at 6 MiB (#2924, closed by the user with no change).
+
+| # | finding and call site | absolute cost at HEAD | evidence | est. removable | premise verified at HEAD | fix sketch | risk |
+|---|---|---|---|---|---|---|---|
+| H1 | **G2, the full-BFS sweep count of `DiameterCtx`** — `search/diameter.go:220` (`bfsFarthest` per level vertex); micro items at `:222–226` (ecc re-derived by scanning `dist`) and `:265–267` (O(V) reset per sweep) | `bfsFarthest` **122.28 s flat**, 127.90 s cum (row 11 net 132.11 s); line 222 3.35 s; line 266 1.85 s | `$N/out/elevated/11_social_network/cpu.pprof`, `-list bfsFarthest` | micro **5.2 s, certain and bit-identical**; macro **≈ 122 s, hypothesised** (bound-driven pruning, Takes and Kosters, CIKM 2011; the iteration-1 midpoint-root hypothesis was refuted at −33%) | yes: `search/` is unchanged since `f6b96b15`; `bfsFarthest` returns `farthest` with `dist[farthest]` the maximum, yet `:222` rescans `distV`; `:265` resets all of `dist` | micro: `ecc = distV[farthest]`, and reset only the vertices in `queue`. Macro: an algorithm spike validated against a brute-force oracle | micro none; macro high (correctness of `(lo, hi, exact)`) |
+| H2 | **G5, `PropertyKeysInUse` scans every edge-property slot per call** — `graph/lpg/introspect.go:141`, loop `:166–181` | **6.58 s cum** in row 25 (25.7% of the row); `RelationshipTypesInUse` 0.40 s | `$N/out/elevated/25_software_house_api/cpu.pprof` | ≈ 6.5 s | yes: O(V + E) per call, no memo; `graph/lpg` is unchanged | MVCC-correct per-key usage counts, or a per-generation memo | medium |
+| H3 | **NEW: resolving a projected relationship's type scans the source's whole slot run** — `cypher/api.go:15858` `g.EdgeLabels(stKey, enKey)` → `lpg.slotLabelsForPair` (`graph/lpg/lpg.go:1841` linear loop over deg(src)) | `:15858` **6.94 s cum** in row 26 (9.5% of the row); `slotLabelsForPair` 4.37 s flat (loop line 1841 3.06 s); `EdgeLabelsAsOf` 919.5 MiB | `$N/out/elevated/26_social_scale_bench/{cpu,heap}.pprof`, `-list buildRelationshipValueFromRow`, `-list slotLabelsForPair` | **≈ 4.4 s, hypothesised** (the O(deg) scan) | partly. The per-pair union is **needed** in row 26: the graph is built by the Go API (`examples/26…/main.go:958` `AddEdgeLabeledWithProperty`), which leaves no by-handle label entry, so the `:15909` by-handle branch does not replace `ets`. It is discarded only for Cypher-created edges (the `handled` branch), and **no sweep row measured that share**. | (a) compute `EdgeLabels` only when `!handled` (bit-identical; saves the scan for Cypher-created edges); (b) resolve the type from the slot the Expand already visited, O(1) instead of O(deg) — needs a handle→slot mapping and must keep the parallel-edge union semantics | (a) low; (b) medium (TCK multigraph scenarios Match2 [6], Match7 [29], MatchWhere1 [11]) |
+| H4 | **NEW: the row header passed to a child's `Next` escapes to the heap on every row** — `cypher/exec/apply.go:96` `innerRow := Row{}` and `cypher/exec/expand.go:1084` `var inputRow Row` | **6.87 GiB** flat across rows (`Apply.Next` 3 797 MiB: `24_plandiff` 2 861, `35` 891; `Expand.advanceInput` 3 236 MiB: `25` 2 614, `24_plandiff` 338, `26` 264); 124.0 M objects of 24 B in `24_plandiff` alone; CPU on the two lines ≥ 1.53 s in the five rows read | `$N/out/elevated/{24_plandiff,35_mvcc_mixed_workload,25_software_house_api}/heap.pprof`, `-list`, `-sample_index=alloc_objects`; `go build -gcflags=-m=1 ./cypher/exec`: `apply.go:96:4: moved to heap: innerRow`, `expand.go:1084:6: moved to heap: inputRow` | **≈ 6.9 GiB and ≈ 1.5 s, certain**: the entire flat allocation of both lines is the escaped header | yes, by escape analysis at HEAD; `buildRow` copies the inner row into `op.outBuf` (`apply.go:138–147`), so nothing retains the header | hold the header in an operator field (`op.innerScratch`, `op.inputScratch`), set it to `nil` before each child `Next` (identical to a fresh zero `Row`), and pass its address. The same escape exists at `apply.go:114` (`outerRow`) and `expand_intersect.go:299` (`row`); both are unmeasured | low; validate with `go test ./cypher/...` and the TCK |
+| H5 | **G6, the physical plan is rebuilt on every execution of a cached point query** — `cypher/api.go:2703` → `:2755` `buildReadPhysical` (rmp #2391) | row 35: **1.62 s cum** (12.4%), **5 794 MiB cum** (59.2% of the row); `copySchema` 1 196 MiB; `buildIRProjection` 2 060 MiB | `$N/out/elevated/35_mvcc_mixed_workload/{cpu,heap}.pprof` | ≈ 1.6 s, ≈ 5.7 GiB | yes: called once per `runRead` execution | plan-pure separation (rmp #2391) | medium-high |
+| H6 | **G7, `AllNodesScan.Init` materialises every node id per execution** — `cypher/exec/scan_all.go:62–85` | **4 926 MiB** flat across rows (row 25 4 434 MiB, 36.4% of the row; `19` 407 MiB) | `$N/out/elevated/25_software_house_api/heap.pprof` | ≈ 4.8 GiB | yes: `op.nodeIDs = append(…)` for every id in `Init`; the backing is reused only across re-inits of the same operator | a streaming scan under a pinned snapshot, or a count-store plan for `count(*)` (a planner change, TCK-observable) | medium |
+| H7 | **G8, four 1 MiB `bufio` writers per checkpoint** — `store/snapshot/{labels.go:228, properties.go:238, mapper.go:149, mapper.go:289, writer.go:141}` | **1 971.7 MiB** flat (73.8% of row 17's 2 673 MiB) over 489 checkpoints = 4.03 MiB each | `$N/out/elevated/17_transactional_log/heap.pprof` | ≈ 1.9 GiB (allocation only) | yes: `store/` is unchanged; `1<<20` at all five sites | size the buffers to the component (or pool one writer across the components of one checkpoint) | low (the byte stream is unchanged; crash battery) |
+
+### Items examined and not ranked
+
+- **Row 20's allocation (31.75 GiB, the largest row).** `pageRankBuildReverseStructure`
+  allocates 13 752.7 MiB over 3 000 reads, about 4.6 MiB per call. That is the per-call
+  transpose of the one-shot `centrality.PageRank` (`search/centrality/pagerank.go:208`). The
+  module already has the cached form: the stateful ranker builds it once
+  (`pagerank.go:429`, `if !st.revInit`). The example calls the one-shot form per read. That
+  is a harness choice (rmp #2382), not module waste.
+  `acquireDijkstra` allocates 4 590 MiB, about 2 MiB per fresh state at `maxID` = 60 000, which
+  is roughly 2 300 fresh states. `BFSCtx`'s frontier append (`search/search.go:164`) allocates
+  4 869 MiB. Both are `sync.Pool`-backed, so these are pool misses. The **hypothesis** is that
+  the misses follow GC frequency, which the row's own allocation volume drives; the profile
+  cannot attribute this, and it is not established. `newDistancesCopy` (3 896 MiB) is the
+  returned result's contract copy.
+- **Interface boxing of row cells** (`expr.IntegerValue` into `expr.Value`: `Expand.buildRow`
+  lines 1282–1283 2.25 GiB; `AllNodesScan.Next` 914 MiB; `NodeByLabelScan.Next` 1 GiB). These
+  follow from the `Row []expr.Value` representation, an architectural choice, and are not a
+  local defect.
+- **Node materialisation** (`nodePropsToExprMap.func1` 8 771 MiB across rows) belongs to
+  rmp #2732. Row 26's `GrowSlotWithValue` (4 551 MiB) and `NewLazyRelationshipValue`
+  (2 724 MiB) are unchanged from iteration 2 (4 471 / 2 843 MiB); the first is the harness's
+  bulk build.
+- **`store/txn.(*Tx).SetEdgeLabel`** (2 331 MiB in `24_seed`, `txn.go:1276`
+  `t.ops = append(…)`): the redo log of the single seed transaction
+  (`examples/24_social_network_cli/cmd_seed.go:197–210`), grown by doubling.
+  A capacity hint would need an API change, and the row is a one-shot load.
+- **Harness-owned, unchanged:** `14` `main.kNearest` (sort, 6.28 GiB) and `32`
+  `math/rand.Perm` (6.86 GiB).
+- **Inherent, unchanged:** `21` fsync-bound commits (`syscall.rawsyscalln` 31.6 s), `03`
+  `brandesSource` 41.0 s, and WAL replay per `24_*` subcommand (`replayWALInto` ≈ 1.15 GiB
+  each).
+- **`runtime.madvise`**, 38.0 s across rows (69.4 s in iteration 2), is the scavenger returning
+  memory. A profile cannot attribute it to one site.
+
+### Materiality verdict
+
+| measure | CPU (net 605.0 s) | allocation (152.99 GiB) |
+|---|---|---|
+| largest removable item, **certain or near-certain** | H2 6.58 s = **1.09%** | H4 6.87 GiB = **4.49%** |
+| largest removable item, **hypothesised** | H1 macro ≈ 122 s = **20.2%** (one row, algorithm spike, a prior hypothesis refuted) | — |
+| top five | H2 6.58 + H1 micro 5.20 + H3 4.37 + H5 1.62 + H4 1.53 = **19.3 s = 3.19%** | H4 6.87 + H5 5.66 + H6 4.81 + H7 1.93 + H3 0.90 = **20.16 GiB = 13.2%** |
+
+**Verdict.**
+- **CPU:** further optimisation of module code on the example surface is **immaterial**. The
+  five largest removable CPU items together are 3.2% of net sweep CPU, and none of them
+  exceeds 1.1%. This is below the ±6% same-code band of a single sweep, so the effect of any
+  one of them could not even be confirmed at sweep level.
+- **The one exception** is algorithmic, not waste removal: the diameter bound in row 11
+  (H1 macro, ≈ 20% of net CPU, hypothesised). It is material only if the user wants a
+  faster `DiameterCtx`, and it needs a spike with an exactness proof.
+- **Allocation:** the remaining waste is **moderate but diffuse**: 13.2% combined, no item
+  above 4.5%.
+- Iteration 2 fixed the last item above 5% of CPU (G1, 40% of net CPU). The campaign has
+  therefore reached the point where CPU improvements have become irrelevant.
+
+### Recommended next step
+
+1. **Close the CPU hunt.** No CPU batch is recommended on materiality grounds.
+2. If the allocation vector is still in scope, **H4 alone** is the only item that is at once
+   the largest, certain, low-risk and small. Validation: `go test ./cypher/...`, the TCK, an
+   `allocs/op` benchmark of an `Apply`/`Expand` pipeline, and a rerun of rows `24_plandiff`,
+   `25` and `35`.
+   - **H7** is the next such candidate: low risk, 1.3%.
+   - **H5 and H6** need design decisions (rmp #2391, a streaming or count-store scan).
+3. **H1 macro** only as a separate, user-approved algorithm spike.
+
+### Limits of iteration 3
+
+- Each pass ran once. The noise band quoted here (−5% to +24% per row, +4.3% in aggregate) is
+  measured from the same-code control, not from a same-versus-same repetition of the whole
+  sweep.
+- The A/B covers three rows. The other reachable rows rest on the aggregate control.
+- Allocation is sampled at the default `MemProfileRate`.
+- H3's removable share for Cypher-created edges and H1's macro gain are unmeasured.
+- The row-20 pool-miss mechanism is a hypothesis.
+- H4's CPU figure covers only the five rows whose line listings were read.
+
+### Reproduction (iteration 3)
+
+```bash
+cd /Users/flaviocfo/dev/xumiga/GoGraph        # the script builds from the CWD
+N="$L/../lab-2925"
+scripts/examples-lab.sh "$N/out" default
+scripts/examples-lab.sh "$N/out" elevated
+bash "$N/reconcile.sh"                           # undropped listings into $N/reconcile
+python3 "$N/cmp3.py" elevated default            # three-iteration per-row tables
+python3 "$N/agg.py" "$N/reconcile" alloc 0 35    # cross-row flat totals (cpu|alloc)
+go tool pprof -nodefraction=0 -list 'cypher.buildRelationshipValueFromRow$' "$N/out/elevated/26_social_scale_bench/cpu.pprof"
+go tool pprof -nodefraction=0 -sample_index=alloc_objects -list 'exec.\(\*Apply\).Next$' "$N/out/elevated/24_plandiff/heap.pprof"
+go build -gcflags=-m=1 ./cypher/exec 2>&1 | grep 'moved to heap'
+go tool pprof -nodefraction=0 -top -diff_base "$M/out/elevated/17_transactional_log/cpu.pprof" "$N/out/elevated/17_transactional_log/cpu.pprof"
+# A/B: git archive f6b96b15 and 65a38f1a to $L/../ab2925-{base,head}.tar (one git command each),
+# tar -x each into $L/../ab2925/{base,head}, go build each arm there, then:
+bash "$L/../ab2925/ab.sh"                        # results: $L/../ab2925/ab.summary, logs/
 ```
