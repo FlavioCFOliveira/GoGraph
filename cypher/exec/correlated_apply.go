@@ -58,6 +58,10 @@ type CorrelatedApply struct {
 	outerRow Row // current outer row; nil when no outer row has been fetched
 	outBuf   []expr.Value
 	outerEOS bool // true after outer plan is exhausted
+
+	// pull receives every child Next call of this operator (see nextRow), so the
+	// per-row pull does not heap-allocate its receiver.
+	pull Row
 }
 
 // NewCorrelatedApply creates a CorrelatedApply operator.
@@ -95,8 +99,7 @@ func (op *CorrelatedApply) Next(out *Row) (bool, error) {
 
 		// If we have an active outer row, try to get the next inner row.
 		if op.outerRow != nil {
-			var innerRow Row
-			ok, err := op.inner.Next(&innerRow)
+			innerRow, ok, err := nextRow(op.inner, &op.pull)
 			if err != nil {
 				return false, err
 			}
@@ -121,8 +124,7 @@ func (op *CorrelatedApply) Next(out *Row) (bool, error) {
 		}
 
 		// Pull the next outer row.
-		var outerRow Row
-		ok, err := op.outer.Next(&outerRow)
+		outerRow, ok, err := nextRow(op.outer, &op.pull)
 		if err != nil {
 			return false, err
 		}
@@ -183,6 +185,10 @@ type OptionalApply struct {
 	pendingInner bool // true when inner is initialised for outerRow but not drained
 	emittedAny   bool // true when ≥1 inner row was emitted for this outer
 	outerEOS     bool // true when outer plan is exhausted
+
+	// pull receives every child Next call of this operator (see nextRow), so the
+	// per-row pull does not heap-allocate its receiver.
+	pull Row
 }
 
 // NewOptionalApply creates an OptionalApply operator.
@@ -231,8 +237,7 @@ func (op *OptionalApply) Next(out *Row) (bool, error) {
 
 		// If we have an outer row being processed, pull from the inner plan.
 		if op.pendingInner {
-			var innerRow Row
-			ok, err := op.inner.Next(&innerRow)
+			innerRow, ok, err := nextRow(op.inner, &op.pull)
 			if err != nil {
 				return false, err
 			}
@@ -264,8 +269,7 @@ func (op *OptionalApply) Next(out *Row) (bool, error) {
 		}
 
 		// Pull the next outer row.
-		var outerRow Row
-		ok, err := op.outer.Next(&outerRow)
+		outerRow, ok, err := nextRow(op.outer, &op.pull)
 		if err != nil {
 			return false, err
 		}

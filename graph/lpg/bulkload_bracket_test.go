@@ -33,6 +33,17 @@ package lpg
 // regimes rather than near either, so it separates them structurally instead of
 // chasing noise.
 //
+// # rmp #2882 removed the per-edge clone, and with it the first regime
+//
+// An unbracketed write no longer clones its shard's slot array: it stores the
+// slot in place unless a Snapshot has pinned the array (adjlist.shardSlots). So
+// the slot-array dedup has nothing left to save, and the bracket's remaining
+// saving is the shared commit record — the 0.921x regime above, measured under
+// #2882 at 0.911x on this fixture (3 rounds, identical to +/-0.001). The
+// threshold is therefore now set between THAT regime and no bracket at all
+// (1.0x): it fails if ApplyAtomically stops opening the write bracket, which is
+// the regression it can still detect.
+//
 // Layer: short.
 
 import (
@@ -142,10 +153,12 @@ func TestApplyAtomically_BulkLoadAllocatesLess(t *testing.T) {
 	// a sibling test allocating concurrently would corrupt the measurement.
 	const rounds = 3
 
-	// maxRatio sits between the two regimes measured by injection (0.758x with
-	// the slot-array dedup live, 0.921x with only the shared commit record), so
-	// losing the dedup fails this test instead of sliding past it.
-	const maxRatio = 0.85
+	// maxRatio sits between the bracket's one remaining saving — the shared
+	// commit record, 0.911x since rmp #2882 — and no bracket at all (1.0x), so
+	// losing the bracket fails this test instead of sliding past it. See the file
+	// comment for why the 0.85x threshold that separated the slot-array dedup no
+	// longer applies.
+	const maxRatio = 0.96
 
 	var bracketWins int
 	var lastPlain, lastBracket uint64
@@ -186,16 +199,15 @@ func TestApplyAtomically_BulkLoadAllocatesLess(t *testing.T) {
 			r, plainObjs, brktObjs, ratio)
 	}
 
-	// Every round must favour the bracket. The saving is a removed per-edge
-	// clone, so a single round going the other way means the writes inside fn
-	// stopped presenting a builder owner to the adjacency — which is the
-	// regression this test exists to catch.
+	// Every round must favour the bracket. The saving is the shared commit
+	// record, so a single round at or near 1.0x means the writes inside fn
+	// stopped running inside the write bracket — which is the regression this
+	// test exists to catch.
 	if bracketWins != rounds {
 		t.Fatalf("bracketed load stayed under %.2fx of unbracketed in only %d of %d rounds "+
-			"(worst %.3fx; last: unbracketed %d, bracketed %d). A ratio near 0.92x means the "+
-			"shared commit record is still saving but the SLOT-ARRAY dedup is not: writes "+
-			"inside ApplyAtomically are no longer presenting a non-zero builder owner to "+
-			"adjlist.storeEntry, so each one clones the shard's slot array again",
+			"(worst %.3fx; last: unbracketed %d, bracketed %d). A ratio near 1.0x means "+
+			"ApplyAtomically no longer opens the write bracket, so each write mints its own "+
+			"MVCC commit record",
 			maxRatio, bracketWins, rounds, worstRatio, lastPlain, lastBracket)
 	}
 }
@@ -251,12 +263,12 @@ func TestApplyAtomicallyTx_AlsoOpensTheWindow(t *testing.T) {
 			gotFP, gotEdges, wantFP, wantEdges)
 	}
 	// Same threshold and same reason as TestApplyAtomically_BulkLoadAllocatesLess:
-	// "fewer than unbracketed" is satisfied by the shared commit record alone, so
-	// it cannot detect the loss of the slot-array dedup.
-	if ratio := float64(txObjs) / float64(plainObjs); ratio >= 0.85 {
+	// since rmp #2882 the bracket's saving is the shared commit record alone, and
+	// 0.96x separates it from no bracket at all (1.0x).
+	if ratio := float64(txObjs) / float64(plainObjs); ratio >= 0.96 {
 		t.Fatalf("ApplyAtomicallyTx allocated %d objects vs %d unbracketed (%.3fx): it must "+
-			"present a builder owner to adjlist.storeEntry exactly as ApplyAtomically does, "+
-			"so a caller needing one commit instant does not pay per-edge slot-array clones",
+			"open the same write bracket as ApplyAtomically, so a caller needing one commit "+
+			"instant does not pay a fresh MVCC commit record per write",
 			txObjs, plainObjs, ratio)
 	}
 	t.Logf("unbracketed %d objects, ApplyAtomicallyTx %d objects (%.3fx)",

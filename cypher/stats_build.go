@@ -13,6 +13,7 @@ package cypher
 import (
 	"context"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
@@ -24,6 +25,42 @@ import (
 // statsScanPollMask sets the cancellation-check granularity of the rebuild scan:
 // ctx is polled every 4096 nodes, matching the CREATE INDEX backfill loops.
 const statsScanPollMask = 0xFFF
+
+// statsNodeRef is one interned (NodeID, key) pair captured by the statistics scan's
+// first phase ([Engine.scanStatsLocked]).
+type statsNodeRef struct {
+	key string
+	id  graph.NodeID
+}
+
+// statsNodeRefPool recycles the pair buffers of [Engine.scanStatsLocked]. It holds
+// *[]statsNodeRef so a Put does not allocate.
+var statsNodeRefPool = sync.Pool{New: func() any { return new([]statsNodeRef) }}
+
+// getStatsNodeRefs returns an empty pooled pair buffer with capacity for at least n
+// pairs.
+func getStatsNodeRefs(n int) *[]statsNodeRef {
+	bp, _ := statsNodeRefPool.Get().(*[]statsNodeRef)
+	if bp == nil {
+		bp = new([]statsNodeRef)
+	}
+	if cap(*bp) < n {
+		*bp = make([]statsNodeRef, 0, n)
+	}
+	*bp = (*bp)[:0]
+	return bp
+}
+
+// putStatsNodeRefs returns bp to the pool unless it outgrew [walkPoolMaxCap]. The
+// used prefix is cleared first so a pooled buffer holds no key strings.
+func putStatsNodeRefs(bp *[]statsNodeRef) {
+	if cap(*bp) > walkPoolMaxCap {
+		return
+	}
+	clear(*bp)
+	*bp = (*bp)[:0]
+	statsNodeRefPool.Put(bp)
+}
 
 // RefreshStatisticsLocked is [Engine.RefreshStatistics] for a caller that ALREADY holds
 // the visibility barrier — specifically db.stats.refresh(), which runs inside query
@@ -295,25 +332,39 @@ func (e *Engine) scanStatsLocked(ctx context.Context) (
 	pk := g.PropertyKeys()
 	nodeIdx := g.NodeIndex()
 
-	i := 0
+	// Phase 1 snapshots the interned (id, key) pairs; phase 2 reads labels and
+	// properties after Walk has released its last shard lock (rmp #2897). Both
+	// reads Lookup the key in the Mapper, on the shard being walked, and the scan
+	// runs while writers intern (see above), so doing them inside the callback
+	// deadlocked against a writer queued on that shard's write lock.
+	// The pair buffer is pooled ([statsNodeRefPool]).
+	bp := getStatsNodeRefs(mapper.Len())
+	defer putStatsNodeRefs(bp)
+	refs := *bp
 	mapper.Walk(func(id graph.NodeID, key string) bool {
+		refs = append(refs, statsNodeRef{id: id, key: key})
+		return true
+	})
+	*bp = refs
+
+	for i := range refs {
 		if i&statsScanPollMask == 0 {
 			if err := ctx.Err(); err != nil {
 				scanErr = err
-				return false
+				break
 			}
 		}
-		i++
+		id, key := refs[i].id, refs[i].key
 		if g.IsTombstoned(id) {
-			return true
+			continue
 		}
 		labels := g.NodeLabels(key)
 		if len(labels) == 0 {
-			return true
+			continue
 		}
 		props := g.NodeProperties(key)
 		if len(props) == 0 {
-			return true
+			continue
 		}
 		for _, lname := range labels {
 			lid, ok := reg.Lookup(lname)
@@ -342,7 +393,6 @@ func (e *Engine) scanStatsLocked(ctx context.Context) (
 				acc.feed(v)
 			}
 		}
-		return true
-	})
+	}
 	return byKey, labelN, generation, scanErr
 }

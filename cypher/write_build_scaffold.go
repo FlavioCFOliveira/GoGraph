@@ -78,6 +78,9 @@ func (sc *writeEvalScaffold) init(
 	sc.ctx = ctx
 	sc.subEval.init(walker, labelSrc, queryReg, wv)
 	sc.patEval.init(wv, e.maxCollectItems)
+	// A bare pattern predicate reaches EvalPattern with no registry, so the
+	// property maps it evaluates use the query's (rmp #2913).
+	sc.patEval.reg = queryReg
 	// Same knob, same polarity, same reason as [Engine.buildReadPhysical]: the
 	// Engine field is positive, the evaluator fields are NEGATIVE so their zero
 	// value keeps both adjacency-answered rewrites live. Set here so a statement

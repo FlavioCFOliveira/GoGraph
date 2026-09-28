@@ -319,36 +319,32 @@ func (t *translator) firstOptionalPath(
 	return plan, nil
 }
 
-// peelOuterDestRebinding strips Selection nodes from the top of p whose
-// PredicateExpr is an equality comparing an inner-only synthetic variable
-// with an outer-bound variable (the canonical destRebinding equality).
-// The returned body is p with those Selections removed; hoisted carries
-// the removed nodes in top-to-bottom order so the caller can re-apply
-// them on the outer plan.
-//
-// The walker stops at the first non-Selection (or non-matching-Selection)
-// node so destRebinding equalities deeper in the tree — added at an
-// inner Expand step — are not mis-peeled.
+// peelOuterDestRebinding strips from p every Selection whose predicate reads
+// an outer-bound variable: the destRebinding equality comparing an inner-only
+// synthetic variable with an outer one, and an inline property map whose value
+// is an expression over an outer variable — `x.k = p[0]` for `(x {k: p[0]})`,
+// or the `all(… WHERE el.k = p[0])` form of a variable-length relationship's map
+// (rmp #2907). p is the inner arm of a plain Apply, built against a fresh
+// schema, so no such predicate can hold where it stands. The returned body is p
+// with those Selections removed; hoisted carries the removed nodes in
+// top-to-bottom order so the caller can re-apply them on the outer plan, where
+// the combined outer||inner row carries every column they read. Moving a
+// Selection above the operators of a single path pattern is result-identical:
+// each of them only adds columns to the rows it keeps.
 func peelOuterDestRebinding(p LogicalPlan, outerVars map[string]struct{}) (LogicalPlan, []*Selection) {
 	var hoisted []*Selection
 	// Phase 1: peel from the very top of p (top-of-Selection-chain stripping).
 	for {
 		sel, ok := p.(*Selection)
-		if !ok || sel.PredicateExpr == nil {
-			break
-		}
-		bin, ok := sel.PredicateExpr.(*ast.BinaryOp)
-		if !ok || bin.Operator != "=" {
-			break
-		}
-		if !referencesOuterVar(bin.Left, outerVars) && !referencesOuterVar(bin.Right, outerVars) {
+		if !ok || !selectionReadsOuterVar(sel, outerVars) {
 			break
 		}
 		hoisted = append(hoisted, sel)
 		p = sel.Child
 	}
-	// Phase 2: deep peel — when the inner subtree contains a rel-rebinding
-	// or dest-rebinding equality Selection BURIED below other operators
+	// Phase 2: deep peel — when the inner subtree contains such a Selection
+	// (a rel-rebinding or dest-rebinding equality, or an inline property map
+	// on a later element of the path) BURIED below other operators
 	// (e.g. inside a chained VLE+Expand pattern: the outer `r` is bound,
 	// the inner Expand emits `__anon_rel_r`, the Selection `r =
 	// __anon_rel_r` sits between the Expand and a subsequent VLE step),
@@ -363,8 +359,8 @@ func peelOuterDestRebinding(p LogicalPlan, outerVars map[string]struct{}) (Logic
 }
 
 // deepPeelOuterRebindings recursively walks p and replaces every
-// equality Selection whose predicate references an outer-bound variable
-// with its child, appending the Selection to *hoisted in document
+// Selection whose predicate references an outer-bound variable (see
+// [selectionReadsOuterVar]) with its child, appending the Selection to *hoisted in document
 // order (top-most first). The walker stops at operators that introduce
 // a fresh schema scope (Projection / EagerAggregation) because peeling
 // across such a boundary would lift a Selection above the projection
@@ -379,13 +375,9 @@ func deepPeelOuterRebindings(p LogicalPlan, outerVars map[string]struct{}, hoist
 	if _, isAgg := p.(*EagerAggregation); isAgg {
 		return p
 	}
-	if sel, ok := p.(*Selection); ok && sel.PredicateExpr != nil {
-		if bin, isBin := sel.PredicateExpr.(*ast.BinaryOp); isBin && bin.Operator == "=" {
-			if referencesOuterVar(bin.Left, outerVars) || referencesOuterVar(bin.Right, outerVars) {
-				*hoisted = append(*hoisted, sel)
-				return deepPeelOuterRebindings(sel.Child, outerVars, hoisted)
-			}
-		}
+	if sel, ok := p.(*Selection); ok && selectionReadsOuterVar(sel, outerVars) {
+		*hoisted = append(*hoisted, sel)
+		return deepPeelOuterRebindings(sel.Child, outerVars, hoisted)
 	}
 	children := p.Children()
 	if len(children) == 0 {
@@ -494,31 +486,91 @@ func deepPeelOuterRebindings(p LogicalPlan, outerVars map[string]struct{}, hoist
 	return p
 }
 
-// referencesOuterVar reports whether e contains any reference to a variable
-// in outerVars. Recognised shapes:
+// selectionReadsOuterVar reports whether sel carries a parsed predicate that
+// may read a variable in outerVars. A Selection with no parsed predicate is a
+// pass-through and is never hoisted.
+func selectionReadsOuterVar(sel *Selection, outerVars map[string]struct{}) bool {
+	return sel.PredicateExpr != nil && referencesOuterVar(sel.PredicateExpr, outerVars)
+}
+
+// referencesOuterVar reports whether e may read a variable in outerVars. It
+// decides whether an equality Selection built inside the inner arm of a plain
+// Apply must be hoisted above the Apply: that arm is built against a fresh
+// schema, so an outer variable read in place evaluates to null and the equality
+// rejects every row. An inline property map whose value is any expression over
+// an outer variable is such a Selection — `(x {k: p})`, `(x {k: p.q})`,
+// `(x {k: p[0]})`, `(x {k: toLower(p)})`, `(x {k: p + 1})` (rmp #2907).
 //
-//   - A bare *ast.Variable whose name is in outerVars.
-//   - A *ast.Property whose receiver chain bottoms out at such a Variable
-//     (e.g. `event.year` when `event` is outer-bound).
-//
-// The walker is deliberately conservative: it stops at the first matching
-// reference and does not descend into sub-expressions of arithmetic / list
-// constructors. The destRebinding equality shapes (`v = u`, `a.k = b.k`)
-// that peelOuterDestRebinding cares about always present at one of these
-// two top-level shapes, so a deep walker would only mis-peel selections
-// that happen to mention an outer variable inside a function call.
+// The walk descends every sub-expression. The two answers are not symmetric in
+// cost: a false "no" leaves a predicate that can never hold where it cannot see
+// its operand, while a false "yes" only moves a correct predicate above the
+// Apply, where the combined outer||inner row carries every column it reads and
+// the result is identical. So an expression shape the walk does not model — a
+// pattern or subquery expression, or an expression type added to the AST later
+// — answers "yes", and a variable a comprehension or reduce binds locally is not
+// told apart from an outer variable of the same name.
 func referencesOuterVar(e ast.Expression, outerVars map[string]struct{}) bool {
-	for {
-		switch n := e.(type) {
-		case *ast.Variable:
-			_, isOuter := outerVars[n.Name]
-			return isOuter
-		case *ast.Property:
-			e = n.Receiver
-			continue
-		default:
-			return false
+	anyRefs := func(es ...ast.Expression) bool {
+		for _, x := range es {
+			if referencesOuterVar(x, outerVars) {
+				return true
+			}
 		}
+		return false
+	}
+	switch n := e.(type) {
+	case nil:
+		return false
+	case *ast.Variable:
+		_, isOuter := outerVars[n.Name]
+		return isOuter
+	case *ast.Parameter, *ast.IntLiteral, *ast.FloatLiteral, *ast.StringLiteral,
+		*ast.BoolLiteral, *ast.OverflowIntLit, *ast.NullLiteral, *ast.StarLiteral:
+		return false
+	case *ast.Property:
+		return anyRefs(n.Receiver)
+	case *ast.LabelPredicate:
+		return anyRefs(n.Receiver)
+	case *ast.SubscriptExpr:
+		return anyRefs(n.Expr, n.Index)
+	case *ast.SliceExpr:
+		return anyRefs(n.Expr, n.From, n.To)
+	case *ast.BinaryOp:
+		return anyRefs(n.Left, n.Right)
+	case *ast.UnaryOp:
+		return anyRefs(n.Operand)
+	case *ast.FunctionInvocation:
+		return anyRefs(n.Args...)
+	case *ast.ListLiteral:
+		return anyRefs(n.Elements...)
+	case *ast.MapLiteral:
+		return anyRefs(n.Values...)
+	case *ast.ListComprehension:
+		return anyRefs(n.Source, n.Predicate, n.Projection)
+	case *ast.ReduceExpr:
+		return anyRefs(n.Init, n.Source, n.Projection)
+	case *ast.CaseExpression:
+		if anyRefs(n.Subject, n.ElseExpr) {
+			return true
+		}
+		for _, alt := range n.Alternatives {
+			if alt != nil && anyRefs(alt.Condition, alt.Consequent) {
+				return true
+			}
+		}
+		return false
+	case *ast.MapProjection:
+		if anyRefs(n.Subject) {
+			return true
+		}
+		for _, it := range n.Items {
+			if it != nil && anyRefs(it.Value) {
+				return true
+			}
+		}
+		return false
+	default:
+		return true
 	}
 }
 
@@ -734,12 +786,12 @@ func (t *translator) matchPattern(pat *ast.Pattern, child LogicalPlan, optional 
 			// single edge bound to any of them. The clause-pattern rels
 			// enforce relationship-isomorphism across the comma boundary
 			// (openCypher 9 §3.2.2); they are single-hop Expand rels that
-			// live in the outer (left) side of the Apply, so the endpoint-
-			// pair comparison in buildVLENoRepeatRelPredicate addresses them
-			// correctly. Single-edge rels only — a prior VLE list cannot be
-			// fed to startNode/endNode, so VLE clause rels are skipped here
-			// (the VLE-vs-VLE same-edge case does not arise on the simple
-			// graph the TCK runs under and is not exercised).
+			// live in the outer (left) side of the Apply, so the identity
+			// comparison in buildVLENoRepeatRelPredicate addresses them
+			// correctly. Single-edge rels only — the predicate compares each
+			// element with ONE relationship, so VLE clause rels are skipped
+			// here (the VLE-vs-VLE same-edge case is not exercised by the
+			// TCK).
 			noRepeatRels := keysOf(t.outerBoundRels)
 			for _, v := range keysOf(t.clausePatternRels) {
 				if _, isVLE := t.clauseVLERels[v]; isVLE {
@@ -777,7 +829,7 @@ func (t *translator) matchPattern(pat *ast.Pattern, child LogicalPlan, optional 
 // pattern so the NEXT pattern's relationship-isomorphism enforcement excludes
 // the edges these patterns bind (openCypher 9 §3.2.2). VLE rels are tracked
 // separately because they bind a LIST of edges, which the single-edge
-// endpoint-pair predicate cannot address.
+// identity predicate cannot address.
 func (t *translator) recordClauseRels(pp *ast.PathPattern) {
 	if t.clausePatternRels == nil {
 		t.clausePatternRels = map[string]struct{}{}
@@ -868,44 +920,28 @@ func collectInnerVLERelVars(plan LogicalPlan) []string {
 
 // buildVLENoRepeatRelPredicate constructs the AST predicate
 //
-//	none(__crp_e_<vleRel> IN <vleRel> WHERE
-//	     (startNode(__crp_e_<vleRel>) = startNode(<outerRel>)
-//	      AND endNode(__crp_e_<vleRel>) = endNode(<outerRel>))
-//	     OR
-//	     (startNode(__crp_e_<vleRel>) = endNode(<outerRel>)
-//	      AND endNode(__crp_e_<vleRel>) = startNode(<outerRel>)))
+//	none(__crp_e_<vleRel> IN <vleRel> WHERE __crp_e_<vleRel> = <outerRel>)
 //
-// which evaluates to true iff no element of the VarLengthExpand-emitted
-// list bound to `vleRel` connects the same node pair (in either
-// orientation) as the outer-bound rel `outerRel`. Endpoint-pair
-// comparison is direction-insensitive — required because undirected
-// VLE traversal can emit a rel value whose StartID/EndID are the
-// traversal anchors rather than the storage direction, while
-// `<outerRel>` (lifted via buildRelationshipValueFromRow on Expand
-// metadata) carries the storage direction. In the simple-graph
-// configuration the TCK runs under, node-pair equality uniquely
-// identifies an edge so this predicate is exact.
+// which evaluates to true iff no element of the list bound to `vleRel` is the
+// relationship bound to `outerRel`. Relationship equality is identity
+// ([expr.RelationshipValue.Equal] compares IDs), the same identity
+// relColHolds excludes on inside the operators, so the predicate is exact on a
+// multigraph — a parallel relationship between the same two nodes is a
+// different relationship and is not excluded (rmp #2915) — and independent of
+// the traversal orientation an undirected hop reports in StartID/EndID. When
+// `outerRel` is not a single relationship (a relationship list carried from an
+// earlier variable-length pattern) no element equals it and nothing is
+// excluded; a NULL `outerRel` makes the predicate NULL, as before.
 func buildVLENoRepeatRelPredicate(outerRel, vleRel string) ast.Expression {
 	eVar := "__crp_e_" + vleRel
-	startE := &ast.FunctionInvocation{Name: "startNode", Args: []ast.Expression{&ast.Variable{Name: eVar}}}
-	endE := &ast.FunctionInvocation{Name: "endNode", Args: []ast.Expression{&ast.Variable{Name: eVar}}}
-	startR := &ast.FunctionInvocation{Name: "startNode", Args: []ast.Expression{&ast.Variable{Name: outerRel}}}
-	endR := &ast.FunctionInvocation{Name: "endNode", Args: []ast.Expression{&ast.Variable{Name: outerRel}}}
-	sameForward := &ast.BinaryOp{
-		Left:     &ast.BinaryOp{Left: startE, Operator: "=", Right: startR},
-		Operator: "AND",
-		Right:    &ast.BinaryOp{Left: endE, Operator: "=", Right: endR},
-	}
-	sameReverse := &ast.BinaryOp{
-		Left:     &ast.BinaryOp{Left: startE, Operator: "=", Right: endR},
-		Operator: "AND",
-		Right:    &ast.BinaryOp{Left: endE, Operator: "=", Right: startR},
-	}
-	eqPred := &ast.BinaryOp{Left: sameForward, Operator: "OR", Right: sameReverse}
 	comp := &ast.ListComprehension{
-		Variable:  eVar,
-		Source:    &ast.Variable{Name: vleRel},
-		Predicate: eqPred,
+		Variable: eVar,
+		Source:   &ast.Variable{Name: vleRel},
+		Predicate: &ast.BinaryOp{
+			Left:     &ast.Variable{Name: eVar},
+			Operator: "=",
+			Right:    &ast.Variable{Name: outerRel},
+		},
 	}
 	return &ast.FunctionInvocation{Name: "none", Args: []ast.Expression{comp}}
 }
@@ -1371,6 +1407,40 @@ func lastSyntheticToFor(plan LogicalPlan, toVar string) string {
 	return toVar
 }
 
+// appendHopSiblings appends to siblings the relationship variables a hop just
+// translated into plan binds, for the cyphermorphism guard of the hops after it.
+// That is the hop's own variable and, when that variable was already bound
+// (`WITH r MATCH (a)-[r]->(b)<-[:R]-(a)`, or `WITH [r1, r2] AS rs MATCH
+// (a)-[rs*]->(b)<-[:R]-(c)`), also the synthetic `__anon_N_rel_<var>` column the
+// expansion wrote instead. The outer binding is compared with that column only
+// by a Selection that may be hoisted above the scope of the later hops, where
+// the outer name resolves to no column, so without the synthetic name a later
+// hop could re-use the relationship the bound hop matched — for a fixed hop
+// (rmp #2909) as for a variable-length one (rmp #2904).
+func appendHopSiblings(siblings []string, plan LogicalPlan, rp *ast.RelationshipPattern) []string {
+	siblings = append(siblings, *rp.Variable)
+	suffix := "_rel_" + *rp.Variable
+	for cur := plan; cur != nil; {
+		relVar := ""
+		switch n := cur.(type) {
+		case *Selection:
+			cur = n.Child
+			continue
+		case *VarLengthExpand:
+			relVar = n.RelVar
+		case *Expand:
+			relVar = n.RelVar
+		case *OptionalExpand:
+			relVar = n.RelVar
+		}
+		if relVar != *rp.Variable && strings.HasSuffix(relVar, suffix) {
+			siblings = append(siblings, relVar)
+		}
+		return siblings
+	}
+	return siblings
+}
+
 // outputVarSet returns the variables exposed by plan as a set.
 func outputVarSet(plan LogicalPlan) map[string]struct{} {
 	if plan == nil {
@@ -1501,7 +1571,7 @@ func (t *translator) matchPathPattern(pp *ast.PathPattern, optional bool, shared
 			prevNodeVar = next
 			boundVars[*el.Node.Variable] = struct{}{}
 			boundVars[*el.Relationship.Variable] = struct{}{}
-			siblingRels = append(siblingRels, *el.Relationship.Variable)
+			siblingRels = appendHopSiblings(siblingRels, plan, el.Relationship)
 		}
 		el = el.Next
 	}
@@ -1605,7 +1675,7 @@ func (t *translator) matchPathPatternWithArg(pp *ast.PathPattern, optional bool,
 			prevNodeVar = next
 			boundVars[*el.Node.Variable] = struct{}{}
 			boundVars[*el.Relationship.Variable] = struct{}{}
-			siblingRels = append(siblingRels, *el.Relationship.Variable)
+			siblingRels = appendHopSiblings(siblingRels, plan, el.Relationship)
 		}
 		el = el.Next
 	}

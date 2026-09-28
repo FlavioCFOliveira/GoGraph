@@ -39,22 +39,20 @@ package cypher
 //
 // # Why a disagreeing re-registration falls back rather than deciding
 //
-// bopts.edgeVarMeta is keyed by variable NAME, is query-scoped, and is read PER
-// ROW by [populateRowCtx] — not captured per plan node. Two Expand hops in ONE
-// plan can therefore bind the SAME name, and the second registration overwrites
-// the first; every row of both hops then reads whatever the build wrote LAST.
-// `MATCH (n)-[r:T]->(m) RETURN r UNION ALL MATCH (n)<-[r:T]-(m) RETURN r` is
-// exactly that shape, and the two hops disagree about the direction.
+// bopts.edgeVarMeta is keyed by variable NAME. Two hops that register the same
+// name overwrite one another, and every plan resolved afterwards reads whatever
+// the build wrote LAST. The facts are scoped as the schema is (see rowbind.go),
+// so a name bound in two SCOPES no longer collides: `MATCH (n)-[r:T]->(m) RETURN r
+// UNION ALL MATCH (n)<-[r:T]-(m) RETURN r` builds each branch against its own
+// registration (TestRelStoredDir_UnionBranchesDoNotCollide). Before that, the
+// shape asserted the last-written direction for both branches and returned the
+// WRONG relationship for the first (a reciprocal pair with distinct
+// per-direction properties returned one row where two are required).
 //
-// This is not theoretical: asserting the last-written direction there was
-// measured to return the WRONG relationship for the first branch (a reciprocal
-// pair with distinct per-direction properties returned one row where two are
-// required — see TestRelStoredDir_CollisionFallsBackToLadder, which fails on a
-// build that omits the demotion below).
-//
-// So the direction is asserted only when EVERY hop that binds the name agrees
-// on it. [demoteRelDirOnDisagreement] enforces that, and the disagreeing case
-// falls through to the per-row ladder — SLOW, never wrong. The rule is monotone:
+// A re-registration inside ONE scope would still overwrite, so the direction is
+// asserted only when EVERY hop that binds the name in the scope agrees on it.
+// [demoteRelDirOnDisagreement] enforces that, and the disagreeing case falls
+// through to the per-row ladder — SLOW, never wrong. The rule is monotone:
 // [relDirUnresolved] differs from every resolved direction, so once a name has
 // been demoted no later registration can promote it back.
 

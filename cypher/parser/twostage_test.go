@@ -281,21 +281,28 @@ var parseErrorGoldens = []parseErrorGolden{
 		text: "unexpected \",\" at 1:7, expected one of {'(', ')', '{', '}', '[', ']', '-', '+', '/', '*', '`', '$', 'CALL', 'FILTER', 'EXTRACT', 'COUNT', 'ANY', 'NONE', 'SINGLE', 'ALL', 'ASC', 'EXISTS', 'LIMIT', 'DISTINCT', 'ENDS', 'NOT', 'OR', 'FALSE', 'TRUE', 'NULL', 'CONSTRAINT', 'CASE', 'WHEN', 'EXPLAIN', 'PROFILE', ID, ESC_LITERAL, CHAR_LITERAL, STRING_LITERAL, DIGIT, FLOAT}",
 	},
 	{
-		// The input that drives antlr4-go v4.13.1's DefaultErrorStrategy into
-		// an unchecked type assertion. The first stage does NOT panic on it,
-		// the second stage does, and [recoverParseScript] converts it — so this
-		// case also proves the retry reproduces a GENUINE runtime panic rather
-		// than swallowing it.
-		name:  "parse_panic_with_return",
+		// Until rmp #2899 this input drove antlr4-go v4.13.1's
+		// DefaultErrorStrategy into an unchecked type assertion: the
+		// hand-written MultiPartQ called withSt without first setting the
+		// invoking ATN state, so error recovery found an epsilon transition
+		// where it asserted a RuleTransition, and the caller saw
+		// "parser panic: interface conversion …" at 0:0. With the invoking
+		// states set, the second stage reports the syntax error itself.
+		name:  "parse_with_no_projection",
 		query: "MATCH (n) WITH RETURN n",
 		want: ParseError{
-			OffendingToken: "",
-			Message:        "parser panic: interface conversion: antlr.Transition is *antlr.EpsilonTransition, not *antlr.RuleTransition",
-			Expected:       nil,
-			Line:           0,
-			Column:         0,
+			OffendingToken: "RETURN",
+			Message:        "extraneous input 'RETURN' expecting {'(', '{', '[', '-', '+', '*', '$', 'FILTER', 'EXTRACT', 'COUNT', 'ANY', 'NONE', 'SINGLE', 'ALL', 'EXISTS', 'DISTINCT', 'NOT', 'FALSE', 'TRUE', 'NULL', 'CASE', 'EXPLAIN', 'PROFILE', ID, ESC_LITERAL, CHAR_LITERAL, STRING_LITERAL, DIGIT}",
+			Expected: []string{"'('", "')'", "'{'", "'}'", "'['", "']'", "'-'", "'+'", "'/'", "'*'",
+				"'`'", "'$'", "'CALL'", "'FILTER'", "'EXTRACT'", "'COUNT'", "'ANY'", "'NONE'",
+				"'SINGLE'", "'ALL'", "'ASC'", "'EXISTS'", "'LIMIT'", "'DISTINCT'", "'ENDS'",
+				"'NOT'", "'OR'", "'FALSE'", "'TRUE'", "'NULL'", "'CONSTRAINT'", "'CASE'",
+				"'WHEN'", "'EXPLAIN'", "'PROFILE'", "ID", "ESC_LITERAL", "CHAR_LITERAL",
+				"STRING_LITERAL", "DIGIT", "FLOAT"},
+			Line:   1,
+			Column: 15,
 		},
-		text: "parse error at 0:0: parser panic: interface conversion: antlr.Transition is *antlr.EpsilonTransition, not *antlr.RuleTransition",
+		text: "unexpected \"RETURN\" at 1:15, expected one of {'(', ')', '{', '}', '[', ']', '-', '+', '/', '*', '`', '$', 'CALL', 'FILTER', 'EXTRACT', 'COUNT', 'ANY', 'NONE', 'SINGLE', 'ALL', 'ASC', 'EXISTS', 'LIMIT', 'DISTINCT', 'ENDS', 'NOT', 'OR', 'FALSE', 'TRUE', 'NULL', 'CONSTRAINT', 'CASE', 'WHEN', 'EXPLAIN', 'PROFILE', ID, ESC_LITERAL, CHAR_LITERAL, STRING_LITERAL, DIGIT, FLOAT}",
 	},
 	{
 		name:  "empty_input",

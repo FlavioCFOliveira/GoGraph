@@ -65,6 +65,23 @@ re-applied after any upstream refresh:
   `PROFILE`=91); `ID` and the literal/whitespace tokens below it moved by +2,
   exactly as FOREACH moved them before.
 
+- **Postfix list operators** (rmp #2918) — the subscript/slice alternative is
+  removed from `listExpression` (now `IN propertyOrLabelExpression` only) and
+  moved into `propertyOrLabelExpression`:
+  `propertyExpression (LBRACK (expression? RANGE expression? | expression) RBRACK (DOT name)*)* nodeLabels?`.
+  Upstream allowed nothing after a subscript except another subscript, so
+  `q[0].w` and `q[0]:Label` failed to parse. openCypher defines a postfix
+  expression as a primary followed by any sequence of property lookups,
+  subscripts and slices (`grammar/openCypher.bnf`, opencypher/openCypher
+  `677cbafa`, lines 741–759). `propertyExpression` itself is unchanged,
+  because REMOVE uses it and must not accept a subscript.
+
+  No rule was added, so rule indices, the lexer, the tokens and the
+  listener/visitor files are unchanged. ATN state numbers moved by **+11**, and
+  `AdaptivePredict` decision numbers by **+1**, in every rule from
+  `propertyExpression` onward; `gen-patches.patch` was regenerated with those
+  offsets.
+
 ## How to update
 
 1. Identify the new commit hash:
@@ -127,6 +144,15 @@ re-applied after any upstream refresh:
    - **Run `TestGenPatchBehaviours`** (`cypher/genpatch_behaviour_test.go`)
      after every regeneration. It pins each patched behaviour to a concrete
      result, which a compile check cannot do.
+   - **Run `TestHandWrittenRuleInvokingStates`**
+     (`cypher/parser/invoking_state_2899_test.go`) after every regeneration.
+     The hand-written rule bodies in the patch (`MultiPartQ`,
+     `ReduceExpression`, and the reduce alternative of `Atom`) call
+     `p.SetState(N)` before each sub-rule call, with `N` taken from the
+     generated code, because antlr4-go requires every context's invoking
+     state to be a rule-invocation state (rmp #2899). These are absolute
+     state numbers: if a grammar change shifts them, the test fails. Re-read
+     the numbers from the raw generator output and update the patch.
 
    To find the shift, compare state numbers between the pre-change generated
    file and the new one for a rule the patch touches; the delta is uniform for

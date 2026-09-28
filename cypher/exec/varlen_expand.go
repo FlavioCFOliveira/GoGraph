@@ -107,6 +107,17 @@ const defaultMaxEdgesTraversed = 1_000_000
 // graph far below this bound, so no conforming query trips it.
 const defaultMaxTotalEdgesTraversed = 100_000_000
 
+// DefaultVarLenMaxEdgesTraversed and DefaultVarLenMaxTotalEdgesTraversed export
+// [defaultMaxEdgesTraversed] and [defaultMaxTotalEdgesTraversed] so that every
+// other evaluator of a variable-length pattern — the cypher package's pattern
+// predicate and pattern comprehension evaluator — enforces the same per-row and
+// per-query traversal limits as this operator and reports exceeding them with the
+// same [ErrVarLenCapExceeded] (rmp #2898).
+const (
+	DefaultVarLenMaxEdgesTraversed      = defaultMaxEdgesTraversed
+	DefaultVarLenMaxTotalEdgesTraversed = defaultMaxTotalEdgesTraversed
+)
+
 // defaultMaxUnboundedHops is the default upper hop bound applied when a
 // variable-length pattern omits its upper bound (-[*]-, -[*1..]-, -[*..]-). The
 // IR encodes "unbounded" as math.MaxInt (see cypher/ir/match.go); leaving the
@@ -265,6 +276,43 @@ type VarLengthExpand struct {
 
 	dir      Direction
 	inputEOS bool // true after input plan exhausted
+
+	// live is the per-source forward-run state (rmp #2883), allocated on the
+	// first Init that serves live runs and kept across re-Inits. ONE pointer, so
+	// an operator that never serves a live run is eight bytes larger and no more.
+	// nil, or a nil live.src, means this Init reads a whole-graph adjacency.
+	live *vleLive
+
+	// pull receives every child Next call of this operator (see nextRow), so the
+	// per-row pull does not heap-allocate its receiver.
+	pull Row
+}
+
+// vleLive is a [VarLengthExpand]'s state for serving forward runs from a
+// [liveOutAdjacency] (rmp #2883).
+type vleLive struct {
+	src        liveOutAdjacency
+	at         uint64
+	handleSeen bool
+	// col is the operator's private type column, pointed at one cached run's
+	// codes before that run's slots are tested.
+	col RelTypeColumn
+	// runs caches each node's run for the Init: a BFS reaches one node along
+	// many paths, and the run at the Init instant cannot change within it.
+	runs map[graph.NodeID]*vleLiveRun
+	// Scratch the live adjacency appends into before a run is copied out.
+	dsts    []graph.NodeID
+	handles []uint64
+	codes   []uint32
+}
+
+// vleLiveRun is one node's forward run at a live Init's instant, owned by the
+// operator's per-Init cache.
+type vleLiveRun struct {
+	dsts  []graph.NodeID
+	ids   []uint64 // the relationship identity of each slot; see [liveEdgeIdentity]
+	codes []uint32
+	extra map[uint64][]uint32
 }
 
 // VarLengthConfig carries configuration for [NewVarLengthExpand].
@@ -343,6 +391,7 @@ func (op *VarLengthExpand) Init(ctx context.Context) error {
 	op.ctx = ctx
 	// Resolved NOW, not at plan-build time (rmp #2317); see [AdjacencySource].
 	op.fwd, op.rev, op.admit = op.src()
+	op.beginLive()
 	op.fwdVerts = op.fwd.VerticesSlice()
 	op.fwdEdges = op.fwd.EdgesSlice()
 	op.fwdHandles = op.fwd.HandlesSlice()
@@ -444,8 +493,7 @@ func (op *VarLengthExpand) Next(out *Row) (bool, error) {
 		}
 
 		// Pull next input row.
-		var inputRow Row
-		ok, err := op.input.Next(&inputRow)
+		inputRow, ok, err := nextRow(op.input, &op.pull)
 		if err != nil {
 			return false, err
 		}
@@ -645,6 +693,13 @@ func (op *VarLengthExpand) expandPath(ps pathState) error {
 // The caller chooses the write target so that the BFS read frontier (op.queue)
 // is never aliased with the write target during a runBFS pass.
 func (op *VarLengthExpand) enqueueEdges(uid uint64, isFwd bool, parent *pathState, target *[]pathState) error {
+	if isFwd && op.live != nil && op.live.src != nil {
+		run, ok := op.liveRun(graph.NodeID(uid))
+		if ok {
+			return op.enqueueLiveEdges(run, parent, target)
+		}
+		// Switched to the whole-graph adjacency; this node is walked from it below.
+	}
 	var (
 		verts []uint64
 		edges []graph.NodeID
@@ -874,7 +929,128 @@ func (op *VarLengthExpand) Close() error {
 	op.results = nil
 	op.outBuf = nil
 	op.inputRow = nil
+	op.live = nil
 	return op.input.Close()
+}
+
+// beginLive switches this Init to per-source forward runs when its source yielded
+// a [liveOutAdjacency] and the pattern reads outgoing edges only (rmp #2883). It
+// mirrors [Expand.beginLive].
+func (op *VarLengthExpand) beginLive() {
+	if op.live != nil {
+		op.live.src = nil
+		clear(op.live.runs)
+	}
+	if op.dir != DirOut {
+		return
+	}
+	la, ok := op.fwd.(liveOutAdjacency)
+	if !ok {
+		return
+	}
+	if op.live == nil {
+		op.live = &vleLive{}
+	}
+	lv := op.live
+	var accept []uint32
+	lv.src = la
+	lv.at, accept = la.LiveBegin()
+	lv.handleSeen = false
+	lv.col = RelTypeColumn{}
+	if op.edgeType != "" {
+		op.admit = lv.col.Admit(accept)
+	} else {
+		op.admit = RelTypeAdmit{}
+	}
+}
+
+// liveRun returns uid's run at this Init's instant, from the cache or the live
+// adjacency. ok=false means the operator switched to the whole-graph adjacency
+// (see [liveEdgeIdentity]); [liveEdgeIdentity] also documents why that switch can
+// only happen before this Init has enqueued any relationship at all.
+func (op *VarLengthExpand) liveRun(uid graph.NodeID) (*vleLiveRun, bool) {
+	lv := op.live
+	if run, ok := lv.runs[uid]; ok {
+		return run, true
+	}
+	d, h, c, extra, handleCol := lv.src.LiveOutRun(
+		uid, lv.at, lv.dsts[:0], lv.handles[:0], lv.codes[:0])
+	lv.dsts, lv.handles, lv.codes = d, h, c
+	var zeros []uint64
+	ids, ok := liveEdgeIdentity(len(d), h, handleCol, lv.handleSeen, &zeros)
+	if !ok {
+		liveFallbacks.Add(1)
+		op.fwd, op.admit = lv.src.LiveFallback(lv.at)
+		lv.src = nil
+		op.fwdVerts = op.fwd.VerticesSlice()
+		op.fwdEdges = op.fwd.EdgesSlice()
+		op.fwdHandles = op.fwd.HandlesSlice()
+		return nil, false
+	}
+	liveOutRunServed.Add(1)
+	if handleCol {
+		lv.handleSeen = true
+	}
+	run := &vleLiveRun{
+		dsts:  append([]graph.NodeID(nil), d...),
+		ids:   append([]uint64(nil), ids...),
+		codes: append([]uint32(nil), c...),
+		extra: extra,
+	}
+	if lv.runs == nil {
+		lv.runs = make(map[graph.NodeID]*vleLiveRun)
+	}
+	lv.runs[uid] = run
+	return run, true
+}
+
+// enqueueLiveEdges is the forward half of [VarLengthExpand.enqueueEdges] over one
+// live run. It applies the same traversal budget, type admission and
+// relationship-uniqueness rules in the same order; the difference is only where a
+// slot's identity comes from. A live Init has no forward positions, so each step
+// records the slot's emitted identity itself, and [VarLengthExpand.emittedEdgeID]
+// returns it unchanged because a live Init carries no handle column.
+func (op *VarLengthExpand) enqueueLiveEdges(run *vleLiveRun, parent *pathState, target *[]pathState) error {
+	typed := op.edgeType != ""
+	if typed {
+		op.live.col.fwdCodes, op.live.col.fwdExtra = run.codes, run.extra
+	}
+	for i, d := range run.dsts {
+		op.edgesVisited++
+		op.totalEdgesVisited++
+		if op.edgesVisited > op.maxEdgesTraversed || op.totalEdgesVisited > op.maxTotalEdgesTraversed {
+			return ErrVarLenCapExceeded
+		}
+		if typed && !op.admit.Fwd(uint64(i)) {
+			continue
+		}
+		edgeUID := run.ids[i]
+		if parent != nil && bitsetContains(parent.visited, edgeUID) {
+			continue
+		}
+		dst := uint64(d)
+		step := edgeStep{fwdPos: edgeUID, dstID: dst}
+		var newPath []edgeStep
+		var newVisited []uint64
+		hops := 1
+		if parent != nil {
+			hops = parent.hops + 1
+			newPath = make([]edgeStep, len(parent.path)+1)
+			copy(newPath, parent.path)
+			newPath[len(parent.path)] = step
+			newVisited = bitsetAdd(parent.visited, edgeUID)
+		} else {
+			newPath = []edgeStep{step}
+			newVisited = bitsetAdd(nil, edgeUID)
+		}
+		*target = append(*target, pathState{
+			hops:    hops,
+			srcNode: dst,
+			path:    newPath,
+			visited: newVisited,
+		})
+	}
+	return nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

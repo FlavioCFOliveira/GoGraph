@@ -367,6 +367,11 @@ type buildOpts struct {
 	// mis-upgrading a count result into a graph node. buildEagerAggregation
 	// populates this set for every aggregate output name it registers in the schema.
 	scalarCols map[string]struct{}
+	// pendingBindPlans logs every [rowBindPlan] made since the last scope
+	// boundary, so [buildOpts.flushBindPlans] can resolve them before the
+	// boundary rewrites the maps they resolve from (see rowbind.go). Build-time
+	// state of one goroutine; forWorker clears it.
+	pendingBindPlans []*rowBindPlan
 	// projAliasScalarCols mirrors scalarCols for the BUILDROWCTX / Variable
 	// fast-path upgrade-bypass only. Distinct from scalarCols so the
 	// colliding-alias guard in buildIRProjection still routes a
@@ -400,6 +405,12 @@ type buildOpts struct {
 	// nil on the public BuildPlanWithMutator path, which then builds uncached —
 	// correct, just unamortised, exactly as edgeTypeFilterCache behaves.
 	csrPairCache *csrPairCache
+	// liveTopo, when non-nil, is the statement's journal of its own adjacency
+	// writes, owned by the concrete mutator adapter the statement was built with
+	// (rmp #2883). Its presence is what lets [traversalAdjacencySource] serve a
+	// write transaction's forward traversal per source instead of building a
+	// whole-graph pair; nil keeps the whole-graph build.
+	liveTopo *liveTopoLog
 	// procReg is the Engine's procedure registry, carried here rather than as a
 	// parameter because the WRITE-path builder ([buildOperatorWrite]) needs it
 	// only to hand back to [buildOperator] at its fall-through branch, and
@@ -1435,6 +1446,11 @@ type Engine struct {
 	// suite cannot otherwise observe both answers for one query. No public setter
 	// exists and production never sets it.
 	disableIndexNestedLoopForTest bool
+	// disableLiveTraversalForTest keeps every write statement's forward traversal
+	// on the whole-graph CSR build (rmp #2883), so the differential tests can
+	// obtain the pre-#2883 answer for the same statement on the same engine
+	// shape. Test-only; nothing in the module sets it.
+	disableLiveTraversalForTest bool
 
 	// forceColumnarChainDeclineForTest makes all three columnar read-chain
 	// recognisers — the two shipping ones and [tryBuildColumnarAggSource] (#2655) —
@@ -7830,11 +7846,22 @@ func buildPlanWithMutatorFull(
 	// row carries the handle itself and no resolution happens, but the adapters still
 	// read bopts for the count store and the undo log. Only the concrete write
 	// adapters carry the field.
+	//
+	// The two concrete adapters are also the only mutators whose writes are
+	// journaled for live forward traversal (rmp #2883), so only they arm it. The
+	// journal belongs to the ADAPTER, not to this bopts: every plan built against
+	// one statement's adapter must share the one journal its writes feed.
 	switch m := mutator.(type) {
 	case *walMutatorAdapter:
 		m.bopts = bopts
+		if m.eng == nil || !m.eng.disableLiveTraversalForTest {
+			bopts.liveTopo = &m.liveTopo
+		}
 	case *lpgMutatorAdapter:
 		m.bopts = bopts
+		if m.eng == nil || !m.eng.disableLiveTraversalForTest {
+			bopts.liveTopo = &m.liveTopo
+		}
 	}
 
 	// When the IR root is a ProduceResults, use its declared columns; otherwise
@@ -8647,6 +8674,7 @@ func buildOperatorWrite(
 		for k := range schema {
 			preKeys[k] = struct{}{}
 		}
+		outerFacts := bopts.snapshotScopeFacts()
 		arg := exec.NewArgument()
 		if argByTag != nil {
 			argByTag[p.ArgTag] = arg
@@ -8665,6 +8693,7 @@ func buildOperatorWrite(
 				delete(schema, k)
 			}
 		}
+		bopts.restoreScopeFacts(outerFacts)
 		return exec.NewForeach(outer, inner, arg), nil
 
 	default:
@@ -9897,10 +9926,14 @@ func buildPlanEngine(
 	// returned as the union's output schema — openCypher requires every
 	// branch of a UNION to expose the same column names in the same order.
 	if u, ok := plan.(*ir.UnionAll); ok {
+		// Each branch is a scope of its own: the right one must not inherit the
+		// facts of the left one's variables (see rowbind.go).
+		preFacts := bopts.snapshotScopeFacts()
 		leftOp, leftCols, lerr := buildPlanEngine(u.Left, walker, labelSrc, reg, params, idxMgr, procReg, bopts)
 		if lerr != nil {
 			return nil, nil, lerr
 		}
+		bopts.restoreScopeFacts(preFacts)
 		rightOp, _, rerr := buildPlanEngine(u.Right, walker, labelSrc, reg, params, idxMgr, procReg, bopts)
 		if rerr != nil {
 			return nil, nil, rerr
@@ -9913,10 +9946,14 @@ func buildPlanEngine(
 		return profileIntermediate(bopts, exec.NewUnionAll(leftOp, rightOp)), leftCols, nil
 	}
 	if u, ok := plan.(*ir.Union); ok {
+		// Each branch is a scope of its own: the right one must not inherit the
+		// facts of the left one's variables (see rowbind.go).
+		preFacts := bopts.snapshotScopeFacts()
 		leftOp, leftCols, lerr := buildPlanEngine(u.Left, walker, labelSrc, reg, params, idxMgr, procReg, bopts)
 		if lerr != nil {
 			return nil, nil, lerr
 		}
+		bopts.restoreScopeFacts(preFacts)
 		rightOp, _, rerr := buildPlanEngine(u.Right, walker, labelSrc, reg, params, idxMgr, procReg, bopts)
 		if rerr != nil {
 			return nil, nil, rerr
@@ -10057,6 +10094,9 @@ func buildOperator(
 	bopts *buildOpts,
 ) (exec.Operator, error) {
 	op, err := buildOperatorRec(plan, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
+	if err == nil && bopts != nil {
+		endScopeAt(plan, bopts)
+	}
 	// ONE early-out for the ordinary query, which has neither an estimate collector
 	// nor a profiler. Keeping the common case on a single short-circuit chain is not
 	// cosmetic: this function runs once per operator of every query, and splitting
@@ -10080,6 +10120,37 @@ func buildOperator(
 		return op, err
 	}
 	return bopts.profiler.Wrap(op), nil
+}
+
+// endScopeAt closes the variable scope plan ends, when it ends one: a Projection
+// (WITH / RETURN) carries only its item aliases into the next scope, and an
+// EagerAggregation only its grouping keys and aggregate outputs, exactly as the
+// schema reset each one performs. Every other node is a no-op. See
+// [buildOpts.endScope] and rowbind.go.
+func endScopeAt(plan ir.LogicalPlan, bopts *buildOpts) {
+	switch p := plan.(type) {
+	case *ir.Projection:
+		bopts.endScope(func(name string) bool {
+			for i := range p.Items {
+				if p.Items[i].Name == name {
+					return true
+				}
+			}
+			return false
+		})
+	case *ir.EagerAggregation:
+		bopts.endScope(func(name string) bool {
+			if slices.Contains(p.GroupBy, name) {
+				return true
+			}
+			for i := range p.Aggregates {
+				if p.Aggregates[i].OutputName == name {
+					return true
+				}
+			}
+			return false
+		})
+	}
 }
 
 // profileIntermediate instruments an operator that [buildOperator]'s single wrap
@@ -10548,7 +10619,7 @@ func buildOperatorRec(
 		if fused := tryFuseCyclicIntersect(p, child, g, schema, bopts); fused != nil {
 			return fused, nil
 		}
-		exp := exec.NewExpand(child, expandAdjacencySource(bopts, g, p.RelTypes), cfg)
+		exp := exec.NewExpand(child, traversalAdjacencySource(bopts, g, p.RelTypes, dir), cfg)
 		// Expand-into (#2206): when this hop's destination is a variable the row
 		// already carries, filter to edges landing on it INSIDE the operator instead
 		// of emitting one row per neighbour for the equality Selection above to
@@ -10627,6 +10698,8 @@ func buildOperatorRec(
 		if err != nil {
 			return nil, err
 		}
+		// Resolve the arm's plans before the rebase below (see rowbind.go).
+		bopts.flushBindPlans()
 		for k, v := range innerSchema {
 			schema[k] = v + outerWidth
 		}
@@ -10774,6 +10847,7 @@ func buildOperatorRec(
 		// introduced in an <ExistentialSubquery> are not available outside the
 		// subquery context".
 		outerSchemaSnap := copySchema(schema)
+		outerFacts := bopts.snapshotScopeFacts()
 		// Pre-allocate the exec.Argument and register it under the IR
 		// SemiApply's ArgTag so the inner subtree's matching Argument leaf
 		// resolves to this instance and receives the outer row per iteration.
@@ -10789,6 +10863,7 @@ func buildOperatorRec(
 			delete(argByTag, p.ArgTag)
 		}
 		restoreSchema(schema, outerSchemaSnap)
+		bopts.restoreScopeFacts(outerFacts)
 		return exec.NewSemiApply(outer, inner, arg), nil
 
 	case *ir.AntiSemiApply:
@@ -10800,6 +10875,7 @@ func buildOperatorRec(
 		// and for the same two reasons — [exec.AntiSemiApply] likewise forwards the
 		// outer row unchanged and discards the inner one. See that case's comment.
 		outerSchemaSnap := copySchema(schema)
+		outerFacts := bopts.snapshotScopeFacts()
 		arg := exec.NewArgument()
 		if argByTag != nil {
 			argByTag[p.ArgTag] = arg
@@ -10812,6 +10888,7 @@ func buildOperatorRec(
 			delete(argByTag, p.ArgTag)
 		}
 		restoreSchema(schema, outerSchemaSnap)
+		bopts.restoreScopeFacts(outerFacts)
 		return exec.NewAntiSemiApply(outer, inner, arg), nil
 
 	case *ir.RollUpApply:
@@ -10830,6 +10907,7 @@ func buildOperatorRec(
 		// name. Without this snapshot, downstream lookups for outer
 		// variables (n, b, …) miss the schema and return NULL.
 		outerSchemaSnap := copySchema(schema)
+		outerFacts := bopts.snapshotScopeFacts()
 		outerWidth := schemaWidth(schema)
 		// Pre-allocate the exec.Argument and register it under the IR
 		// RollUpApply's ArgTag so the inner subtree's matching
@@ -10858,6 +10936,7 @@ func buildOperatorRec(
 		for k, v := range outerSchemaSnap {
 			schema[k] = v
 		}
+		bopts.restoreScopeFacts(outerFacts)
 		schema[p.CollectVar] = outerWidth
 		// listEval is left nil — the inner subplan ends with a
 		// Projection that puts the comprehension's projected value at
@@ -11230,7 +11309,7 @@ func buildOperatorRec(
 			cfg.EdgeType = p.RelTypes[0]
 			// The filter travels with the adjacency; see the Expand case above.
 		}
-		return exec.NewOptionalExpand(child, expandAdjacencySource(bopts, g, p.RelTypes), cfg), nil
+		return exec.NewOptionalExpand(child, traversalAdjacencySource(bopts, g, p.RelTypes, dir), cfg), nil
 
 	case *ir.ShortestPath:
 		return buildShortestPath(p, walker, labelSrc, reg, params, schema, idxMgr, procReg, argByTag, bopts)
@@ -11348,7 +11427,7 @@ func buildOperatorRec(
 		}
 		// The filter travels with the adjacency, both resolved at execution time; see
 		// [expandAdjacencySource].
-		return exec.NewVarLengthExpand(child, expandAdjacencySource(bopts, g, p.RelTypes), &cfg), nil
+		return exec.NewVarLengthExpand(child, traversalAdjacencySource(bopts, g, p.RelTypes, dir), &cfg), nil
 
 	case *ir.NamedPath:
 		// NamedPath is a pure pass-through: build the child, then register
@@ -11870,6 +11949,9 @@ func (b *buildOpts) forWorker() *buildOpts {
 	cp.pathVarChain = nil
 	cp.vleRelMeta = nil
 	cp.expandTripletSeq = nil
+	// Bind-plan log: a worker builds its subtree at execution time and must not
+	// append to the shared log's backing array; it keeps a log of its own.
+	cp.pendingBindPlans = nil
 	// SHARED INSTRUMENTATION. The profiler is a POINTER, so a value copy hands
 	// every worker the same *exec.Profiler and each one mutates it while building
 	// its sub-plan — the data race at cypher/exec/profile.go:93 (rmp #2664).
@@ -12008,6 +12090,11 @@ func (b *buildOpts) forSubquery() *buildOpts {
 		// The adjacency cache (rmp #2646). Keyed to graph state, not to this
 		// scope — see "Why the adjacency cache IS carried" above.
 		csrPairCache: b.csrPairCache,
+		// The statement's live-traversal journal (rmp #2883). Scope-independent in
+		// the same way: it describes the statement's writes, and an inner forward
+		// traversal must see them journaled exactly as an outer one does. Absent,
+		// the inner traversal would merely keep the whole-graph build.
+		liveTopo: b.liveTopo,
 		// The labelled-count differential-test seam (rmp #2654). Carried because a
 		// control arm that stops being a control inside a subquery is not a control:
 		// the field's whole purpose is to hold for the WHOLE build, and it is
@@ -13037,10 +13124,11 @@ func newAggregationEval(
 		// 46.8% was buildEdgeProps alone.
 		//
 		// analyseNodeScalarUse runs ONCE at build time and a bailout restores the
-		// previous eager path exactly. The context is built through
-		// buildRowCtxWithUse, whose arena is nil, so every value handed to the
-		// expression is independently allocated and may escape into the projected
-		// row — the property populateRowCtx documents for that path. The gate
+		// previous eager path exactly. The context is populated with a nil arena
+		// (evalRowPooledOwned on a gated plan, buildRowCtxWithUse otherwise), so
+		// every value handed to the expression is independently allocated and may
+		// escape into the projected row — the property populateRowCtx documents
+		// for that path. The gate
 		// therefore only ever OMITS variables the expression never names, and a
 		// variable it never names cannot appear in its result.
 		//
@@ -13054,6 +13142,27 @@ func newAggregationEval(
 			scalarUse = nil
 		}
 		bp := newRowBindPlan(rs, bopts, g, scalarUse)
+		if bp.gated {
+			// RECYCLE THE MAP CONTAINER (rmp #2890). A heap profile of
+			// examples/26_social_scale_bench at 127c012b attributed 22.2 GiB (44.4%
+			// of the run) to this closure, ~14 GiB of it the per-row RowContext map:
+			// its make, and the group Go allocates on the first insert.
+			//
+			// evalRowPooledOwned draws the map from rowCtxPool but passes a NIL lazy
+			// arena to populateRowCtx, so every VALUE placed in the map is allocated
+			// exactly as before — independently owned. That split is what makes the
+			// recycling sound on a path whose result flows into a group key or a
+			// collect() buffer: what escapes is the evaluator's result, and the
+			// result can be a value the map holds (a pass-through column, a lazy
+			// node) but never the map itself — expr.RowContext is not an
+			// expr.Value. A gated plan exists only when analyseNodeScalarUse did
+			// not bail, i.e. the expression has no subquery, comprehension,
+			// pattern, reduce or map projection, the only kinds whose evaluator
+			// could keep a reference to the RowContext past the call.
+			return func(row exec.Row) (expr.Value, error) {
+				return evalRowPooledOwned(astExpr, row, bp, params, reg)
+			}
+		}
 		return func(row exec.Row) (expr.Value, error) {
 			rowCtx := buildRowCtxWithUse(row, bp)
 			return evalRow(bopts, astExpr, rowCtx, params, reg)
@@ -15250,7 +15359,9 @@ type pooledRowCtx struct {
 
 // rowCtxPool recycles per-row [pooledRowCtx] units for the non-escaping
 // evaluation sites (the WHERE-predicate and scalar-projection closures), where
-// the map is built, passed to one [evalRow], and discarded. Reusing the outer
+// the map is built, passed to one [evalRow], and discarded. The aggregation
+// pre-projection recycles the map alone, without the arena
+// ([evalRowPooledOwned], rmp #2890), because its result may escape. Reusing the outer
 // map container removes the per-row map allocation that a heap profile of
 // `RETURN count(r)` flagged as a top allocator (#1575); reusing the co-located
 // lazy-node arena removes the per-row [expr.LazyNodeValue] allocation that a
@@ -15362,6 +15473,23 @@ func evalRowPooled(e ast.Expression, row exec.Row, bp *rowBindPlan, params map[s
 	defer releaseRowCtx(p)
 	populateRowCtx(p.ctx, row, bp, p)
 	return evalRow(bp.bopts, e, p.ctx, params, reg)
+}
+
+// evalRowPooledOwned is [evalRowPooled] for a GATED plan whose result may
+// escape into a result row — the aggregation pre-projection (rmp #2890). It
+// recycles only the map container: populateRowCtx receives a nil arena, so no
+// lazy node is borrowed and every value the map holds is independently
+// allocated, exactly as [buildRowCtxWithUse] allocates it. The map itself never
+// escapes (see [newAggregationEval] for the argument), so returning it to the
+// pool after the evaluation cannot recycle anything the result references.
+//
+// bp must be gated; an ungated plan has no non-escape guarantee for the map.
+func evalRowPooledOwned(e ast.Expression, row exec.Row, bp *rowBindPlan, params map[string]expr.Value, reg expr.FunctionRegistry) (expr.Value, error) {
+	p := acquireRowCtx(bp.rs.width)
+	populateRowCtx(p.ctx, row, bp, nil)
+	v, err := evalRow(bp.bopts, e, p.ctx, params, reg)
+	releaseRowCtx(p)
+	return v, err
 }
 
 // populateRowCtx fills ctx (which the caller sized/cleared) with the row's
@@ -16817,13 +16945,19 @@ func buildIRProjection(
 										storageStart, storageEnd = dstID, srcID
 									}
 									ets := capturedG.EdgeLabelsByHandle(propSrc, propDst, edgeID)
-									if len(ets) == 0 {
+									hasByHandleEntry := len(ets) > 0
+									if !hasByHandleEntry {
 										ets = capturedG.EdgeLabels(propSrc, propDst)
 									}
 									if len(ets) > 0 {
 										edgeType = pickEdgeType(ets, capturedMeta.acceptedTypes)
 									}
-									edgeProps = edgePropsToExprMap(capturedG, propSrc, propDst)
+									// The properties follow the SAME per-instance routing
+									// as the type: the bound edge's own by-handle bag when
+									// it has one, the per-pair store otherwise. Reading the
+									// per-pair store unconditionally reported the coalesced
+									// value of a parallel sibling (rmp #2910).
+									edgeProps = buildEdgeProps(capturedG, propSrc, propDst, edgeID, hasByHandleEntry, nil)
 								}
 							}
 							return expr.RelationshipValue{
@@ -16935,99 +17069,32 @@ func buildIRProjection(
 				if bopts != nil && bopts.edgeVarMeta != nil {
 					_, aliasIsBoundRel = bopts.edgeVarMeta[name]
 				}
-				// Narrow soundness guard: when the item is a property
-				// access whose alias EXACTLY equals the property's
-				// receiver name (e.g. `RETURN a.id AS a`, where
-				// schema[a] still holds the bound node), bypass the
-				// fast path so general eval computes the property
-				// value. Other Property shapes keep the fast path
-				// because they reuse the same alias name and the
-				// schema slot already carries the projected value.
-				//
-				// Map-literal extension: a projection item whose
-				// expression is a *ast.MapLiteral and whose alias
-				// collides with a pre-existing schema entry that
-				// holds a bound node (`WITH {first: m.id} AS m`) is
-				// the same shape — the schema-name fast path would
-				// return the original bound node, not the freshly
-				// constructed map.
+				// Colliding-alias guard: an item `<expr> AS name` whose
+				// name is already bound in the INPUT schema must read the
+				// slot only when that slot already holds THIS item's value.
+				// That is the case when an earlier projection projected the
+				// same item — it registered the expression string as a
+				// secondary key on the alias's column, so both keys name one
+				// column — or when the slot is precomputed for it: a grouping
+				// key of an EagerAggregation (preprojectedCols) or an
+				// aggregate output (the expression contains an aggregate,
+				// which general eval would re-run as a scalar function).
+				// Otherwise the slot holds the value of a DIFFERENT variable
+				// of that name, and reading it returned that variable: `RETURN
+				// a.id AS a` returned the node, and `MATCH (x) RETURN 1 AS x`
+				// returned x instead of 1 (rmp #2914) — the literal and
+				// parameter shapes were once exempted here on the claim that
+				// their value matches the slot, which holds only for the
+				// re-projection of the same item.
 				skipForCollidingAlias := false
-				// Preprojected schema slots already carry the projection-
-				// equivalent value (e.g. an EagerAggregation grouping key)
-				// — the fast path is sound and skipColliding must not fire.
 				isPreprojSlot := false
 				if bopts != nil && bopts.preprojectedCols != nil {
 					_, isPreprojSlot = bopts.preprojectedCols[name]
 				}
-				if prop, isProp := item.Expr.(*ast.Property); isProp && exprStr != name && !isPreprojSlot {
-					if recv, recvIsVar := prop.Receiver.(*ast.Variable); recvIsVar && recv.Name == name {
-						skipForCollidingAlias = true
-					}
-				} else if _, isMap := item.Expr.(*ast.MapLiteral); isMap && exprStr != name {
-					if _, exists := schema[name]; exists {
-						skipForCollidingAlias = true
-					}
-				} else if exprStr != name {
-					// Generalised colliding-alias guard: when the projection
-					// expression renames a value (`<expr> AS x`) and `x`
-					// already exists in the INPUT schema (typically because a
-					// prior WITH x... is being shadowed), the schema-name
-					// fast path would silently return the upstream value
-					// instead of computing the new expression. Route
-					// through the general eval path so the new value is
-					// projected.
-					//
-					// Aggregations are exempt: count/sum/avg/etc. are
-					// precomputed by EagerAggregation upstream and the
-					// schema slot already carries their evaluated value.
-					// Falling through to evalRow would re-evaluate them
-					// as scalar functions and return the per-row count
-					// (always 1) instead of the group's aggregate.
-					//
-					// Preprojected columns are also exempt: an
-					// EagerAggregation grouping key already carries the
-					// pre-evaluated grouping expression value in the row
-					// slot. The fast path returns that value directly;
-					// routing through general eval would re-interpret the
-					// variable as its pre-aggregation form.
-					//
-					// Only the BinaryOp / UnaryOp / arithmetic shapes are
-					// flagged here. A bare-Variable expression (`WITH x AS
-					// x`) takes the same value either way; a Property/
-					// MapLiteral has its own dedicated branch above.
-					isPreproj := false
-					if bopts != nil && bopts.preprojectedCols != nil {
-						_, isPreproj = bopts.preprojectedCols[name]
-					}
-					isScalar := false
-					if bopts != nil && bopts.scalarCols != nil {
-						_, isScalar = bopts.scalarCols[name]
-					}
-					if _, exists := schema[name]; exists && !isPreproj && !isScalar {
-						// Case A: the expression references the alias name —
-						// the fast path would return the OLD value, but the
-						// expression intends to read the OLD value as input
-						// and produce a NEW transformed value. Route to
-						// general eval (already covered by exprReferencesVarName).
-						if exprReferencesVarName(item.Expr, name) && !exprContainsAggregate(item.Expr) {
+				if exprStr != name && !isPreprojSlot && !exprContainsAggregate(item.Expr) {
+					if col, exists := schema[name]; exists {
+						if exprCol, same := schema[exprStr]; !same || exprCol != col {
 							skipForCollidingAlias = true
-						}
-						// Case B: the expression does NOT reference the alias
-						// name but still produces a new value (a WITH cascade
-						// of two projections that both bind `x`, where the
-						// second projection computes a fresh expression that
-						// happens to be independent of x). Route to general
-						// eval for any computed expression shape; bare
-						// Variable / Literal / Parameter projections keep the
-						// fast path because their value matches the slot.
-						if !skipForCollidingAlias && !exprContainsAggregate(item.Expr) {
-							switch item.Expr.(type) {
-							case *ast.BinaryOp, *ast.UnaryOp, *ast.FunctionInvocation,
-								*ast.SubscriptExpr, *ast.SliceExpr, *ast.CaseExpression,
-								*ast.ListComprehension, *ast.PatternComprehension,
-								*ast.ListLiteral, *ast.LabelPredicate:
-								skipForCollidingAlias = true
-							}
 						}
 					}
 				}
@@ -18540,6 +18607,19 @@ func newRowPredicate(predExpr ast.Expression, schema map[string]int, g *lpg.Read
 		scalarUse = nil
 	}
 	bp := newRowBindPlan(rs, bopts, g, scalarUse)
+	// Typed fast path (rmp #2892): a predicate in the columnar grammar — a node
+	// property compared with a constant, a label test, an IN over constants, or
+	// a conjunction of those — is decided per row without a RowContext, a lazy
+	// node or a boxed operand; an undecided row falls back to the boxed path
+	// below. See [rowTypedPredicate] for why the two are result-identical.
+	if rp, ok := newRowTypedPredicate(predExpr, bp, params, reg); ok {
+		return func(row exec.Row) (expr.Value, error) {
+			if v, decided := rp.eval(row); decided {
+				return v, nil
+			}
+			return evalRowPooled(predExpr, row, bp, params, reg)
+		}
+	}
 	return func(row exec.Row) (expr.Value, error) {
 		return evalRowPooled(predExpr, row, bp, params, reg)
 	}
@@ -18570,7 +18650,7 @@ func newRowPredicate(predExpr ast.Expression, schema map[string]int, g *lpg.Read
 // CIP2016-06-14 and the openCypher TCK).
 // Beyond the bare comparison it also accepts a CONJUNCTION of accepted shapes, a
 // LABEL test and an IN over a scalar literal list — see
-// [buildColumnarConjunction], [makeColumnarLabelPredicate] and
+// [parseTypedConjunction], [makeColumnarLabelPredicate] and
 // [makeColumnarInPredicate] (#2186). Each of those recurses through this function
 // (via the col0 resolver) so the accepted-shape set stays a single definition.
 func buildColumnarPredicate(predExpr ast.Expression, schema map[string]int, g *lpg.ReadView[string, float64], params map[string]expr.Value, reg expr.FunctionRegistry, bopts *buildOpts) (exec.ChunkPredicate, bool) {
@@ -18583,6 +18663,11 @@ func buildColumnarPredicate(predExpr ast.Expression, schema map[string]int, g *l
 // receiver may be a bound node at ANY chunk column, the row shape a traversal
 // produces). Keeping one implementation is what guarantees the two entry points
 // accept exactly the same predicate grammar — the round-3 audit found them drifting.
+//
+// The grammar itself is [parseTypedPredicate]; this function only turns the parsed
+// tree into its chunk evaluator. The row-at-a-time evaluator of rmp #2892
+// ([newRowTypedPredicate]) is built from the SAME parse, so the two cannot drift
+// either.
 func buildColumnarPredicateAt(
 	predExpr ast.Expression,
 	schema map[string]int,
@@ -18592,30 +18677,99 @@ func buildColumnarPredicateAt(
 	bopts *buildOpts,
 	anyCol bool,
 ) (exec.ChunkPredicate, bool) {
-	// resolve reports whether e is `node.prop` on an eligible bound NODE variable and
-	// returns the property key and the variable's chunk column.
-	resolve := func(e ast.Expression) (propName string, nodeCol int, ok bool) {
-		if anyCol {
-			return nodePropAtAnyCol(e, schema, bopts)
-		}
-		p, isProp := nodePropAtCol0(e, schema, bopts)
-		return p, 0, isProp
+	tp, ok := parseTypedPredicate(predExpr, schema, params, reg, bopts, anyCol)
+	if !ok {
+		return nil, false
 	}
-	// resolveNodeCol reports whether e is a bare bound NODE variable and returns its
-	// chunk column — the receiver shape a label test needs.
-	resolveNodeCol := func(e ast.Expression) (nodeCol int, ok bool) {
+	return tp.chunkPredicate(g), true
+}
+
+// typedPredKind is the node kind of a [typedPred].
+type typedPredKind uint8
+
+const (
+	// typedPredCompare is `node.prop op const`, op one of <, <=, >, >=, =, <>.
+	typedPredCompare typedPredKind = iota
+	// typedPredLabel is the conjunctive label test `node:A:B`.
+	typedPredLabel
+	// typedPredIn is `node.prop IN [const, …]`.
+	typedPredIn
+	// typedPredAnd is an n-way conjunction of the other kinds, never of itself.
+	typedPredAnd
+)
+
+// typedPred is a WHERE predicate parsed into the typed grammar the unboxed
+// evaluators decide: a comparison of a node property with a scalar constant, a
+// label test, an IN over scalar constants, or a flattened conjunction of those.
+// It is built once per plan and read-only afterwards, so the evaluators built from
+// it are safe for concurrent use.
+type typedPred struct {
+	kind typedPredKind
+	// varName and col are the receiver node variable and its row-schema column —
+	// under the columnar chain's alignment also its chunk column. Leaf kinds only.
+	varName string
+	col     int
+	// walkIdx is the receiver's index in the row walk; set by
+	// [typedPred.bindWalk] for the row evaluator only.
+	walkIdx int
+	op      string       // typedPredCompare
+	prop    string       // typedPredCompare, typedPredIn
+	cv      expr.Value   // typedPredCompare: the pre-evaluated constant
+	vals    []expr.Value // typedPredIn: the pre-evaluated constants
+	labels  []string     // typedPredLabel: a private copy of the AST's labels
+	kids    []typedPred  // typedPredAnd
+}
+
+// parseTypedPredicate parses predExpr into the typed grammar described on
+// [buildColumnarPredicate], or reports false. anyCol selects the receiver rule of
+// [buildColumnarPredicateAt].
+func parseTypedPredicate(
+	predExpr ast.Expression,
+	schema map[string]int,
+	params map[string]expr.Value,
+	reg expr.FunctionRegistry,
+	bopts *buildOpts,
+	anyCol bool,
+) (typedPred, bool) {
+	// resolve reports whether e is `node.prop` on an eligible bound NODE variable and
+	// returns the property key, the variable and its column.
+	resolve := func(e ast.Expression) (propName, varName string, nodeCol int, ok bool) {
+		var p string
+		var col int
+		if anyCol {
+			p, col, ok = nodePropAtAnyCol(e, schema, bopts)
+		} else {
+			p, ok = nodePropAtCol0(e, schema, bopts)
+		}
+		if !ok {
+			return "", "", 0, false
+		}
+		// Both helpers accept only an *ast.Property over an *ast.Variable.
+		prop, isProp := e.(*ast.Property)
+		if !isProp {
+			return "", "", 0, false
+		}
+		recv, isVar := prop.Receiver.(*ast.Variable)
+		if !isVar {
+			return "", "", 0, false
+		}
+		return p, recv.Name, col, true
+	}
+	// resolveNodeCol reports whether e is a bare bound NODE variable and returns it
+	// and its column — the receiver shape a label test needs.
+	resolveNodeCol := func(e ast.Expression) (varName string, nodeCol int, ok bool) {
 		v, isVar := e.(*ast.Variable)
 		if !isVar {
-			return 0, false
+			return "", 0, false
 		}
 		col, inSchema := schema[v.Name]
 		if !inSchema || isNonNodeVar(v.Name, bopts) {
-			return 0, false
+			return "", 0, false
 		}
 		if !anyCol && col != 0 {
-			return 0, false
+			return "", 0, false
 		}
-		return col, true
+		return v.Name, col, true
 	}
 
 	switch e := predExpr.(type) {
@@ -18623,47 +18777,50 @@ func buildColumnarPredicateAt(
 		// `n:A:B` — a conjunctive label test, decided by a per-label roaring-bitmap
 		// membership check on the raw NodeID. Cheaper unboxed than boxed, and it is
 		// what an added pattern label becomes once the stacked Selections are fused.
-		nodeCol, ok := resolveNodeCol(e.Receiver)
+		varName, nodeCol, ok := resolveNodeCol(e.Receiver)
 		if !ok || len(e.Labels) == 0 {
-			return nil, false
+			return typedPred{}, false
 		}
-		return makeColumnarLabelPredicate(e.Labels, nodeCol, g), true
+		// Copy so a later mutation of the AST slice cannot change the built predicate.
+		labels := make([]string, len(e.Labels))
+		copy(labels, e.Labels)
+		return typedPred{kind: typedPredLabel, varName: varName, col: nodeCol, labels: labels}, true
 
 	case *ast.BinaryOp:
 		switch e.Operator {
 		case "AND":
-			return buildColumnarConjunction(e, schema, g, params, reg, bopts, anyCol)
+			return parseTypedConjunction(e, schema, params, reg, bopts, anyCol)
 		case "IN":
-			propName, nodeCol, isProp := resolve(e.Left)
+			propName, varName, nodeCol, isProp := resolve(e.Left)
 			if !isProp {
-				return nil, false
+				return typedPred{}, false
 			}
 			vals, isConstList := columnarConstList(e.Right, params, reg)
 			if !isConstList {
-				return nil, false
+				return typedPred{}, false
 			}
-			return makeColumnarInPredicate(propName, vals, nodeCol, g), true
+			return typedPred{kind: typedPredIn, varName: varName, col: nodeCol, prop: propName, vals: vals}, true
 		case "<", "<=", ">", ">=", "=", "<>":
-			if propName, nodeCol, isProp := resolve(e.Left); isProp {
+			if propName, varName, nodeCol, isProp := resolve(e.Left); isProp {
 				if cv, isConst := columnarConstValue(e.Right, params, reg); isConst {
-					return makeColumnarComparePredicate(e.Operator, propName, cv, nodeCol, g), true
+					return typedPred{kind: typedPredCompare, varName: varName, col: nodeCol, op: e.Operator, prop: propName, cv: cv}, true
 				}
 			}
-			if propName, nodeCol, isProp := resolve(e.Right); isProp {
+			if propName, varName, nodeCol, isProp := resolve(e.Right); isProp {
 				if cv, isConst := columnarConstValue(e.Left, params, reg); isConst {
-					return makeColumnarComparePredicate(flipComparisonOp(e.Operator), propName, cv, nodeCol, g), true
+					return typedPred{kind: typedPredCompare, varName: varName, col: nodeCol, op: flipComparisonOp(e.Operator), prop: propName, cv: cv}, true
 				}
 			}
-			return nil, false
+			return typedPred{}, false
 		default:
-			return nil, false
+			return typedPred{}, false
 		}
 	}
-	return nil, false
+	return typedPred{}, false
 }
 
-// buildColumnarConjunction combines the two operands of an `AND` into a single
-// [exec.ChunkPredicate] (#2186).
+// parseTypedConjunction parses the two operands of an `AND` into one flattened
+// conjunction (#2186).
 //
 // The combination rule follows directly from openCypher three-valued logic under a
 // WHERE: a row survives iff the conjunction evaluates to TRUE, which requires EVERY
@@ -18674,8 +18831,8 @@ func buildColumnarPredicateAt(
 // undecided, and the [exec.ColumnarFilter] falls back to the boxed row predicate for
 // that row, which is byte-identical by construction.
 //
-// EVERY conjunct must be a shape this builder recognises; one it does not decays the
-// whole conjunction to (nil, false), keeping the plain boxed predicate. That
+// EVERY conjunct must be a shape this parser recognises; one it does not decays the
+// whole conjunction to (zero, false), keeping the plain boxed predicate. That
 // restriction is what makes the identity argument complete rather than merely
 // plausible. Every recognised leaf is error-free by construction — a property read
 // plus a same-kind scalar comparison, a roaring-bitmap label membership test, or a
@@ -18684,38 +18841,237 @@ func buildColumnarPredicateAt(
 // boxed path would have raised. Admitting an arbitrary unrecognised conjunct as an
 // always-undecided leaf would forfeit that: the sibling's decided drop could
 // short-circuit past a conjunct whose boxed evaluation raises.
-func buildColumnarConjunction(
+func parseTypedConjunction(
 	bo *ast.BinaryOp,
 	schema map[string]int,
-	g *lpg.ReadView[string, float64],
 	params map[string]expr.Value,
 	reg expr.FunctionRegistry,
 	bopts *buildOpts,
 	anyCol bool,
-) (exec.ChunkPredicate, bool) {
+) (typedPred, bool) {
 	// Flatten the conjunction so an n-way AND costs one predicate slice, not a tree
 	// of closures.
-	var leaves []exec.ChunkPredicate
+	var kids []typedPred
 	var flatten func(e ast.Expression) bool
 	flatten = func(e ast.Expression) bool {
 		if inner, isBO := e.(*ast.BinaryOp); isBO && inner.Operator == "AND" {
 			return flatten(inner.Left) && flatten(inner.Right)
 		}
-		cp, ok := buildColumnarPredicateAt(e, schema, g, params, reg, bopts, anyCol)
+		kid, ok := parseTypedPredicate(e, schema, params, reg, bopts, anyCol)
 		if !ok {
 			return false
 		}
-		leaves = append(leaves, cp)
+		kids = append(kids, kid)
 		return true
 	}
 	if !flatten(bo.Left) || !flatten(bo.Right) {
+		return typedPred{}, false
+	}
+	return typedPred{kind: typedPredAnd, kids: kids}, true
+}
+
+// chunkPredicate builds tp's [exec.ChunkPredicate] over g.
+func (tp *typedPred) chunkPredicate(g *lpg.ReadView[string, float64]) exec.ChunkPredicate {
+	switch tp.kind {
+	case typedPredLabel:
+		return makeColumnarLabelPredicate(tp.labels, tp.col, g)
+	case typedPredIn:
+		return makeColumnarInPredicate(tp.prop, tp.vals, tp.col, g)
+	case typedPredAnd:
+		leaves := make([]exec.ChunkPredicate, len(tp.kids))
+		for i := range tp.kids {
+			leaves[i] = tp.kids[i].chunkPredicate(g)
+		}
+		return makeColumnarConjunctionPredicate(leaves)
+	default: // typedPredCompare
+		return makeColumnarComparePredicate(tp.op, tp.prop, tp.cv, tp.col, g)
+	}
+}
+
+// triState is a typed-predicate verdict for one row: undecided, or one of the
+// three openCypher truth values.
+type triState uint8
+
+const (
+	// triUndecided defers the row to the boxed predicate.
+	triUndecided triState = iota
+	triFalse
+	triTrue
+	triNull
+)
+
+// rowTypedPredicate is the row-at-a-time evaluator of a [typedPred] (rmp #2892):
+// it decides a Filter predicate over the boxed row WITHOUT building a
+// RowContext, a lazy node or a boxed operand, and defers every row it cannot
+// decide to the boxed predicate.
+//
+// # Why it is result-identical
+//
+// It reads the same inputs, through the same calls, as the boxed path it
+// short-cuts. The boxed path binds a node variable by [populateRowCtx] — the
+// cell must be an [expr.IntegerValue] that [lpg.ReadView]'s mapper resolves,
+// and the variable must be bound as a plain node, which [rowBindPlan] records —
+// and then reads the property through [lpg.ReadView.NodePropertyByID] or tests
+// the label through [lpg.ReadView.HasNodeLabelByID] on the same view. The row
+// evaluator applies the same binding test to the same resolved plan and calls
+// the same two reads; any row where the test fails is undecided. The
+// comparison is [compareStoredScalar], the certified core of the columnar
+// filter (#1824), which decides only same-kind scalar pairs.
+//
+// The verdict is the exact openCypher value, not merely its truthiness: an
+// absent property is NULL, a conjunction is Kleene AND, and IN is TRUE on an
+// equal element, otherwise FALSE (a present property against non-null
+// constants never yields NULL). A conjunction is decided only when EVERY
+// conjunct is: an undecided conjunct defers the whole predicate, so a decided
+// FALSE can never short-circuit past a conjunct whose boxed evaluation would
+// raise (a cell holding a deleted-entity value, for instance).
+type rowTypedPredicate struct {
+	tp typedPred
+	bp *rowBindPlan
+}
+
+// newRowTypedPredicate parses predExpr into the typed grammar against bp's frozen
+// schema and binds every receiver to its row-walk entry, or reports false.
+func newRowTypedPredicate(predExpr ast.Expression, bp *rowBindPlan, params map[string]expr.Value, reg expr.FunctionRegistry) (*rowTypedPredicate, bool) {
+	if bp.g == nil {
 		return nil, false
 	}
-	return makeColumnarConjunctionPredicate(leaves), true
+	tp, ok := parseTypedPredicate(predExpr, bp.rs.cols, params, reg, bp.bopts, true)
+	if !ok || !tp.bindWalk(bp.rs.walk) {
+		return nil, false
+	}
+	return &rowTypedPredicate{tp: tp, bp: bp}, true
+}
+
+// bindWalk sets every leaf's walkIdx to its receiver's entry in walk, reporting
+// false when a receiver has no entry at the column the parse resolved.
+func (tp *typedPred) bindWalk(walk schemaWalk) bool {
+	if tp.kind == typedPredAnd {
+		for i := range tp.kids {
+			if !tp.kids[i].bindWalk(walk) {
+				return false
+			}
+		}
+		return true
+	}
+	for i, w := range walk {
+		if w.name == tp.varName && w.col == tp.col {
+			tp.walkIdx = i
+			return true
+		}
+	}
+	return false
+}
+
+// eval decides the predicate for row. decided is false when the boxed predicate
+// must evaluate the row.
+func (rp *rowTypedPredicate) eval(row exec.Row) (v expr.Value, decided bool) {
+	switch rp.tp.evalRow(row, rp.bp.resolved(), rp.bp) {
+	case triTrue:
+		return expr.BoolValue(true), true
+	case triFalse:
+		return expr.BoolValue(false), true
+	case triNull:
+		return expr.Null, true
+	}
+	return nil, false
+}
+
+// evalRow is the per-node evaluation behind [rowTypedPredicate.eval].
+func (tp *typedPred) evalRow(row exec.Row, vars []boundVar, bp *rowBindPlan) triState {
+	if tp.kind == typedPredAnd {
+		verdict := triTrue
+		for i := range tp.kids {
+			switch tp.kids[i].evalRow(row, vars, bp) {
+			case triUndecided:
+				return triUndecided
+			case triFalse:
+				verdict = triFalse
+			case triNull:
+				if verdict == triTrue {
+					verdict = triNull
+				}
+			}
+		}
+		return verdict
+	}
+	id, ok := rowNodeID(row, &vars[tp.walkIdx], bp)
+	if !ok {
+		return triUndecided
+	}
+	g := bp.g
+	switch tp.kind {
+	case typedPredLabel:
+		for _, name := range tp.labels {
+			if !g.HasNodeLabelByID(id, name) {
+				return triFalse
+			}
+		}
+		return triTrue
+	case typedPredIn:
+		pv, present := g.NodePropertyByID(id, tp.prop)
+		if !present {
+			return triNull // NULL IN [non-empty list] is NULL
+		}
+		verdict := triFalse
+		for _, c := range tp.vals {
+			keep, decided := compareStoredScalar("=", pv, c)
+			if !decided {
+				verdict = triUndecided
+				continue
+			}
+			if keep {
+				return triTrue
+			}
+		}
+		return verdict
+	default: // typedPredCompare
+		pv, present := g.NodePropertyByID(id, tp.prop)
+		if !present {
+			return triNull
+		}
+		keep, decided := compareStoredScalar(tp.op, pv, tp.cv)
+		if !decided {
+			return triUndecided
+		}
+		if keep {
+			return triTrue
+		}
+		return triFalse
+	}
+}
+
+// rowNodeID returns the NodeID bound to b in row when [populateRowCtx] would bind
+// b as a plain node read through bp.g — the precondition of every typed row leaf —
+// and reports false otherwise.
+func rowNodeID(row exec.Row, b *boundVar, bp *rowBindPlan) (graph.NodeID, bool) {
+	// An entity kind (relationship, path, VLE list) or a scalar pass-through
+	// column is not bound as a node; a gated plan leaves a variable its
+	// expression never names out of the context altogether.
+	if b.kind&(bindEntityKinds|bindScalarPassThrough) != 0 {
+		return 0, false
+	}
+	if bp.gated && b.kind&bindScalarUsed == 0 {
+		return 0, false
+	}
+	if b.col >= len(row) {
+		return 0, false
+	}
+	iv, ok := row[b.col].(expr.IntegerValue)
+	if !ok {
+		return 0, false
+	}
+	id := graph.NodeID(iv)
+	// The identity gate both node upgrades apply: an unresolved integer stays an
+	// integer in the boxed path, which the typed leaves do not model.
+	if _, resolved := bp.g.AdjList().Mapper().Resolve(id); !resolved {
+		return 0, false
+	}
+	return id, true
 }
 
 // makeColumnarConjunctionPredicate folds leaves into the single [exec.ChunkPredicate]
-// described on [buildColumnarConjunction]: a decided drop from any leaf decides the
+// described on [parseTypedConjunction]: a decided drop from any leaf decides the
 // conjunction FALSE-or-NULL; all leaves decided TRUE decides it TRUE; anything else
 // is undecided and defers to the boxed predicate.
 func makeColumnarConjunctionPredicate(leaves []exec.ChunkPredicate) exec.ChunkPredicate {
@@ -18970,51 +19326,62 @@ func makeColumnarComparePredicate(op, propName string, cv expr.Value, nodeCol in
 			// for every comparison operator.
 			return false, true
 		}
-		switch c := cv.(type) {
-		case expr.IntegerValue:
-			if pv.Kind() != lpg.PropInt64 {
-				return false, false
-			}
-			a, aok := pv.Int64()
-			if !aok {
-				return false, false
-			}
-			return cmpKeepOrdered(op, a, int64(c)), true
-		case expr.FloatValue:
-			if pv.Kind() != lpg.PropFloat64 {
-				return false, false
-			}
-			a, aok := pv.Float64()
-			if !aok {
-				return false, false
-			}
-			return cmpKeepOrdered(op, a, float64(c)), true
-		case expr.StringValue:
-			if pv.Kind() != lpg.PropString {
-				return false, false
-			}
-			s, sok := pv.String()
-			if !sok {
-				return false, false
-			}
-			// A property physically stored as a SOH-tagged string is a temporal, not
-			// text: the boxed path compares it as a temporal, so fall back.
-			if _, isTemporal := decodeTemporalString(s); isTemporal {
-				return false, false
-			}
-			return cmpKeepOrdered(op, s, string(c)), true
-		case expr.BoolValue:
-			if pv.Kind() != lpg.PropBool {
-				return false, false
-			}
-			b, bok := pv.Bool()
-			if !bok {
-				return false, false
-			}
-			return cmpKeepOrdered(op, boolToInt64(b), boolToInt64(bool(c))), true
-		}
-		return false, false
+		return compareStoredScalar(op, pv, cv)
 	}
+}
+
+// compareStoredScalar decides `stored op cv` for a PRESENT stored property pv and
+// a constant cv that [columnarConstValue] accepted. It decides only when both
+// share the same primitive kind, reproducing the openCypher comparison with Go's
+// native operators; every other pairing — cross-type numeric included, which the
+// boxed path resolves with lossy promotion, and a temporal stored as a SOH-tagged
+// string — is reported undecided. It is the single comparison core of the chunk
+// ([makeColumnarComparePredicate]) and row ([typedPred.evalRow]) evaluators.
+func compareStoredScalar(op string, pv lpg.PropertyValue, cv expr.Value) (keep, decided bool) {
+	switch c := cv.(type) {
+	case expr.IntegerValue:
+		if pv.Kind() != lpg.PropInt64 {
+			return false, false
+		}
+		a, aok := pv.Int64()
+		if !aok {
+			return false, false
+		}
+		return cmpKeepOrdered(op, a, int64(c)), true
+	case expr.FloatValue:
+		if pv.Kind() != lpg.PropFloat64 {
+			return false, false
+		}
+		a, aok := pv.Float64()
+		if !aok {
+			return false, false
+		}
+		return cmpKeepOrdered(op, a, float64(c)), true
+	case expr.StringValue:
+		if pv.Kind() != lpg.PropString {
+			return false, false
+		}
+		s, sok := pv.String()
+		if !sok {
+			return false, false
+		}
+		// A property physically stored as a SOH-tagged string is a temporal, not
+		// text: the boxed path compares it as a temporal, so fall back.
+		if _, isTemporal := decodeTemporalString(s); isTemporal {
+			return false, false
+		}
+		return cmpKeepOrdered(op, s, string(c)), true
+	case expr.BoolValue:
+		if pv.Kind() != lpg.PropBool {
+			return false, false
+		}
+		b, bok := pv.Bool()
+		if !bok {
+			return false, false
+		}
+		return cmpKeepOrdered(op, boolToInt64(b), boolToInt64(bool(c))), true
+	}
+	return false, false
 }
 
 // cmpKeepOrdered returns whether `a op b` holds for the openCypher comparison op,
@@ -20022,6 +20389,10 @@ type lpgMutatorAdapter struct {
 	// when it gains an edge. Lazily allocated, so a pure node-create workload over
 	// an edgeless graph (the write benchmark) never allocates it.
 	fresh map[string]struct{}
+	// liveTopo journals this statement's adjacency-affecting writes for the live
+	// forward traversals it plans (rmp #2883). Held inline, so a statement pays
+	// nothing for it until a live traversal begins; see [liveTopoLog].
+	liveTopo liveTopoLog
 }
 
 // cs returns the engine's relationship count-store, or nil when the adapter has
@@ -20219,6 +20590,7 @@ func (a *lpgMutatorAdapter) resolveID(n string) graph.NodeID {
 
 // AddNode interns n and returns its stable NodeID.
 func (a *lpgMutatorAdapter) AddNode(n string) (graph.NodeID, error) {
+	defer a.liveTopo.nodePost(n, a.liveTopo.nodePre(n)) // rmp #2883
 	idBefore, existed := a.g.AdjList().Mapper().Lookup(n)
 	// Capture the tombstone state BEFORE AddNode: AddNode now revives a
 	// tombstoned node (clears its tombstone), so checking afterwards would
@@ -20251,6 +20623,10 @@ var ErrParallelEdgeInSimpleGraph = errors.New("cypher: cannot create a parallel 
 
 // AddEdge inserts a directed edge and returns the endpoint NodeIDs.
 func (a *lpgMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, graph.NodeID, error) {
+	// rmp #2883: journal both endpoints' liveness and src's run before the write.
+	defer a.liveTopo.nodePost(src, a.liveTopo.nodePre(src))
+	defer a.liveTopo.nodePost(dst, a.liveTopo.nodePre(dst))
+	a.liveTopo.beforeAdjWrite(src)
 	_, srcExisted := a.g.AdjList().Mapper().Lookup(src)
 	_, dstExisted := a.g.AdjList().Mapper().Lookup(dst)
 	edgeExisted := a.g.AdjList().HasEdge(src, dst)
@@ -20274,7 +20650,7 @@ func (a *lpgMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 	// [walMutatorAdapter.AddEdge].
 	if edgeAdded := a.g.AdjList().Multigraph() || !edgeExisted; edgeAdded {
 		a.countRelCreated()
-		a.rec().recordAddEdge(src, dst, !srcExisted, !dstExisted)
+		a.rec().recordAddEdge(src, dst, 0, !srcExisted, !dstExisted)
 	}
 	a.countClearFresh(src, dst) // count-store (#2082): endpoints now carry an edge
 	return srcID, dstID, nil
@@ -20283,6 +20659,10 @@ func (a *lpgMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 // AddEdgeH mirrors [lpgMutatorAdapter.AddEdge] but allocates and returns a
 // stable per-edge handle (see [exec.GraphMutator.AddEdgeH]).
 func (a *lpgMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, graph.NodeID, uint64, error) {
+	// rmp #2883: journal both endpoints' liveness and src's run before the write.
+	defer a.liveTopo.nodePost(src, a.liveTopo.nodePre(src))
+	defer a.liveTopo.nodePost(dst, a.liveTopo.nodePre(dst))
+	a.liveTopo.beforeAdjWrite(src)
 	_, srcExisted := a.g.AdjList().Mapper().Lookup(src)
 	_, dstExisted := a.g.AdjList().Mapper().Lookup(dst)
 	edgeExisted := a.g.AdjList().HasEdge(src, dst)
@@ -20307,7 +20687,7 @@ func (a *lpgMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 	// [walMutatorAdapter.AddEdge].
 	if edgeAdded := a.g.AdjList().Multigraph() || !edgeExisted; edgeAdded {
 		a.countRelCreated()
-		a.rec().recordAddEdge(src, dst, !srcExisted, !dstExisted)
+		a.rec().recordAddEdge(src, dst, handle, !srcExisted, !dstExisted)
 	}
 	a.countClearFresh(src, dst) // count-store (#2082): endpoints now carry an edge
 	return srcID, dstID, handle, nil
@@ -20328,6 +20708,7 @@ func (a *lpgMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 // the bulk path took at rmp #2694 — this was the loop they both missed, the one
 // DETACH DELETE uses for the victim's INBOUND arcs.
 func (a *lpgMutatorAdapter) RemoveEdge(src, dst string) {
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	present := a.g.AdjList().HasEdge(src, dst)
 	r := a.rec()
 	var pre removedEdgePreimage
@@ -20395,6 +20776,7 @@ func orientHandleEndpoints(g *lpg.Graph[string, float64], src, dst string, handl
 }
 
 func (a *lpgMutatorAdapter) RemoveEdgeByHandle(src, dst string, handle uint64) {
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	src, dst = orientHandleEndpoints(a.g, src, dst, handle)
 	r := a.rec()
 	var pre removedEdgePreimage
@@ -20495,6 +20877,7 @@ func (a *lpgMutatorAdapter) RemoveNodeLabel(n, label string) {
 // removal changes so subscribed indexes drop every entry describing the node
 // (a deleted node must never be served by a NodeByIndexSeek, task #1340).
 func (a *lpgMutatorAdapter) RemoveNode(n string) {
+	a.liveTopo.beforeNodeRemove(n) // rmp #2883
 	id, ok := a.g.AdjList().Mapper().Lookup(n)
 	if !ok {
 		return
@@ -20662,6 +21045,7 @@ func (a *lpgMutatorAdapter) HasEdge(src, dst string) bool {
 
 // SetEdgeLabel attaches label to the directed edge (src, dst).
 func (a *lpgMutatorAdapter) SetEdgeLabel(src, dst, label string) {
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	r := a.rec()
 	hadLabel := r.active() && a.g.HasEdgeLabel(src, dst, label)
 	a.w().SetEdgeLabel(src, dst, label)
@@ -20766,6 +21150,7 @@ func (a *lpgMutatorAdapter) EdgeLabels(src, dst string) []string {
 // IncEdgeCreateCount, EdgeCreateCount, DecEdgeCreateCount delegate to
 // the underlying [lpg.Graph] CREATE-multiplicity counter.
 func (a *lpgMutatorAdapter) IncEdgeCreateCount(src, dst string) int64 {
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	n := a.g.IncEdgeCreateCount(src, dst)
 	a.rec().recordIncEdgeCreateCount(src, dst)
 	return n
@@ -20774,6 +21159,7 @@ func (a *lpgMutatorAdapter) EdgeCreateCount(src, dst string) int64 {
 	return a.g.EdgeCreateCount(src, dst)
 }
 func (a *lpgMutatorAdapter) DecEdgeCreateCount(src, dst string) {
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	r := a.rec()
 	had := r.active() && a.g.EdgeCreateCount(src, dst) > 0
 	a.g.DecEdgeCreateCount(src, dst)
@@ -20784,6 +21170,7 @@ func (a *lpgMutatorAdapter) DecEdgeCreateCount(src, dst string) {
 // RemoveEdgeInstance delegate to the per-instance metadata stores on
 // the underlying [lpg.Graph].
 func (a *lpgMutatorAdapter) SetEdgeLabelAt(src, dst string, idx int64, label string) {
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	a.w().SetEdgeLabelAt(src, dst, idx, label)
 }
 func (a *lpgMutatorAdapter) EdgeLabelsAt(src, dst string, idx int64) []string {
@@ -20796,6 +21183,7 @@ func (a *lpgMutatorAdapter) EdgePropertiesAt(src, dst string, idx int64) map[str
 	return a.g.EdgePropertiesAt(src, dst, idx)
 }
 func (a *lpgMutatorAdapter) RemoveEdgeInstance(src, dst string, idx int64) {
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	a.w().RemoveEdgeInstance(src, dst, idx)
 }
 
@@ -20809,6 +21197,7 @@ func (a *lpgMutatorAdapter) RemoveEdgeInstance(src, dst string, idx int64) {
 // there is on the CREATE path (#1686/#1282). The store-less engine has no WAL,
 // so these buffer no transaction op; their durability is the in-memory graph.
 func (a *lpgMutatorAdapter) SetEdgeLabelByHandle(src, dst string, handle uint64, label string) {
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	a.w().SetEdgeLabelByHandle(src, dst, handle, label)
 	// Count-store (#2082): SetEdgeLabelByHandle is the single authoritative
 	// once-per-edge typing hook (create_relationship.go also fires SetEdgeLabel and
@@ -20849,6 +21238,7 @@ func (a *lpgMutatorAdapter) EdgePropertiesByHandle(src, dst string, handle uint6
 	return a.g.EdgePropertiesByHandle(src, dst, handle)
 }
 func (a *lpgMutatorAdapter) RemoveEdgeInstanceByHandle(src, dst string, handle uint64) {
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	a.w().RemoveEdgeInstanceByHandle(src, dst, handle)
 }
 
@@ -20906,6 +21296,7 @@ func (a *lpgMutatorAdapter) InNeighbours(n string) []string {
 // Per-edge undo entries are recorded before the bulk removal so the undo log
 // can reverse the operation edge-by-edge on rollback.
 func (a *lpgMutatorAdapter) RemoveAllEdgesFrom(n string) {
+	a.liveTopo.beforeAdjWrite(n) // rmp #2883: journal the Init-instant run first
 	r := a.rec()
 	// Snapshot outgoing neighbours for undo recording and side-effect counting.
 	outgoing := a.OutNeighbours(n)
@@ -20949,14 +21340,77 @@ func (a *lpgMutatorAdapter) ResolveNodeLabel(id graph.NodeID) (string, bool) {
 	return a.g.AdjList().Mapper().Resolve(id)
 }
 
-// WalkNodeIDs calls fn for every interned, non-tombstoned node.
+// WalkNodeIDs calls fn for every interned, non-tombstoned node. fn may call
+// back into the adapter; see [walkMutatorNodeIDs].
 func (a *lpgMutatorAdapter) WalkNodeIDs(fn func(graph.NodeID) bool) {
-	a.g.AdjList().Mapper().Walk(func(id graph.NodeID, _ string) bool {
-		if a.g.IsTombstoned(id) {
-			return true
-		}
-		return fn(id)
+	walkMutatorNodeIDs(a.g, fn)
+}
+
+// walkMutatorNodeIDs is the shared body of both mutator adapters' WalkNodeIDs.
+//
+// It collects the interned ids first and calls fn only after [graph.Mapper.Walk]
+// has released its last shard lock (rmp #2897). Every consumer of WalkNodeIDs —
+// the label-less MERGE candidate walk and seedGlobalNodeCounter — resolves each id
+// back through the Mapper (ResolveNodeLabel, then labels and properties by key),
+// and Walk's contract forbids exactly that inside its callback while a writer may
+// run: the nested read lock on the walked shard deadlocks against a writer queued
+// on its write lock, and concurrent writers are the engine's normal mode since
+// rmp #2306. The walked set and the liveness test are the same as before; only the
+// point at which fn runs moves past the lock.
+//
+// The id buffer is pooled ([walkIDPool]), so the collection costs no allocation
+// in the steady state.
+func walkMutatorNodeIDs(g *lpg.Graph[string, float64], fn func(graph.NodeID) bool) {
+	mapper := g.AdjList().Mapper()
+	bp := getWalkIDs(mapper.Len())
+	defer putWalkIDs(bp)
+	ids := *bp
+	mapper.Walk(func(id graph.NodeID, _ string) bool {
+		ids = append(ids, id)
+		return true
 	})
+	*bp = ids
+	for _, id := range ids {
+		if g.IsTombstoned(id) {
+			continue
+		}
+		if !fn(id) {
+			return
+		}
+	}
+}
+
+// walkPoolMaxCap bounds the capacity of a buffer [putWalkIDs] and
+// [putStatsNodeRefs] return to their pools, in elements. A walk of a larger
+// graph still works — its buffer is simply left to the GC — so a pool never
+// pins more than walkPoolMaxCap elements per pooled buffer after one very large
+// walk. 1<<20 ids is 8 MiB; 1<<20 (key, id) pairs is 24 MiB.
+const walkPoolMaxCap = 1 << 20
+
+// walkIDPool recycles the NodeID buffers [walkMutatorNodeIDs] collects a Mapper
+// walk into. It holds *[]graph.NodeID so a Put does not allocate.
+var walkIDPool = sync.Pool{New: func() any { return new([]graph.NodeID) }}
+
+// getWalkIDs returns an empty pooled id buffer with capacity for at least n ids.
+func getWalkIDs(n int) *[]graph.NodeID {
+	bp, _ := walkIDPool.Get().(*[]graph.NodeID)
+	if bp == nil {
+		bp = new([]graph.NodeID)
+	}
+	if cap(*bp) < n {
+		*bp = make([]graph.NodeID, 0, n)
+	}
+	*bp = (*bp)[:0]
+	return bp
+}
+
+// putWalkIDs returns bp to the pool unless it outgrew [walkPoolMaxCap].
+func putWalkIDs(bp *[]graph.NodeID) {
+	if cap(*bp) > walkPoolMaxCap {
+		return
+	}
+	*bp = (*bp)[:0]
+	walkIDPool.Put(bp)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -21069,6 +21523,10 @@ type walMutatorAdapter struct {
 	// (#2082), so initial CREATE labelling is not mistaken for a relabel; see the
 	// lpgMutatorAdapter twin.
 	fresh map[string]struct{}
+	// liveTopo journals this statement's adjacency-affecting writes for the live
+	// forward traversals it plans (rmp #2883). Held inline, so a statement pays
+	// nothing for it until a live traversal begins; see [liveTopoLog].
+	liveTopo liveTopoLog
 }
 
 // constraintReg mirrors [lpgMutatorAdapter.constraintReg].
@@ -21241,6 +21699,7 @@ func (a *walMutatorAdapter) resolveID(n string) graph.NodeID {
 
 // AddNode interns n and returns its stable NodeID.
 func (a *walMutatorAdapter) AddNode(n string) (graph.NodeID, error) {
+	defer a.liveTopo.nodePost(n, a.liveTopo.nodePre(n)) // rmp #2883
 	idBefore, existed := a.g.AdjList().Mapper().Lookup(n)
 	// Capture the tombstone state BEFORE AddNode: AddNode now revives a
 	// tombstoned node, so checking afterwards would always observe it live.
@@ -21274,6 +21733,10 @@ func (a *walMutatorAdapter) AddNode(n string) (graph.NodeID, error) {
 
 // AddEdge inserts a directed edge and returns the endpoint NodeIDs.
 func (a *walMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, graph.NodeID, error) {
+	// rmp #2883: journal both endpoints' liveness and src's run before the write.
+	defer a.liveTopo.nodePost(src, a.liveTopo.nodePre(src))
+	defer a.liveTopo.nodePost(dst, a.liveTopo.nodePre(dst))
+	a.liveTopo.beforeAdjWrite(src)
 	_, srcExisted := a.g.AdjList().Mapper().Lookup(src)
 	_, dstExisted := a.g.AdjList().Mapper().Lookup(dst)
 	edgeExisted := a.g.AdjList().HasEdge(src, dst)
@@ -21311,7 +21774,7 @@ func (a *walMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 	// line already implies !edgeExisted.
 	if edgeAdded := a.g.AdjList().Multigraph() || !edgeExisted; edgeAdded {
 		a.countRelCreated()
-		a.rec().recordAddEdge(src, dst, !srcExisted, !dstExisted)
+		a.rec().recordAddEdge(src, dst, 0, !srcExisted, !dstExisted)
 	}
 	a.countClearFresh(src, dst) // count-store (#2082): endpoints now carry an edge
 	if txErr != nil {
@@ -21329,6 +21792,10 @@ func (a *walMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 // ([lpg.Graph.AddEdgeHIfAbsent]), so snapshot + full-WAL recovery does not
 // double the edge. See graph/lpg/edge_handle.go for the durability contract.
 func (a *walMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, graph.NodeID, uint64, error) {
+	// rmp #2883: journal both endpoints' liveness and src's run before the write.
+	defer a.liveTopo.nodePost(src, a.liveTopo.nodePre(src))
+	defer a.liveTopo.nodePost(dst, a.liveTopo.nodePre(dst))
+	a.liveTopo.beforeAdjWrite(src)
 	_, srcExisted := a.g.AdjList().Mapper().Lookup(src)
 	_, dstExisted := a.g.AdjList().Mapper().Lookup(dst)
 	edgeExisted := a.g.AdjList().HasEdge(src, dst)
@@ -21366,7 +21833,7 @@ func (a *walMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 	// [lpgMutatorAdapter.AddEdge].
 	if edgeAdded := a.g.AdjList().Multigraph() || !edgeExisted; edgeAdded {
 		a.countRelCreated()
-		a.rec().recordAddEdge(src, dst, !srcExisted, !dstExisted)
+		a.rec().recordAddEdge(src, dst, handle, !srcExisted, !dstExisted)
 	}
 	a.countClearFresh(src, dst) // count-store (#2082): endpoints now carry an edge
 	if txErr != nil {
@@ -21380,6 +21847,7 @@ func (a *walMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 // disconnected, so re-creating an edge between the same endpoints does not
 // resurrect the deleted relationship's type or properties.
 func (a *walMutatorAdapter) RemoveEdge(src, dst string) {
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	present := a.g.AdjList().HasEdge(src, dst)
 	r := a.rec()
 	var pre removedEdgePreimage
@@ -21460,6 +21928,7 @@ func (a *walMutatorAdapter) RemoveEdge(src, dst string) {
 // instance. The edges-removed counter, the durable frame and the undo record are
 // all gated on the actual removal result (rmp #2018, rmp #2734).
 func (a *walMutatorAdapter) RemoveEdgeByHandle(src, dst string, handle uint64) {
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	src, dst = orientHandleEndpoints(a.g, src, dst, handle)
 	r := a.rec()
 	var pre removedEdgePreimage
@@ -21616,6 +22085,7 @@ func (a *walMutatorAdapter) RemoveNodeLabel(n, label string) {
 // removal changes so subscribed indexes drop every entry describing the node
 // (a deleted node must never be served by a NodeByIndexSeek, task #1340).
 func (a *walMutatorAdapter) RemoveNode(n string) {
+	a.liveTopo.beforeNodeRemove(n) // rmp #2883
 	id, ok := a.g.AdjList().Mapper().Lookup(n)
 	if !ok {
 		return
@@ -21777,6 +22247,7 @@ func (a *walMutatorAdapter) HasEdge(src, dst string) bool {
 
 // SetEdgeLabel attaches label to the directed edge (src, dst).
 func (a *walMutatorAdapter) SetEdgeLabel(src, dst, label string) {
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	r := a.rec()
 	hadLabel := r.active() && a.g.HasEdgeLabel(src, dst, label)
 	a.w().SetEdgeLabel(src, dst, label)
@@ -21890,6 +22361,7 @@ func (a *walMutatorAdapter) EdgeLabels(src, dst string) []string {
 // IncEdgeCreateCount, EdgeCreateCount, DecEdgeCreateCount delegate to
 // the underlying [lpg.Graph] CREATE-multiplicity counter.
 func (a *walMutatorAdapter) IncEdgeCreateCount(src, dst string) int64 {
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	n := a.g.IncEdgeCreateCount(src, dst)
 	a.rec().recordIncEdgeCreateCount(src, dst)
 	return n
@@ -21898,6 +22370,7 @@ func (a *walMutatorAdapter) EdgeCreateCount(src, dst string) int64 {
 	return a.g.EdgeCreateCount(src, dst)
 }
 func (a *walMutatorAdapter) DecEdgeCreateCount(src, dst string) {
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	r := a.rec()
 	had := r.active() && a.g.EdgeCreateCount(src, dst) > 0
 	a.g.DecEdgeCreateCount(src, dst)
@@ -21911,15 +22384,17 @@ func (a *walMutatorAdapter) DecEdgeCreateCount(src, dst string) {
 // These per-instance / per-handle setters intentionally record NO separate undo
 // entry: CreateRelationship is their only caller and always invokes them on a
 // handle/instance it allocated via AddEdgeH in the SAME operator, so the matching
-// recordAddEdge inverse already removes that edge — and [Graph.RemoveEdge] →
-// clearEdgePairState drops the pair's per-handle and per-instance metadata once
-// the last edge between the endpoints is gone. The exotic case (a per-handle
+// recordAddEdge inverse already removes that edge by its handle —
+// [Graph.RemoveEdgeByHandle] drops the instance's per-handle metadata, and
+// clearEdgePairState drops the pair's per-instance metadata once the last edge
+// between the endpoints is gone (rmp #2885). The exotic case (a per-handle
 // metadata set on an edge that a later failed row removes while a parallel edge
 // survives) is handled by the edge-removal undo itself: captureRemovedEdge
 // snapshots the removed slot's handle and its per-handle labels/properties, and
 // recordRemoveEdge re-adds the instance with that handle and restores them
 // (#1327).
 func (a *walMutatorAdapter) SetEdgeLabelAt(src, dst string, idx int64, label string) {
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	a.w().SetEdgeLabelAt(src, dst, idx, label)
 }
 func (a *walMutatorAdapter) EdgeLabelsAt(src, dst string, idx int64) []string {
@@ -21932,6 +22407,7 @@ func (a *walMutatorAdapter) EdgePropertiesAt(src, dst string, idx int64) map[str
 	return a.g.EdgePropertiesAt(src, dst, idx)
 }
 func (a *walMutatorAdapter) RemoveEdgeInstance(src, dst string, idx int64) {
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	a.w().RemoveEdgeInstance(src, dst, idx)
 }
 
@@ -21952,6 +22428,7 @@ func (a *walMutatorAdapter) RemoveEdgeInstance(src, dst string, idx int64) {
 // [lpg.Graph.ApplyAtomically] window and the one transaction the per-pair write
 // uses, so the per-pair and per-handle stores stay atomic together.
 func (a *walMutatorAdapter) SetEdgeLabelByHandle(src, dst string, handle uint64, label string) {
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	a.w().SetEdgeLabelByHandle(src, dst, handle, label)
 	_ = a.tx.SetEdgeLabelByHandle(src, dst, handle, label) // rmp #2747: [txn.Tx.SetEdgeLabelByHandle] returns ErrTxFinished (unreachable here) or ErrFieldTooLong on a label over 65535 bytes. The SECOND is reachable and is DISCARDED: [exec.GraphMutator.SetEdgeLabelByHandle] returns nothing; the encoder backstop refuses it at Commit.
 	// Count-store (#2082): the single authoritative once-per-edge typing hook.
@@ -22000,6 +22477,7 @@ func (a *walMutatorAdapter) EdgePropertiesByHandle(src, dst string, handle uint6
 	return a.g.EdgePropertiesByHandle(src, dst, handle)
 }
 func (a *walMutatorAdapter) RemoveEdgeInstanceByHandle(src, dst string, handle uint64) {
+	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	a.w().RemoveEdgeInstanceByHandle(src, dst, handle)
 	_ = a.tx.RemoveEdgeInstanceByHandle(src, dst, handle) // rmp #2747: [txn.Tx.RemoveEdgeInstanceByHandle] returns ErrTxFinished and nothing else, unreachable here; it stages no schema string. Discarded: [exec.GraphMutator.RemoveEdgeInstanceByHandle] returns nothing.
 }
@@ -22041,6 +22519,7 @@ func (a *walMutatorAdapter) InNeighbours(n string) []string {
 // Per-edge undo entries and WAL records are emitted before the bulk adjacency
 // removal, exactly mirroring what d sequential RemoveEdge calls would produce.
 func (a *walMutatorAdapter) RemoveAllEdgesFrom(n string) {
+	a.liveTopo.beforeAdjWrite(n) // rmp #2883: journal the Init-instant run first
 	r := a.rec()
 	// Snapshot outgoing neighbours for undo recording, WAL emission, and
 	// side-effect counting before the bulk removal clears the adjacency.
@@ -22089,14 +22568,10 @@ func (a *walMutatorAdapter) ResolveNodeLabel(id graph.NodeID) (string, bool) {
 	return a.g.AdjList().Mapper().Resolve(id)
 }
 
-// WalkNodeIDs calls fn for every interned, non-tombstoned node.
+// WalkNodeIDs calls fn for every interned, non-tombstoned node. fn may call
+// back into the adapter; see [walkMutatorNodeIDs].
 func (a *walMutatorAdapter) WalkNodeIDs(fn func(graph.NodeID) bool) {
-	a.g.AdjList().Mapper().Walk(func(id graph.NodeID, _ string) bool {
-		if a.g.IsTombstoned(id) {
-			return true
-		}
-		return fn(id)
-	})
+	walkMutatorNodeIDs(a.g, fn)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -22359,31 +22834,9 @@ func forEachResolvedSlotType(
 	handles := fwdCSR.HandlesSlice()
 	mapper := adj.Mapper()
 
-	// slotTypes collects the relationship types of ONE adjacency slot for the
-	// per-slot resolution below, and appendSlotType is the visitor that fills it.
-	// Both are declared ONCE for the whole sweep — the buffer is truncated per slot
-	// rather than reallocated, and the closure is not rebuilt per CSR position — so
-	// the fallback costs one small buffer instead of a []string and a closure per
-	// edge. That is the cold-path allocation hot spot the profile attributed to
-	// EdgeLabelsByID (rmp #1877), and it applies to a closure declared inside the
-	// loop just as much as to a returned slice.
-	var slotTypes []string
-	appendSlotType := func(name string) { slotTypes = append(slotTypes, name) }
-
-	// slotLabs is the scratch behind that resolution: slotLabs[dst] is the ordered
-	// list of the adjacency label-column entries of that pair's COLUMN-TYPED slots —
-	// the slots whose relationship type is not recorded against a stable per-edge
-	// handle. slotFallbackSeen counts how many of each pair's CSR positions have
-	// already consumed one, so the next resolves against the next slot.
-	//
-	// All three are created on the FIRST source that actually needs them and then
-	// reused for every later source, reset through slotLabsTouched rather than
-	// reallocated or swept. A graph whose every slot resolves by handle — anything
-	// Cypher built — therefore allocates none of them, and a graph that does need
-	// them allocates each once for the whole O(V+E) sweep instead of once per source.
-	var slotLabs map[graph.NodeID][]uint32
-	var slotFallbackSeen map[graph.NodeID]int
-	var slotLabsTouched []graph.NodeID
+	// The per-slot scratch is created ONCE for the whole sweep and reused for every
+	// source; see [slotTypeScratch] for what it holds and why.
+	sc := newSlotTypeScratch()
 
 	// Bound the loop on the SNAPSHOT CSR, not the live graph. fwdCSR was
 	// built from a point-in-time copy of adj above; verts has a fixed length
@@ -22395,141 +22848,264 @@ func forEachResolvedSlotType(
 	for srcID := uint64(0); srcID < maxID; srcID++ {
 		start := verts[srcID]
 		end := verts[srcID+1]
-		srcStr, ok := mapper.Resolve(graph.NodeID(srcID))
+		// The handle column is sliced to this source's run only where it covers
+		// it, which keeps the per-slot "pos < len(handles)" test meaning exactly
+		// what it meant against the whole column.
+		var runHandles []uint64
+		switch {
+		case uint64(len(handles)) >= end:
+			runHandles = handles[start:end]
+		case uint64(len(handles)) > start:
+			runHandles = handles[start:]
+		}
+		resolveSourceSlotTypes(g, mapper, sc, graph.NodeID(srcID), edges[start:end], runHandles, start, visit)
+	}
+}
+
+// slotTypeScratch is the reusable state behind [resolveSourceSlotTypes], held
+// across sources so a sweep allocates it once.
+//
+// slotTypes collects the relationship types of ONE adjacency slot for the
+// per-slot resolution, and appendSlotType is the visitor that fills it. Both are
+// created ONCE — the buffer is truncated per slot rather than reallocated, and the
+// closure is not rebuilt per CSR position — so the fallback costs one small buffer
+// instead of a []string and a closure per edge. That is the cold-path allocation
+// hot spot the profile attributed to EdgeLabelsByID (rmp #1877), and it applies to
+// a closure declared inside the loop just as much as to a returned slice.
+//
+// slotLabs is the scratch behind that resolution: slotLabs[dst] is the ordered
+// list of the adjacency label-column entries of that pair's COLUMN-TYPED slots —
+// the slots whose relationship type is not recorded against a stable per-edge
+// handle. slotFallbackSeen counts how many of each pair's CSR positions have
+// already consumed one, so the next resolves against the next slot.
+//
+// All three are created on the FIRST source that actually needs them and then
+// reused for every later source, reset through slotLabsTouched rather than
+// reallocated or swept. A graph whose every slot resolves by handle — anything
+// Cypher built — therefore allocates none of them, and a graph that does need
+// them allocates each once for the whole O(V+E) sweep instead of once per source.
+//
+// NOT safe for concurrent use.
+type slotTypeScratch struct {
+	slotTypes        []string
+	appendSlotType   func(name string)
+	slotLabs         map[graph.NodeID][]uint32
+	slotFallbackSeen map[graph.NodeID]int
+	slotLabsTouched  []graph.NodeID
+
+	// dstParallelTotal and dstSeen are the positional inference's per-source
+	// counters: dstParallelTotal[dst] is how many slots of the source's run
+	// point at dst, and dstSeen[dst] how many of them the sweep has reached so
+	// far, the current slot included. They are built on the FIRST slot of a
+	// source that reaches the positional inference, and emptied by that
+	// source's own run before the next source, so a source that never reaches
+	// it — every source of a Cypher-built graph — touches neither (rmp #2889).
+	dstParallelTotal map[graph.NodeID]int64
+	dstSeen          map[graph.NodeID]int64
+}
+
+// startPositionalCounts builds the positional inference's counters for a source
+// whose run is edges, on reaching that inference at position pos. dstSeen must
+// then read exactly what counting every resolvable slot up to and including pos
+// would have given, so the slots before pos are counted here under the same
+// Resolve test the sweep applies, and every later slot is counted by the sweep.
+func (sc *slotTypeScratch) startPositionalCounts(mapper *graph.Mapper[string], edges []graph.NodeID, pos uint64) {
+	if sc.dstParallelTotal == nil {
+		sc.dstParallelTotal = make(map[graph.NodeID]int64, len(edges))
+		sc.dstSeen = make(map[graph.NodeID]int64, len(edges))
+	}
+	for _, d := range edges {
+		sc.dstParallelTotal[d]++
+	}
+	for _, d := range edges[:pos+1] {
+		if _, ok := mapper.Resolve(d); ok {
+			sc.dstSeen[d]++
+		}
+	}
+}
+
+// endPositionalCounts empties the counters [slotTypeScratch.startPositionalCounts]
+// built for a source whose run is edges. Deleting the run's own keys keeps the
+// reset O(run) however many keys the maps have held before.
+func (sc *slotTypeScratch) endPositionalCounts(edges []graph.NodeID) {
+	for _, d := range edges {
+		delete(sc.dstParallelTotal, d)
+		delete(sc.dstSeen, d)
+	}
+}
+
+// newSlotTypeScratch returns an empty scratch whose visitor appends to its own
+// buffer.
+func newSlotTypeScratch() *slotTypeScratch {
+	sc := &slotTypeScratch{}
+	sc.appendSlotType = func(name string) { sc.slotTypes = append(sc.slotTypes, name) }
+	return sc
+}
+
+// resolveSourceSlotTypes is the per-source body of [forEachResolvedSlotType],
+// moved out verbatim so the live per-source runs of a write transaction resolve
+// their slots by exactly the same rules as the whole-graph column (rmp #2883). Read
+// [forEachResolvedSlotType] before changing it.
+//
+// edges is src's run in its FINAL order and handles the handle column aligned with
+// it (nil, or shorter than edges, exactly where the whole column did not cover a
+// slot). visit receives base+i for the run's i-th slot, which is the absolute
+// position for the whole-graph sweep and the run index for a live run.
+func resolveSourceSlotTypes(
+	g *lpg.ReadView[string, float64],
+	mapper *graph.Mapper[string],
+	sc *slotTypeScratch,
+	src graph.NodeID,
+	edges []graph.NodeID,
+	handles []uint64,
+	base uint64,
+	visit func(pos uint64, types []string),
+) {
+	srcStr, ok := mapper.Resolve(src)
+	if !ok {
+		return
+	}
+	// sc.dstSeen drives only the positional fallback (handle-less /
+	// MERGE slots): it counts parallel CSR occurrences per dst so a
+	// fallback slot maps to its CREATE-instance idx. The
+	// handle-driven path below ignores it entirely. sc.dstParallelTotal
+	// lets the fallback tell multigraph (N_csr == N_create) from
+	// simple-graph (N_csr < N_create) storage for each pair. Both are
+	// built only once a slot of this source reaches that fallback; see
+	// [slotTypeScratch.startPositionalCounts].
+	positionalReady := false
+	// slotLabsReady defers the adjacency read until a slot of THIS source
+	// actually needs it: a Cypher-built graph resolves every slot by handle and
+	// must not pay for a resolution it never reaches.
+	slotLabsReady := false
+	for pos := uint64(0); pos < uint64(len(edges)); pos++ {
+		dst := edges[pos]
+		dstStr, ok := mapper.Resolve(dst)
 		if !ok {
 			continue
 		}
-		// dstSeen drives only the positional fallback (handle-less /
-		// MERGE slots): it counts parallel CSR occurrences per dst so a
-		// fallback slot maps to its CREATE-instance idx. The
-		// handle-driven path below ignores it entirely. dstParallelTotal
-		// lets the fallback tell multigraph (N_csr == N_create) from
-		// simple-graph (N_csr < N_create) storage for each pair.
-		dstParallelTotal := make(map[graph.NodeID]int64, end-start)
-		for pos := start; pos < end; pos++ {
-			dstParallelTotal[edges[pos]]++
+		if positionalReady {
+			sc.dstSeen[dst]++
 		}
-		dstSeen := make(map[graph.NodeID]int64, len(dstParallelTotal))
-		// slotLabsReady defers the adjacency read until a slot of THIS source
-		// actually needs it: a Cypher-built graph resolves every slot by handle and
-		// must not pay for a resolution it never reaches.
-		slotLabsReady := false
-		for pos := start; pos < end; pos++ {
-			dst := edges[pos]
-			dstStr, ok := mapper.Resolve(dst)
-			if !ok {
-				continue
-			}
-			dstSeen[dst]++
-			var labels []string
-			// slotResolved records that this position was matched to a real
-			// column-typed adjacency slot below, so its type — including the absence
-			// of one — is settled and the positional inference must not guess.
-			slotResolved := false
-			if pos < uint64(len(handles)) && handles[pos] != 0 {
-				// Stable-handle path: resolve this slot's type by the
-				// explicit per-edge handle read directly from the CSR
-				// position. This is delete-stable — removing a parallel
-				// sibling compacts the neighbour slice but the surviving
-				// slot keeps its original handle, so the type no longer
-				// mis-maps the way the positional idx did (Match2 [6] /
-				// Match7 [29]).
-				labels = g.EdgeLabelsByHandle(srcStr, dstStr, handles[pos])
-			}
-			if len(labels) == 0 {
-				// PER-SLOT resolution, for a slot with no by-handle type record.
-				// This CSR position is the n-th of its pair to reach here, so it
-				// resolves against the n-th COLUMN-TYPED adjacency slot of that pair
-				// and asks lpg only what THAT slot carries — its own inline type plus
-				// the pair's overflow.
-				//
-				// The pair's derived union is deliberately NOT consulted. It reports
-				// every type any parallel slot of the pair carries, so on a pair
-				// holding one :K edge and one untyped edge it matched `[r:K]` twice
-				// where once is correct, and on a 12-slot self-loop with a single
-				// typed slot it matched twelve times where once is correct (rmp
-				// #2258). Resolving per slot is also what makes this agree with the
-				// typed-degree rewrite, which resolves per slot in
-				// [lpg.Graph.slotCarriesType]: the two now answer the same question
-				// from the same state, so a count and its enumeration cannot differ.
-				//
-				// It runs BEFORE the positional inference below, and that order is
-				// load-bearing. The positional index is a per-PAIR ordinal: on a
-				// multigraph pair mixing a Cypher-created slot with a Go-API slot it
-				// handed the Go-API slot the CREATE's per-instance type, so an
-				// untyped edge matched `[r:K]` and an edge typed :K by the Go API
-				// reported the sibling's :M. The column is the authoritative source
-				// for such a slot, so it decides first — and it decides even when the
-				// type it finds is NOT accepted, because "this slot is an :M" is an
-				// answer, not a failure to resolve.
-				//
-				// A position beyond the pair's column-typed slots (possible only
-				// against a snapshot the adjacency has since changed under) resolves
-				// as carrying no inline type, which the overflow half of
-				// ForEachSlotRelTypeByID may still qualify — never as inheriting a
-				// sibling's type.
-				if !slotLabsReady {
-					if slotLabs == nil {
-						slotLabs = make(map[graph.NodeID][]uint32)
-						slotFallbackSeen = make(map[graph.NodeID]int)
-					}
-					slotLabsTouched = fillSlotLabs(
-						g, graph.NodeID(srcID), slotLabs, slotFallbackSeen, slotLabsTouched)
-					slotLabsReady = true
-				}
-				var encoded uint32
-				// The counter is advanced only for a pair that HAS column-typed
-				// slots, which keeps slotFallbackSeen's key set inside
-				// slotLabsTouched and so resettable in O(touched).
-				if ls := slotLabs[dst]; len(ls) > 0 {
-					if k := slotFallbackSeen[dst]; k < len(ls) {
-						encoded = ls[k]
-						slotResolved = true
-					}
-					slotFallbackSeen[dst]++
-				}
-				slotTypes = slotTypes[:0]
-				g.ForEachSlotRelTypeByID(graph.NodeID(srcID), dst, encoded, appendSlotType)
-				labels = slotTypes
-			}
-			if len(labels) == 0 && !slotResolved {
-				// Positional inference, reached only when the position could not be
-				// matched to a column-typed adjacency slot at all — legacy pre-handle
-				// storage, and a CSR snapshot the adjacency has since changed under.
-				//
-				// A position that WAS matched to such a slot never gets here, and that
-				// is the point: the slot's own emptiness means the relationship has no
-				// type, and the per-PAIR ordinal would answer with a sibling CREATE's
-				// type instead. On a multigraph pair mixing a Cypher-created :K slot
-				// with an untyped Go-API slot that made the untyped edge match
-				// `[r:K]`, so a bare MATCH counted two where one was correct.
-				totalCreates := g.EdgeCreateCount(srcStr, dstStr)
-				parallel := dstParallelTotal[dst]
-				if parallel >= totalCreates && totalCreates > 0 {
-					// Multigraph: one CSR slot per CREATE. Use the
-					// per-instance label set for this specific slot.
-					labels = g.EdgeLabelsAt(srcStr, dstStr, dstSeen[dst])
-				} else {
-					// Simple-graph (or no per-instance store): merge every
-					// instance's labels with the per-pair union so a
-					// filter targeting any CREATE's label still matches.
-					labels = collectAllInstanceLabels(g, srcStr, dstStr, totalCreates)
-				}
-			}
-			if len(labels) == 0 {
-				// The slot carries no relationship type at all, so it matches no
-				// type filter and is not visited.
-				continue
-			}
-			// The ONLY step removed from the original [buildEdgeTypeFilter] is the
-			// accept-set filtering that used to happen here. Everything above is the
-			// resolution, verbatim, and the caller now decides what to do with the
-			// answer — which is what makes the result type-set INDEPENDENT.
+		var labels []string
+		// slotResolved records that this position was matched to a real
+		// column-typed adjacency slot below, so its type — including the absence
+		// of one — is settled and the positional inference must not guess.
+		slotResolved := false
+		if pos < uint64(len(handles)) && handles[pos] != 0 {
+			// Stable-handle path: resolve this slot's type by the
+			// explicit per-edge handle read directly from the CSR
+			// position. This is delete-stable — removing a parallel
+			// sibling compacts the neighbour slice but the surviving
+			// slot keeps its original handle, so the type no longer
+			// mis-maps the way the positional idx did (Match2 [6] /
+			// Match7 [29]).
 			//
-			// types aliases a buffer reused across slots (see slotTypes above), so a
-			// visitor that keeps it must copy.
-			visit(pos, labels)
+			// It reads by NodeID: the Mapper is append-only and bijective, so
+			// src and dst are exactly what their resolved keys look up to,
+			// and the key round trip bought nothing (rmp #2888).
+			labels = g.EdgeLabelsByHandleID(src, dst, handles[pos])
 		}
+		if len(labels) == 0 {
+			// PER-SLOT resolution, for a slot with no by-handle type record.
+			// This CSR position is the n-th of its pair to reach here, so it
+			// resolves against the n-th COLUMN-TYPED adjacency slot of that pair
+			// and asks lpg only what THAT slot carries — its own inline type plus
+			// the pair's overflow.
+			//
+			// The pair's derived union is deliberately NOT consulted. It reports
+			// every type any parallel slot of the pair carries, so on a pair
+			// holding one :K edge and one untyped edge it matched `[r:K]` twice
+			// where once is correct, and on a 12-slot self-loop with a single
+			// typed slot it matched twelve times where once is correct (rmp
+			// #2258). Resolving per slot is also what makes this agree with the
+			// typed-degree rewrite, which resolves per slot in
+			// [lpg.Graph.slotCarriesType]: the two now answer the same question
+			// from the same state, so a count and its enumeration cannot differ.
+			//
+			// It runs BEFORE the positional inference below, and that order is
+			// load-bearing. The positional index is a per-PAIR ordinal: on a
+			// multigraph pair mixing a Cypher-created slot with a Go-API slot it
+			// handed the Go-API slot the CREATE's per-instance type, so an
+			// untyped edge matched `[r:K]` and an edge typed :K by the Go API
+			// reported the sibling's :M. The column is the authoritative source
+			// for such a slot, so it decides first — and it decides even when the
+			// type it finds is NOT accepted, because "this slot is an :M" is an
+			// answer, not a failure to resolve.
+			//
+			// A position beyond the pair's column-typed slots (possible only
+			// against a snapshot the adjacency has since changed under) resolves
+			// as carrying no inline type, which the overflow half of
+			// ForEachSlotRelTypeByID may still qualify — never as inheriting a
+			// sibling's type.
+			if !slotLabsReady {
+				if sc.slotLabs == nil {
+					sc.slotLabs = make(map[graph.NodeID][]uint32)
+					sc.slotFallbackSeen = make(map[graph.NodeID]int)
+				}
+				sc.slotLabsTouched = fillSlotLabs(
+					g, src, sc.slotLabs, sc.slotFallbackSeen, sc.slotLabsTouched)
+				slotLabsReady = true
+			}
+			var encoded uint32
+			// The counter is advanced only for a pair that HAS column-typed
+			// slots, which keeps sc.slotFallbackSeen's key set inside
+			// sc.slotLabsTouched and so resettable in O(touched).
+			if ls := sc.slotLabs[dst]; len(ls) > 0 {
+				if k := sc.slotFallbackSeen[dst]; k < len(ls) {
+					encoded = ls[k]
+					slotResolved = true
+				}
+				sc.slotFallbackSeen[dst]++
+			}
+			sc.slotTypes = sc.slotTypes[:0]
+			g.ForEachSlotRelTypeByID(src, dst, encoded, sc.appendSlotType)
+			labels = sc.slotTypes
+		}
+		if len(labels) == 0 && !slotResolved {
+			// Positional inference, reached only when the position could not be
+			// matched to a column-typed adjacency slot at all — legacy pre-handle
+			// storage, and a CSR snapshot the adjacency has since changed under.
+			//
+			// A position that WAS matched to such a slot never gets here, and that
+			// is the point: the slot's own emptiness means the relationship has no
+			// type, and the per-PAIR ordinal would answer with a sibling CREATE's
+			// type instead. On a multigraph pair mixing a Cypher-created :K slot
+			// with an untyped Go-API slot that made the untyped edge match
+			// `[r:K]`, so a bare MATCH counted two where one was correct.
+			if !positionalReady {
+				sc.startPositionalCounts(mapper, edges, pos)
+				positionalReady = true
+			}
+			totalCreates := g.EdgeCreateCount(srcStr, dstStr)
+			parallel := sc.dstParallelTotal[dst]
+			if parallel >= totalCreates && totalCreates > 0 {
+				// Multigraph: one CSR slot per CREATE. Use the
+				// per-instance label set for this specific slot.
+				labels = g.EdgeLabelsAt(srcStr, dstStr, sc.dstSeen[dst])
+			} else {
+				// Simple-graph (or no per-instance store): merge every
+				// instance's labels with the per-pair union so a
+				// filter targeting any CREATE's label still matches.
+				labels = collectAllInstanceLabels(g, srcStr, dstStr, totalCreates)
+			}
+		}
+		if len(labels) == 0 {
+			// The slot carries no relationship type at all, so it matches no
+			// type filter and is not visited.
+			continue
+		}
+		// The ONLY step removed from the original [buildEdgeTypeFilter] is the
+		// accept-set filtering that used to happen here. Everything above is the
+		// resolution, verbatim, and the caller now decides what to do with the
+		// answer — which is what makes the result type-set INDEPENDENT.
+		//
+		// types aliases a buffer reused across slots (see sc.slotTypes above), so a
+		// visitor that keeps it must copy.
+		visit(base+pos, labels)
+	}
+	if positionalReady {
+		sc.endPositionalCounts(edges)
 	}
 }
 

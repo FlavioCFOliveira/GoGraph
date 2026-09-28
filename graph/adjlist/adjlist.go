@@ -36,6 +36,7 @@ import (
 	"context"
 	"errors"
 	"iter"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"unsafe"
@@ -348,10 +349,46 @@ type adjShard[W any] struct {
 }
 
 // shardSlots holds the slot-pointer slice for a shard. It is replaced
-// atomically when the shard grows.
+// atomically when the shard grows, and whenever a write must not touch a
+// version that a [Snapshot] has pinned.
+//
+// # Pin-gated copy-on-write (rmp #2882)
+//
+// A write outside a commit window used to clone the WHOLE slot array, 8·V/256
+// bytes per write, so building a graph by unbracketed writes cost O(E·V):
+// 170.6 GiB, 44% of every byte the examples laboratory allocated
+// (docs/campaign-waste-hunt-2026-09-24.md, F1). The clone exists for one
+// reader only: a [Snapshot] must see its pinned version unchanged. Every other
+// reader — [loadEntry], the MVCC as-of accessors, the non-blocking
+// checkpointer — is already sound against an in-place atomic slot store, which
+// is exactly what a commit window's builder does (see [loadEntry] and
+// [AdjList.storeEntry]). No production code pins a Snapshot.
+//
+// So an unbracketed write stores the slot IN PLACE unless the version has been
+// pinned, and clones only then. state arbitrates between a writer and
+// [AdjList.PinSnapshot] without a lock: 0 = writable, 1 = an in-place store is
+// in progress, 2 = frozen by a pin, forever. A writer claims 0→1, stores, and
+// releases 1→0; a pinner claims 0→2, waiting out a claimed store. A pin
+// therefore either precedes a store (the writer's claim fails and it clones) or
+// follows it (the pin captures the stored slot), and a frozen version is never
+// written again.
+//
+// state shares a cache line with the slots header readers load, deliberately.
+// A writer's claim invalidates that line once per write, exactly as the
+// slotsRef store of the clone it replaces invalidated the line readers load
+// slotsRef from. Padding state onto its own 128-byte line was measured under
+// rmp #2882 at +6-12% on LoadEntry with no concurrent writer at all: it moves
+// shardSlots from the 32-byte size class to the 144-byte one.
 type shardSlots struct {
 	slots []unsafe.Pointer // each element holds *adjEntry[W]
+	state atomic.Uint32
 }
+
+const (
+	slotsWritable uint32 = iota
+	slotsStoring
+	slotsFrozen
+)
 
 // adjEntry is an immutable snapshot of a node's outgoing adjacency.
 // Once an entry is published to a shard slot via atomic.StorePointer
@@ -2507,10 +2544,11 @@ func loadEntry[W any](s *adjShard[W], intraIdx uint64) *adjEntry[W] {
 //
 // # Immutable-version invariant (task #1526, F3.2)
 //
-// A [shardSlots] value, once FROZEN — published into s.slotsRef and no longer
-// the active commit window's private builder — is NEVER mutated in place again;
-// a write to a frozen shard produces a fresh slot array. This per-shard
-// copy-on-write is what makes a pinned adjacency version ([AdjList.PinSnapshot])
+// A [shardSlots] value, once FROZEN by [AdjList.PinSnapshot], is NEVER mutated in
+// place again; a write to a frozen shard produces a fresh slot array. Since
+// rmp #2882 a version is frozen by a PIN, not by publication: an unbracketed
+// write to an unpinned version stores its slot in place (see [shardSlots]).
+// This per-shard copy-on-write is what makes a pinned adjacency version
 // stable for a reader's lifetime: the per-shard atomic.Pointer[shardSlots] is
 // itself the published immutable-version root for this stage (no separate
 // Snapshot object). The previous implementation mutated the live shared slot
@@ -2538,8 +2576,9 @@ func loadEntry[W any](s *adjShard[W], intraIdx uint64) *adjEntry[W] {
 // version chain — never on a lock.
 //
 // [AdjList.EndCommit] freezes every dirty builder (clears s.building),
-// after which it is immutable forever. Outside any window every write is its
-// own 1-op window: clone-and-publish once (correct, just no dedup).
+// after which it is never written through the builder again. Outside any
+// window a write stores its slot in place into the published array, or clones
+// it when a Snapshot has pinned it (rmp #2882; see [shardSlots]).
 //
 // # F3.5 / #1671 UNWIND ITEM — RESOLVED BY VERSIONING, NOT BY REMOVAL
 //
@@ -2686,9 +2725,23 @@ func (a *AdjList[N, W]) storeEntry(s *adjShard[W], intraIdx uint64, entry *adjEn
 		return nil
 	}
 
-	// First touch of this shard (in a window or not): clone the frozen array,
-	// set the slot in the clone, publish it. Within a window the clone becomes
-	// the shard's private builder for the rest of the window.
+	if !inWindow && base.state.CompareAndSwap(slotsWritable, slotsStoring) {
+		// Unbracketed write to a version no Snapshot has pinned: store the slot
+		// in place instead of cloning the array (rmp #2882; see [shardSlots]).
+		// Sound for every lock-free reader by the same four properties as the
+		// in-window builder mutation above: an atomic store paired with the
+		// readers' atomic load, an immutable entry, an array never resized in
+		// place, and the version chain for isolation. The claim keeps a
+		// concurrent PinSnapshot from freezing this version mid-store.
+		atomic.StorePointer(&base.slots[intraIdx], unsafe.Pointer(entry)) //nolint:gosec // atomic publication of *adjEntry[W] into an unpinned published array
+		base.state.Store(slotsWritable)
+		return nil
+	}
+
+	// First touch of this shard in a window, or an unbracketed write to a
+	// version a Snapshot has pinned: clone the frozen array, set the slot in
+	// the clone, publish it. Within a window the clone becomes the shard's
+	// private builder for the rest of the window.
 	next := &shardSlots{slots: make([]unsafe.Pointer, len(base.slots))}
 	copy(next.slots, base.slots)
 	next.slots[intraIdx] = unsafe.Pointer(entry) //nolint:gosec // typed publication of *adjEntry[W] into a fresh clone
@@ -3079,10 +3132,11 @@ func growShardLocked[W any](minLen uint64, maxCap int, cur *shardSlots) (*shardS
 
 // Snapshot is an immutable, pinned view of an [AdjList]'s adjacency captured at
 // one instant: it holds, per shard, the [shardSlots] version that was current
-// when the snapshot was taken (task #1526, F3.2). Because every adjacency write
-// now publishes a FRESH immutable shardSlots (copy-on-write — see [storeEntry])
-// rather than mutating the published one in place, the per-shard versions a
-// Snapshot captured stay valid and unchanged for the snapshot's whole lifetime,
+// when the snapshot was taken (task #1526, F3.2). Because pinning FREEZES each
+// captured version, and a write to a frozen version publishes a FRESH
+// shardSlots (copy-on-write — see [shardSlots] and [storeEntry]) rather than
+// mutating it in place, the per-shard versions a Snapshot captured stay valid
+// and unchanged for the snapshot's whole lifetime,
 // even while concurrent writers publish newer versions the Snapshot does not
 // see. The Go garbage collector reclaims a retired version once the last
 // Snapshot (and any other reader) holding it is released — the runtime supplies
@@ -3126,6 +3180,13 @@ func growShardLocked[W any](minLen uint64, maxCap int, cur *shardSlots) (*shardS
 // The adjacency read is 0.62% of read-path CPU and holds 0% of mutex delay at
 // every concurrency level, so there is no contention here to relieve.
 //
+// Since rmp #2882 a pin also FREEZES each captured version, which makes it
+// dearer: 308.1 ns to 515.1 ns per pin on a 50 000-node graph, same 2304 B
+// (BenchmarkSlotCOW_PinSnapshot, interleaved, n=8), and the first unbracketed
+// write to each shard after a pin clones that shard's slot array once. That is
+// the price of unbracketed writes storing in place the rest of the time, and
+// no production code pins.
+//
 // The type is retained deliberately, not as dead code: it is a correct
 // lock-free topology pin. It is simply not the instrument for an isolation job
 // the version chain already does, and wiring reads onto it as it stands would
@@ -3145,22 +3206,49 @@ type Snapshot[N comparable, W any] struct {
 }
 
 // PinSnapshot captures the current per-shard adjacency versions and returns an
-// immutable [Snapshot] over them. It performs one atomic load per shard
-// (shardCount loads total — 256, measured at 353.2 ns and 2304 B per pin under
-// rmp #2704) and allocates a single Snapshot; it takes no lock and never blocks
-// a writer. A nil shard version (a shard that has never been
+// immutable [Snapshot] over them. Per shard it loads the current version and
+// FREEZES it (see [shardSlots]): the next unbracketed write to that shard
+// clones instead of storing in place, so the captured version stays unchanged
+// for the Snapshot's lifetime. It allocates a single Snapshot; it takes no lock
+// and never blocks a writer. A nil shard version (a shard that has never been
 // written) is captured as nil and read back as an empty adjacency, so an empty
 // or partially-populated graph is handled without special-casing.
 //
-// PinSnapshot is lock-free and safe for concurrent use. The returned Snapshot
-// is valid until it is dropped; the captured versions are kept alive by the
-// reference and reclaimed by GC afterwards.
+// PinSnapshot is safe for concurrent use. It never blocks a writer, but it may
+// spin while a writer finishes one in-place slot store on a shard it is
+// freezing (rmp #2882): the wait is bounded by that single store, not by any
+// lock. The returned Snapshot is valid until it is dropped; the captured
+// versions are kept alive by the reference and reclaimed by GC afterwards.
 func (a *AdjList[N, W]) PinSnapshot() *Snapshot[N, W] {
 	snap := &Snapshot[N, W]{mapper: a.mapper, cfg: a.cfg}
 	for i := range a.shards {
-		snap.shards[i] = a.shards[i].slotsRef.Load()
+		snap.shards[i] = freezeCurrent(&a.shards[i].slotsRef)
 	}
 	return snap
+}
+
+// freezeCurrent loads the version published in ref and freezes it, returning
+// it. A version replaced after the load is returned as it is: a writer only
+// ever stores into the version it loaded from slotsRef under the shard mutex,
+// and once that version is frozen its claim fails, so the version returned
+// here is never written again either way.
+func freezeCurrent(ref *atomic.Pointer[shardSlots]) *shardSlots {
+	for {
+		ss := ref.Load()
+		if ss == nil {
+			return nil
+		}
+		switch ss.state.Load() {
+		case slotsFrozen:
+			return ss
+		case slotsWritable:
+			if ss.state.CompareAndSwap(slotsWritable, slotsFrozen) {
+				return ss
+			}
+		}
+		// A writer holds the claim for one atomic store; let it finish.
+		runtime.Gosched()
+	}
 }
 
 // loadEntryPinned resolves the entry for id through the pinned per-shard

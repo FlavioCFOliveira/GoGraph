@@ -52,6 +52,10 @@ type Apply struct {
 	outerRow Row // current outer row; nil when no outer row has been fetched
 	outBuf   []expr.Value
 	outerEOS bool // true after outer plan is exhausted
+
+	// pull receives every child Next call of this operator (see nextRow), so the
+	// per-row pull does not heap-allocate its receiver.
+	pull Row
 }
 
 // NewApply creates an Apply operator.
@@ -93,8 +97,7 @@ func (op *Apply) Next(out *Row) (bool, error) {
 
 		// If we have an active outer row, try to get the next inner row.
 		if op.outerRow != nil {
-			innerRow := Row{}
-			ok, err := op.inner.Next(&innerRow)
+			innerRow, ok, err := nextRow(op.inner, &op.pull)
 			if err != nil {
 				return false, err
 			}
@@ -111,8 +114,7 @@ func (op *Apply) Next(out *Row) (bool, error) {
 		}
 
 		// Pull the next outer row.
-		var outerRow Row
-		ok, err := op.outer.Next(&outerRow)
+		outerRow, ok, err := nextRow(op.outer, &op.pull)
 		if err != nil {
 			return false, err
 		}

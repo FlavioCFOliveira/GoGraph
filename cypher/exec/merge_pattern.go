@@ -243,6 +243,10 @@ type MergePattern struct {
 	// builder (see [MergePattern.WithLeadingClause]), never inferred at runtime
 	// from whether rows arrived (rmp #2512).
 	leadingClause bool
+
+	// pull receives every child Next call of this operator (see nextRow), so the
+	// per-row pull does not heap-allocate its receiver.
+	pull Row
 }
 
 // NewMergePattern creates an empty MergePattern; call AddBoundNode/
@@ -615,8 +619,7 @@ func (op *MergePattern) Next(out *Row) (bool, error) {
 		if op.done {
 			return false, nil
 		}
-		var childRow Row
-		ok, err := op.child.Next(&childRow)
+		childRow, ok, err := nextRow(op.child, &op.pull)
 		if err != nil {
 			return false, err
 		}

@@ -535,6 +535,13 @@ func TestSubqueryAdjacencyRebuild_Attribution(t *testing.T) {
 // the first, and this test is written to fail if the first two ever stop holding:
 // the answer assertion catches a stale serve, and the lookup assertion catches the
 // cache being consulted here at all.
+//
+// # Since rmp #2883
+//
+// The subquery hop is INCOMING. A write statement's forward hop now reads the
+// transaction's own adjacency per source and builds nothing, so it no longer
+// reaches the route this test watches; the incoming form still does, and the
+// forward form is asserted separately to answer the same without any build.
 func TestSubqueryAdjacencyRebuild_WritePathStaysUncached(t *testing.T) {
 	const n = 4
 	ctx := context.Background()
@@ -558,7 +565,7 @@ func TestSubqueryAdjacencyRebuild_WritePathStaysUncached(t *testing.T) {
 	pairBefore := csrPairUncachedBuildCount.Load()
 	setMetricsBackendForTest(probe)
 	res, err := e.RunAny(ctx,
-		`MATCH (a:P) CREATE (a)-[:Z]->(a) WITH a WHERE EXISTS { MATCH (a)-[:Z]->(:P) } RETURN count(*) AS c`, nil)
+		`MATCH (a:P) CREATE (a)-[:Z]->(a) WITH a WHERE EXISTS { MATCH (a)<-[:Z]-(:P) } RETURN count(*) AS c`, nil)
 	if err != nil {
 		setMetricsBackendForTest(nil)
 		t.Fatalf("write statement: %v", err)
@@ -596,6 +603,29 @@ func TestSubqueryAdjacencyRebuild_WritePathStaysUncached(t *testing.T) {
 			"is not exercising the path it claims to", builds)
 	}
 	t.Logf("write path: rows=%v builds=%d lookups=%s", got, builds, probe)
+
+	// The forward form, on a fresh fixture: same answer, no build (rmp #2883).
+	e2 := NewEngine(buildRebuildFixture(t, n))
+	before := csrPairUncachedBuildCount.Load()
+	res, err = e2.RunAny(ctx,
+		`MATCH (a:P) CREATE (a)-[:Z]->(a) WITH a WHERE EXISTS { MATCH (a)-[:Z]->(:P) } RETURN count(*) AS c`, nil)
+	if err != nil {
+		t.Fatalf("forward write statement: %v", err)
+	}
+	got = got[:0]
+	for res.Next() {
+		got = append(got, fmt.Sprint(res.Record()))
+	}
+	if err := res.Err(); err != nil {
+		t.Fatalf("forward write statement Err: %v", err)
+	}
+	_ = res.Close()
+	if len(got) != 1 || got[0] != want {
+		t.Errorf("forward form: got %v, want [%s]", got, want)
+	}
+	if d := csrPairUncachedBuildCount.Load() - before; d != 0 {
+		t.Errorf("forward form built %d CSR pair(s); want 0 (rmp #2883)", d)
+	}
 }
 
 // BenchmarkAdjacencyCacheLookup measures what rmp #2646 COSTS, as opposed to what

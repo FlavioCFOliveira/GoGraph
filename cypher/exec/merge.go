@@ -117,6 +117,10 @@ type Merge struct {
 	// whether rows arrived, because an exhausted child looks identical in both
 	// cases and guessing created data no statement asked for (rmp #2512).
 	leadingClause bool
+
+	// pull receives every child Next call of this operator (see nextRow), so the
+	// per-row pull does not heap-allocate its receiver.
+	pull Row
 }
 
 // mergeAction is a pre-parsed ON CREATE / ON MATCH SET item. Two shapes
@@ -563,8 +567,7 @@ func (op *Merge) Next(out *Row) (bool, error) {
 			return false, nil
 		}
 		// Drained — pull the next child row, run the merge cycle.
-		var childRow Row
-		ok, err := op.child.Next(&childRow)
+		childRow, ok, err := nextRow(op.child, &op.pull)
 		if err != nil {
 			return false, err
 		}

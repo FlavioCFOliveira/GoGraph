@@ -236,9 +236,13 @@ func isRegexCombiner(toks []antlr.Token, i int) bool {
 }
 
 // recoverParseScript calls p.Script() and converts any runtime panic into a
-// *ParseError. Incomplete WITH clauses and certain pipe-in-arg expressions
-// drive ANTLR's DefaultErrorStrategy into an unchecked type assertion in
-// antlr4-go v4.13.1; without this guard the process crashes.
+// *ParseError. antlr4-go v4.13.1 asserts, unchecked, that the invoking state
+// of every rule context starts with a RuleTransition, both in full-context
+// prediction and in DefaultErrorStrategy's recovery. The hand-written rules in
+// gen-patches.patch violated it until rmp #2899, so incomplete WITH clauses,
+// reduce() and cyclic pattern comprehensions beneath a WITH crashed the
+// process. The guard stays so that any remaining runtime panic in the
+// generated parser is reported as a *ParseError instead.
 func recoverParseScript(p *gen.CypherParser) (tree gen.IScriptContext, err error) {
 	defer func() {
 		if r := recover(); r != nil {

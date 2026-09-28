@@ -71,6 +71,10 @@ type DeleteNode struct {
 	relEndpointsFn RelEndpointFn
 	reg            *ConstraintRegistry // nil means no registry maintenance
 	nodeVar        string
+
+	// pull receives every child Next call of this operator (see nextRow), so the
+	// per-row pull does not heap-allocate its receiver.
+	pull Row
 }
 
 // NewDeleteNode creates a DeleteNode operator.
@@ -128,8 +132,7 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 		return false, err
 	}
 
-	var childRow Row
-	ok, err := op.child.Next(&childRow)
+	childRow, ok, err := nextRow(op.child, &op.pull)
 	if err != nil {
 		return false, err
 	}
@@ -447,6 +450,10 @@ type DeleteRelationship struct {
 	schema  map[string]int
 	relCols *RelCols // non-nil enables instance-precise by-handle removal
 	relVar  string
+
+	// pull receives every child Next call of this operator (see nextRow), so the
+	// per-row pull does not heap-allocate its receiver.
+	pull Row
 }
 
 // NewDeleteRelationship creates a DeleteRelationship operator.
@@ -487,8 +494,7 @@ func (op *DeleteRelationship) Next(out *Row) (bool, error) {
 		return false, err
 	}
 
-	var childRow Row
-	ok, err := op.child.Next(&childRow)
+	childRow, ok, err := nextRow(op.child, &op.pull)
 	if err != nil {
 		return false, err
 	}

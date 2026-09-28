@@ -1,9 +1,13 @@
 package cypher
 
 import (
+	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/FlavioCFOliveira/GoGraph/cypher/ast"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/funcs"
 )
 
 // nowAwareRegistry wraps an [expr.FunctionRegistry] and overrides the
@@ -19,16 +23,75 @@ import (
 // A nowAwareRegistry is constructed once per Engine.Run / Engine.RunInTx call
 // via [newNowAwareRegistry] and is never shared across queries, so r.now is
 // effectively immutable after construction.
+//
+// Because it has exactly one statement's lifetime, it also hosts that
+// statement's call-site table (rmp #2891): the evaluator memoises, per
+// [ast.FunctionInvocation], the resolved function and — for a statement-constant
+// call such as date($ref) — its value (see cypher/expr/callsite.go). The table
+// is bounded by [maxStatementCallSites].
+//
+// # Concurrency
+//
+// Safe for concurrent use by the goroutines evaluating one statement (the
+// parallel scan tier shares it): delegate, now and foldsBuiltins are written
+// only by the constructor or [nowAwareRegistry.bind], before the statement's
+// plan is built, and the call-site table is a [sync.Map] with an atomic bound.
 type nowAwareRegistry struct {
 	delegate expr.FunctionRegistry
 	now      time.Time
+	// foldsBuiltins reports that delegate resolves the openCypher built-ins
+	// ([funcs.DefaultRegistry], optionally behind the engine's graph-aware
+	// overlay), the precondition for folding a call's value.
+	foldsBuiltins bool
+	sites         sync.Map // *ast.FunctionInvocation -> evaluator-owned memo
+	nSites        atomic.Int32
+}
+
+// maxStatementCallSites bounds one statement's call-site table. A statement's
+// call sites are the FunctionInvocation nodes of its plan, so the bound is
+// reached only by a pathological query; past it the remaining sites are
+// evaluated unmemoised, exactly as before the table existed.
+const maxStatementCallSites = 1024
+
+// LoadCallSite implements the evaluator's call-site host capability.
+func (r *nowAwareRegistry) LoadCallSite(key *ast.FunctionInvocation) (any, bool) {
+	return r.sites.Load(key)
+}
+
+// StoreCallSite implements the evaluator's call-site host capability: it keeps
+// the first site stored for key and returns it, or returns nil once the table
+// holds [maxStatementCallSites] entries.
+func (r *nowAwareRegistry) StoreCallSite(key *ast.FunctionInvocation, site any) any {
+	if r.nSites.Add(1) > maxStatementCallSites {
+		r.nSites.Add(-1)
+		return nil
+	}
+	actual, loaded := r.sites.LoadOrStore(key, site)
+	if loaded {
+		r.nSites.Add(-1)
+	}
+	return actual
+}
+
+// FoldsStatementConstants implements the evaluator's call-site host capability.
+func (r *nowAwareRegistry) FoldsStatementConstants() bool { return r.foldsBuiltins }
+
+// resolvesBuiltins reports whether reg is [funcs.DefaultRegistry], directly or
+// behind the engine's [graphAwareRegistry] overlay, whose overrides (startNode,
+// endNode) are not statement-constant functions.
+func resolvesBuiltins(reg expr.FunctionRegistry) bool {
+	if ga, ok := reg.(*graphAwareRegistry); ok {
+		reg = ga.delegate
+	}
+	fr, ok := reg.(*funcs.Registry)
+	return ok && fr == funcs.DefaultRegistry
 }
 
 // newNowAwareRegistry wraps delegate, pinning t as the statement-frozen "now"
 // for the five temporal constructors. t should be time.Now() captured at the
 // start of the query.
 func newNowAwareRegistry(delegate expr.FunctionRegistry, t time.Time) expr.FunctionRegistry {
-	return &nowAwareRegistry{delegate: delegate, now: t.UTC()}
+	return &nowAwareRegistry{delegate: delegate, now: t.UTC(), foldsBuiltins: resolvesBuiltins(delegate)}
 }
 
 // bind is [newNowAwareRegistry] for a wrapper that already has storage — the one
@@ -37,9 +100,18 @@ func newNowAwareRegistry(delegate expr.FunctionRegistry, t time.Time) expr.Funct
 //
 // The returned registry aliases r, so a caller must not bind the same wrapper
 // twice while a statement built on it is still running. The write path binds
-// once per statement, before the plan is built.
+// once per statement, before the plan is built. bind empties the call-site
+// table, so a wrapper re-bound for a later statement never serves the previous
+// statement's memo.
 func (r *nowAwareRegistry) bind(delegate expr.FunctionRegistry, t time.Time) expr.FunctionRegistry {
 	r.delegate, r.now = delegate, t.UTC()
+	r.foldsBuiltins = resolvesBuiltins(delegate)
+	// Guarded so a first bind — the common case, on a freshly allocated adapter —
+	// does not initialise the empty map: Clear would allocate its root node.
+	if r.nSites.Load() != 0 {
+		r.sites.Clear()
+		r.nSites.Store(0)
+	}
 	return r
 }
 

@@ -217,6 +217,8 @@ func tryBuildIndexNestedLoopJoin(
 	if err != nil {
 		return nil, false, err
 	}
+	// Resolve the arm's plans before the rebase below (see rowbind.go).
+	bopts.flushBindPlans()
 	for k, v := range innerSchema {
 		schema[k] = v + outerWidth
 	}

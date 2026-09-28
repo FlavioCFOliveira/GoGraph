@@ -96,6 +96,10 @@ type MergeRelationship struct {
 	// and (dst, src); the create path still uses the canonical (src, dst)
 	// direction.
 	undirected bool
+
+	// pull receives every child Next call of this operator (see nextRow), so the
+	// per-row pull does not heap-allocate its receiver.
+	pull Row
 }
 
 // MergeRelAction is a pre-parsed `SET <relVar>.<key> = <value>` item, or a
@@ -283,8 +287,7 @@ func (op *MergeRelationship) Next(out *Row) (bool, error) {
 		op.pendingRemaining--
 		return true, nil
 	}
-	var row Row
-	ok, err := op.child.Next(&row)
+	row, ok, err := nextRow(op.child, &op.pull)
 	if err != nil {
 		return false, err
 	}

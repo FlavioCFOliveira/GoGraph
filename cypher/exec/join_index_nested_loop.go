@@ -186,6 +186,10 @@ type IndexNestedLoopJoin struct {
 	outerEOS bool
 	// haveOuter records that outerRow holds a row whose inner side is mid-drain.
 	haveOuter bool
+
+	// pull receives every child Next call of this operator (see nextRow), so the
+	// per-row pull does not heap-allocate its receiver.
+	pull Row
 }
 
 // NewIndexNestedLoopJoin creates an IndexNestedLoopJoin.
@@ -268,8 +272,7 @@ func (op *IndexNestedLoopJoin) Next(out *Row) (bool, error) {
 // numeric key, the inner arm for any other kind, and nothing at all for a key
 // that cannot match.
 func (op *IndexNestedLoopJoin) advanceOuter() error {
-	var row Row
-	ok, err := op.outer.Next(&row)
+	row, ok, err := nextRow(op.outer, &op.pull)
 	if err != nil {
 		return err
 	}
@@ -400,8 +403,7 @@ func (op *IndexNestedLoopJoin) nextSeekHit(out *Row) (bool, error) {
 // key, applying exactly the equality the join's key semantics define.
 func (op *IndexNestedLoopJoin) nextFallback(out *Row) (bool, error) {
 	for {
-		var innerRow Row
-		ok, err := op.inner.Next(&innerRow)
+		innerRow, ok, err := nextRow(op.inner, &op.pull)
 		if err != nil {
 			return false, err
 		}

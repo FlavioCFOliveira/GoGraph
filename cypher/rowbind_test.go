@@ -476,19 +476,13 @@ func TestRowBindPlan_NameCollisionShapes(t *testing.T) {
 		},
 		{
 			// A name in edgeVarMeta AND in scalarCols: `r` is a relationship
-			// variable, and then an UNWIND element variable.
-			//
-			// THE EXPECTED VALUE IS A DEFECT, PINNED AS A DIFFERENTIAL, NOT AS A
-			// DESIRED ANSWER. The rows should be 1, 2, 3, 4 — the collected
-			// weights — and every one comes back NULL. It comes back NULL at
-			// f62a3c83 too, MEASURED, so it is not this change's doing and
-			// fixing it is not this change's scope; it is recorded separately.
-			// The case is here because it is the collision this change resolves,
-			// and pinning the behaviour is what makes a future change to it
-			// visible instead of silent.
-			"unwind_element_reuses_a_relationship_name_PREEXISTING_DEFECT",
+			// variable, and after the WITH an UNWIND element variable. The two
+			// are different variables (the WITH ends r's scope), so the element
+			// is the collected weight. Every row came back NULL while the
+			// relationship's facts outlived its scope; rmp #2906 scopes them.
+			"unwind_element_reuses_a_relationship_name",
 			`MATCH (:N)-[r:T]->() WITH collect(r.w) AS ws UNWIND ws AS r RETURN r ORDER BY r`,
-			[]string{"r=null", "r=null", "r=null", "r=null"},
+			[]string{"r=1", "r=2", "r=3", "r=4"},
 		},
 		{
 			// A named path and its relationship list bind under one plan, and the

@@ -888,7 +888,7 @@ func (a *analyser) checkLabelTargetIsNode(target ast.Expression, pos ast.Positio
 	if !ok {
 		return // undefined variable: reported separately by checkExpr
 	}
-	if sym.Type == "relationship" {
+	if isRelKind(sym.Type) {
 		a.error(labelOnNonNodeError(v.Name, "Relationship", pos))
 	}
 }
@@ -976,9 +976,12 @@ func (a *analyser) whereClause(w *ast.Where) {
 	// (Pattern1 [11] `WHERE (n)` where n is bound to a node).
 	if v, ok := w.Predicate.(*ast.Variable); ok {
 		if sym, ok := a.scope.Lookup(v.Name); ok {
-			switch sym.Type {
-			case "node", "relationship", "path":
-				a.error(invalidBooleanOperandError("WHERE", sym.Type+"-variable", v.Pos))
+			switch typ := sym.Type; typ {
+			case "node", "relationship", relListType, "path":
+				if typ == relListType {
+					typ = "relationship"
+				}
+				a.error(invalidBooleanOperandError("WHERE", typ+"-variable", v.Pos))
 			}
 		}
 	}
@@ -1166,21 +1169,52 @@ func (a *analyser) relPatternIntroduce(rp *ast.RelationshipPattern) {
 	// allows `WITH [r1, r2] AS rs MATCH (a)-[rs*]->(b)` so the var-length
 	// match is restricted to the supplied relationship list.
 	if sym, ok := a.scope.Lookup(name); ok {
-		if rp.Range != nil && (sym.Type == "value" || sym.Type == "list") {
-			return
-		}
-		if conflictsWith(sym.Type, "relationship") {
+		if relVarConflicts(sym.Type, rp) {
 			a.error(redeclarationError(name, rp.Pos))
 		}
 		return
 	}
-	a.error(a.scope.Define(name, rp.Pos, "relationship"))
+	a.error(a.scope.Define(name, rp.Pos, relVarType(rp)))
+}
+
+// relListType is the static type of a variable bound by a variable-length
+// relationship pattern (`[rs*]`): a List of relationships, not a relationship
+// (openCypher 9, "Variable-length pattern matching" — the variable is bound to
+// the list of relationships of the matched path; clauses/match/Match4.feature).
+// It is interchangeable with "relationship" in every check that predates it
+// (see [isRelKind]); only a check that must tell a list from a single
+// relationship reads it distinctly — [analyser.checkFunctionArgTypes] admits it
+// for size(), which is defined on lists (rmp #2912).
+const relListType = "relationship-list"
+
+// relVarType returns the static type a relationship pattern binds its variable
+// to: [relListType] for a variable-length pattern, "relationship" otherwise.
+func relVarType(rp *ast.RelationshipPattern) string {
+	if rp.Range != nil {
+		return relListType
+	}
+	return "relationship"
+}
+
+// isRelKind reports whether typ is "relationship" or [relListType].
+func isRelKind(typ string) bool {
+	return typ == "relationship" || typ == relListType
 }
 
 // pathPatternRefCheck walks a path pattern in pure-reference mode: every
 // named node and relationship variable must already be in scope, otherwise
 // KindUndefinedVar is reported. Used for bare WHERE pattern predicates
 // (existential checks) where openCypher forbids variable introduction.
+//
+// A variable that is in scope must also be usable in the position it fills,
+// exactly as [analyser.nodePatternIntroduce] and [analyser.relPatternIntroduce]
+// require of MATCH and of a pattern comprehension: a name statically known to
+// hold something else raises VariableTypeConflict (clauses/match/Match2.feature
+// [13] for a relationship variable bound to a value, Match1.feature [11] for a
+// node variable). Without this, `WITH 123 AS r MATCH (a), (b) WHERE
+// (a)-[r]->(b)` compiled and answered false while the comprehension over the same
+// pattern was rejected (rmp #2911). A name whose static type is unknown ("any"),
+// such as NULL or a parameter, is left to the runtime, as MATCH leaves it.
 func (a *analyser) pathPatternRefCheck(pp *ast.PathPattern) {
 	if pp == nil {
 		return
@@ -1191,17 +1225,36 @@ func (a *analyser) pathPatternRefCheck(pp *ast.PathPattern) {
 		}
 	}
 	for el := pp.Head; el != nil; el = el.Next {
-		if el.Node != nil && el.Node.Variable != nil {
-			if _, ok := a.scope.Lookup(*el.Node.Variable); !ok {
-				a.error(undefinedVarError(*el.Node.Variable, el.Node.Pos))
+		if np := el.Node; np != nil && np.Variable != nil {
+			sym, ok := a.scope.Lookup(*np.Variable)
+			switch {
+			case !ok:
+				a.error(undefinedVarError(*np.Variable, np.Pos))
+			case conflictsWith(sym.Type, "node"):
+				a.error(redeclarationError(*np.Variable, np.Pos))
 			}
 		}
-		if el.Relationship != nil && el.Relationship.Variable != nil {
-			if _, ok := a.scope.Lookup(*el.Relationship.Variable); !ok {
-				a.error(undefinedVarError(*el.Relationship.Variable, el.Relationship.Pos))
+		if rp := el.Relationship; rp != nil && rp.Variable != nil {
+			sym, ok := a.scope.Lookup(*rp.Variable)
+			switch {
+			case !ok:
+				a.error(undefinedVarError(*rp.Variable, rp.Pos))
+			case relVarConflicts(sym.Type, rp):
+				a.error(redeclarationError(*rp.Variable, rp.Pos))
 			}
 		}
 	}
+}
+
+// relVarConflicts reports whether a variable of static type have cannot fill the
+// relationship pattern rp. A variable-length pattern (`[rs*]`) also accepts a
+// "value" or "list" binding, the relationship list it is constrained to (`WITH
+// [r1, r2] AS rs MATCH (a)-[rs*]->(b)`).
+func relVarConflicts(have string, rp *ast.RelationshipPattern) bool {
+	if rp.Range != nil && (have == "value" || have == "list") {
+		return false
+	}
+	return conflictsWith(have, "relationship")
 }
 
 // conflictsWith reports whether an existing symbol of kind have can be
@@ -1209,6 +1262,9 @@ func (a *analyser) pathPatternRefCheck(pp *ast.PathPattern) {
 // (used for projection aliases and YIELD items where the static type is
 // unknown). Identical kinds never conflict.
 func conflictsWith(have, want string) bool {
+	if isRelKind(have) && isRelKind(want) {
+		return false
+	}
 	if have == want || have == "" || have == "any" || want == "any" {
 		return false
 	}
@@ -2692,6 +2748,9 @@ func containsNonDetCall(e ast.Expression) (ast.Position, bool) {
 //   - length(x):              rejects node, relationship (length is path-only here)
 //   - size(x):                rejects node, relationship, path (size is for strings / lists)
 //
+// A variable-length relationship variable ([relListType]) is rejected wherever
+// a relationship is, except by size(): it holds a List (rmp #2912).
+//
 // The first failing argument surfaces InvalidArgumentType; subsequent
 // arguments are not re-reported for the same invocation.
 func (a *analyser) checkFunctionArgTypes(fn *ast.FunctionInvocation) {
@@ -2724,10 +2783,17 @@ func (a *analyser) checkFunctionArgTypes(fn *ast.FunctionInvocation) {
 	if !exists {
 		return
 	}
-	if !reject[sym.Type] {
+	typ := sym.Type
+	if typ == relListType {
+		if name == "size" {
+			return
+		}
+		typ = "relationship"
+	}
+	if !reject[typ] {
 		return
 	}
-	a.error(invalidBooleanOperandError(name, sym.Type, v.Pos))
+	a.error(invalidBooleanOperandError(name, typ, v.Pos))
 }
 
 // checkCreateRelationshipTypes flags every relationship pattern in pat

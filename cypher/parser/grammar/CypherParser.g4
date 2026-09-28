@@ -258,7 +258,6 @@ atomicExpression
 
 listExpression
     : IN propertyOrLabelExpression
-    | LBRACK (expression? RANGE expression? | expression) RBRACK
     ;
 
 stringExpression
@@ -275,8 +274,14 @@ nullExpression
     : IS NOT? NULL_W
     ;
 
+// Local modification (rmp #2918): list subscripts and slices are postfix
+// operators of the operand, interleaved freely with property lookups and
+// followed by an optional label test, as in openCypher's
+// oC_NonArithmeticOperatorExpression. The leading `(DOT name)*` run stays in
+// propertyExpression, which REMOVE also uses and which must not accept a
+// subscript there.
 propertyOrLabelExpression
-    : propertyExpression nodeLabels?
+    : propertyExpression (LBRACK (expression? RANGE expression? | expression) RBRACK (DOT name)*)* nodeLabels?
     ;
 
 propertyExpression

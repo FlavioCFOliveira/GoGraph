@@ -1089,15 +1089,17 @@ type Graph[N comparable, W any] struct {
 // single bracket over a very large load blocks every other writer, and every
 // snapshot-taking reader, until fn returns.
 //
-// TWO mechanisms produce that saving, and they were separated by measurement
-// rather than assumed: forcing the adjacency's dedup off leaves the bracketed
-// arm at 0.921x instead of 0.758x, so roughly two thirds of the objects saved
-// are the per-edge slot-array clone and the remaining third is ONE shared MVCC
-// commit record in place of a fresh one per write. Both follow from the
-// transaction, which is why bracketing is the whole answer and no separate
-// bulk-import API is needed. graph/lpg/bulkload_bracket_test.go pins the
-// combined effect against a threshold chosen between those two regimes, so
-// losing the dedup alone fails the test.
+// TWO mechanisms produced that saving, and they were separated by measurement
+// rather than assumed: forcing the adjacency's dedup off left the bracketed arm
+// at 0.921x instead of 0.758x, so roughly two thirds of the objects saved were
+// the per-edge slot-array clone and the remaining third is ONE shared MVCC
+// commit record in place of a fresh one per write. The table above predates
+// rmp #2882, which removed the first mechanism's cause: an unbracketed write
+// now stores its slot in place unless a Snapshot has pinned the array, so it
+// no longer clones, and the bracket's remaining saving is the commit record
+// (0.911x objects on the graph/lpg/bulkload_bracket_test.go fixture).
+// That test pins it against a threshold between that regime and no bracket at
+// all, so losing the bracket fails the test.
 //
 // Two cautions:
 //

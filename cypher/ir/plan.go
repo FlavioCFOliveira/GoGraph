@@ -1390,7 +1390,10 @@ func (s *SubqueryCount) Vars() []string { return nil }
 // RollUpApply evaluates Inner for each outer row and collects all Inner result
 // rows into a list, which is bound to CollectVar in the output row.
 type RollUpApply struct {
-	// Outer is the driving subplan.
+	// Outer is the driving subplan. It is nil when the comprehension sits in
+	// the leading clause of a query (`RETURN [(a)-->(b) | b]`): there is no
+	// preceding pipeline, and the physical builder drives the comprehension
+	// from a single empty row.
 	Outer LogicalPlan
 	// Inner is the correlated subplan whose results are collected.
 	Inner LogicalPlan
@@ -1413,8 +1416,13 @@ func NewRollUpApply(outer, inner LogicalPlan, collectVar string) *RollUpApply {
 // Children implements LogicalPlan. Returns [Outer, Inner].
 func (r *RollUpApply) Children() []LogicalPlan { return []LogicalPlan{r.Outer, r.Inner} }
 
-// Vars implements LogicalPlan.
+// Vars implements LogicalPlan. It returns the outer variables followed by
+// CollectVar; with a nil Outer (a leading-clause comprehension) it returns
+// CollectVar alone.
 func (r *RollUpApply) Vars() []string {
+	if r.Outer == nil {
+		return []string{r.CollectVar}
+	}
 	seen := make(map[string]struct{})
 	var out []string
 	for _, v := range r.Outer.Vars() {

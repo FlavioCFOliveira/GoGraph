@@ -273,6 +273,17 @@ type Expand struct {
 	// already occupies and EVERY existing offset is byte-identical to HEAD's
 	// (verified: dstAdmit 560, dir 552, slotsRejected 496, size 576).
 	cPendInv bool
+
+	// live is the per-source forward-run state (rmp #2883), allocated on the first
+	// Init that serves live runs and kept across re-Inits so its buffers are
+	// reused. ONE pointer, appended last for the reason the block above gives: it
+	// leaves every existing field offset unchanged and grows the struct by eight
+	// bytes. nil, or a nil live.src, means this Init reads a whole-graph adjacency.
+	live *expandLive
+
+	// pull receives every child Next call of this operator (see nextRow), so the
+	// per-row pull does not heap-allocate its receiver.
+	pull Row
 }
 
 // ExpandConfig carries the optional configuration for [NewExpand].
@@ -298,10 +309,11 @@ type ExpandConfig struct {
 	// type label.
 	EdgeType string
 	// RelCols lists the input-row columns holding edge IDs already traversed
-	// by sibling Expand operators in the same MATCH pattern. Each emitted
-	// edge must NOT match any of these columns (openCypher 9 §3.2.2
-	// relationship-isomorphism / cyphermorphism). Empty disables the
-	// check.
+	// by sibling Expand operators in the same MATCH pattern, or the flat path
+	// list of a sibling [VarLengthExpand] (rmp #2904). Each emitted edge must
+	// NOT match any of these columns, nor any edge of such a list (openCypher 9
+	// §3.2.2 relationship-isomorphism / cyphermorphism; see [relColHolds]).
+	// Empty disables the check.
 	RelCols []int
 	// InputCol is the column index in each input row that holds the source
 	// NodeID (as expr.IntegerValue).  Defaults to 0.
@@ -443,6 +455,7 @@ func (op *Expand) Init(ctx context.Context) error {
 	// once per outer row under Apply, so a traversal in a later clause of a
 	// statement sees the edges its own earlier clauses created or deleted.
 	op.fwd, op.rev, op.admit = op.src()
+	op.beginLive()
 	op.fwdVerts = op.fwd.VerticesSlice()
 	op.fwdEdges = op.fwd.EdgesSlice()
 	op.fwdHandles = op.fwd.HandlesSlice()
@@ -1072,8 +1085,7 @@ func (op *Expand) handlesUsable() bool {
 // (false, err) on error, (false, nil) when a new source was loaded
 // successfully.
 func (op *Expand) advanceInput() (done bool, err error) {
-	var inputRow Row
-	ok, err := op.input.Next(&inputRow)
+	inputRow, ok, err := nextRow(op.input, &op.pull)
 	if err != nil {
 		return false, err
 	}
@@ -1109,10 +1121,16 @@ func (op *Expand) loadAdjacency(uid uint64) {
 	// walked, so it is the only place the window has to be closed (rmp #2761).
 	op.closeSlotWindow()
 	op.fwdDone = false
-	if uid+1 < uint64(len(op.fwdVerts)) {
+	// The whole-graph case is tested FIRST so an Init over a whole-graph
+	// adjacency takes exactly the pre-#2883 path. A live Init has no offsets
+	// array, so it always falls through to the second case.
+	switch {
+	case uid+1 < uint64(len(op.fwdVerts)):
 		op.fwdStart = op.fwdVerts[uid]
 		op.fwdEnd = op.fwdVerts[uid+1]
-	} else {
+	case op.live != nil && op.live.src != nil:
+		op.loadLiveRun(uid)
+	default:
 		op.fwdStart, op.fwdEnd = 0, 0
 		op.fwdDone = true
 	}
@@ -1150,11 +1168,58 @@ func (op *Expand) passesRelMorphism(edgeID int64) bool {
 		if col < 0 || col >= len(op.inputRow) {
 			continue
 		}
-		if iv, ok := op.inputRow[col].(expr.IntegerValue); ok && int64(iv) == edgeID {
+		if relColHolds(op.inputRow[col], edgeID) {
 			return false
 		}
 	}
 	return true
+}
+
+// relColHolds reports whether the cyphermorphism column value v already carries
+// the relationship edgeID. A single-relationship sibling (a prior [Expand]) holds
+// its edge id as an [expr.IntegerValue]. A variable-length sibling holds either
+// the flat path list [VarLengthExpand] emits, [srcNode, edge0, dst0, dir0, edge1,
+// …], whose edge ids sit at index 1 + [VLEHopStride]*h, or — when its variable
+// was bound before the pattern (`WITH [r1, r2] AS rs MATCH (a)-[rs*]->(b)`) — a
+// list of [expr.RelationshipValue]. Both carry the identity
+// [Expand.emittedEdgeID] emits, and every relationship of either list is
+// excluded, so a fixed hop placed AFTER a variable-length hop cannot re-use a
+// relationship that hop crossed (openCypher relationship isomorphism, rmp #2904).
+// A sibling BEFORE a variable-length hop is excluded by
+// [VarLengthConfig.ExcludedRelCols] instead.
+//
+// A relationship variable bound BEFORE the MATCH (`WITH r MATCH
+// (a)-[r]->(b)<-[:R]-(a)`) holds the relationship itself, an
+// [expr.RelationshipValue] or [*expr.LazyRelationshipValue] whose ID is that same
+// identity; it is excluded too, so a later hop — in the same path or in a later
+// comma-separated one — cannot re-use it (rmp #2909). Any other value excludes
+// nothing, as before.
+func relColHolds(v expr.Value, edgeID int64) bool {
+	switch t := v.(type) {
+	case expr.IntegerValue:
+		return int64(t) == edgeID
+	case expr.RelationshipValue:
+		return int64(t.ID) == edgeID
+	case *expr.LazyRelationshipValue:
+		return int64(t.ID()) == edgeID
+	case expr.ListValue:
+		if len(t) > 0 {
+			if _, relList := t[0].(expr.RelationshipValue); relList {
+				for _, item := range t {
+					if rv, ok := item.(expr.RelationshipValue); ok && int64(rv.ID) == edgeID {
+						return true
+					}
+				}
+				return false
+			}
+		}
+		for i := 1; i < len(t); i += VLEHopStride {
+			if iv, ok := t[i].(expr.IntegerValue); ok && int64(iv) == edgeID {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // passesFilter reports whether the edge at absolute position pos (in the
@@ -1434,7 +1499,103 @@ func (op *Expand) Close() error {
 	op.revEdges = nil
 	op.outBuf = nil
 	op.cScratch = nil
+	op.live = nil
 	return op.input.Close()
+}
+
+// expandLive is an [Expand]'s state for serving per-source forward runs from a
+// [liveOutAdjacency] (rmp #2883).
+type expandLive struct {
+	// src is the live adjacency THIS Init reads from, or nil.
+	src liveOutAdjacency
+	// at is the instant this Init reads at, from [liveOutAdjacency.LiveBegin].
+	at uint64
+	// handleSeen records that this Init has read a live source whose entry
+	// carries a handle column; see [liveEdgeIdentity].
+	handleSeen bool
+	// col is the operator's private type column: one run's codes at a time, so a
+	// typed live Init tests a slot with the same [RelTypeAdmit.Fwd] the
+	// whole-graph column answers.
+	col RelTypeColumn
+	// Reused run buffers, so a run costs no allocation once they have grown to
+	// the largest out-degree this operator has served.
+	dsts    []graph.NodeID
+	handles []uint64
+	codes   []uint32
+	zeros   []uint64
+}
+
+// beginLive switches this Init to per-source forward runs when its source
+// yielded a [liveOutAdjacency] and the hop reads outgoing edges only (rmp #2883).
+//
+// A typed hop gets an admission view over the operator's private column, which
+// each run refills, so [Expand.passesFilter] is unchanged. The accepted codes are
+// resolved here, at the Init instant, exactly where the whole-graph source
+// resolves them.
+func (op *Expand) beginLive() {
+	if op.live != nil {
+		op.live.src = nil
+	}
+	if op.dir != DirOut {
+		return
+	}
+	la, ok := op.fwd.(liveOutAdjacency)
+	if !ok {
+		return
+	}
+	if op.live == nil {
+		op.live = &expandLive{}
+	}
+	lv := op.live
+	var accept []uint32
+	lv.src = la
+	lv.at, accept = la.LiveBegin()
+	lv.handleSeen = false
+	lv.col = RelTypeColumn{}
+	if op.edgeType != "" {
+		op.admit = lv.col.Admit(accept)
+	} else {
+		op.admit = RelTypeAdmit{}
+	}
+}
+
+// loadLiveRun points the forward cursor at uid's run from the live adjacency, or,
+// when the operator had to switch to a whole-graph adjacency, at uid's range in it.
+func (op *Expand) loadLiveRun(uid uint64) {
+	lv := op.live
+	d, h, c, extra, handleCol := lv.src.LiveOutRun(
+		graph.NodeID(uid), lv.at, lv.dsts[:0], lv.handles[:0], lv.codes[:0])
+	lv.dsts, lv.handles, lv.codes = d, h, c
+	ids, ok := liveEdgeIdentity(len(d), h, handleCol, lv.handleSeen, &lv.zeros)
+	if !ok {
+		op.switchToFallback()
+		if uid+1 < uint64(len(op.fwdVerts)) {
+			op.fwdStart, op.fwdEnd = op.fwdVerts[uid], op.fwdVerts[uid+1]
+		} else {
+			op.fwdStart, op.fwdEnd = 0, 0
+			op.fwdDone = true
+		}
+		return
+	}
+	liveOutRunServed.Add(1)
+	if handleCol {
+		lv.handleSeen = true
+	}
+	op.fwdEdges, op.fwdHandles = d, ids
+	lv.col.fwdCodes, lv.col.fwdExtra = c, extra
+	op.fwdStart, op.fwdEnd = 0, uint64(len(d))
+}
+
+// switchToFallback replaces this Init's live adjacency with the whole-graph one
+// at the same instant. [liveEdgeIdentity] documents why no identity emitted
+// before the switch can disagree with one emitted after it.
+func (op *Expand) switchToFallback() {
+	liveFallbacks.Add(1)
+	op.fwd, op.admit = op.live.src.LiveFallback(op.live.at)
+	op.live.src = nil
+	op.fwdVerts = op.fwd.VerticesSlice()
+	op.fwdEdges = op.fwd.EdgesSlice()
+	op.fwdHandles = op.fwd.HandlesSlice()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1756,7 +1917,7 @@ func (op *Expand) passesRelMorphismChunk(edgeID int64) bool {
 			}
 			continue
 		}
-		if iv, ok := op.cScratch.BoxCell(col, op.cRow).(expr.IntegerValue); ok && int64(iv) == edgeID {
+		if relColHolds(op.cScratch.BoxCell(col, op.cRow), edgeID) {
 			return false
 		}
 	}
