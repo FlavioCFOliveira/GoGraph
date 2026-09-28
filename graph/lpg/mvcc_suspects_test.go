@@ -50,7 +50,12 @@ func TestLabelBitmapAsOf_CorrectsWhenTheSweepLandsDuringTheClone(t *testing.T) {
 	// and only a correction can take it out.
 	snap := g.BeginRead()
 	defer g.EndRead(snap)
-	if err := g.ApplyAtomically(func() error { g.RemoveNodeLabel("a", "L"); return nil }); err != nil {
+	if err := g.ApplyAtomically(func() error {
+		if err := g.RemoveNodeLabel("a", "L"); err != nil {
+			t.Fatalf("g.RemoveNodeLabel(\"a\", \"L\"): %v", err)
+		}
+		return nil
+	}); err != nil {
 		t.Fatalf("RemoveNodeLabel: %v", err)
 	}
 	if !g.nodeIdx.Intersect(uint32(lid)).Contains(uint64(id)) {
@@ -116,7 +121,12 @@ func TestLabelBitmapAsOf_SpanningSurvivesTheDeferredClone(t *testing.T) {
 
 	snap := g.BeginRead()
 	defer g.EndRead(snap)
-	if err := g.ApplyAtomically(func() error { g.RemoveNodeLabel("a", "L"); return nil }); err != nil {
+	if err := g.ApplyAtomically(func() error {
+		if err := g.RemoveNodeLabel("a", "L"); err != nil {
+			t.Fatalf("g.RemoveNodeLabel(\"a\", \"L\"): %v", err)
+		}
+		return nil
+	}); err != nil {
 		t.Fatalf("RemoveNodeLabel: %v", err)
 	}
 	if !g.nodeIdx.BitmapShared(uint32(lid)).Contains(uint64(id)) {

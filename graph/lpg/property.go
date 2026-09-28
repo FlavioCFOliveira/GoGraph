@@ -280,9 +280,21 @@ func (r *PropertyKeyRegistry) Resolve(id PropertyKeyID) (string, bool) {
 
 // SetNodeProperty records the named property on n with the given
 // value, inserting n into the graph if necessary. Returns the error
-// from the underlying [adjlist.AdjList.AddNode] when present, or any
-// error returned by the installed [SchemaValidator].
+// from the underlying [adjlist.AdjList.AddNode] when present, any
+// error returned by the installed [SchemaValidator], or [ErrIndexedRawWrite].
+//
+// Index maintenance: SetNodeProperty writes the graph directly and delivers no
+// change to the secondary indexes, which only the engine's write path maintains
+// (see [ErrIndexedRawWrite]). While any index is registered on, or being built
+// for, [Graph.IndexManager] it is therefore refused with [ErrIndexedRawWrite]
+// and changes nothing — a value written here would be invisible to an index
+// seek. Write an indexed graph through the engine, or seed the graph through
+// this method BEFORE its first index is created: creating an index backfills it
+// from the graph.
 func (g *Graph[N, W]) SetNodeProperty(n N, key string, value PropertyValue) error {
+	if err := g.refuseIndexedRawWrite(); err != nil {
+		return err
+	}
 	err := g.setNodePropertyInfo(n, key, value, nil)
 	g.reclaimAfterDirectWrite(nil)
 	return err
@@ -387,9 +399,19 @@ func (g *Graph[N, W]) GetNodeProperty(n N, key string) (PropertyValue, bool) {
 }
 
 // DelNodeProperty removes the named property from n. No-op if absent.
-func (g *Graph[N, W]) DelNodeProperty(n N, key string) {
+//
+// Index maintenance: DelNodeProperty delivers no change to the secondary
+// indexes, which only the engine's write path maintains, so a value it removed
+// stayed reachable through an index seek. While any index is registered on, or
+// being built for, [Graph.IndexManager] it is refused with [ErrIndexedRawWrite]
+// and changes nothing.
+func (g *Graph[N, W]) DelNodeProperty(n N, key string) error {
+	if err := g.refuseIndexedRawWrite(); err != nil {
+		return err
+	}
 	g.delNodePropertyInfo(n, key, nil)
 	g.reclaimAfterDirectWrite(nil)
+	return nil
 }
 
 // delNodePropertyInfo is [Graph.DelNodeProperty] with an explicit commit

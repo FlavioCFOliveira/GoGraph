@@ -103,7 +103,9 @@ func BenchmarkLabelWrite(b *testing.B) {
 					if err := g.SetNodeLabel(k, "Hot"); err != nil {
 						b.Fatalf("SetNodeLabel: %v", err)
 					}
-					g.RemoveNodeLabel(k, "Hot")
+					if err := g.RemoveNodeLabel(k, "Hot"); err != nil {
+						b.Fatalf("g.RemoveNodeLabel(k, \"Hot\"): %v", err)
+					}
 				}
 				b.StopTimer()
 				if deltas {

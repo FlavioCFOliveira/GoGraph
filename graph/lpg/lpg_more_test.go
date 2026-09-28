@@ -66,7 +66,9 @@ func TestGraph_RemoveNodeLabel_UnknownNode(t *testing.T) {
 	t.Parallel()
 	g := New[string, int64](adjlist.Config{Directed: true})
 	// Must not panic and must be a no-op.
-	g.RemoveNodeLabel("ghost", "AnyLabel")
+	if err := g.RemoveNodeLabel("ghost", "AnyLabel"); err != nil {
+		t.Fatalf("g.RemoveNodeLabel(\"ghost\", \"AnyLabel\"): %v", err)
+	}
 }
 
 // TestGraph_RemoveNodeLabel_UnknownLabel covers the early-return path
@@ -77,7 +79,9 @@ func TestGraph_RemoveNodeLabel_UnknownLabel(t *testing.T) {
 	if err := g.AddNode("alice"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
-	g.RemoveNodeLabel("alice", "NeverRegistered")
+	if err := g.RemoveNodeLabel("alice", "NeverRegistered"); err != nil {
+		t.Fatalf("g.RemoveNodeLabel(\"alice\", \"NeverRegistered\"): %v", err)
+	}
 }
 
 // TestGraph_HasNodeLabel_NegativePaths covers every false-returning

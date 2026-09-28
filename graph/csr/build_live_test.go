@@ -44,7 +44,9 @@ func TestBuildLive_NoGhostEdgesAfterTombstone_1790(t *testing.T) {
 	}
 
 	// Tombstone b WITHOUT stripping its incident edges (the direct-Go-API path).
-	g.RemoveNode("b")
+	if err := g.RemoveNode("b"); err != nil {
+		t.Fatalf("g.RemoveNode(\"b\"): %v", err)
+	}
 	bID, ok := g.AdjList().Mapper().Lookup("b")
 	if !ok {
 		t.Fatal("expected b to remain interned (NodeID stability)")

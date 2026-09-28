@@ -302,7 +302,9 @@ func TestLabelCount_AfterDelete(t *testing.T) {
 	// Delete 40 :Item nodes directly on the graph (indices 0..39). RemoveNode
 	// strips the node from every label bitmap, so the direct count drops to 160.
 	for i := range 40 {
-		g.RemoveNode(fmt.Sprintf("n%d", i))
+		if err := g.RemoveNode(fmt.Sprintf("n%d", i)); err != nil {
+			t.Fatalf("g.RemoveNode(fmt.Sprintf(\"n%%d\", i)): %v", err)
+		}
 	}
 	on, off := labelCountEngines(g)
 

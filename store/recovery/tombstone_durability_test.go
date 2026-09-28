@@ -171,7 +171,9 @@ func TestRecovery_DeleteSurvivesCheckpointReopen(t *testing.T) {
 		if err := tx.Commit(); err != nil {
 			t.Fatalf("open2 delete Commit: %v", err)
 		}
-		g.RemoveNode("auth")
+		if err := g.RemoveNode("auth"); err != nil {
+			t.Fatalf("g.RemoveNode(\"auth\"): %v", err)
+		}
 		checkpointAndClose(t, dir, g, w)
 	}
 

@@ -54,13 +54,17 @@ func TestLabelBag_TierTransitions_LockstepWithIndex(t *testing.T) {
 	// Remove every other label, then the rest, checking lockstep each time.
 	remaining := append([]string(nil), names...)
 	for _, name := range []string{"L11", "L09", "L07", "L05", "L03", "L01"} {
-		g.RemoveNodeLabel("n", name)
+		if err := g.RemoveNodeLabel("n", name); err != nil {
+			t.Fatalf("g.RemoveNodeLabel(\"n\", name): %v", err)
+		}
 		remaining = deleteStr(remaining, name)
 		assertLabelState(t, g, "n", id, remaining)
 	}
 	// Now 6 labels remain (small tier). Drain to 1 (singleton collapse) and 0.
 	for _, name := range append([]string(nil), remaining...) {
-		g.RemoveNodeLabel("n", name)
+		if err := g.RemoveNodeLabel("n", name); err != nil {
+			t.Fatalf("g.RemoveNodeLabel(\"n\", name): %v", err)
+		}
 		remaining = deleteStr(remaining, name)
 		assertLabelState(t, g, "n", id, remaining)
 	}

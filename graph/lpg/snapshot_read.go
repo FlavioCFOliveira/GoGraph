@@ -255,6 +255,41 @@ func (g *Graph[N, W]) EntryViewAsOf(id graph.NodeID, s *Snapshot) adjlist.EntryV
 	})
 }
 
+// InNeighbourIDsAsOf returns the distinct NodeIDs holding an edge into dstID
+// as it stood at s, excluding dstID itself, in [graph.Mapper.Walk] order. A nil
+// s reads the present, exactly as [adjlist.AdjList.InNeighbourIDs] does.
+//
+// It is the question the delete path asks — "does this node still have an
+// incoming relationship", and "which ones must DETACH DELETE remove" — answered
+// from the reader's snapshot plus its own writes, never from another in-flight
+// transaction's work (rmp #2884). See [adjlist.AdjList.InNeighbourIDsVisible]
+// for how the present-state in-edge index is reconciled with the snapshot.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) InNeighbourIDsAsOf(dstID graph.NodeID, s *Snapshot) []graph.NodeID {
+	startTS, txID, walk := snapshotTimes(s)
+	if !walk {
+		return g.adj.InNeighbourIDs(dstID)
+	}
+	return g.adj.InNeighbourIDsVisible(dstID, func(info *commitInfo, ts uint64) bool {
+		return s.visible(info, ts, startTS, txID)
+	})
+}
+
+// HasInNeighbourAsOf reports whether [Graph.InNeighbourIDsAsOf] would return at
+// least one NodeID, stopping at the first confirmed one.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) HasInNeighbourAsOf(dstID graph.NodeID, s *Snapshot) bool {
+	startTS, txID, walk := snapshotTimes(s)
+	if !walk {
+		return len(g.adj.InNeighbourIDs(dstID)) > 0
+	}
+	return g.adj.HasInNeighbourVisible(dstID, func(info *commitInfo, ts uint64) bool {
+		return s.visible(info, ts, startTS, txID)
+	})
+}
+
 // HasEdgeByIDAsOf reports whether a directed edge srcID→dstID existed at s.
 //
 // Safe for concurrent use.

@@ -40,7 +40,9 @@ func benchExistenceGraph(b *testing.B, size, removeEvery int) (*Graph[string, fl
 		}
 		ids = append(ids, id)
 		if removeEvery > 0 && i%removeEvery == 0 {
-			g.RemoveNode(k)
+			if err := g.RemoveNode(k); err != nil {
+				b.Fatalf("g.RemoveNode(k): %v", err)
+			}
 		}
 	}
 	return g, ids

@@ -183,7 +183,9 @@ func TestLabelChurnGate_DeferredIndexRemovalRaisesTheGate(t *testing.T) {
 	defer func() { _ = g.Close() }()
 	id := mustID(t, g, "gone")
 
-	g.RemoveNode("gone")
+	if err := g.RemoveNode("gone"); err != nil {
+		t.Fatalf("g.RemoveNode(\"gone\"): %v", err)
+	}
 
 	// Drop the life records, and only those. What is left holding the gate is the
 	// deferred index removal the strip recorded.
@@ -222,7 +224,9 @@ func TestLabelChurnGate_ReviveRaisesTheGate(t *testing.T) {
 	defer func() { _ = g.Close() }()
 	id := mustID(t, g, "phoenix")
 
-	g.RemoveNode("phoenix")
+	if err := g.RemoveNode("phoenix"); err != nil {
+		t.Fatalf("g.RemoveNode(\"phoenix\"): %v", err)
+	}
 	g.ReclaimNow()
 	if g.nodeIdx.Has(uint32(lid), id) {
 		t.Fatal("setup: the deferred removal should have been applied by the reclaim, leaving " +
@@ -425,11 +429,15 @@ func TestLabelChurnGate_GatedAnswerMatchesUngatedUnderMixedLoad(t *testing.T) {
 			case 0:
 				_ = g.SetNodeLabel(key, hot[(i+1)%len(hot)])
 			case 1:
-				g.RemoveNodeLabel(key, hot[(i+1)%len(hot)])
+				if err := g.RemoveNodeLabel(key, hot[(i+1)%len(hot)]); err != nil {
+					t.Errorf("g.RemoveNodeLabel(key, hot[(i+1)%%len(hot)]): %v", err)
+				}
 			case 2:
 				// Each doomed node is retired exactly ONCE, and never revived.
 				if nextDoomed < doomed {
-					g.RemoveNode(fmt.Sprintf("d%d", nextDoomed))
+					if err := g.RemoveNode(fmt.Sprintf("d%d", nextDoomed)); err != nil {
+						t.Errorf("g.RemoveNode(fmt.Sprintf(\"d%%d\", nextDoomed)): %v", err)
+					}
 					nextDoomed++
 				}
 			case 3:
@@ -656,7 +664,9 @@ func TestLabelChurnGate_NoReaderSeesADeadNode(t *testing.T) {
 		run(t, "removeNodeInfo", nil,
 			func(t *testing.T, g *Graph[string, float64], keys []string, ids []graph.NodeID, dead *settledDead) {
 				for i, k := range keys {
-					g.RemoveNode(k)
+					if err := g.RemoveNode(k); err != nil {
+						t.Fatalf("g.RemoveNode(k): %v", err)
+					}
 					dead.publish(ids[i])
 				}
 			})
@@ -755,7 +765,9 @@ func TestLabelChurnGate_NoReaderSeesADeadNode(t *testing.T) {
 				}
 				// Nothing is settled-dead on this path, so publish the one node the
 				// close needs to be non-vacuous: a node retired the ordinary way.
-				g.RemoveNode(keys[0])
+				if err := g.RemoveNode(keys[0]); err != nil {
+					t.Fatalf("g.RemoveNode(keys[0]): %v", err)
+				}
 				dead.publish(ids[0])
 			})
 	})
@@ -800,7 +812,9 @@ func TestLabelChurnGate_NoReaderSeesADeadNode(t *testing.T) {
 			func(t *testing.T, g *Graph[string, float64], _ []string, ids []graph.NodeID, dead *settledDead) {
 				for batch := 0; batch < 4; batch++ {
 					chunk := ids[batch*30 : batch*30+30]
-					g.RestoreTombstones(chunk)
+					if err := g.RestoreTombstones(chunk); err != nil {
+						t.Fatalf("g.RestoreTombstones(chunk): %v", err)
+					}
 					dead.publish(chunk...)
 				}
 				if got := g.labelChurn.load(g.reg.Intern("Retired")); got == 0 {
@@ -833,7 +847,9 @@ func TestLabelChurnGate_DeathRecordRaisesTheGate(t *testing.T) {
 	snap := g.BeginRead()
 	defer g.EndRead(snap)
 
-	g.RemoveNode("victim")
+	if err := g.RemoveNode("victim"); err != nil {
+		t.Fatalf("g.RemoveNode(\"victim\"): %v", err)
+	}
 	g.applyDeferredIndexRemovals(g.mvccClock.ReadTS())
 	if got := g.idxPendingActive.Load(); got != 0 {
 		t.Fatalf("setup: %d deferred removals survived, so their hold may still be covering "+
@@ -871,7 +887,9 @@ func abortedRevivalFixture(t *testing.T, key, label string) (*Graph[string, floa
 	g, lid := churnFixture(t, label, key)
 	id := mustID(t, g, key)
 
-	g.RemoveNode(key)
+	if err := g.RemoveNode(key); err != nil {
+		t.Fatalf("g.RemoveNode(key): %v", err)
+	}
 	g.ReclaimNow()
 	if g.nodeIdx.Has(uint32(lid), id) {
 		t.Fatalf("setup: %q should have left %s's bitmap when the deferred removal was applied", key, label)
@@ -1072,7 +1090,9 @@ func TestLabelChurnGate_ScopedHoldSpansTheTombstoneFlip(t *testing.T) {
 		}()
 	}
 	for _, k := range keys {
-		g.RemoveNode(k)
+		if err := g.RemoveNode(k); err != nil {
+			t.Fatalf("g.RemoveNode(k): %v", err)
+		}
 	}
 	stop.Store(true)
 	wg.Wait()

@@ -595,6 +595,11 @@ func (g *Graph[N, W]) delEdgePropertyByHandleInfo(src, dst N, handle uint64, key
 // [Graph.RemoveEdgeInstance]; used by DELETE to drop one logical edge
 // while leaving sibling handles untouched. No-op when handle is 0.
 //
+// On an undirected graph the records are cleared under BOTH directions of the
+// pair, because they live under whichever direction the metadata was written
+// through — normally the creation direction — while a removal may name the
+// relationship through its mirror (rmp #2887).
+//
 // RemoveEdgeInstanceByHandle is safe for concurrent use.
 func (g *Graph[N, W]) RemoveEdgeInstanceByHandle(src, dst N, handle uint64) {
 	g.removeEdgeInstanceByHandleInfo(src, dst, handle, nil)
@@ -616,15 +621,42 @@ func (g *Graph[N, W]) removeEdgeInstanceByHandleInfo(src, dst N, handle uint64, 
 		return
 	}
 	k := edgeKey{src: srcID, dst: dstID}
+	g.dropHandleRecords(k, handle, tx, false)
+	// THE MIRROR KEY TOO, on an undirected graph (rmp #2887). The per-handle
+	// records are keyed by the DIRECTED pair they were written under, while the
+	// adjacency retires both mirror slots whichever direction the removal names:
+	// RemoveEdgeByHandle(b, a, h) cleared only (b, a) and left h's creation-
+	// direction (a, b) labels and properties behind — in autocommit and in a
+	// write transaction alike — for a handle the adjacency no longer holds.
+	//
+	// Only a record that EXISTS is versioned here. The mirror key normally holds
+	// none, and recording a version for an absent record would make an idempotent
+	// cleanup a write that can collide with a concurrent writer of that key.
+	if !g.adj.Directed() && srcID != dstID {
+		g.dropHandleRecords(edgeKey{src: dstID, dst: srcID}, handle, tx, true)
+	}
+}
+
+// dropHandleRecords removes handle's labels and properties stored under the
+// directed pair k, recording a version on each store it changes so a concurrent
+// snapshot and a rollback both see the pre-image. When onlyIfPresent is set a
+// store holding no record for handle is left untouched and unversioned;
+// otherwise a store holding any record for the pair is versioned even when
+// handle carries none, which is the behaviour the creation-direction clear has
+// always had.
+func (g *Graph[N, W]) dropHandleRecords(k edgeKey, handle uint64, tx *writeCtx, onlyIfPresent bool) {
 	{
 		sh := g.edgeHandleLabelShardFor(k)
 		sh.mu.Lock()
-		if im, ok := sh.m[k]; ok && g.pushHandleLabelVersion(sh, k, handle, tx) {
-			im.del(handle)
-			if im.len() == 0 {
-				delete(sh.m, k)
-			} else {
-				sh.m[k] = im
+		if im, ok := sh.m[k]; ok {
+			_, has := im.get(handle)
+			if (has || !onlyIfPresent) && g.pushHandleLabelVersion(sh, k, handle, tx) {
+				im.del(handle)
+				if im.len() == 0 {
+					delete(sh.m, k)
+				} else {
+					sh.m[k] = im
+				}
 			}
 		}
 		sh.mu.Unlock()
@@ -632,12 +664,15 @@ func (g *Graph[N, W]) removeEdgeInstanceByHandleInfo(src, dst N, handle uint64, 
 	{
 		sh := g.edgeHandlePropShardFor(k)
 		sh.mu.Lock()
-		if im, ok := sh.m[k]; ok && g.pushHandlePropVersion(sh, k, handle, tx) {
-			im.del(handle)
-			if im.len() == 0 {
-				delete(sh.m, k)
-			} else {
-				sh.m[k] = im
+		if im, ok := sh.m[k]; ok {
+			_, has := im.get(handle)
+			if (has || !onlyIfPresent) && g.pushHandlePropVersion(sh, k, handle, tx) {
+				im.del(handle)
+				if im.len() == 0 {
+					delete(sh.m, k)
+				} else {
+					sh.m[k] = im
+				}
 			}
 		}
 		sh.mu.Unlock()

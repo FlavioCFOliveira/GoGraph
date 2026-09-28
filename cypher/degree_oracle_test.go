@@ -108,7 +108,9 @@ func buildDegreeFixture(t *testing.T, seed int64, nodes, edges int) *degreeFixtu
 			continue
 		}
 		removed[n] = true
-		g.RemoveNode(key(n))
+		if err := g.RemoveNode(key(n)); err != nil {
+			t.Fatalf("g.RemoveNode(key(n)): %v", err)
+		}
 	}
 
 	f := &degreeFixture{

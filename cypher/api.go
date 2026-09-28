@@ -21333,6 +21333,26 @@ func (a *lpgMutatorAdapter) InNeighbours(n string) []string {
 	return a.g.AdjList().InNeighbours(n)
 }
 
+// InNeighboursInTx returns n's incoming neighbour keys in THIS transaction's
+// view: its snapshot plus its own writes (rmp #2884). It satisfies the exec
+// package's optional transaction-visible adjacency reader, which the DELETE
+// guard and DETACH DELETE decide through; see [lpg.Graph.InNeighbourIDsAsOf].
+func (a *lpgMutatorAdapter) InNeighboursInTx(n string) []string {
+	return a.g.WriterViewOf(a.wtx).InNeighbours(n)
+}
+
+// HasInNeighbourInTx reports whether n has an incoming neighbour in THIS
+// transaction's view. See [lpgMutatorAdapter.InNeighboursInTx].
+func (a *lpgMutatorAdapter) HasInNeighbourInTx(n string) bool {
+	return a.g.WriterViewOf(a.wtx).HasInNeighbour(n)
+}
+
+// OutDegreeInTx returns n's outgoing edge-slot count in THIS transaction's
+// view. See [lpgMutatorAdapter.InNeighboursInTx].
+func (a *lpgMutatorAdapter) OutDegreeInTx(n string) int {
+	return a.g.WriterViewOf(a.wtx).OutDegree(n)
+}
+
 // RemoveAllEdgesFrom removes all outgoing edges from n in O(degree) time.
 // Per-edge undo entries are recorded before the bulk removal so the undo log
 // can reverse the operation edge-by-edge on rollback.
@@ -22554,6 +22574,24 @@ func (a *walMutatorAdapter) OutNeighbours(n string) []string {
 // [lpgMutatorAdapter.InNeighbours] for why this is not a graph walk.
 func (a *walMutatorAdapter) InNeighbours(n string) []string {
 	return a.g.AdjList().InNeighbours(n)
+}
+
+// InNeighboursInTx is [lpgMutatorAdapter.InNeighboursInTx] for the durable
+// write path.
+func (a *walMutatorAdapter) InNeighboursInTx(n string) []string {
+	return a.g.WriterViewOf(a.wtx).InNeighbours(n)
+}
+
+// HasInNeighbourInTx is [lpgMutatorAdapter.HasInNeighbourInTx] for the
+// durable write path.
+func (a *walMutatorAdapter) HasInNeighbourInTx(n string) bool {
+	return a.g.WriterViewOf(a.wtx).HasInNeighbour(n)
+}
+
+// OutDegreeInTx is [lpgMutatorAdapter.OutDegreeInTx] for the durable write
+// path.
+func (a *walMutatorAdapter) OutDegreeInTx(n string) int {
+	return a.g.WriterViewOf(a.wtx).OutDegree(n)
 }
 
 // RemoveAllEdgesFrom removes all outgoing edges from n in O(degree) time.

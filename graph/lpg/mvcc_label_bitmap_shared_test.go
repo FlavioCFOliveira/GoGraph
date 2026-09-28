@@ -96,7 +96,12 @@ func TestLabelBitmapAsOf_CorrectingPathDoesNotTouchTheIndexImage(t *testing.T) {
 	// the correcting path is forced.
 	snap := g.BeginRead()
 	defer g.EndRead(snap)
-	if err := g.ApplyAtomically(func() error { g.RemoveNodeLabel("aa", "L"); return nil }); err != nil {
+	if err := g.ApplyAtomically(func() error {
+		if err := g.RemoveNodeLabel("aa", "L"); err != nil {
+			t.Fatalf("g.RemoveNodeLabel(\"aa\", \"L\"): %v", err)
+		}
+		return nil
+	}); err != nil {
 		t.Fatalf("RemoveNodeLabel: %v", err)
 	}
 

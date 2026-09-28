@@ -81,7 +81,9 @@ func TestGraph_NodeProperties(t *testing.T) {
 		t.Fatalf("len = %d, want 3", len(props))
 	}
 
-	g.DelNodeProperty("alice", "active")
+	if err := g.DelNodeProperty("alice", "active"); err != nil {
+		t.Fatalf("g.DelNodeProperty(\"alice\", \"active\"): %v", err)
+	}
 	if _, ok := g.GetNodeProperty("alice", "active"); ok {
 		t.Fatalf("active not deleted")
 	}

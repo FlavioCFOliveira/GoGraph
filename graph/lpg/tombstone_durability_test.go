@@ -36,7 +36,9 @@ func TestRemoveNode_AddNode_Resurrects(t *testing.T) {
 		t.Fatal("node auth was not interned")
 	}
 
-	g.RemoveNode("auth")
+	if err := g.RemoveNode("auth"); err != nil {
+		t.Fatalf("g.RemoveNode(\"auth\"): %v", err)
+	}
 	if !g.IsTombstoned(id) {
 		t.Fatal("node auth should be tombstoned immediately after RemoveNode")
 	}
@@ -75,7 +77,9 @@ func TestSetNodeLabel_DoesNotRevive(t *testing.T) {
 		t.Fatalf("AddNode: %v", err)
 	}
 	id, _ := g.AdjList().Mapper().Lookup("auth")
-	g.RemoveNode("auth")
+	if err := g.RemoveNode("auth"); err != nil {
+		t.Fatalf("g.RemoveNode(\"auth\"): %v", err)
+	}
 	if !g.IsTombstoned(id) {
 		t.Fatal("auth should be tombstoned")
 	}
@@ -198,8 +202,12 @@ func TestTombstonedIDs(t *testing.T) {
 	}
 	idA, _ := g.AdjList().Mapper().Lookup("a")
 	idC, _ := g.AdjList().Mapper().Lookup("c")
-	g.RemoveNode("a")
-	g.RemoveNode("c")
+	if err := g.RemoveNode("a"); err != nil {
+		t.Fatalf("g.RemoveNode(\"a\"): %v", err)
+	}
+	if err := g.RemoveNode("c"); err != nil {
+		t.Fatalf("g.RemoveNode(\"c\"): %v", err)
+	}
 
 	got := g.TombstonedIDs()
 	if len(got) != 2 {

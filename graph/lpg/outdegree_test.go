@@ -162,7 +162,9 @@ func TestOutDegreeAfterTombstone(t *testing.T) {
 		t.Fatalf("before tombstone: OutDegree = %d, want 3", got)
 	}
 
-	g.RemoveNode("b")
+	if err := g.RemoveNode("b"); err != nil {
+		t.Fatalf("g.RemoveNode(\"b\"): %v", err)
+	}
 
 	// The adjacency still holds hub->b, so the raw slot count is stale.
 	rawSlots, _ := g.AdjList().OutDegree("hub")

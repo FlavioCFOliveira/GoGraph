@@ -52,7 +52,9 @@ func TestRemoveNode_StripsLabelBitmap(t *testing.T) {
 		t.Fatal("Employee bitmap missing alice before RemoveNode")
 	}
 
-	g.RemoveNode("alice")
+	if err := g.RemoveNode("alice"); err != nil {
+		t.Fatalf("g.RemoveNode(\"alice\"): %v", err)
+	}
 
 	// Post-condition: bitmap must NOT contain the node (task #1409).
 	if labelIndexHas(g, uint32(lidPerson), id) {
@@ -78,7 +80,9 @@ func TestRemoveNode_StripsLabelBitmap_NoPriorRemoveNodeLabel(t *testing.T) {
 	lid := uint32(g.Registry().Intern("Manager"))
 
 	// RemoveNode directly — no RemoveNodeLabel call first.
-	g.RemoveNode("bob")
+	if err := g.RemoveNode("bob"); err != nil {
+		t.Fatalf("g.RemoveNode(\"bob\"): %v", err)
+	}
 
 	if labelIndexHas(g, uint32(lid), id) {
 		t.Errorf("Manager bitmap still contains bob after direct RemoveNode (stale entry, task #1409)")
@@ -103,7 +107,9 @@ func TestRevive_RestoresLabelBitmap(t *testing.T) {
 	lid := uint32(g.Registry().Intern("Admin"))
 
 	// RemoveNode (no prior label strip) — strips from bitmap.
-	g.RemoveNode("carol")
+	if err := g.RemoveNode("carol"); err != nil {
+		t.Fatalf("g.RemoveNode(\"carol\"): %v", err)
+	}
 	if labelIndexHas(g, uint32(lid), id) {
 		t.Fatal("Admin bitmap still contains carol after RemoveNode (pre-condition failed)")
 	}
@@ -135,8 +141,12 @@ func TestRevive_ExecutorPath(t *testing.T) {
 	lid := uint32(g.Registry().Intern("Dev"))
 
 	// Executor path: strip label first, then remove.
-	g.RemoveNodeLabel("dave", "Dev")
-	g.RemoveNode("dave")
+	if err := g.RemoveNodeLabel("dave", "Dev"); err != nil {
+		t.Fatalf("g.RemoveNodeLabel(\"dave\", \"Dev\"): %v", err)
+	}
+	if err := g.RemoveNode("dave"); err != nil {
+		t.Fatalf("g.RemoveNode(\"dave\"): %v", err)
+	}
 
 	// After executor delete: bitmap is empty.
 	if labelIndexHas(g, uint32(lid), id) {
@@ -178,7 +188,9 @@ func TestRemoveNode_MultipleNodes(t *testing.T) {
 	lid := uint32(g.Registry().Intern("Shared"))
 
 	// Remove just n2.
-	g.RemoveNode("n2")
+	if err := g.RemoveNode("n2"); err != nil {
+		t.Fatalf("g.RemoveNode(\"n2\"): %v", err)
+	}
 	n2id, _ := g.AdjList().Mapper().Lookup("n2")
 	n1id, _ := g.AdjList().Mapper().Lookup("n1")
 	n3id, _ := g.AdjList().Mapper().Lookup("n3")
@@ -203,7 +215,9 @@ func TestRemoveNode_NoLabels(t *testing.T) {
 	if err := g.AddNode("bare"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
-	g.RemoveNode("bare") // must not panic
+	if err := g.RemoveNode("bare"); err != nil {
+		t.Fatalf("g.RemoveNode(\"bare\"): %v", err)
+	} // must not panic
 	id, _ := g.AdjList().Mapper().Lookup("bare")
 	if !g.IsTombstoned(id) {
 		t.Error("bare node is not tombstoned after RemoveNode")
@@ -222,8 +236,12 @@ func TestRemoveNode_IdempotentBitmap(t *testing.T) {
 		t.Fatalf("SetNodeLabel: %v", err)
 	}
 
-	g.RemoveNode("dup")
-	g.RemoveNode("dup") // second call must not panic
+	if err := g.RemoveNode("dup"); err != nil {
+		t.Fatalf("g.RemoveNode(\"dup\"): %v", err)
+	}
+	if err := g.RemoveNode("dup"); err != nil {
+		t.Fatalf("g.RemoveNode(\"dup\"): %v", err)
+	} // second call must not panic
 
 	id, _ := g.AdjList().Mapper().Lookup("dup")
 	lid := uint32(g.Registry().Intern("X"))

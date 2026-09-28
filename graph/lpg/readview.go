@@ -254,6 +254,48 @@ func (v *ReadView[N, W]) EntryView(id graph.NodeID) adjlist.EntryView[W] {
 	return v.g.EntryViewAsOf(id, v.snap)
 }
 
+// InNeighbours returns the keys of the distinct nodes holding an edge into n at
+// this view's instant, excluding n itself, in [graph.Mapper.Walk] order. Keys
+// the Mapper can no longer resolve are skipped. See [Graph.InNeighbourIDsAsOf].
+func (v *ReadView[N, W]) InNeighbours(n N) []N {
+	m := v.g.adj.Mapper()
+	id, ok := m.Lookup(n)
+	if !ok {
+		return nil
+	}
+	ids := v.g.InNeighbourIDsAsOf(id, v.snap)
+	if len(ids) == 0 {
+		return nil
+	}
+	out := make([]N, 0, len(ids))
+	for _, src := range ids {
+		if key, ok := m.Resolve(src); ok {
+			out = append(out, key)
+		}
+	}
+	return out
+}
+
+// HasInNeighbour reports whether any node held an edge into n at this view's
+// instant, n itself excluded. See [Graph.HasInNeighbourAsOf].
+func (v *ReadView[N, W]) HasInNeighbour(n N) bool {
+	id, ok := v.g.adj.Mapper().Lookup(n)
+	if !ok {
+		return false
+	}
+	return v.g.HasInNeighbourAsOf(id, v.snap)
+}
+
+// OutDegree returns how many outgoing edge slots n had at this view's instant,
+// counting parallel edges and self-loops, or zero when n is unknown.
+func (v *ReadView[N, W]) OutDegree(n N) int {
+	id, ok := v.g.adj.Mapper().Lookup(n)
+	if !ok {
+		return 0
+	}
+	return len(v.g.EntryViewAsOf(id, v.snap).Neighbours)
+}
+
 // HasEdge reports whether a directed edge existed at this view's instant.
 func (v *ReadView[N, W]) HasEdge(src, dst N) bool { return v.g.HasEdgeAsOf(src, dst, v.snap) }
 

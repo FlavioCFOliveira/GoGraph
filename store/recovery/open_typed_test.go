@@ -52,9 +52,6 @@ func TestOpen_StringInt64(t *testing.T) {
 	mgr := index.NewManager()
 	g.SetIndexManager(mgr)
 	bt := btree.New[string]()
-	if err := mgr.CreateIndex("btree.score", bt); err != nil {
-		t.Fatalf("CreateIndex: %v", err)
-	}
 
 	opts := txn.Options[string, int64]{
 		Codec:       txn.NewStringCodec(),
@@ -81,6 +78,13 @@ func TestOpen_StringInt64(t *testing.T) {
 	}
 	if err := g.SetEdgeProperty("alice", "bob", "since", lpg.Int64Value(2026)); err != nil {
 		t.Fatalf("SetEdgeProperty: %v", err)
+	}
+
+	// The index is registered only after the raw property writes above: once an
+	// index is registered, raw node mutators are refused with
+	// lpg.ErrIndexedRawWrite.
+	if err := mgr.CreateIndex("btree.score", bt); err != nil {
+		t.Fatalf("CreateIndex: %v", err)
 	}
 
 	// Populate the btree index with a known entry so we can assert

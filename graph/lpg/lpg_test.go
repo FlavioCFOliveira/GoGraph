@@ -56,7 +56,9 @@ func TestGraph_NodeLabels(t *testing.T) {
 	if len(labels) != 2 || labels[0] != "Active" || labels[1] != "Person" {
 		t.Fatalf("NodeLabels(alice) = %v", labels)
 	}
-	g.RemoveNodeLabel("alice", "Active")
+	if err := g.RemoveNodeLabel("alice", "Active"); err != nil {
+		t.Fatalf("g.RemoveNodeLabel(\"alice\", \"Active\"): %v", err)
+	}
 	if g.HasNodeLabel("alice", "Active") {
 		t.Fatalf("Active should be gone after RemoveNodeLabel")
 	}

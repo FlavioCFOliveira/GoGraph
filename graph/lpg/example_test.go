@@ -73,7 +73,10 @@ func ExampleGraph_RemoveNode() {
 	_ = g.SetNodeLabel("auth", "Spec")
 	id, _ := g.AdjList().Mapper().Lookup("auth")
 
-	g.RemoveNode("auth")
+	if err := g.RemoveNode("auth"); err != nil {
+		fmt.Println("RemoveNode:", err)
+		return
+	}
 	fmt.Println("tombstoned:", g.IsTombstoned(id), "live:", g.LiveOrder())
 
 	// Re-create the same key: revived under the same NodeID.

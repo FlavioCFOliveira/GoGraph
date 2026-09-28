@@ -118,7 +118,9 @@ func TestCSRPairCache_TransparentAcrossTombstoneTransitions(t *testing.T) {
 	// directly makes RemoveNode a silent no-op.
 	b0 := keyNode(t, g, "b0")
 	before := g.TopoGeneration()
-	g.RemoveNode(b0)
+	if err := g.RemoveNode(b0); err != nil {
+		t.Fatalf("g.RemoveNode(b0): %v", err)
+	}
 	if after := g.TopoGeneration(); after == before {
 		t.Error("RemoveNode did not advance TopoGeneration, so a CSR pair cache keyed " +
 			"on it cannot notice a tombstone")

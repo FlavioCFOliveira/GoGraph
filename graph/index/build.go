@@ -310,6 +310,7 @@ func (m *Manager) BeginBuild(resolve BuildResolver) *BuildLog {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.builds = append(m.builds, b)
+	m.publishActiveLocked()
 	return b
 }
 
@@ -399,6 +400,7 @@ func (m *Manager) FinishBuild(l *BuildLog, fn func(reg RegisterFunc) error) erro
 			sub.Apply(recorded[k].Change)
 		}
 		m.indexes[name] = sub
+		m.publishActiveLocked()
 		return nil
 	})
 }
@@ -415,6 +417,7 @@ func (m *Manager) retireLocked(l *BuildLog) {
 		if len(m.builds) == 0 {
 			m.builds = nil
 		}
+		m.publishActiveLocked()
 		return
 	}
 }

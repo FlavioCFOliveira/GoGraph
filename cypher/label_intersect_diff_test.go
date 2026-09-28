@@ -95,7 +95,9 @@ func liDiffGraph(t *testing.T) (*lpg.Graph[string, float64], []liDiffNode) {
 	}
 	// A registered-but-EMPTY label.
 	add("empty_donor", "L1", "Vanished")
-	g.RemoveNodeLabel("empty_donor", "Vanished")
+	if err := g.RemoveNodeLabel("empty_donor", "Vanished"); err != nil {
+		t.Fatalf("g.RemoveNodeLabel(\"empty_donor\", \"Vanished\"): %v", err)
+	}
 	for i := range truth {
 		if truth[i].key == "empty_donor" {
 			delete(truth[i].labels, "Vanished")
@@ -104,11 +106,15 @@ func liDiffGraph(t *testing.T) (*lpg.Graph[string, float64], []liDiffNode) {
 	// A node carrying BOTH labels that is then DELETED, so a stale bitmap would
 	// surface it.
 	add("deleted_both", "L1", "L2")
-	g.RemoveNode("deleted_both")
+	if err := g.RemoveNode("deleted_both"); err != nil {
+		t.Fatalf("g.RemoveNode(\"deleted_both\"): %v", err)
+	}
 	truth = truth[:len(truth)-1]
 	// A node RELABELLED away from the conjunction after the fact.
 	add("relabelled_away", "L1", "L2")
-	g.RemoveNodeLabel("relabelled_away", "L2")
+	if err := g.RemoveNodeLabel("relabelled_away", "L2"); err != nil {
+		t.Fatalf("g.RemoveNodeLabel(\"relabelled_away\", \"L2\"): %v", err)
+	}
 	for i := range truth {
 		if truth[i].key == "relabelled_away" {
 			delete(truth[i].labels, "L2")
@@ -483,7 +489,9 @@ func TestLabelIntersect_ConcurrentRelabelling(t *testing.T) {
 				if err := g.SetNodeLabel(k, "CB"); err != nil {
 					return
 				}
-				g.RemoveNodeLabel(k, "CB")
+				if err := g.RemoveNodeLabel(k, "CB"); err != nil {
+					t.Errorf("g.RemoveNodeLabel(k, \"CB\"): %v", err)
+				}
 			}
 		}
 	}()

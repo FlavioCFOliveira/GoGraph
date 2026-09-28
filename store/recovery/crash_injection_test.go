@@ -714,7 +714,9 @@ func TestGraphFingerprint_LivenessGate(t *testing.T) {
 		t.Fatalf("live fingerprint must carry bob:\n%s", live)
 	}
 
-	g.RemoveNode("bob")
+	if err := g.RemoveNode("bob"); err != nil {
+		t.Fatalf("g.RemoveNode(\"bob\"): %v", err)
+	}
 	dead := graphFingerprint(t, g)
 	if dead == live {
 		t.Fatalf("fingerprint did not observe the tombstone: a resurrected node "+

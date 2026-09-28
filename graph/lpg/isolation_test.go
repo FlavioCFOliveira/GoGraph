@@ -748,8 +748,12 @@ func TestIsolation_DirectReadObservesPartialTransaction(t *testing.T) {
 	// Reset to the clean, fully-applied state for half 2.
 	if err := g.ApplyAtomically(func() error {
 		g.AdjList().RemoveEdge("u", "v")
-		g.RemoveNodeLabel("u", "Hot")
-		g.RemoveNodeLabel("v", "Hot")
+		if err := g.RemoveNodeLabel("u", "Hot"); err != nil {
+			t.Fatalf("g.RemoveNodeLabel(\"u\", \"Hot\"): %v", err)
+		}
+		if err := g.RemoveNodeLabel("v", "Hot"); err != nil {
+			t.Fatalf("g.RemoveNodeLabel(\"v\", \"Hot\"): %v", err)
+		}
 		return nil
 	}); err != nil {
 		t.Fatalf("reset: %v", err)

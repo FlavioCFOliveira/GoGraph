@@ -337,6 +337,13 @@ func (a *AdjList[N, W]) versionStamp(tx mvcc.Tx) (*mvcc.CommitInfo, uint64) {
 // Safe for concurrent use with readers and with writers. NOT safe to run
 // concurrently with itself: two sweeps would walk and sever the same chain.
 func (a *AdjList[N, W]) Reclaim(watermark uint64, hist *mvcc.DepthHist) int {
+	// The reverse index's ghosts are retired on the same watermark as the forward
+	// versions they shadow (rmp #2884), and BEFORE the gate below: a sweep that
+	// finds no live version must still retire the ghosts the previous one left.
+	// They are not counted in the return, which reports version records only.
+	if a.versioning {
+		a.rev.sweepGhosts(watermark)
+	}
 	if watermark == 0 || a.versionActive.Load() == 0 {
 		return 0
 	}

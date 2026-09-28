@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 )
@@ -209,6 +210,37 @@ type Manager struct {
 	// for this mechanism: one length check per call.
 	builds []*BuildLog
 	mu     sync.RWMutex
+	// active mirrors len(indexes)+len(builds), republished under mu held
+	// exclusively by every method that changes either, so [Manager.Active] can
+	// answer without taking mu. It is read on the raw lpg write path, once per
+	// mutation, which is why it is an atomic and not a lock (rmp #2848).
+	active atomic.Int64
+}
+
+// publishActiveLocked republishes [Manager.active]. The caller holds mu
+// exclusively.
+func (m *Manager) publishActiveLocked() {
+	m.active.Store(int64(len(m.indexes) + len(m.builds)))
+}
+
+// Active reports whether at least one index is registered or being built. It is
+// safe to call on a nil Manager, which has none.
+//
+// It is the question the graph's raw, index-bypassing mutators ask before they
+// write (rmp #2848): an index is maintained ONLY by the change fan-out
+// ([Manager.Apply], [Manager.ApplyBatch]), so a write that delivers no change
+// while an index exists — or while one is being built, whose build log records
+// only fanned-out changes — leaves that index silently stale.
+//
+// Active reads one atomic and takes no lock, so it is safe for concurrent use
+// and cheap enough for every mutation to ask. A registration or build that
+// begins concurrently with a caller's check is ordered by that atomic alone: the
+// caller observes either the state before it or the state after it.
+func (m *Manager) Active() bool {
+	if m == nil {
+		return false
+	}
+	return m.active.Load() > 0
 }
 
 // NewManager returns an empty Manager.
@@ -225,6 +257,7 @@ func (m *Manager) CreateIndex(name string, sub Subscriber) error {
 		return fmt.Errorf("%w: %q", ErrIndexExists, name)
 	}
 	m.indexes[name] = sub
+	m.publishActiveLocked()
 	return nil
 }
 
@@ -236,6 +269,7 @@ func (m *Manager) DropIndex(name string) error {
 		return fmt.Errorf("%w: %q", ErrIndexNotFound, name)
 	}
 	delete(m.indexes, name)
+	m.publishActiveLocked()
 	return nil
 }
 

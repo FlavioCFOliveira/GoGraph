@@ -8,8 +8,9 @@ package exec
 //
 // # Enumeration strategy
 //
-// Outgoing edges are enumerated via graphMutator.OutNeighbours. Incoming edges
-// are enumerated via graphMutator.InNeighbours. Each edge is removed with
+// Outgoing edges are removed in bulk via graphMutator.RemoveAllEdgesFrom.
+// Incoming edges are enumerated in the transaction's own view via
+// [inNeighboursInTx] (rmp #2884). Each incoming edge is removed with
 // graphMutator.RemoveEdge before the node itself is cleaned up.
 //
 // Snapshot before mutate: outgoing and incoming neighbour lists are
@@ -177,7 +178,12 @@ func (op *DetachDelete) Next(out *Row) (bool, error) {
 	// graphs: RemoveAllEdgesFrom only removes outgoing edges from the
 	// adjacency layer; incoming edges from other nodes pointing at nodeKey
 	// must still be removed one-by-one via RemoveEdge).
-	incoming := op.mutator.InNeighbours(nodeKey)
+	// Read in THIS transaction's view (rmp #2884): an incoming relationship its
+	// snapshot holds is removed even when a concurrent transaction has already
+	// taken it out of the present — the removal then collides with that
+	// transaction's adjacency claim instead of silently leaving the arc for its
+	// rollback to restore into a deleted node.
+	incoming := inNeighboursInTx(op.mutator, nodeKey)
 
 	// The per-Next ctx check above is per node; a supernode's incident-edge
 	// sweep is O(degree) under the visibility barrier, so poll ctx.Err()
@@ -255,7 +261,7 @@ func (op *DetachDelete) detachDeletePath(p expr.PathValue) error {
 			continue
 		}
 		// Snapshot incoming before the bulk outgoing removal.
-		incoming := op.mutator.InNeighbours(nodeKey)
+		incoming := inNeighboursInTx(op.mutator, nodeKey)
 
 		// Remove all outgoing edges in O(degree) via the bulk path.
 		if swept&0xFFF == 0 {

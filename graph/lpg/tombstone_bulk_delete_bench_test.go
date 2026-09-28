@@ -47,7 +47,9 @@ func buildDeleteGraph(tb testing.TB, preloaded int) (*Graph[string, float64], []
 		}
 		live = append(live, key)
 	}
-	g.RestoreTombstones(ids)
+	if err := g.RestoreTombstones(ids); err != nil {
+		tb.Fatalf("g.RestoreTombstones(ids): %v", err)
+	}
 	if got := g.TombstoneCount(); got != preloaded {
 		tb.Fatalf("preload: TombstoneCount = %d, want %d", got, preloaded)
 	}
@@ -69,7 +71,9 @@ func BenchmarkBulkNodeDelete(b *testing.B) {
 				g, live := buildDeleteGraph(b, preloaded)
 				b.StartTimer()
 				for _, key := range live {
-					g.RemoveNode(key)
+					if err := g.RemoveNode(key); err != nil {
+						b.Fatalf("g.RemoveNode(key): %v", err)
+					}
 				}
 				b.StopTimer()
 				if got := g.TombstoneCount(); got != preloaded+bulkDeleteBatch {

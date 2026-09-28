@@ -66,7 +66,12 @@ func assertLabelIndexNeverMissesABagLabel(t *testing.T, budget time.Duration) {
 			if i%2 == 0 {
 				_ = g.ApplyAtomically(func() error { return g.SetNodeLabel(k, "L") })
 			} else {
-				_ = g.ApplyAtomically(func() error { g.RemoveNodeLabel(k, "L"); return nil })
+				_ = g.ApplyAtomically(func() error {
+					if err := g.RemoveNodeLabel(k, "L"); err != nil {
+						t.Errorf("g.RemoveNodeLabel(k, \"L\"): %v", err)
+					}
+					return nil
+				})
 			}
 			// Bumped AFTER the operation completes, so an epoch the reader finds
 			// unchanged across its window means no operation FINISHED inside it —

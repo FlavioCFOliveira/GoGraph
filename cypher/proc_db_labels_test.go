@@ -131,7 +131,9 @@ func TestProcDbLabels_DroppedAfterDelete(t *testing.T) {
 	}
 
 	// Delete the only node bearing "Rare".
-	g.RemoveNode("bob")
+	if err := g.RemoveNode("bob"); err != nil {
+		t.Fatalf("g.RemoveNode(\"bob\"): %v", err)
+	}
 
 	after := labelsInUse(t, eng)
 	if _, ok := after["Rare"]; ok {

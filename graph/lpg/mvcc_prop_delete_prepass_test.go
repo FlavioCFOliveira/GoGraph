@@ -266,7 +266,9 @@ func TestPropDeletePrePass_EmptyingABagStillDropsTheEntry(t *testing.T) {
 		t.Fatal("the seeded property left no bag")
 	}
 
-	g.DelNodeProperty("n", "only")
+	if err := g.DelNodeProperty("n", "only"); err != nil {
+		t.Fatalf("g.DelNodeProperty(\"n\", \"only\"): %v", err)
+	}
 
 	s.mu.RLock()
 	bag, still := s.m[id]
@@ -278,7 +280,9 @@ func TestPropDeletePrePass_EmptyingABagStillDropsTheEntry(t *testing.T) {
 
 	// A second delete of the same now-absent key must be a clean no-op rather
 	// than resurrecting an entry — this is the pre-pass's own fast path.
-	g.DelNodeProperty("n", "only")
+	if err := g.DelNodeProperty("n", "only"); err != nil {
+		t.Fatalf("g.DelNodeProperty(\"n\", \"only\"): %v", err)
+	}
 	s.mu.RLock()
 	_, resurrected := s.m[id]
 	s.mu.RUnlock()
@@ -328,7 +332,9 @@ func TestPropDeletePrePass_ConcurrentAbsentDeletesLoseNoWrite(t *testing.T) {
 				n := names[(w*11+r)%nodes]
 				// A key no writer ever sets: every one of these takes the
 				// pre-pass's absent-key fast path under the shared lock.
-				g.DelNodeProperty(n, "never-set")
+				if err := g.DelNodeProperty(n, "never-set"); err != nil {
+					t.Errorf("g.DelNodeProperty(n, \"never-set\"): %v", err)
+				}
 			}
 		}(w)
 	}

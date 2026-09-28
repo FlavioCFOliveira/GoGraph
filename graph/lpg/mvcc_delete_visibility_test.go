@@ -301,7 +301,9 @@ func TestDeleteVisibility_PresentReaderAgreesWithTheTombstone(t *testing.T) {
 		reportDeleteVisibility(t, "RemoveNode",
 			runDeleteVisibilityProbe(t, rounds, 64, 4, true, nil,
 				func(g *Graph[string, float64], key string, _ graph.NodeID) {
-					g.RemoveNode(key)
+					if err := g.RemoveNode(key); err != nil {
+						t.Fatalf("g.RemoveNode(key): %v", err)
+					}
 				}))
 	})
 
@@ -333,7 +335,9 @@ func TestDeleteVisibility_ReviveIsTheMirrorOfRetirement(t *testing.T) {
 		runDeleteVisibilityProbe(t, rounds, 64, 4, false,
 			func(g *Graph[string, float64], keys []string, _ []graph.NodeID) {
 				for _, k := range keys {
-					g.RemoveNode(k)
+					if err := g.RemoveNode(k); err != nil {
+						t.Fatalf("g.RemoveNode(k): %v", err)
+					}
 				}
 				// Sweep, so the entries really have left the bitmap and the
 				// revival has something to restore. Without this the probe would
@@ -375,7 +379,9 @@ func TestDeleteVisibility_RestoreTombstonesRetiresTheEntries(t *testing.T) {
 		t.Fatal("setup: the live node is not reported, so the assertions below could " +
 			"pass without the retirement having done anything")
 	}
-	g.RestoreTombstones([]graph.NodeID{id})
+	if err := g.RestoreTombstones([]graph.NodeID{id}); err != nil {
+		t.Fatalf("g.RestoreTombstones([]graph.NodeID{id}): %v", err)
+	}
 	if !g.IsTombstoned(id) {
 		t.Fatal("setup: RestoreTombstones did not tombstone the node")
 	}
@@ -421,7 +427,9 @@ func TestDeleteVisibility_LabellingADeadNodeDoesNotIndexIt(t *testing.T) {
 	if !ok {
 		t.Fatal("Lookup missed after AddNode")
 	}
-	g.RestoreTombstones([]graph.NodeID{id})
+	if err := g.RestoreTombstones([]graph.NodeID{id}); err != nil {
+		t.Fatalf("g.RestoreTombstones([]graph.NodeID{id}): %v", err)
+	}
 	if err := g.SetNodeLabel("a", "Retired"); err != nil {
 		t.Fatalf("SetNodeLabel: %v", err)
 	}
@@ -594,7 +602,9 @@ func TestDeleteVisibility_TombstoneCounterNeverUnderCountsTheBitmap(t *testing.T
 			}
 		}()
 		runtime.Gosched()
-		g.RemoveNode("a")
+		if err := g.RemoveNode("a"); err != nil {
+			t.Fatalf("g.RemoveNode(\"a\"): %v", err)
+		}
 		stop.Store(true)
 		wg.Wait()
 		if err := g.Close(); err != nil {

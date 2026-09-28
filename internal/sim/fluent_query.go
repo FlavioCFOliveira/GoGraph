@@ -1960,7 +1960,10 @@ func fluentQueryGhostFixture(tick int64, seed *Seed, perturb fqPerturb) ([]Viola
 			continue
 		}
 		removed[name] = struct{}{}
-		g.RemoveNode(name)
+		if err := g.RemoveNode(name); err != nil {
+			return []Violation{fqViolation(ViolationOracleDeviation, tick, "ghost-fixture:setup",
+				"RemoveNode(%q): %v", name, err)}, 0
+		}
 	}
 
 	// The MODEL, computed by hand from the construction above.

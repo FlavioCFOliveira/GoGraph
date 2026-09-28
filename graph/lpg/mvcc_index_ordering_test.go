@@ -147,7 +147,9 @@ func TestDeferredIndexRemoval_UntransactedWriteStillSweeps(t *testing.T) {
 	lid := g.reg.Intern("L")
 
 	// No transaction: the public mutator.
-	g.RemoveNodeLabel("a", "L")
+	if err := g.RemoveNodeLabel("a", "L"); err != nil {
+		t.Fatalf("g.RemoveNodeLabel(\"a\", \"L\"): %v", err)
+	}
 
 	// Either it was removed immediately (versioning disarmed) or deferred and then
 	// swept. Both are correct; what is not correct is remaining in the bitmap with

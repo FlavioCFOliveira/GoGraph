@@ -140,7 +140,9 @@ func TestInUseEnumerators_TombstoneFiltering(t *testing.T) {
 	// it is the dst endpoint of the only WORKS_AT edge. After removal those
 	// three names must disappear; shared names (Person via a/b, "name"/"age"
 	// via a, KNOWS via a->b) must survive.
-	g.RemoveNode("c")
+	if err := g.RemoveNode("c"); err != nil {
+		t.Fatalf("g.RemoveNode(\"c\"): %v", err)
+	}
 
 	t.Run("node-labels", func(t *testing.T) {
 		got := g.NodeLabelsInUse()
@@ -189,7 +191,9 @@ func TestInUseEnumerators_EdgeRetiredWhenEndpointRemoved(t *testing.T) {
 		t.Fatalf("pre-remove RelationshipTypesInUse = %v, want [LINK]", got)
 	}
 
-	g.RemoveNode("y") // dst endpoint gone
+	if err := g.RemoveNode("y"); err != nil {
+		t.Fatalf("g.RemoveNode(\"y\"): %v", err)
+	} // dst endpoint gone
 
 	if got := g.RelationshipTypesInUse(); len(got) != 0 {
 		t.Errorf("RelationshipTypesInUse after endpoint removal = %v, want empty", got)
@@ -227,7 +231,9 @@ func TestInUseEnumerators_Concurrency(t *testing.T) {
 					g.SetEdgeLabel(n, n-1, "KNOWS")
 				}
 				if i%7 == 0 {
-					g.RemoveNode(n)
+					if err := g.RemoveNode(n); err != nil {
+						t.Errorf("g.RemoveNode(n): %v", err)
+					}
 				}
 			}
 		}(w)

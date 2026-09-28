@@ -36,12 +36,18 @@ func buildTombstoneGraph(t *testing.T) *lpg.Graph[string, int64] {
 	// Delete a and c the way the engine does: strip then tombstone.
 	for _, k := range []string{"a", "c"} {
 		for _, lbl := range g.NodeLabels(k) {
-			g.RemoveNodeLabel(k, lbl)
+			if err := g.RemoveNodeLabel(k, lbl); err != nil {
+				t.Fatalf("g.RemoveNodeLabel(k, lbl): %v", err)
+			}
 		}
 		for pk := range g.NodeProperties(k) {
-			g.DelNodeProperty(k, pk)
+			if err := g.DelNodeProperty(k, pk); err != nil {
+				t.Fatalf("g.DelNodeProperty(k, pk): %v", err)
+			}
 		}
-		g.RemoveNode(k)
+		if err := g.RemoveNode(k); err != nil {
+			t.Fatalf("g.RemoveNode(k): %v", err)
+		}
 	}
 	return g
 }
@@ -164,7 +170,9 @@ func TestSnapshot_TombstonesRoundTrip(t *testing.T) {
 	if err := ApplyPropertiesToGraph(fresh, loaded.Properties); err != nil {
 		t.Fatalf("ApplyPropertiesToGraph: %v", err)
 	}
-	ApplyTombstonesToGraph(fresh, loaded.Tombstones)
+	if err := ApplyTombstonesToGraph(fresh, loaded.Tombstones); err != nil {
+		t.Fatalf("ApplyTombstonesToGraph: %v", err)
+	}
 
 	if !fresh.IsTombstoned(idA) {
 		t.Error("node a must be tombstoned after snapshot round-trip")

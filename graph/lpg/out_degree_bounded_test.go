@@ -69,7 +69,9 @@ func boundedDegreeFixture(t *testing.T, dead, live int) *Graph[string, float64] 
 		edge("clean", l)
 	}
 	for i := 0; i < dead; i++ {
-		g.RemoveNode(fmt.Sprintf("dead%d", i))
+		if err := g.RemoveNode(fmt.Sprintf("dead%d", i)); err != nil {
+			t.Fatalf("g.RemoveNode(fmt.Sprintf(\"dead%%d\", i)): %v", err)
+		}
 	}
 	return g
 }

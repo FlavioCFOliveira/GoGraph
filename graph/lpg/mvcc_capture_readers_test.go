@@ -124,12 +124,16 @@ func TestTombstonedIDsAsOf_ReportsTheSnapshotsDeadSet(t *testing.T) {
 			t.Fatalf("AddNode %s: %v", n, err)
 		}
 	}
-	g.RemoveNode("b")
+	if err := g.RemoveNode("b"); err != nil {
+		t.Fatalf("g.RemoveNode(\"b\"): %v", err)
+	}
 
 	snap := g.BeginRead()
 	defer g.EndRead(snap)
 
-	g.RemoveNode("c") // after the snapshot
+	if err := g.RemoveNode("c"); err != nil {
+		t.Fatalf("g.RemoveNode(\"c\"): %v", err)
+	} // after the snapshot
 
 	dead := map[graph.NodeID]bool{}
 	got := g.TombstonedIDsAsOf(snap)

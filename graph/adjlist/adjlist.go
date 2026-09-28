@@ -1291,6 +1291,7 @@ func (a *AdjList[N, W]) removeAllEdgesFromTx(src N, tx mvcc.Tx) {
 	// Publish nil atomically: readers after this store see an empty adjacency
 	// for src. storeEntry cannot fail here because the slot already exists.
 	_ = a.storeEntry(s, intraIdx, nil, tx)
+	info, ts := a.removalStamp(s, intraIdx)
 	removed := len(old.neighbours)
 	// Copy neighbour IDs before releasing the lock so the mirror-removal loop
 	// below is not affected by concurrent writes to the shard.
@@ -1302,7 +1303,7 @@ func (a *AdjList[N, W]) removeAllEdgesFromTx(src N, tx mvcc.Tx) {
 	// call per SLOT, not per distinct destination, so parallel edges lose
 	// exactly as many recorded in-edges as the forward entry held.
 	for _, dstID := range dsts {
-		a.rev.remove(dstID, srcID)
+		a.rev.remove(dstID, srcID, info, ts)
 	}
 
 	// Adjust the edge counter atomically. The two's-complement trick
@@ -1356,13 +1357,15 @@ func (a *AdjList[N, W]) removeOneEdgeWithHandle(src, dst graph.NodeID, tx mvcc.T
 		// instead of an empty struct to avoid a small allocation on each
 		// last-edge removal; loadEntry handles nil slots correctly.
 		_ = a.storeEntry(s, intraIdx, nil, tx)
-		a.rev.remove(dst, src)
+		info, ts := a.removalStamp(s, intraIdx)
+		a.rev.remove(dst, src, info, ts)
 		return true, removedH
 	}
 	newEntry := compactEntry(current, idx)
 	// storeEntry cannot fail here: same slot, no growth required.
 	_ = a.storeEntry(s, intraIdx, newEntry, tx)
-	a.rev.remove(dst, src)
+	info, ts := a.removalStamp(s, intraIdx)
+	a.rev.remove(dst, src, info, ts)
 	return true, removedH
 }
 
@@ -1397,11 +1400,13 @@ func (a *AdjList[N, W]) removeOneEdgeLocked(src, dst graph.NodeID, tx mvcc.Tx) {
 	}
 	if len(current.neighbours) == 1 {
 		_ = a.storeEntry(s, intraIdx, nil, tx)
-		a.rev.remove(dst, src)
+		info, ts := a.removalStamp(s, intraIdx)
+		a.rev.remove(dst, src, info, ts)
 		return
 	}
 	_ = a.storeEntry(s, intraIdx, compactEntry(current, idx), tx)
-	a.rev.remove(dst, src)
+	info, ts := a.removalStamp(s, intraIdx)
+	a.rev.remove(dst, src, info, ts)
 }
 
 // removeOneEdgeByHandle publishes a new adjacency snapshot for src that omits
@@ -1433,11 +1438,13 @@ func (a *AdjList[N, W]) removeOneEdgeByHandle(src, dst graph.NodeID, targetHandl
 	}
 	if len(current.neighbours) == 1 {
 		_ = a.storeEntry(s, intraIdx, nil, tx)
-		a.rev.remove(dst, src)
+		info, ts := a.removalStamp(s, intraIdx)
+		a.rev.remove(dst, src, info, ts)
 		return true
 	}
 	_ = a.storeEntry(s, intraIdx, compactEntry(current, idx), tx)
-	a.rev.remove(dst, src)
+	info, ts := a.removalStamp(s, intraIdx)
+	a.rev.remove(dst, src, info, ts)
 	return true
 }
 
@@ -1460,11 +1467,13 @@ func (a *AdjList[N, W]) removeOneEdgeFallback(s *adjShard[W], intraIdx uint64, c
 	}
 	if len(current.neighbours) == 1 {
 		_ = a.storeEntry(s, intraIdx, nil, tx)
-		a.rev.remove(dst, src)
+		info, ts := a.removalStamp(s, intraIdx)
+		a.rev.remove(dst, src, info, ts)
 		return true
 	}
 	_ = a.storeEntry(s, intraIdx, compactEntry(current, idx), tx)
-	a.rev.remove(dst, src)
+	info, ts := a.removalStamp(s, intraIdx)
+	a.rev.remove(dst, src, info, ts)
 	return true
 }
 

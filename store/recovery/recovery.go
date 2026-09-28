@@ -1514,7 +1514,9 @@ func openCodec[N comparable, W any](
 			// by replaying OpRemoveNode, so applying a possibly-stale
 			// snapshot set there could wrongly re-tombstone a re-created
 			// node.
-			snapshot.ApplyTombstonesToGraph(g, loaded.Tombstones)
+			if err := snapshot.ApplyTombstonesToGraph(g, loaded.Tombstones); err != nil {
+				return res, fmt.Errorf("recovery: apply snapshot tombstones: %w", err)
+			}
 			res.SnapshotTombstones = len(loaded.Tombstones.IDs)
 
 			// Self-sufficient path: the mapper is fully restored, so every
@@ -2223,11 +2225,17 @@ func applyOpCodec[N comparable, W any](
 			// itself.
 			for _, lbl := range g.NodeLabels(src) {
 				touched.addLabel(lbl)
-				g.RemoveNodeLabel(src, lbl)
+				if err := g.RemoveNodeLabel(src, lbl); err != nil {
+					metrics.IncCounter("store.recovery.applyOp.removeNodeLabelErrors", 1)
+					return false
+				}
 			}
 			for k := range g.NodeProperties(src) {
 				touched.addKey(k)
-				g.DelNodeProperty(src, k)
+				if err := g.DelNodeProperty(src, k); err != nil {
+					metrics.IncCounter("store.recovery.applyOp.delNodePropertyErrors", 1)
+					return false
+				}
 			}
 			// Reconstruct the tombstone so the node is logically deleted
 			// after replay, not merely a label-stripped live node. Without
@@ -2235,10 +2243,16 @@ func applyOpCodec[N comparable, W any](
 			// resurrect the node as an undeletable ghost. A later OpAddNode
 			// for the same key revives it (g.AddNode clears the tombstone),
 			// so replay order is honoured.
-			g.RemoveNode(src)
+			if err := g.RemoveNode(src); err != nil {
+				metrics.IncCounter("store.recovery.applyOp.removeNodeErrors", 1)
+				return false
+			}
 		case txn.OpRemoveNodeLabel:
 			touched.addLabel(label)
-			g.RemoveNodeLabel(src, label)
+			if err := g.RemoveNodeLabel(src, label); err != nil {
+				metrics.IncCounter("store.recovery.applyOp.removeNodeLabelErrors", 1)
+				return false
+			}
 		case txn.OpSetNodeLabel:
 			touched.addLabel(label)
 			if err := g.SetNodeLabel(src, label); err != nil {
@@ -2298,7 +2312,10 @@ func applyOpCodec[N comparable, W any](
 			}
 		case txn.OpDelNodeProperty:
 			touched.addKey(key)
-			g.DelNodeProperty(src, key)
+			if err := g.DelNodeProperty(src, key); err != nil {
+				metrics.IncCounter("store.recovery.applyOp.delNodePropertyErrors", 1)
+				return false
+			}
 		case txn.OpSetEdgeProperty:
 			val, _, verr := decodeRecoveryPropertyValue(rest)
 			if verr != nil {

@@ -187,7 +187,9 @@ func TestEmptyRegistry_OutputIsUnchanged(t *testing.T) {
 				}
 			}
 		}
-		g.RemoveNode("n3")
+		if err := g.RemoveNode("n3"); err != nil {
+			t.Fatalf("g.RemoveNode(\"n3\"): %v", err)
+		}
 		return g
 	}
 

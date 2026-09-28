@@ -443,7 +443,9 @@ func TestDeferredIndexRemoval_ConcurrentReaddIsNotLost(t *testing.T) {
 		// Remove it, which DEFERS the bitmap removal, and let the watermark pass
 		// the removal's instant so the next sweep finds it ready.
 		if err := g.ApplyAtomically(func() error {
-			g.RemoveNodeLabel(k, "L")
+			if err := g.RemoveNodeLabel(k, "L"); err != nil {
+				t.Fatalf("g.RemoveNodeLabel(k, \"L\"): %v", err)
+			}
 			return nil
 		}); err != nil {
 			t.Fatalf("round %d remove: %v", r, err)

@@ -74,9 +74,16 @@ package lpg
 // adjacency shard's copy-on-write builder under that transaction's identity.
 //
 // Obtain one with [Graph.Writer]. A view built from the zero [WriteTx] carries no
-// transaction and behaves exactly as the graph's own mutators do — each write is
-// its own transaction, committed the instant it is made — which is the right
-// answer for a caller outside any bracket and the wrong one inside one.
+// transaction and behaves as the graph's own mutators do — each write is its own
+// transaction, committed the instant it is made — which is the right answer for a
+// caller outside any bracket and the wrong one inside one.
+//
+// A WriteView does NOT take the raw mutators' index-maintenance refusal
+// ([ErrIndexedRawWrite]), with or without a transaction: it is the write surface
+// of a caller that maintains the secondary indexes itself, as the Cypher engine
+// does by recording every change it makes and fanning the changes out at commit.
+// A caller that writes an indexed graph through a WriteView without doing so
+// leaves the indexes stale.
 //
 // It is valid only while its transaction's bracket is open and must NOT be
 // retained past it: the state it names is recycled on the unwind. A retained view

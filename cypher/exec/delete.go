@@ -40,6 +40,58 @@ import (
 // remove the node together with its relationships.
 var ErrDeleteNodeHasRelationships = errors.New("exec: cannot delete node with existing relationships; use DETACH DELETE")
 
+// txVisibleAdjacencyReader is the optional part of a [GraphMutator] that
+// answers the delete path's adjacency questions from THIS transaction's view:
+// its snapshot plus its own writes, never another in-flight transaction's work
+// (rmp #2884).
+//
+// # Why the delete path must not read the present
+//
+// The DELETE guard ("does this node still have relationships") and DETACH
+// DELETE's enumeration of the incoming relationships it must remove are
+// decisions, and a decision taken from the newest stored state is taken from
+// other transactions' uncommitted work. Measured before this reader existed,
+// with T2 open and T1 deleting d:
+//
+//	T2 removes x->d, T1 runs DELETE d: T1 saw no in-edge and committed, T2
+//	rolled back, and the committed graph held x->d into a deleted d;
+//	T2 adds x->d, T1 runs DELETE d: T1 was refused for a relationship its
+//	snapshot does not hold.
+//
+// Eight of the twelve interleavings in
+// cypher.TestDeleteInEdgeIndex_DecidesFromTheTransactionSnapshot violated
+// snapshot isolation this way.
+type txVisibleAdjacencyReader interface {
+	// InNeighboursInTx is [GraphMutator.InNeighbours] in this transaction's
+	// view.
+	InNeighboursInTx(n string) []string
+	// HasInNeighbourInTx reports whether InNeighboursInTx would return anything.
+	HasInNeighbourInTx(n string) bool
+	// OutDegreeInTx is [GraphMutator.OutDegree] in this transaction's view.
+	OutDegreeInTx(n string) int
+}
+
+// inNeighboursInTx returns n's incoming neighbours as THIS transaction sees
+// them. The fallback is not a degradation: a mutator without the reader carries
+// no transaction — the read-only and test stubs — and for such a caller the
+// present IS its view (the reading [labelsInTx] gives the same fallback).
+func inNeighboursInTx(mut GraphMutator, n string) []string {
+	if tv, ok := mut.(txVisibleAdjacencyReader); ok {
+		return tv.InNeighboursInTx(n)
+	}
+	return mut.InNeighbours(n)
+}
+
+// hasRelationshipsInTx reports whether n has any outgoing or incoming
+// relationship in THIS transaction's view — the DELETE guard. See
+// [inNeighboursInTx] for the fallback.
+func hasRelationshipsInTx(mut GraphMutator, n string) bool {
+	if tv, ok := mut.(txVisibleAdjacencyReader); ok {
+		return tv.OutDegreeInTx(n) > 0 || tv.HasInNeighbourInTx(n)
+	}
+	return mut.OutDegree(n) > 0 || len(mut.InNeighbours(n)) > 0
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // DeleteNode
 // ─────────────────────────────────────────────────────────────────────────────
@@ -192,7 +244,7 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 				for _, dst := range op.mutator.OutNeighbours(nodeKey) {
 					op.mutator.RemoveEdge(nodeKey, dst)
 				}
-				for _, src := range op.mutator.InNeighbours(nodeKey) {
+				for _, src := range inNeighboursInTx(op.mutator, nodeKey) {
 					op.mutator.RemoveEdge(src, nodeKey)
 				}
 				// Stripping the node's labels and properties is internal teardown, not a
@@ -317,11 +369,12 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 		return true, nil
 	}
 
-	// Guard: the node must not have any outgoing or incoming edges.
-	if op.mutator.OutDegree(nodeKey) > 0 {
-		return false, ErrDeleteNodeHasRelationships
-	}
-	if len(op.mutator.InNeighbours(nodeKey)) > 0 {
+	// Guard: the node must not have any outgoing or incoming edges IN THIS
+	// TRANSACTION'S VIEW (rmp #2884). A relationship another transaction added
+	// and has not committed does not refuse the delete; that transaction's
+	// adjacency claim on this node refuses it instead, as a serialization
+	// conflict, when the node is retired below.
+	if hasRelationshipsInTx(op.mutator, nodeKey) {
 		return false, ErrDeleteNodeHasRelationships
 	}
 

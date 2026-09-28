@@ -120,7 +120,9 @@ func TestAllNodesCountPushdown_Tombstones(t *testing.T) {
 	// skips them and LiveOrder() drops accordingly.
 	deleted := 0
 	for i := 0; i < total; i += 3 {
-		g.RemoveNode(fmt.Sprintf("n%d", i))
+		if err := g.RemoveNode(fmt.Sprintf("n%d", i)); err != nil {
+			t.Fatalf("g.RemoveNode(fmt.Sprintf(\"n%%d\", i)): %v", err)
+		}
 		deleted++
 	}
 	e := NewEngineWithOptions(g, EngineOptions{DisableParallelScan: true})

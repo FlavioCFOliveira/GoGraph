@@ -64,6 +64,7 @@ package lpg
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 
@@ -1960,6 +1961,46 @@ func (g *Graph[N, W]) IndexManager() *index.Manager { return g.idxMgr.load() }
 // after this store returns will observe m (or a later value).
 func (g *Graph[N, W]) SetIndexManager(m *index.Manager) { g.idxMgr.store(m) }
 
+// ErrIndexedRawWrite is returned by a raw node mutator of [Graph] —
+// [Graph.AddNode] when it would revive a removed node, [Graph.SetNodeLabel],
+// [Graph.RemoveNodeLabel], [Graph.SetNodeProperty], [Graph.DelNodeProperty],
+// [Graph.RemoveNode], [Graph.Revive] and [Graph.RestoreTombstones] — when it is
+// called while a secondary index is registered on, or being built for, the
+// graph's [Graph.IndexManager]. The refused call changes nothing.
+//
+// # The index-maintenance contract (rmp #2848)
+//
+// A secondary index is maintained by exactly one path: the change fan-out of
+// its [index.Manager], which the Cypher engine drives at commit from the changes
+// its write path records. The raw mutators write the graph directly and deliver
+// no change, so a node they seed, relabel, re-value or retire after an index
+// exists is invisible to that index: before this error existed, an index created
+// before a raw seed of 100 nodes answered a seek with 0 rows while a label scan
+// returned all 100, and a raw removal left a seek returning a node the scan no
+// longer found.
+//
+// So an indexed graph is written through the engine. The raw mutators remain
+// the way to populate a graph BEFORE its first index is created: creating an
+// index backfills it from the graph as it stands. Refusal is decided per call
+// from one atomic read ([index.Manager.Active]), so the mutators stay lock-free;
+// a call that races the registration of the first index is ordered by that read
+// alone.
+//
+// Callers should match it with [errors.Is].
+var ErrIndexedRawWrite = errors.New("lpg: raw write refused: a secondary index is registered, " +
+	"and only the engine's write path maintains it")
+
+// refuseIndexedRawWrite returns [ErrIndexedRawWrite] while an index is
+// registered on, or being built for, g's index manager, and nil otherwise. It is
+// the single decision every raw node mutator takes before it writes; see
+// [ErrIndexedRawWrite]. One atomic pointer load and one atomic counter load.
+func (g *Graph[N, W]) refuseIndexedRawWrite() error {
+	if g.idxMgr.load().Active() {
+		return ErrIndexedRawWrite
+	}
+	return nil
+}
+
 // AddNode inserts n if not already present. The error contract
 // matches the underlying [adjlist.AdjList.AddNode]: callers must
 // propagate [adjlist.ErrShardFull] when the responsible shard is at
@@ -1973,7 +2014,18 @@ func (g *Graph[N, W]) SetIndexManager(m *index.Manager) { g.idxMgr.store(m) }
 // place that must revive. [Graph.SetNodeLabel] does not revive: a
 // tombstoned node is never matched by a read clause, so a label can only
 // reach a removed key after AddNode has already revived it.
+//
+// Index maintenance: AddNode delivers no change to the secondary indexes (see
+// [ErrIndexedRawWrite]). Creating a new node changes no indexed state, so it is
+// always admitted; REVIVING a removed node restores whatever labels and
+// properties it kept, so while an index is registered a revival is refused with
+// [ErrIndexedRawWrite] and changes nothing.
 func (g *Graph[N, W]) AddNode(n N) error {
+	if err := g.refuseIndexedRawWrite(); err != nil {
+		if id, ok := g.adj.Mapper().Lookup(n); ok && g.IsTombstoned(id) {
+			return err
+		}
+	}
 	return g.addNodeInfo(n, nil)
 }
 
@@ -2141,9 +2193,17 @@ func (g *Graph[N, W]) revive(id graph.NodeID, tx *writeCtx) {
 // [Graph.IsTombstoned]/[Graph.LiveOrder], so it is atomic against those
 // readers.
 //
+// Index maintenance: Revive delivers no change to the secondary indexes, so
+// while an index is registered it is refused with [ErrIndexedRawWrite] and
+// changes nothing. The engine's undo path revives through [WriteView.Revive].
+//
 // Revive is safe for concurrent use.
-func (g *Graph[N, W]) Revive(n N) {
+func (g *Graph[N, W]) Revive(n N) error {
+	if err := g.refuseIndexedRawWrite(); err != nil {
+		return err
+	}
 	g.reviveInfo(n, nil)
+	return nil
 }
 
 // reviveInfo is [Graph.Revive] with an explicit write transaction; tx is
@@ -2586,7 +2646,13 @@ func (g *Graph[N, W]) removeEdgeInfo(src, dst N, tx *writeCtx) bool {
 		if err := g.adjVer.noteExclusive(srcID, tx); err != nil {
 			return false
 		}
-		if !g.adj.Directed() && dstOK {
+		// The DESTINATION is claimed on DIRECTED graphs too (rmp #2884), exactly
+		// as an append already claims it (rmp #2444): the arc references both
+		// endpoints, and a concurrent delete of dst decides from dst's in-edges.
+		// Without the claim, a transaction that removed x→d and then rolled back
+		// re-created the arc into a d that a concurrent DELETE had committed away
+		// — the delete saw no conflict because nothing it claimed was touched.
+		if dstOK && dstID != srcID {
 			if err := g.adjVer.noteExclusive(dstID, tx); err != nil {
 				return false
 			}
@@ -2717,7 +2783,13 @@ func (g *Graph[N, W]) removeEdgeByHandleInfo(src, dst N, handle uint64, tx *writ
 		if err := g.adjVer.noteExclusive(srcID, tx); err != nil {
 			return false
 		}
-		if !g.adj.Directed() && dstOK {
+		// The DESTINATION is claimed on DIRECTED graphs too (rmp #2884), exactly
+		// as an append already claims it (rmp #2444): the arc references both
+		// endpoints, and a concurrent delete of dst decides from dst's in-edges.
+		// Without the claim, a transaction that removed x→d and then rolled back
+		// re-created the arc into a d that a concurrent DELETE had committed away
+		// — the delete saw no conflict because nothing it claimed was touched.
+		if dstOK && dstID != srcID {
 			if err := g.adjVer.noteExclusive(dstID, tx); err != nil {
 				return false
 			}
@@ -2928,21 +3000,24 @@ func (g *Graph[N, W]) removeAllEdgesFromInfo(src N, tx *writeCtx) bool {
 	// adjacency untouched — the property [Graph.removeEdgeInfo] states for the
 	// per-edge path, and the reason the peer's own rollback stays sound.
 	//
-	// The undirected case claims each destination too: the mirror removal below
-	// mutates that node's entry, so an in-flight append there is a write this
-	// removal may not step over either.
+	// Each destination is claimed too. On an undirected graph the mirror removal
+	// below mutates that node's entry, so an in-flight append there is a write
+	// this removal may not step over; on either shape a concurrent delete of the
+	// destination decides from its in-edges, so the arc's removal must collide
+	// with it (rmp #2884).
 	if tx != nil {
 		if err := g.adjVer.noteExclusive(srcID, tx); err != nil {
 			return false
 		}
-		if !g.adj.Directed() {
-			for _, dstID := range dstIDs {
-				if dstID == srcID {
-					continue // the self-loop's mirror is this same entry
-				}
-				if err := g.adjVer.noteExclusive(dstID, tx); err != nil {
-					return false
-				}
+		// Every destination is claimed, on directed graphs as well (rmp #2884):
+		// see [Graph.removeEdgeInfo] for the delete-versus-rollback interleaving
+		// the destination claim closes.
+		for _, dstID := range dstIDs {
+			if dstID == srcID {
+				continue // the self-loop's mirror is this same entry
+			}
+			if err := g.adjVer.noteExclusive(dstID, tx); err != nil {
+				return false
 			}
 		}
 	}
@@ -3123,12 +3198,18 @@ func (g *Graph[N, W]) EdgeWeightAsOf(src, dst N, snap *Snapshot) (W, bool) {
 }
 
 // SetNodeLabel attaches label to n, inserting n if needed. Returns
-// the error from the underlying [adjlist.AdjList.AddNode] (which can
-// only happen via a future bounded-growth implementation); the
-// current [adjlist.AdjList.AddNode] never fails, so callers in
-// codepaths that do not configure [adjlist.Config.MaxShardCapacity]
-// may safely ignore the return.
+// the error from the underlying [adjlist.AdjList.AddNode] when the responsible
+// shard is at [adjlist.Config.MaxShardCapacity], or [ErrIndexedRawWrite].
+//
+// Index maintenance: SetNodeLabel writes the graph directly and delivers no
+// change to the secondary indexes, which only the engine's write path maintains.
+// While any index is registered on, or being built for, [Graph.IndexManager] it
+// is refused with [ErrIndexedRawWrite] and changes nothing; label an indexed
+// graph through the engine, or before its first index is created.
 func (g *Graph[N, W]) SetNodeLabel(n N, name string) error {
+	if err := g.refuseIndexedRawWrite(); err != nil {
+		return err
+	}
 	err := g.setNodeLabelInfo(n, name, nil)
 	g.reclaimAfterDirectWrite(nil)
 	return err
@@ -3373,14 +3454,23 @@ func (g *Graph[N, W]) setNodeLabelInfo(n N, name string, tx *writeCtx) error {
 // edges before calling RemoveNode so the tombstone reflects the
 // fully-deleted node state. No-op when n was never interned or is
 // already tombstoned.
-func (g *Graph[N, W]) RemoveNode(n N) {
-	// The report is discarded because there is nothing here to report: this
-	// entry point passes a nil transaction, and every refusal below sits inside
-	// `if g.mvccArmed && tx != nil`, so an untransacted removal is always
-	// admitted. Widening this exported signature would carry no information.
-	// Callers that CAN be refused go through [WriteView.RemoveNode], which
-	// returns it.
+//
+// Index maintenance: RemoveNode delivers no change to the secondary indexes,
+// which only the engine's write path maintains, so a node it retired stayed
+// reachable through an index seek. While any index is registered on, or being
+// built for, [Graph.IndexManager] it is refused with [ErrIndexedRawWrite] and
+// changes nothing; delete from an indexed graph through the engine.
+func (g *Graph[N, W]) RemoveNode(n N) error {
+	if err := g.refuseIndexedRawWrite(); err != nil {
+		return err
+	}
+	// The admitted-report is discarded because there is nothing here to report:
+	// this entry point passes a nil transaction, and every write-write refusal
+	// in removeNodeInfo sits inside `if g.mvccArmed && tx != nil`, so an
+	// untransacted removal is always admitted. Callers that CAN be refused on a
+	// conflict go through [WriteView.RemoveNode], which returns it.
 	_ = g.removeNodeInfo(n, nil)
+	return nil
 }
 
 // removeNodeInfo is [Graph.RemoveNode] with an explicit write transaction; tx is nil
@@ -4359,9 +4449,17 @@ func derivedCount(p *atomic.Pointer[func() int64]) int64 {
 // RestoreTombstones is intended for the one-shot snapshot-load phase of
 // recovery and is not safe to call concurrently with other mutations or
 // reads on g.
-func (g *Graph[N, W]) RestoreTombstones(ids []graph.NodeID) {
+//
+// Index maintenance: RestoreTombstones delivers no change to the secondary
+// indexes. Recovery calls it on a graph it has just constructed, before any
+// index manager is attached; while an index IS registered it is refused with
+// [ErrIndexedRawWrite] and changes nothing.
+func (g *Graph[N, W]) RestoreTombstones(ids []graph.NodeID) error {
+	if err := g.refuseIndexedRawWrite(); err != nil {
+		return err
+	}
 	if len(ids) == 0 {
-		return
+		return nil
 	}
 	// RETIRE THE INDEX ENTRIES THIS LEAVES DISAGREEING (rmp #2687).
 	//
@@ -4421,6 +4519,7 @@ func (g *Graph[N, W]) RestoreTombstones(ids []graph.NodeID) {
 		g.topoGeneration.Add(1)
 	}
 	g.tombstoneMu.Unlock()
+	return nil
 }
 
 // IsTombstoned reports whether id has been marked removed via
@@ -4634,9 +4733,18 @@ func (g *Graph[N, W]) DecrEdgesRemoved() {
 }
 
 // RemoveNodeLabel detaches name from n. No-op if absent.
-func (g *Graph[N, W]) RemoveNodeLabel(n N, name string) {
+//
+// Index maintenance: RemoveNodeLabel delivers no change to the secondary
+// indexes, which only the engine's write path maintains. While any index is
+// registered on, or being built for, [Graph.IndexManager] it is refused with
+// [ErrIndexedRawWrite] and changes nothing.
+func (g *Graph[N, W]) RemoveNodeLabel(n N, name string) error {
+	if err := g.refuseIndexedRawWrite(); err != nil {
+		return err
+	}
 	g.removeNodeLabelInfo(n, name, nil)
 	g.reclaimAfterDirectWrite(nil)
+	return nil
 }
 
 // removeNodeLabelInfo is [Graph.RemoveNodeLabel] with an explicit commit

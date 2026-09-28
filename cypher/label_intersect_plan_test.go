@@ -79,7 +79,9 @@ func liGraph(t *testing.T, n int) *lpg.Graph[string, float64] {
 	if err := g.SetNodeLabel("b00000", "Empty"); err != nil {
 		t.Fatalf("SetNodeLabel Empty: %v", err)
 	}
-	g.RemoveNodeLabel("b00000", "Empty")
+	if err := g.RemoveNodeLabel("b00000", "Empty"); err != nil {
+		t.Fatalf("g.RemoveNodeLabel(\"b00000\", \"Empty\"): %v", err)
+	}
 	// A disjoint population.
 	for i := 0; i < 20; i++ {
 		key := fmt.Sprintf("o%05d", i)

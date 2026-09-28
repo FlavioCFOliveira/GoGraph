@@ -75,7 +75,9 @@ func TestPropDelta_AllThreeTransitionsReconstruct(t *testing.T) {
 
 	t.Run("value to absent", func(t *testing.T) {
 		before := g.readTS()
-		g.DelNodeProperty("a", "w")
+		if err := g.DelNodeProperty("a", "w"); err != nil {
+			t.Fatalf("g.DelNodeProperty(\"a\", \"w\"): %v", err)
+		}
 		old := g.propBagAsOf(id, before, 0)
 		if v, had := old.get(keyID); !had || v.v != int64(2) {
 			t.Fatalf("the older version lost the deleted key (%v/%v), want 2", v.v, had)
@@ -107,7 +109,9 @@ func TestPropDelta_UncomparableValueDoesNotPanic(t *testing.T) {
 		if err := g.SetNodeProperty("a", "k", v[1]); err != nil {
 			t.Fatalf("overwrite of an uncomparable value: %v", err)
 		}
-		g.DelNodeProperty("a", "k")
+		if err := g.DelNodeProperty("a", "k"); err != nil {
+			t.Fatalf("g.DelNodeProperty(\"a\", \"k\"): %v", err)
+		}
 	}
 }
 
@@ -210,7 +214,9 @@ func TestPropDelta_ArmedByDefaultAndDisarmable(t *testing.T) {
 	if err := armed.SetNodeProperty("a", "w", Int64Value(1)); err != nil {
 		t.Fatalf("SetNodeProperty: %v", err)
 	}
-	armed.DelNodeProperty("a", "w")
+	if err := armed.DelNodeProperty("a", "w"); err != nil {
+		t.Fatalf("armed.DelNodeProperty(\"a\", \"w\"): %v", err)
+	}
 	if n := armed.PropDeltaCount(); n != 2 {
 		t.Fatalf("a default graph recorded %d property deltas for one set and one delete, want 2", n)
 	}
@@ -223,7 +229,9 @@ func TestPropDelta_ArmedByDefaultAndDisarmable(t *testing.T) {
 	if err := inert.SetNodeProperty("a", "w", Int64Value(1)); err != nil {
 		t.Fatalf("SetNodeProperty: %v", err)
 	}
-	inert.DelNodeProperty("a", "w")
+	if err := inert.DelNodeProperty("a", "w"); err != nil {
+		t.Fatalf("inert.DelNodeProperty(\"a\", \"w\"): %v", err)
+	}
 	if n := inert.PropDeltaCount(); n != 0 {
 		t.Fatalf("a disarmed graph recorded %d property deltas; DisableMVCC must record nothing", n)
 	}

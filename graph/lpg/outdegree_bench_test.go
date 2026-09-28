@@ -335,7 +335,9 @@ func BenchmarkOutDegreeByTypeBounded_Shapes(b *testing.B) {
 func BenchmarkOutDegree_WithTombstones(b *testing.B) {
 	const d = 256
 	g := buildHub(b, 4096, d)
-	g.RemoveNode("n4000") // one tombstone is enough to leave the O(1) path
+	if err := g.RemoveNode("n4000"); err != nil {
+		b.Fatalf("g.RemoveNode(\"n4000\"): %v", err)
+	} // one tombstone is enough to leave the O(1) path
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		if _, ok := g.OutDegree("hub"); !ok {

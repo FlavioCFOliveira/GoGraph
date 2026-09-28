@@ -45,7 +45,12 @@ func TestNodeExistence_IsVersionedInBothDirections(t *testing.T) {
 	}
 
 	// A node removed after the reader started.
-	if err := g.ApplyAtomically(func() error { g.RemoveNode("old"); return nil }); err != nil {
+	if err := g.ApplyAtomically(func() error {
+		if err := g.RemoveNode("old"); err != nil {
+			t.Fatalf("g.RemoveNode(\"old\"): %v", err)
+		}
+		return nil
+	}); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
 	if !g.NodeExistsAsOf(oldID, before) {
@@ -75,7 +80,9 @@ func TestNodeExistence_RemoveThenReviveInOneTransaction(t *testing.T) {
 	id := mvccNodeID(t, g, "a")
 
 	if err := g.ApplyAtomically(func() error {
-		g.RemoveNode("a")
+		if err := g.RemoveNode("a"); err != nil {
+			t.Fatalf("g.RemoveNode(\"a\"): %v", err)
+		}
 		return g.AddNode("a") // the undo log's revival
 	}); err != nil {
 		t.Fatalf("remove+revive: %v", err)
@@ -105,7 +112,12 @@ func TestLabelIndex_RemovalIsDeferredAndVisibleToOlderReaders(t *testing.T) {
 	lid := g.reg.Intern("P")
 	before := snapAt(g.readTS())
 
-	if err := g.ApplyAtomically(func() error { g.RemoveNodeLabel("a", "P"); return nil }); err != nil {
+	if err := g.ApplyAtomically(func() error {
+		if err := g.RemoveNodeLabel("a", "P"); err != nil {
+			t.Fatalf("g.RemoveNodeLabel(\"a\", \"P\"): %v", err)
+		}
+		return nil
+	}); err != nil {
 		t.Fatalf("remove label: %v", err)
 	}
 	if g.IndexRemovalBacklog() == 0 {
@@ -158,7 +170,9 @@ func TestLabelIndex_DeferredRemovalIsCancelledByReAdd(t *testing.T) {
 	lid := g.reg.Intern("P")
 
 	if err := g.ApplyAtomically(func() error {
-		g.RemoveNodeLabel("a", "P")
+		if err := g.RemoveNodeLabel("a", "P"); err != nil {
+			t.Fatalf("g.RemoveNodeLabel(\"a\", \"P\"): %v", err)
+		}
 		return g.SetNodeLabel("a", "P") // the undo log's inverse
 	}); err != nil {
 		t.Fatalf("strip+restore: %v", err)
@@ -217,7 +231,9 @@ func TestCandidateFilter_DoesNotDeadlockUnderConcurrentReaders(t *testing.T) {
 			}
 			k := fmt.Sprintf("n%d", i%n)
 			_ = g.ApplyAtomically(func() error {
-				g.RemoveNodeLabel(k, "P")
+				if err := g.RemoveNodeLabel(k, "P"); err != nil {
+					t.Errorf("g.RemoveNodeLabel(k, \"P\"): %v", err)
+				}
 				return g.SetNodeLabel(k, "P")
 			})
 		}
