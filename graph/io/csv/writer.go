@@ -15,6 +15,15 @@ import (
 
 // Write streams every edge of a in src,dst,weight order to w.
 // Returns the number of rows written.
+//
+// Concurrency: Write and [WriteCtx] are safe to call while other goroutines
+// add nodes and edges to a. The endpoint set is bounded by the
+// [adjlist.AdjList.MaxNodeID] read before the name table is built: an edge
+// incident to a node created after that read is omitted.
+// Each source's adjacency is read once, as an immutable snapshot, when the
+// loop reaches it, so the output is not an atomic snapshot of the graph: a
+// concurrent write may be reflected for some nodes and not for others. For a
+// transactionally consistent export, stop the writers first.
 func Write(w io.Writer, a *adjlist.AdjList[string, int64], opts Options) (int, error) {
 	n, err := WriteCtx(context.Background(), w, a, opts)
 	if err != nil {
@@ -60,6 +69,11 @@ func WriteCtx(ctx context.Context, w io.Writer, a *adjlist.AdjList[string, int64
 	names := make([]string, maxID)
 	live := make([]bool, maxID)
 	a.Mapper().Walk(func(id graphNodeID, v string) bool {
+		// A node interned after maxID was read carries an id at or above
+		// the table length; it is outside this export's node set (rmp #2902).
+		if uint64(id) >= maxID {
+			return true
+		}
 		names[uint64(id)] = v
 		live[uint64(id)] = true
 		return true
