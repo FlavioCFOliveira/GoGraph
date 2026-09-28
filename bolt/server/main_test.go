@@ -16,10 +16,11 @@ import (
 )
 
 // sharedServerAddr is the address of the package-level test server started in
-// TestMain. All TestBoltSmokeTest_* tests that do not require special server
-// configuration (e.g. TLS) connect to this shared server so that only one TCP
-// listener is created for the entire smoke suite, avoiding macOS ephemeral
-// port exhaustion when many tests run concurrently.
+// TestMain. The TestBoltSmokeTest_* tests that need neither a special server
+// configuration (e.g. TLS) nor a graph of their own (a test asserting a row count
+// over what it created, rmp #2825) connect to this shared server, so that only
+// one TCP listener is created for them, avoiding macOS ephemeral port exhaustion
+// when many tests run concurrently.
 var sharedServerAddr string
 
 // TestMain starts a single shared server for the test binary, runs all tests,
