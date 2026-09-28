@@ -391,14 +391,6 @@ type buildOpts struct {
 	// regressing Return6 [1] / ExistentialSubquery2 [2] (which both
 	// rely on the pre-projection's `a`/`n` staying a NodeValue).
 	aggKeyScalarCols map[string]struct{}
-	// edgeIDResolver, when non-nil, returns the storage endpoints of an
-	// edge identified by its forward-CSR position. Used by the path-
-	// reconstruction fast paths to determine the true storage direction
-	// of a relationship when the row's (src, dst) columns reflect the
-	// traversal direction (which differs from storage for undirected /
-	// reverse-edge traversals). Lazily populated on first use to avoid
-	// building CSR snapshots for queries that never reconstruct paths.
-	edgeIDResolver func(edgeID uint64) (storageSrc, storageDst uint64, ok bool)
 	// csrPairCache, when non-nil, is the Engine's shared [csrPairCache], consulted
 	// by [csrPairCachedFor] so a query needing a CSR pair reuses a prior query's
 	// O(V+E) build while lpg.Graph.TopoGeneration has not advanced (rmp #2143).
@@ -452,7 +444,7 @@ type buildOpts struct {
 	// reconstruction helpers (edgeHandleAtFwdPos / edgeInstanceIdxFor) to read
 	// the stable per-edge handle and the per-CREATE instance index at a forward
 	// CSR position. It is built lazily, at most once per query, by [ensureFwdCSR]
-	// the first time a relationship is reconstructed (mirroring edgeIDResolver):
+	// the first time a relationship is reconstructed:
 	// before #1574 each helper rebuilt the whole forward CSR (O(V+E)) PER result
 	// row, making `RETURN r` O(R·(V+E)) and dominating heap allocations.
 	//
@@ -471,8 +463,8 @@ type buildOpts struct {
 	// disambiguates "not yet built" from a nil snapshot. Forward-only by design:
 	// the helpers never read reverse state, so the reverse CSR is not cached.
 	//
-	// Concurrency: assigned without synchronisation, exactly like edgeIDResolver,
-	// under the single-goroutine-per-query build/exec contract (the projection
+	// Concurrency: assigned without synchronisation, under the
+	// single-goroutine-per-query build/exec contract (the projection
 	// operator's Next drives reconstruction on one goroutine; ParallelScan
 	// workers never touch bopts).
 	fwdCSR *csr.CSR[float64]
@@ -11936,9 +11928,9 @@ func exprHasNonScalar(e ast.Expression) bool { // per-AST-node dispatch; no hidd
 //     and carries the identical hazard, so it is reset for the identical reason:
 //     edgeVarMeta below is nil'd so a worker rebuilds its own, which means a
 //     future widening of the fused shape to a relationship pattern would reach
-//     lazyRelResolverFor on the worker goroutine. fwdCSR / fwdCSRReady /
-//     edgeIDResolver are relationship-reconstruction caches the fused shape never
-//     touches; reset defensively.
+//     lazyRelResolverFor on the worker goroutine. fwdCSR / fwdCSRReady are
+//     relationship-reconstruction caches the fused shape never touches; reset
+//     defensively.
 //
 //   - BUILD-WRITTEN maps. The per-worker subtree rebuild runs buildOperator /
 //     buildIRProjection on the worker goroutine, and those WRITE bopts maps
@@ -11979,7 +11971,6 @@ func (b *buildOpts) forWorker() *buildOpts {
 	cp.relResolver = nil
 	cp.fwdCSR = nil
 	cp.fwdCSRReady = false
-	cp.edgeIDResolver = nil
 	// Build-written maps: nil so each worker allocates its own (no shared-map race).
 	cp.scalarCols = nil
 	cp.projAliasScalarCols = nil
@@ -12091,9 +12082,7 @@ func (b *buildOpts) forWorker() *buildOpts {
 //     EXCLUSION and not merely by the key.
 //   - PLAN SHAPE is untouched. The field is read by no recogniser and no gate, and
 //     every consumer of it runs after the plan exists: the adjacency closures
-//     [expandAdjacencySource] and [intersectAdjacencySource] return, and
-//     [ensureEdgeIDResolver], which derives the path-reconstruction resolver from
-//     the same pair at eval time.
+//     [expandAdjacencySource] and [intersectAdjacencySource] return.
 //
 // # What it carries, and what it deliberately does not
 //
@@ -15225,7 +15214,7 @@ func buildPathValueFromChainInfo(row exec.Row, cinfo pathChainInfo, g *lpg.ReadV
 		dstNode := buildNodeValueFromID(graph.NodeID(dstIDVal), g)
 		pathStart := nodes[len(nodes)-1].ID
 		pathEnd := dstNode.ID
-		reversed := leadingHopReversed(g, pathStart, pathEnd)
+		reversed := pathHopStoredInverted(g, pathStart, pathEnd, uint64(edgeIDVal))
 		rels = append(rels, resolveHopRel(bopts, g, pathStart, pathEnd, uint64(edgeIDVal), reversed, step.edgeType, nil))
 		nodes = append(nodes, dstNode)
 	}
@@ -15268,7 +15257,7 @@ func buildPathValueFromVLEMeta(row exec.Row, pmeta pathVarInfo, g *lpg.ReadView[
 		}
 		dstNode := buildNodeValueFromID(graph.NodeID(dstIDVal), g)
 		prevID := nodes[len(nodes)-1].ID
-		reversed := leadingHopReversed(g, prevID, dstNode.ID)
+		reversed := pathHopStoredInverted(g, prevID, dstNode.ID, uint64(edgeIDVal))
 		rels = append(rels, resolveHopRel(bopts, g, prevID, dstNode.ID, uint64(edgeIDVal), reversed, step.edgeType, nil))
 		nodes = append(nodes, dstNode)
 	}
@@ -16101,27 +16090,39 @@ func resolveHopRel(_ *buildOpts, g *lpg.ReadView[string, float64], prevID, dstID
 	return rel
 }
 
-// leadingHopReversed reports whether a fixed-length leading Expand hop from
-// prevID to dstID was traversed against storage direction, used to feed the
-// reversed flag of [resolveHopRel] for the leading-Expand hops that can precede
-// a VLE within the same named path (Match6 [14]). It mirrors the topology probe
-// in [buildRelationshipValueFromRow]: a hop is reversed when the forward edge
-// prevID -> dstID is absent but the reverse edge dstID -> prevID exists, so the
-// edge is stored as dstID -> prevID. When the forward edge exists (including
-// parallel-edge and self-loop cases) the hop is treated as forward. g is
-// assumed non-nil and the endpoints resolvable by the caller's contract.
-func leadingHopReversed(g *lpg.ReadView[string, float64], prevID, dstID uint64) bool {
+// pathHopStoredInverted reports whether the edge a named-path hop bound, identified
+// by its handle, is stored as dstID -> prevID rather than in the hop's path order
+// prevID -> dstID. It feeds the reversed flag of [resolveHopRel] on the three
+// named-path routes: [buildPathValueFromChainInfo], the leading fixed-length hops of
+// [buildPathValueFromVLEMeta], and the projection's fixed-length chain fast path.
+//
+// It is an adapter, not a recovery mechanism of its own: the question is exactly
+// the one [relStoredInverted] answers for a bound relationship variable, and it is
+// answered by the same ladder (by-handle type record, then topology, then the
+// adjacency's handle column), so a named path and a relationship variable over the
+// same edge cannot render different endpoints.
+//
+// It replaces two weaker mechanisms (rmp #2874, #2875). The first asked the
+// topology alone, which cannot tell the two edges of a RECIPROCAL pair apart and
+// answered "stored forward" for both — the defect rmp #2504 fixed for relationship
+// variables. The second read the handle as a forward-CSR position, which it
+// stopped being in rmp #2317, and derived the orientation from whichever edge
+// occupied that position. With a handle of 0 the ladder reduces to the topology
+// answer the first mechanism gave.
+//
+// Returns false when g is nil or an endpoint does not resolve, the value
+// [resolveHopRel] needs to keep its own degenerate behaviour for that case.
+func pathHopStoredInverted(g *lpg.ReadView[string, float64], prevID, dstID, handle uint64) bool {
 	if g == nil {
 		return false
 	}
-	prevKey, prevOK := g.AdjList().Mapper().Resolve(graph.NodeID(prevID))
-	dstKey, dstOK := g.AdjList().Mapper().Resolve(graph.NodeID(dstID))
+	mapper := g.AdjList().Mapper()
+	prevKey, prevOK := mapper.Resolve(graph.NodeID(prevID))
+	dstKey, dstOK := mapper.Resolve(graph.NodeID(dstID))
 	if !prevOK || !dstOK {
 		return false
 	}
-	// Versioned form: see buildRelationshipValueFromRow for why the direction
-	// probe must answer at this read's instant (rmp #2294).
-	return !g.HasEdge(prevKey, dstKey) && g.HasEdge(dstKey, prevKey)
+	return relStoredInverted(g, graph.NodeID(prevID), graph.NodeID(dstID), prevKey, dstKey, handle)
 }
 
 // relPresencePlaceholder is the non-null sentinel stamped under a presence-only
@@ -16825,24 +16826,17 @@ func buildIRProjection(
 								// when the graph carries edges in BOTH
 								// directions between the endpoint pair (Match6
 								// [12]'s `a:A -[:T1]-> b:B` + `b:B -[:T2]->
-								// a:A`), probing EdgeLabels(pathStart, pathEnd)
-								// alone returns whichever direction happens
-								// to be present, even when the row's edge ID
-								// references the OPPOSITE direction. Resolve
-								// the edge by ID via the bopts resolver to get
-								// the true storage endpoints, then derive the
-								// traversal direction from them and hydrate the
-								// hop's per-instance type/properties through the
-								// shared resolver (rmp #1685).
+								// a:A`), the pair alone cannot say which of the
+								// two the row bound. The row's edge id is the
+								// bound edge's HANDLE (rmp #2317), and
+								// pathHopStoredInverted resolves the stored
+								// orientation from it (rmp #2874, #2875); the
+								// hop's per-instance type/properties are then
+								// hydrated through the shared resolver (rmp
+								// #1685).
 								pathStart := nodes[len(nodes)-1].ID
 								pathEnd := dstNode.ID
-								storageStart := pathStart
-								if resolver := ensureEdgeIDResolver(capturedBopts, capturedG); resolver != nil {
-									if rss, _, ok := resolver(uint64(edgeIDVal)); ok {
-										storageStart = rss
-									}
-								}
-								reversed := storageStart != pathStart
+								reversed := pathHopStoredInverted(capturedG, pathStart, pathEnd, uint64(edgeIDVal))
 								rels = append(rels, resolveHopRel(capturedBopts, capturedG, pathStart, pathEnd, uint64(edgeIDVal), reversed, step.edgeType, nil))
 								nodes = append(nodes, dstNode)
 							}
@@ -22728,53 +22722,11 @@ func csrPairFromGraphAt(g *lpg.ReadView[string, float64]) (fwd, rev *csr.CSR[flo
 	return fwd, rev, key
 }
 
-// ensureEdgeIDResolver makes sure bopts.edgeIDResolver is populated and
-// returns it. The resolver maps a forward-CSR edge position (the
-// IntegerValue Expand emits) to the edge's storage endpoints
-// (storage_src, storage_dst). Path-reconstruction fast paths use it to
-// determine the relationship's storage direction when the row's
-// traversal columns disagree (undirected MATCH reverse-pass rows
-// carry traversal_src ≠ storage_src).
-//
-// The resolver is built lazily on first use because most queries never
-// reconstruct paths. CSR construction is O(V+E) but happens at most
-// once per query.
-func ensureEdgeIDResolver(bopts *buildOpts, g *lpg.ReadView[string, float64]) func(uint64) (uint64, uint64, bool) {
-	if bopts == nil || g == nil {
-		return nil
-	}
-	if bopts.edgeIDResolver != nil {
-		return bopts.edgeIDResolver
-	}
-	fwd, _ := csrPairCachedFor(bopts, g)
-	verts := fwd.VerticesSlice()
-	edges := fwd.EdgesSlice()
-	nEdges := uint64(len(edges))
-	bopts.edgeIDResolver = func(edgeID uint64) (uint64, uint64, bool) {
-		if edgeID >= nEdges {
-			return 0, 0, false
-		}
-		storageDst := uint64(edges[edgeID])
-		// Binary search for the largest src such that verts[src] <= edgeID.
-		lo, hi := 0, len(verts)-1
-		for lo < hi {
-			mid := (lo + hi + 1) / 2
-			if verts[mid] <= edgeID {
-				lo = mid
-			} else {
-				hi = mid - 1
-			}
-		}
-		return uint64(lo), storageDst, true
-	}
-	return bopts.edgeIDResolver
-}
-
 // ensureFwdCSR returns the forward CSR snapshot for relationship reconstruction,
-// building it at most once per query and caching it on bopts. It mirrors
-// [ensureEdgeIDResolver]: the snapshot is built lazily on first use so queries
-// that never project a relationship pay nothing, and reused for every result
-// row thereafter so the O(V+E) build leaves the per-row path (the #1574 fix).
+// building it at most once per query and caching it on bopts. The snapshot is
+// built lazily on first use so queries that never project a relationship pay
+// nothing, and reused for every result row thereafter so the O(V+E) build leaves
+// the per-row path (the #1574 fix).
 //
 // When bopts is nil (no per-query cache is available — the helpers are only
 // reached with a non-nil bopts today, but the guard keeps them safe in
