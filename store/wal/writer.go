@@ -346,9 +346,9 @@ func Open(path string) (*Writer, error) {
 // never on the commit hot path.
 func discardTornTail(f *os.File) error {
 	r := NewReader(f, nil) // nil closer: Open retains ownership of f
-	//nolint:revive // empty-block: the loop intentionally discards every
-	// frame — iterating to exhaustion is what populates TailOffset and
-	// TailError, which are the only outputs this scan needs.
+	// empty-block: the loop intentionally discards every frame —
+	// iterating to exhaustion is what populates TailOffset and TailError,
+	// which are the only outputs this scan needs.
 	for range r.Frames() {
 	}
 	if tErr := r.TailError(); tErr != nil && !errors.Is(tErr, ErrTornFrame) {
