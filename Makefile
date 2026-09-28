@@ -795,7 +795,7 @@ generate-cypher-parser: ## Regenerate cypher/parser/gen/ from ANTLR grammar (req
 	# 3. Canonical import grouping (matches the checked-in gen).
 	goimports -w "$(CYPHER_GEN_DIR)"
 	# 4. Re-apply the hand-written parser patches that cannot live in the grammar
-	#    (numeric-ID workarounds, chained-WITH, optional CALL parens, reduce()).
+	#    (numeric-ID workarounds, chained-WITH, optional CALL parens).
 	#    See cypher/parser/grammar/README.md and docs/tck/parser-report.md.
 	git apply --whitespace=nowarn "$(CYPHER_GRAMMAR_DIR)/gen-patches.patch"
 	$(GO) vet ./$(CYPHER_GEN_DIR)/...

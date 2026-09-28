@@ -3,10 +3,12 @@ package cypher_test
 // genpatch_behaviour_test.go — regression guard for the hand-written parser
 // patches in cypher/parser/grammar/gen-patches.patch.
 //
-// Those patches carry four behaviours that cannot live in the ANTLR grammar:
+// Those patches carry three behaviours that cannot live in the ANTLR grammar:
 // the numeric-ID workarounds (integer literals and variable-length range
 // bounds tokenise as ID rather than DIGIT because of lexer-rule ordering),
-// chained WITH, optional CALL parentheses, and reduce().
+// chained WITH, and optional CALL parentheses. reduce() was a fourth until rmp
+// #2923 made it a grammar rule; its cases stay below because a regeneration
+// that loses the rule fails them just as a lost patch did.
 //
 // The patch is re-applied by `make generate-cypher-parser` on top of freshly
 // generated code, and several of its hunks pin ABSOLUTE ATN state numbers. Any
@@ -62,7 +64,7 @@ func TestGenPatchBehaviours(t *testing.T) {
 		{"optional CALL parens", "with-parens", `CALL db.labels() YIELD label RETURN count(label) AS v`, "v", expr.IntegerValue(1)},
 		{"optional CALL parens", "without-parens", `CALL db.labels YIELD label RETURN count(label) AS v`, "v", expr.IntegerValue(1)},
 
-		// reduce() — a hand-written parser rule, not generated from the grammar.
+		// reduce() — a grammar rule since rmp #2923, formerly a hand-written one.
 		{"reduce()", "sum", `RETURN reduce(acc = 0, x IN [1, 2, 3] | acc + x) AS v`, "v", expr.IntegerValue(6)},
 		{"reduce()", "concat", `RETURN reduce(s = '', x IN ['a', 'b'] | s + x) AS v`, "v", expr.StringValue("ab")},
 	}

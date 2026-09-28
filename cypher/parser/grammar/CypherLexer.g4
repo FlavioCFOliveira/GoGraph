@@ -128,13 +128,6 @@ OF         : 'OF';
 ADD        : 'ADD';
 DROP       : 'DROP';
 
-// NB: there is deliberately no REDUCE keyword token. The reduce(acc = init, x
-// IN list | expr) construct is handled by a hand-written post-generation patch
-// (gen-patches.patch, section E) that intercepts the identifier "reduce"/
-// "REDUCE" lexed as ID. Introducing a REDUCE token here would shift every
-// subsequent token id and force a full ATN rewrite of the generated parser, so
-// it is intentionally omitted to keep the generated parser stable.
-
 // FOREACH is defined here, immediately before ID, so it takes the last keyword
 // token id and does not shift the ids of the keyword tokens above it — keeping
 // the post-generation hand patches (which reference tokens by name) applicable
@@ -156,6 +149,19 @@ FOREACH: 'FOREACH';
 // non-reserved for the same reason.
 EXPLAIN: 'EXPLAIN';
 PROFILE: 'PROFILE';
+
+// REDUCE (rmp #2923) opens the reduce(acc = init, x IN list | expr) expression,
+// the parser's reduceExpression rule. It sits after PROFILE and before ID for the
+// reason FOREACH, EXPLAIN and PROFILE do, and is listed in the parser's `symbol`
+// rule for the reason EXPLAIN and PROFILE are: `reduce` lexed as ID before this
+// token existed, so it must stay usable as a variable, label, property key and
+// map key.
+//
+// reduce() used to be a hand-written function spliced into the generated parser
+// (gen-patches.patch). Adaptive prediction simulates the ATN, which did not know
+// it, so any decision that looked past a reduce() call rejected the `|` inside
+// it: `x[reduce(a = 0, y IN l | a)]` failed to parse.
+REDUCE: 'REDUCE';
 
 ID: LetterOrDigit+;
 
