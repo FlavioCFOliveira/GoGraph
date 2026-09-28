@@ -101,6 +101,12 @@ type varLenSearch struct {
 	// ruled out every other end node.
 	onlyStart bool
 	start     graph.NodeID
+
+	// late and remainingLate are the enumerating search's [sameHopRefs] marks
+	// for s and for remaining (rmp #2916); the existential search leaves them
+	// zero.
+	late          bool
+	remainingLate []bool
 }
 
 // accepts reports whether the hop may end on id. It is a function of the node
@@ -414,7 +420,10 @@ func (pe *patternEvaluator) pairQualifies(srcID, dstID graph.NodeID, srcKey, dst
 // it calls cb once per complete match, with the end node and the hop's
 // relationship variable — a list of the relationships crossed, in traversal
 // order — bound on the row.
-func (pe *patternEvaluator) enumerateVarLen(ctx context.Context, srcID graph.NodeID, s step, remaining []step, row expr.RowContext, used relPath, cb func(expr.RowContext) error) error {
+//
+// late marks s as a late hop and remainingLate the hops of remaining (see
+// [patternEvaluator.enumerateSteps]).
+func (pe *patternEvaluator) enumerateVarLen(ctx context.Context, srcID graph.NodeID, s step, late bool, remaining []step, remainingLate []bool, row expr.RowContext, used relPath, cb func(expr.RowContext) error) error {
 	minDepth, maxDepth := varLenBounds(s.rel)
 	if list, bound := boundRelList(s.rel, row); bound {
 		end, next, ok, err := pe.walkBoundRelList(ctx, srcID, s, row, used, list, minDepth, maxDepth)
@@ -425,17 +434,35 @@ func (pe *patternEvaluator) enumerateVarLen(ctx context.Context, srcID graph.Nod
 		if s.node != nil && s.node.Variable != nil {
 			out[*s.node.Variable] = nodeValueForID(pe.g, end)
 		}
-		return pe.enumerateSteps(ctx, end, remaining, out, next, cb)
+		if late {
+			// The maps read the end node the walk has just found (the list itself
+			// is already bound), so they are resolved on out and the same list is
+			// walked again under them (rmp #2916).
+			rs, ok, err := pe.resolveStep(ctx, s, out)
+			if err != nil || !ok {
+				return err
+			}
+			if end, next, ok, err = pe.walkBoundRelList(ctx, srcID, rs, out, used, list, minDepth, maxDepth); err != nil || !ok {
+				return err
+			}
+		}
+		return pe.enumerateSteps(ctx, end, remaining, remainingLate, out, next, cb)
 	}
-	vs := varLenSearch{s: s, remaining: remaining, row: row, minDepth: minDepth, maxDepth: maxDepth, dir: hopDirection(s.rel), start: srcID}
-	return pe.varLenEnum(ctx, &vs, srcID, 0, ensureRelPath(used), nil, cb)
+	vs := varLenSearch{s: s, remaining: remaining, row: row, minDepth: minDepth, maxDepth: maxDepth, dir: hopDirection(s.rel), start: srcID,
+		late: late, remainingLate: remainingLate}
+	return pe.varLenEnum(ctx, &vs, s, srcID, 0, ensureRelPath(used), nil, cb)
 }
 
 // varLenEnum is the exact enumerating search from cur at depth hops; hops is the
 // path so far. Sibling extensions share hops' backing array, which is sound
 // because each is consumed — materialised at acceptance — before the next sibling
 // overwrites it.
-func (pe *patternEvaluator) varLenEnum(ctx context.Context, vs *varLenSearch, cur graph.NodeID, depth int64, used relPath, hops []candidateHop, cb func(expr.RowContext) error) error {
+//
+// s is vs.s, passed on its own for the late-hop check: resolving a step's maps
+// leaks its pattern pointers, and a pointer loaded from *vs leaking would make
+// escape analysis — which does not tell struct fields apart — leak vs.remaining,
+// and with it move every caller's step slice to the heap.
+func (pe *patternEvaluator) varLenEnum(ctx context.Context, vs *varLenSearch, s step, cur graph.NodeID, depth int64, used relPath, hops []candidateHop, cb func(expr.RowContext) error) error {
 	if depth >= vs.minDepth && vs.accepts(pe, cur) {
 		next := cloneRow(vs.row)
 		if n := vs.s.node; n != nil && n.Variable != nil {
@@ -448,8 +475,17 @@ func (pe *patternEvaluator) varLenEnum(ctx context.Context, vs *varLenSearch, cu
 			}
 			next[*r.Variable] = rels
 		}
-		if err := pe.enumerateSteps(ctx, cur, vs.remaining, next, used, cb); err != nil {
-			return err
+		ok := true
+		if vs.late {
+			var err error
+			if ok, err = pe.lateVarLenQualifies(ctx, s, cur, hops, next); err != nil {
+				return err
+			}
+		}
+		if ok {
+			if err := pe.enumerateSteps(ctx, cur, vs.remaining, vs.remainingLate, next, used, cb); err != nil {
+				return err
+			}
 		}
 	}
 	if depth >= vs.maxDepth {
@@ -463,11 +499,32 @@ func (pe *patternEvaluator) varLenEnum(ctx context.Context, vs *varLenSearch, cu
 	pe.varLenFrame++
 	defer func() { pe.varLenFrame-- }()
 	for _, c := range cands {
-		if err := pe.varLenEnum(ctx, vs, c.traversalDst(), depth+1, pushRel(used, c.instance()), append(hops, c), cb); err != nil {
+		if err := pe.varLenEnum(ctx, vs, s, c.traversalDst(), depth+1, pushRel(used, c.instance()), append(hops, c), cb); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// lateVarLenQualifies evaluates the property maps of the late variable-length
+// hop s against next — the row with the hop's list of relationships and its end
+// node cur bound — and reports whether every relationship of the path, hops, and
+// cur satisfy them (rmp #2916). A rejected path may still be extended: its
+// extensions bind a different list and end node, so their maps are evaluated
+// anew.
+func (pe *patternEvaluator) lateVarLenQualifies(ctx context.Context, s step, cur graph.NodeID, hops []candidateHop, next expr.RowContext) (bool, error) {
+	rs, ok, err := pe.resolveStep(ctx, s, next)
+	if err != nil || !ok {
+		return false, err
+	}
+	if rs.props != nil {
+		for _, h := range hops {
+			if !pe.slotPropsMatch(h.srcID, h.dstID, h.srcKey, h.dstKey, h.handle, rs.props) {
+				return false, nil
+			}
+		}
+	}
+	return rs.nodeProps == nil || pe.checkNodePattern(rs.node, rs.nodeProps, cur), nil
 }
 
 // boundRelList reports whether the variable-length hop's relationship variable is

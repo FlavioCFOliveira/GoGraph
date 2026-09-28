@@ -68,6 +68,12 @@ type patternEvaluator struct {
 	// query run rather than once per outer row. Lazily created.
 	constNodeProps map[*ast.NodePattern]*nodePropValues
 
+	// sameHopRefs caches, per pattern occurrence, which of its property maps
+	// read a variable the same element or hop binds ([sameHopRefsOf]; rmp #2916),
+	// so the reference walk runs once per query run rather than once per outer
+	// row. A nil entry records a pattern with no such map. Lazily created.
+	sameHopRefs map[*ast.PathPattern]*sameHopRefs
+
 	// params is the enclosing query's fully-resolved parameter map (rmp #2507).
 	//
 	// [patternEvaluator.checkNodePattern] evaluates an inline property map itself
@@ -292,15 +298,42 @@ func (pe *patternEvaluator) enumeratePatternMatches(ctx context.Context, pp *ast
 		startIDs = allNodeIDs(mapper)
 	}
 
-	startProps, ok, err := pe.resolveNodeProps(ctx, startNode, row)
-	if err != nil || !ok {
-		return err
+	refs := pe.sameHopRefsOf(pp)
+	lateStart := refs != nil && refs.start
+	var startProps *nodePropValues
+	if !lateStart {
+		var ok bool
+		var err error
+		if startProps, ok, err = pe.resolveNodeProps(ctx, startNode, row); err != nil || !ok {
+			return err
+		}
 	}
 	steps := collectSteps(pp.Head)
+	var late []bool
+	if refs != nil {
+		late = refs.hops
+	}
 	used := newRelPath(steps)
 	for _, sid := range startIDs {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		if lateStart {
+			// The start node's map reads the start node itself: bind it first
+			// (rmp #2916).
+			base := cloneRow(row)
+			base[*startNode.Variable] = nodeValueForID(pe.g, sid)
+			props, ok, err := pe.resolveNodeProps(ctx, startNode, base)
+			if err != nil {
+				return err
+			}
+			if !ok || !pe.checkStartNode(startNode, props, sid, row) {
+				continue
+			}
+			if err := pe.enumerateSteps(ctx, sid, steps, late, base, used, cb); err != nil {
+				return err
+			}
+			continue
 		}
 		if !pe.checkStartNode(startNode, startProps, sid, row) {
 			continue
@@ -309,7 +342,7 @@ func (pe *patternEvaluator) enumeratePatternMatches(ctx context.Context, pp *ast
 		if startNode != nil && startNode.Variable != nil {
 			base[*startNode.Variable] = nodeValueForID(pe.g, sid)
 		}
-		if err := pe.enumerateSteps(ctx, sid, steps, base, used, cb); err != nil {
+		if err := pe.enumerateSteps(ctx, sid, steps, late, base, used, cb); err != nil {
 			return err
 		}
 	}
@@ -323,12 +356,26 @@ func (pe *patternEvaluator) enumeratePatternMatches(ctx context.Context, pp *ast
 // used holds the relationships the path has crossed so far (see [relPath]); a
 // candidate already on it is skipped, which is openCypher's relationship
 // isomorphism (rmp #2895).
-func (pe *patternEvaluator) enumerateSteps(ctx context.Context, srcID graph.NodeID, steps []step, row expr.RowContext, used relPath, cb func(expr.RowContext) error) error {
+//
+// late is aligned with steps and marks each hop whose property maps read the
+// hop's own relationship or end node ([sameHopRefs]); nil marks none. It is a
+// parallel slice rather than a [step] field so that step stays four words: a
+// one-hop step slice then fits the stack buffer the compiler gives a small
+// non-escaping make in [patternEvaluator.matchPattern].
+func (pe *patternEvaluator) enumerateSteps(ctx context.Context, srcID graph.NodeID, steps []step, late []bool, row expr.RowContext, used relPath, cb func(expr.RowContext) error) error {
 	if len(steps) == 0 {
 		return cb(row)
 	}
 	s := steps[0]
-	if s.hasProps() {
+	isLate := len(late) > 0 && late[0]
+	var restLate []bool
+	if len(late) > 0 {
+		restLate = late[1:]
+	}
+	// A late hop's maps read the hop's own variables, so they are resolved per
+	// candidate, once those are bound ([patternEvaluator.lateHopQualifies]); until
+	// then s carries none and the candidates are filtered by type and label only.
+	if s.hasProps() && !isLate {
 		var ok bool
 		var err error
 		if s, ok, err = pe.resolveStep(ctx, s, row); err != nil || !ok {
@@ -337,7 +384,7 @@ func (pe *patternEvaluator) enumerateSteps(ctx context.Context, srcID graph.Node
 	}
 	remaining := steps[1:]
 	if s.isVarLen() {
-		return pe.enumerateVarLen(ctx, srcID, s, remaining, row, used, cb)
+		return pe.enumerateVarLen(ctx, srcID, s, isLate, remaining, restLate, row, used, cb)
 	}
 	if s.hasRelVar() {
 		if c, bound, found := pe.boundRelHop(srcID, s, row); bound {
@@ -350,7 +397,12 @@ func (pe *patternEvaluator) enumerateSteps(ctx context.Context, srcID graph.Node
 			if s.node != nil && s.node.Variable != nil {
 				next[*s.node.Variable] = nodeValueForID(pe.g, dstID)
 			}
-			return pe.enumerateSteps(ctx, dstID, remaining, next, pushRel(used, inst), cb)
+			if isLate {
+				if ok, err := pe.lateHopQualifies(ctx, s, c, dstID, next); err != nil || !ok {
+					return err
+				}
+			}
+			return pe.enumerateSteps(ctx, dstID, remaining, restLate, next, pushRel(used, inst), cb)
 		}
 	}
 
@@ -409,11 +461,36 @@ func (pe *patternEvaluator) enumerateSteps(ctx context.Context, srcID graph.Node
 		if s.rel != nil && s.rel.Variable != nil {
 			next[*s.rel.Variable] = relValueFromHop(pe.g, c, s.rel)
 		}
-		if err := pe.enumerateSteps(ctx, dstID, remaining, next, pushRel(used, inst), cb); err != nil {
+		if isLate {
+			ok, err := pe.lateHopQualifies(ctx, s, c, dstID, next)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				continue
+			}
+		}
+		if err := pe.enumerateSteps(ctx, dstID, remaining, restLate, next, pushRel(used, inst), cb); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// lateHopQualifies evaluates the property maps of the late hop s against next —
+// the row with the hop's relationship and end node bound — and reports whether
+// the relationship c crosses and its end node dstID satisfy them (rmp #2916). s
+// is unresolved: the caller has applied the type, label and bound-variable
+// filters only.
+func (pe *patternEvaluator) lateHopQualifies(ctx context.Context, s step, c candidateHop, dstID graph.NodeID, next expr.RowContext) (bool, error) {
+	rs, ok, err := pe.resolveStep(ctx, s, next)
+	if err != nil || !ok {
+		return false, err
+	}
+	if !pe.slotPropsMatch(c.srcID, c.dstID, c.srcKey, c.dstKey, c.handle, rs.props) {
+		return false, nil
+	}
+	return rs.nodeProps == nil || pe.checkNodePattern(rs.node, rs.nodeProps, dstID), nil
 }
 
 // candidateHop describes one (rel, dst) traversal candidate found by
@@ -1608,6 +1685,149 @@ func constantPropMap(ml *ast.MapLiteral) bool {
 		}
 	}
 	return true
+}
+
+// sameHopRefs records which property maps of one pattern read a variable that
+// the same element or hop binds (rmp #2916).
+//
+// openCypher evaluates an element's property map as the equivalent predicate on
+// the element (clauses/match/Match2.feature [5], Match1.feature [4]), and MATCH —
+// the parity oracle, the TCK being silent on references inside one pattern —
+// evaluates it once the element and its hop are bound: a relationship map and
+// its end node's map both see the hop's relationship, its end node, and every
+// element before them, and a start node's map sees the start node. A variable
+// bound only by a LATER hop reads as NULL there. The enumerating evaluator
+// resolved every map before the hop's candidate was chosen, so a map reading the
+// hop's own relationship or end node read NULL and matched nothing.
+//
+// start marks the start node's map reading the start node; hops[i] marks the
+// i-th hop (in [collectSteps] order) whose relationship or end-node map reads
+// the hop's relationship variable or end-node variable. References to earlier
+// elements need no mark: [patternEvaluator.enumerateSteps] resolves a hop
+// against the row that already binds them. Only the enumerating route consults
+// it: a bare pattern predicate may not introduce a variable
+// (expressions/pattern/Pattern1.feature [10]), so every variable the maps of
+// [patternEvaluator.matchPattern] read is already on the outer row.
+type sameHopRefs struct {
+	start bool
+	hops  []bool
+}
+
+// sameHopRefsOf returns the [sameHopRefs] of pp, or nil when no map of pp reads a
+// variable its own element or hop binds, computing it once per query run.
+func (pe *patternEvaluator) sameHopRefsOf(pp *ast.PathPattern) *sameHopRefs {
+	if refs, ok := pe.sameHopRefs[pp]; ok {
+		return refs
+	}
+	refs := computeSameHopRefs(pp)
+	if pe.sameHopRefs == nil {
+		pe.sameHopRefs = make(map[*ast.PathPattern]*sameHopRefs, 1)
+	}
+	pe.sameHopRefs[pp] = refs
+	return refs
+}
+
+// computeSameHopRefs is [patternEvaluator.sameHopRefsOf] without the cache.
+func computeSameHopRefs(pp *ast.PathPattern) *sameHopRefs {
+	var refs sameHopRefs
+	found := false
+	if np := pp.Head.Node; np != nil && np.Properties != nil && np.Variable != nil {
+		refs.start = exprMayRead(np.Properties, *np.Variable, "")
+		found = refs.start
+	}
+	for el := pp.Head.Next; el != nil; el = el.Next {
+		rel := el.Relationship
+		if rel == nil {
+			continue
+		}
+		var relVar, nodeVar string
+		if rel.Variable != nil {
+			relVar = *rel.Variable
+		}
+		np := el.Node
+		if np != nil && np.Variable != nil {
+			nodeVar = *np.Variable
+		}
+		late := (rel.Properties != nil && exprMayRead(rel.Properties, relVar, nodeVar)) ||
+			(np != nil && np.Properties != nil && exprMayRead(np.Properties, relVar, nodeVar))
+		refs.hops = append(refs.hops, late)
+		found = found || late
+	}
+	if !found {
+		return nil
+	}
+	return &refs
+}
+
+// exprMayRead reports whether e may read the variable a or b; an empty name
+// matches nothing. It fails closed: an expression kind it does not walk — a
+// nested pattern, a subquery, or a kind added later — counts as a read, which
+// costs a per-candidate evaluation but never a wrong answer. A name shadowed by
+// a comprehension or reduce variable also counts, for the same reason.
+func exprMayRead(e ast.Expression, a, b string) bool {
+	switch n := e.(type) {
+	case nil:
+		return false
+	case *ast.IntLiteral, *ast.FloatLiteral, *ast.StringLiteral, *ast.BoolLiteral,
+		*ast.OverflowIntLit, *ast.NullLiteral, *ast.StarLiteral, *ast.Parameter:
+		return false
+	case *ast.Variable:
+		return n != nil && n.Name != "" && (n.Name == a || n.Name == b)
+	case *ast.Property:
+		return exprMayRead(n.Receiver, a, b)
+	case *ast.LabelPredicate:
+		return exprMayRead(n.Receiver, a, b)
+	case *ast.UnaryOp:
+		return exprMayRead(n.Operand, a, b)
+	case *ast.BinaryOp:
+		return exprMayRead(n.Left, a, b) || exprMayRead(n.Right, a, b)
+	case *ast.FunctionInvocation:
+		return anyMayRead(n.Args, a, b)
+	case *ast.ListLiteral:
+		return anyMayRead(n.Elements, a, b)
+	case *ast.MapLiteral:
+		return anyMayRead(n.Values, a, b)
+	case *ast.SubscriptExpr:
+		return exprMayRead(n.Expr, a, b) || exprMayRead(n.Index, a, b)
+	case *ast.SliceExpr:
+		return exprMayRead(n.Expr, a, b) || exprMayRead(n.From, a, b) || exprMayRead(n.To, a, b)
+	case *ast.CaseExpression:
+		if exprMayRead(n.Subject, a, b) || exprMayRead(n.ElseExpr, a, b) {
+			return true
+		}
+		for _, alt := range n.Alternatives {
+			if exprMayRead(alt.Condition, a, b) || exprMayRead(alt.Consequent, a, b) {
+				return true
+			}
+		}
+		return false
+	case *ast.ListComprehension:
+		return exprMayRead(n.Source, a, b) || exprMayRead(n.Predicate, a, b) || exprMayRead(n.Projection, a, b)
+	case *ast.ReduceExpr:
+		return exprMayRead(n.Init, a, b) || exprMayRead(n.Source, a, b) || exprMayRead(n.Projection, a, b)
+	case *ast.MapProjection:
+		if exprMayRead(n.Subject, a, b) {
+			return true
+		}
+		for _, it := range n.Items {
+			if exprMayRead(it.Value, a, b) {
+				return true
+			}
+		}
+		return false
+	default:
+		return true
+	}
+}
+
+// anyMayRead is [exprMayRead] over a list of expressions.
+func anyMayRead(es []ast.Expression, a, b string) bool {
+	for _, e := range es {
+		if exprMayRead(e, a, b) {
+			return true
+		}
+	}
+	return false
 }
 
 // checkNodePattern validates that nodeID satisfies the label constraints
