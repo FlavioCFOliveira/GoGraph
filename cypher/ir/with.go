@@ -203,15 +203,7 @@ func substVarRefs(e ast.Expression, subst map[string]ast.Expression) ast.Express
 		}
 		return n
 	case *ast.BinaryOp:
-		left := substVarRefs(n.Left, subst)
-		right := substVarRefs(n.Right, subst)
-		if left == n.Left && right == n.Right {
-			return n
-		}
-		cp := *n
-		cp.Left = left
-		cp.Right = right
-		return &cp
+		return substBinaryOp(n, subst)
 	case *ast.UnaryOp:
 		op := substVarRefs(n.Operand, subst)
 		if op == n.Operand {
@@ -245,27 +237,9 @@ func substVarRefs(e ast.Expression, subst map[string]ast.Expression) ast.Express
 		cp.Receiver = rec
 		return &cp
 	case *ast.SubscriptExpr:
-		ex := substVarRefs(n.Expr, subst)
-		idx := substVarRefs(n.Index, subst)
-		if ex == n.Expr && idx == n.Index {
-			return n
-		}
-		cp := *n
-		cp.Expr = ex
-		cp.Index = idx
-		return &cp
+		return substSubscript(n, subst)
 	case *ast.SliceExpr:
-		ex := substVarRefs(n.Expr, subst)
-		from := substVarRefs(n.From, subst)
-		to := substVarRefs(n.To, subst)
-		if ex == n.Expr && from == n.From && to == n.To {
-			return n
-		}
-		cp := *n
-		cp.Expr = ex
-		cp.From = from
-		cp.To = to
-		return &cp
+		return substSlice(n, subst)
 	case *ast.ListLiteral:
 		elems, changed := substExprList(n.Elements, subst)
 		if !changed {
@@ -283,95 +257,156 @@ func substVarRefs(e ast.Expression, subst map[string]ast.Expression) ast.Express
 		cp.Values = vals
 		return &cp
 	case *ast.CaseExpression:
-		subj := substVarRefs(n.Subject, subst)
-		els := substVarRefs(n.ElseExpr, subst)
-		changed := subj != n.Subject || els != n.ElseExpr
-		alts := make([]*ast.CaseAlternative, len(n.Alternatives))
-		for i, alt := range n.Alternatives {
-			alts[i] = alt
-			if alt == nil {
-				continue
-			}
-			cond := substVarRefs(alt.Condition, subst)
-			cons := substVarRefs(alt.Consequent, subst)
-			if cond != alt.Condition || cons != alt.Consequent {
-				cpAlt := *alt
-				cpAlt.Condition = cond
-				cpAlt.Consequent = cons
-				alts[i] = &cpAlt
-				changed = true
-			}
-		}
-		if !changed {
-			return n
-		}
-		cp := *n
-		cp.Subject = subj
-		cp.ElseExpr = els
-		cp.Alternatives = alts
-		return &cp
+		return substCaseExpression(n, subst)
 	case *ast.MapProjection:
-		subj := substVarRefs(n.Subject, subst)
-		changed := subj != n.Subject
-		items := make([]*ast.MapProjectionItem, len(n.Items))
-		for i, it := range n.Items {
-			items[i] = it
-			if it == nil || it.Value == nil {
-				continue
-			}
-			val := substVarRefs(it.Value, subst)
-			if val == it.Value {
-				continue
-			}
-			cpIt := *it
-			cpIt.Value = val
-			// A variable selector (`m {q}`) takes its key from the variable's
-			// name, which the replacement no longer carries.
-			if v, isVar := it.Value.(*ast.Variable); isVar && cpIt.Key == "" {
-				cpIt.Key = v.Name
-			}
-			items[i] = &cpIt
-			changed = true
-		}
-		if !changed {
-			return n
-		}
-		cp := *n
-		cp.Subject = subj
-		cp.Items = items
-		return &cp
+		return substMapProjection(n, subst)
 	case *ast.ListComprehension:
-		src := substVarRefs(n.Source, subst)
-		inner, renamed := substScoped(subst, n.Variable)
-		pred := substVarRefs(n.Predicate, inner)
-		proj := substVarRefs(n.Projection, inner)
-		if src == n.Source && pred == n.Predicate && proj == n.Projection && renamed == n.Variable {
-			return n
-		}
-		cp := *n
-		cp.Source = src
-		cp.Predicate = pred
-		cp.Projection = proj
-		cp.Variable = renamed
-		return &cp
+		return substListComprehension(n, subst)
 	case *ast.ReduceExpr:
-		init := substVarRefs(n.Init, subst)
-		src := substVarRefs(n.Source, subst)
-		inner, acc := substScoped(subst, n.AccVar)
-		inner, elem := substScoped(inner, n.ElemVar)
-		proj := substVarRefs(n.Projection, inner)
-		if init == n.Init && src == n.Source && proj == n.Projection && acc == n.AccVar && elem == n.ElemVar {
-			return n
-		}
-		cp := *n
-		cp.Init = init
-		cp.Source = src
-		cp.Projection = proj
-		cp.AccVar = acc
-		cp.ElemVar = elem
-		return &cp
+		return substReduceExpr(n, subst)
 	}
 	return e
+}
+
+// substBinaryOp is the *ast.BinaryOp case of [substVarRefs].
+func substBinaryOp(n *ast.BinaryOp, subst map[string]ast.Expression) ast.Expression {
+	left := substVarRefs(n.Left, subst)
+	right := substVarRefs(n.Right, subst)
+	if left == n.Left && right == n.Right {
+		return n
+	}
+	cp := *n
+	cp.Left = left
+	cp.Right = right
+	return &cp
+}
+
+// substSubscript is the *ast.SubscriptExpr case of [substVarRefs].
+func substSubscript(n *ast.SubscriptExpr, subst map[string]ast.Expression) ast.Expression {
+	ex := substVarRefs(n.Expr, subst)
+	idx := substVarRefs(n.Index, subst)
+	if ex == n.Expr && idx == n.Index {
+		return n
+	}
+	cp := *n
+	cp.Expr = ex
+	cp.Index = idx
+	return &cp
+}
+
+// substSlice is the *ast.SliceExpr case of [substVarRefs].
+func substSlice(n *ast.SliceExpr, subst map[string]ast.Expression) ast.Expression {
+	ex := substVarRefs(n.Expr, subst)
+	from := substVarRefs(n.From, subst)
+	to := substVarRefs(n.To, subst)
+	if ex == n.Expr && from == n.From && to == n.To {
+		return n
+	}
+	cp := *n
+	cp.Expr = ex
+	cp.From = from
+	cp.To = to
+	return &cp
+}
+
+// substCaseExpression is the *ast.CaseExpression case of [substVarRefs].
+func substCaseExpression(n *ast.CaseExpression, subst map[string]ast.Expression) ast.Expression {
+	subj := substVarRefs(n.Subject, subst)
+	els := substVarRefs(n.ElseExpr, subst)
+	changed := subj != n.Subject || els != n.ElseExpr
+	alts := make([]*ast.CaseAlternative, len(n.Alternatives))
+	for i, alt := range n.Alternatives {
+		alts[i] = alt
+		if alt == nil {
+			continue
+		}
+		cond := substVarRefs(alt.Condition, subst)
+		cons := substVarRefs(alt.Consequent, subst)
+		if cond != alt.Condition || cons != alt.Consequent {
+			cpAlt := *alt
+			cpAlt.Condition = cond
+			cpAlt.Consequent = cons
+			alts[i] = &cpAlt
+			changed = true
+		}
+	}
+	if !changed {
+		return n
+	}
+	cp := *n
+	cp.Subject = subj
+	cp.ElseExpr = els
+	cp.Alternatives = alts
+	return &cp
+}
+
+// substMapProjection is the *ast.MapProjection case of [substVarRefs].
+func substMapProjection(n *ast.MapProjection, subst map[string]ast.Expression) ast.Expression {
+	subj := substVarRefs(n.Subject, subst)
+	changed := subj != n.Subject
+	items := make([]*ast.MapProjectionItem, len(n.Items))
+	for i, it := range n.Items {
+		items[i] = it
+		if it == nil || it.Value == nil {
+			continue
+		}
+		val := substVarRefs(it.Value, subst)
+		if val == it.Value {
+			continue
+		}
+		cpIt := *it
+		cpIt.Value = val
+		// A variable selector (`m {q}`) takes its key from the variable's
+		// name, which the replacement no longer carries.
+		if v, isVar := it.Value.(*ast.Variable); isVar && cpIt.Key == "" {
+			cpIt.Key = v.Name
+		}
+		items[i] = &cpIt
+		changed = true
+	}
+	if !changed {
+		return n
+	}
+	cp := *n
+	cp.Subject = subj
+	cp.Items = items
+	return &cp
+}
+
+// substListComprehension is the *ast.ListComprehension case of [substVarRefs].
+func substListComprehension(n *ast.ListComprehension, subst map[string]ast.Expression) ast.Expression {
+	src := substVarRefs(n.Source, subst)
+	inner, renamed := substScoped(subst, n.Variable)
+	pred := substVarRefs(n.Predicate, inner)
+	proj := substVarRefs(n.Projection, inner)
+	if src == n.Source && pred == n.Predicate && proj == n.Projection && renamed == n.Variable {
+		return n
+	}
+	cp := *n
+	cp.Source = src
+	cp.Predicate = pred
+	cp.Projection = proj
+	cp.Variable = renamed
+	return &cp
+}
+
+// substReduceExpr is the *ast.ReduceExpr case of [substVarRefs].
+func substReduceExpr(n *ast.ReduceExpr, subst map[string]ast.Expression) ast.Expression {
+	init := substVarRefs(n.Init, subst)
+	src := substVarRefs(n.Source, subst)
+	inner, acc := substScoped(subst, n.AccVar)
+	inner, elem := substScoped(inner, n.ElemVar)
+	proj := substVarRefs(n.Projection, inner)
+	if init == n.Init && src == n.Source && proj == n.Projection && acc == n.AccVar && elem == n.ElemVar {
+		return n
+	}
+	cp := *n
+	cp.Init = init
+	cp.Source = src
+	cp.Projection = proj
+	cp.AccVar = acc
+	cp.ElemVar = elem
+	return &cp
 }
 
 // substExprList applies [substVarRefs] to every element of es. It returns es
