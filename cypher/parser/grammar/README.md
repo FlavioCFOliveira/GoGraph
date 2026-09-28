@@ -65,6 +65,23 @@ re-applied after any upstream refresh:
   `PROFILE`=91); `ID` and the literal/whitespace tokens below it moved by +2,
   exactly as FOREACH moved them before.
 
+- **Postfix list operators** (rmp #2918) — the subscript/slice alternative is
+  removed from `listExpression` (now `IN propertyOrLabelExpression` only) and
+  moved into `propertyOrLabelExpression`:
+  `propertyExpression (LBRACK (expression? RANGE expression? | expression) RBRACK (DOT name)*)* nodeLabels?`.
+  Upstream allowed nothing after a subscript except another subscript, so
+  `q[0].w` and `q[0]:Label` failed to parse. openCypher defines a postfix
+  expression as a primary followed by any sequence of property lookups,
+  subscripts and slices (`grammar/openCypher.bnf`, opencypher/openCypher
+  `677cbafa`, lines 741–759). `propertyExpression` itself is unchanged,
+  because REMOVE uses it and must not accept a subscript.
+
+  No rule was added, so rule indices, the lexer, the tokens and the
+  listener/visitor files are unchanged. ATN state numbers moved by **+11**, and
+  `AdaptivePredict` decision numbers by **+1**, in every rule from
+  `propertyExpression` onward; `gen-patches.patch` was regenerated with those
+  offsets.
+
 ## How to update
 
 1. Identify the new commit hash:

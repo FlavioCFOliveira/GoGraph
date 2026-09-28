@@ -1621,51 +1621,18 @@ func (v *visitor) VisitAtomicExpression(ctx *gen.AtomicExpressionContext) interf
 		}
 	}
 
-	// Apply IN / subscript / slice. Subscripts and slices that
-	// immediately follow an IN clause apply to the IN's right operand,
-	// not to the (lhs IN rhs) result — `3 IN list[0]` parses as
-	// `3 IN (list[0])`, matching the openCypher precedence rule that
-	// list/subscript operators bind tighter than the IN comparison.
-	listExprs := ctx.AllListExpression()
-	i := 0
-	for i < len(listExprs) {
-		r := v.visit(listExprs[i])
+	// Apply IN. Subscripts and slices are postfix operators of the operand
+	// (propertyOrLabelExpression, rmp #2918), so `3 IN list[0]` already
+	// reaches here as `3 IN (list[0])`: list operators bind tighter than
+	// the IN comparison, as openCypher requires.
+	for _, le := range ctx.AllListExpression() {
+		r := v.visit(le)
 		if err := firstError(r); err != nil {
 			return err
 		}
-		switch e := r.(type) {
-		case *listInExpr:
-			// Consume any trailing subscripts/slices that operate on
-			// the IN's right operand before wrapping the whole thing.
-			rhs := e.list
-			j := i + 1
-			for j < len(listExprs) {
-				inner := v.visit(listExprs[j])
-				if err := firstError(inner); err != nil {
-					return err
-				}
-				sub, isSub := inner.(*subscriptOrSlice)
-				if !isSub {
-					break
-				}
-				if sub.isSlice {
-					rhs = &ast.SliceExpr{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Expr: rhs, From: sub.from, To: sub.to}
-				} else {
-					rhs = &ast.SubscriptExpr{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Expr: rhs, Index: sub.index}
-				}
-				j++
-			}
-			base = &ast.BinaryOp{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Left: base, Operator: "IN", Right: rhs}
-			i = j
-			continue
-		case *subscriptOrSlice:
-			if e.isSlice {
-				base = &ast.SliceExpr{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Expr: base, From: e.from, To: e.to}
-			} else {
-				base = &ast.SubscriptExpr{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Expr: base, Index: e.index}
-			}
+		if in, ok := r.(*listInExpr); ok {
+			base = &ast.BinaryOp{Pos: positionOf(ctx), EndPos: endPositionOf(ctx), Left: base, Operator: "IN", Right: in.list}
 		}
-		i++
 	}
 
 	// Apply IS NULL / IS NOT NULL.
@@ -1682,72 +1649,17 @@ func (v *visitor) VisitAtomicExpression(ctx *gen.AtomicExpressionContext) interf
 	return base
 }
 
-// VisitListExpression handles IN expr | [expr?..expr?] | [expr].
+// VisitListExpression handles IN propertyOrLabelExpression.
 func (v *visitor) VisitListExpression(ctx *gen.ListExpressionContext) interface{} {
-	if ctx.IN() != nil {
-		// IN propertyOrLabelExpression
-		right, err := asExpr(v.visit(ctx.PropertyOrLabelExpression()))
-		if err != nil {
-			return &SemaError{Rule: "listExpression", Pos: positionOf(ctx), Message: err.Error()}
-		}
-		return &listInExpr{list: right}
+	right, err := asExpr(v.visit(ctx.PropertyOrLabelExpression()))
+	if err != nil {
+		return &SemaError{Rule: "listExpression", Pos: positionOf(ctx), Message: err.Error()}
 	}
-	// [ … ] form: slice or subscript
-	exprs := ctx.AllExpression()
-	if ctx.RANGE() != nil {
-		// Slice: [from?..to?]
-		var from, to ast.Expression
-		// Determine from / to by position: text before ".." is from, after is to.
-		text := ctx.GetText()
-		// Strip surrounding brackets
-		inner := strings.TrimPrefix(strings.TrimSuffix(text, "]"), "[")
-		idx := strings.Index(inner, "..")
-		hasBefore := idx > 0
-		hasAfter := idx >= 0 && idx < len(inner)-2
-
-		if hasBefore && len(exprs) > 0 {
-			var err error
-			from, err = asExpr(v.visit(exprs[0]))
-			if err != nil {
-				return &SemaError{Rule: "listExpression", Pos: positionOf(ctx), Message: err.Error()}
-			}
-		}
-		if hasAfter {
-			exprIdx := 0
-			if hasBefore {
-				exprIdx = 1
-			}
-			if exprIdx < len(exprs) {
-				var err error
-				to, err = asExpr(v.visit(exprs[exprIdx]))
-				if err != nil {
-					return &SemaError{Rule: "listExpression", Pos: positionOf(ctx), Message: err.Error()}
-				}
-			}
-		}
-		return &subscriptOrSlice{isSlice: true, from: from, to: to}
-	}
-	// Subscript: [expr]
-	if len(exprs) == 1 {
-		idx, err := asExpr(v.visit(exprs[0]))
-		if err != nil {
-			return &SemaError{Rule: "listExpression", Pos: positionOf(ctx), Message: err.Error()}
-		}
-		return &subscriptOrSlice{isSlice: false, index: idx}
-	}
-	return unsupported(ctx, "listExpression", "unexpected form")
+	return &listInExpr{list: right}
 }
 
 // listInExpr is an internal transfer type for the IN rhs.
 type listInExpr struct{ list ast.Expression }
-
-// subscriptOrSlice is an internal transfer type.
-type subscriptOrSlice struct {
-	from    ast.Expression
-	to      ast.Expression
-	index   ast.Expression
-	isSlice bool
-}
 
 // VisitStringExpression returns a partial *BinaryOp with nil Left (filled by parent).
 func (v *visitor) VisitStringExpression(ctx *gen.StringExpressionContext) interface{} {
@@ -1776,17 +1688,21 @@ func (v *visitor) VisitNullExpression(ctx *gen.NullExpressionContext) interface{
 	return "IS NULL"
 }
 
-// VisitPropertyOrLabelExpression handles atom (labelFilter | propertyAccess)*.
+// VisitPropertyOrLabelExpression handles
+// propertyExpression ('[' index-or-slice ']' ('.' name)*)* nodeLabels?.
 //
-// The grammar rule produces either or both of:
+// The grammar rule produces, in source order:
 //
 //   - PropertyExpression: atom + dot-access chain (e.g. `n.name`, `a.b.c`).
+//   - Postfix list operators, each optionally followed by further property
+//     lookups: `q[0]`, `q[1..2]`, `q[0].w`, `q[0][1].a.b` (rmp #2918). They
+//     apply left to right, so every operator's receiver is the expression
+//     built so far — openCypher's oC_NonArithmeticOperatorExpression.
 //   - NodeLabels: trailing label filter (`:Foo:Bar`).
 //
-// When NodeLabels are present they wrap the (possibly empty) property
-// chain in an ast.LabelPredicate so the predicate `n:Foo` evaluates to
-// the right TRUE / FALSE / NULL at run-time. A bare property chain is
-// returned verbatim.
+// When NodeLabels are present they wrap the (possibly empty) postfix chain in
+// an ast.LabelPredicate so the predicate `n:Foo` evaluates to the right
+// TRUE / FALSE / NULL at run-time. A bare chain is returned verbatim.
 func (v *visitor) VisitPropertyOrLabelExpression(ctx *gen.PropertyOrLabelExpressionContext) interface{} {
 	pe := ctx.PropertyExpression()
 	if pe == nil {
@@ -1795,6 +1711,12 @@ func (v *visitor) VisitPropertyOrLabelExpression(ctx *gen.PropertyOrLabelExpress
 	base, err := v.visitPropertyExpression(pe)
 	if err != nil {
 		return &SemaError{Rule: "propertyOrLabelExpression", Pos: positionOf(ctx), Message: err.Error()}
+	}
+	if len(ctx.AllLBRACK()) > 0 {
+		base, err = v.applyPostfixOperators(ctx, base)
+		if err != nil {
+			return &SemaError{Rule: "propertyOrLabelExpression", Pos: positionOf(ctx), Message: err.Error()}
+		}
 	}
 	if nl := ctx.NodeLabels(); nl != nil {
 		labels := nodeLabels(nl)
@@ -1808,6 +1730,64 @@ func (v *visitor) VisitPropertyOrLabelExpression(ctx *gen.PropertyOrLabelExpress
 		}
 	}
 	return base
+}
+
+// applyPostfixOperators folds the subscripts, slices and property lookups that
+// follow ctx's propertyExpression onto base, in source order. The children are
+// read in order because the grammar interleaves them: an expression before
+// '..' is a slice's lower bound, one after it the upper bound, and one in a
+// bracket without '..' a subscript index.
+func (v *visitor) applyPostfixOperators(ctx *gen.PropertyOrLabelExpressionContext, base ast.Expression) (ast.Expression, error) {
+	var (
+		inBracket, isSlice bool
+		first, second      ast.Expression
+	)
+	pos := positionOf(ctx)
+	for _, child := range ctx.GetChildren() {
+		switch c := child.(type) {
+		case antlr.TerminalNode:
+			switch c.GetSymbol().GetTokenType() {
+			case gen.CypherParserLBRACK:
+				inBracket, isSlice, first, second = true, false, nil, nil
+			case gen.CypherParserRANGE:
+				isSlice = true
+			case gen.CypherParserRBRACK:
+				end := endPositionOfToken(c.GetSymbol())
+				if isSlice {
+					base = &ast.SliceExpr{Pos: pos, EndPos: end, Expr: base, From: first, To: second}
+				} else {
+					base = &ast.SubscriptExpr{Pos: pos, EndPos: end, Expr: base, Index: first}
+				}
+				inBracket = false
+			}
+		case gen.IExpressionContext:
+			if !inBracket {
+				continue
+			}
+			e, err := asExpr(v.visit(c))
+			if err != nil {
+				return nil, err
+			}
+			if isSlice {
+				second = e
+			} else {
+				first = e
+			}
+		case gen.INameContext:
+			base = &ast.Property{Pos: pos, EndPos: endPositionOf(c), Receiver: base, Key: nameText(c)}
+		}
+	}
+	return base, nil
+}
+
+// endPositionOfToken is endPositionOf for a single token: the first byte past
+// its text.
+func endPositionOfToken(tok antlr.Token) ast.Position {
+	return ast.Position{
+		Line:   uint32(tok.GetLine()),
+		Column: uint32(tok.GetColumn()) + uint32(len(tok.GetText())),
+		Offset: uint32(tok.GetStop()) + 1,
+	}
 }
 
 func (v *visitor) visitPropertyExpression(ctx gen.IPropertyExpressionContext) (ast.Expression, error) {
