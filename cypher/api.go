@@ -5722,12 +5722,15 @@ func (e *Engine) parseAndAnalyse(query string) (*planCacheEntry, map[string]stri
 // median 762.68 s of mutex delay at concurrency 1024 on cypher-read-scan-large,
 // out of 762.90 s process-wide; with this collapse it is 0.
 func (e *Engine) buildPlanCacheEntry(query string) (*planCacheEntry, error) {
-	return e.planBuilds.do(query, e.compilePlanCacheEntry)
+	return e.planBuilds.do(query, e.cache.generation(), e.compilePlanCacheEntry)
 }
 
 // compilePlanCacheEntry is the body of [Engine.buildPlanCacheEntry], run by
 // exactly one goroutine per query text at a time.
 func (e *Engine) compilePlanCacheEntry(query string) (*planCacheEntry, error) {
+	// Read before anything below reads the index catalog: the entry is
+	// published only if no DDL has cleared the cache since (rmp #2854).
+	gen := e.cache.generation()
 	astNode, planMode, err := parser.ParseStatement(query)
 	if err != nil {
 		return nil, fmt.Errorf("cypher: parse: %w", err)
@@ -5797,7 +5800,7 @@ func (e *Engine) compilePlanCacheEntry(query string) (*planCacheEntry, error) {
 		// single plan walk on a cache miss. See [planCacheEntry.containsWrite].
 		containsWrite: ir.ContainsWrite(plan),
 	}
-	actual, _ := e.cache.loadOrStore(query, entry)
+	actual, _ := e.cache.loadOrStoreAt(query, entry, gen)
 	return actual, nil
 }
 
