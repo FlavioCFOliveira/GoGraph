@@ -328,7 +328,22 @@ func restoreFactMap[V any](dst, src map[string]V) map[string]V {
 // the column itself, not coordinates elsewhere, and a boundary registers them
 // for the columns it writes, so they are dropped only for the names it does not
 // carry.
-func (b *buildOpts) endScope(keep func(string) bool) {
+//
+// scalarOut names the boundary's outputs whose column holds a scalar: a computed
+// projection item, an aggregate output, a computed grouping key, or a variable
+// item that forwards a scalar column under another name. They are registered in
+// projAliasScalarCols AFTER the flush, so that no plan made below the boundary
+// can read them. Without the registration, a row reader that finds no fact for a
+// name upgrades an integer cell to the node whose NodeID it happens to equal.
+// NodeIDs derive from node keys that a process-wide counter assigns, so the same
+// query over the same data answered `(node#1)` or `1` depending on how many
+// nodes the process had created before. The two
+// build-time registrations skip exactly the names that shadow an input variable
+// (`count(*) AS r` over a bound r, `1 + 1 AS x` over a bound x): a plan below the
+// boundary still reads that input variable, and registering the name before the
+// flush would have told it the variable was a scalar. A variable item that
+// renames a scalar (`WITH y AS x`) was registered nowhere.
+func (b *buildOpts) endScope(keep func(string) bool, scalarOut []string) {
 	if b == nil {
 		return
 	}
@@ -340,6 +355,22 @@ func (b *buildOpts) endScope(keep func(string) bool) {
 	clear(b.pathVarMeta)
 	clear(b.pathVarChain)
 	clear(b.vleRelMeta)
+	for _, name := range scalarOut {
+		// A name already in one of the two sets [rowBindPlan.resolve] reads needs
+		// no second entry, and skipping it keeps the common aggregate from
+		// allocating a map on every execution. aggKeyScalarCols is not one of
+		// them, so a computed grouping key is still registered here.
+		if _, ok := b.scalarCols[name]; ok {
+			continue
+		}
+		if _, ok := b.projAliasScalarCols[name]; ok {
+			continue
+		}
+		if b.projAliasScalarCols == nil {
+			b.projAliasScalarCols = make(map[string]struct{})
+		}
+		b.projAliasScalarCols[name] = struct{}{}
+	}
 }
 
 // dropFacts deletes from m every name keep does not report.

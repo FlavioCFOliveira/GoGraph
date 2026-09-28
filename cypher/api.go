@@ -10133,6 +10133,16 @@ func buildOperator(
 func endScopeAt(plan ir.LogicalPlan, bopts *buildOpts) {
 	switch p := plan.(type) {
 	case *ir.Projection:
+		// The outputs are decided before endScope drops the input facts they are
+		// read from, and registered by it after; the buffer keeps an ordinary
+		// projection off the heap on the per-execution read path.
+		var buf [8]string
+		scalarOut := buf[:0]
+		for i := range p.Items {
+			if boundaryItemIsScalar(p.Items[i].Expr, p.Items[i].Name, bopts) {
+				scalarOut = append(scalarOut, p.Items[i].Name)
+			}
+		}
 		bopts.endScope(func(name string) bool {
 			for i := range p.Items {
 				if p.Items[i].Name == name {
@@ -10140,8 +10150,18 @@ func endScopeAt(plan ir.LogicalPlan, bopts *buildOpts) {
 				}
 			}
 			return false
-		})
+		}, scalarOut)
 	case *ir.EagerAggregation:
+		var buf [8]string
+		scalarOut := buf[:0]
+		for i := range p.Aggregates {
+			scalarOut = append(scalarOut, p.Aggregates[i].OutputName)
+		}
+		for i, name := range p.GroupBy {
+			if i < len(p.GroupByExprs) && boundaryItemIsScalar(p.GroupByExprs[i], name, bopts) {
+				scalarOut = append(scalarOut, name)
+			}
+		}
 		bopts.endScope(func(name string) bool {
 			if slices.Contains(p.GroupBy, name) {
 				return true
@@ -10152,7 +10172,25 @@ func endScopeAt(plan ir.LogicalPlan, bopts *buildOpts) {
 				}
 			}
 			return false
-		})
+		}, scalarOut)
+	}
+}
+
+// boundaryItemIsScalar reports whether the output column name of a projection
+// item or grouping key, computed by e, holds a scalar. It must be asked BEFORE
+// [buildOpts.endScope] drops the input scope's facts. A computed expression is a
+// scalar: the evaluator returns a node or a relationship as a self-describing
+// value, never as a bare id. A variable is a scalar exactly when its input column
+// is one, which is what carries the fact across a rename such as `WITH y AS x`.
+// A nil e — a legacy string-only item — asserts nothing.
+func boundaryItemIsScalar(e ast.Expression, name string, bopts *buildOpts) bool {
+	switch v := e.(type) {
+	case nil:
+		return false
+	case *ast.Variable:
+		return v.Name != name && isScalarColumn(v.Name, bopts)
+	default:
+		return true
 	}
 }
 
