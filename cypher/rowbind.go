@@ -297,6 +297,17 @@ func restoreFactMap[V any](dst, src map[string]V) map[string]V {
 // aggregation. Dropping is what stops a later clause that introduces a name afresh
 // from inheriting the facts of the earlier variable of that name (rmp #2906). A
 // nil receiver is a no-op.
+//
+// The variable-length relationship facts are dropped for EVERY name, carried or
+// not (rmp #2917). Such a fact addresses the raw hop list VarLengthExpand writes
+// ([vleRelInfo.listCol]), and that list exists only in the layout below the
+// boundary: a Projection or an EagerAggregation that carries the variable
+// materialises it into its own column as a list of RelationshipValues, and one
+// that re-binds the name (`WITH [1, 2] AS rs`) puts an unrelated value there.
+// A kept fact would decode whatever the next layout holds at the old column — an
+// empty list when that is the carried list itself, fabricated relationships when
+// it is an integer list — so the carried value must be read from its own column,
+// which is what the absence of a fact does.
 func (b *buildOpts) endScope(keep func(string) bool) {
 	if b == nil {
 		return
@@ -308,7 +319,7 @@ func (b *buildOpts) endScope(keep func(string) bool) {
 	dropFacts(b.edgeVarMeta, keep)
 	dropFacts(b.pathVarMeta, keep)
 	dropFacts(b.pathVarChain, keep)
-	dropFacts(b.vleRelMeta, keep)
+	clear(b.vleRelMeta)
 }
 
 // dropFacts deletes from m every name keep does not report.

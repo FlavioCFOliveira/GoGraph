@@ -786,12 +786,12 @@ func (t *translator) matchPattern(pat *ast.Pattern, child LogicalPlan, optional 
 			// single edge bound to any of them. The clause-pattern rels
 			// enforce relationship-isomorphism across the comma boundary
 			// (openCypher 9 §3.2.2); they are single-hop Expand rels that
-			// live in the outer (left) side of the Apply, so the endpoint-
-			// pair comparison in buildVLENoRepeatRelPredicate addresses them
-			// correctly. Single-edge rels only — a prior VLE list cannot be
-			// fed to startNode/endNode, so VLE clause rels are skipped here
-			// (the VLE-vs-VLE same-edge case does not arise on the simple
-			// graph the TCK runs under and is not exercised).
+			// live in the outer (left) side of the Apply, so the identity
+			// comparison in buildVLENoRepeatRelPredicate addresses them
+			// correctly. Single-edge rels only — the predicate compares each
+			// element with ONE relationship, so VLE clause rels are skipped
+			// here (the VLE-vs-VLE same-edge case is not exercised by the
+			// TCK).
 			noRepeatRels := keysOf(t.outerBoundRels)
 			for _, v := range keysOf(t.clausePatternRels) {
 				if _, isVLE := t.clauseVLERels[v]; isVLE {
@@ -829,7 +829,7 @@ func (t *translator) matchPattern(pat *ast.Pattern, child LogicalPlan, optional 
 // pattern so the NEXT pattern's relationship-isomorphism enforcement excludes
 // the edges these patterns bind (openCypher 9 §3.2.2). VLE rels are tracked
 // separately because they bind a LIST of edges, which the single-edge
-// endpoint-pair predicate cannot address.
+// identity predicate cannot address.
 func (t *translator) recordClauseRels(pp *ast.PathPattern) {
 	if t.clausePatternRels == nil {
 		t.clausePatternRels = map[string]struct{}{}
@@ -920,44 +920,28 @@ func collectInnerVLERelVars(plan LogicalPlan) []string {
 
 // buildVLENoRepeatRelPredicate constructs the AST predicate
 //
-//	none(__crp_e_<vleRel> IN <vleRel> WHERE
-//	     (startNode(__crp_e_<vleRel>) = startNode(<outerRel>)
-//	      AND endNode(__crp_e_<vleRel>) = endNode(<outerRel>))
-//	     OR
-//	     (startNode(__crp_e_<vleRel>) = endNode(<outerRel>)
-//	      AND endNode(__crp_e_<vleRel>) = startNode(<outerRel>)))
+//	none(__crp_e_<vleRel> IN <vleRel> WHERE __crp_e_<vleRel> = <outerRel>)
 //
-// which evaluates to true iff no element of the VarLengthExpand-emitted
-// list bound to `vleRel` connects the same node pair (in either
-// orientation) as the outer-bound rel `outerRel`. Endpoint-pair
-// comparison is direction-insensitive — required because undirected
-// VLE traversal can emit a rel value whose StartID/EndID are the
-// traversal anchors rather than the storage direction, while
-// `<outerRel>` (lifted via buildRelationshipValueFromRow on Expand
-// metadata) carries the storage direction. In the simple-graph
-// configuration the TCK runs under, node-pair equality uniquely
-// identifies an edge so this predicate is exact.
+// which evaluates to true iff no element of the list bound to `vleRel` is the
+// relationship bound to `outerRel`. Relationship equality is identity
+// ([expr.RelationshipValue.Equal] compares IDs), the same identity
+// relColHolds excludes on inside the operators, so the predicate is exact on a
+// multigraph — a parallel relationship between the same two nodes is a
+// different relationship and is not excluded (rmp #2915) — and independent of
+// the traversal orientation an undirected hop reports in StartID/EndID. When
+// `outerRel` is not a single relationship (a relationship list carried from an
+// earlier variable-length pattern) no element equals it and nothing is
+// excluded; a NULL `outerRel` makes the predicate NULL, as before.
 func buildVLENoRepeatRelPredicate(outerRel, vleRel string) ast.Expression {
 	eVar := "__crp_e_" + vleRel
-	startE := &ast.FunctionInvocation{Name: "startNode", Args: []ast.Expression{&ast.Variable{Name: eVar}}}
-	endE := &ast.FunctionInvocation{Name: "endNode", Args: []ast.Expression{&ast.Variable{Name: eVar}}}
-	startR := &ast.FunctionInvocation{Name: "startNode", Args: []ast.Expression{&ast.Variable{Name: outerRel}}}
-	endR := &ast.FunctionInvocation{Name: "endNode", Args: []ast.Expression{&ast.Variable{Name: outerRel}}}
-	sameForward := &ast.BinaryOp{
-		Left:     &ast.BinaryOp{Left: startE, Operator: "=", Right: startR},
-		Operator: "AND",
-		Right:    &ast.BinaryOp{Left: endE, Operator: "=", Right: endR},
-	}
-	sameReverse := &ast.BinaryOp{
-		Left:     &ast.BinaryOp{Left: startE, Operator: "=", Right: endR},
-		Operator: "AND",
-		Right:    &ast.BinaryOp{Left: endE, Operator: "=", Right: startR},
-	}
-	eqPred := &ast.BinaryOp{Left: sameForward, Operator: "OR", Right: sameReverse}
 	comp := &ast.ListComprehension{
-		Variable:  eVar,
-		Source:    &ast.Variable{Name: vleRel},
-		Predicate: eqPred,
+		Variable: eVar,
+		Source:   &ast.Variable{Name: vleRel},
+		Predicate: &ast.BinaryOp{
+			Left:     &ast.Variable{Name: eVar},
+			Operator: "=",
+			Right:    &ast.Variable{Name: outerRel},
+		},
 	}
 	return &ast.FunctionInvocation{Name: "none", Args: []ast.Expression{comp}}
 }

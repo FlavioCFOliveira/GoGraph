@@ -172,7 +172,7 @@ type translator struct {
 	clausePatternRels map[string]struct{}
 	// clauseVLERels marks which entries of clausePatternRels are bound by a
 	// variable-length relationship pattern (and therefore hold a LIST of
-	// edges rather than a single edge). The single-edge endpoint-pair
+	// edges rather than a single edge). The single-edge identity
 	// predicate used for the cross-pattern no-repeat-relationship filter
 	// cannot address a list, so VLE clause rels are skipped by that filter.
 	clauseVLERels map[string]struct{}
