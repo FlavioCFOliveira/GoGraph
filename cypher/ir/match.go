@@ -686,13 +686,18 @@ func (t *translator) matchPattern(pat *ast.Pattern, child LogicalPlan, optional 
 			boundVars[v] = struct{}{}
 		}
 	}
-	// Snapshot outer-scope rel vars (relationship vars bound BEFORE this
-	// matchPattern call) so VarLengthExpand construction below can wire
-	// them into the no-repeated-relationships exclusion set (Match4 [7]
-	// / Match5 [27]). Save and restore so nested matchPattern calls do
-	// not bleed outer scope into deeper patterns.
+	// Snapshot the outer-scope rel vars (relationship vars bound BEFORE this
+	// matchPattern call) that THIS pattern reuses, so VarLengthExpand
+	// construction below can wire them into the no-repeated-relationships
+	// exclusion set (Match4 [7]). Only the reused ones: relationship
+	// uniqueness binds the relationships of one MATCH pattern together, and a
+	// reused variable is one of them, but a variable bound by an earlier
+	// clause that this pattern does not name is not part of it and may bind
+	// the same relationship as any hop here (openCypher 9, MATCH; rmp #2921).
+	// Save and restore so nested matchPattern calls do not bleed outer scope
+	// into deeper patterns.
 	prevOuterRels := t.outerBoundRels
-	t.outerBoundRels = liveRelVars(child)
+	t.outerBoundRels = reusedOuterRels(liveRelVars(child), pat)
 	defer func() { t.outerBoundRels = prevOuterRels }()
 	// Reset the per-clause cross-pattern relationship-variable accumulator
 	// (save/restore for nested matchPattern calls). It starts empty: the
@@ -820,6 +825,30 @@ func (t *translator) matchPattern(pat *ast.Pattern, child LogicalPlan, optional 
 		t.recordClauseRels(pp)
 	}
 	return plan, nil
+}
+
+// reusedOuterRels returns the members of outer — the relationship variables
+// bound before the MATCH clause whose pattern is pat — that pat names as a
+// relationship variable again. Those, and only those, take part in the
+// relationship uniqueness of pat (rmp #2921).
+func reusedOuterRels(outer map[string]struct{}, pat *ast.Pattern) map[string]struct{} {
+	out := map[string]struct{}{}
+	if len(outer) == 0 || pat == nil {
+		return out
+	}
+	for _, pp := range pat.Paths {
+		if pp == nil {
+			continue
+		}
+		for el := pp.Head; el != nil; el = el.Next {
+			if rp := el.Relationship; rp != nil && rp.Variable != nil {
+				if _, bound := outer[*rp.Variable]; bound {
+					out[*rp.Variable] = struct{}{}
+				}
+			}
+		}
+	}
+	return out
 }
 
 // recordClauseRels adds every relationship variable bound by pp (named or

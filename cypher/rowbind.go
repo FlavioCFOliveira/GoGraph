@@ -298,16 +298,36 @@ func restoreFactMap[V any](dst, src map[string]V) map[string]V {
 // from inheriting the facts of the earlier variable of that name (rmp #2906). A
 // nil receiver is a no-op.
 //
-// The variable-length relationship facts are dropped for EVERY name, carried or
-// not (rmp #2917). Such a fact addresses the raw hop list VarLengthExpand writes
-// ([vleRelInfo.listCol]), and that list exists only in the layout below the
-// boundary: a Projection or an EagerAggregation that carries the variable
-// materialises it into its own column as a list of RelationshipValues, and one
-// that re-binds the name (`WITH [1, 2] AS rs`) puts an unrelated value there.
-// A kept fact would decode whatever the next layout holds at the old column — an
-// empty list when that is the carried list itself, fabricated relationships when
-// it is an integer list — so the carried value must be read from its own column,
-// which is what the absence of a fact does.
+// The ENTITY facts — the relationship, path and variable-length relationship
+// metadata — are dropped for EVERY name, carried or not (rmp #2917 for the
+// variable-length relationship list, rmp #2920 and rmp #2878 for the other
+// three). Each such fact is a set of column COORDINATES in the layout below the
+// boundary: the Expand triplet of a relationship ([edgeVarInfo]), the source
+// columns of a fixed-length named path ([pathChainInfo]), the raw hop list of a
+// variable-length path or relationship ([pathVarInfo], [vleRelInfo]). A
+// Projection or an EagerAggregation re-lays the row, so after it those
+// coordinates address other variables. Two things can then happen, and both
+// were measured:
+//
+//   - The boundary CARRIES the variable (`WITH r`, a grouping key `r`). It
+//     materialises the value into the variable's own column as a
+//     self-describing RelationshipValue, PathValue or list. A kept fact decoded
+//     the old coordinates whenever that column did not already hold the value
+//     it expected: a NULL relationship carried out of an OPTIONAL MATCH was
+//     reconstructed from whatever integer the next layout held at the old edge
+//     column, and came back as a fabricated relationship.
+//   - The boundary RE-BINDS the name (`WITH 5 AS r`, `WITH [1, 2] AS p`,
+//     `WITH count(*) AS r`). The fact then described a different, unrelated
+//     variable: `RETURN r` decoded the old triplet and returned null instead of
+//     5, `RETURN p` invented a path out of an integer list, and an aggregate
+//     aliased to a relationship name was re-evaluated as a scalar function —
+//     `count() takes exactly 1 argument(s), got 0`.
+//
+// With no fact, a later reader reads the variable from its own column, which is
+// what both cases require. The scalar-column sets are different: they describe
+// the column itself, not coordinates elsewhere, and a boundary registers them
+// for the columns it writes, so they are dropped only for the names it does not
+// carry.
 func (b *buildOpts) endScope(keep func(string) bool) {
 	if b == nil {
 		return
@@ -316,9 +336,9 @@ func (b *buildOpts) endScope(keep func(string) bool) {
 	dropFacts(b.scalarCols, keep)
 	dropFacts(b.projAliasScalarCols, keep)
 	dropFacts(b.aggKeyScalarCols, keep)
-	dropFacts(b.edgeVarMeta, keep)
-	dropFacts(b.pathVarMeta, keep)
-	dropFacts(b.pathVarChain, keep)
+	clear(b.edgeVarMeta)
+	clear(b.pathVarMeta)
+	clear(b.pathVarChain)
 	clear(b.vleRelMeta)
 }
 

@@ -145,7 +145,9 @@ func stripProduceResults(plan LogicalPlan) LogicalPlan {
 // names for anonymous nodes in CREATE patterns (e.g. CREATE ()-[:R]->()).
 type translator struct {
 	// outerBoundRels carries the relationship-variable names already in
-	// scope at the entry of the current matchPattern call. The
+	// scope at the entry of the current matchPattern call that the current
+	// MATCH pattern names again (a reused relationship variable); a variable
+	// the pattern does not name is not in it (rmp #2921). The
 	// VarLengthExpand construction inside matchExpandStepBoundWithFrom
 	// reads this so excluded-edge bitsets honour rel vars bound by
 	// preceding MATCH/WITH clauses (Match4 [7]) even though those vars
