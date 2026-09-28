@@ -282,6 +282,10 @@ type VarLengthExpand struct {
 	// an operator that never serves a live run is eight bytes larger and no more.
 	// nil, or a nil live.src, means this Init reads a whole-graph adjacency.
 	live *vleLive
+
+	// pull receives every child Next call of this operator (see nextRow), so the
+	// per-row pull does not heap-allocate its receiver.
+	pull Row
 }
 
 // vleLive is a [VarLengthExpand]'s state for serving forward runs from a
@@ -489,8 +493,7 @@ func (op *VarLengthExpand) Next(out *Row) (bool, error) {
 		}
 
 		// Pull next input row.
-		var inputRow Row
-		ok, err := op.input.Next(&inputRow)
+		inputRow, ok, err := nextRow(op.input, &op.pull)
 		if err != nil {
 			return false, err
 		}

@@ -252,7 +252,12 @@ func TestRemoveLabels_WithUniqueConstraint_DoesTakeRegistryLock(t *testing.T) {
 // here: the harness is entirely local and deterministic — a one-row source and a
 // map-backed mutator — and the figure measured 4, unchanged across repeated runs
 // both with and without -race.
-const zeroConstraintLabelWriteAllocs = 4
+//
+// rmp #2926 lowered it from 4 to 2: the operator's pull of its child row used a
+// fresh local receiver that escaped to the heap, one allocation per Next call, and
+// driveOnce makes two (the row, then end-of-stream). The receiver is now an
+// operator-owned field reached through nextRow.
+const zeroConstraintLabelWriteAllocs = 2
 
 // TestLabelWrites_NoUniqueConstraint_AllocateNothingNew pins the allocation cost
 // of a label write against a schema with no UNIQUE constraint. Any new per-row

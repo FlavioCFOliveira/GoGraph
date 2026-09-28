@@ -39,6 +39,10 @@ type SemiApply struct {
 	arg   *Argument
 
 	ctx context.Context //nolint:containedctx // stored for per-Next ctx check
+
+	// pull receives every child Next call of this operator (see nextRow), so the
+	// per-row pull does not heap-allocate its receiver.
+	pull Row
 }
 
 // NewSemiApply creates a SemiApply operator.
@@ -62,8 +66,7 @@ func (op *SemiApply) Next(out *Row) (bool, error) {
 			return false, err
 		}
 
-		var outerRow Row
-		ok, err := op.outer.Next(&outerRow)
+		outerRow, ok, err := nextRow(op.outer, &op.pull)
 		if err != nil {
 			return false, err
 		}
@@ -82,8 +85,7 @@ func (op *SemiApply) Next(out *Row) (bool, error) {
 		}
 
 		// Check whether inner produces ≥1 row.
-		var dummy Row
-		innerOK, err := op.inner.Next(&dummy)
+		_, innerOK, err := nextRow(op.inner, &op.pull)
 		if err != nil {
 			return false, err
 		}
@@ -122,6 +124,10 @@ type AntiSemiApply struct {
 	arg   *Argument
 
 	ctx context.Context //nolint:containedctx // stored for per-Next ctx check
+
+	// pull receives every child Next call of this operator (see nextRow), so the
+	// per-row pull does not heap-allocate its receiver.
+	pull Row
 }
 
 // NewAntiSemiApply creates an AntiSemiApply operator.
@@ -145,8 +151,7 @@ func (op *AntiSemiApply) Next(out *Row) (bool, error) {
 			return false, err
 		}
 
-		var outerRow Row
-		ok, err := op.outer.Next(&outerRow)
+		outerRow, ok, err := nextRow(op.outer, &op.pull)
 		if err != nil {
 			return false, err
 		}
@@ -165,8 +170,7 @@ func (op *AntiSemiApply) Next(out *Row) (bool, error) {
 		}
 
 		// Check whether inner produces any row.
-		var dummy Row
-		innerOK, err := op.inner.Next(&dummy)
+		_, innerOK, err := nextRow(op.inner, &op.pull)
 		if err != nil {
 			return false, err
 		}

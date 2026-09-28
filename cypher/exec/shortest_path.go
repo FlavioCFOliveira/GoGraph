@@ -209,6 +209,10 @@ type ShortestPath struct {
 	// which is enough to turn a large win into a 75% regression. This flag makes
 	// the build once-per-operator; everything else in Init stays per-Init.
 	revPrepared bool
+
+	// pull receives every child Next call of this operator (see nextRow), so the
+	// per-row pull does not heap-allocate its receiver.
+	pull Row
 }
 
 // NewShortestPath creates a ShortestPath operator.
@@ -362,8 +366,7 @@ func (op *ShortestPath) Next(out *Row) (bool, error) {
 			return false, err
 		}
 
-		var inputRow Row
-		ok, err := op.input.Next(&inputRow)
+		inputRow, ok, err := nextRow(op.input, &op.pull)
 		if err != nil {
 			return false, err
 		}
@@ -1403,6 +1406,10 @@ type AllShortestPaths struct {
 	optional    bool
 	inputEOS    bool
 	pendingNull bool // emit one Null-path row (OPTIONAL MATCH, no path found)
+
+	// pull receives every child Next call of this operator (see nextRow), so the
+	// per-row pull does not heap-allocate its receiver.
+	pull Row
 }
 
 // NewAllShortestPaths creates an AllShortestPaths operator. Like
@@ -1526,8 +1533,7 @@ func (op *AllShortestPaths) Next(out *Row) (bool, error) {
 		}
 
 		// Pull next input row.
-		var inputRow Row
-		ok, err := op.input.Next(&inputRow)
+		inputRow, ok, err := nextRow(op.input, &op.pull)
 		if err != nil {
 			return false, err
 		}

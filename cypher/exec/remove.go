@@ -53,6 +53,10 @@ type RemoveProperty struct {
 	reg         *ConstraintRegistry // nil means no registry maintenance
 	entityVar   string
 	propertyKey string
+
+	// pull receives every child Next call of this operator (see nextRow), so the
+	// per-row pull does not heap-allocate its receiver.
+	pull Row
 }
 
 // NewRemoveProperty creates a RemoveProperty operator.
@@ -99,8 +103,7 @@ func (op *RemoveProperty) Next(out *Row) (bool, error) {
 		return false, err
 	}
 
-	var childRow Row
-	ok, err := op.child.Next(&childRow)
+	childRow, ok, err := nextRow(op.child, &op.pull)
 	if err != nil {
 		return false, err
 	}
@@ -179,6 +182,10 @@ type RemoveLabels struct {
 	schema  map[string]int
 	nodeVar string
 	labels  []string
+
+	// pull receives every child Next call of this operator (see nextRow), so the
+	// per-row pull does not heap-allocate its receiver.
+	pull Row
 }
 
 // NewRemoveLabels creates a RemoveLabels operator.
@@ -221,8 +228,7 @@ func (op *RemoveLabels) Next(out *Row) (bool, error) {
 		return false, err
 	}
 
-	var childRow Row
-	ok, err := op.child.Next(&childRow)
+	childRow, ok, err := nextRow(op.child, &op.pull)
 	if err != nil {
 		return false, err
 	}

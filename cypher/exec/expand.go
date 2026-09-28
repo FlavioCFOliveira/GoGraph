@@ -280,6 +280,10 @@ type Expand struct {
 	// leaves every existing field offset unchanged and grows the struct by eight
 	// bytes. nil, or a nil live.src, means this Init reads a whole-graph adjacency.
 	live *expandLive
+
+	// pull receives every child Next call of this operator (see nextRow), so the
+	// per-row pull does not heap-allocate its receiver.
+	pull Row
 }
 
 // ExpandConfig carries the optional configuration for [NewExpand].
@@ -1081,8 +1085,7 @@ func (op *Expand) handlesUsable() bool {
 // (false, err) on error, (false, nil) when a new source was loaded
 // successfully.
 func (op *Expand) advanceInput() (done bool, err error) {
-	var inputRow Row
-	ok, err := op.input.Next(&inputRow)
+	inputRow, ok, err := nextRow(op.input, &op.pull)
 	if err != nil {
 		return false, err
 	}

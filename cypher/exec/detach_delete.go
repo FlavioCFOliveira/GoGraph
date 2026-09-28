@@ -41,6 +41,10 @@ type DetachDelete struct {
 	targetEvalFn TargetEvalFn
 	reg          *ConstraintRegistry // nil means no registry maintenance
 	nodeVar      string
+
+	// pull receives every child Next call of this operator (see nextRow), so the
+	// per-row pull does not heap-allocate its receiver.
+	pull Row
 }
 
 // NewDetachDelete creates a DetachDelete operator.
@@ -86,8 +90,7 @@ func (op *DetachDelete) Next(out *Row) (bool, error) {
 		return false, err
 	}
 
-	var childRow Row
-	ok, err := op.child.Next(&childRow)
+	childRow, ok, err := nextRow(op.child, &op.pull)
 	if err != nil {
 		return false, err
 	}

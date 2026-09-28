@@ -114,6 +114,10 @@ type HashJoin struct {
 	buildOnLeft bool
 	built       bool
 	probeEOS    bool
+
+	// pull receives every child Next call of this operator (see nextRow), so the
+	// per-row pull does not heap-allocate its receiver.
+	pull Row
 }
 
 // NewHashJoin creates a HashJoin.
@@ -173,8 +177,7 @@ func (op *HashJoin) buildTable() error {
 				return err
 			}
 		}
-		var r Row
-		ok, err := op.build.Next(&r)
+		r, ok, err := nextRow(op.build, &op.pull)
 		if err != nil {
 			return err
 		}
@@ -248,8 +251,7 @@ func (op *HashJoin) Next(out *Row) (bool, error) {
 		}
 
 		// Pull the next probe row.
-		var pr Row
-		ok, err := op.probe.Next(&pr)
+		pr, ok, err := nextRow(op.probe, &op.pull)
 		if err != nil {
 			return false, err
 		}

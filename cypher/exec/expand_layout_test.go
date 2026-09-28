@@ -23,6 +23,12 @@ import (
 // A/B on BenchmarkExpandDir_InVsOut_Baseline was run for it (4f733f9e against the
 // change); its result is recorded in the task.
 //
+// rmp #2926 appended ONE Row, pull, after live: the receiver of the per-row input
+// pull, which had escaped to the heap on every row. The size grows from 584 to
+// 608 and, again, no existing offset moves. The two-binary interleaved A/B on
+// BenchmarkExpandDir_InVsOut_Baseline was run for it (fd696e6b against the
+// change); its result is recorded in the task.
+//
 // A failure is not necessarily a defect — a Go release may repack the struct —
 // but it does mean the layout moved, and the rule is that a layout move is
 // measured with the two-binary interleaved A/B on
@@ -34,7 +40,8 @@ func TestExpandLayoutUnchangedByStoredDir(t *testing.T) {
 		got  uintptr
 		want uintptr
 	}{
-		{"Sizeof(Expand)", unsafe.Sizeof(Expand{}), 584},
+		{"Sizeof(Expand)", unsafe.Sizeof(Expand{}), 608},
+		{"Offsetof(pull)", unsafe.Offsetof(Expand{}.pull), 584},
 		{"Offsetof(live)", unsafe.Offsetof(Expand{}.live), 576},
 		{"Offsetof(dstAdmit)", unsafe.Offsetof(Expand{}.dstAdmit), 560},
 		{"Offsetof(dir)", unsafe.Offsetof(Expand{}.dir), 552},

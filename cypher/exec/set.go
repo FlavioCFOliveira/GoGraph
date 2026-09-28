@@ -89,6 +89,10 @@ type SetProperty struct {
 	valueExpr   string        // opaque literal string from IR
 	parsedMap   []propLiteral // cached parse of valueExpr when it is a literal map
 	merge       bool          // true when mode is SET n += {…}
+
+	// pull receives every child Next call of this operator (see nextRow), so the
+	// per-row pull does not heap-allocate its receiver.
+	pull Row
 }
 
 // NewSetProperty creates a SetProperty operator.
@@ -179,8 +183,7 @@ func (op *SetProperty) Next(out *Row) (bool, error) {
 		return false, err
 	}
 
-	var childRow Row
-	ok, err := op.child.Next(&childRow)
+	childRow, ok, err := nextRow(op.child, &op.pull)
 	if err != nil {
 		return false, err
 	}
@@ -710,6 +713,10 @@ type SetLabels struct {
 	schema  map[string]int
 	nodeVar string
 	labels  []string
+
+	// pull receives every child Next call of this operator (see nextRow), so the
+	// per-row pull does not heap-allocate its receiver.
+	pull Row
 }
 
 // NewSetLabels creates a SetLabels operator.
@@ -752,8 +759,7 @@ func (op *SetLabels) Next(out *Row) (bool, error) {
 		return false, err
 	}
 
-	var childRow Row
-	ok, err := op.child.Next(&childRow)
+	childRow, ok, err := nextRow(op.child, &op.pull)
 	if err != nil {
 		return false, err
 	}
