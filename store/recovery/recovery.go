@@ -88,9 +88,13 @@ type Result[N comparable, W any] struct {
 	// graph topology, so they are surfaced here rather than applied to Graph.
 	// The slice is deterministically ordered (kind, label, property, name).
 	Constraints []ConstraintRecord
-	// Indexes reports the durable index definitions recovered from the WAL
-	// ([txn.OpCreateIndex] / [txn.OpDropIndex] ops). The engine re-registers
-	// and re-backfills these on open so a user-created index survives a crash
+	// Indexes reports the durable index definitions recovered for the graph:
+	// the set declared in the snapshot's indexdefs.bin component (the
+	// checkpoint-survival path) reconciled with the [txn.OpCreateIndex] /
+	// [txn.OpDropIndex] ops replayed from the WAL tail (last writer wins by
+	// name), so the result is the index set as of the last durable commit.
+	// The engine re-registers and re-backfills these on open so a
+	// user-created index survives a crash
 	// and a restart (Durability). Index definitions are engine schema, not
 	// graph topology, so they are surfaced here rather than applied to Graph.
 	// The slice is deterministically ordered (by name).
@@ -2110,9 +2114,14 @@ func applyOrAccumulate[N comparable, W any](
 // When wcodec is non-nil and the op is [txn.OpAddEdgeWeighted], the
 // typed weight payload between codec.dst and the trailing label is
 // decoded and applied to the graph. When wcodec is nil and the op is
-// [txn.OpAddEdgeWeighted], the apply falls back to a zero weight and
-// the `store.recovery.applyOp.fallbackZeroWeight` counter is
-// incremented.
+// [txn.OpAddEdgeWeighted], the weight payload cannot be decoded: the
+// op is NOT applied, the `store.recovery.applyOp.fallbackZeroWeight`
+// counter is incremented (the name predates this behaviour; no zero
+// weight is applied), and false is returned. Inside a committed v3
+// transaction the replay loop then raises [ErrCommittedTxnCorruptOp]
+// and stops, so that transaction and every transaction after it in the
+// WAL are discarded; [Open] still returns a nil error and
+// [Result.IsClean] reports false.
 //
 // It also returns false when the graph REFUSES a decoded op — every mutation
 // whose lpg.Graph primitive can fail (node add, node label, node property, edge
