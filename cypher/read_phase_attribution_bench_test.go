@@ -209,7 +209,12 @@ const (
 // must not grow a phase parameter for a benchmark's benefit, and a transcription that
 // drifts is caught by TestReadPhasePrefixMatchesRunRead.
 func (e *Engine) runReadPrefix(ctx context.Context, phase readPhase, query string, params map[string]expr.Value) error {
-	entry, _, err := e.parseAndAnalyse(query)
+	// The auto-parameters are merged exactly as runRead merges them, and at the
+	// same point: a hoisted literal is a parameter the plan reads, so without the
+	// merge any literal-bearing query failed ParameterMissing here while runRead
+	// executed it (rmp #2847).
+	entry, autoParams, err := e.parseAndAnalyse(query)
+	params = mergeAutoParams(params, autoParams)
 	if err != nil {
 		return err
 	}
