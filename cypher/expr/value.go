@@ -14,11 +14,15 @@
 //
 // # Ordering
 //
-// [Compare] implements the openCypher 9 total ordering for use in ORDER BY:
-// NULLs sort last. Within a type the ordering matches Go's natural ordering.
-// Across different non-null types the canonical sequence is:
+// [Compare] implements the orderability of CIP2016-06-14 for use in ORDER BY,
+// min, and max. Across different types the ascending global sort order is:
 //
-//	Path < Node < Relationship < Map < List < String < Boolean < Float < Integer
+//	Map < Node < Relationship < List < Path < DateTime < LocalDateTime <
+//	Date < Time < LocalTime < Duration < String < Boolean < Number < NULL
+//
+// Integer and Float are one type, Number, ordered by magnitude with NaN the
+// largest number. NULL sorts after every other value. Within any other type,
+// Compare applies that type's own ordering.
 //
 // # Concurrency
 //
@@ -1015,18 +1019,21 @@ func (v PathValue) Equal(other Value) Value {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // kindOrder returns the cross-type sort weight for ORDER BY. Lower weight
-// sorts first. NULLs are last (highest weight) per openCypher 9.
+// sorts first. NULLs are last (highest weight).
 //
-// Within a type the canonical order is:
+// The weights encode the ascending global sort order of disjoint types defined
+// by CIP2016-06-14 ("Orderability"):
 //
 //	Map(0) < Node(1) < Relationship(2) < List(3) < Path(4) <
-//	String(5) < Boolean(6) < Float(7) < Integer(8) <
-//	Duration(20) < Date(21) < LocalTime(22) < Time(23) <
-//	LocalDateTime(24) < DateTime(25) < Null(99)
+//	DateTime(5) < LocalDateTime(6) < Date(7) < Time(8) < LocalTime(9) <
+//	Duration(10) < String(11) < Boolean(12) < Float(13) = Integer(13) <
+//	Null(99)
 //
-// Temporal kinds occupy a range above the numeric kinds to keep the existing
-// cross-type ordering stable; relative order among temporal kinds follows the
-// openCypher 9 §3.4 total order.
+// Map, Node, and Relationship are the CIP's three MAP sub-types, in that
+// order. Integer and Float share one weight because the CIP defines a single
+// NUMBER type; [Compare] orders two numbers by magnitude, with NaN the largest,
+// before kindOrder is consulted. Every temporal type sits below String, so no
+// value is ordered after NaN except null, as the CIP requires.
 //
 // Flat lookup over every known kind; splitting hides the order table.
 func kindOrder(k Kind) int {
@@ -1041,26 +1048,24 @@ func kindOrder(k Kind) int {
 		return 3
 	case KindPath:
 		return 4
-	case KindString:
-		return 5
-	case KindBool:
-		return 6
-	case KindFloat:
-		return 7
-	case KindInteger:
-		return 8
-	case KindDuration:
-		return 20
-	case KindDate:
-		return 21
-	case KindLocalTime:
-		return 22
-	case KindTime:
-		return 23
-	case KindLocalDateTime:
-		return 24
 	case KindDateTime:
-		return 25
+		return 5
+	case KindLocalDateTime:
+		return 6
+	case KindDate:
+		return 7
+	case KindTime:
+		return 8
+	case KindLocalTime:
+		return 9
+	case KindDuration:
+		return 10
+	case KindString:
+		return 11
+	case KindBool:
+		return 12
+	case KindFloat, KindInteger:
+		return 13
 	case KindNull:
 		return 99
 	default:
