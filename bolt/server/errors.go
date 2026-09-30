@@ -115,29 +115,52 @@ func FailureCode(err error) string {
 		return "Neo.ClientError.General.TransactionOutOfMemoryError"
 	}
 
-	// A field the durable formats cannot carry ([txn.ErrFieldTooLong], rmp #2819):
-	// a label or a property key whose length overruns the uint16 length prefix every
-	// WAL op body reserves for a schema string (65535 bytes), or a property value
-	// whose snapshot encoding would exceed the checkpointer's per-field cap. Every
-	// one of those bytes came from the client's own statement and the refusal is
-	// deterministic — the same statement fails the same way — so it is a CLIENT
-	// fault, in the Statement family for the reason rmp #2570 gave when it
-	// reclassified the parameter-nesting cap: the message decoded and the statement
-	// was dispatched, so what is invalid is the ARGUMENT, not the form of the
-	// request.
+	// A field the durable formats cannot carry ([txn.ErrFieldTooLong], rmp #2819).
+	// Every one of those bytes came from the client's own statement and the refusal
+	// is deterministic — the same statement fails the same way — so it is a CLIENT
+	// fault. isClientFaultErr (derived from this function) then forwards the
+	// sentinel's own message, which names the field kind ("node label", "edge
+	// property key", "property value"), its length and the cap that was exceeded:
+	// no path, no Go type, no server state.
 	//
-	// isClientFaultErr (derived from this function) then forwards the sentinel's own
-	// message, which names the field kind ("node label", "edge property key"), its
-	// length and the cap that was exceeded. That is the client's own diagnostic: no
-	// path, no Go type, no server state. Before this rule the server logged exactly
-	// that sentence to its stderr and sent the client a session id, so the one party
-	// that could shorten the label was the one party not told why.
+	// The code follows the field KIND (rmp #2942). Both codes were read in Neo4j's
+	// own taxonomy, not chosen by appearance: neo4j/neo4j at commit 54a7dcf7
+	// (2026-09-14), community/common/src/main/java/org/neo4j/kernel/api/exceptions/Status.java.
 	//
-	// Neo.ClientError.General.LimitExceeded was rejected: rmp #2561 established that
-	// it does not appear in Neo4j's status codes at all (see [txQuotaRefusalCode]).
-	if errors.Is(err, txn.ErrFieldTooLong) {
-		return "Neo.ClientError.Statement.ArgumentError"
+	//   - A TOKEN — a label, a relationship type, a property key, or a schema
+	//     identifier — over the 65535-byte uint16 prefix ([txn.ErrTokenTooLong]) is
+	//     Schema.TokenLengthError, "A token name, such as a label, relationship type
+	//     or property key is too long" (Status.java line 471).
+	//   - Any other field — a property value over the snapshot fold cap or the WAL
+	//     prefix ([txn.ErrValueTooLong]), or a per-edge-handle label or property
+	//     count over the snapshot's per-record cap (the umbrella alone) — is
+	//     Data.DataUnsupportedByStoreFormat, a ClientError described as "some data
+	//     added in this transaction is not supported by the store format of this
+	//     database" (Status.java line 829). Neo4j has no value-length code of its
+	//     own; that description is this refusal exactly.
+	//
+	// Both used to share Statement.ArgumentError, the code substring('abc', -1)
+	// also earns, so a client could not tell an over-long label from a bad
+	// function argument.
+	if errors.Is(err, txn.ErrTokenTooLong) {
+		return "Neo.ClientError.Schema.TokenLengthError"
 	}
+	if errors.Is(err, txn.ErrFieldTooLong) {
+		return "Neo.ClientError.Data.DataUnsupportedByStoreFormat"
+	}
+
+	// store/snapshot.ErrFieldTooLong is deliberately NOT mapped (rmp #2827). It is
+	// raised by the snapshot writers, which only the checkpointer, bulk import and
+	// the offline tools call; neither this package nor package cypher calls a
+	// snapshot writer, and store/checkpoint is not in this package's dependency
+	// closure, so no statement a Bolt client sends can return it. Every field a
+	// commit accepts is already bounded at or below the snapshot's caps by
+	// store/txn (tokens at 65535 against a 1 MiB string-table cap; values at the
+	// same 1 GiB, pinned by TestSnapshotValueCapAgreement_2750; per-record counts
+	// at the same 1 Mi, pinned by TestSnapshotPerRecordCountCapAgreement_2784). If
+	// it ever did arrive here it would mean the store accepted data it cannot fold
+	// — a server invariant breach, not a client fault — so the DatabaseError
+	// fallback, with the message masked, is the correct answer.
 
 	// A DURABILITY failure ([wal.ErrDurabilityFailed], rmp #2306): the write-ahead
 	// log could not be made durable, the un-synced suffix was discarded, and the

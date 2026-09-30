@@ -15,6 +15,10 @@ package server_test
 // The three, each measured over a real Bolt socket at df0b1866 before the fix:
 //
 //	long label / property key  txn.ErrFieldTooLong          -> UnknownError, masked
+//
+// rmp #2942 then split the code by field kind: an over-long token now arrives as
+// Neo.ClientError.Schema.TokenLengthError instead of the Statement.ArgumentError
+// that #2819 first gave it.
 //	unsupported DDL            "cypher: DDL parse: …"       -> UnknownError, masked
 //	presence constraint        exec.ErrConstraintViolation  -> UnknownError, masked
 //
@@ -140,14 +144,20 @@ func TestNamedClientFault_ReachesTheClientNamed(t *testing.T) {
 		{
 			name:         "over-long node label",
 			query:        "CREATE (n:" + overLong + ")",
-			wantCode:     "Neo.ClientError.Statement.ArgumentError",
-			wantFragment: "field too long for its WAL length prefix",
+			wantCode:     "Neo.ClientError.Schema.TokenLengthError",
+			wantFragment: "token too long for its WAL length prefix: node label is 65536 bytes, maximum 65535",
 		},
 		{
 			name:         "over-long node property key",
 			query:        "CREATE (n:Ok {`" + overLong + "`: 1})",
-			wantCode:     "Neo.ClientError.Statement.ArgumentError",
-			wantFragment: "field too long for its WAL length prefix",
+			wantCode:     "Neo.ClientError.Schema.TokenLengthError",
+			wantFragment: "token too long for its WAL length prefix: node property key is 65536 bytes, maximum 65535",
+		},
+		{
+			name:         "over-long relationship property key",
+			query:        "CREATE (:A)-[:T {`" + overLong + "`: 1}]->(:B)",
+			wantCode:     "Neo.ClientError.Schema.TokenLengthError",
+			wantFragment: "token too long for its WAL length prefix",
 		},
 		{
 			name:         "composite index",

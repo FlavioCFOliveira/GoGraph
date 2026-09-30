@@ -214,11 +214,11 @@ func TestFailureCode(t *testing.T) {
 			want: "Neo.ClientError.Request.Invalid",
 		},
 		{
-			// rmp #2819: a field too long for the durable formats. Wrapped as
-			// the engine's commit path wraps it.
-			name: "txn.ErrFieldTooLong wrapped",
-			err:  fmt.Errorf("%w: node label is 65536 bytes, maximum 65535", txn.ErrFieldTooLong),
-			want: "Neo.ClientError.Statement.ArgumentError",
+			// rmp #2819, #2942: a token too long for the WAL. Wrapped as the
+			// engine's commit path wraps it.
+			name: "txn.ErrTokenTooLong wrapped",
+			err:  fmt.Errorf("%w: node label is 65536 bytes, maximum 65535", txn.ErrTokenTooLong),
+			want: "Neo.ClientError.Schema.TokenLengthError",
 		},
 		{
 			// rmp #2819: a constraint violation carrying the SENTINEL only and

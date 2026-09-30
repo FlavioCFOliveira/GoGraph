@@ -2440,10 +2440,49 @@ const maxWALValueLenInt = maxWALValueLen & math.MaxInt
 // The same sentinel carries the OTHER refusal a property value can earn at
 // commit: a value whose snapshot encoding would exceed [maxSnapshotValueLen],
 // which the WAL could hold but the checkpointer could never fold (rmp #2750).
-// It is deliberately not a second sentinel — from the caller's side both mean
-// "this field is too long for a durable format to carry", and the message names
-// the length and the cap that was exceeded.
+//
+// # Field kinds (rmp #2942)
+//
+// ErrFieldTooLong is the UMBRELLA. Every refusal also matches exactly one
+// narrower sentinel or none, so a caller can tell WHAT was too long without
+// parsing the message:
+//
+//   - [ErrTokenTooLong] — a label, a relationship type, a property key, or a
+//     schema identifier (index or constraint name, label, property) over the
+//     uint16 length prefix every WAL op body reserves for one: 65535 bytes.
+//   - [ErrValueTooLong] — a property value over a durable format's cap: the
+//     snapshot fold cap ([maxSnapshotValueLen], 1 GiB) or the WAL's uint32
+//     prefix (a string or byte payload, a list element, a list element count).
+//   - neither — a per-edge-handle label or property COUNT over the snapshot's
+//     per-record cap (rmp #2784), which is neither a token nor a value.
+//
+// errors.Is(err, ErrFieldTooLong) holds for all three, so every caller that
+// tested the umbrella before the split still matches.
 var ErrFieldTooLong = errors.New("txn: field too long for its WAL length prefix")
+
+// ErrTokenTooLong is the [ErrFieldTooLong] refusal for a TOKEN: a label, a
+// relationship type, a property key, or a schema identifier longer than the
+// 65535 bytes the WAL's uint16 length prefix can carry. [CheckSchemaField]
+// reports it before anything is staged. errors.Is(err, ErrFieldTooLong) is
+// also true for it (rmp #2942).
+var ErrTokenTooLong error = &fieldTooLongKind{msg: "txn: token too long for its WAL length prefix"}
+
+// ErrValueTooLong is the [ErrFieldTooLong] refusal for a property VALUE whose
+// encoding exceeds what a durable format can carry: the snapshot fold cap
+// (1 GiB) or the WAL's uint32 length prefix. errors.Is(err, ErrFieldTooLong) is
+// also true for it (rmp #2942).
+var ErrValueTooLong error = &fieldTooLongKind{msg: "txn: property value too long for a durable format"}
+
+// fieldTooLongKind is the type of the per-kind sentinels [ErrTokenTooLong] and
+// [ErrValueTooLong]. Each is its own identity for errors.Is and ALSO matches
+// the umbrella [ErrFieldTooLong], through the Is method below.
+type fieldTooLongKind struct{ msg string }
+
+func (k *fieldTooLongKind) Error() string { return k.msg }
+
+// Is reports whether target is the umbrella [ErrFieldTooLong]; identity with
+// the kind itself is decided by errors.Is before this method is consulted.
+func (k *fieldTooLongKind) Is(target error) bool { return target == ErrFieldTooLong }
 
 // ErrNestedPropertyList is the sentinel a commit fails with when a property
 // value is a [lpg.PropList] one of whose elements is itself a PropList. It is a
@@ -2494,8 +2533,9 @@ var ErrNestedPropertyList = errors.New("txn: a nested list is not a valid proper
 
 // CheckSchemaField reports whether s fits the uint16 length prefix every WAL
 // frame reserves for a schema string — a label, a property key, or a schema
-// identifier — returning an error wrapping [ErrFieldTooLong] when it does not.
-// what names the field in that error ("node label", "edge property key", ...).
+// identifier — returning an error wrapping [ErrTokenTooLong] (and therefore
+// [ErrFieldTooLong]) when it does not. what names the field in that error
+// ("node label", "edge property key", ...). The bound is 65535 bytes.
 //
 // It exists so a caller that stages work of its own BEFORE it reaches a [Tx]
 // mutator can refuse an unencodable field at its own API boundary, against the
@@ -2519,7 +2559,7 @@ func CheckSchemaField(what, s string) error { return checkWALSchemaString(what, 
 // (backstop). See [Tx.SetNodeLabel] for why both.
 func checkWALSchemaString(what, s string) error {
 	if len(s) > maxWALSchemaStringLen {
-		return errFieldTooLong(what, len(s), maxWALSchemaStringLen)
+		return errFieldTooLong(ErrTokenTooLong, what, len(s), maxWALSchemaStringLen)
 	}
 	return nil
 }
@@ -2528,7 +2568,7 @@ func checkWALSchemaString(what, s string) error {
 // property value, a list element, or a list element count (rmp #2742).
 func checkWALValueLen(what string, n int) error {
 	if n > maxWALValueLenInt {
-		return errFieldTooLong(what, n, maxWALValueLen)
+		return errFieldTooLong(ErrValueTooLong, what, n, maxWALValueLen)
 	}
 	return nil
 }
@@ -2673,7 +2713,7 @@ func snapshotEncodedScalarLen(v lpg.PropertyValue) int64 {
 // checkSnapshotValueLen is pinned.
 func checkSnapshotFoldableLen(what string, n int64) error {
 	if n > maxSnapshotValueLen {
-		return errFieldTooLongN(what, n, maxSnapshotValueLen)
+		return errFieldTooLongN(ErrValueTooLong, what, n, maxSnapshotValueLen)
 	}
 	return nil
 }
@@ -2739,16 +2779,19 @@ func checkFlatPropertyList(v lpg.PropertyValue) error {
 // well-predicted branch, not a call. Verified with
 // `go build -gcflags='-m' ./store/txn/`, which reports both checks
 // "can inline" and this one not.
-func errFieldTooLong(what string, n int, maxLen uint64) error {
-	return errFieldTooLongN(what, int64(n), maxLen)
+//
+// kind is the sentinel the refusal wraps: [ErrTokenTooLong], [ErrValueTooLong],
+// or the umbrella [ErrFieldTooLong] itself for a refusal of neither kind.
+func errFieldTooLong(kind error, what string, n int, maxLen uint64) error {
+	return errFieldTooLongN(kind, what, int64(n), maxLen)
 }
 
 // errFieldTooLongN is [errFieldTooLong] for a length that is already an int64,
 // which [checkSnapshotFoldableLen] needs because it sums a list's elements and
 // that sum must not be truncated on a 32-bit platform. It holds the ONE format
 // string, so the two refusal shapes cannot drift apart.
-func errFieldTooLongN(what string, n int64, maxLen uint64) error {
-	return fmt.Errorf("%w: %s is %d bytes, maximum %d", ErrFieldTooLong, what, n, maxLen)
+func errFieldTooLongN(kind error, what string, n int64, maxLen uint64) error {
+	return fmt.Errorf("%w: %s is %d bytes, maximum %d", kind, what, n, maxLen)
 }
 
 // appendOpIndexBody appends the body of an [OpCreateIndex] / [OpDropIndex]
