@@ -892,12 +892,12 @@ func resolveEntityBinding(
 		// a WITH boundary to the pairwise path — the per-pair store changed
 		// while the instance's own bag, which reads route through, kept the
 		// pre-SET map (#2502, the SetAllProperties residual of #2334).
-		srcKey, srcOK := mut.ResolveNodeLabel(graph.NodeID(v.StartID))
-		dstKey, dstOK := mut.ResolveNodeLabel(graph.NodeID(v.EndID))
-		if !srcOK || !dstOK {
+		// The endpoints are normalised to the stored order (rmp #2945).
+		ent, ok := relValueEntity(mut, v)
+		if !ok {
 			return entityBinding{}, fmt.Errorf("cannot resolve relationship endpoints (%d, %d)", v.StartID, v.EndID)
 		}
-		return entityBinding{isRel: true, relSrcKey: srcKey, relDstKey: dstKey, relHandle: v.ID}, nil
+		return ent, nil
 	default:
 		return entityBinding{}, fmt.Errorf("variable %q is not IntegerValue/NodeValue/RelationshipValue (got %T)", varName, row[colIdx])
 	}

@@ -9,6 +9,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 
@@ -353,6 +356,40 @@ func (s *stubMutator) FirstEdgeHandle(src, dst string) (uint64, bool) {
 		return 0, false
 	}
 	return s.firstHandle(src, dst)
+}
+
+// EdgeHandles lists the stub's src→dst instances: every handle that carries a
+// by-handle property bag on the pair, or — when none does — the single slot
+// firstHandle reports (0 when it reports none).
+func (s *stubMutator) EdgeHandles(src, dst string, buf []uint64) []uint64 {
+	if !s.HasEdge(src, dst) {
+		return buf
+	}
+	start := len(buf)
+	s.mu.Lock()
+	prefix := src + "|" + dst + "|"
+	for k := range s.byHandleProps {
+		if strings.HasPrefix(k, prefix) {
+			if h, err := strconv.ParseUint(k[len(prefix):], 10, 64); err == nil {
+				buf = append(buf, h)
+			}
+		}
+	}
+	s.mu.Unlock()
+	if len(buf) > start {
+		slices.Sort(buf[start:])
+		return buf
+	}
+	h, _ := s.FirstEdgeHandle(src, dst)
+	return append(buf, h)
+}
+
+// HasEdgeHandle reports whether handle is one of the stub's src→dst instances.
+func (s *stubMutator) HasEdgeHandle(src, dst string, handle uint64) bool {
+	if handle == 0 {
+		return false
+	}
+	return slices.Contains(s.EdgeHandles(src, dst, nil), handle)
 }
 
 // EdgeLabels returns the edge labels for (src, dst). Reads from the

@@ -517,6 +517,43 @@ func (g *Graph[N, W]) FirstEdgeHandleAsOf(src, dst N, snap *Snapshot) (uint64, b
 	return 0, false
 }
 
+// AppendEdgeHandles appends to buf the stable handle of every adjacency slot
+// from src to dst, in slot order, one entry per slot, and returns the extended
+// slice. A slot without a handle contributes the 0 "no handle" sentinel, so the
+// number of appended entries is always the number of stored src→dst edges. It
+// appends nothing when either endpoint is unknown or no src→dst edge exists.
+//
+// It is the per-INSTANCE enumerator [Graph.FirstEdgeHandle] is not: a caller that
+// must visit every parallel relationship between a pair — MERGE's match path,
+// which binds one row per matching instance — reads each instance's identity
+// here instead of collapsing the pair onto its first slot.
+//
+// AppendEdgeHandles reads the same immutable adjacency snapshot as
+// [Graph.FirstEdgeHandle], allocates only when buf must grow, and is safe for
+// concurrent use.
+func (g *Graph[N, W]) AppendEdgeHandles(src, dst N, buf []uint64) []uint64 {
+	srcID, ok := g.adj.Mapper().Lookup(src)
+	if !ok {
+		return buf
+	}
+	dstID, ok := g.adj.Mapper().Lookup(dst)
+	if !ok {
+		return buf
+	}
+	v := g.EntryViewAsOf(srcID, nil)
+	for i, nb := range v.Neighbours {
+		if nb != dstID {
+			continue
+		}
+		var h uint64
+		if i < len(v.Handles) {
+			h = v.Handles[i]
+		}
+		buf = append(buf, h)
+	}
+	return buf
+}
+
 // DelEdgePropertyByHandle removes exactly key from the property bag of the
 // edge identified by handle on the (src, dst) pair, leaving every other
 // property of that handle — and every sibling handle on the same pair —

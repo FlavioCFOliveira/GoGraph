@@ -284,12 +284,12 @@ func (op *SetProperty) resolveEntity(varName string, row Row) (entityBinding, er
 		// since rmp #2317 its ID is the stable HANDLE — so the write targets the
 		// same instance a read resolves. Leaving the handle at 0 here is what made
 		// a relationship's properties split-brain across two stores (rmp #2334).
-		srcKey, srcOK := op.mutator.ResolveNodeLabel(graph.NodeID(v.StartID))
-		dstKey, dstOK := op.mutator.ResolveNodeLabel(graph.NodeID(v.EndID))
-		if !srcOK || !dstOK {
+		// The endpoints are normalised to the stored order (rmp #2945).
+		ent, ok := relValueEntity(op.mutator, v)
+		if !ok {
 			return entityBinding{}, fmt.Errorf("cannot resolve relationship endpoints (%d, %d)", v.StartID, v.EndID)
 		}
-		return entityBinding{isRel: true, relSrcKey: srcKey, relDstKey: dstKey, relHandle: v.ID}, nil
+		return ent, nil
 	default:
 		return entityBinding{}, fmt.Errorf("variable %q is not IntegerValue/NodeValue/RelationshipValue (got %T)", varName, row[colIdx])
 	}

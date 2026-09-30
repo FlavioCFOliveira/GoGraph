@@ -55,20 +55,17 @@ package exec
 //
 // # Parallel-relationship multiplicity
 //
-// [binding] carries one NodeID per chain position — it has no relationship
-// identity — so when two or more parallel relationships satisfy a hop's
-// type/property predicate between the same resolved node pair,
-// [MergePattern.expandCandidates] fans out one binding per parallel
-// relationship rather than a single candidate, so MERGE's match multiplicity
-// equals the equivalent MATCH's (rmp #1875). The per-hop multiplicity comes
-// from [MergePattern.hopMultiplicity], which counts the graph's Cypher
-// CREATE-multiplicity for the pair filtered by the hop's type/property
-// predicate — the same parallel-edge population a MATCH enumerates. The bound
-// bindings for a hop are identical NodeID pairs (the join carries no per-edge
-// identity), which is sufficient for the multiplicity-sensitive aggregations
-// (`count(r)`); it does not create a duplicate node or relationship and does
-// not affect the match-vs-create decision. [MergeRelationship] fans out its
-// own single both-bound hop via the same EdgeCreateCount counter.
+// A [binding] carries, for every hop, the stable handle and stored order of
+// the ONE relationship instance it binds, so when two or more parallel
+// relationships satisfy a hop between the same resolved node pair,
+// [MergePattern.expandCandidates] fans out one binding per matching instance —
+// MERGE's match multiplicity equals the equivalent MATCH's (rmp #1875), and
+// every row, every ON MATCH write and every emitted relationship value names
+// its own instance (rmp #2939). Instances are enumerated from the adjacency by
+// handle ([GraphMutator.EdgeHandles]) and each is tested against the hop's type
+// and inline properties through its OWN by-handle metadata, never through the
+// pair's coalesced union and never through a CREATE ordinal, which recovery
+// does not rebuild.
 //
 // # Concurrency
 //
@@ -221,16 +218,12 @@ type MergePattern struct {
 	// not re-evaluated once per frontier binding. Indexed by hop position; len
 	// == len(hops) after runForRow computes it.
 	hopPropsForRow [][]propLiteral
-	// hopCreateHandles holds, per hop position, the stable per-edge handle
-	// [MergePattern.createChain] allocated for that hop on THIS driving row, or
-	// 0 when the row took the match path (no edge was created). It is the
-	// create-path half of [MergePattern.hopHandle], which is the single place
-	// every write and every emitted binding resolves a hop's edge identity —
-	// so a created hop names the instance createChain actually wrote to rather
-	// than the pair's first slot, which in a multigraph is a DIFFERENT edge
-	// when the pattern added a parallel hop over an already-connected bound
-	// pair. Reset per driving row in [MergePattern.runForRow].
-	hopCreateHandles []uint64
+	// handleBuf is the reusable buffer [GraphMutator.EdgeHandles] appends a
+	// pair's slot handles to while a hop's instances are enumerated, so the
+	// per-candidate enumeration does not allocate once it has grown. It starts
+	// on handleArr, which covers a pair of a few parallel relationships.
+	handleBuf []uint64
+	handleArr [4]uint64
 
 	matchedIdx int
 
@@ -486,7 +479,7 @@ func (op *MergePattern) WithSetAllActions(onCreate, onMatch []MergeSetAllAction)
 func (op *MergePattern) applySetAllActions(b binding, evalRow Row, actions []MergeSetAllAction) error {
 	for _, a := range actions {
 		if idx, ok := op.nodeIndexByVar(a.TargetVar); ok {
-			nodeKey, resolved := op.mutator.ResolveNodeLabel(b[idx])
+			nodeKey, resolved := op.mutator.ResolveNodeLabel(b[idx].node)
 			if !resolved {
 				continue
 			}
@@ -500,10 +493,9 @@ func (op *MergePattern) applySetAllActions(b binding, evalRow Row, actions []Mer
 			continue
 		}
 		if hopIdx, ok := op.hopIndexByRelVar(a.TargetVar); ok {
-			hop := &op.hops[hopIdx]
-			srcIdx, dstIdx := hop.storageOrder(hopIdx)
-			srcKey, ok1 := op.mutator.ResolveNodeLabel(b[srcIdx])
-			dstKey, ok2 := op.mutator.ResolveNodeLabel(b[dstIdx])
+			srcIdx, dstIdx := b.hopStorageOrder(hopIdx)
+			srcKey, ok1 := op.mutator.ResolveNodeLabel(b[srcIdx].node)
+			dstKey, ok2 := op.mutator.ResolveNodeLabel(b[dstIdx].node)
 			if !ok1 || !ok2 {
 				continue
 			}
@@ -511,7 +503,7 @@ func (op *MergePattern) applySetAllActions(b binding, evalRow Row, actions []Mer
 			if err != nil {
 				return err
 			}
-			handle := op.hopHandle(hopIdx, srcKey, dstKey)
+			handle := b.hopHandle(hopIdx)
 			if err := applyWholeEntityValueToEdge(
 				op.mutator, a.TargetVar, srcKey, dstKey, handle, a.IsReplace, v,
 			); err != nil {
@@ -681,15 +673,6 @@ func (op *MergePattern) runForRow(childRow Row) error {
 		}
 		op.hopPropsForRow[i] = props
 	}
-	// Reset the per-row create handles: a hop that is MATCHED this row must not
-	// inherit the handle a previous row's create allocated for it.
-	if cap(op.hopCreateHandles) < len(op.hops) {
-		op.hopCreateHandles = make([]uint64, len(op.hops))
-	} else {
-		op.hopCreateHandles = op.hopCreateHandles[:len(op.hops)]
-		clear(op.hopCreateHandles)
-	}
-
 	bindings, err := op.search(childRow)
 	if err != nil {
 		return fmt.Errorf("exec: MergePattern: search: %w", err)
@@ -705,6 +688,9 @@ func (op *MergePattern) runForRow(childRow Row) error {
 			}
 			if err := op.applySetAllActions(b, row, op.onMatchSetAll); err != nil {
 				return err
+			}
+			if len(op.onMatchActions) > 0 || len(op.onMatchSetAll) > 0 {
+				op.refreshRelValues(row, b)
 			}
 			op.matched = append(op.matched, row)
 		}
@@ -723,6 +709,9 @@ func (op *MergePattern) runForRow(childRow Row) error {
 	}
 	if err := op.applySetAllActions(b, row, op.onCreateSetAll); err != nil {
 		return err
+	}
+	if len(op.onCreateActions) > 0 || len(op.onCreateSetAll) > 0 {
+		op.refreshRelValues(row, b)
 	}
 	op.created = true
 	op.createdRow = row
@@ -763,8 +752,44 @@ func (op *MergePattern) parseLazy() error {
 	return nil
 }
 
-// binding is one complete joint solution: one NodeID per chain position.
-type binding []graph.NodeID
+// bindingSlot is one chain position of a [binding]: the position's NodeID and,
+// for every position after the first, the relationship instance of the hop
+// that reaches it from the previous position — its stable handle (0 for a slot
+// stamped without one) and whether it is stored from the previous position to
+// this one (fwd) or the other way round.
+type bindingSlot struct {
+	node   graph.NodeID
+	handle uint64
+	fwd    bool
+}
+
+// binding is one complete joint solution: one slot per chain position, so the
+// hop connecting positions i and i+1 is described by slot i+1.
+type binding []bindingSlot
+
+// hopStorageOrder returns the chain-position indices, in EDGE-STORAGE order, of
+// the relationship instance bound for hop i.
+func (b binding) hopStorageOrder(i int) (srcIdx, dstIdx int) {
+	if b[i+1].fwd {
+		return i, i + 1
+	}
+	return i + 1, i
+}
+
+// hopHandle returns the stable handle of the relationship instance bound for
+// hop i — the single identity every write and every emitted value for that hop
+// uses, because the read path routes a bound relationship's properties by
+// handle. 0 means the instance carries no handle: callers then use the per-pair
+// store only.
+func (b binding) hopHandle(i int) uint64 { return b[i+1].handle }
+
+// hopCandidate is one way to extend a partial binding across a hop: the target
+// NodeID and the relationship instance that reaches it.
+type hopCandidate struct {
+	node   graph.NodeID
+	handle uint64
+	fwd    bool
+}
 
 // search returns every complete joint binding of the chain against the live
 // graph, honouring childRow's bound-column values. Returns an empty slice
@@ -785,7 +810,7 @@ func (op *MergePattern) search(childRow Row) ([]binding, error) {
 			// neither be matched against nor safely created.
 			return nil, fmt.Errorf("exec: MergePattern: bound variable %q is null", first.varName)
 		}
-		frontier = []binding{{id}}
+		frontier = []binding{{{node: id}}}
 	} else {
 		firstProps, epErr := op.effectiveNodeProps(first, childRow)
 		if epErr != nil {
@@ -801,7 +826,7 @@ func (op *MergePattern) search(childRow Row) ([]binding, error) {
 			if !ok {
 				continue
 			}
-			frontier = append(frontier, binding{id})
+			frontier = append(frontier, binding{{node: id}})
 		}
 	}
 
@@ -813,7 +838,7 @@ func (op *MergePattern) search(childRow Row) ([]binding, error) {
 		target := &op.nodes[hopIdx+1]
 		next := make([]binding, 0, len(frontier))
 		for _, b := range frontier {
-			fromID := b[len(b)-1]
+			fromID := b[len(b)-1].node
 			fromKey, ok := op.mutator.ResolveNodeLabel(fromID)
 			if !ok {
 				continue
@@ -839,7 +864,7 @@ func (op *MergePattern) search(childRow Row) ([]binding, error) {
 			for _, c := range cands {
 				extended := make(binding, len(b), len(b)+1)
 				copy(extended, b)
-				next = append(next, append(extended, c))
+				next = append(next, append(extended, bindingSlot(c)))
 			}
 		}
 		frontier = next
@@ -847,22 +872,18 @@ func (op *MergePattern) search(childRow Row) ([]binding, error) {
 	return frontier, nil
 }
 
-// expandCandidates returns the NodeIDs reachable from fromKey via hop that
-// also satisfy target's predicate (an exact-value filter when target is
-// bound, a label/property filter when fresh).
-func (op *MergePattern) expandCandidates(fromKey string, hop *mergePatternHop, target *mergePatternNode, childRow Row, hopProps []propLiteral) ([]graph.NodeID, error) {
+// expandCandidates returns one candidate per relationship instance that
+// satisfies hop from fromKey and reaches a node satisfying target's predicate
+// (an exact-value filter when target is bound, a label/property filter when
+// fresh). Parallel matching relationships to one node yield one candidate each
+// (rmp #1875), each carrying its own instance (rmp #2939).
+func (op *MergePattern) expandCandidates(fromKey string, hop *mergePatternHop, target *mergePatternNode, childRow Row, hopProps []propLiteral) ([]hopCandidate, error) {
 	// hopProps is the hop's effective inline relationship property predicate for
 	// THIS driving row (literals merged with any non-literal per-row values,
 	// e.g. `{kind: row.pk}`), pre-computed once per row by runForRow, so the
 	// search matches on the evaluated value exactly as the created edge will
 	// carry it.
 	if target.bound {
-		// The target node is fixed to its bound value, but the hop may be
-		// satisfied by more than one PARALLEL relationship between the pair.
-		// Fan out one candidate per pre-existing parallel relationship that
-		// satisfies the hop's type/property predicate so MERGE's match
-		// multiplicity equals the equivalent MATCH's (#1875) — instead of the
-		// single boolean edge-exists candidate that under-counted `count(r)`.
 		id, key, ok, err := op.resolveBound(childRow, target)
 		if err != nil {
 			return nil, err
@@ -870,35 +891,20 @@ func (op *MergePattern) expandCandidates(fromKey string, hop *mergePatternHop, t
 		if !ok {
 			return nil, fmt.Errorf("exec: MergePattern: bound variable %q is null", target.varName)
 		}
-		mult := op.hopMultiplicity(fromKey, key, hop, hopProps)
-		if mult == 0 {
-			return nil, nil
-		}
-		out := make([]graph.NodeID, mult)
-		for i := range out {
-			out[i] = id
-		}
-		return out, nil
+		return op.appendHopInstances(nil, fromKey, key, id, hop, hopProps), nil
 	}
 
 	targetProps, tpErr := op.effectiveNodeProps(target, childRow)
 	if tpErr != nil {
 		return nil, tpErr
 	}
-	var out []graph.NodeID
+	var out []hopCandidate
 	seen := map[string]struct{}{}
-	tryNeighbour := func(candKey string, edgeSrc, edgeDst string) {
+	tryNeighbour := func(candKey string) {
 		if _, dup := seen[candKey]; dup {
 			return
 		}
-		if hop.relType != "" {
-			if !edgeHasLabel(op.mutator, edgeSrc, edgeDst, hop.relType) {
-				return
-			}
-		}
-		if len(hopProps) > 0 && !nodeMatchesAllProperties(hopProps, op.mutator.EdgeProperties(edgeSrc, edgeDst)) {
-			return
-		}
+		seen[candKey] = struct{}{}
 		if !nodeMatchesAllLabels(target.labels, labelsInTx(op.mutator, candKey)) {
 			return
 		}
@@ -909,140 +915,68 @@ func (op *MergePattern) expandCandidates(fromKey string, hop *mergePatternHop, t
 		if !ok {
 			return
 		}
-		seen[candKey] = struct{}{}
-		// Fan out one candidate per pre-existing parallel relationship to this
-		// neighbour that satisfies the hop, matching MATCH multiplicity (#1875).
-		// hopMultiplicity returns 1 for a single edge, so a non-parallel graph
-		// is unaffected.
-		mult := op.hopMultiplicity(fromKey, candKey, hop, hopProps)
-		for i := 0; i < mult; i++ {
-			out = append(out, id)
-		}
+		out = op.appendHopInstances(out, fromKey, candKey, id, hop, hopProps)
 	}
 
 	checkForward, checkReverse := hop.directions()
 	if checkForward {
 		for _, n := range op.mutator.OutNeighbours(fromKey) {
-			tryNeighbour(n, fromKey, n)
+			tryNeighbour(n)
 		}
 	}
 	if checkReverse {
 		for _, n := range op.mutator.InNeighbours(fromKey) {
-			tryNeighbour(n, n, fromKey)
+			tryNeighbour(n)
 		}
 	}
 	return out, nil
 }
 
-// edgeSatisfiesHop reports whether the directed edge (src, dst) satisfies
-// hop's type and the per-row inline property predicate hopProps.
-func edgeSatisfiesHop(mutator GraphMutator, src, dst string, hop *mergePatternHop, hopProps []propLiteral) bool {
-	if !mutator.HasEdge(src, dst) {
-		return false
-	}
-	if hop.relType != "" && !edgeHasLabel(mutator, src, dst, hop.relType) {
-		return false
-	}
-	if len(hopProps) > 0 && !nodeMatchesAllProperties(hopProps, mutator.EdgeProperties(src, dst)) {
-		return false
-	}
-	return true
-}
-
-// edgeHasLabel reports whether the directed edge (src, dst) carries label
-// among its (possibly multigraph-unioned) relationship types.
-func edgeHasLabel(mutator GraphMutator, src, dst, label string) bool {
-	for _, l := range mutator.EdgeLabels(src, dst) {
-		if l == label {
-			return true
-		}
-	}
-	return false
-}
-
-// hopMultiplicity reports how many pre-existing parallel relationships between
-// the resolved (fromKey, toKey) node pair satisfy hop's type and property
-// predicate, in the hop's permitted direction(s). It is the per-hop analogue of
-// the parallel-edge fan-out a MATCH of the same pattern produces (#1875): a
-// bound MERGE hop over two parallel :T edges must contribute two joint bindings
-// so `RETURN count(r)` equals the MATCH count. Returns 0 when the pair is not
-// connected by any matching edge (the caller then treats the hop as unmatched).
-func (op *MergePattern) hopMultiplicity(fromKey, toKey string, hop *mergePatternHop, hopProps []propLiteral) int {
+// appendHopInstances appends one candidate reaching toID for every stored
+// relationship instance between fromKey and toKey, in the hop's permitted
+// direction(s), whose own type and properties satisfy the hop. An instance is
+// visited once even when both directions list it — a self-loop, or an
+// undirected graph's mirror slot, which shares its relationship's handle.
+func (op *MergePattern) appendHopInstances(out []hopCandidate, fromKey, toKey string, toID graph.NodeID, hop *mergePatternHop, hopProps []propLiteral) []hopCandidate {
 	checkForward, checkReverse := hop.directions()
-	var n int
+	start := len(out)
 	if checkForward {
-		n += op.countMatchingInstances(fromKey, toKey, hop, hopProps)
+		out = op.appendDirectedInstances(out, start, fromKey, toKey, toID, true, hop, hopProps)
 	}
-	if checkReverse {
-		n += op.countMatchingInstances(toKey, fromKey, hop, hopProps)
+	if checkReverse && (fromKey != toKey || !checkForward) {
+		out = op.appendDirectedInstances(out, start, toKey, fromKey, toID, false, hop, hopProps)
 	}
-	return n
+	return out
 }
 
-// countMatchingInstances counts the parallel relationship instances stored in
-// the directed (src → dst) slot that satisfy hop's type and property predicate.
-// The count is the graph's Cypher CREATE-multiplicity for the pair
-// (EdgeCreateCount) filtered by the per-instance type/property metadata the
-// write path records (SetEdgeLabelAt / SetEdgePropertyAt), so it equals the
-// number of parallel edges a MATCH would enumerate. When the pair carries no
-// CREATE-multiplicity metadata (an edge added directly through the Go API,
-// bypassing IncEdgeCreateCount) it falls back to the boolean edgeSatisfiesHop
-// result — one instance — preserving the pre-fix behaviour for that path.
-func (op *MergePattern) countMatchingInstances(src, dst string, hop *mergePatternHop, hopProps []propLiteral) int {
-	if !edgeSatisfiesHop(op.mutator, src, dst, hop, hopProps) {
-		return 0
+// appendDirectedInstances is [MergePattern.appendHopInstances] for the stored
+// order (src, dst). fwd records whether that order runs from the hop's source
+// position to its target. Candidates from out[start:] with the same non-zero
+// handle are not appended twice.
+func (op *MergePattern) appendDirectedInstances(out []hopCandidate, start int, src, dst string, toID graph.NodeID, fwd bool, hop *mergePatternHop, hopProps []propLiteral) []hopCandidate {
+	if op.handleBuf == nil {
+		op.handleBuf = op.handleArr[:0]
 	}
-	mult := op.mutator.EdgeCreateCount(src, dst)
-	if mult <= 0 {
-		return 1
-	}
-	var n int
-	for idx := int64(1); idx <= mult; idx++ {
-		if op.instanceMatchesHop(src, dst, idx, hop, hopProps) {
-			n++
+	op.handleBuf = op.mutator.EdgeHandles(src, dst, op.handleBuf[:0])
+	for _, h := range op.handleBuf {
+		if h != 0 && candidateHasHandle(out[start:], h) {
+			continue
 		}
+		if !relInstanceHasType(op.mutator, src, dst, h, hop.relType) {
+			continue
+		}
+		if len(hopProps) > 0 && !nodeMatchesAllProperties(hopProps, relInstanceProps(op.mutator, src, dst, h)) {
+			continue
+		}
+		out = append(out, hopCandidate{node: toID, handle: h, fwd: fwd})
 	}
-	if n == 0 {
-		// edgeSatisfiesHop already proved a matching edge exists between the
-		// pair, but no per-instance record matched (a storage path that records
-		// the type only on the per-pair union): contribute one so the matching
-		// pair is never dropped.
-		return 1
-	}
-	return n
+	return out
 }
 
-// instanceMatchesHop reports whether CREATE instance idx of the directed
-// (src → dst) pair carries hop's type and satisfies its property predicate,
-// using the per-instance metadata (EdgeLabelsAt / EdgePropertiesAt). An
-// instance that recorded no per-instance labels is treated as type-agnostic
-// (deferred to the per-pair check the caller already performed) so a storage
-// path recording the type only on the per-pair union is not wrongly excluded;
-// an instance that DID record labels but not hop.relType is excluded, which is
-// what filters a mixed-type parallel pair down to the matching subset.
-func (op *MergePattern) instanceMatchesHop(src, dst string, idx int64, hop *mergePatternHop, hopProps []propLiteral) bool {
-	if hop.relType != "" {
-		labels := op.mutator.EdgeLabelsAt(src, dst, idx)
-		if len(labels) > 0 && !containsLabel(labels, hop.relType) {
-			return false
-		}
-	}
-	if len(hopProps) > 0 {
-		props := op.mutator.EdgePropertiesAt(src, dst, idx)
-		if props == nil {
-			props = op.mutator.EdgeProperties(src, dst)
-		}
-		if !nodeMatchesAllProperties(hopProps, props) {
-			return false
-		}
-	}
-	return true
-}
-
-// containsLabel reports whether labels contains want.
-func containsLabel(labels []string, want string) bool {
-	for _, l := range labels {
-		if l == want {
+// candidateHasHandle reports whether cands already holds handle.
+func candidateHasHandle(cands []hopCandidate, handle uint64) bool {
+	for i := range cands {
+		if cands[i].handle == handle {
 			return true
 		}
 	}
@@ -1074,6 +1008,10 @@ func (op *MergePattern) resolveBound(childRow Row, n *mergePatternNode) (graph.N
 func (op *MergePattern) createChain(childRow Row) (binding, error) {
 	b := make(binding, len(op.nodes))
 	keys := make([]string, len(op.nodes))
+	for i := range op.hops {
+		// The created instance is stored in the hop's declared order.
+		b[i+1].fwd = !op.hops[i].reversed
+	}
 	for i := range op.nodes {
 		n := &op.nodes[i]
 		if n.bound {
@@ -1084,7 +1022,7 @@ func (op *MergePattern) createChain(childRow Row) (binding, error) {
 			if !ok {
 				return nil, fmt.Errorf("bound variable %q is null", n.varName)
 			}
-			b[i], keys[i] = id, key
+			b[i].node, keys[i] = id, key
 			continue
 		}
 		key := op.freshNodeKey()
@@ -1117,7 +1055,7 @@ func (op *MergePattern) createChain(childRow Row) (binding, error) {
 		if !ok {
 			return nil, fmt.Errorf("freshly created node %q did not resolve", n.varName)
 		}
-		b[i], keys[i] = id, key
+		b[i].node, keys[i] = id, key
 	}
 	for i := range op.hops {
 		hop := &op.hops[i]
@@ -1127,12 +1065,12 @@ func (op *MergePattern) createChain(childRow Row) (binding, error) {
 		if err != nil {
 			return nil, fmt.Errorf("AddEdge: %w", err)
 		}
-		// Publish the created instance's identity for this row, so the emitted
-		// binding, the ON CREATE actions and any later standalone SET all name
-		// the edge whose by-handle metadata is written just below.
-		if i < len(op.hopCreateHandles) {
-			op.hopCreateHandles[i] = handle
-		}
+		// Publish the created instance's identity in the binding, so the
+		// emitted value, the ON CREATE actions and any later standalone SET all
+		// name the edge whose by-handle metadata is written just below — in a
+		// multigraph NOT the pair's first slot whenever the pattern added a
+		// parallel hop over an already-connected bound pair.
+		b[i+1].handle = handle
 		if hop.relType != "" {
 			op.mutator.SetEdgeLabel(srcKey, dstKey, hop.relType)
 			op.mutator.SetEdgeLabelByHandle(srcKey, dstKey, handle, hop.relType)
@@ -1174,42 +1112,6 @@ func (op *MergePattern) freshNodeKey() string {
 	return synthKeyPrefix + mergeKeyInfix + fmt.Sprintf("%x", n)
 }
 
-// hopHandle resolves the stable per-edge handle that identifies the ONE
-// relationship instance hop hopIdx is bound to on the resolved storage pair
-// (srcKey -> dstKey). It is the single identity every write and every emitted
-// binding for that hop must agree on, because the engine's read path routes a
-// bound relationship's properties EXCLUSIVELY by handle: a write under any
-// other value lands in a bag no read consults.
-//
-// Two sources, in order:
-//
-//   - The handle [MergePattern.createChain] allocated for this hop on this
-//     driving row, when the row took the create path. This is the instance
-//     whose by-handle type and inline properties createChain wrote, and in a
-//     multigraph it is NOT the pair's first slot whenever the pattern added a
-//     parallel hop over an already-connected bound pair.
-//   - Otherwise (the match path) the pair's first handle. A MERGE binds a
-//     single logical (src, dst) edge rather than a specific parallel instance —
-//     the binding carries no per-edge identity — so the first slot is the only
-//     instance this operator can name, and it is the one the ON MATCH arms have
-//     always pinned.
-//
-// Returns 0 when neither source yields a handle (an edge stamped without one:
-// simple-graph or pre-handle storage). Every caller treats 0 as "per-pair store
-// only", never as a handle.
-func (op *MergePattern) hopHandle(hopIdx int, srcKey, dstKey string) uint64 {
-	if hopIdx >= 0 && hopIdx < len(op.hopCreateHandles) {
-		if h := op.hopCreateHandles[hopIdx]; h != 0 {
-			return h
-		}
-	}
-	h, ok := op.mutator.FirstEdgeHandle(srcKey, dstKey)
-	if !ok {
-		return 0
-	}
-	return h
-}
-
 // emitRow extends childRow with every chain position's binding (fresh
 // positions only — a bound position's column already carries its value)
 // and every named hop's RelationshipValue.
@@ -1232,30 +1134,25 @@ func (op *MergePattern) emitRow(childRow Row, b binding) (Row, error) {
 		if n.bound || n.outCol < 0 {
 			continue
 		}
-		row[n.outCol] = expr.IntegerValue(int64(b[i]))
+		row[n.outCol] = expr.IntegerValue(int64(b[i].node))
 	}
 	for i := range op.hops {
 		hop := &op.hops[i]
 		if hop.relCol < 0 {
 			continue
 		}
-		srcIdx, dstIdx := hop.storageOrder(i)
-		srcKey, ok1 := op.mutator.ResolveNodeLabel(b[srcIdx])
-		dstKey, ok2 := op.mutator.ResolveNodeLabel(b[dstIdx])
+		srcIdx, dstIdx := b.hopStorageOrder(i)
+		srcKey, ok1 := op.mutator.ResolveNodeLabel(b[srcIdx].node)
+		dstKey, ok2 := op.mutator.ResolveNodeLabel(b[dstIdx].node)
 		if !ok1 || !ok2 {
 			continue
 		}
-		var relProps expr.MapValue
-		if raw := op.mutator.EdgeProperties(srcKey, dstKey); len(raw) > 0 {
-			relProps = make(expr.MapValue, len(raw))
-			for k, pv := range raw {
-				if v, ok := lpgPropToExprBinding(pv); ok {
-					relProps[k] = v
-				}
-			}
-		}
-		// ID is the hop's STABLE PER-EDGE HANDLE, resolved by the same
-		// [MergePattern.hopHandle] the ON CREATE / ON MATCH arms use, so the
+		handle := b.hopHandle(i)
+		// The instance's OWN properties: the pair's coalesced map folds every
+		// parallel sibling's properties into one (rmp #2939).
+		relProps := exprMapFromLPGProps(relInstanceProps(op.mutator, srcKey, dstKey, handle))
+		// ID is the hop's STABLE PER-EDGE HANDLE, taken from the binding the
+		// ON CREATE / ON MATCH arms also write through, so the
 		// emitted binding names exactly the instance this operator's own
 		// writes landed on. It used to be a synthetic `src<<32|dst` packing,
 		// which every consumer of a post-projection relationship binding then
@@ -1263,14 +1160,42 @@ func (op *MergePattern) emitRow(childRow Row, b binding) (Row, error) {
 		// `SET r.k` after the MERGE mirrored into an orphan by-handle bag that
 		// no read consults, and `id(r)` disagreed with MATCH (rmp #2705).
 		row[hop.relCol] = expr.RelationshipValue{
-			ID:         op.hopHandle(i, srcKey, dstKey),
-			StartID:    uint64(b[srcIdx]),
-			EndID:      uint64(b[dstIdx]),
+			ID:         handle,
+			StartID:    uint64(b[srcIdx].node),
+			EndID:      uint64(b[dstIdx].node),
 			Type:       hop.relType,
 			Properties: relProps,
 		}
 	}
 	return row, nil
+}
+
+// refreshRelValues re-reads, by handle, the properties of every named hop's
+// relationship value in row once the ON CREATE / ON MATCH actions have run.
+// [MergePattern.emitRow] builds the row BEFORE the actions — the actions'
+// evaluators read the entities through it — so without this refresh the row
+// carried the pre-action snapshot and `ON MATCH SET e.m = 4 RETURN e.m`
+// returned the old value (rmp #2951). Node positions need no refresh: they are
+// emitted as NodeIDs and read live.
+func (op *MergePattern) refreshRelValues(row Row, b binding) {
+	for i := range op.hops {
+		hop := &op.hops[i]
+		if hop.relCol < 0 || hop.relCol >= len(row) {
+			continue
+		}
+		rel, ok := row[hop.relCol].(expr.RelationshipValue)
+		if !ok {
+			continue
+		}
+		srcIdx, dstIdx := b.hopStorageOrder(i)
+		srcKey, ok1 := op.mutator.ResolveNodeLabel(b[srcIdx].node)
+		dstKey, ok2 := op.mutator.ResolveNodeLabel(b[dstIdx].node)
+		if !ok1 || !ok2 {
+			continue
+		}
+		rel.Properties = exprMapFromLPGProps(relInstanceProps(op.mutator, srcKey, dstKey, b.hopHandle(i)))
+		row[hop.relCol] = rel
+	}
 }
 
 // bindingEvalRow builds the row a fresh position's inline property map is
@@ -1294,7 +1219,7 @@ func (op *MergePattern) bindingEvalRow(childRow Row, b binding, nBound int) Row 
 		if n.bound || n.outCol < 0 || n.outCol >= width {
 			continue
 		}
-		row[n.outCol] = expr.IntegerValue(int64(b[i]))
+		row[n.outCol] = expr.IntegerValue(int64(b[i].node))
 	}
 	return row
 }
@@ -1310,7 +1235,7 @@ func (op *MergePattern) bindingEvalRow(childRow Row, b binding, nBound int) Row 
 func (op *MergePattern) applyActions(b binding, evalRow Row, actions []mergeAction, evals map[string]ValueEvalFn) error {
 	for _, act := range actions {
 		if idx, ok := op.nodeIndexByVar(act.nodeVar); ok {
-			key, ok := op.mutator.ResolveNodeLabel(b[idx])
+			key, ok := op.mutator.ResolveNodeLabel(b[idx].node)
 			if !ok {
 				continue
 			}
@@ -1320,14 +1245,13 @@ func (op *MergePattern) applyActions(b binding, evalRow Row, actions []mergeActi
 			continue
 		}
 		if hopIdx, ok := op.hopIndexByRelVar(act.nodeVar); ok {
-			hop := &op.hops[hopIdx]
-			srcIdx, dstIdx := hop.storageOrder(hopIdx)
-			srcKey, ok1 := op.mutator.ResolveNodeLabel(b[srcIdx])
-			dstKey, ok2 := op.mutator.ResolveNodeLabel(b[dstIdx])
+			srcIdx, dstIdx := b.hopStorageOrder(hopIdx)
+			srcKey, ok1 := op.mutator.ResolveNodeLabel(b[srcIdx].node)
+			dstKey, ok2 := op.mutator.ResolveNodeLabel(b[dstIdx].node)
 			if !ok1 || !ok2 {
 				continue
 			}
-			handle := op.hopHandle(hopIdx, srcKey, dstKey)
+			handle := b.hopHandle(hopIdx)
 			if err := op.applyRelAction(srcKey, dstKey, handle, act, evalRow, evals); err != nil {
 				return err
 			}
@@ -1335,9 +1259,8 @@ func (op *MergePattern) applyActions(b binding, evalRow Row, actions []mergeActi
 		}
 		// Not a chain variable: a node or relationship bound by a preceding clause
 		// is still a legitimate target, and skipping it lost the write silently
-		// (rmp #2511). Unlike the hop arm above, a relationship resolved here
-		// carries the row's own stable handle, so the write pins the bound
-		// instance rather than the pair's first edge.
+		// (rmp #2511). A relationship resolved here carries the row's own
+		// stable handle, so the write pins the bound instance.
 		if ent, ok := op.resolveOuterEntity(act.nodeVar, evalRow); ok {
 			if ent.isRel {
 				if err := op.applyRelAction(ent.relSrcKey, ent.relDstKey, ent.relHandle, act, evalRow, evals); err != nil {

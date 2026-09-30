@@ -204,6 +204,21 @@ type GraphMutator interface {
 	// by-handle instance.
 	FirstEdgeHandle(src, dst string) (uint64, bool)
 
+	// EdgeHandles appends to buf the stable handle of every stored src→dst
+	// relationship instance, one entry per adjacency slot in slot order, and
+	// returns the extended slice. A slot stamped without a handle contributes
+	// the 0 sentinel, so the appended count is the number of parallel src→dst
+	// relationships. It is the per-instance enumerator MERGE's match path binds
+	// one row per matching relationship from; FirstEdgeHandle names only the
+	// first. Allocates only when buf must grow.
+	EdgeHandles(src, dst string, buf []uint64) []uint64
+
+	// HasEdgeHandle reports whether a stored src→dst slot carries the non-zero
+	// handle. A bound relationship value names a stored instance of the pair
+	// exactly when this holds for one of the pair's two orders; DELETE uses it
+	// to remove that instance rather than the pair's first slot.
+	HasEdgeHandle(src, dst string, handle uint64) bool
+
 	// OutNeighbours returns the outgoing neighbour node keys of n as a
 	// snapshot slice. Callers must not mutate the returned slice.
 	OutNeighbours(n string) []string

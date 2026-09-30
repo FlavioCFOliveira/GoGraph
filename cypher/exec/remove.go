@@ -318,12 +318,12 @@ func resolveEntityFromRow(varName string, schema map[string]int, row Row, mut Gr
 		// instance a read resolves. Leaving the handle at 0 here removed the property
 		// from the per-pair store only, which the direct read path never consults —
 		// so the REMOVE appeared to do nothing (rmp #2334).
-		srcKey, srcOK := mut.ResolveNodeLabel(graph.NodeID(v.StartID))
-		dstKey, dstOK := mut.ResolveNodeLabel(graph.NodeID(v.EndID))
-		if !srcOK || !dstOK {
+		// The endpoints are normalised to the stored order (rmp #2945).
+		ent, ok := relValueEntity(mut, v)
+		if !ok {
 			return resolvedEntity{}, fmt.Errorf("cannot resolve relationship endpoints (%d, %d)", v.StartID, v.EndID)
 		}
-		return resolvedEntity{isRel: true, relSrcKey: srcKey, relDstKey: dstKey, relHandle: v.ID}, nil
+		return resolvedEntity{isRel: true, relSrcKey: ent.relSrcKey, relDstKey: ent.relDstKey, relHandle: ent.relHandle}, nil
 	}
 	if expr.IsNull(row[colIdx]) {
 		return resolvedEntity{}, errNullTarget
@@ -358,12 +358,12 @@ func resolveEntityMaybeRel(varName string, schema map[string]int, rc *RelCols, r
 		// instance a read resolves. Leaving the handle at 0 here removed the property
 		// from the per-pair store only, which the direct read path never consults —
 		// so the REMOVE appeared to do nothing (rmp #2334).
-		srcKey, srcOK := mut.ResolveNodeLabel(graph.NodeID(v.StartID))
-		dstKey, dstOK := mut.ResolveNodeLabel(graph.NodeID(v.EndID))
-		if !srcOK || !dstOK {
+		// The endpoints are normalised to the stored order (rmp #2945).
+		ent, ok := relValueEntity(mut, v)
+		if !ok {
 			return resolvedEntity{}, fmt.Errorf("cannot resolve relationship endpoints (%d, %d)", v.StartID, v.EndID)
 		}
-		return resolvedEntity{isRel: true, relSrcKey: srcKey, relDstKey: dstKey, relHandle: v.ID}, nil
+		return resolvedEntity{isRel: true, relSrcKey: ent.relSrcKey, relDstKey: ent.relDstKey, relHandle: ent.relHandle}, nil
 	}
 	if expr.IsNull(row[colIdx]) {
 		return resolvedEntity{}, errNullTarget
@@ -375,8 +375,8 @@ func resolveEntityMaybeRel(varName string, schema map[string]int, rc *RelCols, r
 // DstCol) pair of row columns that hold endpoint NodeIDs as IntegerValue, and
 // resolves the bound parallel instance's stable handle from the forward-CSR
 // edge position at rc.EdgeCol (when present) so REMOVE r.x can maintain the
-// per-instance by-handle store (#1686). Mirrors resolveRelBinding in set.go but
-// returns resolvedEntity.
+// per-instance by-handle store (#1686). Mirrors resolveRelBinding in set.go —
+// including its stored-order normalisation — but returns resolvedEntity.
 func resolveRelBindingFromRow(rc *RelCols, row Row, mut GraphMutator) (resolvedEntity, error) {
 	srcCol, dstCol := rc.SrcCol, rc.DstCol
 	if srcCol >= len(row) || dstCol >= len(row) {
@@ -392,11 +392,19 @@ func resolveRelBindingFromRow(rc *RelCols, row Row, mut GraphMutator) (resolvedE
 	if !srcResolved || !dstResolved {
 		return resolvedEntity{}, fmt.Errorf("cannot resolve relationship endpoint NodeIDs (%d, %d)", graph.NodeID(srcIV), graph.NodeID(dstIV))
 	}
+	// The endpoint columns carry TRAVERSAL order; the reverse hop of an
+	// undirected pattern, or the mirror slot of an undirected graph, swaps them
+	// relative to how the relationship is stored, and every edge mutator is
+	// keyed by the stored order. Normalised exactly as the SET path's
+	// [resolveRelBinding] does (rmp #2945, the REMOVE twin of #2817) — without
+	// it the removal targeted the empty mirror order and did nothing.
+	handle := resolveRelHandle(rc, row, srcKey, dstKey, mut)
+	stKey, enKey := relStorageDirection(mut, srcKey, dstKey, handle)
 	return resolvedEntity{
 		isRel:     true,
-		relSrcKey: srcKey,
-		relDstKey: dstKey,
-		relHandle: resolveRelHandle(rc, row, srcKey, dstKey, mut),
+		relSrcKey: stKey,
+		relDstKey: enKey,
+		relHandle: handle,
 	}, nil
 }
 

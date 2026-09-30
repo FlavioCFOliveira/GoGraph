@@ -118,7 +118,7 @@ func (op *DetachDelete) Next(out *Row) (bool, error) {
 			srcKey, srcOK := op.mutator.ResolveNodeLabel(graph.NodeID(tv.StartID))
 			dstKey, dstOK := op.mutator.ResolveNodeLabel(graph.NodeID(tv.EndID))
 			if srcOK && dstOK {
-				op.mutator.RemoveEdge(srcKey, dstKey)
+				removeBoundRelationship(op.mutator, srcKey, dstKey, tv.ID, false)
 			}
 			*out = childRow
 			return true, nil
@@ -146,7 +146,7 @@ func (op *DetachDelete) Next(out *Row) (bool, error) {
 				srcKey, srcOK := op.mutator.ResolveNodeLabel(graph.NodeID(tv.StartID))
 				dstKey, dstOK := op.mutator.ResolveNodeLabel(graph.NodeID(tv.EndID))
 				if srcOK && dstOK {
-					op.mutator.RemoveEdge(srcKey, dstKey)
+					removeBoundRelationship(op.mutator, srcKey, dstKey, tv.ID, false)
 				}
 				*out = childRow
 				return true, nil

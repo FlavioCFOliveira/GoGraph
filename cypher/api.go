@@ -8333,7 +8333,20 @@ func buildOperatorWrite(
 			dn.WithRelEndpoints(deleteRelEndpoints)
 		}
 		if p.TargetExpr != nil {
-			if _, isVar := p.TargetExpr.(*ast.Variable); !isVar {
+			_, isVar := p.TargetExpr.(*ast.Variable)
+			// A bare variable that names a path carries the path's leading node id
+			// in its row slot, not a PathValue, so the schema-direct branch would
+			// treat `DELETE p` as a DELETE of that node and refuse it for the
+			// path's own relationship. Evaluate it into the reconstructed path, as
+			// DETACH DELETE does (rmp #2950).
+			if isVar && bopts != nil {
+				if _, isChainPath := bopts.pathVarChain[p.NodeVar]; isChainPath {
+					isVar = false
+				} else if _, isVLEPath := bopts.pathVarMeta[p.NodeVar]; isVLEPath {
+					isVar = false
+				}
+			}
+			if !isVar {
 				schemaSnap := newRowSchema(schemaCopy)
 				capturedExpr := p.TargetExpr
 				capturedParams := params
@@ -21421,6 +21434,18 @@ func (a *lpgMutatorAdapter) FirstEdgeHandle(src, dst string) (uint64, bool) {
 	return a.g.FirstEdgeHandle(src, dst)
 }
 
+// EdgeHandles appends the handle of every stored src→dst slot to buf,
+// delegating to [lpg.Graph.AppendEdgeHandles]. See [exec.GraphMutator.EdgeHandles].
+func (a *lpgMutatorAdapter) EdgeHandles(src, dst string, buf []uint64) []uint64 {
+	return a.g.AppendEdgeHandles(src, dst, buf)
+}
+
+// HasEdgeHandle reports whether a stored src→dst slot carries handle,
+// delegating to [lpg.Graph.HasEdgeHandle]. See [exec.GraphMutator.HasEdgeHandle].
+func (a *lpgMutatorAdapter) HasEdgeHandle(src, dst string, handle uint64) bool {
+	return a.g.HasEdgeHandle(src, dst, handle)
+}
+
 // OutNeighbours returns a snapshot of the outgoing neighbour keys of n.
 func (a *lpgMutatorAdapter) OutNeighbours(n string) []string {
 	var out []string
@@ -22684,6 +22709,18 @@ func (a *walMutatorAdapter) ConstraintTxn() *exec.ConstraintTxn { return a.conTx
 // handled src→dst slot exists.
 func (a *walMutatorAdapter) FirstEdgeHandle(src, dst string) (uint64, bool) {
 	return a.g.FirstEdgeHandle(src, dst)
+}
+
+// EdgeHandles appends the handle of every stored src→dst slot to buf,
+// delegating to [lpg.Graph.AppendEdgeHandles]. See [exec.GraphMutator.EdgeHandles].
+func (a *walMutatorAdapter) EdgeHandles(src, dst string, buf []uint64) []uint64 {
+	return a.g.AppendEdgeHandles(src, dst, buf)
+}
+
+// HasEdgeHandle reports whether a stored src→dst slot carries handle,
+// delegating to [lpg.Graph.HasEdgeHandle]. See [exec.GraphMutator.HasEdgeHandle].
+func (a *walMutatorAdapter) HasEdgeHandle(src, dst string, handle uint64) bool {
+	return a.g.HasEdgeHandle(src, dst, handle)
 }
 
 // OutNeighbours returns a snapshot of the outgoing neighbour keys of n.

@@ -61,12 +61,8 @@ func resolveRowEntity(
 	}
 	switch t := v.(type) {
 	case expr.RelationshipValue:
-		srcKey, srcOK := mut.ResolveNodeLabel(graph.NodeID(t.StartID))
-		dstKey, dstOK := mut.ResolveNodeLabel(graph.NodeID(t.EndID))
-		if !srcOK || !dstOK {
-			return entityBinding{}, false
-		}
-		return entityBinding{isRel: true, relSrcKey: srcKey, relDstKey: dstKey, relHandle: t.ID}, true
+		// The endpoints are normalised to the stored order (rmp #2945).
+		return relValueEntity(mut, t)
 	case expr.NodeValue:
 		nodeKey, resolved := mut.ResolveNodeLabel(graph.NodeID(t.ID))
 		if !resolved {

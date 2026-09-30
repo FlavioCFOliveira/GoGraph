@@ -124,6 +124,8 @@ func (m *seedStubMutator) EdgePropertiesByHandle(string, string, uint64) map[str
 }
 func (m *seedStubMutator) RemoveEdgeInstanceByHandle(string, string, uint64) {}
 func (m *seedStubMutator) FirstEdgeHandle(string, string) (uint64, bool)     { return 0, false }
+func (m *seedStubMutator) EdgeHandles(_, _ string, buf []uint64) []uint64    { return buf }
+func (m *seedStubMutator) HasEdgeHandle(string, string, uint64) bool         { return false }
 func (m *seedStubMutator) OutNeighbours(string) []string                     { panic("unused") }
 func (m *seedStubMutator) InNeighbours(string) []string                      { panic("unused") }
 func (m *seedStubMutator) RemoveAllEdgesFrom(string)                         { panic("unused") }
