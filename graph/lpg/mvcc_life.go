@@ -502,6 +502,52 @@ func (sh *nodeLifeShard) headStamp(id graph.NodeID) uint64 {
 	return 0
 }
 
+// NodesLifeWrittenBy returns, each once, every node whose existence tx changed
+// — created, deleted or revived — by the birth and death records tx stamped.
+//
+// It exists for commit-time constraint validation (rmp #2936), which must know
+// every node a transaction touched, including one it deleted before any index
+// existed, when no index change recorded the deletion. It walks every life
+// shard, so it costs in proportion to the life records not yet reclaimed; it is
+// called only on the rare commit of a transaction that straddles a new
+// constraint, and on no write path. It returns nil for a zero tx and on a graph
+// whose versioning substrate is disarmed.
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) NodesLifeWrittenBy(tx WriteTx) []graph.NodeID {
+	if !g.mvccArmed || tx.w == nil {
+		return nil
+	}
+	info := tx.w.tx.OpenRecord()
+	if info == nil {
+		return nil
+	}
+	var out []graph.NodeID
+	seen := make(map[graph.NodeID]struct{})
+	for i := range g.nodeLifeShards {
+		sh := &g.nodeLifeShards[i]
+		sh.mu.RLock()
+		for id, st := range sh.born {
+			if st.info == info {
+				if _, dup := seen[id]; !dup {
+					seen[id] = struct{}{}
+					out = append(out, id)
+				}
+			}
+		}
+		for id, st := range sh.died {
+			if st.info == info {
+				if _, dup := seen[id]; !dup {
+					seen[id] = struct{}{}
+					out = append(out, id)
+				}
+			}
+		}
+		sh.mu.RUnlock()
+	}
+	return out
+}
+
 // NodeExistsAsOf reports whether id was a live node at s.
 //
 // A nil snapshot asks about the present, which is the tombstone check the read

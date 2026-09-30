@@ -173,6 +173,173 @@ type ConstraintTxn struct {
 	inline [4]ckeyval
 	n      int
 	spill  map[ckeyval]struct{}
+	// reserved holds the reservations this transaction has TAKEN, and not
+	// rolled back, under a constraint registered after it began — the only
+	// reservations [ConstraintRegistry.ValidateStraddler] reads, since only
+	// such a constraint is validated at commit (rmp #2936). It stays nil for
+	// every transaction that straddles no constraint, and tracking is off
+	// altogether unless [ConstraintTxn.TrackReservationsSince] enabled it: an
+	// autocommit statement cannot straddle a constraint, and this type is
+	// embedded by value in every autocommit statement's mutator, so the marks
+	// live behind a pointer to keep that allocation the size it was before
+	// they existed (measured: 292 B/op more on an index-free autocommit write).
+	reserved  *reservedMarks
+	trackFrom uint64
+	tracking  bool
+}
+
+// reservedMarks is the storage behind [ConstraintTxn.reserved].
+type reservedMarks struct {
+	inline [4]reservedMark
+	n      int
+	spill  map[ckeyval]uint64 // the tagged generation of [reservedMark.gen]
+}
+
+// TrackReservationsSince makes t record the reservations it takes under a
+// constraint registered after generation gen, which an explicit transaction
+// passes as the generation it began at. Without it t records none.
+func (t *ConstraintTxn) TrackReservationsSince(gen uint64) {
+	if t == nil {
+		return
+	}
+	t.trackFrom, t.tracking = gen, true
+}
+
+// reservedMark is one reservation this transaction took: the (label, property,
+// value) and the generation of the value-set it was taken in — the generation
+// the constraint on that key was registered at. A value-set dropped and
+// re-created is a different set: a reservation taken in the old one is absent
+// from it, and the generation is what tells the two apart (rmp #2936).
+//
+// gen also carries [reservationInserted] when one of this transaction's
+// reservations of the value in that value-set INSERTED it there. Only such a
+// value is this transaction's own: a reservation that found the value already
+// present — which a write allows when the transaction released that value
+// itself, judging from its snapshot — inserted nothing, and the value it found
+// may belong to a node the transaction never touched (rmp #2936 audit, R5-1).
+type reservedMark struct {
+	kv  ckeyval
+	gen uint64
+}
+
+// markReserved records that this transaction reserved val under key, in the
+// value-set of generation gen&^[reservationInserted], when that constraint was
+// registered after the transaction began and tracking is on. gen carries
+// [reservationInserted] when this reservation inserted the value. A mark kept
+// for the same value-set stays inserted once any of its reservations inserted;
+// a mark for an older value-set is replaced.
+func (t *ConstraintTxn) markReserved(key ckey, val string, gen uint64) {
+	if t == nil || !t.tracking || gen&^reservationInserted <= t.trackFrom {
+		return
+	}
+	if t.reserved == nil {
+		t.reserved = new(reservedMarks)
+	}
+	m := t.reserved
+	kv := ckeyval{key: key, val: val}
+	for i := 0; i < m.n; i++ {
+		if m.inline[i].kv == kv {
+			m.inline[i].gen = mergeReservedGen(m.inline[i].gen, gen)
+			return
+		}
+	}
+	if m.spill != nil {
+		if old, ok := m.spill[kv]; ok {
+			m.spill[kv] = mergeReservedGen(old, gen)
+			return
+		}
+	}
+	if m.n < len(m.inline) {
+		m.inline[m.n] = reservedMark{kv: kv, gen: gen}
+		m.n++
+		return
+	}
+	if m.spill == nil {
+		m.spill = make(map[ckeyval]uint64, 4)
+	}
+	m.spill[kv] = gen
+}
+
+// mergeReservedGen combines a mark's tagged generation old with a new
+// reservation's tagged generation gen: the same value-set keeps the inserted
+// bit either carries, and a different one replaces old.
+func mergeReservedGen(old, gen uint64) uint64 {
+	if old&^reservationInserted == gen&^reservationInserted {
+		return old | gen
+	}
+	return gen
+}
+
+// unmarkReserved withdraws a reservation mark: the reservation was rolled back.
+func (t *ConstraintTxn) unmarkReserved(key ckey, val string) {
+	if t == nil || t.reserved == nil {
+		return
+	}
+	m := t.reserved
+	kv := ckeyval{key: key, val: val}
+	for i := 0; i < m.n; i++ {
+		if m.inline[i].kv == kv {
+			m.inline[i] = m.inline[m.n-1]
+			m.inline[m.n-1] = reservedMark{}
+			m.n--
+			return
+		}
+	}
+	if m.spill != nil {
+		delete(m.spill, kv)
+	}
+}
+
+// forEachInsertedIn calls fn for every value this transaction inserted under
+// key in the value-set of generation gen. With anyMark it calls fn for every
+// value it holds a mark of there, inserted or not — the defect the inserted bit
+// closes, kept reachable only for the enumeration's mutation check.
+func (t *ConstraintTxn) forEachInsertedIn(key ckey, gen uint64, anyMark bool, fn func(val string)) {
+	if t == nil || t.reserved == nil {
+		return
+	}
+	m := t.reserved
+	var vals []string
+	for i := 0; i < m.n; i++ {
+		if m.inline[i].kv.key == key && reservedGenMatches(m.inline[i].gen, gen, anyMark) {
+			vals = append(vals, m.inline[i].kv.val)
+		}
+	}
+	for kv, g := range m.spill {
+		if kv.key == key && reservedGenMatches(g, gen, anyMark) {
+			vals = append(vals, kv.val)
+		}
+	}
+	for _, v := range vals {
+		fn(v)
+	}
+}
+
+// insertedIn reports whether this transaction inserted val under key in the
+// value-set of generation gen; anyMark is as for [ConstraintTxn.forEachInsertedIn].
+// A reservation taken in an earlier incarnation of the constraint does not count.
+func (t *ConstraintTxn) insertedIn(key ckey, val string, gen uint64, anyMark bool) bool {
+	if t == nil || t.reserved == nil {
+		return false
+	}
+	m := t.reserved
+	kv := ckeyval{key: key, val: val}
+	for i := 0; i < m.n; i++ {
+		if m.inline[i].kv == kv {
+			return reservedGenMatches(m.inline[i].gen, gen, anyMark)
+		}
+	}
+	if m.spill == nil {
+		return false
+	}
+	g, ok := m.spill[kv]
+	return ok && reservedGenMatches(g, gen, anyMark)
+}
+
+// reservedGenMatches reports whether a mark's tagged generation tagged names
+// the value-set of generation gen and, unless anyMark, records an insertion.
+func reservedGenMatches(tagged, gen uint64, anyMark bool) bool {
+	return tagged&^reservationInserted == gen && (anyMark || tagged&reservationInserted != 0)
 }
 
 // markReleased records that this transaction has released val under key.
@@ -275,6 +442,7 @@ func (t *ConstraintTxn) Reset() {
 	}
 	t.n = 0
 	clear(t.spill)
+	t.reserved = nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -354,6 +522,24 @@ type ConstraintRegistry struct {
 	// [ConstraintRegistry.ReleasePropertyValue]) touch only the UNIQUE value sets and
 	// gate on uniqueActive alone.
 	notNullActive atomic.Int64
+
+	// gen is the constraint catalogue's generation: it advances once per UNIQUE
+	// or NOT NULL constraint registered, and uniqueSince / notNullSince record the
+	// generation each live constraint was registered at. An explicit transaction
+	// reads gen when it begins and again when it commits; a difference means a
+	// constraint registered while it was open, which
+	// [ConstraintRegistry.ValidateStraddler] then enforces over the transaction's
+	// final state (rmp #2936). Both maps are guarded by mu.
+	gen          atomic.Uint64
+	uniqueSince  map[ckey]uint64
+	notNullSince map[ckey]uint64
+
+	// straddleAnyMarkForTest, set only by
+	// [ConstraintRegistry.SetStraddleAnyMarkForTest] before the registry is
+	// shared, makes [ConstraintRegistry.ValidateStraddler] treat every
+	// reservation mark as an insertion — the R5-1 defect — so the straddler
+	// enumeration can prove it detects that defect. Read under mu.
+	straddleAnyMarkForTest bool
 }
 
 // NewConstraintRegistry creates an empty ConstraintRegistry.
@@ -366,6 +552,8 @@ func NewConstraintRegistry() *ConstraintRegistry {
 		notNullNames:   make(map[ckey]string),
 		notNullByLabel: make(map[string][]string),
 		uniqueByLabel:  make(map[string][]string),
+		uniqueSince:    make(map[ckey]uint64),
+		notNullSince:   make(map[ckey]uint64),
 	}
 }
 
@@ -409,6 +597,7 @@ func (r *ConstraintRegistry) RegisterUnique(label, prop, indexName string) {
 	addLabelProp(r.uniqueByLabel, label, prop)
 	if !existed {
 		r.uniqueActive.Add(1)
+		r.uniqueSince[key] = r.gen.Add(1)
 	}
 	r.mu.Unlock()
 }
@@ -569,6 +758,7 @@ func (r *ConstraintRegistry) RegisterNotNull(label, prop string) {
 	key := constraintKey(label, prop)
 	if !r.notNull[key] {
 		r.notNullActive.Add(1)
+		r.notNullSince[key] = r.gen.Add(1)
 	}
 	r.notNull[key] = true
 	addLabelProp(r.notNullByLabel, label, prop)
@@ -632,6 +822,7 @@ func (r *ConstraintRegistry) UnregisterUnique(label, prop string) {
 	delete(r.unique, key)
 	delete(r.valueSets, key)
 	delete(r.uniqueNames, key)
+	delete(r.uniqueSince, key)
 	removeLabelProp(r.uniqueByLabel, label, prop)
 	r.mu.Unlock()
 }
@@ -655,6 +846,7 @@ func (r *ConstraintRegistry) UnregisterNotNull(label, prop string) {
 	}
 	delete(r.notNull, key)
 	delete(r.notNullNames, key)
+	delete(r.notNullSince, key)
 	removeLabelProp(r.notNullByLabel, label, prop)
 	r.mu.Unlock()
 }
@@ -889,6 +1081,23 @@ func (r *ConstraintRegistry) CheckSetProperty(ct *ConstraintTxn, labels []string
 // [ConstraintTxn]. It may be nil, which means "no transaction" — a caller with
 // nothing to roll back.
 func (r *ConstraintRegistry) ReserveSetProperty(ct *ConstraintTxn, labels []string, prop string, value lpg.PropertyValue, mgr *index.Manager) error {
+	_, _, err := r.reserveSetPropertyGen(ct, labels, prop, value, mgr)
+	return err
+}
+
+// reservationInserted is set in a generation reserveSetPropertyGen reports when
+// the reservation itself put the value in that label's value-set.
+const reservationInserted = uint64(1) << 63
+
+// reserveSetPropertyGen is [ConstraintRegistry.ReserveSetProperty] reporting,
+// from inside the same critical section, the generation each label's UNIQUE
+// value-set was registered at (0 when none), with [reservationInserted] set when
+// this reservation inserted the value: gen0 for labels[0], and rest for the
+// others, allocated only when there are others. The reservation's inverse
+// carries them so it withdraws exactly what it inserted, and only from the
+// value-set it inserted it in (rmp #2936 audit, R4-3); reading them here costs
+// no second acquisition of the registry's lock.
+func (r *ConstraintRegistry) reserveSetPropertyGen(ct *ConstraintTxn, labels []string, prop string, value lpg.PropertyValue, mgr *index.Manager) (gen0 uint64, rest []uint64, err error) {
 	// No constraint of EITHER kind: nothing to check and nothing to reserve, so do not
 	// take this registry's global lock — it would put one mutex on every property write
 	// for no benefit. BOTH counters, because this method enforces UNIQUE and NOT NULL;
@@ -896,7 +1105,7 @@ func (r *ConstraintRegistry) ReserveSetProperty(ct *ConstraintTxn, labels []stri
 	// TestReserveSetProperty_NotNullStillEnforced caught it. See
 	// [ConstraintRegistry.notNullActive].
 	if r.uniqueActive.Load() == 0 && r.notNullActive.Load() == 0 {
-		return nil
+		return 0, nil, nil
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -906,13 +1115,35 @@ func (r *ConstraintRegistry) ReserveSetProperty(ct *ConstraintTxn, labels []stri
 	// carries all its labels at once; a partial reservation would be a phantom that
 	// only a whole-graph reseed could clear.
 	if err := r.checkSetPropertyLocked(ct, labels, prop, value, mgr); err != nil {
-		return err
+		return 0, nil, err
+	}
+	if len(labels) > 1 {
+		rest = make([]uint64, len(labels)-1)
 	}
 
 	// Phase 2 — reserve. Same critical section, so no other writer observed the gap.
 	// A null value is not constrained by UNIQUE and has nothing to reserve.
-	if strVal, ok := propertyValueToString(value); ok {
-		for _, label := range labels {
+	strVal, isValue := propertyValueToString(value)
+	for i, label := range labels {
+		key := constraintKey(label, prop)
+		g := r.uniqueSince[key]
+		// Whether THIS reservation put the value in the set — decided here,
+		// under the lock, and not inferred from the transaction's own marks: a
+		// release mark says the transaction's snapshot saw the value held, which
+		// a concurrent commit may already have freed (rmp #2936 enumeration).
+		if vs := r.valueSets[key]; isValue && vs != nil {
+			if _, had := vs[strVal]; !had {
+				g |= reservationInserted
+			}
+		}
+		if i == 0 {
+			gen0 = g
+		} else {
+			rest[i-1] = g
+		}
+	}
+	if isValue {
+		for i, label := range labels {
 			key := constraintKey(label, prop)
 			if vs := r.valueSets[key]; vs != nil {
 				vs[strVal] = struct{}{}
@@ -922,9 +1153,14 @@ func (r *ConstraintRegistry) ReserveSetProperty(ct *ConstraintTxn, labels []stri
 			// re-reserved it would, at commit, apply the release and delete the
 			// reservation it had just taken.
 			ct.unmarkReleased(key, strVal)
+			g := gen0
+			if i > 0 {
+				g = rest[i-1]
+			}
+			ct.markReserved(key, strVal, g)
 		}
 	}
-	return nil
+	return gen0, rest, nil
 }
 
 // checkSetPropertyLocked is the constraint test shared by

@@ -178,9 +178,9 @@ func (t *labelTx[N, W]) commit() (uint64, error) {
 		return 0, nil
 	}
 	// Allocate, store, publish — in that order; see [mvcc.Clock.ReadTS].
-	ts := t.g.nextCommitTS()
+	ts := t.g.mvccClock.AllocateFor(info, true)
 	info.Commit(ts)
-	t.g.mvccClock.PublishCommitTS(ts)
+	t.g.mvccClock.PublishCommit(info, ts)
 	// Counted on the same rule [Graph.endWrite] uses: a published instant is a
 	// commit, and a transaction that versioned nothing is neither (rmp #2312).
 	t.g.writeCounts.Commit(t.ctx.txID)

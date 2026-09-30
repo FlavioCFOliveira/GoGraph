@@ -478,20 +478,32 @@ func (g *Graph[N, W]) delNodePropertyInfo(n N, key string, tx *writeCtx) {
 		return
 	}
 	s.mu.Lock()
+	// THE CONFLICT TEST RUNS BEFORE, AND OUTSIDE, BOTH PRESENCE GUARDS
+	// (rmp #2943), exactly as [Graph.removeNodeLabelInfo] does since rmp #2354.
+	// Both guards read the RAW stored bag, which already carries another
+	// in-flight transaction's eager removal, so a key a peer removed but has
+	// not committed looked absent here and this delete returned as a no-op:
+	// no version, no conflict, and the transaction committed as if the removal
+	// had happened. When the peer rolled back, its undo restored the value and
+	// the committed removal was lost. [nodePropShard.headStamp] reads the delta
+	// chain, not the bag, so it also answers for a node whose bag entry the
+	// peer's removal of its last property deleted outright. delNodePropertyInfo
+	// cannot return, so the conflict is recorded on the transaction and commit
+	// refuses it. See [writeCtx.conflictErr].
+	if g.propDeltasEnabled() {
+		if head := s.headStamp(id); tx.conflicts(head) {
+			_ = tx.conflictErr(mvcc.StoreNodeProperties, head)
+			s.mu.Unlock()
+			return
+		}
+	}
 	if bag, ok2 := s.m[id]; ok2 {
 		// MVCC P2 (rmp #2279), inert unless armed. Deleting a key that is not
 		// there changes nothing and records nothing; deleting one that is there
-		// records the pre-image so a reader can restore it.
+		// records the pre-image so a reader can restore it. Only the DELTA is
+		// guarded; the conflict test above is not (rmp #2943).
 		if g.propDeltasEnabled() {
 			if prev, had := bag.get(keyID); had {
-				// See setNodePropertyInfo; delNodePropertyInfo cannot return, so
-				// the conflict is recorded on the transaction and commit
-				// refuses it. See [writeCtx.conflictErr].
-				if head := s.headStamp(id); tx.conflicts(head) {
-					_ = tx.conflictErr(mvcc.StoreNodeProperties, head)
-					s.mu.Unlock()
-					return
-				}
 				ci, ts := g.deltaStamp(tx.record())
 				s.pushPropDelta(id, undoSetProp, keyID, prev, ci, ts, &g.propDeltaActive)
 			}
@@ -552,6 +564,20 @@ const (
 // records the conflict on tx and touches no shard at all.
 func (g *Graph[N, W]) delNodePropertyShared(s *nodePropShard, id graph.NodeID, keyID PropertyKeyID, tx *writeCtx) delPropOutcome {
 	s.mu.RLock()
+	// The same unconditional head test the exclusive body runs, BEFORE either
+	// presence guard (rmp #2943): a key another in-flight transaction removed is
+	// absent from the raw bag, and settling that as "nothing to remove" without
+	// the test is the lost update described in [Graph.delNodePropertyInfo]. It
+	// runs over the same shard lock held in shared mode, so the head and the
+	// decision taken from it are ONE consistent observation. A refusal claims
+	// nothing, which is what lets it be settled without excluding writers.
+	if g.propDeltasEnabled() {
+		if head := s.headStamp(id); tx.conflicts(head) {
+			_ = tx.conflictErr(mvcc.StoreNodeProperties, head)
+			s.mu.RUnlock()
+			return delPropRefused
+		}
+	}
 	bag, ok := s.m[id]
 	if !ok {
 		s.mu.RUnlock()
@@ -575,17 +601,6 @@ func (g *Graph[N, W]) delNodePropertyShared(s *nodePropShard, id graph.NodeID, k
 			return delPropNeedsExclusive
 		}
 		return delPropNothingToRemove
-	}
-	if g.propDeltasEnabled() {
-		// The same unconditional head test the exclusive body runs, over the
-		// same shard lock held in shared mode, so the head and the decision
-		// taken from it are ONE consistent observation. A refusal claims
-		// nothing, which is what lets it be settled without excluding writers.
-		if head := s.headStamp(id); tx.conflicts(head) {
-			_ = tx.conflictErr(mvcc.StoreNodeProperties, head)
-			s.mu.RUnlock()
-			return delPropRefused
-		}
 	}
 	s.mu.RUnlock()
 	return delPropNeedsExclusive

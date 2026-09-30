@@ -68,6 +68,8 @@ package lpg
 // the transaction-carrying path and the untransacted path run the same code with
 // a different value in one parameter.
 
+import "github.com/FlavioCFOliveira/GoGraph/graph"
+
 // WriteView is a [Graph] bound to ONE write transaction: every mutation made
 // through it stamps its versions with that transaction's shared commit record,
 // tests write-write conflicts against that transaction's snapshot, and claims an
@@ -164,6 +166,16 @@ func (wv WriteView[N, W]) NoteConstraintTouch(n N) error {
 	}
 	id, ok := wv.g.adj.Mapper().Lookup(n)
 	if !ok {
+		return nil
+	}
+	return wv.g.conVer.note(id, wv.w)
+}
+
+// NoteConstraintTouchByID is [WriteView.NoteConstraintTouch] for a node named by
+// its id. It exists for commit-time constraint validation, which knows the nodes a
+// transaction touched by id (rmp #2936).
+func (wv WriteView[N, W]) NoteConstraintTouchByID(id graph.NodeID) error {
+	if wv.w == nil {
 		return nil
 	}
 	return wv.g.conVer.note(id, wv.w)

@@ -186,100 +186,109 @@ func TestClock_ConcurrentPublicationIsMonotone(t *testing.T) {
 	}
 }
 
-// TestCommitLog_MemoryIsBoundedByTheInFlightWindow is acceptance criterion 3's
-// memory half. What the log retains is the window between the oldest unfinished
-// timestamp and the newest allocated one — not the history of every commit.
-func TestCommitLog_MemoryIsBoundedByTheInFlightWindow(t *testing.T) {
-	var l commitLog
-
-	// 50 000 commits, all finishing in order: the log must not grow with the
-	// number of commits, because each block retires as soon as it fills.
-	for ts := uint64(1); ts <= 50000; ts++ {
-		l.finish(ts)
+// TestCommitRegistry_HoldsEveryPendingRecordAcrossLaps is the memory and
+// capacity half. The registry is a fixed ring of slots, but a timestamp's record
+// must stay findable until the frontier passes it however many laps of the ring
+// are in flight — nothing may wait for room, because a transaction waiting for
+// room could be holding what the frontier's owner needs. So a straggler held back
+// while three full laps finish above it must still be publishable, and the
+// frontier must then carry over all of them in one step.
+func TestCommitRegistry_HoldsEveryPendingRecordAcrossLaps(t *testing.T) {
+	var c Clock
+	for i := 0; i < 50000; i++ {
+		c.PublishCommitTS(c.NextCommitTS())
 	}
-	if got := l.liveBlocks(); got > 2 {
-		t.Fatalf("liveBlocks %d after 50 000 in-order commits, want at most 2: the log is retaining "+
-			"history instead of the in-flight window", got)
+	table := c.reg.slots.Load()
+	if table == nil {
+		t.Fatal("allocation did not create the registry")
 	}
-	if got := l.frontier(); got != 50000 {
-		t.Fatalf("frontier %d, want 50000", got)
+	stalled := c.NextCommitTS()
+	above := make([]uint64, 3*registrySlots)
+	for i := range above {
+		above[i] = c.NextCommitTS()
 	}
-
-	// Now hold one timestamp back and finish a whole block's worth above it.
-	// The log must retain that window — and only it.
-	stalled := uint64(50001)
-	for ts := stalled + 1; ts <= stalled+clIDsPerBlock; ts++ {
-		l.finish(ts)
+	if got := c.reg.chained.Load(); got == 0 {
+		t.Fatal("more than one lap in flight chained no record: the fixture did not cross a lap")
 	}
-	if got := l.frontier(); got != 50000 {
-		t.Fatalf("frontier %d with %d still in flight, want 50000", got, stalled)
+	for _, ts := range above {
+		c.PublishCommitTS(ts)
 	}
-	blocks := l.liveBlocks()
-	if blocks > 3 {
-		t.Fatalf("liveBlocks %d holding a %d-timestamp window, want at most 3", blocks, clIDsPerBlock)
+	if got, want := c.ReadTS(), stalled-1; got != want {
+		t.Fatalf("frontier %d with %d still in flight, want %d", got, stalled, want)
 	}
-
-	// The window closes and the memory goes with it.
-	l.finish(stalled)
-	if got := l.frontier(); got != stalled+clIDsPerBlock {
-		t.Fatalf("frontier %d after the stalled timestamp finished, want %d", got, stalled+clIDsPerBlock)
+	c.PublishCommitTS(stalled)
+	if got, want := c.ReadTS(), above[len(above)-1]; got != want {
+		t.Fatalf("frontier %d after the stalled timestamp finished, want %d", got, want)
 	}
-	if got := l.liveBlocks(); got > 2 {
-		t.Fatalf("liveBlocks %d after the window closed, want at most 2", got)
+	if c.reg.slots.Load() != table {
+		t.Fatal("the registry was reallocated; it must be allocated once for the life of the clock")
+	}
+	if got := c.InFlightCommits(); got != 0 {
+		t.Fatalf("InFlightCommits %d after every commit finished, want 0", got)
 	}
 }
 
-// TestCommitLog_RepeatedAndStaleFinishAreIgnored covers the two inputs that
-// must not corrupt the frontier: finishing the same timestamp twice, and
-// finishing one the frontier has already swept past — whose block may have been
-// retired and now describes entirely different timestamps.
-func TestCommitLog_RepeatedAndStaleFinishAreIgnored(t *testing.T) {
-	var l commitLog
-	for ts := uint64(1); ts <= 10; ts++ {
-		l.finish(ts)
-	}
-	if got := l.frontier(); got != 10 {
-		t.Fatalf("frontier %d, want 10", got)
+// TestCommitRegistry_RepeatedAndStaleFinishAreIgnored covers the two inputs
+// that must not corrupt the frontier: finishing the same timestamp twice, and
+// finishing one the frontier has already swept past — whose slot may by now
+// belong to a newer timestamp that is still pending.
+func TestCommitRegistry_RepeatedAndStaleFinishAreIgnored(t *testing.T) {
+	var c Clock
+	for i := 0; i < 10; i++ {
+		c.PublishCommitTS(c.NextCommitTS())
 	}
 	for _, ts := range []uint64{1, 5, 10} {
-		if got := l.finish(ts); got != 10 {
+		c.PublishCommitTS(ts)
+		if got := c.ReadTS(); got != 10 {
 			t.Fatalf("re-finishing %d moved the frontier to %d, want 10", ts, got)
 		}
 	}
-	// And a stale one from beyond a retired block.
-	for ts := uint64(11); ts <= clIDsPerBlock*2; ts++ {
-		l.finish(ts)
+	for c.ReadTS()%registrySlots != 1 {
+		c.PublishCommitTS(c.NextCommitTS())
 	}
-	want := uint64(clIDsPerBlock * 2)
-	if got := l.finish(3); got != want {
-		t.Fatalf("finishing swept-past timestamp 3 moved the frontier to %d, want %d", got, want)
+	gap := c.NextCommitTS()     // f+1, left in flight
+	pending := c.NextCommitTS() // f+2 == 3 mod registrySlots: shares stale 3's slot
+	if pending%registrySlots != 3 {
+		t.Fatalf("fixture: pending %d does not share timestamp 3's slot", pending)
+	}
+	c.PublishCommitTS(3) // stale, before pending finishes
+	c.PublishCommitTS(pending)
+	c.PublishCommitTS(3) // stale again, after
+	if got, want := c.ReadTS(), gap-1; got != want {
+		t.Fatalf("frontier %d with the gap still in flight, want %d: a stale finish advanced it", got, want)
+	}
+	c.PublishCommitTS(gap)
+	if got := c.ReadTS(); got != pending {
+		t.Fatalf("frontier %d after the gap closed, want %d: a stale finish displaced a pending one",
+			got, pending)
 	}
 }
 
-// TestCommitLog_WordBoundaries walks the frontier across the bitmap's word and
-// block seams, where the skip-a-whole-word fast path and the block retirement
-// both live.
-func TestCommitLog_WordBoundaries(t *testing.T) {
+// TestCommitRegistry_WrapBoundaries walks the frontier across the ring's wrap,
+// where a slot is reused for a timestamp one lap later, with a hole at each
+// position around the seam.
+func TestCommitRegistry_WrapBoundaries(t *testing.T) {
 	for _, hole := range []uint64{
-		1, 2,
-		clWordBits - 1, clWordBits, clWordBits + 1,
-		2*clWordBits - 1, 2 * clWordBits,
-		clIDsPerBlock - 1, clIDsPerBlock, clIDsPerBlock + 1,
-		2 * clIDsPerBlock,
+		1, 2, registrySlots - 1, registrySlots, registrySlots + 1,
+		2*registrySlots - 1, 2 * registrySlots, 2*registrySlots + 1,
 	} {
-		var l commitLog
-		const n = 3 * clIDsPerBlock
+		var c Clock
+		const n = 3 * registrySlots
 		for ts := uint64(1); ts <= n; ts++ {
-			if ts == hole {
-				continue
+			if got := c.NextCommitTS(); got != ts {
+				t.Fatalf("fixture: allocated %d, want %d", got, ts)
 			}
-			l.finish(ts)
 		}
-		if got, want := l.frontier(), hole-1; got != want {
+		for ts := uint64(1); ts <= n; ts++ {
+			if ts != hole {
+				c.PublishCommitTS(ts)
+			}
+		}
+		if got, want := c.ReadTS(), hole-1; got != want {
 			t.Fatalf("hole at %d: frontier %d, want %d", hole, got, want)
 		}
-		l.finish(hole)
-		if got := l.frontier(); got != n {
+		c.PublishCommitTS(hole)
+		if got := c.ReadTS(); got != n {
 			t.Fatalf("hole at %d: frontier %d after filling it, want %d", hole, got, n)
 		}
 	}

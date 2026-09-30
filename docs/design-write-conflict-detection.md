@@ -257,6 +257,47 @@ hypothesised. The conflict is therefore recorded on the `writeCtx` — Memgraph'
 advisory: its caller must abandon the mutation too. Recording no pre-image while
 applying the change would leave the store holding a write no reader can undo.
 
+#### A property removal is conflict-tested even when the key is absent (rmp #2943)
+
+A property removal runs the write-write conflict test **before** it looks for
+the key, and it runs the test whether or not the key is present. The stored
+bag already reflects another in-flight transaction's eager removal, so a
+removal that returned early on "key absent" recorded no version and no
+conflict; when the peer rolled back, its undo restored the value and the
+committed removal was lost.
+
+The test compares the transaction's start with the head of the object's
+version chain, and that head covers **every** property of the object, not one
+key:
+
+| object | conflict unit | where |
+|---|---|---|
+| node | the node's property delta chain (`nodePropShard.headStamp`) | `Graph.delNodePropertyInfo`, `Graph.delNodePropertyShared` in `graph/lpg/property.go` |
+| relationship instance | the per-handle property bag (`Graph.checkHandlePropConflict`) | `Graph.delEdgePropertyByHandleInfo` in `graph/lpg/edge_handle.go` |
+
+So `REMOVE n.k` is refused with `mvcc.ErrSerializationConflict` when a peer
+committed a write to **any** property of `n` after the transaction began, or
+has one pending — including a peer that wrote a different key, and including a
+removal of a key `n` does not carry. This is the same per-node unit that
+`SET` already uses.
+
+**The used/unused key asymmetry.** Both removal paths first resolve the key
+name in the graph's property-key dictionary (`propKeys().Lookup`,
+`pkeys.Lookup`) and return before the conflict test when the name has never
+been interned. Therefore:
+
+- `REMOVE n.k`, where some node or relationship in the graph has used `k`: conflict-tested, and refused against a peer's concurrent write to any property of `n`;
+- `REMOVE n.k`, where no write has ever used `k`: a no-op that records nothing and is never refused.
+
+Both outcomes are correct. Removing a key the object does not carry changes
+nothing, so admitting it and refusing it both leave a state that some serial
+order produces. The refusal is conservative, not a lost update: it reaches the
+client as a retriable conflict (§4), and a retry that begins after the peer
+has finished is not refused on the peer's account. An unused name needs no
+test: a write interns its key before it lands, so no transaction can hold a
+pending write of a name that was never interned, and there is no removal whose
+loss a peer's undo could cause.
+
 ### BLOCKED on rmp #2301 — found by measurement, 2026-08-02 (RESOLVED)
 
 The wiring was implemented on the label and property stores, gated by tests

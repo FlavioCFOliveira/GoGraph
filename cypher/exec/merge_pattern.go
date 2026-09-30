@@ -791,7 +791,7 @@ func (op *MergePattern) search(childRow Row) ([]binding, error) {
 		if epErr != nil {
 			return nil, epErr
 		}
-		rows, err := searchMergeNodes(op.ctx, op.mutator, op.labelSrc, first.labels, firstProps)
+		rows, err := searchMergeNodes(op.ctx, op.mutator, op.labelSrc, nil, first.labels, firstProps)
 		if err != nil {
 			return nil, err
 		}

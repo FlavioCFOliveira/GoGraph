@@ -71,6 +71,16 @@ func (g *Graph[N, W]) HasNodeLabelByIDAsOf(id graph.NodeID, name string, s *Snap
 	if !ok {
 		return false
 	}
+	return g.HasNodeLabelIDAsOf(id, lid, s)
+}
+
+// HasNodeLabelIDAsOf is [Graph.HasNodeLabelByIDAsOf] for a label already
+// resolved to its interned id, for a caller that holds the id and would
+// otherwise pay a name round trip per call (the commit-time index fan-out, rmp
+// #2931).
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) HasNodeLabelIDAsOf(id graph.NodeID, lid LabelID, s *Snapshot) bool {
 	// Written out for the same reason as [Graph.NodePropertyByIDAsOf]: this is a
 	// per-ROW predicate on every labelled scan. The membership test runs INSIDE
 	// the lock, because the bag aliases the stored backing array; see
@@ -187,6 +197,14 @@ func (g *Graph[N, W]) NodePropertyByIDAsOf(id graph.NodeID, key string, s *Snaps
 	if !ok {
 		return PropertyValue{}, false
 	}
+	return g.NodePropertyIDAsOf(id, pid, s)
+}
+
+// NodePropertyIDAsOf is [Graph.NodePropertyByIDAsOf] for a property key already
+// resolved to its interned id; see [Graph.HasNodeLabelIDAsOf].
+//
+// Safe for concurrent use.
+func (g *Graph[N, W]) NodePropertyIDAsOf(id graph.NodeID, pid PropertyKeyID, s *Snapshot) (PropertyValue, bool) {
 	// The fast path is written out HERE rather than delegated through
 	// propBagAsOf, and that is measured: this is the per-ROW accessor of a
 	// scalar projection, so two extra call frames returning a 32-byte bag cost

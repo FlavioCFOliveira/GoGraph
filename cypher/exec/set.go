@@ -469,8 +469,8 @@ func (op *SetProperty) applyToNode(nodeKey string, row Row) error {
 	// entry in the replacement map equal to the node's current value is not
 	// rejected as its own duplicate (H-C, #1905) — the ordering is what preserves
 	// that, now that enforcement is at the mutator (rmp #2358).
-	existing := op.mutator.NodeProperties(nodeKey)
-	for k := range existing {
+	// nodeClearKeys, not the raw present: see its rmp #2943 commentary.
+	for k := range nodeClearKeys(op.mutator, nodeKey) {
 		op.mutator.DelNodeProperty(nodeKey, k)
 	}
 	for _, p := range op.parsedMap {

@@ -53,7 +53,7 @@ import (
 // would let a pathological string literal seek match a node the scan+filter
 // path would reject.
 func projectStringPropValue(v any) (string, bool) {
-	pv, ok := v.(lpg.PropertyValue)
+	pv, ok := propValueOf(v)
 	if !ok || pv.Kind() != lpg.PropString {
 		return "", false
 	}
@@ -65,6 +65,24 @@ func projectStringPropValue(v any) (string, bool) {
 		return "", false
 	}
 	return s, true
+}
+
+// propValueOf unwraps an index value payload: an lpg.PropertyValue, or a pointer
+// to one. The commit-time fan-out hands the projections a pointer to a scratch
+// value so that resolving a node's current value boxes nothing (rmp #2931); the
+// change payloads and the build-log recordings carry the value itself.
+func propValueOf(v any) (lpg.PropertyValue, bool) {
+	switch x := v.(type) {
+	case lpg.PropertyValue:
+		return x, true
+	case *lpg.PropertyValue:
+		if x == nil {
+			return lpg.PropertyValue{}, false
+		}
+		return *x, true
+	default:
+		return lpg.PropertyValue{}, false
+	}
 }
 
 // nodeIndexEligible returns the [hash.Binding.Eligible] / [btree.Binding.Eligible]
@@ -341,14 +359,43 @@ func shouldPollWorkerRelative(i, lo int) bool {
 // #2793's fabrication. The resolution has to happen when the change is RECORDED,
 // which is what [nodeIndexBuildResolver] does and what makes the replay produce
 // precisely the effects the live fan-out would have produced.
-func (e *Engine) beginIndexBuild(idxMgr *index.Manager, label, prop string) (
-	log *index.BuildLog, scanView *lpg.ReadView[string, float64], releaseScanView func(),
+//
+// # Why the snapshot waits for the commits already deciding (rmp #2936)
+//
+// Recording first is necessary and not sufficient. An explicit transaction
+// decides what its index buffer owes the indexes inside its finalisation and
+// publishes later, without the schema gate this DDL holds, so a commit could
+// decide before the recording started — dropping its changes, or delivering them
+// only to the indexes that already existed — and publish after the snapshot.
+// Neither the scan nor the recording then carried its node, and the index was
+// registered without it for good. So between the two steps the build waits out
+// every commit inside the decision bracket ([index.Manager.AwaitCommitDecisions])
+// and then waits for the frontier to cover every commit allocated so far
+// ([lpg.Graph.AwaitAllocatedCommits]); a commit that enters the bracket later
+// finds the recording. Both waits honour ctx, and on its error nothing is left
+// recording.
+func (e *Engine) beginIndexBuild(ctx context.Context, idxMgr *index.Manager, label, prop string) (
+	log *index.BuildLog, scanView *lpg.ReadView[string, float64], releaseScanView func(), err error,
 ) {
 	// Recording FIRST, snapshot SECOND. Do not reorder — see above. The resolver
 	// reads the LIVE view deliberately: it runs at fan-out time, where the live
 	// state is the committing transaction's final state, which is the same
 	// instant and the same view the live fan-out resolves at.
-	log = idxMgr.BeginBuild(nodeIndexBuildResolver(e.g.ReadAt(nil), label, prop))
+	//
+	// The engine's commit path delivers through index.Manager.ApplyBatchInState,
+	// and a BOUND build log resolves those deliveries from the committed state
+	// the delivery carries, not through this resolver (rmp #2931); the resolver
+	// remains for the deliveries that carry none.
+	log = idxMgr.BeginBoundBuild(nodeIndexBuildResolver(e.g.ReadAt(nil), label, prop),
+		uint32(e.g.Registry().Intern(label)), uint32(e.g.PropertyKeys().Intern(prop)))
+	if werr := idxMgr.AwaitCommitDecisions(ctx); werr != nil {
+		idxMgr.AbandonBuild(log)
+		return nil, nil, nil, werr
+	}
+	if werr := e.g.AwaitAllocatedCommits(ctx); werr != nil {
+		idxMgr.AbandonBuild(log)
+		return nil, nil, nil, werr
+	}
 	snap := e.g.BeginRead()
 	released := false
 	return log, e.g.ReadAt(snap), func() {
@@ -357,7 +404,7 @@ func (e *Engine) beginIndexBuild(idxMgr *index.Manager, label, prop string) (
 		}
 		released = true
 		e.g.EndRead(snap)
-	}
+	}, nil
 }
 
 // uniqueValueSeed is the property values a UNIQUE constraint's value-set must be
@@ -618,7 +665,7 @@ func numericBTreeName(label, prop string) string {
 // int64 whose float64 widening loses precision is still indexed — the residual
 // Filter removes any boundary false positive (cypher-expert-consultant).
 func projectNumericPropValue(v any) (float64, bool) {
-	pv, ok := v.(lpg.PropertyValue)
+	pv, ok := propValueOf(v)
 	if !ok {
 		return 0, false
 	}
@@ -1203,7 +1250,10 @@ func (e *Engine) createHashIndexLocked(ctx context.Context, p *ir.CreateIndex, i
 	// the recording starts — the ordering, and why the scan must not read the
 	// live property bag at all, are in [Engine.beginIndexBuild] (rmp #2738,
 	// rmp #2778).
-	buildLog, scanView, releaseScanView := e.beginIndexBuild(idxMgr, p.Label, p.Property)
+	buildLog, scanView, releaseScanView, err := e.beginIndexBuild(ctx, idxMgr, p.Label, p.Property)
+	if err != nil {
+		return nil, fmt.Errorf("exec: CreateIndex %q: %w", p.Name, err)
+	}
 	defer idxMgr.AbandonBuild(buildLog)
 	defer releaseScanView()
 

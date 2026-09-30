@@ -1,5 +1,20 @@
 # The commit-publication fast path: the `l.oldest` question, settled (rmp #2362)
 
+> **Superseded by rmp #2932.** The locked slow path this document analyses — `pubMu`, the
+> `commitLog` bitmap and its `blocked` flag — has been replaced by a lock-free registry of
+> commits (`graph/mvcc/commitlog.go`, type `commitRegistry`). Under 32 concurrent writers the
+> locked path became a convoy: 35-87% of publications took the lock and a publisher
+> descheduled inside it held the frontier for milliseconds. The stall this document derives —
+> a fast-path advance that strands commits recorded above it — is still the hazard. The
+> registry closes it without a lock: a publication that finishes out of order marks its
+> record finished and counts it in `pending`, and whoever closes the gap below it carries the
+> frontier over it; an in-order publication walks the registry only while `pending` is
+> non-zero. Only an out-of-order publication helps: until the frontier reaches its own
+> timestamp it stamps and publishes every READY record it finds stuck below it, on the
+> owner's behalf. An in-order publication never helps. See `Clock.AllocateFor` for the
+> invariants and `Clock.finishCommitTS` for the pairing. What follows is the rmp #2362
+> analysis, kept as the record of how that hazard was found.
+
 `Clock.finishCommitTS` takes `pubMu` once per commit, for every writer. rmp #2362 proposes
 a lock-free fast path in front of it. That task's technical requirements demand one question
 be settled **in writing before any code**, because a wrong answer "stalls the visibility

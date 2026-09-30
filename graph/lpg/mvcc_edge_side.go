@@ -195,6 +195,29 @@ func (g *Graph[N, W]) pushHandlePropVersion(sh *edgeHandlePropShard, k edgeKey, 
 	return true
 }
 
+// checkHandlePropConflict runs the write-write conflict test of
+// [Graph.pushHandlePropVersion] for a property delete that finds no bag to
+// change, recording a conflict on tx, and pushes no version. The caller must
+// hold the shard's lock.
+//
+// A delete that finds the handle's bag absent is NOT a write nobody can collide
+// with (rmp #2943): the raw map already carries another in-flight transaction's
+// eager removal, and when that removal took the instance's last property the bag
+// entry is gone. Returning without the test let the delete commit as a no-op; the
+// peer's rollback then restored the value and the committed removal was lost. The
+// head is read from the version chain, which the peer's removal pushed to, so the
+// test answers correctly with no bag at all. An untouched chain yields zero and
+// never conflicts. This is the rule [Graph.removeNodeLabelInfo] applies to labels
+// (rmp #2354).
+func (g *Graph[N, W]) checkHandlePropConflict(sh *edgeHandlePropShard, k edgeKey, handle uint64, tx *writeCtx) {
+	if !g.mvccArmed {
+		return
+	}
+	if head := sh.v.headStamp(edgeHandleKey{pair: k, handle: handle}); tx.conflicts(head) {
+		_ = tx.conflictErr(mvcc.StoreEdgePropsHandle, head)
+	}
+}
+
 // ── per-instance relationship types and properties (keyed by ordinal) ────────
 
 // pushInstanceLabelVersion records the label bag of the (pair, ordinal)

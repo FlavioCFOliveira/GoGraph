@@ -142,9 +142,10 @@ func BenchmarkPublish(b *testing.B) {
 }
 
 // BenchmarkPublishConcurrent measures the publish path under real contention,
-// which is the regime the sprint is moving towards: the frontier arm serialises
-// publishers on pubMu, the legacy arm on the CAS retry loop. Neither is free,
-// and this is what says by how much they differ.
+// which is the regime the sprint is moving towards: the frontier arm contends on
+// the frontier's compare-and-swap and, out of order, on the ring (lock-free since
+// rmp #2932); the legacy arm on the CAS retry loop. Neither is free, and this is
+// what says by how much they differ.
 func BenchmarkPublishConcurrent(b *testing.B) {
 	b.Run("frontier", func(b *testing.B) {
 		var c Clock

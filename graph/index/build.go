@@ -201,6 +201,13 @@ type BuildLog struct {
 	// recorded. It is set once by [Manager.BeginBuild], before the log is
 	// reachable by any fan-out, and never mutated afterwards.
 	resolve BuildResolver
+	// bound, labelID and propID are the coordinates of the index under build,
+	// set by [Manager.BeginBoundBuild]. With them the log resolves a change
+	// delivered through [Manager.ApplyBatchInState] from that delivery's
+	// [NodeState] rather than through resolve, which reads the graph's present.
+	bound   bool
+	labelID uint32
+	propID  uint32
 	changes []recordedChange
 	mu      sync.Mutex
 	// overflowed latches once more than MaxBuildLogChanges changes have been
@@ -226,6 +233,51 @@ func (b *BuildLog) recordBatch(changes []Change) {
 	for k := range changes {
 		b.appendLocked(changes[k])
 	}
+}
+
+// recordBatchInState is [BuildLog.recordBatch] for a delivery that carries the
+// committing transaction's [NodeState]. A bound log resolves each change from st,
+// exactly as a bound index's ApplyInState would; an unbound log, or a nil st,
+// falls back to resolve.
+func (b *BuildLog) recordBatchInState(changes []Change, st NodeState) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for k := range changes {
+		if !b.bound || st == nil {
+			b.appendLocked(changes[k])
+			continue
+		}
+		b.appendInStateLocked(changes[k], st)
+	}
+}
+
+// appendInStateLocked is [BuildLog.appendLocked] resolving from st. A change that
+// concerns neither the bound property nor the bound label is recorded with no
+// resolution, which every arm of the index under build ignores.
+func (b *BuildLog) appendInStateLocked(c Change, st NodeState) {
+	if b.overflowed {
+		return
+	}
+	if len(b.changes) >= MaxBuildLogChanges {
+		b.overflowed = true
+		b.changes = nil
+		return
+	}
+	r := recordedChange{Change: c}
+	relevant := false
+	switch c.Op {
+	case OpAddNodeLabel, OpRemoveNodeLabel:
+		relevant = c.Label == b.labelID
+	case OpSetNodeProperty, OpDelNodeProperty:
+		relevant = c.Property == b.propID
+	}
+	if relevant {
+		if v, ok := st.NodeValueRetained(c.Node, b.propID); ok {
+			r.current = v
+		}
+		r.eligible = st.NodeEligible(c.Node, b.labelID)
+	}
+	b.changes = append(b.changes, r)
 }
 
 // appendLocked appends one change together with its resolution, latching
@@ -307,6 +359,20 @@ type RegisterFunc func(name string, sub Subscriber) error
 // AbandonBuild, which is a no-op once FinishBuild has retired the log.
 func (m *Manager) BeginBuild(resolve BuildResolver) *BuildLog {
 	b := &BuildLog{resolve: resolve}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.builds = append(m.builds, b)
+	m.publishActiveLocked()
+	return b
+}
+
+// BeginBoundBuild is [Manager.BeginBuild] for an index bound to (labelID,
+// propID). A change delivered through [Manager.ApplyBatchInState] is then
+// recorded from that delivery's [NodeState] — the committed state — while resolve
+// still serves the deliveries that carry none ([Manager.Apply],
+// [Manager.ApplyBatch]).
+func (m *Manager) BeginBoundBuild(resolve BuildResolver, labelID, propID uint32) *BuildLog {
+	b := &BuildLog{resolve: resolve, bound: true, labelID: labelID, propID: propID}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.builds = append(m.builds, b)
@@ -400,6 +466,7 @@ func (m *Manager) FinishBuild(l *BuildLog, fn func(reg RegisterFunc) error) erro
 			sub.Apply(recorded[k].Change)
 		}
 		m.indexes[name] = sub
+		m.noteRegistration()
 		m.publishActiveLocked()
 		return nil
 	})

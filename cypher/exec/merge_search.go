@@ -34,6 +34,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"slices"
 
 	"github.com/RoaringBitmap/roaring/v2/roaring64"
 
@@ -68,6 +69,24 @@ func NewMergeSearchFnFromPattern(
 	mutator GraphMutator,
 	labelSrc MergeLabelSource,
 ) (MergeSearchFn, error) {
+	return NewMergeSearchFnWithProbe(labels, propertiesRaw, params, mutator, labelSrc, nil)
+}
+
+// NewMergeSearchFnWithProbe is [NewMergeSearchFnFromPattern] with an optional
+// index access path: when prober is non-nil and it offers a probe for one of the
+// pattern's (label, property) pairs, the candidates come from that property
+// index instead of the label posting list, whenever the probe can prove its
+// answer complete (see [MergeIndexProbe]). The candidates are re-checked exactly
+// as the walk's are, so the matches are identical either way; only the number of
+// nodes examined changes. A nil prober is the walk.
+func NewMergeSearchFnWithProbe(
+	labels []string,
+	propertiesRaw string,
+	params map[string]expr.Value,
+	mutator GraphMutator,
+	labelSrc MergeLabelSource,
+	prober MergeIndexProber,
+) (MergeSearchFn, error) {
 	var props []propLiteral
 	var err error
 	if len(params) == 0 {
@@ -81,6 +100,7 @@ func NewMergeSearchFnFromPattern(
 
 	wantLabels := make([]string, len(labels))
 	copy(wantLabels, labels)
+	probe := newMergeProbeSlot(prober)
 
 	return func(ctx context.Context) ([]Row, error) {
 		if cerr := ctx.Err(); cerr != nil {
@@ -88,7 +108,7 @@ func NewMergeSearchFnFromPattern(
 		}
 		var matches []Row
 		var walkErr error
-		walkMergeCandidates(mutator, labelSrc, wantLabels, func(id graph.NodeID) bool {
+		walkMergeCandidates(mutator, labelSrc, wantLabels, props, probe, func(id graph.NodeID) bool {
 			if cerr := ctx.Err(); cerr != nil {
 				walkErr = cerr
 				return false
@@ -145,8 +165,21 @@ type mergeLabelCounter interface {
 // use, and it is what preserves MERGE's requirement to bind EVERY match: no
 // candidate is skipped and no enumeration is cut short.
 //
+// When probe answers (see [mergeProbeSlot.candidates]) its candidates replace
+// the posting list. They are a superset of the matches under the same proof, so
+// fn's full re-check yields the same matches, in the same ascending id order the
+// posting list iterates in.
+//
 // fn returns false to stop early (used for context cancellation only).
-func walkMergeCandidates(mutator GraphMutator, src MergeLabelSource, labels []string, fn func(graph.NodeID) bool) {
+func walkMergeCandidates(mutator GraphMutator, src MergeLabelSource, labels []string, props []propLiteral, probe *mergeProbeSlot, fn func(graph.NodeID) bool) {
+	if ids, ok := probe.candidates(labels, props); ok {
+		for _, id := range ids {
+			if !fn(graph.NodeID(id)) {
+				return
+			}
+		}
+		return
+	}
 	if src == nil || len(labels) == 0 {
 		mutator.WalkNodeIDs(fn)
 		return
@@ -189,6 +222,105 @@ func mergeDrivingLabel(src MergeLabelSource, labels []string) string {
 	return best
 }
 
+// MergeIndexProber is the optional index access path of the node MERGE match
+// phase (rmp #2812). The engine's write adapters implement it; a mutator that
+// does not simply leaves MERGE on the label walk.
+type MergeIndexProber interface {
+	// MergeIndexProbe returns a probe for the property index covering
+	// (label, key), or nil when no index covers it. It is called at most once per
+	// operator and pattern, from the goroutine driving the operator tree.
+	MergeIndexProbe(label, key string) MergeIndexProbe
+}
+
+// MergeIndexProbe answers the MERGE match phase from one property index.
+//
+// # The contract that makes it a candidate filter and never the answer
+//
+// Candidates appends to dst the ids the index files under v and reports ok ONLY
+// when it can prove those ids are a SUPERSET of every node that carries the
+// probe's label with a key value equal to v under openCypher `=` — cross-type
+// numeric equality included — as the calling transaction sees the graph. The
+// caller re-checks every candidate against every label and every property, so an
+// over-reported id costs one check and a missing one would be a wrong answer; a
+// probe that cannot prove completeness MUST return ok == false, and the caller
+// then walks the label posting list. That is the case whenever the transaction
+// has itself written the probe's coordinate, whenever a concurrent commit the
+// transaction cannot see may have reached the index, and whenever the index
+// family cannot hold v's kind at all.
+type MergeIndexProbe interface {
+	Candidates(v lpg.PropertyValue, dst []uint64) ([]uint64, bool)
+}
+
+// mergeProbeSlot is one MERGE search's lazily resolved [MergeIndexProbe] and the
+// id buffer it reuses. A nil slot, or one with no prober, walks. It is NOT safe
+// for concurrent use: one per operator, driven by the goroutine that owns the
+// operator tree.
+type mergeProbeSlot struct {
+	prober MergeIndexProber
+	probe  MergeIndexProbe
+	key    string
+	ids    []uint64
+	// resolved records that the (label, key) choice has been made, so a pattern no
+	// index covers asks the prober once rather than once per row.
+	resolved bool
+}
+
+// newMergeProbeSlot returns nil for a nil prober, which is the walk.
+func newMergeProbeSlot(prober MergeIndexProber) *mergeProbeSlot {
+	if prober == nil {
+		return nil
+	}
+	return &mergeProbeSlot{prober: prober}
+}
+
+// candidates returns the probe's ascending candidate ids and true, or false when
+// the search must walk: no probe, no label, no property, no covering index, or a
+// probe that could not prove its answer complete.
+//
+// The (label, key) pair is the first one, in pattern order, that an index covers.
+// Which pair is chosen is a cost decision only: every label and every property is
+// re-checked per candidate. The pattern's property keys are the same on every row
+// (a map literal's keys are static), so resolving once per operator is exact; a
+// row whose property set lacks the chosen key walks.
+func (s *mergeProbeSlot) candidates(labels []string, props []propLiteral) ([]uint64, bool) {
+	if s == nil || s.prober == nil || len(labels) == 0 || len(props) == 0 {
+		return nil, false
+	}
+	if !s.resolved {
+		s.resolved = true
+	resolve:
+		for _, l := range labels {
+			for _, p := range props {
+				if pr := s.prober.MergeIndexProbe(l, p.key); pr != nil {
+					s.probe, s.key = pr, p.key
+					break resolve
+				}
+			}
+		}
+	}
+	if s.probe == nil {
+		return nil, false
+	}
+	for _, p := range props {
+		if p.key != s.key {
+			continue
+		}
+		ids, ok := s.probe.Candidates(p.value, s.ids[:0])
+		s.ids = ids
+		if !ok {
+			return nil, false
+		}
+		// The walk iterates a roaring bitmap, so it visits ascending ids and emits
+		// its matches in that order. Sorting the candidates keeps the ON MATCH row
+		// order identical, not merely the match set.
+		if !slices.IsSorted(ids) {
+			slices.Sort(ids)
+		}
+		return ids, true
+	}
+	return nil, false
+}
+
 // searchMergeNodes runs the same scan as the closure returned by
 // [NewMergeSearchFnFromPattern] but with explicit (labels, props) inputs.
 // Used by row-aware MERGE: the property map's expressions are evaluated
@@ -199,13 +331,15 @@ func mergeDrivingLabel(src MergeLabelSource, labels []string) string {
 // labelSrc narrows the candidate enumeration exactly as in the closure and may
 // be nil. This is the path the UNWIND-MERGE bulk-ingest idiom drives, so it is
 // the one where the whole-graph walk cost B×N.
-func searchMergeNodes(ctx context.Context, mutator GraphMutator, labelSrc MergeLabelSource, labels []string, props []propLiteral) ([]Row, error) {
+//
+// probe is the optional index access path, as in the closure; nil walks.
+func searchMergeNodes(ctx context.Context, mutator GraphMutator, labelSrc MergeLabelSource, probe *mergeProbeSlot, labels []string, props []propLiteral) ([]Row, error) {
 	if cerr := ctx.Err(); cerr != nil {
 		return nil, cerr
 	}
 	var matches []Row
 	var walkErr error
-	walkMergeCandidates(mutator, labelSrc, labels, func(id graph.NodeID) bool {
+	walkMergeCandidates(mutator, labelSrc, labels, props, probe, func(id graph.NodeID) bool {
 		if cerr := ctx.Err(); cerr != nil {
 			walkErr = cerr
 			return false

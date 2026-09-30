@@ -563,12 +563,12 @@ func (g *Graph[N, W]) delEdgePropertyByHandleInfo(src, dst N, handle uint64, key
 	sh := g.edgeHandlePropShardFor(k)
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
-	im, ok := sh.m[k]
-	if !ok {
-		return
-	}
+	// A missing map entry reads as the zero instMap, whose get reports no record.
+	im := sh.m[k]
 	bag, ok := im.get(handle)
 	if !ok {
+		// No bag to change is still a write to conflict-test (rmp #2943).
+		g.checkHandlePropConflict(sh, k, handle, tx)
 		return
 	}
 	// Both tiers are stored by value: mutate local copies and either write them

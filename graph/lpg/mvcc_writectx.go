@@ -193,6 +193,15 @@ type writeCtx struct {
 	// Plain, not atomic: it is written by the committing goroutine before the fsync
 	// and read by the same goroutine after it, with the WAL fsync between them.
 	commitTS uint64
+	// allocRec is the record commitTS was registered for by
+	// [Graph.AllocateCommitTS] — the transaction's own record, or an anonymous one
+	// when it had versioned nothing yet — kept so that the publication or the
+	// abandonment that discharges commitTS can pass it to the clock rather than
+	// have the clock look it up (rmp #2932 re-audit, N3). nil with commitTS.
+	allocRec *mvcc.CommitInfo
+	// applier is the commit-time work registered through
+	// [WriteTx.SetCommitApplier], run by [Graph.endWrite]; nil when none.
+	applier CommitApplier
 	// counts is the graph's write-side telemetry bank, carried rather than looked up
 	// because [writeCtx] is not generic in the graph's type parameters and every
 	// other piece of per-transaction state already travels with the write (rmp
@@ -289,6 +298,8 @@ func (g *Graph[N, W]) acquireWriteCtx(startTS, txID uint64) *writeCtx {
 	// property (no two transactions share an instant), which is what actually
 	// matters; it is not a test of this line alone.
 	w.commitTS = 0
+	w.allocRec = nil
+	w.applier = nil
 	return w
 }
 

@@ -190,6 +190,27 @@ func (g *Graph[N, W]) reclaimAbortedLife() int {
 	var toTombstone, toRevive []graph.NodeID
 	var released []LabelID
 	freed := 0
+	// pair withdraws an aborted birth and death of id together and restores the
+	// state before the transaction's EARLIEST event, which the pair's write order
+	// encodes (see [aliveBefore]). Deciding each direction independently
+	// tombstoned the node and then REVIVED it, so an aborted create+delete left
+	// a bare phantom node visible to every reader (rmp #2443, found by the DST
+	// multi-session mode). died-then-born — an applied delete the rollback's
+	// undo replay revived before the abort was processed — means the node was
+	// ALIVE when the transaction first touched it: restore alive, never
+	// re-tombstone the node the undo just repaired (rmp #2445, same finder).
+	pair := func(sh *nodeLifeShard, id graph.NodeID, born, died lifeStamp) {
+		delete(sh.born, id)
+		delete(sh.died, id)
+		released = append(released, sh.takeChurnHeld(true, id)...)
+		released = append(released, sh.takeChurnHeld(false, id)...)
+		freed += 2
+		if aliveBefore(born, died) {
+			toRevive = append(toRevive, id)
+		} else {
+			toTombstone = append(toTombstone, id)
+		}
+	}
 	for i := range g.nodeLifeShards {
 		sh := &g.nodeLifeShards[i]
 		sh.mu.Lock()
@@ -197,44 +218,52 @@ func (g *Graph[N, W]) reclaimAbortedLife() int {
 			if st.at() != mvcc.AbortedTS {
 				continue
 			}
+			if d, ok := sh.died[id]; ok && d.at() == mvcc.AbortedTS {
+				pair(sh, id, st, d)
+				continue
+			}
 			delete(sh.born, id)
 			released = append(released, sh.takeChurnHeld(true, id)...)
 			freed++
-			if d, ok := sh.died[id]; ok && d.at() == mvcc.AbortedTS {
-				// BOTH events belong to the aborted transaction, so the state
-				// to restore is the one before the transaction's EARLIEST
-				// event, which the pair's write order encodes (see
-				// [aliveBefore]). Deciding each direction independently
-				// tombstoned the node here and then REVIVED it in the loop
-				// below, so an aborted create+delete left a bare phantom node
-				// visible to every reader (rmp #2443, found by the DST
-				// multi-session mode). died-then-born — an applied delete the
-				// rollback's undo replay revived before the abort was
-				// processed — means the node was ALIVE when the transaction
-				// first touched it: restore alive, never re-tombstone the
-				// node the undo just repaired (rmp #2445, same finder).
-				delete(sh.died, id)
-				released = append(released, sh.takeChurnHeld(false, id)...)
-				freed++
-				if aliveBefore(st, d) {
-					toRevive = append(toRevive, id)
-				} else {
-					toTombstone = append(toTombstone, id)
-				}
+			if st.wasAlive {
+				// The undo replay of a rolled-back DELETE, whose death record is
+				// already gone: the node was alive before the transaction, so
+				// the abort restores it alive. See the died loop below for how
+				// the pair can be split across passes.
+				toRevive = append(toRevive, id)
 				continue
 			}
 			// Created by a transaction that never committed, so as far as
 			// every reader is concerned the node never existed.
 			toTombstone = append(toTombstone, id)
 		}
+		if h := g.reclaimAbortedLifeHookForTest; h != nil {
+			h(sh)
+		}
 		for id, st := range sh.died {
-			if st.at() == mvcc.AbortedTS {
-				delete(sh.died, id)
-				released = append(released, sh.takeChurnHeld(false, id)...)
-				freed++
-				// Removed by a transaction that never committed, so it is alive.
-				toRevive = append(toRevive, id)
+			if st.at() != mvcc.AbortedTS {
+				continue
 			}
+			// THE PAIR IS DECIDED HERE TOO (rmp #2949). The abort that makes a
+			// record's timestamp read AbortedTS is an atomic store by the
+			// transaction's own goroutine, taken under no shard lock, so it can
+			// land after the loop above passed over this node's birth as not yet
+			// aborted and before this loop reads its death. Both records carry
+			// the same commit record, so the birth reads AbortedTS by now as
+			// well. Withdrawing the death alone split the pair: the birth, left
+			// for a later pass, was taken for a create and tombstoned a node that
+			// was alive before the transaction — the node of a rolled-back
+			// DETACH DELETE vanished for every reader, measured at about one in
+			// 20000 concurrent runs of the straddler enumeration's case.
+			if b, ok := sh.born[id]; ok && b.at() == mvcc.AbortedTS {
+				pair(sh, id, b, st)
+				continue
+			}
+			delete(sh.died, id)
+			released = append(released, sh.takeChurnHeld(false, id)...)
+			freed++
+			// Removed by a transaction that never committed, so it is alive.
+			toRevive = append(toRevive, id)
 		}
 		if len(sh.born) == 0 {
 			sh.born = nil

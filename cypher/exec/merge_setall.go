@@ -280,13 +280,11 @@ func copyPropsToNode(
 // clearNodeProps removes every property from nodeKey. Each removal releases its
 // constrained value at the mutator choke point, so none leaks as a phantom
 // reservation (rmp #2358).
+//
+// The keys come from [nodeClearKeys], not the raw present; see its rmp #2943
+// commentary. It returns a fresh set, so deleting while ranging over it is safe.
 func clearNodeProps(mut GraphMutator, nodeKey string) {
-	props := mut.NodeProperties(nodeKey)
-	keys := make([]string, 0, len(props))
-	for k := range props {
-		keys = append(keys, k)
-	}
-	for _, k := range keys {
+	for k := range nodeClearKeys(mut, nodeKey) {
 		delNodeProp(mut, nodeKey, k)
 	}
 }

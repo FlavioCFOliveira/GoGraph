@@ -707,11 +707,52 @@ func (op *SetAllProperties) clearTarget(target entityBinding) {
 		}
 		return
 	}
-	props := op.mutator.NodeProperties(target.nodeKey)
-	for k := range props {
+	for k := range nodeClearKeys(op.mutator, target.nodeKey) {
 		// DelNodeProperty releases, at the mutator choke point (rmp #2358).
 		op.mutator.DelNodeProperty(target.nodeKey, k)
 	}
+}
+
+// txVisiblePropertyEnumerator is the optional reader that enumerates an
+// entity's properties as THIS transaction sees them: its own eager writes
+// included, no other transaction's unpublished work. It is asserted at the call
+// site, following [txVisibleNodeReader]; a mutator that does not implement it
+// carries no transaction, and for such a caller the present IS its view.
+type txVisiblePropertyEnumerator interface {
+	// NodePropertiesInTx returns n's properties in this transaction's view.
+	NodePropertiesInTx(n string) map[string]lpg.PropertyValue
+	// EdgePropertiesByHandleInTx returns the by-handle bag of one relationship
+	// instance in this transaction's view.
+	EdgePropertiesByHandleInTx(src, dst string, handle uint64) map[string]lpg.PropertyValue
+}
+
+// nodeClearKeys returns the set of property keys a whole-entity replace or clear
+// must remove from n: the keys of the RAW present plus the keys of this
+// transaction's view.
+//
+// The raw present alone is NOT sufficient (rmp #2943). It already carries
+// another in-flight transaction's eager removal, so when a peer had removed n's
+// only property the enumeration came back empty, `SET n = {}` issued no delete,
+// no write-write conflict test ran, and the statement committed having written
+// nothing. The peer's rollback then restored the value the committed replace had
+// removed. The transaction's view still carries that value, so enumerating it
+// makes the replace issue the delete, and the property store's conflict test
+// refuses it. The raw keys stay in the union because they are what the replace
+// physically clears.
+func nodeClearKeys(mut GraphMutator, n string) map[string]struct{} {
+	raw := mut.NodeProperties(n)
+	var view map[string]lpg.PropertyValue
+	if tv, ok := mut.(txVisiblePropertyEnumerator); ok {
+		view = tv.NodePropertiesInTx(n)
+	}
+	keys := make(map[string]struct{}, max(len(raw), len(view)))
+	for k := range raw {
+		keys[k] = struct{}{}
+	}
+	for k := range view {
+		keys[k] = struct{}{}
+	}
+	return keys
 }
 
 // relClearKeys returns the set of property keys a whole-entity replace must
@@ -722,6 +763,11 @@ func (op *SetAllProperties) clearTarget(target entityBinding) {
 // bag still carries the key, and reads are bag-authoritative — enumerating the
 // aggregate let that key survive `SET r = {…}` (#2502). Shared by
 // [SetAllProperties.clearTarget] and [SetProperty.applyToRelationship].
+//
+// With a resolved handle the instance's bag is also read in THIS transaction's
+// view, for the reason [nodeClearKeys] records (rmp #2943): a peer's
+// uncommitted removal of the instance's only property empties the raw bag, and
+// a replace that enumerates nothing writes nothing and conflicts with nothing.
 func relClearKeys(mut GraphMutator, srcKey, dstKey string, handle uint64) map[string]struct{} {
 	pair := mut.EdgeProperties(srcKey, dstKey)
 	keys := make(map[string]struct{}, len(pair))
@@ -731,6 +777,11 @@ func relClearKeys(mut GraphMutator, srcKey, dstKey string, handle uint64) map[st
 	if handle != 0 {
 		for k := range mut.EdgePropertiesByHandle(srcKey, dstKey, handle) {
 			keys[k] = struct{}{}
+		}
+		if tv, ok := mut.(txVisiblePropertyEnumerator); ok {
+			for k := range tv.EdgePropertiesByHandleInTx(srcKey, dstKey, handle) {
+				keys[k] = struct{}{}
+			}
 		}
 	}
 	return keys

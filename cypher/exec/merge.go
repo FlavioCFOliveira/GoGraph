@@ -74,6 +74,9 @@ type Merge struct {
 	// It is consulted only by the propsEvalFn path; the literal-props path
 	// carries its own source inside searchFn.
 	labelSrc MergeLabelSource
+	// probe is the row-aware search's optional property-index access path
+	// (rmp #2812); nil walks. Like labelSrc it serves only the propsEvalFn path.
+	probe *mergeProbeSlot
 	// onCreateEvals / onMatchEvals map an action's target (via
 	// [MergeActionEvalKey]) to a per-row RHS evaluator for a non-literal
 	// ON CREATE / ON MATCH SET expression (e.g. `SET n.num = n.num + 1`).
@@ -380,6 +383,20 @@ func (op *Merge) WithLabelSource(src MergeLabelSource) *Merge {
 	return op
 }
 
+// WithIndexProber attaches the property-index access path of the row-aware
+// merge search (rmp #2812): when an index covers one of the pattern's
+// (label, property) pairs and the probe can prove its answer complete, the
+// candidates come from the index instead of the label posting list, and are
+// re-checked in full exactly as the walk's are. It is what makes the
+// UNWIND-MERGE bulk-ingest idiom cost one index lookup per row rather than one
+// label walk.
+//
+// prober may be nil, which keeps the walk. Returns op for chaining.
+func (op *Merge) WithIndexProber(prober MergeIndexProber) *Merge {
+	op.probe = newMergeProbeSlot(prober)
+	return op
+}
+
 // Init initialises the operator: executes the search plan, then dispatches
 // to the ON MATCH or ON CREATE branch depending on whether the search
 // returned any rows.
@@ -433,7 +450,7 @@ func (op *Merge) runMergeForChild(childRow Row) error {
 	var rows []Row
 	var err error
 	if op.propsEvalFn != nil {
-		rows, err = searchMergeNodes(op.ctx, op.mutator, op.labelSrc, op.labels, propsForRow)
+		rows, err = searchMergeNodes(op.ctx, op.mutator, op.labelSrc, op.probe, op.labels, propsForRow)
 	} else {
 		rows, err = op.searchFn(op.ctx)
 	}

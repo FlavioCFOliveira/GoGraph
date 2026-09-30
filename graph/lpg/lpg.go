@@ -450,6 +450,13 @@ type Graph[N comparable, W any] struct {
 	// The cost in production is one nil load and a predictable branch, on a path
 	// that takes the label index's read lock either side of it.
 	labelCountGateProbe func()
+	// reclaimAbortedLifeHookForTest is a TEST-ONLY seam, nil in production and
+	// with no exported setter, called by [Graph.reclaimAbortedLife] in every
+	// life shard, under the shard's lock, BETWEEN its birth loop and its death
+	// loop (rmp #2949). A test aborts a transaction there, which is the one
+	// interleaving that split an aborted birth and death of one node across two
+	// passes and tombstoned a node that was alive before the transaction.
+	reclaimAbortedLifeHookForTest func(sh *nodeLifeShard)
 	// labelCountWindowProbe is a TEST-ONLY seam, nil in production and with no
 	// exported setter, called by [Graph.LabelsCountExact] and
 	// [Graph.LabelCountBound] BETWEEN their cardinality read and the gate sample
@@ -847,6 +854,13 @@ type Graph[N comparable, W any] struct {
 	// still allocates nothing, which
 	// TestBarrierGuard_ApplyAtomicallyAllocatesNothing requires.
 	writeTx atomic.Pointer[writeCtx]
+	// commitApply serialises the stamp-and-apply step of transactions that
+	// registered a [CommitApplier] and touch a common node shard. See
+	// [CommitApplier] and [Graph.commitAndApply].
+	commitApply [commitApplyShards]commitApplyShard
+	// commitApplySnaps recycles the snapshot of a [CommitApplier] that holds no
+	// shard lock, and so owns no shard's snapshot. See [Graph.commitAndApply].
+	commitApplySnaps sync.Pool
 	// writeCtxFree caches ONE finished [writeCtx] for the next bracket to reuse,
 	// so per-transaction state costs no allocation in steady state. See
 	// [Graph.acquireWriteCtx] for why one slot and not a sync.Pool, with the
@@ -1366,12 +1380,13 @@ func (g *Graph[N, W]) endVersionedTxInstant(tx WriteTx) uint64 {
 	g.barrier.stampWriter(gid)
 	defer g.visGate.WeakUnlock(visTok)
 	defer g.barrier.clearWriter(gid)
-	ts := g.endWrite(tx.w)
 	// After endWrite, so nothing the transaction still reads is reclaimable while
 	// its record publishes, and unconditionally, because a transaction that
-	// versioned nothing still took a slot (rmp #2299).
-	g.releaseWriterSnapshot(tx.w)
-	return ts
+	// versioned nothing still took a slot (rmp #2299). Deferred, so a panic out
+	// of endWrite — a commit applier's — does not leak the slot and pin the
+	// reclamation watermark for the life of the process (rmp #2936 audit, L2).
+	defer g.releaseWriterSnapshot(tx.w)
+	return g.endWrite(tx.w)
 }
 
 // openWriteBracket opens the adjacency's commit window and the transaction's
@@ -1404,13 +1419,16 @@ func (g *Graph[N, W]) openWriteBracket() *writeCtx {
 // only by its owner, which is what stops a queued writer clobbering it (#1286,
 // #1355).
 func (g *Graph[N, W]) finishWrite(w *writeCtx, gid int64) {
-	g.endWrite(w)
+	// Deferred in reverse of the order they must run, so that a panic out of
+	// endWrite — a commit applier's — still returns the horizon slot, freezes the
+	// builders and clears the stamp (rmp #2936 audit, L2).
+	defer g.barrier.clearWriter(gid)
+	defer g.adj.EndCommit()
 	// Return the writer's horizon slot after endWrite, so nothing the writer
 	// still reads is reclaimable while it runs, and unconditionally, because a
 	// bracket that versioned nothing still took a slot (rmp #2299).
-	g.releaseWriterSnapshot(w)
-	g.adj.EndCommit()
-	g.barrier.clearWriter(gid)
+	defer g.releaseWriterSnapshot(w)
+	g.endWrite(w)
 }
 
 // finishWriteShared is [Graph.finishWrite] for the shared bracket. The order is
@@ -1471,12 +1489,14 @@ func (g *Graph[N, W]) finishWriteShared(w *writeCtx, gid int64) {
 // by the time the bracket has returned the record is gone and the object may already
 // belong to another transaction. out may be nil.
 func (g *Graph[N, W]) finishWriteSharedInstant(w *writeCtx, gid int64, out *uint64) {
+	// Deferred so a panic out of endWrite still returns the horizon slot and
+	// clears the stamp (rmp #2936 audit, L2); they run in the order written here.
+	defer g.barrier.clearWriter(gid)
+	defer g.releaseWriterSnapshot(w)
 	ts := g.endWrite(w)
 	if out != nil {
 		*out = ts
 	}
-	g.releaseWriterSnapshot(w)
-	g.barrier.clearWriter(gid)
 }
 
 // applyVersionedInstant is [Graph.ApplyVersionedCtx] reporting the instant the
@@ -1959,7 +1979,16 @@ func (g *Graph[N, W]) IndexManager() *index.Manager { return g.idxMgr.load() }
 // SetIndexManager is safe for concurrent use; the pointer is stored
 // with sequential consistency. Goroutines that call [Graph.IndexManager]
 // after this store returns will observe m (or a later value).
-func (g *Graph[N, W]) SetIndexManager(m *index.Manager) { g.idxMgr.store(m) }
+//
+// It also gives m the graph's visible commit frontier as its frontier source
+// ([index.Manager.SetFrontierSource]), so registering an index on m raises the
+// watermark that tells a snapshot whether the indexes describe it.
+func (g *Graph[N, W]) SetIndexManager(m *index.Manager) {
+	if m != nil {
+		m.SetFrontierSource(g.mvccClock.ReadTS)
+	}
+	g.idxMgr.store(m)
+}
 
 // ErrIndexedRawWrite is returned by a raw node mutator of [Graph] —
 // [Graph.AddNode] when it would revive a removed node, [Graph.SetNodeLabel],

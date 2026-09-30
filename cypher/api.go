@@ -917,6 +917,10 @@ type EngineOptions struct {
 	// NodeByIndexSeek that SUBSUMES the Selection it replaces, keeping only a
 	// label residual.
 	//
+	// It also turns OFF the property-index probe of the node MERGE match phase
+	// (rmp #2812, merge_index_probe.go), which then walks the label posting list:
+	// both are equality lookups answered from the same indexes.
+	//
 	// It exists because that rewrite shipped without a kill switch of any kind: its
 	// only gate was `idxMgr != nil` — no population floor, no cost model, no knob —
 	// unlike every other index access path, which meant the one access path capable
@@ -1438,6 +1442,27 @@ type Engine struct {
 	// suite cannot otherwise observe both answers for one query. No public setter
 	// exists and production never sets it.
 	disableIndexNestedLoopForTest bool
+	// commitDecidedHookForTest and indexDeliveredHookForTest are TEST SEAMS for
+	// the commit-decision bracket (rmp #2936), set only by in-package tests before
+	// the engine is shared. The first runs in [ExplicitTx.Commit] after the
+	// finalisation has decided what the index buffer owes the indexes and before
+	// the transaction publishes; the second runs after an explicit transaction's
+	// index delivery and before its publication. nil in production.
+	commitDecidedHookForTest  func()
+	indexDeliveredHookForTest func()
+	// constraintValidatedHookForTest runs in CREATE CONSTRAINT after its live
+	// validation scan and before it registers the constraint;
+	// constraintDroppedHookForTest runs in DROP CONSTRAINT after the constraint is
+	// unregistered in memory and before the drop is made durable. TEST SEAMS for
+	// rmp #2936, nil in production.
+	constraintValidatedHookForTest func()
+	constraintDroppedHookForTest   func()
+	// dropCommitErrForTest, when set and returning an error, makes DROP
+	// CONSTRAINT treat its durable commit as failed with that error and run the
+	// rewind, WITHOUT poisoning the WAL, so a transaction open across the
+	// failed DROP can still commit afterwards (rmp #2936 audit, H2). TEST SEAM,
+	// nil in production.
+	dropCommitErrForTest func() error
 	// disableLiveTraversalForTest keeps every write statement's forward traversal
 	// on the whole-graph CSR build (rmp #2883), so the differential tests can
 	// obtain the pre-#2883 answer for the same statement on the same engine
@@ -2550,6 +2575,9 @@ func (e *Engine) runRead(ctx context.Context, query string, params map[string]ex
 	// but before parseAndAnalyse so a caller that has already given up never
 	// pays for the parse. O(1) and allocation-free on the happy path. ─────────
 	if err := checkContext(ctx); err != nil {
+		return nil, err
+	}
+	if err := e.failStopped(); err != nil {
 		return nil, err
 	}
 	// ── 1. DDL fast-path ─────────────────────────────────────────────────────
@@ -3782,7 +3810,10 @@ func (e *Engine) createBTreeIndexLocked(ctx context.Context, p *ir.CreateIndex, 
 	// recording starts, exactly as on the hash path — see
 	// [Engine.beginIndexBuild] for the ordering and for why the scan must not
 	// read the live property bag (rmp #2738, rmp #2778).
-	buildLog, scanView, releaseScanView := e.beginIndexBuild(idxMgr, p.Label, p.Property)
+	buildLog, scanView, releaseScanView, err := e.beginIndexBuild(ctx, idxMgr, p.Label, p.Property)
+	if err != nil {
+		return nil, fmt.Errorf("exec: CreateIndex %q: %w", p.Name, err)
+	}
 	defer idxMgr.AbandonBuild(buildLog)
 	defer releaseScanView()
 
@@ -4184,6 +4215,30 @@ func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstra
 	// validatePreExisting ignores the values and there is no value-set to seed —
 	// so a NOT NULL DDL used to fill, and discard, one PropertyValue per labelled
 	// node.
+	// NO COMMIT MAY DECIDE WHILE THE CONSTRAINT IS BUILT (rmp #2936). The scans
+	// below validate the existing data and seed the UNIQUE value-set and backing
+	// index from one snapshot, and nothing records a commit that lands in
+	// between. An autocommit statement is kept out by the schema gate this DDL
+	// holds; an explicit transaction is not, and one that had already decided
+	// what its index buffer owed — with no constraint yet to reserve its value in
+	// — and published after the snapshot was missing from the backing index and
+	// from the value-set for good: a second node with the same value then
+	// committed under the live constraint, and MERGE created one. So the build
+	// waits out every commit inside the decision bracket, keeps new ones out until
+	// it is registered, and waits for the frontier to cover every commit allocated
+	// so far, so the scans see every committed node.
+	//
+	// Taken HERE, after the caller has opened its store transaction: that admission
+	// can park behind a checkpointer's quiesce, which waits for the very explicit
+	// transactions this hold keeps out, so holding across it would deadlock.
+	if err := idxMgr.HoldCommitDecisions(ctx); err != nil {
+		return nil, err
+	}
+	defer idxMgr.ReleaseCommitDecisions()
+	if err := e.g.AwaitAllocatedCommits(ctx); err != nil {
+		return nil, err
+	}
+
 	var values []lpg.PropertyValue
 	var vals *[]lpg.PropertyValue
 	if kind == exec.ConstraintUnique {
@@ -4195,6 +4250,9 @@ func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstra
 	}
 	if err := validatePreExisting(kind, p.Label, p.Property, values, anyNull); err != nil {
 		return nil, err
+	}
+	if h := e.constraintValidatedHookForTest; h != nil {
+		h()
 	}
 
 	// Registration, backfill, and value-set seed run inside the visibility
@@ -4494,9 +4552,35 @@ func (e *Engine) dropConstraintLocked(ctx context.Context, p *ir.DropConstraint,
 	// IF EXISTS is satisfied (the constraint exists), so the operator drops it
 	// unconditionally; pass ifExists=false so any unexpected internal mismatch
 	// surfaces rather than being absorbed.
+	// NO COMMIT MAY DECIDE WHILE THE CONSTRAINT IS DROPPED AND POSSIBLY RESTORED
+	// (rmp #2936). The unregistration below takes effect in memory before the drop
+	// is durable, and a failed durable commit restores the constraint by
+	// re-seeding it from a snapshot ([Engine.rewindConstraintDrop]). An explicit
+	// transaction committing in between wrote a value no constraint reserved, and
+	// was then held by a restored constraint it had never been checked against: a
+	// duplicate under a live UNIQUE constraint. Holding the decision bracket keeps
+	// such a commit out until the outcome is settled; one that straddles the
+	// restoration re-registers into a new catalogue generation and is validated at
+	// its own commit. Taken after the caller's store transaction is open, for the
+	// reason given on createConstraintLocked.
+	if err := idxMgr.HoldCommitDecisions(ctx); err != nil {
+		return nil, err
+	}
+	defer idxMgr.ReleaseCommitDecisions()
+	if err := e.g.AwaitAllocatedCommits(ctx); err != nil {
+		return nil, err
+	}
 	op := exec.NewDropConstraintOp(p.Name, label, prop, kind, false, idxMgr, e.constraintReg, e.ClearPlanCache)
 	if err := applyDDLOp(ctx, op); err != nil {
 		return nil, err
+	}
+	if h := e.constraintDroppedHookForTest; h != nil {
+		h()
+	}
+	if h := e.dropCommitErrForTest; h != nil {
+		if err := h(); err != nil {
+			return nil, e.rewindConstraintDrop(err, p.Name, label, prop, kind, idxMgr)
+		}
 	}
 	if tx != nil {
 		if err := commitConstraintTx(tx, txn.OpDropConstraint, kind, label, prop, p.Name); err != nil {
@@ -5660,10 +5744,15 @@ func analyseNodeScalarUseFor(bopts *buildOpts, x ast.Expression) (map[string]*no
 // subsequent calls with the same query string skip every stage above plan
 // execution.
 //
-// A non-nil error is returned only for parse or translation failures; a
-// semantically invalid (but parseable) query yields a cache entry whose
-// semaErr field is set, and parseAndAnalyse returns (entry, nil).
+// A non-nil error is returned only for parse or translation failures, and for a
+// fail-stopped engine ([ErrEngineFailStopped]), refused before parsing so that
+// every query entry point planning through here refuses too; a semantically
+// invalid (but parseable) query yields a cache entry whose semaErr field is set,
+// and parseAndAnalyse returns (entry, nil).
 func (e *Engine) parseAndAnalyse(query string) (*planCacheEntry, map[string]string, error) {
+	if err := e.failStopped(); err != nil {
+		return nil, nil, err
+	}
 	// The cache is keyed on query text, so a query that inlines a rotating
 	// string literal would miss on every execution and pay a full parse —
 	// measured at 65% more CPU per query than the same query written with a
@@ -6842,7 +6931,12 @@ func (r *Result) commitUnderBarrier() {
 		crashpoint.Breakpoint("mvcc.commit.post-fsync-pre-publish")
 	}
 	if r.buf != nil {
-		r.buf.Commit(r.idxMgr)
+		// The index changes are delivered when the bracket PUBLISHES this
+		// transaction, resolved against the state its commit produces, never
+		// against the present, which holds other transactions' uncommitted writes
+		// (rmp #2931, index_commit_apply.go). r.g, not r.mvccG: the handle below
+		// is dropped at the bracket boundary, and the applier runs inside it.
+		armIndexCommit((*resultApplier)(r), r.buf, r.idxMgr, r.g, r.wtx)
 	}
 	// Relationship count-store (#2082): apply this transaction's count deltas and
 	// dirty markings AFTER the WAL fsync and alongside the index buffer, on the
@@ -8592,7 +8686,13 @@ func buildOperatorWrite(
 		// MATCH branch fires; only zero matches drives the ON CREATE branch.
 		// Single-writer serialisation in the engine keeps concurrent MERGE
 		// callers from racing to a phantom zero-match result.
-		searchFn, sfErr := exec.NewMergeSearchFnFromPattern(labels, props, params, mutator, mergeLabelSource(labelSrc))
+		// The property-index access path (rmp #2812), under the same kill switch as
+		// the equality seek: with an index covering a (label, property) of the
+		// pattern the candidates come from that index, re-checked in full, and the
+		// probe itself declines whenever it cannot prove its answer complete for
+		// this transaction (see merge_index_probe.go).
+		prober := mergeIndexProberFor(mutator, bopts)
+		searchFn, sfErr := exec.NewMergeSearchFnWithProbe(labels, props, params, mutator, mergeLabelSource(labelSrc), prober)
 		if sfErr != nil {
 			return nil, sfErr
 		}
@@ -8620,6 +8720,9 @@ func buildOperatorWrite(
 		// Label posting list for the row-aware search, so a per-row MERGE key
 		// examines the label's population instead of the whole graph (#2217).
 		m.WithLabelSource(mergeLabelSource(labelSrc))
+		// The same index access path for the row-aware search (rmp #2812), which is
+		// the one the UNWIND-MERGE bulk-ingest idiom drives.
+		m.WithIndexProber(prober)
 		// p.Child == nil is the LEADING-clause plan shape: the MERGE has no
 		// driving clause, so buildOperatorWrite gave it a SingleRow leaf above
 		// and it owns the query's one initial empty row. Any other shape fires
@@ -19759,6 +19862,9 @@ func (e *Engine) runInTxSession(ctx context.Context, sess *lpg.Session[string, f
 	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
+	if err := e.failStopped(); err != nil {
+		return nil, err
+	}
 	// DDL queries don't require a write transaction.
 	if ir.IsDDL(query) {
 		return e.runDDL(ctx, query, params)
@@ -21067,6 +21173,20 @@ func (a *lpgMutatorAdapter) NodeLabelsInTx(n string) []string {
 	return a.g.WriterViewOf(a.wtx).NodeLabels(n)
 }
 
+// NodePropertiesInTx returns n's properties in THIS transaction's view. A
+// whole-entity replace enumerates them alongside the raw present so a peer's
+// uncommitted removal cannot hide a key from it (rmp #2943; see
+// [exec.nodeClearKeys]).
+func (a *lpgMutatorAdapter) NodePropertiesInTx(n string) map[string]lpg.PropertyValue {
+	return a.g.WriterViewOf(a.wtx).NodeProperties(n)
+}
+
+// EdgePropertiesByHandleInTx is [lpgMutatorAdapter.NodePropertiesInTx] for one
+// relationship instance's by-handle bag (rmp #2943; see [exec.relClearKeys]).
+func (a *lpgMutatorAdapter) EdgePropertiesByHandleInTx(src, dst string, handle uint64) map[string]lpg.PropertyValue {
+	return a.g.WriterViewOf(a.wtx).EdgePropertiesByHandle(src, dst, handle)
+}
+
 // NodePropertyInTx returns n's value for key in THIS transaction's view. See
 // [lpgMutatorAdapter.HasNodeLabelInTx] for why the view and not the raw graph.
 func (a *lpgMutatorAdapter) NodePropertyInTx(n, key string) (lpg.PropertyValue, bool) {
@@ -22287,6 +22407,18 @@ func (a *walMutatorAdapter) HasNodeLabelInTx(n, label string) bool {
 // (rmp #2355).
 func (a *walMutatorAdapter) NodeLabelsInTx(n string) []string {
 	return a.g.WriterViewOf(a.wtx).NodeLabels(n)
+}
+
+// NodePropertiesInTx is [lpgMutatorAdapter.NodePropertiesInTx] for the durable
+// write path (rmp #2943).
+func (a *walMutatorAdapter) NodePropertiesInTx(n string) map[string]lpg.PropertyValue {
+	return a.g.WriterViewOf(a.wtx).NodeProperties(n)
+}
+
+// EdgePropertiesByHandleInTx is [lpgMutatorAdapter.EdgePropertiesByHandleInTx]
+// for the durable write path (rmp #2943).
+func (a *walMutatorAdapter) EdgePropertiesByHandleInTx(src, dst string, handle uint64) map[string]lpg.PropertyValue {
+	return a.g.WriterViewOf(a.wtx).EdgePropertiesByHandle(src, dst, handle)
 }
 
 // NodePropertyInTx returns n's value for key in THIS transaction's view. See
