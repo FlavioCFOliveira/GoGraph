@@ -14,7 +14,7 @@ edge type, or property is added or removed, update both in the same change.
   element was last confirmed) and `gitDate` (ISO `YYYY-MM-DD`).
 
 Counts as of commit `567253c` + in-flight worktree (2026-06-11): **11,867 nodes**, **15,360 edges**.
-Re-measured live 2026-09-08: **15,447 nodes**, **19,507 edges**, **0 indexes**, **0 constraints**.
+Current counts come from the graph (`MATCH (n) RETURN count(n)`, `SHOW CONSTRAINTS`, `SHOW INDEXES`), not from this file.
 
 > ## ⚠️ Read this before copying any command out of this file
 >
@@ -35,9 +35,10 @@ Re-measured live 2026-09-08: **15,447 nodes**, **19,507 edges**, **0 indexes**, 
 > passages as what was true on their date, never as instructions for today.
 >
 > What did **not** change: **pattern-`MERGE` still creates every node in the pattern
-> afresh unless the whole pattern matches**, which is the cause of the 249 stub
-> `Package` nodes recorded under Constraints. The new `counters` block in every
-> write's response is now the detector for it.
+> afresh unless the whole pattern matches**. It created the stub `Package` nodes that
+> rmp #2802 repaired. The UNIQUE constraints under [Constraints](#constraints) now
+> reject such a duplicate, and the `counters` block in every write's response
+> reports `nodesCreated`.
 Incrementally synced at commit `257ce96` (2026-06-14, task #1502): +4 nodes
 (`NodePropertiesByIDFunc` Method, `nodePropsToExprMap` Function,
 `TestNodePropertiesByIDFunc_MatchesByID` Test, `BenchmarkNodeReturnToPackstream`
@@ -1638,10 +1639,9 @@ single node property:** `IS UNIQUE` (reported type `UNIQUE`) and `IS NOT NULL`
 enforced** — a violating write is rejected with exit 1 — which makes it the only
 real defence against the pattern-`MERGE` duplication above.
 
-**Live schema state, 2026-09-08 (15447 nodes, 19507 edges): zero constraints and
-zero indexes exist.** Everything below is therefore *declared*, and each row says
-whether the data permits enforcing it today. A constraint marked VIOLATED is still
-the model's rule — it is a repair waiting to be scheduled, not an abandoned idea.
+**Live schema state:** read it with `SHOW CONSTRAINTS`. The rows under "Uniqueness —
+DECLARED and enforced" exist in the graph. Every other row is the model's rule and
+states whether the data permits enforcing it.
 
 ### Uniqueness — enforceable today
 
@@ -1659,20 +1659,24 @@ Measured clean (no duplicate values, no nulls):
 | `Skill` | `name` | 2 | `CREATE CONSTRAINT skill_name_uniq IF NOT EXISTS FOR (n:Skill) REQUIRE n.name IS UNIQUE` |
 | `File` | `path` | — (count with `MATCH (n:File) RETURN count(n)`; check with the duplicate query below) | `CREATE CONSTRAINT file_path_uniq IF NOT EXISTS FOR (n:File) REQUIRE n.path IS UNIQUE` |
 
-### Uniqueness — VIOLATED, cannot be created until repaired
+### Uniqueness — DECLARED and enforced
 
-| Label | Property | Violation (measured 2026-09-08) | Cause |
-|---|---|---|---|
-| `Package` | `path` | **9 values across 256 nodes.** 249 of 369 `Package` nodes are null-`name` stubs; the worst path, `graph/index/hash`, has **115** nodes | pattern-`MERGE` |
-| `Task` | `id` | **5 values across 10 nodes** | pattern-`MERGE`, plus the historical `task_id`/`number` key drift |
-| `Commit` | `hash` | **3 values across 10 nodes** | pattern-`MERGE` |
+The engine enforces these constraints. A write that would duplicate one of these
+identities is rejected, so a pattern-`MERGE` that would rebuild an existing node
+now fails loudly instead of silently creating a stub.
 
-The `Package` split is not cosmetic: 234 edges hang off the stubs (219 `CONTAINS`
-out, 15 `TOUCHES` in). The named `cypher/exec` node holds **1086** `CONTAINS`
-edges while its 64 stubs hold **63**, so *"what does `cypher/exec` contain?"*
-answers 1086 or 1149 depending on which node binds. Filed as rmp **#2802**.
+| Label | Property | Constraint name |
+|---|---|---|
+| `Package` | `path` | `package_path_unique` |
+| `Task` | `id` | `task_id_unique` |
+| `Commit` | `hash` | `commit_hash_unique` |
 
-Detect with:
+They were declared after the rmp **#2802** repair. Before it, null-`name` `Package`
+stubs and duplicate `Task` and `Commit` nodes left by pattern-`MERGE` split
+containment queries. The repair re-homed the stubs' edges onto the named nodes,
+folded the duplicates, and deleted the stubs.
+
+Detect a regression with:
 
 ```
 MATCH (n:Package) WHERE n.name IS NULL RETURN count(n)
@@ -1696,7 +1700,7 @@ propose `IS NOT NULL` for them without deciding the model question first:
 | Label | Property | Nulls | Why it is null |
 |---|---|---:|---|
 | `Defect` | `id` | 32 of 53 | those nodes key on `ref` instead — a second, accepted keying |
-| `Package` | `importPath` | 258 of 369 | mostly the 249 stubs; the real packages carry it |
+| `Package` | `importPath` | count with `MATCH (n:Package) WHERE n.importPath IS NULL RETURN count(n)` | non-Go directories modelled as packages; every Go package carries it |
 | `Test` | `pkg` | 207 | the `internal/sim` divergence: keyed on `package`, not `pkg` |
 | `Function` / `Type` / `Method` | `pkg` | 59 / 47 / 20 | the same `internal/sim` divergence |
 | `Sprint` | `id` | 14 of 87 | legacy nodes predating the canonical shape |
