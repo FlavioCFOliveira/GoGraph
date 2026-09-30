@@ -242,8 +242,15 @@ func tryBuildIndexNestedLoopJoin(
 
 	// Coverage was proved above, so tell the operator: a non-numeric key then needs
 	// no scan to establish that it matches nothing.
-	var op exec.Operator = exec.NewIndexNestedLoopJoin(outerOp, innerOp, pointIdx, outerKeyFn, innerKeyFn).
+	inlj := exec.NewIndexNestedLoopJoin(outerOp, innerOp, pointIdx, outerKeyFn, innerKeyFn).
 		WithProvenNumericCoverage(true)
+	// Every seek is asked, after it, whether the index described the reader's
+	// snapshot; a row whose seek cannot be vouched for takes the operator's own
+	// fallback, which drives the inner arm at that snapshot (rmp #2937).
+	if bopts.idxSnap.guarded() {
+		inlj.AtSnapshot(bopts.idxSnap.proof, bopts.idxSnap.startTS)
+	}
+	var op exec.Operator = inlj
 
 	// Re-apply every residual conjunct as a Filter on the combined row, preserving
 	// Selection(fullPredicate, …) semantics — the same treatment the hash join

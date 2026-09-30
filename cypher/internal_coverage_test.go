@@ -18,6 +18,17 @@ import (
 
 // indexManagerFor returns the index.Manager for g, initialising one if the
 // graph was created without one (lpg.New does not install a manager by default).
+// mustBoundNodeHashIndex returns the bound string hash index the engine builds for
+// (label, prop) on g, empty.
+func mustBoundNodeHashIndex(t *testing.T, g *lpg.Graph[string, float64], label, prop string) *hash.Index[string] {
+	t.Helper()
+	idx, err := newBoundNodeHashIndex(g.ReadAt(nil), label, prop)
+	if err != nil {
+		t.Fatalf("newBoundNodeHashIndex: %v", err)
+	}
+	return idx
+}
+
 func indexManagerFor(g *lpg.Graph[string, float64]) *index.Manager {
 	if mgr := g.IndexManager(); mgr != nil {
 		return mgr
@@ -615,13 +626,16 @@ func TestBuildIndexSeekOperator_StringHash(t *testing.T) {
 	if err := g.SetNodeLabel("Alice", "Person"); err != nil {
 		t.Fatalf("SetNodeLabel: %v", err)
 	}
+	if err := g.SetNodeProperty("Alice", "name", lpg.StringValue("Alice")); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
 	id, _ := g.AdjList().Mapper().Lookup("Alice")
 
-	// Populate a string hash index named "person_name_hash".
-	idx := hash.New[string]()
-	idx.Insert("Alice", id)
-
+	// Populate a BOUND string hash index named "person_name_hash": an unbound
+	// index is never covering, because nothing maintains it (rmp #2938).
 	mgr := indexManagerFor(g)
+	idx := mustBoundNodeHashIndex(t, g, "Person", "name")
+	idx.Insert("Alice", id)
 	if err := mgr.CreateIndex("person_name_hash", idx); err != nil {
 		t.Fatalf("CreateIndex: %v", err)
 	}
@@ -629,7 +643,11 @@ func TestBuildIndexSeekOperator_StringHash(t *testing.T) {
 	p := ir.NewNodeByIndexSeek("n", "Person", "name", "'Alice'")
 	schema := make(map[string]int)
 
-	op, err := buildIndexSeekOperator(p, nil, schema, mgr, labelSrcFromView(g.ReadAt(nil)))
+	// A snapshot-bound view, so the seek can prove the index describes it and
+	// serves the lookup (rmp #2937).
+	snap := g.BeginRead()
+	defer g.EndRead(snap)
+	op, err := buildIndexSeekOperator(p, nil, schema, mgr, labelSrcFromView(g.ReadAt(snap)))
 	if err != nil {
 		t.Fatalf("buildIndexSeekOperator: %v", err)
 	}
@@ -715,17 +733,24 @@ func TestBuildOperator_NodeByIndexSeekCase(t *testing.T) {
 	if err := g.SetNodeLabel("Alice", "Person"); err != nil {
 		t.Fatalf("SetNodeLabel: %v", err)
 	}
+	if err := g.SetNodeProperty("Alice", "name", lpg.StringValue("Alice")); err != nil {
+		t.Fatalf("SetNodeProperty: %v", err)
+	}
 	id, _ := g.AdjList().Mapper().Lookup("Alice")
 
-	idx := hash.New[string]()
-	idx.Insert("Alice", id)
+	// Bound, for the reason given in TestBuildIndexSeekOperator_StringHash
+	// (rmp #2938).
 	mgr := indexManagerFor(g)
+	idx := mustBoundNodeHashIndex(t, g, "Person", "name")
+	idx.Insert("Alice", id)
 	if err := mgr.CreateIndex("person_name_hash3", idx); err != nil {
 		t.Fatalf("CreateIndex: %v", err)
 	}
 
-	walker := &lpgNodeWalker{g: g.ReadAt(nil)}
-	labelSrc := &lpgLabelResolver{g: g.ReadAt(nil)}
+	snap := g.BeginRead()
+	defer g.EndRead(snap)
+	walker := &lpgNodeWalker{g: g.ReadAt(snap)}
+	labelSrc := &lpgLabelResolver{g: g.ReadAt(snap)}
 
 	seek := ir.NewNodeByIndexSeek("n", "Person", "name", "'Alice'")
 	schema := make(map[string]int)

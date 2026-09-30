@@ -74,14 +74,18 @@ type NodeByIndexSeekSet struct {
 	// admit, when non-nil, qualifies every candidate the index returns — the label
 	// check this rewrite owes because it SUBSUMES a labelled scan leaf exactly as the
 	// single-key seek does. See [NodeByIndexSeek] for the defect and rmp #2423.
-	admit  func(nodeID uint64) bool
-	ctx    context.Context //nolint:containedctx // stored for per-Next ctx check
-	keys   []expr.Value
-	buf    [1]expr.Value // fixed backing buffer — zero-alloc per Next
-	ids    []uint64      // merged NodeIDs, drained once at Init
-	idbuf  [16]uint64    // inline backing for ids — small key sets stay zero-alloc
-	pos    int           // cursor into ids
-	budget uint64        // maximum merged posting count; 0 means unbounded
+	admit func(nodeID uint64) bool
+	// residual and snap, when set by [NodeByIndexSeekSet.AtSnapshot], replace
+	// admit exactly as they do on [NodeByIndexSeek] (rmp #2937).
+	residual SeekResidual
+	snap     snapshotGuard
+	ctx      context.Context //nolint:containedctx // stored for per-Next ctx check
+	keys     []expr.Value
+	buf      [1]expr.Value // fixed backing buffer — zero-alloc per Next
+	ids      []uint64      // merged NodeIDs, drained once at Init
+	idbuf    [16]uint64    // inline backing for ids — small key sets stay zero-alloc
+	pos      int           // cursor into ids
+	budget   uint64        // maximum merged posting count; 0 means unbounded
 }
 
 // NewNodeByIndexSeekSet creates an operator that looks up every key in idx.
@@ -98,6 +102,19 @@ func NewNodeByIndexSeekSet(idx HashLookup, keys []expr.Value, budget uint64) *No
 // admit field (rmp #2423).
 func (op *NodeByIndexSeekSet) Admitting(admit func(nodeID uint64) bool) *NodeByIndexSeekSet {
 	op.admit = admit
+	return op
+}
+
+// AtSnapshot makes op read for a reader at the snapshot started at startTS, and
+// returns op so a builder can chain it onto the constructor: residual.Admit
+// replaces the admit predicate, and when proof cannot vouch for the merged lookup
+// the operator emits residual.AppendMatching over its keys instead — the
+// snapshot's own answer, which the budget does not apply to because it has
+// already been paid for (rmp #2937, see index_snapshot.go). residual and proof
+// must be non-nil.
+func (op *NodeByIndexSeekSet) AtSnapshot(residual SeekResidual, proof SnapshotProof, startTS uint64) *NodeByIndexSeekSet {
+	op.residual = residual
+	op.snap = snapshotGuard{proof: proof, startTS: startTS}
 	return op
 }
 
@@ -146,11 +163,25 @@ func (op *NodeByIndexSeekSet) Init(ctx context.Context) error {
 	}
 
 	op.ids = dedupeSorted(ids)
+	if op.residual != nil && op.snap.declines() {
+		// Asked AFTER every probe; see [SnapshotProof].
+		op.ids = op.residual.AppendMatching(op.keys, op.idbuf[:0])
+		return nil
+	}
 	// The residual predicate runs AFTER the dedupe, so a node is qualified once
 	// however many keys reached it, and BEFORE the budget test, so the budget is
 	// measured against the rows this operator will actually emit. In place, so a
 	// guarded set seek allocates exactly what an unguarded one does (rmp #2423).
-	if op.admit != nil {
+	switch {
+	case op.residual != nil:
+		kept := op.ids[:0]
+		for _, id := range op.ids {
+			if op.residual.Admit(id) {
+				kept = append(kept, id)
+			}
+		}
+		op.ids = kept
+	case op.admit != nil:
 		kept := op.ids[:0]
 		for _, id := range op.ids {
 			if op.admit(id) {

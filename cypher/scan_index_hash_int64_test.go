@@ -15,7 +15,6 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/adjlist"
-	"github.com/FlavioCFOliveira/GoGraph/graph/index/hash"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 )
 
@@ -49,9 +48,13 @@ func buildAgeGraph(t *testing.T, persons []personAgeEntry) *lpg.Graph[string, fl
 }
 
 // installAgeIndex creates and populates a hash.Index[int64] named "age_hash" on
-// the "age" property of all Person nodes.
+// the "age" property of all Person nodes. It is bound to (Person, age) through
+// the Go API, because the planner serves reads only from a bound index
+// (rmp #2938).
 func installAgeIndex(g *lpg.Graph[string, float64]) {
-	idx := hash.New[int64]()
+	idx := boundTestHashIndex(g, "Person", "age", func(pv lpg.PropertyValue) (int64, bool) {
+		return pv.Int64()
+	})
 	if err := g.IndexManager().CreateIndex("age_hash", idx); err != nil {
 		if !strings.Contains(err.Error(), "already exists") {
 			panic(fmt.Sprintf("installAgeIndex CreateIndex: %v", err))

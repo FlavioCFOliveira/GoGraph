@@ -60,6 +60,28 @@
 // PostgreSQL and Memgraph use. Recorded rather than silently rewritten, because
 // a reader who remembers the old contract would otherwise look for a lock that
 // nothing takes. See docs/isolation-design.md for the full model.
+//
+// # Secondary indexes are maintained by the engine's write path only
+//
+// A secondary index registered on [Graph.IndexManager] — a hash or btree property
+// index, or a UNIQUE constraint's backing index — is written by exactly one path:
+// the change fan-out of its [index.Manager], which the Cypher engine drives when a
+// transaction commits, from the changes its write operators recorded. A method of
+// [Graph] that mutates the graph directly delivers no change, so it cannot keep an
+// index current. The contract is therefore:
+//
+//   - Populate a graph through the raw mutators BEFORE its first index exists;
+//     creating an index backfills it from the graph as it stands.
+//   - Once an index is registered, or being built, every raw mutator that can
+//     change what a node index holds — a node's labels, its properties, its
+//     existence — refuses with [ErrIndexedRawWrite] and changes nothing. Write an
+//     indexed graph through the engine.
+//   - The raw EDGE mutators are admitted: no index the module builds consumes an
+//     edge change (see [ErrIndexedRawWrite]).
+//
+// An index registered through the Go API without a binding (for example
+// [index.Manager.CreateIndex] with an index from hash.New) is maintained by no
+// path at all, and the Cypher planner never serves a read from one.
 package lpg
 
 import (
@@ -2014,6 +2036,21 @@ func (g *Graph[N, W]) SetIndexManager(m *index.Manager) {
 // from one atomic read ([index.Manager.Active]), so the mutators stay lock-free;
 // a call that races the registration of the first index is ordered by that read
 // alone.
+//
+// # The edge mutators are not refused (rmp #2062)
+//
+// [Graph.AddEdge], [Graph.RemoveEdge], [Graph.SetEdgeLabel],
+// [Graph.SetEdgeProperty] and the other edge mutators change no node's labels,
+// properties or existence — AddEdge interns a missing endpoint as a new node
+// with no labels and never revives a removed one — so they cannot change what a
+// node index holds. And no index the module builds consumes an edge change:
+// the bound hash and btree indexes the engine registers decline every edge
+// change through [index.ChangeFilter], and [index.Manager.Concerns], which the
+// engine's commit asks before delivering, keeps a batch for an edge change only
+// when a registered filter claims it. A subscriber registered through the Go API
+// that consumes edge changes is outside this contract: the raw edge mutators do
+// not maintain it, and the engine's commit delivers edge changes to it only in a
+// batch delivered for another reason.
 //
 // Callers should match it with [errors.Is].
 var ErrIndexedRawWrite = errors.New("lpg: raw write refused: a secondary index is registered, " +

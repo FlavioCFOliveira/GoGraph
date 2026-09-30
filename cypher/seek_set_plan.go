@@ -138,11 +138,19 @@ func tryBuildIndexSeekSetFromSelection(
 	// The label the subsumed scan leaf carried must still qualify every candidate
 	// (rmp #2423); a set seek that cannot verify it declines, exactly as the
 	// single-key seek does.
-	admit, canVerify := labelAdmitFn(labelSrcFromView(g), label)
-	if !canVerify {
-		return nil, false
+	//
+	// On a snapshot-bound build the guard checks the label, and also proves after
+	// the probes that the index described the reader's snapshot, answering from
+	// that snapshot when it cannot (rmp #2937).
+	guard := hashSeekGuard{snap: bopts.idxSnap, label: label, key: propKey}
+	if !guard.snapshotBound() {
+		admit, canVerify := labelAdmitFn(labelSrcFromView(g), label)
+		if !canVerify {
+			return nil, false
+		}
+		guard.admit = admit
 	}
-	return buildSeekSetOperator(idxMgr, label, propKey, keys, budget, nodeVar, schema, admit, bopts.pendingIdx)
+	return buildSeekSetOperator(idxMgr, label, propKey, keys, budget, nodeVar, schema, guard, bopts.pendingIdx)
 }
 
 // countOrDisjuncts counts the operands of a chain of OR without allocating.
@@ -203,7 +211,7 @@ func buildSeekSetOperator(
 	budget uint64,
 	nodeVar string,
 	schema map[string]int,
-	admit func(uint64) bool,
+	guard hashSeekGuard,
 	pending *pendingIndexDelta,
 ) (exec.Operator, bool) {
 	// The transaction has already moved this coordinate in the graph without the
@@ -233,7 +241,12 @@ func buildSeekSetOperator(
 		if !servable || total == 0 {
 			return nil, false
 		}
-		op := exec.NewNodeByIndexSeekSet(exec.NewStringHashIndex(sl), keys, budget).Admitting(admit)
+		op := exec.NewNodeByIndexSeekSet(exec.NewStringHashIndex(sl), keys, budget)
+		if guard.snapshotBound() {
+			op.AtSnapshot(guard.snap.residualFor(guard.label, guard.key), guard.snap.proof, guard.snap.startTS)
+		} else {
+			op.Admitting(guard.admit)
+		}
 		schema[nodeVar] = schemaWidth(schema)
 		return op, true
 	}

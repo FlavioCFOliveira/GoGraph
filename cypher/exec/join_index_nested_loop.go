@@ -145,6 +145,9 @@ type IndexNestedLoopJoin struct {
 	outerKey expr.Value
 
 	idx NumericPointLookup
+	// snap, when set by [IndexNestedLoopJoin.AtSnapshot], is asked after every seek
+	// whether the index described the reader's snapshot (rmp #2937).
+	snap snapshotGuard
 
 	// ids holds the current outer row's seek result, drained once per row.
 	ids   []uint64
@@ -220,6 +223,16 @@ func NewIndexNestedLoopJoin(outer, inner Operator, idx NumericPointLookup, outer
 // it without the proof would drop rows.
 func (op *IndexNestedLoopJoin) WithProvenNumericCoverage(proven bool) *IndexNestedLoopJoin {
 	op.provenNumericCoverage = proven
+	return op
+}
+
+// AtSnapshot makes op read for a reader at the snapshot started at startTS, and
+// returns op so a builder can chain it: after every seek proof is asked whether
+// the index described that snapshot, and a row whose seek it cannot vouch for
+// takes the fallback path, which drives the inner arm and applies the join
+// equality to each of its rows (rmp #2937). proof must be non-nil.
+func (op *IndexNestedLoopJoin) AtSnapshot(proof SnapshotProof, startTS uint64) *IndexNestedLoopJoin {
+	op.snap = snapshotGuard{proof: proof, startTS: startTS}
 	return op
 }
 
@@ -325,6 +338,19 @@ func (op *IndexNestedLoopJoin) advanceOuter() error {
 		return nil
 	}
 	op.ids = op.idx.LookupAppend(f, op.idbuf[:0])
+	// Asked AFTER the lookup; see [SnapshotProof]. A lookup the proof cannot vouch
+	// for is discarded and this row takes the fallback, which reads the inner arm at
+	// the reader's snapshot (rmp #2937).
+	if op.snap.declines() {
+		op.ids = op.ids[:0]
+		op.fallback = true
+		op.haveOuter = true
+		if err := op.inner.Init(op.ctx); err != nil {
+			return err
+		}
+		op.innerLive = true
+		return nil
+	}
 	op.verifySeekHits = ambiguousSeekKey(f)
 	op.haveOuter = true
 	return nil

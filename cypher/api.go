@@ -577,6 +577,13 @@ type buildOpts struct {
 	// See [pendingIndexDelta] for the measured defect this closes and for why the
 	// two-dimensional key is exactly as tight as the change buffer allows.
 	pendingIdx *pendingIndexDelta
+	// idxSnap is the proof every property-index access path of this build asks
+	// for after its lookup, and the reader's start instant: when the index cannot
+	// be proved to describe the snapshot the build reads at, the access path
+	// answers from the snapshot instead (rmp #2937, see index_snapshot_read.go).
+	// Resolved once per build from the view the build reads through. The zero
+	// value asks for nothing.
+	idxSnap seekSnapshot
 	// reorderSwap is the set of plain Apply nodes whose arms the disjoint-
 	// component ordering peephole (#2091) has decided to swap for THIS query,
 	// keyed by the exact *ir.Apply pointer buildOperator will visit. The read-path
@@ -1442,6 +1449,12 @@ type Engine struct {
 	// suite cannot otherwise observe both answers for one query. No public setter
 	// exists and production never sets it.
 	disableIndexNestedLoopForTest bool
+	// trustIndexSnapshotForTest makes every property-index access path treat the
+	// index as describing its reader's snapshot without asking, which is the
+	// behaviour before rmp #2937. It is a TEST SEAM for the negative controls of
+	// that task's regression tests; no public setter exists and production never
+	// sets it.
+	trustIndexSnapshotForTest bool
 	// commitDecidedHookForTest and indexDeliveredHookForTest are TEST SEAMS for
 	// the commit-decision bracket (rmp #2936), set only by in-package tests before
 	// the engine is shared. The first runs in [ExplicitTx.Commit] after the
@@ -2869,6 +2882,9 @@ func (e *Engine) buildReadPhysical(
 	// an unflushed delta of its own. A statement inside an OPEN write transaction
 	// does not come through here; it comes through [Engine.execUnderBarrier].
 	bopts.indexSeekEnabled = e.indexSeekEnabled
+	// The snapshot proof every property-index access path asks for (rmp #2937),
+	// resolved from the ONE view this whole build reads through.
+	bopts.idxSnap = indexSeekSnapshotOf(rv, e.trustIndexSnapshotForTest)
 	// Min-label scan gating (#2077): enable the smallest-cardinality
 	// multi-label anchor substitution when the Engine permits it. The
 	// substitution is result-identical (a label conjunction is commutative)
@@ -3397,7 +3413,7 @@ func explainWithIndexesNode(
 			// seek does — both replace the Selection and its scan child — so it
 			// renders in the Selection's place (#2183).
 			opName = "NodeByIndexSeekSet"
-		} else if _, fired := tryBuildRangeSeekChild(sel, make(map[string]int), idxMgr, explainGraph, params, prefixSeek, true, nil); fired {
+		} else if _, fired := tryBuildRangeSeekChild(sel, make(map[string]int), idxMgr, explainGraph, params, prefixSeek, true, nil, seekSnapshot{}); fired {
 			// A range seek REPLACES the scan child but the original Selection
 			// Filter is retained on top, so the node renders as Selection over
 			// NodeByIndexRangeScan (not subsumed like the equality seek).
@@ -4177,44 +4193,34 @@ func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstra
 	// ctx-cancellable (rmp #1872): nothing has been registered yet, so a
 	// cancellation here aborts cleanly with no unwind needed.
 	//
-	// THIS SCAN READS THE LIVE GRAPH, AND THAT IS DELIBERATE (rmp #2792, kept by
-	// rmp #2798). It is the VALIDATION scan only; the UNIQUE value-set is no
-	// longer seeded from it (see the barrier below). Its live read is
-	// load-bearing, and that was measured rather than reasoned about: an explicit
-	// transaction that has EAGERLY written a duplicate has not committed it, so a
-	// snapshot read would ACCEPT the constraint — and nothing would then refuse
-	// that transaction's commit, because UNIQUE is reserved at WRITE time
-	// (cypher/constraint_check.go) and this transaction's statement ran before
-	// the constraint existed. Measured on this build: with the live read the DDL
-	// is refused ("pre-existing data contains duplicate value"); with a snapshot
-	// read the DDL succeeds, the commit returns nil, and two COMMITTED nodes hold
-	// the same value under an active UNIQUE constraint. A conservatively refused
-	// DDL is a poor answer; a Consistency breach is a different category.
+	// THE SCAN READS COMMITTED STATE ONLY (rmp #2946). It reads a snapshot taken
+	// after the hold below has waited out every commit already deciding and the
+	// frontier covers every commit allocated so far, so the snapshot is the
+	// committed state, and it stays the committed state until the constraint is
+	// registered: while the hold is in force no explicit transaction can decide a
+	// commit, and the schema gate the caller holds keeps every autocommit
+	// statement out.
 	//
-	// The SAME argument holds for NOT NULL, in the mirror direction and with the
-	// same verdict — measured, rmp #2798. An open transaction that has eagerly
-	// NULLED a committed property makes a compliant node look violating, so the
-	// live scan refuses a DDL that the committed data would have allowed. That
-	// conservative refusal is deliberately kept, because the alternative is not
-	// symmetric: with validation moved to the snapshot alone, the DDL SUCCEEDS,
-	// the transaction's COMMIT of the removal returns nil, and a committed node
-	// carries no value under an active NOT NULL constraint. Nothing refuses that
-	// commit for the same shape of reason as UNIQUE — [ExplicitTx] allocates its
-	// touched-node set at BeginTx, and a transaction that began before the
-	// constraint existed has none, so its commit-time NOT NULL check is a no-op.
-	// Both single-view designs are therefore unsound, in opposite directions, and
-	// the committed-state scan below is ADDED to this one rather than replacing it.
+	// An open explicit transaction's EAGER, uncommitted writes are therefore not
+	// validated here, in either direction, and must not be: a duplicate value or a
+	// removed property it has written may never commit, and refusing the DDL for
+	// it refused a constraint the committed data satisfies. Measured before this
+	// rule: with a committed (:L {s: 'v'}) and an open transaction that had run
+	// CREATE (:L {s: 'v'}), CREATE CONSTRAINT … IS UNIQUE was refused with
+	// "pre-existing data contains duplicate value", and the NOT NULL DDL was
+	// refused the same way after an open REMOVE n.s or CREATE (:L).
 	//
-	// The converse hole — a COMMITTED duplicate that an open transaction has
-	// eagerly removed, which this live scan cannot see — is closed by the seed
-	// inside the barrier, which reads committed state and lets SeedUniqueValues
-	// refuse. Its NOT NULL counterpart is committedNull, likewise inside the
-	// barrier.
+	// Such a transaction began before the constraint existed, and it is validated
+	// at its own COMMIT instead, against the latest committed state merged with its
+	// own writes (the straddler validation of rmp #2936,
+	// [exec.ConstraintRegistry.ValidateStraddler]): its duplicate or its null is
+	// refused there, so no committed state ever violates the registered
+	// constraint. That validation is what made the live read of rmp #2792 and
+	// rmp #2798 — which refused the DDL because nothing else would have refused
+	// such a commit — unnecessary.
 	//
 	// vals is collected ONLY for UNIQUE. NOT NULL reads nothing but anyNull —
-	// validatePreExisting ignores the values and there is no value-set to seed —
-	// so a NOT NULL DDL used to fill, and discard, one PropertyValue per labelled
-	// node.
+	// validatePreExisting ignores the values and there is no value-set to seed.
 	// NO COMMIT MAY DECIDE WHILE THE CONSTRAINT IS BUILT (rmp #2936). The scans
 	// below validate the existing data and seed the UNIQUE value-set and backing
 	// index from one snapshot, and nothing records a commit that lands in
@@ -4244,7 +4250,13 @@ func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstra
 	if kind == exec.ConstraintUnique {
 		vals = &values
 	}
-	anyNull, serr := e.scanLabelProperty(ctx, e.g.ReadAt(nil), p.Label, p.Property, vals)
+	// The horizon slot is returned as soon as the scan ends, panic included,
+	// hence the closure.
+	anyNull, serr := func() (bool, error) {
+		snap := e.g.BeginRead()
+		defer e.g.EndRead(snap)
+		return e.scanLabelProperty(ctx, e.g.ReadAt(snap), p.Label, p.Property, vals)
+	}()
 	if serr != nil {
 		return nil, serr
 	}
@@ -4259,14 +4271,14 @@ func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstra
 	// barrier (ApplyAtomically) so concurrent Graph.View readers never observe
 	// the constraint or its backing index in a partially-constructed state.
 	// The visibility barrier is not re-entrant, so nothing inside the closure may
-	// call Graph.View or Graph.ApplyAtomically. The LIVE scanLabelProperty above is
+	// call Graph.View or Graph.ApplyAtomically. The validation scan above is
 	// outside it for the ORDERING reason rather than that one — it must complete
 	// before the registration it validates — and takes no barrier itself, so it is
 	// not constrained to sit outside; commitConstraintTx only appends a WAL frame
-	// and is outside so the append is not held under visMu. The COMMITTED-state NOT
-	// NULL scan is INSIDE, at the top of the closure, and calls neither View nor
-	// ApplyAtomically — see the comment on it for why that placement is what makes
-	// its observation gap-free (rmp #2798).
+	// and is outside so the append is not held under visMu. No commit can land
+	// between that scan and the registration: the commit-decision hold above keeps
+	// every explicit transaction's commit out, and the schema gate every autocommit
+	// statement.
 	//
 	// Lock ordering: the caller holds [Engine.schemaMu] exclusively, and schemaMu is
 	// taken before visMu everywhere in the write path — the ApplyAtomically call
@@ -4281,8 +4293,8 @@ func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstra
 		// every CREATE, DELETE, SET, and REMOVE, so NodeByIndexSeek queries
 		// always see the live state and checkUniqueViolation never reports stale
 		// "ghost" cardinality for deleted values (#1342). The bound index is
-		// backfilled from the live graph before it is registered so pre-existing
-		// nodes are covered immediately.
+		// backfilled from a committed snapshot before it is registered so
+		// pre-existing nodes are covered immediately.
 		//
 		// backfillNodeHashIndex reads graph state directly (no View/Apply) and
 		// is safe to call inside the barrier. newBoundNodeHashIndex only
@@ -4290,70 +4302,12 @@ func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstra
 		// it installs keep reading e.g.ReadAt(nil), the live value, and must: they
 		// run at commit time, on the state the index has to converge to.
 		//
-		// seedValues is what the value-set is seeded from. It starts as the live
-		// validation scan's values and is used as such ONLY on the unbound
-		// fallback below, where there is no backing index for it to agree with;
-		// on every real path the backfill's own reads replace it (rmp #2792).
+		// seedValues is what the value-set is seeded from. It starts as the
+		// validation scan's committed values and is used as such ONLY on the
+		// unbound fallback below, where there is no backing index for it to agree
+		// with; on every real path the backfill's own reads replace it (rmp #2792).
 		seedValues := values
 		op := exec.NewCreateConstraintOp(p.Name, p.Label, p.Property, kind, p.IfNotExists, idxMgr, e.constraintReg, e.ClearPlanCache)
-		if kind == exec.ConstraintNotNull {
-			// COMMITTED-STATE NOT NULL VALIDATION (rmp #2798).
-			//
-			// The live scan above cannot see that a node LACKS the property when an
-			// open transaction has eagerly FILLED it: the fill has not committed, the
-			// live read finds a value, and the DDL registered a NOT NULL constraint
-			// over a committed node that carries nothing. Measured on the pre-fix
-			// build, one goroutine and no concurrency at all: after an eager
-			// `SET n.email = 'x@x'` on a node with no committed email, CREATE
-			// CONSTRAINT returned err = <nil> with the constraint REGISTERED, and the
-			// rollback then left that node with no email under an active constraint.
-			// That is an ACID Consistency breach, and it is the same defect as
-			// rmp #2778 and rmp #2792 from the other side.
-			//
-			// This scan reads COMMITTED state, and it is ADDED to the live scan, not
-			// substituted for it. Either view alone is unsound — see the measurement
-			// recorded above the live scan — so the constraint is registered only when
-			// NEITHER the committed state NOR any in-flight eager state violates it.
-			// The refusal is deliberately conservative in the direction where a
-			// conservative answer is merely unhelpful, and never in the direction where
-			// it would be a breach.
-			//
-			// PLACED INSIDE THE BARRIER, immediately before applyDDLOp, for the reason
-			// rmp #2792 established for the UNIQUE seed and verified on this very path:
-			// commit-time fan-out runs under [lpg.Graph.ApplyInVersionedTx], which
-			// holds the barrier SHARED, so while this EXCLUSIVE hold is in force no
-			// transaction can commit at all. There is therefore NO window between this
-			// observation of the committed state and the registration it authorises —
-			// which the same scan placed outside the barrier could not claim, because
-			// [ExplicitTx] does not take the schema gate and its commit is not excluded
-			// by the caller's StrongLock.
-			//
-			// Re-entrancy: [Engine.scanLabelProperty] takes no barrier and calls
-			// neither Graph.View nor Graph.ApplyAtomically, and BeginRead/EndRead touch
-			// only the reclamation horizon (atomics) and the MVCC clock — never visMu,
-			// never the schema gate. The documented order schemaGate -> writer
-			// admission -> visMu is untouched. The horizon slot is returned before
-			// applyDDLOp, panic included, hence the closure.
-			//
-			// Nothing is registered yet, so a violation — or a ctx cancellation, which
-			// this scan polls — aborts the whole DDL cleanly with no unwind needed.
-			// validatePreExisting is reused so the refusal wording and the
-			// [exec.ErrConstraintViolation] wrap have one source of truth.
-			var committedNull bool
-			cerr := func() error {
-				snap := e.g.BeginRead()
-				defer e.g.EndRead(snap)
-				var serr error
-				committedNull, serr = e.scanLabelProperty(ctx, e.g.ReadAt(snap), p.Label, p.Property, nil)
-				return serr
-			}()
-			if cerr != nil {
-				return cerr
-			}
-			if err := validatePreExisting(kind, p.Label, p.Property, nil, committedNull); err != nil {
-				return err
-			}
-		}
 		if kind == exec.ConstraintUnique {
 			boundIdx, bidxErr := newBoundNodeHashIndex(e.g.ReadAt(nil), p.Label, p.Property)
 			if bidxErr == nil {
@@ -4416,8 +4370,8 @@ func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstra
 			// On binding error fall through: the operator uses an unbound
 			// index as a safe fallback. The value-set (seeded below) remains
 			// the primary enforcement source; the secondary check is cosmetic.
-			// That branch keeps the live validation values, because with no
-			// backing index there is no second structure for them to agree with.
+			// That branch keeps the validation scan's committed values, because with
+			// no backing index there is no second structure for them to agree with.
 			// newBoundNodeHashIndex fails only on an empty label or property,
 			// which the DDL parser cannot produce.
 		}
@@ -4426,13 +4380,12 @@ func (e *Engine) createConstraintLocked(ctx context.Context, p *ir.CreateConstra
 		}
 		if kind == exec.ConstraintUnique {
 			if err := e.constraintReg.SeedUniqueValues(p.Label, p.Property, seedValues); err != nil {
-				// REACHABLE SINCE rmp #2792, and when it fires it is the correct
-				// refusal. validatePreExisting accepted the LIVE values; these are
-				// the COMMITTED ones, so a duplicate that an open transaction had
-				// eagerly removed is seen here and nowhere earlier. Measured before
-				// the fix: that constraint was REGISTERED over committed data still
-				// holding the duplicate. The unwind below is what refuses it, and
-				// it also remains the defensive path it always was.
+				// DEFENSIVE since rmp #2946. validatePreExisting and the backfill now
+				// read the same committed state — no commit can land between them
+				// under the commit-decision hold and the schema gate — so the values
+				// seeded here are the ones already found free of duplicates. The
+				// unwind below keeps a refusal here from leaving a constraint
+				// registered over a duplicate.
 				return e.unwindConstraintRegistration(err, p.Name, p.Label, p.Property, kind, idxMgr)
 			}
 		}
@@ -4657,13 +4610,11 @@ func (e *Engine) dropConstraintLocked(ctx context.Context, p *ir.DropConstraint,
 // most once per fail-stopped store, and makes this function identical in
 // discipline to createConstraintLocked instead of a second variant free to drift.
 //
-// NO UNION with a live read is taken, and that is the difference from rmp #2798.
-// There the union is over a VIOLATION predicate, so admitting the live view only
-// ever refuses a DDL that might have been legal — unhelpful, never a breach.
-// Here a live value would be merged into the enforcement value-set permanently,
-// so a phantom from a rolled-back transaction would refuse a legitimate write
-// forever. Conservative in the harmless direction there; not conservative at all
-// here.
+// NO UNION with a live read is taken. A live value would be merged into the
+// enforcement value-set permanently, so a phantom from a rolled-back transaction
+// would refuse a legitimate write forever. (CREATE CONSTRAINT once took such a
+// union over its VIOLATION predicate, rmp #2798; since rmp #2946 it validates
+// committed state only, as this does.)
 //
 // Adding an exclusion is NOT how this is done: an explicit transaction still does
 // not take the schema gate, and the lock order stays schemaGate -> writer
@@ -4861,7 +4812,7 @@ func commitIndexTx(tx *txn.Tx[string, float64], opKind txn.OpKind, kind txn.Inde
 // keys are interned and immutable, so resolving them outside the walk is safe.
 //
 // It takes NO BARRIER of its own, and it is safe to call from INSIDE one, which
-// the committed-state NOT NULL scan relies on. Both phases used to run inside
+// [Engine.rewindConstraintDrop] relies on. Both phases used to run inside
 // lpg.Graph.View (task #1341) for CATALOG stability across the scan.
 // [Engine.schemaMu] supplies that already, and strictly better: every catalog
 // mutator — both [lpg.Graph.ApplyAtomically] call sites, and every DDL entry point
@@ -4876,12 +4827,10 @@ func commitIndexTx(tx *txn.Tx[string, float64], opKind txn.OpKind, kind txn.Inde
 //
 // On a LIVE view it never gave the scan a consistent view of DATA and still does
 // not: since rmp #2320 an ordinary write holds the barrier SHARED, so a value a
-// concurrent writer is adding may or may not be seen. That is sound for what the
-// live scan is FOR — it pre-validates a constraint that is not yet registered, and
-// every write after registration is checked by the enforcement path — so a value
-// added during the scan is caught there rather than missed. A caller that needs a
-// consistent data view passes a snapshot-bound rv, which is precisely what rmp
-// #2798 added on the NOT NULL path.
+// concurrent writer is adding may or may not be seen, and an explicit
+// transaction's eager, uncommitted writes are seen. A caller that needs a
+// consistent data view passes a snapshot-bound rv, as every constraint
+// validation does since rmp #2946.
 //
 // The #1339 deadlock is prevented by the TWO-PHASE structure below, not by any lock:
 // phase 1 snapshots (id, key) pairs under the mapper shard locks and phase 2 resolves
@@ -7843,6 +7792,9 @@ type planGates struct {
 	// the scan+filter that reads the writer view (rmp #2814). nil means nothing
 	// is pending, which is the state of every read-only build.
 	pendingIdx *pendingIndexDelta
+	// trustIndexSnapshot is the engine's rmp #2937 test seam
+	// ([Engine.trustIndexSnapshotForTest]) carried to the write-path build.
+	trustIndexSnapshot bool
 }
 
 // buildPlanWithMutatorFull is the engine-internal variant of
@@ -7916,6 +7868,12 @@ func buildPlanWithMutatorFull(
 	// transaction started.
 	bopts.indexSeekEnabled = gates.indexSeek
 	bopts.pendingIdx = gates.pendingIdx
+	// The snapshot proof (rmp #2937), from the view the label resolver reads
+	// through — the writing transaction's own view on the engine's write path. A
+	// caller-supplied resolver carries no view, and its build reads unguarded.
+	if r, ok := labelSrc.(*lpgLabelResolver); ok {
+		bopts.idxSnap = indexSeekSnapshotOf(r.g, gates.trustIndexSnapshot)
+	}
 	// The expression-level evaluators (rmp #2660). Without them [evalRow] saw two
 	// nil fields and degraded to the bare [expr.Eval] path for every expression in
 	// a writing statement, so a pattern predicate, an EXISTS { … } outside WHERE
@@ -13832,13 +13790,19 @@ func buildIndexSeekOperator(
 		return nil, fmt.Errorf("cypher: NodeByIndexSeek on %q.%q cannot verify the label: "+
 			"the label resolver supplies no per-node membership check", p.Label, p.Property)
 	}
+	// A resolver bound to a view carries the reader's snapshot, so this form
+	// guards its lookup exactly as the Selection rewrite does (rmp #2937).
+	guard := hashSeekGuard{admit: admit, label: p.Label, key: p.Property}
+	if r, ok := labelSrc.(*lpgLabelResolver); ok {
+		guard.snap = indexSeekSnapshotOf(r.g, false)
+	}
 	names := idxMgr.ListIndexes()
 	for _, name := range names {
 		sub, err := idxMgr.GetIndex(name)
 		if err != nil || sub.Kind() != "hash" || !indexCoversNode(sub, p.Label, p.Property) {
 			continue
 		}
-		if op, ok := tryNewHashSeek(sub, seekVal, admit); ok {
+		if op, ok := tryNewHashSeekGuarded(sub, seekVal, guard); ok {
 			schema[p.NodeVar] = schemaWidth(schema)
 			return op, nil
 		}
@@ -13882,15 +13846,23 @@ func tryBuildIndexSeekFromSelection(
 	if err != nil || seekVal == nil {
 		return nil, false, err
 	}
-	admit, canVerify := labelAdmitFn(labelSrc, label)
-	if !canVerify {
-		return nil, false, nil
+	// The seek subsumes the Selection, so it has no residual value check: what it
+	// returns must be its reader's snapshot, which the guard proves after every
+	// lookup and falls back to when it cannot (rmp #2937). A guarded seek's label
+	// check is the guard's; only an unguarded build allocates the closure.
+	guard := hashSeekGuard{snap: bopts.idxSnap, label: label, key: propKey}
+	if !guard.snapshotBound() {
+		admit, canVerify := labelAdmitFn(labelSrc, label)
+		if !canVerify {
+			return nil, false, nil
+		}
+		guard.admit = admit
 	}
-	if op, ok := tryNamedHashSeek(idxMgr, label, propKey, seekVal, admit, bopts.pendingIdx); ok {
+	if op, ok := tryNamedHashSeek(idxMgr, label, propKey, seekVal, guard, bopts.pendingIdx); ok {
 		schema[nodeVar] = schemaWidth(schema)
 		return op, true, nil
 	}
-	if op, ok := tryAnyHashSeek(idxMgr, label, propKey, seekVal, admit, bopts.pendingIdx); ok {
+	if op, ok := tryAnyHashSeek(idxMgr, label, propKey, seekVal, guard, bopts.pendingIdx); ok {
 		schema[nodeVar] = schemaWidth(schema)
 		return op, true, nil
 	}
@@ -13946,15 +13918,36 @@ type boundNodeIndex interface {
 }
 
 // indexCoversNode reports whether sub may serve an equality seek for the
-// (label, propKey) predicate. A bound index covers exactly its declared
-// (label, property) pair — serving any other predicate would return the
-// wrong rows, because the NodeByIndexSeek rewrite replaces the label scan
-// and the filter entirely. An index without coverage metadata (a manually
-// registered Go-API index) is accepted, preserving the historical
-// name-convention contract for that wiring. Matching is case-sensitive:
-// openCypher labels and property keys are case-sensitive even though the
-// auto-generated index NAME is lowercased.
+// (label, propKey) predicate. Only a BOUND index qualifies, and it covers exactly
+// its declared (label, property) pair — serving any other predicate would return
+// the wrong rows, because the NodeByIndexSeek rewrite replaces the label scan and
+// the filter entirely. Matching is case-sensitive: openCypher labels and property
+// keys are case-sensitive even though the auto-generated index NAME is
+// lowercased.
+//
+// An index without a binding — one registered through the Go API with
+// [index.Manager.CreateIndex], whatever its name — is never covering (rmp #2938).
+// The engine's commit-time maintenance delivers a change only to a subscriber
+// whose [index.ChangeFilter] claims it, and an unbound hash or btree index claims
+// none, so its contents describe no state of the graph. Measured before this
+// rule: an empty unbound hash index registered under the auto-generated name, or
+// under any other name, made `MATCH (n:L {s: 'f7'})` return 0 rows while the
+// label scan returned 1.
 func indexCoversNode(sub index.Subscriber, label, propKey string) bool {
+	b, ok := sub.(boundNodeIndex)
+	if !ok {
+		return false
+	}
+	bl, bp, bound := b.BoundNode()
+	return bound && bl == label && bp == propKey
+}
+
+// indexDeclaresNodeKey reports whether sub declares the key type of the
+// (label, propKey) property for parameter type inference ([indexedPropKind]). It
+// keeps the coverage rule [indexCoversNode] had before rmp #2938, under which an
+// index with no binding is accepted: that change is confined to the access paths
+// that read an index's contents, and type inference reads only its key type.
+func indexDeclaresNodeKey(sub index.Subscriber, label, propKey string) bool {
 	b, ok := sub.(boundNodeIndex)
 	if !ok {
 		return true
@@ -13969,7 +13962,7 @@ func indexCoversNode(sub index.Subscriber, label, propKey string) bool {
 // tryNamedHashSeek looks up the auto-named hash index for a (label,
 // propKey) pair and returns the seek operator + true when present
 // and applicable to seekVal.
-func tryNamedHashSeek(idxMgr *index.Manager, label, propKey string, seekVal expr.Value, admit func(uint64) bool, pending *pendingIndexDelta) (exec.Operator, bool) {
+func tryNamedHashSeek(idxMgr *index.Manager, label, propKey string, seekVal expr.Value, guard hashSeekGuard, pending *pendingIndexDelta) (exec.Operator, bool) {
 	if label == "" || propKey == "" {
 		return nil, false
 	}
@@ -13986,13 +13979,13 @@ func tryNamedHashSeek(idxMgr *index.Manager, label, propKey string, seekVal expr
 	if err != nil || sub.Kind() != "hash" || !indexCoversNode(sub, label, propKey) {
 		return nil, false
 	}
-	return tryNewHashSeek(sub, seekVal, admit)
+	return tryNewHashSeekGuarded(sub, seekVal, guard)
 }
 
 // tryAnyHashSeek iterates every registered index and returns the
 // first hash index that both covers the (label, propKey) predicate and can
 // serve seekVal. It is the fallback when the named-index lookup misses.
-func tryAnyHashSeek(idxMgr *index.Manager, label, propKey string, seekVal expr.Value, admit func(uint64) bool, pending *pendingIndexDelta) (exec.Operator, bool) {
+func tryAnyHashSeek(idxMgr *index.Manager, label, propKey string, seekVal expr.Value, guard hashSeekGuard, pending *pendingIndexDelta) (exec.Operator, bool) {
 	// See [tryNamedHashSeek]: the same decline, applied before the listing walk so
 	// a blocked coordinate costs no GetIndex calls (rmp #2814).
 	if pending.blocksNodeIndex(label, propKey) {
@@ -14003,7 +13996,7 @@ func tryAnyHashSeek(idxMgr *index.Manager, label, propKey string, seekVal expr.V
 		if err != nil || sub.Kind() != "hash" || !indexCoversNode(sub, label, propKey) {
 			continue
 		}
-		if op, ok := tryNewHashSeek(sub, seekVal, admit); ok {
+		if op, ok := tryNewHashSeekGuarded(sub, seekVal, guard); ok {
 			return op, true
 		}
 	}
@@ -14202,8 +14195,46 @@ type hashInt64Lookup interface {
 	LookupAppend(value int64, dst []uint64) []uint64
 }
 
-// tryNewHashSeek attempts to build a NodeByIndexSeek operator using sub as the
-// hash index. It returns (nil, false) when sub is not a supported hash type, or
+// hashSeekGuard is what an equality seek over a labelled scan owes its reader:
+// the label check (rmp #2423) and, on a snapshot-bound build, the proof that the
+// index described the reader's snapshot (rmp #2937). It is passed by value so a
+// seek that is declined allocates nothing for it.
+type hashSeekGuard struct {
+	// admit is the label check of an unguarded build; a snapshot-bound build
+	// checks the label through its residual instead.
+	admit      func(uint64) bool
+	snap       seekSnapshot
+	label, key string
+}
+
+// snapshotBound reports whether the seek is built for a reader at a snapshot and
+// can fall back to that snapshot's label scan.
+func (g hashSeekGuard) snapshotBound() bool {
+	return g.snap.guarded() && g.label != "" && g.key != ""
+}
+
+// newHashSeekOp builds the seek operator with or without a residual predicate, so
+// the forms are chosen in ONE place and a future seek site cannot silently pick an
+// unguarded one (rmp #2423, rmp #2937).
+func newHashSeekOp(idx exec.HashLookup, seekVal expr.Value, guard hashSeekGuard) *exec.NodeByIndexSeek {
+	if guard.snapshotBound() {
+		return exec.NewNodeByIndexSeekAtSnapshot(idx, seekVal,
+			guard.snap.residualFor(guard.label, guard.key), guard.snap.proof, guard.snap.startTS)
+	}
+	if guard.admit == nil {
+		return exec.NewNodeByIndexSeek(idx, seekVal)
+	}
+	return exec.NewNodeByIndexSeekAdmitting(idx, seekVal, guard.admit)
+}
+
+// tryNewHashSeek is [tryNewHashSeekGuarded] with a label check and no snapshot
+// proof.
+func tryNewHashSeek(sub index.Subscriber, seekVal expr.Value, admit func(uint64) bool) (*exec.NodeByIndexSeek, bool) {
+	return tryNewHashSeekGuarded(sub, seekVal, hashSeekGuard{admit: admit})
+}
+
+// tryNewHashSeekGuarded attempts to build a NodeByIndexSeek operator using sub as the
+// hash index, guarded by guard. It returns (nil, false) when sub is not a supported hash type, or
 // when seekVal's kind is incompatible with the index key type.
 //
 // The kind gate keeps the index a transparent optimisation: a string parameter
@@ -14212,22 +14243,12 @@ type hashInt64Lookup interface {
 // back to the scan+filter, which yields the same zero-row result a non-indexed
 // graph would — rather than building a seek that fails at Init with
 // [exec.ErrIndexTypeMismatch].
-// newHashSeekOp builds the seek operator with or without a residual predicate, so
-// the two forms are chosen in ONE place and a future seek site cannot silently pick
-// the unguarded one (rmp #2423).
-func newHashSeekOp(idx exec.HashLookup, seekVal expr.Value, admit func(uint64) bool) *exec.NodeByIndexSeek {
-	if admit == nil {
-		return exec.NewNodeByIndexSeek(idx, seekVal)
-	}
-	return exec.NewNodeByIndexSeekAdmitting(idx, seekVal, admit)
-}
-
-func tryNewHashSeek(sub index.Subscriber, seekVal expr.Value, admit func(uint64) bool) (*exec.NodeByIndexSeek, bool) {
+func tryNewHashSeekGuarded(sub index.Subscriber, seekVal expr.Value, guard hashSeekGuard) (*exec.NodeByIndexSeek, bool) {
 	if sl, ok := sub.(hashStringLookup); ok {
 		if seekVal.Kind() != expr.KindString {
 			return nil, false
 		}
-		return newHashSeekOp(exec.NewStringHashIndex(sl), seekVal, admit), true
+		return newHashSeekOp(exec.NewStringHashIndex(sl), seekVal, guard), true
 	}
 	if il, ok := sub.(hashInt64Lookup); ok {
 		if seekVal.Kind() != expr.KindInteger {
@@ -14243,7 +14264,7 @@ func tryNewHashSeek(sub index.Subscriber, seekVal expr.Value, admit func(uint64)
 		// it on float64 and keep a residual filter (as the range companion does),
 		// or gate this branch to decline cross-type — otherwise a float-valued node
 		// equal to an integer seek would be silently dropped.
-		return newHashSeekOp(exec.NewInt64HashIndex(il), seekVal, admit), true
+		return newHashSeekOp(exec.NewInt64HashIndex(il), seekVal, guard), true
 	}
 	return nil, false
 }
@@ -14262,7 +14283,7 @@ func indexedPropKind(idxMgr *index.Manager, label, property string) (expr.Kind, 
 	}
 	wantName := strings.ToLower(label) + "_" + strings.ToLower(property) + "_hash"
 	if sub, err := idxMgr.GetIndex(wantName); err == nil && sub.Kind() == "hash" &&
-		indexCoversNode(sub, label, property) {
+		indexDeclaresNodeKey(sub, label, property) {
 		if k, ok := hashIndexKind(sub); ok {
 			return k, true
 		}
@@ -14272,7 +14293,7 @@ func indexedPropKind(idxMgr *index.Manager, label, property string) (expr.Kind, 
 	// index for an unrelated label.
 	for _, name := range idxMgr.ListIndexes() {
 		sub, err := idxMgr.GetIndex(name)
-		if err != nil || sub.Kind() != "hash" || !indexCoversNode(sub, label, property) {
+		if err != nil || sub.Kind() != "hash" || !indexDeclaresNodeKey(sub, label, property) {
 			continue
 		}
 		if k, ok := hashIndexKind(sub); ok {
@@ -20287,7 +20308,8 @@ func (e *Engine) execUnderBarrier(
 			planGates{rangeSeek: e.rangeSeekEnabled, prefixSeek: e.prefixSeekEnabled,
 				minLabelScan: e.minLabelScanEnabled, bitmapIntersect: e.bitmapIntersectEnabled,
 				hashJoin: e.hashJoinEnabled, indexSeek: e.indexSeekEnabled,
-				pendingIdx: mutatorIndexDelta(mutator, plan)},
+				pendingIdx:         mutatorIndexDelta(mutator, plan),
+				trustIndexSnapshot: e.trustIndexSnapshotForTest},
 			&evals)
 		if berr != nil {
 			buildErr = berr

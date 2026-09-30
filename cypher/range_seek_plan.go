@@ -182,7 +182,7 @@ func buildRangeSeekIfEnabled(
 		return nil, false
 	}
 	return tryBuildRangeSeekChild(sel, schema, idxMgr, g, params,
-		bopts.prefixSeekEnabled, bopts.bitmapIntersectEnabled, bopts.pendingIdx)
+		bopts.prefixSeekEnabled, bopts.bitmapIntersectEnabled, bopts.pendingIdx, bopts.idxSnap)
 }
 
 // tryBuildRangeSeekChild attempts to build a NodeByIndexRangeScan to replace
@@ -238,6 +238,7 @@ func tryBuildRangeSeekChild(
 	prefixSeek bool,
 	intersectSeek bool,
 	pending *pendingIndexDelta,
+	snap seekSnapshot,
 ) (exec.Operator, bool) {
 	if idxMgr == nil || g == nil || sel.PredicateExpr == nil {
 		// No index, or no AST predicate to build the residual Filter from:
@@ -263,16 +264,35 @@ func tryBuildRangeSeekChild(
 	// composition falls straight through to the single-property paths below.
 	if intersectSeek {
 		if op, ok := tryIndexIntersectionSeek(sel, schema, idxMgr, g, lblScan, nodeVar, params, prefixSeek, pending); ok {
-			return op, true
+			return rangeScanAtSnapshot(op, snap), true
 		}
 	}
 	// Try the string-btree path first (a string range over a string-typed
 	// index). When the predicate is not a string range — typically a numeric
 	// range n.age > 30 — fall through to the unified numeric companion.
 	if op, ok := tryStringRangeSeek(sel, schema, idxMgr, g, lblScan, nodeVar, params, prefixSeek, pending); ok {
-		return op, true
+		return rangeScanAtSnapshot(op, snap), true
 	}
-	return tryNumericRangeSeek(sel, schema, idxMgr, g, lblScan, nodeVar, params, pending)
+	op, ok := tryNumericRangeSeek(sel, schema, idxMgr, g, lblScan, nodeVar, params, pending)
+	if !ok {
+		return nil, false
+	}
+	return rangeScanAtSnapshot(op, snap), true
+}
+
+// rangeScanAtSnapshot makes a range, prefix or intersection scan built above ask,
+// after its lookups, whether the index described the reader's snapshot, and emit
+// the label scan it replaced when it did not (rmp #2937). Every one of them is
+// built with the label restriction of the scan leaf it replaces, which is that
+// fallback, and keeps the original predicate as the residual Filter the caller
+// stacks on top, which refines it. The range family cannot fabricate a row
+// through a stale index — the Filter reads the snapshot — but it loses one when a
+// peer's commit has moved a node the snapshot still holds in range out of it.
+func rangeScanAtSnapshot(op exec.Operator, snap seekSnapshot) exec.Operator {
+	if rs, ok := op.(*exec.NodeByIndexRangeScan); ok && snap.guarded() {
+		rs.AtSnapshot(snap.proof, snap.startTS)
+	}
+	return op
 }
 
 // tryStringRangeSeek builds a NodeByIndexRangeScan over a bound string btree

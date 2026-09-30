@@ -75,11 +75,17 @@ type NodeByIndexSeek struct {
 	// planner DECLINES the rewrite altogether when it cannot supply one — an
 	// unverifiable rewrite must not become a silent wrong answer.
 	admit func(nodeID uint64) bool
-	ctx   context.Context //nolint:containedctx // stored for per-Next ctx check
-	buf   [1]expr.Value   // fixed backing buffer — zero-alloc per Next
-	ids   []uint64        // matching NodeIDs, drained once at Init
-	idbuf [8]uint64       // inline backing for ids — singleton/small seeks stay zero-alloc
-	pos   int             // cursor into ids
+	// residual and snap, when set by [NewNodeByIndexSeekAtSnapshot], replace admit:
+	// the label check is residual.Admit, and a lookup snap cannot prove describes
+	// the reader's snapshot is replaced by residual.AppendMatching (rmp #2937).
+	residual SeekResidual
+	snap     snapshotGuard
+	key      [1]expr.Value   // the seek value as a one-key set, for AppendMatching
+	ctx      context.Context //nolint:containedctx // stored for per-Next ctx check
+	buf      [1]expr.Value   // fixed backing buffer — zero-alloc per Next
+	ids      []uint64        // matching NodeIDs, drained once at Init
+	idbuf    [8]uint64       // inline backing for ids — singleton/small seeks stay zero-alloc
+	pos      int             // cursor into ids
 }
 
 // NewNodeByIndexSeek creates a NodeByIndexSeek that looks up seekValue in idx.
@@ -101,6 +107,20 @@ func NewNodeByIndexSeekAdmitting(idx HashLookup, seekValue expr.Value, admit fun
 	return &NodeByIndexSeek{idx: idx, seek: seekValue, admit: admit}
 }
 
+// NewNodeByIndexSeekAtSnapshot is [NewNodeByIndexSeekAdmitting] for a reader at a
+// snapshot: residual.Admit is the label check, and after every lookup proof is
+// asked whether the index described the snapshot started at startTS. When it
+// did not, the operator emits residual.AppendMatching instead of the lookup — the
+// snapshot's own answer (rmp #2937, see index_snapshot.go).
+//
+// residual and proof must be non-nil.
+func NewNodeByIndexSeekAtSnapshot(idx HashLookup, seekValue expr.Value, residual SeekResidual, proof SnapshotProof, startTS uint64) *NodeByIndexSeek {
+	return &NodeByIndexSeek{
+		idx: idx, seek: seekValue, residual: residual,
+		snap: snapshotGuard{proof: proof, startTS: startTS},
+	}
+}
+
 // Init performs the index lookup, draining the matching NodeIDs into the
 // operator's reused buffer. The dominant singleton/small posting list fits the
 // inline idbuf, so a seek allocates nothing after the buffer is established.
@@ -109,6 +129,24 @@ func (op *NodeByIndexSeek) Init(ctx context.Context) error {
 	ids, err := op.idx.LookupAppend(op.seek, op.idbuf[:0])
 	if err != nil {
 		return err
+	}
+	if op.residual != nil {
+		// Asked AFTER the lookup; see [SnapshotProof].
+		if op.snap.declines() {
+			op.key[0] = op.seek
+			ids = op.residual.AppendMatching(op.key[:], op.idbuf[:0])
+		} else {
+			kept := ids[:0]
+			for _, id := range ids {
+				if op.residual.Admit(id) {
+					kept = append(kept, id)
+				}
+			}
+			ids = kept
+		}
+		op.ids = ids
+		op.pos = 0
+		return nil
 	}
 	// The residual predicate is applied HERE, in place, rather than per Next: the
 	// filter runs once per candidate either way, and doing it at Init keeps Next's
