@@ -345,6 +345,12 @@ func exprMapValueToEntries(entityVar string, mv expr.MapValue) (props []propLite
 			pv, perr = valueToPropertyValue(vv)
 		}
 		if perr != nil {
+			if isInvalidPropertyValueErr(perr) {
+				// A list with a null element is refused, not dropped: dropping
+				// it made `SET n += {k: [1, null]}` report success and keep the
+				// old value (rmp #2941).
+				return nil, nil, fmt.Errorf("SET %s: value for key %q: %w", entityVar, k, perr)
+			}
 			continue
 		}
 		props = append(props, propLiteral{key: k, value: pv})
@@ -949,7 +955,7 @@ func parseMapWithNulls(s string, params map[string]expr.Value) (props []propLite
 				nullKeys = append(nullKeys, key)
 				continue
 			}
-			if errors.Is(perr, ErrNestedPropertyValue) {
+			if isInvalidPropertyValueErr(perr) {
 				// A nested collection (e.g. a nested list that valueStringIsNonStorable
 				// does not catch) is a hard InvalidPropertyType error, not a
 				// deferrable non-literal: fail-stop rather than drop the key (F3).

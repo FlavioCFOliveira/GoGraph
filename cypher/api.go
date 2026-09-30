@@ -8139,6 +8139,12 @@ func buildOperatorWrite(
 					}
 					return lpg.PropertyValue{}, false, false, nil
 				}
+				// A list with a null element is refused, not dropped into the
+				// !ok no-op below that reported success and kept the old value
+				// (rmp #2941).
+				if listHasNullElement(v) {
+					return lpg.PropertyValue{}, false, false, errNullListElementProperty("SET", p.PropertyKey)
+				}
 				pv, ok := exprValueToLPGProp(v)
 				if !ok {
 					return lpg.PropertyValue{}, false, false, nil
@@ -9179,6 +9185,11 @@ func buildPropsEvalFn(
 				// rather than store an unserialisable value or drop it silently.
 				return nil, fmt.Errorf("exec: property %s: %w", k, exec.ErrNestedPropertyValue)
 			}
+			if listHasNullElement(v) {
+				// A stored list cannot contain null: refuse rather than drop the
+				// key (rmp #2941).
+				return nil, errNullListElementProperty("property", k)
+			}
 			pv, ok := exprValueToLPGProp(v)
 			if !ok {
 				// A node- or relationship-valued property is InvalidPropertyType
@@ -9334,6 +9345,12 @@ func buildMapEvalFn(
 					return nil, nil, errEntityPropertyValue("property", k)
 				}
 				continue // scalar-vs-NodeID mis-upgrade: drop, as before
+			}
+			// A list with a null element is refused, not dropped: dropping it
+			// made `SET n += {k: [1, null]}` report success and keep the old
+			// value (rmp #2941).
+			if listHasNullElement(v) {
+				return nil, nil, errNullListElementProperty("property", k)
 			}
 			pv, ok := exprValueToLPGProp(v)
 			if !ok {
@@ -9598,6 +9615,11 @@ func buildMergeActionEvals(
 				}
 				return lpg.PropertyValue{}, false, false, nil
 			}
+			// A list with a null element is refused, matching regular SET
+			// (rmp #2941).
+			if listHasNullElement(v) {
+				return lpg.PropertyValue{}, false, false, errNullListElementProperty("MERGE SET", propKey)
+			}
 			pv, ok := exprValueToLPGProp(v)
 			if !ok {
 				return lpg.PropertyValue{}, false, false, nil
@@ -9729,6 +9751,35 @@ func isEntityPropertyValue(v expr.Value) bool {
 // diagnostic matches the shape the map case already produces (rmp #2816).
 func errEntityPropertyValue(clause, key string) error {
 	return fmt.Errorf("exec: %s %s: InvalidPropertyType: a node, relationship or path is not a valid property value", clause, key)
+}
+
+// listHasNullElement reports whether v is a list with a null element.
+//
+// A stored list cannot contain null (rmp #2941; TCK Set1 [10] classifies an
+// unstorable list as InvalidPropertyType). [exprValueToLPGProp] already refuses
+// to convert such a list, but reports the refusal as ok == false, which every
+// SET write path read as "no value produced" and turned into a silent no-op
+// that kept the old value. Each write path tests this first and raises
+// [exec.ErrNullListElement] instead. Nested lists are refused earlier by
+// [isStorableProperty], so only the top-level elements are inspected.
+func listHasNullElement(v expr.Value) bool {
+	lv, ok := v.(expr.ListValue)
+	if !ok {
+		return false
+	}
+	for _, el := range lv {
+		if el == nil || expr.IsNull(el) {
+			return true
+		}
+	}
+	return false
+}
+
+// errNullListElementProperty builds the InvalidPropertyType error a write path
+// raises for a list-valued property with a null element, naming the clause and
+// the key in the shape [errEntityPropertyValue] uses.
+func errNullListElementProperty(clause, key string) error {
+	return fmt.Errorf("exec: %s %s: %w", clause, key, exec.ErrNullListElement)
 }
 
 func exprValueToLPGProp(v expr.Value) (lpg.PropertyValue, bool) {

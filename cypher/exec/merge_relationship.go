@@ -646,6 +646,11 @@ func (op *MergeRelationship) applyRelActions(row Row, srcKey, dstKey string, han
 				// left unchanged to keep the fix in scope — #1965).
 				continue
 			}
+			if isInvalidPropertyValueErr(err) {
+				// An unstorable literal (a nested collection, or a list with a
+				// null element) is refused, never deferred (rmp #2941).
+				return err
+			}
 			fn, has := evals[MergeActionEvalKey(op.relVar, act.key)]
 			if !has {
 				return fmt.Errorf("exec: MergeRelationship: parse value %q: %w", act.value, err)

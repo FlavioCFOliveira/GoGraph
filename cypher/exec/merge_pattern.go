@@ -1427,6 +1427,11 @@ func (op *MergePattern) resolveNonLiteral(act mergeAction, parseErr error, evalR
 	if isNullPropertyValueErr(parseErr) {
 		return true, false, lpg.PropertyValue{}, nil
 	}
+	if isInvalidPropertyValueErr(parseErr) {
+		// An unstorable literal (a nested collection, or a list with a null
+		// element) is refused, never deferred (rmp #2941).
+		return false, false, lpg.PropertyValue{}, parseErr
+	}
 	fn, has := evals[MergeActionEvalKey(act.nodeVar, act.key)]
 	if !has {
 		return false, false, lpg.PropertyValue{}, fmt.Errorf("exec: MergePattern: parse value %q: %w", act.value, parseErr)

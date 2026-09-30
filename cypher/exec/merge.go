@@ -39,7 +39,6 @@ package exec
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 
@@ -760,9 +759,10 @@ func (op *Merge) resolveActionValue(a mergeAction, evals map[string]ValueEvalFn,
 		return lit, true, false, nil
 	case isNullPropertyValueErr(perr):
 		return lpg.PropertyValue{}, false, false, nil
-	case errors.Is(perr, ErrNestedPropertyValue):
-		// A nested collection is a hard InvalidPropertyType error, not a
-		// deferrable non-literal RHS: fail-stop rather than drop the action (F3).
+	case isInvalidPropertyValueErr(perr):
+		// A nested collection, or a list with a null element, is a hard
+		// InvalidPropertyType error, not a deferrable non-literal RHS:
+		// fail-stop rather than drop the action (F3, rmp #2941).
 		return lpg.PropertyValue{}, false, false, perr
 	default:
 		fn, has := evals[MergeActionEvalKey(a.nodeVar, a.key)]

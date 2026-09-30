@@ -66,6 +66,26 @@ var ErrPropertyValueIsNull = errors.New("exec: property value is null (skip)")
 // security F3).
 var ErrNestedPropertyValue = errors.New("exec: InvalidPropertyType: a nested list or map is not a valid property value")
 
+// ErrNullListElement is returned when a property value is a list with a null
+// element. openCypher 9 restricts a property value to a primitive or a list of
+// primitives, and null is not a primitive value; TCK Set1 [10] classifies an
+// unstorable list as InvalidPropertyType, and Neo4j documents that a stored list
+// cannot contain null. Like [ErrNestedPropertyValue] it is a hard, fail-stop
+// error on every write path (rmp #2941): the statement fails and nothing is
+// written. Before it existed, SET treated such a list as a silent no-op that
+// kept the old value, and the CREATE/MERGE literal path stored the list with its
+// nulls removed.
+var ErrNullListElement = errors.New("exec: InvalidPropertyType: a list containing null is not a valid property value")
+
+// isInvalidPropertyValueErr reports whether err is one of the hard
+// InvalidPropertyType refusals a literal or parameter value can earn:
+// [ErrNestedPropertyValue] or [ErrNullListElement]. The literal builders use
+// it to tell a refusal, which fails the statement, from a non-literal
+// expression, which is deferred to a runtime evaluator.
+func isInvalidPropertyValueErr(err error) bool {
+	return errors.Is(err, ErrNestedPropertyValue) || errors.Is(err, ErrNullListElement)
+}
+
 // synthKeyPrefix is the fixed prefix of every synthetic node key produced by
 // [CreateNode.freshNodeKey]. Kept as a constant so the counter-seeding scan in
 // [seedGlobalNodeCounter] and the formatter in [CreateNode.freshNodeKey] cannot
@@ -502,9 +522,10 @@ func parsePropLiteralDeferred(s string) ([]propLiteral, error) {
 			if errors.Is(err, ErrPropertyValueIsNull) {
 				continue // null value: openCypher says do not set the property
 			}
-			if errors.Is(err, ErrNestedPropertyValue) {
-				// A nested collection is a hard InvalidPropertyType error, not a
-				// deferrable non-literal: fail-stop rather than store or drop it (F3).
+			if isInvalidPropertyValueErr(err) {
+				// A nested collection, or a list with a null element, is a hard
+				// InvalidPropertyType error, not a deferrable non-literal:
+				// fail-stop rather than store or drop it (F3, rmp #2941).
 				return nil, err
 			}
 			// Non-literal expression (variable ref, property access, arithmetic):
@@ -732,10 +753,11 @@ func parsePropLiteralWithParamsCtx(s string, params map[string]expr.Value, merge
 				}
 				continue // null value: openCypher says do not set the property
 			}
-			if errors.Is(err, ErrNestedPropertyValue) {
-				// A nested collection (incl. a nested collection reached through a
-				// resolved parameter) is a hard InvalidPropertyType error, not a
-				// deferrable non-literal: fail-stop rather than drop it (F3).
+			if isInvalidPropertyValueErr(err) {
+				// A nested collection or a list with a null element (incl. one
+				// reached through a resolved parameter) is a hard
+				// InvalidPropertyType error, not a deferrable non-literal:
+				// fail-stop rather than drop it (F3, rmp #2941).
 				return nil, err
 			}
 			// Non-literal expression or unresolvable param: silently defer.
@@ -924,8 +946,10 @@ func parsePropScalar(s string) (lpg.PropertyValue, error) {
 // string and nested-bracket boundaries) and recursively calls [parsePropValue]
 // on each element.
 //
-// An empty list literal "[]" produces a zero-element PropList.
-// Null elements are silently dropped (openCypher: [1, null, 3] → [1, 3]).
+// An empty list literal "[]" produces a zero-element PropList. A null element
+// refuses the whole list with [ErrNullListElement] (rmp #2941): a stored list
+// cannot contain null, and dropping the element stored a different value from
+// the one the statement wrote.
 func parsePropList(inner string) (lpg.PropertyValue, error) {
 	inner = strings.TrimSpace(inner)
 	if inner == "" {
@@ -944,7 +968,7 @@ func parsePropList(inner string) (lpg.PropertyValue, error) {
 		pv, err := parsePropValue(part)
 		if err != nil {
 			if errors.Is(err, ErrPropertyValueIsNull) {
-				continue // null inside list: openCypher drops the element
+				return lpg.PropertyValue{}, ErrNullListElement
 			}
 			return lpg.PropertyValue{}, fmt.Errorf("list element %q: %w", part, err)
 		}
@@ -959,6 +983,10 @@ func parsePropList(inner string) (lpg.PropertyValue, error) {
 func exprListToLPGList(lv expr.ListValue) (lpg.PropertyValue, error) {
 	elems := make([]lpg.PropertyValue, 0, len(lv))
 	for _, v := range lv {
+		if v == nil || expr.IsNull(v) {
+			// A stored list cannot contain null (rmp #2941).
+			return lpg.PropertyValue{}, ErrNullListElement
+		}
 		var pv lpg.PropertyValue
 		switch val := v.(type) {
 		case expr.StringValue:
