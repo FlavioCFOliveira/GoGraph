@@ -364,9 +364,19 @@ func (g *Graph[N, W]) noteNodeLife(id graph.NodeID, tx *writeCtx, alive bool, ba
 		sh.died[id] = st
 		displaced = sh.setChurnHeld(false, id, held)
 	}
-	sh.mu.Unlock()
-	g.labelChurn.releaseAll(displaced)
+	// THE GATE IS RAISED UNDER THE LOCK THAT PUBLISHES THE RECORD (rmp #2842).
+	// nodeLifeActive is read lock-free as "no life record exists"; raised after
+	// the unlock, a reader could take the shard lock, find this record, and
+	// still load 0 from the gate. Every reader that can see the record takes
+	// this lock first, so the increment happens-before its observation. The
+	// decrements in the reclaimers stay after their unlocks: there the counter
+	// briefly over-counts, which is the safe direction.
 	g.nodeLifeActive.Add(1)
+	sh.mu.Unlock()
+	if h := g.nodeLifePublishedHookForTest; h != nil {
+		h(id)
+	}
+	g.labelChurn.releaseAll(displaced)
 	return true
 }
 

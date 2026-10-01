@@ -493,6 +493,15 @@ type Graph[N comparable, W any] struct {
 	// interleaving that split an aborted birth and death of one node across two
 	// passes and tombstoned a node that was alive before the transaction.
 	reclaimAbortedLifeHookForTest func(sh *nodeLifeShard)
+	// nodeLifePublishedHookForTest is a TEST-ONLY seam, nil in production and
+	// with no exported setter, called by [Graph.noteNodeLife] IMMEDIATELY after
+	// it releases the life shard's lock on a record it wrote (rmp #2842). That
+	// is the earliest instant any other goroutine can observe the record, so a
+	// test reading the record and [Graph.nodeLifeActive] there sees what a
+	// reader scheduled at that instant would see. It pins that the counter is
+	// published under the same lock as the record: placed after the unlock, the
+	// increment left the record visible while the lock-free gate still read 0.
+	nodeLifePublishedHookForTest func(id graph.NodeID)
 	// labelCountWindowProbe is a TEST-ONLY seam, nil in production and with no
 	// exported setter, called by [Graph.LabelsCountExact] and
 	// [Graph.LabelCountBound] BETWEEN their cardinality read and the gate sample

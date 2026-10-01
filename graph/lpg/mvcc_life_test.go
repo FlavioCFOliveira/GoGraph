@@ -313,3 +313,64 @@ func TestNodeLife_RepeatedDeleteReviveKeepsTheTransactionsPriorState(t *testing.
 			born.at(), born.seq, born.wasAlive, died.at(), died.seq)
 	}
 }
+
+// TestNodeLife_GateIsRaisedBeforeTheRecordIsObservable pins that
+// [Graph.nodeLifeActive] is published under the life shard lock that publishes
+// the record (rmp #2842).
+//
+// The gate is read lock-free as "no life record exists", so a reader that can
+// find a record must never load it at zero. The seam runs at the earliest
+// instant any other goroutine can observe the record — right after the lock is
+// released — and reads both there. Against the old ordering, which raised the
+// gate after the unlock, every record written from a zero gate fails this.
+//
+// Both directions are driven from a zero gate: a birth on a fresh graph, and a
+// death after every life record has been reclaimed.
+func TestNodeLife_GateIsRaisedBeforeTheRecordIsObservable(t *testing.T) {
+	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: false})
+	t.Cleanup(func() { _ = g.Close() })
+	if !g.mvccArmed {
+		t.Fatal("setup: the graph is not MVCC-armed, so no life record is ever written")
+	}
+
+	var observed, atZero int
+	g.nodeLifePublishedHookForTest = func(id graph.NodeID) {
+		if _, hasBorn, _, hasDied := lifePair(g, id); !hasBorn && !hasDied {
+			return
+		}
+		observed++
+		if g.nodeLifeActive.Load() == 0 {
+			atZero++
+		}
+	}
+
+	if got := g.nodeLifeActive.Load(); got != 0 {
+		t.Fatalf("setup: a fresh graph's life gate reads %d, want 0", got)
+	}
+	if err := g.AddNode("a"); err != nil {
+		t.Fatalf("AddNode: %v", err)
+	}
+	if observed != 1 {
+		t.Fatalf("the birth published %d observable life records, want 1", observed)
+	}
+
+	// Drop every life record so the death below is written from a zero gate.
+	// Single-threaded here, which is the exclusion reclaimNodeLife requires.
+	g.reclaimNodeLife(^uint64(0))
+	if got := g.nodeLifeActive.Load(); got != 0 {
+		t.Fatalf("setup: after reclaiming every life record the gate reads %d, want 0", got)
+	}
+	if err := g.RemoveNode("a"); err != nil {
+		t.Fatalf("RemoveNode: %v", err)
+	}
+	g.nodeLifePublishedHookForTest = nil
+
+	if observed != 2 {
+		t.Fatalf("the birth and the death published %d observable life records, want 2", observed)
+	}
+	if atZero != 0 {
+		t.Fatalf("%d of %d life records were observable while nodeLifeActive read 0: the "+
+			"gate was raised after the shard lock was released, so a lock-free reader "+
+			"skips a record it could already see (rmp #2842)", atZero, observed)
+	}
+}
