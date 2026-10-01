@@ -71,10 +71,12 @@ import (
 //
 // The retained outer Selection is never removed, so this can only narrow what
 // that filter examines — the same argument correlated_seek_plan.go relies on. The
-// seek must therefore not UNDER-return, which is what the skip rules in
-// [exec.NodeByIndexSeekSet.Init] establish: a NULL key matches nothing under
-// openCypher, and a key whose type the index cannot hold matches nothing because
-// equality across type groups is FALSE.
+// seek must therefore not UNDER-return. A NULL key matches nothing under
+// openCypher, so [exec.NodeByIndexSeekSet.Init] skips it. A key of any other
+// non-string kind is NOT skippable: the string hash index holds only the
+// string-valued nodes, so a node whose property is the integer 5 is absent from
+// it while `n.s = 5` (or `n.s = 5.0`) is true for it. A set carrying such a key
+// is therefore declined, and the scan answers it (rmp #2954).
 
 // tryBuildIndexSeekSetFromSelection inspects a Selection whose predicate is a
 // disjunction of equalities on one property of a scanned node, and returns a
@@ -132,7 +134,7 @@ func tryBuildIndexSeekSetFromSelection(
 		return nil, false
 	}
 	propKey, keys, ok := extractKeySetFromAST(sel.PredicateExpr, nodeVar, params)
-	if !ok {
+	if !ok || !stringOrNullKeys(keys) {
 		return nil, false
 	}
 	// The label the subsumed scan leaf carried must still qualify every candidate
@@ -151,6 +153,19 @@ func tryBuildIndexSeekSetFromSelection(
 		guard.admit = admit
 	}
 	return buildSeekSetOperator(idxMgr, label, propKey, keys, budget, nodeVar, schema, guard, bopts.pendingIdx)
+}
+
+// stringOrNullKeys reports whether every key is a string or NULL — the only
+// kinds the string hash index answers completely. A numeric, boolean, list or
+// temporal key can equal a node the index does not hold, so a set carrying one
+// must not be served by the seek alone (rmp #2954).
+func stringOrNullKeys(keys []expr.Value) bool {
+	for _, k := range keys {
+		if k != nil && k.Kind() != expr.KindString && k.Kind() != expr.KindNull {
+			return false
+		}
+	}
+	return true
 }
 
 // countOrDisjuncts counts the operands of a chain of OR without allocating.
@@ -262,9 +277,9 @@ func buildSeekSetOperator(
 // mergedPostingCount sums the exact posting counts of the distinct string keys,
 // stopping as soon as the running total exceeds budget.
 //
-// Keys that this index cannot hold contribute nothing and are skipped, mirroring
-// [exec.NodeByIndexSeekSet.Init] — a non-string or NULL key matches nothing on a
-// string-keyed index, so it neither adds postings nor invalidates the seek.
+// A NULL key contributes nothing and is skipped, mirroring
+// [exec.NodeByIndexSeekSet.Init]. Every other key is a string: a set carrying a
+// key of another kind was declined by [stringOrNullKeys] before this runs.
 // servable is false only when the budget is exceeded.
 func mergedPostingCount(card hashStringCardinality, keys []expr.Value, budget uint64) (total uint64, servable bool) {
 	seen := make(map[string]struct{}, len(keys))
