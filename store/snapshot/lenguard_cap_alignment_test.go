@@ -28,11 +28,17 @@ import (
 // stops exercising the write path can never pass by doing nothing (the standard
 // #2742's suite set).
 
-// TestWriterRefusesOversizeStringTableEntry is the CHEAP, fully end-to-end half
-// of the proof: a string-table entry one byte over the readers' 1 MiB cap, put
-// through the real public writers on a real graph. Before the fix every case
-// here wrote a snapshot that its own reader rejects; after it, each writer
+// TestWriterRefusesOversizeStringTableEntry is the CHEAP half of the proof: a
+// string-table entry one byte over the readers' 1 MiB cap. Before the fix every
+// case here wrote a snapshot that its own reader rejects; after it, each writer
 // fail-stops with [ErrFieldTooLong].
+//
+// Since rmp #2748 a graph cannot carry such a label or property key at all:
+// graph/lpg refuses any token over lpg.MaxTokenLen (65535 bytes), far below this
+// cap, so the public writers can no longer be handed one. The two graph cases
+// therefore assert that refusal first — the layer that now stops the name — and
+// then drive the writer's own guard with the same length, which stays as the
+// backstop. [TestStringTableCapIsAboveTheTokenLimit] pins the ordering.
 func TestWriterRefusesOversizeStringTableEntry(t *testing.T) {
 	oversize := strings.Repeat("k", maxStringTableLen+1)
 
@@ -49,11 +55,10 @@ func TestWriterRefusesOversizeStringTableEntry(t *testing.T) {
 				if err := g.AddNode("n"); err != nil {
 					t.Fatalf("AddNode: %v", err)
 				}
-				if err := g.SetNodeProperty("n", oversize, lpg.StringValue("v")); err != nil {
-					t.Fatalf("SetNodeProperty: %v", err)
+				if err := g.SetNodeProperty("n", oversize, lpg.StringValue("v")); !errors.Is(err, lpg.ErrTokenTooLong) {
+					t.Fatalf("SetNodeProperty(%d-byte key) = %v, want lpg.ErrTokenTooLong", len(oversize), err)
 				}
-				_, _, err := WriteProperties(w, g, nil)
-				return err
+				return checkSnapshotStringLen("property key", len(oversize))
 			},
 		},
 		{
@@ -65,11 +70,10 @@ func TestWriterRefusesOversizeStringTableEntry(t *testing.T) {
 				if err := g.AddNode("n"); err != nil {
 					t.Fatalf("AddNode: %v", err)
 				}
-				if err := g.SetNodeLabel("n", oversize); err != nil {
-					t.Fatalf("SetNodeLabel: %v", err)
+				if err := g.SetNodeLabel("n", oversize); !errors.Is(err, lpg.ErrTokenTooLong) {
+					t.Fatalf("SetNodeLabel(%d-byte label) = %v, want lpg.ErrTokenTooLong", len(oversize), err)
 				}
-				_, _, err := WriteLabels(w, g, nil)
-				return err
+				return checkSnapshotStringLen("label name", len(oversize))
 			},
 		},
 		{
@@ -276,9 +280,14 @@ func TestFormerlyVacuousPerRecordChecksCanNowFail(t *testing.T) {
 func TestCapBoundaryStillWrites(t *testing.T) {
 	reached := 0
 
-	// Exactly at the string-table cap: writes, and round-trips through the reader.
+	// The largest key a graph can hold (lpg.MaxTokenLen, rmp #2748) writes and
+	// round-trips through the reader. A graph cannot reach the string-table cap
+	// itself any more; [checkSnapshotStringLen] is pinned at that cap below.
 	t.Run("string table at cap round-trips", func(t *testing.T) {
-		atCap := strings.Repeat("k", maxStringTableLen)
+		atCap := strings.Repeat("k", lpg.MaxTokenLen)
+		if err := checkSnapshotStringLen("property key", maxStringTableLen); err != nil {
+			t.Fatalf("an entry of exactly maxStringTableLen (%d) must be accepted: %v", maxStringTableLen, err)
+		}
 		g := lpg.New[string, int64](adjlist.Config{Directed: true})
 		if err := g.AddNode("n"); err != nil {
 			t.Fatalf("AddNode: %v", err)
@@ -288,11 +297,11 @@ func TestCapBoundaryStillWrites(t *testing.T) {
 		}
 		var buf bytes.Buffer
 		if _, _, err := WriteProperties(&buf, g, nil); err != nil {
-			t.Fatalf("a key of exactly maxStringTableLen (%d) must still write: %v", maxStringTableLen, err)
+			t.Fatalf("a key of exactly lpg.MaxTokenLen (%d) must still write: %v", lpg.MaxTokenLen, err)
 		}
 		rb, err := ReadProperties(bytes.NewReader(buf.Bytes()))
 		if err != nil {
-			t.Fatalf("a key of exactly maxStringTableLen must read back: %v", err)
+			t.Fatalf("a key of exactly lpg.MaxTokenLen must read back: %v", err)
 		}
 		found := false
 		for _, k := range rb.Keys {
@@ -370,24 +379,18 @@ func TestCaptureRefusesUnreadableSnapshot(t *testing.T) {
 	if err := g.AddNode("n"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
-	// A property KEY one byte over the reader's string-table cap: cheap to
-	// build, and refused by ReadProperties exactly as a >1 GiB value would be.
-	if err := g.SetNodeProperty("n", strings.Repeat("k", maxStringTableLen+1), lpg.StringValue("v")); err != nil {
-		t.Fatalf("SetNodeProperty: %v", err)
+	// A property KEY one byte over the reader's string-table cap. Since rmp
+	// #2748 the graph itself refuses it — any token over lpg.MaxTokenLen is
+	// refused before it is stored — so a graph that capture would have to refuse
+	// for its key can no longer be built. Capture's own guard is the backstop
+	// behind that refusal, and it is exercised directly by
+	// TestWriterRefusesOversizeStringTableEntry.
+	if err := g.SetNodeProperty("n", strings.Repeat("k", maxStringTableLen+1), lpg.StringValue("v")); !errors.Is(err, lpg.ErrTokenTooLong) {
+		t.Fatalf("SetNodeProperty(over-cap key) = %v, want lpg.ErrTokenTooLong", err)
 	}
-
 	cs := csr.BuildFromAdjList(g.AdjList())
-	capt, err := CaptureGraph[string, float64](g, cs, nil, nil)
-	if err == nil {
-		t.Fatal("CaptureGraph ACCEPTED a graph whose snapshot ReadProperties is required to " +
-			"refuse. The checkpointer would publish it and then truncate the WAL prefix " +
-			"behind it (checkpoint.go:1133), destroying committed data")
-	}
-	if !errors.Is(err, ErrFieldTooLong) {
-		t.Fatalf("capture refusal is not typed: got %v, want it to wrap ErrFieldTooLong", err)
-	}
-	if capt != nil {
-		t.Error("a refused capture must return a nil Capture, or the caller may publish it anyway")
+	if _, err := CaptureGraph[string, float64](g, cs, nil, nil); err != nil {
+		t.Fatalf("the graph that refused the key must still capture: %v", err)
 	}
 
 	// Control: the SAME graph with an in-cap key captures normally, so the guard
@@ -396,7 +399,7 @@ func TestCaptureRefusesUnreadableSnapshot(t *testing.T) {
 	if err := g2.AddNode("n"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
-	if err := g2.SetNodeProperty("n", strings.Repeat("k", maxStringTableLen), lpg.StringValue("v")); err != nil {
+	if err := g2.SetNodeProperty("n", strings.Repeat("k", lpg.MaxTokenLen), lpg.StringValue("v")); err != nil {
 		t.Fatalf("SetNodeProperty: %v", err)
 	}
 	cs2 := csr.BuildFromAdjList(g2.AdjList())
@@ -472,8 +475,10 @@ func TestIndexDefsWriterRefusesOversizeIdentifier(t *testing.T) {
 // writer, not break it. Each field sits at exactly its cap — the largest value
 // that is still legal — so an over-restrictive guard fails here.
 func TestFixedWriterSnapshotRoundTrips(t *testing.T) {
-	atCapKey := strings.Repeat("k", maxStringTableLen)
-	atCapLabel := strings.Repeat("L", maxStringTableLen)
+	// The largest label and key a graph can hold (lpg.MaxTokenLen, rmp #2748);
+	// the string-table cap above it is no longer reachable from a graph.
+	atCapKey := strings.Repeat("k", lpg.MaxTokenLen)
+	atCapLabel := strings.Repeat("L", lpg.MaxTokenLen)
 
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
 	if err := g.AddEdge("alice", "bob", 1); err != nil {
@@ -516,5 +521,17 @@ func TestFixedWriterSnapshotRoundTrips(t *testing.T) {
 	if !foundLabel {
 		t.Fatalf("at-cap label did not survive the round trip (%d strings read back)",
 			len(loaded.Labels.Strings))
+	}
+}
+
+// TestStringTableCapIsAboveTheTokenLimit pins the layering rmp #2748 created:
+// graph/lpg refuses every token over lpg.MaxTokenLen, so the snapshot's
+// string-table cap must stay at or above it — otherwise a graph could hold a
+// label or key its own snapshot writer refuses, which is the #2743 failure in
+// the other direction.
+func TestStringTableCapIsAboveTheTokenLimit(t *testing.T) {
+	if lpg.MaxTokenLen > maxStringTableLen {
+		t.Fatalf("lpg.MaxTokenLen (%d) exceeds the snapshot string-table cap (%d): a graph "+
+			"could hold a token its snapshot cannot carry", lpg.MaxTokenLen, maxStringTableLen)
 	}
 }

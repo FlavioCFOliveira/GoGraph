@@ -22,7 +22,7 @@ func init() {
 		reg := NewLabelRegistry()
 		m := make(map[string]LabelID, len(fixedLabels))
 		for _, l := range fixedLabels {
-			m[l] = reg.Intern(l)
+			m[l] = reg.intern(l)
 		}
 		if err := json.NewEncoder(os.Stdout).Encode(m); err != nil {
 			fmt.Fprintf(os.Stderr, "label-registry-intern: encode: %v\n", err)
@@ -44,7 +44,7 @@ func TestCrossProc_LabelRegistry_StableIDs(t *testing.T) {
 	reg := NewLabelRegistry()
 	wantIDs := make(map[string]LabelID, len(fixedLabels))
 	for _, l := range fixedLabels {
-		wantIDs[l] = reg.Intern(l)
+		wantIDs[l] = reg.intern(l)
 	}
 
 	// Child: independent process, same label order.

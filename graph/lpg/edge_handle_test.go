@@ -81,8 +81,12 @@ func TestGraph_EdgeLabelsByHandle_RoundTrip(t *testing.T) {
 		t.Fatalf("AddEdgeH #2: %v", err)
 	}
 
-	g.SetEdgeLabelByHandle("a", "b", h1, "USES")
-	g.SetEdgeLabelByHandle("a", "b", h2, "CALLS")
+	if err := g.SetEdgeLabelByHandle("a", "b", h1, "USES"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetEdgeLabelByHandle("a", "b", h2, "CALLS"); err != nil {
+		t.Fatal(err)
+	}
 
 	if got := g.EdgeLabelsByHandle("a", "b", h1); len(got) != 1 || got[0] != "USES" {
 		t.Fatalf("EdgeLabelsByHandle(h1) = %v, want [USES]", got)
@@ -110,8 +114,12 @@ func TestGraph_EdgeLabelsByHandle_SurvivesSiblingDelete(t *testing.T) {
 
 	h1, _ := g.AddEdgeH("a", "b", 0)
 	h2, _ := g.AddEdgeH("a", "b", 0)
-	g.SetEdgeLabelByHandle("a", "b", h1, "USES")
-	g.SetEdgeLabelByHandle("a", "b", h2, "CALLS")
+	if err := g.SetEdgeLabelByHandle("a", "b", h1, "USES"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetEdgeLabelByHandle("a", "b", h2, "CALLS"); err != nil {
+		t.Fatal(err)
+	}
 
 	// Remove the FIRST parallel (handle h1). The pair still has one edge,
 	// so the per-handle store is NOT cleared. The survivor (h2) keeps its
@@ -157,8 +165,12 @@ func TestGraph_RemoveEdgeInstanceByHandle(t *testing.T) {
 
 	h1, _ := g.AddEdgeH("a", "b", 0)
 	h2, _ := g.AddEdgeH("a", "b", 0)
-	g.SetEdgeLabelByHandle("a", "b", h1, "USES")
-	g.SetEdgeLabelByHandle("a", "b", h2, "CALLS")
+	if err := g.SetEdgeLabelByHandle("a", "b", h1, "USES"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetEdgeLabelByHandle("a", "b", h2, "CALLS"); err != nil {
+		t.Fatal(err)
+	}
 
 	g.RemoveEdgeInstanceByHandle("a", "b", h1)
 
@@ -179,7 +191,9 @@ func TestGraph_PairFullDelete_ClearsHandleStore(t *testing.T) {
 	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
 
 	h1, _ := g.AddEdgeH("a", "b", 0)
-	g.SetEdgeLabelByHandle("a", "b", h1, "USES")
+	if err := g.SetEdgeLabelByHandle("a", "b", h1, "USES"); err != nil {
+		t.Fatal(err)
+	}
 
 	g.RemoveEdge("a", "b") // last edge gone → pair state cleared
 

@@ -49,6 +49,9 @@ import (
 // immutable column block is built with every dst-matching slot updated and is
 // published with a single atomic store, so a concurrent lock-free reader
 // observes either the prior block or the fully-updated one.
+//
+// It refuses a property key longer than [MaxTokenLen] bytes with an error wrapping
+// [ErrTokenTooLong], before changing any state (rmp #2748).
 func (g *Graph[N, W]) SetEdgeProperty(src, dst N, key string, value PropertyValue) error {
 	return g.setEdgePropertyInfo(src, dst, key, value, nil)
 }
@@ -73,6 +76,9 @@ func (g *Graph[N, W]) SetEdgeProperty(src, dst N, key string, value PropertyValu
 // writers lose an update silently AND publish at two instants; after this they
 // still lose the update — until #2300 — but each statement is atomic.
 func (g *Graph[N, W]) setEdgePropertyInfo(src, dst N, key string, value PropertyValue, tx *writeCtx) error {
+	if err := CheckToken("property key", key); err != nil {
+		return err
+	}
 	if v := g.validator.load(); v != nil {
 		if err := v.Validate(key, value); err != nil {
 			return err
@@ -83,7 +89,7 @@ func (g *Graph[N, W]) setEdgePropertyInfo(src, dst N, key string, value Property
 	}
 	srcID, _ := g.adj.Mapper().Lookup(src)
 	dstID, _ := g.adj.Mapper().Lookup(dst)
-	keyID := g.pkeys.Intern(key)
+	keyID := g.pkeys.intern(key)
 	g.adj.Writer(tx.adjTx()).UpdateEntryAux(srcID, func(cur adjlist.AuxColumn, neighbours []graph.NodeID) (adjlist.AuxColumn, bool) {
 		block := asEdgePropCols(cur)
 		length := len(neighbours)
@@ -225,8 +231,17 @@ func (g *Graph[N, W]) EdgeHasPropertyAsOf(src, dst N, key string, snap *Snapshot
 // DelEdgeProperty removes the named property from the directed edge
 // (src, dst). No-op if absent. The key is cleared on every dst-matching slot so
 // the per-pair view no longer reports it.
-func (g *Graph[N, W]) DelEdgeProperty(src, dst N, key string) {
+//
+// It refuses a property key longer than [MaxTokenLen] bytes with an error wrapping
+// [ErrTokenTooLong] and changes nothing (rmp #2748): no such token can exist,
+// and the WAL-backed store refuses the same call. The error return is a
+// breaking change: DelEdgeProperty used to return nothing.
+func (g *Graph[N, W]) DelEdgeProperty(src, dst N, key string) error {
+	if err := CheckToken("property key", key); err != nil {
+		return err
+	}
 	g.delEdgePropertyInfo(src, dst, key, nil)
+	return nil
 }
 
 // delEdgePropertyInfo is [Graph.DelEdgeProperty] with an explicit write

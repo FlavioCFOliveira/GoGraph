@@ -41,7 +41,7 @@ func propGraph(t *testing.T, nodes ...string) (*Graph[string, float64], map[stri
 func TestPropDelta_AllThreeTransitionsReconstruct(t *testing.T) {
 	g, ids := propGraph(t, "a")
 	id := ids["a"]
-	keyID := g.propKeys().Intern("w")
+	keyID := g.propKeys().intern("w")
 
 	t.Run("absent to value", func(t *testing.T) {
 		before := g.readTS()
@@ -148,7 +148,7 @@ func TestPropDelta_NoDeltaForARedundantWrite(t *testing.T) {
 // writes become visible all at once, and are invisible before that.
 func TestPropTx_CommitIsAtomic(t *testing.T) {
 	g, ids := propGraph(t, "a", "b")
-	keyID := g.propKeys().Intern("w")
+	keyID := g.propKeys().intern("w")
 	before := g.readTS()
 
 	tx := g.beginLabelTx()

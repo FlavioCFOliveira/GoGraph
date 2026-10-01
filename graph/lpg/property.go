@@ -232,7 +232,21 @@ func NewPropertyKeyRegistry() *PropertyKeyRegistry {
 // already-interned id without taking the mutex; only the first interning
 // of a previously unseen name serialises under mu to publish the extended
 // tables. The steady-state property vocabulary is small and stable.
-func (r *PropertyKeyRegistry) Intern(name string) PropertyKeyID {
+//
+// It refuses a name longer than [MaxTokenLen] bytes with an error wrapping
+// [ErrTokenTooLong], allocating nothing (rmp #2748). This is a breaking change:
+// Intern used to return the id alone and accept a name of any length.
+func (r *PropertyKeyRegistry) Intern(name string) (PropertyKeyID, error) {
+	if err := CheckToken("property key", name); err != nil {
+		return 0, err
+	}
+	return r.intern(name), nil
+}
+
+// intern is [PropertyKeyRegistry.Intern] without the length check, for the
+// callers in this package that have already run [CheckToken] on name at their
+// own entry, before changing any state.
+func (r *PropertyKeyRegistry) intern(name string) PropertyKeyID {
 	if id, ok := r.fwd.Load().m[name]; ok {
 		return id
 	}
@@ -291,7 +305,13 @@ func (r *PropertyKeyRegistry) Resolve(id PropertyKeyID) (string, bool) {
 // seek. Write an indexed graph through the engine, or seed the graph through
 // this method BEFORE its first index is created: creating an index backfills it
 // from the graph.
+//
+// It refuses a property key longer than [MaxTokenLen] bytes with an error wrapping
+// [ErrTokenTooLong], before changing any state (rmp #2748).
 func (g *Graph[N, W]) SetNodeProperty(n N, key string, value PropertyValue) error {
+	if err := CheckToken("property key", key); err != nil {
+		return err
+	}
 	if err := g.refuseIndexedRawWrite(); err != nil {
 		return err
 	}
@@ -303,6 +323,9 @@ func (g *Graph[N, W]) SetNodeProperty(n N, key string, value PropertyValue) erro
 // setNodePropertyInfo is [Graph.SetNodeProperty] with an explicit commit
 // record; info is nil for an autocommit write. See [Graph.setNodeLabelInfo].
 func (g *Graph[N, W]) setNodePropertyInfo(n N, key string, value PropertyValue, tx *writeCtx) error {
+	if err := CheckToken("property key", key); err != nil {
+		return err
+	}
 	if v := g.validator.load(); v != nil {
 		if err := v.Validate(key, value); err != nil {
 			return err
@@ -320,7 +343,7 @@ func (g *Graph[N, W]) setNodePropertyInfo(n N, key string, value PropertyValue, 
 	// tuple's identity once per write, and Memgraph's accessor carries the vertex
 	// pointer rather than re-looking it up per store.
 	id := g.adj.Mapper().Intern(n)
-	keyID := g.propKeys().Intern(key)
+	keyID := g.propKeys().intern(key)
 	s := g.nodePropShardFor(id)
 	s.mu.Lock()
 	// propBag is stored by value, so mutate a local copy and write it back.
@@ -405,7 +428,14 @@ func (g *Graph[N, W]) GetNodeProperty(n N, key string) (PropertyValue, bool) {
 // stayed reachable through an index seek. While any index is registered on, or
 // being built for, [Graph.IndexManager] it is refused with [ErrIndexedRawWrite]
 // and changes nothing.
+//
+// It refuses a property key longer than [MaxTokenLen] bytes with an error wrapping
+// [ErrTokenTooLong] and changes nothing (rmp #2748): no such token can exist,
+// and the WAL-backed store refuses the same call.
 func (g *Graph[N, W]) DelNodeProperty(n N, key string) error {
+	if err := CheckToken("property key", key); err != nil {
+		return err
+	}
 	if err := g.refuseIndexedRawWrite(); err != nil {
 		return err
 	}

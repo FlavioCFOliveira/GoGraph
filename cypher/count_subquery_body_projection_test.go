@@ -148,7 +148,9 @@ func bodyProjectionFixture(t *testing.T) *lpg.Graph[string, float64] {
 		if err := g.AddEdge("a", dst, 1); err != nil {
 			t.Fatalf("AddEdge(a, %s): %v", dst, err)
 		}
-		g.SetEdgeLabel("a", dst, "K")
+		if err := g.SetEdgeLabel("a", dst, "K"); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return g
 }
@@ -493,7 +495,9 @@ func TestBodyProjection_NestedSubqueryInsideTheBodysReturn(t *testing.T) {
 		if err := g.AddEdge(e[0], e[1], 1); err != nil {
 			t.Fatalf("AddEdge(%s, %s): %v", e[0], e[1], err)
 		}
-		g.SetEdgeLabel(e[0], e[1], "K")
+		if err := g.SetEdgeLabel(e[0], e[1], "K"); err != nil {
+			t.Fatal(err)
+		}
 	}
 	on, off := adjacencyCountEngines(g)
 

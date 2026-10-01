@@ -116,9 +116,10 @@ func countEdgeTyped(g *lpg.Graph[string, float64], cs *count.Store, cbuf *exec.C
 	if !ok1 || !ok2 {
 		return
 	}
-	// The type was just interned by SetEdgeLabelByHandle; Intern returns the
-	// existing id via its lock-free fast path.
-	rt := uint32(g.Registry().Intern(relType))
+	// The type was just interned by SetEdgeLabelByHandle, which refuses a name
+	// over lpg.MaxTokenLen before writing; Intern returns the existing id via its
+	// lock-free fast path.
+	rt := checkedLabelID(g, relType)
 	var sb, db [countLabelScratch]uint32
 	sl := appendNodeLabelIDs(g, srcID, sb[:0])
 	dl := appendNodeLabelIDs(g, dstID, db[:0])

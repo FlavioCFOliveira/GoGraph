@@ -317,8 +317,8 @@ func (t *labelTx[N, W]) removeEdge(src, dst N) bool { return t.g.removeEdgeInfo(
 
 // setEdgeLabel writes a pair's relationship type inside this transaction. It
 // reaches the overflow store when the pair already carries one.
-func (t *labelTx[N, W]) setEdgeLabel(src, dst N, name string) {
-	t.g.setEdgeLabelInfo(src, dst, name, t.ctx)
+func (t *labelTx[N, W]) setEdgeLabel(src, dst N, name string) error {
+	return t.g.setEdgeLabelInfo(src, dst, name, t.ctx)
 }
 
 // removeEdgeLabel detaches a pair's relationship type inside this transaction.
@@ -328,8 +328,8 @@ func (t *labelTx[N, W]) removeEdgeLabel(src, dst N, name string) {
 
 // setEdgeLabelByHandle writes one parallel edge instance's relationship type,
 // addressed by its stable handle.
-func (t *labelTx[N, W]) setEdgeLabelByHandle(src, dst N, handle uint64, name string) {
-	t.g.setEdgeLabelByHandleInfo(src, dst, handle, name, t.ctx)
+func (t *labelTx[N, W]) setEdgeLabelByHandle(src, dst N, handle uint64, name string) error {
+	return t.g.setEdgeLabelByHandleInfo(src, dst, handle, name, t.ctx)
 }
 
 // setEdgePropertyByHandle writes one parallel edge instance's property,
@@ -340,8 +340,8 @@ func (t *labelTx[N, W]) setEdgePropertyByHandle(src, dst N, handle uint64, key s
 
 // setEdgeLabelAt writes one parallel edge instance's relationship type,
 // addressed by its ordinal within the pair.
-func (t *labelTx[N, W]) setEdgeLabelAt(src, dst N, idx int64, name string) {
-	t.g.setEdgeLabelAtInfo(src, dst, idx, name, t.ctx)
+func (t *labelTx[N, W]) setEdgeLabelAt(src, dst N, idx int64, name string) error {
+	return t.g.setEdgeLabelAtInfo(src, dst, idx, name, t.ctx)
 }
 
 // setEdgePropertyAt writes one parallel edge instance's property, addressed by

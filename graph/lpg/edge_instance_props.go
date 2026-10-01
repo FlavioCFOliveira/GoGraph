@@ -33,7 +33,9 @@ type edgeInstancePropShard struct {
 // any error returned by the installed [SchemaValidator]; when the validator
 // rejects the write the graph state is left unchanged.
 //
-// SetEdgePropertyAt is safe for concurrent use.
+// SetEdgePropertyAt is safe for concurrent use.//
+// It refuses a property key longer than [MaxTokenLen] bytes with an error wrapping
+// [ErrTokenTooLong], before changing any state (rmp #2748).
 func (g *Graph[N, W]) SetEdgePropertyAt(src, dst N, idx int64, key string, value PropertyValue) error {
 	return g.setEdgePropertyAtInfo(src, dst, idx, key, value, nil)
 }
@@ -42,6 +44,9 @@ func (g *Graph[N, W]) SetEdgePropertyAt(src, dst N, idx int64, key string, value
 // nil for a direct Go-API mutation, which is committed the instant it is made
 // and takes no conflict check. See [writeCtx].
 func (g *Graph[N, W]) setEdgePropertyAtInfo(src, dst N, idx int64, key string, value PropertyValue, tx *writeCtx) error {
+	if err := CheckToken("property key", key); err != nil {
+		return err
+	}
 	if v := g.validator.load(); v != nil {
 		if err := v.Validate(key, value); err != nil {
 			return err
@@ -58,7 +63,7 @@ func (g *Graph[N, W]) setEdgePropertyAtInfo(src, dst N, idx int64, key string, v
 	if !ok {
 		return nil
 	}
-	pid := g.pkeys.Intern(key)
+	pid := g.pkeys.intern(key)
 	k := edgeKey{src: srcID, dst: dstID}
 	sh := g.edgeInstancePropShardFor(k)
 	sh.mu.Lock()

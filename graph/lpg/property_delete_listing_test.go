@@ -187,7 +187,9 @@ func testDelEdgeProperty(t *testing.T, shape shapegen.Shape[int, int64]) {
 	deleted := make(map[int]bool, len(edges)/2+1)
 	for i, e := range edges {
 		if i%2 == 0 {
-			g.DelEdgeProperty(e.src, e.dst, propKey)
+			if err := g.DelEdgeProperty(e.src, e.dst, propKey); err != nil {
+				t.Fatal(err)
+			}
 			deleted[i] = true
 		}
 	}
@@ -213,8 +215,12 @@ func testDelEdgeProperty(t *testing.T, shape shapegen.Shape[int, int64]) {
 
 	// Delete already-absent property — must not panic.
 	for _, e := range edges {
-		g.DelEdgeProperty(e.src, e.dst, propKey) // may already be gone
-		g.DelEdgeProperty(e.src, e.dst, "no_such_key")
+		if err := g.DelEdgeProperty(e.src, e.dst, propKey); err != nil {
+			t.Fatal(err)
+		} // may already be gone
+		if err := g.DelEdgeProperty(e.src, e.dst, "no_such_key"); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

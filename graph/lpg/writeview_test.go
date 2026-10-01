@@ -188,27 +188,59 @@ func TestWriteView_CoversEveryTransactionalMutator(t *testing.T) {
 	// breaks the build here, which is the point; a store that gains a threaded form
 	// with no WriteView method must be added.
 	calls := map[string]func(){
-		"addNodeInfo":                    func() { _ = wv.AddNode("n") },
-		"removeNodeInfo":                 func() { wv.RemoveNode("n") },
-		"reviveInfo":                     func() { wv.Revive("n") },
-		"setNodeLabelInfo":               func() { _ = wv.SetNodeLabel("n", "L") },
-		"removeNodeLabelInfo":            func() { wv.RemoveNodeLabel("n", "L") },
-		"setNodePropertyInfo":            func() { _ = wv.SetNodeProperty("n", "k", Int64Value(1)) },
-		"delNodePropertyInfo":            func() { wv.DelNodeProperty("n", "k") },
-		"addEdgeInfo":                    func() { _ = wv.AddEdge("n", "m", 0) },
-		"addEdgeHInfo":                   func() { _, _ = wv.AddEdgeH("n", "m", 0) },
-		"addEdgeHIfAbsentInfo":           func() { _, _ = wv.AddEdgeHIfAbsent("n", "m", 0, 99) },
-		"removeEdgeByHandleInfo":         func() { wv.RemoveEdgeByHandle("n", "m", 99) },
-		"setEdgeLabelInfo":               func() { wv.SetEdgeLabel("n", "m", "R") },
-		"removeEdgeLabelInfo":            func() { wv.RemoveEdgeLabel("n", "m", "R") },
-		"setEdgePropertyInfo":            func() { _ = wv.SetEdgeProperty("n", "m", "k", Int64Value(1)) },
-		"delEdgePropertyInfo":            func() { wv.DelEdgeProperty("n", "m", "k") },
-		"setEdgeLabelAtInfo":             func() { wv.SetEdgeLabelAt("n", "m", 0, "R") },
-		"setEdgePropertyAtInfo":          func() { _ = wv.SetEdgePropertyAt("n", "m", 0, "k", Int64Value(1)) },
-		"removeEdgeInstanceInfo":         func() { wv.RemoveEdgeInstance("n", "m", 0) },
-		"setEdgeLabelByHandleInfo":       func() { wv.SetEdgeLabelByHandle("n", "m", 99, "R") },
-		"setEdgePropertyByHandleInfo":    func() { _ = wv.SetEdgePropertyByHandle("n", "m", 99, "k", Int64Value(1)) },
-		"delEdgePropertyByHandleInfo":    func() { wv.DelEdgePropertyByHandle("n", "m", 99, "k") },
+		"addNodeInfo":      func() { _ = wv.AddNode("n") },
+		"removeNodeInfo":   func() { wv.RemoveNode("n") },
+		"reviveInfo":       func() { wv.Revive("n") },
+		"setNodeLabelInfo": func() { _ = wv.SetNodeLabel("n", "L") },
+		"removeNodeLabelInfo": func() {
+			if err := wv.RemoveNodeLabel("n", "L"); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"setNodePropertyInfo": func() { _ = wv.SetNodeProperty("n", "k", Int64Value(1)) },
+		"delNodePropertyInfo": func() {
+			if err := wv.DelNodeProperty("n", "k"); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"addEdgeInfo":            func() { _ = wv.AddEdge("n", "m", 0) },
+		"addEdgeHInfo":           func() { _, _ = wv.AddEdgeH("n", "m", 0) },
+		"addEdgeHIfAbsentInfo":   func() { _, _ = wv.AddEdgeHIfAbsent("n", "m", 0, 99) },
+		"removeEdgeByHandleInfo": func() { wv.RemoveEdgeByHandle("n", "m", 99) },
+		"setEdgeLabelInfo": func() {
+			if err := wv.SetEdgeLabel("n", "m", "R"); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"removeEdgeLabelInfo": func() {
+			if err := wv.RemoveEdgeLabel("n", "m", "R"); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"setEdgePropertyInfo": func() { _ = wv.SetEdgeProperty("n", "m", "k", Int64Value(1)) },
+		"delEdgePropertyInfo": func() {
+			if err := wv.DelEdgeProperty("n", "m", "k"); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"setEdgeLabelAtInfo": func() {
+			if err := wv.SetEdgeLabelAt("n", "m", 0, "R"); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"setEdgePropertyAtInfo":  func() { _ = wv.SetEdgePropertyAt("n", "m", 0, "k", Int64Value(1)) },
+		"removeEdgeInstanceInfo": func() { wv.RemoveEdgeInstance("n", "m", 0) },
+		"setEdgeLabelByHandleInfo": func() {
+			if err := wv.SetEdgeLabelByHandle("n", "m", 99, "R"); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"setEdgePropertyByHandleInfo": func() { _ = wv.SetEdgePropertyByHandle("n", "m", 99, "k", Int64Value(1)) },
+		"delEdgePropertyByHandleInfo": func() {
+			if err := wv.DelEdgePropertyByHandle("n", "m", 99, "k"); err != nil {
+				t.Fatal(err)
+			}
+		},
 		"removeEdgeInstanceByHandleInfo": func() { wv.RemoveEdgeInstanceByHandle("n", "m", 99) },
 		"removeAllEdgesFromInfo":         func() { wv.RemoveAllEdgesFrom("n") },
 		"removeEdgeInfo(via RemoveEdge)": func() { wv.RemoveEdge("n", "m") },

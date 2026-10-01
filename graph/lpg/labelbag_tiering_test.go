@@ -90,7 +90,7 @@ func assertLabelState(t *testing.T, g *Graph[string, float64], key string, id gr
 		if !g.HasNodeLabel(key, name) {
 			t.Fatalf("HasNodeLabel(%s) = false, want true", name)
 		}
-		lid := uint32(g.Registry().Intern(name))
+		lid := uint32(g.Registry().intern(name))
 		if !labelIndexHas(g, uint32(lid), id) {
 			t.Fatalf("nodeIdx missing %s for id %d (bag/index out of lockstep)", name, id)
 		}

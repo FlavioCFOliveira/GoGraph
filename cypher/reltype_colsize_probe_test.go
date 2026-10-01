@@ -35,7 +35,9 @@ func TestRelTypeColumnSize(t *testing.T) {
 				if err := g.AddEdge(src, dst, 1); err != nil {
 					t.Fatal(err)
 				}
-				g.SetEdgeLabel(src, dst, typ)
+				if err := g.SetEdgeLabel(src, dst, typ); err != nil {
+					t.Fatal(err)
+				}
 			}
 		}
 		view := g.ReadAt(nil)

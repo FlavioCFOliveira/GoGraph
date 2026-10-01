@@ -2648,7 +2648,9 @@ func buildRing(ctx context.Context, n, degree int) (*lpg.Graph[string, float64],
 		if err := g.AddEdge(keys[i], keys[j], 1.0); err != nil {
 			return fmt.Errorf("AddEdge %s->%s: %w", keys[i], keys[j], err)
 		}
-		g.SetEdgeLabel(keys[i], keys[j], relFriend)
+		if err := g.SetEdgeLabel(keys[i], keys[j], relFriend); err != nil {
+			return err
+		}
 		return nil
 	}
 	for i := 0; i < n; i++ {

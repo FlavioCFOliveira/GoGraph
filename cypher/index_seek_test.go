@@ -114,8 +114,8 @@ func boundTestHashIndex[V comparable](g *lpg.Graph[string, float64], label, prop
 	idx, err := hash.NewBound(hash.Binding[V]{
 		Label:      label,
 		Property:   prop,
-		LabelID:    uint32(g.Registry().Intern(label)),
-		PropertyID: uint32(g.PropertyKeys().Intern(prop)),
+		LabelID:    labelIDOf(g.Registry(), label),
+		PropertyID: keyIDOf(g.PropertyKeys(), prop),
 		Project:    proj,
 		Eligible:   func(id graph.NodeID) bool { return g.HasNodeLabelByID(id, label) },
 		CurrentValue: func(id graph.NodeID) (V, bool) {
@@ -269,4 +269,24 @@ func TestIndexSeek_NoIndexKeepsLabelScan(t *testing.T) {
 	if !strings.Contains(plan, "LabelScan") && !strings.Contains(plan, "Selection") {
 		t.Errorf("expected LabelScan or Selection without index; plan:\n%s", plan)
 	}
+}
+
+// labelIDOf interns name in r and returns its id as an index.Change carries it.
+// Test names are short constants that the token bound (lpg.MaxTokenLen) cannot
+// refuse, so a refusal is a defect in the test itself and panics.
+func labelIDOf(r *lpg.LabelRegistry, name string) uint32 {
+	id, err := r.Intern(name)
+	if err != nil {
+		panic(err)
+	}
+	return uint32(id)
+}
+
+// keyIDOf is [labelIDOf] for a property key.
+func keyIDOf(r *lpg.PropertyKeyRegistry, name string) uint32 {
+	id, err := r.Intern(name)
+	if err != nil {
+		panic(err)
+	}
+	return uint32(id)
 }

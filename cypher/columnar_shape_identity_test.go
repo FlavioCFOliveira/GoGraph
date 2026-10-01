@@ -117,7 +117,9 @@ func shapeIdentityGraph(t *testing.T) *lpg.Graph[string, float64] {
 		if err := g.AddEdge(keys[i], keys[i+1], 1.0); err != nil {
 			t.Fatalf("AddEdge: %v", err)
 		}
-		g.SetEdgeLabel(keys[i], keys[i+1], "K")
+		if err := g.SetEdgeLabel(keys[i], keys[i+1], "K"); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return g
 }

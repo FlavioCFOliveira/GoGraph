@@ -256,8 +256,16 @@ func (g *Graph[N, W]) ForEachPairOverflowRelTypeByID(srcID, dstID graph.NodeID, 
 // whether a handle record also exists.
 //
 // SetEdgeRelTypeAtSlotByID is safe for concurrent use.
-func (g *Graph[N, W]) SetEdgeRelTypeAtSlotByID(srcID, dstID graph.NodeID, ordinal int, name string) bool {
-	return g.setEdgeRelTypeAtSlotByIDInfo(srcID, dstID, ordinal, name, nil)
+//
+// It refuses a relationship type longer than [MaxTokenLen] bytes with an error wrapping
+// [ErrTokenTooLong], before changing any state (rmp #2748).
+// The error result is a breaking change: SetEdgeRelTypeAtSlotByID used to
+// return the bool alone.
+func (g *Graph[N, W]) SetEdgeRelTypeAtSlotByID(srcID, dstID graph.NodeID, ordinal int, name string) (bool, error) {
+	if err := CheckToken("relationship type", name); err != nil {
+		return false, err
+	}
+	return g.setEdgeRelTypeAtSlotByIDInfo(srcID, dstID, ordinal, name, nil), nil
 }
 
 // setEdgeRelTypeAtSlotByIDInfo is [Graph.SetEdgeRelTypeAtSlotByID] with an explicit
@@ -267,7 +275,7 @@ func (g *Graph[N, W]) setEdgeRelTypeAtSlotByIDInfo(srcID, dstID graph.NodeID, or
 	if ordinal < 0 {
 		return false
 	}
-	lid := g.reg.Intern(name)
+	lid := g.reg.intern(name)
 	enc := encodeSlotLabel(lid)
 	k := edgeKey{src: srcID, dst: dstID}
 	sh := g.edgeLabelShardFor(k)
@@ -330,15 +338,23 @@ func (g *Graph[N, W]) setSlotRelTypeLocked(k edgeKey, ordinal int, lid LabelID, 
 // [adjlist.AdjList.HasEdge] before calling.
 //
 // AddEdgeRelTypeOverflowByID is safe for concurrent use.
-func (g *Graph[N, W]) AddEdgeRelTypeOverflowByID(srcID, dstID graph.NodeID, name string) bool {
-	return g.addEdgeRelTypeOverflowByIDInfo(srcID, dstID, name, nil)
+//
+// It refuses a relationship type longer than [MaxTokenLen] bytes with an error wrapping
+// [ErrTokenTooLong], before changing any state (rmp #2748).
+// The error result is a breaking change: AddEdgeRelTypeOverflowByID used to
+// return the bool alone.
+func (g *Graph[N, W]) AddEdgeRelTypeOverflowByID(srcID, dstID graph.NodeID, name string) (bool, error) {
+	if err := CheckToken("relationship type", name); err != nil {
+		return false, err
+	}
+	return g.addEdgeRelTypeOverflowByIDInfo(srcID, dstID, name, nil), nil
 }
 
 // addEdgeRelTypeOverflowByIDInfo is [Graph.AddEdgeRelTypeOverflowByID] with an explicit write transaction; tx is
 // nil for a direct Go-API mutation, which is committed the instant it is made
 // and takes no conflict check. See [writeCtx].
 func (g *Graph[N, W]) addEdgeRelTypeOverflowByIDInfo(srcID, dstID graph.NodeID, name string, tx *writeCtx) bool {
-	lid := g.reg.Intern(name)
+	lid := g.reg.intern(name)
 	k := edgeKey{src: srcID, dst: dstID}
 	sh := g.edgeLabelShardFor(k)
 	sh.mu.Lock()

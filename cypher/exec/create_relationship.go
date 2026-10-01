@@ -176,7 +176,9 @@ func (op *CreateRelationship) Next(out *Row) (bool, error) {
 		return false, fmt.Errorf("exec: CreateRelationship AddEdge: %w", err)
 	}
 	if op.relType != "" {
-		op.mutator.SetEdgeLabel(srcLabel, dstLabel, op.relType)
+		if err := op.mutator.SetEdgeLabel(srcLabel, dstLabel, op.relType); err != nil {
+			return false, err
+		}
 	}
 	// Bump the Cypher CREATE-multiplicity counter even when AddEdge
 	// silently no-ops a duplicate (a→b) in simple-graph storage —
@@ -185,8 +187,12 @@ func (op *CreateRelationship) Next(out *Row) (bool, error) {
 	// entry (Merge5 [3]).
 	instanceIdx := op.mutator.IncEdgeCreateCount(srcLabel, dstLabel)
 	if op.relType != "" {
-		op.mutator.SetEdgeLabelAt(srcLabel, dstLabel, instanceIdx, op.relType)
-		op.mutator.SetEdgeLabelByHandle(srcLabel, dstLabel, handle, op.relType)
+		if err := op.mutator.SetEdgeLabelAt(srcLabel, dstLabel, instanceIdx, op.relType); err != nil {
+			return false, err
+		}
+		if err := op.mutator.SetEdgeLabelByHandle(srcLabel, dstLabel, handle, op.relType); err != nil {
+			return false, err
+		}
 	}
 
 	props, mErr := mergeProps(op.props, op.propsExprFn, childRow)

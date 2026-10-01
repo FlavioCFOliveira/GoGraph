@@ -142,11 +142,13 @@ func nodeIndexRawValue(
 // string index and its numeric companion project it differently; that boxing is
 // one allocation per RELEVANT change recorded during a build, bounded by
 // [index.MaxBuildLogChanges].
+//
+// labelID and propID are the registry ids of label and prop, resolved by the
+// caller through [indexTokenIDs] so a token refusal is reported where it can be
+// returned.
 func nodeIndexBuildResolver(
-	g *lpg.ReadView[string, float64], label, prop string,
+	g *lpg.ReadView[string, float64], prop string, labelID, propID uint32,
 ) index.BuildResolver {
-	labelID := uint32(g.Registry().Intern(label))
-	propID := uint32(g.PropertyKeys().Intern(prop))
 	eligible := nodeIndexEligible(g, labelID)
 	rawValue := nodeIndexRawValue(g, prop)
 	return func(c index.Change) (any, bool) {
@@ -170,6 +172,22 @@ func nodeIndexBuildResolver(
 	}
 }
 
+// indexTokenIDs resolves the registry ids of an index's label and property,
+// refusing either one if it is longer than [lpg.MaxTokenLen] bytes (rmp #2748).
+// The DDL boundary caps both far below that, so the refusal is reachable only
+// through a definition that did not pass that boundary.
+func indexTokenIDs(g *lpg.ReadView[string, float64], label, prop string) (labelID, propID uint32, err error) {
+	lid, err := g.Registry().Intern(label)
+	if err != nil {
+		return 0, 0, err
+	}
+	pid, err := g.PropertyKeys().Intern(prop)
+	if err != nil {
+		return 0, 0, err
+	}
+	return uint32(lid), uint32(pid), nil
+}
+
 // newBoundNodeHashIndex builds a hash.Index[string] bound to (label, prop) on
 // g. The binding closures read g's FINAL state — Apply runs at commit time,
 // after the transaction's eager mutations — which is the state the index must
@@ -177,8 +195,10 @@ func nodeIndexBuildResolver(
 func newBoundNodeHashIndex(
 	g *lpg.ReadView[string, float64], label, prop string,
 ) (*indexhash.Index[string], error) {
-	labelID := uint32(g.Registry().Intern(label))
-	propID := uint32(g.PropertyKeys().Intern(prop))
+	labelID, propID, err := indexTokenIDs(g, label, prop)
+	if err != nil {
+		return nil, err
+	}
 	rawValue := nodeIndexRawValue(g, prop)
 	return indexhash.NewBound(indexhash.Binding[string]{
 		PropertyID: propID,
@@ -386,8 +406,12 @@ func (e *Engine) beginIndexBuild(ctx context.Context, idxMgr *index.Manager, lab
 	// and a BOUND build log resolves those deliveries from the committed state
 	// the delivery carries, not through this resolver (rmp #2931); the resolver
 	// remains for the deliveries that carry none.
-	log = idxMgr.BeginBoundBuild(nodeIndexBuildResolver(e.g.ReadAt(nil), label, prop),
-		uint32(e.g.Registry().Intern(label)), uint32(e.g.PropertyKeys().Intern(prop)))
+	labelID, propID, err := indexTokenIDs(e.g.ReadAt(nil), label, prop)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	log = idxMgr.BeginBoundBuild(nodeIndexBuildResolver(e.g.ReadAt(nil), prop, labelID, propID),
+		labelID, propID)
 	if werr := idxMgr.AwaitCommitDecisions(ctx); werr != nil {
 		idxMgr.AbandonBuild(log)
 		return nil, nil, nil, werr
@@ -697,8 +721,10 @@ func projectNumericPropValue(v any) (float64, bool) {
 func newBoundNodeBTreeIndexNumeric(
 	g *lpg.ReadView[string, float64], label, prop string,
 ) (*indexbtree.Index[float64], error) {
-	labelID := uint32(g.Registry().Intern(label))
-	propID := uint32(g.PropertyKeys().Intern(prop))
+	labelID, propID, err := indexTokenIDs(g, label, prop)
+	if err != nil {
+		return nil, err
+	}
 	rawValue := nodeIndexRawValue(g, prop)
 	return indexbtree.NewBound(indexbtree.Binding[float64]{
 		PropertyID: propID,
@@ -791,8 +817,10 @@ func (e *Engine) backfillNodeBTreeIndexNumeric(
 func newBoundNodeBTreeIndex(
 	g *lpg.ReadView[string, float64], label, prop string,
 ) (*indexbtree.Index[string], error) {
-	labelID := uint32(g.Registry().Intern(label))
-	propID := uint32(g.PropertyKeys().Intern(prop))
+	labelID, propID, err := indexTokenIDs(g, label, prop)
+	if err != nil {
+		return nil, err
+	}
 	rawValue := nodeIndexRawValue(g, prop)
 	return indexbtree.NewBound(indexbtree.Binding[string]{
 		PropertyID: propID,
@@ -903,7 +931,7 @@ func enqueueNodeRemovalChanges(g *lpg.Graph[string, float64], buf *exec.IndexBuf
 		buf.Enqueue(index.Change{
 			Op:       index.OpDelNodeProperty,
 			Node:     id,
-			Property: uint32(g.PropertyKeys().Intern(key)),
+			Property: checkedKeyID(g, key), // read back from the graph, so already interned
 			OldValue: pv,
 		})
 	}
@@ -911,7 +939,7 @@ func enqueueNodeRemovalChanges(g *lpg.Graph[string, float64], buf *exec.IndexBuf
 		buf.Enqueue(index.Change{
 			Op:    index.OpRemoveNodeLabel,
 			Node:  id,
-			Label: uint32(g.Registry().Intern(lb)),
+			Label: checkedLabelID(g, lb), // read back from the graph, so already interned
 		})
 	}
 }

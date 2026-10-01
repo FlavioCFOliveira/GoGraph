@@ -606,7 +606,7 @@ func TestIndexMaintenance_RawEdgeWritesCannotStaleAnEngineIndex(t *testing.T) {
 		`CREATE CONSTRAINT u FOR (n:L) REQUIRE n.tag IS UNIQUE`)...)
 	g := eng.g
 	mgr := g.IndexManager()
-	lid := uint32(g.Registry().Intern("L"))
+	lid := labelIDOf(g.Registry(), "L")
 	edgeOps := []index.ChangeOp{index.OpAddEdgeLabel, index.OpRemoveEdgeLabel, index.OpSetEdgeProperty, index.OpDelEdgeProperty}
 	names := mgr.ListIndexes()
 	if len(names) < 4 {
@@ -622,7 +622,7 @@ func TestIndexMaintenance_RawEdgeWritesCannotStaleAnEngineIndex(t *testing.T) {
 		}
 		for _, op := range edgeOps {
 			for _, key := range []string{"s", "p", "tag"} {
-				c := index.Change{Op: op, Node: 1, Dst: 2, Label: lid, Property: uint32(g.PropertyKeys().Intern(key))}
+				c := index.Change{Op: op, Node: 1, Dst: 2, Label: lid, Property: keyIDOf(g.PropertyKeys(), key)}
 				if f.Concerns(c) {
 					t.Errorf("index %q claims edge change %v on %q", name, op, key)
 				}
@@ -634,7 +634,9 @@ func TestIndexMaintenance_RawEdgeWritesCannotStaleAnEngineIndex(t *testing.T) {
 	}
 	// The raw edge mutators are admitted and leave every index answer intact.
 	mustNoErr(t, g.AddEdge("t1", "t2", 1))
-	g.SetEdgeLabel("t1", "t2", "R")
+	if err := g.SetEdgeLabel("t1", "t2", "R"); err != nil {
+		t.Fatal(err)
+	}
 	mustNoErr(t, g.SetEdgeProperty("t1", "t2", "s", lpg.StringValue("v5")))
 	mustNoErr(t, g.AddEdge("t3", "brand-new", 1))
 	g.RemoveEdge("t1", "t2")
@@ -648,4 +650,24 @@ func TestIndexMaintenance_RawEdgeWritesCannotStaleAnEngineIndex(t *testing.T) {
 	if err := g.SetNodeProperty("t1", "s", lpg.StringValue("zz")); !errors.Is(err, lpg.ErrIndexedRawWrite) {
 		t.Errorf("raw SetNodeProperty on an indexed graph: err = %v, want ErrIndexedRawWrite", err)
 	}
+}
+
+// labelIDOf interns name in r and returns its id as an index.Change carries it.
+// Test names are short constants that the token bound (lpg.MaxTokenLen) cannot
+// refuse, so a refusal is a defect in the test itself and panics.
+func labelIDOf(r *lpg.LabelRegistry, name string) uint32 {
+	id, err := r.Intern(name)
+	if err != nil {
+		panic(err)
+	}
+	return uint32(id)
+}
+
+// keyIDOf is [labelIDOf] for a property key.
+func keyIDOf(r *lpg.PropertyKeyRegistry, name string) uint32 {
+	id, err := r.Intern(name)
+	if err != nil {
+		panic(err)
+	}
+	return uint32(id)
 }

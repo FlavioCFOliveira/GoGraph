@@ -108,7 +108,7 @@ func churnFixture(t *testing.T, label string, keys ...string) (*Graph[string, fl
 		}
 	}
 	g.ReclaimNow()
-	lid := g.reg.Intern(label)
+	lid := g.reg.intern(label)
 	if got := g.labelChurn.load(lid); got != 0 {
 		t.Fatalf("precondition: the churn gate for %q reads %d after a full reclaim, want 0. "+
 			"Every assertion in this file would then pass on leftover churn rather than on "+
@@ -141,7 +141,7 @@ func TestLabelChurnGate_LabelDeltaRaisesTheGate(t *testing.T) {
 	}
 	g.ReclaimNow()
 
-	lid := g.reg.Intern("Late")
+	lid := g.reg.intern("Late")
 	if got := g.labelChurn.load(lid); got != 0 {
 		t.Fatalf("precondition: gate for Late reads %d, want 0", got)
 	}
@@ -280,7 +280,7 @@ func TestLabelChurnGate_QuietLabelIsNotCorrected(t *testing.T) {
 	if err := g.SetNodeLabel("c", "Busy"); err != nil {
 		t.Fatalf("SetNodeLabel: %v", err)
 	}
-	busy := g.reg.Intern("Busy")
+	busy := g.reg.intern("Busy")
 	if !g.labelChurn.live(busy) {
 		t.Fatal("setup: the write on Busy did not raise its own gate")
 	}
@@ -403,7 +403,7 @@ func TestLabelChurnGate_GatedAnswerMatchesUngatedUnderMixedLoad(t *testing.T) {
 	for i := 0; i < still; i++ {
 		seedLabelled(fmt.Sprintf("g%d", i), "Gamma")
 	}
-	alpha, beta, gamma := g.reg.Intern("Alpha"), g.reg.Intern("Beta"), g.reg.Intern("Gamma")
+	alpha, beta, gamma := g.reg.intern("Alpha"), g.reg.intern("Beta"), g.reg.intern("Gamma")
 	lids := []LabelID{alpha, beta, gamma}
 
 	// Opened BEFORE the writer starts, and held to the end: it pins the
@@ -719,7 +719,7 @@ func TestLabelChurnGate_NoReaderSeesADeadNode(t *testing.T) {
 	t.Run("reviveAborted", func(t *testing.T) {
 		run(t, "reviveAborted", nil,
 			func(t *testing.T, g *Graph[string, float64], keys []string, ids []graph.NodeID, dead *settledDead) {
-				lid := g.reg.Intern("Retired")
+				lid := g.reg.intern("Retired")
 				for batch := 0; batch < 4; batch++ {
 					lo, hi := batch*30, batch*30+30
 					err := g.ApplyVersioned(func(tx WriteTx) error {
@@ -799,7 +799,7 @@ func TestLabelChurnGate_NoReaderSeesADeadNode(t *testing.T) {
 						t.Fatalf("SetNodeLabel(Marker): %v", err)
 					}
 				}
-				retired, marker := g.reg.Intern("Retired"), g.reg.Intern("Marker")
+				retired, marker := g.reg.intern("Retired"), g.reg.intern("Marker")
 				if !g.churnLive(oneLabel(marker)) {
 					t.Fatal("setup: the Marker writes did not raise Marker's gate")
 				}
@@ -817,7 +817,7 @@ func TestLabelChurnGate_NoReaderSeesADeadNode(t *testing.T) {
 					}
 					dead.publish(chunk...)
 				}
-				if got := g.labelChurn.load(g.reg.Intern("Retired")); got == 0 {
+				if got := g.labelChurn.load(g.reg.intern("Retired")); got == 0 {
 					t.Fatal("RestoreTombstones left Retired's gate at zero while the nodes it " +
 						"tombstoned are still in Retired's bitmap: a reader will take the raw " +
 						"bitmap and report them (rmp #2686)")
@@ -903,7 +903,7 @@ func abortedRevivalFixture(t *testing.T, key, label string) (*Graph[string, floa
 		g.EndRead(hold)
 		t.Fatalf("SetNodeLabel(Marker): %v", err)
 	}
-	if !g.churnLive(oneLabel(g.reg.Intern("Marker"))) {
+	if !g.churnLive(oneLabel(g.reg.intern("Marker"))) {
 		g.EndRead(hold)
 		t.Fatal("setup: the Marker write did not raise Marker's own gate")
 	}

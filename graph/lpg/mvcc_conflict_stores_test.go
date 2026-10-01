@@ -112,13 +112,19 @@ func TestConflict_EdgeOverflowRelTypes(t *testing.T) {
 		t.Fatalf("AddEdge: %v", err)
 	}
 	// The first type lands on the adjacency slot; overflow starts at the second.
-	g.SetEdgeLabel("a", "b", "FIRST")
+	if err := g.SetEdgeLabel("a", "b", "FIRST"); err != nil {
+		t.Fatal(err)
+	}
 
 	txA := g.beginLabelTx()
-	txA.setEdgeLabel("a", "b", "FROM_A")
+	if err := txA.setEdgeLabel("a", "b", "FROM_A"); err != nil {
+		t.Fatal(err)
+	}
 
 	txB := g.beginLabelTx()
-	txB.setEdgeLabel("a", "b", "FROM_B")
+	if err := txB.setEdgeLabel("a", "b", "FROM_B"); err != nil {
+		t.Fatal(err)
+	}
 	wantConflictAt(t, txB, "edge relationship types")
 
 	if _, err := txA.commit(); err != nil {
@@ -136,10 +142,14 @@ func TestConflict_EdgeRelTypeByHandle(t *testing.T) {
 	}
 
 	txA := g.beginLabelTx()
-	txA.setEdgeLabelByHandle("a", "b", h, "FROM_A")
+	if err := txA.setEdgeLabelByHandle("a", "b", h, "FROM_A"); err != nil {
+		t.Fatal(err)
+	}
 
 	txB := g.beginLabelTx()
-	txB.setEdgeLabelByHandle("a", "b", h, "FROM_B")
+	if err := txB.setEdgeLabelByHandle("a", "b", h, "FROM_B"); err != nil {
+		t.Fatal(err)
+	}
 	wantConflictAt(t, txB, "edge relationship types by handle")
 
 	if _, err := txA.commit(); err != nil {
@@ -181,10 +191,14 @@ func TestConflict_EdgeRelTypeByOrdinal(t *testing.T) {
 	}
 
 	txA := g.beginLabelTx()
-	txA.setEdgeLabelAt("a", "b", 1, "FROM_A")
+	if err := txA.setEdgeLabelAt("a", "b", 1, "FROM_A"); err != nil {
+		t.Fatal(err)
+	}
 
 	txB := g.beginLabelTx()
-	txB.setEdgeLabelAt("a", "b", 1, "FROM_B")
+	if err := txB.setEdgeLabelAt("a", "b", 1, "FROM_B"); err != nil {
+		t.Fatal(err)
+	}
 	wantConflictAt(t, txB, "edge relationship types by ordinal")
 
 	if _, err := txA.commit(); err != nil {
@@ -230,24 +244,40 @@ func TestConflict_DisjointEdgeWritersDoNotConflict(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AddEdgeH c->d: %v", err)
 	}
-	g.SetEdgeLabel("a", "b", "FIRST")
-	g.SetEdgeLabel("c", "d", "FIRST")
+	if err := g.SetEdgeLabel("a", "b", "FIRST"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetEdgeLabel("c", "d", "FIRST"); err != nil {
+		t.Fatal(err)
+	}
 
 	txA := g.beginLabelTx()
 	txB := g.beginLabelTx()
 
-	txA.setEdgeLabel("a", "b", "SECOND_A")
-	txB.setEdgeLabel("c", "d", "SECOND_B")
-	txA.setEdgeLabelByHandle("a", "b", hAB, "BY_HANDLE_A")
-	txB.setEdgeLabelByHandle("c", "d", hCD, "BY_HANDLE_B")
+	if err := txA.setEdgeLabel("a", "b", "SECOND_A"); err != nil {
+		t.Fatal(err)
+	}
+	if err := txB.setEdgeLabel("c", "d", "SECOND_B"); err != nil {
+		t.Fatal(err)
+	}
+	if err := txA.setEdgeLabelByHandle("a", "b", hAB, "BY_HANDLE_A"); err != nil {
+		t.Fatal(err)
+	}
+	if err := txB.setEdgeLabelByHandle("c", "d", hCD, "BY_HANDLE_B"); err != nil {
+		t.Fatal(err)
+	}
 	if err := txA.setEdgePropertyByHandle("a", "b", hAB, "w", Int64Value(1)); err != nil {
 		t.Fatalf("A property by handle: %v", err)
 	}
 	if err := txB.setEdgePropertyByHandle("c", "d", hCD, "w", Int64Value(2)); err != nil {
 		t.Fatalf("B property by handle: %v", err)
 	}
-	txA.setEdgeLabelAt("a", "b", 1, "BY_ORDINAL_A")
-	txB.setEdgeLabelAt("c", "d", 1, "BY_ORDINAL_B")
+	if err := txA.setEdgeLabelAt("a", "b", 1, "BY_ORDINAL_A"); err != nil {
+		t.Fatal(err)
+	}
+	if err := txB.setEdgeLabelAt("c", "d", 1, "BY_ORDINAL_B"); err != nil {
+		t.Fatal(err)
+	}
 	if err := txA.setEdgePropertyAt("a", "b", 1, "v", Int64Value(1)); err != nil {
 		t.Fatalf("A property by ordinal: %v", err)
 	}
@@ -274,21 +304,35 @@ func TestConflict_OwnSecondWriteToEdgeStores(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AddEdgeH: %v", err)
 	}
-	g.SetEdgeLabel("a", "b", "FIRST")
+	if err := g.SetEdgeLabel("a", "b", "FIRST"); err != nil {
+		t.Fatal(err)
+	}
 
 	tx := g.beginLabelTx()
-	tx.setEdgeLabel("a", "b", "SECOND")
-	tx.setEdgeLabel("a", "b", "THIRD")
-	tx.setEdgeLabelByHandle("a", "b", h, "ONE")
-	tx.setEdgeLabelByHandle("a", "b", h, "TWO")
+	if err := tx.setEdgeLabel("a", "b", "SECOND"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.setEdgeLabel("a", "b", "THIRD"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.setEdgeLabelByHandle("a", "b", h, "ONE"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.setEdgeLabelByHandle("a", "b", h, "TWO"); err != nil {
+		t.Fatal(err)
+	}
 	if err := tx.setEdgePropertyByHandle("a", "b", h, "w", Int64Value(1)); err != nil {
 		t.Fatalf("first property write: %v", err)
 	}
 	if err := tx.setEdgePropertyByHandle("a", "b", h, "w", Int64Value(2)); err != nil {
 		t.Fatalf("a transaction was refused its own second write to the same edge: %v", err)
 	}
-	tx.setEdgeLabelAt("a", "b", 1, "ORD_ONE")
-	tx.setEdgeLabelAt("a", "b", 1, "ORD_TWO")
+	if err := tx.setEdgeLabelAt("a", "b", 1, "ORD_ONE"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.setEdgeLabelAt("a", "b", 1, "ORD_TWO"); err != nil {
+		t.Fatal(err)
+	}
 	if err := tx.setEdgePropertyAt("a", "b", 1, "v", Int64Value(1)); err != nil {
 		t.Fatalf("first ordinal property write: %v", err)
 	}
@@ -317,12 +361,18 @@ func TestConflict_EdgeOverflowRelTypeRemoval(t *testing.T) {
 	}
 	// The first type lands on the adjacency slot; the second goes to overflow,
 	// which is the chain this test is about.
-	g.SetEdgeLabel("a", "b", "FIRST")
-	g.SetEdgeLabel("a", "b", "SECOND")
+	if err := g.SetEdgeLabel("a", "b", "FIRST"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetEdgeLabel("a", "b", "SECOND"); err != nil {
+		t.Fatal(err)
+	}
 
 	// A writes the overflow list and stays in flight.
 	txA := g.beginLabelTx()
-	txA.setEdgeLabel("a", "b", "THIRD")
+	if err := txA.setEdgeLabel("a", "b", "THIRD"); err != nil {
+		t.Fatal(err)
+	}
 
 	// B removes from the same list.
 	txB := g.beginLabelTx()

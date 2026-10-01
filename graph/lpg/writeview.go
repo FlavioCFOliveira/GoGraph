@@ -217,9 +217,15 @@ func (wv WriteView[N, W]) SetNodeLabel(n N, name string) error {
 	return wv.g.setNodeLabelInfo(n, name, wv.w)
 }
 
-// RemoveNodeLabel is [Graph.RemoveNodeLabel] inside this view's transaction.
-func (wv WriteView[N, W]) RemoveNodeLabel(n N, name string) {
+// RemoveNodeLabel is [Graph.RemoveNodeLabel] inside this view's transaction. It refuses an over-long token
+// with [ErrTokenTooLong] and changes nothing (rmp #2748); the error return is a
+// breaking change.
+func (wv WriteView[N, W]) RemoveNodeLabel(n N, name string) error {
+	if err := CheckToken("node label", name); err != nil {
+		return err
+	}
 	wv.g.removeNodeLabelInfo(n, name, wv.w)
+	return nil
 }
 
 // SetNodeProperty is [Graph.SetNodeProperty] inside this view's transaction.
@@ -227,9 +233,15 @@ func (wv WriteView[N, W]) SetNodeProperty(n N, key string, value PropertyValue) 
 	return wv.g.setNodePropertyInfo(n, key, value, wv.w)
 }
 
-// DelNodeProperty is [Graph.DelNodeProperty] inside this view's transaction.
-func (wv WriteView[N, W]) DelNodeProperty(n N, key string) {
+// DelNodeProperty is [Graph.DelNodeProperty] inside this view's transaction. It refuses an over-long token
+// with [ErrTokenTooLong] and changes nothing (rmp #2748); the error return is a
+// breaking change.
+func (wv WriteView[N, W]) DelNodeProperty(n N, key string) error {
+	if err := CheckToken("property key", key); err != nil {
+		return err
+	}
 	wv.g.delNodePropertyInfo(n, key, wv.w)
+	return nil
 }
 
 // ── topology ─────────────────────────────────────────────────────────────────
@@ -290,14 +302,21 @@ func (wv WriteView[N, W]) RemoveAllEdgesFrom(src N) bool {
 
 // ── per-pair relationship types and properties ───────────────────────────────
 
-// SetEdgeLabel is [Graph.SetEdgeLabel] inside this view's transaction.
-func (wv WriteView[N, W]) SetEdgeLabel(src, dst N, name string) {
-	wv.g.setEdgeLabelInfo(src, dst, name, wv.w)
+// SetEdgeLabel is [Graph.SetEdgeLabel] inside this view's transaction. The error return is a
+// breaking change (rmp #2748).
+func (wv WriteView[N, W]) SetEdgeLabel(src, dst N, name string) error {
+	return wv.g.setEdgeLabelInfo(src, dst, name, wv.w)
 }
 
-// RemoveEdgeLabel is [Graph.RemoveEdgeLabel] inside this view's transaction.
-func (wv WriteView[N, W]) RemoveEdgeLabel(src, dst N, name string) {
+// RemoveEdgeLabel is [Graph.RemoveEdgeLabel] inside this view's transaction. It refuses an over-long token
+// with [ErrTokenTooLong] and changes nothing (rmp #2748); the error return is a
+// breaking change.
+func (wv WriteView[N, W]) RemoveEdgeLabel(src, dst N, name string) error {
+	if err := CheckToken("relationship type", name); err != nil {
+		return err
+	}
 	wv.g.removeEdgeLabelInfo(src, dst, name, wv.w)
+	return nil
 }
 
 // SetEdgeProperty is [Graph.SetEdgeProperty] inside this view's transaction.
@@ -305,16 +324,23 @@ func (wv WriteView[N, W]) SetEdgeProperty(src, dst N, key string, value Property
 	return wv.g.setEdgePropertyInfo(src, dst, key, value, wv.w)
 }
 
-// DelEdgeProperty is [Graph.DelEdgeProperty] inside this view's transaction.
-func (wv WriteView[N, W]) DelEdgeProperty(src, dst N, key string) {
+// DelEdgeProperty is [Graph.DelEdgeProperty] inside this view's transaction. It refuses an over-long token
+// with [ErrTokenTooLong] and changes nothing (rmp #2748); the error return is a
+// breaking change.
+func (wv WriteView[N, W]) DelEdgeProperty(src, dst N, key string) error {
+	if err := CheckToken("property key", key); err != nil {
+		return err
+	}
 	wv.g.delEdgePropertyInfo(src, dst, key, wv.w)
+	return nil
 }
 
 // ── per-instance surfaces, addressed by CREATE ordinal ───────────────────────
 
-// SetEdgeLabelAt is [Graph.SetEdgeLabelAt] inside this view's transaction.
-func (wv WriteView[N, W]) SetEdgeLabelAt(src, dst N, idx int64, name string) {
-	wv.g.setEdgeLabelAtInfo(src, dst, idx, name, wv.w)
+// SetEdgeLabelAt is [Graph.SetEdgeLabelAt] inside this view's transaction. The error return is a
+// breaking change (rmp #2748).
+func (wv WriteView[N, W]) SetEdgeLabelAt(src, dst N, idx int64, name string) error {
+	return wv.g.setEdgeLabelAtInfo(src, dst, idx, name, wv.w)
 }
 
 // SetEdgePropertyAt is [Graph.SetEdgePropertyAt] inside this view's transaction.
@@ -331,9 +357,10 @@ func (wv WriteView[N, W]) RemoveEdgeInstance(src, dst N, idx int64) {
 // ── per-instance surfaces, addressed by stable handle ────────────────────────
 
 // SetEdgeLabelByHandle is [Graph.SetEdgeLabelByHandle] inside this view's
-// transaction.
-func (wv WriteView[N, W]) SetEdgeLabelByHandle(src, dst N, handle uint64, name string) {
-	wv.g.setEdgeLabelByHandleInfo(src, dst, handle, name, wv.w)
+// transaction. The error return is a
+// breaking change (rmp #2748).
+func (wv WriteView[N, W]) SetEdgeLabelByHandle(src, dst N, handle uint64, name string) error {
+	return wv.g.setEdgeLabelByHandleInfo(src, dst, handle, name, wv.w)
 }
 
 // SetEdgePropertyByHandle is [Graph.SetEdgePropertyByHandle] inside this view's
@@ -343,9 +370,15 @@ func (wv WriteView[N, W]) SetEdgePropertyByHandle(src, dst N, handle uint64, key
 }
 
 // DelEdgePropertyByHandle is [Graph.DelEdgePropertyByHandle] inside this view's
-// transaction.
-func (wv WriteView[N, W]) DelEdgePropertyByHandle(src, dst N, handle uint64, key string) {
+// transaction. It refuses an over-long token
+// with [ErrTokenTooLong] and changes nothing (rmp #2748); the error return is a
+// breaking change.
+func (wv WriteView[N, W]) DelEdgePropertyByHandle(src, dst N, handle uint64, key string) error {
+	if err := CheckToken("property key", key); err != nil {
+		return err
+	}
 	wv.g.delEdgePropertyByHandleInfo(src, dst, handle, key, wv.w)
+	return nil
 }
 
 // RemoveEdgeInstanceByHandle is [Graph.RemoveEdgeInstanceByHandle] inside this

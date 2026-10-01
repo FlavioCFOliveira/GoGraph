@@ -17,7 +17,7 @@ func ExampleSchema() {
 
 	// Declare that "Person" exists and that "age" is an Int64 property
 	// every Person must carry.
-	s.RegisterLabel("Person")
+	_, _ = s.RegisterLabel("Person")
 	_, _ = s.RegisterProperty("age", lpg.PropInt64)
 	s.RequireProperty("Person", "age")
 

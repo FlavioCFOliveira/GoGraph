@@ -82,43 +82,43 @@ func (m *seedStubMutator) AddEdgeH(string, string, float64) (graph.NodeID, graph
 func (m *seedStubMutator) RemoveEdge(string, string)                 { panic("unused") }
 func (m *seedStubMutator) RemoveEdgeByHandle(string, string, uint64) { panic("unused") }
 func (m *seedStubMutator) SetNodeLabel(string, string) error         { panic("unused") }
-func (m *seedStubMutator) RemoveNodeLabel(string, string)            { panic("unused") }
+func (m *seedStubMutator) RemoveNodeLabel(string, string) error      { panic("unused") }
 func (m *seedStubMutator) SetNodeProperty(string, string, lpg.PropertyValue) error {
 	panic("unused")
 }
-func (m *seedStubMutator) DelNodeProperty(string, string) { panic("unused") }
+func (m *seedStubMutator) DelNodeProperty(string, string) error { panic("unused") }
 func (m *seedStubMutator) NodeProperties(string) map[string]lpg.PropertyValue {
 	panic("unused")
 }
-func (m *seedStubMutator) NodeLabels(string) []string          { panic("unused") }
-func (m *seedStubMutator) HasEdge(string, string) bool         { panic("unused") }
-func (m *seedStubMutator) SetEdgeLabel(string, string, string) { panic("unused") }
+func (m *seedStubMutator) NodeLabels(string) []string                { panic("unused") }
+func (m *seedStubMutator) HasEdge(string, string) bool               { panic("unused") }
+func (m *seedStubMutator) SetEdgeLabel(string, string, string) error { panic("unused") }
 func (m *seedStubMutator) SetEdgeProperty(string, string, string, lpg.PropertyValue) error {
 	panic("unused")
 }
-func (m *seedStubMutator) DelEdgeProperty(string, string, string) { panic("unused") }
+func (m *seedStubMutator) DelEdgeProperty(string, string, string) error { panic("unused") }
 func (m *seedStubMutator) EdgeProperties(string, string) map[string]lpg.PropertyValue {
 	panic("unused")
 }
-func (m *seedStubMutator) EdgeLabels(string, string) []string           { panic("unused") }
-func (m *seedStubMutator) IncEdgeCreateCount(string, string) int64      { return 0 }
-func (m *seedStubMutator) EdgeCreateCount(string, string) int64         { return 0 }
-func (m *seedStubMutator) DecEdgeCreateCount(string, string)            {}
-func (m *seedStubMutator) SetEdgeLabelAt(string, string, int64, string) {}
-func (m *seedStubMutator) EdgeLabelsAt(string, string, int64) []string  { return nil }
+func (m *seedStubMutator) EdgeLabels(string, string) []string                 { panic("unused") }
+func (m *seedStubMutator) IncEdgeCreateCount(string, string) int64            { return 0 }
+func (m *seedStubMutator) EdgeCreateCount(string, string) int64               { return 0 }
+func (m *seedStubMutator) DecEdgeCreateCount(string, string)                  {}
+func (m *seedStubMutator) SetEdgeLabelAt(string, string, int64, string) error { return nil }
+func (m *seedStubMutator) EdgeLabelsAt(string, string, int64) []string        { return nil }
 func (m *seedStubMutator) SetEdgePropertyAt(string, string, int64, string, lpg.PropertyValue) error {
 	return nil
 }
 func (m *seedStubMutator) EdgePropertiesAt(string, string, int64) map[string]lpg.PropertyValue {
 	return nil
 }
-func (m *seedStubMutator) RemoveEdgeInstance(string, string, int64)            {}
-func (m *seedStubMutator) SetEdgeLabelByHandle(string, string, uint64, string) {}
-func (m *seedStubMutator) EdgeLabelsByHandle(string, string, uint64) []string  { return nil }
+func (m *seedStubMutator) RemoveEdgeInstance(string, string, int64)                  {}
+func (m *seedStubMutator) SetEdgeLabelByHandle(string, string, uint64, string) error { return nil }
+func (m *seedStubMutator) EdgeLabelsByHandle(string, string, uint64) []string        { return nil }
 func (m *seedStubMutator) SetEdgePropertyByHandle(string, string, uint64, string, lpg.PropertyValue) error {
 	return nil
 }
-func (m *seedStubMutator) DelEdgePropertyByHandle(string, string, uint64, string) {}
+func (m *seedStubMutator) DelEdgePropertyByHandle(string, string, uint64, string) error { return nil }
 func (m *seedStubMutator) EdgePropertiesByHandle(string, string, uint64) map[string]lpg.PropertyValue {
 	return nil
 }

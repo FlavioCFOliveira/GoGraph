@@ -84,8 +84,8 @@ func attachHashIndex[V comparable](
 	project func(lpg.PropertyValue) (V, bool),
 ) {
 	tb.Helper()
-	labelID := uint32(g.Registry().Intern(label))
-	propID := uint32(g.PropertyKeys().Intern(prop))
+	labelID := labelIDOf(g.Registry(), label)
+	propID := keyIDOf(g.PropertyKeys(), prop)
 	mapper := g.AdjList().Mapper()
 	nodeIdx := g.NodeIndex()
 
@@ -165,8 +165,8 @@ func attachBTreeIndex[V interface {
 	project func(lpg.PropertyValue) (V, bool),
 ) {
 	tb.Helper()
-	labelID := uint32(g.Registry().Intern(label))
-	propID := uint32(g.PropertyKeys().Intern(prop))
+	labelID := labelIDOf(g.Registry(), label)
+	propID := keyIDOf(g.PropertyKeys(), prop)
 	mapper := g.AdjList().Mapper()
 	nodeIdx := g.NodeIndex()
 
@@ -542,4 +542,24 @@ func trunc(s []string) []string {
 		return append(append([]string{}, s[:10]...), "...")
 	}
 	return s
+}
+
+// labelIDOf interns name in r and returns its id as an index.Change carries it.
+// Test names are short constants that the token bound (lpg.MaxTokenLen) cannot
+// refuse, so a refusal is a defect in the test itself and panics.
+func labelIDOf(r *lpg.LabelRegistry, name string) uint32 {
+	id, err := r.Intern(name)
+	if err != nil {
+		panic(err)
+	}
+	return uint32(id)
+}
+
+// keyIDOf is [labelIDOf] for a property key.
+func keyIDOf(r *lpg.PropertyKeyRegistry, name string) uint32 {
+	id, err := r.Intern(name)
+	if err != nil {
+		panic(err)
+	}
+	return uint32(id)
 }

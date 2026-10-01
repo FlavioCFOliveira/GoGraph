@@ -391,7 +391,9 @@ func (op *MergeRelationship) Next(out *Row) (bool, error) {
 			}
 			if !labelled[ord] {
 				labelled[ord] = true
-				op.mutator.SetEdgeLabel(m.srcKey, m.dstKey, op.relType)
+				if err := op.mutator.SetEdgeLabel(m.srcKey, m.dstKey, op.relType); err != nil {
+					return false, err
+				}
 			}
 			if err := op.applyRelActions(row, m.srcKey, m.dstKey, m.handle, op.onMatchActions, op.onMatchEvals); err != nil {
 				return false, err
@@ -419,8 +421,12 @@ func (op *MergeRelationship) Next(out *Row) (bool, error) {
 		return false, fmt.Errorf("exec: MergeRelationship: AddEdge: %w", addErr)
 	}
 	if op.relType != "" {
-		op.mutator.SetEdgeLabel(srcKey, dstKey, op.relType)
-		op.mutator.SetEdgeLabelByHandle(srcKey, dstKey, handle, op.relType)
+		if err := op.mutator.SetEdgeLabel(srcKey, dstKey, op.relType); err != nil {
+			return false, err
+		}
+		if err := op.mutator.SetEdgeLabelByHandle(srcKey, dstKey, handle, op.relType); err != nil {
+			return false, err
+		}
 	}
 	for _, p := range effectiveProps {
 		if setErr := op.mutator.SetEdgeProperty(srcKey, dstKey, p.key, p.value); setErr != nil {
@@ -576,7 +582,9 @@ func (op *MergeRelationship) applyRelActions(row Row, srcKey, dstKey string, han
 		// existing edge property absent from retainKeys before the per-key
 		// write actions that follow apply the new values.
 		if act.replace && act.key == "" && act.value == "" {
-			op.clearRelPropsAbsent(srcKey, dstKey, handle, act.retainKeys)
+			if err := op.clearRelPropsAbsent(srcKey, dstKey, handle, act.retainKeys); err != nil {
+				return err
+			}
 			continue
 		}
 		// Entity-copy sentinel: key=="" carries the source variable name in
@@ -616,7 +624,9 @@ func (op *MergeRelationship) applyRelActions(row Row, srcKey, dstKey string, han
 				for k := range srcProps {
 					retain = append(retain, k)
 				}
-				op.clearRelPropsAbsent(srcKey, dstKey, handle, retain)
+				if err := op.clearRelPropsAbsent(srcKey, dstKey, handle, retain); err != nil {
+					return err
+				}
 			}
 			// Copy, mirrored key-by-key to the by-handle store so both
 			// stores stay in lock-step (by-handle == per-pair for the
@@ -661,7 +671,9 @@ func (op *MergeRelationship) applyRelActions(row Row, srcKey, dstKey string, han
 			}
 			if isNull {
 				// RHS evaluated to null → openCypher removes the property.
-				op.delEdgeProp(srcKey, dstKey, handle, act.key)
+				if err := op.delEdgeProp(srcKey, dstKey, handle, act.key); err != nil {
+					return err
+				}
 				continue
 			}
 			if !hasValue {
@@ -693,15 +705,22 @@ func (op *MergeRelationship) applyRelActions(row Row, srcKey, dstKey string, han
 // on parallel edges the aggregate can carry a key a SIBLING wrote, which the
 // bound instance never had — removing it must count 0. The handle==0 fallback
 // keeps the pairwise path byte-identical.
-func (op *MergeRelationship) delEdgeProp(srcKey, dstKey string, handle uint64, key string) {
+func (op *MergeRelationship) delEdgeProp(srcKey, dstKey string, handle uint64, key string) error {
 	if m, ok := op.mutator.(relInstancePropRemover); ok && handle != 0 {
-		m.DelEdgePropertyOnInstance(srcKey, dstKey, handle, key)
-		return
+		if err := m.DelEdgePropertyOnInstance(srcKey, dstKey, handle, key); err != nil {
+			return err
+		}
+		return nil
 	}
-	op.mutator.DelEdgeProperty(srcKey, dstKey, key)
+	if err := op.mutator.DelEdgeProperty(srcKey, dstKey, key); err != nil {
+		return err
+	}
 	if handle != 0 {
-		op.mutator.DelEdgePropertyByHandle(srcKey, dstKey, handle, key)
+		if err := op.mutator.DelEdgePropertyByHandle(srcKey, dstKey, handle, key); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // actionEvalRow returns a row for a per-row RHS evaluator: a copy of the
@@ -746,10 +765,10 @@ func (op *MergeRelationship) currentRelValue(srcKey, dstKey string, handle uint6
 // undo log — so a rolled-back statement restores the cleared values exactly —
 // and counts -properties on the instance's OWN bag rather than on the pair
 // aggregate a parallel sibling also contributes to (#2501).
-func (op *MergeRelationship) clearRelPropsAbsent(srcKey, dstKey string, handle uint64, retain []string) {
+func (op *MergeRelationship) clearRelPropsAbsent(srcKey, dstKey string, handle uint64, retain []string) error {
 	existing := relClearKeys(op.mutator, srcKey, dstKey, handle)
 	if len(existing) == 0 {
-		return
+		return nil
 	}
 	keep := make(map[string]struct{}, len(retain))
 	for _, k := range retain {
@@ -759,8 +778,11 @@ func (op *MergeRelationship) clearRelPropsAbsent(srcKey, dstKey string, handle u
 		if _, ok := keep[k]; ok {
 			continue
 		}
-		op.delEdgeProp(srcKey, dstKey, handle, k)
+		if err := op.delEdgeProp(srcKey, dstKey, handle, k); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // Close closes the child operator.

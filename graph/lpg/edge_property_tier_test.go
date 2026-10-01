@@ -168,7 +168,9 @@ func TestEdgePropTier_DeletePreservesOtherKeys(t *testing.T) {
 	g.mustSet(t, "a", "b", "since", Int64Value(2020))
 	g.mustSet(t, "a", "b", "weight", Float64Value(0.9))
 
-	g.DelEdgeProperty("a", "b", "weight")
+	if err := g.DelEdgeProperty("a", "b", "weight"); err != nil {
+		t.Fatal(err)
+	}
 	if _, ok := g.GetEdgeProperty("a", "b", "weight"); ok {
 		t.Fatalf("weight not deleted")
 	}
@@ -304,7 +306,9 @@ func runPublicOracle(t *testing.T, seed int64) {
 				continue
 			}
 			k := keys[rng.Intn(len(keys))]
-			g.DelEdgeProperty(s, d, k)
+			if err := g.DelEdgeProperty(s, d, k); err != nil {
+				t.Fatal(err)
+			}
 			if oracle[p] != nil {
 				delete(oracle[p], k)
 			}
@@ -394,7 +398,7 @@ func TestEdgePropTier_HeterogeneousKindAcrossEdges(t *testing.T) {
 	}
 	kinds := map[PropertyKind]bool{}
 	for i := range block.cols {
-		if block.cols[i].key != g.pkeys.Intern("v") {
+		if block.cols[i].key != g.pkeys.intern("v") {
 			continue
 		}
 		if kinds[block.cols[i].kind] {

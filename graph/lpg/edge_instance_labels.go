@@ -50,27 +50,33 @@ type edgeInstanceLabelShard struct {
 // (src, dst) at the supplied 1-based CREATE index. No-op when either
 // endpoint is unknown to the underlying mapper.
 //
-// SetEdgeLabelAt is safe for concurrent use.
-func (g *Graph[N, W]) SetEdgeLabelAt(src, dst N, idx int64, name string) {
-	g.setEdgeLabelAtInfo(src, dst, idx, name, nil)
+// SetEdgeLabelAt is safe for concurrent use.//
+// It refuses a relationship type longer than [MaxTokenLen] bytes with an error wrapping
+// [ErrTokenTooLong], before changing any state (rmp #2748). The error return is a
+// breaking change: SetEdgeLabelAt used to return nothing.
+func (g *Graph[N, W]) SetEdgeLabelAt(src, dst N, idx int64, name string) error {
+	return g.setEdgeLabelAtInfo(src, dst, idx, name, nil)
 }
 
 // setEdgeLabelAtInfo is [Graph.SetEdgeLabelAt] with an explicit write transaction; tx is
 // nil for a direct Go-API mutation, which is committed the instant it is made
 // and takes no conflict check. See [writeCtx].
-func (g *Graph[N, W]) setEdgeLabelAtInfo(src, dst N, idx int64, name string, tx *writeCtx) {
+func (g *Graph[N, W]) setEdgeLabelAtInfo(src, dst N, idx int64, name string, tx *writeCtx) error {
+	if err := CheckToken("relationship type", name); err != nil {
+		return err
+	}
 	if idx <= 0 {
-		return
+		return nil
 	}
 	srcID, ok := g.adj.Mapper().Lookup(src)
 	if !ok {
-		return
+		return nil
 	}
 	dstID, ok := g.adj.Mapper().Lookup(dst)
 	if !ok {
-		return
+		return nil
 	}
-	lid := g.reg.Intern(name)
+	lid := g.reg.intern(name)
 	k := edgeKey{src: srcID, dst: dstID}
 	sh := g.edgeInstanceLabelShardFor(k)
 	sh.mu.Lock()
@@ -85,14 +91,15 @@ func (g *Graph[N, W]) setEdgeLabelAtInfo(src, dst N, idx int64, name string, tx 
 	im := sh.m[k]
 	bag, _ := im.get(idx)
 	if bag.has(lid) {
-		return
+		return nil
 	}
 	if !g.pushInstanceLabelVersion(sh, k, idx, tx) {
-		return
+		return nil
 	}
 	bag.add(lid)
 	im.set(idx, bag)
 	sh.m[k] = im
+	return nil
 }
 
 // EdgeLabelsAt returns the labels recorded at instance `idx` of the

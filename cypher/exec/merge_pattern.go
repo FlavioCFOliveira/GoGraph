@@ -1072,8 +1072,12 @@ func (op *MergePattern) createChain(childRow Row) (binding, error) {
 		// parallel hop over an already-connected bound pair.
 		b[i+1].handle = handle
 		if hop.relType != "" {
-			op.mutator.SetEdgeLabel(srcKey, dstKey, hop.relType)
-			op.mutator.SetEdgeLabelByHandle(srcKey, dstKey, handle, hop.relType)
+			if err := op.mutator.SetEdgeLabel(srcKey, dstKey, hop.relType); err != nil {
+				return binding{}, err
+			}
+			if err := op.mutator.SetEdgeLabelByHandle(srcKey, dstKey, handle, hop.relType); err != nil {
+				return binding{}, err
+			}
 		}
 		// Write the hop's effective inline properties for THIS driving row
 		// (literals merged with any non-literal per-row values, e.g.
@@ -1335,7 +1339,9 @@ func (op *MergePattern) applyNodeAction(key string, act mergeAction, evalRow Row
 			// SET x.k = null (literal or expression→null) removes the property;
 			// DelNodeProperty releases its old constrained value, so a UNIQUE slot
 			// is not leaked as a phantom reservation (#1904, rmp #2358).
-			op.mutator.DelNodeProperty(key, act.key)
+			if err := op.mutator.DelNodeProperty(key, act.key); err != nil {
+				return err
+			}
 			return nil
 		}
 		if !resolved {
@@ -1385,14 +1391,22 @@ func (op *MergePattern) applyRelAction(srcKey, dstKey string, handle uint64, act
 			// handle==0 fallback keeps the pairwise path byte-identical.
 			if handle != 0 {
 				if m, isInst := op.mutator.(relInstancePropRemover); isInst {
-					m.DelEdgePropertyOnInstance(srcKey, dstKey, handle, act.key)
+					if err := m.DelEdgePropertyOnInstance(srcKey, dstKey, handle, act.key); err != nil {
+						return err
+					}
 					return nil
 				}
-				op.mutator.DelEdgeProperty(srcKey, dstKey, act.key)
-				op.mutator.DelEdgePropertyByHandle(srcKey, dstKey, handle, act.key)
+				if err := op.mutator.DelEdgeProperty(srcKey, dstKey, act.key); err != nil {
+					return err
+				}
+				if err := op.mutator.DelEdgePropertyByHandle(srcKey, dstKey, handle, act.key); err != nil {
+					return err
+				}
 				return nil
 			}
-			op.mutator.DelEdgeProperty(srcKey, dstKey, act.key)
+			if err := op.mutator.DelEdgeProperty(srcKey, dstKey, act.key); err != nil {
+				return err
+			}
 			return nil
 		}
 		if !resolved {

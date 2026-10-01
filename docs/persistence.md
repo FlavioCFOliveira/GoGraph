@@ -97,6 +97,12 @@ one that would block every subsequent checkpoint while the WAL grew unbounded.
 The transaction consumes a sequence, applies nothing, and leaves the store
 usable.
 
+The 65535-byte token limit is not a WAL-only rule. It is `lpg.MaxTokenLen`, and
+the in-memory engine, every `Tx` mutator, bulk import and the Cypher engines all
+refuse an over-long label, relationship type or property key with
+`lpg.ErrTokenTooLong` before any write, so a graph cannot hold a token its own
+WAL could not log (rmp #2748). Call `lpg.CheckToken` to validate a name first.
+
 ## Transaction isolation
 
 **Writes do not serialise.** Since rmp #2306 the transactional layer's

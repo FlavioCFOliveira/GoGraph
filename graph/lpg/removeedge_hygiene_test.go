@@ -56,7 +56,9 @@ func TestRemoveEdge_ClearsSidecarStores(t *testing.T) {
 	}
 
 	// --- populate the three instance sidecar stores ---
-	g.SetEdgeLabelAt(a, b, idx, "KNOWS")
+	if err := g.SetEdgeLabelAt(a, b, idx, "KNOWS"); err != nil {
+		t.Fatal(err)
+	}
 	g.IncEdgeCreateCount(a, b) // bumps counter to 1
 	if err := g.SetEdgePropertyAt(a, b, idx, "since", lpg.StringValue("2024")); err != nil {
 		t.Fatalf("SetEdgePropertyAt: %v", err)

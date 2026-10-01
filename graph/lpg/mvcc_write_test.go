@@ -84,8 +84,8 @@ func TestMVCCWrite_MultiOpStatementIsAtomicallyVisible(t *testing.T) {
 	// edge is the torn state the shared commit record exists to make impossible.
 	midLabels := g.labelBagAsOf(id, midTS, 0)
 	midProps := g.propBagAsOf(id, midTS, 0)
-	sawLabel := midLabels.has(g.reg.Intern("Person"))
-	_, sawProp := midProps.get(g.pkeys.Intern("name"))
+	sawLabel := midLabels.has(g.reg.intern("Person"))
+	_, sawProp := midProps.get(g.pkeys.intern("name"))
 	sawEdge := len(g.adj.EntryNeighboursAsOf(id, midTS, 0)) > 0
 	if sawLabel != sawProp || sawProp != sawEdge {
 		t.Fatalf("a reader that started mid-statement sees label=%v property=%v edge=%v — a TORN "+
@@ -94,10 +94,10 @@ func TestMVCCWrite_MultiOpStatementIsAtomicallyVisible(t *testing.T) {
 	}
 
 	// A reader from BEFORE must see none of the three.
-	if bag := g.labelBagAsOf(id, before, 0); bag.has(g.reg.Intern("Person")) {
+	if bag := g.labelBagAsOf(id, before, 0); bag.has(g.reg.intern("Person")) {
 		t.Error("a reader from before the transaction sees its LABEL")
 	}
-	if bag := g.propBagAsOf(id, before, 0); func() bool { _, ok := bag.get(g.pkeys.Intern("name")); return ok }() {
+	if bag := g.propBagAsOf(id, before, 0); func() bool { _, ok := bag.get(g.pkeys.intern("name")); return ok }() {
 		t.Error("a reader from before the transaction sees its PROPERTY")
 	}
 	if n := len(g.adj.EntryNeighboursAsOf(id, before, 0)); n != 0 {
@@ -105,10 +105,10 @@ func TestMVCCWrite_MultiOpStatementIsAtomicallyVisible(t *testing.T) {
 	}
 
 	// A reader from AFTER must see all three.
-	if bag := g.labelBagAsOf(id, after, 0); !bag.has(g.reg.Intern("Person")) {
+	if bag := g.labelBagAsOf(id, after, 0); !bag.has(g.reg.intern("Person")) {
 		t.Error("a reader from after the transaction is missing its LABEL")
 	}
-	if bag := g.propBagAsOf(id, after, 0); func() bool { _, ok := bag.get(g.pkeys.Intern("name")); return ok }() == false {
+	if bag := g.propBagAsOf(id, after, 0); func() bool { _, ok := bag.get(g.pkeys.intern("name")); return ok }() == false {
 		t.Error("a reader from after the transaction is missing its PROPERTY")
 	}
 	if n := len(g.adj.EntryNeighboursAsOf(id, after, 0)); n != 1 {
@@ -138,7 +138,7 @@ func TestMVCCWrite_ExplicitTransactionSharesOneRecord(t *testing.T) {
 	// Mid-transaction: a reader from before must still see nothing, and so must
 	// a reader that starts NOW — the transaction has not published.
 	midTS := g.readTS()
-	if bag := g.labelBagAsOf(id, midTS, 0); bag.has(g.reg.Intern("One")) {
+	if bag := g.labelBagAsOf(id, midTS, 0); bag.has(g.reg.intern("One")) {
 		g.UnlockBarrier()
 		t.Fatal("a statement inside an open explicit transaction is already visible: the " +
 			"transaction is publishing statement by statement instead of as a whole")
@@ -147,10 +147,10 @@ func TestMVCCWrite_ExplicitTransactionSharesOneRecord(t *testing.T) {
 	g.UnlockBarrier()
 
 	after := g.readTS()
-	if bag := g.labelBagAsOf(id, before, 0); bag.has(g.reg.Intern("One")) {
+	if bag := g.labelBagAsOf(id, before, 0); bag.has(g.reg.intern("One")) {
 		t.Error("a reader from before the transaction sees its label")
 	}
-	if bag := g.labelBagAsOf(id, after, 0); !bag.has(g.reg.Intern("One")) {
+	if bag := g.labelBagAsOf(id, after, 0); !bag.has(g.reg.intern("One")) {
 		t.Error("a reader from after the transaction is missing its label")
 	}
 	if n := len(g.adj.EntryNeighboursAsOf(id, after, 0)); n != 1 {
@@ -173,10 +173,10 @@ func TestMVCCWrite_DirectMutationTakesItsOwnTimestamp(t *testing.T) {
 	if err := g.SetNodeLabel("a", "L"); err != nil {
 		t.Fatalf("SetNodeLabel: %v", err)
 	}
-	if bag := g.labelBagAsOf(id, before, 0); bag.has(g.reg.Intern("L")) {
+	if bag := g.labelBagAsOf(id, before, 0); bag.has(g.reg.intern("L")) {
 		t.Error("a reader from before a direct write sees it")
 	}
-	if bag := g.labelBagAsOf(id, g.readTS(), 0); !bag.has(g.reg.Intern("L")) {
+	if bag := g.labelBagAsOf(id, g.readTS(), 0); !bag.has(g.reg.intern("L")) {
 		t.Error("a reader from after a direct write does not see it")
 	}
 }
@@ -255,7 +255,7 @@ func TestMVCCReclaim_HeldBackByAnActiveReader(t *testing.T) {
 	}
 	// And the pinned reader still resolves to what it pinned.
 	bag := g.propBagAsOf(id, startTS, 0)
-	v, ok := bag.get(g.pkeys.Intern("w"))
+	v, ok := bag.get(g.pkeys.intern("w"))
 	if !ok {
 		t.Fatal("the pinned reader lost the property entirely")
 	}
@@ -342,7 +342,9 @@ func TestMVCCWrite_TransactionSpanningEveryStoreIsAtomicallyVisible(t *testing.T
 			return err
 		}
 		sample()
-		g.SetEdgeLabelByHandle("a", "b", handle, "KNOWS") // relationship types
+		if err := g.SetEdgeLabelByHandle("a", "b", handle, "KNOWS"); err != nil {
+			t.Fatal(err)
+		} // relationship types
 		sample()
 		if err := g.SetEdgePropertyByHandle("a", "b", handle, "since", Int64Value(1815)); err != nil {
 			return err // edge properties
@@ -370,9 +372,9 @@ func TestMVCCWrite_TransactionSpanningEveryStoreIsAtomicallyVisible(t *testing.T
 		_, sawEdgeProp := v.EdgePropertiesByHandle("a", "b", handle)["since"]
 		labels := g.labelBagAsOf(id, ts, 0)
 		props := g.propBagAsOf(id, ts, 0)
-		_, sawProp := props.get(g.pkeys.Intern("name"))
+		_, sawProp := props.get(g.pkeys.intern("name"))
 		return map[string]bool{
-			"node label":        labels.has(g.reg.Intern("Person")),
+			"node label":        labels.has(g.reg.intern("Person")),
 			"node property":     sawProp,
 			"topology":          v.HasEdge("a", "c"),
 			"relationship type": sawType,

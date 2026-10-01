@@ -235,8 +235,12 @@ func BenchmarkOutDegreeByType_ByHandle(b *testing.B) {
 			if err != nil {
 				b.Fatalf("AddEdgeH: %v", err)
 			}
-			g.SetEdgeLabel("hub", dst, "T")
-			g.SetEdgeLabelByHandle("hub", dst, h, "T")
+			if err := g.SetEdgeLabel("hub", dst, "T"); err != nil {
+				b.Fatal(err)
+			}
+			if err := g.SetEdgeLabelByHandle("hub", dst, h, "T"); err != nil {
+				b.Fatal(err)
+			}
 		}
 		relType, ok := g.Registry().Lookup("T")
 		if !ok {
@@ -295,8 +299,12 @@ func BenchmarkOutDegreeByTypeBounded_Shapes(b *testing.B) {
 				b.Fatalf("AddEdgeH: %v", err)
 			}
 			rel := fmt.Sprintf("T%d", i%4)
-			gh.SetEdgeLabel("hub", dst, rel)
-			gh.SetEdgeLabelByHandle("hub", dst, h, rel)
+			if err := gh.SetEdgeLabel("hub", dst, rel); err != nil {
+				b.Fatal(err)
+			}
+			if err := gh.SetEdgeLabelByHandle("hub", dst, h, rel); err != nil {
+				b.Fatal(err)
+			}
 		}
 		relTypeH, okH := gh.Registry().Lookup("T0")
 		if !okH {
@@ -317,7 +325,10 @@ func BenchmarkOutDegreeByTypeBounded_Shapes(b *testing.B) {
 		// slot. This is the worst case for the overflow gate the per-slot type
 		// resolution added, and the shape a `COUNT { (a)-[:ABSENT]->() } > 0`
 		// produces.
-		absent := g.Registry().Intern("ABSENT")
+		absent, err := g.Registry().Intern("ABSENT")
+		if err != nil {
+			b.Fatal(err)
+		}
 		b.Run(fmt.Sprintf("absent-tight-cap/d=%d", d), func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {

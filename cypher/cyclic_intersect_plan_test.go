@@ -68,7 +68,9 @@ func cyclicGraph(t *testing.T, nodes int, edges [][2]int) *lpg.Graph[string, flo
 		if err := g.AddEdge(keys[e[0]], keys[e[1]], 1.0); err != nil {
 			t.Fatalf("AddEdge: %v", err)
 		}
-		g.SetEdgeLabel(keys[e[0]], keys[e[1]], "K")
+		if err := g.SetEdgeLabel(keys[e[0]], keys[e[1]], "K"); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return g
 }

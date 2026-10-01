@@ -797,7 +797,9 @@ func typedSchemaInstall(
 	}
 	sort.Strings(labels)
 	for _, label := range labels {
-		sc.RegisterLabel(label)
+		if _, err := sc.RegisterLabel(label); err != nil {
+			return nil, nil, fmt.Errorf("sim: typed-schema RegisterLabel %q: %w", label, err)
+		}
 		props := make([]string, len(required[label]))
 		copy(props, required[label])
 		sort.Strings(props)
@@ -1548,7 +1550,7 @@ func (p *TypedSchemaProbes) checkNoMutation(
 	case tsPerturbInternGhostKey:
 		// Reproduces a hook that ran AFTER the intern. It permanently taints the
 		// fixture's registry, which is why it is only ever passed by a test.
-		side.g.PropertyKeys().Intern(spec.key)
+		_, _ = side.g.PropertyKeys().Intern(spec.key) // the perturbation is the intern itself
 	default:
 	}
 

@@ -34,9 +34,10 @@ import (
 // bag rather than the per-pair aggregate — on parallel edges the aggregate
 // probe reports the removal only once per (src, dst) pair. Both engine
 // adapters implement it; the interface stays optional so pairwise-only
-// mutators keep compiling.
+// mutators keep compiling. It returns an error for the reason every
+// token-taking [GraphMutator] method does (rmp #2748).
 type relInstancePropRemover interface {
-	DelEdgePropertyOnInstance(src, dst string, handle uint64, key string)
+	DelEdgePropertyOnInstance(src, dst string, handle uint64, key string) error
 }
 
 // RemoveProperty removes a single named property from an already-bound node
@@ -133,17 +134,25 @@ func (op *RemoveProperty) Next(out *Row) (bool, error) {
 			// both removals itself so -properties is gated on the TARGETED
 			// instance's own bag, not the per-pair aggregate (#2500).
 			if m, ok := op.mutator.(relInstancePropRemover); ok && ent.relHandle != 0 {
-				m.DelEdgePropertyOnInstance(ent.relSrcKey, ent.relDstKey, ent.relHandle, op.propertyKey)
+				if err := m.DelEdgePropertyOnInstance(ent.relSrcKey, ent.relDstKey, ent.relHandle, op.propertyKey); err != nil {
+					return false, err
+				}
 			} else {
-				op.mutator.DelEdgeProperty(ent.relSrcKey, ent.relDstKey, op.propertyKey)
+				if err := op.mutator.DelEdgeProperty(ent.relSrcKey, ent.relDstKey, op.propertyKey); err != nil {
+					return false, err
+				}
 				if ent.relHandle != 0 {
-					op.mutator.DelEdgePropertyByHandle(ent.relSrcKey, ent.relDstKey, ent.relHandle, op.propertyKey)
+					if err := op.mutator.DelEdgePropertyByHandle(ent.relSrcKey, ent.relDstKey, ent.relHandle, op.propertyKey); err != nil {
+						return false, err
+					}
 				}
 			}
 		} else {
 			// DelNodeProperty frees the constrained slot, at the mutator choke
 			// point and before the removal it guards (rmp #2358).
-			op.mutator.DelNodeProperty(ent.nodeKey, op.propertyKey)
+			if err := op.mutator.DelNodeProperty(ent.nodeKey, op.propertyKey); err != nil {
+				return false, err
+			}
 		}
 	}
 	// Empty propertyKey is treated as a no-op (whole-entity remove is not a
@@ -256,7 +265,9 @@ func (op *RemoveLabels) Next(out *Row) (bool, error) {
 	for _, lbl := range op.labels {
 		// RemoveNodeLabel gives the reservation back, at the mutator choke point and
 		// before the write it guards (rmp #2358).
-		op.mutator.RemoveNodeLabel(nodeKey, lbl)
+		if err := op.mutator.RemoveNodeLabel(nodeKey, lbl); err != nil {
+			return false, err
+		}
 	}
 
 	*out = childRow

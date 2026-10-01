@@ -2389,10 +2389,14 @@ func appendOpConstraintBody[N comparable, W any](buf []byte, op Op[N, W]) ([]byt
 // uint16-prefixed string on the wire: the schema identifiers (constraint and
 // index label, property and name) and the graph vocabulary the mutation frames
 // carry (node and edge labels, property keys). Schema identifiers are capped far
-// below this at the DDL boundary (cypher/ir maxSchemaIdentifierLen, #1903);
-// labels and property keys reaching the embedded Go API are bounded HERE and
-// nowhere else.
-const maxWALSchemaStringLen = 1<<16 - 1
+// below this at the DDL boundary (cypher/ir maxSchemaIdentifierLen, #1903).
+//
+// It IS [lpg.MaxTokenLen] (rmp #2748): the one definition of the token limit
+// lives in graph/lpg, which refuses an over-long label, relationship type or
+// property key before any in-memory write, and this layer refuses the same
+// names as they are staged. Taking the value from there means the two layers
+// cannot disagree about what is durable.
+const maxWALSchemaStringLen = lpg.MaxTokenLen
 
 // maxWALValueLen is the largest byte length a uint32 length prefix in the
 // property-value encoders can represent without truncation. It bounds a
@@ -2460,12 +2464,17 @@ const maxWALValueLenInt = maxWALValueLen & math.MaxInt
 // tested the umbrella before the split still matches.
 var ErrFieldTooLong = errors.New("txn: field too long for its WAL length prefix")
 
-// ErrTokenTooLong is the [ErrFieldTooLong] refusal for a TOKEN: a label, a
-// relationship type, a property key, or a schema identifier longer than the
-// 65535 bytes the WAL's uint16 length prefix can carry. [CheckSchemaField]
-// reports it before anything is staged. errors.Is(err, ErrFieldTooLong) is
-// also true for it (rmp #2942).
-var ErrTokenTooLong error = &fieldTooLongKind{msg: "txn: token too long for its WAL length prefix"}
+// ErrTokenTooLong is the refusal for a TOKEN: a label, a relationship type, a
+// property key, or a schema identifier longer than [lpg.MaxTokenLen] (65535
+// bytes), the most the WAL's uint16 length prefix can carry. [CheckSchemaField]
+// reports it before anything is staged.
+//
+// It is the same value as [lpg.ErrTokenTooLong] (rmp #2748), so a refusal from
+// the in-memory engine and one from this layer match each other's name. A
+// refusal raised by THIS package also matches the umbrella [ErrFieldTooLong]
+// (rmp #2942); one raised by graph/lpg, which knows nothing of the WAL, does
+// not.
+var ErrTokenTooLong = lpg.ErrTokenTooLong
 
 // ErrValueTooLong is the [ErrFieldTooLong] refusal for a property VALUE whose
 // encoding exceeds what a durable format can carry: the snapshot fold cap
@@ -2473,9 +2482,9 @@ var ErrTokenTooLong error = &fieldTooLongKind{msg: "txn: token too long for its 
 // also true for it (rmp #2942).
 var ErrValueTooLong error = &fieldTooLongKind{msg: "txn: property value too long for a durable format"}
 
-// fieldTooLongKind is the type of the per-kind sentinels [ErrTokenTooLong] and
-// [ErrValueTooLong]. Each is its own identity for errors.Is and ALSO matches
-// the umbrella [ErrFieldTooLong], through the Is method below.
+// fieldTooLongKind is the type of the per-kind sentinel [ErrValueTooLong]. It
+// is its own identity for errors.Is and ALSO matches the umbrella
+// [ErrFieldTooLong], through the Is method below.
 type fieldTooLongKind struct{ msg string }
 
 func (k *fieldTooLongKind) Error() string { return k.msg }
@@ -2533,9 +2542,10 @@ var ErrNestedPropertyList = errors.New("txn: a nested list is not a valid proper
 
 // CheckSchemaField reports whether s fits the uint16 length prefix every WAL
 // frame reserves for a schema string — a label, a property key, or a schema
-// identifier — returning an error wrapping [ErrTokenTooLong] (and therefore
-// [ErrFieldTooLong]) when it does not. what names the field in that error
-// ("node label", "edge property key", ...). The bound is 65535 bytes.
+// identifier — returning an error wrapping [ErrTokenTooLong] and
+// [ErrFieldTooLong] when it does not. what names the field in that error
+// ("node label", "edge property key", ...). The bound is [lpg.MaxTokenLen],
+// 65535 bytes.
 //
 // It exists so a caller that stages work of its own BEFORE it reaches a [Tx]
 // mutator can refuse an unencodable field at its own API boundary, against the
@@ -2791,7 +2801,31 @@ func errFieldTooLong(kind error, what string, n int, maxLen uint64) error {
 // that sum must not be truncated on a 32-bit platform. It holds the ONE format
 // string, so the two refusal shapes cannot drift apart.
 func errFieldTooLongN(kind error, what string, n int64, maxLen uint64) error {
-	return fmt.Errorf("%w: %s is %d bytes, maximum %d", kind, what, n, maxLen)
+	return &fieldTooLongError{
+		kind: kind,
+		msg:  fmt.Sprintf("%s: %s is %d bytes, maximum %d", kind, what, n, maxLen),
+	}
+}
+
+// fieldTooLongError is every refusal this package raises for an over-long
+// field. It matches its kind ([ErrTokenTooLong], [ErrValueTooLong], or the
+// umbrella alone) AND the umbrella [ErrFieldTooLong]. The second is not
+// automatic for a token: [ErrTokenTooLong] is graph/lpg's sentinel, which
+// cannot know about this package's umbrella.
+type fieldTooLongError struct {
+	kind error
+	msg  string
+}
+
+func (e *fieldTooLongError) Error() string { return e.msg }
+
+// Unwrap exposes both the kind and the umbrella to errors.Is and errors.As.
+func (e *fieldTooLongError) Unwrap() []error {
+	if errors.Is(e.kind, ErrFieldTooLong) {
+		// The umbrella itself, or a kind that already matches it.
+		return []error{e.kind}
+	}
+	return []error{e.kind, ErrFieldTooLong}
 }
 
 // appendOpIndexBody appends the body of an [OpCreateIndex] / [OpDropIndex]
@@ -3399,11 +3433,15 @@ func applyOp[N comparable, W any](wv lpg.WriteView[N, W], op Op[N, W]) error {
 			wv.Graph().BumpTopoGeneration()
 		}
 	case OpSetEdgeLabelByHandle:
-		wv.SetEdgeLabelByHandle(op.Src, op.Dst, op.Handle, op.Label)
+		if err := wv.SetEdgeLabelByHandle(op.Src, op.Dst, op.Handle, op.Label); err != nil {
+			return err
+		}
 	case OpSetEdgePropertyByHandle:
 		return wv.SetEdgePropertyByHandle(op.Src, op.Dst, op.Handle, op.Key, op.Value)
 	case OpDelEdgePropertyByHandle:
-		wv.DelEdgePropertyByHandle(op.Src, op.Dst, op.Handle, op.Key)
+		if err := wv.DelEdgePropertyByHandle(op.Src, op.Dst, op.Handle, op.Key); err != nil {
+			return err
+		}
 	case OpRemoveEdgeInstanceByHandle:
 		wv.RemoveEdgeInstanceByHandle(op.Src, op.Dst, op.Handle)
 		wv.Graph().BumpTopoGeneration() // rmp #1871; unconditional, see OpAddEdge above
@@ -3416,7 +3454,9 @@ func applyOp[N comparable, W any](wv lpg.WriteView[N, W], op Op[N, W]) error {
 	case OpSetNodeLabel:
 		return wv.SetNodeLabel(op.Src, op.Label)
 	case OpSetEdgeLabel:
-		wv.SetEdgeLabel(op.Src, op.Dst, op.Label)
+		if err := wv.SetEdgeLabel(op.Src, op.Dst, op.Label); err != nil {
+			return err
+		}
 	case OpAddNode:
 		return wv.AddNode(op.Src)
 	case OpRemoveNode:
@@ -3435,18 +3475,26 @@ func applyOp[N comparable, W any](wv lpg.WriteView[N, W], op Op[N, W]) error {
 		// earlier ops would leave the tombstoned node still label-reachable.
 		rv := wv.Read()
 		for _, lbl := range rv.NodeLabels(op.Src) {
-			wv.RemoveNodeLabel(op.Src, lbl)
+			if err := wv.RemoveNodeLabel(op.Src, lbl); err != nil {
+				return err
+			}
 		}
 		for k := range rv.NodeProperties(op.Src) {
-			wv.DelNodeProperty(op.Src, k)
+			if err := wv.DelNodeProperty(op.Src, k); err != nil {
+				return err
+			}
 		}
 		wv.RemoveNode(op.Src)
 	case OpRemoveNodeLabel:
-		wv.RemoveNodeLabel(op.Src, op.Label)
+		if err := wv.RemoveNodeLabel(op.Src, op.Label); err != nil {
+			return err
+		}
 	case OpSetNodeProperty:
 		return wv.SetNodeProperty(op.Src, op.Key, op.Value)
 	case OpDelNodeProperty:
-		wv.DelNodeProperty(op.Src, op.Key)
+		if err := wv.DelNodeProperty(op.Src, op.Key); err != nil {
+			return err
+		}
 	case OpRemoveEdge:
 		// Use the LPG edge removal so a fully-disconnected pair also sheds
 		// its per-pair edge labels/properties (matching recovery replay),
@@ -3456,7 +3504,9 @@ func applyOp[N comparable, W any](wv lpg.WriteView[N, W], op Op[N, W]) error {
 	case OpSetEdgeProperty:
 		return wv.SetEdgeProperty(op.Src, op.Dst, op.Key, op.Value)
 	case OpDelEdgeProperty:
-		wv.DelEdgeProperty(op.Src, op.Dst, op.Key)
+		if err := wv.DelEdgeProperty(op.Src, op.Dst, op.Key); err != nil {
+			return err
+		}
 	case OpCreateConstraint:
 		// The store keeps no constraint registry of its own (constraint
 		// enforcement lives in the cypher engine), so the only in-memory effect

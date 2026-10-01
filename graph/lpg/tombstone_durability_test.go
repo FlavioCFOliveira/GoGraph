@@ -101,7 +101,9 @@ func TestRemoveEdge_StripsPerPairStateOnFullDisconnect(t *testing.T) {
 	if err := g.AddEdge("a", "b", 0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
-	g.SetEdgeLabel("a", "b", "REL")
+	if err := g.SetEdgeLabel("a", "b", "REL"); err != nil {
+		t.Fatal(err)
+	}
 	if err := g.SetEdgeProperty("a", "b", "since", Int64Value(2020)); err != nil {
 		t.Fatalf("SetEdgeProperty: %v", err)
 	}
@@ -143,7 +145,9 @@ func TestRemoveEdge_KeepsPerPairStateWhileParallelEdgeRemains(t *testing.T) {
 	if err := g.AddEdge("a", "b", 0); err != nil {
 		t.Fatalf("AddEdge 2: %v", err)
 	}
-	g.SetEdgeLabel("a", "b", "REL")
+	if err := g.SetEdgeLabel("a", "b", "REL"); err != nil {
+		t.Fatal(err)
+	}
 
 	g.RemoveEdge("a", "b") // one parallel edge remains
 	if !g.AdjList().HasEdge("a", "b") {
@@ -173,8 +177,12 @@ func TestRemoveEdge_DirectedDoesNotStripReverseEdge(t *testing.T) {
 	if err := g.AddEdge("b", "a", 0); err != nil {
 		t.Fatalf("AddEdge b->a: %v", err)
 	}
-	g.SetEdgeLabel("a", "b", "FWD")
-	g.SetEdgeLabel("b", "a", "REV")
+	if err := g.SetEdgeLabel("a", "b", "FWD"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetEdgeLabel("b", "a", "REV"); err != nil {
+		t.Fatal(err)
+	}
 
 	g.RemoveEdge("a", "b")
 

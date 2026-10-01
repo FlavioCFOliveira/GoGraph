@@ -6,6 +6,42 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed — BREAKING
+
+- **One token limit on every layer: 65535 bytes (rmp #2748).** A node label, a
+  relationship type or a property key longer than `lpg.MaxTokenLen` (65535) bytes is
+  refused with an error wrapping `lpg.ErrTokenTooLong`, before any state change, by the
+  in-memory engine (`graph/lpg`), the WAL-backed store (`store/txn`, whose
+  `ErrTokenTooLong` is the same value), bulk import (`store/bulkimport`, before it
+  publishes) and both Cypher engines. Before, only the WAL refused such a name, so the same
+  graph was durable or not depending on how it was built. `lpg.CheckToken` validates a name
+  before any write. A snapshot carrying an over-long token, which only a pre-bound bulk
+  import could write, now fails to open with that error instead of loading silently.
+- **Signatures changed to carry the refusal:**
+  - `graph/lpg.Graph`: `SetEdgeLabel`, `RemoveEdgeLabel`, `DelEdgeProperty`,
+    `SetEdgeLabelAt`, `SetEdgeLabelByHandle`, `DelEdgePropertyByHandle`,
+    `SetEdgeLabelByHandleID`, `SetEdgePropertyByHandleID` and `DelEdgePropertyByHandleID`
+    now return `error`; `SetEdgeRelTypeAtSlotByID` and `AddEdgeRelTypeOverflowByID` now
+    return `(bool, error)`.
+  - `graph/lpg.WriteView`: `RemoveNodeLabel`, `DelNodeProperty`, `SetEdgeLabel`,
+    `RemoveEdgeLabel`, `DelEdgeProperty`, `SetEdgeLabelAt`, `SetEdgeLabelByHandle` and
+    `DelEdgePropertyByHandle` now return `error`.
+  - `graph/lpg.LabelRegistry.Intern` and `graph/lpg.PropertyKeyRegistry.Intern` now return
+    `(id, error)`.
+  - `graph/lpg/schema.Schema.RegisterLabel` now returns `(lpg.LabelID, error)`.
+  - `store/snapshot.ApplyEdgeHandlesToGraph` now returns `error`.
+  - `cypher/exec.GraphMutator`: `RemoveNodeLabel`, `DelNodeProperty`, `SetEdgeLabel`,
+    `DelEdgeProperty`, `SetEdgeLabelAt`, `SetEdgeLabelByHandle` and
+    `DelEdgePropertyByHandle` now return `error`.
+
+### Fixed
+
+- **A relationship type over 65535 bytes was acknowledged on a WAL-backed store and
+  recovered with no type (rmp #2956).** The WAL adapter discarded the staging refusal, so
+  the statement and its commit succeeded while nothing reached the log. The statement is now
+  refused before commit with `Neo.ClientError.Schema.TokenLengthError` over Bolt, and nothing
+  is written.
+
 ## [0.15.0] — 2026-09-17
 
 **33 commits** — 21 `perf`, 8 `docs`, 1 `fix`, 1 `build` and 2 merges. Counted at `19138042`,

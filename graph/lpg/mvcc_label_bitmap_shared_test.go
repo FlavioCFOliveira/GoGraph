@@ -35,7 +35,7 @@ func sharedBitmapRig(t *testing.T, n int) (*Graph[string, float64], LabelID) {
 	// Drain the rig's OWN history: without this the gate is live for L and every
 	// read takes the correcting path, which is the opposite of what is measured.
 	g.ReclaimNow()
-	return g, g.reg.Intern("L")
+	return g, g.reg.intern("L")
 }
 
 // TestLabelBitmapAsOf_QuietLabelReturnsTheIndexImageUncopied is the white-box

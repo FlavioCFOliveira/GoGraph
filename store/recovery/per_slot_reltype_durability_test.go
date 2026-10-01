@@ -97,7 +97,9 @@ func perSlotShapes() []perSlotShape {
 				t.Helper()
 				mustAddEdge(t, g, "a", "b")
 				mustAddEdge(t, g, "a", "b")
-				g.SetEdgeLabel("a", "b", "K")
+				if err := g.SetEdgeLabel("a", "b", "K"); err != nil {
+					t.Fatal(err)
+				}
 			},
 			wantOutDegree:  2,
 			wantByType:     map[string]int{"K": 2},
@@ -112,8 +114,12 @@ func perSlotShapes() []perSlotShape {
 				t.Helper()
 				for i := 0; i < 3; i++ {
 					h := mustAddEdgeH(t, g, "a", "b")
-					g.SetEdgeLabel("a", "b", "K")
-					g.SetEdgeLabelByHandle("a", "b", h, "K")
+					if err := g.SetEdgeLabel("a", "b", "K"); err != nil {
+						t.Fatal(err)
+					}
+					if err := g.SetEdgeLabelByHandle("a", "b", h, "K"); err != nil {
+						t.Fatal(err)
+					}
 				}
 			},
 			wantOutDegree:  3,
@@ -128,7 +134,9 @@ func perSlotShapes() []perSlotShape {
 			build: func(t *testing.T, g *lpg.Graph[string, int64]) {
 				t.Helper()
 				mustAddEdgeH(t, g, "a", "b")
-				g.SetEdgeLabel("a", "b", "K")
+				if err := g.SetEdgeLabel("a", "b", "K"); err != nil {
+					t.Fatal(err)
+				}
 			},
 			wantOutDegree:  1,
 			wantByType:     map[string]int{"K": 1},
@@ -142,8 +150,12 @@ func perSlotShapes() []perSlotShape {
 			build: func(t *testing.T, g *lpg.Graph[string, int64]) {
 				t.Helper()
 				h := mustAddEdgeH(t, g, "a", "b")
-				g.SetEdgeLabel("a", "b", "K")
-				g.SetEdgeLabelByHandle("a", "b", h, "K")
+				if err := g.SetEdgeLabel("a", "b", "K"); err != nil {
+					t.Fatal(err)
+				}
+				if err := g.SetEdgeLabelByHandle("a", "b", h, "K"); err != nil {
+					t.Fatal(err)
+				}
 				mustAddEdgeLabeled(t, g, "a", "b", "M")
 			},
 			wantOutDegree:  2,
@@ -160,8 +172,12 @@ func perSlotShapes() []perSlotShape {
 				t.Helper()
 				mustAddEdge(t, g, "a", "b")
 				mustAddEdge(t, g, "a", "b")
-				g.SetEdgeLabel("a", "b", "K")
-				g.SetEdgeLabel("a", "b", "M")
+				if err := g.SetEdgeLabel("a", "b", "K"); err != nil {
+					t.Fatal(err)
+				}
+				if err := g.SetEdgeLabel("a", "b", "M"); err != nil {
+					t.Fatal(err)
+				}
 			},
 			wantOutDegree:  2,
 			wantByType:     map[string]int{"K": 2, "M": 2},
@@ -175,9 +191,13 @@ func perSlotShapes() []perSlotShape {
 			build: func(t *testing.T, g *lpg.Graph[string, int64]) {
 				t.Helper()
 				mustAddEdge(t, g, "a", "b")
-				g.SetEdgeLabel("a", "b", "K")
+				if err := g.SetEdgeLabel("a", "b", "K"); err != nil {
+					t.Fatal(err)
+				}
 				mustAddEdge(t, g, "a", "b")
-				g.SetEdgeLabel("a", "b", "M")
+				if err := g.SetEdgeLabel("a", "b", "M"); err != nil {
+					t.Fatal(err)
+				}
 			},
 			wantOutDegree:  2,
 			wantByType:     map[string]int{"K": 1, "M": 1},

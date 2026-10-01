@@ -47,8 +47,12 @@ func mirrorHandleGraph(t *testing.T) (g *Graph[string, float64], h1, h2 uint64) 
 	if h2, err = g.AddEdgeH("a", "b", 0); err != nil {
 		t.Fatalf("AddEdgeH h2: %v", err)
 	}
-	g.SetEdgeLabelByHandle("a", "b", h1, "T1")
-	g.SetEdgeLabelByHandle("a", "b", h2, "T2")
+	if err := g.SetEdgeLabelByHandle("a", "b", h1, "T1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetEdgeLabelByHandle("a", "b", h2, "T2"); err != nil {
+		t.Fatal(err)
+	}
 	if err := g.SetEdgePropertyByHandle("a", "b", h1, "k", Int64Value(1)); err != nil {
 		t.Fatalf("SetEdgePropertyByHandle h1: %v", err)
 	}

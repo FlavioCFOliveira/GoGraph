@@ -145,19 +145,19 @@ func TestNamedClientFault_ReachesTheClientNamed(t *testing.T) {
 			name:         "over-long node label",
 			query:        "CREATE (n:" + overLong + ")",
 			wantCode:     "Neo.ClientError.Schema.TokenLengthError",
-			wantFragment: "token too long for its WAL length prefix: node label is 65536 bytes, maximum 65535",
+			wantFragment: "token too long: node label is 65536 bytes, maximum 65535",
 		},
 		{
 			name:         "over-long node property key",
 			query:        "CREATE (n:Ok {`" + overLong + "`: 1})",
 			wantCode:     "Neo.ClientError.Schema.TokenLengthError",
-			wantFragment: "token too long for its WAL length prefix: node property key is 65536 bytes, maximum 65535",
+			wantFragment: "token too long: node property key is 65536 bytes, maximum 65535",
 		},
 		{
 			name:         "over-long relationship property key",
 			query:        "CREATE (:A)-[:T {`" + overLong + "`: 1}]->(:B)",
 			wantCode:     "Neo.ClientError.Schema.TokenLengthError",
-			wantFragment: "token too long for its WAL length prefix",
+			wantFragment: "token too long: edge property key is 65536 bytes, maximum 65535",
 		},
 		{
 			name:         "composite index",

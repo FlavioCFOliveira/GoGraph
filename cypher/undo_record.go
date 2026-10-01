@@ -220,7 +220,7 @@ func (m mutationUndo) recordSetNodeLabel(n, label string, hadLabel bool) {
 	if !m.active() {
 		return
 	}
-	m.undo.record(func() { m.wv.RemoveNodeLabel(n, label) })
+	m.undo.record(func() { _ = m.wv.RemoveNodeLabel(n, label) })
 }
 
 // recordRemoveNodeLabel records the inverse of detaching label from n. hadLabel
@@ -283,7 +283,7 @@ func (m mutationUndo) recordSetNodeProperty(n, key string, prev lpg.PropertyValu
 		if had {
 			_ = m.wv.SetNodeProperty(n, key, prev)
 		} else {
-			m.wv.DelNodeProperty(n, key)
+			_ = m.wv.DelNodeProperty(n, key) // replays a name the forward write accepted (rmp #2748)
 		}
 	})
 }
@@ -315,7 +315,7 @@ func (m mutationUndo) recordSetEdgeLabel(src, dst, label string, hadLabel bool) 
 	if !m.active() || hadLabel {
 		return
 	}
-	m.undo.record(func() { m.wv.RemoveEdgeLabel(src, dst, label) })
+	m.undo.record(func() { _ = m.wv.RemoveEdgeLabel(src, dst, label) })
 }
 
 // recordSetEdgeProperty records the inverse of SetEdgeProperty(src, dst, key, …)
@@ -328,7 +328,7 @@ func (m mutationUndo) recordSetEdgeProperty(src, dst, key string, prev lpg.Prope
 		if had {
 			_ = m.wv.SetEdgeProperty(src, dst, key, prev)
 		} else {
-			m.wv.DelEdgeProperty(src, dst, key)
+			_ = m.wv.DelEdgeProperty(src, dst, key) // replays a name the forward write accepted (rmp #2748)
 		}
 	})
 }
@@ -365,7 +365,7 @@ func (m mutationUndo) recordSetEdgePropertyByHandle(src, dst string, handle uint
 		if had {
 			_ = m.wv.SetEdgePropertyByHandle(src, dst, handle, key, prev)
 		} else {
-			m.wv.DelEdgePropertyByHandle(src, dst, handle, key)
+			_ = m.wv.DelEdgePropertyByHandle(src, dst, handle, key) // replays a name the forward write accepted (rmp #2748)
 		}
 	})
 }
@@ -578,7 +578,7 @@ func (m mutationUndo) recordRemoveEdge(pre *removedEdgePreimage, wasPresent bool
 		_, _ = m.wv.AddEdgeHIfAbsent(pre.src, pre.dst, pre.weight, pre.handle)
 		m.wv.Graph().DecrEdgesRemoved()
 		for _, lbl := range pre.labels {
-			m.wv.SetEdgeLabel(pre.src, pre.dst, lbl)
+			_ = m.wv.SetEdgeLabel(pre.src, pre.dst, lbl) // replays a name the forward write accepted (rmp #2748)
 		}
 		for k, v := range pre.props {
 			_ = m.wv.SetEdgeProperty(pre.src, pre.dst, k, v)
@@ -588,7 +588,7 @@ func (m mutationUndo) recordRemoveEdge(pre *removedEdgePreimage, wasPresent bool
 		// case: RemoveEdge keeps it while a sibling survives); authoritative
 		// when it did not. No-op when handle is 0.
 		for _, lbl := range pre.handleLabels {
-			m.wv.SetEdgeLabelByHandle(pre.src, pre.dst, pre.handle, lbl)
+			_ = m.wv.SetEdgeLabelByHandle(pre.src, pre.dst, pre.handle, lbl) // replays a name the forward write accepted (rmp #2748)
 		}
 		for k, v := range pre.handleProps {
 			// Restoring a value that passed validation at the original write; ignore the error.

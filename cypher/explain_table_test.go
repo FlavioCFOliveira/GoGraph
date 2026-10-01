@@ -61,7 +61,9 @@ func tableGraph(t *testing.T) *lpg.Graph[string, float64] {
 		if err := g.AddEdge(src, dst, 1); err != nil {
 			t.Fatalf("AddEdge(%s,%s): %v", src, dst, err)
 		}
-		g.SetEdgeLabel(src, dst, "KNOWS")
+		if err := g.SetEdgeLabel(src, dst, "KNOWS"); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return g
 }

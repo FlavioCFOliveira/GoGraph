@@ -161,12 +161,13 @@ func (s *stubMutator) SetNodeLabel(n, label string) error {
 	return nil
 }
 
-func (s *stubMutator) RemoveNodeLabel(n, label string) {
+func (s *stubMutator) RemoveNodeLabel(n, label string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.labels[n] != nil {
 		delete(s.labels[n], label)
 	}
+	return nil
 }
 
 func (s *stubMutator) SetNodeProperty(n, key string, value lpg.PropertyValue) error {
@@ -179,12 +180,13 @@ func (s *stubMutator) SetNodeProperty(n, key string, value lpg.PropertyValue) er
 	return nil
 }
 
-func (s *stubMutator) DelNodeProperty(n, key string) {
+func (s *stubMutator) DelNodeProperty(n, key string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.props[n] != nil {
 		delete(s.props[n], key)
 	}
+	return nil
 }
 
 func (s *stubMutator) NodeProperties(n string) map[string]lpg.PropertyValue {
@@ -221,7 +223,7 @@ func (s *stubMutator) HasEdge(src, dst string) bool {
 	return s.edges[src] != nil && s.edges[src][dst]
 }
 
-func (s *stubMutator) SetEdgeLabel(src, dst, label string) {
+func (s *stubMutator) SetEdgeLabel(src, dst, label string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	k := src + "|" + dst
@@ -229,6 +231,7 @@ func (s *stubMutator) SetEdgeLabel(src, dst, label string) {
 		s.edgeLabels[k] = make(map[string]bool)
 	}
 	s.edgeLabels[k][label] = true
+	return nil
 }
 
 func (s *stubMutator) SetEdgeProperty(src, dst, key string, value lpg.PropertyValue) error {
@@ -245,13 +248,14 @@ func (s *stubMutator) SetEdgeProperty(src, dst, key string, value lpg.PropertyVa
 	return nil
 }
 
-func (s *stubMutator) DelEdgeProperty(src, dst, key string) {
+func (s *stubMutator) DelEdgeProperty(src, dst, key string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	k := src + "|" + dst
 	if s.edgeProps != nil && s.edgeProps[k] != nil {
 		delete(s.edgeProps[k], key)
 	}
+	return nil
 }
 
 // EdgeProperties returns a snapshot of the property map for the directed edge
@@ -273,11 +277,11 @@ func (s *stubMutator) EdgeProperties(src, dst string) map[string]lpg.PropertyVal
 // IncEdgeCreateCount, EdgeCreateCount, DecEdgeCreateCount and the
 // per-instance metadata stubs are inert: the write-operator tests do
 // not exercise multi-edge MERGE / parallel-CREATE semantics.
-func (s *stubMutator) IncEdgeCreateCount(string, string) int64      { return 0 }
-func (s *stubMutator) EdgeCreateCount(string, string) int64         { return 0 }
-func (s *stubMutator) DecEdgeCreateCount(string, string)            {}
-func (s *stubMutator) SetEdgeLabelAt(string, string, int64, string) {}
-func (s *stubMutator) EdgeLabelsAt(string, string, int64) []string  { return nil }
+func (s *stubMutator) IncEdgeCreateCount(string, string) int64            { return 0 }
+func (s *stubMutator) EdgeCreateCount(string, string) int64               { return 0 }
+func (s *stubMutator) DecEdgeCreateCount(string, string)                  {}
+func (s *stubMutator) SetEdgeLabelAt(string, string, int64, string) error { return nil }
+func (s *stubMutator) EdgeLabelsAt(string, string, int64) []string        { return nil }
 func (s *stubMutator) SetEdgePropertyAt(string, string, int64, string, lpg.PropertyValue) error {
 	return nil
 }
@@ -289,8 +293,8 @@ func (s *stubMutator) RemoveEdgeInstance(string, string, int64) {}
 // The stable-handle keyed label stubs are inert; the property stubs track a
 // real per-(src,dst,handle) store so the by-handle dual-write (#1686) can be
 // asserted (sibling isolation, durability mirror).
-func (s *stubMutator) SetEdgeLabelByHandle(string, string, uint64, string) {}
-func (s *stubMutator) EdgeLabelsByHandle(string, string, uint64) []string  { return nil }
+func (s *stubMutator) SetEdgeLabelByHandle(string, string, uint64, string) error { return nil }
+func (s *stubMutator) EdgeLabelsByHandle(string, string, uint64) []string        { return nil }
 
 func byHandleKey(src, dst string, handle uint64) string {
 	return fmt.Sprintf("%s|%s|%d", src, dst, handle)
@@ -313,14 +317,14 @@ func (s *stubMutator) SetEdgePropertyByHandle(src, dst string, handle uint64, ke
 	return nil
 }
 
-func (s *stubMutator) DelEdgePropertyByHandle(src, dst string, handle uint64, key string) {
+func (s *stubMutator) DelEdgePropertyByHandle(src, dst string, handle uint64, key string) error {
 	if handle == 0 {
-		return
+		return nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.byHandleProps == nil {
-		return
+		return nil
 	}
 	k := byHandleKey(src, dst, handle)
 	if s.byHandleProps[k] != nil {
@@ -329,6 +333,7 @@ func (s *stubMutator) DelEdgePropertyByHandle(src, dst string, handle uint64, ke
 			delete(s.byHandleProps, k)
 		}
 	}
+	return nil
 }
 
 func (s *stubMutator) EdgePropertiesByHandle(src, dst string, handle uint64) map[string]lpg.PropertyValue {

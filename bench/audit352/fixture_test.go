@@ -69,7 +69,7 @@ func TestMain(m *testing.M) {
 		for k := 1; k <= outDegree; k++ {
 			dst := fmt.Sprintf("n%d", (i+k*stride)%nodeCount)
 			must(g.AddEdge(src, dst, 0))
-			g.SetEdgeLabel(src, dst, "KNOWS")
+			_ = g.SetEdgeLabel(src, dst, "KNOWS")
 		}
 	}
 	benchGraph = g

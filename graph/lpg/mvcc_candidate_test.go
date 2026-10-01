@@ -109,7 +109,7 @@ func TestLabelIndex_RemovalIsDeferredAndVisibleToOlderReaders(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 	id := mvccNodeID(t, g, "a")
-	lid := g.reg.Intern("P")
+	lid := g.reg.intern("P")
 	before := snapAt(g.readTS())
 
 	if err := g.ApplyAtomically(func() error {
@@ -167,7 +167,7 @@ func TestLabelIndex_DeferredRemovalIsCancelledByReAdd(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 	id := mvccNodeID(t, g, "a")
-	lid := g.reg.Intern("P")
+	lid := g.reg.intern("P")
 
 	if err := g.ApplyAtomically(func() error {
 		if err := g.RemoveNodeLabel("a", "P"); err != nil {
@@ -214,7 +214,7 @@ func TestCandidateFilter_DoesNotDeadlockUnderConcurrentReaders(t *testing.T) {
 			t.Fatalf("SetNodeLabel: %v", err)
 		}
 	}
-	lid := g.reg.Intern("P")
+	lid := g.reg.intern("P")
 
 	done := make(chan struct{})
 	var wg sync.WaitGroup

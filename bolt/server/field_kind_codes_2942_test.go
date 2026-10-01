@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
 )
@@ -84,22 +85,32 @@ func TestFailureCode_FieldKinds_2942(t *testing.T) {
 }
 
 // TestFieldKindSentinels_MatchTheUmbrella_2942 pins the compatibility promise of
-// the split: every per-kind sentinel still matches txn.ErrFieldTooLong, and the
-// kinds do not match each other.
+// the split: every refusal store/txn raises still matches txn.ErrFieldTooLong,
+// and the kinds do not match each other.
+//
+// Since rmp #2748, txn.ErrTokenTooLong IS lpg.ErrTokenTooLong, so a token
+// refusal from the in-memory engine matches it too. That bare lpg sentinel does
+// NOT match the txn umbrella — graph/lpg knows nothing of the WAL — which is why
+// the token row below takes a refusal raised by store/txn itself.
 func TestFieldKindSentinels_MatchTheUmbrella_2942(t *testing.T) {
 	t.Parallel()
-	tok := fmt.Errorf("%w: x", txn.ErrTokenTooLong)
+	tok := txn.CheckSchemaField("node label", string(make([]byte, lpg.MaxTokenLen+1)))
 	val := fmt.Errorf("%w: x", txn.ErrValueTooLong)
+	lpgTok := lpg.CheckToken("node label", string(make([]byte, lpg.MaxTokenLen+1)))
 	for name, c := range map[string]struct {
 		err    error
 		target error
 		want   bool
 	}{
-		"token is umbrella":  {tok, txn.ErrFieldTooLong, true},
-		"value is umbrella":  {val, txn.ErrFieldTooLong, true},
-		"token is not value": {tok, txn.ErrValueTooLong, false},
-		"value is not token": {val, txn.ErrTokenTooLong, false},
-		"umbrella not token": {txn.ErrFieldTooLong, txn.ErrTokenTooLong, false},
+		"txn token is umbrella":      {tok, txn.ErrFieldTooLong, true},
+		"txn token is lpg token":     {tok, lpg.ErrTokenTooLong, true},
+		"lpg token is txn token":     {lpgTok, txn.ErrTokenTooLong, true},
+		"lpg token is not umbrella":  {lpgTok, txn.ErrFieldTooLong, false},
+		"value is umbrella":          {val, txn.ErrFieldTooLong, true},
+		"token is not value":         {tok, txn.ErrValueTooLong, false},
+		"value is not token":         {val, txn.ErrTokenTooLong, false},
+		"umbrella not token":         {txn.ErrFieldTooLong, txn.ErrTokenTooLong, false},
+		"sentinels are the same one": {txn.ErrTokenTooLong, lpg.ErrTokenTooLong, true},
 	} {
 		if got := errors.Is(c.err, c.target); got != c.want {
 			t.Errorf("%s: errors.Is = %v, want %v", name, got, c.want)

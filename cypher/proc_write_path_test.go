@@ -68,7 +68,9 @@ func procParityEngine(t *testing.T) *Engine {
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
-	g.SetEdgeLabel("a", "b", "K")
+	if err := g.SetEdgeLabel("a", "b", "K"); err != nil {
+		t.Fatal(err)
+	}
 
 	eng := NewEngine(g)
 	for _, ddl := range []string{

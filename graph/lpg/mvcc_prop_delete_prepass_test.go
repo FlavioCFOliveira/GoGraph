@@ -140,7 +140,7 @@ func TestPropDeletePrePass_OutcomeParity(t *testing.T) {
 			}
 			// A key the registry has never seen would be rejected before the
 			// pre-pass is ever reached, so intern it exactly as the caller does.
-			keyID := g.propKeys().Intern(key)
+			keyID := g.propKeys().intern(key)
 			got := g.delNodePropertyShared(g.nodePropShardFor(id), id, keyID, tx)
 			if got != tc.want {
 				t.Fatalf("pre-pass outcome = %d, want %d", got, tc.want)
@@ -176,7 +176,7 @@ func TestPropDeletePrePass_RefusalIsSettledUnderTheSharedLock(t *testing.T) {
 	if !ok {
 		t.Fatal("n was never interned")
 	}
-	keyID := g.propKeys().Intern("k")
+	keyID := g.propKeys().intern("k")
 	if got := g.delNodePropertyShared(g.nodePropShardFor(id), id, keyID, txB.ctx); got != delPropRefused {
 		t.Fatalf("pre-pass outcome on a refused delete = %d, want delPropRefused (%d)", got, delPropRefused)
 	}

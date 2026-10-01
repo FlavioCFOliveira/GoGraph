@@ -27,7 +27,7 @@ func ExampleGraph() {
 
 	// Connect them with a labelled edge.
 	_ = g.AddEdge("alice", "bob", 0)
-	g.SetEdgeLabel("alice", "bob", "KNOWS")
+	_ = g.SetEdgeLabel("alice", "bob", "KNOWS")
 
 	name, _ := g.GetNodeProperty("alice", "name")
 	nameStr, _ := name.String()
@@ -95,7 +95,7 @@ func ExampleGraph_RemoveNode() {
 func ExampleGraph_RemoveEdge() {
 	g := lpg.New[string, int](adjlist.Config{Directed: true})
 	_ = g.AddEdge("alice", "bob", 0)
-	g.SetEdgeLabel("alice", "bob", "KNOWS")
+	_ = g.SetEdgeLabel("alice", "bob", "KNOWS")
 	fmt.Println("before delete:", g.HasEdgeLabel("alice", "bob", "KNOWS"))
 
 	g.RemoveEdge("alice", "bob")

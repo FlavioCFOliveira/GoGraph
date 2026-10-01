@@ -74,11 +74,15 @@ func TestIsolation_EdgeInstanceStores_CrossStoreRequiresView(t *testing.T) {
 				return err
 			}
 			i1 := g.IncEdgeCreateCount("a", "b")
-			g.SetEdgeLabelAt("a", "b", i1, "R")
+			if err := g.SetEdgeLabelAt("a", "b", i1, "R"); err != nil {
+				t.Fatal(err)
+			}
 			if err := g.SetEdgePropertyAt("a", "b", i1, "seq", Int64Value(i1)); err != nil {
 				return err
 			}
-			g.SetEdgeLabelByHandle("a", "b", h1, "R")
+			if err := g.SetEdgeLabelByHandle("a", "b", h1, "R"); err != nil {
+				t.Fatal(err)
+			}
 			if err := g.SetEdgePropertyByHandle("a", "b", h1, "seq", Int64Value(i1)); err != nil {
 				return err
 			}
@@ -92,11 +96,15 @@ func TestIsolation_EdgeInstanceStores_CrossStoreRequiresView(t *testing.T) {
 				return err
 			}
 			i2 := g.IncEdgeCreateCount("a", "b")
-			g.SetEdgeLabelAt("a", "b", i2, "R")
+			if err := g.SetEdgeLabelAt("a", "b", i2, "R"); err != nil {
+				t.Fatal(err)
+			}
 			if err := g.SetEdgePropertyAt("a", "b", i2, "seq", Int64Value(i2)); err != nil {
 				return err
 			}
-			g.SetEdgeLabelByHandle("a", "b", h2, "R")
+			if err := g.SetEdgeLabelByHandle("a", "b", h2, "R"); err != nil {
+				t.Fatal(err)
+			}
 			if err := g.SetEdgePropertyByHandle("a", "b", h2, "seq", Int64Value(i2)); err != nil {
 				return err
 			}

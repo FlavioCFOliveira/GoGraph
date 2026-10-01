@@ -261,7 +261,9 @@ func TestMergeRel_OnMatchReplaceMap_DropsAbsentKeys(t *testing.T) {
 	mut, srcID, dstID := newMergeRelStub(t, h)
 	// Pre-existing typed edge with two properties.
 	mustAddEdge(t, mut, "a", "b", 0)
-	mut.SetEdgeLabel("a", "b", "T")
+	if err := mut.SetEdgeLabel("a", "b", "T"); err != nil {
+		t.Fatal(err)
+	}
 	seedRelProps(t, mut, h, map[string]lpg.PropertyValue{"a": lpg.Int64Value(1), "b": lpg.Int64Value(2)})
 
 	op := exec.NewMergeRelationship(newSliceOperator(mergeRow(srcID, dstID)), 0, 1, "T", mut).
@@ -286,7 +288,9 @@ func TestMergeRel_OnMatchMergeMap_KeepsAbsentKeys(t *testing.T) {
 	const h = uint64(22)
 	mut, srcID, dstID := newMergeRelStub(t, h)
 	mustAddEdge(t, mut, "a", "b", 0)
-	mut.SetEdgeLabel("a", "b", "T")
+	if err := mut.SetEdgeLabel("a", "b", "T"); err != nil {
+		t.Fatal(err)
+	}
 	seedRelProps(t, mut, h, map[string]lpg.PropertyValue{"a": lpg.Int64Value(1), "b": lpg.Int64Value(2)})
 
 	op := exec.NewMergeRelationship(newSliceOperator(mergeRow(srcID, dstID)), 0, 1, "T", mut).
@@ -312,7 +316,9 @@ func TestMergeRel_OnMatchReplaceEntityCopy_DropsAbsentKeys(t *testing.T) {
 	const h = uint64(23)
 	mut, srcID, dstID := newMergeRelStub(t, h)
 	mustAddEdge(t, mut, "a", "b", 0)
-	mut.SetEdgeLabel("a", "b", "T")
+	if err := mut.SetEdgeLabel("a", "b", "T"); err != nil {
+		t.Fatal(err)
+	}
 	seedRelProps(t, mut, h, map[string]lpg.PropertyValue{"a": lpg.Int64Value(1), "b": lpg.Int64Value(2)})
 	// Source node `n` carries a single property x:5.
 	nID := mustAddNode(t, mut, "n")
@@ -342,7 +348,9 @@ func TestMergeRel_OnMatchMergeEntityCopy_KeepsAbsentKeys(t *testing.T) {
 	const h = uint64(24)
 	mut, srcID, dstID := newMergeRelStub(t, h)
 	mustAddEdge(t, mut, "a", "b", 0)
-	mut.SetEdgeLabel("a", "b", "T")
+	if err := mut.SetEdgeLabel("a", "b", "T"); err != nil {
+		t.Fatal(err)
+	}
 	seedRelProps(t, mut, h, map[string]lpg.PropertyValue{"a": lpg.Int64Value(1), "b": lpg.Int64Value(2)})
 	nID := mustAddNode(t, mut, "n")
 	if err := mut.SetNodeProperty("n", "x", lpg.Int64Value(5)); err != nil {

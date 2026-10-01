@@ -419,7 +419,9 @@ func (op *SetProperty) applyToNode(nodeKey string, row Row) error {
 			}
 			if isNull {
 				// SET n.k = null is a removal; DelNodeProperty releases (rmp #2358).
-				op.mutator.DelNodeProperty(nodeKey, op.propertyKey)
+				if err := op.mutator.DelNodeProperty(nodeKey, op.propertyKey); err != nil {
+					return err
+				}
 				return nil
 			}
 			if !hasValue {
@@ -442,7 +444,9 @@ func (op *SetProperty) applyToNode(nodeKey string, row Row) error {
 			if errors.Is(parseErr, ErrPropertyValueIsNull) {
 				// openCypher: SET n.k = null removes the property k from n.
 				// DelNodeProperty releases (rmp #2358).
-				op.mutator.DelNodeProperty(nodeKey, op.propertyKey)
+				if err := op.mutator.DelNodeProperty(nodeKey, op.propertyKey); err != nil {
+					return err
+				}
 				return nil
 			}
 			return nil // non-literal expression: no-op for current IR
@@ -471,7 +475,9 @@ func (op *SetProperty) applyToNode(nodeKey string, row Row) error {
 	// that, now that enforcement is at the mutator (rmp #2358).
 	// nodeClearKeys, not the raw present: see its rmp #2943 commentary.
 	for k := range nodeClearKeys(op.mutator, nodeKey) {
-		op.mutator.DelNodeProperty(nodeKey, k)
+		if err := op.mutator.DelNodeProperty(nodeKey, k); err != nil {
+			return err
+		}
 	}
 	for _, p := range op.parsedMap {
 		if serr := op.mutator.SetNodeProperty(nodeKey, p.key, p.value); serr != nil {
@@ -496,7 +502,9 @@ func (op *SetProperty) applyToRelationship(ent entityBinding, row Row) error {
 				return evalErr
 			}
 			if isNull {
-				op.delRelProp(ent, op.propertyKey)
+				if err := op.delRelProp(ent, op.propertyKey); err != nil {
+					return err
+				}
 				return nil
 			}
 			if !hasValue {
@@ -508,7 +516,9 @@ func (op *SetProperty) applyToRelationship(ent entityBinding, row Row) error {
 		if parseErr != nil {
 			if errors.Is(parseErr, ErrPropertyValueIsNull) {
 				// openCypher: SET r.k = null removes the property k from r.
-				op.delRelProp(ent, op.propertyKey)
+				if err := op.delRelProp(ent, op.propertyKey); err != nil {
+					return err
+				}
 				return nil
 			}
 			return nil // non-literal expression: no-op for current IR
@@ -545,7 +555,9 @@ func (op *SetProperty) applyToRelationship(ent entityBinding, row Row) error {
 		if _, ok := keep[k]; ok {
 			continue
 		}
-		op.delRelProp(ent, k)
+		if err := op.delRelProp(ent, k); err != nil {
+			return err
+		}
 	}
 	for _, p := range op.parsedMap {
 		if serr := op.setRelProp(ent, p.key, p.value); serr != nil {
@@ -581,15 +593,22 @@ func (op *SetProperty) setRelProp(ent entityBinding, key string, value lpg.Prope
 // probe reports a SET-to-null removal only once per (src, dst) pair (#2501,
 // the SET-path residual of #2500). The handle==0 fallback keeps the pairwise
 // path byte-identical.
-func (op *SetProperty) delRelProp(ent entityBinding, key string) {
+func (op *SetProperty) delRelProp(ent entityBinding, key string) error {
 	if m, ok := op.mutator.(relInstancePropRemover); ok && ent.relHandle != 0 {
-		m.DelEdgePropertyOnInstance(ent.relSrcKey, ent.relDstKey, ent.relHandle, key)
-		return
+		if err := m.DelEdgePropertyOnInstance(ent.relSrcKey, ent.relDstKey, ent.relHandle, key); err != nil {
+			return err
+		}
+		return nil
 	}
-	op.mutator.DelEdgeProperty(ent.relSrcKey, ent.relDstKey, key)
+	if err := op.mutator.DelEdgeProperty(ent.relSrcKey, ent.relDstKey, key); err != nil {
+		return err
+	}
 	if ent.relHandle != 0 {
-		op.mutator.DelEdgePropertyByHandle(ent.relSrcKey, ent.relDstKey, ent.relHandle, key)
+		if err := op.mutator.DelEdgePropertyByHandle(ent.relSrcKey, ent.relDstKey, ent.relHandle, key); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // Close closes the child operator.

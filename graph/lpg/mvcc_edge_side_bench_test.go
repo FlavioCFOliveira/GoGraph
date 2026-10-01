@@ -43,9 +43,15 @@ func edgeSideFixture(b *testing.B, pairs int) (*Graph[string, float64], []graph.
 				return err
 			}
 			// Two types: the second has nowhere to go but overflow.
-			g.SetEdgeLabel(s, d, "KNOWS")
-			g.SetEdgeLabel(s, d, "LIKES")
-			g.SetEdgeLabelByHandle(s, d, 1, "KNOWS")
+			if err := g.SetEdgeLabel(s, d, "KNOWS"); err != nil {
+				b.Fatal(err)
+			}
+			if err := g.SetEdgeLabel(s, d, "LIKES"); err != nil {
+				b.Fatal(err)
+			}
+			if err := g.SetEdgeLabelByHandle(s, d, 1, "KNOWS"); err != nil {
+				b.Fatal(err)
+			}
 			return g.SetEdgePropertyByHandle(s, d, 1, "since", Int64Value(2020))
 		}); err != nil {
 			b.Fatalf("fixture %d: %v", i, err)

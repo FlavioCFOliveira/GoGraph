@@ -73,20 +73,20 @@ func TestLabelDelta_ReconstructsOlderVersion(t *testing.T) {
 
 	// A reader that started BEFORE the change must not see "Hot".
 	old := g.labelBagAsOf(id, baseline, 0)
-	if !old.has(g.reg.Intern("Base")) {
+	if !old.has(g.reg.intern("Base")) {
 		t.Fatal("the older version lost the label it had")
 	}
-	if old.has(g.reg.Intern("Hot")) {
+	if old.has(g.reg.intern("Hot")) {
 		t.Fatal("a reader that started before the change can see it: the delta was not applied")
 	}
 	// A reader that started AFTER must see it.
 	now := g.labelBagAsOf(id, g.readTS(), 0)
-	if !now.has(g.reg.Intern("Hot")) {
+	if !now.has(g.reg.intern("Hot")) {
 		t.Fatal("a reader that started after the change cannot see it")
 	}
 	// The stored version must be untouched by the reconstruction.
 	stored := g.labelBagPlain(id)
-	if !stored.has(g.reg.Intern("Hot")) {
+	if !stored.has(g.reg.intern("Hot")) {
 		t.Fatal("reconstructing an older version mutated the stored one")
 	}
 }

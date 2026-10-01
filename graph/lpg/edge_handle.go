@@ -201,27 +201,33 @@ func (g *Graph[N, W]) HasEdgeHandleLabelRecordByIDAsOf(srcID, dstID graph.NodeID
 // the stable handle on the (src, dst) pair. No-op when handle is 0 (the
 // no-handle sentinel) or when either endpoint is unknown to the mapper.
 //
-// SetEdgeLabelByHandle is safe for concurrent use.
-func (g *Graph[N, W]) SetEdgeLabelByHandle(src, dst N, handle uint64, name string) {
-	g.setEdgeLabelByHandleInfo(src, dst, handle, name, nil)
+// SetEdgeLabelByHandle is safe for concurrent use.//
+// It refuses a relationship type longer than [MaxTokenLen] bytes with an error wrapping
+// [ErrTokenTooLong], before changing any state (rmp #2748). The error return is a
+// breaking change: SetEdgeLabelByHandle used to return nothing.
+func (g *Graph[N, W]) SetEdgeLabelByHandle(src, dst N, handle uint64, name string) error {
+	return g.setEdgeLabelByHandleInfo(src, dst, handle, name, nil)
 }
 
 // setEdgeLabelByHandleInfo is [Graph.SetEdgeLabelByHandle] with an explicit write transaction; tx is
 // nil for a direct Go-API mutation, which is committed the instant it is made
 // and takes no conflict check. See [writeCtx].
-func (g *Graph[N, W]) setEdgeLabelByHandleInfo(src, dst N, handle uint64, name string, tx *writeCtx) {
+func (g *Graph[N, W]) setEdgeLabelByHandleInfo(src, dst N, handle uint64, name string, tx *writeCtx) error {
+	if err := CheckToken("relationship type", name); err != nil {
+		return err
+	}
 	if handle == 0 {
-		return
+		return nil
 	}
 	srcID, ok := g.adj.Mapper().Lookup(src)
 	if !ok {
-		return
+		return nil
 	}
 	dstID, ok := g.adj.Mapper().Lookup(dst)
 	if !ok {
-		return
+		return nil
 	}
-	lid := g.reg.Intern(name)
+	lid := g.reg.intern(name)
 	k := edgeKey{src: srcID, dst: dstID}
 	sh := g.edgeHandleLabelShardFor(k)
 	// changed is read by the FIRST-registered defer, which therefore runs LAST —
@@ -253,17 +259,18 @@ func (g *Graph[N, W]) setEdgeLabelByHandleInfo(src, dst N, handle uint64, name s
 		// through here for every MERGE that binds an existing relationship, and a
 		// spurious bump would invalidate the forward/reverse CSR pair cache and
 		// force an O(V+E) rebuild for a mutation that changed nothing.
-		return
+		return nil
 	}
 	if !g.pushHandleLabelVersion(sh, k, handle, tx) {
 		// Refused: the conflict is recorded on tx and this write must not land,
 		// so the epoch must not move either.
-		return
+		return nil
 	}
 	bag.add(lid)
 	im.set(handle, bag)
 	sh.m[k] = im
 	changed = true
+	return nil
 }
 
 // EdgeLabelsByHandle returns the labels recorded for the edge identified
@@ -325,7 +332,9 @@ func (g *Graph[N, W]) EdgeLabelsByHandleAsOf(src, dst N, handle uint64, snap *Sn
 // installed [SchemaValidator]; when the validator rejects the write the
 // graph state is left unchanged.
 //
-// SetEdgePropertyByHandle is safe for concurrent use.
+// SetEdgePropertyByHandle is safe for concurrent use.//
+// It refuses a property key longer than [MaxTokenLen] bytes with an error wrapping
+// [ErrTokenTooLong], before changing any state (rmp #2748).
 func (g *Graph[N, W]) SetEdgePropertyByHandle(src, dst N, handle uint64, key string, value PropertyValue) error {
 	return g.setEdgePropertyByHandleInfo(src, dst, handle, key, value, nil)
 }
@@ -334,6 +343,9 @@ func (g *Graph[N, W]) SetEdgePropertyByHandle(src, dst N, handle uint64, key str
 // nil for a direct Go-API mutation, which is committed the instant it is made
 // and takes no conflict check. See [writeCtx].
 func (g *Graph[N, W]) setEdgePropertyByHandleInfo(src, dst N, handle uint64, key string, value PropertyValue, tx *writeCtx) error {
+	if err := CheckToken("property key", key); err != nil {
+		return err
+	}
 	if v := g.validator.load(); v != nil {
 		if err := v.Validate(key, value); err != nil {
 			return err
@@ -350,7 +362,7 @@ func (g *Graph[N, W]) setEdgePropertyByHandleInfo(src, dst N, handle uint64, key
 	if !ok {
 		return nil
 	}
-	pid := g.pkeys.Intern(key)
+	pid := g.pkeys.intern(key)
 	k := edgeKey{src: srcID, dst: dstID}
 	// Latch BEFORE the lock, so the store is ordered ahead of any state this
 	// write makes visible; see [Graph.anyHandleProp]. Latching here rather than
@@ -571,9 +583,17 @@ func (g *Graph[N, W]) AppendEdgeHandles(src, dst N, buf []uint64) []uint64 {
 // separately by the caller (dual-write); this method only touches the
 // handle-keyed per-instance store.
 //
-// DelEdgePropertyByHandle is safe for concurrent use.
-func (g *Graph[N, W]) DelEdgePropertyByHandle(src, dst N, handle uint64, key string) {
+// DelEdgePropertyByHandle is safe for concurrent use.//
+// It refuses a property key longer than [MaxTokenLen] bytes with an error wrapping
+// [ErrTokenTooLong] and changes nothing (rmp #2748): no such token can exist,
+// and the WAL-backed store refuses the same call. The error return is a
+// breaking change: DelEdgePropertyByHandle used to return nothing.
+func (g *Graph[N, W]) DelEdgePropertyByHandle(src, dst N, handle uint64, key string) error {
+	if err := CheckToken("property key", key); err != nil {
+		return err
+	}
 	g.delEdgePropertyByHandleInfo(src, dst, handle, key, nil)
+	return nil
 }
 
 // delEdgePropertyByHandleInfo is [Graph.DelEdgePropertyByHandle] with an explicit write transaction; tx is

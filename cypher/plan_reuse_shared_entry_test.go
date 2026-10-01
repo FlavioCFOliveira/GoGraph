@@ -88,7 +88,9 @@ func newSharedEntryRig(tb testing.TB) *Engine {
 		if err := g.AddEdge(src, dst, 1); err != nil {
 			tb.Fatalf("AddEdge %d: %v", i, err)
 		}
-		g.SetEdgeLabel(src, dst, "E")
+		if err := g.SetEdgeLabel(src, dst, "E"); err != nil {
+			tb.Fatal(err)
+		}
 	}
 	return NewEngine(g)
 }

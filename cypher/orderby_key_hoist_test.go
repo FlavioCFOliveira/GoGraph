@@ -86,7 +86,9 @@ func hoistGraph(t testing.TB, n int) *lpg.Graph[string, float64] {
 		if err := g.AddEdge(src, dst, 0); err != nil {
 			t.Fatalf("AddEdge: %v", err)
 		}
-		g.SetEdgeLabel(src, dst, "KNOWS")
+		if err := g.SetEdgeLabel(src, dst, "KNOWS"); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return g
 }

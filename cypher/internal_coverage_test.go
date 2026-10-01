@@ -218,7 +218,9 @@ func TestLpgMutatorAdapter_DelEdgeProperty(t *testing.T) {
 	}
 
 	a := &lpgMutatorAdapter{g: g}
-	a.DelEdgeProperty("S", "D", "weight")
+	if err := a.DelEdgeProperty("S", "D", "weight"); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestLpgMutatorAdapter_WalkNodeIDs(t *testing.T) {

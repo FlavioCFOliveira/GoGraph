@@ -41,8 +41,8 @@ func TestRemoveNode_StripsLabelBitmap(t *testing.T) {
 	if !ok {
 		t.Fatal("mapper lookup failed")
 	}
-	lidPerson := uint32(g.Registry().Intern("Person"))
-	lidEmployee := uint32(g.Registry().Intern("Employee"))
+	lidPerson := uint32(g.Registry().intern("Person"))
+	lidEmployee := uint32(g.Registry().intern("Employee"))
 
 	// Pre-condition: bitmap contains the node.
 	if !labelIndexHas(g, uint32(lidPerson), id) {
@@ -77,7 +77,7 @@ func TestRemoveNode_StripsLabelBitmap_NoPriorRemoveNodeLabel(t *testing.T) {
 		t.Fatalf("SetNodeLabel: %v", err)
 	}
 	id, _ := g.AdjList().Mapper().Lookup("bob")
-	lid := uint32(g.Registry().Intern("Manager"))
+	lid := uint32(g.Registry().intern("Manager"))
 
 	// RemoveNode directly — no RemoveNodeLabel call first.
 	if err := g.RemoveNode("bob"); err != nil {
@@ -104,7 +104,7 @@ func TestRevive_RestoresLabelBitmap(t *testing.T) {
 		t.Fatalf("SetNodeLabel: %v", err)
 	}
 	id, _ := g.AdjList().Mapper().Lookup("carol")
-	lid := uint32(g.Registry().Intern("Admin"))
+	lid := uint32(g.Registry().intern("Admin"))
 
 	// RemoveNode (no prior label strip) — strips from bitmap.
 	if err := g.RemoveNode("carol"); err != nil {
@@ -138,7 +138,7 @@ func TestRevive_ExecutorPath(t *testing.T) {
 		t.Fatalf("SetNodeLabel: %v", err)
 	}
 	id, _ := g.AdjList().Mapper().Lookup("dave")
-	lid := uint32(g.Registry().Intern("Dev"))
+	lid := uint32(g.Registry().intern("Dev"))
 
 	// Executor path: strip label first, then remove.
 	if err := g.RemoveNodeLabel("dave", "Dev"); err != nil {
@@ -185,7 +185,7 @@ func TestRemoveNode_MultipleNodes(t *testing.T) {
 			t.Fatalf("SetNodeLabel %s: %v", name, err)
 		}
 	}
-	lid := uint32(g.Registry().Intern("Shared"))
+	lid := uint32(g.Registry().intern("Shared"))
 
 	// Remove just n2.
 	if err := g.RemoveNode("n2"); err != nil {
@@ -244,7 +244,7 @@ func TestRemoveNode_IdempotentBitmap(t *testing.T) {
 	} // second call must not panic
 
 	id, _ := g.AdjList().Mapper().Lookup("dup")
-	lid := uint32(g.Registry().Intern("X"))
+	lid := uint32(g.Registry().intern("X"))
 	if labelIndexHas(g, uint32(lid), id) {
 		t.Error("X bitmap contains dup after double RemoveNode")
 	}

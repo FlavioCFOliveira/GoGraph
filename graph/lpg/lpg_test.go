@@ -11,12 +11,12 @@ import (
 func TestLabelRegistry(t *testing.T) {
 	t.Parallel()
 	r := NewLabelRegistry()
-	a := r.Intern("Person")
-	b := r.Intern("Account")
+	a := r.intern("Person")
+	b := r.intern("Account")
 	if a == b {
 		t.Fatalf("distinct names should produce distinct IDs")
 	}
-	if r.Intern("Person") != a {
+	if r.intern("Person") != a {
 		t.Fatalf("Intern not idempotent")
 	}
 	if _, ok := r.Lookup("Person"); !ok {
@@ -70,8 +70,12 @@ func TestGraph_EdgeLabels(t *testing.T) {
 	if err := g.AddEdge("alice", "bob", 0); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
-	g.SetEdgeLabel("alice", "bob", "KNOWS")
-	g.SetEdgeLabel("alice", "bob", "FOLLOWS")
+	if err := g.SetEdgeLabel("alice", "bob", "KNOWS"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetEdgeLabel("alice", "bob", "FOLLOWS"); err != nil {
+		t.Fatal(err)
+	}
 	if !g.HasEdgeLabel("alice", "bob", "KNOWS") {
 		t.Fatalf("edge should carry KNOWS")
 	}
@@ -83,7 +87,9 @@ func TestGraph_EdgeLabels(t *testing.T) {
 func TestGraph_SetEdgeLabel_NoEdge(t *testing.T) {
 	t.Parallel()
 	g := New[string, int64](adjlist.Config{Directed: true})
-	g.SetEdgeLabel("alice", "bob", "KNOWS") // no edge yet
+	if err := g.SetEdgeLabel("alice", "bob", "KNOWS"); err != nil {
+		t.Fatal(err)
+	} // no edge yet
 	if g.HasEdgeLabel("alice", "bob", "KNOWS") {
 		t.Fatalf("SetEdgeLabel on missing edge must be a no-op")
 	}

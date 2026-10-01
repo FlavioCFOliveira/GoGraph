@@ -74,7 +74,7 @@ func TestMain(m *testing.M) {
 			if err := g.AddEdge(src, dst, 0); err != nil {
 				log.Fatalf("seed AddEdge: %v", err)
 			}
-			g.SetEdgeLabel(src, dst, "KNOWS")
+			_ = g.SetEdgeLabel(src, dst, "KNOWS")
 		}
 	}
 	// A handful of :MENTORS edges among the first mentorsEdgeCount*2 nodes —
@@ -87,7 +87,7 @@ func TestMain(m *testing.M) {
 		if err := g.AddEdge(src, dst, 0); err != nil {
 			log.Fatalf("seed AddEdge (mentors): %v", err)
 		}
-		g.SetEdgeLabel(src, dst, "MENTORS")
+		_ = g.SetEdgeLabel(src, dst, "MENTORS")
 	}
 	benchGraph = g
 	os.Exit(m.Run())

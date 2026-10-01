@@ -86,7 +86,9 @@ func buildLazyRelPerPairGraph(t *testing.T) *lpg.Graph[string, float64] {
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
-	g.SetEdgeLabel("a", "b", "R")
+	if err := g.SetEdgeLabel("a", "b", "R"); err != nil {
+		t.Fatal(err)
+	}
 	set := func(k string, v lpg.PropertyValue) {
 		t.Helper()
 		if err := g.SetEdgeProperty("a", "b", k, v); err != nil {

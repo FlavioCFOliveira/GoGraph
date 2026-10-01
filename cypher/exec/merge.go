@@ -710,7 +710,9 @@ func (op *Merge) applyActions(actions []mergeAction, evals map[string]ValueEvalF
 		if remove {
 			// The RHS evaluated to null → openCypher removes the property.
 			// DelNodeProperty releases (rmp #2358).
-			op.mutator.DelNodeProperty(nodeKey, a.key)
+			if err := op.mutator.DelNodeProperty(nodeKey, a.key); err != nil {
+				return err
+			}
 			continue
 		}
 		if !ok {
@@ -802,7 +804,9 @@ func (op *Merge) applyRelAction(ent entityBinding, a mergeAction, evals map[stri
 		return err
 	}
 	if remove {
-		delEdgeProp(op.mutator, ent.relSrcKey, ent.relDstKey, ent.relHandle, a.key)
+		if err := delEdgeProp(op.mutator, ent.relSrcKey, ent.relDstKey, ent.relHandle, a.key); err != nil {
+			return err
+		}
 		return nil
 	}
 	if !ok {

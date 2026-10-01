@@ -212,8 +212,12 @@ func TestByHandleID_RoundTrip(t *testing.T) {
 	srcID, _ := g.AdjList().Mapper().Lookup("a")
 	dstID, _ := g.AdjList().Mapper().Lookup("b")
 
-	g.SetEdgeLabelByHandleID(srcID, dstID, h, "KNOWS")
-	g.SetEdgePropertyByHandleID(srcID, dstID, h, "since", Int64Value(2020))
+	if err := g.SetEdgeLabelByHandleID(srcID, dstID, h, "KNOWS"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetEdgePropertyByHandleID(srcID, dstID, h, "since", Int64Value(2020)); err != nil {
+		t.Fatal(err)
+	}
 
 	gotLabels := g.EdgeLabelsByHandleID(srcID, dstID, h)
 	if len(gotLabels) != 1 || gotLabels[0] != "KNOWS" {
@@ -245,11 +249,15 @@ func TestByHandleID_ZeroHandleNoop(t *testing.T) {
 	}
 	srcID, _ := g.AdjList().Mapper().Lookup("a")
 	dstID, _ := g.AdjList().Mapper().Lookup("b")
-	g.SetEdgeLabelByHandleID(srcID, dstID, 0, "X")
+	if err := g.SetEdgeLabelByHandleID(srcID, dstID, 0, "X"); err != nil {
+		t.Fatal(err)
+	}
 	if l := g.EdgeLabelsByHandleID(srcID, dstID, 0); l != nil {
 		t.Fatalf("EdgeLabelsByHandleID(0) = %v, want nil", l)
 	}
-	g.SetEdgePropertyByHandleID(srcID, dstID, 0, "k", Int64Value(1))
+	if err := g.SetEdgePropertyByHandleID(srcID, dstID, 0, "k", Int64Value(1)); err != nil {
+		t.Fatal(err)
+	}
 	if p := g.EdgePropertiesByHandleID(srcID, dstID, 0); p != nil {
 		t.Fatalf("EdgePropertiesByHandleID(0) = %v, want nil", p)
 	}

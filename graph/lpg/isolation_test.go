@@ -104,8 +104,12 @@ func TestIsolation_CrossSubstructure_EdgeImpliesLabels(t *testing.T) {
 					_ = wv.SetNodeLabel("v", "Hot")
 				} else {
 					wv.RemoveEdge("u", "v")
-					wv.RemoveNodeLabel("u", "Hot")
-					wv.RemoveNodeLabel("v", "Hot")
+					if err := wv.RemoveNodeLabel("u", "Hot"); err != nil {
+						t.Error(err)
+					}
+					if err := wv.RemoveNodeLabel("v", "Hot"); err != nil {
+						t.Error(err)
+					}
 				}
 				return nil
 			})

@@ -163,7 +163,21 @@ func NewLabelRegistry() *LabelRegistry {
 // mutex; only the first interning of a previously unseen name serialises
 // under mu to publish the extended tables. The steady-state label
 // vocabulary is small and stable.
-func (r *LabelRegistry) Intern(name string) LabelID {
+//
+// It refuses a name longer than [MaxTokenLen] bytes with an error wrapping
+// [ErrTokenTooLong], allocating nothing (rmp #2748). This is a breaking change:
+// Intern used to return the id alone and accept a name of any length.
+func (r *LabelRegistry) Intern(name string) (LabelID, error) {
+	if err := CheckToken("label", name); err != nil {
+		return 0, err
+	}
+	return r.intern(name), nil
+}
+
+// intern is [LabelRegistry.Intern] without the length check, for the callers
+// in this package that have already run [CheckToken] on name at their own
+// entry, before changing any state.
+func (r *LabelRegistry) intern(name string) LabelID {
 	if id, ok := r.fwd.Load().m[name]; ok {
 		return id
 	}
@@ -2457,8 +2471,14 @@ func (g *Graph[N, W]) addEdgeInfo(src, dst N, w W, tx *writeCtx) error {
 // callers that may re-label an existing edge must use SetEdgeLabel.
 //
 // AddEdgeLabeled is safe for concurrent use.
+//
+// It refuses a relationship type longer than [MaxTokenLen] bytes with an error wrapping
+// [ErrTokenTooLong], before changing any state (rmp #2748).
 func (g *Graph[N, W]) AddEdgeLabeled(src, dst N, w W, relType string) error {
-	lid := g.reg.Intern(relType)
+	if err := CheckToken("relationship type", relType); err != nil {
+		return err
+	}
+	lid := g.reg.intern(relType)
 	if err := g.adj.AddEdgeLabeled(src, dst, w, encodeSlotLabel(lid)); err != nil {
 		return err
 	}
@@ -2511,13 +2531,16 @@ func (g *Graph[N, W]) AddEdgeLabeled(src, dst N, w W, relType string) error {
 //
 // AddEdgeLabeledWithProperty is safe for concurrent use.
 func (g *Graph[N, W]) AddEdgeLabeledWithProperty(src, dst N, w W, relType, key string, value PropertyValue) error {
+	if err := checkTokens("relationship type", relType, "property key", key); err != nil {
+		return err
+	}
 	if v := g.validator.load(); v != nil {
 		if err := v.Validate(key, value); err != nil {
 			return err
 		}
 	}
-	lid := g.reg.Intern(relType)
-	keyID := g.pkeys.Intern(key)
+	lid := g.reg.intern(relType)
+	keyID := g.pkeys.intern(key)
 	payload := &edgePropPayload{keyID: keyID, value: value}
 	if err := g.adj.AddEdgeLabeledWithProp(src, dst, w, encodeSlotLabel(lid), payload); err != nil {
 		return err
@@ -3272,7 +3295,13 @@ func (g *Graph[N, W]) EdgeWeightAsOf(src, dst N, snap *Snapshot) (W, bool) {
 // While any index is registered on, or being built for, [Graph.IndexManager] it
 // is refused with [ErrIndexedRawWrite] and changes nothing; label an indexed
 // graph through the engine, or before its first index is created.
+//
+// It refuses a label longer than [MaxTokenLen] bytes with an error wrapping
+// [ErrTokenTooLong], before changing any state (rmp #2748).
 func (g *Graph[N, W]) SetNodeLabel(n N, name string) error {
+	if err := CheckToken("node label", name); err != nil {
+		return err
+	}
 	if err := g.refuseIndexedRawWrite(); err != nil {
 		return err
 	}
@@ -3289,6 +3318,11 @@ func (g *Graph[N, W]) SetNodeLabel(n N, name string) error {
 // than looked up so a transaction's deltas all point at ONE record and its
 // commit is a single store (rmp #2278).
 func (g *Graph[N, W]) setNodeLabelInfo(n N, name string, tx *writeCtx) error {
+	// The token bound runs before the node is interned, so a refused label
+	// creates no node either (rmp #2748).
+	if err := CheckToken("node label", name); err != nil {
+		return err
+	}
 	// ONE mapper shard acquisition, not two (rmp #2360). Mapper.Intern already
 	// RETURNS the id it assigned, and [adjlist.AdjList.AddNode] is exactly
 	// `mapper.Intern(n); return nil` — so the Lookup that used to follow it re-took
@@ -3301,7 +3335,7 @@ func (g *Graph[N, W]) setNodeLabelInfo(n N, name string, tx *writeCtx) error {
 	// tuple's identity once per write, and Memgraph's accessor carries the vertex
 	// pointer rather than re-looking it up per store.
 	id := g.adj.Mapper().Intern(n)
-	lid := g.reg.Intern(name)
+	lid := g.reg.intern(name)
 	sh := g.nodeLabelShardFor(id)
 	sh.mu.Lock()
 	// labelBag is stored by value: read it out, mutate, write it back under the
@@ -4804,7 +4838,14 @@ func (g *Graph[N, W]) DecrEdgesRemoved() {
 // indexes, which only the engine's write path maintains. While any index is
 // registered on, or being built for, [Graph.IndexManager] it is refused with
 // [ErrIndexedRawWrite] and changes nothing.
+//
+// It refuses a label longer than [MaxTokenLen] bytes with an error wrapping
+// [ErrTokenTooLong] and changes nothing (rmp #2748): no such label can exist,
+// and the WAL-backed store refuses the same call.
 func (g *Graph[N, W]) RemoveNodeLabel(n N, name string) error {
+	if err := CheckToken("node label", name); err != nil {
+		return err
+	}
 	if err := g.refuseIndexedRawWrite(); err != nil {
 		return err
 	}
@@ -5030,20 +5071,27 @@ func (g *Graph[N, W]) HasNodeLabelByID(id graph.NodeID, name string) bool {
 // returned by [Graph.EdgeLabels]. The whole update runs under the pair's
 // edge-label shard write lock so the slot and overflow halves transition
 // together with respect to a concurrent reader.
-func (g *Graph[N, W]) SetEdgeLabel(src, dst N, name string) {
-	g.setEdgeLabelInfo(src, dst, name, nil)
+//
+// It refuses a relationship type longer than [MaxTokenLen] bytes with an error
+// wrapping [ErrTokenTooLong], before changing any state (rmp #2748). The error
+// return is a breaking change: SetEdgeLabel used to return nothing.
+func (g *Graph[N, W]) SetEdgeLabel(src, dst N, name string) error {
+	return g.setEdgeLabelInfo(src, dst, name, nil)
 }
 
 // setEdgeLabelInfo is [Graph.SetEdgeLabel] with an explicit write transaction; tx is
 // nil for a direct Go-API mutation, which is committed the instant it is made and
 // takes no conflict check. See [writeCtx].
-func (g *Graph[N, W]) setEdgeLabelInfo(src, dst N, name string, tx *writeCtx) {
+func (g *Graph[N, W]) setEdgeLabelInfo(src, dst N, name string, tx *writeCtx) error {
+	if err := CheckToken("relationship type", name); err != nil {
+		return err
+	}
 	if !g.adj.HasEdge(src, dst) {
-		return
+		return nil
 	}
 	srcID, _ := g.adj.Mapper().Lookup(src)
 	dstID, _ := g.adj.Mapper().Lookup(dst)
-	lid := g.reg.Intern(name)
+	lid := g.reg.intern(name)
 	k := edgeKey{src: srcID, dst: dstID}
 	sh := g.edgeLabelShardFor(k)
 	sh.mu.Lock()
@@ -5058,6 +5106,7 @@ func (g *Graph[N, W]) setEdgeLabelInfo(src, dst N, name string, tx *writeCtx) {
 		// samples the new epoch must be unable to miss the write it announces.
 		g.topoGeneration.Add(1)
 	}
+	return nil
 }
 
 // setEdgeLabelLocked adds lid to the label set of every column-typed slot of k.
@@ -5229,8 +5278,16 @@ func (g *Graph[N, W]) HasEdgeLabelAsOf(src, dst N, name string, snap *Snapshot) 
 // wrong result.
 //
 // RemoveEdgeLabel is safe for concurrent use.
-func (g *Graph[N, W]) RemoveEdgeLabel(src, dst N, name string) {
+//
+// It refuses a relationship type longer than [MaxTokenLen] bytes with an error
+// wrapping [ErrTokenTooLong] and changes nothing (rmp #2748). The error return
+// is a breaking change: RemoveEdgeLabel used to return nothing.
+func (g *Graph[N, W]) RemoveEdgeLabel(src, dst N, name string) error {
+	if err := CheckToken("relationship type", name); err != nil {
+		return err
+	}
 	g.removeEdgeLabelInfo(src, dst, name, nil)
+	return nil
 }
 
 // removeEdgeLabelInfo is [Graph.RemoveEdgeLabel] with an explicit write transaction; tx is

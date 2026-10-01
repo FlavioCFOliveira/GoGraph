@@ -768,8 +768,12 @@ func TestGraphFingerprint_ParallelSlotAssignment(t *testing.T) {
 		if h1 == h2 {
 			t.Fatalf("parallel edges must get distinct handles, both = %d", h1)
 		}
-		g.SetEdgeLabelByHandle("a", "b", h1, firstLabel)
-		g.SetEdgeLabelByHandle("a", "b", h2, secondLabel)
+		if err := g.SetEdgeLabelByHandle("a", "b", h1, firstLabel); err != nil {
+			t.Fatal(err)
+		}
+		if err := g.SetEdgeLabelByHandle("a", "b", h2, secondLabel); err != nil {
+			t.Fatal(err)
+		}
 		if err := g.SetEdgePropertyByHandle("a", "b", h1, "role", lpg.StringValue(firstProp)); err != nil {
 			t.Fatalf("SetEdgePropertyByHandle: %v", err)
 		}

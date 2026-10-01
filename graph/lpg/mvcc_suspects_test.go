@@ -40,7 +40,7 @@ func TestLabelBitmapAsOf_CorrectsWhenTheSweepLandsDuringTheClone(t *testing.T) {
 	if err := g.ApplyAtomically(func() error { return g.SetNodeLabel("a", "L") }); err != nil {
 		t.Fatalf("SetNodeLabel: %v", err)
 	}
-	lid := g.reg.Intern("L")
+	lid := g.reg.intern("L")
 	id, ok := g.adj.Mapper().Lookup("a")
 	if !ok {
 		t.Fatal("node a not found")
@@ -113,7 +113,7 @@ func TestLabelBitmapAsOf_SpanningSurvivesTheDeferredClone(t *testing.T) {
 	if err := g.ApplyAtomically(func() error { return g.SetNodeLabel("a", "L") }); err != nil {
 		t.Fatalf("SetNodeLabel: %v", err)
 	}
-	lid := g.reg.Intern("L")
+	lid := g.reg.intern("L")
 	id, ok := g.adj.Mapper().Lookup("a")
 	if !ok {
 		t.Fatal("node a not found")

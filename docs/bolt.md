@@ -788,10 +788,11 @@ poisoned and the next attempt fails the same way.
 Error matching uses `errors.Is` and `errors.As`, so wrapped errors are matched
 correctly.
 
-The 65535-byte token limit is enforced by the write-ahead log, so only a
-WAL-backed engine raises `Neo.ClientError.Schema.TokenLengthError`; a store-less
-(in-memory) engine accepts a longer label or key. A client can check a token
-before it sends a statement: the limit is a byte length, not a character count.
+The 65535-byte token limit (`lpg.MaxTokenLen`) is enforced by every engine, so a
+store-less (in-memory) engine and a WAL-backed one both raise
+`Neo.ClientError.Schema.TokenLengthError` for the same label, relationship type or
+property key, before anything is written. A client can check a token before it
+sends a statement: the limit is a byte length, not a character count.
 `store/snapshot.ErrFieldTooLong` has no Bolt code of its own. Only the
 checkpointer, bulk import and the offline tools write snapshots, so no Bolt
 statement can return it; if one ever did, it would be a server fault and would

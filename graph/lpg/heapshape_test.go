@@ -243,7 +243,9 @@ func measureObjectsPerNode(t *testing.T, nodes, degree int) (ratio float64, befo
 			}
 			// SetEdgeLabel returns no error, exactly as the audit's own fixture in
 			// bench/audit352/gctax_soak_test.go calls it.
-			g.SetEdgeLabel(src, dst, "KNOWS")
+			if err := g.SetEdgeLabel(src, dst, "KNOWS"); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 

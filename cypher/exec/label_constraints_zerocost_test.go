@@ -77,9 +77,10 @@ func (m *labelProbeMutator) SetNodeLabel(n, label string) error {
 	return nil
 }
 
-func (m *labelProbeMutator) RemoveNodeLabel(n, label string) {
+func (m *labelProbeMutator) RemoveNodeLabel(n, label string) error {
 	EnforceUniqueOnLabelRemove(m.reg, m, n, label)
 	delete(m.labels, label)
+	return nil
 }
 
 func (m *labelProbeMutator) NodeLabels(string) []string {

@@ -35,12 +35,16 @@ func TestEdgeInstanceAndHandleTiering(t *testing.T) {
 		pk := "p" + string(rune('a'+i))
 		wantProps[pk] = true
 		// per-instance (idx-keyed)
-		g.SetEdgeLabelAt("a", "b", 1, lbl)
+		if err := g.SetEdgeLabelAt("a", "b", 1, lbl); err != nil {
+			t.Fatal(err)
+		}
 		if err := g.SetEdgePropertyAt("a", "b", 1, pk, Int64Value(int64(i))); err != nil {
 			t.Fatal(err)
 		}
 		// per-handle
-		g.SetEdgeLabelByHandle("a", "b", 7, lbl)
+		if err := g.SetEdgeLabelByHandle("a", "b", 7, lbl); err != nil {
+			t.Fatal(err)
+		}
 		if err := g.SetEdgePropertyByHandle("a", "b", 7, pk, Int64Value(int64(i))); err != nil {
 			t.Fatal(err)
 		}

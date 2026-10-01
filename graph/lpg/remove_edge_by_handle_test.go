@@ -26,8 +26,12 @@ func TestGraph_RemoveEdgeByHandle_InstancePrecise(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AddEdgeH h2: %v", err)
 	}
-	g.SetEdgeLabelByHandle("a", "b", h1, "T1")
-	g.SetEdgeLabelByHandle("a", "b", h2, "T2")
+	if err := g.SetEdgeLabelByHandle("a", "b", h1, "T1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetEdgeLabelByHandle("a", "b", h2, "T2"); err != nil {
+		t.Fatal(err)
+	}
 
 	if !g.RemoveEdgeByHandle("a", "b", h2) {
 		t.Fatal("RemoveEdgeByHandle(h2) returned false, want true")
@@ -59,8 +63,12 @@ func TestGraph_RemoveEdgeByHandle_LastInstanceClearsPairState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AddEdgeH: %v", err)
 	}
-	g.SetEdgeLabelByHandle("a", "b", h, "T")
-	g.SetEdgeLabel("a", "b", "T") // per-pair coalesced label
+	if err := g.SetEdgeLabelByHandle("a", "b", h, "T"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetEdgeLabel("a", "b", "T"); err != nil {
+		t.Fatal(err)
+	} // per-pair coalesced label
 
 	if !g.RemoveEdgeByHandle("a", "b", h) {
 		t.Fatal("RemoveEdgeByHandle returned false, want true")

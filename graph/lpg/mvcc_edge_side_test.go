@@ -62,12 +62,22 @@ func TestEdgeOverflowVersion_AddAndRemove(t *testing.T) {
 	// A reader must actually EXIST for the past this test reads through snapAt
 	// to be retained; see pinHorizon.
 	pinHorizon(t, g)
-	if err := g.ApplyAtomically(func() error { g.SetEdgeLabel("a", "b", "KNOWS"); return nil }); err != nil {
+	if err := g.ApplyAtomically(func() error {
+		if err := g.SetEdgeLabel("a", "b", "KNOWS"); err != nil {
+			t.Fatal(err)
+		}
+		return nil
+	}); err != nil {
 		t.Fatalf("first type: %v", err)
 	}
 
 	beforeSecond := g.readTS()
-	if err := g.ApplyAtomically(func() error { g.SetEdgeLabel("a", "b", "LIKES"); return nil }); err != nil {
+	if err := g.ApplyAtomically(func() error {
+		if err := g.SetEdgeLabel("a", "b", "LIKES"); err != nil {
+			t.Fatal(err)
+		}
+		return nil
+	}); err != nil {
 		t.Fatalf("second type: %v", err)
 	}
 	afterSecond := g.readTS()
@@ -86,7 +96,12 @@ func TestEdgeOverflowVersion_AddAndRemove(t *testing.T) {
 
 	// REMOVAL is the direction a missing pre-image silently loses.
 	beforeRemove := g.readTS()
-	if err := g.ApplyAtomically(func() error { g.RemoveEdgeLabel("a", "b", "LIKES"); return nil }); err != nil {
+	if err := g.ApplyAtomically(func() error {
+		if err := g.RemoveEdgeLabel("a", "b", "LIKES"); err != nil {
+			t.Fatal(err)
+		}
+		return nil
+	}); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
 	if !hasName(g.EdgeLabelsByIDAsOf(srcID, dstID, snapAt(beforeRemove)), "LIKES") {
@@ -110,7 +125,9 @@ func TestEdgeHandleVersion_LabelsAndProperties(t *testing.T) {
 	before := g.readTS()
 	var mid uint64
 	if err := g.ApplyAtomically(func() error {
-		g.SetEdgeLabelByHandle("a", "b", handle, "KNOWS")
+		if err := g.SetEdgeLabelByHandle("a", "b", handle, "KNOWS"); err != nil {
+			t.Fatal(err)
+		}
 		mid = g.readTS()
 		return g.SetEdgePropertyByHandle("a", "b", handle, "since", Int64Value(2020))
 	}); err != nil {
@@ -169,7 +186,9 @@ func TestEdgeInstanceVersion_LabelsAndProperties(t *testing.T) {
 	before := g.readTS()
 	var mid uint64
 	if err := g.ApplyAtomically(func() error {
-		g.SetEdgeLabelAt("a", "b", idx, "KNOWS")
+		if err := g.SetEdgeLabelAt("a", "b", idx, "KNOWS"); err != nil {
+			t.Fatal(err)
+		}
 		mid = g.readTS()
 		return g.SetEdgePropertyAt("a", "b", idx, "since", Int64Value(2020))
 	}); err != nil {
@@ -221,8 +240,12 @@ func TestEdgeSideVersion_SurvivesWholePairDrop(t *testing.T) {
 	pinHorizon(t, g)
 	const h1, h2 = uint64(11), uint64(12)
 	if err := g.ApplyAtomically(func() error {
-		g.SetEdgeLabelByHandle("a", "b", h1, "KNOWS")
-		g.SetEdgeLabelByHandle("a", "b", h2, "LIKES")
+		if err := g.SetEdgeLabelByHandle("a", "b", h1, "KNOWS"); err != nil {
+			t.Fatal(err)
+		}
+		if err := g.SetEdgeLabelByHandle("a", "b", h2, "LIKES"); err != nil {
+			t.Fatal(err)
+		}
 		return nil
 	}); err != nil {
 		t.Fatalf("seed instances: %v", err)
@@ -251,9 +274,13 @@ func TestEdgeSideVersion_ReclaimReturnsToZero(t *testing.T) {
 	g, _, _ := sideGraph(t)
 	for i := 0; i < 64; i++ {
 		if err := g.ApplyAtomically(func() error {
-			g.SetEdgeLabelByHandle("a", "b", uint64(i+1), "T")
+			if err := g.SetEdgeLabelByHandle("a", "b", uint64(i+1), "T"); err != nil {
+				t.Fatal(err)
+			}
 			_ = g.SetEdgePropertyByHandle("a", "b", uint64(i+1), "w", Int64Value(int64(i)))
-			g.SetEdgeLabelAt("a", "b", int64(i+1), "T")
+			if err := g.SetEdgeLabelAt("a", "b", int64(i+1), "T"); err != nil {
+				t.Fatal(err)
+			}
 			return g.SetEdgePropertyAt("a", "b", int64(i+1), "w", Int64Value(int64(i)))
 		}); err != nil {
 			t.Fatalf("write %d: %v", i, err)

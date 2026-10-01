@@ -429,7 +429,7 @@ func TestDeferredIndexRemoval_ConcurrentReaddIsNotLost(t *testing.T) {
 	if err := g.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	lid := g.reg.Intern("L")
+	lid := g.reg.intern("L")
 	const rounds = 4000
 
 	for r := 0; r < rounds; r++ {

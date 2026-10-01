@@ -522,7 +522,9 @@ func lpgPropsToMapValue(props map[string]lpg.PropertyValue) expr.MapValue {
 func (op *SetAllProperties) applyExprValue(target entityBinding, v expr.Value) error {
 	if v == nil || expr.IsNull(v) {
 		if op.isReplace {
-			op.clearTarget(target)
+			if err := op.clearTarget(target); err != nil {
+				return err
+			}
 		}
 		return nil
 	}
@@ -561,10 +563,14 @@ func (op *SetAllProperties) applyMapValue(target entityBinding, mv expr.MapValue
 		return err
 	}
 	if op.isReplace {
-		op.clearTarget(target)
+		if err := op.clearTarget(target); err != nil {
+			return err
+		}
 	}
 	for _, k := range nullKeys {
-		op.deleteOne(target, k)
+		if err := op.deleteOne(target, k); err != nil {
+			return err
+		}
 	}
 	for _, p := range props {
 		if err := op.writeOne(target, p.key, p.value); err != nil {
@@ -664,7 +670,9 @@ func (op *SetAllProperties) copyFromSource(target, src entityBinding) error {
 	}
 
 	if op.isReplace {
-		op.clearTarget(target)
+		if err := op.clearTarget(target); err != nil {
+			return err
+		}
 	}
 
 	for k, v := range sourceProps {
@@ -686,10 +694,14 @@ func (op *SetAllProperties) applyMap(target entityBinding, row Row) error {
 		return err
 	}
 	if op.isReplace {
-		op.clearTarget(target)
+		if err := op.clearTarget(target); err != nil {
+			return err
+		}
 	}
 	for _, k := range nullKeys {
-		op.deleteOne(target, k)
+		if err := op.deleteOne(target, k); err != nil {
+			return err
+		}
 	}
 	for _, p := range parsedMap {
 		if err := op.writeOne(target, p.key, p.value); err != nil {
@@ -706,17 +718,22 @@ func (op *SetAllProperties) applyMap(target entityBinding, row Row) error {
 // reservation is released so the registry stays in sync with the graph (a
 // value freed by a replace must become available again) — mirroring
 // delNodePropConstrained in merge_setall.go.
-func (op *SetAllProperties) clearTarget(target entityBinding) {
+func (op *SetAllProperties) clearTarget(target entityBinding) error {
 	if target.isRel {
 		for k := range relClearKeys(op.mutator, target.relSrcKey, target.relDstKey, target.relHandle) {
-			op.deleteOne(target, k)
+			if err := op.deleteOne(target, k); err != nil {
+				return err
+			}
 		}
-		return
+		return nil
 	}
 	for k := range nodeClearKeys(op.mutator, target.nodeKey) {
 		// DelNodeProperty releases, at the mutator choke point (rmp #2358).
-		op.mutator.DelNodeProperty(target.nodeKey, k)
+		if err := op.mutator.DelNodeProperty(target.nodeKey, k); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // txVisiblePropertyEnumerator is the optional reader that enumerates an
@@ -827,7 +844,7 @@ func (op *SetAllProperties) writeOne(target entityBinding, key string, value lpg
 // is mirrored to the per-instance by-handle store (#1686). For node writes
 // with a constraint registry attached, the removed value's UNIQUE reservation
 // is released so the registry stays in sync with the graph.
-func (op *SetAllProperties) deleteOne(target entityBinding, key string) {
+func (op *SetAllProperties) deleteOne(target entityBinding, key string) error {
 	if target.isRel {
 		// When the targeted instance's stable handle is resolved and the
 		// mutator implements [relInstancePropRemover], it performs both
@@ -837,17 +854,26 @@ func (op *SetAllProperties) deleteOne(target entityBinding, key string) {
 		// carried. The handle==0 fallback keeps the pairwise path
 		// byte-identical.
 		if m, ok := op.mutator.(relInstancePropRemover); ok && target.relHandle != 0 {
-			m.DelEdgePropertyOnInstance(target.relSrcKey, target.relDstKey, target.relHandle, key)
-			return
+			if err := m.DelEdgePropertyOnInstance(target.relSrcKey, target.relDstKey, target.relHandle, key); err != nil {
+				return err
+			}
+			return nil
 		}
-		op.mutator.DelEdgeProperty(target.relSrcKey, target.relDstKey, key)
+		if err := op.mutator.DelEdgeProperty(target.relSrcKey, target.relDstKey, key); err != nil {
+			return err
+		}
 		if target.relHandle != 0 {
-			op.mutator.DelEdgePropertyByHandle(target.relSrcKey, target.relDstKey, target.relHandle, key)
+			if err := op.mutator.DelEdgePropertyByHandle(target.relSrcKey, target.relDstKey, target.relHandle, key); err != nil {
+				return err
+			}
 		}
-		return
+		return nil
 	}
 	// DelNodeProperty releases, at the mutator choke point (rmp #2358).
-	op.mutator.DelNodeProperty(target.nodeKey, key)
+	if err := op.mutator.DelNodeProperty(target.nodeKey, key); err != nil {
+		return err
+	}
+	return nil
 }
 
 // Close closes the child operator.

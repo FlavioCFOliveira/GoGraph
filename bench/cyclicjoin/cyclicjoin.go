@@ -95,7 +95,9 @@ func SeedUniform(n, degree int) (*lpg.Graph[string, float64], error) {
 		if err := g.AddEdge(keys[i], keys[j], 1.0); err != nil {
 			return fmt.Errorf("AddEdge: %w", err)
 		}
-		g.SetEdgeLabel(keys[i], keys[j], "K")
+		if err := g.SetEdgeLabel(keys[i], keys[j], "K"); err != nil {
+			return err
+		}
 		return nil
 	}
 	for i := 0; i < n; i++ {
@@ -146,7 +148,9 @@ func SeedPowerLaw(n, mEdges int, triadP float64, seed int64) (*lpg.Graph[string,
 			if err := g.AddEdge(keys[e[0]], keys[e[1]], 1.0); err != nil {
 				return fmt.Errorf("AddEdge: %w", err)
 			}
-			g.SetEdgeLabel(keys[e[0]], keys[e[1]], "K")
+			if err := g.SetEdgeLabel(keys[e[0]], keys[e[1]], "K"); err != nil {
+				return err
+			}
 		}
 		repeated = append(repeated, u, v)
 		adjacency[u] = append(adjacency[u], v)

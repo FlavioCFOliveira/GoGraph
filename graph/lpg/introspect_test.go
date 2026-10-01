@@ -76,8 +76,12 @@ func buildSampleGraph(t *testing.T) *lpg.Graph[string, int64] {
 	// Edges with distinct relationship types.
 	mustAddEdge(t, g, "a", "b")
 	mustAddEdge(t, g, "a", "c")
-	g.SetEdgeLabel("a", "b", "KNOWS")
-	g.SetEdgeLabel("a", "c", "WORKS_AT")
+	if err := g.SetEdgeLabel("a", "b", "KNOWS"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.SetEdgeLabel("a", "c", "WORKS_AT"); err != nil {
+		t.Fatal(err)
+	}
 
 	// Node properties.
 	if err := g.SetNodeProperty("a", "name", lpg.StringValue("Alice")); err != nil {
@@ -182,7 +186,9 @@ func TestInUseEnumerators_EdgeRetiredWhenEndpointRemoved(t *testing.T) {
 	t.Parallel()
 	g := lpg.New[string, int64](adjlist.Config{Directed: true})
 	mustAddEdge(t, g, "x", "y")
-	g.SetEdgeLabel("x", "y", "LINK")
+	if err := g.SetEdgeLabel("x", "y", "LINK"); err != nil {
+		t.Fatal(err)
+	}
 	if err := g.SetEdgeProperty("x", "y", "w", lpg.Float64Value(1.5)); err != nil {
 		t.Fatalf("SetEdgeProperty: %v", err)
 	}
@@ -228,7 +234,9 @@ func TestInUseEnumerators_Concurrency(t *testing.T) {
 				_ = g.SetNodeProperty(n, "k", lpg.Int64Value(int64(i)))
 				if i > 0 {
 					_ = g.AddEdge(n, n-1, 1)
-					g.SetEdgeLabel(n, n-1, "KNOWS")
+					if err := g.SetEdgeLabel(n, n-1, "KNOWS"); err != nil {
+						t.Error(err)
+					}
 				}
 				if i%7 == 0 {
 					if err := g.RemoveNode(n); err != nil {

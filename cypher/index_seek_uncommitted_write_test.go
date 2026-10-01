@@ -513,8 +513,8 @@ func TestPendingIndexDelta_DeclineIsKeyedPerCoordinate(t *testing.T) {
 // path free.
 func TestPendingIndexDelta_FromBuffer(t *testing.T) {
 	_, g := idxUncommittedEngine(t)
-	sID := uint32(g.PropertyKeys().Intern("s"))
-	lID := uint32(g.Registry().Intern("L"))
+	sID := keyIDOf(g.PropertyKeys(), "s")
+	lID := labelIDOf(g.Registry(), "L")
 
 	if d := newPendingIndexDelta(nil, g); d != nil {
 		t.Errorf("a nil buffer must yield nil, got %+v", d)

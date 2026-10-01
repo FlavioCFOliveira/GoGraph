@@ -1557,7 +1557,10 @@ func openCodec[N comparable, W any](
 			// handle high-water counter so post-recovery edge creation never
 			// re-mints a live handle (invariant I5).
 			if haveSnapEdgeHandles {
-				snapshot.ApplyEdgeHandlesToGraph(g, loaded.EdgeHandles)
+				if err := snapshot.ApplyEdgeHandlesToGraph(g, loaded.EdgeHandles); err != nil {
+					metrics.IncCounter("store.recovery.openCodec.errors", 1)
+					return res, fmt.Errorf("recovery: apply snapshot edge handles: %w", err)
+				}
 			}
 			snapshotSideAppliedEarly = true
 		}
@@ -1703,7 +1706,10 @@ func openCodec[N comparable, W any](
 	// column. The self-sufficient path applied these before WAL replay
 	// (snapshotSideAppliedEarly), so it is skipped here.
 	if haveSnapEdgeHandles && !snapshotSideAppliedEarly {
-		snapshot.ApplyEdgeHandlesToGraph(g, snapEdgeHandles)
+		if err := snapshot.ApplyEdgeHandlesToGraph(g, snapEdgeHandles); err != nil {
+			metrics.IncCounter("store.recovery.openCodec.errors", 1)
+			return res, fmt.Errorf("recovery: apply snapshot edge handles: %w", err)
+		}
 	}
 	// SECONDARY INDEXES ARE REPORTED, NEVER LOADED (rmp #2490).
 	//
@@ -2269,7 +2275,12 @@ func applyOpCodec[N comparable, W any](
 				return false
 			}
 		case txn.OpSetEdgeLabel:
-			g.SetEdgeLabel(src, dst, label)
+			// A refusal here can only be the token bound, which no op the
+			// uint16-prefixed WAL decoded can exceed: an undecodable op.
+			if err := g.SetEdgeLabel(src, dst, label); err != nil {
+				metrics.IncCounter("store.recovery.applyOp.setEdgeLabelErrors", 1)
+				return false
+			}
 		case txn.OpRemoveEdge:
 			// LPG edge removal: a fully-disconnected pair also sheds its
 			// per-pair edge labels/properties, so a later OpAddEdge for the
@@ -2335,7 +2346,10 @@ func applyOpCodec[N comparable, W any](
 				return false
 			}
 		case txn.OpDelEdgeProperty:
-			g.DelEdgeProperty(src, dst, key)
+			if err := g.DelEdgeProperty(src, dst, key); err != nil {
+				metrics.IncCounter("store.recovery.applyOp.delEdgePropertyErrors", 1)
+				return false
+			}
 		}
 	}
 	return true
@@ -2436,7 +2450,10 @@ func applySetEdgeLabelByHandle[N comparable, W any](g *lpg.Graph[N, W], src, dst
 	if !ok {
 		return false
 	}
-	g.SetEdgeLabelByHandle(src, dst, handle, label)
+	if err := g.SetEdgeLabelByHandle(src, dst, handle, label); err != nil {
+		metrics.IncCounter("store.recovery.applyOp.setEdgeLabelErrors", 1)
+		return false
+	}
 	g.SeedEdgeHandle(handle + 1)
 	return true
 }
@@ -2501,7 +2518,10 @@ func applyDelEdgePropertyByHandle[N comparable, W any](g *lpg.Graph[N, W], src, 
 	if !ok {
 		return false
 	}
-	g.DelEdgePropertyByHandle(src, dst, handle, key)
+	if err := g.DelEdgePropertyByHandle(src, dst, handle, key); err != nil {
+		metrics.IncCounter("store.recovery.applyOp.delEdgePropertyErrors", 1)
+		return false
+	}
 	g.SeedEdgeHandle(handle + 1)
 	return true
 }

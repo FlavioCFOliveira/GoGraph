@@ -45,7 +45,7 @@ func assertLabelIndexNeverMissesABagLabel(t *testing.T, budget time.Duration) {
 			t.Fatalf("AddNode: %v", err)
 		}
 	}
-	lid := g.reg.Intern("L")
+	lid := g.reg.intern("L")
 
 	stop := make(chan struct{})
 	var wg sync.WaitGroup

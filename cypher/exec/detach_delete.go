@@ -225,11 +225,17 @@ func (op *DetachDelete) Next(out *Row) (bool, error) {
 	// (#2212). Suppress effect counting for the span.
 	resumeCounting := suppressEffectCounting(op.mutator)
 	for _, lbl := range nodeLabels {
-		op.mutator.RemoveNodeLabel(nodeKey, lbl)
+		if err := op.mutator.RemoveNodeLabel(nodeKey, lbl); err != nil {
+			resumeCounting()
+			return false, err
+		}
 	}
 	// Strip all properties.
 	for k := range op.mutator.NodeProperties(nodeKey) {
-		op.mutator.DelNodeProperty(nodeKey, k)
+		if err := op.mutator.DelNodeProperty(nodeKey, k); err != nil {
+			resumeCounting()
+			return false, err
+		}
 	}
 	resumeCounting()
 	// Tombstone the node so subsequent scans treat it as absent.
@@ -289,10 +295,16 @@ func (op *DetachDelete) detachDeletePath(p expr.PathValue) error {
 		// (#2212). Suppress effect counting for the span.
 		resumeCounting := suppressEffectCounting(op.mutator)
 		for _, lbl := range pathLabels {
-			op.mutator.RemoveNodeLabel(nodeKey, lbl)
+			if err := op.mutator.RemoveNodeLabel(nodeKey, lbl); err != nil {
+				resumeCounting()
+				return err
+			}
 		}
 		for k := range op.mutator.NodeProperties(nodeKey) {
-			op.mutator.DelNodeProperty(nodeKey, k)
+			if err := op.mutator.DelNodeProperty(nodeKey, k); err != nil {
+				resumeCounting()
+				return err
+			}
 		}
 		resumeCounting()
 		op.mutator.RemoveNode(nodeKey)

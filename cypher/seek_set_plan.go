@@ -184,7 +184,13 @@ const maxSeekSetDisjuncts = 1 << 20
 // This is the plan-time half of the gate; [exec.NodeByIndexSeekSet] enforces the
 // budget itself once the exact count is known.
 func seekSetBudget(g *lpg.ReadView[string, float64], label string) (uint64, bool) {
-	nLabel := g.NodeIndex().Count(uint32(g.Registry().Intern(label)))
+	lid, err := g.Registry().Intern(label)
+	if err != nil {
+		// A label over lpg.MaxTokenLen cannot exist, so its population is zero
+		// and no seek can win (rmp #2748).
+		return 0, false
+	}
+	nLabel := g.NodeIndex().Count(uint32(lid))
 	if nLabel < rangeSeekMinLabelPopulation {
 		return 0, false
 	}

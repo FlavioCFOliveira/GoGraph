@@ -261,9 +261,11 @@ func run(ctx context.Context, w io.Writer, cfg config) error {
 // write is type-checked before it is applied.
 func installSchema(g *lpg.Graph[string, int64]) error {
 	s := schema.New(g.Registry(), g.PropertyKeys())
-	s.RegisterLabel(labelPerson)
-	s.RegisterLabel(labelManager)
-	s.RegisterLabel(labelOrg)
+	for _, l := range []string{labelPerson, labelManager, labelOrg} {
+		if _, err := s.RegisterLabel(l); err != nil {
+			return fmt.Errorf("register label %q: %w", l, err)
+		}
+	}
 
 	decls := []struct {
 		key  string

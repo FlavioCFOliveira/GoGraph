@@ -167,7 +167,9 @@ func (op *DeleteNode) deletePath(p expr.PathValue) error {
 			op.deferredPathNodes = append(op.deferredPathNodes, id)
 			continue
 		}
-		op.removeDetachedNode(nodeKey)
+		if err := op.removeDetachedNode(nodeKey); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -186,7 +188,9 @@ func (op *DeleteNode) flushDeferredPathNodes() error {
 		if hasRelationshipsInTx(op.mutator, nodeKey) {
 			return ErrDeleteNodeHasRelationships
 		}
-		op.removeDetachedNode(nodeKey)
+		if err := op.removeDetachedNode(nodeKey); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -196,16 +200,26 @@ func (op *DeleteNode) flushDeferredPathNodes() error {
 // a user-visible side effect: openCypher declares DELETE as -nodes only
 // (#2212), so effect counting is suppressed for the span. RemoveNodeLabel
 // releases the node's constrained values (rmp #2358).
-func (op *DeleteNode) removeDetachedNode(nodeKey string) {
+func (op *DeleteNode) removeDetachedNode(nodeKey string) error {
 	resumeCounting := suppressEffectCounting(op.mutator)
+	// The labels and keys are read back from the node, so the mutator's token
+	// gate cannot refuse them; the errors are propagated all the same (rmp
+	// #2956), and counting is resumed on every path.
 	for _, lbl := range labelsInTx(op.mutator, nodeKey) {
-		op.mutator.RemoveNodeLabel(nodeKey, lbl)
+		if err := op.mutator.RemoveNodeLabel(nodeKey, lbl); err != nil {
+			resumeCounting()
+			return err
+		}
 	}
 	for k := range op.mutator.NodeProperties(nodeKey) {
-		op.mutator.DelNodeProperty(nodeKey, k)
+		if err := op.mutator.DelNodeProperty(nodeKey, k); err != nil {
+			resumeCounting()
+			return err
+		}
 	}
 	resumeCounting()
 	op.mutator.RemoveNode(nodeKey)
+	return nil
 }
 
 // NewDeleteNode creates a DeleteNode operator.
@@ -438,11 +452,17 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 	resumeCounting := suppressEffectCounting(op.mutator)
 	// Remove all labels.
 	for _, lbl := range labelsInTx(op.mutator, nodeKey) {
-		op.mutator.RemoveNodeLabel(nodeKey, lbl)
+		if err := op.mutator.RemoveNodeLabel(nodeKey, lbl); err != nil {
+			resumeCounting()
+			return false, err
+		}
 	}
 	// Remove all properties.
 	for k := range op.mutator.NodeProperties(nodeKey) {
-		op.mutator.DelNodeProperty(nodeKey, k)
+		if err := op.mutator.DelNodeProperty(nodeKey, k); err != nil {
+			resumeCounting()
+			return false, err
+		}
 	}
 	resumeCounting()
 	// Tombstone the node entity so AllNodesScan, count(*), and the

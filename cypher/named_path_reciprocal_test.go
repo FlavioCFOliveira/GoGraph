@@ -65,7 +65,9 @@ func newGoAPIReciprocalEngine(t *testing.T) *cypher.Engine {
 		if h != uint64(i+1) {
 			t.Fatalf("AddEdgeH(%s,%s) handle = %d, want %d", e[0], e[1], h, i+1)
 		}
-		g.SetEdgeLabel(e[0], e[1], "KNOWS")
+		if err := g.SetEdgeLabel(e[0], e[1], "KNOWS"); err != nil {
+			t.Fatal(err)
+		}
 		if err := g.SetEdgeProperty(e[0], e[1], "tag", lpg.StringValue(e[0]+e[1])); err != nil {
 			t.Fatalf("SetEdgeProperty(%s,%s): %v", e[0], e[1], err)
 		}

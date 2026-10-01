@@ -116,7 +116,7 @@ func deleteVisibilityFixture(t *testing.T, round, population int) (
 		ids[i] = id
 	}
 	g.ReclaimNow()
-	return g, g.reg.Intern("Retired"), keys, ids
+	return g, g.reg.intern("Retired"), keys, ids
 }
 
 // runDeleteVisibilityProbe drives `rounds` independent graphs. In each round the
@@ -433,7 +433,7 @@ func TestDeleteVisibility_LabellingADeadNodeDoesNotIndexIt(t *testing.T) {
 	if err := g.SetNodeLabel("a", "Retired"); err != nil {
 		t.Fatalf("SetNodeLabel: %v", err)
 	}
-	lid := g.reg.Intern("Retired")
+	lid := g.reg.intern("Retired")
 
 	if g.nodeIdx.Has(uint32(lid), id) {
 		t.Fatal("labelling a tombstoned node put it into the raw label bitmap. The bag " +

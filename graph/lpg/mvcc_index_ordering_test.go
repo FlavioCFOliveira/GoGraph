@@ -87,7 +87,7 @@ func TestDeferredIndexRemoval_IsStampedWithItsOwnTransaction(t *testing.T) {
 		t.Fatalf("SetNodeLabel: %v", err)
 	}
 	id := nodeIDOf(t, g, "a")
-	lid := g.reg.Intern("L")
+	lid := g.reg.intern("L")
 	if !g.nodeIdx.Has(uint32(lid), id) {
 		t.Fatal("the label bitmap does not carry the node it was just given a label for")
 	}
@@ -144,7 +144,7 @@ func TestDeferredIndexRemoval_UntransactedWriteStillSweeps(t *testing.T) {
 		t.Fatalf("SetNodeLabel: %v", err)
 	}
 	id := nodeIDOf(t, g, "a")
-	lid := g.reg.Intern("L")
+	lid := g.reg.intern("L")
 
 	// No transaction: the public mutator.
 	if err := g.RemoveNodeLabel("a", "L"); err != nil {

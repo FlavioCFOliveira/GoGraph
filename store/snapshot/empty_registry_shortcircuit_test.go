@@ -181,7 +181,9 @@ func TestEmptyRegistry_OutputIsUnchanged(t *testing.T) {
 				t.Fatalf("AddEdge: %v", err)
 			}
 			if edgeAttrs {
-				g.SetEdgeLabel(s, d, "K")
+				if err := g.SetEdgeLabel(s, d, "K"); err != nil {
+					t.Fatal(err)
+				}
 				if err := g.SetEdgeProperty(s, d, "z", lpg.Int64Value(int64(i))); err != nil {
 					t.Fatalf("SetEdgeProperty: %v", err)
 				}
