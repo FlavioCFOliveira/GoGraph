@@ -175,7 +175,7 @@ type MergePattern struct {
 	// [MergeActionEvalKey]) to a per-row RHS evaluator for a non-literal
 	// ON CREATE / ON MATCH SET expression targeting any chain node or hop
 	// relationship variable (e.g. `ON MATCH SET n.num = n.num + 1`). nil
-	// when every action's RHS is a literal. See [MergePattern.applyActions].
+	// when every action's RHS is a literal. See [MergePattern.applyAction].
 	onCreateEvals map[string]ValueEvalFn
 	onMatchEvals  map[string]ValueEvalFn
 
@@ -458,9 +458,9 @@ func (op *MergePattern) WithSetAllActions(onCreate, onMatch []MergeSetAllAction)
 	return op
 }
 
-// applySetAllActions applies each whole-entity SET action to the chain node OR
+// applySetAllAction applies one whole-entity SET action to the chain node OR
 // chain relationship it names (resolved via b), dispatching on the target
-// variable exactly as [MergePattern.applyActions] does for the per-property
+// variable exactly as [MergePattern.applyAction] does for the per-property
 // form.
 //
 // The relationship arm used to be absent: a relationship target was skipped as
@@ -469,75 +469,73 @@ func (op *MergePattern) WithSetAllActions(onCreate, onMatch []MergeSetAllAction)
 // right-hand side is an all-literal map — every other shape routes here, so the
 // write had no owner and was lost silently, with no error and no +properties
 // (rmp #2510). The per-property form (`ON CREATE SET r.k = v`) was never lost
-// because applyActions has always had the relationship arm; that asymmetry is
+// because applyAction has always had the relationship arm; that asymmetry is
 // what hid the defect.
 //
 // The third arm — a target bound by a clause PRECEDING the MERGE — was absent for
 // the same reason and lost its write the same way, in BOTH action paths this time
 // (rmp #2511). It runs last, so a chain node or chain hop of the same name still
 // takes precedence, exactly as it did before.
-func (op *MergePattern) applySetAllActions(b binding, evalRow Row, actions []MergeSetAllAction) error {
-	for _, a := range actions {
-		if idx, ok := op.nodeIndexByVar(a.TargetVar); ok {
-			nodeKey, resolved := op.mutator.ResolveNodeLabel(b[idx].node)
-			if !resolved {
-				continue
-			}
-			v, err := a.Eval(evalRow)
-			if err != nil {
-				return err
-			}
-			if err := applyWholeEntityValueToNode(op.mutator, a.TargetVar, nodeKey, a.IsReplace, v); err != nil {
-				return err
-			}
-			continue
+func (op *MergePattern) applySetAllAction(b binding, evalRow Row, a MergeSetAllAction) error {
+	if idx, ok := op.nodeIndexByVar(a.TargetVar); ok {
+		nodeKey, resolved := op.mutator.ResolveNodeLabel(b[idx].node)
+		if !resolved {
+			return nil
 		}
-		if hopIdx, ok := op.hopIndexByRelVar(a.TargetVar); ok {
-			srcIdx, dstIdx := b.hopStorageOrder(hopIdx)
-			srcKey, ok1 := op.mutator.ResolveNodeLabel(b[srcIdx].node)
-			dstKey, ok2 := op.mutator.ResolveNodeLabel(b[dstIdx].node)
-			if !ok1 || !ok2 {
-				continue
-			}
-			v, err := a.Eval(evalRow)
-			if err != nil {
-				return err
-			}
-			handle := b.hopHandle(hopIdx)
-			if err := applyWholeEntityValueToEdge(
-				op.mutator, a.TargetVar, srcKey, dstKey, handle, a.IsReplace, v,
-			); err != nil {
-				return err
-			}
-			continue
+		v, err := a.Eval(evalRow)
+		if err != nil {
+			return err
 		}
-		// Not a chain variable: a node or relationship bound by a preceding
-		// clause is still a legitimate target (rmp #2511). A relationship
-		// resolved here carries the row's own stable handle, so the write pins
-		// the bound instance rather than the pair's first edge.
-		if ent, ok := op.resolveOuterEntity(a.TargetVar, evalRow); ok {
-			v, err := a.Eval(evalRow)
-			if err != nil {
-				return err
-			}
-			if ent.isRel {
-				if err := applyWholeEntityValueToEdge(
-					op.mutator, a.TargetVar, ent.relSrcKey, ent.relDstKey, ent.relHandle, a.IsReplace, v,
-				); err != nil {
-					return err
-				}
-				continue
-			}
-			if err := applyWholeEntityValueToNode(
-				op.mutator, a.TargetVar, ent.nodeKey, a.IsReplace, v,
-			); err != nil {
-				return err
-			}
-			continue
+		if err := applyWholeEntityValueToNode(op.mutator, a.TargetVar, nodeKey, a.IsReplace, v); err != nil {
+			return err
 		}
-		// a.TargetVar names no entity in scope — an unbound or null target. Skipped,
-		// matching applyActions.
+		return nil
 	}
+	if hopIdx, ok := op.hopIndexByRelVar(a.TargetVar); ok {
+		srcIdx, dstIdx := b.hopStorageOrder(hopIdx)
+		srcKey, ok1 := op.mutator.ResolveNodeLabel(b[srcIdx].node)
+		dstKey, ok2 := op.mutator.ResolveNodeLabel(b[dstIdx].node)
+		if !ok1 || !ok2 {
+			return nil
+		}
+		v, err := a.Eval(evalRow)
+		if err != nil {
+			return err
+		}
+		handle := b.hopHandle(hopIdx)
+		if err := applyWholeEntityValueToEdge(
+			op.mutator, a.TargetVar, srcKey, dstKey, handle, a.IsReplace, v,
+		); err != nil {
+			return err
+		}
+		return nil
+	}
+	// Not a chain variable: a node or relationship bound by a preceding
+	// clause is still a legitimate target (rmp #2511). A relationship
+	// resolved here carries the row's own stable handle, so the write pins
+	// the bound instance rather than the pair's first edge.
+	if ent, ok := op.resolveOuterEntity(a.TargetVar, evalRow); ok {
+		v, err := a.Eval(evalRow)
+		if err != nil {
+			return err
+		}
+		if ent.isRel {
+			if err := applyWholeEntityValueToEdge(
+				op.mutator, a.TargetVar, ent.relSrcKey, ent.relDstKey, ent.relHandle, a.IsReplace, v,
+			); err != nil {
+				return err
+			}
+			return nil
+		}
+		if err := applyWholeEntityValueToNode(
+			op.mutator, a.TargetVar, ent.nodeKey, a.IsReplace, v,
+		); err != nil {
+			return err
+		}
+		return nil
+	}
+	// a.TargetVar names no entity in scope — an unbound or null target. Skipped,
+	// matching applyAction.
 	return nil
 }
 
@@ -683,14 +681,8 @@ func (op *MergePattern) runForRow(childRow Row) error {
 			if err != nil {
 				return err
 			}
-			if err := op.applyActions(b, row, op.onMatchActions, op.onMatchEvals); err != nil {
+			if err := op.applyItems(b, row, op.onMatchActions, op.onMatchEvals, op.onMatchSetAll); err != nil {
 				return err
-			}
-			if err := op.applySetAllActions(b, row, op.onMatchSetAll); err != nil {
-				return err
-			}
-			if len(op.onMatchActions) > 0 || len(op.onMatchSetAll) > 0 {
-				op.refreshRelValues(row, b)
 			}
 			op.matched = append(op.matched, row)
 		}
@@ -704,14 +696,8 @@ func (op *MergePattern) runForRow(childRow Row) error {
 	if err != nil {
 		return err
 	}
-	if err := op.applyActions(b, row, op.onCreateActions, op.onCreateEvals); err != nil {
+	if err := op.applyItems(b, row, op.onCreateActions, op.onCreateEvals, op.onCreateSetAll); err != nil {
 		return err
-	}
-	if err := op.applySetAllActions(b, row, op.onCreateSetAll); err != nil {
-		return err
-	}
-	if len(op.onCreateActions) > 0 || len(op.onCreateSetAll) > 0 {
-		op.refreshRelValues(row, b)
 	}
 	op.created = true
 	op.createdRow = row
@@ -1174,12 +1160,54 @@ func (op *MergePattern) emitRow(childRow Row, b binding) (Row, error) {
 	return row, nil
 }
 
+// applyItems applies one ON CREATE / ON MATCH list to the binding b in source
+// order — the per-property and label items and the whole-entity items
+// interleaved by position ([applyMergeItemsInOrder]) — and refreshes the
+// written entity's value in row after EACH item, so a later item of the same
+// list reads every earlier item's write (rmp #2953). The refresh used to run
+// once, after the whole list: `ON MATCH SET e.a = 1, e.b = e.a + 1` then read
+// e.a from the pre-action snapshot and stored nothing for e.b. A chain hop's
+// relationship is refreshed by [MergePattern.refreshRelValues]; an entity bound
+// by a preceding clause by [refreshRowEntityValue]; a chain node is emitted as
+// a NodeID and read live.
+func (op *MergePattern) applyItems(b binding, row Row, actions []mergeAction, evals map[string]ValueEvalFn, setAll []MergeSetAllAction) error {
+	return applyMergeItemsInOrder(actions, setAll,
+		func(a *mergeAction) error {
+			if err := op.applyAction(b, row, a, evals); err != nil {
+				return err
+			}
+			op.refreshWritten(row, b, a.nodeVar)
+			return nil
+		},
+		func(a MergeSetAllAction) error {
+			if err := op.applySetAllAction(b, row, a); err != nil {
+				return err
+			}
+			op.refreshWritten(row, b, a.TargetVar)
+			return nil
+		},
+	)
+}
+
+// refreshWritten refreshes the value row holds for varName after an item wrote
+// to it; see [MergePattern.applyItems].
+func (op *MergePattern) refreshWritten(row Row, b binding, varName string) {
+	if _, isNode := op.nodeIndexByVar(varName); isNode {
+		return
+	}
+	if _, isHop := op.hopIndexByRelVar(varName); isHop {
+		op.refreshRelValues(row, b)
+		return
+	}
+	refreshRowEntityValue(op.mutator, op.rowScope, varName, row)
+}
+
 // refreshRelValues re-reads, by handle, the properties of every named hop's
-// relationship value in row once the ON CREATE / ON MATCH actions have run.
-// [MergePattern.emitRow] builds the row BEFORE the actions — the actions'
-// evaluators read the entities through it — so without this refresh the row
-// carried the pre-action snapshot and `ON MATCH SET e.m = 4 RETURN e.m`
-// returned the old value (rmp #2951). Node positions need no refresh: they are
+// relationship value in row after an ON CREATE / ON MATCH item has written to
+// one ([MergePattern.applyItems]). [MergePattern.emitRow] builds the row BEFORE
+// the actions — the actions' evaluators read the entities through it — so
+// without this refresh the row carried the pre-action snapshot and `ON MATCH
+// SET e.m = 4 RETURN e.m` returned the old value (rmp #2951). Node positions need no refresh: they are
 // emitted as NodeIDs and read live.
 func (op *MergePattern) refreshRelValues(row Row, b binding) {
 	for i := range op.hops {
@@ -1228,7 +1256,7 @@ func (op *MergePattern) bindingEvalRow(childRow Row, b binding, nBound int) Row 
 	return row
 }
 
-// applyActions applies each pre-parsed ON CREATE / ON MATCH action to
+// applyAction applies one pre-parsed ON CREATE / ON MATCH action to
 // whichever chain entity its nodeVar names — a fresh or bound node position,
 // or a hop's relationship variable — resolved against b.
 // evalRow is the schema-consistent row emitted for this binding (nodes as
@@ -1236,52 +1264,50 @@ func (op *MergePattern) bindingEvalRow(childRow Row, b binding, nBound int) Row 
 // theirs); it feeds the per-row RHS evaluators in evals so an expression
 // action such as `ON MATCH SET n.num = n.num + 1` reads the entity's current
 // value instead of being dropped as a literal-parse failure (#1965).
-func (op *MergePattern) applyActions(b binding, evalRow Row, actions []mergeAction, evals map[string]ValueEvalFn) error {
-	for _, act := range actions {
-		if idx, ok := op.nodeIndexByVar(act.nodeVar); ok {
-			key, ok := op.mutator.ResolveNodeLabel(b[idx].node)
-			if !ok {
-				continue
-			}
-			if err := op.applyNodeAction(key, act, evalRow, evals); err != nil {
-				return err
-			}
-			continue
+func (op *MergePattern) applyAction(b binding, evalRow Row, act *mergeAction, evals map[string]ValueEvalFn) error {
+	if idx, ok := op.nodeIndexByVar(act.nodeVar); ok {
+		key, ok := op.mutator.ResolveNodeLabel(b[idx].node)
+		if !ok {
+			return nil
 		}
-		if hopIdx, ok := op.hopIndexByRelVar(act.nodeVar); ok {
-			srcIdx, dstIdx := b.hopStorageOrder(hopIdx)
-			srcKey, ok1 := op.mutator.ResolveNodeLabel(b[srcIdx].node)
-			dstKey, ok2 := op.mutator.ResolveNodeLabel(b[dstIdx].node)
-			if !ok1 || !ok2 {
-				continue
-			}
-			handle := b.hopHandle(hopIdx)
-			if err := op.applyRelAction(srcKey, dstKey, handle, act, evalRow, evals); err != nil {
-				return err
-			}
-			continue
+		if err := op.applyNodeAction(key, act, evalRow, evals); err != nil {
+			return err
 		}
-		// Not a chain variable: a node or relationship bound by a preceding clause
-		// is still a legitimate target, and skipping it lost the write silently
-		// (rmp #2511). A relationship resolved here carries the row's own
-		// stable handle, so the write pins the bound instance.
-		if ent, ok := op.resolveOuterEntity(act.nodeVar, evalRow); ok {
-			if ent.isRel {
-				if err := op.applyRelAction(ent.relSrcKey, ent.relDstKey, ent.relHandle, act, evalRow, evals); err != nil {
-					return err
-				}
-				continue
-			}
-			if err := op.applyNodeAction(ent.nodeKey, act, evalRow, evals); err != nil {
-				return err
-			}
-			continue
-		}
-		// act.nodeVar names no entity in scope — parseMergeActions only recognises
-		// the `var.key = value` and `var:Label` shapes, so an unbound, null, or
-		// unrecognised target is simply not one this operator can apply; skip
-		// rather than error, matching Merge's own tolerant behaviour.
+		return nil
 	}
+	if hopIdx, ok := op.hopIndexByRelVar(act.nodeVar); ok {
+		srcIdx, dstIdx := b.hopStorageOrder(hopIdx)
+		srcKey, ok1 := op.mutator.ResolveNodeLabel(b[srcIdx].node)
+		dstKey, ok2 := op.mutator.ResolveNodeLabel(b[dstIdx].node)
+		if !ok1 || !ok2 {
+			return nil
+		}
+		handle := b.hopHandle(hopIdx)
+		if err := op.applyRelAction(srcKey, dstKey, handle, act, evalRow, evals); err != nil {
+			return err
+		}
+		return nil
+	}
+	// Not a chain variable: a node or relationship bound by a preceding clause
+	// is still a legitimate target, and skipping it lost the write silently
+	// (rmp #2511). A relationship resolved here carries the row's own
+	// stable handle, so the write pins the bound instance.
+	if ent, ok := op.resolveOuterEntity(act.nodeVar, evalRow); ok {
+		if ent.isRel {
+			if err := op.applyRelAction(ent.relSrcKey, ent.relDstKey, ent.relHandle, act, evalRow, evals); err != nil {
+				return err
+			}
+			return nil
+		}
+		if err := op.applyNodeAction(ent.nodeKey, act, evalRow, evals); err != nil {
+			return err
+		}
+		return nil
+	}
+	// act.nodeVar names no entity in scope — parseMergeActions only recognises
+	// the `var.key = value` and `var:Label` shapes, so an unbound, null, or
+	// unrecognised target is simply not one this operator can apply; skip
+	// rather than error, matching Merge's own tolerant behaviour.
 	return nil
 }
 
@@ -1309,8 +1335,8 @@ func (op *MergePattern) hopIndexByRelVar(v string) (int, bool) {
 
 // applyNodeAction applies one mergeAction (a property write or a label-set)
 // to the node identified by key. evalRow / evals feed the per-row RHS
-// evaluator for a non-literal expression (#1965); see [MergePattern.applyActions].
-func (op *MergePattern) applyNodeAction(key string, act mergeAction, evalRow Row, evals map[string]ValueEvalFn) error {
+// evaluator for a non-literal expression (#1965); see [MergePattern.applyAction].
+func (op *MergePattern) applyNodeAction(key string, act *mergeAction, evalRow Row, evals map[string]ValueEvalFn) error {
 	if len(act.setLabels) > 0 {
 		// Attaching a label puts the node under every UNIQUE constraint declared
 		// on that label, so reserve before writing — see
@@ -1369,8 +1395,8 @@ func (op *MergePattern) applyNodeAction(key string, act mergeAction, evalRow Row
 // different things: the chain-hop arm has only the resolved node pair, while an
 // outer relationship target carries its own handle in the row (rmp #2511).
 // Only the single-property write and label-set shapes are handled here; the
-// whole-entity forms travel [MergePattern.applySetAllActions].
-func (op *MergePattern) applyRelAction(srcKey, dstKey string, handle uint64, act mergeAction, evalRow Row, evals map[string]ValueEvalFn) error {
+// whole-entity forms travel [MergePattern.applySetAllAction].
+func (op *MergePattern) applyRelAction(srcKey, dstKey string, handle uint64, act *mergeAction, evalRow Row, evals map[string]ValueEvalFn) error {
 	if len(act.setLabels) > 0 {
 		// A relationship has no labels beyond its single type; SET r:Foo
 		// is rejected at compile time (sema), so this shape cannot occur
@@ -1437,7 +1463,7 @@ func (op *MergePattern) applyRelAction(srcKey, dstKey string, handle uint64, act
 //     fail-stop behaviour (it never silently dropped such an action). Every
 //     genuine non-literal action is wired with an evaluator by the physical
 //     builder, so the error branch is defensive only.
-func (op *MergePattern) resolveNonLiteral(act mergeAction, parseErr error, evalRow Row, evals map[string]ValueEvalFn) (remove, resolved bool, val lpg.PropertyValue, err error) {
+func (op *MergePattern) resolveNonLiteral(act *mergeAction, parseErr error, evalRow Row, evals map[string]ValueEvalFn) (remove, resolved bool, val lpg.PropertyValue, err error) {
 	if isNullPropertyValueErr(parseErr) {
 		return true, false, lpg.PropertyValue{}, nil
 	}
@@ -1446,7 +1472,7 @@ func (op *MergePattern) resolveNonLiteral(act mergeAction, parseErr error, evalR
 		// element) is refused, never deferred (rmp #2941).
 		return false, false, lpg.PropertyValue{}, parseErr
 	}
-	fn, has := evals[MergeActionEvalKey(act.nodeVar, act.key)]
+	fn, has := evals[MergeActionEvalKey(act.ord, act.nodeVar, act.key)]
 	if !has {
 		return false, false, lpg.PropertyValue{}, fmt.Errorf("exec: MergePattern: parse value %q: %w", act.value, parseErr)
 	}

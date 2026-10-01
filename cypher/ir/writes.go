@@ -401,7 +401,7 @@ func extractRelKVActions(items []*ast.SetItem, relVar string) ([]KVAction, bool)
 		return nil, false
 	}
 	out := make([]KVAction, 0, len(items))
-	for _, item := range items {
+	for ord, item := range items {
 		if item == nil || len(item.Labels) > 0 || item.Value == nil {
 			return nil, false
 		}
@@ -411,7 +411,7 @@ func extractRelKVActions(items []*ast.SetItem, relVar string) ([]KVAction, bool)
 			if !isVar || recv.Name != relVar {
 				return nil, false
 			}
-			out = append(out, KVAction{Key: prop.Key, Value: item.Value.String()})
+			out = append(out, KVAction{Key: prop.Key, Value: item.Value.String(), Ord: ord})
 			continue
 		}
 		// Whole-entity form on relVar: SET relVar = … or SET relVar += ….
@@ -426,7 +426,7 @@ func extractRelKVActions(items []*ast.SetItem, relVar string) ([]KVAction, bool)
 			// clears keys absent from the source entity (true REPLACE,
 			// #1687). Closes Merge6 [6] / Merge7 [4].
 			if src, isSrcVar := item.Value.(*ast.Variable); isSrcVar && src.Name != relVar {
-				out = append(out, KVAction{Key: "", Value: src.Name, Replace: isReplace})
+				out = append(out, KVAction{Key: "", Value: src.Name, Replace: isReplace, Ord: ord})
 				continue
 			}
 			ml, isMap := item.Value.(*ast.MapLiteral)
@@ -453,13 +453,13 @@ func extractRelKVActions(items []*ast.SetItem, relVar string) ([]KVAction, bool)
 					}
 					retain = append(retain, ml.Keys[i])
 				}
-				out = append(out, KVAction{Key: "", Value: "", Replace: true, RetainKeys: retain})
+				out = append(out, KVAction{Key: "", Value: "", Replace: true, RetainKeys: retain, Ord: ord})
 			}
 			for i, key := range ml.Keys {
 				if i >= len(ml.Values) {
 					break
 				}
-				out = append(out, KVAction{Key: key, Value: ml.Values[i].String()})
+				out = append(out, KVAction{Key: key, Value: ml.Values[i].String(), Ord: ord})
 			}
 			continue
 		}
@@ -481,7 +481,7 @@ func extractRelKVActions(items []*ast.SetItem, relVar string) ([]KVAction, bool)
 // not property-write expressions the evaluator applies to.
 func extractMergeSetExprs(items []*ast.SetItem) []MergeSetExpr {
 	var out []MergeSetExpr
-	for _, si := range items {
+	for ord, si := range items {
 		if si == nil || len(si.Labels) > 0 || si.Value == nil {
 			continue
 		}
@@ -496,7 +496,7 @@ func extractMergeSetExprs(items []*ast.SetItem) []MergeSetExpr {
 		if isLiteralExpr(si.Value) {
 			continue
 		}
-		out = append(out, MergeSetExpr{TargetVar: recv.Name, Key: prop.Key, Value: si.Value})
+		out = append(out, MergeSetExpr{TargetVar: recv.Name, Key: prop.Key, Value: si.Value, Ord: ord})
 	}
 	return out
 }
@@ -509,7 +509,7 @@ func extractMergeSetExprs(items []*ast.SetItem) []MergeSetExpr {
 // Property-write items and label-set items are skipped (handled elsewhere).
 func extractMergeSetAll(items []*ast.SetItem) []MergeSetAll {
 	var out []MergeSetAll
-	for _, si := range items {
+	for ord, si := range items {
 		if si == nil || len(si.Labels) > 0 || si.Value == nil {
 			continue
 		}
@@ -517,7 +517,7 @@ func extractMergeSetAll(items []*ast.SetItem) []MergeSetAll {
 		if !isVar {
 			continue
 		}
-		out = append(out, MergeSetAll{TargetVar: v.Name, IsReplace: si.Operator == "=", Value: si.Value})
+		out = append(out, MergeSetAll{TargetVar: v.Name, IsReplace: si.Operator == "=", Value: si.Value, Ord: ord})
 	}
 	return out
 }

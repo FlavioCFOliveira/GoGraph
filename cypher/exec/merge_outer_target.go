@@ -86,3 +86,34 @@ func resolveRowEntity(
 		return entityBinding{}, false
 	}
 }
+
+// refreshRowEntityValue re-reads, from the mutator, the entity value row holds
+// for varName once an ON CREATE / ON MATCH item has written to it, so the next
+// item of the same list evaluates against the entity's current state (rmp
+// #2953). Only a materialised value needs it: a [expr.NodeValue] or an
+// [expr.RelationshipValue] carries a property snapshot, while a bare NodeID is
+// resolved live by every evaluator. Any other cell, or a name with no column,
+// is left untouched.
+func refreshRowEntityValue(mut GraphMutator, schema map[string]int, varName string, row Row) {
+	col, ok := schema[varName]
+	if !ok || col < 0 || col >= len(row) {
+		return
+	}
+	switch v := row[col].(type) {
+	case expr.NodeValue:
+		key, resolved := mut.ResolveNodeLabel(graph.NodeID(v.ID))
+		if !resolved {
+			return
+		}
+		v.Labels = append([]string(nil), labelsInTx(mut, key)...)
+		v.Properties = exprMapFromLPGProps(mut.NodeProperties(key))
+		row[col] = v
+	case expr.RelationshipValue:
+		ent, resolved := relValueEntity(mut, v)
+		if !resolved {
+			return
+		}
+		v.Properties = exprMapFromLPGProps(relInstanceProps(mut, ent.relSrcKey, ent.relDstKey, ent.relHandle))
+		row[col] = v
+	}
+}

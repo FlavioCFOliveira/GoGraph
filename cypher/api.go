@@ -8147,7 +8147,7 @@ func buildOperatorWrite(
 				}
 				pv, ok := exprValueToLPGProp(v)
 				if !ok {
-					return lpg.PropertyValue{}, false, false, nil
+					return lpg.PropertyValue{}, false, false, errUnstorablePropertyValue("SET", p.PropertyKey)
 				}
 				return pv, false, true, nil
 			})
@@ -8478,14 +8478,14 @@ func buildOperatorWrite(
 		if len(p.OnCreate) > 0 {
 			actions := make([]exec.MergeRelAction, 0, len(p.OnCreate))
 			for _, kv := range p.OnCreate {
-				actions = append(actions, exec.MergeRelActionReplaceFromKV(kv.Key, kv.Value, kv.Replace, kv.RetainKeys))
+				actions = append(actions, exec.MergeRelActionReplaceFromKV(kv.Key, kv.Value, kv.Replace, kv.RetainKeys).At(kv.Ord))
 			}
 			op = op.WithOnCreate(p.RelVar, actions)
 		}
 		if len(p.OnMatch) > 0 {
 			actions := make([]exec.MergeRelAction, 0, len(p.OnMatch))
 			for _, kv := range p.OnMatch {
-				actions = append(actions, exec.MergeRelActionReplaceFromKV(kv.Key, kv.Value, kv.Replace, kv.RetainKeys))
+				actions = append(actions, exec.MergeRelActionReplaceFromKV(kv.Key, kv.Value, kv.Replace, kv.RetainKeys).At(kv.Ord))
 			}
 			op = op.WithOnMatch(p.RelVar, actions)
 		}
@@ -9209,10 +9209,13 @@ func buildPropsEvalFn(
 				// A PATH is equally unstorable and equally silent when dropped,
 				// so the guard classifies by [isEntityPropertyValue] — which also
 				// reaches an entity nested inside a list (rmp #2816).
-				if isEntityPropertyValue(v) && !valueExprIsScalarCol(vals[i], scalarSnap) {
-					return nil, errEntityPropertyValue("property", k)
+				if isEntityPropertyValue(v) {
+					if !valueExprIsScalarCol(vals[i], scalarSnap) {
+						return nil, errEntityPropertyValue("property", k)
+					}
+					continue // scalar-vs-NodeID mis-upgrade: drop, as before
 				}
-				continue
+				return nil, errUnstorablePropertyValue("property", k)
 			}
 			out = append(out, exec.PropEntry{Key: k, Value: pv})
 		}
@@ -9295,10 +9298,9 @@ func maybeMapEvalFn(
 // `SET x += {…}` operator. It mirrors [buildPropsEvalFn] but, instead of
 // silently omitting a key whose value evaluates to null, it reports that key in
 // nullKeys — SET-map semantics delete such keys from the target (openCypher:
-// `SET n += {k: null}` removes k). Runtime evaluation errors and invalid
-// property types (a map or nested collection) fail-stop; a node/relationship-
-// valued entry is dropped (consistent with [buildPropsEvalFn] and the shared
-// scalar-vs-NodeID guard). A nil ml produces a nil closure.
+// `SET n += {k: null}` removes k). Runtime evaluation errors and every invalid
+// property type fail-stop; only the shared scalar-vs-NodeID mis-upgrade is
+// dropped. A nil ml produces a nil closure.
 func buildMapEvalFn(
 	ml *ast.MapLiteral,
 	schemaCopy map[string]int,
@@ -9354,7 +9356,7 @@ func buildMapEvalFn(
 			}
 			pv, ok := exprValueToLPGProp(v)
 			if !ok {
-				continue
+				return nil, nil, errUnstorablePropertyValue("property", k)
 			}
 			entries = append(entries, exec.PropEntry{Key: k, Value: pv})
 		}
@@ -9415,6 +9417,7 @@ func buildMergeSetAllActions(
 		out = append(out, exec.MergeSetAllAction{
 			TargetVar: it.TargetVar,
 			IsReplace: it.IsReplace,
+			Ord:       it.Ord,
 			Eval:      buildExprMapEvalFn(it.Value, schemaCopy, params, reg, mutator, bopts),
 		})
 	}
@@ -9567,8 +9570,8 @@ func scalarColSnapshot(bopts *buildOpts) map[string]struct{} {
 // degrading to a no-op on an evaluation error or unstorable type exactly as
 // regular SET does, and reporting an unstorable map RHS as InvalidPropertyType.
 //
-// The returned map is keyed by [exec.MergeActionEvalKey] on the item's target
-// variable and property key, the same key the merge operators look up at apply
+// The returned map is keyed by [exec.MergeActionEvalKey] on the item's position,
+// target variable and property key, the same key the merge operators look up at apply
 // time. Returns nil when exprs is empty (all-literal action set), which keeps
 // the literal fast path byte-identical. #1965.
 func buildMergeActionEvals(
@@ -9587,7 +9590,7 @@ func buildMergeActionEvals(
 	for _, e := range exprs {
 		valAST := e.Value
 		propKey := e.Key
-		out[exec.MergeActionEvalKey(e.TargetVar, e.Key)] = func(row exec.Row) (lpg.PropertyValue, bool, bool, error) {
+		out[exec.MergeActionEvalKey(e.Ord, e.TargetVar, e.Key)] = func(row exec.Row) (lpg.PropertyValue, bool, bool, error) {
 			rowCtx := buildRowCtxFromMutator(row, schemaCopy, mutator, scalarSnap)
 			// evalRow, not expr.Eval — same reason as [buildPropsEvalFn]: a
 			// MERGE ON CREATE / ON MATCH SET right-hand side is an ordinary
@@ -9622,7 +9625,7 @@ func buildMergeActionEvals(
 			}
 			pv, ok := exprValueToLPGProp(v)
 			if !ok {
-				return lpg.PropertyValue{}, false, false, nil
+				return lpg.PropertyValue{}, false, false, errUnstorablePropertyValue("MERGE SET", propKey)
 			}
 			return pv, false, true, nil
 		}
@@ -9734,7 +9737,7 @@ func isStorableProperty(v expr.Value) bool {
 // spec-mandated outcome; the defect was refusing SILENTLY.
 func isEntityPropertyValue(v expr.Value) bool {
 	switch val := v.(type) {
-	case expr.NodeValue, expr.RelationshipValue, expr.PathValue:
+	case expr.NodeValue, *expr.LazyNodeValue, expr.RelationshipValue, *expr.LazyRelationshipValue, expr.PathValue:
 		return true
 	case expr.ListValue:
 		for _, el := range val {
@@ -9751,6 +9754,15 @@ func isEntityPropertyValue(v expr.Value) bool {
 // diagnostic matches the shape the map case already produces (rmp #2816).
 func errEntityPropertyValue(clause, key string) error {
 	return fmt.Errorf("exec: %s %s: InvalidPropertyType: a node, relationship or path is not a valid property value", clause, key)
+}
+
+// errUnstorablePropertyValue builds the InvalidPropertyType error a write path
+// raises when [exprValueToLPGProp] cannot encode a value that no earlier check
+// classified. Every write path used to read that case as "no value produced" and
+// skip the key silently (rmp #2958); it is refused instead, in the shape
+// [errEntityPropertyValue] uses.
+func errUnstorablePropertyValue(clause, key string) error {
+	return fmt.Errorf("exec: %s %s: %w", clause, key, exec.ErrUnsupportedPropertyValue)
 }
 
 // listHasNullElement reports whether v is a list with a null element.

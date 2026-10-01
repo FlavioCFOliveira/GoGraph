@@ -37,6 +37,45 @@ type MergeSetAllAction struct {
 	Eval      ExprValueEvalFn
 	TargetVar string
 	IsReplace bool
+	// Ord is the item's position in its ON CREATE / ON MATCH list; see
+	// [applyMergeItemsInOrder] (rmp #2953).
+	Ord int
+}
+
+// applyMergeItemsInOrder applies one ON CREATE / ON MATCH list in source order.
+// The list reaches the operators split in two — the per-property and label
+// items as mergeActions, the whole-entity items as [MergeSetAllAction]s — and
+// both halves are ordered by position, so a merge walk restores the order.
+//
+// openCypher evaluates a clause's items against a state that includes the
+// changes the clause itself has made (CIP2015-10-27 "State visibility between
+// clauses": "Each clause lives in its own state, which includes all the changes
+// of clauses coming before it, including changes performed by itself"), and the
+// plain SET clause applies its items one after another. Applying every
+// per-property item before every whole-entity item made `ON MATCH SET
+// n += {a: 1}, n.b = n.a + 1` read a as null, and `n += {a: 1}, n.a = 2` end with
+// a = 1 (rmp #2953).
+func applyMergeItemsInOrder(
+	actions []mergeAction,
+	setAll []MergeSetAllAction,
+	applyAction func(*mergeAction) error,
+	applySetAll func(MergeSetAllAction) error,
+) error {
+	i, j := 0, 0
+	for i < len(actions) || j < len(setAll) {
+		if j >= len(setAll) || (i < len(actions) && actions[i].ord <= setAll[j].Ord) {
+			if err := applyAction(&actions[i]); err != nil {
+				return err
+			}
+			i++
+			continue
+		}
+		if err := applySetAll(setAll[j]); err != nil {
+			return err
+		}
+		j++
+	}
+	return nil
 }
 
 // applyWholeEntityValueToNode applies a whole-entity SET value v to the node

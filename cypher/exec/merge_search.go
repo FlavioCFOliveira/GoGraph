@@ -15,7 +15,7 @@ package exec
 // pattern labels and whose properties equal every (key, value) parsed from
 // the pattern's property map. Matches are returned as single-column rows
 // carrying the matched node's [graph.NodeID] as an [expr.IntegerValue], the
-// same shape produced by the ON CREATE branch — so [Merge.applyActions] can
+// same shape produced by the ON CREATE branch — so [Merge.applyAction] can
 // resolve the bound node via either the schema lookup or the row[0]
 // fallback.
 //

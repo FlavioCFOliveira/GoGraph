@@ -128,6 +128,17 @@ type MergeRelAction struct {
 	value      string // opaque literal string, parsed via parsePropValue
 	retainKeys []string
 	replace    bool // whole-entity `=` replace (clear absent keys first)
+	// ord is the position of the source SET item in its ON CREATE / ON MATCH
+	// list; it keys the item's evaluator ([MergeActionEvalKey], rmp #2953).
+	ord int
+}
+
+// At returns a copy of a carrying ord, the position of its source SET item in
+// its ON CREATE / ON MATCH list, which keys the item's per-row evaluator
+// ([MergeActionEvalKey], rmp #2953).
+func (a MergeRelAction) At(ord int) MergeRelAction {
+	a.ord = ord
+	return a
 }
 
 // NewMergeRelationship constructs a MergeRelationship operator.
@@ -661,7 +672,7 @@ func (op *MergeRelationship) applyRelActions(row Row, srcKey, dstKey string, han
 				// null element) is refused, never deferred (rmp #2941).
 				return err
 			}
-			fn, has := evals[MergeActionEvalKey(op.relVar, act.key)]
+			fn, has := evals[MergeActionEvalKey(act.ord, op.relVar, act.key)]
 			if !has {
 				return fmt.Errorf("exec: MergeRelationship: parse value %q: %w", act.value, err)
 			}

@@ -317,9 +317,8 @@ func (op *SetAllProperties) parseParamMap() error {
 // entries and null-valued keys used by the whole-entity SET forms. A null value
 // is reported in nullKeys (SET-map semantics REMOVE such keys). A map- or
 // nested-map-valued entry is rejected with InvalidPropertyType (property values
-// are primitives or homogeneous lists of primitives). A list of primitives is
-// routed through the list encoder; any other unconvertible kind is a defensive
-// skip. Shared by the parameter-map ([SetAllProperties.parseParamMap]) and the
+// are primitives, temporal values, or lists of those). Every other entry is
+// converted by [exprValueToProperty], whose refusals fail the statement. Shared by the parameter-map ([SetAllProperties.parseParamMap]) and the
 // per-row map-value ([SetAllProperties.applyMapValue]) ingestion paths.
 func exprMapValueToEntries(entityVar string, mv expr.MapValue) (props []propLiteral, nullKeys []string, err error) {
 	for k, vv := range mv {
@@ -337,21 +336,15 @@ func exprMapValueToEntries(entityVar string, mv expr.MapValue) (props []propLite
 		if exprValueIsEntity(vv) {
 			return nil, nil, fmt.Errorf("InvalidPropertyType: SET %s: value for key %q is a node, relationship or path, which cannot be stored as a property", entityVar, k)
 		}
-		var pv lpg.PropertyValue
-		var perr error
-		if lst, isList := vv.(expr.ListValue); isList {
-			pv, perr = exprListToLPGList(lst)
-		} else {
-			pv, perr = valueToPropertyValue(vv)
-		}
+		pv, perr := exprValueToProperty(vv)
 		if perr != nil {
-			if isInvalidPropertyValueErr(perr) {
-				// A list with a null element is refused, not dropped: dropping
-				// it made `SET n += {k: [1, null]}` report success and keep the
-				// old value (rmp #2941).
-				return nil, nil, fmt.Errorf("SET %s: value for key %q: %w", entityVar, k, perr)
-			}
-			continue
+			// Every conversion failure is an InvalidPropertyType refusal, never
+			// a skip. A list with a null element used to be the only one; any
+			// other unconvertible entry — a temporal value among them — was
+			// dropped with a defensive `continue`, so `SET n += $m` reported
+			// success and wrote nothing, and `SET n = $m` still cleared every
+			// key n carried (rmp #2941, rmp #2958).
+			return nil, nil, fmt.Errorf("SET %s: value for key %q: %w", entityVar, k, perr)
 		}
 		props = append(props, propLiteral{key: k, value: pv})
 	}
@@ -381,14 +374,14 @@ func exprValueIsStorable(v expr.Value) bool {
 //
 // openCypher 9 restricts a property value to a primitive or a homogeneous list
 // of primitives, so an entity is InvalidPropertyType and must be REFUSED. It
-// used to be dropped instead: [valueToPropertyValue] reports an entity as an
-// error, which [exprMapValueToEntries]'s defensive `continue` turned into a
-// silent omission, so the statement reported success and stored nothing (rmp
+// used to be dropped instead: the converter reported an entity as an error,
+// which [exprMapValueToEntries]'s defensive `continue` turned into a silent
+// omission, so the statement reported success and stored nothing (rmp
 // #2816). This is the exec-side mirror of isEntityPropertyValue in package
 // cypher, alongside [exprValueIsStorable]'s mirror of isStorableProperty.
 func exprValueIsEntity(v expr.Value) bool {
 	switch x := v.(type) {
-	case expr.NodeValue, expr.RelationshipValue, expr.PathValue:
+	case expr.NodeValue, *expr.LazyNodeValue, expr.RelationshipValue, *expr.LazyRelationshipValue, expr.PathValue:
 		return true
 	case expr.ListValue:
 		for _, el := range x {
@@ -1022,23 +1015,4 @@ func valueStringIsNonStorable(valStr string) bool {
 		}
 	}
 	return false
-}
-
-// valueToPropertyValue converts an expr.Value to an lpg.PropertyValue when a
-// faithful mapping exists. Returns an error for kinds that have no
-// PropertyValue representation. Used by SetAllProperties to ingest the
-// entries of a parameter MapValue.
-func valueToPropertyValue(v expr.Value) (lpg.PropertyValue, error) {
-	switch x := v.(type) {
-	case expr.StringValue:
-		return lpg.StringValue(string(x)), nil
-	case expr.IntegerValue:
-		return lpg.Int64Value(int64(x)), nil
-	case expr.FloatValue:
-		return lpg.Float64Value(float64(x)), nil
-	case expr.BoolValue:
-		return lpg.BoolValue(bool(x)), nil
-	default:
-		return lpg.PropertyValue{}, fmt.Errorf("unsupported parameter value kind %T", v)
-	}
 }

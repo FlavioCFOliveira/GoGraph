@@ -96,6 +96,20 @@ func FailureCode(err error) string {
 		return "Neo.ClientError.Statement.TypeError"
 	}
 
+	// A value the statement tried to store as a property that is not a property
+	// type — a map, a nested list, a list with a null element, a node, a
+	// relationship or a path (TCK Set1 [10]: "TypeError: InvalidPropertyType").
+	// The value came from the client's own statement or parameters and the
+	// refusal is deterministic, so it is a CLIENT fault: it used to match no rule
+	// and reached the driver as the server-fault General.UnknownError with the
+	// internal-error text (rmp #2957). Statement.TypeError is the code the TCK
+	// class names. isClientFaultErr (derived from this function) then forwards
+	// the message, which names the refused kind and the client's own SET target
+	// and key: no Go type, no path, no server state.
+	if isInvalidPropertyTypeErr(err) {
+		return "Neo.ClientError.Statement.TypeError"
+	}
+
 	// A writing or DDL statement issued inside a read-only transaction (BEGIN
 	// with mode="r"). The request is invalid for the transaction's declared
 	// access mode — a deterministic client fault — so it maps to Neo4j's
@@ -358,6 +372,24 @@ func evalErrorCode(ee *expr.EvalError) (code string, ok bool) {
 		return "Neo.ClientError.Statement.ArithmeticError", true
 	}
 	return "", false
+}
+
+// invalidPropertyTypeTag is the TCK detail every InvalidPropertyType refusal
+// carries in its message.
+const invalidPropertyTypeTag = "InvalidPropertyType: "
+
+// isInvalidPropertyTypeErr reports whether err is an InvalidPropertyType
+// refusal from a write path: one of the exec sentinels, or one of the plain
+// errors cypher and exec build around the TCK detail with fmt.Errorf, which
+// carry no type to match. Those message shapes are TCK-pinned (Set1 [10]), so
+// matching the detail is stable, as it is for the TCK categories in
+// [FailureCode].
+func isInvalidPropertyTypeErr(err error) bool {
+	return errors.Is(err, exec.ErrNestedPropertyValue) ||
+		errors.Is(err, exec.ErrNullListElement) ||
+		errors.Is(err, exec.ErrEntityPropertyValue) ||
+		errors.Is(err, exec.ErrUnsupportedPropertyValue) ||
+		strings.Contains(err.Error(), invalidPropertyTypeTag)
 }
 
 // isClientFaultErr reports whether err describes a condition caused by the

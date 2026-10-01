@@ -2010,6 +2010,11 @@ type MergeSetAll struct {
 	Value     ast.Expression
 	TargetVar string
 	IsReplace bool
+	// Ord is the item's position in its ON CREATE / ON MATCH list. The exec
+	// operators apply the items in that order, interleaving this list with the
+	// per-property actions, so each item sees every earlier item's write (rmp
+	// #2953).
+	Ord int
 }
 
 // MergeSetExpr carries the parsed value-expression AST for a MERGE
@@ -2025,6 +2030,10 @@ type MergeSetExpr struct {
 	Value     ast.Expression
 	TargetVar string
 	Key       string
+	// Ord is the item's position in its ON CREATE / ON MATCH list. It keys the
+	// item's evaluator, so two items writing the same property each run their
+	// own right-hand side (rmp #2953).
+	Ord int
 }
 
 // MergeRelationship is the relationship-pattern variant of [Merge]. It
@@ -2114,6 +2123,9 @@ type KVAction struct {
 	// actions. Always false for the additive `+=` form and for
 	// single-property `SET <relVar>.<key> = <value>` items.
 	Replace bool
+	// Ord is the position, in its ON CREATE / ON MATCH list, of the SET item
+	// this action was extracted from. It keys the item's evaluator (rmp #2953).
+	Ord int
 }
 
 // NewMergeRelationship creates a MergeRelationship operator without

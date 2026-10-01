@@ -124,10 +124,13 @@ type DeleteNode struct {
 	reg            *ConstraintRegistry // nil means no registry maintenance
 	nodeVar        string
 
-	// deferredPathNodes are path nodes whose deletion waits because a
-	// relationship outside the path still held them when their path was
-	// deleted; see [DeleteNode.deletePath].
-	deferredPathNodes []graph.NodeID
+	// deferredNodes are nodes whose deletion waits because a relationship
+	// still held them when their row was processed: a path node held by a
+	// relationship outside its path ([DeleteNode.deletePath], rmp #2950), or a
+	// bare node target whose relationship a later item of the same DELETE
+	// clause may still remove (rmp #2952). [DeleteNode.flushDeferredNodes]
+	// decides each one once every row has been processed.
+	deferredNodes []graph.NodeID
 
 	// pull receives every child Next call of this operator (see nextRow), so the
 	// per-row pull does not heap-allocate its receiver.
@@ -143,7 +146,7 @@ type DeleteNode struct {
 // A node still held by another relationship is not refused on the spot. The
 // same statement can delete that relationship later — a second path in the
 // same DELETE clause (Delete5 [7]) or a later row — so the node is deferred and
-// [DeleteNode.flushDeferredPathNodes] decides once every row has been
+// [DeleteNode.flushDeferredNodes] decides once every row has been
 // processed: deleted if the relationship has gone by then, refused with
 // [ErrDeleteNodeHasRelationships] otherwise, which rolls the statement back.
 func (op *DeleteNode) deletePath(p expr.PathValue) error {
@@ -164,7 +167,7 @@ func (op *DeleteNode) deletePath(p expr.PathValue) error {
 			continue
 		}
 		if hasRelationshipsInTx(op.mutator, nodeKey) {
-			op.deferredPathNodes = append(op.deferredPathNodes, id)
+			op.deferredNodes = append(op.deferredNodes, id)
 			continue
 		}
 		if err := op.removeDetachedNode(nodeKey); err != nil {
@@ -174,12 +177,13 @@ func (op *DeleteNode) deletePath(p expr.PathValue) error {
 	return nil
 }
 
-// flushDeferredPathNodes deletes every deferred path node that no longer has a
-// relationship and refuses the statement when one still has. A node another
-// row or operator already deleted is skipped.
-func (op *DeleteNode) flushDeferredPathNodes() error {
-	pending := op.deferredPathNodes
-	op.deferredPathNodes = nil
+// flushDeferredNodes deletes every deferred node that no longer has a
+// relationship and refuses the statement with [ErrDeleteNodeHasRelationships]
+// when one still has. A node another row or operator already deleted is
+// skipped.
+func (op *DeleteNode) flushDeferredNodes() error {
+	pending := op.deferredNodes
+	op.deferredNodes = nil
 	for _, id := range pending {
 		nodeKey, ok := op.mutator.ResolveNodeLabel(id)
 		if !ok || op.mutator.IsTombstoned(id) {
@@ -282,9 +286,9 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 		return false, err
 	}
 	if !ok {
-		// Every row has been processed: a path node deferred because another
-		// relationship still held it must be free now (rmp #2950).
-		return false, op.flushDeferredPathNodes()
+		// Every row has been processed: a node deferred because a relationship
+		// still held it must be free now (rmp #2950, rmp #2952).
+		return false, op.flushDeferredNodes()
 	}
 
 	var nodeID graph.NodeID
@@ -417,15 +421,6 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 		return true, nil
 	}
 
-	// Guard: the node must not have any outgoing or incoming edges IN THIS
-	// TRANSACTION'S VIEW (rmp #2884). A relationship another transaction added
-	// and has not committed does not refuse the delete; that transaction's
-	// adjacency claim on this node refuses it instead, as a serialization
-	// conflict, when the node is retired below.
-	if hasRelationshipsInTx(op.mutator, nodeKey) {
-		return false, ErrDeleteNodeHasRelationships
-	}
-
 	// Snapshot labels and properties BEFORE removing them — these become
 	// the frozen view carried on the row's NodeValue after the entity is
 	// tombstoned, so `RETURN id(n)` still works but `RETURN n.foo` /
@@ -441,6 +436,30 @@ func (op *DeleteNode) Next(out *Row) (bool, error) {
 			}
 		}
 	}
+
+	// Guard: the node must not have any outgoing or incoming edges IN THIS
+	// TRANSACTION'S VIEW (rmp #2884). A relationship another transaction added
+	// and has not committed does not refuse the delete; that transaction's
+	// adjacency claim on this node refuses it instead, as a serialization
+	// conflict, when the node is retired below.
+	//
+	// The guard is decided at the end of the clause, not on the spot (rmp
+	// #2952). The items of one DELETE clause are applied one operator after
+	// another, so in `DELETE a, r` the node is reached before the relationship
+	// that holds it is removed, and refusing here made the statement fail
+	// while `DELETE r, a` succeeded. openCypher decides the guard for the
+	// clause as a whole — TCK Delete5 [7] deletes two paths whose nodes each
+	// path's own relationship holds, and that is the deferral #2950 built for
+	// paths — so the node is deferred like a held path node and
+	// [DeleteNode.flushDeferredNodes] deletes it, or refuses the statement,
+	// once every row has been processed. The row carries the Deleted snapshot
+	// now, exactly as an immediate delete would.
+	if hasRelationshipsInTx(op.mutator, nodeKey) {
+		op.deferredNodes = append(op.deferredNodes, nodeID)
+		*out = op.markRowDeleted(childRow, nodeID, deletedLabels, deletedProps)
+		return true, nil
+	}
+
 	// The constrained values this node holds are given back by RemoveNodeLabel
 	// below, at the mutator choke point (rmp #2358). The bulk release that used to
 	// stand here would now be a SECOND release of the same reservations, and a
