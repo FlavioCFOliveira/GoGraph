@@ -1024,6 +1024,27 @@ func TestLabelChurnGate_ReviveAbortedPinsTheGate(t *testing.T) {
 // The window is microseconds wide inside one function call, so this drives it
 // many times rather than constructing it. It is the one guard in this file that
 // is probabilistic; the counter assertion beneath it is not.
+//
+// # The overlap is structural, not timed (rmp #2944)
+//
+// What the guard needs is reads that run WHILE retirements run. Starting the
+// readers and then retiring at full speed left that to the scheduler: on a
+// saturated host the 300 retirements finished before any reader was scheduled,
+// and the test failed its own vacuity check. So the writer waits for a reader to
+// have completed a read before the first retirement, and before EVERY
+// retirement for a read to be in flight. Each wait is bounded by
+// overlapDeadline, sized to catch a hang, never to pace the race. The window
+// itself is still raced, not constructed, and the test asserts that at least
+// one read observed a retirement boundary while it ran.
+//
+// # What it discriminates today (measured for rmp #2944)
+//
+// Since rmp #2687 the autocommit path registers the deferred strip ABOVE the
+// flip, which closes the window described above by itself. Removing the scoped
+// hold ALONE therefore does not fail this test (0 failures in 200 runs, idle and
+// with every core saturated), nor any other test in this package. With the
+// pre-#2687 order restored as well, removing the hold fails it in 86 of 100
+// runs, and the version before rmp #2944 caught that double mutant in 0 of 100.
 func TestLabelChurnGate_ScopedHoldSpansTheTombstoneFlip(t *testing.T) {
 	const population = 300
 	keys := make([]string, population)
@@ -1062,20 +1083,33 @@ func TestLabelChurnGate_ScopedHoldSpansTheTombstoneFlip(t *testing.T) {
 		return out
 	}
 
+	const overlapDeadline = time.Minute
 	var (
-		stop  atomic.Bool
-		wg    sync.WaitGroup
-		reads atomic.Int64
-		bad   atomic.Int64
+		stop       atomic.Bool
+		wg         sync.WaitGroup
+		reads      atomic.Int64
+		inFlight   atomic.Int64
+		overlapped atomic.Int64
+		// retiring counts retirement boundaries: odd while one is in progress. A
+		// read overlapped a retirement when it started inside one or saw a
+		// boundary pass while it ran.
+		retiring atomic.Uint64
+		bad      atomic.Int64
 	)
 	for r := 0; r < 3; r++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for !stop.Load() {
+				inFlight.Add(1)
+				startPass := retiring.Load()
 				before := dead()
 				got := g.LabelBitmapAsOf(lid, nil)
 				after := dead()
+				if startPass%2 == 1 || retiring.Load() != startPass {
+					overlapped.Add(1)
+				}
+				inFlight.Add(-1)
 				reads.Add(1)
 				if v := roaring64.And(roaring64.And(before, after), got); !v.IsEmpty() {
 					if bad.Add(1) == 1 {
@@ -1089,21 +1123,49 @@ func TestLabelChurnGate_ScopedHoldSpansTheTombstoneFlip(t *testing.T) {
 			}
 		}()
 	}
+	// awaitAbove blocks until c exceeds floor, bounded by overlapDeadline. It
+	// stops the readers before failing so the deferred cleanup does not race
+	// them.
+	awaitAbove := func(c *atomic.Int64, floor int64, what string) {
+		deadline := time.Now().Add(overlapDeadline)
+		for c.Load() <= floor {
+			if time.Now().After(deadline) {
+				stop.Store(true)
+				wg.Wait()
+				t.Fatalf("no %s within %v: the readers are hung", what, overlapDeadline)
+			}
+			runtime.Gosched()
+		}
+	}
+	awaitAbove(&reads, 0, "reader completed a read before the first retirement")
 	for _, k := range keys {
-		if err := g.RemoveNode(k); err != nil {
+		awaitAbove(&inFlight, 0, "read in flight before a retirement")
+		retiring.Add(1)
+		err := g.RemoveNode(k)
+		retiring.Add(1)
+		if err != nil {
+			stop.Store(true)
+			wg.Wait()
 			t.Fatalf("g.RemoveNode(k): %v", err)
 		}
 	}
 	stop.Store(true)
 	wg.Wait()
 
+	// Structural floors, not proportions (a fraction of a fixed workload in a
+	// fixed window is a timing assertion in disguise).
 	if reads.Load() == 0 {
 		t.Fatal("the readers completed no read, so nothing was asserted")
+	}
+	if overlapped.Load() == 0 {
+		t.Fatalf("none of %d reads overlapped any of %d retirements, so the window "+
+			"was never raced", reads.Load(), population)
 	}
 	if bm := g.LabelBitmapAsOf(lid, nil); !roaring64.And(dead(), bm).IsEmpty() {
 		t.Fatalf("with the workload stopped, the Scanned bitmap still reports tombstoned "+
 			"nodes %v", roaring64.And(dead(), bm).ToArray())
 	}
 	_ = ids
-	t.Logf("%d reads asserted across %d retirements", reads.Load(), population)
+	t.Logf("%d reads asserted across %d retirements, %d of them overlapping one",
+		reads.Load(), population, overlapped.Load())
 }
