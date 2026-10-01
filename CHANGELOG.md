@@ -36,6 +36,9 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **`MVCCStats.NodeLifeRecords` over-reported, and the node-life gate never returned to
+  zero, after a node was revived or removed twice (rmp #2962).** A second birth or death
+  of the same node overwrites its record but was counted as a new one.
 - **A relationship type over 65535 bytes was acknowledged on a WAL-backed store and
   recovered with no type (rmp #2956).** The WAL adapter discarded the staging refusal, so
   the statement and its commit succeeded while nothing reached the log. The statement is now

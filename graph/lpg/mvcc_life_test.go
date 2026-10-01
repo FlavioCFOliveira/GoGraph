@@ -374,3 +374,66 @@ func TestNodeLife_GateIsRaisedBeforeTheRecordIsObservable(t *testing.T) {
 			"skips a record it could already see (rmp #2842)", atZero, observed)
 	}
 }
+
+// lifeRecordCount counts the birth and death records actually held, across
+// every life shard.
+func lifeRecordCount[N comparable, W any](g *Graph[N, W]) int64 {
+	var n int64
+	for i := range g.nodeLifeShards {
+		sh := &g.nodeLifeShards[i]
+		sh.mu.RLock()
+		n += int64(len(sh.born) + len(sh.died))
+		sh.mu.RUnlock()
+	}
+	return n
+}
+
+// TestNodeLife_GateCountsRecordsNotWrites pins that [Graph.nodeLifeActive]
+// counts the life records held, not the life writes made (rmp #2962).
+//
+// The store is one record deep per direction, so a second birth or death of the
+// same node OVERWRITES the first. Counting that write as a new record made the
+// gate drift upward for good: the reclaimers subtract one per record they free,
+// so the overwritten one was never subtracted, the gate never returned to zero,
+// and [MVCCStats.NodeLifeRecords] over-reported.
+func TestNodeLife_GateCountsRecordsNotWrites(t *testing.T) {
+	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: false})
+	t.Cleanup(func() { _ = g.Close() })
+	// Pinned so the direct writes' own reclamation frees nothing mid-sequence.
+	hold := g.BeginRead()
+
+	steps := []struct {
+		name string
+		op   func() error
+	}{
+		{"birth", func() error { return g.AddNode("a") }},
+		{"death", func() error { return g.RemoveNode("a") }},
+		{"revival overwrites the birth", func() error { return g.AddNode("a") }},
+		{"second death overwrites the death", func() error { return g.RemoveNode("a") }},
+	}
+	for _, s := range steps {
+		if err := s.op(); err != nil {
+			t.Fatalf("%s: %v", s.name, err)
+		}
+		if got, want := g.nodeLifeActive.Load(), lifeRecordCount(g); got != want {
+			t.Errorf("after %s the gate reads %d but %d life records are held (rmp #2962)",
+				s.name, got, want)
+		}
+	}
+	if got := lifeRecordCount(g); got != 2 {
+		t.Fatalf("setup: %d life records held, want 2 (one per direction)", got)
+	}
+
+	g.EndRead(hold)
+	g.reclaimNodeLife(^uint64(0))
+	if got := lifeRecordCount(g); got != 0 {
+		t.Fatalf("setup: %d life records survive a reclaim at the maximum watermark", got)
+	}
+	if got := g.nodeLifeActive.Load(); got != 0 {
+		t.Fatalf("every life record is reclaimed but the gate reads %d: overwrites were "+
+			"counted as new records (rmp #2962)", got)
+	}
+	if got := g.MVCCStats().NodeLifeRecords; got != 0 {
+		t.Fatalf("MVCCStats.NodeLifeRecords = %d with no life record held, want 0", got)
+	}
+}

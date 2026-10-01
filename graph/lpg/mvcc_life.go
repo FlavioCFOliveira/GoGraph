@@ -351,16 +351,24 @@ func (g *Graph[N, W]) noteNodeLife(id graph.NodeID, tx *writeCtx, alive bool, ba
 	// and are released below — after the unlock, so the union of old and new is
 	// never briefly under-raised.
 	var displaced []LabelID
+	// overwrote reports whether this write REPLACED a record rather than adding
+	// one. The gate counts records held, not writes made, because the reclaimers
+	// subtract one per record they free: counting an overwrite left the gate
+	// above zero for good and over-reported MVCCStats.NodeLifeRecords
+	// (rmp #2962).
+	var overwrote bool
 	if alive {
 		if sh.born == nil {
 			sh.born = make(map[graph.NodeID]lifeStamp, 8)
 		}
+		_, overwrote = sh.born[id]
 		sh.born[id] = st
 		displaced = sh.setChurnHeld(true, id, held)
 	} else {
 		if sh.died == nil {
 			sh.died = make(map[graph.NodeID]lifeStamp, 8)
 		}
+		_, overwrote = sh.died[id]
 		sh.died[id] = st
 		displaced = sh.setChurnHeld(false, id, held)
 	}
@@ -371,7 +379,9 @@ func (g *Graph[N, W]) noteNodeLife(id graph.NodeID, tx *writeCtx, alive bool, ba
 	// this lock first, so the increment happens-before its observation. The
 	// decrements in the reclaimers stay after their unlocks: there the counter
 	// briefly over-counts, which is the safe direction.
-	g.nodeLifeActive.Add(1)
+	if !overwrote {
+		g.nodeLifeActive.Add(1)
+	}
 	sh.mu.Unlock()
 	if h := g.nodeLifePublishedHookForTest; h != nil {
 		h(id)
