@@ -8123,7 +8123,7 @@ func buildOperatorWrite(
 				// Per openCypher these surface as InvalidPropertyType at
 				// runtime (Set1 [10]).
 				if !isStorableProperty(v) {
-					return lpg.PropertyValue{}, false, false, fmt.Errorf("exec: SET %s: InvalidPropertyType: maps cannot be stored as property values", p.PropertyKey)
+					return lpg.PropertyValue{}, false, false, fmt.Errorf("exec: SET %s: maps cannot be stored as property values: %w", p.PropertyKey, exec.ErrNestedPropertyValue)
 				}
 				// A node-, relationship- or path-valued RHS is equally
 				// unstorable and must be REFUSED, not dropped into the
@@ -9146,10 +9146,12 @@ func buildPropsEvalFn(
 		}
 	}
 
+	schemaCopy = writeEvalRowSchema(schemaCopy, vals...)
+	relSnap := edgeVarSnapshot(bopts, schemaCopy)
 	return func(row exec.Row) ([]exec.PropEntry, error) {
 		// Build a RowContext that can resolve variable bindings and node
 		// property accesses from the current row.
-		rowCtx := buildRowCtxFromMutator(row, schemaCopy, mutator, scalarSnap)
+		rowCtx := buildRowCtxFromMutator(row, schemaCopy, mutator, scalarSnap, relSnap)
 
 		var out []exec.PropEntry
 		for i, k := range keys {
@@ -9317,9 +9319,11 @@ func buildMapEvalFn(
 	vals := make([]ast.Expression, len(ml.Values))
 	copy(vals, ml.Values)
 	scalarSnap := scalarColSnapshot(bopts)
+	schemaCopy = writeEvalRowSchema(schemaCopy, vals...)
+	relSnap := edgeVarSnapshot(bopts, schemaCopy)
 
 	return func(row exec.Row) ([]exec.PropEntry, []string, error) {
-		rowCtx := buildRowCtxFromMutator(row, schemaCopy, mutator, scalarSnap)
+		rowCtx := buildRowCtxFromMutator(row, schemaCopy, mutator, scalarSnap, relSnap)
 		var entries []exec.PropEntry
 		var nullKeys []string
 		for i, k := range keys {
@@ -9381,11 +9385,13 @@ func buildExprMapEvalFn(
 	bopts *buildOpts,
 ) exec.ExprValueEvalFn {
 	scalarSnap := scalarColSnapshot(bopts)
+	schemaCopy = writeEvalRowSchema(schemaCopy, exprAST)
+	relSnap := edgeVarSnapshot(bopts, schemaCopy)
 	return func(row exec.Row) (expr.Value, error) {
 		if exprAST == nil {
 			return expr.Null, nil
 		}
-		rowCtx := buildRowCtxFromMutator(row, schemaCopy, mutator, scalarSnap)
+		rowCtx := buildRowCtxFromMutator(row, schemaCopy, mutator, scalarSnap, relSnap)
 		// evalRow, not expr.Eval — same reason as [buildPropsEvalFn]. The RHS
 		// here is a whole map-valued expression (a CASE, a coalesce, a map
 		// projection), any sub-expression of which may be a subquery or a
@@ -9561,6 +9567,145 @@ func scalarColSnapshot(bopts *buildOpts) map[string]struct{} {
 	return out
 }
 
+// edgeVarSnapshot copies, from bopts, the column triplets of the relationship
+// variables in schema, for a per-row write-path evaluator, so
+// [buildRowCtxFromMutator] resolves each to its value (rmp #2960). The copy is
+// taken when the evaluator is built because bopts.edgeVarMeta is cleared at the
+// next scope boundary, before the evaluator runs. schema is the evaluator's
+// pruned layout ([writeEvalRowSchema]), so a relationship no expression reads
+// is left out and costs nothing per row. Returns nil when none remains.
+func edgeVarSnapshot(bopts *buildOpts, schema map[string]int) map[string]edgeVarInfo {
+	if bopts == nil || len(bopts.edgeVarMeta) == 0 {
+		return nil
+	}
+	var out map[string]edgeVarInfo
+	for k, v := range bopts.edgeVarMeta {
+		if _, inSchema := schema[k]; !inSchema {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]edgeVarInfo, len(schema))
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// writeEvalRowSchema restricts schema to the variables exprs reference, so a
+// write-path evaluator's per-row context materialises only what it reads: a
+// node's property bag or a relationship's endpoints, type and properties cost
+// a read per row each, and an entity no expression names was paid for and then
+// discarded. When any expression carries a construct whose variable use the
+// walk cannot see ([exprVarRefs]), the full schema is kept.
+func writeEvalRowSchema(schema map[string]int, exprs ...ast.Expression) map[string]int {
+	refs := make(map[string]struct{}, 4)
+	for _, e := range exprs {
+		if !exprVarRefs(e, refs) {
+			return schema
+		}
+	}
+	out := make(map[string]int, len(refs))
+	for name := range refs {
+		if col, ok := schema[name]; ok {
+			out[name] = col
+		}
+	}
+	return out
+}
+
+// exprVarRefs adds to refs the name of every variable e references, and
+// reports whether the walk saw all of them. It is conservative by
+// construction: a subquery, a pattern predicate, a pattern comprehension, or any
+// node kind it does not know reports false, because such a construct reads row
+// variables through a pattern rather than through a *ast.Variable. A name bound
+// locally by a comprehension or reduce may be added as well; an extra name only
+// keeps a column that would otherwise have been pruned.
+func exprVarRefs(e ast.Expression, refs map[string]struct{}) bool {
+	switch n := e.(type) {
+	case nil:
+		return true
+	case *ast.Variable:
+		refs[n.Name] = struct{}{}
+		return true
+	case *ast.IntLiteral, *ast.FloatLiteral, *ast.StringLiteral, *ast.BoolLiteral,
+		*ast.OverflowIntLit, *ast.NullLiteral, *ast.StarLiteral, *ast.Parameter:
+		return true
+	case *ast.Property:
+		return exprVarRefs(n.Receiver, refs)
+	case *ast.LabelPredicate:
+		return exprVarRefs(n.Receiver, refs)
+	case *ast.UnaryOp:
+		return exprVarRefs(n.Operand, refs)
+	case *ast.BinaryOp:
+		return exprVarRefs(n.Left, refs) && exprVarRefs(n.Right, refs)
+	case *ast.FunctionInvocation:
+		return exprVarRefsAll(n.Args, refs)
+	case *ast.ListLiteral:
+		return exprVarRefsAll(n.Elements, refs)
+	case *ast.MapLiteral:
+		return exprVarRefsAll(n.Values, refs)
+	case *ast.SubscriptExpr:
+		return exprVarRefs(n.Expr, refs) && exprVarRefs(n.Index, refs)
+	case *ast.SliceExpr:
+		return exprVarRefs(n.Expr, refs) && exprVarRefs(n.From, refs) && exprVarRefs(n.To, refs)
+	case *ast.CaseExpression:
+		if !exprVarRefs(n.Subject, refs) || !exprVarRefs(n.ElseExpr, refs) {
+			return false
+		}
+		for _, alt := range n.Alternatives {
+			if alt != nil && (!exprVarRefs(alt.Condition, refs) || !exprVarRefs(alt.Consequent, refs)) {
+				return false
+			}
+		}
+		return true
+	case *ast.ListComprehension:
+		return exprVarRefs(n.Source, refs) && exprVarRefs(n.Predicate, refs) && exprVarRefs(n.Projection, refs)
+	case *ast.ReduceExpr:
+		return exprVarRefs(n.Init, refs) && exprVarRefs(n.Source, refs) && exprVarRefs(n.Projection, refs)
+	case *ast.MapProjection:
+		if !exprVarRefs(n.Subject, refs) {
+			return false
+		}
+		for _, it := range n.Items {
+			if it != nil && !exprVarRefs(it.Value, refs) {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+// exprVarRefsAll is [exprVarRefs] over a list of expressions.
+func exprVarRefsAll(es []ast.Expression, refs map[string]struct{}) bool {
+	for _, e := range es {
+		if !exprVarRefs(e, refs) {
+			return false
+		}
+	}
+	return true
+}
+
+// relValueFromMutator resolves the relationship the Expand triplet info binds
+// in row to its [expr.RelationshipValue], through the mutator so a write path
+// reads its own pending writes. The type is the stored type the pattern
+// accepted, as on the read path ([pickEdgeType]). When the triplet does not
+// resolve, the value still carries the handle and the declared type, so it
+// stays a relationship: refused as a property value, never stored as an
+// integer.
+func relValueFromMutator(row exec.Row, info *edgeVarInfo, mutator exec.GraphMutator, handle expr.IntegerValue) expr.Value {
+	rv, types, ok := exec.RelationshipValueFromCols(mutator, exec.RelCols{SrcCol: info.srcCol, DstCol: info.dstCol, EdgeCol: info.edgeCol}, row)
+	if !ok {
+		return expr.RelationshipValue{ID: uint64(handle), Type: info.edgeType}
+	}
+	rv.Type = info.edgeType
+	if len(types) > 0 {
+		rv.Type = pickEdgeType(types, info.acceptedTypes)
+	}
+	return rv
+}
+
 // buildMergeActionEvals builds the per-row RHS evaluator map for a MERGE
 // operator's ON CREATE / ON MATCH property-set items whose right-hand side is a
 // non-literal expression (e.g. `ON MATCH SET n.num = n.num + 1`). Each
@@ -9590,8 +9735,10 @@ func buildMergeActionEvals(
 	for _, e := range exprs {
 		valAST := e.Value
 		propKey := e.Key
+		itemSchema := writeEvalRowSchema(schemaCopy, valAST)
+		relSnap := edgeVarSnapshot(bopts, itemSchema)
 		out[exec.MergeActionEvalKey(e.Ord, e.TargetVar, e.Key)] = func(row exec.Row) (lpg.PropertyValue, bool, bool, error) {
-			rowCtx := buildRowCtxFromMutator(row, schemaCopy, mutator, scalarSnap)
+			rowCtx := buildRowCtxFromMutator(row, itemSchema, mutator, scalarSnap, relSnap)
 			// evalRow, not expr.Eval — same reason as [buildPropsEvalFn]: a
 			// MERGE ON CREATE / ON MATCH SET right-hand side is an ordinary
 			// expression and may carry a subquery or a pattern predicate
@@ -9607,7 +9754,7 @@ func buildMergeActionEvals(
 				return lpg.PropertyValue{}, true, false, nil
 			}
 			if !isStorableProperty(v) {
-				return lpg.PropertyValue{}, false, false, fmt.Errorf("exec: MERGE SET %s: InvalidPropertyType: maps cannot be stored as property values", propKey)
+				return lpg.PropertyValue{}, false, false, fmt.Errorf("exec: MERGE SET %s: maps cannot be stored as property values: %w", propKey, exec.ErrNestedPropertyValue)
 			}
 			// Entity-valued RHS: refuse, matching regular SET, rather than fall
 			// into the !hasValue no-op that reported success and wrote nothing
@@ -9642,12 +9789,24 @@ func buildMergeActionEvals(
 // When no mutator is available, or when the integer cannot be resolved to a
 // node, the raw IntegerValue is kept.
 //
+// schema is the row layout restricted to the variables the evaluated
+// expressions reference ([writeEvalRowSchema]), so a bound entity no expression
+// reads is never materialised.
+//
+// rels, when non-nil, maps each relationship variable bound by an Expand to
+// its column triplet ([edgeVarInfo], snapshot by [edgeVarSnapshot]). Such a
+// variable's column holds the relationship's handle, so it is resolved to the
+// full [expr.RelationshipValue] a read produces (type, stored orientation and
+// the instance's own properties) rather than left as an integer that r.p,
+// type(r) and properties(r) cannot read and a property write would store
+// (rmp #2960).
+//
 // scalarCols, when non-nil, lists variable names whose row values must pass
 // through unchanged: UNWIND element variables and EagerAggregation outputs
 // are scalar by construction and may numerically coincide with internal node
 // ids — upgrading them would silently corrupt downstream CREATE/SET property
 // writes.
-func buildRowCtxFromMutator(row exec.Row, schema map[string]int, mutator exec.GraphMutator, scalarCols map[string]struct{}) expr.RowContext {
+func buildRowCtxFromMutator(row exec.Row, schema map[string]int, mutator exec.GraphMutator, scalarCols map[string]struct{}, rels map[string]edgeVarInfo) expr.RowContext {
 	ctx := make(expr.RowContext, len(schema))
 	for varName, colIdx := range schema {
 		if colIdx >= len(row) || row[colIdx] == nil {
@@ -9662,6 +9821,13 @@ func buildRowCtxFromMutator(row exec.Row, schema map[string]int, mutator exec.Gr
 		}
 		if mutator != nil {
 			if iv, ok := v.(expr.IntegerValue); ok {
+				// A relationship variable's column holds its handle, not a
+				// node id: resolve it to the relationship value before the node
+				// upgrade below can mistake the handle for a node (rmp #2960).
+				if info, isRel := rels[varName]; isRel {
+					ctx[varName] = relValueFromMutator(row, &info, mutator, iv)
+					continue
+				}
 				nodeID := graph.NodeID(iv)
 				if key, resolved := mutator.ResolveNodeLabel(nodeID); resolved {
 					rawProps := mutator.NodeProperties(key)
@@ -9751,9 +9917,11 @@ func isEntityPropertyValue(v expr.Value) bool {
 
 // errEntityPropertyValue builds the InvalidPropertyType error a write path
 // raises for an entity-valued property, naming the clause and the key so the
-// diagnostic matches the shape the map case already produces (rmp #2816).
+// diagnostic matches the shape the map case already produces (rmp #2816). It
+// wraps [exec.ErrEntityPropertyValue], so a caller classifies it with
+// errors.Is rather than by its text.
 func errEntityPropertyValue(clause, key string) error {
-	return fmt.Errorf("exec: %s %s: InvalidPropertyType: a node, relationship or path is not a valid property value", clause, key)
+	return fmt.Errorf("exec: %s %s: %w", clause, key, exec.ErrEntityPropertyValue)
 }
 
 // errUnstorablePropertyValue builds the InvalidPropertyType error a write path

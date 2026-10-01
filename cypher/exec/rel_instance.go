@@ -186,3 +186,37 @@ func pairHasHandlelessSlot(mut GraphMutator, a, b string) bool {
 	}
 	return false
 }
+
+// RelationshipValueFromCols resolves the relationship a row binds through the
+// Expand triplet rc to the value a read of the same variable produces: its
+// stable handle as ID, its endpoints in STORAGE order, and the instance's own
+// property bag. It also returns the instance's stored type set, from which the
+// caller picks the type its pattern accepted.
+//
+// The instance is resolved exactly as a SET on the same variable resolves its
+// target ([resolveRelBinding]): by handle, and normalised to storage order, so
+// a value read from a write-path map names the instance the write path
+// mutates (rmp #2960). ok is false when the triplet does not hold resolvable
+// endpoint ids.
+func RelationshipValueFromCols(mut GraphMutator, rc RelCols, row Row) (v expr.RelationshipValue, types []string, ok bool) {
+	ent, err := resolveRelBinding(&rc, row, mut)
+	if err != nil {
+		return expr.RelationshipValue{}, nil, false
+	}
+	// resolveRelBinding verified both endpoint cells are IntegerValue.
+	srcIV, srcOK := row[rc.SrcCol].(expr.IntegerValue)
+	dstIV, dstOK := row[rc.DstCol].(expr.IntegerValue)
+	if !srcOK || !dstOK {
+		return expr.RelationshipValue{}, nil, false
+	}
+	srcID, dstID := uint64(srcIV), uint64(dstIV)
+	if srcKey, _ := mut.ResolveNodeLabel(graph.NodeID(srcID)); ent.relSrcKey != srcKey {
+		srcID, dstID = dstID, srcID
+	}
+	return expr.RelationshipValue{
+		ID:         ent.relHandle,
+		StartID:    srcID,
+		EndID:      dstID,
+		Properties: exprMapFromLPGProps(relInstanceProps(mut, ent.relSrcKey, ent.relDstKey, ent.relHandle)),
+	}, relInstanceLabels(mut, ent.relSrcKey, ent.relDstKey, ent.relHandle), true
+}

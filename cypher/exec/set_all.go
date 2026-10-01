@@ -327,14 +327,14 @@ func exprMapValueToEntries(entityVar string, mv expr.MapValue) (props []propLite
 			continue
 		}
 		if !exprValueIsStorable(vv) {
-			return nil, nil, fmt.Errorf("InvalidPropertyType: SET %s: value for key %q is a map or a list of maps, which cannot be stored as a property", entityVar, k)
+			return nil, nil, fmt.Errorf("SET %s: value for key %q is a map or a list of maps, which cannot be stored as a property: %w", entityVar, k, ErrNestedPropertyValue)
 		}
 		// A graph entity is equally unstorable. It used to fall through to the
 		// defensive `continue` below, which made `SET n = {k: <node>}` report
 		// success while writing nothing — and, on the REPLACE form, still clear
 		// every key the entity already carried (rmp #2816).
 		if exprValueIsEntity(vv) {
-			return nil, nil, fmt.Errorf("InvalidPropertyType: SET %s: value for key %q is a node, relationship or path, which cannot be stored as a property", entityVar, k)
+			return nil, nil, fmt.Errorf("SET %s: value for key %q is a node, relationship or path, which cannot be stored as a property: %w", entityVar, k, ErrEntityPropertyValue)
 		}
 		pv, perr := exprValueToProperty(vv)
 		if perr != nil {
@@ -965,7 +965,7 @@ func parseMapWithNulls(s string, params map[string]expr.Value) (props []propLite
 		// rather than silently dropping the key — matching the single-property
 		// form `SET n.k = {…}` (Set1 [10]).
 		if valueStringIsNonStorable(valStr) {
-			return nil, nil, fmt.Errorf("InvalidPropertyType: value for key %q is a map or a list of maps, which cannot be stored as a property", key)
+			return nil, nil, fmt.Errorf("value for key %q is a map or a list of maps, which cannot be stored as a property: %w", key, ErrNestedPropertyValue)
 		}
 
 		pv, perr := parsePropValueWithParams(valStr, params)
