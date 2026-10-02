@@ -64,7 +64,22 @@ func FromAST(q ast.Query) (LogicalPlan, error) {
 // call safe — it is not stateless, and it was not safe before rmp #2508. The
 // regression test TestSubqueryConcurrentFirstExecution_2508 is what holds the
 // precondition in place.
-func TranslateSubquery(q *ast.SingleQuery, outerVars []string, argTag uint32) (LogicalPlan, error) {
+//
+// # A UNION body (rmp #2627)
+//
+// When q is a *ast.MultiQuery the result is the left-associative fold of the
+// branches under [Union] (UNION) or [UnionAll] (UNION ALL) — the same shape
+// [translator.multiQuery] gives a top-level UNION — and every branch is a
+// [ProduceResults] over its own pipeline rooted at its OWN [Argument] leaf
+// carrying outerVars and argTag. The [ProduceResults] is kept, unlike the
+// one-branch case, because it names the branch's columns: a de-duplicating
+// UNION compares rows column by column, so the consumer must project each
+// branch onto exactly its declared columns. One [translator] translates every
+// branch, so synthetic anonymous names never collide across branches. The
+// consumer — the subquery evaluator in cypher/subquery_eval.go — builds and
+// seeds each branch separately; the fold records the order and the
+// de-duplication mode, and is not a pipeline to build in one piece.
+func TranslateSubquery(q ast.Query, outerVars []string, argTag uint32) (LogicalPlan, error) {
 	t := &translator{}
 	// The subquery is a NEW translator, so its anonymous-variable counter would
 	// otherwise restart at zero and mint `__anon_0` for the inner pattern's first
@@ -78,48 +93,32 @@ func TranslateSubquery(q *ast.SingleQuery, outerVars []string, argTag uint32) (L
 	// counts zero. Naming the outer relationship — `-[rr:KNOWS]->` — made the same
 	// query answer correctly, which is what identified the cause.
 	t.reserveAnonVars(outerVars)
-	arg := NewArgumentWithTag(outerVars, argTag)
-	plan := LogicalPlan(arg)
-	for _, rc := range q.ReadingClauses {
-		var err error
-		plan, err = t.readingClause(rc, plan)
+	switch v := q.(type) {
+	case *ast.SingleQuery:
+		return t.subqueryBranch(v, outerVars, argTag, false)
+	case *ast.MultiQuery:
+		if len(v.Parts) == 0 {
+			return nil, &TranslateError{UnsupportedClause: "empty UNION", Pos: v.Pos}
+		}
+		left, err := t.subqueryBranch(v.Parts[0], outerVars, argTag, true)
 		if err != nil {
 			return nil, err
 		}
-	}
-	// The body's TRAILING projection is PART of the body, and dropping it was a
-	// wrong ANSWER, not a lost optimisation (rmp #2675). Before this line the loop
-	// above was the whole function, so `COUNT { MATCH (a)-[:K]->(x) RETURN count(*) }`
-	// counted the two matches instead of the one row the aggregation emits, and
-	// `COUNT { … RETURN x LIMIT 1 }` counted two instead of one.
-	//
-	// A WITH was never affected — the parser appends every WITH to ReadingClauses
-	// in document order (cypher/parser/visitor.go, VisitMultiPartQ) — so only the
-	// trailing RETURN, and with it DISTINCT / ORDER BY / SKIP / LIMIT and any
-	// aggregation, was lost.
-	//
-	// The counted quantity is the row count of the body AFTER its own projection.
-	// Read at github.com/neo4j/neo4j, release tag 2026.07.1 (commit
-	// f213380f812b820a1b312e2ea52cb3d8f1931ccc),
-	// community/cypher/cypher-planner/src/main/scala/org/neo4j/cypher/internal/compiler/ast/convert/plannerQuery/CreateIrExpressions.scala:
-	// `case countExpression @ CountExpression(q)` converts the WHOLE body query,
-	// then either overrides its final horizon with `AggregatingQueryProjection(count(*))`
-	// — permitted only for a `RegularQueryProjection` with `QueryPagination.empty`
-	// and `Selections.empty`, a plain projection that cannot change the row count —
-	// or, for every other horizon, appends a TAIL carrying that aggregation over the
-	// body's own output. Either way count(*) counts the rows the body produces.
-	// `case existsExpression @ ExistsExpression(q)` in the same file converts the
-	// body with no override at all, so EXISTS is "the body produced at least one
-	// row" — which is why an aggregating body, emitting one row even over an empty
-	// input, is TRUE and not FALSE.
-	if q.Return != nil {
-		projected, err := t.returnClause(q.Return, plan)
-		if err != nil {
-			return nil, err
+		for _, part := range v.Parts[1:] {
+			right, err := t.subqueryBranch(part, outerVars, argTag, true)
+			if err != nil {
+				return nil, err
+			}
+			if v.All {
+				left = NewUnionAll(left, right)
+			} else {
+				left = NewUnion(left, right)
+			}
 		}
-		plan = stripProduceResults(projected)
+		return left, nil
+	default:
+		return nil, &TranslateError{UnsupportedClause: fmt.Sprintf("subquery body %T", q)}
 	}
-	return plan, nil
 }
 
 // stripProduceResults returns plan without the terminal [ProduceResults] that
@@ -196,6 +195,57 @@ func (t *translator) freshAnonVar() string {
 	n := t.anonCounter
 	t.anonCounter++
 	return anonVarPrefix + strconv.Itoa(n)
+}
+
+// subqueryBranch translates one branch of a subquery body onto a fresh
+// [Argument] leaf. keepProduceResults is true for a branch of a UNION body; see
+// [TranslateSubquery].
+func (t *translator) subqueryBranch(q *ast.SingleQuery, outerVars []string, argTag uint32, keepProduceResults bool) (LogicalPlan, error) {
+	arg := NewArgumentWithTag(outerVars, argTag)
+	plan := LogicalPlan(arg)
+	for _, rc := range q.ReadingClauses {
+		var err error
+		plan, err = t.readingClause(rc, plan)
+		if err != nil {
+			return nil, err
+		}
+	}
+	// The body's TRAILING projection is PART of the body, and dropping it was a
+	// wrong ANSWER, not a lost optimisation (rmp #2675). Before this line the loop
+	// above was the whole function, so `COUNT { MATCH (a)-[:K]->(x) RETURN count(*) }`
+	// counted the two matches instead of the one row the aggregation emits, and
+	// `COUNT { … RETURN x LIMIT 1 }` counted two instead of one.
+	//
+	// A WITH was never affected — the parser appends every WITH to ReadingClauses
+	// in document order (cypher/parser/visitor.go, VisitMultiPartQ) — so only the
+	// trailing RETURN, and with it DISTINCT / ORDER BY / SKIP / LIMIT and any
+	// aggregation, was lost.
+	//
+	// The counted quantity is the row count of the body AFTER its own projection.
+	// Read at github.com/neo4j/neo4j, release tag 2026.07.1 (commit
+	// f213380f812b820a1b312e2ea52cb3d8f1931ccc),
+	// community/cypher/cypher-planner/src/main/scala/org/neo4j/cypher/internal/compiler/ast/convert/plannerQuery/CreateIrExpressions.scala:
+	// `case countExpression @ CountExpression(q)` converts the WHOLE body query,
+	// then either overrides its final horizon with `AggregatingQueryProjection(count(*))`
+	// — permitted only for a `RegularQueryProjection` with `QueryPagination.empty`
+	// and `Selections.empty`, a plain projection that cannot change the row count —
+	// or, for every other horizon, appends a TAIL carrying that aggregation over the
+	// body's own output. Either way count(*) counts the rows the body produces.
+	// `case existsExpression @ ExistsExpression(q)` in the same file converts the
+	// body with no override at all, so EXISTS is "the body produced at least one
+	// row" — which is why an aggregating body, emitting one row even over an empty
+	// input, is TRUE and not FALSE.
+	if q.Return != nil {
+		projected, err := t.returnClause(q.Return, plan)
+		if err != nil {
+			return nil, err
+		}
+		if keepProduceResults {
+			return projected, nil
+		}
+		plan = stripProduceResults(projected)
+	}
+	return plan, nil
 }
 
 // reserveAnonVars advances this translator's anonymous-variable counter past

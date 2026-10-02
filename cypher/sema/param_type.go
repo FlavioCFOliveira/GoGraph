@@ -457,14 +457,14 @@ func collectParamNamesExpr(e ast.Expression, seen map[string]struct{}) {
 		if v.Where != nil {
 			collectParamNamesExpr(v.Where.Predicate, seen)
 		}
-		if v.Query != nil {
-			collectParamNamesSingle(v.Query, seen)
+		for _, branch := range ast.QueryBranches(v.Query) {
+			collectParamNamesSingle(branch, seen)
 		}
 
 	case *ast.CountSubquery:
 		collectParamNamesPattern(v.Pattern, seen)
-		if v.Query != nil {
-			collectParamNamesSingle(v.Query, seen)
+		for _, branch := range ast.QueryBranches(v.Query) {
+			collectParamNamesSingle(branch, seen)
 		}
 
 	// Leaves: literals and variables carry no parameter references.

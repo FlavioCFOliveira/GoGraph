@@ -1767,10 +1767,26 @@ func (a *analyser) existsSubquery(e *ast.ExistsSubquery) {
 		if e.Where != nil {
 			sub.whereClause(e.Where)
 		}
-	} else if e.Query != nil {
-		sub.singleQuery(e.Query)
+		a.errs = append(a.errs, sub.errs...)
+		return
 	}
-	a.errs = append(a.errs, sub.errs...)
+	a.subqueryBranches(e.Query)
+}
+
+// subqueryBranches analyses the block-form body of an EXISTS or COUNT
+// subquery. Each branch of a UNION body is analysed in a scope of its own that
+// sees every outer-scope variable and shares nothing with its sibling branches,
+// exactly as a top-level UNION's branches share nothing ([analyser.multiQuery]).
+// Neo4j analyses a subquery UNION the same way: Union.checkRecursively wraps
+// each branch in withScopedState after importValuesFromScope(outer)
+// (github.com/neo4j/neo4j 2026.07.1,
+// community/cypher/front-end/ast/src/main/scala/org/neo4j/cypher/internal/ast/Query.scala:1157-1207).
+func (a *analyser) subqueryBranches(q ast.Query) {
+	for _, branch := range ast.QueryBranches(q) {
+		sub := &analyser{scope: a.scope.Child()}
+		sub.singleQuery(branch)
+		a.errs = append(a.errs, sub.errs...)
+	}
 }
 
 // countSubquery analyses a COUNT { … } expression identically to EXISTS.
@@ -1779,10 +1795,10 @@ func (a *analyser) countSubquery(c *ast.CountSubquery) {
 	if c.Pattern != nil {
 		sub.patternIntroduce(c.Pattern)
 		sub.checkNonEmptyRelTypesAndLabels(c.Pattern)
-	} else if c.Query != nil {
-		sub.singleQuery(c.Query)
+		a.errs = append(a.errs, sub.errs...)
+		return
 	}
-	a.errs = append(a.errs, sub.errs...)
+	a.subqueryBranches(c.Query)
 }
 
 // isLogicalOperator returns true for the openCypher logical operators whose

@@ -316,13 +316,13 @@ func (c *schemaChecker) expr(e ast.Expression) {
 		}
 
 	case *ast.ExistsSubquery:
-		if v.Query != nil {
-			c.singleQuery(v.Query)
+		for _, branch := range ast.QueryBranches(v.Query) {
+			c.singleQuery(branch)
 		}
 
 	case *ast.CountSubquery:
-		if v.Query != nil {
-			c.singleQuery(v.Query)
+		for _, branch := range ast.QueryBranches(v.Query) {
+			c.singleQuery(branch)
 		}
 
 	// Literals, variables, parameters, and path patterns carry no sub-expressions

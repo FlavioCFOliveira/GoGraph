@@ -548,14 +548,14 @@ func (p printer) existsSubquery(e *ExistsSubquery) string {
 	if e.Pattern != nil {
 		return "EXISTS { " + p.pattern(e.Pattern) + " }"
 	}
-	return "EXISTS { " + p.singleQuery(e.Query) + " }"
+	return "EXISTS { " + p.query(e.Query) + " }"
 }
 
 func (p printer) countSubquery(c *CountSubquery) string {
 	if c.Pattern != nil {
 		return "COUNT { " + p.pattern(c.Pattern) + " }"
 	}
-	return "COUNT { " + p.singleQuery(c.Query) + " }"
+	return "COUNT { " + p.query(c.Query) + " }"
 }
 
 func (p printer) subscriptExpr(s *SubscriptExpr) string {

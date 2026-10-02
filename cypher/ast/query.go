@@ -78,6 +78,28 @@ type MultiQuery struct {
 func (*MultiQuery) astNode()   {}
 func (*MultiQuery) queryNode() {}
 
+// QueryBranches returns the branches of q in document order: q itself for a
+// *SingleQuery, every UNION branch for a *MultiQuery, and nil for a nil q. It
+// is the one enumeration every consumer of a subquery body
+// ([ExistsSubquery.Query], [CountSubquery.Query]) walks, so a UNION body is
+// visited in full rather than through its first branch alone.
+func QueryBranches(q Query) []*SingleQuery {
+	switch v := q.(type) {
+	case *SingleQuery:
+		if v == nil {
+			return nil
+		}
+		return []*SingleQuery{v}
+	case *MultiQuery:
+		if v == nil {
+			return nil
+		}
+		return v.Parts
+	default:
+		return nil
+	}
+}
+
 // String returns the Cypher UNION query.
 func (m *MultiQuery) String() string {
 	if len(m.Parts) == 0 {

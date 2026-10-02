@@ -131,7 +131,7 @@ func TestDegreeRewrite_ParallelEdges_BoundedAndUnboundedAgree(t *testing.T) {
 
 // TestExistsSubquery_HonoursInlineWhere is the regression gate for the EXISTS
 // half of rmp #2242. The pattern form of EXISTS, evaluated as an EXPRESSION,
-// discarded its inline WHERE: existsToSingleQuery built the inner ast.Match
+// discarded its inline WHERE: existsToQuery built the inner ast.Match
 // without threading sub.Where, so any predicate was dropped and the bare
 // pattern's verdict was returned.
 //

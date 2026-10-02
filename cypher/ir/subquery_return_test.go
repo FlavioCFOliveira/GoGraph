@@ -72,10 +72,14 @@ func subqueryBody(t *testing.T, body string) *ast.SingleQuery {
 	if cs.Query == nil {
 		t.Fatalf("Parse(%q) produced the PATTERN form, so there is no body RETURN to translate", src)
 	}
-	if cs.Query.Return == nil {
+	single, isSingle := cs.Query.(*ast.SingleQuery)
+	if !isSingle {
+		t.Fatalf("Parse(%q) produced a %T body, not a one-branch body", src, cs.Query)
+	}
+	if single.Return == nil {
 		t.Fatalf("Parse(%q) left SingleQuery.Return nil, so this case cannot prove the field is read", src)
 	}
-	return cs.Query
+	return single
 }
 
 // planKinds returns the concrete type names of every operator in plan, root
@@ -249,7 +253,7 @@ func TestTranslateSubquery_ReturnlessBodyIsUnchanged(t *testing.T) {
 			if cs.Query == nil {
 				t.Fatalf("Parse(%q) produced the pattern form; this control needs the block form", src)
 			}
-			if cs.Query.Return != nil {
+			if single, isSingle := cs.Query.(*ast.SingleQuery); !isSingle || single.Return != nil {
 				t.Fatalf("Parse(%q) set SingleQuery.Return on a RETURN-less body, so this control "+
 					"is not testing what it claims", src)
 			}
