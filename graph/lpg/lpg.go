@@ -4217,28 +4217,21 @@ func (g *Graph[N, W]) removeNodeInfo(n N, tx *writeCtx) bool {
 		}
 		return true
 	}
-	// A SCOPED CHURN HOLD ACROSS THE WHOLE RETIREMENT (rmp #2686).
-	//
-	// This retirement moves the node out of every one of its label bitmaps, and
-	// it does so in three steps that do not happen together: the tombstone flip,
-	// the death record, and the deferred index removals. Each of the last two
-	// takes a hold of its own, but the AUTOCOMMIT path writes the death record in
-	// a deferred call that runs after both of the others, so between the flip and
-	// the strip there would be an instant at which the node is dead, still in
-	// every bitmap, and the gate says its labels are quiet.
-	//
-	// Registered FIRST so it is released LAST — defers run in reverse — which is
-	// after the death record and after the deferred removals have taken theirs.
-	// A refusal below returns through it having mutated nothing.
+	// NO SCOPED CHURN HOLD (rmp #2963). The churn gate of every label in the bag
+	// is raised before the first mutation by two holders that outlive the
+	// retirement: the death claim below ([Graph.noteNodeDied] raises it before
+	// it publishes the record), and the deferred strip, which raises it per
+	// entry before the tombstone flip. Armed, tx is never nil — a direct write
+	// runs as an implicit transaction — so the claim always precedes the strip
+	// and the flip. The hold rmp #2686 took across the whole retirement covered
+	// an autocommit window that no longer exists; it was removed with a
+	// deterministic guard on the window
+	// (TestRetireHold_GateRaisedAcrossStripAndFlip).
 	var bagLids []LabelID
 	if g.mvccArmed {
-		// ONE bag read for the whole retirement: the scoped hold below, the death
-		// record's own hold, and the bitmap strip all need the same set.
+		// ONE bag read for the whole retirement: the death record's hold and the
+		// bitmap strip need the same set.
 		bagLids = g.nodeLabelBagLids(id)
-		if len(bagLids) > 0 {
-			g.raiseChurnFor(bagLids)
-			defer g.labelChurn.releaseAll(bagLids)
-		}
 	}
 	claimed := false
 	if g.mvccArmed && tx != nil {
@@ -4436,9 +4429,10 @@ func lidsNotIn(got, had []LabelID) []LabelID {
 // Cypher executor do not need to consult IsTombstoned (task #1409).
 //
 // lids is the node's label bag as its caller read it. It is passed in rather than
-// re-read because [Graph.removeNodeInfo] already needs the same set for the churn
-// hold it takes across the whole retirement, and the bag cannot change under it:
-// nothing on this path writes it.
+// re-read because [Graph.removeNodeInfo] already needs the same set for the death
+// record's churn hold. Nothing on this path writes the bag, but a peer may commit
+// a label before the removal's claim is held; the durable store therefore strips
+// again after the claim (store/txn applyOp, OpRemoveNode).
 func (g *Graph[N, W]) stripLabelBitmaps(id graph.NodeID, lids []LabelID, tx *writeCtx) {
 	if !g.mvccArmed {
 		// The disarmed path never read the bag, so read it here.

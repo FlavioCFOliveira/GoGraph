@@ -292,8 +292,8 @@ func (g *Graph[N, W]) noteNodeDied(id graph.NodeID, tx *writeCtx, bagLids []Labe
 	// takes it out of every one of those labels' bitmaps as far as a reader newer
 	// than the death is concerned, so the churn gate has to be held up for all of
 	// them until the death record is reclaimed. [Graph.removeNodeInfo] needs the
-	// same bag for its own scoped hold and for the bitmap strip, and passes it in
-	// rather than making this read it a second and third time.
+	// same bag for the bitmap strip, and passes it in rather than making this
+	// read it a second time.
 	return g.noteNodeLife(id, tx, false, false, bagLids)
 }
 

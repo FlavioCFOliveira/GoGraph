@@ -46,8 +46,9 @@ package lpg
 //     record so the release names exactly the labels the raise took.
 //
 // The three overlap deliberately: a node deleted through [Graph.removeNodeInfo]
-// is held by its life record AND by one deferred removal per label AND by the
-// scoped hold that call takes across the whole retirement. Redundant holds
+// is held by its life record AND by one deferred removal per label, both raised
+// before the tombstone flip (the scoped hold rmp #2686 added across the whole
+// retirement was redundant with them and removed by rmp #2963). Redundant holds
 // over-count, which is the safe direction; a single missing hold is the unsafe
 // one.
 //

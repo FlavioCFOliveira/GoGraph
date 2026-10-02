@@ -1050,6 +1050,10 @@ func TestLabelChurnGate_ReviveAbortedPinsTheGate(t *testing.T) {
 // with every core saturated), nor any other test in this package. With the
 // pre-#2687 order restored as well, removing the hold fails it in 86 of 100
 // runs, and the version before rmp #2944 caught that double mutant in 0 of 100.
+//
+// The scoped hold itself was removed by rmp #2963. This test is kept as the
+// reader-side check on the window; the deterministic guard on the gate is
+// TestRetireHold_GateRaisedAcrossStripAndFlip.
 func TestLabelChurnGate_ScopedHoldSpansTheTombstoneFlip(t *testing.T) {
 	const population = 300
 	keys := make([]string, population)
