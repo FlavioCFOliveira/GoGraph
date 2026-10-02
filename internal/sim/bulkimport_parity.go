@@ -20,41 +20,23 @@ package sim
 // (type, properties, weight) on every pair, including the parallel twins a
 // pair-addressed carriage would collapse.
 //
-// # The fault regimes this scenario CANNOT reach, and why
+// # Fault regimes
 //
-// Read this before assuming bulk-import publication is fault-covered. It is not.
+// Arms 1 to 4 run against a real directory through the OS-backed entry points
+// ([bulkimport.Publish], [bulkimport.ImportInto]) and prove the publish's
+// OUTCOME state: the parity of the published image, the reopen being
+// repeatable, the durable state a crashed import leaves behind (RECONSTRUCTED
+// by moving a completed snapshot to the assembly name), and byte-reproducibility.
 //
-// Every other durability scenario in this package injects its faults through
-// [SimDisk], which reaches the persistence packages via their filesystem seams
-// (`wal.OpenFS`, `recovery.OpenFS`, `snapshot.WriteSnapshotFullWithMapperCodecAndConstraintsFS`
-// and siblings). [bulkimport.Publish] has NO such seam: it calls `os.MkdirAll`
-// and `os.ReadDir` directly and writes through the NON-seamed
-// [snapshot.WriteSnapshotFullCtx], and [bulkimport.ImportInto] takes a
-// `storeDir string` plus an `Options` that carries no filesystem. There is
-// therefore no way to put a SimDisk underneath a publish without changing the
-// production API, which is out of scope here and filed for a user decision as
-// rmp #2518.
-//
-// Concretely, the following are UNREACHABLE by this scenario, and no test below
-// should be read as covering them:
-//
-//   - ENOSPC part-way through writing the snapshot components.
-//   - A failing fsync on a component file, on the staging directory, or on the
-//     store's parent directory.
-//   - A failing or crash-interrupted rename of `snapshot.tmp` to `snapshot` —
-//     the exact instant [bulkimport.Publish]'s atomicity claim rests on.
-//   - A crash landing INSIDE the publish window, with the crash-window
-//     non-determinism (`ArmRenameWritebackForPath`) that
-//     `checkpoint-crash-storm` uses to select which dirent survived.
-//
-// What IS reachable against a real directory, and is exercised below, is the
-// publish's OUTCOME state rather than its interruption: the parity of the
-// published image, the reopen being repeatable, and the durable state a crashed
-// import leaves behind — RECONSTRUCTED by moving a completed snapshot to the
-// assembly name, which is byte-for-byte what a crash between assembly and rename
-// leaves, but is not an interrupted publish. The distinction matters: this
-// scenario proves recovery's treatment of that state, not the writer's behaviour
-// while reaching it.
+// Arm 5 (bulkimport_faults.go) interrupts the publish itself. Since rmp #2518
+// the package exposes [bulkimport.PublishFS] and [bulkimport.ImportIntoFS],
+// which route the empty-directory check, the store-directory creation and the
+// whole snapshot write through a filesystem seam, so a [SimDisk] can sit
+// underneath a publish. That arm injects ENOSPC (eager and at sync), fsync
+// faults, a rename fault on `snapshot.tmp` -> `snapshot`, a crash at every
+// filesystem operation of the publish, and a crash after the publish rename
+// with the rename written back, and requires every outcome to be all or
+// nothing.
 
 import (
 	"context"
@@ -403,31 +385,16 @@ type bulkImportEvidence struct {
 	// wall clock, whose rendering drops a trailing zero about one run in ten — a
 	// measured 654-vs-655-byte swing that has nothing to do with the graph.
 	//
-	// # dataBytes is seed-stable; dataDigest is NOT, and that is the package's
-	// behaviour rather than a defect
+	// # Both dataBytes and dataDigest are seed-stable
 	//
-	// A publish of the same records twice produces data components of the same
-	// names and the same sizes, but NOT the same bytes. The cause was isolated by
-	// measurement, not inferred: publishing the identical record slices twice in
-	// one process already diverges, while the same fixture stripped to NO
-	// properties, and the same fixture reduced to exactly ONE property per node
-	// and per edge, are both byte-identical.
-	//
-	// So the divergence is Go map iteration order over
-	// [bulkimport.Node.Properties] / [bulkimport.Edge.Properties] whenever an
-	// item carries two or more properties. Those fields are maps, so no caller
-	// can avoid it. [bulkimport.Node] documents that properties are set "in
-	// map-iteration order, which is unspecified. That is safe because each key is
-	// written once, so no ordering can change the result" — and that claim holds
-	// exactly as written: the LOGICAL result is identical every run, which the
-	// parity pass re-proves on every execution of this scenario. What is not
-	// promised, and is not true, is byte-identity of the physical image.
-	//
-	// The practical consequence, worth knowing before relying on it: two imports
-	// of identical data cannot be compared by checksum, and bulk-import snapshots
-	// will not deduplicate in content-addressed storage.
-	// [bulkImportCheckByteBoundary] pins this boundary so a future change to it
-	// is noticed rather than assumed.
+	// A publish of the same records twice produces byte-identical data
+	// components. Until rmp #2519 it did not: the importer applied each item's
+	// Properties map in Go iteration order, which fixed the property-key
+	// interning order and each item's property-bag layout, and the snapshot
+	// writer serialised a promoted bag in map order. The importer now applies
+	// properties in ascending key order and the writer emits each node's records
+	// in ascending key-index order, so the physical image is a deterministic
+	// function of the records. [bulkImportCheckByteBoundary] asserts it.
 	dataComponents []string
 	dataDigest     string
 	dataBytes      int64
@@ -465,6 +432,8 @@ type bulkImportEvidence struct {
 	// byteBoundary is the measured byte-reproducibility of the publish across
 	// the three property regimes. See [bulkImportCheckByteBoundary].
 	byteBoundary bulkImportByteBoundary
+	// faults is what the fault arm measured. See [bulkImportCheckFaults].
+	faults bulkImportFaultEvidence
 }
 
 // bulkImportLifecycle records the package's lifecycle contract AS MEASURED,
@@ -539,7 +508,7 @@ func bulkImportParityScenario() Scenario {
 		Name: ScenarioBulkImportParity,
 		Description: "offline bulk-import publication round-tripped through real recovery: exact node/label/property/" +
 			"per-handle-edge parity against a harness model, plus the measured lifecycle contract " +
-			"(fault injection is out of reach — see rmp #2518)",
+			"and the publish under ENOSPC, fsync, rename and crash faults through the filesystem seam (rmp #2518)",
 		Mode:        ModeDeterministic,
 		DefaultSeed: 0xB01C1770,
 		run:         runBulkImportParity,
@@ -580,11 +549,13 @@ func bulkImportReport(seed uint64, v []Violation) *SimReport {
 //  3. CRASHED-IMPORT OUTCOME. A completed snapshot is moved to the assembly name
 //     in a fresh directory, reproducing the on-disk state a crash between
 //     assembly and rename leaves, and recovery must find nothing and remove the
-//     debris. See the file header: this is the crash's outcome state, NOT an
-//     interrupted publish, which no seam in this package can produce.
-//  4. BYTE-REPRODUCIBILITY BOUNDARY. The same records are published twice at
-//     three property regimes, pinning where the published image is byte-stable
-//     and where it is not (see [bulkImportCheckByteBoundary]).
+//     debris. This is the crash's outcome state; arm 5 interrupts a real publish.
+//  4. BYTE-REPRODUCIBILITY. The same records are published twice at three
+//     property regimes, and every regime must publish byte-identical data
+//     components (see [bulkImportCheckByteBoundary]).
+//  5. FAULTS. The publish runs through the filesystem seam over a [SimDisk]
+//     under every fault regime, and each outcome must be all or nothing (see
+//     [bulkImportCheckFaults]).
 func runBulkImportParityWith(
 	ctx context.Context, seed uint64, opts bulkImportOptions,
 ) (*bulkImportEvidence, *SimReport, error) {
@@ -674,13 +645,21 @@ func runBulkImportParityWith(
 	}
 	v = append(v, crashViolations...)
 
-	// --- Arm 4: the byte-reproducibility boundary. ---
+	// --- Arm 4: byte-reproducibility. ---
 	boundary, boundaryViolations, err := bulkImportCheckByteBoundary(ctx, nodes, edges)
 	if err != nil {
 		return ev, nil, err
 	}
 	ev.byteBoundary = boundary
 	v = append(v, boundaryViolations...)
+
+	// --- Arm 5: the publish under injected faults (bulkimport_faults.go). ---
+	faults, faultViolations, err := bulkImportCheckFaults(ctx, seed, model, b, nodes, edges)
+	if err != nil {
+		return ev, nil, err
+	}
+	ev.faults = faults
+	v = append(v, faultViolations...)
 
 	v = append(v, bulkImportCheckLifecycle(&ev.lifecycle)...)
 
@@ -1141,49 +1120,48 @@ func bulkImportCheckEdges(
 // bulk-import publish at each of three property regimes.
 type bulkImportByteBoundary struct {
 	// multiStable is whether the full fixture — most items carrying two or more
-	// properties — published byte-identically across repeated publishes.
+	// properties, every property kind represented — published byte-identically
+	// in every one of the attempted publish pairs.
 	multiStable bool
 	// noneStable and singleStable are the same measurement for the fixture
 	// stripped to no properties at all, and reduced to exactly one property per
 	// node and per edge.
 	noneStable   bool
 	singleStable bool
-	// attempts is how many publish pairs the multi-property regime was given
-	// before being declared unstable.
+	// attempts is how many publish pairs the multi-property regime ran.
 	attempts int
 }
 
-// bulkImportCheckByteBoundary measures where byte-reproducibility of a
-// bulk-import publish begins and ends, and returns violations when the boundary
-// has moved from what was measured under rmp #2466.
+// bulkImportByteAttempts is how many publish pairs the multi-property regime
+// runs. Every pair must be byte-identical; under the pre-#2519 importer the
+// first pair already differed, so three pairs make a lucky pass of a map-order
+// writer vanishingly unlikely.
+const bulkImportByteAttempts = 3
+
+// bulkImportCheckByteBoundary asserts that a bulk-import publish is
+// byte-reproducible (rmp #2519): publishing the SAME records twice must yield
+// byte-identical data components at every property regime — the full property
+// matrix, no properties, and one property per item. manifest.json is excluded
+// because its created_at is a wall clock (see docs/test-layers.md).
 //
-// The three regimes are the experiment that isolated the cause. Publishing the
-// SAME record slices twice diverges once items carry two or more properties, and
-// stops diverging when they carry one or none — which identifies Go map
-// iteration over the Properties maps as the whole of it, and rules out a
-// timestamp, a pointer address, or the fixture's own construction.
-//
-// A regime that flips is not necessarily a regression: making the writer sort
-// property keys would turn multiStable true, which is an improvement. It is
-// reported so the change is noticed and this scenario's documentation updated,
-// rather than the old claim quietly becoming false.
+// The no-property and single-property regimes are the controls that isolated
+// the original defect under rmp #2466: they were stable while the full matrix
+// was not, which identified map iteration over the Properties maps as the
+// cause. They are kept so a regression is located as well as detected.
 func bulkImportCheckByteBoundary(
 	ctx context.Context, nodes []bulkimport.Node, edges []bulkimport.Edge[int64],
 ) (bulkImportByteBoundary, []Violation, error) {
 	var b bulkImportByteBoundary
 
-	// The multi-property regime is given a few attempts before being called
-	// unstable: "differs" needs only one witness, and demanding it from a single
-	// pair would be a flake if two map walks ever coincided.
-	const attempts = 3
-	for i := 0; i < attempts; i++ {
+	b.multiStable = true
+	for i := 0; i < bulkImportByteAttempts; i++ {
 		b.attempts++
 		same, err := bulkImportPublishesIdentically(ctx, nodes, edges)
 		if err != nil {
 			return b, nil, err
 		}
-		b.multiStable = same
 		if !same {
+			b.multiStable = false
 			break
 		}
 	}
@@ -1202,32 +1180,40 @@ func bulkImportCheckByteBoundary(
 	}
 	b.singleStable = singleSame
 
+	return b, bulkImportCheckByteStability(b), nil
+}
+
+// bulkImportCheckByteStability turns a measured boundary into violations. It is
+// separate from the measurement so a test can prove each clause can fail.
+func bulkImportCheckByteStability(b bulkImportByteBoundary) []Violation {
 	var v []Violation
-	if b.multiStable {
+	if b.attempts == 0 {
 		v = append(v, Violation{
 			Kind: ViolationOracleDeviation, Op: "<bulk import publish>",
-			Message: "bulk-import publication is now byte-reproducible with multi-property items, " +
-				"which it was not when this scenario was written (rmp #2466). That is likely an " +
-				"improvement — property keys are presumably ordered now — but the documented boundary " +
-				"is stale and must be updated",
+			Message: "the byte-reproducibility arm ran no publish pair, so it proves nothing",
+		})
+	}
+	if !b.multiStable {
+		v = append(v, Violation{
+			Kind: ViolationOracleDeviation, Op: "<bulk import publish>",
+			Message: "two publishes of identical multi-property records produced different data " +
+				"components: the publish is not byte-reproducible (rmp #2519)",
 		})
 	}
 	if !b.noneStable {
 		v = append(v, Violation{
 			Kind: ViolationOracleDeviation, Op: "<bulk import publish>",
-			Message: "a property-free bulk import no longer publishes byte-identically; the byte " +
-				"divergence is no longer explained by property map order alone, so a second source " +
-				"of non-determinism has appeared in the publish path",
+			Message: "two publishes of identical property-free records produced different data " +
+				"components, so the publish path has a source of non-determinism unrelated to properties",
 		})
 	}
 	if !b.singleStable {
 		v = append(v, Violation{
 			Kind: ViolationOracleDeviation, Op: "<bulk import publish>",
-			Message: "a single-property-per-item bulk import no longer publishes byte-identically; " +
-				"the byte divergence is no longer explained by property map order alone",
+			Message: "two publishes of identical single-property records produced different data components",
 		})
 	}
-	return b, v, nil
+	return v
 }
 
 // bulkImportPublishesIdentically publishes the same records twice and reports
@@ -1296,8 +1282,9 @@ func bulkImportSingleProperty(
 // It is a RECONSTRUCTION, not an interruption: a completed snapshot is published
 // to a scratch directory and then moved to `snapshot.tmp` in a fresh one. That
 // is byte-for-byte the directory shape the crash leaves, so what recovery does
-// with it is genuinely measured — but the writer was never actually interrupted,
-// and no seam in this package can interrupt it (see the file header, rmp #2518).
+// with it is genuinely measured — but the writer was never actually interrupted
+// here. The interrupted publish is arm 5's, through the filesystem seam
+// (bulkimport_faults.go, rmp #2518).
 func bulkImportCheckCrashedImport(
 	ctx context.Context, root string,
 	nodes []bulkimport.Node, edges []bulkimport.Edge[int64], ev *bulkImportEvidence,

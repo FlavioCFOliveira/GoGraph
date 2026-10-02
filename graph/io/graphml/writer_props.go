@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -461,6 +462,11 @@ func WriteWithPropsCtx(ctx context.Context, w io.Writer, g *lpg.Graph[string, in
 		// Emit the node's labels under the reserved label key (#1793). Labels
 		// are JSON-encoded so any label text (including commas) round-trips.
 		if labels := g.NodeLabels(name); len(labels) > 0 {
+			// NodeLabels returns a fresh slice in unspecified order — a node
+			// with more than eight labels holds them in a Go map — so sort it,
+			// keeping the export a deterministic function of the graph, as the
+			// property keys already are (rmp #2519).
+			slices.Sort(labels)
 			lj, mErr := json.Marshal(labels)
 			if mErr != nil {
 				encErr = fmt.Errorf("graphml: node %q labels: %w", name, mErr)

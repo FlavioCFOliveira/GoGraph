@@ -135,10 +135,11 @@ type walWatermarkSample struct {
 //     that are actually on disk.
 //
 // The second form deliberately asserts NO absolute size. rmp #2521 measured that
-// the durable image varies with process wall-clock time, because a commit marker
-// encodes the instant at which it was written; an oracle pinning a byte count
-// would be pinning the clock. Monotonicity and the frame-boundary relation are
-// invariant under that variation.
+// the durable image is not byte-stable across runs in one process: the hidden
+// node key "__cx_"+hex(n) is minted from a process-global counter
+// (cypher/exec/create_node.go), so its width tracks how many nodes the process
+// minted before. An oracle pinning a byte count would be pinning that history.
+// Monotonicity and the frame-boundary relation are invariant under it.
 type WALWatermarkEvidence struct {
 	// Label names the arm in a failure message.
 	Label string
@@ -419,8 +420,8 @@ const tmplCreateWALBeacon = "CREATE (n:WALBeacon {name:$name})"
 // WAL-backed [SimStore] whose frames the engine composes, observed after every
 // acknowledged commit.
 //
-// It is the arm that proves the oracle is size-agnostic. The engine's commit
-// markers encode the instant they were written, so the durable image is not
+// It is the arm that proves the oracle is size-agnostic. The engine's generated
+// node keys come from a process-global counter, so the durable image is not
 // byte-stable across runs (rmp #2521); the relative clauses — monotonicity, the
 // accepted-bytes ceiling, and the frame-boundary relation — hold regardless,
 // and are exactly what a watermark defect would break.

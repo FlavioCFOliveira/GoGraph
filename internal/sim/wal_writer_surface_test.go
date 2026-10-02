@@ -64,8 +64,8 @@ func TestWALWatermark_DirectExact(t *testing.T) {
 
 // TestWALWatermark_EngineIsSizeAgnostic is the arm against the REAL stack, and it
 // is also the standing proof that the oracle does not depend on an absolute byte
-// size. The engine's commit markers encode the instant they were written, so the
-// durable image is not byte-stable across runs (rmp #2521); the clauses the
+// size. The engine's generated node keys come from a process-global counter, so
+// the durable image is not byte-stable across runs (rmp #2521); the clauses the
 // oracle applies here are monotonicity, the accepted-bytes ceiling and the
 // frame-boundary relation, none of which reference a constant.
 func TestWALWatermark_EngineIsSizeAgnostic(t *testing.T) {

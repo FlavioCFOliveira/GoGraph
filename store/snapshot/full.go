@@ -419,6 +419,37 @@ func WriteSnapshotFullWithWeightCodecCtx[N comparable, W any](
 	return err
 }
 
+// WriteSnapshotFullWithWeightCodecCtxFS is the filesystem-seam variant of
+// [WriteSnapshotFullWithWeightCodecCtx]: it routes every filesystem operation
+// of the snapshot publish through fsys instead of the default OS backend. It is
+// the entry point store/bulkimport's seamed publish uses, so the deterministic-
+// simulation harness (internal/sim) can inject faults into a bulk-import
+// publish and crash it mid-way (rmp #2518).
+//
+// The fsys parameter type ([fileSystem]) is intentionally unexported, as on
+// [WriteSnapshotFullWithMapperCodecAndConstraintsFS]. Passing osBackend{}
+// reproduces [WriteSnapshotFullWithWeightCodecCtx] byte for byte. A nil wcodec
+// behaves exactly as [WriteSnapshotFullCtx] over fsys.
+func WriteSnapshotFullWithWeightCodecCtxFS[N comparable, W any](
+	ctx context.Context,
+	fsys fileSystem,
+	dir string,
+	c *csr.CSR[W],
+	g *lpg.Graph[N, W],
+	wcodec weightEncoder[W],
+) error {
+	defer metrics.Time("store.snapshot.WriteSnapshotFullWithWeightCodecCtxFS").Stop()
+	if fsys == nil {
+		metrics.IncCounter("store.snapshot.WriteSnapshotFullWithWeightCodecCtxFS.errors", 1)
+		return errors.New("snapshot: nil filesystem")
+	}
+	err := captureAndWriteW[N, W](ctx, fsys, dir, c, g, nil, wcodec, nil, nil)
+	if err != nil {
+		metrics.IncCounter("store.snapshot.WriteSnapshotFullWithWeightCodecCtxFS.errors", 1)
+	}
+	return err
+}
+
 // WriteCapture publishes a [Capture] taken earlier to dir, emitting
 // constraints.bin from constraints and indexdefs.bin from indexDefs (each
 // omitted when nil or empty). It touches no graph: every graph-derived byte was

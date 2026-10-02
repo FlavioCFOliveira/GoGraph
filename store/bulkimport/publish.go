@@ -116,6 +116,68 @@ func Publish[W any](ctx context.Context, storeDir string, b *Builder[W]) (Publis
 // size, so a float64 or int64 import publishes byte-identical bytes with or
 // without it. A nil wcodec behaves exactly as [Publish].
 func PublishWithWeightCodec[W any](ctx context.Context, storeDir string, b *Builder[W], wcodec txn.WeightCodec[W]) (PublishResult, error) {
+	return publish[W](ctx, nil, storeDir, b, wcodec)
+}
+
+// fileSystem is the filesystem seam [PublishFS] and [ImportIntoFS] publish
+// through. Its method set is the store/snapshot package's own seam plus
+// ReadDir, which the empty-directory check needs, so one value both serves this
+// package's directory operations and is handed on unchanged to
+// [snapshot.WriteSnapshotFullWithWeightCodecCtxFS] for the snapshot write.
+//
+// The interface is intentionally unexported, exactly as store/snapshot's is: an
+// external package cannot name it, but it can pass any value that satisfies it.
+// Production callers use [Publish], [PublishWithWeightCodec] and [ImportInto],
+// which perform the same operations directly against the operating system; the
+// deterministic-simulation harness (internal/sim) supplies an in-memory disk so
+// it can inject ENOSPC, sync and rename faults into a publish and crash it part
+// way through (rmp #2518).
+type fileSystem interface {
+	// ReadDir lists the entries of dir. A missing dir is reported with an error
+	// wrapping [fs.ErrNotExist], as [os.ReadDir] does.
+	ReadDir(dir string) ([]fs.DirEntry, error)
+	MkdirAll(dir string, perm fs.FileMode) error
+	Create(path string) (snapshot.File, error)
+	OpenComponent(path string) (snapshot.ReadFile, error)
+	Open(path string) (snapshot.ReadFile, error)
+	Rename(oldPath, newPath string) error
+	Remove(path string) error
+	RemoveAll(path string) error
+	Stat(path string) (fs.FileInfo, error)
+	DirSync(path string) error
+	ParentDirSync(childPath string) error
+}
+
+// errNilFS is returned by the seamed entry points when given a nil filesystem.
+var errNilFS = errors.New("bulkimport: nil filesystem")
+
+// PublishFS is [PublishWithWeightCodec] over a caller-supplied filesystem: the
+// empty-directory check, the store-directory creation and the whole snapshot
+// write go through fsys instead of the operating system. The contract is
+// [Publish]'s in full, including what is and is not atomic; a nil wcodec
+// behaves exactly as [Publish].
+//
+// It exists for the deterministic-simulation harness, which backs fsys with an
+// in-memory disk to prove the publish is all-or-nothing under injected faults.
+// The fsys parameter type is intentionally unexported; see [fileSystem]. A nil
+// fsys is refused with an error rather than silently falling back to the
+// operating system.
+func PublishFS[W any](
+	ctx context.Context, fsys fileSystem, storeDir string, b *Builder[W], wcodec txn.WeightCodec[W],
+) (PublishResult, error) {
+	if fsys == nil {
+		return PublishResult{}, errNilFS
+	}
+	return publish[W](ctx, fsys, storeDir, b, wcodec)
+}
+
+// publish is the body shared by the OS-backed and seamed entry points. A nil
+// fsys selects the operating system, through exactly the calls [Publish] made
+// before the seam existed, so the OS-backed entry points are unchanged in
+// behaviour.
+func publish[W any](
+	ctx context.Context, fsys fileSystem, storeDir string, b *Builder[W], wcodec txn.WeightCodec[W],
+) (PublishResult, error) {
 	var res PublishResult
 	if b == nil {
 		return res, fmt.Errorf("bulkimport: nil builder")
@@ -130,10 +192,10 @@ func PublishWithWeightCodec[W any](ctx context.Context, storeDir string, b *Buil
 	if err := ctx.Err(); err != nil {
 		return res, err
 	}
-	if err := requireEmptyDir(storeDir); err != nil {
+	if err := requireEmptyDir(fsys, storeDir); err != nil {
 		return res, err
 	}
-	if err := os.MkdirAll(storeDir, 0o750); err != nil {
+	if err := mkdirAll(fsys, storeDir); err != nil {
 		return res, fmt.Errorf("bulkimport: create store directory %q: %w", storeDir, err)
 	}
 
@@ -143,9 +205,14 @@ func PublishWithWeightCodec[W any](ctx context.Context, storeDir string, b *Buil
 	// reach the snapshot package as an untyped nil, or its own nil check sees a
 	// non-nil interface holding a nil value and it calls through it.
 	var perr error
-	if wcodec != nil {
+	switch {
+	case fsys != nil && wcodec != nil:
+		perr = snapshot.WriteSnapshotFullWithWeightCodecCtxFS[string, W](ctx, fsys, snapDir, c, g, wcodec)
+	case fsys != nil:
+		perr = snapshot.WriteSnapshotFullWithWeightCodecCtxFS[string, W](ctx, fsys, snapDir, c, g, nil)
+	case wcodec != nil:
 		perr = snapshot.WriteSnapshotFullWithWeightCodecCtx[string, W](ctx, snapDir, c, g, wcodec)
-	} else {
+	default:
 		perr = snapshot.WriteSnapshotFullCtx[string, W](ctx, snapDir, c, g)
 	}
 	if perr != nil {
@@ -164,8 +231,16 @@ func PublishWithWeightCodec[W any](ctx context.Context, storeDir string, b *Buil
 // which is harmless in itself, but a directory with debris in it is not one whose
 // contents this function can vouch for. Refusing is the honest answer; the
 // operator deletes the directory or picks another.
-func requireEmptyDir(dir string) error {
-	entries, err := os.ReadDir(dir)
+func requireEmptyDir(fsys fileSystem, dir string) error {
+	var (
+		entries []fs.DirEntry
+		err     error
+	)
+	if fsys != nil {
+		entries, err = fsys.ReadDir(dir)
+	} else {
+		entries, err = os.ReadDir(dir)
+	}
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		return nil // will be created
@@ -199,10 +274,31 @@ func requireEmptyDir(dir string) error {
 func ImportInto[W any](
 	ctx context.Context, storeDir string, opts Options, nodes []Node, edges []Edge[W],
 ) (PublishResult, error) {
+	return importInto[W](ctx, nil, storeDir, opts, nodes, edges)
+}
+
+// ImportIntoFS is [ImportInto] over a caller-supplied filesystem; every
+// filesystem operation of the import goes through fsys, as on [PublishFS]. The
+// fsys parameter type is intentionally unexported; see [fileSystem]. A nil fsys
+// is refused with an error.
+func ImportIntoFS[W any](
+	ctx context.Context, fsys fileSystem, storeDir string, opts Options, nodes []Node, edges []Edge[W],
+) (PublishResult, error) {
+	if fsys == nil {
+		return PublishResult{}, errNilFS
+	}
+	return importInto[W](ctx, fsys, storeDir, opts, nodes, edges)
+}
+
+// importInto is the body shared by [ImportInto] and [ImportIntoFS]; a nil fsys
+// selects the operating system.
+func importInto[W any](
+	ctx context.Context, fsys fileSystem, storeDir string, opts Options, nodes []Node, edges []Edge[W],
+) (PublishResult, error) {
 	var res PublishResult
 	// Refuse before doing any work, so a caller with a bad target does not pay for
 	// the whole build first.
-	if err := requireEmptyDir(storeDir); err != nil {
+	if err := requireEmptyDir(fsys, storeDir); err != nil {
 		return res, err
 	}
 	if opts.ExpectNodes == 0 {
@@ -218,5 +314,14 @@ func ImportInto[W any](
 	if _, err := b.Finish(); err != nil {
 		return res, err
 	}
-	return Publish[W](ctx, storeDir, b)
+	return publish[W](ctx, fsys, storeDir, b, nil)
+}
+
+// mkdirAll creates dir through fsys, or through the operating system when fsys
+// is nil.
+func mkdirAll(fsys fileSystem, dir string) error {
+	if fsys != nil {
+		return fsys.MkdirAll(dir, 0o750)
+	}
+	return os.MkdirAll(dir, 0o750)
 }

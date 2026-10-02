@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
 	"time"
 
@@ -214,6 +215,10 @@ func WriteWithPropsCtx(ctx context.Context, w io.Writer, g *lpg.Graph[string, in
 		if len(labels) == 0 {
 			labels = nil
 		}
+		// NodeLabels returns a fresh slice in unspecified order — a node with
+		// more than eight labels holds them in a Go map — so sort it, keeping
+		// the export a deterministic function of the graph (rmp #2534).
+		slices.Sort(labels)
 		if err := enc.Encode(Record{Type: "node", ID: &names[id], Labels: labels}); err != nil {
 			metrics.IncCounter("graph.io.jsonl.WriteWithPropsCtx.errors", 1)
 			return written, err
@@ -256,13 +261,24 @@ func WriteWithPropsCtx(ctx context.Context, w io.Writer, g *lpg.Graph[string, in
 	}
 
 	// Phase 3: property records.
+	var propNames []string
 	for id := uint64(0); id < maxID; id++ {
 		if !live[id] {
 			continue
 		}
 		nodeKey := names[id]
 		props := g.NodeProperties(nodeKey)
-		for propName, pv := range props {
+		// Emit in ascending key order, never in map-iteration order, so two
+		// exports of the same graph are byte-identical (rmp #2534). This is
+		// the GraphML writer's precedent. The reader applies each property
+		// record independently, so it depends on no order.
+		propNames = propNames[:0]
+		for propName := range props {
+			propNames = append(propNames, propName)
+		}
+		slices.Sort(propNames)
+		for _, propName := range propNames {
+			pv := props[propName]
 			if written&0xFFF == 0 {
 				if cerr := ctx.Err(); cerr != nil {
 					_ = bw.Flush()

@@ -1035,6 +1035,65 @@ The delete-scaling gates are split accordingly:
 | `TestDeleteWallTimeDoesNotDegradeAcrossCycles`, `TestDetachDeleteWallTimeDoesNotDegradeAcrossCycles` | soak | last/first **wall** ratio ≤ 2.5×, on a quiet machine |
 | `TestSingleStatementDeleteOfNinetyThousandNodes` | soak | an absolute 10 s budget for a 90 000-node single-statement delete |
 
+## Golden images: what is byte-stable, and what is not (rmp #2521)
+
+Read this before writing a test that pins a durable byte image or byte count.
+Determinism in this module is **logical**: the same input yields the same graph,
+the same op history and the same recovered state. For the WAL it is **not
+byte-level**, and a test that asserts an exact WAL size or digest is asserting
+something the engine does not promise.
+
+**The WAL field.** Every node a Cypher `CREATE` or `MERGE` creates gets a hidden
+external key `"__cx_" + hex(n)`, where `n` is drawn from the process-global
+counter `globalNodeCounter` (`cypher/exec/create_node.go:445-446`; the same
+counter at `cypher/exec/merge.go:653` and `cypher/exec/merge_pattern.go:1101`).
+The key is written into every WAL op frame that names the node, by
+`stringCodec.Encode` (`store/txn/codec.go:45-55`) as a uint32 length followed by
+the key bytes. The counter is shared by every engine in the process and is never
+reset, so the key's hex width — and therefore the frame's length field, its
+bytes and the whole image's size — depends on how many nodes the PROCESS minted
+before. Measured on the `edge-properties` scenario run four times in one test
+process: the WAL before its forced checkpoint was 2390, 2421, 2447 and 2487
+bytes, with identical op histories; the first differing frame carried
+`__cx_6b` in one run and `__cx_d7` in the next.
+
+**It is not the wall clock.** rmp #2521 was filed as "the WAL varies with
+process wall-clock time" (10 790 bytes at 4 ms into a process against 10 850
+from ~600 ms), and an earlier version of `docs/dst.md` attributed it to
+varint-encoded per-frame timestamps. Both are refuted: no WAL frame carries a
+timestamp — the commit marker's MVCC commit instant is a logical counter written
+as a fixed-width uint64 (`store/txn/txn.go:2488-2492`) — and a fresh process
+that sleeps 700 ms before writing the same 50 Cypher `CREATE`s produces a WAL
+byte-identical to one that does not sleep. Process age only correlated with the
+number of nodes earlier tests in the same process had minted.
+
+**Why it stays.** The counter is process-global so that generated keys are
+unique across every engine in the process, and it is seeded once past the
+largest `__cx_` suffix already interned, so a reopened store never re-mints a
+live key (see the `globalNodeCounter` documentation). Making it per-store would
+change key generation, which is an engine change, not a test convenience.
+
+**The snapshot side.** The same keys are persisted in `mapper.bin`, so a
+snapshot of a Cypher-built graph inherits the exposure: measured on the same
+four runs, `mapper.bin` changed size (2051 against 2066 bytes) and every other
+component (`csr.bin`, `labels.bin`, `properties.bin`, `edgehandles.bin`) kept
+its size but changed bytes. Separately, `manifest.json` carries `created_at`,
+which IS the wall clock (`time.Now().UTC()` at `store/snapshot/full.go:757` and
+`store/snapshot/writer.go:634`), and the component CRCs it records.
+
+**What a test may assert instead.**
+
+- Relative WAL facts derived from the frames actually on disk: monotonic
+  counters, the durable offset landing on a frame boundary, a non-empty WAL
+  before a checkpoint and an empty one after (as `internal/sim`'s watermark and
+  snapshot-boundary oracles do).
+- Byte-identity of snapshot data components, excluding `manifest.json`, for a
+  graph whose node keys the caller supplied. `store/bulkimport` publishes are
+  byte-reproducible on that basis (rmp #2519), and so are the `graph/io`
+  encoders (rmp #2534).
+- Within ONE fresh process, an image produced before any other node was minted
+  — fragile, and not recommended.
+
 ## Sample invocations
 
 ```bash

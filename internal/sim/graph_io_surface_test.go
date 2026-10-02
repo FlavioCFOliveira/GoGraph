@@ -157,26 +157,22 @@ func TestGraphIOSurface_CrossFormatVerdictIsFalsifiable(t *testing.T) {
 		t.Fatal("a recorded importer panic produced no violation")
 	}
 
-	// The byte-reproducibility oracle must be able to fire — and must NOT fire
-	// for the one encoder measured unstable, so a future fix there cannot break
-	// this run.
-	brokenStable := r
-	brokenStable.ExportStability = map[string]int{}
-	for k, n := range r.ExportStability {
-		brokenStable.ExportStability[k] = n
+	// The byte-reproducibility oracle must be able to fire, for every encoder
+	// it measures — the JSONL property-graph encoder included, which was exempt
+	// until rmp #2534.
+	for _, name := range sortedCopy(keysOf(r.ExportStability)) {
+		brokenStable := r
+		brokenStable.ExportStability = map[string]int{}
+		for k, n := range r.ExportStability {
+			brokenStable.ExportStability[k] = n
+		}
+		brokenStable.ExportStability[name] = graphIOStabilityRuns - 1
+		if len(CheckGraphIOSurface(&brokenStable)) == 0 {
+			t.Fatalf("a non-reproducible %s export produced no violation", name)
+		}
 	}
-	brokenStable.ExportStability["dot.Write"] = 3
-	if len(CheckGraphIOSurface(&brokenStable)) == 0 {
-		t.Fatal("a non-reproducible DOT export produced no violation")
-	}
-	exempt := r
-	exempt.ExportStability = map[string]int{}
-	for k, n := range r.ExportStability {
-		exempt.ExportStability[k] = n
-	}
-	exempt.ExportStability[graphIOUnstableEncoder] = graphIOStabilityRuns - 1
-	if len(CheckGraphIOSurface(&exempt)) != 0 {
-		t.Fatal("the exempted encoder's instability failed the verdict; the exemption is not in force")
+	if _, ok := r.ExportStability[graphIOJSONLPropsEncoder]; !ok {
+		t.Fatalf("%s was not measured for byte-reproducibility", graphIOJSONLPropsEncoder)
 	}
 }
 

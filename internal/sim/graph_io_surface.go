@@ -493,12 +493,10 @@ type GraphIOSurfaceResult struct {
 	AllocMeasured bool
 	// ExportStability maps an encoder to the number of repeat exports of the
 	// SAME graph that differed byte for byte from the first, out of
-	// graphIOStabilityRuns-1 repeats. Every encoder here is expected to be
-	// byte-reproducible EXCEPT jsonl.WriteWithProps, which emits one record per
-	// entry of the node's property map and therefore in Go's randomised map
-	// order. That one is witnessed rather than asserted, so a future fix does
-	// not fail the run; the canonical form the mutation sweep uses is asserted
-	// instead.
+	// graphIOStabilityRuns-1 repeats. Every encoder here must be
+	// byte-reproducible, and the verdict asserts it for all of them. Until
+	// rmp #2534 jsonl.WriteWithProps was exempt, because it emitted its
+	// property records in Go map order; it now emits them in ascending key order.
 	ExportStability map[string]int
 }
 
@@ -508,10 +506,10 @@ type GraphIOSurfaceResult struct {
 // probability well under a half per repeat.
 const graphIOStabilityRuns = 8
 
-// graphIOUnstableEncoder is the one encoder whose byte output is NOT asserted
-// stable, because it is measurably not. It is named once here so the exemption
-// is explicit rather than an omission from a list.
-const graphIOUnstableEncoder = "jsonl.WriteWithProps"
+// graphIOJSONLPropsEncoder names the JSONL property-graph encoder in
+// [GraphIOSurfaceResult.ExportStability]. It is held to byte-reproducibility
+// like every other encoder (rmp #2534).
+const graphIOJSONLPropsEncoder = "jsonl.WriteWithProps"
 
 // graphIOMeasureExportStability re-exports the same two models through every
 // encoder and counts how many repeats differ from the first.
@@ -551,12 +549,12 @@ func graphIOMeasureExportStability(ctx context.Context, model *adjlist.AdjList[s
 			}
 			return b.Bytes(), nil
 		},
-		graphIOUnstableEncoder: func() ([]byte, error) {
+		graphIOJSONLPropsEncoder: func() ([]byte, error) {
 			var b bytes.Buffer
 			_, err := jsonl.WriteWithPropsCtx(ctx, &b, propModel)
 			return b.Bytes(), err
 		},
-		graphIOUnstableEncoder + "/canonical": func() ([]byte, error) {
+		graphIOJSONLPropsEncoder + "/canonical": func() ([]byte, error) {
 			var b bytes.Buffer
 			_, err := jsonl.WriteWithPropsCtx(ctx, &b, propModel)
 			return graphIOCanonicalJSONLProps(b.Bytes()), err
@@ -1036,12 +1034,10 @@ func graphIOMutationSweep(
 	if _, err := jsonl.WriteWithPropsCtx(ctx, &propBuf, propModel); err != nil {
 		return nil, 0, 0, fmt.Errorf("jsonl props export: %w", err)
 	}
-	// jsonl.WriteWithProps emits one "property" record per entry of the node's
-	// property MAP, in Go map-iteration order, so two exports of the same graph
-	// differ byte for byte (measured: 4 of 7 repeat exports differed; the
-	// GraphML property writer, which emits in a fixed key order, differed in 0
-	// of 7). A seed-derived byte offset into an unstable artefact is not
-	// reproducible, so the sweep mutates the CANONICAL form. See
+	// The sweep mutates the CANONICAL form of the export. That was required
+	// while jsonl.WriteWithProps emitted its property records in Go map order
+	// (rmp #2534); the writer is byte-stable now, and the canonical form is kept
+	// so the seed-derived mutation offsets stay exactly where they were. See
 	// [graphIOCanonicalJSONLProps].
 	propSrc := graphIOCanonicalJSONLProps(propBuf.Bytes())
 
@@ -1133,11 +1129,10 @@ func graphIOMutationSweep(
 // graphIOCanonicalJSONLProps returns src with its "property" records sorted,
 // leaving every other record in place.
 //
-// It exists because jsonl.WriteWithProps walks the node's property MAP, so the
-// order of its property records is Go's randomised map order and two exports of
-// the same graph are not byte-identical. The GraphML property writer emits in a
-// fixed key order and is byte-stable, so this canonicalisation is needed for the
-// JSONL artefact alone. The writer already emits every property record after
+// It was introduced because jsonl.WriteWithProps used to walk the node's
+// property MAP, so its property records came out in Go's randomised order. The
+// writer now sorts by key (rmp #2534); the canonical form is retained so the
+// mutation sweep's seed-derived offsets are unchanged. The writer emits every property record after
 // every node record, so sorting that suffix preserves the ordering the reader
 // requires (a property record must follow the node record it names).
 func graphIOCanonicalJSONLProps(src []byte) []byte {
@@ -1332,14 +1327,11 @@ func CheckGraphIOSurface(r *GraphIOSurfaceResult) []Violation {
 				m.Format, m.Kind, m.Offset, m.Source))
 		}
 	}
-	// --- byte-reproducibility. Every encoder but the one measured unstable must
-	// produce identical bytes for identical input; the canonical form of the
-	// unstable one must be stable, because the mutation sweep's seed-derived
-	// offsets are drawn against it. ---
+	// --- byte-reproducibility. Every encoder must produce identical bytes for
+	// identical input, the JSONL property-graph encoder included (rmp #2534);
+	// the canonical JSONL form is asserted too, because the mutation sweep's
+	// seed-derived offsets are drawn against it. ---
 	for name, differed := range r.ExportStability {
-		if name == graphIOUnstableEncoder {
-			continue
-		}
 		if differed != 0 {
 			add("<io-export-stability>", fmt.Sprintf(
 				"%s produced different bytes for the same graph in %d of %d repeat exports — the export is not reproducible",
@@ -1467,7 +1459,7 @@ func CheckGraphIOSurfaceShape(r *GraphIOSurfaceResult) []Violation {
 	// writer this file exists to reach.
 	for _, name := range []string{
 		"dot.Write", "csv.Write", "jsonl.Write", "graphml.Write",
-		"graphml.WriteWithProps", graphIOUnstableEncoder, graphIOUnstableEncoder + "/canonical",
+		"graphml.WriteWithProps", graphIOJSONLPropsEncoder, graphIOJSONLPropsEncoder + "/canonical",
 	} {
 		if _, ok := r.ExportStability[name]; !ok {
 			add("<io-export-stability-shape>", name+" was not measured for byte-reproducibility")
