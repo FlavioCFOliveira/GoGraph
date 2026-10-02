@@ -56,6 +56,7 @@ package exec
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
@@ -65,6 +66,32 @@ import (
 // posting count exceeds the budget the operator was built with. It is a planning
 // signal, not a failure: the caller answers the query by scanning instead.
 var ErrSeekSetOverBudget = errors.New("exec: index seek set exceeds its posting budget")
+
+// SeekSetKeyTypeError is returned by [NodeByIndexSeekSet.Init] for a key whose
+// type the index does not hold. It wraps [ErrIndexTypeMismatch], so
+// errors.Is(err, ErrIndexTypeMismatch) matches it, and errors.As recovers the
+// key's position and kind.
+//
+// A hash index holds the nodes whose property has its one key type, and no
+// other: a node whose property is the integer 5 is absent from a string index,
+// while `n.s = 5` is true for it. A key of another type therefore cannot be
+// answered by the index alone, and skipping it would silently drop the nodes it
+// matches (rmp #2961). The planner declines such a key set and scans
+// (rmp #2954); a direct caller receives this error and must do the same.
+type SeekSetKeyTypeError struct {
+	// Index is the key's position in the key set the operator was built with.
+	Index int
+	// Kind is the key's kind.
+	Kind expr.Kind
+}
+
+// Error implements the error interface.
+func (e *SeekSetKeyTypeError) Error() string {
+	return fmt.Sprintf("exec: index seek set key %d of kind %s does not match the index key type", e.Index, e.Kind)
+}
+
+// Unwrap returns [ErrIndexTypeMismatch].
+func (e *SeekSetKeyTypeError) Unwrap() error { return ErrIndexTypeMismatch }
 
 // NodeByIndexSeekSet is a Volcano leaf operator that performs an equality lookup
 // on a property hash index for each of several keys, emitting each matching
@@ -121,12 +148,12 @@ func (op *NodeByIndexSeekSet) AtSnapshot(residual SeekResidual, proof SnapshotPr
 // Init probes the index once per distinct key and merges the results into one
 // ascending, duplicate-free run.
 //
-// A key whose type the index cannot serve is SKIPPED rather than failing the
-// query. That is a correctness requirement, not leniency: openCypher equality
-// across type groups is FALSE, so a key that cannot be in this index matches
-// nothing, and contributing nothing is the right answer. Failing instead would
-// turn `WHERE n.name IN ['a', 7]` into an error where the specification asks for
-// the rows matching 'a'.
+// A NULL key matches nothing and is skipped. A key of any other type the index
+// does not hold fails Init with a [*SeekSetKeyTypeError] before any id is
+// emitted: the index holds only the nodes whose property has its key type, so
+// such a key can match nodes the index does not contain, and skipping it would
+// silently under-return (rmp #2961). The planner never builds this operator for
+// such a key set (rmp #2954).
 func (op *NodeByIndexSeekSet) Init(ctx context.Context) error {
 	op.ctx = ctx
 	op.pos = 0
@@ -145,7 +172,7 @@ func (op *NodeByIndexSeekSet) Init(ctx context.Context) error {
 		next, err := op.idx.LookupAppend(op.keys[i], ids)
 		if err != nil {
 			if errors.Is(err, ErrIndexTypeMismatch) {
-				continue
+				return &SeekSetKeyTypeError{Index: i, Kind: op.keys[i].Kind()}
 			}
 			return err
 		}
