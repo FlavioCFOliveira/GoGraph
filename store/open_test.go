@@ -13,12 +13,15 @@ package store_test
 //   - A recovery that is not clean is refused with a typed error, leaves the
 //     directory untouched and the WAL lock free; that holds for the
 //     nil-error not-clean outcome and for fail-stop corruption alike.
+//   - With Options.AllowUnclean an unclean recovery opens read-only: the
+//     committed prefix is readable and every commit that would write refuses.
 //   - A SIGKILL, reopen and append cycle through store.Open loses no
 //     acknowledged commit.
 
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -32,6 +35,7 @@ import (
 	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph"
+	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
 	"github.com/FlavioCFOliveira/GoGraph/internal/subproc"
 	"github.com/FlavioCFOliveira/GoGraph/store"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
@@ -487,4 +491,207 @@ func TestOpen_SIGKILLReopenAppend_LosesNothingAcknowledged(t *testing.T) {
 	requireStrictlyIncreasing(t, walCommitSeqs(t, dir))
 	t.Logf("%d cycles, %d acknowledged commits, all recovered; WALTailOffset=%d",
 		cycles, len(acked), o.Recovery().WALTailOffset)
+}
+
+// ─── AllowUnclean: read-only open ───────────────────────────────────────────
+
+// corruptCRCInTxn flips the last byte of the first data frame of transaction
+// txnSeq in dir/wal, leaving every other byte as it was. The frame's CRC no
+// longer matches and a commit marker still follows it, so recovery reports a
+// fail-stop [wal.ErrCRCMismatch] and keeps every transaction before txnSeq.
+func corruptCRCInTxn(t *testing.T, dir string, txnSeq uint64) {
+	t.Helper()
+	raw := readWAL(t, dir)
+	r := bytes.NewReader(raw)
+	for {
+		f, derr := wal.Decode(r)
+		if derr != nil {
+			t.Fatalf("no data frame of transaction %d in the WAL", txnSeq)
+		}
+		op, oerr := recovery.Decode(f.Payload)
+		if oerr != nil {
+			t.Fatalf("recovery.Decode: %v", oerr)
+		}
+		if op.Version == txn.OpRecordV3 && op.TxnSeq == txnSeq && op.Kind != txn.OpCommit {
+			end := len(raw) - r.Len()
+			raw[end-1] ^= 0xFF
+			break
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "wal"), raw, 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+}
+
+// uncleanShapes are the two not-clean outcomes, each built over the keys
+// keep1, keep2, gone and with transaction 3 (gone) damaged.
+var uncleanShapes = []struct {
+	name   string
+	damage func(t *testing.T, dir string)
+	want   error
+}{
+	{"committed-txn-corrupt-op", func(t *testing.T, dir string) { injectUndecodableBodyInCommittedTxn(t, dir, 3) }, recovery.ErrCommittedTxnCorruptOp},
+	{"crc-mismatch", func(t *testing.T, dir string) { corruptCRCInTxn(t, dir, 3) }, wal.ErrCRCMismatch},
+}
+
+// readOnlyOptions is openOptions with AllowUnclean set.
+func readOnlyOptions() store.Options[string, float64] {
+	o := openOptions()
+	o.AllowUnclean = true
+	return o
+}
+
+// requirePrefix fails unless o's graph holds keep1 and keep2 and not gone.
+func requirePrefix(t *testing.T, o *store.Opened[string, float64]) {
+	t.Helper()
+	m := o.Graph().AdjList().Mapper()
+	if !has(m, "keep1") || !has(m, "keep2") {
+		t.Fatal("the committed prefix (keep1, keep2) is not readable")
+	}
+	for _, k := range []string{"gone", "ro-1", "ro-2", "ro-3"} {
+		if has(m, k) {
+			t.Fatalf("node %q is present: a damaged or refused transaction was applied", k)
+		}
+	}
+}
+
+// TestOpen_AllowUnclean_OpensReadOnly pins the read-only mode: an unclean
+// recovery with the opt-in opens, the committed prefix is readable, every
+// write path refuses with ErrReadOnlyStore, the WAL is not opened (lock free,
+// bytes unchanged), and a reopen sees exactly the same prefix.
+func TestOpen_AllowUnclean_OpensReadOnly(t *testing.T) {
+	t.Parallel()
+	for _, shape := range uncleanShapes {
+		t.Run(shape.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			buildCommittedWAL(t, dir, "keep1", "keep2", "gone")
+			shape.damage(t, dir)
+			before := readWAL(t, dir)
+
+			o, err := store.Open(dir, readOnlyOptions())
+			if err != nil {
+				t.Fatalf("store.Open with AllowUnclean: %v", err)
+			}
+			if !o.ReadOnly() || !o.Store().ReadOnly() || o.WAL() != nil {
+				t.Fatalf("ReadOnly()=%t Store().ReadOnly()=%t WAL()=%v: want a read-only open with no WAL writer",
+					o.ReadOnly(), o.Store().ReadOnly(), o.WAL())
+			}
+			if o.Recovery().IsClean() || !errors.Is(o.Recovery().TailErr, shape.want) {
+				t.Fatalf("Recovery(): IsClean=%t TailErr=%v, want not clean with %v",
+					o.Recovery().IsClean(), o.Recovery().TailErr, shape.want)
+			}
+			requirePrefix(t, o)
+			// No lock is held while the read-only store is open.
+			requireWALLockFree(t, dir)
+
+			st := o.Store()
+			mustRefuse := func(path string, err error) {
+				t.Helper()
+				if !errors.Is(err, store.ErrReadOnlyStore) || !errors.Is(err, txn.ErrReadOnlyStore) {
+					t.Fatalf("%s: got %v, want store.ErrReadOnlyStore", path, err)
+				}
+			}
+			tx := st.Begin()
+			if err := tx.AddNode("ro-1"); err != nil {
+				t.Fatalf("AddNode buffers before the commit is refused: %v", err)
+			}
+			mustRefuse("Commit", tx.Commit())
+			if err := tx.Rollback(); err != nil && !errors.Is(err, txn.ErrTxFinished) {
+				t.Fatalf("Rollback after a refused Commit: %v", err)
+			}
+			tx, err = st.BeginCtx(context.Background())
+			if err != nil {
+				t.Fatalf("BeginCtx: %v", err)
+			}
+			if err := tx.SetNodeProperty("ro-2", "p", lpg.StringValue("v")); err != nil {
+				t.Fatalf("SetNodeProperty: %v", err)
+			}
+			mustRefuse("CommitCtx", tx.CommitCtx(context.Background()))
+			tx = st.Begin()
+			if err := tx.AddEdge("ro-3", "keep1", 1); err != nil {
+				t.Fatalf("AddEdge: %v", err)
+			}
+			mustRefuse("CommitWALOnly", tx.CommitWALOnly(0))
+			// A transaction that buffered nothing writes nothing and succeeds,
+			// so a read that opens and closes a transaction is unaffected.
+			if err := st.Begin().Commit(); err != nil {
+				t.Fatalf("empty Commit on a read-only store: %v", err)
+			}
+			// Begin/Rollback leave no writer registered: the quiesce drains.
+			tx = st.Begin()
+			if err := tx.Rollback(); err != nil {
+				t.Fatalf("Rollback: %v", err)
+			}
+			if err := st.RunUnderCommitLock(func() error { return nil }); err != nil {
+				t.Fatalf("RunUnderCommitLock: %v", err)
+			}
+			requirePrefix(t, o)
+
+			if err := o.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			if err := o.Close(); err != nil {
+				t.Fatalf("second Close: %v", err)
+			}
+			if !bytes.Equal(readWAL(t, dir), before) {
+				t.Fatal("a read-only open modified the WAL")
+			}
+			requireWALLockFree(t, dir)
+			if !bytes.Equal(readWAL(t, dir), before) {
+				t.Fatal("the WAL changed after the read-only store was closed")
+			}
+
+			// A reopen sees exactly the committed prefix: nothing lost, nothing added.
+			o2, err := store.Open(dir, readOnlyOptions())
+			if err != nil {
+				t.Fatalf("reopen: %v", err)
+			}
+			defer func() {
+				if cerr := o2.Close(); cerr != nil {
+					t.Errorf("Close: %v", cerr)
+				}
+			}()
+			requirePrefix(t, o2)
+			if got, want := o2.Recovery().WALOps, o.Recovery().WALOps; got != want {
+				t.Fatalf("reopen replayed %d WAL ops, the first open %d", got, want)
+			}
+			if got, want := o2.Graph().LiveOrderStored(), o.Graph().LiveOrderStored(); got != want {
+				t.Fatalf("reopen holds %d live nodes, the first open %d", got, want)
+			}
+		})
+	}
+}
+
+// TestOpen_AllowUnclean_CleanRecoveryOpensForWriting pins that the opt-in
+// changes nothing on a clean directory: it opens for writing, and a commit is
+// durable across a reopen.
+func TestOpen_AllowUnclean_CleanRecoveryOpensForWriting(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	buildCommittedWAL(t, dir, "a")
+	o, err := store.Open(dir, readOnlyOptions())
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	if o.ReadOnly() || o.Store().ReadOnly() || o.WAL() == nil {
+		t.Fatalf("a clean recovery with AllowUnclean opened read-only (ReadOnly=%t, WAL=%v)", o.ReadOnly(), o.WAL())
+	}
+	commitNodes(t, o.Store(), "b")
+	if _, err := wal.Open(filepath.Join(dir, "wal")); !errors.Is(err, wal.ErrWALLocked) {
+		t.Fatalf("a writable open does not hold the WAL lock: %v", err)
+	}
+	if err := o.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	o2, err := store.Open(dir, openOptions())
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer func() { _ = o2.Close() }()
+	m := o2.Graph().AdjList().Mapper()
+	if !has(m, "a") || !has(m, "b") {
+		t.Fatal("a commit through a clean AllowUnclean open did not survive the reopen")
+	}
+	requireStrictlyIncreasing(t, walCommitSeqs(t, dir))
 }

@@ -154,7 +154,12 @@ and the project follows [Semantic Versioning](https://semver.org/).
   dropped by omission. A recovery that is not clean, including the nil-error
   `recovery.ErrCommittedTxnCorruptOp` outcome, is refused with a
   `*store.UncleanRecoveryError` wrapping `store.ErrUncleanRecovery` and the recovery's
-  `TailErr`; nothing is opened for append. `cypher.NewEngineWithOpened` builds the engine
+  `TailErr`; nothing is opened for append. With `Options.AllowUnclean` such a directory
+  opens **read-only** instead: the committed prefix and `Recovery()` are readable,
+  `ReadOnly()` reports it, no WAL writer is opened (no lock, no byte written), and every
+  commit that would write, including every Cypher write, fails with
+  `store.ErrReadOnlyStore` (= `txn.ErrReadOnlyStore`). `txn.NewReadOnlyStore` and
+  `txn.Store.ReadOnly` are the store side of that mode. `cypher.NewEngineWithOpened` builds the engine
   over an opened store and re-registers the recovered schema. Non-breaking: the low-level
   `recovery.Open`, `Result.NewStore` and `store.New` are unchanged. Examples 24 and 25 now
   reopen through `store.OpenCtx`.

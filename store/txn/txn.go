@@ -81,6 +81,11 @@ import (
 // already been committed or rolled back.
 var ErrTxFinished = errors.New("txn: transaction already finished")
 
+// ErrReadOnlyStore is returned by [Tx.Commit], [Tx.CommitCtx] and
+// [Tx.CommitWALOnly] on a transaction of a store built by [NewReadOnlyStore]
+// that buffered at least one op. Nothing is applied and nothing is written.
+var ErrReadOnlyStore = errors.New("txn: store is read-only; refusing to commit")
+
 // ErrTransactionTooLarge is returned by [Tx.Commit] / [Tx.CommitWALOnly]
 // when the transaction has buffered more than the store's per-transaction
 // op cap (see [DefaultMaxTxnOps] and the maxTxnOps argument of
@@ -535,7 +540,12 @@ type Store[N comparable, W any] struct {
 	applyWaiters map[uint64]chan struct{}
 
 	g   *lpg.Graph[N, W]
-	wal *wal.Writer
+	wal *wal.Writer // nil only when readOnly
+
+	// readOnly is set by [NewReadOnlyStore]: the store has no WAL, and every
+	// commit that buffered an op is refused with [ErrReadOnlyStore]. Fixed at
+	// construction, so it is read without synchronisation.
+	readOnly bool
 
 	inflightCond *sync.Cond
 
@@ -775,6 +785,35 @@ func NewStoreWithOptionsCapped[N comparable, W any](g *lpg.Graph[N, W], wlog *wa
 	s.inflightCond = sync.NewCond(&s.inflightMu)
 	return s
 }
+
+// NewReadOnlyStore returns a Store over g that has no WAL and refuses every
+// write: a transaction may be begun and may buffer ops, but [Tx.Commit],
+// [Tx.CommitCtx] and [Tx.CommitWALOnly] return [ErrReadOnlyStore] for any
+// transaction that buffered at least one op, before a sequence is minted and
+// before anything is applied. A transaction that buffered nothing commits as a
+// no-op, so a read-only statement that opens and closes a transaction still
+// succeeds. Rollback behaves as on any store.
+//
+// It exists for a directory whose recovery did not complete cleanly and that
+// the caller has chosen to open for reading (store.Options.AllowUnclean):
+// appending to such a WAL would be discarded by every later recovery, so no
+// WAL writer is opened at all.
+//
+// opts.Codec must not be nil; opts.WeightCodec may be nil.
+// opts.ResumeTxnSeq is ignored, because no sequence is ever minted.
+//
+// Concurrency: as for any [Store]; [Store.ReadOnly] is safe from any
+// goroutine.
+func NewReadOnlyStore[N comparable, W any](g *lpg.Graph[N, W], opts Options[N, W]) *Store[N, W] {
+	defer metrics.Time("store.txn.NewReadOnlyStore").Stop()
+	s := NewStoreWithOptionsCapped(g, nil, Options[N, W]{Codec: opts.Codec, WeightCodec: opts.WeightCodec}, 0)
+	s.readOnly = true
+	return s
+}
+
+// ReadOnly reports whether the store was built by [NewReadOnlyStore] and
+// therefore refuses every commit that would write.
+func (s *Store[N, W]) ReadOnly() bool { return s.readOnly }
 
 // Codec returns the [Codec] installed on the Store. The returned value
 // is the same one passed to [NewStoreWithCodec] or [NewStoreWithOptions].
@@ -1831,6 +1870,17 @@ func (t *Tx[N, W]) CommitCtx(ctx context.Context) error {
 	// in-flight count while a commit still owes the gate an advance.
 	defer t.finishCommit()
 
+	if t.store.readOnly {
+		// No WAL exists: refuse a commit that would write, before anything is
+		// minted or applied; an empty one is a no-op.
+		t.markFinished()
+		if len(t.ops) == 0 {
+			return nil
+		}
+		metrics.IncCounter("store.txn.Commit.errors", 1)
+		return ErrReadOnlyStore
+	}
+
 	if len(t.ops) == 0 {
 		// Empty commit: no sequence is minted and nothing is applied. It still
 		// flushes any prior buffered tail. SyncBuffered, not SyncGroup: this
@@ -2061,6 +2111,16 @@ func (t *Tx[N, W]) CommitWALOnly(commitTS uint64) error {
 
 	// See [Tx.Commit] for why this is registered before the mint.
 	defer t.finishCommit()
+
+	if t.store.readOnly {
+		// See the same guard in [Tx.CommitCtx].
+		t.markFinished()
+		if len(t.ops) == 0 {
+			return nil
+		}
+		metrics.IncCounter("store.txn.CommitWALOnly.errors", 1)
+		return ErrReadOnlyStore
+	}
 
 	hasSeq, mark, appendErr := t.appendOnly(commitTS)
 	if !hasSeq {

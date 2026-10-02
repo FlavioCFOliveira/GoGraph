@@ -309,6 +309,11 @@ func (d *DB) closeOnce0(ctx context.Context) error {
 	// writer only when the embedder guarantees no concurrent commits, so
 	// ErrWriterClosed can only arise from a genuine double-close by the
 	// embedder (which the sync.Once already prevents for DB.Close itself).
+	if d.wal == nil {
+		// A read-only [Opened] owns no WAL ([Options.AllowUnclean]); there is
+		// nothing to flush or close. [New] never builds a DB without one.
+		return nil
+	}
 	if d.quiesce != nil {
 		return d.quiesce(func() error {
 			return d.wal.Close()

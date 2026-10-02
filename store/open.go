@@ -23,6 +23,13 @@ const walFileName = "wal"
 // errors.Is.
 var ErrUncleanRecovery = errors.New("store: recovery did not complete cleanly; refusing to append to the WAL")
 
+// ErrReadOnlyStore is returned by every commit that would write through a
+// store opened read-only ([Options.AllowUnclean] on a recovery that was not
+// clean): the [txn.Tx] commit methods, and therefore every write through a
+// Cypher engine built over it. It is the same value as [txn.ErrReadOnlyStore],
+// so errors.Is matches either.
+var ErrReadOnlyStore = txn.ErrReadOnlyStore
+
 // UncleanRecoveryError reports that [Open] refused a directory whose recovery
 // did not complete cleanly. It wraps both [ErrUncleanRecovery] and the
 // recovery's [recovery.Result.TailErr], so errors.Is matches the refusal and
@@ -85,6 +92,17 @@ type Options[N comparable, W any] struct {
 	// CloseOptions are applied to the returned [DB] after the options [Open]
 	// always applies ([WithQuiesce] bound to the store's commit lock).
 	CloseOptions []Option
+	// AllowUnclean opens a directory whose recovery was not clean
+	// ([recovery.Result.IsClean] false) in READ-ONLY mode instead of refusing
+	// it: the recovered graph (the committed prefix), [Opened.Recovery] and
+	// reads are available, no WAL writer is opened (no lock is taken and no
+	// byte is written), and every commit that would write fails with
+	// [ErrReadOnlyStore]. It covers both not-clean outcomes, the fail-stop
+	// corruption recovery returns as its error and the nil-error
+	// [recovery.ErrCommittedTxnCorruptOp]. A recovery error that is not a
+	// corruption (an I/O error, a cancelled ctx) is returned whatever this
+	// says, and a clean recovery opens for writing whatever this says.
+	AllowUnclean bool
 }
 
 // Opened is a durable store directory opened for reading and writing by [Open]
@@ -104,18 +122,28 @@ type Options[N comparable, W any] struct {
 // of goroutines, as documented on [DB].
 type Opened[N comparable, W any] struct {
 	*DB
-	store  *txn.Store[N, W]
-	wlog   *wal.Writer
-	result recovery.Result[N, W]
+	store    *txn.Store[N, W]
+	wlog     *wal.Writer // nil when readOnly
+	result   recovery.Result[N, W]
+	readOnly bool
 }
+
+// ReadOnly reports whether the directory was opened read-only: its recovery
+// was not clean and [Options.AllowUnclean] was set. A read-only Opened has no
+// WAL writer, and every commit that would write returns [ErrReadOnlyStore].
+func (o *Opened[N, W]) ReadOnly() bool { return o.readOnly }
 
 // Store returns the transactional store bound to the WAL. Its transaction
 // sequence resumes from the recovered maximum, its op cap is clamped to the
 // replay bound, and it carries the codecs the directory was recovered with.
+// On a read-only Opened it is a [txn.NewReadOnlyStore], whose commits that
+// would write return [ErrReadOnlyStore].
 func (o *Opened[N, W]) Store() *txn.Store[N, W] { return o.store }
 
 // Graph returns the recovered in-memory graph the store writes to. It is the
-// same graph as Store().Graph() and Recovery().Graph.
+// same graph as Store().Graph() and Recovery().Graph. Mutating it directly
+// bypasses the store and is never durable; on a read-only Opened, read it
+// only.
 func (o *Opened[N, W]) Graph() *lpg.Graph[N, W] { return o.store.Graph() }
 
 // Recovery returns the recovery result this store was built from: the
@@ -128,7 +156,7 @@ func (o *Opened[N, W]) Recovery() recovery.Result[N, W] { return o.result }
 // WAL returns the WAL writer the store appends to. It is exposed so a
 // background checkpointer can be wired to it. Do not close it directly: the
 // embedded [DB] owns it, and closing it out of order is the defect [DB.Close]
-// exists to prevent.
+// exists to prevent. It is nil on a read-only Opened.
 func (o *Opened[N, W]) WAL() *wal.Writer { return o.wlog }
 
 // Open is [OpenCtx] with a background context.
@@ -147,7 +175,9 @@ func Open[N comparable, W any](dir string, opts Options[N, W]) (*Opened[N, W], e
 //     opened for writing.
 //  2. The clean gate. When [recovery.Result.IsClean] is false the open is
 //     refused with an [*UncleanRecoveryError] wrapping [ErrUncleanRecovery]
-//     and the recovery's TailErr, and no WAL writer is opened. The check is on
+//     and the recovery's TailErr, and no WAL writer is opened, unless
+//     [Options.AllowUnclean] is set, in which case the directory is opened
+//     read-only and steps 3 to 5 are replaced (see below). The check is on
 //     IsClean, not on the recovery error alone: one not-clean outcome
 //     ([recovery.ErrCommittedTxnCorruptOp]) returns a nil error from recovery.
 //  3. The WAL is opened for append ([wal.Open]), which takes the directory's
@@ -168,15 +198,22 @@ func Open[N comparable, W any](dir string, opts Options[N, W]) (*Opened[N, W], e
 // When any step after the WAL open fails, the WAL is closed before OpenCtx
 // returns, so a failed open leaks no file handle and no lock.
 //
-// # Why an unclean directory is always refused
+// # Why an unclean directory is refused, or opened read-only
 //
 // Appending to a WAL that did not replay cleanly does not repair it: every
 // later recovery stops at the same damaged frame, so each commit appended
 // after it is acknowledged and then discarded at the next open. Refusing the
-// open keeps those commits from being acknowledged at all. A caller
-// that needs the committed prefix of such a directory reads it from
-// [UncleanRecoveryError.Result], or recovers it with [recovery.Open], without
-// opening the WAL for append.
+// open keeps those commits from being acknowledged at all.
+//
+// With [Options.AllowUnclean] the directory is opened READ-ONLY instead: the
+// store is a [txn.NewReadOnlyStore] over the recovered graph, no WAL writer is
+// opened (so no lock is taken and the directory is not modified), and the
+// embedded [DB] owns no WAL ([DB.Close] then only stops a checkpointer, if
+// [Options.CloseOptions] supplied one). Reads, [Opened.Recovery] and
+// [Opened.ReadOnly] work; every commit that would write fails with
+// [ErrReadOnlyStore], so no write is ever acknowledged. The refused
+// [UncleanRecoveryError.Result] carries the same committed prefix for a
+// caller that does not want an Opened at all.
 //
 // # Prior art
 //
@@ -226,14 +263,18 @@ func openCtx[N comparable, W any](ctx context.Context, dir string, opts Options[
 		WeightCodec: opts.WeightCodec,
 		MaxTxnOps:   opts.ReplayMaxTxnOps,
 	})
-	if err != nil {
-		if !res.IsClean() {
-			return nil, &UncleanRecoveryError[N, W]{Dir: dir, TailErr: err, Result: res}
-		}
+	if err != nil && res.IsClean() {
 		return nil, fmt.Errorf("store: open %q: recover: %w", dir, err)
 	}
 	if !res.IsClean() {
-		return nil, &UncleanRecoveryError[N, W]{Dir: dir, TailErr: res.TailErr, Result: res}
+		tailErr := res.TailErr
+		if err != nil {
+			tailErr = err
+		}
+		if !opts.AllowUnclean {
+			return nil, &UncleanRecoveryError[N, W]{Dir: dir, TailErr: tailErr, Result: res}
+		}
+		return openReadOnly(res, opts), nil
 	}
 	wlog, err := wal.Open(filepath.Join(dir, walFileName))
 	if err != nil {
@@ -253,4 +294,25 @@ func openCtx[N comparable, W any](ctx context.Context, dir string, opts Options[
 		wlog:   wlog,
 		result: res,
 	}, nil
+}
+
+// openReadOnly assembles a read-only [Opened] over an unclean recovery: a
+// [txn.NewReadOnlyStore] over the recovered graph and a [DB] that owns no WAL.
+// No file is opened and no lock is taken.
+func openReadOnly[N comparable, W any](res recovery.Result[N, W], opts Options[N, W]) *Opened[N, W] {
+	metrics.IncCounter("store.Open.readOnly", 1)
+	st := txn.NewReadOnlyStore(res.Graph, txn.Options[N, W]{
+		Codec:       opts.Codec,
+		WeightCodec: opts.WeightCodec,
+	})
+	d := &DB{}
+	for _, opt := range opts.CloseOptions {
+		opt(d)
+	}
+	return &Opened[N, W]{
+		DB:       d,
+		store:    st,
+		result:   res,
+		readOnly: true,
+	}
 }

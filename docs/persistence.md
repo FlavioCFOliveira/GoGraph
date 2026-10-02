@@ -1710,7 +1710,9 @@ It runs, in order:
    WAL writer is opened and the directory is left as recovery left it. The gate
    is on `IsClean`, not on the recovery error alone, so the nil-error
    `recovery.ErrCommittedTxnCorruptOp` outcome is refused too: every commit
-   appended after that damage would be discarded by the next recovery.
+   appended after that damage would be discarded by the next recovery. With
+   `Options.AllowUnclean` the directory is opened **read-only** instead (see
+   below) and steps 3 to 5 do not run.
 3. `wal.Open(dir/wal)`, which takes the WAL lock and truncates a benign torn
    tail.
 4. `Result.NewStoreCapped`, which carries the recovered graph (with its graph
@@ -1726,6 +1728,32 @@ The returned `*store.Opened[N, W]` embeds `*store.DB` and exposes `Store()`,
 closes anything it opened. `store.Open` must not run concurrently with another
 open of, or writer on, the same directory; a second process that reaches step 3
 while the first holds the WAL lock fails with `wal.ErrWALLocked`.
+
+### Read-only open of an unclean directory
+
+`Options.AllowUnclean` turns the refusal into a read-only open, for both
+not-clean outcomes (the fail-stop corruption recovery returns as its error, and
+the nil-error `ErrCommittedTxnCorruptOp`). A recovery error that is not a
+corruption (an I/O error, a cancelled context) is still returned, and a clean
+recovery opens for writing whatever the option says.
+
+A read-only `Opened`:
+
+- holds the recovered committed prefix in `Graph()` and the full `Recovery()`
+  result; reads, including Cypher reads through `cypher.NewEngineWithOpened`,
+  work;
+- opens no WAL writer: no lock is taken, no byte is written, and `WAL()` is nil;
+- reports `ReadOnly() == true`, and its store is a `txn.NewReadOnlyStore`
+  (`Store().ReadOnly() == true`);
+- refuses every commit that would write with `store.ErrReadOnlyStore` (the same
+  value as `txn.ErrReadOnlyStore`): `Tx.Commit`, `Tx.CommitCtx`,
+  `Tx.CommitWALOnly`, and therefore every Cypher write and DDL statement. A
+  transaction that buffered nothing commits as a no-op;
+- closes with `Close` as usual; the embedded `DB` owns no WAL.
+
+Nothing is acknowledged, so nothing can be lost: a later open sees exactly the
+same committed prefix. Mutating `Graph()` directly bypasses the store and is
+never durable; do not.
 
 The low-level pieces stay public; the sections below describe them, and
 `store.Open` is exactly their composition.

@@ -335,6 +335,7 @@ a call records a single sample regardless of entry point (rmp #1524).
 | `store.txn.BeginCtx`         | Open a new transaction with context.                                  |
 | `store.txn.Commit`           | fsync-append every buffered op then apply to the graph.               |
 | `store.txn.Rollback`         | Discard buffered ops without touching WAL or graph.                   |
+| `store.txn.NewReadOnlyStore` | Construct a store with no WAL that refuses every commit that would write (`store/txn/txn.go`). |
 | `store.txn.appendOnly.handleRecordTooLarge` | Counter: commits refused **before** a sequence was minted because an edge handle would carry more labels or properties than `store/snapshot` can capture, which would commit a record that then blocks every checkpoint for ever (`store/txn/txn.go:2025`). |
 
 ### `store`
@@ -342,6 +343,7 @@ a call records a single sample regardless of entry point (rmp #1524).
 | Metric       | Description                                                                                         |
 | ------------ | --------------------------------------------------------------------------------------------------- |
 | `store.Open` | Composed open of a store directory: recovery, the clean gate, the WAL open, and the store built from the recovery result (`store/open.go`). The `.errors` sibling counts every refused or failed open, including an unclean recovery. |
+| `store.Open.readOnly` | Counter: unclean recoveries opened read-only because `Options.AllowUnclean` was set (`store/open.go`). |
 
 ### `store/checkpoint`
 
