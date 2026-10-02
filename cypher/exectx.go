@@ -458,6 +458,11 @@ func (e *Engine) beginTxSession(ctx context.Context, sess *lpg.Session[string, f
 	// load is one the transaction's writes may predate (rmp #2936).
 	tx.conGen = e.constraintReg.Generation()
 	tx.conTxn.TrackReservationsSince(tx.conGen)
+	// A write refused under a constraint registered after this point, of a value
+	// this transaction released before that constraint existed, is deferred to
+	// the commit-time validation; the registry reads this transaction's touched
+	// nodes through this reader to recognise such a release (rmp #2948).
+	tx.conTxn.SetStraddleStateReader(func() exec.StraddleReader { return newStraddleReader(tx) })
 	// Open the WAL transaction on a WAL-backed engine. Store.BeginCtx registers this
 	// transaction as an admitted writer until Commit/Rollback. It no longer excludes
 	// anybody (rmp #2306 retired the capacity-one semaphore), so the only thing that

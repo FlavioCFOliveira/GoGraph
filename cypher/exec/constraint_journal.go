@@ -129,17 +129,34 @@ func reserveConstraintValue(
 	//
 	// remark is allocated ONLY in that case, so the ordinary reserve — no pending
 	// release of the same value — journals exactly the single delete it always did.
-	var remark []string
-	if sv := valueSetKeyOf(value); ct != nil && sv != "" {
-		for _, label := range labels {
-			if ct.releasedHere(constraintKey(label, prop), sv) {
-				remark = append(remark, label)
+	var (
+		remark  []string
+		gen0    uint64
+		genRest []uint64
+		err     error
+	)
+	// One attempt per label at most past the first: a refusal under a UNIQUE
+	// constraint registered while the transaction was open, of a value the
+	// transaction itself released before that constraint existed, is deferred
+	// to the commit-time validation by marking that release and retrying
+	// (rmp #2948, [ConstraintRegistry.adoptStraddledRelease]). Every other
+	// refusal is returned as it is.
+	for attempt := 0; ; attempt++ {
+		remark = remark[:0]
+		if sv := valueSetKeyOf(value); ct != nil && sv != "" {
+			for _, label := range labels {
+				if ct.releasedHere(constraintKey(label, prop), sv) {
+					remark = append(remark, label)
+				}
 			}
 		}
-	}
-	gen0, genRest, err := reg.reserveSetPropertyGen(ct, labels, prop, value, mgr)
-	if err != nil {
-		return err
+		gen0, genRest, err = reg.reserveSetPropertyGen(ct, labels, prop, value, mgr)
+		if err == nil {
+			break
+		}
+		if attempt >= len(labels) || !reg.adoptStraddledRelease(ct, err, value) {
+			return err
+		}
 	}
 	all := copyLabels(labels)
 	journalConstraintInverse(mutator, func() {

@@ -53,15 +53,18 @@ package cypher
 //     CONSTRAINT runs before it, and a CREATE CONSTRAINT that fell between a
 //     transaction's own statements stays between them.
 //
-// A refusal justified only because the refused transaction violates ALONE,
-// with the CREATE CONSTRAINT between the same statements, is not caused by the
-// other transaction: it is the engine's behaviour for a straddler whose
-// release precedes the constraint and whose reservation of the same value
-// follows it — the statement-time UNIQUE check sees no release mark, since
-// none was recorded before the constraint existed, and refuses a transaction
-// whose final state is valid. Those refusals are counted and reported
-// separately (straddleReport.isolated), never passed silently. Two transactions that share a node without overlapping in
-//     time have no conflict, so a refusal between them is an over-refusal.
+// Two transactions that share a node without overlapping in time have no
+// conflict, so a refusal between them is an over-refusal.
+//
+// A refusal that the refused transaction reproduces ALONE, with the CREATE
+// CONSTRAINT between the same statements, is a finding. It was the engine's
+// behaviour for a straddler whose release precedes the constraint and whose
+// reservation of the same value follows it: the statement-time UNIQUE check saw
+// no release mark, since none was recorded before the constraint existed, and
+// refused a transaction whose final state is valid — 3,784 cases per wiring,
+// counted rather than failed until rmp #2948 deferred that refusal to the
+// commit-time validation. Such refusals are still counted
+// (straddleReport.isolated) and each also fails the enumeration.
 //
 // A case whose constraint is not live at the end — the DROP shape by design,
 // and a CREATE refused by its validation, which reads uncommitted writes and is
@@ -678,10 +681,11 @@ func runStraddleCase(t *testing.T, rep *straddleReport, c *straddleCase, cache *
 				}
 				if straddleReplayViolates(t, cache, c.kind, nil, nil, self.ops, selfScript) {
 					// The refused transaction violates ALONE, with the DDL
-					// between the same statements: the refusal is the engine's
-					// straddle behaviour, not an interaction with the other
-					// transaction. Counted and reported, never silent.
+					// between the same statements: the engine refused a
+					// straddler that no other transaction interfered with
+					// (rmp #2948). Counted, and a finding.
 					rep.isolatedStraddle(fmt.Sprintf("%v: %s: %v", c, who, err))
+					rep.Errorf("%v: %s refused although it violates only alone with the DDL between its statements: %v", c, who, err)
 					break
 				}
 			}

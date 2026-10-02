@@ -118,6 +118,7 @@ package exec
 // UNIQUE storage accessor — which this engine does not.
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph"
@@ -351,4 +352,81 @@ func (r *ConstraintRegistry) validateStraddledUnique(
 		}
 	})
 	return nil
+}
+
+// straddlesUnique reports whether the UNIQUE constraint on (label, prop) was
+// registered after the transaction owning ct began, so the transaction's
+// writes may predate it. False when ct tracks nothing.
+func (r *ConstraintRegistry) straddlesUnique(ct *ConstraintTxn, label, prop string) bool {
+	if ct == nil || !ct.tracking {
+		return false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	at, ok := r.uniqueSince[constraintKey(label, prop)]
+	return ok && at > ct.trackFrom
+}
+
+// adoptStraddledRelease recognises, for a UNIQUE refusal err of a write of
+// value by the transaction owning ct, a release the transaction made BEFORE the
+// refusing constraint existed (rmp #2948).
+//
+// Such a release recorded no mark — there was no value-set to mark it in — so
+// the statement-time check finds the value held by the very node the
+// transaction freed, and refused a transaction whose final state may be valid:
+//
+//	BEGIN; MATCH (n:L {s: 'a'}) REMOVE n:L
+//	CREATE CONSTRAINT FOR (n:L) REQUIRE n.s IS UNIQUE
+//	CREATE (:L {s: 'a'})                 ← refused, although T alone holds 'a'
+//
+// When the constraint was registered after the transaction began, and a node
+// the transaction touched holds the value in the latest committed state without
+// its writes and no longer holds it with them, the release is marked now and
+// true is returned, so the caller retries the reservation. The decision is then
+// the commit's ([ConstraintRegistry.ValidateStraddler]), which validates the
+// final state against the latest committed one and replaces every release mark
+// the statements recorded for the constraint. A value held by any other writer
+// — a committed node the transaction never touched, or a live peer's
+// reservation — was not released by the transaction, and the refusal stands.
+//
+// The reader reads the graph, so this runs outside the registry's lock.
+func (r *ConstraintRegistry) adoptStraddledRelease(ct *ConstraintTxn, err error, value lpg.PropertyValue) bool {
+	if ct == nil || ct.straddleState == nil {
+		return false
+	}
+	var cv *ConstraintViolationError
+	if !errors.As(err, &cv) || cv.Kind != "UNIQUE" {
+		return false
+	}
+	val, ok := propertyValueToString(value)
+	if !ok {
+		return false
+	}
+	key := constraintKey(cv.Label, cv.Property)
+	if ct.releasedHere(key, val) || !r.straddlesUnique(ct, cv.Label, cv.Property) {
+		return false
+	}
+	rd := ct.straddleState()
+	released := false
+	for _, id := range rd.Touched() {
+		had, bv := rd.Before(id, cv.Label, cv.Property)
+		if !had {
+			continue
+		}
+		if bs, ok := propertyValueToString(bv); !ok || bs != val {
+			continue
+		}
+		if has, av := rd.After(id, cv.Label, cv.Property); has {
+			if as, ok := propertyValueToString(av); ok && as == val {
+				continue // the node still holds it: no release
+			}
+		}
+		released = true
+		break
+	}
+	if !released {
+		return false
+	}
+	ct.markReleased(key, val)
+	return true
 }

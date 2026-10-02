@@ -186,6 +186,10 @@ type ConstraintTxn struct {
 	reserved  *reservedMarks
 	trackFrom uint64
 	tracking  bool
+	// straddleState, set by [ConstraintTxn.SetStraddleStateReader], reads the
+	// transaction's touched nodes in the latest committed state without and with
+	// its writes; nil for every autocommit statement (rmp #2948).
+	straddleState func() StraddleReader
 }
 
 // reservedMarks is the storage behind [ConstraintTxn.reserved].
@@ -203,6 +207,20 @@ func (t *ConstraintTxn) TrackReservationsSince(gen uint64) {
 		return
 	}
 	t.trackFrom, t.tracking = gen, true
+}
+
+// SetStraddleStateReader installs state, which returns a [StraddleReader] over
+// this transaction's touched nodes in the latest committed state without and
+// with its writes. An explicit transaction installs it at BEGIN. It is read
+// only when a write would be refused under a UNIQUE constraint registered after
+// the transaction began, to recognise a release the transaction made before
+// that constraint existed and which therefore recorded no mark (rmp #2948); see
+// [ConstraintRegistry.adoptStraddledRelease].
+func (t *ConstraintTxn) SetStraddleStateReader(state func() StraddleReader) {
+	if t == nil {
+		return
+	}
+	t.straddleState = state
 }
 
 // reservedMark is one reservation this transaction took: the (label, property,
