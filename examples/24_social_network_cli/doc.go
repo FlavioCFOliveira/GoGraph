@@ -6,9 +6,9 @@
 //
 //  1. Graph initialisation with a labelled property graph (LPG) backend.
 //  2. Crash-safe ACID persistence via a write-ahead log plus snapshots
-//     (recovery.Open[string, float64] and snapshot.WriteSnapshotFull).
+//     (store.OpenCtx[string, float64] and snapshot.WriteSnapshotFull).
 //  3. CRUD via Cypher through a WAL-backed engine
-//     (cypher.NewEngineWithStore and Engine.RunInTx).
+//     (cypher.NewEngineWithOpened and Engine.RunInTx).
 //  4. A small CLI surface that accepts ad-hoc Cypher queries from
 //     positional arguments or stdin and streams results as JSON Lines.
 //  5. Count-store-gated query optimisation: the `plandiff` subcommand
@@ -194,8 +194,8 @@
 // manifest emitted for string-keyed graphs (every graph the CLI
 // produces) is self-sufficient: the snapshot alone carries enough
 // state to rebuild the in-memory graph without any WAL frames. On
-// open, recovery.Open (the canonical [string, float64] generic entry
-// point) restores the natural-key interning table from mapper.bin,
+// open, store.OpenCtx runs recovery (the canonical [string, float64]
+// generic entry point), which restores the natural-key interning table from mapper.bin,
 // applies the CSR adjacency, attaches labels.bin and properties.bin,
 // then replays any WAL tail on top. Every write performed through
 // Engine.RunInTx is appended to the WAL with fsync at commit, so a

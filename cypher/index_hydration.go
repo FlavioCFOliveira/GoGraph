@@ -241,7 +241,9 @@ func (e *Engine) hydrateRecoveredIndex(name, label, property string, sub index.S
 // constraints and index definitions AND hydrating each index from the snapshot
 // payload wherever recovery certified that safe.
 //
-// It is the recommended constructor for opening a persisted store:
+// A store opened with [store.Open] is wired with [NewEngineWithOpened] instead,
+// which calls this constructor with the opened store and its recovery. The
+// low-level sequence it replaces is:
 //
 //	res, err := recovery.Open[string, float64](dir, ropts)
 //	if err != nil { return err }

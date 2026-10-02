@@ -12,6 +12,7 @@ import (
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/graph/csr"
 	"github.com/FlavioCFOliveira/GoGraph/graph/lpg"
+	"github.com/FlavioCFOliveira/GoGraph/store"
 	"github.com/FlavioCFOliveira/GoGraph/store/recovery"
 	"github.com/FlavioCFOliveira/GoGraph/store/snapshot"
 	"github.com/FlavioCFOliveira/GoGraph/store/txn"
@@ -19,7 +20,7 @@ import (
 )
 
 // dataDirPaths returns the canonical WAL and snapshot paths inside dir.
-// The layout is the one consumed by recovery.Open: <dir>/wal and
+// The layout is the one consumed by store.Open: <dir>/wal and
 // <dir>/snapshot/manifest.json plus its sibling .bin files.
 func dataDirPaths(dir string) (walPath, snapDir string) {
 	return filepath.Join(dir, "wal"), filepath.Join(dir, "snapshot")
@@ -34,26 +35,27 @@ func hasManifest(dir string) bool {
 	return err == nil
 }
 
-// dataDirOptions returns the canonical recovery.Options for the
-// example's [string, float64] graph shape. Pinned at package level so
-// every subcommand uses the same string / float64 codec pair.
-func dataDirOptions() recovery.Options[string, float64] {
-	return recovery.Options[string, float64]{
+// dataDirOptions returns the canonical store.Options for the example's
+// [string, float64] graph shape. Pinned at package level so every
+// subcommand uses the same string / float64 codec pair.
+func dataDirOptions() store.Options[string, float64] {
+	return store.Options[string, float64]{
 		Codec:       txn.NewStringCodec(),
 		WeightCodec: txn.NewFloat64WeightCodec(),
 	}
 }
 
 // openedStore bundles the live resources held while a subcommand is
-// running against the data directory: the WAL-backed transactional
-// store, the WAL-backed Cypher engine, and the recovery metadata. The
-// close method releases the WAL writer and flushes its tail.
+// running against the data directory: the directory opened by store.OpenCtx
+// (WAL writer, WAL-backed transactional store, and recovery metadata) and the
+// Cypher engine over it. The close method releases the WAL writer and
+// flushes its tail.
 //
 // One openedStore is created per subcommand invocation. It is not safe
 // for concurrent use across subcommands; the CLI is one-shot by design.
 type openedStore struct {
 	dir    string
-	wal    *wal.Writer
+	opened *store.Opened[string, float64]
 	store  *txn.Store[string, float64]
 	engine *cypher.Engine
 	graph  *lpg.Graph[string, float64]
@@ -73,42 +75,25 @@ func openStore(ctx context.Context, dir string) (*openedStore, error) {
 	if !hasManifest(dir) {
 		return nil, fmt.Errorf("open: data dir %q has no manifest; run `init -d %s` first", dir, dir)
 	}
-	res, err := recovery.OpenCtx[string, float64](ctx, dir, dataDirOptions())
+	// store.OpenCtx is the composed reopen: it recovers the snapshot and the
+	// WAL tail, refuses a directory whose recovery was not clean (appending
+	// there would permanently embed the corruption and every later recovery
+	// would discard what was appended), opens the WAL for append, and builds
+	// the transactional store from the recovery result, so the recovered
+	// transaction sequence is resumed rather than restarted at 0 (rmp #2522).
+	opened, err := store.OpenCtx(ctx, dir, dataDirOptions())
 	if err != nil {
-		return nil, fmt.Errorf("open: recover: %w", err)
+		return nil, fmt.Errorf("open: %w", err)
 	}
-	// Fail-stop on a corrupt WAL: recovery surfaces genuine corruption (a CRC
-	// mismatch, bad magic, or unsupported record version inside an
-	// already-durable frame) via a non-nil error AND res.IsClean() == false.
-	// We must not open the WAL for append in that state — appending would
-	// permanently embed the corruption and silently drop every committed op
-	// past the bad frame. A benign torn tail (the normal crash case) leaves
-	// res.IsClean() == true and is safe to append onto.
-	if !res.IsClean() {
-		return nil, fmt.Errorf("open: refusing to append to a corrupt WAL: %w", res.TailErr)
-	}
-	walPath, _ := dataDirPaths(dir)
-	w, err := wal.Open(walPath)
-	if err != nil {
-		return nil, fmt.Errorf("open: wal: %w", err)
-	}
-	// res.NewStore, not txn.NewStoreWithOptions: this reopen appends to a WAL that
-	// already holds transactions, so the store must RESUME the sequence recovery
-	// derived rather than restart at 0 and re-mint numbers the log already spent
-	// (rmp #2522). Building it off the Result is what applies that floor; the
-	// plain constructor cannot, because it never saw the log.
-	store := res.NewStore(w, txn.Options[string, float64]{
-		Codec:       txn.NewStringCodec(),
-		WeightCodec: txn.NewFloat64WeightCodec(),
-	})
-	eng := cypher.NewEngineWithStore(store)
+	// NewEngineWithOpened re-registers the recovered schema (constraints and
+	// index definitions) and hydrates each index from its snapshot payload.
 	return &openedStore{
 		dir:    dir,
-		wal:    w,
-		store:  store,
-		engine: eng,
-		graph:  res.Graph,
-		res:    res,
+		opened: opened,
+		store:  opened.Store(),
+		engine: cypher.NewEngineWithOpened(opened),
+		graph:  opened.Graph(),
+		res:    opened.Recovery(),
 	}, nil
 }
 
@@ -116,11 +101,11 @@ func openStore(ctx context.Context, dir string) (*openedStore, error) {
 // shutdown error. Calling Close more than once is safe; subsequent
 // calls return nil.
 func (o *openedStore) Close() error {
-	if o == nil || o.wal == nil {
+	if o == nil || o.opened == nil {
 		return nil
 	}
-	err := o.wal.Close()
-	o.wal = nil
+	err := o.opened.Close()
+	o.opened = nil
 	return err
 }
 

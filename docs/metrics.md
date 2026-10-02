@@ -337,6 +337,12 @@ a call records a single sample regardless of entry point (rmp #1524).
 | `store.txn.Rollback`         | Discard buffered ops without touching WAL or graph.                   |
 | `store.txn.appendOnly.handleRecordTooLarge` | Counter: commits refused **before** a sequence was minted because an edge handle would carry more labels or properties than `store/snapshot` can capture, which would commit a record that then blocks every checkpoint for ever (`store/txn/txn.go:2025`). |
 
+### `store`
+
+| Metric       | Description                                                                                         |
+| ------------ | --------------------------------------------------------------------------------------------------- |
+| `store.Open` | Composed open of a store directory: recovery, the clean gate, the WAL open, and the store built from the recovery result (`store/open.go`). The `.errors` sibling counts every refused or failed open, including an unclean recovery. |
+
 ### `store/checkpoint`
 
 | Metric                                       | Description                                                              |

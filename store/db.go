@@ -1,7 +1,19 @@
-// Package store provides the composed teardown owner that bundles a
-// WAL-backed store's durability pieces — a [wal.Writer] and an optional
-// background [checkpoint.Checkpointer] — and closes them in the single
+// Package store provides the composed open and teardown of a WAL-backed
+// store. [Open] / [OpenCtx] run the one correct reopen sequence (recovery, the
+// clean gate, the WAL open, and the transactional store built from the
+// recovery result); [DB] bundles the durability pieces — a [wal.Writer] and an
+// optional background [checkpoint.Checkpointer] — and closes them in the single
 // crash-safe order.
+//
+// # Why a composed Open exists
+//
+// Reopening a directory by hand is four steps (recovery, the clean gate,
+// wal.Open, building the store from the recovery result), and every step
+// carries state the next one must not drop: the recovered transaction
+// sequence, the replay op cap, the codecs, and the schema. rmp #2522 measured
+// that every hand-written reopen in the module dropped the sequence. [Open]
+// performs the sequence once, so recovered state cannot be dropped by
+// omission. See docs/persistence.md ("Composed open").
 //
 // # Why a composed Close exists
 //
@@ -94,8 +106,11 @@ type Checkpointer interface {
 // in-memory graph or the [txn.Store]/[cypher.Engine] driving it: those carry
 // no goroutine or file handle of their own and need no teardown.
 //
-// Construct a DB with [New] after wiring the WAL, store, engine, and (if used)
-// the checkpointer the usual way; hand the DB to whatever owns the shutdown
+// To reopen an existing directory, use [Open] / [OpenCtx]: the returned
+// [Opened] embeds a DB with the store's commit lock already wired as the
+// quiesce. To assemble the pieces by hand (for example over a fresh graph),
+// construct a DB with [New] after wiring the WAL, store, engine, and (if used)
+// the checkpointer; hand the DB to whatever owns the shutdown
 // sequence (e.g. a [bolt/server.Server] via [bolt/server.Options.Closer]) and
 // call [DB.Close] exactly where you would otherwise have hand-written
 // "stop the checkpointer, then close the WAL".

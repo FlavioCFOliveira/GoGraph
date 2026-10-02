@@ -308,8 +308,10 @@ The data directory `<dir>` holds:
 - `<dir>/snapshot/*` — a manifest plus the CSR adjacency, labels, properties and
   mapper images, written at startup (empty graph) and at graceful shutdown.
 
-On startup the server calls `recovery.OpenCtx`, which loads the snapshot and
-replays any WAL tail on top, reconstructing the exact in-memory graph. Because
+On startup the server calls `store.OpenCtx`, which loads the snapshot and
+replays any WAL tail on top, reconstructing the exact in-memory graph, refuses a
+directory whose recovery was not clean, and builds the transactional store from
+the recovery result so the transaction sequence resumes. Because
 each write is durable at commit time, the store is **`kill -9`-safe**: a crash
 with no clean shutdown still recovers every acknowledged write from the WAL on
 the next boot. The shutdown snapshot is an optimisation (it shortens WAL replay),
@@ -319,9 +321,10 @@ Schema is durable too (§11). The `CREATE CONSTRAINT` / `CREATE INDEX` statement
 are ordinary WAL-logged writes, and the shutdown snapshot embeds the constraint
 set (`constraints.bin`) and the index definitions (`indexdefs.bin`) via
 `snapshot.WriteSnapshotFullWithConstraintsAndIndexDefs`. On the next boot the
-engine is constructed with `cypher.NewEngineWithStoreAndSchema`, which
-re-registers both from the recovered `store/recovery.Result` and re-backfills
-each backing index by scanning the graph — so a constraint declared before a
+engine is constructed with `cypher.NewEngineWithOpened`, which
+re-registers both from the recovered `store/recovery.Result` and restores
+each backing index (from its snapshot payload where recovery certified that
+safe, otherwise by scanning the graph) — so a constraint declared before a
 crash is enforced again and an index seek serves live rows immediately. The
 plain `cypher.NewEngineWithStore` would leave the constraint registry empty
 (duplicates silently accepted) and index seeks reverting to a full label scan; a
@@ -491,7 +494,7 @@ backfilled from the seeded graph; every later write goes through the engine
 
 **Durability.** See §7: the schema survives both a graceful restart and a
 `kill -9`, via the WAL and the schema-embedding snapshot, and is re-registered
-and re-backfilled by `cypher.NewEngineWithStoreAndSchema` on open.
+and restored by `cypher.NewEngineWithOpened` on open.
 
 **Introspection.** `GET /schema` returns the live schema via the built-in `db.*`
 procedures — `db.labels()`, `db.relationshipTypes()`, `db.propertyKeys()`,

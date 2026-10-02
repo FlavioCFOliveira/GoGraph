@@ -1380,9 +1380,10 @@ and is evaluated by the caller, because only the engine knows which
    union is a deliberate over-approximation: it can refuse a hydration that would
    have been sound, never permit one that is not.
 
-`cypher.NewEngineWithStoreAndRecovery(store, res)` is the recommended
-constructor: it threads the whole `Result` so the payloads travel with it and
-cannot be dropped by accident. `NewEngineWithStoreAndSchema` remains available
+`cypher.NewEngineWithOpened(opened)`, over a directory opened by `store.Open`, is
+the recommended constructor; it is `cypher.NewEngineWithStoreAndRecovery(store,
+res)` applied to the opened store and its recovery. Both thread the whole
+`Result` so the payloads travel with it and cannot be dropped by accident. `NewEngineWithStoreAndSchema` remains available
 and unchanged — it carries no payloads and therefore always rebuilds.
 
 **A damaged payload is a per-index rebuild, never a fail-stop.** An index is
@@ -1680,6 +1681,55 @@ post-drain close when the abandoned connections eventually finish (idle
 timeout, transaction reap, client exit). Only if a full drain never
 completes is the closer left for process exit.
 
+## Composed open
+
+`store.Open[N, W](dir, opts)` and its context-aware twin
+`store.OpenCtx[N, W](ctx, dir, opts)` are the composed counterpart of
+`store.DB.Close`: the one correct reopen sequence, so an embedder does not
+hand-write it and cannot drop recovered state by omission:
+
+```go
+opened, err := store.Open(dir, store.Options[string, float64]{
+    Codec:       txn.NewStringCodec(),
+    WeightCodec: txn.NewFloat64WeightCodec(),
+})
+if err != nil {
+    return err // recovery error, or *store.UncleanRecoveryError
+}
+defer opened.Close()                     // store.DB teardown, quiesce wired
+eng := cypher.NewEngineWithOpened(opened) // re-registers the recovered schema
+```
+
+It runs, in order:
+
+1. Recovery (`recovery.OpenCtx`) over `dir`: the snapshot, then the WAL tail at
+   `dir/wal`.
+2. The clean gate. When `Result.IsClean()` is false the open is refused with a
+   `*store.UncleanRecoveryError`, which wraps `store.ErrUncleanRecovery` and the
+   recovery's `TailErr`, and carries the refused `Result` for diagnostics. No
+   WAL writer is opened and the directory is left as recovery left it. The gate
+   is on `IsClean`, not on the recovery error alone, so the nil-error
+   `recovery.ErrCommittedTxnCorruptOp` outcome is refused too: every commit
+   appended after that damage would be discarded by the next recovery.
+3. `wal.Open(dir/wal)`, which takes the WAL lock and truncates a benign torn
+   tail.
+4. `Result.NewStoreCapped`, which carries the recovered graph (with its graph
+   configuration and restored MVCC clock), the transaction-sequence floor
+   `MaxTxnSeq` (ratcheted with `Options.ResumeTxnSeq`), the producer op cap
+   clamped to the replay bound `MaxTxnOps`, and the codecs recovery used.
+5. A `store.DB` over the WAL with `WithQuiesce(st.RunUnderCommitLock)` wired,
+   followed by `Options.CloseOptions`.
+
+The returned `*store.Opened[N, W]` embeds `*store.DB` and exposes `Store()`,
+`Graph()`, `Recovery()` (the schema, index payloads, and derived counters), and
+`WAL()` (for wiring a checkpointer; never close it directly). A failed open
+closes anything it opened. `store.Open` must not run concurrently with another
+open of, or writer on, the same directory; a second process that reaches step 3
+while the first holds the WAL lock fails with `wal.ErrWALLocked`.
+
+The low-level pieces stay public; the sections below describe them, and
+`store.Open` is exactly their composition.
+
 ## Recovery procedure
 
 `recovery.Open[N, W](dir, opts)` and its context-aware twin
@@ -1724,8 +1774,9 @@ two over an injected filesystem — return a `Result` containing the rebuilt
   `OpCreateConstraint` / `OpCreateIndex` frames, with later DROPs applied.
   Both slices are deterministically ordered so a reopen is reproducible.
   Recovery does not enforce or build them; the engine does, via
-  `cypher.NewEngineWithStoreAndSchema` or
-  `cypher.NewEngineWithStoreAndRecovery`.
+  `cypher.NewEngineWithOpened` (over `store.Open`),
+  `cypher.NewEngineWithStoreAndRecovery`, or
+  `cypher.NewEngineWithStoreAndSchema`.
 - `WALOps int` — how many WAL ops were applied.
 - `WALTailOffset int64` — the byte offset at which replay stopped.
 - `MaxTxnSeq uint64` — the highest transaction sequence any durable `OpCommit`
@@ -1789,9 +1840,10 @@ st := res.NewStore(w, txn.Options[int64, float64]{
 
 Appending to a corrupt WAL would permanently embed the corruption and
 silently drop every committed op that followed the bad frame, so the
-safe behaviour — refusing to append — is the default. Every shipped
-example under `examples/` that recovers then reopens the WAL for
-append checks `IsClean()` before doing so.
+safe behaviour — refusing to append — is the default. The snippet above is
+what `store.Open` composes (see *Composed open*); the shipped examples that
+recover and then append reopen through `store.Open`, which applies the
+`IsClean()` gate itself.
 
 **Reopen through `Result.NewStore`, not through a hand-built `txn.Store`.**
 `NewStore` is `txn.NewStoreWithOptions` with `Options.ResumeTxnSeq` already set

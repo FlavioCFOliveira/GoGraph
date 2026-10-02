@@ -143,6 +143,22 @@ and the project follows [Semantic Versioning](https://semver.org/).
   recovery contract are unchanged; old WALs replay as before. The four schema-DDL ops are
   still always logged.
 
+### Added
+
+- **`store.Open` / `store.OpenCtx`: the composed open (rmp #2523).** One call runs the
+  reopen sequence every embedder used to hand-write: recovery, the clean gate,
+  `wal.Open`, and the transactional store built from the recovery result. The returned
+  `*store.Opened[N, W]` embeds `*store.DB` (with the store's commit lock already wired as
+  the close quiesce) and exposes `Store()`, `Graph()`, `Recovery()` and `WAL()`, so the
+  recovered transaction sequence, the replay op cap, the codecs and the schema cannot be
+  dropped by omission. A recovery that is not clean, including the nil-error
+  `recovery.ErrCommittedTxnCorruptOp` outcome, is refused with a
+  `*store.UncleanRecoveryError` wrapping `store.ErrUncleanRecovery` and the recovery's
+  `TailErr`; nothing is opened for append. `cypher.NewEngineWithOpened` builds the engine
+  over an opened store and re-registers the recovered schema. Non-breaking: the low-level
+  `recovery.Open`, `Result.NewStore` and `store.New` are unchanged. Examples 24 and 25 now
+  reopen through `store.OpenCtx`.
+
 ### Fixed
 
 - **A degree read no longer hides a neighbour removed after its snapshot (rmp #2969).**
