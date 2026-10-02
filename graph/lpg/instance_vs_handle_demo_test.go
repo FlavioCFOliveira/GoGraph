@@ -52,7 +52,7 @@ func TestDemo2403_OrdinalSurvivesSiblingDeleteButHandleIsSlotPrecise(t *testing.
 
 	// Remove the MIDDLE instance through the handle-precise path, which is what
 	// DELETE uses for a bound relationship.
-	g.RemoveEdgeInstanceByHandle("a", "b", handles[1])
+	must(t).E(g.RemoveEdgeInstanceByHandle("a", "b", handles[1]))
 
 	// The handle surface is instance-precise: the removed one is gone, the
 	// survivors still resolve to their OWN types.

@@ -326,7 +326,7 @@ func (g *Graph[N, W]) retireDivergentIndexEntries(id graph.NodeID) {
 		if !g.nodeIdx.Has(uint32(lid), id) {
 			continue
 		}
-		if !g.deferLabelIndexRemoval(uint32(lid), id, nil) {
+		if !g.deferLabelIndexRemoval(uint32(lid), id, nil, true) {
 			g.nodeIdx.Remove(uint32(lid), id)
 		}
 	}

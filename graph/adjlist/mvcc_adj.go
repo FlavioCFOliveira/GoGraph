@@ -47,6 +47,12 @@ package adjlist
 // and no edge-level undo record is ever built.
 
 import (
+	"fmt"
+	"slices"
+	"strings"
+	"sync/atomic"
+	"unsafe"
+
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 )
@@ -65,10 +71,19 @@ type adjVersion[W any] struct {
 	// union lpg's deltas use, for the same reason: an autocommit write is
 	// already committed when it is made and needs no shared mutable record.
 	info *mvcc.CommitInfo
-	// ts is the commit timestamp of an autocommit write; read only when info is
-	// nil.
+	// ts is the commit timestamp of an autocommit write when info is nil. When
+	// info is set, no reader consults it, and it carries [adjOverPreImage] or
+	// zero instead: whether this version is its transaction's FIRST write over a
+	// committed pre-image, the only kind [AdjList.WithdrawTx] restores
+	// (rmp #2965). Keeping the mark here costs no memory.
 	ts uint64
 }
+
+// adjOverPreImage marks, in a transactional version's ts, that prev was a
+// committed entry — or no entry — when the version was linked, so prev is the
+// transaction's exact pre-image. A version over another transaction's
+// uncommitted entry does not carry it, and its abort leaves the entry alone.
+const adjOverPreImage = 1
 
 // supersededAt returns the timestamp at which prev was replaced.
 func (v *adjVersion[W]) supersededAt() uint64 {
@@ -127,20 +142,50 @@ func (a *AdjList[N, W]) VersionCount() int64 { return a.versionActive.Load() }
 // the chain. That matters because a multi-edge write to one node replaces its
 // entry once per edge, and without this a single statement would leave one
 // record per edge instead of one per node.
-func (a *AdjList[N, W]) linkVersion(next, prev *adjEntry[W], info *mvcc.CommitInfo, ts uint64) {
+//
+// It reports whether it linked a NEW version carrying info, which is when the
+// transaction's write set gains this entry. A transactional version over a
+// committed pre-image is marked [adjOverPreImage].
+func (a *AdjList[N, W]) linkVersion(next, prev *adjEntry[W], info *mvcc.CommitInfo, ts uint64) bool {
 	if next == nil {
-		return
+		return false
 	}
 	if info != nil && prev != nil {
 		if pv := prev.ver.Load(); pv != nil && pv.info == info {
 			// Same transaction, already recorded for this node: keep prev's
 			// chain and drop the intermediate entry, which no reader can need.
 			next.ver.Store(pv)
-			return
+			return false
+		}
+	}
+	if info != nil {
+		ts = 0
+		if overPreImage(prev) {
+			ts = adjOverPreImage
 		}
 	}
 	next.ver.Store(&adjVersion[W]{prev: prev, info: info, ts: ts})
 	a.versionActive.Add(1)
+	return info != nil
+}
+
+// overPreImage reports whether e is a committed entry, or no entry at all, so
+// that a transaction's first write over it supersedes its exact pre-image. An
+// aborted head is stepped back over, as [AdjList.WithdrawTx] steps back over
+// it; another transaction's in-flight entry is not a pre-image.
+func overPreImage[W any](e *adjEntry[W]) bool {
+	for e != nil {
+		v := e.ver.Load()
+		if v == nil {
+			return true
+		}
+		at := v.supersededAt()
+		if at != mvcc.AbortedTS {
+			return at < mvcc.TxIDBase
+		}
+		e = v.prev
+	}
+	return true
 }
 
 // entryAsOf returns the adjacency entry of intraIdx as it was at startTS for a
@@ -224,22 +269,29 @@ func (a *AdjList[N, W]) EntryNeighboursAsOf(id graph.NodeID, startTS, txID uint6
 //
 // It is SHARED rather than owned: the higher layer passes the same stamp to
 // every versioned store it has, so one transaction's topology, node labels and
-// node properties all take one commit record and become visible together. It is
-// a field rather than a parameter because storeEntry has a dozen callers and
-// every one of them would otherwise have to thread it.
+// node properties all take one commit record and become visible together. A
+// transaction reaches the adjacency through [AdjList.Writer], which carries it to
+// every version the write creates.
 //
-// # What a concurrent unstamped writer inherits, and why that is sound
+// # A write that carries no transaction (rmp #2967)
 //
-// The public Go-API mutators are documented as per-operation atomic, not
-// transactional, so one may run on another goroutine while a transaction holds
-// the barrier and has the stamp armed. That write then joins the transaction's
-// visibility group: it becomes visible when the transaction publishes rather
-// than the instant it is made. That is not a regression — under the barrier
-// such a write is ALREADY invisible to every barrier reader until the barrier
-// is released, which is the same instant. It cannot be lost, because a
-// transaction's record is published on rollback as well as on commit (the
-// in-memory undo log restores the stored value physically, so the chain nets
-// out; see lpg's endWrite).
+// A write made through the AdjList's own methods, or through a [Writer] built
+// from the zero [mvcc.Tx], is its own single-operation transaction. It never
+// joins a transaction the stamp's slot names, even while an exclusive bracket
+// of the higher layer holds that slot: the module cannot tell the bracket's own
+// goroutine from an unrelated one, so a write that joined the bracket was
+// acknowledged and then lost when the bracket aborted. Instead the write
+//
+//   - refuses, with a [*mvcc.Conflict] for [mvcc.StoreAdjacency] and no change,
+//     an entry another transaction published and has not committed — the
+//     bracket's included ([AdjList.directConflictLocked]). The refusal is
+//     retryable: it clears once that transaction commits or aborts;
+//   - otherwise commits at once, under a fresh timestamp of its own
+//     ([mvcc.WriteStamp.UntransactedStamp]), so a later abort of any
+//     transaction leaves it in place.
+//
+// A write that belongs to a transaction says so by writing through
+// [AdjList.Writer] over it.
 //
 // Must be called before any edge is written and never concurrently with another
 // operation.
@@ -254,23 +306,22 @@ func (a *AdjList[N, W]) SetWriteStamp(s *mvcc.WriteStamp) { a.stamp = s }
 // armed AND this write actually supersedes something, so its cost is paid per
 // topology change and never on a read.
 //
-// # The three cases, and why the middle one may not fall back to the slot
+// # The three cases
 //
 // A write that carries a transaction takes that transaction's shared record, so
 // every version of one transaction points at one record and publishing it is one
 // atomic store — whatever else is writing concurrently (rmp #2320).
 //
 // A write that carries a transaction whose window has already been RETRACTED
-// takes a fresh untransacted timestamp instead of consulting the ambient slot.
-// Consulting it would be the defect this threading removes, arrived at from the
-// far side: the slot may name a live concurrent transaction, and adopting that
-// record would publish this version at that transaction's commit instant. A
-// timestamp later than the write actually happened is the safe direction; see
-// the [mvcc.WriteStamp] file comment.
+// takes a fresh untransacted timestamp. Adopting the record the stamp's slot
+// names instead would publish this version at a concurrent transaction's
+// commit instant. A timestamp later than the write actually happened is the
+// safe direction; see the [mvcc.WriteStamp] file comment.
 //
-// A write that carries NO transaction resolves through the ambient slot, which
-// is the correct reading for adjlist's remaining untransacted callers — the
-// exclusive bulk builds, WAL replay, snapshot apply and the direct Go API.
+// A write that carries NO transaction takes a fresh untransacted timestamp too,
+// and never the slot's record (rmp #2967): it is its own single-operation
+// transaction, committed the instant it is made. See [AdjList.SetWriteStamp].
+// The slot is not consulted on this path at all.
 func (a *AdjList[N, W]) versionStamp(tx mvcc.Tx) (*mvcc.CommitInfo, uint64) {
 	if a.stamp == nil {
 		return nil, 0
@@ -279,9 +330,8 @@ func (a *AdjList[N, W]) versionStamp(tx mvcc.Tx) (*mvcc.CommitInfo, uint64) {
 		if info := tx.Record(); info != nil {
 			return info, 0
 		}
-		return a.stamp.UntransactedStamp()
 	}
-	return a.stamp.Stamp()
+	return a.stamp.UntransactedStamp()
 }
 
 // Reclaim frees every adjacency version that no reader can reach any more, and
@@ -410,4 +460,293 @@ func severChain[W any](e *adjEntry[W], watermark uint64) (freed, retained int, r
 		cur = v.prev
 	}
 	return freed, retained, e.ver.Load() != nil
+}
+
+// WithdrawTx restores every adjacency entry the transaction whose commit
+// record is info published to the entry it superseded, and returns how many
+// version records it released (rmp #2965). ids is the transaction's adjacency
+// write set ([mvcc.TxState.AdjacencyWrites]); only those entries are visited,
+// each under its own shard's lock, so the cost is O(the transaction's own
+// adjacency writes) and nothing at all when it wrote none. The caller calls it
+// while the transaction is still in flight and marks info aborted only after it
+// returns.
+//
+// # Why the adjacency needs a withdrawal of its own
+//
+// Rollback of an adjacency write used to be physical only: an inverse write made
+// by the engine's undo log, or by the write itself when it refuses after
+// inserting. A bracket aborted without either — a caller of lpg's ApplyVersioned
+// that has no undo log, such as the durable store's in-memory apply — left its
+// entries as the stored value. Its version records made a snapshot reader step
+// back over them, but a present-time read took the aborted entry as it was, and
+// the next write built on it, so an aborted edge removal or append became
+// permanent.
+//
+// # What it restores, and from where
+//
+// A transaction's writes to one node's entry share ONE version record. When that
+// record was linked over a committed entry it is marked [adjOverPreImage], and
+// its prev is the exact pre-image; only such a head is restored. No
+// transaction can build on another's uncommitted entry, because
+// [AdjList.directConflictLocked] refuses every write over one whatever claims
+// the writing path took (the ACID audit of rmp #2965 found a path that took
+// none), so the mark is the defence in depth, not the guarantee. A pre-image whose own head
+// is aborted is stepped back over. The restored entry is a copy whose columns
+// are clipped to their length: the aborted entry may have extended the
+// pre-image's backing arrays in place, and a lock-free reader may still hold it,
+// so the next append must allocate rather than write into that memory. The
+// reverse index and the edge count are corrected from the difference between
+// the two entries' neighbour multisets. The ghost a withdrawn removal left in
+// the reverse index is retired by [AdjList.Reclaim], which retires every
+// aborted ghost.
+//
+// # Why before the record is marked aborted
+//
+// While the record is in flight its entries are guarded as they were for the
+// transaction's whole life: the claims refuse every claiming writer, and
+// [AdjList.directConflictLocked] refuses a direct write. Restoring them first
+// means no aborted entry is ever the stored value.
+//
+// Safe for concurrent use with readers, writers and [AdjList.Reclaim]: every
+// chain it changes is changed under that chain's shard lock, which Reclaim
+// takes too, and Reclaim never severs a record that is still in flight.
+func (a *AdjList[N, W]) WithdrawTx(info *mvcc.CommitInfo, ids []uint64) (freed int) {
+	if info == nil || len(ids) == 0 || !a.versioning {
+		return 0
+	}
+	var size int64
+	for _, id := range ids {
+		si := id & shardMask
+		intraIdx := id >> shardBits
+		s := &a.shards[si]
+		s.mu.Lock()
+		cur := loadEntry(s, intraIdx)
+		var v *adjVersion[W]
+		if cur != nil {
+			v = cur.ver.Load()
+		}
+		if v == nil || v.info != info || v.ts != adjOverPreImage {
+			s.mu.Unlock()
+			continue
+		}
+		pre, n := v.prev, 1
+		for pre != nil {
+			pv := pre.ver.Load()
+			if pv == nil || pv.supersededAt() != mvcc.AbortedTS {
+				break
+			}
+			pre, n = pv.prev, n+1
+		}
+		size += a.reindexWithdrawnLocked(graph.NodeID(id), cur, pre)
+		restoreSlotLocked(s, intraIdx, clipEntry(pre))
+		if pre == nil || pre.ver.Load() == nil {
+			delete(s.versioned, intraIdx)
+		}
+		freed += n
+		s.mu.Unlock()
+	}
+	if freed > 0 {
+		a.versionActive.Add(-int64(freed))
+	}
+	if size != 0 {
+		a.size.Add(uint64(size))
+	}
+	return freed
+}
+
+// clipEntry returns a copy of e whose columns have no spare capacity, carrying
+// e's version chain, or nil for nil. See [AdjList.WithdrawTx] for why a restored
+// entry may not share spare capacity with the entry it replaces.
+func clipEntry[W any](e *adjEntry[W]) *adjEntry[W] {
+	if e == nil {
+		return nil
+	}
+	c := &adjEntry[W]{
+		aux:        e.aux,
+		neighbours: e.neighbours[:len(e.neighbours):len(e.neighbours)],
+		weights:    e.weights[:len(e.weights):len(e.weights)],
+		handles:    e.handles[:len(e.handles):len(e.handles)],
+		labels:     e.labels[:len(e.labels):len(e.labels)],
+	}
+	c.ver.Store(e.ver.Load())
+	return c
+}
+
+// reindexWithdrawnLocked corrects the reverse index for src's entry going back
+// from cur to pre, and returns the change in the edge count. An undirected edge
+// lives in both endpoints' entries and is counted once, from the entry of the
+// lower node id; a self-loop has one slot and is counted from it. The caller
+// holds src's shard lock; the reverse index is a leaf below it.
+func (a *AdjList[N, W]) reindexWithdrawnLocked(src graph.NodeID, cur, pre *adjEntry[W]) int64 {
+	var delta map[graph.NodeID]int
+	note := func(e *adjEntry[W], d int) {
+		if e == nil {
+			return
+		}
+		for _, nb := range e.neighbours {
+			if delta == nil {
+				delta = make(map[graph.NodeID]int, len(e.neighbours))
+			}
+			delta[nb] += d
+		}
+	}
+	note(pre, 1)
+	note(cur, -1)
+	var size int64
+	for nb, d := range delta {
+		counted := a.cfg.Directed || src <= nb
+		for ; d > 0; d-- {
+			a.rev.add(nb, src)
+			if counted {
+				size++
+			}
+		}
+		for ; d < 0; d++ {
+			a.rev.remove(nb, src, nil, 0)
+			if counted {
+				size--
+			}
+		}
+	}
+	return size
+}
+
+// restoreSlotLocked publishes e as the entry of slot intraIdx of s without
+// versioning it: in place when no [Snapshot] has pinned the published slot
+// array, and otherwise into a clone, exactly as [AdjList.storeEntry] decides. A
+// clone also drops the shard's window builder, so its owner's next write starts
+// from the published array instead of mutating one no reader can reach. The
+// caller holds s.mu, so no in-place store can be in progress.
+func restoreSlotLocked[W any](s *adjShard[W], intraIdx uint64, e *adjEntry[W]) {
+	base := s.slotsRef.Load()
+	if base.state.CompareAndSwap(slotsWritable, slotsStoring) {
+		atomic.StorePointer(&base.slots[intraIdx], unsafe.Pointer(e)) //nolint:gosec // atomic publication of *adjEntry[W] into an unpinned published array
+		base.state.Store(slotsWritable)
+		return
+	}
+	next := &shardSlots{slots: make([]unsafe.Pointer, len(base.slots))}
+	copy(next.slots, base.slots)
+	next.slots[intraIdx] = unsafe.Pointer(e) //nolint:gosec // typed publication of *adjEntry[W] into a fresh clone
+	s.building, s.buildingOwner = nil, 0
+	s.slotsRef.Store(next)
+}
+
+// CheckInvariants verifies the adjacency's derived structures against its
+// forward entries and returns a description of every disagreement, or nil: the
+// reverse index must be exactly the multiset transpose of the forward entries,
+// the edge count must equal the arcs the entries hold (an undirected edge
+// counted once), and an undirected graph's entries must be symmetric.
+//
+// It is a diagnostic for tests and for an operator who suspects corruption. It
+// takes every shard's lock in turn, so the answer is meaningful only while no
+// writer runs; with writers running it may report a transient disagreement.
+func (a *AdjList[N, W]) CheckInvariants() error {
+	fwd := map[[2]graph.NodeID]int{}
+	var arcs int64
+	for si := range a.shards {
+		s := &a.shards[si]
+		s.mu.Lock()
+		if base := s.slotsRef.Load(); base != nil {
+			for intra := range base.slots {
+				e := loadEntry[W](s, uint64(intra))
+				if e == nil {
+					continue
+				}
+				src := graph.NodeID(uint64(intra)<<shardBits | uint64(si))
+				for _, nb := range e.neighbours {
+					fwd[[2]graph.NodeID{src, nb}]++
+					if a.cfg.Directed || src <= nb {
+						arcs++
+					}
+				}
+			}
+		}
+		s.mu.Unlock()
+	}
+	rev := map[[2]graph.NodeID]int{}
+	for si := range a.rev.shards {
+		sh := &a.rev.shards[si]
+		sh.mu.RLock()
+		for intra, list := range sh.srcs {
+			dst := graph.NodeID(uint64(intra)<<shardBits | uint64(si))
+			for _, src := range list {
+				rev[[2]graph.NodeID{src, dst}]++
+			}
+		}
+		sh.mu.RUnlock()
+	}
+	var errs []string
+	for k, n := range fwd {
+		if rev[k] != n {
+			errs = append(errs, fmt.Sprintf("arc %v: forward %d, reverse %d", k, n, rev[k]))
+		}
+		if !a.cfg.Directed {
+			if m := fwd[[2]graph.NodeID{k[1], k[0]}]; m != n {
+				errs = append(errs, fmt.Sprintf("asymmetric %v: %d against %d", k, n, m))
+			}
+		}
+	}
+	for k, n := range rev {
+		if fwd[k] == 0 {
+			errs = append(errs, fmt.Sprintf("arc %v: reverse %d, no forward", k, n))
+		}
+	}
+	if got := a.size.Load(); got != uint64(arcs) {
+		errs = append(errs, fmt.Sprintf("edge count %d, entries hold %d", got, arcs))
+	}
+	if len(errs) == 0 {
+		return nil
+	}
+	slices.Sort(errs)
+	if len(errs) > 10 {
+		errs = append(errs[:10], fmt.Sprintf("and %d more", len(errs)-10))
+	}
+	return fmt.Errorf("adjlist: invariants violated: %s", strings.Join(errs, "; "))
+}
+
+// committedStartTS is the read position of the present-state readers: every
+// committed version is visible and every uncommitted one is not (rmp #2965,
+// round 5). It is the start timestamp the graph layer's implicit transactions
+// read at.
+const committedStartTS = mvcc.TxIDBase - 1
+
+// committedEntry returns the newest COMMITTED version of node id's entry: the
+// stored entry when the change that produced it has committed, and otherwise
+// the entry it replaced, repeated until a committed one is reached.
+//
+// # Why the present-state readers step back (finding R5-F3)
+//
+// [AdjList.HasEdge], [AdjList.Neighbours], the out-degree family and the
+// in-neighbour readers used to read the stored entry, which a transaction
+// replaces as soon as it writes: a durable commit applied but not yet fsynced
+// was visible through them, and withdrawn again if the fsync failed. A version
+// written by a transaction that has not published is invisible to every other
+// reader; a transaction reads its own writes through its own snapshot
+// ([AdjList.EntryViewAsOf] with its id, or a [Writer]).
+//
+// The fast path — no version on the entry, or a committed one — is the one
+// atomic load the stored read already cost, and allocates nothing. A
+// transaction that commits while the walk runs is seen wholly or not at all: a
+// record first classified in flight is held so for the rest of the walk, even
+// if its timestamp flips before the walk reaches its next version.
+func (a *AdjList[N, W]) committedEntry(id graph.NodeID) *adjEntry[W] {
+	e := loadEntry[W](&a.shards[id&shardMask], uint64(id)>>shardBits)
+	if !a.versioning {
+		return e
+	}
+	var held *mvcc.CommitInfo
+	for e != nil {
+		v := e.ver.Load()
+		if v == nil {
+			return e
+		}
+		if v.info == nil || v.info != held {
+			if mvcc.Visible(v.supersededAt(), committedStartTS, 0) {
+				return e
+			}
+			held = v.info
+		}
+		e = v.prev
+	}
+	return nil
 }

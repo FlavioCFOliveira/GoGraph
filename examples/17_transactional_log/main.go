@@ -633,7 +633,7 @@ func recoverLedger(ctx context.Context, dir string, plan ledgerPlan, w io.Writer
 	// re-derived from the plan, so a lost or spurious node surfaces as a
 	// mismatch the test pins. LiveOrder counts non-tombstoned interned nodes;
 	// the ledger never removes a node, so it equals the account total.
-	rec.accounts = int(g.LiveOrder()) //nolint:gosec // G115: account count is bounded by cfg.accounts (an int), no realistic overflow
+	rec.accounts = int(g.LiveOrderStored()) //nolint:gosec // G115: account count is bounded by cfg.accounts (an int), no realistic overflow
 
 	return rec, nil
 }

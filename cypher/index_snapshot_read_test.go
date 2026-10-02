@@ -639,7 +639,7 @@ func TestIndexMaintenance_RawEdgeWritesCannotStaleAnEngineIndex(t *testing.T) {
 	}
 	mustNoErr(t, g.SetEdgeProperty("t1", "t2", "s", lpg.StringValue("v5")))
 	mustNoErr(t, g.AddEdge("t3", "brand-new", 1))
-	g.RemoveEdge("t1", "t2")
+	must(t).E(g.RemoveEdge("t1", "t2"))
 	// No node was touched, so every shape still sees the seeded graph.
 	for _, sh := range snapReadShapes {
 		if c := snapReadCount(t, eng, sh.q, sh.params); c != sh.want {

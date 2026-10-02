@@ -74,6 +74,9 @@ type Graph[N comparable, W any] interface {
 
 	// RemoveEdge removes the directed edge from src to dst if present.
 	// It is a no-op when no such edge exists. The endpoints remain in
-	// the graph.
-	RemoveEdge(src, dst N)
+	// the graph. Implementations return an error, and remove nothing, when
+	// the removal is refused — for example, a versioned implementation
+	// refuses a removal that would overwrite another transaction's
+	// uncommitted write.
+	RemoveEdge(src, dst N) error
 }

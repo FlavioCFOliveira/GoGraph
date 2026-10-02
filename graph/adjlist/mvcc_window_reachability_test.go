@@ -64,8 +64,8 @@ func TestLoadEntry_SnapshotReaderReachesAnOpenWindowAndStepsBackOverIt(t *testin
 	s := &a.shards[id&shardMask]
 
 	// A committed past, so "step back" has somewhere to step to.
-	_, tsBefore := txWrite(a, clk, func() {
-		if err := a.AddEdge("a", "b", 1); err != nil {
+	_, tsBefore := txWrite(a, clk, func(wr Writer[string, float64]) {
+		if err := wr.AddEdge("a", "b", 1); err != nil {
 			t.Fatalf("AddEdge: %v", err)
 		}
 	})
@@ -73,13 +73,13 @@ func TestLoadEntry_SnapshotReaderReachesAnOpenWindowAndStepsBackOverIt(t *testin
 	// Open a window and write the same shard twice. The second write is the in-place
 	// builder mutation; the first is the clone-and-publish that creates the builder.
 	ws := a.WriteStampForTest()
-	beginTx(ws)
+	wtx := beginTxW(ws)
 	a.BeginCommit()
-	if err := a.AddEdge("a", "c", 1); err != nil {
+	if err := a.Writer(wtx).AddEdge("a", "c", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
 	arrayAfterFirst := s.slotsRef.Load()
-	if err := a.AddEdge("a", "d", 1); err != nil {
+	if err := a.Writer(wtx).AddEdge("a", "d", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
 	arrayAfterSecond := s.slotsRef.Load()
@@ -216,10 +216,10 @@ func TestLoadEntry_ConcurrentSnapshotReadersNeverObserveAnOpenWindow(t *testing.
 
 	for tx := 0; tx < txCount; tx++ {
 		ws := a.WriteStampForTest()
-		beginTx(ws)
+		wtx := beginTxW(ws)
 		a.BeginCommit()
 		for i := 0; i < windowFanout; i++ {
-			if err := a.AddEdge("a", dst[tx*windowFanout+i], 1); err != nil {
+			if err := a.Writer(wtx).AddEdge("a", dst[tx*windowFanout+i], 1); err != nil {
 				t.Fatalf("AddEdge: %v", err)
 			}
 			// Hold the window open across a scheduling point, so readers get to

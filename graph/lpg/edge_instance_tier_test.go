@@ -79,14 +79,14 @@ func TestEdgeInstanceAndHandleTiering(t *testing.T) {
 	checkProps("EdgePropertiesByHandle", g.EdgePropertiesByHandle("a", "b", 7))
 
 	// RemoveEdgeInstance / RemoveEdgeInstanceByHandle clear the stores.
-	g.RemoveEdgeInstance("a", "b", 1)
+	must(t).E(g.RemoveEdgeInstance("a", "b", 1))
 	if got := g.EdgeLabelsAt("a", "b", 1); got != nil {
 		t.Fatalf("EdgeLabelsAt after RemoveEdgeInstance = %v, want nil", got)
 	}
 	if got := g.EdgePropertiesAt("a", "b", 1); got != nil {
 		t.Fatalf("EdgePropertiesAt after RemoveEdgeInstance = %v, want nil", got)
 	}
-	g.RemoveEdgeInstanceByHandle("a", "b", 7)
+	must(t).E(g.RemoveEdgeInstanceByHandle("a", "b", 7))
 	if got := g.EdgeLabelsByHandle("a", "b", 7); got != nil {
 		t.Fatalf("EdgeLabelsByHandle after remove = %v, want nil", got)
 	}

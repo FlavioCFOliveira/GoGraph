@@ -13,3 +13,8 @@ package lpg
 // relationship type. A test that hard-coded "+1" would keep passing if the
 // encoding ever changed; one that calls the real codec would not.
 func DecodeSlotLabelForTest(v uint32) (LabelID, bool) { return decodeSlotLabel(v) }
+
+// SetNodeRemovalEntryHookForTest installs fn as the seam [Graph.removeNodeInfo]
+// calls on entry for a transactional removal, before any claim; nil removes it.
+// Not safe to call while writers run.
+func (g *Graph[N, W]) SetNodeRemovalEntryHookForTest(fn func()) { g.nodeRemovalEntryHookForTest = fn }

@@ -287,7 +287,9 @@ func (g *Graph[N, W]) EntryViewAsOf(id graph.NodeID, s *Snapshot) adjlist.EntryV
 func (g *Graph[N, W]) InNeighbourIDsAsOf(dstID graph.NodeID, s *Snapshot) []graph.NodeID {
 	startTS, txID, walk := snapshotTimes(s)
 	if !walk {
-		return g.adj.InNeighbourIDs(dstID)
+		// The STORED in-edges, including uncommitted writes: the adjacency's own
+		// InNeighbourIDs is committed-only (rmp #2965, round 5).
+		return g.adj.InNeighbourIDsStored(dstID)
 	}
 	return g.adj.InNeighbourIDsVisible(dstID, func(info *commitInfo, ts uint64) bool {
 		return s.visible(info, ts, startTS, txID)
@@ -301,7 +303,7 @@ func (g *Graph[N, W]) InNeighbourIDsAsOf(dstID graph.NodeID, s *Snapshot) []grap
 func (g *Graph[N, W]) HasInNeighbourAsOf(dstID graph.NodeID, s *Snapshot) bool {
 	startTS, txID, walk := snapshotTimes(s)
 	if !walk {
-		return len(g.adj.InNeighbourIDs(dstID)) > 0
+		return len(g.adj.InNeighbourIDsStored(dstID)) > 0
 	}
 	return g.adj.HasInNeighbourVisible(dstID, func(info *commitInfo, ts uint64) bool {
 		return s.visible(info, ts, startTS, txID)

@@ -24,7 +24,7 @@ func TestNodeExistence_IsVersionedInBothDirections(t *testing.T) {
 	// A reader must actually EXIST for the past this test reads through snapAt
 	// to be retained; see pinHorizon.
 	pinHorizon(t, g)
-	if err := g.ApplyAtomically(func() error { return g.AddNode("old") }); err != nil {
+	if err := g.ApplyAtomicallyTx(func(tx WriteTx) error { return g.Writer(tx).AddNode("old") }); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	oldID := mvccNodeID(t, g, "old")
@@ -32,7 +32,7 @@ func TestNodeExistence_IsVersionedInBothDirections(t *testing.T) {
 	before := snapAt(g.readTS())
 
 	// A node created after the reader started.
-	if err := g.ApplyAtomically(func() error { return g.AddNode("new") }); err != nil {
+	if err := g.ApplyAtomicallyTx(func(tx WriteTx) error { return g.Writer(tx).AddNode("new") }); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	newID := mvccNodeID(t, g, "new")
@@ -45,9 +45,9 @@ func TestNodeExistence_IsVersionedInBothDirections(t *testing.T) {
 	}
 
 	// A node removed after the reader started.
-	if err := g.ApplyAtomically(func() error {
-		if err := g.RemoveNode("old"); err != nil {
-			t.Fatalf("g.RemoveNode(\"old\"): %v", err)
+	if err := g.ApplyAtomicallyTx(func(tx WriteTx) error {
+		if !g.Writer(tx).RemoveNode("old") {
+			t.Fatalf("g.RemoveNode(\"old\") removed nothing: %v", tx.Err())
 		}
 		return nil
 	}); err != nil {
@@ -74,16 +74,16 @@ func TestNodeExistence_RemoveThenReviveInOneTransaction(t *testing.T) {
 	// A reader must actually EXIST for the past this test reads through snapAt
 	// to be retained; see pinHorizon.
 	pinHorizon(t, g)
-	if err := g.ApplyAtomically(func() error { return g.AddNode("a") }); err != nil {
+	if err := g.ApplyAtomicallyTx(func(tx WriteTx) error { return g.Writer(tx).AddNode("a") }); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	id := mvccNodeID(t, g, "a")
 
-	if err := g.ApplyAtomically(func() error {
-		if err := g.RemoveNode("a"); err != nil {
-			t.Fatalf("g.RemoveNode(\"a\"): %v", err)
+	if err := g.ApplyAtomicallyTx(func(tx WriteTx) error {
+		if !g.Writer(tx).RemoveNode("a") {
+			t.Fatalf("g.RemoveNode(\"a\") removed nothing: %v", tx.Err())
 		}
-		return g.AddNode("a") // the undo log's revival
+		return g.Writer(tx).AddNode("a") // the undo log's revival
 	}); err != nil {
 		t.Fatalf("remove+revive: %v", err)
 	}
@@ -100,11 +100,11 @@ func TestLabelIndex_RemovalIsDeferredAndVisibleToOlderReaders(t *testing.T) {
 	// A reader must actually EXIST for the past this test reads through snapAt
 	// to be retained; see pinHorizon.
 	pinHorizon(t, g)
-	if err := g.ApplyAtomically(func() error {
-		if err := g.AddNode("a"); err != nil {
+	if err := g.ApplyAtomicallyTx(func(tx WriteTx) error {
+		if err := g.Writer(tx).AddNode("a"); err != nil {
 			return err
 		}
-		return g.SetNodeLabel("a", "P")
+		return g.Writer(tx).SetNodeLabel("a", "P")
 	}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -112,8 +112,8 @@ func TestLabelIndex_RemovalIsDeferredAndVisibleToOlderReaders(t *testing.T) {
 	lid := g.reg.intern("P")
 	before := snapAt(g.readTS())
 
-	if err := g.ApplyAtomically(func() error {
-		if err := g.RemoveNodeLabel("a", "P"); err != nil {
+	if err := g.ApplyAtomicallyTx(func(tx WriteTx) error {
+		if err := g.Writer(tx).RemoveNodeLabel("a", "P"); err != nil {
 			t.Fatalf("g.RemoveNodeLabel(\"a\", \"P\"): %v", err)
 		}
 		return nil
@@ -133,11 +133,11 @@ func TestLabelIndex_RemovalIsDeferredAndVisibleToOlderReaders(t *testing.T) {
 	}
 	// A label ADDED after the reader started is the harmless direction, and it
 	// must still be filtered out rather than emitted.
-	if err := g.ApplyAtomically(func() error {
-		if err := g.AddNode("b"); err != nil {
+	if err := g.ApplyAtomicallyTx(func(tx WriteTx) error {
+		if err := g.Writer(tx).AddNode("b"); err != nil {
 			return err
 		}
-		return g.SetNodeLabel("b", "P")
+		return g.Writer(tx).SetNodeLabel("b", "P")
 	}); err != nil {
 		t.Fatalf("add later: %v", err)
 	}
@@ -158,22 +158,22 @@ func TestLabelIndex_DeferredRemovalIsCancelledByReAdd(t *testing.T) {
 	// A reader must actually EXIST for the past this test reads through snapAt
 	// to be retained; see pinHorizon.
 	pinHorizon(t, g)
-	if err := g.ApplyAtomically(func() error {
-		if err := g.AddNode("a"); err != nil {
+	if err := g.ApplyAtomicallyTx(func(tx WriteTx) error {
+		if err := g.Writer(tx).AddNode("a"); err != nil {
 			return err
 		}
-		return g.SetNodeLabel("a", "P")
+		return g.Writer(tx).SetNodeLabel("a", "P")
 	}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	id := mvccNodeID(t, g, "a")
 	lid := g.reg.intern("P")
 
-	if err := g.ApplyAtomically(func() error {
-		if err := g.RemoveNodeLabel("a", "P"); err != nil {
+	if err := g.ApplyAtomicallyTx(func(tx WriteTx) error {
+		if err := g.Writer(tx).RemoveNodeLabel("a", "P"); err != nil {
 			t.Fatalf("g.RemoveNodeLabel(\"a\", \"P\"): %v", err)
 		}
-		return g.SetNodeLabel("a", "P") // the undo log's inverse
+		return g.Writer(tx).SetNodeLabel("a", "P") // the undo log's inverse
 	}); err != nil {
 		t.Fatalf("strip+restore: %v", err)
 	}
@@ -230,11 +230,11 @@ func TestCandidateFilter_DoesNotDeadlockUnderConcurrentReaders(t *testing.T) {
 			default:
 			}
 			k := fmt.Sprintf("n%d", i%n)
-			_ = g.ApplyAtomically(func() error {
-				if err := g.RemoveNodeLabel(k, "P"); err != nil {
+			_ = g.ApplyAtomicallyTx(func(tx WriteTx) error {
+				if err := g.Writer(tx).RemoveNodeLabel(k, "P"); err != nil {
 					t.Errorf("g.RemoveNodeLabel(k, \"P\"): %v", err)
 				}
-				return g.SetNodeLabel(k, "P")
+				return g.Writer(tx).SetNodeLabel(k, "P")
 			})
 		}
 	}()

@@ -47,8 +47,10 @@ func TestInEdgeSnapshot_RemovedArcStaysVisibleToAnOlderSnapshot(t *testing.T) {
 		t.Fatal("premise: the removal of the committed arc x→d was refused")
 	}
 
-	if got := g.AdjList().InNeighbours("d"); len(got) != 0 {
-		t.Fatalf("premise: the present in-edge index still lists %v after the removal", got)
+	// The removal is uncommitted, so a committed-only present read still lists
+	// x (rmp #2965, round 5); the remover's own view, checked below, does not.
+	if got := g.AdjList().InNeighbours("d"); !slices.Equal(got, []string{"x"}) {
+		t.Fatalf("the present in-edge read lists %v while the removal is uncommitted, want [x]", got)
 	}
 	if got := g.ReadAt(snap).InNeighbours("d"); !slices.Equal(got, []string{"x"}) {
 		t.Fatalf("a snapshot older than the removal reads in-neighbours %v of d, want [x]: "+

@@ -57,7 +57,7 @@ func TestAdjList_Multigraph_RemoveOneOfMany(t *testing.T) {
 	}
 	a := g.AdjList()
 
-	a.RemoveEdge(0, 1)
+	must(t).E(a.RemoveEdge(0, 1))
 
 	if got := a.Size(); got != k-1 {
 		t.Errorf("after RemoveEdge: Size = %d, want %d", got, k-1)

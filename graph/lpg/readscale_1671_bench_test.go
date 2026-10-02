@@ -91,10 +91,10 @@ func BenchmarkReadScale1671_ViewUnderWriter(b *testing.B) {
 				return
 			default:
 			}
-			_ = g.ApplyAtomically(func() error {
+			_ = g.ApplyAtomicallyTx(func(tx WriteTx) error {
 				for k := 0; k < 8; k++ {
 					key := "n" + strconv.Itoa((w+k)&(len(ids)-1))
-					_ = g.SetNodeProperty(key, "v", Int64Value(int64(w+k)))
+					_ = g.Writer(tx).SetNodeProperty(key, "v", Int64Value(int64(w+k)))
 				}
 				return nil
 			})

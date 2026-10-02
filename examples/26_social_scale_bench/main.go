@@ -432,7 +432,7 @@ func csrOrderingExercise(
 	// Build the forward CSR exactly as the Cypher engine does (live-filtered),
 	// so the snapshot measured here is the one queries actually traverse.
 	buildStart := time.Now()
-	fwd := csr.BuildFromAdjListLive(g.AdjList(), g.LiveNodeFilter())
+	fwd := csr.BuildFromAdjListLive(g.AdjList(), g.LiveNodeFilterStored())
 	buildElapsed := time.Since(buildStart)
 
 	fmt.Fprintf(w, "\n# --- CSR neighbour ordering (sprint 313) ---\n")

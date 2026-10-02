@@ -578,7 +578,7 @@ func (a codecArmOf[N, W]) checkRecovered(
 		if !ok {
 			add(ViolationACIDDurability, "<codec-node-lost>",
 				"[%s] acknowledged node ordinal %d did not come back under its own key after recovery"+
-					" (acked=%d, live order=%d)", a.label, ord, len(led.acked), g.LiveOrder())
+					" (acked=%d, live order=%d)", a.label, ord, len(led.acked), g.LiveOrderStored())
 			continue
 		}
 		got, isInt := pv.Int64()
@@ -662,7 +662,7 @@ func (a codecArmOf[N, W]) checkRecovered(
 	// Consistency: the recovered graph must not carry more live nodes than the
 	// workload ever issued. The ordinal sweep above cannot see a phantom outside
 	// the modelled range; this can.
-	ev.liveOrder = g.LiveOrder()
+	ev.liveOrder = g.LiveOrderStored()
 	if ev.liveOrder > uint64(len(led.issued)) {
 		add(ViolationACIDConsistency, "<codec-phantom>",
 			"[%s] the recovered graph holds %d live nodes but the workload only ever issued %d",

@@ -32,27 +32,27 @@ func edgeSideFixture(b *testing.B, pairs int) (*Graph[string, float64], []graph.
 	for i := 0; i < pairs; i++ {
 		s := "s" + strconv.Itoa(i)
 		d := "d" + strconv.Itoa(i)
-		if err := g.ApplyAtomically(func() error {
-			if err := g.AddNode(s); err != nil {
+		if err := g.ApplyAtomicallyTx(func(tx WriteTx) error {
+			if err := g.Writer(tx).AddNode(s); err != nil {
 				return err
 			}
-			if err := g.AddNode(d); err != nil {
+			if err := g.Writer(tx).AddNode(d); err != nil {
 				return err
 			}
-			if err := g.AddEdge(s, d, 1); err != nil {
+			if err := g.Writer(tx).AddEdge(s, d, 1); err != nil {
 				return err
 			}
 			// Two types: the second has nowhere to go but overflow.
-			if err := g.SetEdgeLabel(s, d, "KNOWS"); err != nil {
+			if err := g.Writer(tx).SetEdgeLabel(s, d, "KNOWS"); err != nil {
 				b.Fatal(err)
 			}
-			if err := g.SetEdgeLabel(s, d, "LIKES"); err != nil {
+			if err := g.Writer(tx).SetEdgeLabel(s, d, "LIKES"); err != nil {
 				b.Fatal(err)
 			}
-			if err := g.SetEdgeLabelByHandle(s, d, 1, "KNOWS"); err != nil {
+			if err := g.Writer(tx).SetEdgeLabelByHandle(s, d, 1, "KNOWS"); err != nil {
 				b.Fatal(err)
 			}
-			return g.SetEdgePropertyByHandle(s, d, 1, "since", Int64Value(2020))
+			return g.Writer(tx).SetEdgePropertyByHandle(s, d, 1, "since", Int64Value(2020))
 		}); err != nil {
 			b.Fatalf("fixture %d: %v", i, err)
 		}

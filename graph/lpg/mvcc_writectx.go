@@ -47,10 +47,10 @@ package lpg
 // replaces the bare `info *commitInfo` those functions already took, so the
 // threading is a widening of an existing parameter rather than new plumbing.
 //
-// A nil *writeCtx means "no transaction": a direct Go-API mutation, committed
-// the instant it is made. It has no snapshot to be stale against and takes no
-// conflict check, which is the correct reading rather than a concession — that
-// call is per-operation atomic by contract, not transactional.
+// A nil *writeCtx means "no transaction", and since rmp #2947 only a graph whose
+// versioning substrate is disarmed (tests) writes with one: a direct Go-API
+// mutation runs as an IMPLICIT single-operation transaction, or inside the open
+// exclusive bracket, through [Graph.direct]. See graph/lpg/direct_tx.go.
 
 import (
 	"sync/atomic"
@@ -88,6 +88,10 @@ type writeCtx struct {
 	// snap is the read view this transaction resolves through, held inline so
 	// [Graph.writerView] can hand out &w.snap without allocating.
 	snap Snapshot
+	// snapMemo is snap's verdict memo, held inline so a transaction's view costs
+	// no allocation; snap.memo points here (see [Snapshot.memo]). A write
+	// transaction's view may be read by several goroutines writing through it.
+	snapMemo snapMemo
 	// startTS is the instant this transaction reads at, and txID its identity.
 	// Together they are what [mvcc.Visible] needs, so a transaction sees its own
 	// uncommitted work and nobody else's — and what [mvcc.Conflicts] needs, so
@@ -148,7 +152,7 @@ type writeCtx struct {
 	// refuses this transaction's own inverse and the rolled-back edge leaks into
 	// committed state (rmp #2445, found by the DST multi-session mode). The
 	// adjacency conflict sites therefore carry their own undoing exemption; see
-	// [adjVersions.checkAppend] and [adjVersions.noteExclusive].
+	// [adjVersions.claimAppend] and [adjVersions.noteExclusive].
 	//
 	// It is also what the prior art does. Memgraph's abort path walks the
 	// transaction's own deltas and restores each object directly, without going
@@ -208,6 +212,14 @@ type writeCtx struct {
 	// #2312). Nil means "not counted", which is what a zero-value state used by a
 	// test constructing a bare writeCtx gets.
 	counts *mvcc.WriteCounters
+	// abandon makes [Graph.endWrite] ABORT the transaction although no conflict
+	// doomed it: its owner failed for another reason after writing — a refused
+	// store apply, a WAL append or fsync that did not complete — and none of
+	// what it wrote may become visible. [Graph.ApplyDurable] raises it before
+	// its work runs and clears it only once the work has succeeded, so a panic
+	// out of that work aborts as well. Plain, not atomic: only the goroutine
+	// that drives the transaction reads or writes it.
+	abandon bool
 }
 
 // beginWriteCtx opens per-transaction write state, NOT published on the graph's
@@ -220,7 +232,7 @@ func (g *Graph[N, W]) beginWriteCtx() *writeCtx {
 	startTS := g.readTS()
 	id := g.nextTxID()
 	w := &writeCtx{startTS: startTS, txID: id, counts: &g.writeCounts}
-	w.snap = Snapshot{startTS: startTS, txID: id}
+	w.snap = Snapshot{startTS: startTS, txID: id, memo: &w.snapMemo}
 	w.tx.Arm(id)
 	return w
 }
@@ -275,7 +287,8 @@ func (g *Graph[N, W]) acquireWriteCtx(startTS, txID uint64) *writeCtx {
 		w.tx.Arm(txID)
 	}
 	w.startTS, w.txID = startTS, txID
-	w.snap = Snapshot{startTS: startTS, txID: txID}
+	clear(w.snapMemo.verdict)
+	w.snap = Snapshot{startTS: startTS, txID: txID, memo: &w.snapMemo}
 	w.counts = &g.writeCounts
 	w.conflict.Store(nil)
 	// EVERY mutable field must be reset here, because this state is RECYCLED. A
@@ -300,6 +313,7 @@ func (g *Graph[N, W]) acquireWriteCtx(startTS, txID uint64) *writeCtx {
 	w.commitTS = 0
 	w.allocRec = nil
 	w.applier = nil
+	w.abandon = false
 	return w
 }
 
@@ -356,9 +370,10 @@ func (w *writeCtx) adjTx() mvcc.Tx {
 // conflicts reports whether this transaction may displace a version whose
 // effective timestamp is headTS.
 //
-// A nil receiver — a direct Go-API mutation outside any transaction — never
-// conflicts: it is committed the instant it is made and has no snapshot to be
-// stale against.
+// A nil receiver — a write on a disarmed graph, which has no versions — never
+// conflicts. A direct Go-API write carries an implicit transaction whose start
+// timestamp sees every committed version, so through this same test it conflicts
+// with exactly the uncommitted ones (rmp #2947, see graph/lpg/direct_tx.go).
 //
 // This is where the per-transaction state pays for itself. The predicate is the
 // same one rmp #2300 defined, but the startTS and txID it reads now travel with
@@ -431,6 +446,15 @@ func (w *writeCtx) conflictErr(store string, headTS uint64) error {
 	return c
 }
 
+// implicit reports whether w is an IMPLICIT transaction: the single-operation
+// transaction a direct Go-API write runs as ([Graph.direct], rmp #2947). A store
+// whose no-op return reads the present value tests the head before it for an
+// implicit transaction, so a direct write that finds nothing to change is not
+// looking at another transaction's uncommitted change. False for nil.
+func (w *writeCtx) implicit() bool {
+	return w != nil && mvcc.IsImplicitTx(w.txID)
+}
+
 // doomed reports whether this transaction has already hit a serialization
 // conflict and can no longer commit.
 //
@@ -439,14 +463,14 @@ func (w *writeCtx) conflictErr(store string, headTS uint64) error {
 // going to abort regardless — Memgraph's PrepareForWrite callers return without
 // writing for the same reason.
 //
-// A nil receiver — a direct Go-API mutation outside any transaction — is never
+// A nil receiver — a write on a disarmed graph — is never
 // doomed.
 //
 // While the transaction is unwinding it reports FALSE, in lockstep with
 // [writeCtx.conflicts]: every caller reads this to mean "the write I just
 // attempted was refused", and during the undo replay no write is refused. The two
 // must give the same answer or a caller would skip bookkeeping for a write that
-// actually landed — [Graph.clearEdgePairState] is exactly such a caller. Whether
+// actually landed — [Graph.clearPairSides] is exactly such a caller. Whether
 // the transaction can still COMMIT is a different question and is answered by
 // [writeCtx.err], which this exemption does not touch.
 func (w *writeCtx) doomed() bool {

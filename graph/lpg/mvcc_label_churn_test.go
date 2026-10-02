@@ -961,18 +961,23 @@ func TestLabelChurnGate_TombstoneAbortedPinsTheGate(t *testing.T) {
 // TestLabelChurnGate_ReviveAbortedPinsTheGate is the guard on the pin in
 // [Graph.reviveAborted], and it tests the LOSING direction.
 //
-// The shape is an aborted DELETE of a node that was already tombstoned: the
-// withdrawal brings it back to life with no birth instant and restores no label
-// bitmap, so it ends alive, carrying the label in its bag, and absent from that
-// label's bitmap. Only the correction's add-back can give the row back, and only
-// the pin can keep the correction from being skipped.
+// The shape is an aborted death record on a node that is tombstoned and absent
+// from its label's bitmap: the withdrawal brings it back to life with no birth
+// instant and restores no label bitmap, so it ends alive, carrying the label in
+// its bag, and absent from that label's bitmap. Only the correction's add-back
+// can give the row back, and only the pin can keep the correction from being
+// skipped.
+//
+// The record is written directly. [Graph.removeNodeInfo] no longer writes a death
+// on a node that is already dead (ACID audit round 6, finding C2), which is how
+// this fixture used to reach it; the pin still guards every lone aborted death
+// whose node's bag and bitmap disagree.
 func TestLabelChurnGate_ReviveAbortedPinsTheGate(t *testing.T) {
 	g, lid, id, hold := abortedRevivalFixture(t, "sleeper", "Kept")
 	defer func() { g.EndRead(hold); _ = g.Close() }()
 
 	err := g.ApplyVersioned(func(tx WriteTx) error {
-		wv := g.Writer(tx)
-		wv.RemoveNode("sleeper")
+		g.noteNodeDied(id, tx.w, g.nodeLabelBagLids(id))
 		_ = tx.w.conflictErr(mvcc.StoreNodeExistence, ^uint64(0))
 		return tx.w.err()
 	})

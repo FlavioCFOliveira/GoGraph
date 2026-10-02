@@ -166,6 +166,11 @@ type StateApplier interface {
 // uses it to spare a commit that touches no indexed coordinate the ordered,
 // state-resolved fan-out. A subscriber that does not implement it is assumed to
 // be concerned by every node change.
+//
+// Implementations must be safe for concurrent use: [Manager.Concerns] calls
+// Concerns from every committing goroutine at once, under the Manager's read
+// lock only. Concerns must not mutate the subscriber; the module's
+// implementations read only the immutable index binding.
 type ChangeFilter interface {
 	Concerns(c Change) bool
 }

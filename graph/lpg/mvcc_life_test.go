@@ -87,7 +87,7 @@ func TestNodeLife_RolledBackDeleteSurvivesAnUnrelatedDelete(t *testing.T) {
 	// tombstoned. A rolled-back apply PUBLISHES a real instant (mvcc_write.go),
 	// so this is not an abort the reclaimer will withdraw.
 	if err := g.ApplyInVersionedTx(ctx, tx1, func(tx WriteTx) error {
-		g.Writer(tx).Revive("a")
+		_ = g.Writer(tx).Revive("a") // a transaction records its refusal on itself
 		return nil
 	}); err != nil {
 		t.Fatalf("tx1 undo revive: %v", err)
@@ -279,9 +279,9 @@ func TestNodeLife_RepeatedDeleteReviveKeepsTheTransactionsPriorState(t *testing.
 	defer g.EndRead(snap)
 
 	for i, step := range []func(WriteTx) error{
-		func(tx WriteTx) error { g.Writer(tx).Revive("a"); return nil },
+		func(tx WriteTx) error { return g.Writer(tx).Revive("a") },
 		func(tx WriteTx) error { g.Writer(tx).RemoveNode("a"); return nil },
-		func(tx WriteTx) error { g.Writer(tx).Revive("a"); return nil },
+		func(tx WriteTx) error { return g.Writer(tx).Revive("a") },
 	} {
 		if err := g.ApplyInVersionedTx(ctx, tx1, step); err != nil {
 			t.Fatalf("tx1 step %d: %v", i, err)

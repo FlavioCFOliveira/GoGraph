@@ -108,7 +108,7 @@ func TestAdjList_RemoveEdge_SurvivorKeepsHandle(t *testing.T) {
 
 	// RemoveEdge removes the FIRST occurrence (handle 111); the survivor
 	// (handle 222) must keep its handle, not inherit 111.
-	a.RemoveEdge("a", "b")
+	must(t).E(a.RemoveEdge("a", "b"))
 
 	nb, h := neighboursOf(t, a, "a")
 	if len(nb) != 1 {
@@ -137,12 +137,12 @@ func TestAdjList_RemoveEdge_MiddleSurvivorsKeepHandles(t *testing.T) {
 	// twice then re-checking is not possible (RemoveEdge always removes
 	// the first), so verify the first-removal case across the three-edge
 	// chain: removing twice leaves only the last handle.
-	a.RemoveEdge("a", "b") // drops handle 10
+	must(t).E(a.RemoveEdge("a", "b")) // drops handle 10
 	_, h := neighboursOf(t, a, "a")
 	if len(h) != 2 || h[0] != 20 || h[1] != 30 {
 		t.Fatalf("after first remove handles = %v, want [20 30]", h)
 	}
-	a.RemoveEdge("a", "b") // drops handle 20
+	must(t).E(a.RemoveEdge("a", "b")) // drops handle 20
 	_, h = neighboursOf(t, a, "a")
 	if len(h) != 1 || h[0] != 30 {
 		t.Fatalf("after second remove handles = %v, want [30]", h)

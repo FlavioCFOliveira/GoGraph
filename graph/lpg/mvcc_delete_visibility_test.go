@@ -595,7 +595,7 @@ func TestDeleteVisibility_TombstoneCounterNeverUnderCountsTheBitmap(t *testing.T
 				// The published bitmap has retired the node. The accelerator the
 				// whole engine reads existence through must agree, now.
 				checks.Add(1)
-				if !g.IsTombstoned(id) {
+				if !g.IsTombstonedStored(id) {
 					lies.Add(1)
 				}
 				return
@@ -612,7 +612,7 @@ func TestDeleteVisibility_TombstoneCounterNeverUnderCountsTheBitmap(t *testing.T
 		}
 	}
 	t.Logf("tombstone publication order: %d samples caught the published bitmap "+
-		"carrying the id, %d of them disagreed with IsTombstoned",
+		"carrying the id, %d of them disagreed with IsTombstonedStored",
 		checks.Load(), lies.Load())
 	if checks.Load() == 0 {
 		t.Fatal("no sample ever observed the published bitmap carrying the id, so " +
@@ -620,8 +620,8 @@ func TestDeleteVisibility_TombstoneCounterNeverUnderCountsTheBitmap(t *testing.T
 	}
 	if n := lies.Load(); n != 0 {
 		t.Errorf("%d times the published tombstone bitmap had already retired the "+
-			"node while IsTombstoned reported it alive. IsTombstoned is "+
-			"NodeExistsAsOf(id, nil), so in that window the present-time authority "+
+			"node while IsTombstonedStored reported it alive. NodeExistsAsOf(id, nil) is "+
+			"!IsTombstonedStored(id), so in that window the present-time authority "+
 			"on existence contradicts the set it is derived from (rmp #2687).", n)
 	}
 }

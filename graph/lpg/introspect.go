@@ -28,7 +28,7 @@ func (g *Graph[N, W]) edgeEndpointLive(k edgeKey) bool {
 	if g.tombstoneActive.Load() == 0 {
 		return true
 	}
-	return !g.IsTombstoned(k.src) && !g.IsTombstoned(k.dst)
+	return !g.IsTombstonedStored(k.src) && !g.IsTombstonedStored(k.dst)
 }
 
 // NodeLabelsInUse returns the distinct names of every label currently
@@ -43,6 +43,11 @@ func (g *Graph[N, W]) edgeEndpointLive(k edgeKey) bool {
 // node-label shards under that shard's RLock (one at a time) and resolves
 // ids through the lock-free [LabelRegistry]. The result is a point-in-time
 // view and is not guaranteed to be consistent across shards.
+//
+// It is a STORED-state primitive: it reflects every uncommitted write, because
+// it is an eagerly maintained structure with no versioned form. It is not one
+// of the committed-only present-state readers (rmp #2965, round 6); see
+// docs/design-write-conflict-detection.md.
 func (g *Graph[N, W]) NodeLabelsInUse() []string {
 	tombstoned := g.tombstoneActive.Load() != 0
 	seen := make(map[LabelID]struct{})
@@ -53,7 +58,7 @@ func (g *Graph[N, W]) NodeLabelsInUse() []string {
 			if bag.len() == 0 {
 				continue
 			}
-			if tombstoned && g.IsTombstoned(id) {
+			if tombstoned && g.IsTombstonedStored(id) {
 				continue
 			}
 			bag.forEach(func(lid LabelID) {
@@ -80,6 +85,11 @@ func (g *Graph[N, W]) NodeLabelsInUse() []string {
 // at a time), and resolves ids through the lock-free [LabelRegistry]. The
 // result is a point-in-time view and is not guaranteed to be consistent across
 // shards.
+//
+// It is a STORED-state primitive: it reflects every uncommitted write, because
+// it is an eagerly maintained structure with no versioned form. It is not one
+// of the committed-only present-state readers (rmp #2965, round 6); see
+// docs/design-write-conflict-detection.md.
 func (g *Graph[N, W]) RelationshipTypesInUse() []string {
 	seen := make(map[LabelID]struct{})
 	// Inline labels: walk every source's adjacency label column. A label
@@ -138,6 +148,11 @@ func (g *Graph[N, W]) RelationshipTypesInUse() []string {
 // that shard's RLock (one at a time) and resolves ids through the
 // lock-free [PropertyKeyRegistry]. The result is a point-in-time view and
 // is not guaranteed to be consistent across shards.
+//
+// It is a STORED-state primitive: it reflects every uncommitted write, because
+// it is an eagerly maintained structure with no versioned form. It is not one
+// of the committed-only present-state readers (rmp #2965, round 6); see
+// docs/design-write-conflict-detection.md.
 func (g *Graph[N, W]) PropertyKeysInUse() []string {
 	tombstoned := g.tombstoneActive.Load() != 0
 	seen := make(map[PropertyKeyID]struct{})
@@ -149,7 +164,7 @@ func (g *Graph[N, W]) PropertyKeysInUse() []string {
 			if bag.len() == 0 {
 				continue
 			}
-			if tombstoned && g.IsTombstoned(id) {
+			if tombstoned && g.IsTombstonedStored(id) {
 				continue
 			}
 			bag.forEach(func(pk PropertyKeyID, _ PropertyValue) {

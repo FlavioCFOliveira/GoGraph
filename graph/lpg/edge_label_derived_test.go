@@ -172,8 +172,8 @@ func TestEdgeLabel_Orphan_SetThenRemoveAfterEdgeGone(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Remove the edge entirely: clearEdgePairState wipes both slot and overflow.
-	g.RemoveEdge("a", "b")
+	// Remove the edge entirely: clearPairSides wipes both slot and overflow.
+	must(t).E(g.RemoveEdge("a", "b"))
 	if got := g.EdgeLabels("a", "b"); len(got) != 0 {
 		t.Fatalf("after RemoveEdge EdgeLabels = %v, want empty", got)
 	}
@@ -323,7 +323,7 @@ func TestEdgeLabel_RelationshipTypesInUse(t *testing.T) {
 
 	// Removing the c->d edge drops "T" only if no other live edge bears it; but
 	// a->b still bears "T", so it must remain.
-	g.RemoveEdge("c", "d")
+	must(t).E(g.RemoveEdge("c", "d"))
 	got = g.RelationshipTypesInUse()
 	sort.Strings(got)
 	if !eqStrings(got, []string{"T", "T2"}) {

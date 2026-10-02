@@ -2285,7 +2285,7 @@ func applyOpCodec[N comparable, W any](
 			// LPG edge removal: a fully-disconnected pair also sheds its
 			// per-pair edge labels/properties, so a later OpAddEdge for the
 			// same endpoints does not resurrect the removed edge's labels.
-			g.RemoveEdge(src, dst)
+			return replayRemoveEdge(g, src, dst)
 		}
 
 	case txn.OpAddEdgeH:
@@ -2544,7 +2544,11 @@ func applyRemoveEdgeInstanceByHandle[N comparable, W any](g *lpg.Graph[N, W], sr
 	if !ok {
 		return false
 	}
-	g.RemoveEdgeInstanceByHandle(src, dst, handle)
+	if err := g.RemoveEdgeInstanceByHandle(src, dst, handle); err != nil {
+		// Nothing can be pending during replay; a refusal is reported, never dropped.
+		metrics.IncCounter("store.recovery.applyOp.removeEdgeErrors", 1)
+		return false
+	}
 	g.SeedEdgeHandle(handle + 1)
 	return true
 }
@@ -2575,7 +2579,11 @@ func applyRemoveEdgeByHandle[N comparable, W any](g *lpg.Graph[N, W], src, dst N
 	if !ok {
 		return false
 	}
-	g.RemoveEdgeByHandle(src, dst, handle)
+	if _, err := g.RemoveEdgeByHandle(src, dst, handle); err != nil {
+		// See OpRemoveEdge: nothing can be pending during replay.
+		metrics.IncCounter("store.recovery.applyOp.removeEdgeErrors", 1)
+		return false
+	}
 	g.SeedEdgeHandle(handle + 1)
 	return true
 }
@@ -2789,4 +2797,16 @@ func decodeRecoveryTimeProp(buf []byte) (lpg.PropertyValue, []byte, error) {
 		return lpg.PropertyValue{}, buf, errors.New("recovery: short time property")
 	}
 	return lpg.TimeValue(time.Unix(0, nanos).UTC()), buf[n:], nil
+}
+
+// replayRemoveEdge applies a logged OpRemoveEdge. Replay runs before the store
+// accepts any transaction, so no write can be pending and the direct-write
+// refusal of rmp #2947 cannot occur; if it does, it is counted and reported as
+// a failed op, never dropped.
+func replayRemoveEdge[N comparable, W any](g *lpg.Graph[N, W], src, dst N) bool {
+	if err := g.RemoveEdge(src, dst); err != nil {
+		metrics.IncCounter("store.recovery.applyOp.removeEdgeErrors", 1)
+		return false
+	}
+	return true
 }

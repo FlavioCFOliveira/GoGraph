@@ -927,7 +927,7 @@ func indexFanoutActive(g *lpg.Graph[string, float64], buf *exec.IndexBuffer) boo
 // removals that follow are no-ops for it (the node is tombstoned by the time
 // the batch applies) but keep any label-scoped subscriber consistent.
 func enqueueNodeRemovalChanges(g *lpg.Graph[string, float64], buf *exec.IndexBuffer, n string, id graph.NodeID) {
-	for key, pv := range g.NodeProperties(n) {
+	for key, pv := range g.NodePropertiesAsOf(n, nil) {
 		buf.Enqueue(index.Change{
 			Op:       index.OpDelNodeProperty,
 			Node:     id,
@@ -935,7 +935,7 @@ func enqueueNodeRemovalChanges(g *lpg.Graph[string, float64], buf *exec.IndexBuf
 			OldValue: pv,
 		})
 	}
-	for _, lb := range g.NodeLabels(n) {
+	for _, lb := range g.NodeLabelsAsOf(n, nil) {
 		buf.Enqueue(index.Change{
 			Op:    index.OpRemoveNodeLabel,
 			Node:  id,

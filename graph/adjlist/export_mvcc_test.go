@@ -15,6 +15,14 @@ func (a *AdjList[N, W]) WriteStampForTest() *mvcc.WriteStamp { return a.stamp }
 // names the one currently writing. lpg recycles it from a pool; a test has no
 // reason to.
 func beginTx(ws *mvcc.WriteStamp) uint64 {
+	return beginTxW(ws).ID()
+}
+
+// beginTxW is [beginTx] returning the transaction itself, for the writes that
+// belong to it: since rmp #2967 a write carrying no transaction is its own
+// transaction and never joins the one the slot names, so a test transaction's
+// writes go through [AdjList.Writer] over the returned handle.
+func beginTxW(ws *mvcc.WriteStamp) mvcc.Tx {
 	var id uint64
 	if c := ws.Clock(); c != nil {
 		id = c.NextTxID()
@@ -22,5 +30,5 @@ func beginTx(ws *mvcc.WriteStamp) uint64 {
 	st := &mvcc.TxState{}
 	st.Arm(id)
 	ws.Publish(st)
-	return id
+	return mvcc.NewTx(st)
 }

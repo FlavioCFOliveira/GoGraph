@@ -297,7 +297,7 @@ func WriteWithPropsCtx(ctx context.Context, w io.Writer, g *lpg.Graph[string, in
 	// re-import. Build the removed set once so every pass below skips
 	// them — and their incident edges — with an O(1) lookup.
 	var dead map[graph.NodeID]struct{}
-	if ids := g.TombstonedIDs(); len(ids) > 0 {
+	if ids := g.TombstonedIDsStored(); len(ids) > 0 {
 		dead = make(map[graph.NodeID]struct{}, len(ids))
 		for _, id := range ids {
 			dead[id] = struct{}{}

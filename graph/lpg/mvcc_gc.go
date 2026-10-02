@@ -211,7 +211,7 @@ func (g *Graph[N, W]) ReclaimNow() int {
 // value. Waiting for [reclaimThreshold] versions of churn to accumulate first
 // would make that window unbounded, and abort is the rare path, so it pays for
 // its own wake.
-func (g *Graph[N, W]) abortWake(created int64) {
+func (g *Graph[N, W]) abortWake(created int64, st *mvcc.TxState) {
 	if !g.mvccArmed {
 		return
 	}
@@ -222,7 +222,7 @@ func (g *Graph[N, W]) abortWake(created int64) {
 	// directly, so the aborted transaction's writes must be out of it before this
 	// returns. See [Graph.withdrawAbortedNow] for why there is no correct
 	// asynchronous answer and what the scan costs.
-	if freed := g.withdrawAbortedNow(); freed > 0 {
+	if freed := g.withdrawAbortedNow(st); freed > 0 {
 		g.reclaimDebt.Add(-int64(freed))
 	}
 	// The vacuum still runs, for anything the withdrawal could not reach — an

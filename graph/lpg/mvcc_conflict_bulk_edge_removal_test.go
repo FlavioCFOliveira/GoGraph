@@ -69,7 +69,7 @@ func TestConflict_AdjacencyBulkRemovalRefusedByConcurrentAppend(t *testing.T) {
 	if !g.AdjList().HasEdge("a", "b") {
 		t.Fatal("the refused bulk removal dropped the COMMITTED arc a→b")
 	}
-	if !g.AdjList().HasEdge("a", "c") {
+	if !g.WriterViewOf(WriteTx{w: txA.ctx}).HasEdge("a", "c") /* A's own view: the arc is uncommitted */ {
 		t.Fatal("the refused bulk removal dropped the peer's in-flight arc a→c")
 	}
 	if got := g.AdjList().Size(); got != 2 {

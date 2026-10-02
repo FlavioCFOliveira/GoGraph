@@ -175,6 +175,9 @@ func (cv *constraintVersions) note(id graph.NodeID, tx *writeCtx) error {
 		cv.active.Add(1)
 	}
 	e.info, e.ts = tx.record(), tx.txID
+	// An abort sweeps the constraint stamps only when it wrote one; see
+	// [Graph.withdrawAbortedNow].
+	tx.tx.Touch(touchedConstraint)
 	return nil
 }
 

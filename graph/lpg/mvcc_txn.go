@@ -167,10 +167,9 @@ func (t *labelTx[N, W]) commit() (uint64, error) {
 		// this shape and reported one conflict against zero aborts.
 		t.g.writeCounts.Abort(t.ctx.txID)
 		if info != nil {
-			info.Abort()
 			// Charged AND woken unconditionally; see [Graph.abortWake] for why an
 			// aborted version is not ordinary garbage (rmp #2318).
-			t.g.abortWake(versions)
+			t.g.abortWake(versions-t.g.abortRecord(&t.ctx.tx, info), &t.ctx.tx)
 		}
 		return 0, err
 	}
@@ -210,8 +209,7 @@ func (t *labelTx[N, W]) abort() {
 	if info == nil {
 		return
 	}
-	info.Abort()
-	t.g.abortWake(versions)
+	t.g.abortWake(versions-t.g.abortRecord(&t.ctx.tx, info), &t.ctx.tx)
 }
 
 // deltaStamp resolves how a new delta records its visibility, in three cases

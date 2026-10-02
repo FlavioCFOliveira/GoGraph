@@ -107,7 +107,7 @@ func buildReviewView(src *lpg.Graph[string, float64]) (*lpg.Graph[string, float6
 	i := 0
 	var addErr error
 	src.AdjList().Mapper().Walk(func(id graph.NodeID, key string) bool {
-		if src.IsTombstoned(id) {
+		if src.IsTombstonedStored(id) {
 			return true
 		}
 		if err := dst.AddNode(key); err != nil {

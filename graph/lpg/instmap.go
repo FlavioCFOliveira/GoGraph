@@ -52,7 +52,7 @@ package lpg
 // Replacing map[edgeKey]map[K]V with a single map[instanceKey]V would remove
 // the nesting outright and cost less still. It was rejected on measurement of
 // a different operation: RemoveEdge drops a whole pair's instance state with
-// ONE map delete (lpg.go, clearEdgePairState), and the MVCC pre-image loops
+// ONE map delete (lpg.go, clearPairSides), and the MVCC pre-image loops
 // iterate exactly the instances that pair holds. Against a flat map both
 // become a scan of the whole shard, turning an O(parallel edges) delete into
 // an O(shard) one — and bulk delete is already this engine's weakest path

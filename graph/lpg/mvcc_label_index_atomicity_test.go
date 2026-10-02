@@ -64,10 +64,10 @@ func assertLabelIndexNeverMissesABagLabel(t *testing.T, budget time.Duration) {
 			}
 			k := keys[i%nodes]
 			if i%2 == 0 {
-				_ = g.ApplyAtomically(func() error { return g.SetNodeLabel(k, "L") })
+				_ = g.ApplyAtomicallyTx(func(tx WriteTx) error { return g.Writer(tx).SetNodeLabel(k, "L") })
 			} else {
-				_ = g.ApplyAtomically(func() error {
-					if err := g.RemoveNodeLabel(k, "L"); err != nil {
+				_ = g.ApplyAtomicallyTx(func(tx WriteTx) error {
+					if err := g.Writer(tx).RemoveNodeLabel(k, "L"); err != nil {
 						t.Errorf("g.RemoveNodeLabel(k, \"L\"): %v", err)
 					}
 					return nil

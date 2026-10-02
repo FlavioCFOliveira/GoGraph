@@ -231,8 +231,8 @@ func TestFused_EquivalenceAfterRemoval(t *testing.T) {
 	}
 	// Remove a handful of edges from both (middle, first, last).
 	for _, d := range []string{"d0", "d15", fmt.Sprintf("d%d", degree-1), "d7"} {
-		ref.RemoveEdge("h", d)
-		fused.RemoveEdge("h", d)
+		must(t).E(ref.RemoveEdge("h", d))
+		must(t).E(fused.RemoveEdge("h", d))
 	}
 	for i := 0; i < degree; i++ {
 		dst := fmt.Sprintf("d%d", i)

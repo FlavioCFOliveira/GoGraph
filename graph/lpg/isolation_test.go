@@ -656,30 +656,19 @@ func tearDirection(ia, ib int64) string {
 	}
 }
 
-// TestIsolation_DirectReadObservesPartialTransaction characterises the
-// documented OPT-IN nature of the visibility barrier (#1283): the
-// no-partial-transaction guarantee holds ONLY for reads routed through
-// [Graph.View]. A direct public read (here g.AdjList().HasEdge and
-// g.HasNodeLabel called WITHOUT View) takes only its own shard locks, not
-// visMu, so it can observe a multi-op transaction half-applied — the edge of
-// an edge-plus-labels write before the endpoint labels exist.
+// TestIsolation_DirectReadDoesNotObservePartialTransaction pins rmp #2965 round
+// 5, finding R5-F3. A direct public read (g.AdjList().HasEdge and
+// g.HasNodeLabel, with no snapshot) used to read the stored value, so it
+// observed a multi-op transaction half-applied — the edge of an
+// edge-plus-labels write before the endpoint labels existed — and this test
+// characterised that hole. The direct accessors now return the newest COMMITTED
+// version, so the same read mid-transaction sees the pre-transaction state and
+// no violation; a pinned snapshot read sees none either.
 //
-// This is a CONTRACT/characterization test, not a bug fix: it locks the
-// currently-documented behaviour. It proves two halves of the same coin under
-// a deterministic handshake (no flaky timing):
-//
-//   - a reader reading DIRECTLY mid-transaction observes violation > 0
-//     (the opt-in hole is real and documented), while
-//   - the same reader, wrapped in [Graph.View], observes ZERO violations
-//     (View closes the window).
-//
-// The writer pins the partial state open across a barrier so the direct read
-// is guaranteed to land inside the transaction; the reader never requests
-// visMu (only shard locks), so the handshake cannot deadlock against the
-// writer that holds visMu via [Graph.ApplyAtomically]. Run under -race: the
-// per-shard locks make every access data-race-free; the gap proven OPEN here
-// is the logical partial-transaction visibility, not a memory race.
-func TestIsolation_DirectReadObservesPartialTransaction(t *testing.T) {
+// The writer pins the partial state open across a handshake so the direct read
+// is guaranteed to land inside the transaction. Run under -race: the per-shard
+// locks make every access data-race-free.
+func TestIsolation_DirectReadDoesNotObservePartialTransaction(t *testing.T) {
 	t.Parallel()
 
 	g := New[string, int64](adjlist.Config{Directed: true})
@@ -714,10 +703,9 @@ func TestIsolation_DirectReadObservesPartialTransaction(t *testing.T) {
 		return e != lu || e != lv
 	}
 
-	// Half 1 — direct read, NO View. A writer opens a transaction, adds the
-	// edge, then blocks BEFORE setting the labels until the reader has read.
-	// The reader, reading directly, must observe {edge present, labels absent}
-	// — a half-applied transaction — proving the opt-in hole.
+	// Half 1 — direct read. A writer opens a transaction, adds the edge, then
+	// blocks BEFORE setting the labels until the reader has read. The reader,
+	// reading directly, must observe the committed pre-transaction state.
 	var directViolation atomic.Int64
 	{
 		readNow := make(chan struct{})  // writer -> reader: edge added, labels not yet
@@ -726,12 +714,12 @@ func TestIsolation_DirectReadObservesPartialTransaction(t *testing.T) {
 
 		go func() {
 			defer close(writeDone)
-			_ = g.ApplyAtomically(func() error {
-				_ = g.AddEdge("u", "v", 0)
+			_ = g.ApplyAtomicallyTx(func(tx WriteTx) error {
+				_ = g.Writer(tx).AddEdge("u", "v", 0)
 				close(readNow) // partial state is now established
 				<-readDone     // hold the transaction open across the direct read
-				_ = g.SetNodeLabel("u", "Hot")
-				_ = g.SetNodeLabel("v", "Hot")
+				_ = g.Writer(tx).SetNodeLabel("u", "Hot")
+				_ = g.Writer(tx).SetNodeLabel("v", "Hot")
 				return nil
 			})
 		}()
@@ -744,18 +732,19 @@ func TestIsolation_DirectReadObservesPartialTransaction(t *testing.T) {
 		<-writeDone
 	}
 
-	if directViolation.Load() == 0 {
-		t.Fatalf("direct (unpinned) read did not observe the documented partial-transaction hole; " +
-			"expected violation > 0")
+	if directViolation.Load() != 0 {
+		t.Fatalf("a direct present-state read observed a partially applied, uncommitted transaction")
 	}
 
 	// Reset to the clean, fully-applied state for half 2.
-	if err := g.ApplyAtomically(func() error {
-		g.AdjList().RemoveEdge("u", "v")
-		if err := g.RemoveNodeLabel("u", "Hot"); err != nil {
+	if err := g.ApplyAtomicallyTx(func(tx WriteTx) error {
+		if !g.Writer(tx).RemoveEdge("u", "v") {
+			t.Fatal("RemoveEdge(u, v) removed nothing")
+		}
+		if err := g.Writer(tx).RemoveNodeLabel("u", "Hot"); err != nil {
 			t.Fatalf("g.RemoveNodeLabel(\"u\", \"Hot\"): %v", err)
 		}
-		if err := g.RemoveNodeLabel("v", "Hot"); err != nil {
+		if err := g.Writer(tx).RemoveNodeLabel("v", "Hot"); err != nil {
 			t.Fatalf("g.RemoveNodeLabel(\"v\", \"Hot\"): %v", err)
 		}
 		return nil
@@ -778,11 +767,11 @@ func TestIsolation_DirectReadObservesPartialTransaction(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-startWrite
-			_ = g.ApplyAtomically(func() error {
-				_ = g.AddEdge("u", "v", 0)
+			_ = g.ApplyAtomicallyTx(func(tx WriteTx) error {
+				_ = g.Writer(tx).AddEdge("u", "v", 0)
 				runtime.Gosched() // widen the partial window the View must mask
-				_ = g.SetNodeLabel("u", "Hot")
-				_ = g.SetNodeLabel("v", "Hot")
+				_ = g.Writer(tx).SetNodeLabel("u", "Hot")
+				_ = g.Writer(tx).SetNodeLabel("v", "Hot")
 				return nil
 			})
 		}()

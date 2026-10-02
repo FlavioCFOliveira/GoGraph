@@ -93,7 +93,11 @@ type mirrorRemoval struct {
 func mirrorRemovals() []mirrorRemoval {
 	return []mirrorRemoval{
 		{"autocommit", func(g *Graph[string, float64], h uint64) bool {
-			return g.RemoveEdgeByHandle("b", "a", h)
+			removed, err := g.RemoveEdgeByHandle("b", "a", h)
+			if err != nil {
+				panic(err) // no concurrent transaction exists here
+			}
+			return removed
 		}},
 		{"write transaction", func(g *Graph[string, float64], h uint64) bool {
 			var ok bool

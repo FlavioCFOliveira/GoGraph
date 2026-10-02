@@ -28,7 +28,7 @@ func sharedBitmapRig(t *testing.T, n int) (*Graph[string, float64], LabelID) {
 		if err := g.AddNode(name); err != nil {
 			t.Fatalf("AddNode(%s): %v", name, err)
 		}
-		if err := g.ApplyAtomically(func() error { return g.SetNodeLabel(name, "L") }); err != nil {
+		if err := g.ApplyAtomicallyTx(func(tx WriteTx) error { return g.Writer(tx).SetNodeLabel(name, "L") }); err != nil {
 			t.Fatalf("SetNodeLabel(%s): %v", name, err)
 		}
 	}
@@ -96,8 +96,8 @@ func TestLabelBitmapAsOf_CorrectingPathDoesNotTouchTheIndexImage(t *testing.T) {
 	// the correcting path is forced.
 	snap := g.BeginRead()
 	defer g.EndRead(snap)
-	if err := g.ApplyAtomically(func() error {
-		if err := g.RemoveNodeLabel("aa", "L"); err != nil {
+	if err := g.ApplyAtomicallyTx(func(tx WriteTx) error {
+		if err := g.Writer(tx).RemoveNodeLabel("aa", "L"); err != nil {
 			t.Fatalf("g.RemoveNodeLabel(\"aa\", \"L\"): %v", err)
 		}
 		return nil

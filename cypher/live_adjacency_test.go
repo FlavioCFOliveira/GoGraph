@@ -574,6 +574,17 @@ func TestLiveTopo_EveryAdjacencyWriteIsJournaled(t *testing.T) {
 					defer func() { _ = recover() }()
 					call(m)
 				}()
+				if kind == "wal" && (method == "SetEdgeLabelAt" || method == "RemoveEdgeInstance") {
+					// Retired on the durable engine (rmp #2968): the method writes
+					// nothing, so it has nothing to journal.
+					if log.seq.Load() != before {
+						t.Fatalf("%s on the wal adapter journaled a write it no longer makes", method)
+					}
+					if l := g.EdgeLabelsAt("a", "b", 1); len(l) != 0 {
+						t.Fatalf("%s on the wal adapter wrote the retired ordinal store: %v", method, l)
+					}
+					return
+				}
 				if log.seq.Load() == before {
 					t.Fatalf("%s on the %s adapter wrote without journaling", method, kind)
 				}

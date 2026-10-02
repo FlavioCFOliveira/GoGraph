@@ -379,7 +379,7 @@ func (v *ReadView[N, W]) Exists(id graph.NodeID) bool { return v.g.NodeExistsAsO
 // LiveNodeFilter returns the liveness predicate at this view's instant.
 func (v *ReadView[N, W]) LiveNodeFilter() func(graph.NodeID) bool {
 	if v.snap == nil {
-		return v.g.LiveNodeFilter()
+		return v.g.LiveNodeFilterStored()
 	}
 	snap := v.snap
 	g := v.g
@@ -392,7 +392,7 @@ func (v *ReadView[N, W]) LiveNodeFilter() func(graph.NodeID) bool {
 // re-checked: it is a COUNT, so there is no object to verify it against. Its
 // only uses are cardinality estimation, where an estimate is what is wanted,
 // and the O(1) count pushdown — which [ReadView.LiveNodeCountExact] gates.
-func (v *ReadView[N, W]) LiveOrder() uint64 { return v.g.LiveOrder() }
+func (v *ReadView[N, W]) LiveOrder() uint64 { return v.g.LiveOrderStored() }
 
 // LiveNodeCountExact returns the live node count and whether it is EXACT for
 // this view's instant.
@@ -410,7 +410,7 @@ func (v *ReadView[N, W]) LiveNodeCountExact() (uint64, bool) {
 	if !v.g.LiveCountExactAsOf(v.snap) {
 		return 0, false
 	}
-	return v.g.LiveOrder(), true
+	return v.g.LiveOrderStored(), true
 }
 
 // EdgeCreateCount returns the CURRENT per-pair CREATE multiplicity.

@@ -196,7 +196,7 @@ func WriteWithPropsCtx(ctx context.Context, w io.Writer, g *lpg.Graph[string, in
 	// re-import. Clear them from the live set once so the node, edge,
 	// and property phases below skip the node and every incident edge
 	// at zero per-record cost.
-	for _, id := range g.TombstonedIDs() {
+	for _, id := range g.TombstonedIDsStored() {
 		if uint64(id) < maxID {
 			live[uint64(id)] = false
 		}

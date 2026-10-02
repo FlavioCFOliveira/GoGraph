@@ -16,7 +16,7 @@ import (
 // memo holds.
 func TestSnapshotVisible_PinsOnlyInFlightRecords(t *testing.T) {
 	const startTS, ownTx = 100, mvcc.TxIDBase + 7
-	s := &Snapshot{startTS: startTS, txID: ownTx}
+	s := newSharedSnapshot(startTS, ownTx, 0)
 
 	older := mvcc.NewCommittedInfo(startTS - 1)
 	newer := mvcc.NewCommittedInfo(startTS + 1)
@@ -37,7 +37,7 @@ func TestSnapshotVisible_PinsOnlyInFlightRecords(t *testing.T) {
 			}
 		}
 	}
-	if n := len(s.verdict); n != 0 {
+	if n := len(s.memo.verdict); n != 0 {
 		t.Fatalf("memo holds %d terminal records, want 0: a final stamp needs no pin", n)
 	}
 
@@ -61,7 +61,30 @@ func TestSnapshotVisible_PinsOnlyInFlightRecords(t *testing.T) {
 	if !s.visible(own, 0, startTS, ownTx) {
 		t.Fatal("the snapshot's own record became invisible after it committed")
 	}
-	if n := len(s.verdict); n != 2 {
+	if n := len(s.memo.verdict); n != 2 {
 		t.Fatalf("memo holds %d records, want exactly the 2 classified in flight", n)
+	}
+}
+
+// TestSnapshotVisible_OwnedSnapshotPinsWithoutAMemo covers the owned snapshot a
+// direct present-state accessor reads through (rmp #2965, round 5): a record
+// first classified in flight stays invisible after it commits, so a read that
+// straddles a commit sees the transaction wholly or not at all, and the pin
+// needs no shared memo.
+func TestSnapshotVisible_OwnedSnapshotPinsWithoutAMemo(t *testing.T) {
+	var s Snapshot
+	s.startTS = implicitStartTS
+	rec := mvcc.NewCommitInfo(mvcc.TxIDBase + 11)
+	if s.visible(rec, 0, s.startTS, 0) {
+		t.Fatal("an in-flight record is visible to a committed-only read")
+	}
+	rec.Commit(7)
+	if s.visible(rec, 0, s.startTS, 0) {
+		t.Fatal("a record first classified in flight became visible mid-read")
+	}
+	var fresh Snapshot
+	fresh.startTS = implicitStartTS
+	if !fresh.visible(rec, 0, fresh.startTS, 0) {
+		t.Fatal("a committed record is invisible to a new committed-only read")
 	}
 }

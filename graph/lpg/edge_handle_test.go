@@ -50,8 +50,8 @@ func TestGraph_EdgeHandle_NeverReusedAfterDelete(t *testing.T) {
 	}
 
 	// Fully remove the pair (two RemoveEdge calls drop both parallels).
-	g.RemoveEdge("a", "b")
-	g.RemoveEdge("a", "b")
+	must(t).E(g.RemoveEdge("a", "b"))
+	must(t).E(g.RemoveEdge("a", "b"))
 
 	h3, err := g.AddEdgeH("a", "b", 0)
 	if err != nil {
@@ -124,7 +124,7 @@ func TestGraph_EdgeLabelsByHandle_SurvivesSiblingDelete(t *testing.T) {
 	// Remove the FIRST parallel (handle h1). The pair still has one edge,
 	// so the per-handle store is NOT cleared. The survivor (h2) keeps its
 	// label.
-	g.RemoveEdge("a", "b")
+	must(t).E(g.RemoveEdge("a", "b"))
 
 	if got := g.EdgeLabelsByHandle("a", "b", h2); len(got) != 1 || got[0] != "CALLS" {
 		t.Fatalf("survivor EdgeLabelsByHandle(h2) = %v, want [CALLS]", got)
@@ -172,7 +172,7 @@ func TestGraph_RemoveEdgeInstanceByHandle(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	g.RemoveEdgeInstanceByHandle("a", "b", h1)
+	must(t).E(g.RemoveEdgeInstanceByHandle("a", "b", h1))
 
 	if got := g.EdgeLabelsByHandle("a", "b", h1); got != nil {
 		t.Fatalf("after RemoveEdgeInstanceByHandle(h1), labels = %v, want nil", got)
@@ -183,7 +183,7 @@ func TestGraph_RemoveEdgeInstanceByHandle(t *testing.T) {
 }
 
 // TestGraph_PairFullDelete_ClearsHandleStore verifies that once the LAST
-// edge between a pair is gone, clearEdgePairState drops the handle store so
+// edge between a pair is gone, clearPairSides drops the handle store so
 // a re-created edge between the same endpoints does not resurrect a removed
 // edge's per-handle type.
 func TestGraph_PairFullDelete_ClearsHandleStore(t *testing.T) {
@@ -195,7 +195,7 @@ func TestGraph_PairFullDelete_ClearsHandleStore(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	g.RemoveEdge("a", "b") // last edge gone → pair state cleared
+	must(t).E(g.RemoveEdge("a", "b")) // last edge gone → pair state cleared
 
 	if got := g.EdgeLabelsByHandle("a", "b", h1); got != nil {
 		t.Fatalf("after full pair delete, labels = %v, want nil (store cleared)", got)
@@ -224,13 +224,13 @@ func TestGraph_FirstEdgeHandle(t *testing.T) {
 	}
 
 	// RemoveEdge drops the first slot (h1); the survivor h2 becomes first.
-	g.RemoveEdge("a", "b")
+	must(t).E(g.RemoveEdge("a", "b"))
 	if h, ok := g.FirstEdgeHandle("a", "b"); !ok || h != h2 {
 		t.Fatalf("after one delete, FirstEdgeHandle = (%d, %v), want (%d, true)", h, ok, h2)
 	}
 
 	// Remove the last edge: pair empty again.
-	g.RemoveEdge("a", "b")
+	must(t).E(g.RemoveEdge("a", "b"))
 	if h, ok := g.FirstEdgeHandle("a", "b"); ok || h != 0 {
 		t.Fatalf("after full delete, FirstEdgeHandle = (%d, %v), want (0, false)", h, ok)
 	}

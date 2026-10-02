@@ -433,7 +433,19 @@ func (a *AdjList[N, W]) arcVisible(c revCandidate, dst graph.NodeID, visible fun
 // InNeighbourIDs is safe for concurrent use, and takes only the destination's
 // own reverse shard lock: it neither blocks nor is blocked by adjacency
 // operations on other nodes.
+//
+// It reads the newest COMMITTED state: an entry a transaction has written and
+// not published is stepped back over to the one it replaced (rmp #2965, round
+// 5; see committedEntry). A transaction reads its own writes through its own
+// snapshot.
 func (a *AdjList[N, W]) InNeighbourIDs(dst graph.NodeID) []graph.NodeID {
+	if a.versioning && a.versionActive.Load() != 0 {
+		// Committed only (rmp #2965, round 5): an arc whose entry an uncommitted
+		// transaction wrote resolves to the entry it replaced; see
+		// [AdjList.committedEntry]. With no live version the stored state is
+		// the committed state, and the reverse index answers directly.
+		return a.inNeighbourIDsVisible(dst, committedVisible, false)
+	}
 	// A graph with no edge has no in-neighbour, so the edge counter the forward
 	// path already maintains answers without touching a shard. This is the case
 	// a bulk delete of unconnected nodes takes — the shape that exposed #2400.
@@ -447,15 +459,20 @@ func (a *AdjList[N, W]) InNeighbourIDs(dst graph.NodeID) []graph.NodeID {
 // excluding dst itself. Keys that the Mapper can no longer resolve are skipped.
 //
 // InNeighbours is safe for concurrent use.
+//
+// It reads the newest COMMITTED state: an entry a transaction has written and
+// not published is stepped back over to the one it replaced (rmp #2965, round
+// 5; see committedEntry). A transaction reads its own writes through its own
+// snapshot.
 func (a *AdjList[N, W]) InNeighbours(dst N) []N {
-	if a.size.Load() == 0 {
+	if a.size.Load() == 0 && a.versionActive.Load() == 0 {
 		return nil
 	}
 	dstID, ok := a.mapper.Lookup(dst)
 	if !ok {
 		return nil
 	}
-	ids := a.rev.sources(dstID)
+	ids := a.InNeighbourIDs(dstID)
 	if len(ids) == 0 {
 		return nil
 	}
@@ -509,4 +526,28 @@ func (a *AdjList[N, W]) RecordedInEdgeGhosts() int64 {
 		sh.mu.RUnlock()
 	}
 	return total
+}
+
+// committedVisible is the visibility rule of the present-state readers: a
+// change is visible once its transaction has committed. See
+// [AdjList.committedEntry].
+func committedVisible(info *mvcc.CommitInfo, ts uint64) bool {
+	if info != nil {
+		ts = info.TS()
+	}
+	return mvcc.Visible(ts, committedStartTS, 0)
+}
+
+// InNeighbourIDsStored is [AdjList.InNeighbourIDs] over the STORED adjacency:
+// it includes arcs written by transactions that have not committed. It is the
+// read a nil snapshot resolves to in the graph layer, for a writer that must
+// see its own uncommitted arcs; every other reader wants InNeighbourIDs, which
+// returns the newest committed state (rmp #2965, round 5).
+//
+// Safe for concurrent use.
+func (a *AdjList[N, W]) InNeighbourIDsStored(dst graph.NodeID) []graph.NodeID {
+	if a.size.Load() == 0 {
+		return nil
+	}
+	return a.rev.sources(dst)
 }

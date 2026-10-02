@@ -94,23 +94,27 @@ package lpg
 // stored value in place with undo records beside it, which puts it in Memgraph's
 // family and not PostgreSQL's.
 //
-// # Why the vacuum and not abort, given Memgraph aborts
+// # The withdrawal now runs at abort, by the transaction's write set
 //
-// Doing it at abort would need the transaction's own write set — Memgraph's
-// `transaction_.deltas` — which GoGraph does not keep, and adding it means an append
-// on EVERY write to serve the rare abort path, on a sprint whose objective is write
-// throughput. The vacuum already scans every chain, so it finds aborted heads for
-// free. Half 1 above is what buys the deferral its safety: with the dirty base
-// unwritable, the only cost of cleaning late is a retry, and a retriable
-// serialization failure is already this sprint's contract.
+// This file first deferred the withdrawal to the vacuum, because doing it at
+// abort needs the transaction's own write set — Memgraph's
+// `transaction_.deltas` — and GoGraph kept none. [Graph.withdrawAbortedNow] later
+// moved it onto the aborting goroutine for correctness, and scanned every store
+// to find the aborted heads. Since ACID audit round 6 (finding M1) a transaction
+// records each object it versions in its [mvcc.TxState] write set, one entry per
+// object written, and the abort visits exactly those, so a conflict-and-rerun
+// workload no longer pays a whole-graph scan per refused attempt. A statement
+// that writes no side-store object records nothing, and one that writes a few
+// records them in an inline buffer without allocating. Half 1 above still holds:
+// the dirty base is unwritable until the withdrawal has run.
 
 import (
 	"github.com/FlavioCFOliveira/GoGraph/graph"
 	"github.com/FlavioCFOliveira/GoGraph/graph/mvcc"
 )
 
-// withdrawAbortedNow withdraws every aborted version in the graph, synchronously,
-// and returns how many records it released.
+// withdrawAbortedNow withdraws every version the aborted transaction whose state
+// is st wrote, synchronously, and returns how many records it released.
 //
 // # Why an abort cannot merely SIGNAL the vacuum
 //
@@ -126,33 +130,229 @@ import (
 // a caller's path, and the justification is the one the decision framework gives:
 // correctness outranks speed, and there is no correct asynchronous answer here.
 //
-// # The cost, stated
+// # The cost: the transaction's own writes (ACID audit round 6, finding M1)
 //
-// It scans the objects carrying history rather than the objects THIS transaction
-// touched, because the substrate keeps no per-transaction write set — Memgraph's
-// `transaction_.deltas` — and adding one taxes every write to serve the rare abort
-// path. The scan is therefore O(objects carrying history), which is bounded by the
-// retained version count and so by [reclaimDebtCeiling] plus whatever a live reader
-// holds back. Abort is the rare path and this is its price; making it O(this
-// transaction's writes) needs the write set and is a separate change.
-func (g *Graph[N, W]) withdrawAbortedNow() int {
+// It visits the objects the transaction wrote and nothing else. Every version a
+// transaction creates in a node-label, node-property, node-life, adjacency-claim or
+// per-edge side store is entered in its [mvcc.TxState] write set as it is created
+// ([writeCtx.noteSide]), exactly as its adjacency entries are entered for
+// [Graph.abortRecord], so an abort is proportional to what the transaction did.
+// It used to scan every object in the graph that carried history, which a
+// conflict-and-rerun workload paid on every refused attempt.
+//
+// Two stores are still swept rather than visited, and only when the transaction
+// touched them: the deferred label-index removals and the constraint stamps,
+// which a transaction reaches far more rarely than the stores above.
+//
+// One shape has no write set to visit: a version an untransacted writer stamped
+// with st's record through the ambient slot ([mvcc.TouchedAmbient]). Such an
+// abort falls back to the full sweep, [Graph.withdrawAbortedAll], so no version
+// is ever missed.
+func (g *Graph[N, W]) withdrawAbortedNow(st *mvcc.TxState) int {
 	if !g.mvccArmed {
 		return 0
 	}
 	g.vac.acquireSweeper()
 	defer g.vac.releaseSweeper()
+	touched := st.Touched()
+	if touched&mvcc.TouchedAmbient != 0 {
+		return g.withdrawAbortedAllLocked()
+	}
+	freed := g.withdrawAbortedWrites(st.SideWrites())
+	if touched&touchedIdxRemoval != 0 {
+		freed += g.withdrawAbortedIndexRemovals()
+	}
+	if touched&touchedConstraint != 0 {
+		// The constraint stamps an aborted transaction set (rmp #2353): a stamp at
+		// [mvcc.AbortedTS] refuses every later writer forever, and the watermark
+		// sweep cannot reach it because AbortedTS is above every watermark there
+		// can be.
+		g.conVer.clearAborted()
+	}
+	return freed
+}
+
+// withdrawAbortedAll withdraws every aborted version in the graph, whichever
+// transaction wrote it, and returns how many records it released. It is the
+// fallback [Graph.withdrawAbortedNow] takes for a transaction whose write set is
+// incomplete, and costs O(objects carrying history).
+func (g *Graph[N, W]) withdrawAbortedAll() int {
+	if !g.mvccArmed {
+		return 0
+	}
+	g.vac.acquireSweeper()
+	defer g.vac.releaseSweeper()
+	return g.withdrawAbortedAllLocked()
+}
+
+// withdrawAbortedAllLocked is [Graph.withdrawAbortedAll] for a caller that
+// holds the sweeper slot.
+func (g *Graph[N, W]) withdrawAbortedAllLocked() int {
 	freed := g.withdrawAbortedLabels() + g.withdrawAbortedProps() +
 		g.withdrawAbortedSides() + g.reclaimAbortedLife() +
 		g.withdrawAbortedIndexRemovals()
 	g.adjVer.clearAborted()
-	// The constraint stamps an aborted transaction set must go the same way (rmp
-	// #2353): a stamp at [mvcc.AbortedTS] refuses every later writer forever, and
-	// the watermark sweep cannot reach it because AbortedTS is above every watermark
-	// there can be. Leaving them behind would turn one rolled-back transaction into
-	// a permanent conflict on the nodes it touched.
 	g.conVer.clearAborted()
 	return freed
 }
+
+// The stores a [mvcc.SideWrite] names, as [writeCtx.noteSide] records them.
+const (
+	sideNodeLabels     uint8 = iota + 1 // A: node id
+	sideNodeProps                       // A: node id
+	sideNodeLife                        // A: node id
+	sideAdjClaim                        // A: node id
+	sideEdgeOverflow                    // A, B: pair
+	sideHandleLabels                    // A, B: pair; C: handle
+	sideHandleProps                     // A, B: pair; C: handle
+	sideInstanceLabels                  // A, B: pair; C: ordinal
+	sideInstanceProps                   // A, B: pair; C: ordinal
+)
+
+// noteSide enters one versioned object in the transaction's write set, so its
+// abort withdraws that object without scanning the store. A nil receiver — a
+// write on a disarmed graph — has nothing to withdraw.
+func (w *writeCtx) noteSide(store uint8, a, b, c uint64) {
+	if w == nil {
+		return
+	}
+	w.tx.NoteSide(mvcc.SideWrite{Store: store, A: a, B: b, C: c})
+}
+
+// withdrawAbortedWrites withdraws the aborted head of every object in writes,
+// a transaction's side write set, and returns how many records it released.
+// An object entered twice is withdrawn by its first visit and found clean by
+// the second. The caller holds the sweeper slot, and the transaction's record
+// is already marked aborted.
+func (g *Graph[N, W]) withdrawAbortedWrites(writes []mvcc.SideWrite) int {
+	if len(writes) == 0 {
+		return 0
+	}
+	var (
+		labels, props, life, overflow int
+		hLabels, hProps, iLabels      int
+		iProps                        int
+		lifeIDs, claimIDs             []graph.NodeID
+	)
+	for _, w := range writes {
+		pair := edgeKey{src: graph.NodeID(w.A), dst: graph.NodeID(w.B)}
+		switch w.Store {
+		case sideNodeLabels:
+			id := graph.NodeID(w.A)
+			sh := g.nodeLabelShardFor(id)
+			sh.mu.Lock()
+			labels += g.reclaimAbortedLabelsLocked(sh, id)
+			if len(sh.d) == 0 {
+				sh.d = nil
+			}
+			sh.mu.Unlock()
+		case sideNodeProps:
+			id := graph.NodeID(w.A)
+			sh := g.nodePropShardFor(id)
+			sh.mu.Lock()
+			props += g.reclaimAbortedPropsLocked(sh, id)
+			if len(sh.d) == 0 {
+				sh.d = nil
+			}
+			sh.mu.Unlock()
+		case sideNodeLife:
+			lifeIDs = append(lifeIDs, graph.NodeID(w.A))
+		case sideAdjClaim:
+			claimIDs = append(claimIDs, graph.NodeID(w.A))
+		case sideEdgeOverflow:
+			sh := g.edgeLabelShardFor(pair)
+			sh.mu.Lock()
+			overflow += g.withdrawAbortedEdgeLabelLocked(sh, pair)
+			sh.mu.Unlock()
+		case sideHandleLabels:
+			sh := g.edgeHandleLabelShardFor(pair)
+			sh.mu.Lock()
+			hLabels += g.withdrawAbortedHandleLabelLocked(sh, edgeHandleKey{pair: pair, handle: w.C})
+			sh.mu.Unlock()
+		case sideHandleProps:
+			sh := g.edgeHandlePropShardFor(pair)
+			sh.mu.Lock()
+			hProps += g.withdrawAbortedHandlePropLocked(sh, edgeHandleKey{pair: pair, handle: w.C})
+			sh.mu.Unlock()
+		case sideInstanceLabels:
+			sh := g.edgeInstanceLabelShardFor(pair)
+			sh.mu.Lock()
+			iLabels += g.withdrawAbortedInstanceLabelLocked(sh, edgeInstanceKey{pair: pair, idx: int64(w.C)})
+			sh.mu.Unlock()
+		case sideInstanceProps:
+			sh := g.edgeInstancePropShardFor(pair)
+			sh.mu.Lock()
+			iProps += g.withdrawAbortedInstancePropLocked(sh, edgeInstanceKey{pair: pair, idx: int64(w.C)})
+			sh.mu.Unlock()
+		}
+	}
+	if labels > 0 {
+		g.labelDeltaActive.Add(-int64(labels))
+	}
+	if props > 0 {
+		g.propDeltaActive.Add(-int64(props))
+	}
+	if overflow > 0 {
+		g.edgeLabelVersionActive.Add(-int64(overflow))
+	}
+	if hLabels > 0 {
+		g.edgeHandleLabelVersionActive.Add(-int64(hLabels))
+	}
+	if hProps > 0 {
+		g.edgeHandlePropVersionActive.Add(-int64(hProps))
+	}
+	if iLabels > 0 {
+		g.edgeInstanceLabelVersionActive.Add(-int64(iLabels))
+	}
+	if iProps > 0 {
+		g.edgeInstancePropVersionActive.Add(-int64(iProps))
+	}
+	if len(lifeIDs) > 0 {
+		life = g.reclaimAbortedLifeOf(lifeIDs)
+	}
+	if len(claimIDs) > 0 {
+		g.adjVer.clearAbortedOf(claimIDs)
+	}
+	return labels + props + life + overflow + hLabels + hProps + iLabels + iProps
+}
+
+// abortRecord aborts the transaction whose state is st and whose commit record
+// is info: it restores the adjacency entries the transaction published to their
+// pre-images, then marks info aborted, and returns how many adjacency version
+// records the restoration released, which the caller's [Graph.abortWake] charge
+// excludes. It visits only the transaction's own adjacency write set, so an
+// abort that wrote no adjacency touches no adjacency shard.
+//
+// The adjacency is withdrawn HERE, while the record is still in flight, and not
+// by [Graph.withdrawAbortedNow] like every other store (rmp #2965). Its rollback
+// used to be physical only, by an undo log or a withdrawal the write itself
+// makes, so a bracket aborted without one — [Graph.ApplyVersioned] as the
+// durable store's apply runs it, [Graph.ApplyAtomicallyTx], an explicit
+// transaction ended without a Cypher undo — left its adjacency writes applied. An
+// adjacency entry is an immutable snapshot, so a write built on an aborted one
+// would embed the aborted change for good; restoring the entries before the
+// record is marked means none is ever the stored value. Until then the
+// transaction's claims still refuse every topology writer, exactly as they did
+// for its whole life. See [adjlist.AdjList.WithdrawTx]. A restored entry changes
+// topology, so the generation every topology-keyed cache checks moves on.
+func (g *Graph[N, W]) abortRecord(st *mvcc.TxState, info *mvcc.CommitInfo) int64 {
+	freed := g.adj.WithdrawTx(info, st.AdjacencyWrites())
+	if freed > 0 {
+		g.topoGeneration.Add(1)
+	}
+	info.Abort()
+	return int64(freed)
+}
+
+// The stores a transaction marks on its [mvcc.TxState] when it writes to them.
+// The withdrawal of an aborted transaction visits its write sets, and sweeps the
+// two stores that keep none only when these bits say it wrote them.
+const (
+	touchedLife       uint32 = 1 << iota // a node-life record ([Graph.noteNodeLife])
+	touchedAdjClaims                     // an adjacency conflict stamp ([adjVersions])
+	touchedIdxRemoval                    // a deferred label-index removal ([Graph.deferLabelIndexRemoval])
+	touchedConstraint                    // a constraint stamp ([constraintVersions.note])
+)
 
 // withdrawAbortedIndexRemovals cancels the deferred label-index removals an
 // aborted transaction recorded, and reports how many it cancelled.
@@ -173,15 +373,44 @@ func (g *Graph[N, W]) withdrawAbortedIndexRemovals() int {
 	g.idxDeferred.mu.Lock()
 	cancelled := 0
 	var released []LabelID
+	var aborted []idxEntry
 	for k, st := range g.idxDeferred.pending {
 		if st.at() == mvcc.AbortedTS {
-			delete(g.idxDeferred.pending, k)
-			cancelled++
-			released = append(released, LabelID(k.lid))
+			aborted = append(aborted, k)
 		}
 	}
-	if len(g.idxDeferred.pending) == 0 {
-		g.idxDeferred.pending = nil
+	for k, sh := range g.idxDeferred.shadow {
+		// A replaced stamp that aborted itself has nothing left to reinstate.
+		if sh.st.at() == mvcc.AbortedTS {
+			g.idxDeferred.dropShadowLocked(k)
+		}
+	}
+	for _, k := range aborted {
+		// ANOTHER TRANSACTION STILL OWES THIS REMOVAL when the aborted stamp
+		// replaced its own (rmp #2947, audit F4): reinstate that stamp, and the
+		// retirement mark it carried, instead of dropping the key. The key stays
+		// pending, so neither the count nor the per-label hold changes.
+		if sh, ok := g.idxDeferred.shadow[k]; ok {
+			g.idxDeferred.pending[k] = sh.st
+			if sh.retiring {
+				if g.idxDeferred.retiring == nil {
+					g.idxDeferred.retiring = make(map[idxEntry]struct{}, 1)
+				}
+				g.idxDeferred.retiring[k] = struct{}{}
+			} else if g.idxDeferred.retiring != nil {
+				delete(g.idxDeferred.retiring, k)
+				if len(g.idxDeferred.retiring) == 0 {
+					g.idxDeferred.retiring = nil
+				}
+			}
+			g.idxDeferred.dropShadowLocked(k)
+			continue
+		}
+		// Every map, so a withdrawn retirement removal leaves no retiring mark
+		// behind (rmp #2964).
+		g.idxDeferred.dropLocked(k)
+		cancelled++
+		released = append(released, LabelID(k.lid))
 	}
 	g.idxDeferred.mu.Unlock()
 	if cancelled > 0 {

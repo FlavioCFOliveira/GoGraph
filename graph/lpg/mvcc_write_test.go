@@ -43,11 +43,11 @@ func TestMVCCWrite_MultiOpStatementIsAtomicallyVisible(t *testing.T) {
 	g := mvccGraph(t)
 	// Seed the endpoints in their own transaction so the one under test changes
 	// only labels, properties and topology.
-	if err := g.ApplyAtomically(func() error {
-		if err := g.AddNode("a"); err != nil {
+	if err := g.ApplyAtomicallyTx(func(tx WriteTx) error {
+		if err := g.Writer(tx).AddNode("a"); err != nil {
 			return err
 		}
-		return g.AddNode("b")
+		return g.Writer(tx).AddNode("b")
 	}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -61,15 +61,15 @@ func TestMVCCWrite_MultiOpStatementIsAtomicallyVisible(t *testing.T) {
 	// assertion passes against the very defect it is supposed to catch. This
 	// was verified by reverting the fix and watching the boundary version pass.
 	var midTS uint64
-	if err := g.ApplyAtomically(func() error {
-		if err := g.SetNodeLabel("a", "Person"); err != nil {
+	if err := g.ApplyAtomicallyTx(func(tx WriteTx) error {
+		if err := g.Writer(tx).SetNodeLabel("a", "Person"); err != nil {
 			return err
 		}
 		midTS = g.readTS()
-		if err := g.SetNodeProperty("a", "name", StringValue("ada")); err != nil {
+		if err := g.Writer(tx).SetNodeProperty("a", "name", StringValue("ada")); err != nil {
 			return err
 		}
-		return g.AddEdge("a", "b", 1)
+		return g.Writer(tx).AddEdge("a", "b", 1)
 	}); err != nil {
 		t.Fatalf("ApplyAtomically: %v", err)
 	}
@@ -122,11 +122,11 @@ func TestMVCCWrite_MultiOpStatementIsAtomicallyVisible(t *testing.T) {
 // which is the same defect one level up.
 func TestMVCCWrite_ExplicitTransactionSharesOneRecord(t *testing.T) {
 	g := mvccGraph(t)
-	if err := g.ApplyAtomically(func() error {
-		if err := g.AddNode("a"); err != nil {
+	if err := g.ApplyAtomicallyTx(func(tx WriteTx) error {
+		if err := g.Writer(tx).AddNode("a"); err != nil {
 			return err
 		}
-		return g.AddNode("b")
+		return g.Writer(tx).AddNode("b")
 	}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestMVCCWrite_ExplicitTransactionSharesOneRecord(t *testing.T) {
 	before := g.readTS()
 
 	g.LockBarrier()
-	_ = g.ApplyInsideLocked(func() error { return g.SetNodeLabel("a", "One") })
+	_ = g.ApplyInsideLockedTx(func(tx WriteTx) error { return g.Writer(tx).SetNodeLabel("a", "One") })
 	// Mid-transaction: a reader from before must still see nothing, and so must
 	// a reader that starts NOW — the transaction has not published.
 	midTS := g.readTS()
@@ -143,7 +143,7 @@ func TestMVCCWrite_ExplicitTransactionSharesOneRecord(t *testing.T) {
 		t.Fatal("a statement inside an open explicit transaction is already visible: the " +
 			"transaction is publishing statement by statement instead of as a whole")
 	}
-	_ = g.ApplyInsideLocked(func() error { return g.AddEdge("a", "b", 1) })
+	_ = g.ApplyInsideLockedTx(func(tx WriteTx) error { return g.Writer(tx).AddEdge("a", "b", 1) })
 	g.UnlockBarrier()
 
 	after := g.readTS()
@@ -192,8 +192,8 @@ func TestMVCCReclaim_BoundedUnderChurn(t *testing.T) {
 	}
 	const churn = reclaimThreshold * 8
 	for i := 0; i < churn; i++ {
-		if err := g.ApplyAtomically(func() error {
-			return g.SetNodeProperty("a", "w", Int64Value(int64(i)))
+		if err := g.ApplyAtomicallyTx(func(tx WriteTx) error {
+			return g.Writer(tx).SetNodeProperty("a", "w", Int64Value(int64(i)))
 		}); err != nil {
 			t.Fatalf("write %d: %v", i, err)
 		}
@@ -228,8 +228,8 @@ func TestMVCCReclaim_HeldBackByAnActiveReader(t *testing.T) {
 	if err := g.AddNode("a"); err != nil {
 		t.Fatalf("AddNode: %v", err)
 	}
-	if err := g.ApplyAtomically(func() error {
-		return g.SetNodeProperty("a", "w", Int64Value(0))
+	if err := g.ApplyAtomicallyTx(func(tx WriteTx) error {
+		return g.Writer(tx).SetNodeProperty("a", "w", Int64Value(0))
 	}); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -240,8 +240,8 @@ func TestMVCCReclaim_HeldBackByAnActiveReader(t *testing.T) {
 	slot := g.Horizon().Enter(startTS)
 
 	for i := 1; i <= 16; i++ {
-		if err := g.ApplyAtomically(func() error {
-			return g.SetNodeProperty("a", "w", Int64Value(int64(i)))
+		if err := g.ApplyAtomicallyTx(func(tx WriteTx) error {
+			return g.Writer(tx).SetNodeProperty("a", "w", Int64Value(int64(i)))
 		}); err != nil {
 			t.Fatalf("write %d: %v", i, err)
 		}
@@ -297,14 +297,14 @@ func TestMVCCWrite_TransactionSpanningEveryStoreIsAtomicallyVisible(t *testing.T
 	// transaction under test is the only writer of everything it asserts. The
 	// handle is what addresses the two per-edge side stores.
 	var handle uint64
-	if err := g.ApplyAtomically(func() error {
-		if err := g.AddNode("a"); err != nil {
+	if err := g.ApplyAtomicallyTx(func(tx WriteTx) error {
+		if err := g.Writer(tx).AddNode("a"); err != nil {
 			return err
 		}
-		if err := g.AddNode("b"); err != nil {
+		if err := g.Writer(tx).AddNode("b"); err != nil {
 			return err
 		}
-		h, err := g.AddEdgeH("a", "b", 1)
+		h, err := g.Writer(tx).AddEdgeH("a", "b", 1)
 		handle = h
 		return err
 	}); err != nil {
@@ -329,24 +329,24 @@ func TestMVCCWrite_TransactionSpanningEveryStoreIsAtomicallyVisible(t *testing.T
 	// transaction's own commit, can see the tear — so every write gets one.
 	var samples []uint64
 	sample := func() { samples = append(samples, g.readTS()) }
-	if err := g.ApplyAtomically(func() error {
-		if err := g.SetNodeLabel("a", "Person"); err != nil { // node labels
+	if err := g.ApplyAtomicallyTx(func(tx WriteTx) error {
+		if err := g.Writer(tx).SetNodeLabel("a", "Person"); err != nil { // node labels
 			return err
 		}
 		sample()
-		if err := g.SetNodeProperty("a", "name", StringValue("ada")); err != nil { // node properties
+		if err := g.Writer(tx).SetNodeProperty("a", "name", StringValue("ada")); err != nil { // node properties
 			return err
 		}
 		sample()
-		if err := g.AddEdge("a", "c", 2); err != nil { // topology
+		if err := g.Writer(tx).AddEdge("a", "c", 2); err != nil { // topology
 			return err
 		}
 		sample()
-		if err := g.SetEdgeLabelByHandle("a", "b", handle, "KNOWS"); err != nil {
+		if err := g.Writer(tx).SetEdgeLabelByHandle("a", "b", handle, "KNOWS"); err != nil {
 			t.Fatal(err)
 		} // relationship types
 		sample()
-		if err := g.SetEdgePropertyByHandle("a", "b", handle, "since", Int64Value(1815)); err != nil {
+		if err := g.Writer(tx).SetEdgePropertyByHandle("a", "b", handle, "since", Int64Value(1815)); err != nil {
 			return err // edge properties
 		}
 		sample()

@@ -2919,7 +2919,7 @@ func (e *Engine) buildReadPhysical(
 	// multiset; SuppressReorder (baked into the candidate set) guarantees no
 	// downstream operator observes the change.
 	if e.joinReorderEnabled && len(entry.reorderCandidates) > 0 {
-		bopts.reorderSwap = computeReorderSwaps(entry.reorderCandidates, labelSrc, params, int64(e.g.LiveOrder()))
+		bopts.reorderSwap = computeReorderSwaps(entry.reorderCandidates, labelSrc, params, int64(e.g.LiveOrderStored()))
 	}
 	bopts.seekHint = entry.pushedSeekHints
 	// Single-edge anchor-swap gating (#2090): when the Engine permits it and
@@ -3246,7 +3246,7 @@ func (e *Engine) explainInputsFor(entry *planCacheEntry, params map[string]expr.
 	var anchorSwaps map[*ir.Expand]bool
 	if e.joinReorderEnabled {
 		if cands := collectReorderCandidates(plan); len(cands) > 0 {
-			reorderSwaps = computeReorderSwaps(cands, labelSrc, params, int64(e.g.LiveOrder()))
+			reorderSwaps = computeReorderSwaps(cands, labelSrc, params, int64(e.g.LiveOrderStored()))
 		}
 	}
 	if e.anchorSwapEnabled {
@@ -14634,7 +14634,7 @@ func nodePropsToExprMap(g *lpg.ReadView[string, float64], id graph.NodeID) expr.
 // (srcKey -> dstKey) by streaming the latest-wins coalesced lpg property set
 // directly into the expr.MapValue, converting each value via lpgPropToExpr in the
 // streaming callback. It is the edge analogue of [nodePropsToExprMap] and the
-// allocation-fusing replacement for the former `rawEP := g.EdgeProperties(...);
+// allocation-fusing replacement for the former `rawEP := g.EdgePropertiesAsOf(..., nil);
 // m := make(expr.MapValue, len(rawEP)); for k, pv := range rawEP { m[k] =
 // lpgPropToExpr(pv) }` shape: that built a throwaway lpg map[string]PropertyValue
 // per relationship row only to copy it into the expr map. Streaming through
@@ -21019,7 +21019,7 @@ func (a *lpgMutatorAdapter) AddNode(n string) (graph.NodeID, error) {
 	// tombstoned node (clears its tombstone), so checking afterwards would
 	// always observe the node live. Re-creating a removed key counts as a
 	// fresh creation for side-effect bookkeeping.
-	if existed && a.g.IsTombstoned(idBefore) {
+	if existed && a.g.IsTombstonedStored(idBefore) {
 		existed = false
 	}
 	if err := a.w().AddNode(n); err != nil {
@@ -21052,7 +21052,7 @@ func (a *lpgMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 	a.liveTopo.beforeAdjWrite(src)
 	_, srcExisted := a.g.AdjList().Mapper().Lookup(src)
 	_, dstExisted := a.g.AdjList().Mapper().Lookup(dst)
-	edgeExisted := a.g.AdjList().HasEdge(src, dst)
+	edgeExisted := a.g.HasEdgeAsOf(src, dst, nil)
 	if !a.g.AdjList().Multigraph() && edgeExisted {
 		return 0, 0, fmt.Errorf("%w (between %q and %q)", ErrParallelEdgeInSimpleGraph, src, dst)
 	}
@@ -21088,7 +21088,7 @@ func (a *lpgMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 	a.liveTopo.beforeAdjWrite(src)
 	_, srcExisted := a.g.AdjList().Mapper().Lookup(src)
 	_, dstExisted := a.g.AdjList().Mapper().Lookup(dst)
-	edgeExisted := a.g.AdjList().HasEdge(src, dst)
+	edgeExisted := a.g.HasEdgeAsOf(src, dst, nil)
 	if !a.g.AdjList().Multigraph() && edgeExisted {
 		return 0, 0, 0, fmt.Errorf("%w (between %q and %q)", ErrParallelEdgeInSimpleGraph, src, dst)
 	}
@@ -21132,7 +21132,7 @@ func (a *lpgMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 // DETACH DELETE uses for the victim's INBOUND arcs.
 func (a *lpgMutatorAdapter) RemoveEdge(src, dst string) {
 	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
-	present := a.g.AdjList().HasEdge(src, dst)
+	present := a.g.HasEdgeAsOf(src, dst, nil)
 	r := a.rec()
 	var pre removedEdgePreimage
 	if r.active() {
@@ -21189,10 +21189,10 @@ func orientHandleEndpoints(g *lpg.Graph[string, float64], src, dst string, handl
 	if handle == 0 || g == nil {
 		return src, dst
 	}
-	if g.HasEdgeHandle(src, dst, handle) {
+	if g.HasEdgeHandleAsOf(src, dst, handle, nil) {
 		return src, dst
 	}
-	if g.HasEdgeHandle(dst, src, handle) {
+	if g.HasEdgeHandleAsOf(dst, src, handle, nil) {
 		return dst, src
 	}
 	return src, dst
@@ -21214,7 +21214,7 @@ func (a *lpgMutatorAdapter) RemoveEdgeByHandle(src, dst string, handle uint64) {
 	if a.cs() != nil {
 		if handle != 0 {
 			countEdgeRemovedByHandle(a.g, a.cs(), a.countBuf(), src, dst, handle)
-		} else if a.g.AdjList().HasEdge(src, dst) {
+		} else if a.g.HasEdgeAsOf(src, dst, nil) {
 			countEdgeRemovedFirstSlot(a.g, a.cs(), a.countBuf(), src, dst)
 		}
 	}
@@ -21237,17 +21237,17 @@ func (a *lpgMutatorAdapter) SetNodeLabel(n, label string) error {
 		return err
 	}
 	r := a.rec()
-	hadLabel := r.active() && a.g.HasNodeLabel(n, label)
+	hadLabel := r.active() && a.g.HasNodeLabelAsOf(n, label, nil)
 	// Count-store (#2082): the relabel affects D/T only when the label is newly
 	// added on a node that ALREADY participates in counted edges. The
 	// AdjList.Size()==0 check is the cheap CREATE (:N) fast path — evaluated first
 	// (an atomic load) so a bare labelled-node create short-circuits before any
 	// probe or buffer allocation; countIsFresh excludes a freshly created node
 	// whose initial labelling the edge-typing +delta already covers.
-	countNew := a.cs() != nil && a.g.AdjList().Size() > 0 && !a.countIsFresh(n) && !a.g.HasNodeLabel(n, label)
+	countNew := a.cs() != nil && a.g.AdjList().Size() > 0 && !a.countIsFresh(n) && !a.g.HasNodeLabelAsOf(n, label, nil)
 	// #2212: a label already present is a no-op and counts nothing. Probed
 	// independently of hadLabel, which is gated on the undo recorder being active.
-	labelIsNew := a.counters != nil && !a.g.HasNodeLabel(n, label)
+	labelIsNew := a.counters != nil && !a.g.HasNodeLabelAsOf(n, label, nil)
 	if err := a.w().SetNodeLabel(n, label); err != nil {
 		return err
 	}
@@ -21277,16 +21277,16 @@ func (a *lpgMutatorAdapter) RemoveNodeLabel(n, label string) error {
 	// must precede the write because it reads both membership and property values.
 	exec.EnforceUniqueOnLabelRemove(a.constraintReg(), a, n, label)
 	r := a.rec()
-	hadLabel := r.active() && a.g.HasNodeLabel(n, label)
+	hadLabel := r.active() && a.g.HasNodeLabelAsOf(n, label, nil)
 	// Count-store (#2082): decrement the OUT-scoped D/T cells before the removal
 	// (so a self-loop endpoint still carries the label), and dirty the IN X-scoped
 	// cells. Only when the label was actually present on a node in a non-edgeless
 	// graph; the Size()==0 fast path short-circuits first.
-	if a.cs() != nil && a.g.AdjList().Size() > 0 && a.g.HasNodeLabel(n, label) {
+	if a.cs() != nil && a.g.AdjList().Size() > 0 && a.g.HasNodeLabelAsOf(n, label, nil) {
 		countRelabel(a.g, a.cs(), a.countBuf(), n, label, -1)
 	}
 	// #2212: removing an absent label counts nothing.
-	labelWasPresent := a.counters != nil && a.g.HasNodeLabel(n, label)
+	labelWasPresent := a.counters != nil && a.g.HasNodeLabelAsOf(n, label, nil)
 	if err := a.w().RemoveNodeLabel(n, label); err != nil {
 		return err
 	}
@@ -21314,7 +21314,7 @@ func (a *lpgMutatorAdapter) RemoveNode(n string) {
 	if !ok {
 		return
 	}
-	wasLive := !a.g.IsTombstoned(id)
+	wasLive := !a.g.IsTombstonedStored(id)
 	// The index fan-out captures the node's PRE-removal state, so it has to stay
 	// AHEAD of the removal. It is safe there even when the removal is refused:
 	// every refusal in [lpg.Graph.removeNodeInfo] dooms the transaction, and a
@@ -21340,7 +21340,7 @@ func (a *lpgMutatorAdapter) RemoveNode(n string) {
 
 // IsTombstoned reports whether the NodeID has been tombstoned.
 func (a *lpgMutatorAdapter) IsTombstoned(id graph.NodeID) bool {
-	return a.g.IsTombstoned(id)
+	return a.g.IsTombstonedStored(id)
 }
 
 // SetNodeProperty sets the named property on n.
@@ -21365,7 +21365,7 @@ func (a *lpgMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 	var prev lpg.PropertyValue
 	var had bool
 	if r.active() || fanout || statsActive {
-		prev, had = a.g.GetNodeProperty(n, key)
+		prev, had = a.g.GetNodePropertyAsOf(n, key, nil)
 	}
 	if err := a.w().SetNodeProperty(n, key, value); err != nil {
 		return err
@@ -21409,11 +21409,11 @@ func (a *lpgMutatorAdapter) DelNodeProperty(n, key string) error {
 	var prev lpg.PropertyValue
 	var had bool
 	if r.active() || fanout || statsActive {
-		prev, had = a.g.GetNodeProperty(n, key)
+		prev, had = a.g.GetNodePropertyAsOf(n, key, nil)
 	}
 	// #2212: removing an absent property is a no-op and counts nothing.
 	if a.counters != nil {
-		if _, present := a.g.GetNodeProperty(n, key); present {
+		if _, present := a.g.GetNodePropertyAsOf(n, key, nil); present {
 			a.countPropertyRemoved()
 		}
 	}
@@ -21443,12 +21443,12 @@ func (a *lpgMutatorAdapter) DelNodeProperty(n, key string) error {
 
 // NodeProperties returns a snapshot of all properties on n.
 func (a *lpgMutatorAdapter) NodeProperties(n string) map[string]lpg.PropertyValue {
-	return a.g.NodeProperties(n)
+	return a.g.NodePropertiesAsOf(n, nil)
 }
 
 // NodeLabels returns a snapshot of all labels on n.
 func (a *lpgMutatorAdapter) NodeLabels(n string) []string {
-	return a.g.NodeLabels(n)
+	return a.g.NodeLabelsAsOf(n, nil)
 }
 
 // HasNodeLabelInTx reports whether n carries label in THIS transaction's view.
@@ -21495,7 +21495,7 @@ func (a *lpgMutatorAdapter) NodePropertyInTx(n, key string) (lpg.PropertyValue, 
 
 // HasEdge reports whether a directed edge from src to dst is present.
 func (a *lpgMutatorAdapter) HasEdge(src, dst string) bool {
-	return a.g.AdjList().HasEdge(src, dst)
+	return a.g.HasEdgeAsOf(src, dst, nil)
 }
 
 // SetEdgeLabel attaches label to the directed edge (src, dst).
@@ -21505,7 +21505,7 @@ func (a *lpgMutatorAdapter) SetEdgeLabel(src, dst, label string) error {
 	}
 	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	r := a.rec()
-	hadLabel := r.active() && a.g.HasEdgeLabel(src, dst, label)
+	hadLabel := r.active() && a.g.HasEdgeLabelAsOf(src, dst, label, nil)
 	if err := a.w().SetEdgeLabel(src, dst, label); err != nil {
 		return err
 	}
@@ -21530,7 +21530,7 @@ func (a *lpgMutatorAdapter) SetEdgeProperty(src, dst, key string, value lpg.Prop
 	var prev lpg.PropertyValue
 	var had bool
 	if r.active() {
-		prev, had = a.g.GetEdgeProperty(src, dst, key)
+		prev, had = a.g.GetEdgePropertyAsOf(src, dst, key, nil)
 	}
 	if err := a.w().SetEdgeProperty(src, dst, key, value); err != nil {
 		return err
@@ -21556,7 +21556,7 @@ func (a *lpgMutatorAdapter) DelEdgeProperty(src, dst, key string) error {
 	}
 	// #2212: removing an absent property is a no-op and counts nothing.
 	if a.counters != nil {
-		if _, present := a.g.GetEdgeProperty(src, dst, key); present {
+		if _, present := a.g.GetEdgePropertyAsOf(src, dst, key, nil); present {
 			a.countPropertyRemoved()
 		}
 	}
@@ -21574,7 +21574,7 @@ func (a *lpgMutatorAdapter) delEdgePropertyUncounted(src, dst, key string) error
 	var prev lpg.PropertyValue
 	var had bool
 	if r.active() {
-		prev, had = a.g.GetEdgeProperty(src, dst, key)
+		prev, had = a.g.GetEdgePropertyAsOf(src, dst, key, nil)
 	}
 	if err := a.w().DelEdgeProperty(src, dst, key); err != nil {
 		return err
@@ -21603,7 +21603,7 @@ func (a *lpgMutatorAdapter) DelEdgePropertyOnInstance(src, dst string, handle ui
 		return err
 	}
 	if a.counters != nil {
-		if _, present := a.g.EdgePropertiesByHandle(src, dst, handle)[key]; present {
+		if _, present := a.g.EdgePropertiesByHandleAsOf(src, dst, handle, nil)[key]; present {
 			a.countPropertyRemoved()
 		}
 	}
@@ -21619,13 +21619,13 @@ func (a *lpgMutatorAdapter) DelEdgePropertyOnInstance(src, dst string, handle ui
 // EdgeProperties returns a snapshot of every property currently set on the
 // directed edge (src, dst).
 func (a *lpgMutatorAdapter) EdgeProperties(src, dst string) map[string]lpg.PropertyValue {
-	return a.g.EdgeProperties(src, dst)
+	return a.g.EdgePropertiesAsOf(src, dst, nil)
 }
 
 // EdgeLabels returns a snapshot of every label currently attached to the
 // directed edge (src, dst).
 func (a *lpgMutatorAdapter) EdgeLabels(src, dst string) []string {
-	return a.g.EdgeLabels(src, dst)
+	return a.g.EdgeLabelsAsOf(src, dst, nil)
 }
 
 // IncEdgeCreateCount, EdgeCreateCount, DecEdgeCreateCount delegate to
@@ -21661,7 +21661,7 @@ func (a *lpgMutatorAdapter) SetEdgeLabelAt(src, dst string, idx int64, label str
 	return nil
 }
 func (a *lpgMutatorAdapter) EdgeLabelsAt(src, dst string, idx int64) []string {
-	return a.g.EdgeLabelsAt(src, dst, idx)
+	return a.g.EdgeLabelsAtAsOf(src, dst, idx, nil)
 }
 func (a *lpgMutatorAdapter) SetEdgePropertyAt(src, dst string, idx int64, key string, value lpg.PropertyValue) error {
 	if err := lpg.CheckToken("edge property key", key); err != nil {
@@ -21670,11 +21670,11 @@ func (a *lpgMutatorAdapter) SetEdgePropertyAt(src, dst string, idx int64, key st
 	return a.w().SetEdgePropertyAt(src, dst, idx, key, value)
 }
 func (a *lpgMutatorAdapter) EdgePropertiesAt(src, dst string, idx int64) map[string]lpg.PropertyValue {
-	return a.g.EdgePropertiesAt(src, dst, idx)
+	return a.g.EdgePropertiesAtAsOf(src, dst, idx, nil)
 }
 func (a *lpgMutatorAdapter) RemoveEdgeInstance(src, dst string, idx int64) {
-	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
-	a.w().RemoveEdgeInstance(src, dst, idx)
+	a.liveTopo.beforeAdjWrite(src)              // rmp #2883: journal the Init-instant run first
+	_ = a.w().RemoveEdgeInstance(src, dst, idx) // rmp #2947: the adapter carries its statement's transaction, so the direct-write refusal, the only error, cannot occur; [exec.GraphMutator] returns nothing.
 }
 
 // SetEdgeLabelByHandle / EdgeLabelsByHandle / SetEdgePropertyByHandle /
@@ -21705,7 +21705,7 @@ func (a *lpgMutatorAdapter) SetEdgeLabelByHandle(src, dst string, handle uint64,
 	return nil
 }
 func (a *lpgMutatorAdapter) EdgeLabelsByHandle(src, dst string, handle uint64) []string {
-	return a.g.EdgeLabelsByHandle(src, dst, handle)
+	return a.g.EdgeLabelsByHandleAsOf(src, dst, handle, nil)
 }
 func (a *lpgMutatorAdapter) SetEdgePropertyByHandle(src, dst string, handle uint64, key string, value lpg.PropertyValue) error {
 	if err := lpg.CheckToken("edge property key", key); err != nil {
@@ -21715,7 +21715,7 @@ func (a *lpgMutatorAdapter) SetEdgePropertyByHandle(src, dst string, handle uint
 	var prev lpg.PropertyValue
 	var had bool
 	if r.active() && handle != 0 {
-		prev, had = a.g.EdgePropertiesByHandle(src, dst, handle)[key]
+		prev, had = a.g.EdgePropertiesByHandleAsOf(src, dst, handle, nil)[key]
 	}
 	if err := a.w().SetEdgePropertyByHandle(src, dst, handle, key, value); err != nil {
 		return err
@@ -21731,7 +21731,7 @@ func (a *lpgMutatorAdapter) DelEdgePropertyByHandle(src, dst string, handle uint
 	var prev lpg.PropertyValue
 	var had bool
 	if r.active() && handle != 0 {
-		prev, had = a.g.EdgePropertiesByHandle(src, dst, handle)[key]
+		prev, had = a.g.EdgePropertiesByHandleAsOf(src, dst, handle, nil)[key]
 	}
 	if err := a.w().DelEdgePropertyByHandle(src, dst, handle, key); err != nil {
 		return err
@@ -21740,11 +21740,11 @@ func (a *lpgMutatorAdapter) DelEdgePropertyByHandle(src, dst string, handle uint
 	return nil
 }
 func (a *lpgMutatorAdapter) EdgePropertiesByHandle(src, dst string, handle uint64) map[string]lpg.PropertyValue {
-	return a.g.EdgePropertiesByHandle(src, dst, handle)
+	return a.g.EdgePropertiesByHandleAsOf(src, dst, handle, nil)
 }
 func (a *lpgMutatorAdapter) RemoveEdgeInstanceByHandle(src, dst string, handle uint64) {
-	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
-	a.w().RemoveEdgeInstanceByHandle(src, dst, handle)
+	a.liveTopo.beforeAdjWrite(src)                         // rmp #2883: journal the Init-instant run first
+	_ = a.w().RemoveEdgeInstanceByHandle(src, dst, handle) // rmp #2947: the adapter carries its statement's transaction, so the direct-write refusal, the only error, cannot occur; [exec.GraphMutator] returns nothing.
 }
 
 // RecordConstraintInverse appends inv to this statement's undo log so a rollback
@@ -21768,28 +21768,24 @@ func (a *lpgMutatorAdapter) ConstraintTxn() *exec.ConstraintTxn { return a.conTx
 // edge's by-handle store. The boolean is false (and the handle 0) when no
 // handled src→dst slot exists.
 func (a *lpgMutatorAdapter) FirstEdgeHandle(src, dst string) (uint64, bool) {
-	return a.g.FirstEdgeHandle(src, dst)
+	return a.g.FirstEdgeHandleAsOf(src, dst, nil)
 }
 
 // EdgeHandles appends the handle of every stored src→dst slot to buf,
 // delegating to [lpg.Graph.AppendEdgeHandles]. See [exec.GraphMutator.EdgeHandles].
 func (a *lpgMutatorAdapter) EdgeHandles(src, dst string, buf []uint64) []uint64 {
-	return a.g.AppendEdgeHandles(src, dst, buf)
+	return a.g.AppendEdgeHandlesAsOf(src, dst, buf, nil)
 }
 
 // HasEdgeHandle reports whether a stored src→dst slot carries handle,
 // delegating to [lpg.Graph.HasEdgeHandle]. See [exec.GraphMutator.HasEdgeHandle].
 func (a *lpgMutatorAdapter) HasEdgeHandle(src, dst string, handle uint64) bool {
-	return a.g.HasEdgeHandle(src, dst, handle)
+	return a.g.HasEdgeHandleAsOf(src, dst, handle, nil)
 }
 
 // OutNeighbours returns a snapshot of the outgoing neighbour keys of n.
 func (a *lpgMutatorAdapter) OutNeighbours(n string) []string {
-	var out []string
-	for nb := range a.g.AdjList().Neighbours(n) {
-		out = append(out, nb)
-	}
-	return out
+	return storedOutNeighbours(a.g, n)
 }
 
 // InNeighbours returns a snapshot of the incoming neighbour keys of n by
@@ -21806,7 +21802,7 @@ func (a *lpgMutatorAdapter) InNeighbours(n string) []string {
 	// live graph: five seed-and-wipe cycles of the same 20 000 nodes measured
 	// 895 ms, 1.635 s, 2.393 s, 3.143 s, 3.924 s for identical work, at exactly
 	// one core. That is rmp #2400, and the walk was 78% of its CPU profile.
-	return a.g.AdjList().InNeighbours(n)
+	return storedInNeighbours(a.g, n)
 }
 
 // InNeighboursInTx returns n's incoming neighbour keys in THIS transaction's
@@ -21908,7 +21904,7 @@ func walkMutatorNodeIDs(g *lpg.Graph[string, float64], fn func(graph.NodeID) boo
 	})
 	*bp = ids
 	for _, id := range ids {
-		if g.IsTombstoned(id) {
+		if g.IsTombstonedStored(id) {
 			continue
 		}
 		if !fn(id) {
@@ -22222,6 +22218,34 @@ func (a *walMutatorAdapter) countIsFresh(n string) bool {
 // for the read-only adapter stubs that never open a bracket.
 func (a *walMutatorAdapter) w() lpg.WriteView[string, float64] { return a.g.Writer(a.wtx) }
 
+// effectMark samples the statement transaction's version count before an
+// in-memory write, so [walMutatorAdapter.tookEffect] can tell afterwards whether
+// the write changed anything.
+//
+// # The WAL records effects, not requests (rmp #2965, round 5)
+//
+// A write that changes nothing — a label already present, a property set to
+// the value it holds, a removal of something absent, a create of a live node —
+// writes no version, so it holds no claim, and a concurrent commit may change
+// the same object and log before this transaction does. Logging the no-op
+// would let replay evaluate it AFTER that commit, where it is no longer a
+// no-op, and recovery would rebuild a graph memory never held: `SET n:L` on a
+// node already labelled L, committed after an autocommit `REMOVE n:L`, came
+// back from recovery labelled L. Every frame this adapter buffers is therefore
+// gated on the write having written a version; see [lpg.WriteTx.Versions].
+func (a *walMutatorAdapter) effectMark() (mark int64, counted bool) { return a.wtx.Versions() }
+
+// tookEffect reports whether the write since effectMark changed anything. A
+// transaction without version accounting (a disarmed graph) cannot tell, so it
+// reports true and the frame is buffered, as before.
+func (a *walMutatorAdapter) tookEffect(mark int64, counted bool) bool {
+	if !counted {
+		return true
+	}
+	n, _ := a.wtx.Versions()
+	return n != mark
+}
+
 func (a *walMutatorAdapter) rec() mutationUndo {
 	return mutationUndo{wv: a.w(), undo: a.undo, touched: a.touched, stampCon: a.stampCon}
 }
@@ -22242,9 +22266,10 @@ func (a *walMutatorAdapter) AddNode(n string) (graph.NodeID, error) {
 	// tombstoned node, so checking afterwards would always observe it live.
 	// Re-creating a removed key counts as a fresh creation for side-effect
 	// bookkeeping.
-	if existed && a.g.IsTombstoned(idBefore) {
+	if existed && a.g.IsTombstonedStored(idBefore) {
 		existed = false
 	}
+	mark, counted := a.effectMark()
 	if err := a.w().AddNode(n); err != nil {
 		return 0, err
 	}
@@ -22255,7 +22280,13 @@ func (a *walMutatorAdapter) AddNode(n string) (graph.NodeID, error) {
 	// is nil — [txn.Tx.AddNode] returns ErrTxFinished alone, and this adapter is
 	// never reached on a finished transaction — so nothing that runs today
 	// changes; what goes is the trap that made a NEW error class disappear.
-	txErr := a.tx.AddNode(n)
+	//
+	// Buffered only when the create took effect: a node that was already live
+	// writes nothing (see [walMutatorAdapter.effectMark]).
+	var txErr error
+	if a.tookEffect(mark, counted) {
+		txErr = a.tx.AddNode(n)
+	}
 	id, _ := a.g.AdjList().Mapper().Lookup(n)
 	if !existed {
 		a.countNodeCreated()
@@ -22276,10 +22307,11 @@ func (a *walMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 	a.liveTopo.beforeAdjWrite(src)
 	_, srcExisted := a.g.AdjList().Mapper().Lookup(src)
 	_, dstExisted := a.g.AdjList().Mapper().Lookup(dst)
-	edgeExisted := a.g.AdjList().HasEdge(src, dst)
+	edgeExisted := a.g.HasEdgeAsOf(src, dst, nil)
 	if !a.g.AdjList().Multigraph() && edgeExisted {
 		return 0, 0, fmt.Errorf("%w (between %q and %q)", ErrParallelEdgeInSimpleGraph, src, dst)
 	}
+	mark, counted := a.effectMark()
 	if err := a.w().AddEdge(src, dst, w); err != nil {
 		return 0, 0, err
 	}
@@ -22292,7 +22324,10 @@ func (a *walMutatorAdapter) AddEdge(src, dst string, w float64) (graph.NodeID, g
 	// [NewEngineWithStore] accepts ANY [txn.Store], including one built by
 	// [txn.NewStoreWithCodec], which has no weight codec. On such a store this
 	// call refuses every non-zero weight.
-	txErr := a.tx.AddEdge(src, dst, w)
+	var txErr error
+	if a.tookEffect(mark, counted) {
+		txErr = a.tx.AddEdge(src, dst, w)
+	}
 	srcID, _ := a.g.AdjList().Mapper().Lookup(src)
 	dstID, _ := a.g.AdjList().Mapper().Lookup(dst)
 	if !srcExisted {
@@ -22335,10 +22370,11 @@ func (a *walMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 	a.liveTopo.beforeAdjWrite(src)
 	_, srcExisted := a.g.AdjList().Mapper().Lookup(src)
 	_, dstExisted := a.g.AdjList().Mapper().Lookup(dst)
-	edgeExisted := a.g.AdjList().HasEdge(src, dst)
+	edgeExisted := a.g.HasEdgeAsOf(src, dst, nil)
 	if !a.g.AdjList().Multigraph() && edgeExisted {
 		return 0, 0, 0, fmt.Errorf("%w (between %q and %q)", ErrParallelEdgeInSimpleGraph, src, dst)
 	}
+	mark, counted := a.effectMark()
 	handle, err := a.w().AddEdgeH(src, dst, w)
 	if err != nil {
 		return 0, 0, 0, err
@@ -22355,7 +22391,10 @@ func (a *walMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 	// endpoints, their labels and their properties, and no relationship between
 	// them. Measured on this tree before the fix — see
 	// TestRelationshipDurability_NoWeightCodec_2747.
-	txErr := a.tx.AddEdgeWithHandle(src, dst, w, handle)
+	var txErr error
+	if a.tookEffect(mark, counted) {
+		txErr = a.tx.AddEdgeWithHandle(src, dst, w, handle)
+	}
 	srcID, _ := a.g.AdjList().Mapper().Lookup(src)
 	dstID, _ := a.g.AdjList().Mapper().Lookup(dst)
 	if !srcExisted {
@@ -22385,7 +22424,7 @@ func (a *walMutatorAdapter) AddEdgeH(src, dst string, w float64) (graph.NodeID, 
 // resurrect the deleted relationship's type or properties.
 func (a *walMutatorAdapter) RemoveEdge(src, dst string) {
 	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
-	present := a.g.AdjList().HasEdge(src, dst)
+	present := a.g.HasEdgeAsOf(src, dst, nil)
 	r := a.rec()
 	var pre removedEdgePreimage
 	if r.active() {
@@ -22444,13 +22483,14 @@ func (a *walMutatorAdapter) RemoveEdge(src, dst string) {
 	// emits no durable record. Neo4j sidesteps the question by traversing a node's
 	// single relationship chain once, direction-agnostically
 	// (`Operations.nodeDetachDelete`). Structure taken as evidence, never code.
+	mark, counted := a.effectMark()
 	if !a.w().RemoveEdge(src, dst) {
 		return
 	}
 	if present {
 		a.countRelDeleted()
 	}
-	if present || a.mustDescribeNoOpRemoval() {
+	if (present && a.tookEffect(mark, counted)) || a.mustDescribeNoOpRemoval() {
 		_ = a.tx.RemoveEdge(src, dst) // rmp #2747: [txn.Tx.RemoveEdge] returns ErrTxFinished and nothing else, and this adapter is never reached on a finished transaction. Discarded because [exec.GraphMutator.RemoveEdge] returns nothing — see the discard note on [walMutatorAdapter].
 	}
 	r.recordRemoveEdge(&pre, present)
@@ -22477,7 +22517,7 @@ func (a *walMutatorAdapter) RemoveEdgeByHandle(src, dst string, handle uint64) {
 	if a.cs() != nil {
 		if handle != 0 {
 			countEdgeRemovedByHandle(a.g, a.cs(), a.countBuf(), src, dst, handle)
-		} else if a.g.AdjList().HasEdge(src, dst) {
+		} else if a.g.HasEdgeAsOf(src, dst, nil) {
 			countEdgeRemovedFirstSlot(a.g, a.cs(), a.countBuf(), src, dst)
 		}
 	}
@@ -22555,14 +22595,15 @@ func (a *walMutatorAdapter) SetNodeLabel(n, label string) error {
 		return err
 	}
 	r := a.rec()
-	hadLabel := r.active() && a.g.HasNodeLabel(n, label)
+	hadLabel := r.active() && a.g.HasNodeLabelAsOf(n, label, nil)
 	// Count-store (#2082): see the lpgMutatorAdapter twin; Size()==0 short-circuits
 	// the CREATE (:N) fast path and countIsFresh excludes a freshly created node's
 	// initial labelling (covered by the edge-typing +delta).
-	countNew := a.cs() != nil && a.g.AdjList().Size() > 0 && !a.countIsFresh(n) && !a.g.HasNodeLabel(n, label)
+	countNew := a.cs() != nil && a.g.AdjList().Size() > 0 && !a.countIsFresh(n) && !a.g.HasNodeLabelAsOf(n, label, nil)
 	// #2212: a label already present is a no-op and counts nothing. Probed
 	// independently of hadLabel, which is gated on the undo recorder being active.
-	labelIsNew := a.counters != nil && !a.g.HasNodeLabel(n, label)
+	labelIsNew := a.counters != nil && !a.g.HasNodeLabelAsOf(n, label, nil)
+	mark, counted := a.effectMark()
 	if err := a.w().SetNodeLabel(n, label); err != nil {
 		return err
 	}
@@ -22574,8 +22615,12 @@ func (a *walMutatorAdapter) SetNodeLabel(n, label string) error {
 	// has run, as in [walMutatorAdapter.AddNode]. [txn.Tx.SetNodeLabel] returns
 	// ErrTxFinished (unreachable here) or ErrFieldTooLong, and the gate at the
 	// top of this method has already refused every label that could raise the
-	// second, so nil is the only value reachable today.
-	txErr := a.tx.SetNodeLabel(n, label)
+	// second, so nil is the only value reachable today. Buffered only when the
+	// label was not already present (see [walMutatorAdapter.effectMark]).
+	var txErr error
+	if a.tookEffect(mark, counted) {
+		txErr = a.tx.SetNodeLabel(n, label)
+	}
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
 			Op:    index.OpAddNodeLabel,
@@ -22597,14 +22642,15 @@ func (a *walMutatorAdapter) RemoveNodeLabel(n, label string) error {
 	// See the lpgMutatorAdapter twin (rmp #2358).
 	exec.EnforceUniqueOnLabelRemove(a.constraintReg(), a, n, label)
 	r := a.rec()
-	hadLabel := r.active() && a.g.HasNodeLabel(n, label)
+	hadLabel := r.active() && a.g.HasNodeLabelAsOf(n, label, nil)
 	// Count-store (#2082): decrement OUT-scoped cells before the removal, dirty
 	// the IN X-scoped cells; see the lpgMutatorAdapter twin.
-	if a.cs() != nil && a.g.AdjList().Size() > 0 && a.g.HasNodeLabel(n, label) {
+	if a.cs() != nil && a.g.AdjList().Size() > 0 && a.g.HasNodeLabelAsOf(n, label, nil) {
 		countRelabel(a.g, a.cs(), a.countBuf(), n, label, -1)
 	}
 	// #2212: removing an absent label counts nothing.
-	labelWasPresent := a.counters != nil && a.g.HasNodeLabel(n, label)
+	labelWasPresent := a.counters != nil && a.g.HasNodeLabelAsOf(n, label, nil)
+	mark, counted := a.effectMark()
 	if err := a.w().RemoveNodeLabel(n, label); err != nil {
 		return err
 	}
@@ -22614,8 +22660,12 @@ func (a *walMutatorAdapter) RemoveNodeLabel(n, label string) error {
 	r.recordRemoveNodeLabel(n, label, hadLabel)
 	// rmp #2956: propagated, never discarded. The token gate at the top of this
 	// method refuses every name the WAL cannot carry before any write, so the
-	// in-memory write and this staged op succeed or fail together.
-	txErr := a.tx.RemoveNodeLabel(n, label)
+	// in-memory write and this staged op succeed or fail together. Buffered only
+	// when the label was present (see [walMutatorAdapter.effectMark]).
+	var txErr error
+	if a.tookEffect(mark, counted) {
+		txErr = a.tx.RemoveNodeLabel(n, label)
+	}
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
 			Op:    index.OpRemoveNodeLabel,
@@ -22636,7 +22686,7 @@ func (a *walMutatorAdapter) RemoveNode(n string) {
 	if !ok {
 		return
 	}
-	wasLive := !a.g.IsTombstoned(id)
+	wasLive := !a.g.IsTombstonedStored(id)
 	// The index fan-out captures the node's PRE-removal state, so it has to stay
 	// AHEAD of the removal. It is safe there even when the removal is refused:
 	// every refusal in [lpg.Graph.removeNodeInfo] dooms the transaction, and a
@@ -22645,6 +22695,7 @@ func (a *walMutatorAdapter) RemoveNode(n string) {
 	if wasLive && indexFanoutActive(a.g, a.buf) {
 		enqueueNodeRemovalChanges(a.g, a.buf, n, id)
 	}
+	mark, counted := a.effectMark()
 	applied := a.w().RemoveNode(n)
 	if !applied {
 		// See the lpgMutatorAdapter twin (rmp #2726). The WAL frame is gated too,
@@ -22657,12 +22708,15 @@ func (a *walMutatorAdapter) RemoveNode(n string) {
 		a.countNodeDeleted()
 		a.rec().recordRemoveNode(n, true)
 	}
+	if !a.tookEffect(mark, counted) {
+		return // already gone: nothing to describe (see [walMutatorAdapter.effectMark])
+	}
 	_ = a.tx.RemoveNode(n) // rmp #2747: [txn.Tx.RemoveNode] returns ErrTxFinished and nothing else, unreachable here; it stages no schema string, so no field bound applies. Discarded: [exec.GraphMutator.RemoveNode] returns nothing.
 }
 
 // IsTombstoned reports whether the NodeID has been tombstoned.
 func (a *walMutatorAdapter) IsTombstoned(id graph.NodeID) bool {
-	return a.g.IsTombstoned(id)
+	return a.g.IsTombstonedStored(id)
 }
 
 // SetNodeProperty sets the named property on n.
@@ -22686,8 +22740,9 @@ func (a *walMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 	var prev lpg.PropertyValue
 	var had bool
 	if r.active() || fanout || statsActive {
-		prev, had = a.g.GetNodeProperty(n, key)
+		prev, had = a.g.GetNodePropertyAsOf(n, key, nil)
 	}
+	mark, counted := a.effectMark()
 	if err := a.w().SetNodeProperty(n, key, value); err != nil {
 		return err
 	}
@@ -22698,7 +22753,11 @@ func (a *walMutatorAdapter) SetNodeProperty(n, key string, value lpg.PropertyVal
 	// rmp #2747: propagated, never discarded.
 	// [txn.Tx.SetNodePropertyPreValidated] returns ErrTxFinished (unreachable
 	// here) or ErrFieldTooLong, which the gate at the top has already refused.
-	txErr := a.tx.SetNodePropertyPreValidated(n, key, value)
+	// Buffered only when the value changed (see [walMutatorAdapter.effectMark]).
+	var txErr error
+	if a.tookEffect(mark, counted) {
+		txErr = a.tx.SetNodePropertyPreValidated(n, key, value)
+	}
 	if a.buf != nil {
 		ch := index.Change{
 			Op:       index.OpSetNodeProperty,
@@ -22732,22 +22791,27 @@ func (a *walMutatorAdapter) DelNodeProperty(n, key string) error {
 	var prev lpg.PropertyValue
 	var had bool
 	if r.active() || fanout || statsActive {
-		prev, had = a.g.GetNodeProperty(n, key)
+		prev, had = a.g.GetNodePropertyAsOf(n, key, nil)
 	}
 	// #2212: removing an absent property is a no-op and counts nothing.
 	if a.counters != nil {
-		if _, present := a.g.GetNodeProperty(n, key); present {
+		if _, present := a.g.GetNodePropertyAsOf(n, key, nil); present {
 			a.countPropertyRemoved()
 		}
 	}
+	mark, counted := a.effectMark()
 	if err := a.w().DelNodeProperty(n, key); err != nil {
 		return err
 	}
 	r.recordDelNodeProperty(n, key, prev, had)
 	// rmp #2956: propagated, never discarded. The token gate at the top of this
 	// method refuses every name the WAL cannot carry before any write, so the
-	// in-memory write and this staged op succeed or fail together.
-	txErr := a.tx.DelNodeProperty(n, key)
+	// in-memory write and this staged op succeed or fail together. Buffered only
+	// when the property was present (see [walMutatorAdapter.effectMark]).
+	var txErr error
+	if a.tookEffect(mark, counted) {
+		txErr = a.tx.DelNodeProperty(n, key)
+	}
 	if a.buf != nil {
 		ch := index.Change{
 			Op:       index.OpDelNodeProperty,
@@ -22768,12 +22832,12 @@ func (a *walMutatorAdapter) DelNodeProperty(n, key string) error {
 
 // NodeProperties returns a snapshot of all properties on n.
 func (a *walMutatorAdapter) NodeProperties(n string) map[string]lpg.PropertyValue {
-	return a.g.NodeProperties(n)
+	return a.g.NodePropertiesAsOf(n, nil)
 }
 
 // NodeLabels returns a snapshot of all labels on n.
 func (a *walMutatorAdapter) NodeLabels(n string) []string {
-	return a.g.NodeLabels(n)
+	return a.g.NodeLabelsAsOf(n, nil)
 }
 
 // HasNodeLabelInTx reports whether n carries label in THIS transaction's view.
@@ -22809,7 +22873,7 @@ func (a *walMutatorAdapter) NodePropertyInTx(n, key string) (lpg.PropertyValue, 
 
 // HasEdge reports whether a directed edge from src to dst is present.
 func (a *walMutatorAdapter) HasEdge(src, dst string) bool {
-	return a.g.AdjList().HasEdge(src, dst)
+	return a.g.HasEdgeAsOf(src, dst, nil)
 }
 
 // SetEdgeLabel attaches label to the directed edge (src, dst).
@@ -22819,7 +22883,8 @@ func (a *walMutatorAdapter) SetEdgeLabel(src, dst, label string) error {
 	}
 	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
 	r := a.rec()
-	hadLabel := r.active() && a.g.HasEdgeLabel(src, dst, label)
+	hadLabel := r.active() && a.g.HasEdgeLabelAsOf(src, dst, label, nil)
+	mark, counted := a.effectMark()
 	if err := a.w().SetEdgeLabel(src, dst, label); err != nil {
 		return err
 	}
@@ -22827,7 +22892,10 @@ func (a *walMutatorAdapter) SetEdgeLabel(src, dst, label string) error {
 	// rmp #2956: propagated, never discarded. The token gate at the top of this
 	// method refuses every name the WAL cannot carry before any write, so the
 	// in-memory write and this staged op succeed or fail together.
-	txErr := a.tx.SetEdgeLabel(src, dst, label)
+	var txErr error
+	if a.tookEffect(mark, counted) { // see [walMutatorAdapter.effectMark]
+		txErr = a.tx.SetEdgeLabel(src, dst, label)
+	}
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
 			Op:    index.OpAddEdgeLabel,
@@ -22850,8 +22918,9 @@ func (a *walMutatorAdapter) SetEdgeProperty(src, dst, key string, value lpg.Prop
 	var prev lpg.PropertyValue
 	var had bool
 	if r.active() {
-		prev, had = a.g.GetEdgeProperty(src, dst, key)
+		prev, had = a.g.GetEdgePropertyAsOf(src, dst, key, nil)
 	}
+	mark, counted := a.effectMark()
 	if err := a.w().SetEdgeProperty(src, dst, key, value); err != nil {
 		return err
 	}
@@ -22861,7 +22930,10 @@ func (a *walMutatorAdapter) SetEdgeProperty(src, dst, key string, value lpg.Prop
 	// rmp #2747: propagated, never discarded.
 	// [txn.Tx.SetEdgePropertyPreValidated] returns ErrTxFinished (unreachable
 	// here) or ErrFieldTooLong, which the gate at the top has already refused.
-	txErr := a.tx.SetEdgePropertyPreValidated(src, dst, key, value)
+	var txErr error
+	if a.tookEffect(mark, counted) { // see [walMutatorAdapter.effectMark]
+		txErr = a.tx.SetEdgePropertyPreValidated(src, dst, key, value)
+	}
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
 			Op:       index.OpSetEdgeProperty,
@@ -22881,7 +22953,7 @@ func (a *walMutatorAdapter) DelEdgeProperty(src, dst, key string) error {
 	}
 	// #2212: removing an absent property is a no-op and counts nothing.
 	if a.counters != nil {
-		if _, present := a.g.GetEdgeProperty(src, dst, key); present {
+		if _, present := a.g.GetEdgePropertyAsOf(src, dst, key, nil); present {
 			a.countPropertyRemoved()
 		}
 	}
@@ -22899,8 +22971,9 @@ func (a *walMutatorAdapter) delEdgePropertyUncounted(src, dst, key string) error
 	var prev lpg.PropertyValue
 	var had bool
 	if r.active() {
-		prev, had = a.g.GetEdgeProperty(src, dst, key)
+		prev, had = a.g.GetEdgePropertyAsOf(src, dst, key, nil)
 	}
+	mark, counted := a.effectMark()
 	if err := a.w().DelEdgeProperty(src, dst, key); err != nil {
 		return err
 	}
@@ -22908,7 +22981,10 @@ func (a *walMutatorAdapter) delEdgePropertyUncounted(src, dst, key string) error
 	// rmp #2956: propagated, never discarded. The token gate at the top of this
 	// method refuses every name the WAL cannot carry before any write, so the
 	// in-memory write and this staged op succeed or fail together.
-	txErr := a.tx.DelEdgeProperty(src, dst, key)
+	var txErr error
+	if a.tookEffect(mark, counted) { // see [walMutatorAdapter.effectMark]
+		txErr = a.tx.DelEdgeProperty(src, dst, key)
+	}
 	if a.buf != nil {
 		a.buf.Enqueue(index.Change{
 			Op:       index.OpDelEdgeProperty,
@@ -22929,7 +23005,7 @@ func (a *walMutatorAdapter) DelEdgePropertyOnInstance(src, dst string, handle ui
 		return err
 	}
 	if a.counters != nil {
-		if _, present := a.g.EdgePropertiesByHandle(src, dst, handle)[key]; present {
+		if _, present := a.g.EdgePropertiesByHandleAsOf(src, dst, handle, nil)[key]; present {
 			a.countPropertyRemoved()
 		}
 	}
@@ -22945,13 +23021,13 @@ func (a *walMutatorAdapter) DelEdgePropertyOnInstance(src, dst string, handle ui
 // EdgeProperties returns a snapshot of every property currently set on the
 // directed edge (src, dst).
 func (a *walMutatorAdapter) EdgeProperties(src, dst string) map[string]lpg.PropertyValue {
-	return a.g.EdgeProperties(src, dst)
+	return a.g.EdgePropertiesAsOf(src, dst, nil)
 }
 
 // EdgeLabels returns a snapshot of every label currently attached to the
 // directed edge (src, dst).
 func (a *walMutatorAdapter) EdgeLabels(src, dst string) []string {
-	return a.g.EdgeLabels(src, dst)
+	return a.g.EdgeLabelsAsOf(src, dst, nil)
 }
 
 // IncEdgeCreateCount, EdgeCreateCount, DecEdgeCreateCount delegate to
@@ -22973,48 +23049,49 @@ func (a *walMutatorAdapter) DecEdgeCreateCount(src, dst string) {
 	r.recordDecEdgeCreateCount(src, dst, had)
 }
 
-// SetEdgeLabelAt / EdgeLabelsAt / SetEdgePropertyAt / EdgePropertiesAt /
-// RemoveEdgeInstance delegate to the per-instance metadata stores on
-// the underlying [lpg.Graph].
+// SetEdgeLabelAt, SetEdgePropertyAt and RemoveEdgeInstance address the
+// per-CREATE-ordinal edge side store. On the durable engine that store is
+// RETIRED, and these write nothing (rmp #2968).
 //
-// These per-instance / per-handle setters intentionally record NO separate undo
-// entry: CreateRelationship is their only caller and always invokes them on a
-// handle/instance it allocated via AddEdgeH in the SAME operator, so the matching
-// recordAddEdge inverse already removes that edge by its handle —
-// [Graph.RemoveEdgeByHandle] drops the instance's per-handle metadata, and
-// clearEdgePairState drops the pair's per-instance metadata once the last edge
-// between the endpoints is gone (rmp #2885). The exotic case (a per-handle
-// metadata set on an edge that a later failed row removes while a parallel edge
-// survives) is handled by the edge-removal undo itself: captureRemovedEdge
-// snapshots the removed slot's handle and its per-handle labels/properties, and
-// recordRemoveEdge re-adds the instance with that handle and restores them
-// (#1327).
-func (a *walMutatorAdapter) SetEdgeLabelAt(src, dst string, idx int64, label string) error {
-	if err := txn.CheckSchemaField("relationship type", label); err != nil {
-		return err
-	}
-	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
-	if err := a.w().SetEdgeLabelAt(src, dst, idx, label); err != nil {
-		return err
-	}
-	return nil
+// # Why nothing is lost
+//
+// The ordinal store has no WAL frame, so before this a write to it was in
+// memory only, and a deleted relationship's entry outlived the relationship.
+// Every reader of it is a fallback that the handle store pre-empts whenever the
+// relationship has a handle-keyed type record, and every relationship this
+// engine creates has one: CREATE (exec/create_relationship.go), MERGE of a
+// pattern (exec/merge_pattern.go) and MERGE of a relationship
+// (exec/merge_relationship.go) each add the edge with [lpg.Graph.AddEdgeH] and
+// then record its mandatory type with SetEdgeLabelByHandle, and its properties
+// with SetEdgePropertyByHandle, which are WAL-described. The readers:
+//
+//   - the relationship materialiser reads [lpg.ReadView.EdgeLabelsAt] only when
+//     the slot's handle has no by-handle type record (the `!handled` branch of
+//     the edge-value builder);
+//   - the per-slot type resolver reads it only for a position whose handle has
+//     no by-handle record AND that matches no column-typed slot, through the
+//     positional inference and collectAllInstanceLabels;
+//   - nothing in the executor reads EdgePropertiesAt or calls this adapter's
+//     EdgeLabelsAt / EdgePropertiesAt (exec.GraphMutator declares them; no
+//     operator calls them).
+//
+// A recovered graph has never had the ordinal store: recovery replays the
+// handle frames only. Retiring it here makes the live engine equal to the
+// recovered one by construction. The CREATE-multiplicity counter
+// ([lpg.Graph.IncEdgeCreateCount]) is unaffected.
+func (a *walMutatorAdapter) SetEdgeLabelAt(_, _ string, _ int64, label string) error {
+	return txn.CheckSchemaField("relationship type", label)
 }
 func (a *walMutatorAdapter) EdgeLabelsAt(src, dst string, idx int64) []string {
-	return a.g.EdgeLabelsAt(src, dst, idx)
+	return a.g.EdgeLabelsAtAsOf(src, dst, idx, nil)
 }
-func (a *walMutatorAdapter) SetEdgePropertyAt(src, dst string, idx int64, key string, value lpg.PropertyValue) error {
-	if err := txn.CheckSchemaField("edge property key", key); err != nil {
-		return err
-	}
-	return a.w().SetEdgePropertyAt(src, dst, idx, key, value)
+func (a *walMutatorAdapter) SetEdgePropertyAt(_, _ string, _ int64, key string, _ lpg.PropertyValue) error {
+	return txn.CheckSchemaField("edge property key", key)
 }
 func (a *walMutatorAdapter) EdgePropertiesAt(src, dst string, idx int64) map[string]lpg.PropertyValue {
-	return a.g.EdgePropertiesAt(src, dst, idx)
+	return a.g.EdgePropertiesAtAsOf(src, dst, idx, nil)
 }
-func (a *walMutatorAdapter) RemoveEdgeInstance(src, dst string, idx int64) {
-	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
-	a.w().RemoveEdgeInstance(src, dst, idx)
-}
+func (a *walMutatorAdapter) RemoveEdgeInstance(string, string, int64) {}
 
 // SetEdgeLabelByHandle / EdgeLabelsByHandle / SetEdgePropertyByHandle /
 // DelEdgePropertyByHandle / EdgePropertiesByHandle / RemoveEdgeInstanceByHandle
@@ -23037,13 +23114,17 @@ func (a *walMutatorAdapter) SetEdgeLabelByHandle(src, dst string, handle uint64,
 		return err
 	}
 	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
+	mark, counted := a.effectMark()
 	if err := a.w().SetEdgeLabelByHandle(src, dst, handle, label); err != nil {
 		return err
 	}
 	// rmp #2956: propagated, never discarded. The token gate at the top of this
 	// method refuses every name the WAL cannot carry before any write, so the
 	// in-memory write and this staged op succeed or fail together.
-	txErr := a.tx.SetEdgeLabelByHandle(src, dst, handle, label)
+	var txErr error
+	if a.tookEffect(mark, counted) { // see [walMutatorAdapter.effectMark]
+		txErr = a.tx.SetEdgeLabelByHandle(src, dst, handle, label)
+	}
 	// Count-store (#2082): the single authoritative once-per-edge typing hook.
 	if a.cs() != nil {
 		countEdgeTyped(a.g, a.cs(), a.countBuf(), src, dst, label)
@@ -23051,7 +23132,7 @@ func (a *walMutatorAdapter) SetEdgeLabelByHandle(src, dst string, handle uint64,
 	return txErr
 }
 func (a *walMutatorAdapter) EdgeLabelsByHandle(src, dst string, handle uint64) []string {
-	return a.g.EdgeLabelsByHandle(src, dst, handle)
+	return a.g.EdgeLabelsByHandleAsOf(src, dst, handle, nil)
 }
 func (a *walMutatorAdapter) SetEdgePropertyByHandle(src, dst string, handle uint64, key string, value lpg.PropertyValue) error {
 	// Reject at the API, backstop at the encoder — see
@@ -23063,8 +23144,9 @@ func (a *walMutatorAdapter) SetEdgePropertyByHandle(src, dst string, handle uint
 	var prev lpg.PropertyValue
 	var had bool
 	if r.active() && handle != 0 {
-		prev, had = a.g.EdgePropertiesByHandle(src, dst, handle)[key]
+		prev, had = a.g.EdgePropertiesByHandleAsOf(src, dst, handle, nil)[key]
 	}
+	mark, counted := a.effectMark()
 	if err := a.w().SetEdgePropertyByHandle(src, dst, handle, key, value); err != nil {
 		return err
 	}
@@ -23074,6 +23156,9 @@ func (a *walMutatorAdapter) SetEdgePropertyByHandle(src, dst string, handle uint
 	// [txn.Tx.SetEdgePropertyByHandlePreValidated] returns ErrTxFinished
 	// (unreachable here) or ErrFieldTooLong, which the gate at the top has
 	// already refused.
+	if !a.tookEffect(mark, counted) { // see [walMutatorAdapter.effectMark]
+		return nil
+	}
 	return a.tx.SetEdgePropertyByHandlePreValidated(src, dst, handle, key, value)
 }
 func (a *walMutatorAdapter) DelEdgePropertyByHandle(src, dst string, handle uint64, key string) error {
@@ -23084,8 +23169,9 @@ func (a *walMutatorAdapter) DelEdgePropertyByHandle(src, dst string, handle uint
 	var prev lpg.PropertyValue
 	var had bool
 	if r.active() && handle != 0 {
-		prev, had = a.g.EdgePropertiesByHandle(src, dst, handle)[key]
+		prev, had = a.g.EdgePropertiesByHandleAsOf(src, dst, handle, nil)[key]
 	}
+	mark, counted := a.effectMark()
 	if err := a.w().DelEdgePropertyByHandle(src, dst, handle, key); err != nil {
 		return err
 	}
@@ -23093,16 +23179,22 @@ func (a *walMutatorAdapter) DelEdgePropertyByHandle(src, dst string, handle uint
 	// rmp #2956: propagated, never discarded. The token gate at the top of this
 	// method refuses every name the WAL cannot carry before any write, so the
 	// in-memory write and this staged op succeed or fail together.
-	txErr := a.tx.DelEdgePropertyByHandle(src, dst, handle, key)
+	var txErr error
+	if a.tookEffect(mark, counted) { // see [walMutatorAdapter.effectMark]
+		txErr = a.tx.DelEdgePropertyByHandle(src, dst, handle, key)
+	}
 	return txErr
 }
 func (a *walMutatorAdapter) EdgePropertiesByHandle(src, dst string, handle uint64) map[string]lpg.PropertyValue {
-	return a.g.EdgePropertiesByHandle(src, dst, handle)
+	return a.g.EdgePropertiesByHandleAsOf(src, dst, handle, nil)
 }
 func (a *walMutatorAdapter) RemoveEdgeInstanceByHandle(src, dst string, handle uint64) {
 	a.liveTopo.beforeAdjWrite(src) // rmp #2883: journal the Init-instant run first
-	a.w().RemoveEdgeInstanceByHandle(src, dst, handle)
-	_ = a.tx.RemoveEdgeInstanceByHandle(src, dst, handle) // rmp #2747: [txn.Tx.RemoveEdgeInstanceByHandle] returns ErrTxFinished and nothing else, unreachable here; it stages no schema string. Discarded: [exec.GraphMutator.RemoveEdgeInstanceByHandle] returns nothing.
+	mark, counted := a.effectMark()
+	_ = a.w().RemoveEdgeInstanceByHandle(src, dst, handle) // rmp #2947: the adapter carries its statement's transaction, so the direct-write refusal, the only error, cannot occur; [exec.GraphMutator] returns nothing.
+	if a.tookEffect(mark, counted) {                       // see [walMutatorAdapter.effectMark]
+		_ = a.tx.RemoveEdgeInstanceByHandle(src, dst, handle) // rmp #2747: [txn.Tx.RemoveEdgeInstanceByHandle] returns ErrTxFinished and nothing else, unreachable here; it stages no schema string. Discarded: [exec.GraphMutator.RemoveEdgeInstanceByHandle] returns nothing.
+	}
 }
 
 // RecordConstraintInverse is [lpgMutatorAdapter.RecordConstraintInverse] for the
@@ -23119,35 +23211,31 @@ func (a *walMutatorAdapter) ConstraintTxn() *exec.ConstraintTxn { return a.conTx
 // edge's by-handle store. The boolean is false (and the handle 0) when no
 // handled src→dst slot exists.
 func (a *walMutatorAdapter) FirstEdgeHandle(src, dst string) (uint64, bool) {
-	return a.g.FirstEdgeHandle(src, dst)
+	return a.g.FirstEdgeHandleAsOf(src, dst, nil)
 }
 
 // EdgeHandles appends the handle of every stored src→dst slot to buf,
 // delegating to [lpg.Graph.AppendEdgeHandles]. See [exec.GraphMutator.EdgeHandles].
 func (a *walMutatorAdapter) EdgeHandles(src, dst string, buf []uint64) []uint64 {
-	return a.g.AppendEdgeHandles(src, dst, buf)
+	return a.g.AppendEdgeHandlesAsOf(src, dst, buf, nil)
 }
 
 // HasEdgeHandle reports whether a stored src→dst slot carries handle,
 // delegating to [lpg.Graph.HasEdgeHandle]. See [exec.GraphMutator.HasEdgeHandle].
 func (a *walMutatorAdapter) HasEdgeHandle(src, dst string, handle uint64) bool {
-	return a.g.HasEdgeHandle(src, dst, handle)
+	return a.g.HasEdgeHandleAsOf(src, dst, handle, nil)
 }
 
 // OutNeighbours returns a snapshot of the outgoing neighbour keys of n.
 func (a *walMutatorAdapter) OutNeighbours(n string) []string {
-	var out []string
-	for nb := range a.g.AdjList().Neighbours(n) {
-		out = append(out, nb)
-	}
-	return out
+	return storedOutNeighbours(a.g, n)
 }
 
 // InNeighbours returns a snapshot of the incoming neighbour keys of n, read
 // from the adjacency's live in-edge index in O(in-degree). See
 // [lpgMutatorAdapter.InNeighbours] for why this is not a graph walk.
 func (a *walMutatorAdapter) InNeighbours(n string) []string {
-	return a.g.AdjList().InNeighbours(n)
+	return storedInNeighbours(a.g, n)
 }
 
 // InNeighboursInTx is [lpgMutatorAdapter.InNeighboursInTx] for the durable
@@ -23187,6 +23275,7 @@ func (a *walMutatorAdapter) RemoveAllEdgesFrom(n string) {
 		countAllOutEdgesRemoved(a.g, a.cs(), a.countBuf(), n)
 	}
 	// Bulk-remove from the in-memory graph (O(d) instead of O(d²)).
+	mark, counted := a.effectMark()
 	if !a.w().RemoveAllEdgesFrom(n) {
 		return
 	}
@@ -23195,8 +23284,13 @@ func (a *walMutatorAdapter) RemoveAllEdgesFrom(n string) {
 	// record a deletion this transaction never performed. A refused transaction
 	// cannot commit, but the frames must not be written on the strength of that
 	// alone — the WAL is the durable truth and it may only describe work done.
-	for _, dst := range outgoing {
-		_ = a.tx.RemoveEdge(n, dst) // rmp #2747: [txn.Tx.RemoveEdge] returns ErrTxFinished and nothing else, unreachable here. Discarded: [exec.GraphMutator.RemoveAllEdgesFrom] returns nothing.
+	// Only a removal that took effect is described (see
+	// [walMutatorAdapter.effectMark]); on an undirected graph every frame is
+	// kept, as [walMutatorAdapter.mustDescribeNoOpRemoval] explains.
+	if a.tookEffect(mark, counted) || a.mustDescribeNoOpRemoval() {
+		for _, dst := range outgoing {
+			_ = a.tx.RemoveEdge(n, dst) // rmp #2747: [txn.Tx.RemoveEdge] returns ErrTxFinished and nothing else, unreachable here. Discarded: [exec.GraphMutator.RemoveAllEdgesFrom] returns nothing.
+		}
 	}
 	journalAllOutEdgesRemoved(r, a, pre)
 }
@@ -24248,4 +24342,43 @@ func tryFuseCyclicIntersect(
 	}
 	// Both filters travel with the adjacency, all resolved at execution time.
 	return exec.NewExpandIntersect(kids[0], intersectAdjacencySource(bopts, g, mid.RelTypes, p.RelTypes), cfg)
+}
+
+// storedOutNeighbours returns the out-neighbour keys of n in the STORED
+// adjacency, including uncommitted writes, as the mutator adapters' bulk
+// removals need (they must see what their own statement added). The graph's
+// present-state readers return the newest committed state instead
+// (rmp #2965, round 5); this is the read those readers performed before.
+func storedOutNeighbours(g *lpg.Graph[string, float64], n string) []string {
+	id, ok := g.AdjList().Mapper().Lookup(n)
+	if !ok {
+		return nil
+	}
+	nbs, _ := g.AdjList().LoadEntry(id)
+	var out []string
+	for _, nb := range nbs {
+		if k, ok := g.AdjList().Mapper().Resolve(nb); ok {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// storedInNeighbours is [storedOutNeighbours] for the in-edge index.
+func storedInNeighbours(g *lpg.Graph[string, float64], n string) []string {
+	id, ok := g.AdjList().Mapper().Lookup(n)
+	if !ok {
+		return nil
+	}
+	ids := g.InNeighbourIDsAsOf(id, nil)
+	if len(ids) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(ids))
+	for _, x := range ids {
+		if k, ok := g.AdjList().Mapper().Resolve(x); ok {
+			out = append(out, k)
+		}
+	}
+	return out
 }

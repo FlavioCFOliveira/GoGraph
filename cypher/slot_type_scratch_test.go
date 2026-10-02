@@ -86,7 +86,7 @@ func staleParallelGraph(t *testing.T) (*lpg.ReadView[string, float64], *csr.CSR[
 	}
 	fwd, _ := csrPairFromGraph(g.ReadAt(nil))
 	for _, s := range sources {
-		g.RemoveEdge(s, "b")
+		must(t).E(g.RemoveEdge(s, "b"))
 	}
 	return g.ReadAt(nil), fwd
 }

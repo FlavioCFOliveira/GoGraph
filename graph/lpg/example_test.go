@@ -98,7 +98,9 @@ func ExampleGraph_RemoveEdge() {
 	_ = g.SetEdgeLabel("alice", "bob", "KNOWS")
 	fmt.Println("before delete:", g.HasEdgeLabel("alice", "bob", "KNOWS"))
 
-	g.RemoveEdge("alice", "bob")
+	if err := g.RemoveEdge("alice", "bob"); err != nil {
+		fmt.Println("remove:", err)
+	}
 	_ = g.AddEdge("alice", "bob", 0) // re-create the same pair
 	fmt.Println("after re-create:", g.HasEdgeLabel("alice", "bob", "KNOWS"))
 	// Output:
@@ -124,10 +126,10 @@ func ExampleGraph_BeginRead() {
 
 	// One transaction establishes a cross-substructure invariant: the edge
 	// alice->bob and both endpoint :Hot labels become visible together.
-	_ = g.ApplyAtomically(func() error {
-		_ = g.AddEdge("alice", "bob", 0)
-		_ = g.SetNodeLabel("alice", "Hot")
-		_ = g.SetNodeLabel("bob", "Hot")
+	_ = g.ApplyAtomicallyTx(func(tx lpg.WriteTx) error {
+		_ = g.Writer(tx).AddEdge("alice", "bob", 0)
+		_ = g.Writer(tx).SetNodeLabel("alice", "Hot")
+		_ = g.Writer(tx).SetNodeLabel("bob", "Hot")
 		return nil
 	})
 

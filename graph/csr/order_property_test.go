@@ -255,7 +255,11 @@ func TestOrdering_SurvivesCompaction(t *testing.T) {
 	removed := map[uint64]bool{}
 	for d := 0; d < 40; d += 2 {
 		hs := handleOf[[2]int{0, 100 + d}]
-		if !a.RemoveEdgeByHandle(0, 100+d, hs[1]) {
+		ok, err := a.RemoveEdgeByHandle(0, 100+d, hs[1])
+		if err != nil {
+			t.Fatalf("RemoveEdgeByHandle(%d, %d): %v", 0, 100+d, err)
+		}
+		if !ok {
 			t.Fatalf("RemoveEdgeByHandle(%d, %d) reported nothing removed", 0, 100+d)
 		}
 		removed[hs[1]] = true

@@ -36,7 +36,7 @@ func TestReclaimAbortedLife_AbortBetweenTheLoopsKeepsARolledBackDeleteAlive(t *t
 	}
 	// The rollback's undo replay revives what the delete tombstoned.
 	if err := g.ApplyInVersionedTx(ctx, tx1, func(tx WriteTx) error {
-		g.Writer(tx).Revive("a")
+		_ = g.Writer(tx).Revive("a") // a transaction records its refusal on itself
 		return nil
 	}); err != nil {
 		t.Fatalf("tx1 undo revive: %v", err)
@@ -68,7 +68,9 @@ func TestReclaimAbortedLife_AbortBetweenTheLoopsKeepsARolledBackDeleteAlive(t *t
 		bornPassedPending = ok && b.at() != 0 && b.at() < ^uint64(0)
 		tx1.w.record().Abort()
 	}
-	g.withdrawAbortedNow()
+	// The full sweep: an abort withdraws its own records by its write set, and
+	// falls back to this sweep when that set is incomplete.
+	g.withdrawAbortedAll()
 	g.reclaimAbortedLifeHookForTest = nil
 	if !fired || !bornPassedPending {
 		t.Fatalf("the interleaving was not driven: hook fired=%v, birth passed over as pending=%v", fired, bornPassedPending)

@@ -51,7 +51,7 @@ func TestSnapshot_PinIsStableAcrossWrites(t *testing.T) {
 			t.Fatalf("post-pin AddEdge 0->%d: %v", dst, err)
 		}
 	}
-	a.RemoveEdge(0, 2)
+	must(t).E(a.RemoveEdge(0, 2))
 
 	// The pinned snapshot must still see exactly {1,2,3} in order — none of the
 	// post-pin additions, and not the post-pin removal of 2.

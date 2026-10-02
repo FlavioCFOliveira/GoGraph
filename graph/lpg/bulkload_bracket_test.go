@@ -78,24 +78,26 @@ func buildBulk(t *testing.T, bracketed bool) *Graph[string, float64] {
 			t.Fatalf("AddNode %d: %v", i, err)
 		}
 	}
-	load := func() error {
+	load := func(wv WriteView[string, float64]) error {
 		for i := 0; i < bulkLoadEdges; i++ {
 			src := bulkLoadKey(i % bulkLoadNodes)
 			dst := bulkLoadKey((i*7 + 11) % bulkLoadNodes)
 			if src == dst {
 				continue
 			}
-			if err := g.AddEdgeLabeledWithProperty(src, dst, float64(i%17), "FRIEND", "since", Int64Value(int64(2000+i%25))); err != nil {
+			if err := wv.AddEdgeLabeledWithProperty(src, dst, float64(i%17), "FRIEND", "since", Int64Value(int64(2000+i%25))); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
+	// The bracketed load writes through the bracket's transaction; the
+	// unbracketed one through the zero transaction, one direct write per edge.
 	var err error
 	if bracketed {
-		err = g.ApplyAtomically(load)
+		err = g.ApplyAtomicallyTx(func(tx WriteTx) error { return load(g.Writer(tx)) })
 	} else {
-		err = load()
+		err = load(g.Writer(WriteTx{}))
 	}
 	if err != nil {
 		t.Fatalf("load(bracketed=%v): %v", bracketed, err)
@@ -237,14 +239,14 @@ func TestApplyAtomicallyTx_AlsoOpensTheWindow(t *testing.T) {
 		}
 	}
 	runtime.ReadMemStats(&before)
-	err := g.ApplyAtomicallyTx(func(WriteTx) error {
+	err := g.ApplyAtomicallyTx(func(tx WriteTx) error {
 		for i := 0; i < bulkLoadEdges; i++ {
 			src := bulkLoadKey(i % bulkLoadNodes)
 			dst := bulkLoadKey((i*7 + 11) % bulkLoadNodes)
 			if src == dst {
 				continue
 			}
-			if err := g.AddEdgeLabeledWithProperty(src, dst, float64(i%17), "FRIEND", "since", Int64Value(int64(2000+i%25))); err != nil {
+			if err := g.Writer(tx).AddEdgeLabeledWithProperty(src, dst, float64(i%17), "FRIEND", "since", Int64Value(int64(2000+i%25))); err != nil {
 				return err
 			}
 		}

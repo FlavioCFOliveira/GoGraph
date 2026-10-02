@@ -85,7 +85,10 @@ package mvcc
 // timestamp of its own. Getting the version stamped LATER than it happened is
 // safe; getting it stamped EARLIER is not.
 
-import "sync/atomic"
+import (
+	"sync"
+	"sync/atomic"
+)
 
 // armedPending marks an open transaction that has not yet created a version.
 //
@@ -138,6 +141,113 @@ type TxState struct {
 	// through the slot; -race is rmp #2301's acceptance instrument and a plain
 	// field reports there.
 	txID atomic.Uint64
+	// adj is the transaction's ADJACENCY WRITE SET: the node id of every
+	// adjacency entry on which it created a version (rmp #2965). An abort
+	// withdraws exactly those entries, under only their shards' locks, and an
+	// abort that wrote no adjacency skips the adjacency entirely. It survives
+	// [TxState.Retract], because the abort runs after the retraction, and is
+	// emptied by the next [TxState.Arm]. adjMu orders the transaction's own
+	// writers, which may run on several shards at once.
+	adjMu sync.Mutex
+	adj   []uint64
+	// side is the transaction's write set in every versioned store OTHER than
+	// the adjacency entries: one [SideWrite] per version it created there, in
+	// write order, duplicates included. An abort withdraws exactly those
+	// objects, so its cost is proportional to the transaction's own writes and
+	// not to the number of objects in the graph that carry history (ACID audit
+	// round 6, finding M1). Guarded by adjMu, survives [TxState.Retract], and is
+	// emptied by the next [TxState.Arm]. A transaction that writes no such store
+	// leaves it nil and allocates nothing for it.
+	side []SideWrite
+	// sideBuf is side's initial backing array, so a transaction that writes a
+	// handful of side-store objects — the common statement — enters them without
+	// allocating.
+	sideBuf [sideInline]SideWrite
+	// touched is a caller-defined bit mask of the stores the transaction wrote
+	// to ([TxState.Touch]), so an abort can skip the withdrawal scans of the
+	// stores it never touched. Emptied by [TxState.Arm].
+	touched atomic.Uint32
+}
+
+// TouchedAmbient is the [TxState.Touch] bit [WriteStamp.Stamp] sets on a
+// transaction whose record an untransacted writer adopted through the ambient
+// slot. Such a version is in none of the transaction's write sets, so a caller
+// that withdraws an aborted transaction by its write sets must instead scan
+// every store when the bit is set. Callers define every other bit of the mask
+// and must not use this one.
+const TouchedAmbient uint32 = 1 << 31
+
+// Touch records, in the caller-defined mask, that the transaction wrote to the
+// stores bits names. Safe for concurrent use.
+func (st *TxState) Touch(bits uint32) {
+	if st.touched.Load()&bits != bits {
+		st.touched.Or(bits)
+	}
+}
+
+// Touched returns the mask [TxState.Touch] built since the last [TxState.Arm].
+func (st *TxState) Touched() uint32 { return st.touched.Load() }
+
+// maxRetainedAdjWrites caps the write-set capacity a recycled [TxState] keeps,
+// so one bulk transaction does not pin its whole write set in a pool for the
+// life of the process.
+const maxRetainedAdjWrites = 1024
+
+// NoteAdjacency records that the transaction created a version on the
+// adjacency entry of node id. Safe for concurrent use.
+func (st *TxState) NoteAdjacency(id uint64) {
+	st.adjMu.Lock()
+	st.adj = append(st.adj, id)
+	st.adjMu.Unlock()
+}
+
+// SideWrite names one versioned object a transaction wrote outside the
+// adjacency entries. Store is a caller-defined store tag and A, B and C the
+// object's key within that store, as the caller encodes it.
+type SideWrite struct {
+	A, B, C uint64
+	Store   uint8
+}
+
+// maxRetainedSideWrites caps the side write-set capacity a recycled [TxState]
+// keeps, for the reason given on [maxRetainedAdjWrites].
+const maxRetainedSideWrites = 1024
+
+// sideInline is the capacity of [TxState.sideBuf].
+const sideInline = 8
+
+// NoteSide records that the transaction created a version on the object w
+// names. An object equal to the last one recorded is not recorded again, so a
+// run of writes to one object costs one entry. Safe for concurrent use.
+func (st *TxState) NoteSide(w SideWrite) {
+	st.adjMu.Lock()
+	if n := len(st.side); n > 0 && st.side[n-1] == w {
+		st.adjMu.Unlock()
+		return
+	}
+	if st.side == nil {
+		st.side = st.sideBuf[:0]
+	}
+	st.side = append(st.side, w)
+	st.adjMu.Unlock()
+}
+
+// SideWrites returns the side write set [TxState.NoteSide] recorded since the
+// last [TxState.Arm]. The slice is valid until that state is armed again, and
+// the caller must not modify it.
+func (st *TxState) SideWrites() []SideWrite {
+	st.adjMu.Lock()
+	defer st.adjMu.Unlock()
+	return st.side
+}
+
+// AdjacencyWrites returns the adjacency write set [TxState.NoteAdjacency]
+// recorded since the last [TxState.Arm]. The slice is valid until that state
+// is armed again, and the caller must not modify it.
+func (st *TxState) AdjacencyWrites() []uint64 {
+	st.adjMu.Lock()
+	defer st.adjMu.Unlock()
+	return st.adj
 }
 
 // Arm opens st's stamping window for the transaction identified by txID, and
@@ -157,12 +267,34 @@ func (st *TxState) Arm(txID uint64) bool {
 	}
 	st.count.Store(0)
 	st.txID.Store(txID)
+	st.touched.Store(0)
+	st.adjMu.Lock()
+	if cap(st.adj) > maxRetainedAdjWrites {
+		st.adj = nil
+	} else {
+		st.adj = st.adj[:0]
+	}
+	if cap(st.side) > maxRetainedSideWrites {
+		st.side = st.sideBuf[:0]
+	} else {
+		st.side = st.side[:0]
+	}
+	st.adjMu.Unlock()
 	st.info.Store(armedPending)
 	return true
 }
 
 // TxID returns the identity of the transaction currently armed on st, or zero.
 func (st *TxState) TxID() uint64 { return st.txID.Load() }
+
+// Versions returns how many versions the open transaction has created so far:
+// the count [TxState.Ensure] keeps, read without changing it. It is zero for a
+// transaction that has versioned nothing and after [TxState.Retract].
+//
+// A caller samples it before and after one operation to learn whether that
+// operation changed anything: on an armed graph every change is a version, so
+// an unchanged count means the operation took no effect (rmp #2965, round 5).
+func (st *TxState) Versions() int64 { return st.count.Load() }
 
 // Reusable reports whether st can be armed for a new transaction — the test
 // [TxState.Arm] makes, without arming.
@@ -386,6 +518,10 @@ func (w *WriteStamp) Stamp() (*CommitInfo, uint64) {
 	if st := w.cur.Load(); st != nil {
 		if info := st.Ensure(); info != nil {
 			w.ambient.Add(1)
+			// The writer that adopted st's record carries no handle on st, so
+			// it cannot enter the version in st's write sets: st's abort must
+			// fall back to scanning every store (see [TouchedAmbient]).
+			st.Touch(TouchedAmbient)
 			return info, 0
 		}
 	}

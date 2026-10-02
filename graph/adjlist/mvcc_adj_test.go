@@ -13,6 +13,7 @@ package adjlist
 // edge, or an ordinary statement grows the chain without bound).
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/FlavioCFOliveira/GoGraph/graph"
@@ -41,10 +42,13 @@ func autoWrite(a *AdjList[string, float64], clk *mvcc.Clock, fn func()) uint64 {
 
 // txWrite performs fn as ONE transaction: every version it creates shares one
 // commit record, published at a single timestamp on return.
-func txWrite(a *AdjList[string, float64], clk *mvcc.Clock, fn func()) (*mvcc.CommitInfo, uint64) {
+//
+// fn writes through the Writer it is handed: a write carrying no transaction is
+// its own transaction and never joins this one (rmp #2967).
+func txWrite(a *AdjList[string, float64], clk *mvcc.Clock, fn func(Writer[string, float64])) (*mvcc.CommitInfo, uint64) {
 	ws := a.WriteStampForTest()
-	beginTx(ws)
-	fn()
+	tx := beginTxW(ws)
+	fn(a.Writer(tx))
 	info, _ := ws.End()
 	if info == nil {
 		return nil, clk.ReadTS()
@@ -110,7 +114,7 @@ func TestAdjVersion_RemovingEveryEdgeKeepsThePast(t *testing.T) {
 			t.Fatalf("AddEdge: %v", err)
 		}
 	})
-	tsDel := autoWrite(a, clk, func() { a.RemoveEdge("a", "b") })
+	tsDel := autoWrite(a, clk, func() { must(t).E(a.RemoveEdge("a", "b")) })
 	id := idOf(t, a, "a")
 
 	if got := len(a.EntryNeighboursAsOf(id, tsDel, 0)); got != 0 {
@@ -135,9 +139,9 @@ func TestAdjVersion_OneRecordPerNodePerTransaction(t *testing.T) {
 			t.Fatalf("AddNode: %v", err)
 		}
 	}
-	txWrite(a, clk, func() {
+	txWrite(a, clk, func(wr Writer[string, float64]) {
 		for i := 0; i < 8; i++ {
-			if err := a.AddEdge("a", string(rune('b'+i)), 1); err != nil {
+			if err := wr.AddEdge("a", string(rune('b'+i)), 1); err != nil {
 				t.Fatalf("AddEdge: %v", err)
 			}
 		}
@@ -162,11 +166,11 @@ func TestAdjVersion_UncommittedIsInvisible(t *testing.T) {
 	observer := clk.ReadTS()
 
 	ws := a.WriteStampForTest()
-	beginTx(ws)
-	if err := a.AddEdge("a", "b", 1); err != nil {
+	wtx := beginTxW(ws)
+	if err := a.Writer(wtx).AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
-	if err := a.AddEdge("a", "c", 1); err != nil {
+	if err := a.Writer(wtx).AddEdge("a", "c", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
 	info, _ := ws.End()
@@ -195,7 +199,7 @@ func TestAdjVersion_InertByDefault(t *testing.T) {
 	if err := a.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
-	a.RemoveEdge("a", "b")
+	must(t).E(a.RemoveEdge("a", "b"))
 	if n := a.VersionCount(); n != 0 {
 		t.Fatalf("recorded %d versions without being armed; the mechanism must ship inert", n)
 	}
@@ -310,12 +314,12 @@ func TestAdjVersion_TypesAndPropertiesComeForFree(t *testing.T) {
 		}
 	})
 	tsTyped := autoWrite(a, clk, func() {
-		if !a.SetEdgeLabelSlot(id, dst, 7) {
+		if !must(t).B(a.SetEdgeLabelSlot(id, dst, 7)) {
 			t.Fatal("SetEdgeLabelSlot did not apply")
 		}
 	})
 	tsRetyped := autoWrite(a, clk, func() {
-		if !a.SetEdgeLabelSlot(id, dst, 9) {
+		if !must(t).B(a.SetEdgeLabelSlot(id, dst, 9)) {
 			t.Fatal("SetEdgeLabelSlot did not apply")
 		}
 	})
@@ -433,5 +437,76 @@ func TestAdjVersion_ReclaimIsBoundedByTheHorizon(t *testing.T) {
 	}
 	if a.VersionCount() != 0 {
 		t.Fatalf("%d versions remain with no reader active", a.VersionCount())
+	}
+}
+
+// TestWithdrawTx_RestoresThePreImage pins the adjacency half of rmp #2965: a
+// transaction's abort restores the entries it published to their exact
+// pre-images — the forward entries, the reverse index and the edge count — so
+// once its record is marked aborted the stored value carries none of its work,
+// and the next write builds on the pre-image rather than on the aborted entry.
+func TestWithdrawTx_RestoresThePreImage(t *testing.T) {
+	for _, directed := range []bool{true, false} {
+		for _, op := range []string{"add", "remove"} {
+			t.Run(fmt.Sprintf("directed=%v/%s", directed, op), func(t *testing.T) {
+				a := New[string, float64](Config{Directed: directed, Multigraph: true})
+				a.EnableVersioning()
+				clk := &mvcc.Clock{}
+				ws := &mvcc.WriteStamp{}
+				ws.SetClock(clk)
+				a.SetWriteStamp(ws)
+				if err := a.AddEdge("a", "b", 1); err != nil {
+					t.Fatal(err)
+				}
+				a.Mapper().Intern("c")
+				aID, _ := a.Mapper().Lookup("a")
+				bID, _ := a.Mapper().Lookup("b")
+				cID, _ := a.Mapper().Lookup("c")
+				state := func() string {
+					return fmt.Sprintf("size=%d a->b=%v b->a=%v a->c=%v in(a)=%v in(b)=%v in(c)=%v",
+						a.Size(), a.HasEdge("a", "b"), a.HasEdge("b", "a"), a.HasEdge("a", "c"),
+						a.InNeighbourIDs(aID), a.InNeighbourIDs(bID), a.InNeighbourIDs(cID))
+				}
+				before := state()
+
+				st := &mvcc.TxState{}
+				st.Arm(clk.NextTxID())
+				wr := a.Writer(mvcc.NewTx(st))
+				switch op {
+				case "add":
+					if err := wr.AddEdge("a", "c", 2); err != nil {
+						t.Fatalf("AddEdge: %v", err)
+					}
+				case "remove":
+					if err := wr.RemoveEdge("a", "b"); err != nil {
+						t.Fatalf("RemoveEdge: %v", err)
+					}
+				}
+				if state() == before {
+					t.Fatal("setup: the transaction's write changed nothing")
+				}
+				info, _ := st.Retract()
+				if info == nil {
+					t.Fatal("setup: the write recorded no version")
+				}
+				want := 1
+				if !directed {
+					want = 2
+				}
+				if got := a.WithdrawTx(info, st.AdjacencyWrites()); got != want {
+					t.Errorf("WithdrawTx released %d version records, want %d", got, want)
+				}
+				info.Abort()
+				if got := state(); got != before {
+					t.Errorf("after the abort the adjacency is %s, want %s", got, before)
+				}
+				if err := a.AddEdge("a", "d", 3); err != nil {
+					t.Fatalf("a write after the abort: %v", err)
+				}
+				if !a.HasEdge("a", "b") || a.HasEdge("a", "c") || !a.HasEdge("a", "d") {
+					t.Error("the write after the abort did not build on the pre-image")
+				}
+			})
+		}
 	}
 }

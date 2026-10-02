@@ -97,15 +97,36 @@ import (
 // [Graph.releaseWriterSnapshot] what it loses on the snapshot side — where it is
 // worse, because it recycles a live writer's state underneath it.
 //
-// The graph slot is still published, because a write that carries no transaction
-// has to resolve one somehow (the whole Cypher write path is such a write); what
-// changed is that a transaction's own lifecycle no longer depends on it.
+// # Who may own the ambient slot (rmp #2947)
+//
+// publish says whether the transaction also claims the graph's AMBIENT slot —
+// [Graph.stamp]'s open transaction and [Graph.writeTx] — through which a write
+// that carries no transaction ([Graph.deltaStamp] with a nil record,
+// [Graph.AmbientWriteTx]) resolves one.
+//
+// Only an EXCLUSIVE bracket publishes: [Graph.ApplyAtomically],
+// [Graph.ApplyAtomicallyTx] and [Graph.LockBarrierCtx]. Each holds the schema
+// barrier exclusively, so it is the only write bracket open, and the slot can
+// name no one else. It serves [Graph.ApplyInsideLockedTx]. A direct Go-API call
+// never resolves through it: it runs as an implicit transaction of its own,
+// inside a bracket or not (rmp #2947, audit F7). Nor does a raw adjacency write
+// made through [Graph.AdjList]: it too is its own transaction (rmp #2967; see
+// [adjlist.AdjList.SetWriteStamp]).
+//
+// A SHARED bracket ([Graph.ApplyVersioned]) or an explicit transaction
+// ([Graph.BeginVersionedTx]) does not. Several can be open at once, so the slot
+// would name whichever published last; and an explicit transaction stays open
+// across client round-trips. Publishing either one made every direct write
+// anywhere in the process — on an object the transaction never touched — join
+// it: invisible to new readers until the transaction ended, and rolled back by
+// its undo. Both thread their [writeCtx] through every write instead (rmp
+// #2320), so neither needs the slot.
 //
 // Nested calls remain forbidden: a nested bracket would be a nested transaction,
 // which this design has no meaning for. [Graph.ApplyInsideLocked] deliberately
 // does not call this, and the re-entrancy guard catches the rest under -race or
 // -tags gograph_debug.
-func (g *Graph[N, W]) beginWrite() *writeCtx {
+func (g *Graph[N, W]) beginWrite(publish bool) *writeCtx {
 	if !g.mvccArmed {
 		return nil
 	}
@@ -137,8 +158,10 @@ func (g *Graph[N, W]) beginWrite() *writeCtx {
 	// object; the graph keeps only a slot naming it.
 	w := g.acquireWriteCtx(startTS, txID)
 	w.snap.slot = slot
-	g.stamp.Publish(&w.tx)
-	g.writeTx.Store(w)
+	if publish {
+		g.stamp.Publish(&w.tx)
+		g.writeTx.Store(w)
+	}
 	// The writer gauge (rmp #2312). Paired with the EndWriter in
 	// [Graph.releaseWriterSnapshot], which every bracket reaches — including the ones
 	// that version nothing, which [Graph.endWrite] returns early from. Both carry the
@@ -336,6 +359,7 @@ func (c CommitNodes) Private(id graph.NodeID) bool {
 type commitApplyShard struct {
 	mu   sync.Mutex
 	snap Snapshot
+	memo snapMemo // snap's verdict memo; see [Snapshot.memo]
 	_    [64]byte
 }
 
@@ -377,6 +401,32 @@ func (tx WriteTx) SetCommitApplier(a CommitApplier) {
 //
 // Nil on the zero value, so a caller can ask unconditionally.
 func (tx WriteTx) Err() error { return tx.w.err() }
+
+// Versions returns how many versions this transaction has written so far, and
+// whether the count is meaningful. ok is false for the zero value and for a
+// bracket on a graph whose versioning substrate is disarmed, where writes leave
+// no version to count.
+//
+// # What the count is for — effect logging (rmp #2965, round 5)
+//
+// On an armed graph every change a write makes is a version: the version is the
+// pre-image an abort restores and the claim that refuses every other writer
+// until this transaction ends. A write that changes nothing — re-asserting a
+// present label, setting a property to the value it already holds, deleting
+// what is absent, creating a live node — writes no version and therefore holds
+// no claim. Sampling the count before and after one operation tells a durable
+// caller whether that operation took effect, so it can log only the operations
+// that did. A logged operation then always holds a claim, which is what makes
+// WAL order agree with the in-memory order of every change.
+//
+// The count only grows during the transaction. It is not safe to compare across
+// transactions.
+func (tx WriteTx) Versions() (n int64, ok bool) {
+	if tx.w == nil {
+		return 0, false
+	}
+	return tx.w.tx.Versions(), true
+}
 
 // EnterUndo marks the start of this transaction's PHYSICAL undo replay, during
 // which its writes are withdrawals of work it already applied rather than new
@@ -457,11 +507,11 @@ func (g *Graph[N, W]) LatestViewOf(tx WriteTx, withOwn bool) *ReadView[N, W] {
 	if tx.w == nil {
 		return g.ReadAt(nil)
 	}
-	snap := &Snapshot{startTS: mvcc.TxIDBase - 1}
+	var own uint64
 	if withOwn {
-		snap.txID = tx.w.txID
+		own = tx.w.txID
 	}
-	return g.ReadAt(snap)
+	return g.ReadAt(newSharedSnapshot(mvcc.TxIDBase-1, own, 0))
 }
 
 // AmbientWriteTx returns the write transaction the graph's slot currently names,
@@ -714,19 +764,21 @@ func (g *Graph[N, W]) endWrite(w *writeCtx) uint64 {
 		// still a refusal and it is counted as one (rmp #2312) — an abort the substrate
 		// does not count is a failure an operator cannot see, and it would leave
 		// Commits+Aborts short of the transactions that actually reached an outcome.
-		if w.err() != nil {
+		if w.err() != nil || w.abandon {
 			g.writeCounts.Abort(w.txID)
 		}
 		return 0
 	}
 	// A transaction that hit a serialization conflict ABORTS. See below for the
 	// measured atomicity violation that this closes, and why it is not the same
-	// thing as the rolled-back-statement case the file comment describes.
-	if w.err() != nil {
+	// thing as the rolled-back-statement case the file comment describes. So does
+	// one its owner abandoned ([writeCtx.abandon]): a durable apply whose WAL
+	// record was refused or never became durable.
+	if w.err() != nil || w.abandon {
 		if applier != nil {
 			applier.DiscardCommitted()
 		}
-		info.Abort()
+		adjFreed := g.abortRecord(&w.tx, info)
 		// Counted here, where publication is REFUSED, because Commits and Aborts are
 		// the two outcomes and must partition the transactions that reached one. The
 		// conflict that caused it is counted separately, at the detection site, and is
@@ -739,7 +791,7 @@ func (g *Graph[N, W]) endWrite(w *writeCtx) uint64 {
 		// Charged AND woken unconditionally: the version records exist and occupy
 		// memory whatever their commit record says, and until the sweep withdraws
 		// them the stored value still carries this transaction's writes (rmp #2318).
-		g.abortWake(created)
+		g.abortWake(created-adjFreed, &w.tx)
 		return 0
 	}
 	// Allocate, store into the shared record, THEN publish. A reader must never
@@ -956,9 +1008,9 @@ func (g *Graph[N, W]) commitAndApply(info *mvcc.CommitInfo, w *writeCtx, applier
 			g.chargeReclaimDebt(created)
 			return
 		}
-		info.Abort()
+		adjFreed := g.abortRecord(&w.tx, info)
 		g.writeCounts.Abort(w.txID)
-		g.abortWake(created)
+		g.abortWake(created-adjFreed, &w.tx)
 	}()
 	mask := applier.CommitApplyShards(CommitNodes{life: &g.nodeLifeShards, info: info})
 	for m := mask; m != 0; m &= m - 1 {
@@ -979,21 +1031,23 @@ func (g *Graph[N, W]) commitAndApply(info *mvcc.CommitInfo, w *writeCtx, applier
 	// takes one from the graph's pool instead and returns it after the apply.
 	var snap *Snapshot
 	if mask != 0 {
-		snap = &g.commitApply[bits.TrailingZeros64(mask)].snap
+		sh := &g.commitApply[bits.TrailingZeros64(mask)]
+		snap = &sh.snap
+		snap.memo = &sh.memo
 	} else {
 		if s, ok := g.commitApplySnaps.Get().(*Snapshot); ok {
 			snap = s
 		} else {
-			snap = new(Snapshot)
+			snap = newSharedSnapshot(0, 0, 0)
 		}
 		defer g.commitApplySnaps.Put(snap)
 	}
 	snap.startTS, snap.txID = mvcc.TxIDBase-1, w.txID
 	// Cleared rather than dropped, so the pinned-verdict map the apply's reads
 	// fill is allocated once per shard and not once per commit.
-	snap.mu.Lock()
-	clear(snap.verdict)
-	snap.mu.Unlock()
+	snap.memo.mu.Lock()
+	clear(snap.memo.verdict)
+	snap.memo.mu.Unlock()
 	applier.ApplyCommitted(snap)
 	// Ready only now: the index changes are applied, so a helper that publishes
 	// this commit on its behalf publishes it with them in place (rmp #2932).

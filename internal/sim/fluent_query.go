@@ -754,11 +754,11 @@ func newFluentQuerySubstrate(g *lpg.Graph[string, float64]) *fluentQuerySubstrat
 	s := &fluentQuerySubstrate{
 		idToName:       make(map[graph.NodeID]string, len(entries)),
 		nameToID:       make(map[string]graph.NodeID, len(entries)),
-		tombstoneCount: g.TombstoneCount(),
+		tombstoneCount: g.TombstoneCountStored(),
 	}
 	s.mapperSlots = len(entries)
 	for _, e := range entries {
-		if g.IsTombstoned(e.id) {
+		if g.IsTombstonedStored(e.id) {
 			s.tombstonedSlots++
 			continue
 		}
@@ -787,7 +787,7 @@ func newFluentQuerySubstrate(g *lpg.Graph[string, float64]) *fluentQuerySubstrat
 	// the same helper the file's reproduction path uses, so the two cannot drift.
 	it := fqUnprunedLabelIDs(g).Iterator()
 	for it.HasNext() {
-		if g.IsTombstoned(graph.NodeID(it.Next())) {
+		if g.IsTombstonedStored(graph.NodeID(it.Next())) {
 			s.tombstonedInLabelIndex++
 		}
 	}
@@ -1446,7 +1446,7 @@ func (p *FluentQueryProbes) Check(
 	}
 
 	// --- (3) the two CSR generations, built FRESH at this instant. ---
-	cLive := csr.BuildFromAdjListLive(g.AdjList(), g.LiveNodeFilter())
+	cLive := csr.BuildFromAdjListLive(g.AdjList(), g.LiveNodeFilterStored())
 	cRaw := csr.BuildFromAdjList(g.AdjList())
 	p.ev.CSRLiveArcs, p.ev.CSRRawArcs = cLive.Size(), cRaw.Size()
 	if cLive.Size() != cRaw.Size() {
@@ -1988,14 +1988,14 @@ func fluentQueryGhostFixture(tick int64, seed *Seed, perturb fqPerturb) ([]Viola
 	}
 
 	cRaw := csr.BuildFromAdjList(g.AdjList())
-	cLive := csr.BuildFromAdjListLive(g.AdjList(), g.LiveNodeFilter())
+	cLive := csr.BuildFromAdjListLive(g.AdjList(), g.LiveNodeFilterStored())
 
 	// The PRECONDITION: count the raw arcs whose target is tombstoned.
 	ghostArcs := 0
 	verts, edges := cRaw.VerticesSlice(), cRaw.EdgesSlice()
 	for src := 0; src+1 < len(verts); src++ {
 		for k := verts[src]; k < verts[src+1]; k++ {
-			if g.IsTombstoned(edges[k]) {
+			if g.IsTombstonedStored(edges[k]) {
 				ghostArcs++
 			}
 		}
@@ -2051,11 +2051,11 @@ func newFluentQueryGhostSubstrate(g *lpg.Graph[string, float64], names []string)
 	s := &fluentQuerySubstrate{
 		idToName:       make(map[graph.NodeID]string, len(names)),
 		nameToID:       make(map[string]graph.NodeID, len(names)),
-		tombstoneCount: g.TombstoneCount(),
+		tombstoneCount: g.TombstoneCountStored(),
 	}
 	for _, n := range names {
 		id, ok := g.AdjList().Mapper().Lookup(n)
-		if !ok || g.IsTombstoned(id) {
+		if !ok || g.IsTombstonedStored(id) {
 			continue
 		}
 		s.idToName[id] = n

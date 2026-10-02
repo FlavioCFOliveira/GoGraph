@@ -649,7 +649,7 @@ func runBulkImportParityWith(
 		return ev, nil, err
 	}
 	ev.snapshotHit, ev.walOps = first.SnapshotHit, first.WALOps
-	ev.schemaVersion, ev.liveOrder = first.SnapshotSchemaVersion, first.Graph.LiveOrder()
+	ev.schemaVersion, ev.liveOrder = first.SnapshotSchemaVersion, first.Graph.LiveOrderStored()
 
 	v := bulkImportCheckParity(model, first.Graph, ev)
 	v = append(v, bulkImportCheckDurableShape(first, "first reopen")...)
@@ -659,7 +659,7 @@ func runBulkImportParityWith(
 		return ev, nil, err
 	}
 	ev.reopenSnapshotHit, ev.reopenWALOps = second.SnapshotHit, second.WALOps
-	ev.reopenLiveOrder = second.Graph.LiveOrder()
+	ev.reopenLiveOrder = second.Graph.LiveOrderStored()
 
 	// Adjudicate the second reopen with a throwaway evidence record, so the
 	// counters the non-vacuity test reads describe ONE pass rather than two.
@@ -972,7 +972,7 @@ func bulkImportCheckDurableShape(res recovery.Result[string, int64], which strin
 func bulkImportCheckParity(m *bulkImportModel, g *lpg.Graph[string, int64], ev *bulkImportEvidence) []Violation {
 	var v []Violation
 
-	if got, want := g.LiveOrder(), uint64(len(m.nodes)); got != want {
+	if got, want := g.LiveOrderStored(), uint64(len(m.nodes)); got != want {
 		v = append(v, Violation{
 			Kind: ViolationGraphIntegrity, Op: "<bulk import parity>",
 			Message: fmt.Sprintf("recovered live order %d, model holds %d nodes", got, want),
@@ -1000,7 +1000,7 @@ func bulkImportCheckParity(m *bulkImportModel, g *lpg.Graph[string, int64], ev *
 			})
 			continue
 		}
-		if g.IsTombstoned(id) {
+		if g.IsTombstonedStored(id) {
 			v = append(v, Violation{
 				Kind: ViolationGraphIntegrity, Op: "<bulk import parity>",
 				Message: fmt.Sprintf("node %q came back tombstoned", key),
@@ -1330,7 +1330,7 @@ func bulkImportCheckCrashedImport(
 		return nil, err
 	}
 	ev.crashedSnapshotHit = out.SnapshotHit
-	ev.crashedLiveOrder = out.Graph.LiveOrder()
+	ev.crashedLiveOrder = out.Graph.LiveOrderStored()
 	_, statErr := os.Stat(assembly)
 	ev.crashedAssemblyRemoved = errors.Is(statErr, fs.ErrNotExist)
 

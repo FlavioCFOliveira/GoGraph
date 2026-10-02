@@ -232,7 +232,7 @@ func BenchmarkHub_RemoveAllEdgesFrom_1k(b *testing.B) {
 	a, hub := buildHub(1_000)
 	b.ResetTimer()
 	for range b.N {
-		a.RemoveAllEdgesFrom(hub)
+		must(b).E(a.RemoveAllEdgesFrom(hub))
 		// Rebuild so the next iteration has something to remove.
 		for i := range 1_000 {
 			_ = a.AddEdge(hub, fmt.Sprintf("l%d", i), 1.0)
@@ -244,7 +244,7 @@ func BenchmarkHub_RemoveAllEdgesFrom_10k(b *testing.B) {
 	a, hub := buildHub(10_000)
 	b.ResetTimer()
 	for range b.N {
-		a.RemoveAllEdgesFrom(hub)
+		must(b).E(a.RemoveAllEdgesFrom(hub))
 		for i := range 10_000 {
 			_ = a.AddEdge(hub, fmt.Sprintf("l%d", i), 1.0)
 		}
@@ -255,7 +255,7 @@ func BenchmarkHub_RemoveAllEdgesFrom_100k(b *testing.B) {
 	a, hub := buildHub(100_000)
 	b.ResetTimer()
 	for range b.N {
-		a.RemoveAllEdgesFrom(hub)
+		must(b).E(a.RemoveAllEdgesFrom(hub))
 		for i := range 100_000 {
 			_ = a.AddEdge(hub, fmt.Sprintf("l%d", i), 1.0)
 		}

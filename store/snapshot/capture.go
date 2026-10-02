@@ -474,7 +474,7 @@ func captureGraph[N comparable, W any](
 			out.order, out.orderKnown = mapperNodes-deadWritten, true
 		}
 
-	} else if g.TombstoneCount() > 0 {
+	} else if g.TombstoneCountStored() > 0 {
 		if out.tombstones, err = captureComponent(func(w io.Writer) (int64, uint32, error) {
 			return WriteTombstones(w, g, nil)
 		}); err != nil {

@@ -111,7 +111,7 @@ func TestRemoveEdge_StripsPerPairStateOnFullDisconnect(t *testing.T) {
 		t.Fatalf("precondition EdgeLabels = %v, want [REL]", got)
 	}
 
-	g.RemoveEdge("a", "b")
+	must(t).E(g.RemoveEdge("a", "b"))
 
 	if g.AdjList().HasEdge("a", "b") {
 		t.Fatal("edge a->b should be gone after RemoveEdge")
@@ -149,7 +149,7 @@ func TestRemoveEdge_KeepsPerPairStateWhileParallelEdgeRemains(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	g.RemoveEdge("a", "b") // one parallel edge remains
+	must(t).E(g.RemoveEdge("a", "b")) // one parallel edge remains
 	if !g.AdjList().HasEdge("a", "b") {
 		t.Fatal("a parallel edge a->b should still exist")
 	}
@@ -157,7 +157,7 @@ func TestRemoveEdge_KeepsPerPairStateWhileParallelEdgeRemains(t *testing.T) {
 		t.Fatalf("per-pair label = %v, want [REL] retained while a parallel edge remains", got)
 	}
 
-	g.RemoveEdge("a", "b") // now fully disconnected
+	must(t).E(g.RemoveEdge("a", "b")) // now fully disconnected
 	if g.AdjList().HasEdge("a", "b") {
 		t.Fatal("edge a->b should be gone")
 	}
@@ -184,7 +184,7 @@ func TestRemoveEdge_DirectedDoesNotStripReverseEdge(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	g.RemoveEdge("a", "b")
+	must(t).E(g.RemoveEdge("a", "b"))
 
 	if got := g.EdgeLabels("a", "b"); len(got) != 0 {
 		t.Fatalf("a->b labels = %v, want empty", got)

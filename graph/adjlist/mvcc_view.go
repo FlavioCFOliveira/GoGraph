@@ -59,6 +59,11 @@ type EntryView[W any] struct {
 // including its own not-yet-published work.
 //
 // Safe for concurrent use.
+//
+// It is a STORED-state primitive: it reflects every uncommitted write, because
+// it is an eagerly maintained structure with no versioned form. It is not one
+// of the committed-only present-state readers (rmp #2965, round 6); see
+// docs/design-write-conflict-detection.md.
 func (a *AdjList[N, W]) LoadEntryView(id graph.NodeID) EntryView[W] {
 	return viewOf(loadEntry[W](&a.shards[id&shardMask], uint64(id)>>shardBits))
 }
@@ -86,6 +91,11 @@ type At struct {
 // at exactly what LoadEntryH costs.
 //
 // Safe for concurrent use.
+//
+// It is a STORED-state primitive: it reflects every uncommitted write, because
+// it is an eagerly maintained structure with no versioned form. It is not one
+// of the committed-only present-state readers (rmp #2965, round 6); see
+// docs/design-write-conflict-detection.md.
 func (a *AdjList[N, W]) LoadEntryHAt(
 	id graph.NodeID, at At,
 ) (neighbours []graph.NodeID, weights []W, handles []uint64) {
@@ -165,6 +175,11 @@ func (a *AdjList[N, W]) OutDegreeAsOf(id graph.NodeID, startTS, txID uint64) int
 // BenchmarkEdgeSideRead_LabelsByID.
 //
 // Safe for concurrent use.
+//
+// It is a STORED-state primitive: it reflects every uncommitted write, because
+// it is an eagerly maintained structure with no versioned form. It is not one
+// of the committed-only present-state readers (rmp #2965, round 6); see
+// docs/design-write-conflict-detection.md.
 func (a *AdjList[N, W]) LoadEntrySlotLabels(id graph.NodeID) (neighbours []graph.NodeID, labels []uint32) {
 	e := loadEntry[W](&a.shards[id&shardMask], uint64(id)>>shardBits)
 	if e == nil {

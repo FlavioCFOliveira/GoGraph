@@ -310,7 +310,7 @@ func TestCSRPairCache_DirectGraphMutationInvalidates(t *testing.T) {
 		{"AddEdge", func() { _ = g.AddEdge("a", "c", 1) }, 2},
 		{"AddEdgeLabeled", func() { _ = g.AddEdgeLabeled("a", "d", 1, "T") }, 3},
 		{"AddEdgeH", func() { _, _ = g.AddEdgeH("a", "e", 1) }, 4},
-		{"RemoveEdge", func() { g.RemoveEdge("a", "c") }, 3},
+		{"RemoveEdge", func() { must(t).E(g.RemoveEdge("a", "c")) }, 3},
 		// The three the first draft of this test missed. They are precisely the
 		// mutators NOT driven by Cypher — bulk labelled builds, store/txn WAL
 		// replay, by-handle DELETE replay — so a regression in them would also be
@@ -319,12 +319,12 @@ func TestCSRPairCache_DirectGraphMutationInvalidates(t *testing.T) {
 			_ = g.AddEdgeLabeledWithProperty("a", "f", 1, "T", "k", lpg.Int64Value(1))
 		}, 4},
 		{"AddEdgeHIfAbsent/absent", func() { _, _ = g.AddEdgeHIfAbsent("a", "g", 1, 9001) }, 5},
-		{"RemoveEdgeByHandle", func() { g.RemoveEdgeByHandle("a", "g", 9001) }, 4},
+		{"RemoveEdgeByHandle", func() { must(t).B(g.RemoveEdgeByHandle("a", "g", 9001)) }, 4},
 		// handle 0 takes AddEdgeHIfAbsent's OTHER branch — the pre-Stage-2 WAL
 		// replay fallback, which delegates to the plain AddEdge. Each branch bumps
 		// separately, so covering only a non-zero handle would leave one unguarded.
 		{"AddEdgeHIfAbsent/handle0", func() { _, _ = g.AddEdgeHIfAbsent("a", "h", 1, 0) }, 5},
-		{"RemoveAllEdgesFrom", func() { g.RemoveAllEdgesFrom("a") }, 0},
+		{"RemoveAllEdgesFrom", func() { must(t).E(g.RemoveAllEdgesFrom("a")) }, 0},
 	} {
 		before := g.TopoGeneration()
 		tc.mut()

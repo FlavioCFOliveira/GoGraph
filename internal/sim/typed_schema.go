@@ -1774,7 +1774,7 @@ func newTypedSchemaSubstrate(g *lpg.Graph[string, float64]) *typedSchemaSubstrat
 		propsOf: make(map[string]map[string]lpg.PropertyValue, len(entries)),
 	}
 	for _, e := range entries {
-		if g.IsTombstoned(e.id) {
+		if g.IsTombstonedStored(e.id) {
 			continue
 		}
 		props := g.NodePropertiesByID(e.id)

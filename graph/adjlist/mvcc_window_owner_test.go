@@ -57,11 +57,11 @@ func TestWindowOwner_SecondTransactionDoesNotAdoptAnothersBuilder(t *testing.T) 
 	ws := a.WriteStampForTest()
 
 	// A: two writes to node "a", so it owns the shard's builder.
-	beginTx(ws)
-	if err := a.AddEdge("a", "b", 1); err != nil {
+	wtx := beginTxW(ws)
+	if err := a.Writer(wtx).AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("A first write: %v", err)
 	}
-	if err := a.AddEdge("a", "c", 2); err != nil {
+	if err := a.Writer(wtx).AddEdge("a", "c", 2); err != nil {
 		t.Fatalf("A second write: %v", err)
 	}
 	s, afterA, _ := slotArrayOf(a, "a")
@@ -74,10 +74,17 @@ func TestWindowOwner_SecondTransactionDoesNotAdoptAnothersBuilder(t *testing.T) 
 		t.Fatal("A's builder is not the published array: markDirtyAndBuild must publish it")
 	}
 	infoA, _ := ws.End()
+	// A commits before B writes. B's write displaces A's entry, so writing it
+	// while A is uncommitted is the dirty write rmp #2947 refuses. The builder
+	// ownership this test is about is decided by the shard's builder field,
+	// which A's commit does not clear.
+	tsA := clk.NextCommitTS()
+	infoA.Commit(tsA)
+	clk.PublishCommitTS(tsA)
 
 	// B: a genuinely separate transaction writing the same shard.
-	beginTx(ws)
-	if err := a.AddEdge("a", "b", 3); err != nil {
+	wtx = beginTxW(ws)
+	if err := a.Writer(wtx).AddEdge("a", "b", 3); err != nil {
 		t.Fatalf("B write: %v", err)
 	}
 	_, afterB, _ := slotArrayOf(a, "a")
@@ -93,10 +100,7 @@ func TestWindowOwner_SecondTransactionDoesNotAdoptAnothersBuilder(t *testing.T) 
 			"in an array A may still publish over, and A's later in-place writes would " +
 			"land in an array B has published past — one of the two is lost either way")
 	}
-	// Commit both so the graph is in a consistent state to read.
-	tsA := clk.NextCommitTS()
-	infoA.Commit(tsA)
-	clk.PublishCommitTS(tsA)
+	// Commit B so the graph is in a consistent state to read.
 	tsB := clk.NextCommitTS()
 	infoB.Commit(tsB)
 	clk.PublishCommitTS(tsB)
@@ -137,16 +141,16 @@ func TestWindowOwner_OneTransactionStillDedupes(t *testing.T) {
 			}
 		}
 		ws := a.WriteStampForTest()
-		beginTx(ws)
+		wtx := beginTxW(ws)
 		a.BeginCommit()
-		if err := a.AddEdge("a", "b", 1); err != nil {
+		if err := a.Writer(wtx).AddEdge("a", "b", 1); err != nil {
 			t.Fatalf("first write: %v", err)
 		}
 		_, first, _ := slotArrayOf(a, "a")
-		if err := a.AddEdge("a", "c", 2); err != nil {
+		if err := a.Writer(wtx).AddEdge("a", "c", 2); err != nil {
 			t.Fatalf("second write: %v", err)
 		}
-		if err := a.AddEdge("a", "d", 3); err != nil {
+		if err := a.Writer(wtx).AddEdge("a", "d", 3); err != nil {
 			t.Fatalf("third write: %v", err)
 		}
 		_, last, _ := slotArrayOf(a, "a")
@@ -169,11 +173,11 @@ func TestWindowOwner_OneTransactionStillDedupes(t *testing.T) {
 			}
 		}
 		ws := a.WriteStampForTest()
-		beginTx(ws)
-		if err := a.AddEdge("a", "b", 1); err != nil {
+		wtx := beginTxW(ws)
+		if err := a.Writer(wtx).AddEdge("a", "b", 1); err != nil {
 			t.Fatalf("first write: %v", err)
 		}
-		if err := a.AddEdge("a", "c", 2); err != nil {
+		if err := a.Writer(wtx).AddEdge("a", "c", 2); err != nil {
 			t.Fatalf("second write: %v", err)
 		}
 		s, second, _ := slotArrayOf(a, "a")
@@ -181,7 +185,7 @@ func TestWindowOwner_OneTransactionStillDedupes(t *testing.T) {
 			t.Fatal("no builder was adopted by the transaction's second write, so the " +
 				"commit record is not being used as the owner token at all")
 		}
-		if err := a.AddEdge("a", "d", 3); err != nil {
+		if err := a.Writer(wtx).AddEdge("a", "d", 3); err != nil {
 			t.Fatalf("third write: %v", err)
 		}
 		_, third, _ := slotArrayOf(a, "a")

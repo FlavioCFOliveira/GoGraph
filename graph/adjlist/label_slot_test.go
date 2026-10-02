@@ -53,7 +53,7 @@ func TestAdjList_SetEdgeLabelSlot_Basic(t *testing.T) {
 	}
 	srcID := slotID(t, a, "a")
 	dstID := slotID(t, a, "b")
-	if ok := a.SetEdgeLabelSlot(srcID, dstID, 7); !ok {
+	if ok := must(t).B(a.SetEdgeLabelSlot(srcID, dstID, 7)); !ok {
 		t.Fatal("SetEdgeLabelSlot returned false, want true (slot exists)")
 	}
 	labs := labelsOf(t, a, "a")
@@ -61,7 +61,7 @@ func TestAdjList_SetEdgeLabelSlot_Basic(t *testing.T) {
 		t.Fatalf("labels = %v, want [7]", labs)
 	}
 	// No edge to a missing dst -> false, no panic.
-	if ok := a.SetEdgeLabelSlot(srcID, srcID, 9); ok {
+	if ok := must(t).B(a.SetEdgeLabelSlot(srcID, srcID, 9)); ok {
 		t.Fatal("SetEdgeLabelSlot on non-existent self-edge returned true")
 	}
 }
@@ -81,7 +81,7 @@ func TestAdjList_Labels_AlignedAcrossGrowth(t *testing.T) {
 	// Label the third slot only.
 	srcID := slotID(t, a, "a")
 	dID := slotID(t, a, "d")
-	if ok := a.SetEdgeLabelSlot(srcID, dID, 42); !ok {
+	if ok := must(t).B(a.SetEdgeLabelSlot(srcID, dID, 42)); !ok {
 		t.Fatal("SetEdgeLabelSlot(d) = false")
 	}
 	// Grow further; the labelled slot must keep its value and the new slots
@@ -120,22 +120,22 @@ func TestAdjList_ClearEdgeLabelSlotValue_TargetsValue(t *testing.T) {
 	srcID := slotID(t, a, "a")
 	dstID := slotID(t, a, "b")
 	// Label the first slot with the encoded value 11.
-	if ok := a.SetEdgeLabelSlot(srcID, dstID, 11); !ok {
+	if ok := must(t).B(a.SetEdgeLabelSlot(srcID, dstID, 11)); !ok {
 		t.Fatal("set slot0 = false")
 	}
 	// Clearing the value a slot carries zeroes exactly that slot.
-	if ok := a.ClearEdgeLabelSlotValue(srcID, dstID, 11); !ok {
+	if ok := must(t).B(a.ClearEdgeLabelSlotValue(srcID, dstID, 11)); !ok {
 		t.Fatal("clear value 11 = false")
 	}
 	if labs := labelsOf(t, a, "a"); labs[0] != 0 {
 		t.Fatalf("after clearing 11, slot0 = %d, want 0", labs[0])
 	}
 	// Clearing a value no slot carries is a no-op false.
-	if ok := a.ClearEdgeLabelSlotValue(srcID, dstID, 999); ok {
+	if ok := must(t).B(a.ClearEdgeLabelSlotValue(srcID, dstID, 999)); ok {
 		t.Fatal("clear of absent value returned true")
 	}
 	// The 0 sentinel is never a valid clear target.
-	if ok := a.ClearEdgeLabelSlotValue(srcID, dstID, 0); ok {
+	if ok := must(t).B(a.ClearEdgeLabelSlotValue(srcID, dstID, 0)); ok {
 		t.Fatal("clear with v=0 returned true")
 	}
 }
@@ -153,12 +153,12 @@ func TestAdjList_Labels_CompactedOnRemove(t *testing.T) {
 	}
 	srcID := slotID(t, a, "a")
 	dstID := slotID(t, a, "b")
-	if ok := a.SetEdgeLabelSlot(srcID, dstID, 5); !ok {
+	if ok := must(t).B(a.SetEdgeLabelSlot(srcID, dstID, 5)); !ok {
 		t.Fatal("set = false")
 	}
 	// Remove one parallel edge: first-match (slot 0) is excised, including its
 	// label. The remaining slots stay 0; the column stays aligned.
-	a.RemoveEdge("a", "b")
+	must(t).E(a.RemoveEdge("a", "b"))
 	nb, _ := a.LoadEntry(srcID)
 	labs := labelsOf(t, a, "a")
 	if len(labs) != len(nb) {
@@ -400,8 +400,8 @@ func TestAdjList_SetEdgeLabelSlot_RaceWithReaders(t *testing.T) {
 		go func() {
 			defer writers.Done()
 			for i := uint32(1); i < 2000; i++ {
-				a.SetEdgeLabelSlot(srcID, dstID, i)
-				a.ClearEdgeLabelSlotValue(srcID, dstID, i)
+				must(t).B(a.SetEdgeLabelSlot(srcID, dstID, i))
+				must(t).B(a.ClearEdgeLabelSlotValue(srcID, dstID, i))
 			}
 		}()
 	}
@@ -446,7 +446,7 @@ func TestAdjList_SetEdgeLabelSlots_Batch(t *testing.T) {
 		dsts[2]: 30,
 		dsts[4]: 50,
 	}
-	if got := a.SetEdgeLabelSlots(srcID, updates); got != 3 {
+	if got := must(t).N(a.SetEdgeLabelSlots(srcID, updates)); got != 3 {
 		t.Fatalf("SetEdgeLabelSlots wrote %d slots, want 3", got)
 	}
 	labs := labelsOf(t, a, "hub")
@@ -463,7 +463,7 @@ func TestAdjList_SetEdgeLabelSlots_Batch(t *testing.T) {
 	// A value of 0 clears a slot; an unknown neighbour is ignored. The two
 	// applied writes are dsts[0]->0 and dsts[4]->7; the bogus id matches nothing.
 	bogus := graph.NodeID(1 << 30)
-	if got := a.SetEdgeLabelSlots(srcID, map[graph.NodeID]uint32{dsts[0]: 0, dsts[4]: 7, bogus: 99}); got != 2 {
+	if got := must(t).N(a.SetEdgeLabelSlots(srcID, map[graph.NodeID]uint32{dsts[0]: 0, dsts[4]: 7, bogus: 99})); got != 2 {
 		t.Fatalf("second batch wrote %d slots, want 2", got)
 	}
 	labs = labelsOf(t, a, "hub")
@@ -475,10 +475,10 @@ func TestAdjList_SetEdgeLabelSlots_Batch(t *testing.T) {
 	}
 
 	// Empty updates and an unknown source are no-ops returning 0.
-	if got := a.SetEdgeLabelSlots(srcID, nil); got != 0 {
+	if got := must(t).N(a.SetEdgeLabelSlots(srcID, nil)); got != 0 {
 		t.Fatalf("nil updates wrote %d, want 0", got)
 	}
-	if got := a.SetEdgeLabelSlots(graph.NodeID(1<<30), map[graph.NodeID]uint32{dsts[0]: 1}); got != 0 {
+	if got := must(t).N(a.SetEdgeLabelSlots(graph.NodeID(1<<30), map[graph.NodeID]uint32{dsts[0]: 1})); got != 0 {
 		t.Fatalf("unknown source wrote %d, want 0", got)
 	}
 }
@@ -497,7 +497,7 @@ func TestAdjList_SetEdgeLabelSlots_FirstSlotMultigraph(t *testing.T) {
 	}
 	srcID := slotID(t, a, "a")
 	dstID := slotID(t, a, "b")
-	if got := a.SetEdgeLabelSlots(srcID, map[graph.NodeID]uint32{dstID: 7}); got != 1 {
+	if got := must(t).N(a.SetEdgeLabelSlots(srcID, map[graph.NodeID]uint32{dstID: 7})); got != 1 {
 		t.Fatalf("batch wrote %d slots, want 1 (first slot only)", got)
 	}
 	labs := labelsOf(t, a, "a")
@@ -548,7 +548,7 @@ func TestAdjList_SetEdgeLabelSlots_RaceWithReaders(t *testing.T) {
 				for _, d := range dsts {
 					updates[d] = i
 				}
-				a.SetEdgeLabelSlots(srcID, updates)
+				must(t).N(a.SetEdgeLabelSlots(srcID, updates))
 			}
 		}()
 	}
@@ -572,7 +572,7 @@ func BenchmarkAdjList_HubRelabel(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				v := uint32(i + 1)
 				for _, d := range dsts {
-					a.SetEdgeLabelSlot(srcID, d, v)
+					must(b).B(a.SetEdgeLabelSlot(srcID, d, v))
 				}
 			}
 		})
@@ -585,7 +585,7 @@ func BenchmarkAdjList_HubRelabel(b *testing.B) {
 				for _, d := range dsts {
 					updates[d] = v
 				}
-				a.SetEdgeLabelSlots(srcID, updates)
+				must(b).N(a.SetEdgeLabelSlots(srcID, updates))
 			}
 		})
 	}

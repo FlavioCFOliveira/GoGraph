@@ -211,7 +211,7 @@ func openStore(ctx context.Context, dir string) (*dataStore, error) {
 	// graph. A fresh, empty store declares its schema after the first seed
 	// instead (see dataStore.seed), so the index backfill covers the seeded
 	// nodes rather than an empty graph.
-	if ds.graph.LiveOrder() > 0 {
+	if ds.graph.LiveOrderStored() > 0 {
 		if err := ds.ensureSchema(ctx); err != nil {
 			_ = ds.Close()
 			return nil, fmt.Errorf("open: ensure schema: %w", err)

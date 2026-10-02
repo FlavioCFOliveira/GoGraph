@@ -702,3 +702,60 @@ func (c *Clock) ReadTS() uint64 { return c.visible.Load() }
 // NextTxID allocates a transaction id, drawn from above [TxIDBase] so it can
 // never be mistaken for a commit timestamp.
 func (c *Clock) NextTxID() uint64 { return TxIDBase + c.txSeq.Add(1) }
+
+// ImplicitTxBit marks the id of an IMPLICIT transaction: the single-operation
+// transaction a direct write (one made outside every transaction) runs as
+// (rmp #2947). The id carries the mark rather than a registry recording it,
+// because the stores that meet such a version at a chain head know only its
+// effective timestamp, and the two questions they ask of it are answered from
+// the id alone:
+//
+//   - may a writer that meets it WAIT for it? An implicit transaction runs no
+//     caller code between its first write and its commit, so it always finishes
+//     in bounded time; an explicit one may be held open across client
+//     round-trips.
+//   - may the adjacency store an implicit write's entry IN PLACE? It is one
+//     operation, so it has no later write that could reuse a private builder.
+//
+// The bit lies inside the transaction-id range: an id with it set is still at or
+// above [TxIDBase] and still classified as in flight by [Visible]. Ids stay
+// unique because they come from the same sequence as every other transaction's,
+// which never reaches 2^62.
+const ImplicitTxBit uint64 = 1 << 62
+
+// NextImplicitTxID allocates the id of an implicit transaction: [Clock.NextTxID]
+// with [ImplicitTxBit] set.
+func (c *Clock) NextImplicitTxID() uint64 { return c.NextTxID() | ImplicitTxBit }
+
+// IsImplicitTx reports whether ts is the in-flight id of an implicit
+// transaction ([ImplicitTxBit]). It is false for a commit timestamp, for an
+// explicit transaction's id and for [AbortedTS].
+func IsImplicitTx(ts uint64) bool {
+	return ts >= TxIDBase && ts != AbortedTS && ts&ImplicitTxBit != 0
+}
+
+// BoundedTxBit marks the id of a BOUNDED transaction: a multi-operation
+// transaction that, like an implicit one, runs no caller code between its first
+// write and its end. The durable store's commit is one: it applies its buffered
+// operations, makes them durable and publishes them, and nothing in between
+// waits for a client. A writer that meets such a version may therefore wait for
+// it, as it may wait for an implicit transaction's.
+//
+// It is distinct from [ImplicitTxBit] because the second question that bit
+// answers has the opposite answer here: a bounded transaction writes several
+// times, so its adjacency writes reuse a private builder like any explicit
+// transaction's. The bit lies inside the transaction-id range, as
+// [ImplicitTxBit] does, and ids stay unique because the sequence they come from
+// never reaches 2^61.
+const BoundedTxBit uint64 = 1 << 61
+
+// NextBoundedTxID allocates the id of a bounded transaction: [Clock.NextTxID]
+// with [BoundedTxBit] set.
+func (c *Clock) NextBoundedTxID() uint64 { return c.NextTxID() | BoundedTxBit }
+
+// IsBoundedTx reports whether ts is the in-flight id of a bounded transaction
+// ([BoundedTxBit]). It is false for a commit timestamp, for every other
+// transaction's id and for [AbortedTS].
+func IsBoundedTx(ts uint64) bool {
+	return ts >= TxIDBase && ts != AbortedTS && ts&BoundedTxBit != 0 && ts&ImplicitTxBit == 0
+}

@@ -58,7 +58,7 @@ const countLabelScratch = 8
 // does not re-intern.
 func appendNodeLabelIDs(g *lpg.Graph[string, float64], id graph.NodeID, dst []uint32) []uint32 {
 	reg := g.Registry()
-	g.ForEachNodeLabelByID(id, func(name string) {
+	g.ForEachNodeLabelByIDAsOf(id, nil, func(name string) {
 		if lid, ok := reg.Lookup(name); ok {
 			dst = append(dst, uint32(lid))
 		}
@@ -90,7 +90,7 @@ func enqueueEdgeDeltas(cbuf *exec.CountBuffer, rt uint32, srcLabels, dstLabels [
 func forEachSlotRelType(g *lpg.Graph[string, float64], srcID, dstID graph.NodeID, handles []uint64, labs []uint32, i int, visit func(rt uint32)) {
 	reg := g.Registry()
 	if i < len(handles) && handles[i] != 0 {
-		names := g.EdgeLabelsByHandleID(srcID, dstID, handles[i])
+		names := g.EdgeLabelsByHandleIDAsOf(srcID, dstID, handles[i], nil)
 		if len(names) > 0 {
 			for _, name := range names {
 				if rt, ok := reg.Lookup(name); ok {
@@ -140,7 +140,7 @@ func countEdgeRemovedByHandle(g *lpg.Graph[string, float64], cs *count.Store, cb
 	if !ok1 || !ok2 {
 		return
 	}
-	names := g.EdgeLabelsByHandleID(srcID, dstID, handle)
+	names := g.EdgeLabelsByHandleIDAsOf(srcID, dstID, handle, nil)
 	if len(names) == 0 {
 		return
 	}
@@ -165,7 +165,7 @@ func countEdgeRemovedFirstSlot(g *lpg.Graph[string, float64], cs *count.Store, c
 	if cs == nil {
 		return
 	}
-	if h, ok := g.FirstEdgeHandle(src, dst); ok && h != 0 {
+	if h, ok := g.FirstEdgeHandleAsOf(src, dst, nil); ok && h != 0 {
 		countEdgeRemovedByHandle(g, cs, cbuf, src, dst, h)
 		return
 	}
@@ -174,7 +174,7 @@ func countEdgeRemovedFirstSlot(g *lpg.Graph[string, float64], cs *count.Store, c
 	if !ok1 || !ok2 {
 		return
 	}
-	names := g.EdgeLabels(src, dst)
+	names := g.EdgeLabelsAsOf(src, dst, nil)
 	if len(names) == 0 {
 		return
 	}
@@ -314,7 +314,7 @@ func (e *Engine) recomputeCountStore() {
 	var buf exec.CountBuffer
 	var sb [countLabelScratch]uint32
 	adj.Mapper().Walk(func(srcID graph.NodeID, _ string) bool {
-		if g.IsTombstoned(srcID) {
+		if g.IsTombstonedStored(srcID) {
 			return true
 		}
 		nbs, _, handles := adj.LoadEntryH(srcID)
@@ -326,7 +326,7 @@ func (e *Engine) recomputeCountStore() {
 		for i, dstID := range nbs {
 			// Skip edges to a tombstoned destination: they are not live edges, so
 			// the ground-truth recount excludes them and the store must too.
-			if g.IsTombstoned(dstID) {
+			if g.IsTombstonedStored(dstID) {
 				continue
 			}
 			var db [countLabelScratch]uint32

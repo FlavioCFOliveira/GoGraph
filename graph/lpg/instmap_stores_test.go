@@ -61,7 +61,7 @@ func TestInstanceStores_ManyParallelEdgesByOrdinal(t *testing.T) {
 	// Remove one instance from the middle: every sibling must survive. A
 	// swap-based removal in the small tier makes this the case most likely to
 	// go wrong, and the promoted map tier must behave identically.
-	g.RemoveEdgeInstance("a", "b", 5)
+	must(t).E(g.RemoveEdgeInstance("a", "b", 5))
 	if labels := g.EdgeLabelsAt("a", "b", 5); len(labels) != 0 {
 		t.Fatalf("EdgeLabelsAt(5) after removal = %v, want none", labels)
 	}
@@ -111,7 +111,7 @@ func TestInstanceStores_ManyParallelEdgesByHandle(t *testing.T) {
 		}
 	}
 
-	g.RemoveEdgeInstanceByHandle("a", "b", handles[5])
+	must(t).E(g.RemoveEdgeInstanceByHandle("a", "b", handles[5]))
 	if labels := g.EdgeLabelsByHandle("a", "b", handles[5]); len(labels) != 0 {
 		t.Fatalf("EdgeLabelsByHandle after removal = %v, want none", labels)
 	}
@@ -143,7 +143,7 @@ func TestInstanceStores_RemoveEdgeDropsEveryInstance(t *testing.T) {
 	if err := g.AddEdge("a", "b", 1); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
-	g.RemoveEdge("a", "b")
+	must(t).E(g.RemoveEdge("a", "b"))
 	if g.AdjList().HasEdge("a", "b") {
 		t.Fatal("RemoveEdge left the edge in place")
 	}
@@ -157,7 +157,7 @@ func TestInstanceStores_RemoveEdgeDropsEveryInstance(t *testing.T) {
 		}
 	}
 	// Re-creating the pair must start clean rather than resurrect the old
-	// instance state — the invariant clearEdgePairState exists to hold.
+	// instance state — the invariant clearPairSides exists to hold.
 	if err := g.SetEdgeLabelAt("a", "b", 1, "Fresh"); err != nil {
 		t.Fatal(err)
 	}

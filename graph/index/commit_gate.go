@@ -62,6 +62,11 @@ import "context"
 
 // CommitTicket is what [Manager.EnterCommit] returns and [Manager.ExitCommit]
 // takes. The zero value names no entry, and exiting it is a no-op.
+//
+// It is an immutable value, so it is safe for concurrent use: it may be copied
+// and handed to another goroutine. It is NOT a reusable handle: each ticket returned by EnterCommit
+// must be passed to ExitCommit exactly once, because exiting it twice releases a
+// commit entry the caller no longer holds.
 type CommitTicket struct{ slot int8 }
 
 // EnterCommit records that a commit is about to take its index decision; see the

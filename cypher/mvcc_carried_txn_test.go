@@ -21,9 +21,11 @@ package cypher_test
 //   - TestWritePath_OneStatementLandsOnOneCommitRecord plants a DECOY transaction
 //     on the slot and requires the statement to ignore it.
 //
-// Both fail against a build where the threading is bypassed, which is the property
-// the acceptance criteria ask for and is verified in
-// TestAmbientSlotGate_FailsWhenTheThreadingIsBypassed below.
+// Both fail against a build where the threading is bypassed. That the counter
+// moves when a write does resolve through the slot is pinned inside lpg by
+// TestWriteView_CarriesTheTransactionRatherThanResolvingIt, because no exported
+// write path resolves through the slot any more (rmp #2967); see
+// TestAmbientSlotGate_NoExportedWriteResolvesThroughTheSlot below.
 
 import (
 	"context"
@@ -86,20 +88,21 @@ func TestWritePath_ResolvesNoCommitRecordThroughTheAmbientSlot(t *testing.T) {
 	}
 }
 
-// TestAmbientSlotGate_FailsWhenTheThreadingIsBypassed is the gate's own negative
-// control: it proves the counter above actually MOVES when a write does not carry
-// its transaction, so a zero from the gate means "threaded" and not "the
-// instrument is dead".
+// TestAmbientSlotGate_NoExportedWriteResolvesThroughTheSlot is the gate's
+// companion: no write an exported API makes resolves its commit record through
+// the slot while an unrelated exclusive bracket is published on it. A direct
+// Go-API mutator runs as an implicit transaction of its own (rmp #2947), and a
+// raw adjacency write is its own transaction too (rmp #2967); either one joining
+// the bracket would be lost if the bracket aborted. A write made with NO bracket
+// open is not an ambient resolution either: it takes a fresh commit timestamp of
+// its own.
 //
-// It reproduces the exact condition the counter names — a write that resolves its
-// commit record through the slot while a transaction is published on it — by
-// holding a DECOY bracket open and writing through the direct Go-API mutators,
-// which carry no transaction by contract. A write made with NO bracket open is not
-// an ambient resolution and must not be counted as one: it takes a fresh commit
-// timestamp of its own, which is the correct reading of a per-operation atomic
-// mutation. That distinction is the whole point of the counter, so the control
-// asserts both halves.
-func TestAmbientSlotGate_FailsWhenTheThreadingIsBypassed(t *testing.T) {
+// The counter's liveness — that it MOVES when a write does resolve through the
+// slot, so a zero means "threaded" and not "the instrument is dead" — can no
+// longer be shown from outside lpg, because no exported write path resolves
+// through the slot. It is pinned inside lpg by
+// TestWriteView_CarriesTheTransactionRatherThanResolvingIt.
+func TestAmbientSlotGate_NoExportedWriteResolvesThroughTheSlot(t *testing.T) {
 	g := lpg.New[string, float64](adjlist.Config{Directed: true})
 
 	// Half one: no bracket open. An untransacted write is NOT an ambient
@@ -115,13 +118,15 @@ func TestAmbientSlotGate_FailsWhenTheThreadingIsBypassed(t *testing.T) {
 
 	// Half two: a bracket IS open and the write does not carry it. This is the
 	// resolution rmp #2320 removed from the engine's write path, and the counter
-	// must see it.
+	// must see it. The bracket is EXCLUSIVE because only an exclusive bracket
+	// claims the ambient slot since rmp #2947; a shared one leaves an
+	// untransacted write untransacted.
 	open := make(chan struct{})
 	release := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = g.ApplyVersioned(func(lpg.WriteTx) error {
+		_ = g.ApplyAtomically(func() error {
 			close(open)
 			<-release
 			return nil
@@ -131,14 +136,24 @@ func TestAmbientSlotGate_FailsWhenTheThreadingIsBypassed(t *testing.T) {
 	before = g.AmbientVersionResolutions()
 	mustSetProp(t, g, "n", 3)
 	mustSetProp(t, g, "n", 4)
+	direct := g.AmbientVersionResolutions() - before
+	before = g.AmbientVersionResolutions()
+	if err := g.AdjList().AddEdge("n", "m", 1); err != nil {
+		t.Fatalf("raw AddEdge: %v", err)
+	}
 	got := g.AmbientVersionResolutions() - before
 	close(release)
 	<-done
 
-	if got == 0 {
-		t.Fatal("a write that carries no transaction, made while a bracket was open, " +
-			"counted ZERO ambient resolutions; the instrument the threading gate relies " +
-			"on is not measuring anything, so that gate's zero proves nothing")
+	if direct != 0 {
+		t.Fatalf("a direct write made while an unrelated bracket was open counted %d ambient "+
+			"resolution(s): it joined that bracket's transaction, so the bracket's abort "+
+			"would withdraw a write its caller was told had succeeded (rmp #2947)", direct)
+	}
+	if got != 0 {
+		t.Fatalf("a raw adjacency write made while an unrelated bracket was open counted %d "+
+			"ambient resolution(s): it joined that bracket's transaction, so the bracket's "+
+			"abort would lose a write its caller was told had succeeded (rmp #2967)", got)
 	}
 }
 
@@ -206,6 +221,13 @@ func TestWritePath_OneStatementLandsOnOneCommitRecord(t *testing.T) {
 		})
 	}()
 	<-decoyOpen
+	// A shared bracket does not claim the ambient slot (rmp #2947), so nothing
+	// can resolve through the decoy at all; the assertions below still prove the
+	// statement's own atomicity and visibility.
+	if g.AmbientWriteTx() != (lpg.WriteTx{}) {
+		t.Fatal("a shared write bracket claimed the ambient slot: a direct write made " +
+			"anywhere in the process would now join that transaction")
+	}
 	// Released exactly once however this test exits, so a failure cannot leak the
 	// bracket and wedge the package's remaining tests on the schema barrier.
 	released := false

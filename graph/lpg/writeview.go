@@ -76,9 +76,10 @@ import "github.com/FlavioCFOliveira/GoGraph/graph"
 // adjacency shard's copy-on-write builder under that transaction's identity.
 //
 // Obtain one with [Graph.Writer]. A view built from the zero [WriteTx] carries no
-// transaction and behaves as the graph's own mutators do — each write is its own
-// transaction, committed the instant it is made — which is the right answer for a
-// caller outside any bracket and the wrong one inside one.
+// transaction, and each of its writes runs as the graph's own direct mutators do
+// (rmp #2947): as a single-operation transaction of its own, or inside the
+// exclusive bracket that is open — the right answer for a caller outside any
+// transaction and the wrong one inside one.
 //
 // A WriteView does NOT take the raw mutators' index-maintenance refusal
 // ([ErrIndexedRawWrite]), with or without a transaction: it is the write surface
@@ -182,9 +183,21 @@ func (wv WriteView[N, W]) NoteConstraintTouchByID(id graph.NodeID) error {
 }
 
 // ── nodes ────────────────────────────────────────────────────────────────────
+//
+// Every mutator below that writes runs, over the zero [WriteTx], through
+// [Graph.direct]: the same single-operation transaction the graph's own direct
+// mutators run as, without their index refusal (rmp #2947). Before that, a view
+// over the zero transaction wrote with no transaction at all, conflict-tested
+// nothing, and could undo another transaction's committed delete
+// ([WriteView.Revive], audit F6).
 
 // AddNode is [Graph.AddNode] inside this view's transaction.
-func (wv WriteView[N, W]) AddNode(n N) error { return wv.g.addNodeInfo(n, wv.w) }
+func (wv WriteView[N, W]) AddNode(n N) error {
+	if wv.w == nil {
+		return wv.g.direct(func(tx *writeCtx) error { return wv.g.addNodeInfo(n, tx) })
+	}
+	return wv.g.addNodeInfo(n, wv.w)
+}
 
 // RemoveNode is [Graph.RemoveNode] inside this view's transaction.
 //
@@ -207,13 +220,37 @@ func (wv WriteView[N, W]) AddNode(n N) error { return wv.g.addNodeInfo(n, wv.w) 
 // never-interned key is admitted and retires nothing, and reports true. The
 // caller's own presence probe answers that; this answers only whether the write
 // was ADMITTED — the same reading [WriteView.RemoveEdge] takes.
-func (wv WriteView[N, W]) RemoveNode(n N) bool { return wv.g.removeNodeInfo(n, wv.w) }
+//
+// A view over the zero [WriteTx] reports FALSE when the removal was refused with
+// [ErrDirectWriteConflict] (rmp #2947), in which case it changed nothing.
+func (wv WriteView[N, W]) RemoveNode(n N) bool {
+	if wv.w == nil {
+		return wv.g.removeNodeDirect(n) == nil
+	}
+	return wv.g.removeNodeInfo(n, wv.w)
+}
 
-// Revive is [Graph.Revive] inside this view's transaction.
-func (wv WriteView[N, W]) Revive(n N) { wv.g.reviveInfo(n, wv.w) }
+// Revive is [Graph.Revive] inside this view's transaction. It returns nil inside
+// a transaction, whose refusal is recorded on the transaction ([WriteTx.Err]),
+// and over the zero [WriteTx] the refusal of the direct write, wrapping
+// [ErrDirectWriteConflict] (rmp #2947, audit F6). The error return is a breaking
+// change: Revive used to return nothing.
+func (wv WriteView[N, W]) Revive(n N) error {
+	if wv.w == nil {
+		return wv.g.direct(func(tx *writeCtx) error {
+			wv.g.reviveInfo(n, tx)
+			return nil
+		})
+	}
+	wv.g.reviveInfo(n, wv.w)
+	return nil
+}
 
 // SetNodeLabel is [Graph.SetNodeLabel] inside this view's transaction.
 func (wv WriteView[N, W]) SetNodeLabel(n N, name string) error {
+	if wv.w == nil {
+		return wv.g.direct(func(tx *writeCtx) error { return wv.g.setNodeLabelInfo(n, name, tx) })
+	}
 	return wv.g.setNodeLabelInfo(n, name, wv.w)
 }
 
@@ -224,12 +261,21 @@ func (wv WriteView[N, W]) RemoveNodeLabel(n N, name string) error {
 	if err := CheckToken("node label", name); err != nil {
 		return err
 	}
+	if wv.w == nil {
+		return wv.g.direct(func(tx *writeCtx) error {
+			wv.g.removeNodeLabelInfo(n, name, tx)
+			return nil
+		})
+	}
 	wv.g.removeNodeLabelInfo(n, name, wv.w)
 	return nil
 }
 
 // SetNodeProperty is [Graph.SetNodeProperty] inside this view's transaction.
 func (wv WriteView[N, W]) SetNodeProperty(n N, key string, value PropertyValue) error {
+	if wv.w == nil {
+		return wv.g.direct(func(tx *writeCtx) error { return wv.g.setNodePropertyInfo(n, key, value, tx) })
+	}
 	return wv.g.setNodePropertyInfo(n, key, value, wv.w)
 }
 
@@ -240,6 +286,12 @@ func (wv WriteView[N, W]) DelNodeProperty(n N, key string) error {
 	if err := CheckToken("property key", key); err != nil {
 		return err
 	}
+	if wv.w == nil {
+		return wv.g.direct(func(tx *writeCtx) error {
+			wv.g.delNodePropertyInfo(n, key, tx)
+			return nil
+		})
+	}
 	wv.g.delNodePropertyInfo(n, key, wv.w)
 	return nil
 }
@@ -248,16 +300,62 @@ func (wv WriteView[N, W]) DelNodeProperty(n N, key string) error {
 
 // AddEdge is [Graph.AddEdge] inside this view's transaction.
 func (wv WriteView[N, W]) AddEdge(src, dst N, w W) error {
+	if wv.w == nil {
+		var h uint64
+		return wv.g.direct(func(tx *writeCtx) error {
+			_, err := wv.g.appendEdgeInfo(src, dst, w, 0, nil, &h, tx)
+			return err
+		})
+	}
 	return wv.g.addEdgeInfo(src, dst, w, wv.w)
+}
+
+// AddEdgeLabeledWithProperty is [Graph.AddEdgeLabeledWithProperty] inside this
+// view's transaction.
+func (wv WriteView[N, W]) AddEdgeLabeledWithProperty(src, dst N, w W, relType, key string, value PropertyValue) error {
+	if wv.w == nil {
+		return wv.g.AddEdgeLabeledWithProperty(src, dst, w, relType, key, value)
+	}
+	enc, payload, err := wv.g.labeledPropAppend(relType, key, value)
+	if err != nil {
+		return err
+	}
+	var h uint64
+	_, err = wv.g.appendEdgeInfo(src, dst, w, enc, payload, &h, wv.w)
+	return err
 }
 
 // AddEdgeH is [Graph.AddEdgeH] inside this view's transaction.
 func (wv WriteView[N, W]) AddEdgeH(src, dst N, w W) (uint64, error) {
+	if wv.w == nil {
+		var h, handle uint64
+		err := wv.g.direct(func(tx *writeCtx) error {
+			var e error
+			handle, e = wv.g.appendEdgeInfo(src, dst, w, 0, nil, &h, tx)
+			return e
+		})
+		if err != nil {
+			return 0, err
+		}
+		return handle, nil
+	}
 	return wv.g.addEdgeHInfo(src, dst, w, wv.w)
 }
 
 // AddEdgeHIfAbsent is [Graph.AddEdgeHIfAbsent] inside this view's transaction.
 func (wv WriteView[N, W]) AddEdgeHIfAbsent(src, dst N, w W, handle uint64) (bool, error) {
+	if wv.w == nil {
+		var inserted bool
+		err := wv.g.direct(func(tx *writeCtx) error {
+			var e error
+			inserted, e = wv.g.addEdgeHIfAbsentInfo(src, dst, w, handle, tx)
+			return e
+		})
+		if err != nil {
+			return false, err
+		}
+		return inserted, nil
+	}
 	return wv.g.addEdgeHIfAbsentInfo(src, dst, w, handle, wv.w)
 }
 
@@ -265,25 +363,47 @@ func (wv WriteView[N, W]) AddEdgeHIfAbsent(src, dst N, w W, handle uint64) (bool
 //
 // It reports whether the removal was APPLIED, as
 // [WriteView.RemoveAllEdgesFrom] and [WriteView.RemoveEdgeByHandle] already do:
-// FALSE means this transaction hit a write-write conflict on the adjacency and
-// nothing was mutated. A caller that journals an inverse MUST gate the journal
-// entry on it — an inverse recorded for a removal that never happened re-adds
-// an arc the conflicting peer still owns, and once that peer has rolled its own
-// arc back the inverse leaves an arc no transaction ever created (rmp #2725,
-// the per-edge mirror of rmp #2694).
+// FALSE means this transaction hit a write-write conflict and nothing was
+// mutated. A caller that journals an inverse MUST gate the journal entry on it —
+// an inverse recorded for a removal that never happened re-adds an arc the
+// conflicting peer still owns, and once that peer has rolled its own arc back the
+// inverse leaves an arc no transaction ever created (rmp #2725, the per-edge
+// mirror of rmp #2694).
 //
 // TRUE does not mean an arc was taken out: a removal of an absent edge applies
 // and removes nothing, and reports true. The caller's presence probe answers
 // that; this answers only whether the write was ADMITTED. The two siblings
 // differ here — both fold "nothing to remove" into their false — so a caller
 // switching between them must read each contract rather than assume it.
+//
+// A view over the zero [WriteTx] reports FALSE when the removal was refused with
+// [ErrDirectWriteConflict] (rmp #2947), in which case it changed nothing.
 func (wv WriteView[N, W]) RemoveEdge(src, dst N) bool {
+	if wv.w == nil {
+		applied := false
+		err := wv.g.direct(func(tx *writeCtx) error {
+			applied = wv.g.removeEdgeInfo(src, dst, tx)
+			return nil
+		})
+		return err == nil && applied
+	}
 	return wv.g.removeEdgeInfo(src, dst, wv.w)
 }
 
 // RemoveEdgeByHandle is [Graph.RemoveEdgeByHandle] inside this view's
 // transaction.
+//
+// A view over the zero [WriteTx] reports FALSE for a direct-write refusal, as
+// [WriteView.RemoveEdge] does.
 func (wv WriteView[N, W]) RemoveEdgeByHandle(src, dst N, handle uint64) bool {
+	if wv.w == nil {
+		removed := false
+		err := wv.g.direct(func(tx *writeCtx) error {
+			removed = wv.g.removeEdgeByHandleInfo(src, dst, handle, tx)
+			return nil
+		})
+		return err == nil && removed
+	}
 	return wv.g.removeEdgeByHandleInfo(src, dst, handle, wv.w)
 }
 
@@ -292,11 +412,21 @@ func (wv WriteView[N, W]) RemoveEdgeByHandle(src, dst N, handle uint64) bool {
 //
 // It reports whether the removal was APPLIED, exactly as
 // [WriteView.RemoveEdgeByHandle] does: FALSE means this transaction hit a
-// write-write conflict on the adjacency and nothing was mutated. A caller that
-// journals an inverse MUST gate the journal entry on it — an inverse recorded
-// for a removal that never happened re-creates an arc the conflicting peer
-// still owns (rmp #2694).
+// write-write conflict and nothing was mutated. A caller that journals an inverse
+// MUST gate the journal entry on it — an inverse recorded for a removal that
+// never happened re-creates an arc the conflicting peer still owns (rmp #2694).
+//
+// A view over the zero [WriteTx] reports FALSE for a direct-write refusal, as
+// [WriteView.RemoveEdge] does.
 func (wv WriteView[N, W]) RemoveAllEdgesFrom(src N) bool {
+	if wv.w == nil {
+		applied := false
+		err := wv.g.direct(func(tx *writeCtx) error {
+			applied = wv.g.removeAllEdgesFromInfo(src, tx)
+			return nil
+		})
+		return err == nil && applied
+	}
 	return wv.g.removeAllEdgesFromInfo(src, wv.w)
 }
 
@@ -305,6 +435,9 @@ func (wv WriteView[N, W]) RemoveAllEdgesFrom(src N) bool {
 // SetEdgeLabel is [Graph.SetEdgeLabel] inside this view's transaction. The error return is a
 // breaking change (rmp #2748).
 func (wv WriteView[N, W]) SetEdgeLabel(src, dst N, name string) error {
+	if wv.w == nil {
+		return wv.g.direct(func(tx *writeCtx) error { return wv.g.setEdgeLabelInfo(src, dst, name, tx) })
+	}
 	return wv.g.setEdgeLabelInfo(src, dst, name, wv.w)
 }
 
@@ -315,12 +448,21 @@ func (wv WriteView[N, W]) RemoveEdgeLabel(src, dst N, name string) error {
 	if err := CheckToken("relationship type", name); err != nil {
 		return err
 	}
+	if wv.w == nil {
+		return wv.g.direct(func(tx *writeCtx) error {
+			wv.g.removeEdgeLabelInfo(src, dst, name, tx)
+			return nil
+		})
+	}
 	wv.g.removeEdgeLabelInfo(src, dst, name, wv.w)
 	return nil
 }
 
 // SetEdgeProperty is [Graph.SetEdgeProperty] inside this view's transaction.
 func (wv WriteView[N, W]) SetEdgeProperty(src, dst N, key string, value PropertyValue) error {
+	if wv.w == nil {
+		return wv.g.direct(func(tx *writeCtx) error { return wv.g.setEdgePropertyInfo(src, dst, key, value, tx) })
+	}
 	return wv.g.setEdgePropertyInfo(src, dst, key, value, wv.w)
 }
 
@@ -331,6 +473,12 @@ func (wv WriteView[N, W]) DelEdgeProperty(src, dst N, key string) error {
 	if err := CheckToken("property key", key); err != nil {
 		return err
 	}
+	if wv.w == nil {
+		return wv.g.direct(func(tx *writeCtx) error {
+			wv.g.delEdgePropertyInfo(src, dst, key, tx)
+			return nil
+		})
+	}
 	wv.g.delEdgePropertyInfo(src, dst, key, wv.w)
 	return nil
 }
@@ -340,18 +488,38 @@ func (wv WriteView[N, W]) DelEdgeProperty(src, dst N, key string) error {
 // SetEdgeLabelAt is [Graph.SetEdgeLabelAt] inside this view's transaction. The error return is a
 // breaking change (rmp #2748).
 func (wv WriteView[N, W]) SetEdgeLabelAt(src, dst N, idx int64, name string) error {
+	if wv.w == nil {
+		return wv.g.direct(func(tx *writeCtx) error { return wv.g.setEdgeLabelAtInfo(src, dst, idx, name, tx) })
+	}
 	return wv.g.setEdgeLabelAtInfo(src, dst, idx, name, wv.w)
 }
 
 // SetEdgePropertyAt is [Graph.SetEdgePropertyAt] inside this view's transaction.
 func (wv WriteView[N, W]) SetEdgePropertyAt(src, dst N, idx int64, key string, value PropertyValue) error {
+	if wv.w == nil {
+		return wv.g.direct(func(tx *writeCtx) error {
+			return wv.g.setEdgePropertyAtInfo(src, dst, idx, key, value, tx)
+		})
+	}
 	return wv.g.setEdgePropertyAtInfo(src, dst, idx, key, value, wv.w)
 }
 
 // RemoveEdgeInstance is [Graph.RemoveEdgeInstance] inside this view's
 // transaction.
-func (wv WriteView[N, W]) RemoveEdgeInstance(src, dst N, idx int64) {
+//
+// It returns nil inside a transaction, whose refusal is recorded on the
+// transaction ([WriteTx.Err]), and over the zero [WriteTx] the refusal of the
+// direct write, wrapping [ErrDirectWriteConflict] (rmp #2947). The error return
+// is a breaking change: RemoveEdgeInstance used to return nothing.
+func (wv WriteView[N, W]) RemoveEdgeInstance(src, dst N, idx int64) error {
+	if wv.w == nil {
+		return wv.g.direct(func(tx *writeCtx) error {
+			wv.g.removeEdgeInstanceInfo(src, dst, idx, tx)
+			return nil
+		})
+	}
 	wv.g.removeEdgeInstanceInfo(src, dst, idx, wv.w)
+	return nil
 }
 
 // ── per-instance surfaces, addressed by stable handle ────────────────────────
@@ -360,12 +528,22 @@ func (wv WriteView[N, W]) RemoveEdgeInstance(src, dst N, idx int64) {
 // transaction. The error return is a
 // breaking change (rmp #2748).
 func (wv WriteView[N, W]) SetEdgeLabelByHandle(src, dst N, handle uint64, name string) error {
+	if wv.w == nil {
+		return wv.g.direct(func(tx *writeCtx) error {
+			return wv.g.setEdgeLabelByHandleInfo(src, dst, handle, name, tx)
+		})
+	}
 	return wv.g.setEdgeLabelByHandleInfo(src, dst, handle, name, wv.w)
 }
 
 // SetEdgePropertyByHandle is [Graph.SetEdgePropertyByHandle] inside this view's
 // transaction.
 func (wv WriteView[N, W]) SetEdgePropertyByHandle(src, dst N, handle uint64, key string, value PropertyValue) error {
+	if wv.w == nil {
+		return wv.g.direct(func(tx *writeCtx) error {
+			return wv.g.setEdgePropertyByHandleInfo(src, dst, handle, key, value, tx)
+		})
+	}
 	return wv.g.setEdgePropertyByHandleInfo(src, dst, handle, key, value, wv.w)
 }
 
@@ -377,12 +555,29 @@ func (wv WriteView[N, W]) DelEdgePropertyByHandle(src, dst N, handle uint64, key
 	if err := CheckToken("property key", key); err != nil {
 		return err
 	}
+	if wv.w == nil {
+		return wv.g.direct(func(tx *writeCtx) error {
+			wv.g.delEdgePropertyByHandleInfo(src, dst, handle, key, tx)
+			return nil
+		})
+	}
 	wv.g.delEdgePropertyByHandleInfo(src, dst, handle, key, wv.w)
 	return nil
 }
 
 // RemoveEdgeInstanceByHandle is [Graph.RemoveEdgeInstanceByHandle] inside this
 // view's transaction.
-func (wv WriteView[N, W]) RemoveEdgeInstanceByHandle(src, dst N, handle uint64) {
+//
+// It returns nil inside a transaction and the direct write's refusal over the
+// zero [WriteTx], as [WriteView.RemoveEdgeInstance] does. The error return is a
+// breaking change: RemoveEdgeInstanceByHandle used to return nothing.
+func (wv WriteView[N, W]) RemoveEdgeInstanceByHandle(src, dst N, handle uint64) error {
+	if wv.w == nil {
+		return wv.g.direct(func(tx *writeCtx) error {
+			wv.g.removeEdgeInstanceByHandleInfo(src, dst, handle, tx)
+			return nil
+		})
+	}
 	wv.g.removeEdgeInstanceByHandleInfo(src, dst, handle, wv.w)
+	return nil
 }

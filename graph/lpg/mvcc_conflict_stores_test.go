@@ -116,8 +116,13 @@ func TestConflict_EdgeOverflowRelTypes(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// A writes the overflow list through the by-id path, which takes no
+	// adjacency claim because it does not rebuild the entry. A label write does
+	// claim the adjacency since rmp #2966, so with both writers going through it
+	// B would be refused there, before this store's own check is reached.
 	txA := g.beginLabelTx()
-	if err := txA.setEdgeLabel("a", "b", "FROM_A"); err != nil {
+	g.addEdgeRelTypeOverflowByIDInfo(nodeIDOf(t, g, "a"), nodeIDOf(t, g, "b"), "FROM_A", txA.ctx)
+	if err := txA.ctx.err(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -368,9 +373,11 @@ func TestConflict_EdgeOverflowRelTypeRemoval(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// A writes the overflow list and stays in flight.
+	// A writes the overflow list and stays in flight, through the by-id path,
+	// which takes no adjacency claim; see TestConflict_EdgeOverflowRelTypes.
 	txA := g.beginLabelTx()
-	if err := txA.setEdgeLabel("a", "b", "THIRD"); err != nil {
+	g.addEdgeRelTypeOverflowByIDInfo(nodeIDOf(t, g, "a"), nodeIDOf(t, g, "b"), "THIRD", txA.ctx)
+	if err := txA.ctx.err(); err != nil {
 		t.Fatal(err)
 	}
 
