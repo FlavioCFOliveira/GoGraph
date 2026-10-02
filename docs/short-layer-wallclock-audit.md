@@ -171,11 +171,11 @@ class and is recorded here, with the measurement that motivated its guard.
 |---|---|---|---|---|---|
 | bench/audit352 | labelcount_gate_ab_test.go:526 | TestLabelCountPushdownIsConstantTime | max(ns/op) ÷ min(ns/op) over n = 1 000 … 100 000 | `ratio > 1.50` | **#2673**; two `testing.Benchmark` windows measured seconds apart, one per graph size |
 
-**Status:** guarded with `testlayers.RequireQuietMachine` at :519, ahead of the
-assertion at :526, and listed in `TIMING_PKGS` / `TIMING_RUN`. The wall-clock ratio
-is measured and logged unconditionally, then asserted only on a quiet machine; the
-test's **allocation** and **byte** arms are unguarded and keep asserting in the
-short layer.
+**Status:** resolved by #2959. The wall-clock ratio is no longer asserted: a
+structural check requires the PROFILE plan to be exactly `[Project LabelCountScan]`,
+each operator emitting one row, at every size. Timing is logged only. The test left
+`TIMING_PKGS` / `TIMING_RUN` and runs in the short layer, with its **allocation** and
+**byte** arms unchanged.
 
 ### The measurement — it failed twice in one day, in OPPOSITE directions
 
