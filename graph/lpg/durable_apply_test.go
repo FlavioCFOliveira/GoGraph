@@ -204,7 +204,7 @@ func TestApplyDurable_Outcomes(t *testing.T) {
 		t1 := g.BeginVersionedTx()
 		requireNoErr(t, g.Writer(t1).SetNodeProperty("n", "v", StringValue("t1")))
 		ran := false
-		err := g.ApplyDurable(write(g), func() error { ran = true; return nil })
+		err := g.ApplyDurable(context.Background(), write(g), func() error { ran = true; return nil })
 		g.EndVersionedTx(t1)
 		if !errors.Is(err, mvcc.ErrSerializationConflict) {
 			t.Fatalf("err = %v; want a serialization conflict", err)
@@ -218,7 +218,7 @@ func TestApplyDurable_Outcomes(t *testing.T) {
 		g := newDirectTxGraph(t, true)
 		requireNoErr(t, g.AddNode("n"))
 		boom := errors.New("fsync failed")
-		if err := g.ApplyDurable(write(g), func() error { return boom }); !errors.Is(err, boom) {
+		if err := g.ApplyDurable(context.Background(), write(g), func() error { return boom }); !errors.Is(err, boom) {
 			t.Fatalf("err = %v; want %v", err, boom)
 		}
 		if visible(g) {
@@ -237,7 +237,7 @@ func TestApplyDurable_Outcomes(t *testing.T) {
 					t.Error("the panic did not continue to the caller")
 				}
 			}()
-			_ = g.ApplyDurable(write(g), func() error { panic("injected") })
+			_ = g.ApplyDurable(context.Background(), write(g), func() error { panic("injected") })
 		}()
 		if visible(g) {
 			t.Error("ATOMICITY: a transaction whose durable step panicked is visible")
@@ -249,7 +249,7 @@ func TestApplyDurable_Outcomes(t *testing.T) {
 		g := newDirectTxGraph(t, true)
 		requireNoErr(t, g.AddNode("n"))
 		var seen bool
-		err := g.ApplyDurable(write(g), func() error {
+		err := g.ApplyDurable(context.Background(), write(g), func() error {
 			// Not yet visible while the durable step runs.
 			seen = visible(g)
 			return nil

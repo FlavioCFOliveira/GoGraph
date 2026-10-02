@@ -6,6 +6,7 @@ package lpg
 // transaction has committed, does not hide a neighbour the reader still sees.
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -35,7 +36,7 @@ func TestDegree_SnapshotSeesANeighbourRemovedAfterIt(t *testing.T) {
 	snap := g.BeginRead()
 	defer g.EndRead(snap)
 	if err := g.ApplyVersioned(func(wtx WriteTx) error {
-		g.Writer(wtx).RemoveNode("b")
+		_, _ = g.Writer(wtx).RemoveNode("b")
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -57,8 +58,8 @@ func TestDegree_SnapshotSeesANeighbourRemovedAfterIt(t *testing.T) {
 func TestDegree_PresentReadIgnoresAnUncommittedNeighbourRemoval(t *testing.T) {
 	g, lid := degreeLivenessFixture(t)
 	var typed, matching, bounded int
-	err := g.ApplyDurable(func(wtx WriteTx) error {
-		g.Writer(wtx).RemoveNode("b")
+	err := g.ApplyDurable(context.Background(), func(wtx WriteTx) error {
+		_, _ = g.Writer(wtx).RemoveNode("b")
 		return nil
 	}, func() error {
 		done := make(chan struct{})

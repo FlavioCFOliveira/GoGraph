@@ -81,13 +81,13 @@ package lpg
 // 5). Neither runs caller code between its first write and its end, so it
 // always finishes, and two writes to the same node would otherwise refuse each
 // other merely for being concurrent. Both are bounded by [directWaitBudget]. A
-// refusal
-// caused by an explicit transaction is returned at once: that transaction may be
-// held open across client round-trips, and these methods take no context to bound
-// a wait by. The retry runs from the top, after the refused attempt has aborted,
+// refusal caused by an explicit transaction is returned at once: that
+// transaction may be held open across client round-trips, and these methods
+// take no context to bound a wait by. The retry runs from the top, after the refused attempt has aborted,
 // so it never waits holding a lock.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"runtime"
@@ -194,7 +194,9 @@ func (g *Graph[N, W]) direct(op func(tx *writeCtx) error) error {
 			if time.Since(start) < directWaitBudget {
 				if mvcc.IsBoundedTx(c.HeadTS) {
 					// Park on the blocking commit's end, FIFO, holding nothing.
-					if q, ok, wk := g.txWait.wait(c.HeadTS, start.Add(directWaitBudget)); ok {
+					// A direct mutator takes no context, so only the budget bounds
+					// the wait and wait cannot return a context error.
+					if q, ok, wk, _ := g.txWait.wait(context.Background(), c.HeadTS, start.Add(directWaitBudget)); ok {
 						inherited, woken = q, wk
 						continue
 					}
@@ -225,6 +227,8 @@ func (g *Graph[N, W]) runImplicit(op func(tx *writeCtx) error) error {
 	settled := false
 	defer func() {
 		if !settled {
+			// The panic in flight is the outcome; the abort's own result is
+			// errImplicitPanic echoed back, and there is no caller to return it to.
 			_ = g.finishImplicit(w, errImplicitPanic)
 		}
 	}()
@@ -301,12 +305,14 @@ func implicitBlocker(head uint64) bool {
 
 // directBackoff pauses before attempt+1 of a direct write: a yield for the first
 // four attempts, which is all a writer behind one other implicit transaction
-// usually needs, then a sleep doubling from 1 µs to at most 256 µs. Measured on
+// usually needs, then a sleep doubling from 1 µs to at most 256 µs. The cap was
+// chosen when [directWaitBudget] was 50 ms, and these figures date from then;
+// they were not re-measured after the budget was raised to 1 s. Measured on
 // one hot object (one node property, one hub's appends), in single one-second
-// runs with a 50 ms budget: no refusal at 8, 64 or 256 concurrent writers, at
-// most 0.19 % at 1024, and no call slower than the budget. A cap of 64 µs refused less
-// at 1024 writers and cost 43 % of the hub's append throughput at 64; a cap of
-// 1 ms refused 0.4 % at 1024.
+// runs: no refusal at 8, 64 or 256 concurrent writers, at most 0.19 % at 1024,
+// and no call slower than the 50 ms budget. A cap of 64 µs refused less at 1024
+// writers and cost 43 % of the hub's append throughput at 64; a cap of 1 ms
+// refused 0.4 % at 1024.
 func directBackoff(attempt int) {
 	if attempt < 4 {
 		runtime.Gosched()

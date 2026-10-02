@@ -110,12 +110,18 @@ type Snapshot struct {
 	// snapshot with a nil memo is OWNED by the one goroutine that made it and pins
 	// into owned instead, without a lock.
 	memo *snapMemo
-	// owned is the pin of an owned snapshot (memo == nil): the in-flight records
-	// it has classified, with their verdicts. A read pins very few — one per
-	// in-flight transaction it meets — so a fixed array suffices; a read that
-	// meets more than len(owned) simply stops pinning the excess, which can only
-	// happen across more concurrent in-flight writers on one object than any
-	// conflict-checked store admits.
+	// owned is the pin of an owned snapshot (memo == nil): the first len(owned)
+	// in-flight records it has classified, with their verdicts. A single-object
+	// read meets few in-flight records — one per transaction holding a version
+	// on that object — so the array covers it. A read that walks MANY objects
+	// through one owned snapshot ([Graph.TombstonedIDs] and
+	// [Graph.committedLifeCounts] do) can meet more distinct in-flight
+	// transactions than that, and stops pinning the excess: an unpinned record
+	// is classified afresh at each visit, so one such transaction committing
+	// part-way through the walk can be seen as uncommitted on objects visited
+	// before its commit and as committed on objects visited after it. Those
+	// walks therefore promise each object's committed state as of its visit,
+	// not one instant for the whole walk.
 	owned [4]pinnedVerdict
 }
 

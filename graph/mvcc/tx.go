@@ -98,6 +98,10 @@ func (tx Tx) Implicit() bool { return IsImplicitTx(tx.ID()) }
 // NoteAdjacency records that this transaction created a version on the
 // adjacency entry of node id; see [TxState.NoteAdjacency]. It is a no-op for
 // the zero value.
+//
+// Safe for concurrent use.
+//
+// For use by graph/lpg and graph/adjlist; not part of the stable API.
 func (tx Tx) NoteAdjacency(id uint64) {
 	if tx.st != nil {
 		tx.st.NoteAdjacency(id)

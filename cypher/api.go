@@ -21323,7 +21323,10 @@ func (a *lpgMutatorAdapter) RemoveNode(n string) {
 	if wasLive && indexFanoutActive(a.g, a.buf) {
 		enqueueNodeRemovalChanges(a.g, a.buf, n, id)
 	}
-	applied := a.w().RemoveNode(n)
+	// The error is the conflict the statement's transaction recorded on itself,
+	// which fails the statement at commit; [exec.GraphMutator.RemoveNode] returns
+	// nothing, so only the admission flag is used here.
+	applied, _ := a.w().RemoveNode(n)
 	// THE COUNTER AND THE INVERSE GATE TOGETHER, on the OUTCOME rather than on
 	// the pre-probe above (rmp #2726). Journalling an inverse for a retirement
 	// that never happened revives a node the conflicting peer went on to delete
@@ -22696,7 +22699,10 @@ func (a *walMutatorAdapter) RemoveNode(n string) {
 		enqueueNodeRemovalChanges(a.g, a.buf, n, id)
 	}
 	mark, counted := a.effectMark()
-	applied := a.w().RemoveNode(n)
+	// The error is the conflict the statement's transaction recorded on itself,
+	// which fails the statement at commit; [exec.GraphMutator.RemoveNode] returns
+	// nothing, so only the admission flag is used here.
+	applied, _ := a.w().RemoveNode(n)
 	if !applied {
 		// See the lpgMutatorAdapter twin (rmp #2726). The WAL frame is gated too,
 		// for the reason rmp #2725 gated the edge one: a frame for a retirement

@@ -510,6 +510,8 @@ func severChain[W any](e *adjEntry[W], watermark uint64) (freed, retained int, r
 // Safe for concurrent use with readers, writers and [AdjList.Reclaim]: every
 // chain it changes is changed under that chain's shard lock, which Reclaim
 // takes too, and Reclaim never severs a record that is still in flight.
+//
+// For use by graph/lpg and graph/adjlist; not part of the stable API.
 func (a *AdjList[N, W]) WithdrawTx(info *mvcc.CommitInfo, ids []uint64) (freed int) {
 	if info == nil || len(ids) == 0 || !a.versioning {
 		return 0

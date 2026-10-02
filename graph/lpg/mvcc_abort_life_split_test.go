@@ -29,7 +29,7 @@ func TestReclaimAbortedLife_AbortBetweenTheLoopsKeepsARolledBackDeleteAlive(t *t
 
 	tx1 := g.BeginVersionedTx()
 	if err := g.ApplyInVersionedTx(ctx, tx1, func(tx WriteTx) error {
-		g.Writer(tx).RemoveNode("a")
+		_, _ = g.Writer(tx).RemoveNode("a")
 		return nil
 	}); err != nil {
 		t.Fatalf("tx1 delete: %v", err)

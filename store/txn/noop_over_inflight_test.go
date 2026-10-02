@@ -20,6 +20,7 @@ package txn_test
 // committing A alone over the same setup.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -264,7 +265,7 @@ func ioRunCase(t *testing.T, setup []ioOp, b, a *ioOp, want ioOracle) string {
 	setupDump := ioDump(g)
 	inB, releaseB, doneB := make(chan struct{}), make(chan struct{}), make(chan error, 1)
 	go func() {
-		doneB <- g.ApplyDurable(func(wtx lpg.WriteTx) error {
+		doneB <- g.ApplyDurable(context.Background(), func(wtx lpg.WriteTx) error {
 			return txn.ApplyOpForTest(g.Writer(wtx), *b)
 		}, func() error {
 			close(inB)

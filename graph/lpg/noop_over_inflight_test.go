@@ -44,7 +44,7 @@ const wvHandle, wvFreshHandle = 7, 9
 
 var wvOps = []wvOp{
 	{"AddNode", func(w WriteView[string, float64]) error { return w.AddNode("x") }},
-	{"RemoveNode", func(w WriteView[string, float64]) error { w.RemoveNode("x"); return nil }},
+	{"RemoveNode", func(w WriteView[string, float64]) error { _, _ = w.RemoveNode("x"); return nil }},
 	{"Revive", func(w WriteView[string, float64]) error { return w.Revive("x") }},
 	{"SetNodeLabel", func(w WriteView[string, float64]) error { return w.SetNodeLabel("x", "L") }},
 	{"RemoveNodeLabel", func(w WriteView[string, float64]) error { return w.RemoveNodeLabel("x", "L") }},
@@ -119,7 +119,7 @@ var wvSetups = []struct {
 				return err
 			}
 		}
-		w.RemoveNode("x")
+		_, _ = w.RemoveNode("x")
 		return nil
 	}},
 }
@@ -176,14 +176,14 @@ var errWVInjected = errors.New("injected durable-step failure")
 func wvNew(t *testing.T, setup func(WriteView[string, float64]) error) *Graph[string, float64] {
 	t.Helper()
 	g := New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
-	if err := g.ApplyDurable(func(wtx WriteTx) error { return setup(g.Writer(wtx)) }, func() error { return nil }); err != nil {
+	if err := g.ApplyDurable(context.Background(), func(wtx WriteTx) error { return setup(g.Writer(wtx)) }, func() error { return nil }); err != nil {
 		t.Fatalf("setup: %v", err)
 	}
 	return g
 }
 
 func wvCommit(g *Graph[string, float64], op wvOp) error {
-	return g.ApplyDurable(func(wtx WriteTx) error { return op.run(g.Writer(wtx)) }, func() error { return nil })
+	return g.ApplyDurable(context.Background(), func(wtx WriteTx) error { return op.run(g.Writer(wtx)) }, func() error { return nil })
 }
 
 // wvMode is how A runs: as the bounded transaction of a durable store commit,
@@ -226,7 +226,7 @@ func wvCell(t *testing.T, setup func(WriteView[string, float64]) error, b, a wvO
 	setupDump := wvDump(g)
 	inB, releaseB, doneB := make(chan struct{}), make(chan struct{}), make(chan error, 1)
 	go func() {
-		doneB <- g.ApplyDurable(func(wtx WriteTx) error { return b.run(g.Writer(wtx)) },
+		doneB <- g.ApplyDurable(context.Background(), func(wtx WriteTx) error { return b.run(g.Writer(wtx)) },
 			func() error { close(inB); <-releaseB; return errWVInjected })
 	}()
 	select {

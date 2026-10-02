@@ -46,7 +46,7 @@ func TestNodeExistence_IsVersionedInBothDirections(t *testing.T) {
 
 	// A node removed after the reader started.
 	if err := g.ApplyAtomicallyTx(func(tx WriteTx) error {
-		if !g.Writer(tx).RemoveNode("old") {
+		if ok, _ := g.Writer(tx).RemoveNode("old"); !ok {
 			t.Fatalf("g.RemoveNode(\"old\") removed nothing: %v", tx.Err())
 		}
 		return nil
@@ -80,7 +80,7 @@ func TestNodeExistence_RemoveThenReviveInOneTransaction(t *testing.T) {
 	id := mvccNodeID(t, g, "a")
 
 	if err := g.ApplyAtomicallyTx(func(tx WriteTx) error {
-		if !g.Writer(tx).RemoveNode("a") {
+		if ok, _ := g.Writer(tx).RemoveNode("a"); !ok {
 			t.Fatalf("g.RemoveNode(\"a\") removed nothing: %v", tx.Err())
 		}
 		return g.Writer(tx).AddNode("a") // the undo log's revival

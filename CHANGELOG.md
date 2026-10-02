@@ -83,9 +83,18 @@ and the project follows [Semantic Versioning](https://semver.org/).
     `(bool, error)`. `SetEdgeRelTypeAtSlotByID` and `AddEdgeRelTypeOverflowByID` keep
     their signatures and can now return the refusal.
   - `graph/lpg.WriteView`: `Revive`, `RemoveEdgeInstance` and
-    `RemoveEdgeInstanceByHandle` now return `error`. Over the zero `WriteTx`,
-    `RemoveNode`, `RemoveEdge`, `RemoveEdgeByHandle` and `RemoveAllEdgesFrom` report
-    `false` for the refusal.
+    `RemoveEdgeInstanceByHandle` now return `error`. `RemoveNode` now returns
+    `(bool, error)`: the error is the refusal behind a `false`, the transaction's
+    recorded conflict inside a transaction and the wrapped `ErrDirectWriteConflict`
+    over the zero `WriteTx`. Over the zero `WriteTx`, `RemoveEdge`, `RemoveEdgeByHandle`
+    and `RemoveAllEdgesFrom` report `false` for the refusal.
+  - `graph/lpg.Graph.ApplyDurable` takes a `context.Context` as its first argument.
+    It bounds the waits behind conflicting commits; a cancelled call returns an error
+    wrapping the context's error, with nothing applied and nothing durable.
+  - `store/txn.Tx.CommitCtx(ctx)` is new: `Commit` with its waits behind conflicting
+    commits bounded by `ctx`; a cancellation before the apply holds its claims writes
+    nothing to the WAL. `Commit` is `CommitCtx(context.Background())`.
+    `ErrCommittedNotApplied` is deprecated: no function returns it any longer.
   - `graph/mvcc`: `ImplicitTxBit`, `IsImplicitTx`, `Clock.NextImplicitTxID` and
     `Tx.Implicit` are new.
   - `graph/adjlist.AdjList`: `WithdrawTx` and the diagnostic `CheckInvariants` are new

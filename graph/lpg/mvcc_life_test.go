@@ -72,7 +72,7 @@ func TestNodeLife_RolledBackDeleteSurvivesAnUnrelatedDelete(t *testing.T) {
 	// separating this from the #2445 case, whose reader survives to the end.
 	tx1 := g.BeginVersionedTx()
 	if err := g.ApplyInVersionedTx(ctx, tx1, func(tx WriteTx) error {
-		g.Writer(tx).RemoveNode("a")
+		_, _ = g.Writer(tx).RemoveNode("a")
 		return nil
 	}); err != nil {
 		t.Fatalf("tx1 delete: %v", err)
@@ -102,7 +102,7 @@ func TestNodeLife_RolledBackDeleteSurvivesAnUnrelatedDelete(t *testing.T) {
 	tx2 := g.BeginVersionedTx()
 	defer g.EndVersionedTx(tx2)
 	if err := g.ApplyInVersionedTx(ctx, tx2, func(tx WriteTx) error {
-		g.Writer(tx).RemoveNode("a")
+		_, _ = g.Writer(tx).RemoveNode("a")
 		return nil
 	}); err != nil {
 		t.Fatalf("tx2 delete: %v", err)
@@ -165,7 +165,7 @@ func TestNodeLife_InTxCreateDeleteRecreateStaysInvisible(t *testing.T) {
 		if err := g.Writer(tx).AddNode("a"); err != nil {
 			return err
 		}
-		g.Writer(tx).RemoveNode("a")
+		_, _ = g.Writer(tx).RemoveNode("a")
 		return g.Writer(tx).AddNode("a")
 	}); err != nil {
 		t.Fatalf("tx1 create/delete/create: %v", err)
@@ -187,7 +187,7 @@ func TestNodeLife_InTxCreateDeleteRecreateStaysInvisible(t *testing.T) {
 	tx2 := g.BeginVersionedTx()
 	defer g.EndVersionedTx(tx2)
 	if err := g.ApplyInVersionedTx(ctx, tx2, func(tx WriteTx) error {
-		g.Writer(tx).RemoveNode("a")
+		_, _ = g.Writer(tx).RemoveNode("a")
 		return nil
 	}); err != nil {
 		t.Fatalf("tx2 delete: %v", err)
@@ -220,7 +220,7 @@ func TestNodeLife_OrdinaryResurrectionIsNotMistakenForAnUndo(t *testing.T) {
 	g, id := lifeGraph(t)
 
 	if err := g.ApplyVersioned(func(tx WriteTx) error {
-		g.Writer(tx).RemoveNode("a")
+		_, _ = g.Writer(tx).RemoveNode("a")
 		return nil
 	}); err != nil {
 		t.Fatalf("committed delete: %v", err)
@@ -268,7 +268,7 @@ func TestNodeLife_RepeatedDeleteReviveKeepsTheTransactionsPriorState(t *testing.
 
 	tx1 := g.BeginVersionedTx()
 	if err := g.ApplyInVersionedTx(ctx, tx1, func(tx WriteTx) error {
-		g.Writer(tx).RemoveNode("a")
+		_, _ = g.Writer(tx).RemoveNode("a")
 		return nil
 	}); err != nil {
 		t.Fatalf("tx1 first delete: %v", err)
@@ -280,7 +280,7 @@ func TestNodeLife_RepeatedDeleteReviveKeepsTheTransactionsPriorState(t *testing.
 
 	for i, step := range []func(WriteTx) error{
 		func(tx WriteTx) error { return g.Writer(tx).Revive("a") },
-		func(tx WriteTx) error { g.Writer(tx).RemoveNode("a"); return nil },
+		func(tx WriteTx) error { _, _ = g.Writer(tx).RemoveNode("a"); return nil },
 		func(tx WriteTx) error { return g.Writer(tx).Revive("a") },
 	} {
 		if err := g.ApplyInVersionedTx(ctx, tx1, step); err != nil {
@@ -301,7 +301,7 @@ func TestNodeLife_RepeatedDeleteReviveKeepsTheTransactionsPriorState(t *testing.
 	tx2 := g.BeginVersionedTx()
 	defer g.EndVersionedTx(tx2)
 	if err := g.ApplyInVersionedTx(ctx, tx2, func(tx WriteTx) error {
-		g.Writer(tx).RemoveNode("a")
+		_, _ = g.Writer(tx).RemoveNode("a")
 		return nil
 	}); err != nil {
 		t.Fatalf("tx2 delete: %v", err)

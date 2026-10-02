@@ -151,7 +151,9 @@ func (m mutationUndo) recordAddNode(n string, wasNew bool) {
 		return
 	}
 	m.undo.record(func() {
-		m.wv.RemoveNode(n)
+		// An inverse has nowhere to return an error, and this view carries the
+		// statement's transaction, which records any refusal on itself.
+		_, _ = m.wv.RemoveNode(n)
 		m.wv.Graph().DecrNodesAdded()
 	})
 }
@@ -194,11 +196,11 @@ func (m mutationUndo) recordAddEdge(src, dst string, handle uint64, srcNew, dstN
 		m.wv.RemoveEdgeByHandle(src, dst, handle)
 		m.wv.Graph().DecrEdgesAdded()
 		if srcNew {
-			m.wv.RemoveNode(src)
+			_, _ = m.wv.RemoveNode(src) // as above: the refusal is recorded on the transaction
 			m.wv.Graph().DecrNodesAdded()
 		}
 		if dstNew && !selfLoop {
-			m.wv.RemoveNode(dst)
+			_, _ = m.wv.RemoveNode(dst) // as above: the refusal is recorded on the transaction
 			m.wv.Graph().DecrNodesAdded()
 		}
 	})

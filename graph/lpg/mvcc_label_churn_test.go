@@ -725,7 +725,7 @@ func TestLabelChurnGate_NoReaderSeesADeadNode(t *testing.T) {
 					err := g.ApplyVersioned(func(tx WriteTx) error {
 						wv := g.Writer(tx)
 						for _, k := range keys[lo:hi] {
-							wv.RemoveNode(k)
+							_, _ = wv.RemoveNode(k)
 						}
 						// IN FLIGHT: the deletes are applied to the tombstone
 						// bitmap already and their index removals are deferred, so

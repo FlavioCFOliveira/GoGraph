@@ -316,7 +316,7 @@ func TestDeleteVisibility_PresentReaderAgreesWithTheTombstone(t *testing.T) {
 			runDeleteVisibilityProbe(t, rounds, 64, 4, true, nil,
 				func(g *Graph[string, float64], key string, _ graph.NodeID) {
 					if err := g.ApplyVersioned(func(tx WriteTx) error {
-						g.Writer(tx).RemoveNode(key)
+						_, _ = g.Writer(tx).RemoveNode(key)
 						return tx.Err()
 					}); err != nil {
 						t.Errorf("ApplyVersioned(RemoveNode %q): %v", key, err)
@@ -527,7 +527,7 @@ func TestDeleteVisibility_UndoReplayRetirementLeavesNoIndexedDeadNode(t *testing
 		// The physical undo of that CREATE, exactly as cypher's undo log replays
 		// it: bracketed by EnterUndo/ExitUndo, so the index removal is immediate.
 		tx.EnterUndo()
-		wv.RemoveNode("created")
+		_, _ = wv.RemoveNode("created")
 		tx.ExitUndo()
 		return nil
 	}); err != nil {

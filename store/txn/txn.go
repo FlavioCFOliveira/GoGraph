@@ -162,6 +162,10 @@ const MaxTxnOpsUnlimited = -1
 // frames and [OpCommit] marker were written and fsynced) while a later
 // in-memory apply step failed.
 //
+// Deprecated: no function of this package returns it any longer; see below.
+// It is kept only so that existing errors.Is checks still compile, and such a
+// check is now always false.
+//
 // [Tx.Commit] no longer returns it. Commit applies the transaction in memory,
 // holding its claims, BEFORE it writes the WAL record, so every refusal the
 // apply can raise — a conflict, a validator's refusal, [adjlist.ErrShardFull]
@@ -1785,7 +1789,35 @@ func (t *Tx[N, W]) DropIndex(name string) error {
 // engine's adapter discarded the mutators' return value at eighteen sites and a
 // refusal raised there would have been swallowed (rmp #2742); those sites either
 // propagate now or carry a verified statement of what their callee can return.
+//
+// Commit is [Tx.CommitCtx] with [context.Background]: its waits behind other
+// store commits are bounded only by the in-memory layer's budget. Like every
+// method of Tx it must be called by the goroutine that owns the transaction.
 func (t *Tx[N, W]) Commit() error {
+	return t.CommitCtx(context.Background())
+}
+
+// CommitCtx is [Tx.Commit] with its waits bounded by ctx; everything Commit's
+// documentation states holds for it.
+//
+// # Cancellation
+//
+// ctx bounds only the time the in-memory apply spends waiting for another
+// store commit or direct write that holds a conflicting uncommitted version
+// ([lpg.Graph.ApplyDurable]). When ctx is done before the apply has taken its
+// claims, CommitCtx returns an error wrapping ctx's error — [context.Canceled]
+// or [context.DeadlineExceeded], matched with [errors.Is] — and the
+// transaction is finished with NOTHING durable and nothing applied: no WAL
+// record was written, and a new transaction may retry the same ops. Once the
+// apply holds its claims, ctx is no longer consulted: the WAL append, the
+// fsync and the publication run to their own end, so a cancellation can never
+// leave a durable record that was not published, nor report a durable commit
+// as cancelled.
+//
+// Like every method of Tx it must be called by the goroutine that owns the
+// transaction; concurrent CommitCtx calls on different transactions of one
+// [Store] are safe.
+func (t *Tx[N, W]) CommitCtx(ctx context.Context) error {
 	defer metrics.Time("store.txn.Commit").Stop()
 	if t.finished {
 		metrics.IncCounter("store.txn.Commit.errors", 1)
@@ -1843,7 +1875,7 @@ func (t *Tx[N, W]) Commit() error {
 	// apply; an op that wrote none changed nothing and is marked, so the durable
 	// step leaves it out of the WAL. The mark is rewritten by every attempt, because
 	// a rerun applies the ops to a newer state, where a no-op may take effect.
-	err := t.store.g.ApplyDurable(func(wtx lpg.WriteTx) error {
+	err := t.store.g.ApplyDurable(ctx, func(wtx lpg.WriteTx) error {
 		wv := t.store.g.Writer(wtx)
 		for i := range t.ops {
 			op := &t.ops[i]
@@ -3705,8 +3737,8 @@ func applyOp[N comparable, W any](wv lpg.WriteView[N, W], op Op[N, W]) error {
 		if err := strip(); err != nil {
 			return err
 		}
-		if !wv.RemoveNode(op.Src) {
-			return wv.Tx().Err()
+		if ok, err := wv.RemoveNode(op.Src); !ok {
+			return err
 		}
 		if err := strip(); err != nil {
 			return err

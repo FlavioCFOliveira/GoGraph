@@ -5,6 +5,7 @@ package lpg
 // arrival order, instead of polling; and the commit releases it on every exit.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -27,7 +28,7 @@ func holdDurable(t *testing.T, g *Graph[string, float64], end func() error) (rel
 				done <- fmt.Errorf("panicked: %v", r)
 			}
 		}()
-		done <- g.ApplyDurable(func(wtx WriteTx) error {
+		done <- g.ApplyDurable(context.Background(), func(wtx WriteTx) error {
 			return g.Writer(wtx).SetNodeProperty("x", "p", Int64Value(1))
 		}, func() error {
 			close(inDurable)
@@ -58,7 +59,7 @@ func TestApplyDurable_WaiterParksUntilTheBlockerEnds(t *testing.T) {
 			var attempts atomic.Int64
 			waiterDone := make(chan error, 1)
 			go func() {
-				waiterDone <- g.ApplyDurable(func(wtx WriteTx) error {
+				waiterDone <- g.ApplyDurable(context.Background(), func(wtx WriteTx) error {
 					attempts.Add(1)
 					return g.Writer(wtx).SetNodeProperty("x", "p", Int64Value(2))
 				}, func() error { return nil })
@@ -106,7 +107,7 @@ func TestApplyDurable_WaitersAreServedInArrivalOrder(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			err := g.ApplyDurable(func(wtx WriteTx) error {
+			err := g.ApplyDurable(context.Background(), func(wtx WriteTx) error {
 				attempts.Add(1)
 				return g.Writer(wtx).SetNodeProperty("x", "p", Int64Value(int64(i)))
 			}, func() error {

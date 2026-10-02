@@ -8,6 +8,7 @@ package lpg
 // Layer: short.
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -20,7 +21,7 @@ var errInjectedDurable = errors.New("injected durable-step failure")
 // so every version it wrote is withdrawn by the abort.
 func abortedDurable(t *testing.T, g *Graph[string, float64], apply func(WriteView[string, float64]) error) {
 	t.Helper()
-	err := g.ApplyDurable(func(wtx WriteTx) error { return apply(g.Writer(wtx)) },
+	err := g.ApplyDurable(context.Background(), func(wtx WriteTx) error { return apply(g.Writer(wtx)) },
 		func() error { return errInjectedDurable })
 	if !errors.Is(err, errInjectedDurable) {
 		t.Fatalf("aborted transaction returned %v, want the injected failure", err)
@@ -29,7 +30,7 @@ func abortedDurable(t *testing.T, g *Graph[string, float64], apply func(WriteVie
 
 func committedDurable(t *testing.T, g *Graph[string, float64], apply func(WriteView[string, float64]) error) {
 	t.Helper()
-	if err := g.ApplyDurable(func(wtx WriteTx) error { return apply(g.Writer(wtx)) },
+	if err := g.ApplyDurable(context.Background(), func(wtx WriteTx) error { return apply(g.Writer(wtx)) },
 		func() error { return nil }); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
@@ -55,7 +56,7 @@ func TestAbortLifeRestore(t *testing.T) {
 				if err := w.AddNode("x"); err != nil {
 					return err
 				}
-				w.RemoveNode("x")
+				_, _ = w.RemoveNode("x")
 				return nil
 			},
 			aborted: func(w WriteView[string, float64]) error { return w.AddNode("x") },
@@ -67,20 +68,20 @@ func TestAbortLifeRestore(t *testing.T) {
 				if err := w.AddNode("x"); err != nil {
 					return err
 				}
-				w.RemoveNode("x")
+				_, _ = w.RemoveNode("x")
 				return nil
 			},
-			aborted: func(w WriteView[string, float64]) error { w.RemoveNode("x"); return nil },
+			aborted: func(w WriteView[string, float64]) error { _, _ = w.RemoveNode("x"); return nil },
 			want:    state{alive: false, unborn: false},
 		},
 		{
 			name:  "aborted revive-then-remove of a committed-dead node leaves it dead and born",
-			setup: func(w WriteView[string, float64]) error { _ = w.AddNode("x"); w.RemoveNode("x"); return nil },
+			setup: func(w WriteView[string, float64]) error { _ = w.AddNode("x"); _, _ = w.RemoveNode("x"); return nil },
 			aborted: func(w WriteView[string, float64]) error {
 				if err := w.AddNode("x"); err != nil {
 					return err
 				}
-				w.RemoveNode("x")
+				_, _ = w.RemoveNode("x")
 				return nil
 			},
 			want: state{alive: false, unborn: false},
@@ -90,7 +91,7 @@ func TestAbortLifeRestore(t *testing.T) {
 			setup: func(w WriteView[string, float64]) error { return w.AddNode("other") },
 			aborted: func(w WriteView[string, float64]) error {
 				_ = w.AddNode("x")
-				w.RemoveNode("x")
+				_, _ = w.RemoveNode("x")
 				return w.AddNode("x")
 			},
 			want: state{alive: false, unborn: true},
@@ -98,7 +99,7 @@ func TestAbortLifeRestore(t *testing.T) {
 		{
 			name:    "aborted removal of a live node leaves it alive",
 			setup:   func(w WriteView[string, float64]) error { return w.AddNode("x") },
-			aborted: func(w WriteView[string, float64]) error { w.RemoveNode("x"); return nil },
+			aborted: func(w WriteView[string, float64]) error { _, _ = w.RemoveNode("x"); return nil },
 			want:    state{alive: true, unborn: false},
 		},
 		{

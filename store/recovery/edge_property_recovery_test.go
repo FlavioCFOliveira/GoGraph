@@ -139,7 +139,7 @@ func TestEdgePropertyByHandle_Txn_ValidatorRejection_RefusesBeforeTheWAL(t *test
 	if commitErr == nil {
 		t.Fatal("Commit returned nil with a rejecting validator; expected the validator's refusal")
 	}
-	if errors.Is(commitErr, txn.ErrCommittedNotApplied) {
+	if errors.Is(commitErr, txn.ErrCommittedNotApplied) { //nolint:staticcheck // SA1019: asserts the deprecated sentinel is never returned
 		t.Fatalf("Commit error = %v; a refused apply must not be reported as durable", commitErr)
 	}
 	if err := w.Close(); err != nil {

@@ -87,6 +87,7 @@ package lpg
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -1341,8 +1342,9 @@ func (g *Graph[N, W]) ApplyVersioned(fn func(WriteTx) error) error {
 // back over it — a snapshot read, and every direct present-state accessor
 // ([Graph.GetNodeProperty], [Graph.HasNodeLabel], [adjlist.AdjList.HasEdge] and
 // the rest; see [Graph.latestCommitted]) except the eagerly maintained
-// tombstone, label-index and count readers. Running apply first therefore takes the transaction's claims on
-// every object it will write before durable logs anything, so a conflict refuses
+// tombstone, label-index and count readers. Running apply first therefore takes
+// the transaction's claims on every object it will write before durable logs
+// anything, so a conflict refuses
 // the transaction while nothing is durable, and once durable has returned nil
 // nothing can refuse it: the publication that follows tests nothing. This is the
 // order PostgreSQL and InnoDB keep — row locks are taken by the statements,
@@ -1394,9 +1396,24 @@ func (g *Graph[N, W]) ApplyVersioned(fn func(WriteTx) error) error {
 // apply and durable must not call [Graph.ApplyAtomically] or
 // [Graph.ApplyVersioned], for the reason given on ApplyVersioned.
 //
+// # Cancellation
+//
+// ctx bounds the WAITS only: the call returns ctx's error, wrapping
+// [context.Canceled] or [context.DeadlineExceeded], when ctx is already done on
+// entry or finishes while an attempt is parked behind another bounded
+// transaction or backing off. Every such return happens between attempts, so
+// the transaction is aborted, holds nothing, has not run durable, and has handed
+// on any waiters it inherited. ctx does NOT interrupt a running attempt: once
+// apply has run, durable is called and the attempt ends as it decides, so a
+// cancellation never leaves a durable record that was not published. An
+// uncancellable ctx such as [context.Background] costs nothing extra.
+//
 // Safe for concurrent use from any number of goroutines.
-func (g *Graph[N, W]) ApplyDurable(apply func(WriteTx) error, durable func() error) error {
+func (g *Graph[N, W]) ApplyDurable(ctx context.Context, apply func(WriteTx) error, durable func() error) error {
 	defer metrics.Time("graph.lpg.ApplyDurable").Stop()
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("lpg: ApplyDurable: %w", err)
+	}
 	if !g.mvccArmed {
 		if err := durable(); err != nil {
 			return err
@@ -1424,7 +1441,10 @@ func (g *Graph[N, W]) ApplyDurable(apply func(WriteTx) error, durable func() err
 		if mvcc.IsBoundedTx(head) {
 			// Park on the blocking commit's end, in arrival order, holding
 			// nothing: this attempt has already been aborted (see txwait.go).
-			q, ok, wk := g.txWait.wait(head, start.Add(directWaitBudget))
+			q, ok, wk, cerr := g.txWait.wait(ctx, head, start.Add(directWaitBudget))
+			if cerr != nil {
+				return fmt.Errorf("lpg: ApplyDurable: waiting for a conflicting commit: %w", cerr)
+			}
 			if !ok {
 				return err
 			}
@@ -1432,6 +1452,9 @@ func (g *Graph[N, W]) ApplyDurable(apply func(WriteTx) error, durable func() err
 			continue
 		}
 		directBackoff(attempt)
+		if cerr := ctx.Err(); cerr != nil {
+			return fmt.Errorf("lpg: ApplyDurable: %w", cerr)
+		}
 	}
 }
 

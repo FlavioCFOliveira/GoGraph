@@ -61,7 +61,7 @@ func TestCommit_ApplyRefusalLeavesNothingDurable(t *testing.T) {
 	if err == nil {
 		t.Fatal("Commit returned nil; expected adjlist.ErrShardFull (capped shard must overflow on apply)")
 	}
-	if errors.Is(err, txn.ErrCommittedNotApplied) {
+	if errors.Is(err, txn.ErrCommittedNotApplied) { //nolint:staticcheck // SA1019: asserts the deprecated sentinel is never returned
 		t.Fatalf("Commit error = %v; a refused apply must not be reported as durable", err)
 	}
 	if !errors.Is(err, adjlist.ErrShardFull) {

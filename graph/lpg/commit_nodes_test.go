@@ -37,7 +37,7 @@ func TestCommitNodes_PrivateIsExactlyTheNodesBornInTheTransaction(t *testing.T) 
 		}
 	}
 	if err := g.ApplyVersioned(func(tx WriteTx) error {
-		g.Writer(tx).RemoveNode("dead")
+		_, _ = g.Writer(tx).RemoveNode("dead")
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -52,7 +52,7 @@ func TestCommitNodes_PrivateIsExactlyTheNodesBornInTheTransaction(t *testing.T) 
 		if err := w.SetNodeLabel("old", "L"); err != nil { // committed before, modified here
 			return err
 		}
-		w.RemoveNode("undone") // deleted and restored here: the undo of a DELETE
+		_, _ = w.RemoveNode("undone") // deleted and restored here: the undo of a DELETE
 		if err := w.AddNode("undone"); err != nil {
 			return err
 		}

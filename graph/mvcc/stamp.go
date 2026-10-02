@@ -146,16 +146,16 @@ type TxState struct {
 	// withdraws exactly those entries, under only their shards' locks, and an
 	// abort that wrote no adjacency skips the adjacency entirely. It survives
 	// [TxState.Retract], because the abort runs after the retraction, and is
-	// emptied by the next [TxState.Arm]. adjMu orders the transaction's own
+	// emptied by the next [TxState.Arm]. writeSetMu orders the transaction's own
 	// writers, which may run on several shards at once.
-	adjMu sync.Mutex
-	adj   []uint64
+	writeSetMu sync.Mutex
+	adj        []uint64
 	// side is the transaction's write set in every versioned store OTHER than
 	// the adjacency entries: one [SideWrite] per version it created there, in
 	// write order, duplicates included. An abort withdraws exactly those
 	// objects, so its cost is proportional to the transaction's own writes and
 	// not to the number of objects in the graph that carry history (ACID audit
-	// round 6, finding M1). Guarded by adjMu, survives [TxState.Retract], and is
+	// round 6, finding M1). Guarded by writeSetMu, survives [TxState.Retract], and is
 	// emptied by the next [TxState.Arm]. A transaction that writes no such store
 	// leaves it nil and allocates nothing for it.
 	side []SideWrite
@@ -175,10 +175,16 @@ type TxState struct {
 // that withdraws an aborted transaction by its write sets must instead scan
 // every store when the bit is set. Callers define every other bit of the mask
 // and must not use this one.
+//
+// For use by graph/lpg and graph/adjlist; not part of the stable API.
 const TouchedAmbient uint32 = 1 << 31
 
 // Touch records, in the caller-defined mask, that the transaction wrote to the
-// stores bits names. Safe for concurrent use.
+// stores bits names.
+//
+// Safe for concurrent use.
+//
+// For use by graph/lpg and graph/adjlist; not part of the stable API.
 func (st *TxState) Touch(bits uint32) {
 	if st.touched.Load()&bits != bits {
 		st.touched.Or(bits)
@@ -186,6 +192,10 @@ func (st *TxState) Touch(bits uint32) {
 }
 
 // Touched returns the mask [TxState.Touch] built since the last [TxState.Arm].
+//
+// Safe for concurrent use: it is one atomic load.
+//
+// For use by graph/lpg and graph/adjlist; not part of the stable API.
 func (st *TxState) Touched() uint32 { return st.touched.Load() }
 
 // maxRetainedAdjWrites caps the write-set capacity a recycled [TxState] keeps,
@@ -194,16 +204,25 @@ func (st *TxState) Touched() uint32 { return st.touched.Load() }
 const maxRetainedAdjWrites = 1024
 
 // NoteAdjacency records that the transaction created a version on the
-// adjacency entry of node id. Safe for concurrent use.
+// adjacency entry of node id.
+//
+// Safe for concurrent use.
+//
+// For use by graph/lpg and graph/adjlist; not part of the stable API.
 func (st *TxState) NoteAdjacency(id uint64) {
-	st.adjMu.Lock()
+	st.writeSetMu.Lock()
 	st.adj = append(st.adj, id)
-	st.adjMu.Unlock()
+	st.writeSetMu.Unlock()
 }
 
 // SideWrite names one versioned object a transaction wrote outside the
 // adjacency entries. Store is a caller-defined store tag and A, B and C the
 // object's key within that store, as the caller encodes it.
+//
+// It is a plain comparable value with no internal synchronisation; copies are
+// independent.
+//
+// For use by graph/lpg and graph/adjlist; not part of the stable API.
 type SideWrite struct {
 	A, B, C uint64
 	Store   uint8
@@ -218,35 +237,49 @@ const sideInline = 8
 
 // NoteSide records that the transaction created a version on the object w
 // names. An object equal to the last one recorded is not recorded again, so a
-// run of writes to one object costs one entry. Safe for concurrent use.
+// run of writes to one object costs one entry.
+//
+// Safe for concurrent use.
+//
+// For use by graph/lpg and graph/adjlist; not part of the stable API.
 func (st *TxState) NoteSide(w SideWrite) {
-	st.adjMu.Lock()
+	st.writeSetMu.Lock()
 	if n := len(st.side); n > 0 && st.side[n-1] == w {
-		st.adjMu.Unlock()
+		st.writeSetMu.Unlock()
 		return
 	}
 	if st.side == nil {
 		st.side = st.sideBuf[:0]
 	}
 	st.side = append(st.side, w)
-	st.adjMu.Unlock()
+	st.writeSetMu.Unlock()
 }
 
 // SideWrites returns the side write set [TxState.NoteSide] recorded since the
 // last [TxState.Arm]. The slice is valid until that state is armed again, and
 // the caller must not modify it.
+//
+// Safe for concurrent use with [TxState.NoteSide]: a concurrent append writes
+// only past the returned slice's length.
+//
+// For use by graph/lpg and graph/adjlist; not part of the stable API.
 func (st *TxState) SideWrites() []SideWrite {
-	st.adjMu.Lock()
-	defer st.adjMu.Unlock()
+	st.writeSetMu.Lock()
+	defer st.writeSetMu.Unlock()
 	return st.side
 }
 
 // AdjacencyWrites returns the adjacency write set [TxState.NoteAdjacency]
 // recorded since the last [TxState.Arm]. The slice is valid until that state
 // is armed again, and the caller must not modify it.
+//
+// Safe for concurrent use with [TxState.NoteAdjacency]: a concurrent append
+// writes only past the returned slice's length.
+//
+// For use by graph/lpg and graph/adjlist; not part of the stable API.
 func (st *TxState) AdjacencyWrites() []uint64 {
-	st.adjMu.Lock()
-	defer st.adjMu.Unlock()
+	st.writeSetMu.Lock()
+	defer st.writeSetMu.Unlock()
 	return st.adj
 }
 
@@ -268,7 +301,7 @@ func (st *TxState) Arm(txID uint64) bool {
 	st.count.Store(0)
 	st.txID.Store(txID)
 	st.touched.Store(0)
-	st.adjMu.Lock()
+	st.writeSetMu.Lock()
 	if cap(st.adj) > maxRetainedAdjWrites {
 		st.adj = nil
 	} else {
@@ -279,7 +312,7 @@ func (st *TxState) Arm(txID uint64) bool {
 	} else {
 		st.side = st.side[:0]
 	}
-	st.adjMu.Unlock()
+	st.writeSetMu.Unlock()
 	st.info.Store(armedPending)
 	return true
 }
@@ -294,6 +327,10 @@ func (st *TxState) TxID() uint64 { return st.txID.Load() }
 // A caller samples it before and after one operation to learn whether that
 // operation changed anything: on an armed graph every change is a version, so
 // an unchanged count means the operation took no effect (rmp #2965, round 5).
+//
+// Safe for concurrent use: it is one atomic load.
+//
+// For use by graph/lpg and graph/adjlist; not part of the stable API.
 func (st *TxState) Versions() int64 { return st.count.Load() }
 
 // Reusable reports whether st can be armed for a new transaction — the test

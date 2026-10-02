@@ -216,7 +216,7 @@ func TestWriteView_CoversEveryTransactionalMutator(t *testing.T) {
 	// with no WriteView method must be added.
 	calls := map[string]func(){
 		"addNodeInfo":      func() { _ = wv.AddNode("n") },
-		"removeNodeInfo":   func() { wv.RemoveNode("n") },
+		"removeNodeInfo":   func() { _, _ = wv.RemoveNode("n") },
 		"reviveInfo":       func() { must(t).E(wv.Revive("n")) },
 		"setNodeLabelInfo": func() { _ = wv.SetNodeLabel("n", "L") },
 		"removeNodeLabelInfo": func() {

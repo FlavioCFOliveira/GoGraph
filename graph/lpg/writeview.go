@@ -221,13 +221,22 @@ func (wv WriteView[N, W]) AddNode(n N) error {
 // caller's own presence probe answers that; this answers only whether the write
 // was ADMITTED — the same reading [WriteView.RemoveEdge] takes.
 //
-// A view over the zero [WriteTx] reports FALSE when the removal was refused with
-// [ErrDirectWriteConflict] (rmp #2947), in which case it changed nothing.
-func (wv WriteView[N, W]) RemoveNode(n N) bool {
+// The error is the refusal behind a FALSE, and nil with a TRUE. Inside a
+// transaction it is the conflict the transaction recorded on itself
+// ([WriteTx.Err]); the transaction is doomed whether or not the caller acts on
+// it. Over the zero [WriteTx] it is the direct write's refusal, wrapping
+// [ErrDirectWriteConflict] (rmp #2947), and the call changed nothing. The
+// (bool, error) result is a breaking change: RemoveNode used to return only the
+// bool.
+func (wv WriteView[N, W]) RemoveNode(n N) (bool, error) {
 	if wv.w == nil {
-		return wv.g.removeNodeDirect(n) == nil
+		err := wv.g.removeNodeDirect(n)
+		return err == nil, err
 	}
-	return wv.g.removeNodeInfo(n, wv.w)
+	if !wv.g.removeNodeInfo(n, wv.w) {
+		return false, wv.w.err()
+	}
+	return true, nil
 }
 
 // Revive is [Graph.Revive] inside this view's transaction. It returns nil inside

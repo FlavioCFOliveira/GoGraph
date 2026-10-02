@@ -80,10 +80,12 @@ package lpg
 // hot-key commit into a client-side retry storm.
 
 import (
+	"context"
 	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"github.com/FlavioCFOliveira/GoGraph/internal/metrics"
 )
@@ -123,12 +125,15 @@ func (q *waitQueue) push(w *txWaiter) {
 	q.tail = w
 }
 
-// txWaitShard is one shard of [txWaitTable], padded to its own cache line so
-// unrelated commits do not contend on one line.
+// txWaitShard is one shard of [txWaitTable]. The pad, derived from the field
+// sizes, makes the shard stride exactly 64 bytes, so a shard's lock and map
+// share cache lines with no more than its two neighbours. It does not align
+// shards to line boundaries: the table is embedded in [Graph], whose layout
+// fixes where the first shard starts.
 type txWaitShard struct {
 	mu sync.Mutex
 	m  map[uint64]waitQueue
-	_  [64 - 16]byte
+	_  [64 - unsafe.Sizeof(sync.Mutex{}) - unsafe.Sizeof(map[uint64]waitQueue(nil))]byte
 }
 
 // txWaitShards is the shard count of [txWaitTable]: a power of two, so the
@@ -230,21 +235,30 @@ func (t *txWaitTable) handOff(q waitQueue) {
 	}
 }
 
-// wait parks the caller until the bounded transaction txID ends or deadline
-// passes. It reports whether the caller should retry — true when txID ended,
-// or had already ended — the queue the caller inherited, which it must enter
-// with its next bounded attempt or hand on with [txWaitTable.handOff], and
-// whether a hand-off woke it, in which case it owes one
-// [txWaitTable.handoffDone] once its next attempt has run.
+// wait parks the caller until the bounded transaction txID ends, deadline
+// passes, or ctx is done. It reports whether the caller should retry — true
+// when txID ended, or had already ended — the queue the caller inherited, which
+// it must enter with its next bounded attempt or hand on with
+// [txWaitTable.handOff], and whether a hand-off woke it, in which case it owes
+// one [txWaitTable.handoffDone] once its next attempt has run.
+//
+// When ctx is done first, wait returns ctx's error and owes the caller nothing:
+// it leaves the queue exactly as a timed-out waiter does, and if a hand-off
+// chose it at the same moment it retires that hand-off's token and hands the
+// inherited queue on itself, so no waiter behind it is stranded. A ctx whose
+// Done channel is nil ([context.Background]) adds no work and no allocation.
 //
 // The caller must hold no version and no lock.
-func (t *txWaitTable) wait(txID uint64, deadline time.Time) (inherited waitQueue, retry, woken bool) {
+func (t *txWaitTable) wait(ctx context.Context, txID uint64, deadline time.Time) (inherited waitQueue, retry, woken bool, err error) {
+	if err := ctx.Err(); err != nil {
+		return waitQueue{}, false, false, err
+	}
 	sh := t.shard(txID)
 	sh.mu.Lock()
 	q, inFlight := sh.m[txID]
 	if !inFlight {
 		sh.mu.Unlock()
-		return waitQueue{}, true, false
+		return waitQueue{}, true, false, nil
 	}
 	w := &txWaiter{ch: make(chan struct{}, 1)}
 	q.push(w)
@@ -258,18 +272,33 @@ func (t *txWaitTable) wait(txID uint64, deadline time.Time) (inherited waitQueue
 	}
 	timer := time.NewTimer(d)
 	defer timer.Stop()
+	cancelled := false
 	select {
 	case <-w.ch:
-		return w.inherit, true, true
+		return w.inherit, true, true, nil
 	case <-timer.C:
+	case <-ctx.Done():
+		cancelled = true
 	}
 	if w.state.CompareAndSwap(waiterWaiting, waiterAbandoned) {
+		if cancelled {
+			metrics.IncCounter("lpg.mvcc.commit_wait_cancels", 1)
+			return waitQueue{}, false, false, ctx.Err()
+		}
 		metrics.IncCounter("lpg.mvcc.commit_wait_timeouts", 1)
-		return waitQueue{}, false, false
+		return waitQueue{}, false, false, nil
 	}
-	// A hand-off chose this waiter as the timer fired; its send is imminent.
-	// Take it and the queue that came with it — dropping the queue would strand
-	// every waiter behind this one until its deadline.
+	// A hand-off chose this waiter as the timer fired or ctx finished; its send
+	// is imminent. Take it and the queue that came with it — dropping the queue
+	// would strand every waiter behind this one until its deadline.
 	<-w.ch
-	return w.inherit, true, true
+	if cancelled {
+		// The caller will not run the attempt it was woken for: retire the
+		// token and pass the queue to the next live waiter now.
+		t.handoffDone()
+		t.handOff(w.inherit)
+		metrics.IncCounter("lpg.mvcc.commit_wait_cancels", 1)
+		return waitQueue{}, false, false, ctx.Err()
+	}
+	return w.inherit, true, true, nil
 }

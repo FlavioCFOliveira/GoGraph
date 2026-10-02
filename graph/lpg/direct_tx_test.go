@@ -335,7 +335,7 @@ func TestDirectTx_LabelSetBetweenStripAndFlip(t *testing.T) {
 			if bracket {
 				err = g.ApplyAtomicallyTx(func(tx WriteTx) error {
 					hookTx = tx
-					if !g.Writer(tx).RemoveNode("a") {
+					if ok, _ := g.Writer(tx).RemoveNode("a"); !ok {
 						t.Errorf("RemoveNode inside the bracket was refused: %v", tx.Err())
 					}
 					return nil

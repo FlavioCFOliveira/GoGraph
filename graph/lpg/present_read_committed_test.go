@@ -6,6 +6,7 @@ package lpg
 // to it, and stays invisible when the fsync fails and the commit is withdrawn.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"slices"
@@ -192,7 +193,7 @@ func inFlightWrites(g *Graph[string, float64]) func(WriteTx) error {
 		if err := w.SetEdgeProperty("n", "b", "pp", Int64Value(8)); err != nil {
 			return err
 		}
-		if !w.RemoveNode("rm") {
+		if ok, _ := w.RemoveNode("rm"); !ok {
 			return errors.New("the removal of rm was refused")
 		}
 		return nil
@@ -206,7 +207,7 @@ func TestPresentReads_NeverSeeAnUnpublishedCommit(t *testing.T) {
 			g := presentReadFixture(t)
 			before := presentReadings(g)
 			var during string
-			err := g.ApplyDurable(inFlightWrites(g), func() error {
+			err := g.ApplyDurable(context.Background(), inFlightWrites(g), func() error {
 				done := make(chan struct{})
 				go func() { defer close(done); during = presentReadings(g) }()
 				<-done
@@ -257,7 +258,7 @@ func diffReadings(want, got string) string {
 // the transaction itself reads its own uncommitted writes through its view.
 func TestPresentReads_ReadYourOwnWritesThroughTheTransaction(t *testing.T) {
 	g := presentReadFixture(t)
-	err := g.ApplyDurable(inFlightWrites(g), func() error { return nil })
+	err := g.ApplyDurable(context.Background(), inFlightWrites(g), func() error { return nil })
 	if err != nil {
 		t.Fatal(err)
 	}

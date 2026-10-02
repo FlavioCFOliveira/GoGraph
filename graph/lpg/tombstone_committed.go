@@ -64,7 +64,9 @@ func (g *Graph[N, W]) TombstonedIDs() []graph.NodeID {
 // [Graph.LiveOrder], as [Graph.TombstonedIDsAsOf] does not list it. The stored
 // counter is [Graph.TombstoneCountStored].
 //
-// Safe for concurrent use.
+// Safe for concurrent use. Under concurrent node creation, removal or revival
+// the count is approximate, off by at most the nodes those writes touch; see
+// [Graph.committedLifeCounts].
 func (g *Graph[N, W]) TombstoneCount() int {
 	dead, _ := g.committedLifeCounts()
 	return dead
@@ -73,7 +75,9 @@ func (g *Graph[N, W]) TombstoneCount() int {
 // LiveOrder returns how many interned nodes exist at the newest committed
 // state. The stored count is [Graph.LiveOrderStored].
 //
-// Safe for concurrent use.
+// Safe for concurrent use. Under concurrent node creation, removal or revival
+// the count is approximate, off by at most the nodes those writes touch; see
+// [Graph.committedLifeCounts].
 func (g *Graph[N, W]) LiveOrder() uint64 {
 	_, live := g.committedLifeCounts()
 	return live
@@ -97,6 +101,14 @@ func (g *Graph[N, W]) LiveNodeFilter() func(graph.NodeID) bool {
 // Only a node with a life record can differ between the stored state and the
 // committed one, so the stored counts are corrected over the retained records
 // alone rather than over every interned node.
+//
+// The counts are EXACT only when no node is created, removed or revived while
+// they are computed. The stored counters, the set of nodes with a life record
+// and each node's stored and committed state are read at different moments
+// under no common lock, so a concurrent removal or revival — committed or not —
+// can leave either count off by the number of nodes it touched, and a node
+// whose first life record appears after its shard was scanned is not
+// corrected. A count taken with no concurrent node-existence write is exact.
 func (g *Graph[N, W]) committedLifeCounts() (dead int, live uint64) {
 	dead, live = g.TombstoneCountStored(), g.LiveOrderStored()
 	if !g.mvccArmed || g.nodeLifeActive.Load() == 0 {
@@ -104,7 +116,9 @@ func (g *Graph[N, W]) committedLifeCounts() (dead int, live uint64) {
 	}
 	var cs Snapshot // the read position: newest committed
 	s := g.latestCommitted(&cs)
-	var ids []graph.NodeID
+	// Sized from the retained-record gauge, so the common case appends without
+	// growing; the gauge is a hint and the slice still grows past it.
+	ids := make([]graph.NodeID, 0, max(g.nodeLifeActive.Load(), 0))
 	for i := range g.nodeLifeShards {
 		sh := &g.nodeLifeShards[i]
 		sh.mu.RLock()

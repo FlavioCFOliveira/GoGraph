@@ -2354,7 +2354,7 @@ func typedSchemaPureStoreArm(seed *Seed) (tsPureStoreObservation, error) {
 	// rejected one OP, not the batch. Committing it is what gives the recovery
 	// half of this arm something to replay.
 	commitErr := rejectTx.Commit()
-	obs.notApplied = errors.Is(commitErr, txn.ErrCommittedNotApplied)
+	obs.notApplied = errors.Is(commitErr, txn.ErrCommittedNotApplied) //nolint:staticcheck // SA1019: asserts the deprecated sentinel is never returned
 	if commitErr != nil && !obs.notApplied {
 		obs.rejectErr += " | commit: " + fmt.Sprint(commitErr)
 	}
