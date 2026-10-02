@@ -3,8 +3,11 @@ package sim
 import (
 	"context"
 	"fmt"
+	"sort"
 
+	"github.com/FlavioCFOliveira/GoGraph/bolt/packstream"
 	"github.com/FlavioCFOliveira/GoGraph/bolt/proto"
+	"github.com/FlavioCFOliveira/GoGraph/cypher/exec"
 )
 
 // SchemaChangeFamily identifies one DDL operation the [SchemaChanger] issues.
@@ -63,6 +66,11 @@ func (f SchemaChangeFamily) String() string {
 // acceptable. A panic, leak, or torn index/lost constraint is a violation,
 // checked structurally after the run rather than per-attempt.
 type SchemaChangeOutcome struct {
+	// Counters is the statement's effect report as the terminal SUCCESS carried
+	// it on the wire, decoded by [wireDDLCounters]: nil when the SUCCESS carried
+	// no `stats` map (the server's report of a statement that changed nothing).
+	// It is set only when Succeeded.
+	Counters   *exec.QueryCounters
 	FailureMsg string
 	Family     SchemaChangeFamily
 	Succeeded  bool
@@ -148,8 +156,106 @@ func (a SchemaChanger) Run(c *WireClient, family SchemaChangeFamily, modern bool
 		out.FailureMsg = m.Code + ": " + m.Message
 	default:
 		out.Succeeded = true
+		counters, err := wireDDLCounters(term)
+		if err != nil {
+			return out, fmt.Errorf("sim: schema-change stats(%s): %w", family, err)
+		}
+		out.Counters = counters
 	}
 	return out, nil
+}
+
+// RunChecked is [SchemaChanger.Run] with the statement's wire-reported counters
+// ADJUDICATED (rmp #2829): it snapshots srv's engine schema registries before
+// and after the statement and holds the counters the terminal SUCCESS carried
+// to their difference with [CheckDDLCounters] — the same expectation the
+// in-process DDL route ([runDDLChecked], rmp #2822) applies. A counter that
+// lies anywhere between the engine's operator and the Bolt `stats` encoding is
+// returned as a violation. A typed FAILURE is not adjudicated, as on the
+// in-process route: a failed statement applied no effect to report.
+//
+// The registry difference is attributable to this statement only while no other
+// DDL runs against srv's engine; data writes never change the registries. Every
+// caller in this package issues DDL from a single connection.
+func (a SchemaChanger) RunChecked(srv *SimServer, c *WireClient, family SchemaChangeFamily, modern bool) (SchemaChangeOutcome, []Violation, error) {
+	engine := NewEngineAdapter(srv.eng)
+	before := readDDLSchemaNames(engine)
+	out, err := a.Run(c, family, modern)
+	if err != nil || !out.Succeeded {
+		return out, nil, err
+	}
+	after := readDDLSchemaNames(engine)
+	return out, CheckDDLCounters(0, a.statement(family, modern), before, after, out.Counters), nil
+}
+
+// wireDDLCounters decodes the `stats` map of a terminal SUCCESS into the
+// counters the server encoded it from (bolt/server/result_stats.go resultStats).
+// A SUCCESS without a `stats` map decodes to nil, which [CheckDDLCounters]
+// treats as an all-zero report.
+//
+// The decoding is strict, so the wire report cannot be misread as a clean one:
+// every key must be one the encoder emits, every counter must be an integer, and
+// `contains-updates` must be the boolean true and present exactly when some
+// counter is non-zero. Bolt's single properties-set is decoded into
+// PropertiesSet; the encoder sums openCypher's +properties and -properties into
+// it, and a DDL statement must report zero for both.
+func wireDDLCounters(term any) (*exec.QueryCounters, error) {
+	s, ok := term.(*proto.Success)
+	if !ok {
+		return nil, fmt.Errorf("terminal %T is not a SUCCESS", term)
+	}
+	rawStats, present := s.Metadata["stats"]
+	if !present {
+		return nil, nil
+	}
+	stats, ok := rawStats.(map[string]packstream.Value)
+	if !ok {
+		return nil, fmt.Errorf("stats is %T, want a map", rawStats)
+	}
+	c := &exec.QueryCounters{}
+	fields := map[string]*int64{
+		"nodes-created":         &c.NodesCreated,
+		"nodes-deleted":         &c.NodesDeleted,
+		"relationships-created": &c.RelationshipsCreated,
+		"relationships-deleted": &c.RelationshipsDeleted,
+		"properties-set":        &c.PropertiesSet,
+		"labels-added":          &c.LabelsAdded,
+		"labels-removed":        &c.LabelsRemoved,
+		"indexes-added":         &c.IndexesAdded,
+		"indexes-removed":       &c.IndexesRemoved,
+		"constraints-added":     &c.ConstraintsAdded,
+		"constraints-removed":   &c.ConstraintsRemoved,
+	}
+	keys := make([]string, 0, len(stats))
+	for k := range stats {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys) // a deterministic first error
+	containsUpdates := false
+	for _, k := range keys {
+		v := stats[k]
+		if k == "contains-updates" {
+			b, ok := v.(bool)
+			if !ok || !b {
+				return nil, fmt.Errorf("stats contains-updates is %T %v, want the boolean true", v, v)
+			}
+			containsUpdates = true
+			continue
+		}
+		dst, known := fields[k]
+		if !known {
+			return nil, fmt.Errorf("stats carries unknown key %q", k)
+		}
+		n, ok := v.(int64)
+		if !ok {
+			return nil, fmt.Errorf("stats %s is %T, want an integer", k, v)
+		}
+		*dst = n
+	}
+	if containsUpdates != c.ContainsUpdates() {
+		return nil, fmt.Errorf("stats contains-updates=%t disagrees with its counters %+v", containsUpdates, *c)
+	}
+	return c, nil
 }
 
 // statement returns the idempotent DDL Cypher for a family. For
@@ -178,7 +284,11 @@ func (SchemaChanger) statement(family SchemaChangeFamily, modern bool) string {
 }
 
 // RunSchemaChurn drives a SchemaChanger through rounds DDL statements over a
-// single connection, returning the per-round outcomes. It stops early on ctx
+// single connection, returning the per-round outcomes. Every statement goes
+// through [SchemaChanger.RunChecked], so a wire-reported counter that disagrees
+// with the engine's registries ends the churn with an error (rmp #2829); the
+// random family draw makes absorbed forms (a drop of an absent object, a
+// re-create of a present one) part of the stream. It stops early on ctx
 // cancellation. It is the unit the concurrent integration test runs alongside
 // honest writers.
 func RunSchemaChurn(ctx context.Context, srv *SimServer, seed *Seed, rounds int) ([]SchemaChangeOutcome, error) {
@@ -204,11 +314,16 @@ func RunSchemaChurn(ctx context.Context, srv *SimServer, seed *Seed, rounds int)
 			// the constraint family, keeping the other families' streams unchanged.
 			modern = a.PickModernForm(seed)
 		}
-		out, err := a.Run(c, fam, modern)
+		out, violations, err := a.RunChecked(srv, c, fam, modern)
 		if err != nil {
 			return outcomes, err
 		}
 		outcomes = append(outcomes, out)
+		if len(violations) > 0 {
+			// The wire-reported counters disagree with the schema effect the
+			// engine's own registries show (rmp #2829).
+			return outcomes, ddlCountersError(a.statement(fam, modern), violations)
+		}
 		if out.Failed {
 			// A typed DDL FAILURE (e.g. a re-create conflict) moves the Bolt session
 			// to FAILED, in which every further RUN is illegal until a RESET. Reset
