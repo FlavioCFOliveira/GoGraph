@@ -399,9 +399,11 @@ already streaming), which bounds the following intentional limitations:
   populated (rmp #2721). Alongside the operator tree, `args` carries `Details`,
   `EstimatedRows` and its provenance, and — for a `PROFILE` — `RowsRemovedByFilter`.
   The page-cache figures Neo4j reports are absent because GoGraph measures none of
-  them, and a fabricated zero would read as a measurement. Two limitations sit
-  inside the pair: `PROFILE` refuses a writing statement, and neither prefix may
-  precede a schema statement.
+  them, and a fabricated zero would read as a measurement. A writing `PROFILE`
+  executes and commits exactly as the unprefixed statement does — in its own
+  transaction on an autocommit RUN, inside the open transaction otherwise — with
+  the same write counters (rmp #2790). Neither prefix may precede a schema
+  statement.
 - **`type`** — not sent, so `ResultSummary.StatementType` reads
   `StatementTypeUnknown`.
 - **`t_first`** / **`t_last`** — not sent; the server does not measure them, so

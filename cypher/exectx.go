@@ -671,7 +671,13 @@ func (tx *ExplicitTx) Exec(query string, params map[string]expr.Value) (res *Res
 	// prefixed statement therefore does not observe writes this transaction has
 	// not committed. That is a diagnostic reading the committed graph, not a
 	// statement of the transaction.
-	if entry.planMode != parser.PlanModeNone {
+	// A PROFILE of a WRITING statement executes inside THIS transaction, exactly
+	// as the unprefixed statement would, with the measuring wrapper installed by
+	// the write builder (rmp #2790); every other prefixed statement is diverted.
+	var prof *exec.Profiler
+	if entry.planMode == parser.PlanModeProfile && entry.containsWrite {
+		prof = exec.NewProfiler()
+	} else if entry.planMode != parser.PlanModeNone {
 		return tx.eng.runPlanPrefixed(tx.ctx, entry, params, nil)
 	}
 	plan := entry.plan
@@ -711,13 +717,18 @@ func (tx *ExplicitTx) Exec(query string, params map[string]expr.Value) (res *Res
 	applyFn := func(fn func(lpg.WriteTx) error) error {
 		return tx.eng.g.ApplyInVersionedTx(tx.ctx, tx.wtx, fn)
 	}
-	r, buildErr := tx.eng.execUnderBarrier(tx.ctx, plan, queryReg, params, mutator, tx.buf, tx.undo, tx.walTx, false, applyFn, tx.touched)
+	r, buildErr := tx.eng.execUnderBarrier(tx.ctx, plan, queryReg, params, mutator, tx.buf, tx.undo, tx.walTx, false, applyFn, tx.touched, prof)
 	if buildErr != nil {
 		return nil, fmt.Errorf("cypher: build plan: %w", buildErr)
 	}
 	if stmtErr := r.Err(); stmtErr != nil {
 		tx.failed = true
 		return nil, &ErrStatementPipeline{Err: stmtErr}
+	}
+	if prof != nil {
+		// The plan-time advisories every prefixed statement carries; see
+		// [Engine.runPlanPrefixed].
+		r.notifications = entry.notifications
 	}
 	return r, nil
 }

@@ -11,6 +11,7 @@ package cypher_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -319,10 +320,12 @@ func totalDbHits(n *exec.PlanNode) int64 {
 	return total
 }
 
-// TestPlanPrefix_ProfileRefusesWritingStatement pins the documented limitation:
-// a writing statement cannot be profiled, because the profiling wrapper is
-// installed by the READ builder. It must be REFUSED, never silently executed
-// without a profile.
+// TestPlanPrefix_ProfileRefusesWritingStatement pinned, until rmp #2790, that a
+// writing statement could not be profiled. It now pins the replacement: a
+// writing PROFILE routed to the transactional path (RunAny sends it to RunInTx)
+// executes, applies its write exactly once, and returns a measured tree; sent to
+// Engine.Run, which never writes, it is refused exactly as the unprefixed
+// statement is, and applies nothing.
 func TestPlanPrefix_ProfileRefusesWritingStatement(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -331,16 +334,26 @@ func TestPlanPrefix_ProfileRefusesWritingStatement(t *testing.T) {
 	t.Cleanup(func() { _ = eng.Close() })
 
 	before := graphFingerprint(ctx, t, eng)
-	r, err := eng.RunAny(ctx, "PROFILE CREATE (:Person {age: 1})", nil)
-	if err == nil {
-		_ = r.Close()
-		t.Fatal("PROFILE of a writing statement was accepted")
-	}
-	if !strings.Contains(err.Error(), "PROFILE") {
-		t.Errorf("error does not name PROFILE: %v", err)
+	if _, err := eng.Run(ctx, "PROFILE CREATE (:Person {age: 1})", nil); !errors.Is(err, cypher.ErrWriteInReadOnlyTx) {
+		t.Fatalf("Engine.Run did not refuse a writing PROFILE as it refuses the write: %v", err)
 	}
 	if after := graphFingerprint(ctx, t, eng); after != before {
-		t.Errorf("a refused PROFILE still mutated the graph: %s -> %s", before, after)
+		t.Fatalf("a refused PROFILE still mutated the graph: %s -> %s", before, after)
+	}
+
+	r, err := eng.RunAny(ctx, "PROFILE CREATE (:Person {age: 1})", nil)
+	if err != nil {
+		t.Fatalf("PROFILE of a writing statement was refused on the transactional path: %v", err)
+	}
+	tree := r.Profile()
+	if err := r.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if tree == nil || tree.Name != "CreateNode" || tree.Rows != 1 || !tree.Profiled {
+		t.Errorf("want a measured CreateNode root with rows=1, got %+v", tree)
+	}
+	if c := g.LiveOrder(); c != 4 {
+		t.Errorf("the profiled CREATE left %d nodes, want exactly 4 (3 seeded + 1)", c)
 	}
 }
 

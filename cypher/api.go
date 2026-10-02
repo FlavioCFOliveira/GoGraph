@@ -2563,8 +2563,32 @@ type pinnedView struct{ snap *lpg.Snapshot }
 // A recoverable panic raised while planning or executing the query is
 // intercepted and returned as an error wrapping [ErrInternalPanic]; it never
 // unwinds past this method to crash the embedding process.
+//
+// # Cross-statement visibility: no read-your-own-writes (rmp #2626)
+//
+// Run gives each statement snapshot isolation and promises nothing ACROSS
+// statements; in particular it does NOT give read-your-own-writes. A statement's
+// snapshot is taken at the contiguous commit frontier ([mvcc.Clock.ReadTS]),
+// which cannot pass an older commit that is still in flight. A caller that
+// committed through [Engine.RunInTx] and then reads through Run can therefore
+// miss its own acknowledged commit while an earlier, unrelated commit is still
+// in flight — measured at 1 to 4 of every 4,000 reads under 16
+// concurrent writers (docs/mvcc-frontier-visibility.md). This DIVERGES from the
+// default of PostgreSQL and InnoDB, whose snapshot carries the set of in-flight
+// transactions, and of Memgraph, which reads its start timestamp under the
+// engine lock: all three show a connection its own commits. A caller that must
+// observe its own writes runs its statements through a [Session]
+// ([Engine.NewSession]), which waits for the frontier to reach its latest commit
+// before taking the next snapshot.
 func (e *Engine) Run(ctx context.Context, query string, params map[string]expr.Value) (*Result, error) {
 	return e.runRead(ctx, query, params, nil)
+}
+
+// errRunWrite returns the refusal [Engine.Run] gives a writing statement, with
+// or without a PROFILE prefix (rmp #2790): one constructor, so the two surfaces
+// cannot drift.
+func errRunWrite() error {
+	return fmt.Errorf("cypher: Run does not execute write or DDL statements; use RunInTx or RunAny instead: %w", ErrWriteInReadOnlyTx)
 }
 
 // runRead is the single read-execution path. It is [Engine.Run] with the read
@@ -2637,7 +2661,7 @@ func (e *Engine) runRead(ctx context.Context, query string, params map[string]ex
 	// answer is a pure function of a plan the cache holds immutable. See
 	// [planCacheEntry.containsWrite].
 	if entry.containsWrite {
-		return nil, fmt.Errorf("cypher: Run does not execute write or DDL statements; use RunInTx or RunAny instead: %w", ErrWriteInReadOnlyTx)
+		return nil, errRunWrite()
 	}
 
 	// ── 1b. Parameter presence + type check ─────────────────────────────────
@@ -3028,9 +3052,14 @@ func (e *Engine) explainPhysical(entry *planCacheEntry, params map[string]expr.V
 // attributed to it — GoGraph's equivalent of the PROFILE both incumbents expose
 // (Neo4j adds db-hits, Memgraph relative time).
 //
-// The query really runs: rows are produced and discarded, so Profile is for a
-// reading statement only and returns an error for a writing one rather than
-// performing its writes as a side effect of a diagnostic.
+// The query really runs: rows are produced and discarded. A WRITING statement
+// therefore really writes (rmp #2790): it executes exactly as [Engine.RunInTx]
+// executes it — one transaction, committed on success and rolled back on error,
+// its writes applied exactly once and its write counters unchanged — with the
+// measuring wrapper installed by the write builder, so the tree covers the write
+// operators too. The Cypher `PROFILE` prefix follows the same rule on
+// [Engine.RunInTx] and [ExplicitTx.Exec]; on [Engine.Run], which never writes, a
+// writing PROFILE is refused exactly as the unprefixed statement is.
 //
 // Times are INCLUSIVE of an operator's children, because a pipelined operator's
 // Next pulls from them. Subtract a node's children to obtain its exclusive cost —
@@ -3066,6 +3095,11 @@ func (e *Engine) profilePlanTree(ctx context.Context, query string, params map[s
 	if ir.IsDDL(query) {
 		return exec.PlanNode{}, fmt.Errorf("cypher: Profile: DDL has no query plan")
 	}
+	// A writing statement is profiled on the transactional write path, by the
+	// classifier [Engine.RunAny] uses to route the same statement (rmp #2790).
+	if queryHasWritingClause(query) {
+		return e.profileWritePlanTree(ctx, query, params)
+	}
 	entry, autoParams, err := e.parseAndAnalyse(query)
 	params = mergeAutoParams(params, autoParams)
 	if err != nil {
@@ -3073,10 +3107,6 @@ func (e *Engine) profilePlanTree(ctx context.Context, query string, params map[s
 	}
 	if entry.semaErr != nil {
 		return exec.PlanNode{}, entry.semaErr
-	}
-	if queryHasWritingClause(query) {
-		return exec.PlanNode{}, fmt.Errorf("cypher: Profile: refusing to execute a writing statement; " +
-			"use Explain for its plan, or RunInTx to execute it")
 	}
 	if err := checkParamPresence(entry.paramRefs, params); err != nil {
 		return exec.PlanNode{}, err
@@ -3101,6 +3131,35 @@ func (e *Engine) profilePlanTree(ctx context.Context, query string, params map[s
 		return exec.PlanNode{}, drainErr
 	}
 	return tree, nil
+}
+
+// profileWritePlanTree is [Engine.profilePlanTree] for a writing statement (rmp
+// #2790). It executes query on the [Engine.RunInTx] path with a profiler in the
+// write builder, drains and closes the Result — which is where an error the
+// statement raised surfaces, after the transaction was rolled back — and returns
+// the measured tree captured before the commit.
+func (e *Engine) profileWritePlanTree(ctx context.Context, query string, params map[string]expr.Value) (exec.PlanNode, error) {
+	r, err := e.runInTxSessionProfiled(ctx, nil, query, params, true)
+	if err != nil {
+		return exec.PlanNode{}, err
+	}
+	node := r.Profile()
+	for r.Next() {
+		// Drain: the measurements are the product, the rows are not.
+	}
+	drainErr := r.Err()
+	if cerr := r.Close(); cerr != nil && drainErr == nil {
+		drainErr = cerr
+	}
+	if drainErr != nil {
+		return exec.PlanNode{}, drainErr
+	}
+	if node == nil {
+		// Reached only for a statement the transactional path diverted rather than
+		// executed, such as one written with an EXPLAIN prefix.
+		return exec.PlanNode{}, fmt.Errorf("cypher: Profile: the statement produced no measured plan")
+	}
+	return *node, nil
 }
 
 // profileMaterialised builds entry's plan with the profiling instrumentation
@@ -7739,7 +7798,7 @@ func BuildPlanWithMutator(
 	//     from the mutator rather than from a new parameter is why
 	//     [mutatorIndexDelta] exists.
 	return buildPlanWithMutatorFull(plan, walker, labelSrc, reg, params, mutator, nil, nil, 0, nil,
-		planGates{indexSeek: true, pendingIdx: mutatorIndexDelta(mutator, plan)}, nil)
+		planGates{indexSeek: true, pendingIdx: mutatorIndexDelta(mutator, plan)}, nil, nil)
 }
 
 // planGates carries the ORDER-NEUTRAL planner substitutions the write-path build
@@ -7822,6 +7881,7 @@ func buildPlanWithMutatorFull(
 	procReg *procs.Registry,
 	gates planGates,
 	evals *writeEvalScaffold,
+	prof *exec.Profiler,
 ) (op exec.Operator, cols []string, err error) {
 	schema := make(map[string]int)
 	argByTag := make(map[uint32]*exec.Argument)
@@ -7834,6 +7894,12 @@ func buildPlanWithMutatorFull(
 	// — falls through to [buildOperator]'s default branch and errors with
 	// "unsupported IR node *ir.CreateNode".
 	bopts := &buildOpts{maxCollectItems: maxCollectItems, procReg: procReg}
+	// The PROFILE instrumentation of a WRITING statement (rmp #2790). nil — and
+	// therefore absent from the built tree — on every unprofiled run, exactly as on
+	// the read path (rmp #2222 AC 3). Installed HERE, in the write builder, so the
+	// write operators it wraps are the ones bound to this statement's live
+	// mutator; see [buildOperatorWrite] for the wrap point.
+	bopts.profiler = prof
 	// Order-neutral planner substitutions (#2225). Before this, the write path
 	// left every gate at its zero value, so a statement carrying any write clause
 	// was planned without the seek, without the min-label re-anchor and without
@@ -7944,7 +8010,10 @@ func buildPlanWithMutatorFull(
 		if projErr != nil {
 			return nil, nil, fmt.Errorf("cypher: build final projection: %w", projErr)
 		}
-		return proj, cols, nil
+		// The final projection is built ABOVE buildOperatorWrite's recursion, so
+		// the wrap point there never sees it; without this a profiled write
+		// rendered its root as "(not measured)". A no-op when unprofiled.
+		return profileIntermediate(bopts, proj), cols, nil
 	}
 
 	// Write-only query (no RETURN clause): build the write operator tree
@@ -7967,9 +8036,39 @@ func buildPlanWithMutatorFull(
 //
 // argByTag is forwarded to buildOperator for [*ir.Argument] resolution; pass
 // nil when no Apply-family operator is in scope.
+func buildOperatorWrite(
+	plan ir.LogicalPlan,
+	walker nodeWalkerIface,
+	labelSrc labelResolverIface,
+	reg expr.FunctionRegistry,
+	params map[string]expr.Value,
+	schema map[string]int,
+	mutator exec.GraphMutator,
+	constraintReg *exec.ConstraintRegistry,
+	idxMgr *index.Manager,
+	argByTag map[uint32]*exec.Argument,
+	bopts *buildOpts,
+) (exec.Operator, error) {
+	op, err := buildOperatorWriteRec(plan, walker, labelSrc, reg, params, schema, mutator, constraintReg, idxMgr, argByTag, bopts)
+	// The write-path counterpart of [buildOperator]'s single wrap point (rmp
+	// #2790): every node buildOperatorWriteRec produces passes through here on the
+	// way out of the recursion, because the recursion calls this function, not
+	// itself. A node the switch hands to [buildOperator] comes back wrapped
+	// already, and [exec.Profiler.Wrap] returns a wrapped operator unchanged, so no
+	// node is measured twice. With no profiler — every unprofiled run — the
+	// operator is returned exactly as built.
+	if err != nil || bopts == nil || bopts.profiler == nil {
+		return op, err
+	}
+	return bopts.profiler.Wrap(op), nil
+}
+
+// buildOperatorWriteRec is the body of [buildOperatorWrite]: the physical build
+// of one write-path plan node. It recurses through buildOperatorWrite, never
+// around it, so the profiling wrap point sees every node.
 //
 //nolint:gocyclo // large switch — one case per write IR node, no hidden branches
-func buildOperatorWrite(
+func buildOperatorWriteRec(
 	plan ir.LogicalPlan,
 	walker nodeWalkerIface,
 	labelSrc labelResolverIface,
@@ -20085,6 +20184,23 @@ func (a *execLabelAdapter) ResolveLabelCountAsOf(name string) (int64, bool) {
 // RunInTx is safe for concurrent use (each call creates an independent
 // operator tree), subject to the per-operator-tree single-goroutine constraint on write queries.
 //
+// # Cross-statement visibility: no read-your-own-writes (rmp #2626)
+//
+// RunInTx gives each statement snapshot isolation and promises nothing ACROSS
+// statements; in particular it does NOT give read-your-own-writes. A statement's
+// snapshot is taken at the contiguous commit frontier ([mvcc.Clock.ReadTS]),
+// which cannot pass an older commit that is still in flight. A caller that
+// commits through RunInTx and then reads, through [Engine.Run] or a later
+// RunInTx, can therefore miss its own acknowledged commit while an earlier,
+// unrelated commit is still in flight — measured at 1 to 4 of every 4,000 reads under 16
+// concurrent writers (docs/mvcc-frontier-visibility.md). This DIVERGES from the
+// default of PostgreSQL and InnoDB, whose snapshot carries the set of in-flight
+// transactions, and of Memgraph, which reads its start timestamp under the
+// engine lock: all three show a connection its own commits. A caller that must
+// observe its own writes runs its statements through a [Session]
+// ([Engine.NewSession]), which waits for the frontier to reach its latest commit
+// before taking the next snapshot.
+//
 // If ctx is already cancelled or its deadline has elapsed when RunInTx is
 // called, it returns promptly — before any parse, plan, or [txn.Store.Begin]
 // work — with an error wrapping the context error (matchable via [errors.Is]
@@ -20100,6 +20216,17 @@ func (e *Engine) RunInTx(ctx context.Context, query string, params map[string]ex
 // commit's instant onto it, which is what makes the caller's NEXT operation wait for
 // the frontier to reach it (rmp #2329). See [Session].
 func (e *Engine) runInTxSession(ctx context.Context, sess *lpg.Session[string, float64], query string, params map[string]expr.Value) (res *Result, err error) {
+	return e.runInTxSessionProfiled(ctx, sess, query, params, false)
+}
+
+// runInTxSessionProfiled is [Engine.runInTxSession] with an explicit request to
+// profile the statement. profile is true only for [Engine.Profile] /
+// [Engine.ProfileTable] of a writing statement; a statement written with the
+// PROFILE prefix is profiled whatever profile says. A profiled WRITING statement
+// executes exactly as the same statement does unprofiled — one transaction, one
+// commit, the same writes and counters — with the measuring wrapper installed by
+// the write builder (rmp #2790).
+func (e *Engine) runInTxSessionProfiled(ctx context.Context, sess *lpg.Session[string, float64], query string, params map[string]expr.Value, profile bool) (res *Result, err error) {
 	defer cmetrics.Time("cypher.RunInTx").Stop()
 	defer func() {
 		if err != nil {
@@ -20168,8 +20295,20 @@ func (e *Engine) runInTxSession(ctx context.Context, sess *lpg.Session[string, f
 	// EXPLAIN must not open a write transaction, let alone apply one. This is the
 	// path RunAny takes for a prefixed WRITING statement, since its textual
 	// writing-clause classifier sees the CREATE/DELETE that follows the prefix.
-	if entry.planMode != parser.PlanModeNone {
+	//
+	// A PROFILE of a WRITING statement is the exception (rmp #2790): it is NOT
+	// diverted, because PROFILE executes the statement and a write executes only
+	// inside a transaction. It takes the ordinary write path below with a profiler
+	// installed in the write builder, so its writes apply exactly once, under the
+	// same transaction, commit and Atomicity machinery as the unprefixed statement.
+	if entry.planMode == parser.PlanModeProfile && entry.containsWrite {
+		profile = true
+	} else if entry.planMode != parser.PlanModeNone {
 		return e.runPlanPrefixed(ctx, entry, params, nil)
+	}
+	var prof *exec.Profiler
+	if profile {
+		prof = exec.NewProfiler()
 	}
 	plan := entry.plan
 
@@ -20296,7 +20435,7 @@ func (e *Engine) runInTxSession(ctx context.Context, sess *lpg.Session[string, f
 				return sess.ApplyVersionedCtx(ctx, apply)
 			}
 			return e.g.ApplyVersionedCtx(ctx, apply)
-		}, touched)
+		}, touched, prof)
 	if buildErr != nil {
 		if walTx != nil {
 			_ = walTx.Rollback()
@@ -20337,6 +20476,11 @@ func (e *Engine) runInTxSession(ctx context.Context, sess *lpg.Session[string, f
 		nnErr := r.notNullErr
 		_ = r.Close()
 		return nil, nnErr
+	}
+	if r != nil && entry.planMode == parser.PlanModeProfile {
+		// The plan-time advisories every prefixed statement carries; see
+		// [Engine.runPlanPrefixed], which attaches them for every other prefix.
+		r.notifications = entry.notifications
 	}
 	return r, nil
 }
@@ -20457,6 +20601,7 @@ func (e *Engine) execUnderBarrier(
 	commit bool,
 	applyFn func(func(lpg.WriteTx) error) error,
 	touched *touchedNodes,
+	prof *exec.Profiler,
 ) (r *Result, buildErr error) {
 	// The bracket's own error is captured, not discarded (rmp #2306). It used to be
 	// `_ =` because the closure always returned nil and the bracket itself could not
@@ -20541,7 +20686,7 @@ func (e *Engine) execUnderBarrier(
 				hashJoin: e.hashJoinEnabled, indexSeek: e.indexSeekEnabled,
 				pendingIdx:         mutatorIndexDelta(mutator, plan),
 				trustIndexSnapshot: e.trustIndexSnapshotForTest},
-			&evals)
+			&evals, prof)
 		if berr != nil {
 			buildErr = berr
 			return nil
@@ -20574,6 +20719,7 @@ func (e *Engine) execUnderBarrier(
 			// only scope in which the handle exists.
 			r.mvccG, r.wtx = e.g, wtx
 			r.materialize()
+			attachWriteProfile(r, op, prof)
 			r.commitUnderBarrier()
 			// DROP THE HANDLE AT THE BRACKET BOUNDARY. Past this point the
 			// transaction's writeCtx is recycled, so keeping a reference would let a
@@ -20592,6 +20738,7 @@ func (e *Engine) execUnderBarrier(
 		r.globalMem = e.globalMem
 		r.counters = mutatorCounters(mutator)
 		r.materialize()
+		attachWriteProfile(r, op, prof)
 		return nil
 	}); bracketErr != nil {
 		// The bracket never opened, so nothing was applied and there is nothing to
@@ -20612,6 +20759,22 @@ func (e *Engine) execUnderBarrier(
 // all, and a read-only mutator reaching here would have nothing to do with the
 // handle. Silently ignoring anything else is therefore the correct behaviour and
 // not a swallowed error.
+// attachWriteProfile captures the measured plan of a PROFILED writing statement
+// onto r (rmp #2790); with no profiler it does nothing.
+//
+// It runs immediately after r.materialize(), which has driven every operator to
+// exhaustion, so the counters are final — and before the commit and any Close,
+// so the capture cannot observe a torn-down tree. That is the same ordering the
+// read path's [Engine.profileMaterialised] keeps.
+func attachWriteProfile(r *Result, op exec.Operator, prof *exec.Profiler) {
+	if prof == nil || r == nil {
+		return
+	}
+	tree := exec.PlanTree(op)
+	r.planNode = &tree
+	r.planMode = parser.PlanModeProfile
+}
+
 func setMutatorWriteTx(m exec.GraphMutator, wtx lpg.WriteTx) {
 	switch a := m.(type) {
 	case *lpgMutatorAdapter:
