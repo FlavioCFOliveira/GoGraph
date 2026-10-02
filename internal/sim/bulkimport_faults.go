@@ -43,11 +43,12 @@ import (
 )
 
 // bulkImportFaultStoreDir is the store directory every fault regime publishes
-// into on its SimDisk. It is root-level, so its own directory entry is exempt
-// from crash revocation exactly as SimDisk exempts every root-level name: the
-// regimes then measure the publish protocol under the store directory, not the
-// durability of the directory the caller handed in.
-const bulkImportFaultStoreDir = "bistore"
+// into on its SimDisk. It is nested: SimDisk exempts root-level names from crash
+// revocation, so a root-level store directory would hide whether the publish
+// makes the directory it creates durable. Nested, both "root" and
+// "root/bistore" are created by the publish, and "root/bistore" survives a host
+// crash only if the publish fsyncs its parent (rmp #2970).
+const bulkImportFaultStoreDir = "root/bistore"
 
 // bulkImportENOSPCCapacity is the disk bound for the ENOSPC regimes. It is half
 // the non-vacuity floor on the published snapshot's size, so a publish of the

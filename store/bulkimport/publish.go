@@ -89,7 +89,11 @@ type PublishResult struct {
 // Durability of the published bytes rests on the snapshot writer's existing fsync
 // discipline — each file fsynced, then the parent directory — which is the same
 // protocol the checkpointer uses and which the crash-injection battery already
-// exercises. This adds no new durability mechanism, deliberately.
+// exercises. The one step the import adds is for the store directory itself:
+// when the import creates storeDir or any of its ancestors, it fsyncs each
+// directory it created and the first ancestor that already existed before
+// writing the snapshot, so the store directory's own entry survives a host
+// crash once the import is acknowledged (rmp #2970).
 // # Weight types
 //
 // Publish persists edge weights whose Go type has a fixed width the CSR writer
@@ -172,9 +176,8 @@ func PublishFS[W any](
 }
 
 // publish is the body shared by the OS-backed and seamed entry points. A nil
-// fsys selects the operating system, through exactly the calls [Publish] made
-// before the seam existed, so the OS-backed entry points are unchanged in
-// behaviour.
+// fsys selects the operating system, through the same calls the seamed entry
+// points make on fsys.
 func publish[W any](
 	ctx context.Context, fsys fileSystem, storeDir string, b *Builder[W], wcodec txn.WeightCodec[W],
 ) (PublishResult, error) {
@@ -195,7 +198,7 @@ func publish[W any](
 	if err := requireEmptyDir(fsys, storeDir); err != nil {
 		return res, err
 	}
-	if err := mkdirAll(fsys, storeDir); err != nil {
+	if err := mkdirAllDurable(fsys, storeDir); err != nil {
 		return res, fmt.Errorf("bulkimport: create store directory %q: %w", storeDir, err)
 	}
 
@@ -317,11 +320,70 @@ func importInto[W any](
 	return publish[W](ctx, fsys, storeDir, b, nil)
 }
 
-// mkdirAll creates dir through fsys, or through the operating system when fsys
-// is nil.
-func mkdirAll(fsys fileSystem, dir string) error {
+// mkdirAllDurable creates dir and any missing ancestors through fsys, or
+// through the operating system when fsys is nil, and makes every directory
+// entry it created durable before returning (rmp #2970).
+//
+// A new directory's name lives in its parent, and on POSIX filesystems that
+// name is durable only once the parent is fsynced. The snapshot write fsyncs
+// dir itself after its publish rename, but not dir's parent; without the syncs
+// here a host crash after an acknowledged publish can drop the store
+// directory's entry, and recovery then finds no store at all. So, deepest
+// first, it fsyncs each directory it created and then the first ancestor that
+// already existed.
+//
+// When dir already exists nothing is created and nothing is synced. The
+// ancestors are probed with Stat before the MkdirAll; a [Publish] is concurrent
+// with nothing, so no other writer can create one of them in between.
+func mkdirAllDurable(fsys fileSystem, dir string) error {
+	created := missingDirs(fsys, dir)
+	var err error
 	if fsys != nil {
-		return fsys.MkdirAll(dir, 0o750)
+		err = fsys.MkdirAll(dir, 0o750)
+	} else {
+		err = os.MkdirAll(dir, 0o750)
 	}
-	return os.MkdirAll(dir, 0o750)
+	if err != nil {
+		return err
+	}
+	if len(created) == 0 {
+		return nil
+	}
+	// created is deepest first; append its last entry's parent, the first
+	// pre-existing ancestor, so it is synced last.
+	created = append(created, filepath.Dir(created[len(created)-1]))
+	for _, d := range created {
+		if fsys != nil {
+			err = fsys.DirSync(d)
+		} else {
+			err = dirFsync(d)
+		}
+		if err != nil {
+			return fmt.Errorf("fsync directory %q: %w", d, err)
+		}
+	}
+	return nil
+}
+
+// missingDirs returns dir and each of its ancestors that does not exist,
+// deepest first, stopping at the first one that exists. A path that is its own
+// parent — the working directory "." or a filesystem root — always exists and
+// is not probed. An ancestor whose Stat fails for a reason other than
+// non-existence ends the walk; the MkdirAll that follows reports that
+// condition.
+func missingDirs(fsys fileSystem, dir string) []string {
+	var created []string
+	for p := filepath.Clean(dir); filepath.Dir(p) != p; p = filepath.Dir(p) {
+		var err error
+		if fsys != nil {
+			_, err = fsys.Stat(p)
+		} else {
+			_, err = os.Stat(p)
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			break
+		}
+		created = append(created, p)
+	}
+	return created
 }

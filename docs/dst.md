@@ -725,11 +725,12 @@ directory before doing anything.
 ### Fault regimes, through the filesystem seam (rmp #2518)
 
 `bulkimport.PublishFS` and `bulkimport.ImportIntoFS` route the empty-directory
-check (`ReadDir`), the store-directory creation (`MkdirAll`) and the whole
-snapshot write (`snapshot.WriteSnapshotFullWithWeightCodecCtxFS`) through a
-caller-supplied filesystem whose type is intentionally unexported, as
-`store/snapshot`'s is. The OS-backed `Publish`, `PublishWithWeightCodec` and
-`ImportInto` make exactly the calls they made before. The scenario's fifth arm
+check (`ReadDir`), the store-directory creation (`Stat`, `MkdirAll` and
+`DirSync`) and the whole snapshot write
+(`snapshot.WriteSnapshotFullWithWeightCodecCtxFS`) through a caller-supplied
+filesystem whose type is intentionally unexported, as `store/snapshot`'s is. The
+OS-backed `Publish`, `PublishWithWeightCodec` and `ImportInto` make the same
+calls against the operating system. The scenario's fifth arm
 (`internal/sim/bulkimport_faults.go`) backs the seam with a `SimDisk` and, after
 each fault, host-crashes the disk and reopens the store through
 `recovery.OpenFS`. The outcome must be **all or nothing**: no snapshot and an
@@ -745,7 +746,7 @@ proves its fault fired. Measured on the default seed:
 | fsync fault on the last component (6th fsync) | `ErrSimFault`, `SyncCount() == 6` | empty |
 | rename fault on `snapshot.tmp` → `snapshot` | `RenameFaultCount() == 1` | empty |
 | crash after the publish rename, rename written back | `RenameWritebackCount() == 1` | complete |
-| process crash at each of the 35 filesystem operations | crash fired at 35 of 35 | 33 empty, 2 complete |
+| process crash at each of the 40 filesystem operations | crash fired at 40 of 40 | 38 empty, 2 complete |
 
 The crash sweep counts every directory operation and every `Write`, `Sync` and
 `Close` on a component file; from the crash point on the process is dead and
@@ -753,10 +754,13 @@ touches nothing. The one sweep point at which the publish still returned nil is
 the best-effort removal of a stale backup after the publish is already durable;
 the arm requires any such acknowledged publish to recover complete.
 
-The store directory is root-level on the `SimDisk`, whose crash model exempts
-root-level names from revocation. The arms therefore measure the publish
-protocol under the store directory, not the durability of a store directory the
-publish itself created inside a parent it never fsyncs.
+The store directory is nested (`root/bistore`), so the publish itself creates
+both `root` and `root/bistore`. The `SimDisk` crash model exempts only root-level
+names from revocation, so `root/bistore` survives a host crash only if the
+publish fsyncs `root`. It does: when the publish creates the store directory or
+any ancestor, it fsyncs each directory it created and the first ancestor that
+already existed, before writing the snapshot (rmp #2970). Before that fix, the
+clean-publish control and the acknowledged sweep point both recovered empty.
 
 The third arm, which runs against a real directory, still reconstructs the
 *outcome* state of a crash between assembly and rename: a complete snapshot is

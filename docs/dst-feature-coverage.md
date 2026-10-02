@@ -966,9 +966,10 @@ durability row, because `bulkimport.Publish` had no filesystem seam. It now has
 one: `bulkimport.PublishFS` and `bulkimport.ImportIntoFS` route the
 empty-directory check, the store-directory creation and the whole snapshot write
 through a caller-supplied filesystem, and the scenario's fifth arm backs it with
-a `SimDisk`. ENOSPC (eager and at sync), an fsync fault on the first and on the
+a `SimDisk` and publishes into a nested store directory, so the durability of the
+directory entry the publish creates is measured too (rmp #2970). ENOSPC (eager and at sync), an fsync fault on the first and on the
 last component, a rename fault on `snapshot.tmp` → `snapshot`, a process crash
-at each of the publish's 35 filesystem operations, and a crash after a
+at each of the publish's 40 filesystem operations, and a crash after a
 written-back publish rename are each injected, proven to have fired, and
 followed by a host crash and a real recovery whose outcome must be all or
 nothing. The publish is also asserted byte-reproducible across identical
