@@ -1,0 +1,218 @@
+spec ww05-update-delete-chain-commit: 2 sessions, 10 permutations
+# WW05, commit arm. s1 updates n then deletes it in ONE transaction and commits; s2,
+# whose snapshot predates s1's commit, writes n.y. s2 is refused whenever s1's chain
+# is in flight or committed after s2's snapshot.
+
+starting permutation: s1u s1d s1c s2w s2c
+step s1u: MATCH (n:Item {name:'n'}) SET n.x = 1 RETURN n.x AS x
+x
+-
+1
+(1 row)
+step s1d: MATCH (n:Item {name:'n'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1c: COMMIT
+step s2w: MATCH (n:Item {name:'n'}) SET n.y = 1 RETURN n.y AS y
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:Item) RETURN n.name AS name, n.x AS x, n.y AS y ORDER BY name
+name|x|y
+----+-+-
+(0 rows)
+
+starting permutation: s1u s1d s2w s1c s2c
+step s1u: MATCH (n:Item {name:'n'}) SET n.x = 1 RETURN n.x AS x
+x
+-
+1
+(1 row)
+step s1d: MATCH (n:Item {name:'n'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s2w: MATCH (n:Item {name:'n'}) SET n.y = 1 RETURN n.y AS y
+ERROR: serialization conflict
+step s1c: COMMIT
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:Item) RETURN n.name AS name, n.x AS x, n.y AS y ORDER BY name
+name|x|y
+----+-+-
+(0 rows)
+
+starting permutation: s1u s1d s2w s2c s1c
+step s1u: MATCH (n:Item {name:'n'}) SET n.x = 1 RETURN n.x AS x
+x
+-
+1
+(1 row)
+step s1d: MATCH (n:Item {name:'n'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s2w: MATCH (n:Item {name:'n'}) SET n.y = 1 RETURN n.y AS y
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s1c: COMMIT
+final final: MATCH (n:Item) RETURN n.name AS name, n.x AS x, n.y AS y ORDER BY name
+name|x|y
+----+-+-
+(0 rows)
+
+starting permutation: s1u s2w s1d s1c s2c
+step s1u: MATCH (n:Item {name:'n'}) SET n.x = 1 RETURN n.x AS x
+x
+-
+1
+(1 row)
+step s2w: MATCH (n:Item {name:'n'}) SET n.y = 1 RETURN n.y AS y
+ERROR: serialization conflict
+step s1d: MATCH (n:Item {name:'n'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:Item) RETURN n.name AS name, n.x AS x, n.y AS y ORDER BY name
+name|x|y
+----+-+-
+(0 rows)
+
+starting permutation: s1u s2w s1d s2c s1c
+step s1u: MATCH (n:Item {name:'n'}) SET n.x = 1 RETURN n.x AS x
+x
+-
+1
+(1 row)
+step s2w: MATCH (n:Item {name:'n'}) SET n.y = 1 RETURN n.y AS y
+ERROR: serialization conflict
+step s1d: MATCH (n:Item {name:'n'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s1c: COMMIT
+final final: MATCH (n:Item) RETURN n.name AS name, n.x AS x, n.y AS y ORDER BY name
+name|x|y
+----+-+-
+(0 rows)
+
+starting permutation: s1u s2w s2c s1d s1c
+step s1u: MATCH (n:Item {name:'n'}) SET n.x = 1 RETURN n.x AS x
+x
+-
+1
+(1 row)
+step s2w: MATCH (n:Item {name:'n'}) SET n.y = 1 RETURN n.y AS y
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s1d: MATCH (n:Item {name:'n'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1c: COMMIT
+final final: MATCH (n:Item) RETURN n.name AS name, n.x AS x, n.y AS y ORDER BY name
+name|x|y
+----+-+-
+(0 rows)
+
+starting permutation: s2w s1u s1d s1c s2c
+step s2w: MATCH (n:Item {name:'n'}) SET n.y = 1 RETURN n.y AS y
+y
+-
+1
+(1 row)
+step s1u: MATCH (n:Item {name:'n'}) SET n.x = 1 RETURN n.x AS x
+ERROR: serialization conflict
+step s1d: MATCH (n:Item {name:'n'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s2c: COMMIT
+final final: MATCH (n:Item) RETURN n.name AS name, n.x AS x, n.y AS y ORDER BY name
+name|x|y
+----+-+-
+"n" |0|1
+(1 row)
+
+starting permutation: s2w s1u s1d s2c s1c
+step s2w: MATCH (n:Item {name:'n'}) SET n.y = 1 RETURN n.y AS y
+y
+-
+1
+(1 row)
+step s1u: MATCH (n:Item {name:'n'}) SET n.x = 1 RETURN n.x AS x
+ERROR: serialization conflict
+step s1d: MATCH (n:Item {name:'n'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:Item) RETURN n.name AS name, n.x AS x, n.y AS y ORDER BY name
+name|x|y
+----+-+-
+"n" |0|1
+(1 row)
+
+starting permutation: s2w s1u s2c s1d s1c
+step s2w: MATCH (n:Item {name:'n'}) SET n.y = 1 RETURN n.y AS y
+y
+-
+1
+(1 row)
+step s1u: MATCH (n:Item {name:'n'}) SET n.x = 1 RETURN n.x AS x
+ERROR: serialization conflict
+step s2c: COMMIT
+step s1d: MATCH (n:Item {name:'n'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:Item) RETURN n.name AS name, n.x AS x, n.y AS y ORDER BY name
+name|x|y
+----+-+-
+"n" |0|1
+(1 row)
+
+starting permutation: s2w s2c s1u s1d s1c
+step s2w: MATCH (n:Item {name:'n'}) SET n.y = 1 RETURN n.y AS y
+y
+-
+1
+(1 row)
+step s2c: COMMIT
+step s1u: MATCH (n:Item {name:'n'}) SET n.x = 1 RETURN n.x AS x
+ERROR: serialization conflict
+step s1d: MATCH (n:Item {name:'n'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:Item) RETURN n.name AS name, n.x AS x, n.y AS y ORDER BY name
+name|x|y
+----+-+-
+"n" |0|1
+(1 row)

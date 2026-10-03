@@ -19,6 +19,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -62,13 +63,14 @@ func mustLine(t *testing.T, out, want string) {
 func TestRun(t *testing.T) {
 	out := runExample(t)
 
-	// Phase 1 — every scaling level ran.
-	mustLine(t, out, "scaling.levels=5")
+	// Phase 1 — every order of every scaling level committed within its retry
+	// budget, and no level ran out of its hang budget.
+	mustLine(t, out, "scaling.unrecovered_conflicts=0")
 
-	// Phase 2 — no order vanished, and the readers actually sampled. The second is
-	// the non-degeneracy guard: a reader that never ran would leave the latency
+	// Phase 2 — every order committed, and the readers actually sampled. The second
+	// is the non-degeneracy guard: a reader that never ran would leave the latency
 	// percentiles at zero and report nothing, while the phase still "passed".
-	mustLine(t, out, "contention.accounted=true")
+	mustLine(t, out, "contention.unrecovered_conflicts=0")
 	mustLine(t, out, "contention.readers_sampled=true")
 	// The version sampler needs the same non-degeneracy guard, and did not have it.
 	// With a 2 ms tick against a 2 ms phase, seven runs in twelve of the documented
@@ -94,6 +96,13 @@ func TestRun(t *testing.T) {
 	mustLine(t, out, "restart.all_nodes_recovered=true")
 	mustLine(t, out, "restart.clock_not_rewound=true")
 	mustLine(t, out, "restart.post_restart_instant_is_new=true")
+
+	// Phase 5 — the catalogue ran in full, no step blocked, and no property check
+	// fired. The per-scenario transcripts are held to their goldens by
+	// TestCatalogue; these lines hold the example's own report to the same facts.
+	mustLine(t, out, "catalogue.scenarios="+strconv.Itoa(len(catalogue())))
+	mustLine(t, out, "catalogue.blocked_steps=0")
+	mustLine(t, out, "catalogue.violations=0")
 }
 
 // TestConservationCheckCanFail validates the INSTRUMENT rather than the engine.

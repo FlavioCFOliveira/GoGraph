@@ -1,0 +1,81 @@
+spec sk13-snapshot-at-begin: 2 sessions, 4 permutations
+# SK13. s1 BEGINs; s2 creates an :L node in autocommit; s1 then reads for the first
+# time. s1 sees the node only if it was committed BEFORE s1's BEGIN: GoGraph takes
+# the snapshot at BEGIN (F6). InnoDB's plain START TRANSACTION takes it at the first
+# read instead, and would see it; WITH CONSISTENT SNAPSHOT matches GoGraph.
+
+starting permutation: s1b s1r s1c s2w
+step s1b: BEGIN
+step s1r: MATCH (n:L) RETURN count(n) AS c
+c
+-
+1
+(1 row)
+step s1c: COMMIT
+step s2w: CREATE (n:L {name:'late'}) RETURN n.name AS created
+created
+-------
+"late" 
+(1 row)
+final final: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+
+starting permutation: s1b s1r s2w s1c
+step s1b: BEGIN
+step s1r: MATCH (n:L) RETURN count(n) AS c
+c
+-
+1
+(1 row)
+step s2w: CREATE (n:L {name:'late'}) RETURN n.name AS created
+created
+-------
+"late" 
+(1 row)
+step s1c: COMMIT
+final final: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+
+starting permutation: s1b s2w s1r s1c
+step s1b: BEGIN
+step s2w: CREATE (n:L {name:'late'}) RETURN n.name AS created
+created
+-------
+"late" 
+(1 row)
+step s1r: MATCH (n:L) RETURN count(n) AS c
+c
+-
+1
+(1 row)
+step s1c: COMMIT
+final final: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+
+starting permutation: s2w s1b s1r s1c
+step s2w: CREATE (n:L {name:'late'}) RETURN n.name AS created
+created
+-------
+"late" 
+(1 row)
+step s1b: BEGIN
+step s1r: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)
+step s1c: COMMIT
+final final: MATCH (n:L) RETURN count(n) AS c
+c
+-
+2
+(1 row)

@@ -1,0 +1,77 @@
+spec ww13-void-property-delete-lpg: 2 sessions, 6 permutations
+# WW13, property arm, through the lpg API: DelNodeProperty is a void primitive: a conflict it hits cannot be returned by the
+# statement, so it is RECORDED on the transaction and must surface at COMMIT as a
+# serialization conflict, applying nothing (F3, rmp #2354). A COMMIT that succeeds
+# after a recorded conflict is a silently dropped write.
+
+starting permutation: s1x s1c s2x s2c
+step s1x: lpg: DelNodeProperty(n, p)
+step s1c: lpg: Session.EndVersionedTx
+step s2x: lpg: DelNodeProperty(n, p)
+step s2c: lpg: Session.EndVersionedTx
+ERROR: serialization conflict
+final final: MATCH (n:Item {name:'n'}) RETURN n.p AS p
+p   
+----
+null
+(1 row)
+
+starting permutation: s1x s2x s1c s2c
+step s1x: lpg: DelNodeProperty(n, p)
+step s2x: lpg: DelNodeProperty(n, p)
+step s1c: lpg: Session.EndVersionedTx
+step s2c: lpg: Session.EndVersionedTx
+ERROR: serialization conflict
+final final: MATCH (n:Item {name:'n'}) RETURN n.p AS p
+p   
+----
+null
+(1 row)
+
+starting permutation: s1x s2x s2c s1c
+step s1x: lpg: DelNodeProperty(n, p)
+step s2x: lpg: DelNodeProperty(n, p)
+step s2c: lpg: Session.EndVersionedTx
+ERROR: serialization conflict
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item {name:'n'}) RETURN n.p AS p
+p   
+----
+null
+(1 row)
+
+starting permutation: s2x s1x s1c s2c
+step s2x: lpg: DelNodeProperty(n, p)
+step s1x: lpg: DelNodeProperty(n, p)
+step s1c: lpg: Session.EndVersionedTx
+ERROR: serialization conflict
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (n:Item {name:'n'}) RETURN n.p AS p
+p   
+----
+null
+(1 row)
+
+starting permutation: s2x s1x s2c s1c
+step s2x: lpg: DelNodeProperty(n, p)
+step s1x: lpg: DelNodeProperty(n, p)
+step s2c: lpg: Session.EndVersionedTx
+step s1c: lpg: Session.EndVersionedTx
+ERROR: serialization conflict
+final final: MATCH (n:Item {name:'n'}) RETURN n.p AS p
+p   
+----
+null
+(1 row)
+
+starting permutation: s2x s2c s1x s1c
+step s2x: lpg: DelNodeProperty(n, p)
+step s2c: lpg: Session.EndVersionedTx
+step s1x: lpg: DelNodeProperty(n, p)
+step s1c: lpg: Session.EndVersionedTx
+ERROR: serialization conflict
+final final: MATCH (n:Item {name:'n'}) RETURN n.p AS p
+p   
+----
+null
+(1 row)

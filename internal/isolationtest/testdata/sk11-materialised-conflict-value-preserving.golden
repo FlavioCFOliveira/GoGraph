@@ -1,0 +1,587 @@
+spec sk11-materialised-conflict-value-preserving: 2 sessions, 20 permutations
+# SK11, value-preserving arm (SET g.v = g.v). SK01 write skew, materialised: each transaction also writes the
+# shared guard node g in the statement that takes its doctor off call. This is the
+# documented snapshot-isolation remedy (Fekete et al., TODS 2005) for the absent
+# locking read (G4).
+# This arm writes g's CURRENT value back. The catalogue left its verdict unverified
+# (G4); this transcript pins it.
+
+starting permutation: s1r s1w s1c s2r s2w s2c
+step s1r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s1w: MATCH (d:Doctor {name:'alice'}) SET d.oncall = false WITH d MATCH (g:Guard {name:'g'}) SET g.v = g.v RETURN d.name AS who, g.v AS guard
+who    |guard
+-------+-----
+"alice"|0    
+(1 row)
+step s1c: COMMIT
+step s2r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s2w: MATCH (d:Doctor {name:'bob'}) SET d.oncall = false WITH d MATCH (g:Guard {name:'g'}) SET g.v = g.v RETURN d.name AS who, g.v AS guard
+who  |guard
+-----+-----
+"bob"|0    
+(1 row)
+step s2c: COMMIT
+final final: MATCH (d:Doctor) WHERE d.oncall = true WITH count(d) AS oncall MATCH (g:Guard {name:'g'}) RETURN oncall, g.v AS guard
+oncall|guard
+------+-----
+0     |0    
+(1 row)
+
+starting permutation: s1r s1w s2r s1c s2w s2c
+step s1r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s1w: MATCH (d:Doctor {name:'alice'}) SET d.oncall = false WITH d MATCH (g:Guard {name:'g'}) SET g.v = g.v RETURN d.name AS who, g.v AS guard
+who    |guard
+-------+-----
+"alice"|0    
+(1 row)
+step s2r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s1c: COMMIT
+step s2w: MATCH (d:Doctor {name:'bob'}) SET d.oncall = false WITH d MATCH (g:Guard {name:'g'}) SET g.v = g.v RETURN d.name AS who, g.v AS guard
+who  |guard
+-----+-----
+"bob"|0    
+(1 row)
+step s2c: COMMIT
+final final: MATCH (d:Doctor) WHERE d.oncall = true WITH count(d) AS oncall MATCH (g:Guard {name:'g'}) RETURN oncall, g.v AS guard
+oncall|guard
+------+-----
+0     |0    
+(1 row)
+
+starting permutation: s1r s1w s2r s2w s1c s2c
+step s1r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s1w: MATCH (d:Doctor {name:'alice'}) SET d.oncall = false WITH d MATCH (g:Guard {name:'g'}) SET g.v = g.v RETURN d.name AS who, g.v AS guard
+who    |guard
+-------+-----
+"alice"|0    
+(1 row)
+step s2r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s2w: MATCH (d:Doctor {name:'bob'}) SET d.oncall = false WITH d MATCH (g:Guard {name:'g'}) SET g.v = g.v RETURN d.name AS who, g.v AS guard
+who  |guard
+-----+-----
+"bob"|0    
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (d:Doctor) WHERE d.oncall = true WITH count(d) AS oncall MATCH (g:Guard {name:'g'}) RETURN oncall, g.v AS guard
+oncall|guard
+------+-----
+0     |0    
+(1 row)
+
+starting permutation: s1r s1w s2r s2w s2c s1c
+step s1r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s1w: MATCH (d:Doctor {name:'alice'}) SET d.oncall = false WITH d MATCH (g:Guard {name:'g'}) SET g.v = g.v RETURN d.name AS who, g.v AS guard
+who    |guard
+-------+-----
+"alice"|0    
+(1 row)
+step s2r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s2w: MATCH (d:Doctor {name:'bob'}) SET d.oncall = false WITH d MATCH (g:Guard {name:'g'}) SET g.v = g.v RETURN d.name AS who, g.v AS guard
+who  |guard
+-----+-----
+"bob"|0    
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (d:Doctor) WHERE d.oncall = true WITH count(d) AS oncall MATCH (g:Guard {name:'g'}) RETURN oncall, g.v AS guard
+oncall|guard
+------+-----
+0     |0    
+(1 row)
+
+starting permutation: s1r s2r s1w s1c s2w s2c
+step s1r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s2r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s1w: MATCH (d:Doctor {name:'alice'}) SET d.oncall = false WITH d MATCH (g:Guard {name:'g'}) SET g.v = g.v RETURN d.name AS who, g.v AS guard
+who    |guard
+-------+-----
+"alice"|0    
+(1 row)
+step s1c: COMMIT
+step s2w: MATCH (d:Doctor {name:'bob'}) SET d.oncall = false WITH d MATCH (g:Guard {name:'g'}) SET g.v = g.v RETURN d.name AS who, g.v AS guard
+who  |guard
+-----+-----
+"bob"|0    
+(1 row)
+step s2c: COMMIT
+final final: MATCH (d:Doctor) WHERE d.oncall = true WITH count(d) AS oncall MATCH (g:Guard {name:'g'}) RETURN oncall, g.v AS guard
+oncall|guard
+------+-----
+0     |0    
+(1 row)
+
+starting permutation: s1r s2r s1w s2w s1c s2c
+step s1r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s2r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s1w: MATCH (d:Doctor {name:'alice'}) SET d.oncall = false WITH d MATCH (g:Guard {name:'g'}) SET g.v = g.v RETURN d.name AS who, g.v AS guard
+who    |guard
+-------+-----
+"alice"|0    
+(1 row)
+step s2w: MATCH (d:Doctor {name:'bob'}) SET d.oncall = false WITH d MATCH (g:Guard {name:'g'}) SET g.v = g.v RETURN d.name AS who, g.v AS guard
+who  |guard
+-----+-----
+"bob"|0    
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (d:Doctor) WHERE d.oncall = true WITH count(d) AS oncall MATCH (g:Guard {name:'g'}) RETURN oncall, g.v AS guard
+oncall|guard
+------+-----
+0     |0    
+(1 row)
+
+starting permutation: s1r s2r s1w s2w s2c s1c
+step s1r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s2r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s1w: MATCH (d:Doctor {name:'alice'}) SET d.oncall = false WITH d MATCH (g:Guard {name:'g'}) SET g.v = g.v RETURN d.name AS who, g.v AS guard
+who    |guard
+-------+-----
+"alice"|0    
+(1 row)
+step s2w: MATCH (d:Doctor {name:'bob'}) SET d.oncall = false WITH d MATCH (g:Guard {name:'g'}) SET g.v = g.v RETURN d.name AS who, g.v AS guard
+who  |guard
+-----+-----
+"bob"|0    
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (d:Doctor) WHERE d.oncall = true WITH count(d) AS oncall MATCH (g:Guard {name:'g'}) RETURN oncall, g.v AS guard
+oncall|guard
+------+-----
+0     |0    
+(1 row)
+
+starting permutation: s1r s2r s2w s1w s1c s2c
+step s1r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s2r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s2w: MATCH (d:Doctor {name:'bob'}) SET d.oncall = false WITH d MATCH (g:Guard {name:'g'}) SET g.v = g.v RETURN d.name AS who, g.v AS guard
+who  |guard
+-----+-----
+"bob"|0    
+(1 row)
+step s1w: MATCH (d:Doctor {name:'alice'}) SET d.oncall = false WITH d MATCH (g:Guard {name:'g'}) SET g.v = g.v RETURN d.name AS who, g.v AS guard
+who    |guard
+-------+-----
+"alice"|0    
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (d:Doctor) WHERE d.oncall = true WITH count(d) AS oncall MATCH (g:Guard {name:'g'}) RETURN oncall, g.v AS guard
+oncall|guard
+------+-----
+0     |0    
+(1 row)
+
+starting permutation: s1r s2r s2w s1w s2c s1c
+step s1r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s2r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s2w: MATCH (d:Doctor {name:'bob'}) SET d.oncall = false WITH d MATCH (g:Guard {name:'g'}) SET g.v = g.v RETURN d.name AS who, g.v AS guard
+who  |guard
+-----+-----
+"bob"|0    
+(1 row)
+step s1w: MATCH (d:Doctor {name:'alice'}) SET d.oncall = false WITH d MATCH (g:Guard {name:'g'}) SET g.v = g.v RETURN d.name AS who, g.v AS guard
+who    |guard
+-------+-----
+"alice"|0    
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (d:Doctor) WHERE d.oncall = true WITH count(d) AS oncall MATCH (g:Guard {name:'g'}) RETURN oncall, g.v AS guard
+oncall|guard
+------+-----
+0     |0    
+(1 row)
+
+starting permutation: s1r s2r s2w s2c s1w s1c
+step s1r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s2r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s2w: MATCH (d:Doctor {name:'bob'}) SET d.oncall = false WITH d MATCH (g:Guard {name:'g'}) SET g.v = g.v RETURN d.name AS who, g.v AS guard
+who  |guard
+-----+-----
+"bob"|0    
+(1 row)
+step s2c: COMMIT
+step s1w: MATCH (d:Doctor {name:'alice'}) SET d.oncall = false WITH d MATCH (g:Guard {name:'g'}) SET g.v = g.v RETURN d.name AS who, g.v AS guard
+who    |guard
+-------+-----
+"alice"|0    
+(1 row)
+step s1c: COMMIT
+final final: MATCH (d:Doctor) WHERE d.oncall = true WITH count(d) AS oncall MATCH (g:Guard {name:'g'}) RETURN oncall, g.v AS guard
+oncall|guard
+------+-----
+0     |0    
+(1 row)
+
+starting permutation: s2r s1r s1w s1c s2w s2c
+step s2r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s1r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s1w: MATCH (d:Doctor {name:'alice'}) SET d.oncall = false WITH d MATCH (g:Guard {name:'g'}) SET g.v = g.v RETURN d.name AS who, g.v AS guard
+who    |guard
+-------+-----
+"alice"|0    
+(1 row)
+step s1c: COMMIT
+step s2w: MATCH (d:Doctor {name:'bob'}) SET d.oncall = false WITH d MATCH (g:Guard {name:'g'}) SET g.v = g.v RETURN d.name AS who, g.v AS guard
+who  |guard
+-----+-----
+"bob"|0    
+(1 row)
+step s2c: COMMIT
+final final: MATCH (d:Doctor) WHERE d.oncall = true WITH count(d) AS oncall MATCH (g:Guard {name:'g'}) RETURN oncall, g.v AS guard
+oncall|guard
+------+-----
+0     |0    
+(1 row)
+
+starting permutation: s2r s1r s1w s2w s1c s2c
+step s2r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s1r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s1w: MATCH (d:Doctor {name:'alice'}) SET d.oncall = false WITH d MATCH (g:Guard {name:'g'}) SET g.v = g.v RETURN d.name AS who, g.v AS guard
+who    |guard
+-------+-----
+"alice"|0    
+(1 row)
+step s2w: MATCH (d:Doctor {name:'bob'}) SET d.oncall = false WITH d MATCH (g:Guard {name:'g'}) SET g.v = g.v RETURN d.name AS who, g.v AS guard
+who  |guard
+-----+-----
+"bob"|0    
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (d:Doctor) WHERE d.oncall = true WITH count(d) AS oncall MATCH (g:Guard {name:'g'}) RETURN oncall, g.v AS guard
+oncall|guard
+------+-----
+0     |0    
+(1 row)
+
+starting permutation: s2r s1r s1w s2w s2c s1c
+step s2r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s1r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s1w: MATCH (d:Doctor {name:'alice'}) SET d.oncall = false WITH d MATCH (g:Guard {name:'g'}) SET g.v = g.v RETURN d.name AS who, g.v AS guard
+who    |guard
+-------+-----
+"alice"|0    
+(1 row)
+step s2w: MATCH (d:Doctor {name:'bob'}) SET d.oncall = false WITH d MATCH (g:Guard {name:'g'}) SET g.v = g.v RETURN d.name AS who, g.v AS guard
+who  |guard
+-----+-----
+"bob"|0    
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (d:Doctor) WHERE d.oncall = true WITH count(d) AS oncall MATCH (g:Guard {name:'g'}) RETURN oncall, g.v AS guard
+oncall|guard
+------+-----
+0     |0    
+(1 row)
+
+starting permutation: s2r s1r s2w s1w s1c s2c
+step s2r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s1r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s2w: MATCH (d:Doctor {name:'bob'}) SET d.oncall = false WITH d MATCH (g:Guard {name:'g'}) SET g.v = g.v RETURN d.name AS who, g.v AS guard
+who  |guard
+-----+-----
+"bob"|0    
+(1 row)
+step s1w: MATCH (d:Doctor {name:'alice'}) SET d.oncall = false WITH d MATCH (g:Guard {name:'g'}) SET g.v = g.v RETURN d.name AS who, g.v AS guard
+who    |guard
+-------+-----
+"alice"|0    
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (d:Doctor) WHERE d.oncall = true WITH count(d) AS oncall MATCH (g:Guard {name:'g'}) RETURN oncall, g.v AS guard
+oncall|guard
+------+-----
+0     |0    
+(1 row)
+
+starting permutation: s2r s1r s2w s1w s2c s1c
+step s2r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s1r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s2w: MATCH (d:Doctor {name:'bob'}) SET d.oncall = false WITH d MATCH (g:Guard {name:'g'}) SET g.v = g.v RETURN d.name AS who, g.v AS guard
+who  |guard
+-----+-----
+"bob"|0    
+(1 row)
+step s1w: MATCH (d:Doctor {name:'alice'}) SET d.oncall = false WITH d MATCH (g:Guard {name:'g'}) SET g.v = g.v RETURN d.name AS who, g.v AS guard
+who    |guard
+-------+-----
+"alice"|0    
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (d:Doctor) WHERE d.oncall = true WITH count(d) AS oncall MATCH (g:Guard {name:'g'}) RETURN oncall, g.v AS guard
+oncall|guard
+------+-----
+0     |0    
+(1 row)
+
+starting permutation: s2r s1r s2w s2c s1w s1c
+step s2r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s1r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s2w: MATCH (d:Doctor {name:'bob'}) SET d.oncall = false WITH d MATCH (g:Guard {name:'g'}) SET g.v = g.v RETURN d.name AS who, g.v AS guard
+who  |guard
+-----+-----
+"bob"|0    
+(1 row)
+step s2c: COMMIT
+step s1w: MATCH (d:Doctor {name:'alice'}) SET d.oncall = false WITH d MATCH (g:Guard {name:'g'}) SET g.v = g.v RETURN d.name AS who, g.v AS guard
+who    |guard
+-------+-----
+"alice"|0    
+(1 row)
+step s1c: COMMIT
+final final: MATCH (d:Doctor) WHERE d.oncall = true WITH count(d) AS oncall MATCH (g:Guard {name:'g'}) RETURN oncall, g.v AS guard
+oncall|guard
+------+-----
+0     |0    
+(1 row)
+
+starting permutation: s2r s2w s1r s1w s1c s2c
+step s2r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s2w: MATCH (d:Doctor {name:'bob'}) SET d.oncall = false WITH d MATCH (g:Guard {name:'g'}) SET g.v = g.v RETURN d.name AS who, g.v AS guard
+who  |guard
+-----+-----
+"bob"|0    
+(1 row)
+step s1r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s1w: MATCH (d:Doctor {name:'alice'}) SET d.oncall = false WITH d MATCH (g:Guard {name:'g'}) SET g.v = g.v RETURN d.name AS who, g.v AS guard
+who    |guard
+-------+-----
+"alice"|0    
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (d:Doctor) WHERE d.oncall = true WITH count(d) AS oncall MATCH (g:Guard {name:'g'}) RETURN oncall, g.v AS guard
+oncall|guard
+------+-----
+0     |0    
+(1 row)
+
+starting permutation: s2r s2w s1r s1w s2c s1c
+step s2r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s2w: MATCH (d:Doctor {name:'bob'}) SET d.oncall = false WITH d MATCH (g:Guard {name:'g'}) SET g.v = g.v RETURN d.name AS who, g.v AS guard
+who  |guard
+-----+-----
+"bob"|0    
+(1 row)
+step s1r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s1w: MATCH (d:Doctor {name:'alice'}) SET d.oncall = false WITH d MATCH (g:Guard {name:'g'}) SET g.v = g.v RETURN d.name AS who, g.v AS guard
+who    |guard
+-------+-----
+"alice"|0    
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (d:Doctor) WHERE d.oncall = true WITH count(d) AS oncall MATCH (g:Guard {name:'g'}) RETURN oncall, g.v AS guard
+oncall|guard
+------+-----
+0     |0    
+(1 row)
+
+starting permutation: s2r s2w s1r s2c s1w s1c
+step s2r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s2w: MATCH (d:Doctor {name:'bob'}) SET d.oncall = false WITH d MATCH (g:Guard {name:'g'}) SET g.v = g.v RETURN d.name AS who, g.v AS guard
+who  |guard
+-----+-----
+"bob"|0    
+(1 row)
+step s1r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s2c: COMMIT
+step s1w: MATCH (d:Doctor {name:'alice'}) SET d.oncall = false WITH d MATCH (g:Guard {name:'g'}) SET g.v = g.v RETURN d.name AS who, g.v AS guard
+who    |guard
+-------+-----
+"alice"|0    
+(1 row)
+step s1c: COMMIT
+final final: MATCH (d:Doctor) WHERE d.oncall = true WITH count(d) AS oncall MATCH (g:Guard {name:'g'}) RETURN oncall, g.v AS guard
+oncall|guard
+------+-----
+0     |0    
+(1 row)
+
+starting permutation: s2r s2w s2c s1r s1w s1c
+step s2r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s2w: MATCH (d:Doctor {name:'bob'}) SET d.oncall = false WITH d MATCH (g:Guard {name:'g'}) SET g.v = g.v RETURN d.name AS who, g.v AS guard
+who  |guard
+-----+-----
+"bob"|0    
+(1 row)
+step s2c: COMMIT
+step s1r: MATCH (d:Doctor) WHERE d.oncall = true RETURN count(d) AS oncall
+oncall
+------
+2     
+(1 row)
+step s1w: MATCH (d:Doctor {name:'alice'}) SET d.oncall = false WITH d MATCH (g:Guard {name:'g'}) SET g.v = g.v RETURN d.name AS who, g.v AS guard
+who    |guard
+-------+-----
+"alice"|0    
+(1 row)
+step s1c: COMMIT
+final final: MATCH (d:Doctor) WHERE d.oncall = true WITH count(d) AS oncall MATCH (g:Guard {name:'g'}) RETURN oncall, g.v AS guard
+oncall|guard
+------+-----
+0     |0    
+(1 row)

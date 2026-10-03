@@ -244,6 +244,13 @@ func (sr *sessionRunner) exec(st *Step) (stepResult, error) {
 	if st.Hook != nil {
 		return stepResult{step: *st}, st.Hook(sr.ctx)
 	}
+	if st.Probe != nil {
+		cols, rows, err := st.Probe(sr.ctx)
+		if err != nil {
+			return stepResult{step: *st}, err
+		}
+		return stepResult{step: *st, render: renderRows(cols, rows), cols: cols, rows: rows}, nil
+	}
 	params, err := toParams(st.Params)
 	if err != nil {
 		return stepResult{step: *st}, err
@@ -429,6 +436,13 @@ func (r *Runner) runPermutation(ctx context.Context, s *Spec, p Permutation, w *
 			}
 		}
 	}
+	for _, st := range s.Final {
+		got, ferr := control.exec(&st)
+		got.step, got.err = st, ferr
+		w.printf("final %s: %s\n", st.Name, st.display())
+		writeOutcome(w, &got)
+		r.observe(p, &got)
+	}
 	for _, st := range s.Teardown {
 		if _, terr := control.exec(&st); terr != nil {
 			w.printf("teardown %s: %v\n", st.Name, terr)
@@ -478,6 +492,11 @@ func writeStep(w *transcript, got *stepResult, suffix string) {
 	} else {
 		w.printf("step %s: %s\n", got.step.Name, got.step.display())
 	}
+	writeOutcome(w, got)
+}
+
+// writeOutcome renders a completed step's error or rows, below its header line.
+func writeOutcome(w *transcript, got *stepResult) {
 	if got.err != nil {
 		w.printf("ERROR: %s\n", classifyError(got.err))
 		return

@@ -1,0 +1,518 @@
+spec ww10-crossing-writes: 2 sessions, 20 permutations
+# WW10. The deadlock shape: s1 writes A then B, s2 writes B then A. GoGraph takes no
+# DML locks (F7), so no step may ever report <waiting ...>; a write whose node holds
+# a peer's version is refused instead. BOTH transactions can be refused in one
+# interleaving, where PostgreSQL and InnoDB pick a single deadlock victim. A refused
+# statement poisons its transaction, so its COMMIT reports the poisoning (G10).
+
+starting permutation: s1a s1b2 s1c s2b2 s2a s2c
+step s1a: MATCH (n:Item {name:'A'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1b2: MATCH (n:Item {name:'B'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1c: COMMIT
+step s2b2: MATCH (n:Item {name:'B'}) SET n.v = 2 RETURN n.v AS v
+ERROR: serialization conflict
+step s2a: MATCH (n:Item {name:'A'}) SET n.v = 2 RETURN n.v AS v
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"A" |1
+"B" |1
+(2 rows)
+
+starting permutation: s1a s1b2 s2b2 s1c s2a s2c
+step s1a: MATCH (n:Item {name:'A'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1b2: MATCH (n:Item {name:'B'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s2b2: MATCH (n:Item {name:'B'}) SET n.v = 2 RETURN n.v AS v
+ERROR: serialization conflict
+step s1c: COMMIT
+step s2a: MATCH (n:Item {name:'A'}) SET n.v = 2 RETURN n.v AS v
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"A" |1
+"B" |1
+(2 rows)
+
+starting permutation: s1a s1b2 s2b2 s2a s1c s2c
+step s1a: MATCH (n:Item {name:'A'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1b2: MATCH (n:Item {name:'B'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s2b2: MATCH (n:Item {name:'B'}) SET n.v = 2 RETURN n.v AS v
+ERROR: serialization conflict
+step s2a: MATCH (n:Item {name:'A'}) SET n.v = 2 RETURN n.v AS v
+ERROR: serialization conflict
+step s1c: COMMIT
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"A" |1
+"B" |1
+(2 rows)
+
+starting permutation: s1a s1b2 s2b2 s2a s2c s1c
+step s1a: MATCH (n:Item {name:'A'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1b2: MATCH (n:Item {name:'B'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s2b2: MATCH (n:Item {name:'B'}) SET n.v = 2 RETURN n.v AS v
+ERROR: serialization conflict
+step s2a: MATCH (n:Item {name:'A'}) SET n.v = 2 RETURN n.v AS v
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s1c: COMMIT
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"A" |1
+"B" |1
+(2 rows)
+
+starting permutation: s1a s2b2 s1b2 s1c s2a s2c
+step s1a: MATCH (n:Item {name:'A'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s2b2: MATCH (n:Item {name:'B'}) SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1b2: MATCH (n:Item {name:'B'}) SET n.v = 1 RETURN n.v AS v
+ERROR: serialization conflict
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s2a: MATCH (n:Item {name:'A'}) SET n.v = 2 RETURN n.v AS v
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"A" |0
+"B" |0
+(2 rows)
+
+starting permutation: s1a s2b2 s1b2 s2a s1c s2c
+step s1a: MATCH (n:Item {name:'A'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s2b2: MATCH (n:Item {name:'B'}) SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1b2: MATCH (n:Item {name:'B'}) SET n.v = 1 RETURN n.v AS v
+ERROR: serialization conflict
+step s2a: MATCH (n:Item {name:'A'}) SET n.v = 2 RETURN n.v AS v
+ERROR: serialization conflict
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"A" |0
+"B" |0
+(2 rows)
+
+starting permutation: s1a s2b2 s1b2 s2a s2c s1c
+step s1a: MATCH (n:Item {name:'A'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s2b2: MATCH (n:Item {name:'B'}) SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1b2: MATCH (n:Item {name:'B'}) SET n.v = 1 RETURN n.v AS v
+ERROR: serialization conflict
+step s2a: MATCH (n:Item {name:'A'}) SET n.v = 2 RETURN n.v AS v
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"A" |0
+"B" |0
+(2 rows)
+
+starting permutation: s1a s2b2 s2a s1b2 s1c s2c
+step s1a: MATCH (n:Item {name:'A'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s2b2: MATCH (n:Item {name:'B'}) SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s2a: MATCH (n:Item {name:'A'}) SET n.v = 2 RETURN n.v AS v
+ERROR: serialization conflict
+step s1b2: MATCH (n:Item {name:'B'}) SET n.v = 1 RETURN n.v AS v
+ERROR: serialization conflict
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"A" |0
+"B" |0
+(2 rows)
+
+starting permutation: s1a s2b2 s2a s1b2 s2c s1c
+step s1a: MATCH (n:Item {name:'A'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s2b2: MATCH (n:Item {name:'B'}) SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s2a: MATCH (n:Item {name:'A'}) SET n.v = 2 RETURN n.v AS v
+ERROR: serialization conflict
+step s1b2: MATCH (n:Item {name:'B'}) SET n.v = 1 RETURN n.v AS v
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"A" |0
+"B" |0
+(2 rows)
+
+starting permutation: s1a s2b2 s2a s2c s1b2 s1c
+step s1a: MATCH (n:Item {name:'A'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s2b2: MATCH (n:Item {name:'B'}) SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s2a: MATCH (n:Item {name:'A'}) SET n.v = 2 RETURN n.v AS v
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s1b2: MATCH (n:Item {name:'B'}) SET n.v = 1 RETURN n.v AS v
+ERROR: serialization conflict
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"A" |0
+"B" |0
+(2 rows)
+
+starting permutation: s2b2 s1a s1b2 s1c s2a s2c
+step s2b2: MATCH (n:Item {name:'B'}) SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1a: MATCH (n:Item {name:'A'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1b2: MATCH (n:Item {name:'B'}) SET n.v = 1 RETURN n.v AS v
+ERROR: serialization conflict
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s2a: MATCH (n:Item {name:'A'}) SET n.v = 2 RETURN n.v AS v
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"A" |0
+"B" |0
+(2 rows)
+
+starting permutation: s2b2 s1a s1b2 s2a s1c s2c
+step s2b2: MATCH (n:Item {name:'B'}) SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1a: MATCH (n:Item {name:'A'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1b2: MATCH (n:Item {name:'B'}) SET n.v = 1 RETURN n.v AS v
+ERROR: serialization conflict
+step s2a: MATCH (n:Item {name:'A'}) SET n.v = 2 RETURN n.v AS v
+ERROR: serialization conflict
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"A" |0
+"B" |0
+(2 rows)
+
+starting permutation: s2b2 s1a s1b2 s2a s2c s1c
+step s2b2: MATCH (n:Item {name:'B'}) SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1a: MATCH (n:Item {name:'A'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1b2: MATCH (n:Item {name:'B'}) SET n.v = 1 RETURN n.v AS v
+ERROR: serialization conflict
+step s2a: MATCH (n:Item {name:'A'}) SET n.v = 2 RETURN n.v AS v
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"A" |0
+"B" |0
+(2 rows)
+
+starting permutation: s2b2 s1a s2a s1b2 s1c s2c
+step s2b2: MATCH (n:Item {name:'B'}) SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1a: MATCH (n:Item {name:'A'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s2a: MATCH (n:Item {name:'A'}) SET n.v = 2 RETURN n.v AS v
+ERROR: serialization conflict
+step s1b2: MATCH (n:Item {name:'B'}) SET n.v = 1 RETURN n.v AS v
+ERROR: serialization conflict
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"A" |0
+"B" |0
+(2 rows)
+
+starting permutation: s2b2 s1a s2a s1b2 s2c s1c
+step s2b2: MATCH (n:Item {name:'B'}) SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1a: MATCH (n:Item {name:'A'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s2a: MATCH (n:Item {name:'A'}) SET n.v = 2 RETURN n.v AS v
+ERROR: serialization conflict
+step s1b2: MATCH (n:Item {name:'B'}) SET n.v = 1 RETURN n.v AS v
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"A" |0
+"B" |0
+(2 rows)
+
+starting permutation: s2b2 s1a s2a s2c s1b2 s1c
+step s2b2: MATCH (n:Item {name:'B'}) SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1a: MATCH (n:Item {name:'A'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s2a: MATCH (n:Item {name:'A'}) SET n.v = 2 RETURN n.v AS v
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s1b2: MATCH (n:Item {name:'B'}) SET n.v = 1 RETURN n.v AS v
+ERROR: serialization conflict
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"A" |0
+"B" |0
+(2 rows)
+
+starting permutation: s2b2 s2a s1a s1b2 s1c s2c
+step s2b2: MATCH (n:Item {name:'B'}) SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s2a: MATCH (n:Item {name:'A'}) SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1a: MATCH (n:Item {name:'A'}) SET n.v = 1 RETURN n.v AS v
+ERROR: serialization conflict
+step s1b2: MATCH (n:Item {name:'B'}) SET n.v = 1 RETURN n.v AS v
+ERROR: serialization conflict
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s2c: COMMIT
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"A" |2
+"B" |2
+(2 rows)
+
+starting permutation: s2b2 s2a s1a s1b2 s2c s1c
+step s2b2: MATCH (n:Item {name:'B'}) SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s2a: MATCH (n:Item {name:'A'}) SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1a: MATCH (n:Item {name:'A'}) SET n.v = 1 RETURN n.v AS v
+ERROR: serialization conflict
+step s1b2: MATCH (n:Item {name:'B'}) SET n.v = 1 RETURN n.v AS v
+ERROR: serialization conflict
+step s2c: COMMIT
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"A" |2
+"B" |2
+(2 rows)
+
+starting permutation: s2b2 s2a s1a s2c s1b2 s1c
+step s2b2: MATCH (n:Item {name:'B'}) SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s2a: MATCH (n:Item {name:'A'}) SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1a: MATCH (n:Item {name:'A'}) SET n.v = 1 RETURN n.v AS v
+ERROR: serialization conflict
+step s2c: COMMIT
+step s1b2: MATCH (n:Item {name:'B'}) SET n.v = 1 RETURN n.v AS v
+ERROR: serialization conflict
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"A" |2
+"B" |2
+(2 rows)
+
+starting permutation: s2b2 s2a s2c s1a s1b2 s1c
+step s2b2: MATCH (n:Item {name:'B'}) SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s2a: MATCH (n:Item {name:'A'}) SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s2c: COMMIT
+step s1a: MATCH (n:Item {name:'A'}) SET n.v = 1 RETURN n.v AS v
+ERROR: serialization conflict
+step s1b2: MATCH (n:Item {name:'B'}) SET n.v = 1 RETURN n.v AS v
+ERROR: serialization conflict
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"A" |2
+"B" |2
+(2 rows)

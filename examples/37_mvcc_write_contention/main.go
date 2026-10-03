@@ -135,6 +135,10 @@ func run(ctx context.Context, w io.Writer, cfg *config) error {
 	if err := phaseRestart(ctx, w, cfg); err != nil {
 		return err
 	}
+	// PHASE 5 — the deterministic scenario catalogue (catalogue.go).
+	if err := phaseCatalogue(ctx, w); err != nil {
+		return err
+	}
 
 	var m1 runtime.MemStats
 	runtime.ReadMemStats(&m1)
@@ -191,16 +195,28 @@ func seedGraph(g *lpg.Graph[string, float64], cfg *config) error {
 // made this the project's rule after a fixed count died under coverage.
 const retryBudget = 2 * time.Second
 
+// hangBudget bounds one writer phase (one scaling level, or the contention
+// phase) by WALL CLOCK, so a writer that stops making progress — a livelock in
+// the retry loop, or a write that never returns from the barrier — ends the phase
+// with its unfinished orders counted as unrecovered instead of hanging the run.
+//
+// It is sized to catch a hang, not to measure speed: a healthy phase of the
+// documented default shape finishes in milliseconds, and the short-layer shape in
+// less, so 30 s is three to four orders of magnitude of margin. A slow machine
+// cannot reach it; a stuck writer always does.
+const hangBudget = 30 * time.Second
+
 // commitOrder applies one order through sess, retrying a serialization conflict
 // until the budget expires. It reports whether it committed, and how many retries
-// it took.
+// it took. ctx bounds the barrier acquisition, so a phase whose hang budget has
+// expired stops waiting.
 func commitOrder(
-	g *lpg.Graph[string, float64], sess *lpg.Session[string, float64],
+	ctx context.Context, g *lpg.Graph[string, float64], sess *lpg.Session[string, float64],
 	custKey, invKey string, n int,
 ) (retries int, err error) {
 	deadline := time.Now().Add(retryBudget)
 	for attempt := 0; ; attempt++ {
-		err = sess.ApplyVersioned(func(tx lpg.WriteTx) error {
+		err = sess.ApplyVersionedCtx(ctx, func(tx lpg.WriteTx) error {
 			wv := g.Writer(tx)
 			// The producer's OWN customer: uncontended by construction.
 			if perr := wv.SetNodeProperty(custKey, "orders", lpg.Int64Value(int64(n+1))); perr != nil {

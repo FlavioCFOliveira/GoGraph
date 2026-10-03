@@ -1,0 +1,108 @@
+spec ww06-predicate-moved-out: 2 sessions, 6 permutations
+# WW06. s1 moves n out of the predicate (status 'a' -> 'b') and commits; s2, with an
+# older snapshot, runs MATCH (n {status:'a'}) SET n.v = 1. s2 still matches n at its
+# snapshot, so its write is REFUSED rather than silently skipped. PostgreSQL READ
+# COMMITTED re-evaluates the predicate and skips the row; InnoDB's semi-consistent
+# read skips it too.
+
+starting permutation: s1m s1c s2w s2c
+step s1m: MATCH (n:Item {name:'n'}) SET n.status = 'b' RETURN n.status AS status
+status
+------
+"b"   
+(1 row)
+step s1c: COMMIT
+step s2w: MATCH (n:Item {status:'a'}) SET n.v = 1 RETURN n.name AS name, n.v AS v
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:Item) RETURN n.name AS name, n.status AS status, n.v AS v
+name|status|v
+----+------+-
+"n" |"b"   |0
+(1 row)
+
+starting permutation: s1m s2w s1c s2c
+step s1m: MATCH (n:Item {name:'n'}) SET n.status = 'b' RETURN n.status AS status
+status
+------
+"b"   
+(1 row)
+step s2w: MATCH (n:Item {status:'a'}) SET n.v = 1 RETURN n.name AS name, n.v AS v
+ERROR: serialization conflict
+step s1c: COMMIT
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:Item) RETURN n.name AS name, n.status AS status, n.v AS v
+name|status|v
+----+------+-
+"n" |"b"   |0
+(1 row)
+
+starting permutation: s1m s2w s2c s1c
+step s1m: MATCH (n:Item {name:'n'}) SET n.status = 'b' RETURN n.status AS status
+status
+------
+"b"   
+(1 row)
+step s2w: MATCH (n:Item {status:'a'}) SET n.v = 1 RETURN n.name AS name, n.v AS v
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s1c: COMMIT
+final final: MATCH (n:Item) RETURN n.name AS name, n.status AS status, n.v AS v
+name|status|v
+----+------+-
+"n" |"b"   |0
+(1 row)
+
+starting permutation: s2w s1m s1c s2c
+step s2w: MATCH (n:Item {status:'a'}) SET n.v = 1 RETURN n.name AS name, n.v AS v
+name|v
+----+-
+"n" |1
+(1 row)
+step s1m: MATCH (n:Item {name:'n'}) SET n.status = 'b' RETURN n.status AS status
+ERROR: serialization conflict
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s2c: COMMIT
+final final: MATCH (n:Item) RETURN n.name AS name, n.status AS status, n.v AS v
+name|status|v
+----+------+-
+"n" |"a"   |1
+(1 row)
+
+starting permutation: s2w s1m s2c s1c
+step s2w: MATCH (n:Item {status:'a'}) SET n.v = 1 RETURN n.name AS name, n.v AS v
+name|v
+----+-
+"n" |1
+(1 row)
+step s1m: MATCH (n:Item {name:'n'}) SET n.status = 'b' RETURN n.status AS status
+ERROR: serialization conflict
+step s2c: COMMIT
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:Item) RETURN n.name AS name, n.status AS status, n.v AS v
+name|status|v
+----+------+-
+"n" |"a"   |1
+(1 row)
+
+starting permutation: s2w s2c s1m s1c
+step s2w: MATCH (n:Item {status:'a'}) SET n.v = 1 RETURN n.name AS name, n.v AS v
+name|v
+----+-
+"n" |1
+(1 row)
+step s2c: COMMIT
+step s1m: MATCH (n:Item {name:'n'}) SET n.status = 'b' RETURN n.status AS status
+ERROR: serialization conflict
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:Item) RETURN n.name AS name, n.status AS status, n.v AS v
+name|status|v
+----+------+-
+"n" |"a"   |1
+(1 row)

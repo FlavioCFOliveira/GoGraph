@@ -1,0 +1,107 @@
+spec ww03-blind-increment: 2 sessions, 6 permutations
+# WW03. Two transactions each run the blind increment SET c.n = c.n + 1 with no
+# prior read. The second writer is refused (F2), so the final value is 1 after
+# one commit; only a retry reaches 2. InnoDB READ COMMITTED / REPEATABLE READ and
+# PostgreSQL READ COMMITTED give 2 without an error.
+
+starting permutation: s1i s1c s2i s2c
+step s1i: MATCH (c:Counter {name:'c'}) SET c.n = c.n + 1 RETURN c.n AS n
+n
+-
+1
+(1 row)
+step s1c: COMMIT
+step s2i: MATCH (c:Counter {name:'c'}) SET c.n = c.n + 1 RETURN c.n AS n
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+1
+(1 row)
+
+starting permutation: s1i s2i s1c s2c
+step s1i: MATCH (c:Counter {name:'c'}) SET c.n = c.n + 1 RETURN c.n AS n
+n
+-
+1
+(1 row)
+step s2i: MATCH (c:Counter {name:'c'}) SET c.n = c.n + 1 RETURN c.n AS n
+ERROR: serialization conflict
+step s1c: COMMIT
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+1
+(1 row)
+
+starting permutation: s1i s2i s2c s1c
+step s1i: MATCH (c:Counter {name:'c'}) SET c.n = c.n + 1 RETURN c.n AS n
+n
+-
+1
+(1 row)
+step s2i: MATCH (c:Counter {name:'c'}) SET c.n = c.n + 1 RETURN c.n AS n
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s1c: COMMIT
+final final: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+1
+(1 row)
+
+starting permutation: s2i s1i s1c s2c
+step s2i: MATCH (c:Counter {name:'c'}) SET c.n = c.n + 1 RETURN c.n AS n
+n
+-
+1
+(1 row)
+step s1i: MATCH (c:Counter {name:'c'}) SET c.n = c.n + 1 RETURN c.n AS n
+ERROR: serialization conflict
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s2c: COMMIT
+final final: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+1
+(1 row)
+
+starting permutation: s2i s1i s2c s1c
+step s2i: MATCH (c:Counter {name:'c'}) SET c.n = c.n + 1 RETURN c.n AS n
+n
+-
+1
+(1 row)
+step s1i: MATCH (c:Counter {name:'c'}) SET c.n = c.n + 1 RETURN c.n AS n
+ERROR: serialization conflict
+step s2c: COMMIT
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+1
+(1 row)
+
+starting permutation: s2i s2c s1i s1c
+step s2i: MATCH (c:Counter {name:'c'}) SET c.n = c.n + 1 RETURN c.n AS n
+n
+-
+1
+(1 row)
+step s2c: COMMIT
+step s1i: MATCH (c:Counter {name:'c'}) SET c.n = c.n + 1 RETURN c.n AS n
+ERROR: serialization conflict
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (c:Counter {name:'c'}) RETURN c.n AS n
+n
+-
+1
+(1 row)

@@ -1,0 +1,603 @@
+spec ww09-disjoint-nodes: 2 sessions, 20 permutations
+# WW09. Each session updates only its own node, twice, then commits. Disjoint writes
+# never conflict: zero refusals in every interleaving (F2, F11).
+
+starting permutation: s1w1 s1w2 s1c s2w1 s2w2 s2c
+step s1w1: MATCH (n:Item {name:'a'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1w2: MATCH (n:Item {name:'a'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1c: COMMIT
+step s2w1: MATCH (n:Item {name:'b'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s2w2: MATCH (n:Item {name:'b'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s2c: COMMIT
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"a" |2
+"b" |2
+(2 rows)
+
+starting permutation: s1w1 s1w2 s2w1 s1c s2w2 s2c
+step s1w1: MATCH (n:Item {name:'a'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1w2: MATCH (n:Item {name:'a'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s2w1: MATCH (n:Item {name:'b'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1c: COMMIT
+step s2w2: MATCH (n:Item {name:'b'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s2c: COMMIT
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"a" |2
+"b" |2
+(2 rows)
+
+starting permutation: s1w1 s1w2 s2w1 s2w2 s1c s2c
+step s1w1: MATCH (n:Item {name:'a'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1w2: MATCH (n:Item {name:'a'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s2w1: MATCH (n:Item {name:'b'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s2w2: MATCH (n:Item {name:'b'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"a" |2
+"b" |2
+(2 rows)
+
+starting permutation: s1w1 s1w2 s2w1 s2w2 s2c s1c
+step s1w1: MATCH (n:Item {name:'a'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1w2: MATCH (n:Item {name:'a'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s2w1: MATCH (n:Item {name:'b'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s2w2: MATCH (n:Item {name:'b'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"a" |2
+"b" |2
+(2 rows)
+
+starting permutation: s1w1 s2w1 s1w2 s1c s2w2 s2c
+step s1w1: MATCH (n:Item {name:'a'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s2w1: MATCH (n:Item {name:'b'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1w2: MATCH (n:Item {name:'a'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1c: COMMIT
+step s2w2: MATCH (n:Item {name:'b'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s2c: COMMIT
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"a" |2
+"b" |2
+(2 rows)
+
+starting permutation: s1w1 s2w1 s1w2 s2w2 s1c s2c
+step s1w1: MATCH (n:Item {name:'a'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s2w1: MATCH (n:Item {name:'b'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1w2: MATCH (n:Item {name:'a'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s2w2: MATCH (n:Item {name:'b'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"a" |2
+"b" |2
+(2 rows)
+
+starting permutation: s1w1 s2w1 s1w2 s2w2 s2c s1c
+step s1w1: MATCH (n:Item {name:'a'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s2w1: MATCH (n:Item {name:'b'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1w2: MATCH (n:Item {name:'a'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s2w2: MATCH (n:Item {name:'b'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"a" |2
+"b" |2
+(2 rows)
+
+starting permutation: s1w1 s2w1 s2w2 s1w2 s1c s2c
+step s1w1: MATCH (n:Item {name:'a'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s2w1: MATCH (n:Item {name:'b'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s2w2: MATCH (n:Item {name:'b'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1w2: MATCH (n:Item {name:'a'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"a" |2
+"b" |2
+(2 rows)
+
+starting permutation: s1w1 s2w1 s2w2 s1w2 s2c s1c
+step s1w1: MATCH (n:Item {name:'a'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s2w1: MATCH (n:Item {name:'b'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s2w2: MATCH (n:Item {name:'b'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1w2: MATCH (n:Item {name:'a'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"a" |2
+"b" |2
+(2 rows)
+
+starting permutation: s1w1 s2w1 s2w2 s2c s1w2 s1c
+step s1w1: MATCH (n:Item {name:'a'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s2w1: MATCH (n:Item {name:'b'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s2w2: MATCH (n:Item {name:'b'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s2c: COMMIT
+step s1w2: MATCH (n:Item {name:'a'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1c: COMMIT
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"a" |2
+"b" |2
+(2 rows)
+
+starting permutation: s2w1 s1w1 s1w2 s1c s2w2 s2c
+step s2w1: MATCH (n:Item {name:'b'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1w1: MATCH (n:Item {name:'a'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1w2: MATCH (n:Item {name:'a'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1c: COMMIT
+step s2w2: MATCH (n:Item {name:'b'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s2c: COMMIT
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"a" |2
+"b" |2
+(2 rows)
+
+starting permutation: s2w1 s1w1 s1w2 s2w2 s1c s2c
+step s2w1: MATCH (n:Item {name:'b'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1w1: MATCH (n:Item {name:'a'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1w2: MATCH (n:Item {name:'a'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s2w2: MATCH (n:Item {name:'b'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"a" |2
+"b" |2
+(2 rows)
+
+starting permutation: s2w1 s1w1 s1w2 s2w2 s2c s1c
+step s2w1: MATCH (n:Item {name:'b'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1w1: MATCH (n:Item {name:'a'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1w2: MATCH (n:Item {name:'a'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s2w2: MATCH (n:Item {name:'b'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"a" |2
+"b" |2
+(2 rows)
+
+starting permutation: s2w1 s1w1 s2w2 s1w2 s1c s2c
+step s2w1: MATCH (n:Item {name:'b'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1w1: MATCH (n:Item {name:'a'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s2w2: MATCH (n:Item {name:'b'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1w2: MATCH (n:Item {name:'a'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"a" |2
+"b" |2
+(2 rows)
+
+starting permutation: s2w1 s1w1 s2w2 s1w2 s2c s1c
+step s2w1: MATCH (n:Item {name:'b'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1w1: MATCH (n:Item {name:'a'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s2w2: MATCH (n:Item {name:'b'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1w2: MATCH (n:Item {name:'a'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"a" |2
+"b" |2
+(2 rows)
+
+starting permutation: s2w1 s1w1 s2w2 s2c s1w2 s1c
+step s2w1: MATCH (n:Item {name:'b'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1w1: MATCH (n:Item {name:'a'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s2w2: MATCH (n:Item {name:'b'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s2c: COMMIT
+step s1w2: MATCH (n:Item {name:'a'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1c: COMMIT
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"a" |2
+"b" |2
+(2 rows)
+
+starting permutation: s2w1 s2w2 s1w1 s1w2 s1c s2c
+step s2w1: MATCH (n:Item {name:'b'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s2w2: MATCH (n:Item {name:'b'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1w1: MATCH (n:Item {name:'a'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1w2: MATCH (n:Item {name:'a'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"a" |2
+"b" |2
+(2 rows)
+
+starting permutation: s2w1 s2w2 s1w1 s1w2 s2c s1c
+step s2w1: MATCH (n:Item {name:'b'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s2w2: MATCH (n:Item {name:'b'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1w1: MATCH (n:Item {name:'a'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1w2: MATCH (n:Item {name:'a'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"a" |2
+"b" |2
+(2 rows)
+
+starting permutation: s2w1 s2w2 s1w1 s2c s1w2 s1c
+step s2w1: MATCH (n:Item {name:'b'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s2w2: MATCH (n:Item {name:'b'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1w1: MATCH (n:Item {name:'a'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s2c: COMMIT
+step s1w2: MATCH (n:Item {name:'a'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1c: COMMIT
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"a" |2
+"b" |2
+(2 rows)
+
+starting permutation: s2w1 s2w2 s2c s1w1 s1w2 s1c
+step s2w1: MATCH (n:Item {name:'b'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s2w2: MATCH (n:Item {name:'b'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s2c: COMMIT
+step s1w1: MATCH (n:Item {name:'a'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1w2: MATCH (n:Item {name:'a'}) SET n.v = n.v + 1 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1c: COMMIT
+final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
+name|v
+----+-
+"a" |2
+"b" |2
+(2 rows)

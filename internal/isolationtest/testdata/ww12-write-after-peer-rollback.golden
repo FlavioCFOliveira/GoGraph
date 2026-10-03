@@ -1,0 +1,63 @@
+spec ww12-write-after-peer-rollback: 2 sessions, 3 permutations
+# WW12. s1 writes n and ROLLS BACK; the vacuum is drained right after (H1); s2 writes
+# n. A write after the rollback and drain succeeds in every interleaving — an aborted
+# write must not leave the node permanently unwritable (#2318 class). A write while
+# s1 is open is refused; one committed before s1's write makes s1's refused.
+# The no-drain arm is NOT pinned: its outcome would depend on the vacuum's timing
+# (F5), so a golden would record a race.
+# The second writer is an autocommit statement, so its snapshot is
+# taken when it runs. An explicit transaction whose snapshot predates the ROLLBACK is
+# refused even after the drain, because ExplicitTx.Rollback publishes its commit
+# record instead of aborting it — a defect this catalogue found and does not pin; see
+# README.md, "Defects found".
+
+starting permutation: s1w s1rb s1dr s2w
+step s1w: MATCH (n:Item {name:'n'}) SET n.x = 1 RETURN n.x AS x
+x
+-
+1
+(1 row)
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+step s2w: MATCH (n:Item {name:'n'}) SET n.x = 2 RETURN n.x AS x
+x
+-
+2
+(1 row)
+final final: MATCH (n:Item {name:'n'}) RETURN n.x AS x
+x
+-
+2
+(1 row)
+
+starting permutation: s1w s2w s1rb s1dr
+step s1w: MATCH (n:Item {name:'n'}) SET n.x = 1 RETURN n.x AS x
+x
+-
+1
+(1 row)
+step s2w: MATCH (n:Item {name:'n'}) SET n.x = 2 RETURN n.x AS x
+ERROR: serialization conflict
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+final final: MATCH (n:Item {name:'n'}) RETURN n.x AS x
+x
+-
+0
+(1 row)
+
+starting permutation: s2w s1w s1rb s1dr
+step s2w: MATCH (n:Item {name:'n'}) SET n.x = 2 RETURN n.x AS x
+x
+-
+2
+(1 row)
+step s1w: MATCH (n:Item {name:'n'}) SET n.x = 1 RETURN n.x AS x
+ERROR: serialization conflict
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+final final: MATCH (n:Item {name:'n'}) RETURN n.x AS x
+x
+-
+2
+(1 row)

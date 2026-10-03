@@ -1,0 +1,125 @@
+spec ww13-void-property-delete: 2 sessions, 6 permutations
+# WW13, property arm. Both sessions REMOVE n.p. Property delete is a void primitive: a conflict it hits cannot be returned by the
+# statement, so it is RECORDED on the transaction and must surface at COMMIT as a
+# serialization conflict, applying nothing (F3, rmp #2354). A COMMIT that succeeds
+# after a recorded conflict is a silently dropped write.
+
+starting permutation: s1x s1c s2x s2c
+step s1x: MATCH (n:Item {name:'n'}) REMOVE n.p RETURN n.name AS name
+name
+----
+"n" 
+(1 row)
+step s1c: COMMIT
+step s2x: MATCH (n:Item {name:'n'}) REMOVE n.p RETURN n.name AS name
+name
+----
+"n" 
+(1 row)
+step s2c: COMMIT
+ERROR: serialization conflict
+final final: MATCH (n:Item {name:'n'}) RETURN n.p AS p
+p   
+----
+null
+(1 row)
+
+starting permutation: s1x s2x s1c s2c
+step s1x: MATCH (n:Item {name:'n'}) REMOVE n.p RETURN n.name AS name
+name
+----
+"n" 
+(1 row)
+step s2x: MATCH (n:Item {name:'n'}) REMOVE n.p RETURN n.name AS name
+name
+----
+"n" 
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+ERROR: serialization conflict
+final final: MATCH (n:Item {name:'n'}) RETURN n.p AS p
+p   
+----
+null
+(1 row)
+
+starting permutation: s1x s2x s2c s1c
+step s1x: MATCH (n:Item {name:'n'}) REMOVE n.p RETURN n.name AS name
+name
+----
+"n" 
+(1 row)
+step s2x: MATCH (n:Item {name:'n'}) REMOVE n.p RETURN n.name AS name
+name
+----
+"n" 
+(1 row)
+step s2c: COMMIT
+ERROR: serialization conflict
+step s1c: COMMIT
+final final: MATCH (n:Item {name:'n'}) RETURN n.p AS p
+p   
+----
+null
+(1 row)
+
+starting permutation: s2x s1x s1c s2c
+step s2x: MATCH (n:Item {name:'n'}) REMOVE n.p RETURN n.name AS name
+name
+----
+"n" 
+(1 row)
+step s1x: MATCH (n:Item {name:'n'}) REMOVE n.p RETURN n.name AS name
+name
+----
+"n" 
+(1 row)
+step s1c: COMMIT
+ERROR: serialization conflict
+step s2c: COMMIT
+final final: MATCH (n:Item {name:'n'}) RETURN n.p AS p
+p   
+----
+null
+(1 row)
+
+starting permutation: s2x s1x s2c s1c
+step s2x: MATCH (n:Item {name:'n'}) REMOVE n.p RETURN n.name AS name
+name
+----
+"n" 
+(1 row)
+step s1x: MATCH (n:Item {name:'n'}) REMOVE n.p RETURN n.name AS name
+name
+----
+"n" 
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+ERROR: serialization conflict
+final final: MATCH (n:Item {name:'n'}) RETURN n.p AS p
+p   
+----
+null
+(1 row)
+
+starting permutation: s2x s2c s1x s1c
+step s2x: MATCH (n:Item {name:'n'}) REMOVE n.p RETURN n.name AS name
+name
+----
+"n" 
+(1 row)
+step s2c: COMMIT
+step s1x: MATCH (n:Item {name:'n'}) REMOVE n.p RETURN n.name AS name
+name
+----
+"n" 
+(1 row)
+step s1c: COMMIT
+ERROR: serialization conflict
+final final: MATCH (n:Item {name:'n'}) RETURN n.p AS p
+p   
+----
+null
+(1 row)

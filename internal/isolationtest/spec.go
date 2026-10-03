@@ -94,7 +94,7 @@ const (
 
 // Step is one named unit of work inside a session.
 //
-// Exactly one of Query and Ctl is set. A step with a Query and no open
+// Exactly one of Query, Ctl, Hook and Probe is set. A step with a Query and no open
 // transaction runs as an autocommit statement, which is the same thing a bare
 // statement does outside a transaction block in PostgreSQL.
 type Step struct {
@@ -120,7 +120,19 @@ type Step struct {
 	// completion is reported when it is observed. Label is what the transcript
 	// prints in place of the query text, so a Hook step renders deterministically
 	// (a Go closure has no stable text).
-	Hook  func(ctx context.Context) error
+	Hook func(ctx context.Context) error
+	// Probe is a Hook that also reports a result: a step body written in Go
+	// whose rows are rendered exactly as a query's would be, and handed to the
+	// [Observer] the same way.
+	//
+	// It exists so a scenario can be driven through an API other than Cypher —
+	// the lpg graph API under the engine, for example — and still produce a
+	// transcript a golden file can pin: a Hook can only succeed or fail, so the
+	// value a Go-level read returned would otherwise never reach the transcript.
+	// Cols and rows are rendered strings for the same reason [Observation]
+	// carries strings. Label is printed in place of the query text, as for Hook.
+	Probe func(ctx context.Context) (cols []string, rows [][]string, err error)
+	// Label is what the transcript prints for a Hook or Probe step.
 	Label string
 	// Params are the query parameters, if any. Rendered into the output so a
 	// golden file records what was actually run.
@@ -135,7 +147,7 @@ func (s *Step) display() string {
 	if s.isControl() {
 		return string(s.Ctl)
 	}
-	if s.Hook != nil {
+	if s.Hook != nil || s.Probe != nil {
 		if s.Label != "" {
 			return s.Label
 		}
@@ -189,7 +201,14 @@ type Spec struct {
 	// Setup runs once per permutation on a control session, before any session
 	// setup. Build the fixture here.
 	Setup []Step
-	// Teardown runs once per permutation on the control session, last.
+	// Final runs once per permutation on the control session, after every
+	// session's teardown and before Teardown. Unlike Teardown, its results ARE
+	// rendered into the transcript (as "final <name>: ...") and handed to the
+	// [Observer], so the state a permutation leaves behind is part of what the
+	// golden file pins — not only what each step returned along the way.
+	Final []Step
+	// Teardown runs once per permutation on the control session, last. Its
+	// results are not rendered; only its errors are.
 	Teardown []Step
 	// Sessions are the scripted actors. Their declaration order is the tie-break
 	// the enumeration uses, so it fixes the order permutations are emitted in.
@@ -242,7 +261,7 @@ func (s *Spec) Validate() error {
 			}
 		}
 	}
-	for _, st := range append(append([]Step{}, s.Setup...), s.Teardown...) {
+	for _, st := range append(append(append([]Step{}, s.Setup...), s.Final...), s.Teardown...) {
 		if err := validateStep(s.Name, "<control>", &st); err != nil {
 			return err
 		}
@@ -275,8 +294,11 @@ func validateStep(spec, sess string, st *Step) error {
 	if st.Hook != nil {
 		set++
 	}
+	if st.Probe != nil {
+		set++
+	}
 	if set != 1 {
-		return fmt.Errorf("isolationtest: spec %q step %q must set exactly one of Query, Ctl and Hook", spec, st.Name)
+		return fmt.Errorf("isolationtest: spec %q step %q must set exactly one of Query, Ctl, Hook and Probe", spec, st.Name)
 	}
 	switch st.Ctl {
 	case "", Begin, BeginRead, Commit, Rollback:

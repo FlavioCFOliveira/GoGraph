@@ -1,0 +1,107 @@
+spec ww02-stale-snapshot-write: 2 sessions, 6 permutations
+# WW02. s2 takes its snapshot at BEGIN; s1 writes the same node and commits after it.
+# s2's write must be refused whenever s1's version is in flight or committed after
+# s2's snapshot (first-updater-wins / first-committer-wins, F2). PostgreSQL READ
+# COMMITTED would re-fetch and succeed; snapshot isolation cannot.
+
+starting permutation: s1w s1c s2w s2c
+step s1w: MATCH (n:Item {name:'n'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1c: COMMIT
+step s2w: MATCH (n:Item {name:'n'}) SET n.v = 2 RETURN n.v AS v
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:Item {name:'n'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+
+starting permutation: s1w s2w s1c s2c
+step s1w: MATCH (n:Item {name:'n'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s2w: MATCH (n:Item {name:'n'}) SET n.v = 2 RETURN n.v AS v
+ERROR: serialization conflict
+step s1c: COMMIT
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:Item {name:'n'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+
+starting permutation: s1w s2w s2c s1c
+step s1w: MATCH (n:Item {name:'n'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s2w: MATCH (n:Item {name:'n'}) SET n.v = 2 RETURN n.v AS v
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s1c: COMMIT
+final final: MATCH (n:Item {name:'n'}) RETURN n.v AS v
+v
+-
+1
+(1 row)
+
+starting permutation: s2w s1w s1c s2c
+step s2w: MATCH (n:Item {name:'n'}) SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1w: MATCH (n:Item {name:'n'}) SET n.v = 1 RETURN n.v AS v
+ERROR: serialization conflict
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s2c: COMMIT
+final final: MATCH (n:Item {name:'n'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+
+starting permutation: s2w s1w s2c s1c
+step s2w: MATCH (n:Item {name:'n'}) SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1w: MATCH (n:Item {name:'n'}) SET n.v = 1 RETURN n.v AS v
+ERROR: serialization conflict
+step s2c: COMMIT
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:Item {name:'n'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+
+starting permutation: s2w s2c s1w s1c
+step s2w: MATCH (n:Item {name:'n'}) SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s2c: COMMIT
+step s1w: MATCH (n:Item {name:'n'}) SET n.v = 1 RETURN n.v AS v
+ERROR: serialization conflict
+step s1c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:Item {name:'n'}) RETURN n.v AS v
+v
+-
+2
+(1 row)

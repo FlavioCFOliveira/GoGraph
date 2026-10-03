@@ -1,0 +1,915 @@
+spec sk12-read-skew-lpg: 2 sessions, 35 permutations
+# SK12 through the lpg API, extended to two keys (read skew, A5A). s1 reads x, then
+# y, then x again inside one transaction; s2 moves 10 from x to y and commits. s1's
+# two reads of x must agree and x + y must be 100 in every interleaving (F1). This
+# spec is the negative control's target: a per-key snapshot breaks both.
+
+starting permutation: s1x s1y s1x2 s1c s2dx s2cy s2c
+step s1x: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s1y: lpg: read y.bal
+y.bal
+-----
+50   
+(1 row)
+step s1x2: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s1c: lpg: Session.EndVersionedTx
+step s2dx: lpg: SetNodeProperty(x, bal, bal + -10)
+step s2cy: lpg: SetNodeProperty(y, bal, bal + 10)
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+100  
+(1 row)
+
+starting permutation: s1x s1y s1x2 s2dx s1c s2cy s2c
+step s1x: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s1y: lpg: read y.bal
+y.bal
+-----
+50   
+(1 row)
+step s1x2: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s2dx: lpg: SetNodeProperty(x, bal, bal + -10)
+step s1c: lpg: Session.EndVersionedTx
+step s2cy: lpg: SetNodeProperty(y, bal, bal + 10)
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+100  
+(1 row)
+
+starting permutation: s1x s1y s1x2 s2dx s2cy s1c s2c
+step s1x: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s1y: lpg: read y.bal
+y.bal
+-----
+50   
+(1 row)
+step s1x2: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s2dx: lpg: SetNodeProperty(x, bal, bal + -10)
+step s2cy: lpg: SetNodeProperty(y, bal, bal + 10)
+step s1c: lpg: Session.EndVersionedTx
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+100  
+(1 row)
+
+starting permutation: s1x s1y s1x2 s2dx s2cy s2c s1c
+step s1x: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s1y: lpg: read y.bal
+y.bal
+-----
+50   
+(1 row)
+step s1x2: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s2dx: lpg: SetNodeProperty(x, bal, bal + -10)
+step s2cy: lpg: SetNodeProperty(y, bal, bal + 10)
+step s2c: lpg: Session.EndVersionedTx
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+100  
+(1 row)
+
+starting permutation: s1x s1y s2dx s1x2 s1c s2cy s2c
+step s1x: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s1y: lpg: read y.bal
+y.bal
+-----
+50   
+(1 row)
+step s2dx: lpg: SetNodeProperty(x, bal, bal + -10)
+step s1x2: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s1c: lpg: Session.EndVersionedTx
+step s2cy: lpg: SetNodeProperty(y, bal, bal + 10)
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+100  
+(1 row)
+
+starting permutation: s1x s1y s2dx s1x2 s2cy s1c s2c
+step s1x: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s1y: lpg: read y.bal
+y.bal
+-----
+50   
+(1 row)
+step s2dx: lpg: SetNodeProperty(x, bal, bal + -10)
+step s1x2: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s2cy: lpg: SetNodeProperty(y, bal, bal + 10)
+step s1c: lpg: Session.EndVersionedTx
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+100  
+(1 row)
+
+starting permutation: s1x s1y s2dx s1x2 s2cy s2c s1c
+step s1x: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s1y: lpg: read y.bal
+y.bal
+-----
+50   
+(1 row)
+step s2dx: lpg: SetNodeProperty(x, bal, bal + -10)
+step s1x2: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s2cy: lpg: SetNodeProperty(y, bal, bal + 10)
+step s2c: lpg: Session.EndVersionedTx
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+100  
+(1 row)
+
+starting permutation: s1x s1y s2dx s2cy s1x2 s1c s2c
+step s1x: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s1y: lpg: read y.bal
+y.bal
+-----
+50   
+(1 row)
+step s2dx: lpg: SetNodeProperty(x, bal, bal + -10)
+step s2cy: lpg: SetNodeProperty(y, bal, bal + 10)
+step s1x2: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s1c: lpg: Session.EndVersionedTx
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+100  
+(1 row)
+
+starting permutation: s1x s1y s2dx s2cy s1x2 s2c s1c
+step s1x: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s1y: lpg: read y.bal
+y.bal
+-----
+50   
+(1 row)
+step s2dx: lpg: SetNodeProperty(x, bal, bal + -10)
+step s2cy: lpg: SetNodeProperty(y, bal, bal + 10)
+step s1x2: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s2c: lpg: Session.EndVersionedTx
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+100  
+(1 row)
+
+starting permutation: s1x s1y s2dx s2cy s2c s1x2 s1c
+step s1x: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s1y: lpg: read y.bal
+y.bal
+-----
+50   
+(1 row)
+step s2dx: lpg: SetNodeProperty(x, bal, bal + -10)
+step s2cy: lpg: SetNodeProperty(y, bal, bal + 10)
+step s2c: lpg: Session.EndVersionedTx
+step s1x2: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+100  
+(1 row)
+
+starting permutation: s1x s2dx s1y s1x2 s1c s2cy s2c
+step s1x: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s2dx: lpg: SetNodeProperty(x, bal, bal + -10)
+step s1y: lpg: read y.bal
+y.bal
+-----
+50   
+(1 row)
+step s1x2: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s1c: lpg: Session.EndVersionedTx
+step s2cy: lpg: SetNodeProperty(y, bal, bal + 10)
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+100  
+(1 row)
+
+starting permutation: s1x s2dx s1y s1x2 s2cy s1c s2c
+step s1x: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s2dx: lpg: SetNodeProperty(x, bal, bal + -10)
+step s1y: lpg: read y.bal
+y.bal
+-----
+50   
+(1 row)
+step s1x2: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s2cy: lpg: SetNodeProperty(y, bal, bal + 10)
+step s1c: lpg: Session.EndVersionedTx
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+100  
+(1 row)
+
+starting permutation: s1x s2dx s1y s1x2 s2cy s2c s1c
+step s1x: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s2dx: lpg: SetNodeProperty(x, bal, bal + -10)
+step s1y: lpg: read y.bal
+y.bal
+-----
+50   
+(1 row)
+step s1x2: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s2cy: lpg: SetNodeProperty(y, bal, bal + 10)
+step s2c: lpg: Session.EndVersionedTx
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+100  
+(1 row)
+
+starting permutation: s1x s2dx s1y s2cy s1x2 s1c s2c
+step s1x: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s2dx: lpg: SetNodeProperty(x, bal, bal + -10)
+step s1y: lpg: read y.bal
+y.bal
+-----
+50   
+(1 row)
+step s2cy: lpg: SetNodeProperty(y, bal, bal + 10)
+step s1x2: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s1c: lpg: Session.EndVersionedTx
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+100  
+(1 row)
+
+starting permutation: s1x s2dx s1y s2cy s1x2 s2c s1c
+step s1x: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s2dx: lpg: SetNodeProperty(x, bal, bal + -10)
+step s1y: lpg: read y.bal
+y.bal
+-----
+50   
+(1 row)
+step s2cy: lpg: SetNodeProperty(y, bal, bal + 10)
+step s1x2: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s2c: lpg: Session.EndVersionedTx
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+100  
+(1 row)
+
+starting permutation: s1x s2dx s1y s2cy s2c s1x2 s1c
+step s1x: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s2dx: lpg: SetNodeProperty(x, bal, bal + -10)
+step s1y: lpg: read y.bal
+y.bal
+-----
+50   
+(1 row)
+step s2cy: lpg: SetNodeProperty(y, bal, bal + 10)
+step s2c: lpg: Session.EndVersionedTx
+step s1x2: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+100  
+(1 row)
+
+starting permutation: s1x s2dx s2cy s1y s1x2 s1c s2c
+step s1x: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s2dx: lpg: SetNodeProperty(x, bal, bal + -10)
+step s2cy: lpg: SetNodeProperty(y, bal, bal + 10)
+step s1y: lpg: read y.bal
+y.bal
+-----
+50   
+(1 row)
+step s1x2: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s1c: lpg: Session.EndVersionedTx
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+100  
+(1 row)
+
+starting permutation: s1x s2dx s2cy s1y s1x2 s2c s1c
+step s1x: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s2dx: lpg: SetNodeProperty(x, bal, bal + -10)
+step s2cy: lpg: SetNodeProperty(y, bal, bal + 10)
+step s1y: lpg: read y.bal
+y.bal
+-----
+50   
+(1 row)
+step s1x2: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s2c: lpg: Session.EndVersionedTx
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+100  
+(1 row)
+
+starting permutation: s1x s2dx s2cy s1y s2c s1x2 s1c
+step s1x: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s2dx: lpg: SetNodeProperty(x, bal, bal + -10)
+step s2cy: lpg: SetNodeProperty(y, bal, bal + 10)
+step s1y: lpg: read y.bal
+y.bal
+-----
+50   
+(1 row)
+step s2c: lpg: Session.EndVersionedTx
+step s1x2: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+100  
+(1 row)
+
+starting permutation: s1x s2dx s2cy s2c s1y s1x2 s1c
+step s1x: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s2dx: lpg: SetNodeProperty(x, bal, bal + -10)
+step s2cy: lpg: SetNodeProperty(y, bal, bal + 10)
+step s2c: lpg: Session.EndVersionedTx
+step s1y: lpg: read y.bal
+y.bal
+-----
+50   
+(1 row)
+step s1x2: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+100  
+(1 row)
+
+starting permutation: s2dx s1x s1y s1x2 s1c s2cy s2c
+step s2dx: lpg: SetNodeProperty(x, bal, bal + -10)
+step s1x: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s1y: lpg: read y.bal
+y.bal
+-----
+50   
+(1 row)
+step s1x2: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s1c: lpg: Session.EndVersionedTx
+step s2cy: lpg: SetNodeProperty(y, bal, bal + 10)
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+100  
+(1 row)
+
+starting permutation: s2dx s1x s1y s1x2 s2cy s1c s2c
+step s2dx: lpg: SetNodeProperty(x, bal, bal + -10)
+step s1x: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s1y: lpg: read y.bal
+y.bal
+-----
+50   
+(1 row)
+step s1x2: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s2cy: lpg: SetNodeProperty(y, bal, bal + 10)
+step s1c: lpg: Session.EndVersionedTx
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+100  
+(1 row)
+
+starting permutation: s2dx s1x s1y s1x2 s2cy s2c s1c
+step s2dx: lpg: SetNodeProperty(x, bal, bal + -10)
+step s1x: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s1y: lpg: read y.bal
+y.bal
+-----
+50   
+(1 row)
+step s1x2: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s2cy: lpg: SetNodeProperty(y, bal, bal + 10)
+step s2c: lpg: Session.EndVersionedTx
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+100  
+(1 row)
+
+starting permutation: s2dx s1x s1y s2cy s1x2 s1c s2c
+step s2dx: lpg: SetNodeProperty(x, bal, bal + -10)
+step s1x: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s1y: lpg: read y.bal
+y.bal
+-----
+50   
+(1 row)
+step s2cy: lpg: SetNodeProperty(y, bal, bal + 10)
+step s1x2: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s1c: lpg: Session.EndVersionedTx
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+100  
+(1 row)
+
+starting permutation: s2dx s1x s1y s2cy s1x2 s2c s1c
+step s2dx: lpg: SetNodeProperty(x, bal, bal + -10)
+step s1x: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s1y: lpg: read y.bal
+y.bal
+-----
+50   
+(1 row)
+step s2cy: lpg: SetNodeProperty(y, bal, bal + 10)
+step s1x2: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s2c: lpg: Session.EndVersionedTx
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+100  
+(1 row)
+
+starting permutation: s2dx s1x s1y s2cy s2c s1x2 s1c
+step s2dx: lpg: SetNodeProperty(x, bal, bal + -10)
+step s1x: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s1y: lpg: read y.bal
+y.bal
+-----
+50   
+(1 row)
+step s2cy: lpg: SetNodeProperty(y, bal, bal + 10)
+step s2c: lpg: Session.EndVersionedTx
+step s1x2: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+100  
+(1 row)
+
+starting permutation: s2dx s1x s2cy s1y s1x2 s1c s2c
+step s2dx: lpg: SetNodeProperty(x, bal, bal + -10)
+step s1x: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s2cy: lpg: SetNodeProperty(y, bal, bal + 10)
+step s1y: lpg: read y.bal
+y.bal
+-----
+50   
+(1 row)
+step s1x2: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s1c: lpg: Session.EndVersionedTx
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+100  
+(1 row)
+
+starting permutation: s2dx s1x s2cy s1y s1x2 s2c s1c
+step s2dx: lpg: SetNodeProperty(x, bal, bal + -10)
+step s1x: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s2cy: lpg: SetNodeProperty(y, bal, bal + 10)
+step s1y: lpg: read y.bal
+y.bal
+-----
+50   
+(1 row)
+step s1x2: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s2c: lpg: Session.EndVersionedTx
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+100  
+(1 row)
+
+starting permutation: s2dx s1x s2cy s1y s2c s1x2 s1c
+step s2dx: lpg: SetNodeProperty(x, bal, bal + -10)
+step s1x: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s2cy: lpg: SetNodeProperty(y, bal, bal + 10)
+step s1y: lpg: read y.bal
+y.bal
+-----
+50   
+(1 row)
+step s2c: lpg: Session.EndVersionedTx
+step s1x2: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+100  
+(1 row)
+
+starting permutation: s2dx s1x s2cy s2c s1y s1x2 s1c
+step s2dx: lpg: SetNodeProperty(x, bal, bal + -10)
+step s1x: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s2cy: lpg: SetNodeProperty(y, bal, bal + 10)
+step s2c: lpg: Session.EndVersionedTx
+step s1y: lpg: read y.bal
+y.bal
+-----
+50   
+(1 row)
+step s1x2: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+100  
+(1 row)
+
+starting permutation: s2dx s2cy s1x s1y s1x2 s1c s2c
+step s2dx: lpg: SetNodeProperty(x, bal, bal + -10)
+step s2cy: lpg: SetNodeProperty(y, bal, bal + 10)
+step s1x: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s1y: lpg: read y.bal
+y.bal
+-----
+50   
+(1 row)
+step s1x2: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s1c: lpg: Session.EndVersionedTx
+step s2c: lpg: Session.EndVersionedTx
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+100  
+(1 row)
+
+starting permutation: s2dx s2cy s1x s1y s1x2 s2c s1c
+step s2dx: lpg: SetNodeProperty(x, bal, bal + -10)
+step s2cy: lpg: SetNodeProperty(y, bal, bal + 10)
+step s1x: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s1y: lpg: read y.bal
+y.bal
+-----
+50   
+(1 row)
+step s1x2: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s2c: lpg: Session.EndVersionedTx
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+100  
+(1 row)
+
+starting permutation: s2dx s2cy s1x s1y s2c s1x2 s1c
+step s2dx: lpg: SetNodeProperty(x, bal, bal + -10)
+step s2cy: lpg: SetNodeProperty(y, bal, bal + 10)
+step s1x: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s1y: lpg: read y.bal
+y.bal
+-----
+50   
+(1 row)
+step s2c: lpg: Session.EndVersionedTx
+step s1x2: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+100  
+(1 row)
+
+starting permutation: s2dx s2cy s1x s2c s1y s1x2 s1c
+step s2dx: lpg: SetNodeProperty(x, bal, bal + -10)
+step s2cy: lpg: SetNodeProperty(y, bal, bal + 10)
+step s1x: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s2c: lpg: Session.EndVersionedTx
+step s1y: lpg: read y.bal
+y.bal
+-----
+50   
+(1 row)
+step s1x2: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+100  
+(1 row)
+
+starting permutation: s2dx s2cy s2c s1x s1y s1x2 s1c
+step s2dx: lpg: SetNodeProperty(x, bal, bal + -10)
+step s2cy: lpg: SetNodeProperty(y, bal, bal + 10)
+step s2c: lpg: Session.EndVersionedTx
+step s1x: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s1y: lpg: read y.bal
+y.bal
+-----
+50   
+(1 row)
+step s1x2: lpg: read x.bal
+x.bal
+-----
+50   
+(1 row)
+step s1c: lpg: Session.EndVersionedTx
+final final: MATCH (a:Account) RETURN sum(a.bal) AS total
+total
+-----
+100  
+(1 row)

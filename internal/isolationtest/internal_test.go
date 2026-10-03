@@ -45,10 +45,15 @@ func TestValidateRejectsMalformedSpecs(t *testing.T) {
 		}}, "unnamed step"},
 		{"step with neither body", &Spec{Name: "x", Sessions: []*Session{
 			{Name: "s", Steps: []Step{{Name: "a"}}},
-		}}, "exactly one of Query, Ctl and Hook"},
+		}}, "exactly one of Query, Ctl, Hook and Probe"},
 		{"step with two bodies", &Spec{Name: "x", Sessions: []*Session{
 			{Name: "s", Steps: []Step{{Name: "a", Query: "RETURN 1", Ctl: Commit}}},
-		}}, "exactly one of Query, Ctl and Hook"},
+		}}, "exactly one of Query, Ctl, Hook and Probe"},
+		{"step with a hook and a probe", &Spec{Name: "x", Sessions: []*Session{
+			{Name: "s", Steps: []Step{{Name: "a",
+				Hook:  func(context.Context) error { return nil },
+				Probe: func(context.Context) ([]string, [][]string, error) { return nil, nil, nil }}}},
+		}}, "exactly one of Query, Ctl, Hook and Probe"},
 		{"unknown control verb", &Spec{Name: "x", Sessions: []*Session{
 			{Name: "s", Steps: []Step{{Name: "a", Ctl: Control("VACUUM")}}},
 		}}, "unknown control verb"},
