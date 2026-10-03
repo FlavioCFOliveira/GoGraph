@@ -133,6 +133,7 @@ var ownedTempPrefixes = []string{
 	"snapshot-csr-example",
 	"snapshot-example",
 	"store-db-example",
+	"store-open-example",
 	"txn-recover-example",
 	"txn-example",
 	"wal-example",
