@@ -170,7 +170,8 @@ is skipped or reordered.
   not warrant a run.
 - **The full `make ci` gate is reserved for very special moments**, and there are
   exactly three: the close of a sprint, any push, and a specific request from the
-  user. Nothing else qualifies — it is never a per-task step and never a reflex at
+  user. For a push, only its correctness stages decide; measurement stages are
+  reported, never gating (see [Tests and validation](#concrete-applications)). Nothing else qualifies — it is never a per-task step and never a reflex at
   the end of an iteration.
 - The enforceable detail — what the targeted validation must cover, which
   compliance gates a change drags in, what `make ci` still guarantees, and how to
@@ -418,12 +419,39 @@ If the answer to any of these is "no" or "I do not know", the cheap alternative 
   single test, not its whole package. This narrows a run's **extent**; it never
   licenses a trickle of small edits each followed by its own run (see
   [Work synergy policy](#work-synergy-policy)).
+- **Use a RAM drive (tmpfs) whenever it naturally speeds a run up — this is very
+  important.** It applies to suites whose cost is I/O: the whole persistence
+  component (`store/` — `wal`, `checkpoint`, `snapshot`, `recovery`, `txn`,
+  `bulkimport` — and `internal/crashinject/`), the MVCC machinery (`graph/mvcc`,
+  the MVCC paths of `graph/lpg`, and the MVCC examples such as
+  `examples/37_mvcc_write_contention`, 17 and 25), and any other suite that writes
+  temporary files intensively or runs for a very long time on disk.
+  - It is not used for CPU-bound suites (parser, planner, algorithms): they gain
+    nothing, and the drive takes RAM the tests need.
+  - Mechanics on macOS: `hdiutil attach -nomount ram://<sectors>`, `newfs_apfs`,
+    mount it, then point `TMPDIR` and `GOTMPDIR` at it so `t.TempDir()` and build
+    temporaries land there; `GOCACHE` stays on disk. Detach the drive
+    (`hdiutil detach`) when the run ends.
+  - Prove equivalence once before relying on it: a short slice of the suite on disk
+    and on the RAM drive gives the same pass set.
+  - Crash tests (`kill -9`, fault injection) remain valid on a RAM drive, because a
+    process kill loses no page cache on either medium. Only tests that measure
+    real-device fsync latency or throughput stay on disk.
+  - This relaxes no gate and changes no test: it changes only the medium the run
+    uses.
 - **This relaxes no gate, it relocates one.** `make ci` — `go test -race ./...`,
   the TCK regression gate, `goleak`, and the lint pass — still runs in full, and
   every [Compliance Mandate](#compliance-mandates) and
   [Reliability and Concurrency Mandate](#reliability-and-concurrency-mandates)
   still has to be green before the sprint closes and before anything is pushed. What
   changes is the frequency, not the standard.
+- **A push is validated by correctness alone — never by a benchmark or a
+  measurement.** The gate before a push is the correctness evidence: build, vet, lint,
+  the race-enabled tests, `goleak`, the TCK regression gate, the crash/recovery
+  battery, and the knowledge-graph fidelity check. A benchmark, a wall-clock or
+  throughput gate, or a per-package test-time budget **never blocks a push**: its
+  result is reported, and a regression it shows is recorded as a task, not used to
+  hold the push.
 - **Read the exit status from inside the log, never from the wrapper.** A
   `make ci | tail` pipeline reports the exit code of `tail`: a real
   `make: *** [test-short] Error 1` has been masked as success this way. Redirect the
@@ -701,7 +729,7 @@ This module must operate **without failure under sustained high load and high co
 ### Acceptance gates
 
 - **Soak test (periodic reliability exercise; not a release gate).** A multi-hour mixed-workload run under `GODEBUG=gctrace=1` should show zero growth in heap, file descriptors, and goroutine count after warm-up. Run it periodically — and ideally before a major release — but it does **not** block a release.
-- **Concurrency stress test in the local gate.** A short variant of the soak workload runs as part of the race-enabled short test layer (`make ci`) before every push.
+- **Concurrency stress test in the local gate.** A short variant of the soak workload runs as part of the race-enabled short test layer (`make ci`) before every push. It gates on correctness (no race, no deadlock, no lost or phantom write), never on its timing.
 - **Load-test report alongside benchmarks.** Each release ships latency and throughput numbers at multiple concurrency levels (1, 8, 64, 256, 1024 goroutines), recorded in `docs/benchmarks/`.
 
 ---
