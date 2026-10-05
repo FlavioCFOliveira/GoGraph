@@ -305,58 +305,106 @@ func TestCheckpoint_CaptureIsAtomic_SnapshotPlusWALArtefact(t *testing.T) {
 	defer cancel()
 	cp.Start(ctx)
 
+	// The workload is a FIXED number of commits, independent of time and of the
+	// storage medium (rmp #2980, the pattern of #2979 above). It used to loop
+	// until a stop flag, so it grew with the medium's speed. Now every checkpoint
+	// round releases each writer for exactly roundCommits transactions and fires
+	// the checkpoint once every writer has committed preTrigger of them, so the
+	// capture is taken while the rest of the round is still committing and the
+	// retained WAL suffix is non-empty.
+	const (
+		writers      = 4
+		checks       = 40
+		roundCommits = 50
+		preTrigger   = 10
+	)
 	var (
-		stop      atomic.Bool
 		committed atomic.Int64
 		writerErr atomic.Pointer[error]
+		wg        sync.WaitGroup
+		round     sync.WaitGroup
+		stopOnce  sync.Once
 	)
-	const writers = 4
-	var wg sync.WaitGroup
+	starts := make([]chan struct{}, writers)
+	for i := range starts {
+		starts[i] = make(chan struct{}, 1)
+	}
+	// One send per writer per round, drained by the round's trigger.
+	triggerReady := make(chan struct{}, writers)
+	// stopWriters ends every writer and joins it. Idempotent; deferred, so a
+	// t.Fatalf below — which runs deferred calls — leaves no writer behind.
+	stopWriters := func() {
+		stopOnce.Do(func() {
+			for _, s := range starts {
+				close(s)
+			}
+			wg.Wait()
+		})
+	}
+	defer stopWriters()
 	for wi := 0; wi < writers; wi++ {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			for n := 0; !stop.Load(); n++ {
-				src := fmt.Sprintf("w%d-a%d", id, n)
-				dst := fmt.Sprintf("w%d-b%d", id, n)
-				tx := st.Begin()
-				if err := tx.AddEdge(src, dst, 0); err != nil {
-					e := err
-					writerErr.Store(&e)
-					_ = tx.Rollback()
+			for c := 0; ; c++ {
+				if _, ok := <-starts[id]; !ok {
 					return
 				}
-				if err := tx.Commit(); err != nil {
-					e := err
-					writerErr.Store(&e)
-					return
+				for n := 0; n < roundCommits; n++ {
+					if n == preTrigger {
+						triggerReady <- struct{}{}
+					}
+					if writerErr.Load() != nil {
+						continue
+					}
+					src := fmt.Sprintf("w%d-c%d-a%d", id, c, n)
+					dst := fmt.Sprintf("w%d-c%d-b%d", id, c, n)
+					tx := st.Begin()
+					if err := tx.AddEdge(src, dst, 0); err != nil {
+						e := err
+						writerErr.Store(&e)
+						_ = tx.Rollback()
+						continue
+					}
+					if err := tx.Commit(); err != nil {
+						e := err
+						writerErr.Store(&e)
+						continue
+					}
+					committed.Add(1)
 				}
-				committed.Add(1)
+				round.Done()
 			}
 		}(wi)
 	}
 
 	// Fire checkpoints while the writers run, so the retained WAL suffix is
 	// non-empty and the snapshot is genuinely mid-workload.
-	for c := 0; c < 40; c++ {
+	for c := 0; c < checks; c++ {
+		round.Add(writers)
+		for _, s := range starts {
+			s <- struct{}{}
+		}
+		for i := 0; i < writers; i++ {
+			<-triggerReady
+		}
 		if err := cp.Trigger(); err != nil {
-			stop.Store(true)
-			wg.Wait()
+			stopWriters()
 			cp.Stop()
 			t.Fatalf("checkpoint %d: %v", c, err)
 		}
+		round.Wait()
 	}
 
-	stop.Store(true)
-	wg.Wait()
+	stopWriters()
 	if p := writerErr.Load(); p != nil {
 		cp.Stop()
 		t.Fatalf("writer failed: %v", *p)
 	}
 	want := uint64(committed.Load())
-	if want == 0 {
+	if exact := uint64(writers * checks * roundCommits); want != exact {
 		cp.Stop()
-		t.Fatal("no transaction committed during the race; the path was not exercised")
+		t.Fatalf("%d transactions committed, want exactly %d", want, exact)
 	}
 	// One final checkpoint, then stop, so the artefact on disk is the pair
 	// (snapshot, surviving WAL) that a restart would recover from.
