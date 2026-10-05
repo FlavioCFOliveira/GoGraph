@@ -6872,6 +6872,15 @@ func (r *Result) releaseTxHandle() {
 	r.mvccG, r.wtx = nil, lpg.WriteTx{}
 }
 
+// resultWALDurable reports whether r's WAL transaction has been made durable by
+// [Result.commitUnderBarrier]: r carries a WAL transaction and the in-barrier
+// finalisation has handled it. A handled transaction that was rolled back instead
+// also reports true, which is harmless where it is used: the rollback has already
+// abandoned the MVCC transaction (rmp #2976). A nil r has made nothing durable.
+func resultWALDurable(r *Result) bool {
+	return r != nil && r.tx != nil && r.walHandled
+}
+
 func (r *Result) commitUnderBarrier() {
 	if r.bufHandled && r.walHandled {
 		return
@@ -6988,6 +6997,16 @@ func (r *Result) commitUnderBarrier() {
 // are set, the registry is reseeded from the restored graph so those phantom
 // reservations do not falsely reject subsequent valid writes (#1342).
 func (r *Result) rollbackUnderBarrier() {
+	// END THE TRANSACTION AS AN ABORT (rmp #2976). Every caller is a path on which
+	// nothing is durable — a failed drain, a tripped resource guard, a recorded
+	// conflict, a NOT NULL violation, a failed WAL fsync — so the bracket must not
+	// publish the transaction when it closes: a published failure counts as a
+	// commit after the snapshot of every older transaction, which
+	// first-updater-wins then refuses for no visible reason. This is the autocommit
+	// counterpart of [ExplicitTx.rollbackInBarrierLocked] (rmp #2973). r.wtx is
+	// still the live handle here: [Result.releaseTxHandle] runs only after
+	// commitUnderBarrier returns, and Abandon is a no-op on the zero value.
+	r.wtx.Abandon()
 	if r.undo != nil && !r.undo.replay() {
 		r.undoErr = wrapUndoFailure(nil)
 	}
@@ -20685,6 +20704,25 @@ func (e *Engine) execUnderBarrier(
 		// unwinding or every inverse is refused and the rollback applies nothing
 		// (rmp #2320, see lpg.WriteTx.EnterUndo).
 		undo.bindTx(wtx)
+		// A FAILED AUTOCOMMIT STATEMENT ENDS AS AN ABORT (rmp #2976). This bracket
+		// closes the transaction when the closure returns, and it publishes it
+		// unless it is abandoned. A published failure is a COMMIT after the snapshot
+		// of every older transaction, so first-updater-wins refuses that
+		// transaction's later write to an object the failed statement touched,
+		// although nothing it can see changed. The handled failures abandon in
+		// [Result.rollbackUnderBarrier] and on the build error below; this covers a
+		// panic, which leaves the closure without reaching either. Registered
+		// before replayUndoOnPanic, so it runs after that replay, during the same
+		// unwind. An explicit transaction's statement is excluded: its bracket does
+		// not close the transaction, and its rollback paths abandon (rmp #2973).
+		returned := false
+		if commit {
+			defer func() {
+				if !returned && !resultWALDurable(r) {
+					wtx.Abandon()
+				}
+			}()
+		}
 		// Roll the in-memory graph back BEFORE this panic leaves the barrier; see
 		// the type-level note above and replayUndoOnPanic for why this must run
 		// while visMu is still held.
@@ -20751,6 +20789,11 @@ func (e *Engine) execUnderBarrier(
 			&evals, prof)
 		if berr != nil {
 			buildErr = berr
+			if commit {
+				// The statement fails and nothing is durable: abort (rmp #2976).
+				wtx.Abandon()
+			}
+			returned = true
 			return nil
 		}
 		rs := exec.Run(ctx, op, cols)
@@ -20788,6 +20831,7 @@ func (e *Engine) execUnderBarrier(
 			// later path allocate through state another transaction now owns. See
 			// [Result.releaseTxHandle].
 			r.releaseTxHandle()
+			returned = true
 			return nil
 		}
 		// Explicit-tx statement: build a read-back-only Result (no buf, no tx, no

@@ -58,6 +58,14 @@ import (
 // signal ([mvcc.AbortedTS]) mean two different things. Pinned by
 // TestLabelTx_ComposesWithPhysicalUndo.
 //
+// The substrate still publishes a rolled-back transaction its owner did not
+// abandon, but the Cypher engine no longer leaves one un-abandoned: its explicit
+// rollback (rmp #2973) and its failed autocommit statement (rmp #2976) call
+// [WriteTx.Abandon] before the transaction closes. A published rollback is a
+// commit after the snapshot of every older transaction, so first-updater-wins
+// refuses such a transaction's later write to an object the rollback touched,
+// although nothing it can see changed. That refusal outweighs the cost above.
+//
 // # Rollback is not ABORT (rmp #2300)
 //
 // The paragraph above is about a statement that ROLLED BACK: its inverses have run,
