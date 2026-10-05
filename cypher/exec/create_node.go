@@ -620,9 +620,13 @@ func quoteEscaped(s string, i int) bool {
 	return bs%2 == 1
 }
 
-// splitMapItems splits a comma-separated list of map items, respecting
-// string literal boundaries (no nesting of sub-maps is needed for the
-// current IR literal format).
+// splitMapItems splits a comma-separated list of map items (or list
+// elements) at its TOP-LEVEL commas: a comma inside a string literal, a nested
+// map or list, or a parenthesised group is part of the item. The parentheses
+// matter because any expression may be a map value, and a function call or a
+// reduce() carries its own commas — `{blob: reduce(s = 'z', i IN range(1, 16) |
+// s + s)}` and `{x: substring('abc', 0, 1)}` were split inside the call, and the
+// fragment after the comma failed with "missing ':' in map item" (rmp #2975).
 func splitMapItems(s string) []string {
 	var parts []string
 	depth := 0
@@ -641,9 +645,9 @@ func splitMapItems(s string) []string {
 		case '"', '\'':
 			inStr = true
 			strChar = c
-		case '{', '[':
+		case '{', '[', '(':
 			depth++
-		case '}', ']':
+		case '}', ']', ')':
 			depth--
 		case ',':
 			if depth == 0 {
