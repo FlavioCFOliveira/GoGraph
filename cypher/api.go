@@ -9907,6 +9907,18 @@ func buildMergeActionEvals(
 // writes.
 func buildRowCtxFromMutator(row exec.Row, schema map[string]int, mutator exec.GraphMutator, scalarCols map[string]struct{}, rels map[string]edgeVarInfo) expr.RowContext {
 	ctx := make(expr.RowContext, len(schema))
+	// A bound node's labels and properties are read through the writing
+	// transaction's view when the mutator carries one, exactly as a RETURN or a
+	// SET right-hand side in the same statement reads them (rmp #2974). The
+	// mutator's plain accessors read the PRESENT, so an explicit transaction
+	// evaluating `CREATE (r {date: c.date})` stored a value another transaction
+	// committed after BEGIN — a read outside the transaction's snapshot. A
+	// mutator without a view carries no transaction; for it the present IS its
+	// view.
+	var view *lpg.ReadView[string, float64]
+	if tv, ok := mutator.(txReadViewer); ok {
+		view = tv.txReadView()
+	}
 	for varName, colIdx := range schema {
 		if colIdx >= len(row) || row[colIdx] == nil {
 			continue
@@ -9924,17 +9936,26 @@ func buildRowCtxFromMutator(row exec.Row, schema map[string]int, mutator exec.Gr
 				// node id: resolve it to the relationship value before the node
 				// upgrade below can mistake the handle for a node (rmp #2960).
 				if info, isRel := rels[varName]; isRel {
-					ctx[varName] = relValueFromMutator(row, &info, mutator, iv)
+					relMut := mutator
+					if view != nil {
+						relMut = txViewRelMutator{GraphMutator: mutator, view: view}
+					}
+					ctx[varName] = relValueFromMutator(row, &info, relMut, iv)
 					continue
 				}
 				nodeID := graph.NodeID(iv)
 				if key, resolved := mutator.ResolveNodeLabel(nodeID); resolved {
-					rawProps := mutator.NodeProperties(key)
+					var rawProps map[string]lpg.PropertyValue
+					var labels []string
+					if view != nil {
+						rawProps, labels = view.NodeProperties(key), view.NodeLabels(key)
+					} else {
+						rawProps, labels = mutator.NodeProperties(key), mutator.NodeLabels(key)
+					}
 					props := make(expr.MapValue, len(rawProps))
 					for k, pv := range rawProps {
 						props[k] = lpgPropToExpr(pv)
 					}
-					labels := mutator.NodeLabels(key)
 					ctx[varName] = expr.NodeValue{
 						ID:         uint64(nodeID),
 						Labels:     labels,
@@ -9947,6 +9968,47 @@ func buildRowCtxFromMutator(row exec.Row, schema map[string]int, mutator exec.Gr
 		ctx[varName] = v
 	}
 	return ctx
+}
+
+// txReadViewer is the optional mutator capability [buildRowCtxFromMutator] uses
+// to read a bound entity as the writing transaction sees it: its own writes
+// included, no commit later than its snapshot, and no other transaction's
+// unpublished work. Both engine mutator adapters implement it.
+type txReadViewer interface {
+	txReadView() *lpg.ReadView[string, float64]
+}
+
+// txViewRelMutator is a mutator whose relationship READS resolve through the
+// writing transaction's view (rmp #2974). It wraps the statement's mutator only
+// for the duration of resolving one relationship variable into an
+// [expr.RelationshipValue] for expression evaluation; every other method is the
+// wrapped mutator's own. Not safe for concurrent use beyond what the wrapped
+// mutator allows.
+type txViewRelMutator struct {
+	exec.GraphMutator
+	view *lpg.ReadView[string, float64]
+}
+
+// HasEdge reports whether the pair holds an edge in the transaction's view.
+func (m txViewRelMutator) HasEdge(src, dst string) bool { return m.view.HasEdge(src, dst) }
+
+// EdgeLabels returns the pair's types in the transaction's view.
+func (m txViewRelMutator) EdgeLabels(src, dst string) []string { return m.view.EdgeLabels(src, dst) }
+
+// EdgeLabelsByHandle returns one instance's types in the transaction's view.
+func (m txViewRelMutator) EdgeLabelsByHandle(src, dst string, handle uint64) []string {
+	return m.view.EdgeLabelsByHandle(src, dst, handle)
+}
+
+// EdgeProperties returns the pair's properties in the transaction's view.
+func (m txViewRelMutator) EdgeProperties(src, dst string) map[string]lpg.PropertyValue {
+	return m.view.EdgeProperties(src, dst)
+}
+
+// EdgePropertiesByHandle returns one instance's properties in the transaction's
+// view.
+func (m txViewRelMutator) EdgePropertiesByHandle(src, dst string, handle uint64) map[string]lpg.PropertyValue {
+	return m.view.EdgePropertiesByHandle(src, dst, handle)
 }
 
 // exprValueToLPGProp converts an [expr.Value] to an [lpg.PropertyValue].
@@ -21607,6 +21669,11 @@ func (a *lpgMutatorAdapter) DelNodeProperty(n, key string) error {
 	return nil
 }
 
+// txReadView returns THIS transaction's view; see [txReadViewer].
+func (a *lpgMutatorAdapter) txReadView() *lpg.ReadView[string, float64] {
+	return a.g.WriterViewOf(a.wtx)
+}
+
 // NodeProperties returns a snapshot of all properties on n.
 func (a *lpgMutatorAdapter) NodeProperties(n string) map[string]lpg.PropertyValue {
 	return a.g.NodePropertiesAsOf(n, nil)
@@ -22997,6 +23064,11 @@ func (a *walMutatorAdapter) DelNodeProperty(n, key string) error {
 			checkedKeyID(a.g, key), true)
 	}
 	return txErr
+}
+
+// txReadView returns THIS transaction's view; see [txReadViewer].
+func (a *walMutatorAdapter) txReadView() *lpg.ReadView[string, float64] {
+	return a.g.WriterViewOf(a.wtx)
 }
 
 // NodeProperties returns a snapshot of all properties on n.
