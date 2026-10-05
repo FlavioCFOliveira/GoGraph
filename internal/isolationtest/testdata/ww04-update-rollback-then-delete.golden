@@ -5,10 +5,8 @@ spec ww04-update-rollback-then-delete: 2 sessions, 3 permutations
 # write makes s1's write refused. Only interleavings with the drain adjacent to the
 # rollback run.
 # The second writer is an autocommit statement, so its snapshot is
-# taken when it runs. An explicit transaction whose snapshot predates the ROLLBACK is
-# refused even after the drain, because ExplicitTx.Rollback publishes its commit
-# record instead of aborting it — a defect this catalogue found and does not pin; see
-# README.md, "Defects found".
+# taken when it runs. The -explicit arm runs the same row with an explicit
+# transaction whose snapshot predates the ROLLBACK.
 
 starting permutation: s1u s1rb s1dr s2d
 step s1u: MATCH (n:Item {name:'n'}) SET n.x = 1 RETURN n.x AS x

@@ -268,9 +268,9 @@ against its golden by `TestCatalogue`.
   exists in the `lpg` API — property reads and writes, label removal and property
   delete inside `Session.BeginVersionedTx` — a second spec (`-lpg` suffix) drives the
   same graph through `lpg.Graph`, using the harness's `Probe` step (a Go step that
-  reports rows; added to `internal/isolationtest` for this purpose). The `lpg` API
-  has no voluntary rollback of a multi-statement transaction, so rows that need
-  `ROLLBACK` run through Cypher only.
+  reports rows; added to `internal/isolationtest` for this purpose). Rows that need
+  `ROLLBACK` run through Cypher only: the undo log a rollback replays belongs to the
+  Cypher engine.
 - **Vacuum drain (H1).** A `Hook` step calls `lpg.Graph.ReclaimNow`. Every
   write-after-rollback row places it in the rolling-back session directly after the
   `ROLLBACK`, and runs only the interleavings in which no other step falls between
@@ -293,15 +293,15 @@ GoGraph permits write skew and refuses a write-write conflict.
 | WW01 | `lost-update` (existing) | Cypher | PG `deadlock-simple`, `lock-committed-update`; MY `concurrent.inc` | Second writer refused | As expected. InnoDB REPEATABLE READ permits the lost update; SI cannot. |
 | WW02 | `ww02-stale-snapshot-write`, `-lpg` | both | PG `lock-committed-update`, `lock-committed-keyupdate`, `eval-plan-qual` | Writer refused when the peer's version is in flight or committed after its snapshot | As expected. PG READ COMMITTED re-fetches and succeeds. |
 | WW03 | `ww03-blind-increment`, `-lpg` | both | MY `innodb_bug52663`, `innodb_bug49164`; PG `eval-plan-qual` | Second increment refused; final 1 | As expected. InnoDB and PG READ COMMITTED reach 2 without an error. |
-| WW04 | `ww04-update-delete-commit`, `ww04-update-rollback-then-delete`, `ww04-delete-rollback-then-update` | Cypher | PG `eval-plan-qual`, `lock-update-delete`, `merge-delete`; MY `concurrent.inc` | Later writer refused; allowed after the earlier rolls back and the vacuum drains | As expected. A `DETACH DELETE` that conflicts reports it at `COMMIT`, not at the statement; nothing is applied. The rollback arms' second writer is an autocommit statement (see Defects found, D1). |
-| WW05 | `ww05-update-delete-chain-commit` | Cypher | PG `lock-update-delete`, `lock-update-traversal`, `aborted-keyrevoke` | Older-snapshot peer refused once the chain commits | Commit arm as expected. **Rollback arm not implemented**: it is defect D1's shape. |
+| WW04 | `ww04-update-delete-commit`, `ww04-update-rollback-then-delete`, `ww04-delete-rollback-then-update`, both rollback arms also `-explicit` | Cypher | PG `eval-plan-qual`, `lock-update-delete`, `merge-delete`; MY `concurrent.inc` | Later writer refused; allowed after the earlier rolls back and the vacuum drains | As expected. A `DETACH DELETE` that conflicts reports it at `COMMIT`, not at the statement; nothing is applied. Each rollback arm runs twice: with an autocommit second writer, and (`-explicit`) with an explicit transaction whose snapshot predates the rollback (D1, rmp #2973). |
+| WW05 | `ww05-update-delete-chain-commit`, `ww05-update-delete-chain-rollback` | Cypher | PG `lock-update-delete`, `lock-update-traversal`, `aborted-keyrevoke` | Older-snapshot peer refused once the chain commits; allowed after the chain rolls back and the vacuum drains | As expected in both arms. The rollback arm is defect D1's shape and witnesses its fix (rmp #2973). |
 | WW06 | `ww06-predicate-moved-out` | Cypher | PG `eval-plan-qual`, `merge-match-recheck`, `merge-update`; MY `innodb-semi-consistent` | Older snapshot still matches and is refused | As expected. PG READ COMMITTED and InnoDB's semi-consistent read skip the row instead. |
 | WW07 | `ww07-non-matching-not-blocked` | Cypher | MY `innodb-semi-consistent`, `innodb-consistent` | No wait, no conflict | As expected. |
 | WW08 | `ww08-different-properties-one-node`, `-lpg` | both | MY `concurrent.inc`; PG `update-locked-tuple` | Second refused: the node is the conflict unit | As expected; same verdict as PG and InnoDB row granularity. |
 | WW09 | `ww09-disjoint-nodes`, `-lpg` | both | `docs/isolation-design.md` | Zero conflicts in every interleaving | As expected. |
 | WW10 | `ww10-crossing-writes`, `-lpg` | both | PG `deadlock-simple`, `fk-deadlock`, `fk-deadlock2`; MY `deadlock_detect`, `innodb_deadlock` | No wait; refused instead | As expected; in some interleavings **both** transactions are refused, where PG and InnoDB pick one deadlock victim. |
 | WW11 | `ww11-ring-3`, `ww11-ring-8` | Cypher | PG `deadlock-hard`; MY `long_deadlock_cycle`, `undetected_deadlock`, `hp_deadlock` | No wait; each write succeeds or is refused; progress after rollback | As expected. Named interleavings (round-robin, sequential; staggered for 3). |
-| WW12 | `ww12-write-after-peer-rollback` | Cypher | PG `eval-plan-qual`, `eval-plan-qual-trigger`, `multixact-no-forget`; MY `innodb_mysql_rbk` | Write after rollback + drain succeeds | As expected for a writer whose snapshot follows the rollback. The no-drain arm is not pinned (a race, F5). The concurrent explicit-transaction arm is defect D1. |
+| WW12 | `ww12-write-after-peer-rollback`, `-explicit` | Cypher | PG `eval-plan-qual`, `eval-plan-qual-trigger`, `multixact-no-forget`; MY `innodb_mysql_rbk` | Write after rollback + drain succeeds | As expected, both for a writer whose snapshot follows the rollback and (`-explicit`) for an explicit transaction whose snapshot predates it (D1, rmp #2973). The no-drain arm is not pinned (a race, F5). |
 | WW13 | `ww13-void-label-removal`, `-lpg`; `ww13-void-property-delete`, `-lpg`; `ww13-void-edge-property` | both | GoGraph rmp #2354 (no PG/InnoDB counterpart) | Statement OK, `COMMIT` refused, nothing applied | As expected for label removal and property delete, through both drivers. The **edge-property** write is refused at the statement, not at `COMMIT`: the catalogue's F3 premise (edge side stores record the conflict) does not hold for `SET r.w` on an existing edge property. The outcome is still a refusal that applies nothing. |
 | WW14 | `ww14-chain-walk-in-flight-head` | Cypher | PG `update-conflict-out`, `multiple-row-versions`; MY `innodb-read-view`, `lob_mvcc_undo` | Pinned reader sees the original; a new reader sees the committed value, never the in-flight one | As expected. |
 | WW15 | `ww15-long-chain-large-values` | Cypher | PG `multiple-row-versions`; MY `lob_mvcc_undo`, `lob_partial_update_concurrent` | Pinned reader returns the 64 KiB value of its BEGIN, byte-identical | As expected. The value is written inline in the `CREATE` map (rmp #2975, fixed). |
@@ -337,9 +337,9 @@ violations and on a transcript diff; with the seam off it passes.
 
 ### Defects found
 
-D2 and the parser defect are fixed; D1 is open.
+All three are fixed.
 
-- **D1 — `ExplicitTx.Rollback` publishes its commit record (rmp #2973, open).** After a Cypher
+- **D1 — `ExplicitTx.Rollback` publishes its commit record (rmp #2973).** After a Cypher
   `ROLLBACK`, `MVCCStats().Write` counts one more commit and no abort, and a
   transaction whose snapshot predates the rollback is refused when it writes a node
   the rolled-back transaction touched — even after `ReclaimNow`. Snapshot isolation
@@ -348,6 +348,10 @@ D2 and the parser defect are fixed; D1 is open.
   `EndVersionedTx`) is allowed. Reproduction: `CREATE (:Item {name:'n', x:0})`;
   T2 `BeginTx`; T1 `BeginTx`, `SET n.x = 1`, `Rollback`; `ReclaimNow`; T2
   `SET n.x = 2` → `mvcc: serialization conflict in node properties`. Expected: success.
+  **Fixed:** every rollback path of an explicit transaction on which nothing is durable
+  — `Rollback`, `Commit`'s refusals, a panic during `Exec` — marks the transaction with
+  `lpg.WriteTx.Abandon`, so `EndVersionedTx` aborts it. The `-explicit` arms of WW04 and
+  WW12 and the WW05 rollback arm pin it.
 - **D2 — a property read inline in a `CREATE` map ignores the snapshot (rmp #2974).** Inside an
   explicit transaction, after a peer committed `c.date = 2` over the transaction's
   snapshot value 1, `MATCH (c:Control) CREATE (r:Receipt {date: c.date, amount: 4})

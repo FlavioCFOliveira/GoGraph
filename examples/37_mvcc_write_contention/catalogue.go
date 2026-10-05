@@ -18,9 +18,8 @@ package main
 // what differs is the surface, so a defect that lives in one surface and not the
 // other shows up as a disagreement between the two transcripts.
 //
-// The lpg API has no voluntary rollback of a multi-statement transaction (the
-// Cypher engine owns the undo log that ExplicitTx.Rollback replays), so a row
-// whose shape needs ROLLBACK runs through the Cypher driver only.
+// A row whose shape needs ROLLBACK runs through the Cypher driver only: the
+// Cypher engine owns the undo log that ExplicitTx.Rollback replays.
 //
 // # The vacuum drain (H1)
 //
@@ -402,7 +401,10 @@ func catalogue() []scenario {
 		{ID: "WW04", Driver: driverCypher, build: ww04Commit},
 		{ID: "WW04", Driver: driverCypher, build: ww04UpdateRollsBack},
 		{ID: "WW04", Driver: driverCypher, build: ww04DeleteRollsBack},
+		{ID: "WW04", Driver: driverCypher, build: ww04UpdateRollsBackExplicit},
+		{ID: "WW04", Driver: driverCypher, build: ww04DeleteRollsBackExplicit},
 		{ID: "WW05", Driver: driverCypher, build: ww05Commit},
+		{ID: "WW05", Driver: driverCypher, build: ww05RollsBack},
 		{ID: "WW06", Driver: driverCypher, build: ww06},
 		{ID: "WW07", Driver: driverCypher, build: ww07},
 		{ID: "WW08", Driver: driverCypher, build: ww08Cypher},
@@ -414,6 +416,7 @@ func catalogue() []scenario {
 		{ID: "WW11", Driver: driverCypher, build: func(w *world) *isolationtest.Spec { return ww11Ring(w, 3) }},
 		{ID: "WW11", Driver: driverCypher, build: func(w *world) *isolationtest.Spec { return ww11Ring(w, 8) }},
 		{ID: "WW12", Driver: driverCypher, build: ww12},
+		{ID: "WW12", Driver: driverCypher, build: ww12Explicit},
 		{ID: "WW13", Driver: driverCypher, build: ww13Label},
 		{ID: "WW13", Driver: driverLPG, build: ww13LabelLPG},
 		{ID: "WW13", Driver: driverCypher, build: ww13PropertyDelete},
@@ -535,13 +538,18 @@ func ww04Commit(*world) *isolationtest.Spec {
 	}
 }
 
-// rollbackArmDoc explains why every write-after-rollback arm drives its second
-// writer with an AUTOCOMMIT statement.
+// rollbackArmDoc describes the autocommit arms of the write-after-rollback rows.
 const rollbackArmDoc = "The second writer is an autocommit statement, so its snapshot is\n" +
-	"taken when it runs. An explicit transaction whose snapshot predates the ROLLBACK is\n" +
-	"refused even after the drain, because ExplicitTx.Rollback publishes its commit\n" +
-	"record instead of aborting it — a defect this catalogue found and does not pin; see\n" +
-	"README.md, \"Defects found\"."
+	"taken when it runs. The -explicit arm runs the same row with an explicit\n" +
+	"transaction whose snapshot predates the ROLLBACK."
+
+// explicitArmDoc describes the explicit-transaction arms of the write-after-rollback
+// rows, which rmp #2973 unblocked.
+const explicitArmDoc = "The second writer is an EXPLICIT transaction that BEGINs before\n" +
+	"either session's first step, so its snapshot predates the ROLLBACK. A ROLLBACK\n" +
+	"aborts its transaction (rmp #2973): once it is drained, the older snapshot's write\n" +
+	"must succeed, exactly as the autocommit arm's does. Before #2973 the ROLLBACK\n" +
+	"published a commit record and this write was refused."
 
 func ww04UpdateRollsBack(w *world) *isolationtest.Spec {
 	return adjacentOnly(&isolationtest.Spec{
@@ -582,6 +590,46 @@ func ww04DeleteRollsBack(w *world) *isolationtest.Spec {
 	}, [2]string{"s2rb", "s2dr"})
 }
 
+func ww04UpdateRollsBackExplicit(w *world) *isolationtest.Spec {
+	return adjacentOnly(&isolationtest.Spec{
+		Name: "ww04-update-rollback-then-delete-explicit",
+		Doc: "WW04, rollback arm (update rolls back), explicit second writer. s1 updates n and\n" +
+			"ROLLS BACK; the vacuum is drained immediately after (H1); s2, open since before\n" +
+			"s1's write, deletes n and commits. Only interleavings with the drain adjacent to\n" +
+			"the rollback run.\n" + explicitArmDoc,
+		Setup: steps(q("mk", "CREATE (:Item {name:'n', x:0}), (:Item {name:'m', x:0})")),
+		Sessions: []*isolationtest.Session{
+			{Name: "s1", Setup: steps(begin("s1b")), Steps: steps(
+				q("s1u", "MATCH (n:Item {name:'n'}) SET n.x = 1 RETURN n.x AS x"),
+				rollback("s1rb"), w.drain("s1dr"))},
+			{Name: "s2", Setup: steps(begin("s2b")), Steps: steps(
+				q("s2d", "MATCH (n:Item {name:'n'}) DETACH DELETE n RETURN count(*) AS deleted"),
+				commit("s2c"))},
+		},
+		Final: steps(q("final", ww04Final)),
+	}, [2]string{"s1rb", "s1dr"})
+}
+
+func ww04DeleteRollsBackExplicit(w *world) *isolationtest.Spec {
+	return adjacentOnly(&isolationtest.Spec{
+		Name: "ww04-delete-rollback-then-update-explicit",
+		Doc: "WW04, rollback arm (delete rolls back), explicit second writer. s2 deletes n and\n" +
+			"ROLLS BACK, the vacuum is drained (H1); s1, open since before s2's delete, updates\n" +
+			"n and commits. A rolled-back delete must neither lose the node nor leave it\n" +
+			"unwritable to an older snapshot.\n" + explicitArmDoc,
+		Setup: steps(q("mk", "CREATE (:Item {name:'n', x:0}), (:Item {name:'m', x:0})")),
+		Sessions: []*isolationtest.Session{
+			{Name: "s1", Setup: steps(begin("s1b")), Steps: steps(
+				q("s1u", "MATCH (n:Item {name:'n'}) SET n.x = 1 RETURN n.x AS x"),
+				commit("s1c"))},
+			{Name: "s2", Setup: steps(begin("s2b")), Steps: steps(
+				q("s2d", "MATCH (n:Item {name:'n'}) DETACH DELETE n RETURN count(*) AS deleted"),
+				rollback("s2rb"), w.drain("s2dr"))},
+		},
+		Final: steps(q("final", ww04Final)),
+	}, [2]string{"s2rb", "s2dr"})
+}
+
 func ww05Commit(*world) *isolationtest.Spec {
 	return &isolationtest.Spec{
 		Name: "ww05-update-delete-chain-commit",
@@ -600,6 +648,29 @@ func ww05Commit(*world) *isolationtest.Spec {
 		},
 		Final: steps(q("final", "MATCH (n:Item) RETURN n.name AS name, n.x AS x, n.y AS y ORDER BY name")),
 	}
+}
+
+func ww05RollsBack(w *world) *isolationtest.Spec {
+	return adjacentOnly(&isolationtest.Spec{
+		Name: "ww05-update-delete-chain-rollback",
+		Doc: "WW05, rollback arm. s1 updates n then deletes it in ONE transaction and ROLLS\n" +
+			"BACK; the vacuum is drained immediately after (H1). s2, whose snapshot predates\n" +
+			"s1's chain, writes n.y. s2 is refused while the chain is in flight and allowed\n" +
+			"after the rollback and drain; n survives with x unchanged. PostgreSQL: the waiter\n" +
+			"proceeds once the DELETE aborts — the same verdict, without the wait.\n" +
+			explicitArmDoc,
+		Setup: steps(q("mk", "CREATE (:Item {name:'n', x:0, y:0})")),
+		Sessions: []*isolationtest.Session{
+			{Name: "s1", Setup: steps(begin("s1b")), Steps: steps(
+				q("s1u", "MATCH (n:Item {name:'n'}) SET n.x = 1 RETURN n.x AS x"),
+				q("s1d", "MATCH (n:Item {name:'n'}) DETACH DELETE n RETURN count(*) AS deleted"),
+				rollback("s1rb"), w.drain("s1dr"))},
+			{Name: "s2", Setup: steps(begin("s2b")), Steps: steps(
+				q("s2w", "MATCH (n:Item {name:'n'}) SET n.y = 1 RETURN n.y AS y"),
+				commit("s2c"))},
+		},
+		Final: steps(q("final", "MATCH (n:Item) RETURN n.name AS name, n.x AS x, n.y AS y ORDER BY name")),
+	}, [2]string{"s1rb", "s1dr"})
 }
 
 func ww06(*world) *isolationtest.Spec {
@@ -855,6 +926,26 @@ func ww12(w *world) *isolationtest.Spec {
 				rollback("s1rb"), w.drain("s1dr"))},
 			{Name: "s2", Steps: steps(
 				q("s2w", "MATCH (n:Item {name:'n'}) SET n.x = 2 RETURN n.x AS x"))},
+		},
+		Final: steps(q("final", "MATCH (n:Item {name:'n'}) RETURN n.x AS x")),
+	}, [2]string{"s1rb", "s1dr"})
+}
+
+func ww12Explicit(w *world) *isolationtest.Spec {
+	return adjacentOnly(&isolationtest.Spec{
+		Name: "ww12-write-after-peer-rollback-explicit",
+		Doc: "WW12, explicit second writer. s1 writes n and ROLLS BACK; the vacuum is drained\n" +
+			"right after (H1); s2, open since before s1's write, writes n and commits. A write\n" +
+			"after the rollback and drain succeeds in every interleaving; one while s1 is open\n" +
+			"is refused.\n" + explicitArmDoc,
+		Setup: steps(q("mk", "CREATE (:Item {name:'n', x:0})")),
+		Sessions: []*isolationtest.Session{
+			{Name: "s1", Setup: steps(begin("s1b")), Steps: steps(
+				q("s1w", "MATCH (n:Item {name:'n'}) SET n.x = 1 RETURN n.x AS x"),
+				rollback("s1rb"), w.drain("s1dr"))},
+			{Name: "s2", Setup: steps(begin("s2b")), Steps: steps(
+				q("s2w", "MATCH (n:Item {name:'n'}) SET n.x = 2 RETURN n.x AS x"),
+				commit("s2c"))},
 		},
 		Final: steps(q("final", "MATCH (n:Item {name:'n'}) RETURN n.x AS x")),
 	}, [2]string{"s1rb", "s1dr"})
