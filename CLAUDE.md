@@ -428,10 +428,19 @@ If the answer to any of these is "no" or "I do not know", the cheap alternative 
   temporary files intensively or runs for a very long time on disk.
   - It is not used for CPU-bound suites (parser, planner, algorithms): they gain
     nothing, and the drive takes RAM the tests need.
-  - Mechanics on macOS: `hdiutil attach -nomount ram://<sectors>`, `newfs_apfs`,
-    mount it, then point `TMPDIR` and `GOTMPDIR` at it so `t.TempDir()` and build
-    temporaries land there; `GOCACHE` stays on disk. Detach the drive
-    (`hdiutil detach`) when the run ends.
+  - Mechanics on macOS. **Reuse first:** if a RAM volume is already mounted
+    (`mount | grep -i ram`, or `diskutil info` showing `Virtual: Yes`), work in a
+    fresh subdirectory on it; create a drive only when none exists. To create one:
+    `dev=$(hdiutil attach -nomount ram://<sectors>)`, then
+    `diskutil erasevolume APFS <Name> $dev`, which formats it and mounts it at
+    `/Volumes/<Name>`. `newfs_apfs` followed by `mount -t apfs` fails (exit 66) and
+    leaves images that cannot be detached until a reboot. Point `TMPDIR` and
+    `GOTMPDIR` at the subdirectory so `t.TempDir()` and build temporaries land
+    there; `GOCACHE` stays on disk. At the end, delete the subdirectory, and eject
+    the drive (`diskutil eject $dev`) only if this run created it.
+  - Tests whose workload is sized by elapsed time grow with the medium's speed and
+    can exhaust the drive or time out. They are tracked and fixed as defects, not
+    run on disk forever.
   - Prove equivalence once before relying on it: a short slice of the suite on disk
     and on the RAM drive gives the same pass set.
   - Crash tests (`kill -9`, fault injection) remain valid on a RAM drive, because a
