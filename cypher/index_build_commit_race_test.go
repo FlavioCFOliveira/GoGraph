@@ -195,6 +195,15 @@ func TestIndexBuild_ExplicitCommitRacingCreateIndex(t *testing.T) {
 // they write. After every build it stops the writers and asserts that every key
 // written is found by the seek exactly as often as by the scan, and that no MERGE
 // key has more than one node.
+//
+// Each writer runs through its own [Session] (rmp #2977). "No MERGE key has more
+// than one node" holds only if a writer's next statement observes its previous
+// commit, and that is the session contract, not the engine's: a sessionless
+// commit above an in-flight one returns before it is visible, so the writer's
+// next MERGE can start below it and create a second node, which snapshot
+// isolation permits (docs/isolation-design.md, "Commit visibility and the
+// session contract"; TestMergeVisibility_SessionContract pins both halves).
+// An index build holds commits in flight long enough to open that window.
 func TestIndexBuild_CreateDropUnderCommittingWriters(t *testing.T) {
 	for _, arm := range []struct {
 		writers   int
@@ -230,6 +239,9 @@ func TestIndexBuild_CreateDropUnderCommittingWriters(t *testing.T) {
 					go func(w int) {
 						defer wg.Done()
 						rng := rand.New(rand.NewPCG(uint64(r*arm.writers+w)+1, 3)) //nolint:gosec // a workload, not a secret
+						// The writer's own session: its next statement observes its
+						// previous commit, which the MERGE-key oracle relies on.
+						sess := eng.NewSession()
 						for i := 0; !stop.Load(); i++ {
 							var q, key string
 							if rng.IntN(2) == 0 {
@@ -240,12 +252,18 @@ func TestIndexBuild_CreateDropUnderCommittingWriters(t *testing.T) {
 								q = fmt.Sprintf(`CREATE (:L {s: '%s'})`, key)
 							}
 							if rng.IntN(2) == 0 {
-								if !run(q) {
+								res, err := sess.RunAny(ctx, q, nil)
+								if err != nil {
+									continue
+								}
+								for res.Next() {
+								}
+								if res.Close() != nil {
 									continue
 								}
 								autocommit.Add(1)
 							} else {
-								tx, err := eng.BeginTx(ctx)
+								tx, err := sess.BeginTx(ctx)
 								if err != nil {
 									continue
 								}
