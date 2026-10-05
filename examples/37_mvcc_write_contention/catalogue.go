@@ -510,6 +510,7 @@ func catalogue() []scenario {
 		{ID: "DD05", Driver: driverCypher, build: dd05Commit, check: seekEqualsScan},
 		{ID: "DD05", Driver: driverCypher, build: dd05Rollback, check: seekEqualsScan},
 		{ID: "DD06", Driver: driverCypher, build: dd06},
+		{ID: "DD06", Driver: driverCypher, build: dd06DDL},
 		{ID: "DD07", Driver: driverCypher, build: dd07InWriteTx},
 		{ID: "DD07", Driver: driverCypher, build: dd07InReadTx},
 		{ID: "DD08", Driver: driverCypher, build: dd08},

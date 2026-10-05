@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"time"
 
 	"github.com/FlavioCFOliveira/GoGraph/cypher"
 	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
@@ -462,8 +463,7 @@ func dd06(*world) *isolationtest.Spec {
 		Doc: "DD06, DML half. s1 opens and writes a; it then sits idle with the transaction open.\n" +
 			"s2 writes b in an autocommit statement and s3 writes c in an explicit transaction.\n" +
 			"Neither waits on the idle transaction (F7): DML takes no lock between statements.\n" +
-			"The DDL half (a DDL bounded by its context behind an in-flight statement) is a\n" +
-			"defect and is not pinned here; see README.md.",
+			"The DDL half is dd06-ddl-bounded-by-context.",
 		Setup: steps(q("mk", "CREATE (:Item {name:'a', v:0}), (:Item {name:'b', v:0}), (:Item {name:'c', v:0})")),
 		Sessions: []*isolationtest.Session{
 			{Name: "s1", Setup: steps(begin("s1b")), Steps: steps(
@@ -473,6 +473,142 @@ func dd06(*world) *isolationtest.Spec {
 				q("s3w", "MATCH (n:Item {name:'c'}) SET n.v = 3 RETURN n.v AS v"), commit("s3c"))},
 		},
 		Final: steps(q("final", "MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name")),
+	}
+}
+
+// dd06DDLs is every DDL kind of DD06's DDL half: both index kinds created and
+// dropped, both constraint kinds created and dropped. The DROP statements remove
+// the objects dd06DDL's setup creates.
+var dd06DDLs = []string{
+	"CREATE INDEX l_s2 FOR (n:L) ON (n.s)",
+	"CREATE INDEX l_s3 FOR (n:L) ON (n.s) OPTIONS {indexType:'btree'}",
+	"DROP INDEX pre_hash",
+	"DROP INDEX pre_btree",
+	"CREATE CONSTRAINT c_u FOR (n:L) REQUIRE n.s IS UNIQUE",
+	"CREATE CONSTRAINT c_nn FOR (n:L) REQUIRE n.s IS NOT NULL",
+	"DROP CONSTRAINT pre_u",
+	"DROP CONSTRAINT pre_nn",
+}
+
+// dd06Deadline is the context deadline each DDL of DD06's DDL half carries. It is
+// the input under test, not a latency bound: the step asserts only that the DDL
+// returned its context error while the write was still parked.
+const dd06Deadline = 50 * time.Millisecond
+
+// holdStatement runs query, which must call cat.hold once, as an autocommit
+// statement on its own goroutine, and returns once it is parked in cat.hold. The
+// statement stays in flight until a releaseStatement step releases it.
+func (w *world) holdStatement(name, query string) isolationtest.Step {
+	return isolationtest.Step{Name: name, Label: "<park in cat.hold> " + query, Hook: func(ctx context.Context) error {
+		sctx, cancel := context.WithCancel(ctx)
+		h := &heldStatement{entered: make(chan struct{}), release: make(chan struct{}),
+			done: make(chan error, 1), cancel: cancel}
+		w.held = h
+		eng := w.eng
+		go func() {
+			res, err := eng.RunInTx(sctx, query, nil)
+			if err == nil {
+				for res.Next() {
+				}
+				err = errors.Join(res.Err(), res.Close())
+			}
+			h.done <- err
+		}()
+		select {
+		case <-h.entered:
+			return nil
+		case err := <-h.done:
+			w.held = nil
+			cancel()
+			return fmt.Errorf("the statement ended before it reached cat.hold: %w", err)
+		case <-ctx.Done():
+			w.releaseHeld()
+			return ctx.Err()
+		}
+	}}
+}
+
+// releaseStatement lets the statement a holdStatement step parked return from
+// cat.hold, and reports what the statement returned.
+func (w *world) releaseStatement(name string) isolationtest.Step {
+	return isolationtest.Step{Name: name, Label: "<release cat.hold>", Hook: func(context.Context) error {
+		h := w.held
+		if h == nil {
+			return errors.New("no statement is parked in cat.hold")
+		}
+		close(h.release)
+		err := <-h.done
+		h.cancel()
+		w.held = nil
+		return err
+	}}
+}
+
+// ddlUnderDeadline runs every DDL of dd06DDLs with a dd06Deadline context while a
+// holdStatement step's write is parked, one row per DDL: the outcome, and whether
+// the write was still parked when the DDL returned.
+func (w *world) ddlUnderDeadline(name string) isolationtest.Step {
+	return isolationtest.Step{Name: name, Label: "<each DDL with a 50 ms deadline>", Probe: func(ctx context.Context) ([]string, [][]string, error) {
+		h := w.held
+		if h == nil {
+			return nil, nil, errors.New("no statement is parked in cat.hold")
+		}
+		rows := make([][]string, 0, len(dd06DDLs))
+		for _, ddl := range dd06DDLs {
+			dctx, cancel := context.WithTimeout(ctx, dd06Deadline)
+			res, err := w.eng.RunInTx(dctx, ddl, nil)
+			if err == nil {
+				for res.Next() {
+				}
+				err = errors.Join(res.Err(), res.Close())
+			}
+			cancel()
+			outcome := "applied"
+			switch {
+			case errors.Is(err, context.DeadlineExceeded):
+				outcome = "context deadline exceeded"
+			case err != nil:
+				outcome = err.Error()
+			}
+			writer := "parked"
+			if len(h.done) != 0 {
+				writer = "ended"
+			}
+			rows = append(rows, []string{ddl, outcome, writer})
+		}
+		return []string{"ddl", "outcome", "writer"}, rows, nil
+	}}
+}
+
+func dd06DDL(w *world) *isolationtest.Spec {
+	retry := make([]isolationtest.Step, 0, len(dd06DDLs))
+	for i, ddl := range dd06DDLs {
+		retry = append(retry, q("s1retry"+strconv.Itoa(i+1), ddl))
+	}
+	return &isolationtest.Spec{
+		Name: "dd06-ddl-bounded-by-context",
+		Doc: "DD06, DDL half (rmp #2982). An autocommit write is parked inside cat.hold, holding\n" +
+			"the schema gate shared. Each DDL kind — CREATE and DROP INDEX for the hash and btree\n" +
+			"kinds, CREATE and DROP CONSTRAINT for UNIQUE and NOT NULL — runs with a 50 ms\n" +
+			"deadline and returns its context error while the write is still parked. The schema\n" +
+			"is unchanged before and after the write is released, the write commits, and a\n" +
+			"retry of every DDL succeeds.",
+		Setup: steps(
+			q("mk", "CREATE (:L {s:'x'}), (:P {a:1, b:2}), (:Q {u:'u1', n:'n1'})"),
+			q("mkh", "CREATE INDEX pre_hash FOR (n:P) ON (n.a)"),
+			q("mkb", "CREATE INDEX pre_btree FOR (n:P) ON (n.b) OPTIONS {indexType:'btree'}"),
+			q("mku", "CREATE CONSTRAINT pre_u FOR (n:Q) REQUIRE n.u IS UNIQUE"),
+			q("mknn", "CREATE CONSTRAINT pre_nn FOR (n:Q) REQUIRE n.n IS NOT NULL")),
+		Sessions: []*isolationtest.Session{
+			{Name: "s1", Steps: steps(append([]isolationtest.Step{
+				w.holdStatement("s1hold", "CREATE (n:T {name:'t'}) WITH n CALL cat.hold() YIELD x RETURN x"),
+				w.ddlUnderDeadline("s1ddl"),
+				w.schema("s1parked"),
+				w.releaseStatement("s1release"),
+				w.schema("s1after"),
+			}, retry...)...)},
+		},
+		Final: steps(q("final", "MATCH (n:T) RETURN n.name AS name"), w.schema("fschema")),
 	}
 }
 

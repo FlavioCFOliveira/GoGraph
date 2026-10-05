@@ -2,8 +2,7 @@ spec dd06-dml-not-blocked-by-idle-tx: 3 sessions, 30 permutations
 # DD06, DML half. s1 opens and writes a; it then sits idle with the transaction open.
 # s2 writes b in an autocommit statement and s3 writes c in an explicit transaction.
 # Neither waits on the idle transaction (F7): DML takes no lock between statements.
-# The DDL half (a DDL bounded by its context behind an in-flight statement) is a
-# defect and is not pinned here; see README.md.
+# The DDL half is dd06-ddl-bounded-by-context.
 
 starting permutation: s1w s1c s2w s3w s3c
 step s1w: MATCH (n:Item {name:'a'}) SET n.v = 1 RETURN n.v AS v

@@ -1,0 +1,68 @@
+spec dd06-ddl-bounded-by-context: 1 sessions, 1 permutations
+# DD06, DDL half (rmp #2982). An autocommit write is parked inside cat.hold, holding
+# the schema gate shared. Each DDL kind — CREATE and DROP INDEX for the hash and btree
+# kinds, CREATE and DROP CONSTRAINT for UNIQUE and NOT NULL — runs with a 50 ms
+# deadline and returns its context error while the write is still parked. The schema
+# is unchanged before and after the write is released, the write commits, and a
+# retry of every DDL succeeds.
+
+starting permutation: s1hold s1ddl s1parked s1release s1after s1retry1 s1retry2 s1retry3 s1retry4 s1retry5 s1retry6 s1retry7 s1retry8
+step s1hold: <park in cat.hold> CREATE (n:T {name:'t'}) WITH n CALL cat.hold() YIELD x RETURN x
+step s1ddl: <each DDL with a 50 ms deadline>
+ddl                                                             |outcome                  |writer
+----------------------------------------------------------------+-------------------------+------
+CREATE INDEX l_s2 FOR (n:L) ON (n.s)                            |context deadline exceeded|parked
+CREATE INDEX l_s3 FOR (n:L) ON (n.s) OPTIONS {indexType:'btree'}|context deadline exceeded|parked
+DROP INDEX pre_hash                                             |context deadline exceeded|parked
+DROP INDEX pre_btree                                            |context deadline exceeded|parked
+CREATE CONSTRAINT c_u FOR (n:L) REQUIRE n.s IS UNIQUE           |context deadline exceeded|parked
+CREATE CONSTRAINT c_nn FOR (n:L) REQUIRE n.s IS NOT NULL        |context deadline exceeded|parked
+DROP CONSTRAINT pre_u                                           |context deadline exceeded|parked
+DROP CONSTRAINT pre_nn                                          |context deadline exceeded|parked
+(8 rows)
+step s1parked: <schema>
+kind      |name         |definition     
+----------+-------------+---------------
+index     |__uniq__Q.u  |               
+index     |p_a_btree_num|               
+index     |p_b_btree_num|               
+index     |pre_btree    |               
+index     |pre_hash     |               
+constraint|pre_nn       |NOT NULL (:Q).n
+constraint|pre_u        |UNIQUE (:Q).u  
+(7 rows)
+step s1release: <release cat.hold>
+step s1after: <schema>
+kind      |name         |definition     
+----------+-------------+---------------
+index     |__uniq__Q.u  |               
+index     |p_a_btree_num|               
+index     |p_b_btree_num|               
+index     |pre_btree    |               
+index     |pre_hash     |               
+constraint|pre_nn       |NOT NULL (:Q).n
+constraint|pre_u        |UNIQUE (:Q).u  
+(7 rows)
+step s1retry1: CREATE INDEX l_s2 FOR (n:L) ON (n.s)
+step s1retry2: CREATE INDEX l_s3 FOR (n:L) ON (n.s) OPTIONS {indexType:'btree'}
+step s1retry3: DROP INDEX pre_hash
+step s1retry4: DROP INDEX pre_btree
+step s1retry5: CREATE CONSTRAINT c_u FOR (n:L) REQUIRE n.s IS UNIQUE
+step s1retry6: CREATE CONSTRAINT c_nn FOR (n:L) REQUIRE n.s IS NOT NULL
+step s1retry7: DROP CONSTRAINT pre_u
+step s1retry8: DROP CONSTRAINT pre_nn
+final final: MATCH (n:T) RETURN n.name AS name
+name
+----
+"t" 
+(1 row)
+final fschema: <schema>
+kind      |name         |definition     
+----------+-------------+---------------
+index     |__uniq__L.s  |               
+index     |l_s2         |               
+index     |l_s3         |               
+index     |l_s_btree_num|               
+constraint|c_nn         |NOT NULL (:L).s
+constraint|c_u          |UNIQUE (:L).s  
+(6 rows)

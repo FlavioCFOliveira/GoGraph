@@ -384,7 +384,7 @@ GoGraph permits write skew and refuses a write-write conflict.
 | DD03 | `dd03-drop-index-between-seeks` | Cypher | PG `drop-index-concurrently-1`, `vacuum-concurrent-drop` | A read after the drop scans, with the same rows; no error | As expected; `DROP INDEX` does not wait for the open transaction. |
 | DD04 | `dd04-drop-recreate-index-with-writers` | Cypher | PG `reindex-concurrently` | Rebuilt index holds every commit | As expected. |
 | DD05 | `dd05-unique-under-open-duplicate-commit`, `-rollback` | Cypher | PG `alter-table-1`; MY `alter_table_rebuild_duplicate_record`, `index-create-dml-rollback`, `innodb-alter-debug` | No committed state violates the constraint | As expected. The uncommitted duplicate never refuses the DDL. The DDL is refused only when the duplicate committed first; otherwise s1 is refused, at its statement (DDL first) or at its COMMIT (the DDL straddles it, rmp #2936). |
-| DD06 | `dd06-dml-not-blocked-by-idle-tx` (DML half) | Cypher | PG `timeouts`, `truncate-conflict`; MY `innodb-timeout`, `innodb_lock_wait_timeout_1`, `innodb-lock` | DML never waits on an idle open transaction; a DDL behind an in-flight statement returns its context error within the deadline | DML half as expected. **DDL half not implemented: engine defect** (see "Defects found"): the DDL waits for the in-flight statement whatever its deadline. |
+| DD06 | `dd06-dml-not-blocked-by-idle-tx` (DML half), `dd06-ddl-bounded-by-context` (DDL half) | Cypher | PG `timeouts`, `truncate-conflict`; MY `innodb-timeout`, `innodb_lock_wait_timeout_1`, `innodb-lock` | DML never waits on an idle open transaction; a DDL behind an in-flight statement returns its context error within the deadline | As expected in both halves. The DDL half parks an autocommit write in `cat.hold` and runs each DDL kind (CREATE and DROP INDEX, hash and btree; CREATE and DROP CONSTRAINT, UNIQUE and NOT NULL) with a 50 ms deadline: each returns `context deadline exceeded` while the write is still parked, the schema is unchanged before and after the release, and every retry succeeds. It witnesses the fix of D3 (rmp #2982). |
 | DD07 | `dd07-ddl-in-write-tx`, `dd07-ddl-in-read-tx` | Cypher | MY `t/implicit_commit`, `t/trans_read_only` | DDL rejected (F9); the transaction stays usable | As expected. The rejection does **not** poison the write transaction: its COMMIT succeeds with its other writes. MySQL commits the transaction implicitly instead. |
 | DD08 | `dd08-ddl-on-one-object` | Cypher | PG `ddl-dependency-locking` | Consistent catalog; the losing DDL gets a typed error | As expected in all 24 orders. The harness runs one step at a time, so the overlap of the DDL statements is #2934's. |
 | DD09 | `dd09-create-index-vs-vacuum` | Cypher | MY `alter_table_rebuild_missing_record`, `innodb-index-online-purge`, `virtual_debug_purge` | Seek = scan; no lost node | As expected with the drain between steps. A drain inside the backfill needs a seam that does not exist; that point is #2934's. |
@@ -458,7 +458,7 @@ Without the mutant all three pass.
 
 ### Defects found
 
-D1, D2 and the first parser defect are fixed; the second parser defect and D3 are
+D1, D2, D3 and the first parser defect are fixed; the second parser defect is
 open.
 
 - **D1 — `ExplicitTx.Rollback` publishes its commit record (rmp #2973).** After a Cypher
@@ -498,7 +498,7 @@ open.
   their scan arm with `left()` instead; the seek arm, which precedes the `WITH`, keeps
   `STARTS WITH`.
 - **D3 — a DDL statement ignores its deadline while an autocommit write is in
-  flight (open).** Reproduction: register a procedure that blocks, start
+  flight (rmp #2982).** Reproduction: register a procedure that blocks, start
   `CREATE (n:T {name:'t'}) WITH n CALL cat.hold() YIELD x RETURN x` through
   `Engine.RunInTx` on one goroutine, and once it is parked run
   `CREATE INDEX l_s2 FOR (n:L) ON (n.s)` through `Engine.RunInTx` with a 50 ms
@@ -507,10 +507,13 @@ open.
   the DDL returns its context error within the deadline plus a margin (catalogue
   DD06; F7; the "Context-aware blocking" rule of `CLAUDE.md`). Cause, from the
   source: an autocommit write holds `Engine.schemaGate` shared for its whole
-  statement, and every DDL path takes it with `schemaGate.StrongLock()`
+  statement, and every DDL path took it with `schemaGate.StrongLock()`
   (`cypher/api.go`, `runCreateBTreeIndex` and its siblings;
-  `cypher/index_binding.go`), which takes no context; the context is checked only
-  after the gate is acquired. DD06's DDL half is therefore not pinned.
+  `cypher/index_binding.go`), which takes no context; the context was checked only
+  after the gate is acquired. **Fixed (rmp #2982):** every DDL path takes the gate
+  through `Engine.lockSchemaForDDL`, which waits with `mvcc.Gate.StrongLockCtx` and
+  returns the context error holding nothing, before any schema, index, constraint or
+  WAL state is touched. `dd06-ddl-bounded-by-context` pins it.
 
 ### Gaps pinned
 
