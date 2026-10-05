@@ -1226,7 +1226,9 @@ func (e *Engine) runCreateHashIndex(ctx context.Context, p *ir.CreateIndex, idxM
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	e.schemaGate.StrongLock()
+	if err := e.lockSchemaForDDL(ctx); err != nil {
+		return nil, err
+	}
 	defer e.schemaGate.StrongUnlock()
 	if e.store == nil {
 		return e.createHashIndexLocked(ctx, p, idxMgr, nil)

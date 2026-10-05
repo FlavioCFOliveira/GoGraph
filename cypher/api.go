@@ -3797,6 +3797,28 @@ func dropIndexCounter(existed bool) func(*exec.QueryCounters) {
 	return func(c *exec.QueryCounters) { c.IndexesRemoved++ }
 }
 
+// lockSchemaForDDL takes [Engine.schemaGate] exclusively for a DDL statement,
+// with the wait bounded by ctx. On success the caller owns the gate and releases
+// it with StrongUnlock. On failure the caller owns nothing, and the returned error
+// wraps ctx's error (matchable with [errors.Is] against [context.Canceled] or
+// [context.DeadlineExceeded]).
+//
+// Every DDL path calls it BEFORE it opens a store transaction, appends to the WAL
+// or touches the index manager or the constraint registry, so a refused
+// acquisition leaves no schema state behind.
+//
+// An autocommit write holds the gate shared for its whole statement, so a DDL
+// can wait behind an in-flight statement for as long as that statement runs
+// (rmp #2982). Before this helper every DDL path took the gate with the
+// context-free StrongLock: a CREATE INDEX with a 50 ms deadline stayed blocked
+// behind a parked write and reported its deadline only once the write ended.
+func (e *Engine) lockSchemaForDDL(ctx context.Context) error {
+	if err := e.schemaGate.StrongLockCtx(ctx); err != nil {
+		return fmt.Errorf("cypher: DDL: acquire schema gate: %w", err)
+	}
+	return nil
+}
+
 // emptyDDLResult returns the canonical zero-row Result that every DDL
 // statement yields once its side effect has already been applied.
 //
@@ -3840,7 +3862,9 @@ func (e *Engine) runCreateBTreeIndex(ctx context.Context, p *ir.CreateIndex, idx
 	}
 	// The whole DDL sequence — scan, validate, register — under one lock, in BOTH
 	// wirings; see [Engine.schemaMu] for why the schema barrier alone cannot do it.
-	e.schemaGate.StrongLock()
+	if err := e.lockSchemaForDDL(ctx); err != nil {
+		return nil, err
+	}
 	defer e.schemaGate.StrongUnlock()
 	if e.store == nil {
 		return e.createBTreeIndexLocked(ctx, p, idxMgr, nil)
@@ -4028,7 +4052,9 @@ func (e *Engine) runDropIndex(ctx context.Context, p *ir.DropIndex, idxMgr *inde
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	e.schemaGate.StrongLock()
+	if err := e.lockSchemaForDDL(ctx); err != nil {
+		return nil, err
+	}
 	defer e.schemaGate.StrongUnlock()
 	if e.store == nil {
 		// Capture the (label, property) of the index about to be dropped so the
@@ -4183,7 +4209,9 @@ func (e *Engine) runCreateConstraint(ctx context.Context, p *ir.CreateConstraint
 	// One lock over scan + validate + register, in BOTH wirings. Lock order
 	// schemaMu → visMu (inside scanLabelProperty's View and the registration's
 	// ApplyAtomically). See [Engine.schemaMu].
-	e.schemaGate.StrongLock()
+	if err := e.lockSchemaForDDL(ctx); err != nil {
+		return nil, err
+	}
 	defer e.schemaGate.StrongUnlock()
 	if e.store == nil {
 		return e.createConstraintLocked(ctx, p, kind, idxMgr, nil)
@@ -4505,7 +4533,9 @@ func (e *Engine) runDropConstraint(ctx context.Context, p *ir.DropConstraint, id
 		return nil, err
 	}
 
-	e.schemaGate.StrongLock()
+	if err := e.lockSchemaForDDL(ctx); err != nil {
+		return nil, err
+	}
 	defer e.schemaGate.StrongUnlock()
 	if e.store == nil {
 		return e.dropConstraintLocked(ctx, p, idxMgr, nil)
