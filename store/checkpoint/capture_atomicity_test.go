@@ -140,46 +140,92 @@ func TestCheckpoint_CaptureIsAtomic_SnapshotOnlyArtefact(t *testing.T) {
 	cp.Start(ctx)
 	defer cp.Stop()
 
+	// The workload is a FIXED number of commits, independent of time and of the
+	// storage medium (rmp #2979). It used to loop until a stop flag, so it grew
+	// with the medium's speed: about 11M nodes on a RAM drive. Now every checkpoint
+	// round releases each writer for exactly roundCommits transactions and fires
+	// the checkpoint once every writer has committed preTrigger of them, so the
+	// capture is taken while the rest of the round is still committing.
+	const (
+		writers      = 4
+		checks       = 60
+		roundCommits = 50
+		preTrigger   = 10
+	)
 	var (
-		stop      atomic.Bool
 		committed atomic.Int64
 		writerErr atomic.Pointer[error]
+		wg        sync.WaitGroup
+		round     sync.WaitGroup
+		stopOnce  sync.Once
 	)
-	const writers = 4
-	var wg sync.WaitGroup
+	starts := make([]chan struct{}, writers)
+	for i := range starts {
+		starts[i] = make(chan struct{}, 1)
+	}
+	// One send per writer per round, drained by the round's trigger.
+	triggerReady := make(chan struct{}, writers)
+	// stopWriters ends every writer and joins it. Idempotent; deferred, so a
+	// t.Fatalf below — which runs deferred calls — leaves no writer behind.
+	stopWriters := func() {
+		stopOnce.Do(func() {
+			for _, s := range starts {
+				close(s)
+			}
+			wg.Wait()
+		})
+	}
+	defer stopWriters()
 	for wi := 0; wi < writers; wi++ {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			for n := 0; !stop.Load(); n++ {
-				// Two FRESH keys per transaction, so each commit contributes
-				// exactly two nodes and one edge to the absolute oracle.
-				src := fmt.Sprintf("w%d-a%d", id, n)
-				dst := fmt.Sprintf("w%d-b%d", id, n)
-				tx := st.Begin()
-				if err := tx.AddEdge(src, dst, 0); err != nil {
-					e := err
-					writerErr.Store(&e)
-					_ = tx.Rollback()
+			for c := 0; ; c++ {
+				if _, ok := <-starts[id]; !ok {
 					return
 				}
-				if err := tx.Commit(); err != nil {
-					e := err
-					writerErr.Store(&e)
-					return
+				for n := 0; n < roundCommits; n++ {
+					if n == preTrigger {
+						triggerReady <- struct{}{}
+					}
+					if writerErr.Load() != nil {
+						continue
+					}
+					// Two FRESH keys per transaction, so each commit contributes
+					// exactly two nodes and one edge to the absolute oracle.
+					src := fmt.Sprintf("w%d-c%d-a%d", id, c, n)
+					dst := fmt.Sprintf("w%d-c%d-b%d", id, c, n)
+					tx := st.Begin()
+					if err := tx.AddEdge(src, dst, 0); err != nil {
+						e := err
+						writerErr.Store(&e)
+						_ = tx.Rollback()
+						continue
+					}
+					if err := tx.Commit(); err != nil {
+						e := err
+						writerErr.Store(&e)
+						continue
+					}
+					committed.Add(1)
 				}
-				committed.Add(1)
+				round.Done()
 			}
 		}(wi)
 	}
 
-	const checks = 60
 	for c := 0; c < checks; c++ {
+		round.Add(writers)
+		for _, s := range starts {
+			s <- struct{}{}
+		}
+		for i := 0; i < writers; i++ {
+			<-triggerReady
+		}
 		if err := cp.Trigger(); err != nil {
-			stop.Store(true)
-			wg.Wait()
 			t.Fatalf("checkpoint %d: %v", c, err)
 		}
+		round.Wait()
 		// Reconstruct from the snapshot ALONE: copy it into a WAL-free
 		// directory so recovery has nothing to repair the artefact with.
 		scratch := t.TempDir()
@@ -187,34 +233,19 @@ func TestCheckpoint_CaptureIsAtomic_SnapshotOnlyArtefact(t *testing.T) {
 
 		man, err := snapshot.ReadManifestFile(filepath.Join(scratch, "snapshot", "manifest.json"))
 		if err != nil {
-			stop.Store(true)
-			wg.Wait()
 			t.Fatalf("checkpoint %d: read manifest: %v", c, err)
 		}
 		res, err := recovery.Open[string, int64](scratch, capAtomicRecOpts())
 		if err != nil {
-			stop.Store(true)
-			wg.Wait()
 			t.Fatalf("checkpoint %d: snapshot-only recovery: %v", c, err)
 		}
 		if !res.SnapshotHit {
-			stop.Store(true)
-			wg.Wait()
 			t.Fatalf("checkpoint %d: SnapshotHit = false", c)
 		}
 		if res.WALOps != 0 {
-			stop.Store(true)
-			wg.Wait()
 			t.Fatalf("checkpoint %d: snapshot-only recovery consulted the WAL (WALOps=%d)", c, res.WALOps)
 		}
-		func() {
-			defer func() {
-				if t.Failed() {
-					stop.Store(true)
-				}
-			}()
-			assertPairInvariant(t, fmt.Sprintf("snapshot-only checkpoint %d", c), res.Graph)
-		}()
+		assertPairInvariant(t, fmt.Sprintf("snapshot-only checkpoint %d", c), res.Graph)
 		// The SAME absolute oracle, applied to the manifest itself. Every
 		// transaction contributes exactly two nodes and one edge, so a manifest
 		// describing a transactional instant must satisfy Order == 2*Size just as
@@ -227,8 +258,6 @@ func TestCheckpoint_CaptureIsAtomic_SnapshotOnlyArtefact(t *testing.T) {
 		// vertex-array length, which is sized from the present id space and so
 		// counts slots for ids interned after the captured instant).
 		if man.Order != 2*man.Size {
-			stop.Store(true)
-			wg.Wait()
 			t.Fatalf("checkpoint %d: the MANIFEST is internally inconsistent — Order=%d Size=%d, "+
 				"want Order == 2*Size (%d). Every transaction contributes exactly two nodes and "+
 				"one edge, so these two numbers were not derived from the same instant",
@@ -242,20 +271,17 @@ func TestCheckpoint_CaptureIsAtomic_SnapshotOnlyArtefact(t *testing.T) {
 		gotOrder := res.Graph.AdjList().Order()
 		gotSize := res.Graph.AdjList().Size()
 		if gotOrder != man.Order || gotSize != man.Size {
-			stop.Store(true)
-			wg.Wait()
 			t.Fatalf("checkpoint %d: components disagree — manifest Order=%d Size=%d, reconstructed Order=%d Size=%d",
 				c, man.Order, man.Size, gotOrder, gotSize)
 		}
 	}
 
-	stop.Store(true)
-	wg.Wait()
+	stopWriters()
 	if p := writerErr.Load(); p != nil {
 		t.Fatalf("writer failed: %v", *p)
 	}
-	if committed.Load() == 0 {
-		t.Fatal("no transaction committed during the race; the path was not exercised")
+	if got, want := committed.Load(), int64(writers*checks*roundCommits); got != want {
+		t.Fatalf("%d transactions committed, want exactly %d", got, want)
 	}
 }
 
