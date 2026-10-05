@@ -985,10 +985,9 @@ func ww15(*world) *isolationtest.Spec {
 		Doc: "WW15. s0 pins a read snapshot over a 64 KiB string; s1 commits four successive\n" +
 			"64 KiB rewrites of it, building a chain of five versions. s0 must read the value\n" +
 			"current at its BEGIN, byte-identical (original=true), in every interleaving (F1).",
-		// The blob is bound with WITH rather than written inline in the CREATE map:
-		// an inline map entry whose expression contains a comma (the reduce) is
-		// rejected by the CREATE property parser — see README.md, "Defects found".
-		Setup: steps(q("mk", "WITH "+ww15Blob("z")+" AS blob CREATE (:Doc {name:'d', blob: blob})")),
+		// The blob is written inline in the CREATE map; a map value carrying its
+		// own commas (the reduce) parses since rmp #2975.
+		Setup: steps(q("mk", "CREATE (:Doc {name:'d', blob: "+ww15Blob("z")+"})")),
 		Sessions: []*isolationtest.Session{
 			{Name: "s0", Setup: steps(beginRead("s0b")), Steps: steps(q("s0r1", read), q("s0r2", read), commit("s0c"))},
 			{Name: "s1", Steps: steps(write("s1w1", "a"), write("s1w2", "b"), write("s1w3", "c"), write("s1w4", "d"))},
@@ -1136,11 +1135,11 @@ func sk07(*world) *isolationtest.Spec {
 		Sessions: []*isolationtest.Session{
 			{Name: "s1", Setup: steps(begin("s1b")), Steps: steps(
 				q("s1r", "MATCH (c:Control) RETURN c.date AS date"),
-				// The date is bound with WITH before the CREATE. Read inline in the
-				// CREATE map, it is taken from the latest committed state rather than
-				// from s1's snapshot — a defect this catalogue found and does not pin;
-				// see README.md, "Defects found".
-				q("s1w", "MATCH (c:Control) WITH c.date AS d CREATE (r:Receipt {date: d, amount: 4}) RETURN r.date AS date"),
+				// The date is read inline in the CREATE map, as the source spec does.
+				// That read must come from s1's snapshot (rmp #2974, fixed); an
+				// interleaving in which s2 commits before s1w would otherwise record
+				// the receipt under the NEW date.
+				q("s1w", "MATCH (c:Control) CREATE (r:Receipt {date: c.date, amount: 4}) RETURN r.date AS date"),
 				commit("s1c"))},
 			{Name: "s2", Setup: steps(begin("s2b")), Steps: steps(
 				q("s2w", "MATCH (c:Control) SET c.date = c.date + 1 RETURN c.date AS date"),

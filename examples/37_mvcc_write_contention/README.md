@@ -304,14 +304,14 @@ GoGraph permits write skew and refuses a write-write conflict.
 | WW12 | `ww12-write-after-peer-rollback` | Cypher | PG `eval-plan-qual`, `eval-plan-qual-trigger`, `multixact-no-forget`; MY `innodb_mysql_rbk` | Write after rollback + drain succeeds | As expected for a writer whose snapshot follows the rollback. The no-drain arm is not pinned (a race, F5). The concurrent explicit-transaction arm is defect D1. |
 | WW13 | `ww13-void-label-removal`, `-lpg`; `ww13-void-property-delete`, `-lpg`; `ww13-void-edge-property` | both | GoGraph rmp #2354 (no PG/InnoDB counterpart) | Statement OK, `COMMIT` refused, nothing applied | As expected for label removal and property delete, through both drivers. The **edge-property** write is refused at the statement, not at `COMMIT`: the catalogue's F3 premise (edge side stores record the conflict) does not hold for `SET r.w` on an existing edge property. The outcome is still a refusal that applies nothing. |
 | WW14 | `ww14-chain-walk-in-flight-head` | Cypher | PG `update-conflict-out`, `multiple-row-versions`; MY `innodb-read-view`, `lob_mvcc_undo` | Pinned reader sees the original; a new reader sees the committed value, never the in-flight one | As expected. |
-| WW15 | `ww15-long-chain-large-values` | Cypher | PG `multiple-row-versions`; MY `lob_mvcc_undo`, `lob_partial_update_concurrent` | Pinned reader returns the 64 KiB value of its BEGIN, byte-identical | As expected. |
+| WW15 | `ww15-long-chain-large-values` | Cypher | PG `multiple-row-versions`; MY `lob_mvcc_undo`, `lob_partial_update_concurrent` | Pinned reader returns the 64 KiB value of its BEGIN, byte-identical | As expected. The value is written inline in the `CREATE` map (rmp #2975, fixed). |
 | SK01 | `write-skew` (existing) | Cypher | Berenson et al. A5B | Permitted | As expected. |
 | SK02 | `sk02-swap-write-skew` | Cypher | PG `simple-write-skew` | Permitted: both commit, sets swapped | As expected. PG SERIALIZABLE aborts one. |
 | SK03 | `sk03-booking-overlap` | Cypher | PG `classroom-scheduling`, `temporal-range-integrity` | Permitted: overlapping bookings | As expected. |
 | SK04 | `sk04-cross-label-write-skew` | Cypher | PG `project-manager` | Permitted | As expected. |
 | SK05 | `sk05-total-cash`, `-lpg` | both | PG `total-cash` | Permitted: total −200 | As expected. |
 | SK06 | `read-only-anomaly-named` (existing) | Cypher | PG `read-only-anomaly`, `read-only-anomaly-2` | Permitted | As expected; PG SERIALIZABLE aborts. |
-| SK07 | `sk07-receipt-report` | Cypher | PG `receipt-report` | Permitted: the report misses a receipt that later commits into its batch | As expected, in two of the four named interleavings. The receipt's date is bound with `WITH` (see D2). |
+| SK07 | `sk07-receipt-report` | Cypher | PG `receipt-report` | Permitted: the report misses a receipt that later commits into its batch | As expected, in two of the four named interleavings. The receipt's date is read inline in the `CREATE` map, as in the source spec; that read is the witness for D2 (rmp #2974, fixed). |
 | SK08 | `sk08-two-ids` | Cypher | PG `two-ids` | All commit in every interleaving | As expected. |
 | SK09 | `bank-transfer` (existing) | Cypher | examples/27 | Total constant | As expected. |
 | SK10 | `sk10-write-skew-hash-seek`, `sk10-write-skew-btree-range` | Cypher | PG `index-only-scan`, `predicate-hash`, `insert-conflict-serializable`, `matview-write-skew` | Permitted; seek = scan in every step | As expected. 1 100 padding nodes make the planner seek; `TestSK10AccessPaths` proves one arm seeks and the other scans. |
@@ -337,9 +337,9 @@ violations and on a transcript diff; with the seam off it passes.
 
 ### Defects found
 
-Neither is fixed here; both are recorded for the engine owners.
+D2 and the parser defect are fixed; D1 is open.
 
-- **D1 — `ExplicitTx.Rollback` publishes its commit record.** After a Cypher
+- **D1 — `ExplicitTx.Rollback` publishes its commit record (rmp #2973, open).** After a Cypher
   `ROLLBACK`, `MVCCStats().Write` counts one more commit and no abort, and a
   transaction whose snapshot predates the rollback is refused when it writes a node
   the rolled-back transaction touched — even after `ReclaimNow`. Snapshot isolation
@@ -348,17 +348,21 @@ Neither is fixed here; both are recorded for the engine owners.
   `EndVersionedTx`) is allowed. Reproduction: `CREATE (:Item {name:'n', x:0})`;
   T2 `BeginTx`; T1 `BeginTx`, `SET n.x = 1`, `Rollback`; `ReclaimNow`; T2
   `SET n.x = 2` → `mvcc: serialization conflict in node properties`. Expected: success.
-- **D2 — a property read inline in a `CREATE` map ignores the snapshot.** Inside an
+- **D2 — a property read inline in a `CREATE` map ignores the snapshot (rmp #2974).** Inside an
   explicit transaction, after a peer committed `c.date = 2` over the transaction's
   snapshot value 1, `MATCH (c:Control) CREATE (r:Receipt {date: c.date, amount: 4})
   RETURN r.date` stores and returns **2**, while `MATCH (c:Control) RETURN c.date`
   in the same transaction returns 1. `CREATE (r:Receipt {date: c.date}) RETURN
   r.date` also returns 2; binding the value first (`WITH c.date AS d CREATE …`) or
   `CREATE … SET r.date = c.date` returns 1. A read of data committed after the
-  snapshot is a non-repeatable read inside one transaction.
-- **Parser.** A `CREATE` map entry whose value contains a comma — `CREATE (:Doc
-  {blob: reduce(s = 'z', i IN range(1, 16) | s + s)})` — fails with `parse
-  properties … missing ':' in map item`. WW15 binds the value with `WITH` instead.
+  snapshot is a non-repeatable read inside one transaction. **Fixed (rmp #2974):**
+  a bound entity read by a write clause's expression — `CREATE` and `MERGE` node and
+  relationship maps, `ON CREATE SET`, `ON MATCH SET` — now resolves through the
+  transaction's view. SK07 uses the inline spelling.
+- **Parser (rmp #2975).** A `CREATE` map entry whose value contains a comma — `CREATE
+  (:Doc {blob: reduce(s = 'z', i IN range(1, 16) | s + s)})` — failed with `parse
+  properties … missing ':' in map item`. **Fixed:** the map-item splitter treats a
+  parenthesised group as one item. WW15 uses the inline spelling.
 
 ### Gaps pinned
 

@@ -12,7 +12,7 @@ date
 ----
 1   
 (1 row)
-step s1w: MATCH (c:Control) WITH c.date AS d CREATE (r:Receipt {date: d, amount: 4}) RETURN r.date AS date
+step s1w: MATCH (c:Control) CREATE (r:Receipt {date: c.date, amount: 4}) RETURN r.date AS date
 date
 ----
 1   
@@ -56,7 +56,7 @@ date|closed_receipts
 2   |0              
 (1 row)
 step s3c: COMMIT
-step s1w: MATCH (c:Control) WITH c.date AS d CREATE (r:Receipt {date: d, amount: 4}) RETURN r.date AS date
+step s1w: MATCH (c:Control) CREATE (r:Receipt {date: c.date, amount: 4}) RETURN r.date AS date
 date
 ----
 1   
@@ -80,7 +80,7 @@ date
 2   
 (1 row)
 step s2c: COMMIT
-step s1w: MATCH (c:Control) WITH c.date AS d CREATE (r:Receipt {date: d, amount: 4}) RETURN r.date AS date
+step s1w: MATCH (c:Control) CREATE (r:Receipt {date: c.date, amount: 4}) RETURN r.date AS date
 date
 ----
 1   
@@ -111,7 +111,7 @@ date
 ----
 1   
 (1 row)
-step s1w: MATCH (c:Control) WITH c.date AS d CREATE (r:Receipt {date: d, amount: 4}) RETURN r.date AS date
+step s1w: MATCH (c:Control) CREATE (r:Receipt {date: c.date, amount: 4}) RETURN r.date AS date
 date
 ----
 1   
