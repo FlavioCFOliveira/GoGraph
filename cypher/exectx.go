@@ -1031,6 +1031,12 @@ func (tx *ExplicitTx) Rollback() (err error) {
 // statements do not produce phantom reservations (#1342).
 func (tx *ExplicitTx) rollbackInBarrierLocked() (undoOK bool) {
 	undoOK = true
+	// The transaction ABORTS (rmp #2973). Every caller is a path on which nothing
+	// is durable — Rollback, and Commit's refusals before or at a failed WAL fsync
+	// — so release() must end the versioned transaction as an abort, not publish
+	// it: a published rollback is a commit after the snapshot of every older
+	// transaction, which first-updater-wins then refuses for no visible reason.
+	tx.wtx.Abandon()
 	if tx.undo != nil && !tx.undo.replay() {
 		undoOK = false
 	}
@@ -1130,6 +1136,9 @@ func (tx *ExplicitTx) recoverExecPanic(errp *error) {
 		if tx.walTx != nil {
 			_ = tx.walTx.Rollback() // rollback error is not actionable while converting a panic
 		}
+		// The undo already ran and nothing is durable: abort, never publish
+		// (rmp #2973; see rollbackInBarrierLocked).
+		tx.wtx.Abandon()
 		tx.release()
 		convertQueryPanic(r, errp, "cypher.ExplicitTx.Exec", "cypher.ExplicitTx.Exec.panics")
 	}

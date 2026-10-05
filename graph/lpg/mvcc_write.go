@@ -428,6 +428,39 @@ func (tx WriteTx) Versions() (n int64, ok bool) {
 	return tx.w.tx.Versions(), true
 }
 
+// Abandon marks this transaction so that closing it with [Graph.EndVersionedTx]
+// (or [Session.EndVersionedTx]) ABORTS it instead of publishing it: none of its
+// versions ever becomes visible, it is counted in [mvcc.WriteCounts] Aborts and
+// not in Commits, and a commit timestamp allocated for it is abandoned.
+//
+// # Why a rollback must abort rather than publish (rmp #2973)
+//
+// An embedder that rolls a multi-statement transaction back PHYSICALLY — the
+// Cypher engine replays its undo log through the ordinary mutators — leaves the
+// stored values right either way. Publishing the record, however, makes it a
+// COMMIT whose instant postdates the snapshot of every transaction that began
+// earlier, so first-updater-wins refuses such a transaction when it later writes
+// an object the rolled-back one touched, although nothing it can see changed.
+// Aborting the record is what PostgreSQL and InnoDB do on ROLLBACK, and it is
+// what [Graph.endWrite] already does for a doomed transaction.
+//
+// # Preconditions
+//
+// Call it only BEFORE the transaction is closed; on a closed transaction it is
+// meaningless and must not be called. Never call it on a path whose commit record
+// is already DURABLE — after the WAL fsync of [Graph.AllocateCommitTS]'s instant
+// — because recovery replays such a transaction as committed, and aborting it in
+// memory would make the running process and a reopened one disagree.
+//
+// A no-op on the zero value. Not safe for concurrent use: like every other
+// operation on one write transaction, it must be called from the goroutine that
+// drives it.
+func (tx WriteTx) Abandon() {
+	if tx.w != nil {
+		tx.w.abandon = true
+	}
+}
+
 // EnterUndo marks the start of this transaction's PHYSICAL undo replay, during
 // which its writes are withdrawals of work it already applied rather than new
 // updates.
