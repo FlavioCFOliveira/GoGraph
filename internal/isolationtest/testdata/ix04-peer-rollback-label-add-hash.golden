@@ -1,0 +1,347 @@
+spec ix04-peer-rollback-label-add-hash: 2 sessions, 10 permutations
+# IX04 (#2931), hash index, equality seek. n33 loses :L in a committed statement. s1 opens and sets
+# n33.s = 'v999p' (the 'polluted' value of #2931, inside the btree's value domain);
+# s2 adds :L back in an autocommit statement; s1 rolls back and the vacuum is
+# drained (H1). The label add must index n33 under its COMMITTED value 'v33', never
+# under s1's uncommitted 'v999p', so seek = scan for both values in every step and
+# after the run (F12).
+
+starting permutation: s1w s1rb s1dr s2l s2v s2p
+step s1w: MATCH (n {name:'n33'}) SET n.s = 'v999p' RETURN n.s AS s
+s      
+-------
+"v999p"
+(1 row)
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+step s2l: MATCH (n {name:'n33'}) SET n:L RETURN n.name AS name
+name 
+-----
+"n33"
+(1 row)
+step s2v: MATCH (n:L {s:'v33'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v33' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s2p: MATCH (n:L {s:'v999p'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v999p' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fv: MATCH (n:L {s:'v33'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v33' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fp: MATCH (n:L {s:'v999p'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v999p' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s1w s2l s1rb s1dr s2v s2p
+step s1w: MATCH (n {name:'n33'}) SET n.s = 'v999p' RETURN n.s AS s
+s      
+-------
+"v999p"
+(1 row)
+step s2l: MATCH (n {name:'n33'}) SET n:L RETURN n.name AS name
+name 
+-----
+"n33"
+(1 row)
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+step s2v: MATCH (n:L {s:'v33'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v33' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s2p: MATCH (n:L {s:'v999p'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v999p' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fv: MATCH (n:L {s:'v33'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v33' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fp: MATCH (n:L {s:'v999p'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v999p' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s1w s2l s2v s1rb s1dr s2p
+step s1w: MATCH (n {name:'n33'}) SET n.s = 'v999p' RETURN n.s AS s
+s      
+-------
+"v999p"
+(1 row)
+step s2l: MATCH (n {name:'n33'}) SET n:L RETURN n.name AS name
+name 
+-----
+"n33"
+(1 row)
+step s2v: MATCH (n:L {s:'v33'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v33' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+step s2p: MATCH (n:L {s:'v999p'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v999p' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fv: MATCH (n:L {s:'v33'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v33' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fp: MATCH (n:L {s:'v999p'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v999p' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s1w s2l s2v s2p s1rb s1dr
+step s1w: MATCH (n {name:'n33'}) SET n.s = 'v999p' RETURN n.s AS s
+s      
+-------
+"v999p"
+(1 row)
+step s2l: MATCH (n {name:'n33'}) SET n:L RETURN n.name AS name
+name 
+-----
+"n33"
+(1 row)
+step s2v: MATCH (n:L {s:'v33'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v33' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s2p: MATCH (n:L {s:'v999p'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v999p' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+final fv: MATCH (n:L {s:'v33'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v33' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fp: MATCH (n:L {s:'v999p'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v999p' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s2l s1w s1rb s1dr s2v s2p
+step s2l: MATCH (n {name:'n33'}) SET n:L RETURN n.name AS name
+name 
+-----
+"n33"
+(1 row)
+step s1w: MATCH (n {name:'n33'}) SET n.s = 'v999p' RETURN n.s AS s
+s      
+-------
+"v999p"
+(1 row)
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+step s2v: MATCH (n:L {s:'v33'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v33' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s2p: MATCH (n:L {s:'v999p'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v999p' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fv: MATCH (n:L {s:'v33'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v33' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fp: MATCH (n:L {s:'v999p'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v999p' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s2l s1w s2v s1rb s1dr s2p
+step s2l: MATCH (n {name:'n33'}) SET n:L RETURN n.name AS name
+name 
+-----
+"n33"
+(1 row)
+step s1w: MATCH (n {name:'n33'}) SET n.s = 'v999p' RETURN n.s AS s
+s      
+-------
+"v999p"
+(1 row)
+step s2v: MATCH (n:L {s:'v33'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v33' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+step s2p: MATCH (n:L {s:'v999p'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v999p' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fv: MATCH (n:L {s:'v33'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v33' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fp: MATCH (n:L {s:'v999p'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v999p' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s2l s1w s2v s2p s1rb s1dr
+step s2l: MATCH (n {name:'n33'}) SET n:L RETURN n.name AS name
+name 
+-----
+"n33"
+(1 row)
+step s1w: MATCH (n {name:'n33'}) SET n.s = 'v999p' RETURN n.s AS s
+s      
+-------
+"v999p"
+(1 row)
+step s2v: MATCH (n:L {s:'v33'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v33' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s2p: MATCH (n:L {s:'v999p'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v999p' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+final fv: MATCH (n:L {s:'v33'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v33' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fp: MATCH (n:L {s:'v999p'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v999p' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s2l s2v s1w s1rb s1dr s2p
+step s2l: MATCH (n {name:'n33'}) SET n:L RETURN n.name AS name
+name 
+-----
+"n33"
+(1 row)
+step s2v: MATCH (n:L {s:'v33'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v33' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1w: MATCH (n {name:'n33'}) SET n.s = 'v999p' RETURN n.s AS s
+s      
+-------
+"v999p"
+(1 row)
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+step s2p: MATCH (n:L {s:'v999p'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v999p' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fv: MATCH (n:L {s:'v33'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v33' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fp: MATCH (n:L {s:'v999p'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v999p' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s2l s2v s1w s2p s1rb s1dr
+step s2l: MATCH (n {name:'n33'}) SET n:L RETURN n.name AS name
+name 
+-----
+"n33"
+(1 row)
+step s2v: MATCH (n:L {s:'v33'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v33' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1w: MATCH (n {name:'n33'}) SET n.s = 'v999p' RETURN n.s AS s
+s      
+-------
+"v999p"
+(1 row)
+step s2p: MATCH (n:L {s:'v999p'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v999p' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+final fv: MATCH (n:L {s:'v33'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v33' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fp: MATCH (n:L {s:'v999p'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v999p' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s2l s2v s2p s1w s1rb s1dr
+step s2l: MATCH (n {name:'n33'}) SET n:L RETURN n.name AS name
+name 
+-----
+"n33"
+(1 row)
+step s2v: MATCH (n:L {s:'v33'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v33' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s2p: MATCH (n:L {s:'v999p'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v999p' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1w: MATCH (n {name:'n33'}) SET n.s = 'v999p' RETURN n.s AS s
+s      
+-------
+"v999p"
+(1 row)
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+final fv: MATCH (n:L {s:'v33'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v33' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fp: MATCH (n:L {s:'v999p'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v999p' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)

@@ -1,0 +1,379 @@
+spec mg09-delete-commit-then-recreate: 2 sessions, 20 permutations
+# MG09. UNIQUE on (:K).k, one node k='u'. Deleting a UNIQUE value and creating it
+# again must leave exactly one holder, never two and never none.
+# (b) s1 deletes k='u' and commits; s2 creates k='u'. Each BEGIN is a step. s2's
+# CREATE succeeds once s1's delete has committed, whatever s2's snapshot; before
+# that it is refused, because the release of a UNIQUE value is deferred to the
+# deleter's commit (fca34a0c).
+
+starting permutation: s1b s1d s1c s2b s2r s2c
+step s1b: BEGIN
+step s1d: MATCH (n:K {k:'u'}) DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1c: COMMIT
+step s2b: BEGIN
+step s2r: CREATE (n:K {k:'u', v:'s2'}) RETURN n.v AS v
+v   
+----
+"s2"
+(1 row)
+step s2c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v   
+---+----
+"u"|"s2"
+(1 row)
+
+starting permutation: s1b s1d s2b s1c s2r s2c
+step s1b: BEGIN
+step s1d: MATCH (n:K {k:'u'}) DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s2b: BEGIN
+step s1c: COMMIT
+step s2r: CREATE (n:K {k:'u', v:'s2'}) RETURN n.v AS v
+v   
+----
+"s2"
+(1 row)
+step s2c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v   
+---+----
+"u"|"s2"
+(1 row)
+
+starting permutation: s1b s1d s2b s2r s1c s2c
+step s1b: BEGIN
+step s1d: MATCH (n:K {k:'u'}) DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s2b: BEGIN
+step s2r: CREATE (n:K {k:'u', v:'s2'}) RETURN n.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "u" already exists
+step s1c: COMMIT
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k|v
+-+-
+(0 rows)
+
+starting permutation: s1b s1d s2b s2r s2c s1c
+step s1b: BEGIN
+step s1d: MATCH (n:K {k:'u'}) DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s2b: BEGIN
+step s2r: CREATE (n:K {k:'u', v:'s2'}) RETURN n.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "u" already exists
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s1c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k|v
+-+-
+(0 rows)
+
+starting permutation: s1b s2b s1d s1c s2r s2c
+step s1b: BEGIN
+step s2b: BEGIN
+step s1d: MATCH (n:K {k:'u'}) DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1c: COMMIT
+step s2r: CREATE (n:K {k:'u', v:'s2'}) RETURN n.v AS v
+v   
+----
+"s2"
+(1 row)
+step s2c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v   
+---+----
+"u"|"s2"
+(1 row)
+
+starting permutation: s1b s2b s1d s2r s1c s2c
+step s1b: BEGIN
+step s2b: BEGIN
+step s1d: MATCH (n:K {k:'u'}) DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s2r: CREATE (n:K {k:'u', v:'s2'}) RETURN n.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "u" already exists
+step s1c: COMMIT
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k|v
+-+-
+(0 rows)
+
+starting permutation: s1b s2b s1d s2r s2c s1c
+step s1b: BEGIN
+step s2b: BEGIN
+step s1d: MATCH (n:K {k:'u'}) DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s2r: CREATE (n:K {k:'u', v:'s2'}) RETURN n.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "u" already exists
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s1c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k|v
+-+-
+(0 rows)
+
+starting permutation: s1b s2b s2r s1d s1c s2c
+step s1b: BEGIN
+step s2b: BEGIN
+step s2r: CREATE (n:K {k:'u', v:'s2'}) RETURN n.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "u" already exists
+step s1d: MATCH (n:K {k:'u'}) DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k|v
+-+-
+(0 rows)
+
+starting permutation: s1b s2b s2r s1d s2c s1c
+step s1b: BEGIN
+step s2b: BEGIN
+step s2r: CREATE (n:K {k:'u', v:'s2'}) RETURN n.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "u" already exists
+step s1d: MATCH (n:K {k:'u'}) DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s1c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k|v
+-+-
+(0 rows)
+
+starting permutation: s1b s2b s2r s2c s1d s1c
+step s1b: BEGIN
+step s2b: BEGIN
+step s2r: CREATE (n:K {k:'u', v:'s2'}) RETURN n.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "u" already exists
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s1d: MATCH (n:K {k:'u'}) DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k|v
+-+-
+(0 rows)
+
+starting permutation: s2b s1b s1d s1c s2r s2c
+step s2b: BEGIN
+step s1b: BEGIN
+step s1d: MATCH (n:K {k:'u'}) DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1c: COMMIT
+step s2r: CREATE (n:K {k:'u', v:'s2'}) RETURN n.v AS v
+v   
+----
+"s2"
+(1 row)
+step s2c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v   
+---+----
+"u"|"s2"
+(1 row)
+
+starting permutation: s2b s1b s1d s2r s1c s2c
+step s2b: BEGIN
+step s1b: BEGIN
+step s1d: MATCH (n:K {k:'u'}) DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s2r: CREATE (n:K {k:'u', v:'s2'}) RETURN n.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "u" already exists
+step s1c: COMMIT
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k|v
+-+-
+(0 rows)
+
+starting permutation: s2b s1b s1d s2r s2c s1c
+step s2b: BEGIN
+step s1b: BEGIN
+step s1d: MATCH (n:K {k:'u'}) DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s2r: CREATE (n:K {k:'u', v:'s2'}) RETURN n.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "u" already exists
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s1c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k|v
+-+-
+(0 rows)
+
+starting permutation: s2b s1b s2r s1d s1c s2c
+step s2b: BEGIN
+step s1b: BEGIN
+step s2r: CREATE (n:K {k:'u', v:'s2'}) RETURN n.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "u" already exists
+step s1d: MATCH (n:K {k:'u'}) DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k|v
+-+-
+(0 rows)
+
+starting permutation: s2b s1b s2r s1d s2c s1c
+step s2b: BEGIN
+step s1b: BEGIN
+step s2r: CREATE (n:K {k:'u', v:'s2'}) RETURN n.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "u" already exists
+step s1d: MATCH (n:K {k:'u'}) DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s1c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k|v
+-+-
+(0 rows)
+
+starting permutation: s2b s1b s2r s2c s1d s1c
+step s2b: BEGIN
+step s1b: BEGIN
+step s2r: CREATE (n:K {k:'u', v:'s2'}) RETURN n.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "u" already exists
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s1d: MATCH (n:K {k:'u'}) DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k|v
+-+-
+(0 rows)
+
+starting permutation: s2b s2r s1b s1d s1c s2c
+step s2b: BEGIN
+step s2r: CREATE (n:K {k:'u', v:'s2'}) RETURN n.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "u" already exists
+step s1b: BEGIN
+step s1d: MATCH (n:K {k:'u'}) DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k|v
+-+-
+(0 rows)
+
+starting permutation: s2b s2r s1b s1d s2c s1c
+step s2b: BEGIN
+step s2r: CREATE (n:K {k:'u', v:'s2'}) RETURN n.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "u" already exists
+step s1b: BEGIN
+step s1d: MATCH (n:K {k:'u'}) DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s1c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k|v
+-+-
+(0 rows)
+
+starting permutation: s2b s2r s1b s2c s1d s1c
+step s2b: BEGIN
+step s2r: CREATE (n:K {k:'u', v:'s2'}) RETURN n.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "u" already exists
+step s1b: BEGIN
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s1d: MATCH (n:K {k:'u'}) DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k|v
+-+-
+(0 rows)
+
+starting permutation: s2b s2r s2c s1b s1d s1c
+step s2b: BEGIN
+step s2r: CREATE (n:K {k:'u', v:'s2'}) RETURN n.v AS v
+ERROR: exec: constraint violation: UNIQUE constraint on (K).k: value "u" already exists
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s1b: BEGIN
+step s1d: MATCH (n:K {k:'u'}) DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k|v
+-+-
+(0 rows)

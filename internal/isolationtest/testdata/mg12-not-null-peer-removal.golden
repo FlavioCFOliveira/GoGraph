@@ -1,0 +1,121 @@
+spec mg12-not-null-peer-removal: 2 sessions, 6 permutations
+# MG12, peer removal. NOT NULL on (:R).p. s1 sets r0.p; s2 removes r0.p. s2's
+# removal is refused, by the constraint at its COMMIT and, when s1 holds the node,
+# by the write-write conflict (F2); s1's write is refused when s2 holds the node.
+# r0.p is never null after any commit.
+
+starting permutation: s1s s1x s2r s2x
+step s1s: MATCH (n:R {name:'r0'}) SET n.p = 1 RETURN n.p AS p
+p
+-
+1
+(1 row)
+step s1x: COMMIT
+step s2r: MATCH (n:R {name:'r0'}) REMOVE n.p RETURN n.p AS p
+p
+-
+0
+(1 row)
+step s2x: COMMIT
+ERROR: serialization conflict
+final final: MATCH (n:R) RETURN n.name AS name, n.p AS p ORDER BY name
+name|p
+----+-
+"r0"|1
+(1 row)
+
+starting permutation: s1s s2r s1x s2x
+step s1s: MATCH (n:R {name:'r0'}) SET n.p = 1 RETURN n.p AS p
+p
+-
+1
+(1 row)
+step s2r: MATCH (n:R {name:'r0'}) REMOVE n.p RETURN n.p AS p
+p
+-
+0
+(1 row)
+step s1x: COMMIT
+step s2x: COMMIT
+ERROR: serialization conflict
+final final: MATCH (n:R) RETURN n.name AS name, n.p AS p ORDER BY name
+name|p
+----+-
+"r0"|1
+(1 row)
+
+starting permutation: s1s s2r s2x s1x
+step s1s: MATCH (n:R {name:'r0'}) SET n.p = 1 RETURN n.p AS p
+p
+-
+1
+(1 row)
+step s2r: MATCH (n:R {name:'r0'}) REMOVE n.p RETURN n.p AS p
+p
+-
+0
+(1 row)
+step s2x: COMMIT
+ERROR: serialization conflict
+step s1x: COMMIT
+final final: MATCH (n:R) RETURN n.name AS name, n.p AS p ORDER BY name
+name|p
+----+-
+"r0"|1
+(1 row)
+
+starting permutation: s2r s1s s1x s2x
+step s2r: MATCH (n:R {name:'r0'}) REMOVE n.p RETURN n.p AS p
+p   
+----
+null
+(1 row)
+step s1s: MATCH (n:R {name:'r0'}) SET n.p = 1 RETURN n.p AS p
+ERROR: serialization conflict
+step s1x: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s2x: COMMIT
+ERROR: exec: constraint violation: NOT NULL constraint on (R).p: property is null on a node carrying the constrained label in its committed state
+final final: MATCH (n:R) RETURN n.name AS name, n.p AS p ORDER BY name
+name|p
+----+-
+"r0"|0
+(1 row)
+
+starting permutation: s2r s1s s2x s1x
+step s2r: MATCH (n:R {name:'r0'}) REMOVE n.p RETURN n.p AS p
+p   
+----
+null
+(1 row)
+step s1s: MATCH (n:R {name:'r0'}) SET n.p = 1 RETURN n.p AS p
+ERROR: serialization conflict
+step s2x: COMMIT
+ERROR: exec: constraint violation: NOT NULL constraint on (R).p: property is null on a node carrying the constrained label in its committed state
+step s1x: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:R) RETURN n.name AS name, n.p AS p ORDER BY name
+name|p
+----+-
+"r0"|0
+(1 row)
+
+starting permutation: s2r s2x s1s s1x
+step s2r: MATCH (n:R {name:'r0'}) REMOVE n.p RETURN n.p AS p
+p   
+----
+null
+(1 row)
+step s2x: COMMIT
+ERROR: exec: constraint violation: NOT NULL constraint on (R).p: property is null on a node carrying the constrained label in its committed state
+step s1s: MATCH (n:R {name:'r0'}) SET n.p = 1 RETURN n.p AS p
+p
+-
+1
+(1 row)
+step s1x: COMMIT
+final final: MATCH (n:R) RETURN n.name AS name, n.p AS p ORDER BY name
+name|p
+----+-
+"r0"|1
+(1 row)

@@ -241,8 +241,8 @@ writer ends the phase with a non-zero count instead of hanging the run.
 ## Phase 5 — deterministic MVCC scenario catalogue (rmp #2933)
 
 `catalogue.go` ports the write-write (§1.1) and snapshot-isolation (§1.2) rows of
-`docs/mvcc-scenario-catalogue.md` from PostgreSQL's isolation specs and InnoDB's
-tests. The PostgreSQL scenarios are re-implemented, not copied. Each row is an
+`docs/mvcc-scenario-catalogue.md`, and `catalogue_mgix.go` its MERGE/UNIQUE (§1.3) and
+index (§1.4) rows, from PostgreSQL's isolation specs and InnoDB's tests. The PostgreSQL scenarios are re-implemented, not copied. Each row is an
 `internal/isolationtest` spec run over **every** order-preserving interleaving of its
 steps (or over named interleavings where the catalogue requires them) and pinned by a
 golden transcript. The transcript ends with a `final` block — the state the
@@ -270,7 +270,11 @@ against its golden by `TestCatalogue`.
   same graph through `lpg.Graph`, using the harness's `Probe` step (a Go step that
   reports rows; added to `internal/isolationtest` for this purpose). Rows that need
   `ROLLBACK` run through Cypher only: the undo log a rollback replays belongs to the
-  Cypher engine.
+  Cypher engine. The MG and IX rows run through Cypher only: the `lpg` API has no
+  `MERGE`, the UNIQUE and NOT NULL constraints are the Cypher engine's registry, and a
+  secondary index is maintained only by the change fan-out the Cypher engine drives at
+  commit (`lpg.ErrIndexedRawWrite`), so an `lpg` arm would test that contract rather
+  than the row.
 - **Vacuum drain (H1).** A `Hook` step calls `lpg.Graph.ReclaimNow`. Every
   write-after-rollback row places it in the rolling-back session directly after the
   `ROLLBACK`, and runs only the interleavings in which no other step falls between
@@ -278,10 +282,20 @@ against its golden by `TestCatalogue`.
 - **Goldens** live in `internal/isolationtest/testdata`. That is decided by the
   harness: `isolationtest.Check` resolves `testdata/<spec>.golden` against its own
   source directory. Catalogue goldens carry the row ID as a prefix
-  (`ww02-…`, `sk12-…`).
+  (`ww02-…`, `sk12-…`, `mg02-…`, `ix04-…`).
 - **Property checks.** WW15 (pinned reader byte-identical), SK10 (seek = scan),
-  SK12 (repeatable count; read-skew freedom) and SK14 (fast path = scan) also assert
-  a property on every step, independently of the golden.
+  SK12 (repeatable count; read-skew freedom), SK14 (fast path = scan) and every IX
+  row (seek = scan) also assert a property on every step, independently of the golden.
+- **Seek = scan in one statement (IX).** Each index read returns two columns: `seek`,
+  the predicate served from the index, and `scan`, the same predicate spelled so no
+  index can serve it (`m.s + ''`, `m.k + 0`, `left(m.s, n)`). The scan arm is an
+  `OPTIONAL MATCH`: with a plain `MATCH`, a scan that finds nothing leaves no row to
+  group, the statement returns no row, and a stale index entry would vanish from the
+  transcript instead of disagreeing in it. `TestIXAccessPaths` proves that every seek
+  arm is planned as an index access and every scan arm as a label scan. The planner
+  estimates a btree or numeric predicate from the committed value domain and plans a
+  label scan for a bound outside it, so the btree and numeric rows write values inside
+  that domain (`'v999x'`, `k = 16`).
 
 ### Rows
 
@@ -319,8 +333,30 @@ GoGraph permits write skew and refuses a write-write conflict.
 | SK12 | `sk12-no-phantom-no-non-repeatable`, `sk12-read-skew-lpg` | both | MY `t/consistent_snapshot`, `select_count_perf`, `innodb-read-view` | Repeated reads equal; no read skew | As expected. The `lpg` arm reads two keys (A5A) and is the negative control's target. |
 | SK13 | `sk13-snapshot-at-begin`, `-lpg` | both | MY `t/consistent_snapshot`; PG `fk-snapshot` | Snapshot at BEGIN | As expected. InnoDB's plain `START TRANSACTION` takes it at the first read. |
 | SK14 | `sk14-fast-path-aggregates` | Cypher | MY `select_count_perf`, `parallel_read`; PG `index-only-bitmapscan` | Fast path = scan, at the snapshot | As expected. |
+| MG01 | `mg01-merge-no-constraint` | Cypher | PG `merge-insert-update` | Both succeed; duplicates when both snapshots precede both commits; one node when serial | As expected: 2 nodes in 18 of 20 interleavings, 1 in the 2 serial ones, where a `BEGIN` follows the other's `COMMIT`. |
+| MG02 | `mg02-unique-merge-winner-commits`, `-winner-rolls-back`, `-autocommit-loser` | Cypher | PG `insert-conflict-do-nothing`, `insert-conflict-do-update`; MY `iodku`, `innodb_replace`, `constraint_check_locks_in_read_committed` | Loser gets a ConstraintViolation, not retriable (F10) | As expected in all three arms. PG waits and then does nothing or updates; InnoDB waits on a shared lock. After the winner rolls back, a new `MERGE` creates the node: no reservation leaks. The autocommit arm is refused too while the winner is open (G6); it matches the node once the winner has committed. |
+| MG03 | `mg03-unique-committed-after-snapshot` | Cypher | PG `insert-conflict-do-nothing-2`, `read-write-unique-2` | `MERGE` cannot see the committed value and gets a ConstraintViolation | As expected. PG REPEATABLE READ raises a serialization failure instead. |
+| MG04 | `mg04-read-then-insert-unique` | Cypher | PG `read-write-unique`, `-2`, `-3` | Second `CREATE` is a ConstraintViolation at the statement | As expected; exactly one node in all 20 interleavings. PG SERIALIZABLE waits, then raises a serialization failure. |
+| MG05 | `mg05-gapless-sequence-no-constraint`, `-unique` | Cypher | PG `read-write-unique-4` | Without a constraint: duplicate numbers (write skew); with UNIQUE: loser refused | As expected: `[1, 2, 2]` in all 20 interleavings without the constraint, `[1, 2]` with it. |
+| MG06 | `mg06-merge-on-match-vs-update` | Cypher | PG `insert-conflict-do-update`, `-3`, `merge-match-recheck`, `merge-update` | `ON MATCH SET` over a version the snapshot cannot see is refused (F2) | As expected: the later writer is refused at its statement in every order. PG `-3` updates a tuple its snapshot cannot see. |
+| MG07 | `mg07-on-match-changes-unique-key` | Cypher | PG `insert-conflict-do-update-2` | One node per key; loser gets a typed error | As expected in all 30 interleavings; the release of the old key is deferred to commit, so a `CREATE` of it is refused while the renamer is open (rmp #2366). |
+| MG08 | `mg08-merge-vs-delete` | Cypher | PG `merge-delete` | `MERGE` onto a node deleted after its snapshot is refused; no resurrection | As expected. The refusal of the `DETACH DELETE` that comes second surfaces at its `COMMIT`. PG READ COMMITTED turns the `MERGE` into an `INSERT`. |
+| MG09 | `mg09-delete-recreate-same-tx`, `mg09-delete-commit-then-recreate`, `mg09-delete-open-then-rollback` | Cypher | MY `innodb-lock-inherit-read_commited`, `index-create-dml-rollback`, `lock-inherit-existing`; PG `read-write-unique-3` | (a) one holder; (b) re-create succeeds after the delete commits; (c) refused while the delete is open, one holder after its rollback | As expected in all three arms. In (b) the re-create succeeds once the delete has committed even when the creator's snapshot still sees the old node: the check reads the reservation set, not the snapshot. |
+| MG10 | `mg10-intra-statement-duplicate` | Cypher | MY `innodb-index`, `create_table_select` | Statement rejected, nothing applied | As expected. Between the failed statement and the client's `ROLLBACK` (F8) the value stays reserved and a peer is refused (G6); after the `ROLLBACK` the peer succeeds. |
+| MG11 | — | — | PG `insert-conflict-specconflict`, PG-inj `on_conflict_probe_window` | One node; loser ConstraintViolation | **Not implemented: random load, #2934.** No hook exists inside `MERGE` between its probe and its create (G5), so the race cannot be scripted. |
+| MG12 | `mg12-not-null-at-commit`, `mg12-not-null-peer-removal` | Cypher | PG `alter-table-1`; MY `constraint_check_locks_in_read_committed` | Set-later commits; removed arm refused at `COMMIT`; peer removal refused | As expected. A peer's `REMOVE n.p` is refused by the write-write conflict at `COMMIT` when the setter committed first, and by the constraint at `COMMIT` otherwise; `p` is never null after a commit. |
+| IX01 | `ix01-own-write-hash-seek` | Cypher | GoGraph #2814 (`efd32fb9`); MY `innodb_fts/transaction` | Own writes visible to the hash seek; seek = scan | As expected. InnoDB's full-text index hides own uncommitted rows by design. Negative control below. |
+| IX02 | `ix02-own-write-btree-seek` | Cypher | GoGraph #2814 | Range and prefix seek = scan after own writes | As expected. Negative control below. |
+| IX03 | `ix03-own-write-autocommit` | Cypher | GoGraph #2814 | One autocommit statement counts its own `CREATE` and `SET` | As expected. Negative control below. |
+| IX04 | `ix04-peer-rollback-label-add-hash`, `-btree` | Cypher | GoGraph #2931; MY `index-create-dml-rollback`, `innodb-index-online`; PG `partial-index` | Node indexed under its committed value; seek = scan | As expected. Negative control below. Without a UNIQUE constraint the label add does not conflict with the open property write on the same node, in either order. |
+| IX05 | `ix05-rollback-leaves-no-trace` | Cypher | MY `innodb-index-online`, `index-create-dml-rollback`, `lob_rollback_update`, `innodb_mysql_rbk`; PG `partial-index` | Every seek = scan = pre-state plus the peer's commits | As expected. With a UNIQUE constraint registered (on any label), a label add and a property write on one node conflict ("node constraint"), so the peer route by which #2931 let a rolled-back value into an index cannot occur here; the row does not fail at `43c69dbe` (see the negative control). |
+| IX06 | `ix06-moved-out-of-index-domain` | Cypher | PG `partial-index`, `partition-key-update-4`; MY `multi_value_index_merge_mvcc` | Pinned reader finds the old values; a new reader the new ones | As expected. |
+| IX07 | `ix07-two-index-predicate-pinned` | Cypher | MY `multi_value_index_merge_mvcc`, `bug32554667` | Pinned reader gains no row | As expected. |
+| IX08 | `ix08-index-created-after-snapshot` | Cypher | PG `drop-index-concurrently-1`, `reindex-concurrently`; MY `innodb-read-view` | Only snapshot rows | As expected; `CREATE INDEX` does not wait for the open read-only transaction. |
+| IX09 | `ix09-label-index-scan-agree` | Cypher | GoGraph #2931 churn; MY `lock_impl_to_expl_case_sensitivity` | Label count = seek = scan at quiescence | As expected. |
+| IX10 | `ix10-parameter-seek-own-write` | Cypher | GoGraph `3fd78c5e` | Parameter seek = literal seek = scan | As expected, for a string and an integer parameter. |
 
-RO01–RO03 sit in catalogue §1.7 and are not part of this stage.
+RO01–RO03 sit in catalogue §1.7 and are not part of this catalogue's rows.
 
 ### Negative control
 
@@ -335,9 +371,30 @@ permutation "s1x s2dx s2cy s2c s1y s1x2 s1c" step s1y: read skew: x=50 y=60 sum 
 Run against the golden with the seam on, the same spec fails on twelve property
 violations and on a transcript diff; with the seam off it passes.
 
+### Negative controls for the index rows
+
+Each spec and golden at HEAD was copied into a temporary worktree of an earlier
+revision and run there. The worktree needed one change to compile:
+`lpgSession.removeLabel` and `lpgSession.delProp` wrap `RemoveNodeLabel` and
+`DelNodeProperty`, which returned no error then; no MG or IX spec uses either.
+
+- **#2814 at `efd32fb9^`.** IX01, IX02 and IX03 all fail. IX01 reports 21 property
+  violations, for example
+  `permutation "s1w s1new s1old s1cr s1crr s1c s2r" step s1old: index seek counted 1, scan counted 0`;
+  IX02 reports 32, for example `step s1rg: index seek counted 1, scan counted 2`; IX03
+  diverges from its golden at line 11 of permutation `s1cr s1set s2r` (`want: 1`,
+  `got: 0`).
+- **#2931 at `43c69dbe`.** Both IX04 specs fail, 18 property violations and a diff at
+  line 59 of permutation `s1w s2l s1rb s1dr s2v s2p` (hash: `want: 1 |1`,
+  `got: 0 |1`; btree: `want: 11 |11`, `got: 10 |11`). **IX05 passes there.** A
+  rolled-back transaction writes no index entry of its own, and the peer route #2931
+  took is closed in IX05 by the "node constraint" conflict that any registered UNIQUE
+  constraint brings. The catalogue's §6 claim that IX05 catches #2931 does not hold;
+  IX04 is the row that does.
+
 ### Defects found
 
-All three are fixed.
+D1, D2 and the first parser defect are fixed; the second parser defect is open.
 
 - **D1 — `ExplicitTx.Rollback` publishes its commit record (rmp #2973).** After a Cypher
   `ROLLBACK`, `MVCCStats().Write` counts one more commit and no abort, and a
@@ -367,6 +424,14 @@ All three are fixed.
   (:Doc {blob: reduce(s = 'z', i IN range(1, 16) | s + s)})` — failed with `parse
   properties … missing ':' in map item`. **Fixed:** the map-item splitter treats a
   parenthesised group as one item. WW15 uses the inline spelling.
+- **Parser: `STARTS WITH` / `ENDS WITH` after a `WITH` clause (open).**
+  `WITH 1 AS x MATCH (m:P) WHERE m.name STARTS WITH 'a' RETURN m.name` fails with
+  `cypher: parse: unexpected "RETURN" at 1:53, expected one of {'WITH', 'UNION'}`
+  through `Engine.Run`; `ENDS WITH` fails the same way, while `CONTAINS`, the same
+  predicate in parentheses, and the same `MATCH … WHERE … STARTS WITH` without a
+  preceding `WITH` parse. openCypher admits the statement. The IX prefix rows spell
+  their scan arm with `left()` instead; the seek arm, which precedes the `WITH`, keeps
+  `STARTS WITH`.
 
 ### Gaps pinned
 
@@ -376,7 +441,20 @@ All three are fixed.
   race is narrower than the catalogue states; the no-drain arm is still not pinned.
 - **G4** (value-preserving write as a skew remedy): pinned by SK11 — it is **not** a
   remedy.
-- **G8** (adjacency append conflicts): not exercised by §1.1–§1.2 (RI03 decides it).
+- **G5** (no hook inside `MERGE`): confirmed — `cypher/exec/merge*.go` has no hook
+  between probe and create. MG11 is left to random load (#2934).
+- **G6** (UNIQUE against an in-flight reservation): pinned by MG02 (all three arms),
+  MG03, MG07, MG09 and MG10 — always a ConstraintViolation, never a serialization
+  conflict, and refused even when the holder later rolls back. An autocommit `MERGE`
+  is refused too while an explicit transaction holds the value, so F10's "autocommit
+  `MERGE` converges" holds only between autocommit callers.
+- **G7** (no online index verifier): unchanged. Each IX row derives seek = scan in the
+  statement itself, and `TestIXAccessPaths` guards that the seek arm is an index
+  access.
+- **G8** (adjacency append conflicts): not exercised by §1.1–§1.4 (RI03 decides it).
+- **G9** (backfill source of `CREATE INDEX`): not settled. IX08 creates an index under
+  an open reader and a committed peer, and the reader sees its snapshot only; a peer
+  whose write is still open during the build is DD01's shape.
 - **G10** (state after a refused statement): pinned — through Cypher, `COMMIT`
   returns `ErrTxPoisoned`; through `lpg`, the refused write dooms the transaction and
   its commit returns the serialization conflict. Both apply nothing.

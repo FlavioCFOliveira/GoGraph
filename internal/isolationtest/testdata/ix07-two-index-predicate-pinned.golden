@@ -1,0 +1,245 @@
+spec ix07-two-index-predicate-pinned: 2 sessions, 10 permutations
+# IX07. Hash indexes on (:L).a and (:L).b; one node matches a = 1 AND b = 2. s1 is a
+# read-only transaction pinned at BEGIN; s2 creates a second matching node in an
+# explicit transaction. s1 counts 1 in every interleaving, through the indexes and
+# through the scan; the final read counts 2.
+
+starting permutation: s1r s1r2 s1c s2w s2c
+step s1r: MATCH (n:L) WHERE n.a = 1 AND n.b = 2 WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.a + 0 = 1 AND m.b + 0 = 2 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1r2: MATCH (n:L) WHERE n.a = 1 AND n.b = 2 WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.a + 0 = 1 AND m.b + 0 = 2 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1c: COMMIT
+step s2w: CREATE (n:L {name:'new', a:1, b:2}) RETURN n.name AS name
+name 
+-----
+"new"
+(1 row)
+step s2c: COMMIT
+final final: MATCH (n:L) WHERE n.a = 1 AND n.b = 2 WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.a + 0 = 1 AND m.b + 0 = 2 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+
+starting permutation: s1r s1r2 s2w s1c s2c
+step s1r: MATCH (n:L) WHERE n.a = 1 AND n.b = 2 WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.a + 0 = 1 AND m.b + 0 = 2 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1r2: MATCH (n:L) WHERE n.a = 1 AND n.b = 2 WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.a + 0 = 1 AND m.b + 0 = 2 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s2w: CREATE (n:L {name:'new', a:1, b:2}) RETURN n.name AS name
+name 
+-----
+"new"
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (n:L) WHERE n.a = 1 AND n.b = 2 WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.a + 0 = 1 AND m.b + 0 = 2 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+
+starting permutation: s1r s1r2 s2w s2c s1c
+step s1r: MATCH (n:L) WHERE n.a = 1 AND n.b = 2 WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.a + 0 = 1 AND m.b + 0 = 2 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1r2: MATCH (n:L) WHERE n.a = 1 AND n.b = 2 WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.a + 0 = 1 AND m.b + 0 = 2 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s2w: CREATE (n:L {name:'new', a:1, b:2}) RETURN n.name AS name
+name 
+-----
+"new"
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (n:L) WHERE n.a = 1 AND n.b = 2 WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.a + 0 = 1 AND m.b + 0 = 2 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+
+starting permutation: s1r s2w s1r2 s1c s2c
+step s1r: MATCH (n:L) WHERE n.a = 1 AND n.b = 2 WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.a + 0 = 1 AND m.b + 0 = 2 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s2w: CREATE (n:L {name:'new', a:1, b:2}) RETURN n.name AS name
+name 
+-----
+"new"
+(1 row)
+step s1r2: MATCH (n:L) WHERE n.a = 1 AND n.b = 2 WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.a + 0 = 1 AND m.b + 0 = 2 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (n:L) WHERE n.a = 1 AND n.b = 2 WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.a + 0 = 1 AND m.b + 0 = 2 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+
+starting permutation: s1r s2w s1r2 s2c s1c
+step s1r: MATCH (n:L) WHERE n.a = 1 AND n.b = 2 WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.a + 0 = 1 AND m.b + 0 = 2 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s2w: CREATE (n:L {name:'new', a:1, b:2}) RETURN n.name AS name
+name 
+-----
+"new"
+(1 row)
+step s1r2: MATCH (n:L) WHERE n.a = 1 AND n.b = 2 WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.a + 0 = 1 AND m.b + 0 = 2 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (n:L) WHERE n.a = 1 AND n.b = 2 WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.a + 0 = 1 AND m.b + 0 = 2 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+
+starting permutation: s1r s2w s2c s1r2 s1c
+step s1r: MATCH (n:L) WHERE n.a = 1 AND n.b = 2 WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.a + 0 = 1 AND m.b + 0 = 2 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s2w: CREATE (n:L {name:'new', a:1, b:2}) RETURN n.name AS name
+name 
+-----
+"new"
+(1 row)
+step s2c: COMMIT
+step s1r2: MATCH (n:L) WHERE n.a = 1 AND n.b = 2 WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.a + 0 = 1 AND m.b + 0 = 2 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1c: COMMIT
+final final: MATCH (n:L) WHERE n.a = 1 AND n.b = 2 WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.a + 0 = 1 AND m.b + 0 = 2 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+
+starting permutation: s2w s1r s1r2 s1c s2c
+step s2w: CREATE (n:L {name:'new', a:1, b:2}) RETURN n.name AS name
+name 
+-----
+"new"
+(1 row)
+step s1r: MATCH (n:L) WHERE n.a = 1 AND n.b = 2 WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.a + 0 = 1 AND m.b + 0 = 2 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1r2: MATCH (n:L) WHERE n.a = 1 AND n.b = 2 WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.a + 0 = 1 AND m.b + 0 = 2 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (n:L) WHERE n.a = 1 AND n.b = 2 WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.a + 0 = 1 AND m.b + 0 = 2 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+
+starting permutation: s2w s1r s1r2 s2c s1c
+step s2w: CREATE (n:L {name:'new', a:1, b:2}) RETURN n.name AS name
+name 
+-----
+"new"
+(1 row)
+step s1r: MATCH (n:L) WHERE n.a = 1 AND n.b = 2 WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.a + 0 = 1 AND m.b + 0 = 2 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1r2: MATCH (n:L) WHERE n.a = 1 AND n.b = 2 WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.a + 0 = 1 AND m.b + 0 = 2 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (n:L) WHERE n.a = 1 AND n.b = 2 WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.a + 0 = 1 AND m.b + 0 = 2 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+
+starting permutation: s2w s1r s2c s1r2 s1c
+step s2w: CREATE (n:L {name:'new', a:1, b:2}) RETURN n.name AS name
+name 
+-----
+"new"
+(1 row)
+step s1r: MATCH (n:L) WHERE n.a = 1 AND n.b = 2 WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.a + 0 = 1 AND m.b + 0 = 2 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s2c: COMMIT
+step s1r2: MATCH (n:L) WHERE n.a = 1 AND n.b = 2 WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.a + 0 = 1 AND m.b + 0 = 2 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1c: COMMIT
+final final: MATCH (n:L) WHERE n.a = 1 AND n.b = 2 WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.a + 0 = 1 AND m.b + 0 = 2 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+
+starting permutation: s2w s2c s1r s1r2 s1c
+step s2w: CREATE (n:L {name:'new', a:1, b:2}) RETURN n.name AS name
+name 
+-----
+"new"
+(1 row)
+step s2c: COMMIT
+step s1r: MATCH (n:L) WHERE n.a = 1 AND n.b = 2 WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.a + 0 = 1 AND m.b + 0 = 2 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1r2: MATCH (n:L) WHERE n.a = 1 AND n.b = 2 WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.a + 0 = 1 AND m.b + 0 = 2 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1c: COMMIT
+final final: MATCH (n:L) WHERE n.a = 1 AND n.b = 2 WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.a + 0 = 1 AND m.b + 0 = 2 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)

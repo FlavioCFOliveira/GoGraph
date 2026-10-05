@@ -1,0 +1,114 @@
+spec mg08-merge-vs-delete: 2 sessions, 6 permutations
+# MG08. s1 DETACH DELETEs the node k='a'; s2, with an older snapshot, runs
+# MERGE (n:K {k:'a'}) ON MATCH SET n.v = 1 ON CREATE SET n.v = -1. s2 matches the node
+# at its snapshot, and its ON MATCH SET writes a node whose head is not visible to
+# it: refused (F2), never written onto a dead node and never resurrected. PostgreSQL
+# READ COMMITTED turns the MERGE into an INSERT.
+
+starting permutation: s1d s1c s2m s2c
+step s1d: MATCH (n:K {k:'a'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1c: COMMIT
+step s2m: MERGE (n:K {k:'a'}) ON MATCH SET n.v = 1 ON CREATE SET n.v = -1 RETURN n.v AS v
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k|v
+-+-
+(0 rows)
+
+starting permutation: s1d s2m s1c s2c
+step s1d: MATCH (n:K {k:'a'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s2m: MERGE (n:K {k:'a'}) ON MATCH SET n.v = 1 ON CREATE SET n.v = -1 RETURN n.v AS v
+ERROR: serialization conflict
+step s1c: COMMIT
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k|v
+-+-
+(0 rows)
+
+starting permutation: s1d s2m s2c s1c
+step s1d: MATCH (n:K {k:'a'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s2m: MERGE (n:K {k:'a'}) ON MATCH SET n.v = 1 ON CREATE SET n.v = -1 RETURN n.v AS v
+ERROR: serialization conflict
+step s2c: COMMIT
+ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
+step s1c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k|v
+-+-
+(0 rows)
+
+starting permutation: s2m s1d s1c s2c
+step s2m: MERGE (n:K {k:'a'}) ON MATCH SET n.v = 1 ON CREATE SET n.v = -1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1d: MATCH (n:K {k:'a'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1c: COMMIT
+ERROR: serialization conflict
+step s2c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v
+---+-
+"a"|1
+(1 row)
+
+starting permutation: s2m s1d s2c s1c
+step s2m: MERGE (n:K {k:'a'}) ON MATCH SET n.v = 1 ON CREATE SET n.v = -1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1d: MATCH (n:K {k:'a'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+ERROR: serialization conflict
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v
+---+-
+"a"|1
+(1 row)
+
+starting permutation: s2m s2c s1d s1c
+step s2m: MERGE (n:K {k:'a'}) ON MATCH SET n.v = 1 ON CREATE SET n.v = -1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s2c: COMMIT
+step s1d: MATCH (n:K {k:'a'}) DETACH DELETE n RETURN count(*) AS deleted
+deleted
+-------
+1      
+(1 row)
+step s1c: COMMIT
+ERROR: serialization conflict
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v
+---+-
+"a"|1
+(1 row)

@@ -1,0 +1,651 @@
+spec ix06-moved-out-of-index-domain: 2 sessions, 15 permutations
+# IX06. Hash index on (:L).s. s1 is a read-only transaction pinned at BEGIN. s2
+# moves n7 to s = 'moved' and removes :L from n8, each in its own autocommit
+# statement. s1 finds n7 under 'v7' and n8 under 'v8', and nothing under 'moved',
+# in every interleaving; the final read, at a new snapshot, finds only the new
+# state. Seek = scan everywhere.
+
+starting permutation: s1v7 s1mv s1v8 s1c s2mv s2rm
+step s1v7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1mv: MATCH (n:L {s:'moved'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'moved' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1v8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1c: COMMIT
+step s2mv: MATCH (n:L {name:'n7'}) SET n.s = 'moved' RETURN n.s AS s
+s      
+-------
+"moved"
+(1 row)
+step s2rm: MATCH (n:L {name:'n8'}) REMOVE n:L RETURN n.name AS name
+name
+----
+"n8"
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fmv: MATCH (n:L {s:'moved'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'moved' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s1v7 s1mv s1v8 s2mv s1c s2rm
+step s1v7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1mv: MATCH (n:L {s:'moved'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'moved' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1v8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s2mv: MATCH (n:L {name:'n7'}) SET n.s = 'moved' RETURN n.s AS s
+s      
+-------
+"moved"
+(1 row)
+step s1c: COMMIT
+step s2rm: MATCH (n:L {name:'n8'}) REMOVE n:L RETURN n.name AS name
+name
+----
+"n8"
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fmv: MATCH (n:L {s:'moved'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'moved' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s1v7 s1mv s1v8 s2mv s2rm s1c
+step s1v7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1mv: MATCH (n:L {s:'moved'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'moved' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1v8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s2mv: MATCH (n:L {name:'n7'}) SET n.s = 'moved' RETURN n.s AS s
+s      
+-------
+"moved"
+(1 row)
+step s2rm: MATCH (n:L {name:'n8'}) REMOVE n:L RETURN n.name AS name
+name
+----
+"n8"
+(1 row)
+step s1c: COMMIT
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fmv: MATCH (n:L {s:'moved'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'moved' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s1v7 s1mv s2mv s1v8 s1c s2rm
+step s1v7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1mv: MATCH (n:L {s:'moved'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'moved' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s2mv: MATCH (n:L {name:'n7'}) SET n.s = 'moved' RETURN n.s AS s
+s      
+-------
+"moved"
+(1 row)
+step s1v8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1c: COMMIT
+step s2rm: MATCH (n:L {name:'n8'}) REMOVE n:L RETURN n.name AS name
+name
+----
+"n8"
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fmv: MATCH (n:L {s:'moved'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'moved' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s1v7 s1mv s2mv s1v8 s2rm s1c
+step s1v7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1mv: MATCH (n:L {s:'moved'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'moved' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s2mv: MATCH (n:L {name:'n7'}) SET n.s = 'moved' RETURN n.s AS s
+s      
+-------
+"moved"
+(1 row)
+step s1v8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s2rm: MATCH (n:L {name:'n8'}) REMOVE n:L RETURN n.name AS name
+name
+----
+"n8"
+(1 row)
+step s1c: COMMIT
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fmv: MATCH (n:L {s:'moved'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'moved' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s1v7 s1mv s2mv s2rm s1v8 s1c
+step s1v7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1mv: MATCH (n:L {s:'moved'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'moved' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s2mv: MATCH (n:L {name:'n7'}) SET n.s = 'moved' RETURN n.s AS s
+s      
+-------
+"moved"
+(1 row)
+step s2rm: MATCH (n:L {name:'n8'}) REMOVE n:L RETURN n.name AS name
+name
+----
+"n8"
+(1 row)
+step s1v8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1c: COMMIT
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fmv: MATCH (n:L {s:'moved'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'moved' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s1v7 s2mv s1mv s1v8 s1c s2rm
+step s1v7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s2mv: MATCH (n:L {name:'n7'}) SET n.s = 'moved' RETURN n.s AS s
+s      
+-------
+"moved"
+(1 row)
+step s1mv: MATCH (n:L {s:'moved'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'moved' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1v8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1c: COMMIT
+step s2rm: MATCH (n:L {name:'n8'}) REMOVE n:L RETURN n.name AS name
+name
+----
+"n8"
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fmv: MATCH (n:L {s:'moved'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'moved' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s1v7 s2mv s1mv s1v8 s2rm s1c
+step s1v7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s2mv: MATCH (n:L {name:'n7'}) SET n.s = 'moved' RETURN n.s AS s
+s      
+-------
+"moved"
+(1 row)
+step s1mv: MATCH (n:L {s:'moved'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'moved' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1v8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s2rm: MATCH (n:L {name:'n8'}) REMOVE n:L RETURN n.name AS name
+name
+----
+"n8"
+(1 row)
+step s1c: COMMIT
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fmv: MATCH (n:L {s:'moved'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'moved' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s1v7 s2mv s1mv s2rm s1v8 s1c
+step s1v7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s2mv: MATCH (n:L {name:'n7'}) SET n.s = 'moved' RETURN n.s AS s
+s      
+-------
+"moved"
+(1 row)
+step s1mv: MATCH (n:L {s:'moved'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'moved' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s2rm: MATCH (n:L {name:'n8'}) REMOVE n:L RETURN n.name AS name
+name
+----
+"n8"
+(1 row)
+step s1v8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1c: COMMIT
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fmv: MATCH (n:L {s:'moved'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'moved' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s1v7 s2mv s2rm s1mv s1v8 s1c
+step s1v7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s2mv: MATCH (n:L {name:'n7'}) SET n.s = 'moved' RETURN n.s AS s
+s      
+-------
+"moved"
+(1 row)
+step s2rm: MATCH (n:L {name:'n8'}) REMOVE n:L RETURN n.name AS name
+name
+----
+"n8"
+(1 row)
+step s1mv: MATCH (n:L {s:'moved'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'moved' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1v8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1c: COMMIT
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fmv: MATCH (n:L {s:'moved'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'moved' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s2mv s1v7 s1mv s1v8 s1c s2rm
+step s2mv: MATCH (n:L {name:'n7'}) SET n.s = 'moved' RETURN n.s AS s
+s      
+-------
+"moved"
+(1 row)
+step s1v7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1mv: MATCH (n:L {s:'moved'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'moved' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1v8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1c: COMMIT
+step s2rm: MATCH (n:L {name:'n8'}) REMOVE n:L RETURN n.name AS name
+name
+----
+"n8"
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fmv: MATCH (n:L {s:'moved'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'moved' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s2mv s1v7 s1mv s1v8 s2rm s1c
+step s2mv: MATCH (n:L {name:'n7'}) SET n.s = 'moved' RETURN n.s AS s
+s      
+-------
+"moved"
+(1 row)
+step s1v7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1mv: MATCH (n:L {s:'moved'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'moved' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1v8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s2rm: MATCH (n:L {name:'n8'}) REMOVE n:L RETURN n.name AS name
+name
+----
+"n8"
+(1 row)
+step s1c: COMMIT
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fmv: MATCH (n:L {s:'moved'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'moved' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s2mv s1v7 s1mv s2rm s1v8 s1c
+step s2mv: MATCH (n:L {name:'n7'}) SET n.s = 'moved' RETURN n.s AS s
+s      
+-------
+"moved"
+(1 row)
+step s1v7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1mv: MATCH (n:L {s:'moved'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'moved' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s2rm: MATCH (n:L {name:'n8'}) REMOVE n:L RETURN n.name AS name
+name
+----
+"n8"
+(1 row)
+step s1v8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1c: COMMIT
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fmv: MATCH (n:L {s:'moved'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'moved' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s2mv s1v7 s2rm s1mv s1v8 s1c
+step s2mv: MATCH (n:L {name:'n7'}) SET n.s = 'moved' RETURN n.s AS s
+s      
+-------
+"moved"
+(1 row)
+step s1v7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s2rm: MATCH (n:L {name:'n8'}) REMOVE n:L RETURN n.name AS name
+name
+----
+"n8"
+(1 row)
+step s1mv: MATCH (n:L {s:'moved'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'moved' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1v8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1c: COMMIT
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fmv: MATCH (n:L {s:'moved'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'moved' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s2mv s2rm s1v7 s1mv s1v8 s1c
+step s2mv: MATCH (n:L {name:'n7'}) SET n.s = 'moved' RETURN n.s AS s
+s      
+-------
+"moved"
+(1 row)
+step s2rm: MATCH (n:L {name:'n8'}) REMOVE n:L RETURN n.name AS name
+name
+----
+"n8"
+(1 row)
+step s1v7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1mv: MATCH (n:L {s:'moved'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'moved' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1v8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1c: COMMIT
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fmv: MATCH (n:L {s:'moved'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'moved' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv8: MATCH (n:L {s:'v8'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v8' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)

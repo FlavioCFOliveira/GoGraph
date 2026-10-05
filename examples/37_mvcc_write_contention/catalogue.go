@@ -1,12 +1,13 @@
 package main
 
-// catalogue.go — the deterministic MVCC scenario catalogue (rmp #2933, stage A).
+// catalogue.go — the deterministic MVCC scenario catalogue (rmp #2933).
 //
 // Every scenario is an isolationtest spec run over EVERY order-preserving
 // interleaving of its steps (or, where the catalogue says so, over named
 // interleavings) and pinned by a golden transcript under testdata/. The rows,
 // their sources and their expected snapshot-isolation outcomes come from
-// docs/mvcc-scenario-catalogue.md §1.1 and §1.2; README.md maps each row to its
+// docs/mvcc-scenario-catalogue.md §1.1 to §1.4 (§1.3 and §1.4 in
+// catalogue_mgix.go); README.md maps each row to its
 // PostgreSQL or InnoDB source and states where GoGraph's outcome differs and why.
 //
 // # Two drivers over one graph (H3)
@@ -440,6 +441,34 @@ func catalogue() []scenario {
 		{ID: "SK13", Driver: driverCypher, build: sk13Cypher},
 		{ID: "SK13", Driver: driverLPG, build: sk13LPG},
 		{ID: "SK14", Driver: driverCypher, build: sk14, check: fastPathEqualsScan},
+		{ID: "MG01", Driver: driverCypher, build: mg01},
+		{ID: "MG02", Driver: driverCypher, build: mg02Commit},
+		{ID: "MG02", Driver: driverCypher, build: mg02RollsBack},
+		{ID: "MG02", Driver: driverCypher, build: mg02Autocommit},
+		{ID: "MG03", Driver: driverCypher, build: mg03},
+		{ID: "MG04", Driver: driverCypher, build: mg04},
+		{ID: "MG05", Driver: driverCypher, build: mg05NoConstraint},
+		{ID: "MG05", Driver: driverCypher, build: mg05Unique},
+		{ID: "MG06", Driver: driverCypher, build: mg06},
+		{ID: "MG07", Driver: driverCypher, build: mg07},
+		{ID: "MG08", Driver: driverCypher, build: mg08},
+		{ID: "MG09", Driver: driverCypher, build: mg09SameTx},
+		{ID: "MG09", Driver: driverCypher, build: mg09AfterCommit},
+		{ID: "MG09", Driver: driverCypher, build: mg09PeerRollsBack},
+		{ID: "MG10", Driver: driverCypher, build: mg10},
+		{ID: "MG12", Driver: driverCypher, build: mg12InTx},
+		{ID: "MG12", Driver: driverCypher, build: mg12PeerRemoval},
+		{ID: "IX01", Driver: driverCypher, build: ix01, check: seekEqualsScan},
+		{ID: "IX02", Driver: driverCypher, build: ix02, check: seekEqualsScan},
+		{ID: "IX03", Driver: driverCypher, build: ix03, check: seekEqualsScan},
+		{ID: "IX04", Driver: driverCypher, build: ix04Hash, check: seekEqualsScan},
+		{ID: "IX04", Driver: driverCypher, build: ix04Btree, check: seekEqualsScan},
+		{ID: "IX05", Driver: driverCypher, build: ix05, check: seekEqualsScan},
+		{ID: "IX06", Driver: driverCypher, build: ix06, check: seekEqualsScan},
+		{ID: "IX07", Driver: driverCypher, build: ix07, check: seekEqualsScan},
+		{ID: "IX08", Driver: driverCypher, build: ix08, check: seekEqualsScan},
+		{ID: "IX09", Driver: driverCypher, build: ix09, check: seekEqualsScan},
+		{ID: "IX10", Driver: driverCypher, build: ix10, check: seekEqualsScan},
 	}
 }
 

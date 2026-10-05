@@ -29,6 +29,7 @@ import (
 
 	"go.uber.org/goleak"
 
+	"github.com/FlavioCFOliveira/GoGraph/cypher/expr"
 	"github.com/FlavioCFOliveira/GoGraph/internal/isolationtest"
 )
 
@@ -44,8 +45,9 @@ func TestMain(m *testing.M) {
 const goldenDir = "../../internal/isolationtest/testdata"
 
 // catalogueGolden matches the catalogue's golden names: a catalogue row ID
-// prefix (ww01-, sk12-, ...). The harness's own goldens carry no such prefix.
-var catalogueGolden = regexp.MustCompile(`^(ww|sk)\d{2}-.*\.golden$`)
+// prefix (ww01-, sk12-, mg02-, ix04-, ...). The harness's own goldens carry no
+// such prefix.
+var catalogueGolden = regexp.MustCompile(`^(ww|sk|mg|ix)\d{2}-.*\.golden$`)
 
 // maxPermutations is the short-layer ceiling on one spec's interleavings. Every
 // spec is checked against it rather than assumed to fit, because the multinomial
@@ -172,6 +174,86 @@ func TestSK10AccessPaths(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestIXAccessPaths proves the index rows compare what they claim to compare:
+// after each spec's fixture is built, the seek arm of every seek-vs-scan read the
+// spec runs is planned as an index access, and the scan arm as a label scan.
+// Without it a planner change could make both arms scans, and seek = scan would
+// compare a plan with itself. The label-count read (countL) is excluded: its seek
+// arm is the label store, not an index.
+//
+// IX08 creates its index in a step, not in its fixture; the test runs that step
+// first, so the read is checked in the state where the index exists.
+func TestIXAccessPaths(t *testing.T) {
+	t.Parallel()
+	builds := []func(*world) *isolationtest.Spec{ix01, ix02, ix03, ix04Hash, ix04Btree, ix05,
+		ix06, ix07, ix08, ix09, ix10}
+	for _, build := range builds {
+		w := &world{}
+		spec := build(w)
+		t.Run(spec.Name, func(t *testing.T) {
+			env, err := w.engine()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = env.Close() }()
+			setup := spec.Setup
+			if spec.Name == "ix08-index-created-after-snapshot" {
+				setup = append(slices.Clone(setup), ixHashStep)
+			}
+			for _, st := range setup {
+				res, err := env.Eng.RunInTxAny(context.Background(), st.Query, nil)
+				if err != nil {
+					t.Fatalf("setup %s: %v", st.Name, err)
+				}
+				_ = res.Close()
+			}
+			reads := seekStepQueries(spec)
+			if len(reads) == 0 {
+				t.Fatal("the spec runs no seek-vs-scan read")
+			}
+			for _, st := range reads {
+				if st.Query == countL {
+					continue
+				}
+				plan, err := env.Eng.Explain(st.Query, explainParams(t, st.Params))
+				if err != nil {
+					t.Fatalf("explain %s: %v", st.Name, err)
+				}
+				if n := strings.Count(plan, "NodeByIndex"); n < 1 {
+					t.Errorf("step %s: the seek arm of %q is not planned as an index access:\n%s", st.Name, st.Query, plan)
+				}
+				if n := strings.Count(plan, "NodeByLabelScan"); n < 1 {
+					t.Errorf("step %s: the scan arm of %q is not planned as a label scan:\n%s", st.Name, st.Query, plan)
+				}
+			}
+		})
+	}
+}
+
+// ixHashStep is IX08's index-creating step, run by TestIXAccessPaths before it
+// plans IX08's read.
+var ixHashStep = isolationtest.Step{Name: "s2ix", Query: ixHash}
+
+// explainParams converts a step's parameters for Engine.Explain.
+func explainParams(t *testing.T, in map[string]any) map[string]expr.Value {
+	t.Helper()
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]expr.Value, len(in))
+	for k, v := range in {
+		switch v := v.(type) {
+		case string:
+			out[k] = expr.StringValue(v)
+		case int:
+			out[k] = expr.IntegerValue(int64(v))
+		default:
+			t.Fatalf("parameter $%s has unsupported type %T", k, v)
+		}
+	}
+	return out
 }
 
 // TestReadSkewNegativeControl validates the INSTRUMENT: the read-skew row must be

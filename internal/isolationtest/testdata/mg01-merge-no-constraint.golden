@@ -1,0 +1,445 @@
+spec mg01-merge-no-constraint: 2 sessions, 20 permutations
+# MG01. Two explicit transactions MERGE (:K {k:'a'}) with no constraint. Each BEGIN
+# is a step, so every relative order of the two snapshots and the two commits is
+# enumerated. Both always succeed. When each snapshot precedes the other's commit,
+# both create and the graph holds two nodes; when one transaction begins after the
+# other committed, it matches the committed node and there is one (F10). PostgreSQL
+# MERGE without a unique index behaves the same way.
+
+starting permutation: s1b s1m s1c s2b s2m s2c
+step s1b: BEGIN
+step s1m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's1' RETURN p.v AS v
+v   
+----
+"s1"
+(1 row)
+step s1c: COMMIT
+step s2b: BEGIN
+step s2m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's2' RETURN p.v AS v
+v   
+----
+"s1"
+(1 row)
+step s2c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v   
+---+----
+"a"|"s1"
+(1 row)
+
+starting permutation: s1b s1m s2b s1c s2m s2c
+step s1b: BEGIN
+step s1m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's1' RETURN p.v AS v
+v   
+----
+"s1"
+(1 row)
+step s2b: BEGIN
+step s1c: COMMIT
+step s2m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's2' RETURN p.v AS v
+v   
+----
+"s2"
+(1 row)
+step s2c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v   
+---+----
+"a"|"s1"
+"a"|"s2"
+(2 rows)
+
+starting permutation: s1b s1m s2b s2m s1c s2c
+step s1b: BEGIN
+step s1m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's1' RETURN p.v AS v
+v   
+----
+"s1"
+(1 row)
+step s2b: BEGIN
+step s2m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's2' RETURN p.v AS v
+v   
+----
+"s2"
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v   
+---+----
+"a"|"s1"
+"a"|"s2"
+(2 rows)
+
+starting permutation: s1b s1m s2b s2m s2c s1c
+step s1b: BEGIN
+step s1m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's1' RETURN p.v AS v
+v   
+----
+"s1"
+(1 row)
+step s2b: BEGIN
+step s2m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's2' RETURN p.v AS v
+v   
+----
+"s2"
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v   
+---+----
+"a"|"s1"
+"a"|"s2"
+(2 rows)
+
+starting permutation: s1b s2b s1m s1c s2m s2c
+step s1b: BEGIN
+step s2b: BEGIN
+step s1m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's1' RETURN p.v AS v
+v   
+----
+"s1"
+(1 row)
+step s1c: COMMIT
+step s2m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's2' RETURN p.v AS v
+v   
+----
+"s2"
+(1 row)
+step s2c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v   
+---+----
+"a"|"s1"
+"a"|"s2"
+(2 rows)
+
+starting permutation: s1b s2b s1m s2m s1c s2c
+step s1b: BEGIN
+step s2b: BEGIN
+step s1m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's1' RETURN p.v AS v
+v   
+----
+"s1"
+(1 row)
+step s2m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's2' RETURN p.v AS v
+v   
+----
+"s2"
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v   
+---+----
+"a"|"s1"
+"a"|"s2"
+(2 rows)
+
+starting permutation: s1b s2b s1m s2m s2c s1c
+step s1b: BEGIN
+step s2b: BEGIN
+step s1m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's1' RETURN p.v AS v
+v   
+----
+"s1"
+(1 row)
+step s2m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's2' RETURN p.v AS v
+v   
+----
+"s2"
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v   
+---+----
+"a"|"s1"
+"a"|"s2"
+(2 rows)
+
+starting permutation: s1b s2b s2m s1m s1c s2c
+step s1b: BEGIN
+step s2b: BEGIN
+step s2m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's2' RETURN p.v AS v
+v   
+----
+"s2"
+(1 row)
+step s1m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's1' RETURN p.v AS v
+v   
+----
+"s1"
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v   
+---+----
+"a"|"s1"
+"a"|"s2"
+(2 rows)
+
+starting permutation: s1b s2b s2m s1m s2c s1c
+step s1b: BEGIN
+step s2b: BEGIN
+step s2m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's2' RETURN p.v AS v
+v   
+----
+"s2"
+(1 row)
+step s1m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's1' RETURN p.v AS v
+v   
+----
+"s1"
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v   
+---+----
+"a"|"s1"
+"a"|"s2"
+(2 rows)
+
+starting permutation: s1b s2b s2m s2c s1m s1c
+step s1b: BEGIN
+step s2b: BEGIN
+step s2m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's2' RETURN p.v AS v
+v   
+----
+"s2"
+(1 row)
+step s2c: COMMIT
+step s1m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's1' RETURN p.v AS v
+v   
+----
+"s1"
+(1 row)
+step s1c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v   
+---+----
+"a"|"s1"
+"a"|"s2"
+(2 rows)
+
+starting permutation: s2b s1b s1m s1c s2m s2c
+step s2b: BEGIN
+step s1b: BEGIN
+step s1m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's1' RETURN p.v AS v
+v   
+----
+"s1"
+(1 row)
+step s1c: COMMIT
+step s2m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's2' RETURN p.v AS v
+v   
+----
+"s2"
+(1 row)
+step s2c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v   
+---+----
+"a"|"s1"
+"a"|"s2"
+(2 rows)
+
+starting permutation: s2b s1b s1m s2m s1c s2c
+step s2b: BEGIN
+step s1b: BEGIN
+step s1m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's1' RETURN p.v AS v
+v   
+----
+"s1"
+(1 row)
+step s2m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's2' RETURN p.v AS v
+v   
+----
+"s2"
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v   
+---+----
+"a"|"s1"
+"a"|"s2"
+(2 rows)
+
+starting permutation: s2b s1b s1m s2m s2c s1c
+step s2b: BEGIN
+step s1b: BEGIN
+step s1m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's1' RETURN p.v AS v
+v   
+----
+"s1"
+(1 row)
+step s2m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's2' RETURN p.v AS v
+v   
+----
+"s2"
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v   
+---+----
+"a"|"s1"
+"a"|"s2"
+(2 rows)
+
+starting permutation: s2b s1b s2m s1m s1c s2c
+step s2b: BEGIN
+step s1b: BEGIN
+step s2m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's2' RETURN p.v AS v
+v   
+----
+"s2"
+(1 row)
+step s1m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's1' RETURN p.v AS v
+v   
+----
+"s1"
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v   
+---+----
+"a"|"s1"
+"a"|"s2"
+(2 rows)
+
+starting permutation: s2b s1b s2m s1m s2c s1c
+step s2b: BEGIN
+step s1b: BEGIN
+step s2m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's2' RETURN p.v AS v
+v   
+----
+"s2"
+(1 row)
+step s1m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's1' RETURN p.v AS v
+v   
+----
+"s1"
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v   
+---+----
+"a"|"s1"
+"a"|"s2"
+(2 rows)
+
+starting permutation: s2b s1b s2m s2c s1m s1c
+step s2b: BEGIN
+step s1b: BEGIN
+step s2m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's2' RETURN p.v AS v
+v   
+----
+"s2"
+(1 row)
+step s2c: COMMIT
+step s1m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's1' RETURN p.v AS v
+v   
+----
+"s1"
+(1 row)
+step s1c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v   
+---+----
+"a"|"s1"
+"a"|"s2"
+(2 rows)
+
+starting permutation: s2b s2m s1b s1m s1c s2c
+step s2b: BEGIN
+step s2m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's2' RETURN p.v AS v
+v   
+----
+"s2"
+(1 row)
+step s1b: BEGIN
+step s1m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's1' RETURN p.v AS v
+v   
+----
+"s1"
+(1 row)
+step s1c: COMMIT
+step s2c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v   
+---+----
+"a"|"s1"
+"a"|"s2"
+(2 rows)
+
+starting permutation: s2b s2m s1b s1m s2c s1c
+step s2b: BEGIN
+step s2m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's2' RETURN p.v AS v
+v   
+----
+"s2"
+(1 row)
+step s1b: BEGIN
+step s1m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's1' RETURN p.v AS v
+v   
+----
+"s1"
+(1 row)
+step s2c: COMMIT
+step s1c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v   
+---+----
+"a"|"s1"
+"a"|"s2"
+(2 rows)
+
+starting permutation: s2b s2m s1b s2c s1m s1c
+step s2b: BEGIN
+step s2m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's2' RETURN p.v AS v
+v   
+----
+"s2"
+(1 row)
+step s1b: BEGIN
+step s2c: COMMIT
+step s1m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's1' RETURN p.v AS v
+v   
+----
+"s1"
+(1 row)
+step s1c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v   
+---+----
+"a"|"s1"
+"a"|"s2"
+(2 rows)
+
+starting permutation: s2b s2m s2c s1b s1m s1c
+step s2b: BEGIN
+step s2m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's2' RETURN p.v AS v
+v   
+----
+"s2"
+(1 row)
+step s2c: COMMIT
+step s1b: BEGIN
+step s1m: MERGE (p:K {k:'a'}) ON CREATE SET p.v = 's1' RETURN p.v AS v
+v   
+----
+"s2"
+(1 row)
+step s1c: COMMIT
+final final: MATCH (n:K) RETURN n.k AS k, n.v AS v ORDER BY k, v
+k  |v   
+---+----
+"a"|"s2"
+(1 row)
