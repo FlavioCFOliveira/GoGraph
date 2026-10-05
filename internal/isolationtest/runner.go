@@ -292,10 +292,23 @@ func (sr *sessionRunner) control(c Control) error {
 		}
 		tx := sr.tx
 		sr.tx = nil
-		if c == Commit {
-			return tx.Commit()
+		if c == Rollback {
+			return tx.Rollback()
 		}
-		return tx.Rollback()
+		err := tx.Commit()
+		// A poisoned transaction is the one COMMIT leaves OPEN: the engine refuses
+		// it without finishing the handle, and expects the caller to roll it back
+		// (cypher.ErrTxPoisoned). The session's handle is cleared above, so without
+		// this the transaction would keep its writes and its horizon slot until the
+		// engine closes, and a later step of the permutation would see them. The
+		// rollback is the client's obligation the harness performs; the COMMIT's own
+		// error is what the step reports.
+		if errors.Is(err, cypher.ErrTxPoisoned) {
+			if rerr := tx.Rollback(); rerr != nil {
+				return errors.Join(err, fmt.Errorf("rolling back the poisoned transaction: %w", rerr))
+			}
+		}
+		return err
 	default:
 		return fmt.Errorf("unknown control verb %q", c)
 	}

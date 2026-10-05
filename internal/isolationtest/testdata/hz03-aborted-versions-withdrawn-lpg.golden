@@ -1,0 +1,103 @@
+spec hz03-aborted-versions-withdrawn-lpg: 2 sessions, 6 permutations
+# HZ03 through the lpg API: s1 sets x.v = 1 and aborts (WriteTx.Abandon, then
+# EndVersionedTx); the vacuum is drained. s2 reads x.v and then sets it to 2, each in
+# its own transaction.
+
+starting permutation: s1w s1rb s1dr s2r s2w
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s1rb: lpg: WriteTx.Abandon + Session.EndVersionedTx
+step s1dr: <vacuum drain>
+step s2r: lpg: read x.v
+x.v
+---
+0  
+(1 row)
+step s2w: lpg: SetNodeProperty(x, v, 2)
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+
+starting permutation: s1w s2r s1rb s1dr s2w
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s2r: lpg: read x.v
+x.v
+---
+0  
+(1 row)
+step s1rb: lpg: WriteTx.Abandon + Session.EndVersionedTx
+step s1dr: <vacuum drain>
+step s2w: lpg: SetNodeProperty(x, v, 2)
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+
+starting permutation: s1w s2r s2w s1rb s1dr
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s2r: lpg: read x.v
+x.v
+---
+0  
+(1 row)
+step s2w: lpg: SetNodeProperty(x, v, 2)
+ERROR: serialization conflict
+step s1rb: lpg: WriteTx.Abandon + Session.EndVersionedTx
+step s1dr: <vacuum drain>
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+0
+(1 row)
+
+starting permutation: s2r s1w s1rb s1dr s2w
+step s2r: lpg: read x.v
+x.v
+---
+0  
+(1 row)
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s1rb: lpg: WriteTx.Abandon + Session.EndVersionedTx
+step s1dr: <vacuum drain>
+step s2w: lpg: SetNodeProperty(x, v, 2)
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+
+starting permutation: s2r s1w s2w s1rb s1dr
+step s2r: lpg: read x.v
+x.v
+---
+0  
+(1 row)
+step s1w: lpg: SetNodeProperty(x, v, 1)
+step s2w: lpg: SetNodeProperty(x, v, 2)
+ERROR: serialization conflict
+step s1rb: lpg: WriteTx.Abandon + Session.EndVersionedTx
+step s1dr: <vacuum drain>
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+0
+(1 row)
+
+starting permutation: s2r s2w s1w s1rb s1dr
+step s2r: lpg: read x.v
+x.v
+---
+0  
+(1 row)
+step s2w: lpg: SetNodeProperty(x, v, 2)
+step s1w: lpg: SetNodeProperty(x, v, 1)
+ERROR: serialization conflict
+step s1rb: lpg: WriteTx.Abandon + Session.EndVersionedTx
+step s1dr: <vacuum drain>
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+2
+(1 row)

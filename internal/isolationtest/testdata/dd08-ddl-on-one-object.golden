@@ -1,0 +1,354 @@
+spec dd08-ddl-on-one-object: 4 sessions, 24 permutations
+# DD08. Four autocommit DDL statements on two objects: s1 creates index l_s, s2 drops
+# it, s3 creates UNIQUE constraint c1 on (:K).k, s4 creates a constraint with the same
+# name on (:K).v. Every order leaves a consistent catalog, and a DDL that cannot apply
+# fails with an error that names why. The harness runs one step at a time, so the
+# statements are serialised by the script; their overlap is #2934's.
+
+starting permutation: s1ix s2drop s3c s4c
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s2drop: DROP INDEX l_s
+step s3c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.k IS UNIQUE
+step s4c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.v IS UNIQUE
+ERROR: cypher: cannot create constraint "c1": exec: constraint name already in use: name is already used by the UNIQUE constraint on (:K).k
+final fschema: <schema>
+kind      |name       |definition   
+----------+-----------+-------------
+index     |__uniq__K.k|             
+constraint|c1         |UNIQUE (:K).k
+(2 rows)
+
+starting permutation: s1ix s2drop s4c s3c
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s2drop: DROP INDEX l_s
+step s4c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.v IS UNIQUE
+step s3c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.k IS UNIQUE
+ERROR: cypher: cannot create constraint "c1": exec: constraint name already in use: name is already used by the UNIQUE constraint on (:K).v
+final fschema: <schema>
+kind      |name       |definition   
+----------+-----------+-------------
+index     |__uniq__K.v|             
+constraint|c1         |UNIQUE (:K).v
+(2 rows)
+
+starting permutation: s1ix s3c s2drop s4c
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s3c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.k IS UNIQUE
+step s2drop: DROP INDEX l_s
+step s4c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.v IS UNIQUE
+ERROR: cypher: cannot create constraint "c1": exec: constraint name already in use: name is already used by the UNIQUE constraint on (:K).k
+final fschema: <schema>
+kind      |name       |definition   
+----------+-----------+-------------
+index     |__uniq__K.k|             
+constraint|c1         |UNIQUE (:K).k
+(2 rows)
+
+starting permutation: s1ix s3c s4c s2drop
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s3c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.k IS UNIQUE
+step s4c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.v IS UNIQUE
+ERROR: cypher: cannot create constraint "c1": exec: constraint name already in use: name is already used by the UNIQUE constraint on (:K).k
+step s2drop: DROP INDEX l_s
+final fschema: <schema>
+kind      |name       |definition   
+----------+-----------+-------------
+index     |__uniq__K.k|             
+constraint|c1         |UNIQUE (:K).k
+(2 rows)
+
+starting permutation: s1ix s4c s2drop s3c
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s4c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.v IS UNIQUE
+step s2drop: DROP INDEX l_s
+step s3c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.k IS UNIQUE
+ERROR: cypher: cannot create constraint "c1": exec: constraint name already in use: name is already used by the UNIQUE constraint on (:K).v
+final fschema: <schema>
+kind      |name       |definition   
+----------+-----------+-------------
+index     |__uniq__K.v|             
+constraint|c1         |UNIQUE (:K).v
+(2 rows)
+
+starting permutation: s1ix s4c s3c s2drop
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s4c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.v IS UNIQUE
+step s3c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.k IS UNIQUE
+ERROR: cypher: cannot create constraint "c1": exec: constraint name already in use: name is already used by the UNIQUE constraint on (:K).v
+step s2drop: DROP INDEX l_s
+final fschema: <schema>
+kind      |name       |definition   
+----------+-----------+-------------
+index     |__uniq__K.v|             
+constraint|c1         |UNIQUE (:K).v
+(2 rows)
+
+starting permutation: s2drop s1ix s3c s4c
+step s2drop: DROP INDEX l_s
+ERROR: exec: DropIndex "l_s": index: no index by that name: "l_s"
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s3c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.k IS UNIQUE
+step s4c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.v IS UNIQUE
+ERROR: cypher: cannot create constraint "c1": exec: constraint name already in use: name is already used by the UNIQUE constraint on (:K).k
+final fschema: <schema>
+kind      |name         |definition   
+----------+-------------+-------------
+index     |__uniq__K.k  |             
+index     |l_s          |             
+index     |l_s_btree_num|             
+constraint|c1           |UNIQUE (:K).k
+(4 rows)
+
+starting permutation: s2drop s1ix s4c s3c
+step s2drop: DROP INDEX l_s
+ERROR: exec: DropIndex "l_s": index: no index by that name: "l_s"
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s4c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.v IS UNIQUE
+step s3c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.k IS UNIQUE
+ERROR: cypher: cannot create constraint "c1": exec: constraint name already in use: name is already used by the UNIQUE constraint on (:K).v
+final fschema: <schema>
+kind      |name         |definition   
+----------+-------------+-------------
+index     |__uniq__K.v  |             
+index     |l_s          |             
+index     |l_s_btree_num|             
+constraint|c1           |UNIQUE (:K).v
+(4 rows)
+
+starting permutation: s2drop s3c s1ix s4c
+step s2drop: DROP INDEX l_s
+ERROR: exec: DropIndex "l_s": index: no index by that name: "l_s"
+step s3c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.k IS UNIQUE
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s4c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.v IS UNIQUE
+ERROR: cypher: cannot create constraint "c1": exec: constraint name already in use: name is already used by the UNIQUE constraint on (:K).k
+final fschema: <schema>
+kind      |name         |definition   
+----------+-------------+-------------
+index     |__uniq__K.k  |             
+index     |l_s          |             
+index     |l_s_btree_num|             
+constraint|c1           |UNIQUE (:K).k
+(4 rows)
+
+starting permutation: s2drop s3c s4c s1ix
+step s2drop: DROP INDEX l_s
+ERROR: exec: DropIndex "l_s": index: no index by that name: "l_s"
+step s3c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.k IS UNIQUE
+step s4c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.v IS UNIQUE
+ERROR: cypher: cannot create constraint "c1": exec: constraint name already in use: name is already used by the UNIQUE constraint on (:K).k
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+final fschema: <schema>
+kind      |name         |definition   
+----------+-------------+-------------
+index     |__uniq__K.k  |             
+index     |l_s          |             
+index     |l_s_btree_num|             
+constraint|c1           |UNIQUE (:K).k
+(4 rows)
+
+starting permutation: s2drop s4c s1ix s3c
+step s2drop: DROP INDEX l_s
+ERROR: exec: DropIndex "l_s": index: no index by that name: "l_s"
+step s4c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.v IS UNIQUE
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s3c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.k IS UNIQUE
+ERROR: cypher: cannot create constraint "c1": exec: constraint name already in use: name is already used by the UNIQUE constraint on (:K).v
+final fschema: <schema>
+kind      |name         |definition   
+----------+-------------+-------------
+index     |__uniq__K.v  |             
+index     |l_s          |             
+index     |l_s_btree_num|             
+constraint|c1           |UNIQUE (:K).v
+(4 rows)
+
+starting permutation: s2drop s4c s3c s1ix
+step s2drop: DROP INDEX l_s
+ERROR: exec: DropIndex "l_s": index: no index by that name: "l_s"
+step s4c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.v IS UNIQUE
+step s3c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.k IS UNIQUE
+ERROR: cypher: cannot create constraint "c1": exec: constraint name already in use: name is already used by the UNIQUE constraint on (:K).v
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+final fschema: <schema>
+kind      |name         |definition   
+----------+-------------+-------------
+index     |__uniq__K.v  |             
+index     |l_s          |             
+index     |l_s_btree_num|             
+constraint|c1           |UNIQUE (:K).v
+(4 rows)
+
+starting permutation: s3c s1ix s2drop s4c
+step s3c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.k IS UNIQUE
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s2drop: DROP INDEX l_s
+step s4c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.v IS UNIQUE
+ERROR: cypher: cannot create constraint "c1": exec: constraint name already in use: name is already used by the UNIQUE constraint on (:K).k
+final fschema: <schema>
+kind      |name       |definition   
+----------+-----------+-------------
+index     |__uniq__K.k|             
+constraint|c1         |UNIQUE (:K).k
+(2 rows)
+
+starting permutation: s3c s1ix s4c s2drop
+step s3c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.k IS UNIQUE
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s4c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.v IS UNIQUE
+ERROR: cypher: cannot create constraint "c1": exec: constraint name already in use: name is already used by the UNIQUE constraint on (:K).k
+step s2drop: DROP INDEX l_s
+final fschema: <schema>
+kind      |name       |definition   
+----------+-----------+-------------
+index     |__uniq__K.k|             
+constraint|c1         |UNIQUE (:K).k
+(2 rows)
+
+starting permutation: s3c s2drop s1ix s4c
+step s3c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.k IS UNIQUE
+step s2drop: DROP INDEX l_s
+ERROR: exec: DropIndex "l_s": index: no index by that name: "l_s"
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s4c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.v IS UNIQUE
+ERROR: cypher: cannot create constraint "c1": exec: constraint name already in use: name is already used by the UNIQUE constraint on (:K).k
+final fschema: <schema>
+kind      |name         |definition   
+----------+-------------+-------------
+index     |__uniq__K.k  |             
+index     |l_s          |             
+index     |l_s_btree_num|             
+constraint|c1           |UNIQUE (:K).k
+(4 rows)
+
+starting permutation: s3c s2drop s4c s1ix
+step s3c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.k IS UNIQUE
+step s2drop: DROP INDEX l_s
+ERROR: exec: DropIndex "l_s": index: no index by that name: "l_s"
+step s4c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.v IS UNIQUE
+ERROR: cypher: cannot create constraint "c1": exec: constraint name already in use: name is already used by the UNIQUE constraint on (:K).k
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+final fschema: <schema>
+kind      |name         |definition   
+----------+-------------+-------------
+index     |__uniq__K.k  |             
+index     |l_s          |             
+index     |l_s_btree_num|             
+constraint|c1           |UNIQUE (:K).k
+(4 rows)
+
+starting permutation: s3c s4c s1ix s2drop
+step s3c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.k IS UNIQUE
+step s4c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.v IS UNIQUE
+ERROR: cypher: cannot create constraint "c1": exec: constraint name already in use: name is already used by the UNIQUE constraint on (:K).k
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s2drop: DROP INDEX l_s
+final fschema: <schema>
+kind      |name       |definition   
+----------+-----------+-------------
+index     |__uniq__K.k|             
+constraint|c1         |UNIQUE (:K).k
+(2 rows)
+
+starting permutation: s3c s4c s2drop s1ix
+step s3c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.k IS UNIQUE
+step s4c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.v IS UNIQUE
+ERROR: cypher: cannot create constraint "c1": exec: constraint name already in use: name is already used by the UNIQUE constraint on (:K).k
+step s2drop: DROP INDEX l_s
+ERROR: exec: DropIndex "l_s": index: no index by that name: "l_s"
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+final fschema: <schema>
+kind      |name         |definition   
+----------+-------------+-------------
+index     |__uniq__K.k  |             
+index     |l_s          |             
+index     |l_s_btree_num|             
+constraint|c1           |UNIQUE (:K).k
+(4 rows)
+
+starting permutation: s4c s1ix s2drop s3c
+step s4c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.v IS UNIQUE
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s2drop: DROP INDEX l_s
+step s3c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.k IS UNIQUE
+ERROR: cypher: cannot create constraint "c1": exec: constraint name already in use: name is already used by the UNIQUE constraint on (:K).v
+final fschema: <schema>
+kind      |name       |definition   
+----------+-----------+-------------
+index     |__uniq__K.v|             
+constraint|c1         |UNIQUE (:K).v
+(2 rows)
+
+starting permutation: s4c s1ix s3c s2drop
+step s4c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.v IS UNIQUE
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s3c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.k IS UNIQUE
+ERROR: cypher: cannot create constraint "c1": exec: constraint name already in use: name is already used by the UNIQUE constraint on (:K).v
+step s2drop: DROP INDEX l_s
+final fschema: <schema>
+kind      |name       |definition   
+----------+-----------+-------------
+index     |__uniq__K.v|             
+constraint|c1         |UNIQUE (:K).v
+(2 rows)
+
+starting permutation: s4c s2drop s1ix s3c
+step s4c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.v IS UNIQUE
+step s2drop: DROP INDEX l_s
+ERROR: exec: DropIndex "l_s": index: no index by that name: "l_s"
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s3c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.k IS UNIQUE
+ERROR: cypher: cannot create constraint "c1": exec: constraint name already in use: name is already used by the UNIQUE constraint on (:K).v
+final fschema: <schema>
+kind      |name         |definition   
+----------+-------------+-------------
+index     |__uniq__K.v  |             
+index     |l_s          |             
+index     |l_s_btree_num|             
+constraint|c1           |UNIQUE (:K).v
+(4 rows)
+
+starting permutation: s4c s2drop s3c s1ix
+step s4c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.v IS UNIQUE
+step s2drop: DROP INDEX l_s
+ERROR: exec: DropIndex "l_s": index: no index by that name: "l_s"
+step s3c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.k IS UNIQUE
+ERROR: cypher: cannot create constraint "c1": exec: constraint name already in use: name is already used by the UNIQUE constraint on (:K).v
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+final fschema: <schema>
+kind      |name         |definition   
+----------+-------------+-------------
+index     |__uniq__K.v  |             
+index     |l_s          |             
+index     |l_s_btree_num|             
+constraint|c1           |UNIQUE (:K).v
+(4 rows)
+
+starting permutation: s4c s3c s1ix s2drop
+step s4c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.v IS UNIQUE
+step s3c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.k IS UNIQUE
+ERROR: cypher: cannot create constraint "c1": exec: constraint name already in use: name is already used by the UNIQUE constraint on (:K).v
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s2drop: DROP INDEX l_s
+final fschema: <schema>
+kind      |name       |definition   
+----------+-----------+-------------
+index     |__uniq__K.v|             
+constraint|c1         |UNIQUE (:K).v
+(2 rows)
+
+starting permutation: s4c s3c s2drop s1ix
+step s4c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.v IS UNIQUE
+step s3c: CREATE CONSTRAINT c1 FOR (n:K) REQUIRE n.k IS UNIQUE
+ERROR: cypher: cannot create constraint "c1": exec: constraint name already in use: name is already used by the UNIQUE constraint on (:K).v
+step s2drop: DROP INDEX l_s
+ERROR: exec: DropIndex "l_s": index: no index by that name: "l_s"
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+final fschema: <schema>
+kind      |name         |definition   
+----------+-------------+-------------
+index     |__uniq__K.v  |             
+index     |l_s          |             
+index     |l_s_btree_num|             
+constraint|c1           |UNIQUE (:K).v
+(4 rows)

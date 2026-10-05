@@ -304,7 +304,7 @@ edge churn), GG02 (detach delete vs edge create), GG04 (label index churn), RI01
 | Defect | Would have caught it | Confidence |
 |---|---|---|
 | **#2814** seek missed own writes | IX01, IX02, IX03, IX10, L07; IX06 partially | High for IX01-IX03: they are the measured reproduction in the fix commit `efd32fb9` |
-| **#2931** commit writeback read a peer's uncommitted value; survived rollback | IX04 (the exact four-step), IX05, IX09, L06, L19; DD01 and DD05 if the backfill shares the defect (unverified) | High for IX04 and L06 (they are the working-tree regression tests' shapes) |
+| **#2931** commit writeback read a peer's uncommitted value; survived rollback | IX04 (the exact four-step), IX09, L06, L19. **Not IX05**: with a UNIQUE constraint registered, a label add and a property write on one node conflict ("node constraint"), which closes the peer route #2931 took; measured at `43c69dbe`, IX04 fails and IX05 passes. **Not DD01 or DD05**: the CREATE INDEX and CREATE CONSTRAINT backfills read a committed snapshot (G9, settled by DD01 and DD05) | High for IX04 and L06 (they are the working-tree regression tests' shapes) |
 | **#2932** publish convoy stalled the frontier | L10 and L04 (streak gate, b_ac); FP01 | Medium: the deterministic catch lives at the clock level (`graph/mvcc/publish_convoy_test.go`); SE02/FP01 observe the liveness shape only if seam H2 exists. A Cypher-level deterministic scenario is not guaranteed to reproduce a scheduling-dependent convoy |
 
 ---

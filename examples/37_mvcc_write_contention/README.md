@@ -241,8 +241,10 @@ writer ends the phase with a non-zero count instead of hanging the run.
 ## Phase 5 — deterministic MVCC scenario catalogue (rmp #2933)
 
 `catalogue.go` ports the write-write (§1.1) and snapshot-isolation (§1.2) rows of
-`docs/mvcc-scenario-catalogue.md`, and `catalogue_mgix.go` its MERGE/UNIQUE (§1.3) and
-index (§1.4) rows, from PostgreSQL's isolation specs and InnoDB's tests. The PostgreSQL scenarios are re-implemented, not copied. Each row is an
+`docs/mvcc-scenario-catalogue.md`, `catalogue_mgix.go` its MERGE/UNIQUE (§1.3) and
+index (§1.4) rows, and `catalogue_ddhz.go` its DDL-vs-DML (§1.5), abort (§1.6) and
+horizon, read-only-transaction and session (§1.7) rows, from PostgreSQL's isolation
+specs and InnoDB's tests. The PostgreSQL scenarios are re-implemented, not copied. Each row is an
 `internal/isolationtest` spec run over **every** order-preserving interleaving of its
 steps (or over named interleavings where the catalogue requires them) and pinned by a
 golden transcript. The transcript ends with a `final` block — the state the
@@ -270,7 +272,11 @@ against its golden by `TestCatalogue`.
   same graph through `lpg.Graph`, using the harness's `Probe` step (a Go step that
   reports rows; added to `internal/isolationtest` for this purpose). Rows that need
   `ROLLBACK` run through Cypher only: the undo log a rollback replays belongs to the
-  Cypher engine. The MG and IX rows run through Cypher only: the `lpg` API has no
+  Cypher engine; an abort through `lpg` (`WriteTx.Abandon`, then `EndVersionedTx`) is
+  used where no eager write has to be undone (HZ03). The DD rows, AB01, AB02, AB04 and
+  AB05 run through Cypher only: the `lpg` API has no DDL, no constraint registry, no
+  statement that can fail midway and no undo of eager writes. The MG and IX rows run
+  through Cypher only: the `lpg` API has no
   `MERGE`, the UNIQUE and NOT NULL constraints are the Cypher engine's registry, and a
   secondary index is maintained only by the change fan-out the Cypher engine drives at
   commit (`lpg.ErrIndexedRawWrite`), so an `lpg` arm would test that contract rather
@@ -284,8 +290,25 @@ against its golden by `TestCatalogue`.
   source directory. Catalogue goldens carry the row ID as a prefix
   (`ww02-…`, `sk12-…`, `mg02-…`, `ix04-…`).
 - **Property checks.** WW15 (pinned reader byte-identical), SK10 (seek = scan),
-  SK12 (repeatable count; read-skew freedom), SK14 (fast path = scan) and every IX
-  row (seek = scan) also assert a property on every step, independently of the golden.
+  SK12 (repeatable count; read-skew freedom), SK14 (fast path = scan), every IX row,
+  DD01-DD05, DD09, AB02 and AB05 (seek = scan), AB04 (final value = acknowledged
+  increments), HZ01 (versions rise while the reader is held and fall after), RO01
+  (repeatable read) and RO03 (parallel count = scan) also assert a property on every
+  step, independently of the golden.
+- **Go steps that drive the engine (§1.5-§1.7).** A sessionless read (SE01, SE03), a
+  statement cancelled while it executes (AB02: the statement parks in a procedure,
+  `cat.hold`, registered on every engine, and is cancelled there), a client retry
+  loop (AB04), and `MVCCStats` readings taken after a vacuum drain (HZ01, HZ04, SE03)
+  reach the engine of the permutation in force through `world.eng` and `world.g`.
+- **COMMIT of a poisoned transaction.** The engine refuses it with `ErrTxPoisoned` and
+  leaves the transaction open for the caller's `ROLLBACK`. The harness's COMMIT
+  control now performs that rollback and still reports the COMMIT's error
+  (`internal/isolationtest/runner.go`; `TestCommitOfPoisonedTxRollsItBack` fails
+  without it: the peer's later write is refused by the leaked transaction). One golden
+  depended on the leak: four permutations of `ww10-crossing-writes`, in which one
+  transaction is poisoned and COMMITs before the other writes the node it held. The
+  other transaction's write now succeeds and commits, as snapshot isolation allows
+  after an abort; before, the leaked transaction refused it.
 - **Seek = scan in one statement (IX).** Each index read returns two columns: `seek`,
   the predicate served from the index, and `scan`, the same predicate spelled so no
   index can serve it (`m.s + ''`, `m.k + 0`, `left(m.s, n)`). The scan arm is an
@@ -313,7 +336,7 @@ GoGraph permits write skew and refuses a write-write conflict.
 | WW07 | `ww07-non-matching-not-blocked` | Cypher | MY `innodb-semi-consistent`, `innodb-consistent` | No wait, no conflict | As expected. |
 | WW08 | `ww08-different-properties-one-node`, `-lpg` | both | MY `concurrent.inc`; PG `update-locked-tuple` | Second refused: the node is the conflict unit | As expected; same verdict as PG and InnoDB row granularity. |
 | WW09 | `ww09-disjoint-nodes`, `-lpg` | both | `docs/isolation-design.md` | Zero conflicts in every interleaving | As expected. |
-| WW10 | `ww10-crossing-writes`, `-lpg` | both | PG `deadlock-simple`, `fk-deadlock`, `fk-deadlock2`; MY `deadlock_detect`, `innodb_deadlock` | No wait; refused instead | As expected; in some interleavings **both** transactions are refused, where PG and InnoDB pick one deadlock victim. |
+| WW10 | `ww10-crossing-writes`, `-lpg` | both | PG `deadlock-simple`, `fk-deadlock`, `fk-deadlock2`; MY `deadlock_detect`, `innodb_deadlock` | No wait; refused instead | As expected; in some interleavings **both** transactions are refused, where PG and InnoDB pick one deadlock victim. When the refused transaction COMMITs (and is rolled back) before the other writes the node it held, that write succeeds. |
 | WW11 | `ww11-ring-3`, `ww11-ring-8` | Cypher | PG `deadlock-hard`; MY `long_deadlock_cycle`, `undetected_deadlock`, `hp_deadlock` | No wait; each write succeeds or is refused; progress after rollback | As expected. Named interleavings (round-robin, sequential; staggered for 3). |
 | WW12 | `ww12-write-after-peer-rollback`, `-explicit` | Cypher | PG `eval-plan-qual`, `eval-plan-qual-trigger`, `multixact-no-forget`; MY `innodb_mysql_rbk` | Write after rollback + drain succeeds | As expected, both for a writer whose snapshot follows the rollback and (`-explicit`) for an explicit transaction whose snapshot predates it (D1, rmp #2973). The no-drain arm is not pinned (a race, F5). |
 | WW13 | `ww13-void-label-removal`, `-lpg`; `ww13-void-property-delete`, `-lpg`; `ww13-void-edge-property` | both | GoGraph rmp #2354 (no PG/InnoDB counterpart) | Statement OK, `COMMIT` refused, nothing applied | As expected for label removal and property delete, through both drivers. The **edge-property** write is refused at the statement, not at `COMMIT`: the catalogue's F3 premise (edge side stores record the conflict) does not hold for `SET r.w` on an existing edge property. The outcome is still a refusal that applies nothing. |
@@ -328,7 +351,7 @@ GoGraph permits write skew and refuses a write-write conflict.
 | SK07 | `sk07-receipt-report` | Cypher | PG `receipt-report` | Permitted: the report misses a receipt that later commits into its batch | As expected, in two of the four named interleavings. The receipt's date is read inline in the `CREATE` map, as in the source spec; that read is the witness for D2 (rmp #2974, fixed). |
 | SK08 | `sk08-two-ids` | Cypher | PG `two-ids` | All commit in every interleaving | As expected. |
 | SK09 | `bank-transfer` (existing) | Cypher | examples/27 | Total constant | As expected. |
-| SK10 | `sk10-write-skew-hash-seek`, `sk10-write-skew-btree-range` | Cypher | PG `index-only-scan`, `predicate-hash`, `insert-conflict-serializable`, `matview-write-skew` | Permitted; seek = scan in every step | As expected. 1 100 padding nodes make the planner seek; `TestSK10AccessPaths` proves one arm seeks and the other scans. |
+| SK10 | `sk10-write-skew-hash-seek`, `sk10-write-skew-btree-range` | Cypher | PG `index-only-scan`, `predicate-hash`, `insert-conflict-serializable`, `matview-write-skew` | Permitted; seek = scan in every step | As expected. 1 100 padding nodes make the planner seek; `TestSK10AccessPaths` proves one arm seeks and the other scans. The scan arm is an `OPTIONAL MATCH`, as in the IX rows, so an empty scan cannot hide a mismatch; the goldens changed only in the query text. |
 | SK11 | `sk11-materialised-conflict-increment`, `sk11-materialised-conflict-value-preserving` | Cypher | Fekete et al., TODS 2005; MY `t/locking_clause` | Increment arm: second refused, rule holds | Increment arm as expected. **Value-preserving arm (`SET g.v = g.v`): both commit and the rule breaks** — a write of the current value writes no version and claims nothing, so it is not a remedy (G4 pinned). |
 | SK12 | `sk12-no-phantom-no-non-repeatable`, `sk12-read-skew-lpg` | both | MY `t/consistent_snapshot`, `select_count_perf`, `innodb-read-view` | Repeated reads equal; no read skew | As expected. The `lpg` arm reads two keys (A5A) and is the negative control's target. |
 | SK13 | `sk13-snapshot-at-begin`, `-lpg` | both | MY `t/consistent_snapshot`; PG `fk-snapshot` | Snapshot at BEGIN | As expected. InnoDB's plain `START TRANSACTION` takes it at the first read. |
@@ -356,7 +379,32 @@ GoGraph permits write skew and refuses a write-write conflict.
 | IX09 | `ix09-label-index-scan-agree` | Cypher | GoGraph #2931 churn; MY `lock_impl_to_expl_case_sensitivity` | Label count = seek = scan at quiescence | As expected. |
 | IX10 | `ix10-parameter-seek-own-write` | Cypher | GoGraph `3fd78c5e` | Parameter seek = literal seek = scan | As expected, for a string and an integer parameter. |
 
-RO01–RO03 sit in catalogue §1.7 and are not part of this catalogue's rows.
+| DD01 | `dd01-create-index-under-open-writer-commit`, `-rollback` | Cypher | PG `multiple-cic`, amcheck `t/002_cic.pl`; MY `innodb-index-online`, `innodb-table-online`, `innodb-index-online-delete`, `bulk_create_index_online`, `index-create-dml-rollback` | Index holds the committed arm, not the rolled-back one; seek = scan | As expected in all 20 interleavings of each arm. **G9 settled:** the backfill reads a committed snapshot (negative control below). |
+| DD02 | `dd02-two-indexes-writer-between` | Cypher | PG `multiple-cic` | Both indexes seek = scan | As expected. |
+| DD03 | `dd03-drop-index-between-seeks` | Cypher | PG `drop-index-concurrently-1`, `vacuum-concurrent-drop` | A read after the drop scans, with the same rows; no error | As expected; `DROP INDEX` does not wait for the open transaction. |
+| DD04 | `dd04-drop-recreate-index-with-writers` | Cypher | PG `reindex-concurrently` | Rebuilt index holds every commit | As expected. |
+| DD05 | `dd05-unique-under-open-duplicate-commit`, `-rollback` | Cypher | PG `alter-table-1`; MY `alter_table_rebuild_duplicate_record`, `index-create-dml-rollback`, `innodb-alter-debug` | No committed state violates the constraint | As expected. The uncommitted duplicate never refuses the DDL. The DDL is refused only when the duplicate committed first; otherwise s1 is refused, at its statement (DDL first) or at its COMMIT (the DDL straddles it, rmp #2936). |
+| DD06 | `dd06-dml-not-blocked-by-idle-tx` (DML half) | Cypher | PG `timeouts`, `truncate-conflict`; MY `innodb-timeout`, `innodb_lock_wait_timeout_1`, `innodb-lock` | DML never waits on an idle open transaction; a DDL behind an in-flight statement returns its context error within the deadline | DML half as expected. **DDL half not implemented: engine defect** (see "Defects found"): the DDL waits for the in-flight statement whatever its deadline. |
+| DD07 | `dd07-ddl-in-write-tx`, `dd07-ddl-in-read-tx` | Cypher | MY `t/implicit_commit`, `t/trans_read_only` | DDL rejected (F9); the transaction stays usable | As expected. The rejection does **not** poison the write transaction: its COMMIT succeeds with its other writes. MySQL commits the transaction implicitly instead. |
+| DD08 | `dd08-ddl-on-one-object` | Cypher | PG `ddl-dependency-locking` | Consistent catalog; the losing DDL gets a typed error | As expected in all 24 orders. The harness runs one step at a time, so the overlap of the DDL statements is #2934's. |
+| DD09 | `dd09-create-index-vs-vacuum` | Cypher | MY `alter_table_rebuild_missing_record`, `innodb-index-online-purge`, `virtual_debug_purge` | Seek = scan; no lost node | As expected with the drain between steps. A drain inside the backfill needs a seam that does not exist; that point is #2934's. |
+| AB01 | `ab01-failed-statement-commit-then-retry`, `-rollback-then-retry` | Cypher | PG `delete-abort-savept`, `-2`, `aborted-keyrevoke`; MY `t/func_rollback`, `innodb_mysql_rbk` | COMMIT is `ErrTxPoisoned`; nothing applied; the retry commits | As expected. |
+| AB02 | `ab02-autocommit-statement-fails-midway` | Cypher | MY `t/func_rollback`, `t/kill` | None applied, indexes clean | As expected for the failing statement and for the statement cancelled while it executes. |
+| AB03 | `ab03-refused-statement-then-continue`, `-lpg` | both | MY `t/innodb_deadlock`, `innodb_mysql_rbk` | Reads keep the snapshot; COMMIT applies nothing | As expected. **G10 pinned:** through Cypher the COMMIT returns `ErrTxPoisoned`, through `lpg` the serialization conflict. |
+| AB04 | `ab04-retry-loop-converges` | Cypher | `docs/isolation-design.md:141-150` | Final = acknowledged increments | As expected. A client whose peer still holds the node is refused on every retry and gives up after three attempts; the final value still equals the acknowledged count. |
+| AB05 | `ab05-rollback-of-created-subgraph` | Cypher | MY `lob_big_rollback`, `zlob_big_rollback`, `undo_log_temp_table` | Invisible; counts and UNIQUE set restored | As expected. While s1 is open its UNIQUE value refuses the peer (G6). |
+| AB06 | `ab06-create-delete-recreate-commit`, `-rollback`; `-commit-lpg` | both | GoGraph `graph/lpg/mvcc_life_test.go:149-265` | Commit: visible once; rollback: never visible | As expected. The `lpg` driver runs the commit arm only (no undo of eager writes). |
+| HZ01 | `hz01-long-reader-retains-versions`, `-lpg` | both | PG `horizons`, `vacuum-no-cleanup-lock`; MY `bug120529`, `purge_on_replica`, `flush-hang`, `lob_purge` | Versions rise while held, fall after | As expected: 0, then 10 while the reader is held, then 0 after it ends (each reading after a drain). One named interleaving. |
+| HZ02 | `hz02-autocommit-read-releases-slot`, `-lpg` | both | MY `innodb-ac-non-locking-select`, `innodb_i_s_innodb_trx`; PG `horizons` | 0 after an autocommit read; 1 while a read transaction is open | As expected. |
+| HZ03 | `hz03-aborted-versions-withdrawn`, `-lpg` | both | GoGraph `docs/design-mvcc-abort-withdrawal.md`; MY `lob_rollback_update`, `zlob_rollback_update` | Reader sees the pre-state; writer succeeds after the drain | As expected; the writer is refused while the aborting transaction is still open. |
+| HZ04 | `hz04-vacuum-during-drop-index` | Cypher | PG `vacuum-concurrent-drop`; MY `innodb_bug26818787` | No error; backlog drains to 0 | As expected: backlog 10 while the reader is pinned, 0 after it ends. Three named interleavings. |
+| RO01 | `ro01-read-only-tx-stable-and-rejects-writes`; `ro01-read-only-snapshot-stable-lpg` | both | MY `t/trans_read_only`; PG `read-only-anomaly-3` | Stable reads; `ErrWriteInReadOnlyTx` | As expected. The `lpg` driver runs the stable-snapshot half: an `lpg` read snapshot has no write surface. |
+| RO02 | `ro02-read-view-before-two-writers`, `-lpg` | both | MY `innodb-read-view` | The reader sees neither commit; a new reader sees both | As expected in all 90 interleavings. |
+| RO03 | `ro03-read-only-tx-parallel-count` | Cypher | PG `serializable-parallel` | Same answer as the serial path | As expected. The engine's `ParallelScanThreshold` is lowered to 2 048 over 3 000 nodes; `TestRO03TakesTheParallelPath` proves the count is planned as `ParallelCountScan`. |
+| SE01 | `se01-session-reads-own-commit` | Cypher | `docs/isolation-design.md:236-248`; PG-rec `057_snapshot_commit_race` | The session sees its commit | As expected. In a serial script the frontier is always contiguous, so the sessionless reader sees it too; the case where they differ needs SE02's straggler. |
+| SE02 | — | — | PG-rec `057_snapshot_commit_race`, PG-inj `repack_commit_race`; MY `binlog_gtid/binlog_group_commit_gtid_order`, `binlog/binlog_after_commit_order_info_schema`, `hp_deadlock` | Sessionless read excludes T1; session read waits for T0 | **Not implemented: random load, #2934.** No exported commit-hold seam (G1, H2 below). |
+| SE03 | `se03-abandoned-commit-does-not-stall-frontier` (NOT NULL arm) | Cypher | `docs/isolation-design.md:389-395`; MY `binlog/binlog_group_commit_flush_crash` | T1 visible to a sessionless reader; `InFlightCommits` returns to 0 | As expected. The injected-fsync arm needs H2 and is **random load, #2934**. |
+| SE04 | — | — | `docs/isolation-design.md:141-150,199-213` | Sessionless self-write may be refused; session write is not | **Not implemented: random load, #2934.** It is SE02 plus a rewrite, so it needs the same seam. |
 
 ### Negative control
 
@@ -389,12 +437,29 @@ revision and run there. The worktree needed one change to compile:
   `got: 0 |1`; btree: `want: 11 |11`, `got: 10 |11`). **IX05 passes there.** A
   rolled-back transaction writes no index entry of its own, and the peer route #2931
   took is closed in IX05 by the "node constraint" conflict that any registered UNIQUE
-  constraint brings. The catalogue's §6 claim that IX05 catches #2931 does not hold;
-  IX04 is the row that does.
+  constraint brings. The catalogue's §6 named IX05 as a row that catches #2931; it
+  does not, and §6 now names IX04 and says why IX05 does not.
+
+### Negative control for G9 (DD01)
+
+A test-only mutant, applied with `go test -overlay` and never written to the tree,
+makes `Engine.beginIndexBuild` (`cypher/index_binding.go`) hand the backfill the live
+graph, `e.g.ReadAt(nil)`, instead of the snapshot it opens. Against it both DD01
+specs and DD09 fail: the rollback arm with 36 property violations, the commit arm
+with 11, DD09 with 8, each also diverging from its golden. For example:
+
+```
+permutation "s1w s1cr s2ix s1rb s2x s2v7" step fx: index seek counted 1, scan counted 0
+permutation "s1w s1cr s2ix s1rb s2x s2v7" step fv7: index seek counted 0, scan counted 1
+```
+
+The index kept n7 under s1's rolled-back 'x' and lost it under its committed 'v7'.
+Without the mutant all three pass.
 
 ### Defects found
 
-D1, D2 and the first parser defect are fixed; the second parser defect is open.
+D1, D2 and the first parser defect are fixed; the second parser defect and D3 are
+open.
 
 - **D1 — `ExplicitTx.Rollback` publishes its commit record (rmp #2973).** After a Cypher
   `ROLLBACK`, `MVCCStats().Write` counts one more commit and no abort, and a
@@ -432,10 +497,31 @@ D1, D2 and the first parser defect are fixed; the second parser defect is open.
   preceding `WITH` parse. openCypher admits the statement. The IX prefix rows spell
   their scan arm with `left()` instead; the seek arm, which precedes the `WITH`, keeps
   `STARTS WITH`.
+- **D3 — a DDL statement ignores its deadline while an autocommit write is in
+  flight (open).** Reproduction: register a procedure that blocks, start
+  `CREATE (n:T {name:'t'}) WITH n CALL cat.hold() YIELD x RETURN x` through
+  `Engine.RunInTx` on one goroutine, and once it is parked run
+  `CREATE INDEX l_s2 FOR (n:L) ON (n.s)` through `Engine.RunInTx` with a 50 ms
+  deadline. Observed: the DDL is still blocked after 1 s and returns
+  `context deadline exceeded` only once the write statement is released. Expected:
+  the DDL returns its context error within the deadline plus a margin (catalogue
+  DD06; F7; the "Context-aware blocking" rule of `CLAUDE.md`). Cause, from the
+  source: an autocommit write holds `Engine.schemaGate` shared for its whole
+  statement, and every DDL path takes it with `schemaGate.StrongLock()`
+  (`cypher/api.go`, `runCreateBTreeIndex` and its siblings;
+  `cypher/index_binding.go`), which takes no context; the context is checked only
+  after the gate is acquired. DD06's DDL half is therefore not pinned.
 
 ### Gaps pinned
 
-- **G1** (commit-hold seam): not needed by any row of this stage; unchanged.
+- **G1** (commit-hold seam): confirmed, and H2 checked. The only route is a WAL-backed
+  engine whose `wal.WALFile.Sync` blocks on a gate (`wal.OpenFS` takes a caller
+  filesystem; `txn.NewStoreWithOptions` and `cypher.NewEngineWithStore` take the
+  result). It can hold T0 between its timestamp allocation and its publication, but
+  one WAL writer runs one fsync at a time: a committer whose frames follow the held
+  leader's waits for the leader to finish (`store/wal/writer.go`, `syncToLocked`), so
+  T1 can never acknowledge while T0 is held, and SE02's shape cannot be built from it. SE02, SE04 and SE03's fsync arm are
+  left to random load (#2934).
 - **G2** (vacuum control): resolved with a drain `Hook` at a fixed point. The
   withdrawal of an aborted version now runs at abort (`withdrawAbortedNow`), so F5's
   race is narrower than the catalogue states; the no-drain arm is still not pinned.
@@ -452,12 +538,16 @@ D1, D2 and the first parser defect are fixed; the second parser defect is open.
   statement itself, and `TestIXAccessPaths` guards that the seek arm is an index
   access.
 - **G8** (adjacency append conflicts): not exercised by §1.1–§1.4 (RI03 decides it).
-- **G9** (backfill source of `CREATE INDEX`): not settled. IX08 creates an index under
-  an open reader and a committed peer, and the reader sees its snapshot only; a peer
-  whose write is still open during the build is DD01's shape.
-- **G10** (state after a refused statement): pinned — through Cypher, `COMMIT`
-  returns `ErrTxPoisoned`; through `lpg`, the refused write dooms the transaction and
-  its commit returns the serialization conflict. Both apply nothing.
+- **G9** (backfill source of `CREATE INDEX` / `CONSTRAINT`): settled — a committed
+  snapshot. DD01 (index) and DD05 (UNIQUE constraint) pass in every interleaving, and
+  DD01 fails against a mutant whose backfill reads the live graph (negative control
+  above). The source agrees: `Engine.beginIndexBuild` waits out the commits deciding
+  and scans `e.g.ReadAt(snap)`; the constraint build scans a snapshot taken after
+  `HoldCommitDecisions`. Not an engine defect.
+- **G10** (state after a refused statement): pinned by AB03 through both drivers —
+  through Cypher, `COMMIT` returns `ErrTxPoisoned`; through `lpg`, the refused write
+  dooms the transaction and its commit returns the serialization conflict. Both apply
+  nothing, and a read after the refusal stays at the transaction's snapshot.
 
 ## Status
 

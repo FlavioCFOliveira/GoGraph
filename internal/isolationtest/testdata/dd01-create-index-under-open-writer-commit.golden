@@ -1,0 +1,787 @@
+spec dd01-create-index-under-open-writer-commit: 2 sessions, 20 permutations
+# DD01 (G9), commit arm. 1 100 :L nodes and no index. s1 opens, moves n7 from
+# s = 'v7' to s = 'x' and creates c1 with s = 'y'; s2 creates a hash index on (:L).s in
+# an autocommit statement; s1 then ends. The backfill must read a committed state,
+# never s1's uncommitted writes, and the commit must reach the index whether it
+# lands before, during or after the build: seek = scan for 'x', 'y' and 'v7' in every
+# step and after the run.
+
+starting permutation: s1w s1cr s1c s2ix s2x s2v7
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'x' RETURN n.s AS s
+s  
+---
+"x"
+(1 row)
+step s1cr: CREATE (n:L {name:'c1', s:'y'}) RETURN n.s AS s
+s  
+---
+"y"
+(1 row)
+step s1c: COMMIT
+step s2ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s2x: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s2v7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fx: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fy: MATCH (n:L {s:'y'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'y' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s1w s1cr s2ix s1c s2x s2v7
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'x' RETURN n.s AS s
+s  
+---
+"x"
+(1 row)
+step s1cr: CREATE (n:L {name:'c1', s:'y'}) RETURN n.s AS s
+s  
+---
+"y"
+(1 row)
+step s2ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s1c: COMMIT
+step s2x: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s2v7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fx: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fy: MATCH (n:L {s:'y'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'y' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s1w s1cr s2ix s2x s1c s2v7
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'x' RETURN n.s AS s
+s  
+---
+"x"
+(1 row)
+step s1cr: CREATE (n:L {name:'c1', s:'y'}) RETURN n.s AS s
+s  
+---
+"y"
+(1 row)
+step s2ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s2x: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1c: COMMIT
+step s2v7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fx: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fy: MATCH (n:L {s:'y'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'y' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s1w s1cr s2ix s2x s2v7 s1c
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'x' RETURN n.s AS s
+s  
+---
+"x"
+(1 row)
+step s1cr: CREATE (n:L {name:'c1', s:'y'}) RETURN n.s AS s
+s  
+---
+"y"
+(1 row)
+step s2ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s2x: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s2v7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1c: COMMIT
+final fx: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fy: MATCH (n:L {s:'y'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'y' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s1w s2ix s1cr s1c s2x s2v7
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'x' RETURN n.s AS s
+s  
+---
+"x"
+(1 row)
+step s2ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s1cr: CREATE (n:L {name:'c1', s:'y'}) RETURN n.s AS s
+s  
+---
+"y"
+(1 row)
+step s1c: COMMIT
+step s2x: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s2v7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fx: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fy: MATCH (n:L {s:'y'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'y' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s1w s2ix s1cr s2x s1c s2v7
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'x' RETURN n.s AS s
+s  
+---
+"x"
+(1 row)
+step s2ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s1cr: CREATE (n:L {name:'c1', s:'y'}) RETURN n.s AS s
+s  
+---
+"y"
+(1 row)
+step s2x: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1c: COMMIT
+step s2v7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fx: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fy: MATCH (n:L {s:'y'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'y' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s1w s2ix s1cr s2x s2v7 s1c
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'x' RETURN n.s AS s
+s  
+---
+"x"
+(1 row)
+step s2ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s1cr: CREATE (n:L {name:'c1', s:'y'}) RETURN n.s AS s
+s  
+---
+"y"
+(1 row)
+step s2x: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s2v7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1c: COMMIT
+final fx: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fy: MATCH (n:L {s:'y'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'y' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s1w s2ix s2x s1cr s1c s2v7
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'x' RETURN n.s AS s
+s  
+---
+"x"
+(1 row)
+step s2ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s2x: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1cr: CREATE (n:L {name:'c1', s:'y'}) RETURN n.s AS s
+s  
+---
+"y"
+(1 row)
+step s1c: COMMIT
+step s2v7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fx: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fy: MATCH (n:L {s:'y'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'y' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s1w s2ix s2x s1cr s2v7 s1c
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'x' RETURN n.s AS s
+s  
+---
+"x"
+(1 row)
+step s2ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s2x: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1cr: CREATE (n:L {name:'c1', s:'y'}) RETURN n.s AS s
+s  
+---
+"y"
+(1 row)
+step s2v7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1c: COMMIT
+final fx: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fy: MATCH (n:L {s:'y'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'y' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s1w s2ix s2x s2v7 s1cr s1c
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'x' RETURN n.s AS s
+s  
+---
+"x"
+(1 row)
+step s2ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s2x: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s2v7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1cr: CREATE (n:L {name:'c1', s:'y'}) RETURN n.s AS s
+s  
+---
+"y"
+(1 row)
+step s1c: COMMIT
+final fx: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fy: MATCH (n:L {s:'y'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'y' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s2ix s1w s1cr s1c s2x s2v7
+step s2ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'x' RETURN n.s AS s
+s  
+---
+"x"
+(1 row)
+step s1cr: CREATE (n:L {name:'c1', s:'y'}) RETURN n.s AS s
+s  
+---
+"y"
+(1 row)
+step s1c: COMMIT
+step s2x: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s2v7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fx: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fy: MATCH (n:L {s:'y'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'y' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s2ix s1w s1cr s2x s1c s2v7
+step s2ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'x' RETURN n.s AS s
+s  
+---
+"x"
+(1 row)
+step s1cr: CREATE (n:L {name:'c1', s:'y'}) RETURN n.s AS s
+s  
+---
+"y"
+(1 row)
+step s2x: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1c: COMMIT
+step s2v7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fx: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fy: MATCH (n:L {s:'y'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'y' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s2ix s1w s1cr s2x s2v7 s1c
+step s2ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'x' RETURN n.s AS s
+s  
+---
+"x"
+(1 row)
+step s1cr: CREATE (n:L {name:'c1', s:'y'}) RETURN n.s AS s
+s  
+---
+"y"
+(1 row)
+step s2x: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s2v7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1c: COMMIT
+final fx: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fy: MATCH (n:L {s:'y'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'y' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s2ix s1w s2x s1cr s1c s2v7
+step s2ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'x' RETURN n.s AS s
+s  
+---
+"x"
+(1 row)
+step s2x: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1cr: CREATE (n:L {name:'c1', s:'y'}) RETURN n.s AS s
+s  
+---
+"y"
+(1 row)
+step s1c: COMMIT
+step s2v7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fx: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fy: MATCH (n:L {s:'y'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'y' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s2ix s1w s2x s1cr s2v7 s1c
+step s2ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'x' RETURN n.s AS s
+s  
+---
+"x"
+(1 row)
+step s2x: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1cr: CREATE (n:L {name:'c1', s:'y'}) RETURN n.s AS s
+s  
+---
+"y"
+(1 row)
+step s2v7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1c: COMMIT
+final fx: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fy: MATCH (n:L {s:'y'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'y' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s2ix s1w s2x s2v7 s1cr s1c
+step s2ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'x' RETURN n.s AS s
+s  
+---
+"x"
+(1 row)
+step s2x: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s2v7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1cr: CREATE (n:L {name:'c1', s:'y'}) RETURN n.s AS s
+s  
+---
+"y"
+(1 row)
+step s1c: COMMIT
+final fx: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fy: MATCH (n:L {s:'y'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'y' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s2ix s2x s1w s1cr s1c s2v7
+step s2ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s2x: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'x' RETURN n.s AS s
+s  
+---
+"x"
+(1 row)
+step s1cr: CREATE (n:L {name:'c1', s:'y'}) RETURN n.s AS s
+s  
+---
+"y"
+(1 row)
+step s1c: COMMIT
+step s2v7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fx: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fy: MATCH (n:L {s:'y'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'y' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s2ix s2x s1w s1cr s2v7 s1c
+step s2ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s2x: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'x' RETURN n.s AS s
+s  
+---
+"x"
+(1 row)
+step s1cr: CREATE (n:L {name:'c1', s:'y'}) RETURN n.s AS s
+s  
+---
+"y"
+(1 row)
+step s2v7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1c: COMMIT
+final fx: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fy: MATCH (n:L {s:'y'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'y' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s2ix s2x s1w s2v7 s1cr s1c
+step s2ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s2x: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'x' RETURN n.s AS s
+s  
+---
+"x"
+(1 row)
+step s2v7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1cr: CREATE (n:L {name:'c1', s:'y'}) RETURN n.s AS s
+s  
+---
+"y"
+(1 row)
+step s1c: COMMIT
+final fx: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fy: MATCH (n:L {s:'y'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'y' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s2ix s2x s2v7 s1w s1cr s1c
+step s2ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s2x: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+step s2v7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+step s1w: MATCH (n:L {name:'n7'}) SET n.s = 'x' RETURN n.s AS s
+s  
+---
+"x"
+(1 row)
+step s1cr: CREATE (n:L {name:'c1', s:'y'}) RETURN n.s AS s
+s  
+---
+"y"
+(1 row)
+step s1c: COMMIT
+final fx: MATCH (n:L {s:'x'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'x' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fy: MATCH (n:L {s:'y'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'y' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)

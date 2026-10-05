@@ -1,0 +1,365 @@
+spec dd02-two-indexes-writer-between: 3 sessions, 12 permutations
+# DD02. 1 100 :L nodes, no index. s1 creates a hash index on (:L).s and s2 one on
+# (:L).k, each in an autocommit statement; s3 moves n7 to s = 'zzz' and k = 16 (n8's
+# key) in an explicit transaction. Both indexes must answer seek = scan after the run,
+# whichever order the two builds and the commit take.
+
+starting permutation: s1ix s2ix s3w s3c
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s2ix: CREATE INDEX l_k FOR (n:L) ON (n.k)
+step s3w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz', n.k = 16 RETURN n.s AS s, n.k AS k
+s    |k 
+-----+--
+"zzz"|16
+(1 row)
+step s3c: COMMIT
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fk16: MATCH (n:L {k:16}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = 16 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+final fk14: MATCH (n:L {k:14}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = 14 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s1ix s3w s2ix s3c
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s3w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz', n.k = 16 RETURN n.s AS s, n.k AS k
+s    |k 
+-----+--
+"zzz"|16
+(1 row)
+step s2ix: CREATE INDEX l_k FOR (n:L) ON (n.k)
+step s3c: COMMIT
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fk16: MATCH (n:L {k:16}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = 16 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+final fk14: MATCH (n:L {k:14}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = 14 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s1ix s3w s3c s2ix
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s3w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz', n.k = 16 RETURN n.s AS s, n.k AS k
+s    |k 
+-----+--
+"zzz"|16
+(1 row)
+step s3c: COMMIT
+step s2ix: CREATE INDEX l_k FOR (n:L) ON (n.k)
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fk16: MATCH (n:L {k:16}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = 16 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+final fk14: MATCH (n:L {k:14}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = 14 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s2ix s1ix s3w s3c
+step s2ix: CREATE INDEX l_k FOR (n:L) ON (n.k)
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s3w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz', n.k = 16 RETURN n.s AS s, n.k AS k
+s    |k 
+-----+--
+"zzz"|16
+(1 row)
+step s3c: COMMIT
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fk16: MATCH (n:L {k:16}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = 16 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+final fk14: MATCH (n:L {k:14}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = 14 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s2ix s3w s1ix s3c
+step s2ix: CREATE INDEX l_k FOR (n:L) ON (n.k)
+step s3w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz', n.k = 16 RETURN n.s AS s, n.k AS k
+s    |k 
+-----+--
+"zzz"|16
+(1 row)
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s3c: COMMIT
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fk16: MATCH (n:L {k:16}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = 16 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+final fk14: MATCH (n:L {k:14}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = 14 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s2ix s3w s3c s1ix
+step s2ix: CREATE INDEX l_k FOR (n:L) ON (n.k)
+step s3w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz', n.k = 16 RETURN n.s AS s, n.k AS k
+s    |k 
+-----+--
+"zzz"|16
+(1 row)
+step s3c: COMMIT
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fk16: MATCH (n:L {k:16}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = 16 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+final fk14: MATCH (n:L {k:14}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = 14 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s3w s1ix s2ix s3c
+step s3w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz', n.k = 16 RETURN n.s AS s, n.k AS k
+s    |k 
+-----+--
+"zzz"|16
+(1 row)
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s2ix: CREATE INDEX l_k FOR (n:L) ON (n.k)
+step s3c: COMMIT
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fk16: MATCH (n:L {k:16}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = 16 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+final fk14: MATCH (n:L {k:14}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = 14 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s3w s1ix s3c s2ix
+step s3w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz', n.k = 16 RETURN n.s AS s, n.k AS k
+s    |k 
+-----+--
+"zzz"|16
+(1 row)
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s3c: COMMIT
+step s2ix: CREATE INDEX l_k FOR (n:L) ON (n.k)
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fk16: MATCH (n:L {k:16}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = 16 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+final fk14: MATCH (n:L {k:14}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = 14 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s3w s2ix s1ix s3c
+step s3w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz', n.k = 16 RETURN n.s AS s, n.k AS k
+s    |k 
+-----+--
+"zzz"|16
+(1 row)
+step s2ix: CREATE INDEX l_k FOR (n:L) ON (n.k)
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s3c: COMMIT
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fk16: MATCH (n:L {k:16}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = 16 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+final fk14: MATCH (n:L {k:14}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = 14 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s3w s2ix s3c s1ix
+step s3w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz', n.k = 16 RETURN n.s AS s, n.k AS k
+s    |k 
+-----+--
+"zzz"|16
+(1 row)
+step s2ix: CREATE INDEX l_k FOR (n:L) ON (n.k)
+step s3c: COMMIT
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fk16: MATCH (n:L {k:16}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = 16 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+final fk14: MATCH (n:L {k:14}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = 14 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s3w s3c s1ix s2ix
+step s3w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz', n.k = 16 RETURN n.s AS s, n.k AS k
+s    |k 
+-----+--
+"zzz"|16
+(1 row)
+step s3c: COMMIT
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+step s2ix: CREATE INDEX l_k FOR (n:L) ON (n.k)
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fk16: MATCH (n:L {k:16}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = 16 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+final fk14: MATCH (n:L {k:14}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = 14 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+
+starting permutation: s3w s3c s2ix s1ix
+step s3w: MATCH (n:L {name:'n7'}) SET n.s = 'zzz', n.k = 16 RETURN n.s AS s, n.k AS k
+s    |k 
+-----+--
+"zzz"|16
+(1 row)
+step s3c: COMMIT
+step s2ix: CREATE INDEX l_k FOR (n:L) ON (n.k)
+step s1ix: CREATE INDEX l_s FOR (n:L) ON (n.s)
+final fzzz: MATCH (n:L {s:'zzz'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'zzz' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+1   |1   
+(1 row)
+final fv7: MATCH (n:L {s:'v7'}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.s + '' = 'v7' RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)
+final fk16: MATCH (n:L {k:16}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = 16 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+2   |2   
+(1 row)
+final fk14: MATCH (n:L {k:14}) WITH count(n) AS seek OPTIONAL MATCH (m:L) WHERE m.k + 0 = 14 RETURN seek, count(m) AS scan
+seek|scan
+----+----
+0   |0   
+(1 row)

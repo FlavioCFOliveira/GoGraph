@@ -37,6 +37,7 @@ package isolationtest_test
 
 import (
 	"context"
+	"errors"
 	"math/big"
 	"strings"
 	"testing"
@@ -327,5 +328,70 @@ func TestFinalIsRenderedAndObserved(t *testing.T) {
 	}
 	if len(seen) != 1 || seen[0][0] != "8" {
 		t.Errorf("observer saw final rows %v, want [[8]]", seen)
+	}
+}
+
+// TestCommitOfPoisonedTxRollsItBack pins the COMMIT control on a poisoned
+// transaction. The engine refuses that COMMIT with cypher.ErrTxPoisoned and
+// leaves the transaction OPEN, so the caller must roll it back. The harness
+// clears the session's handle at COMMIT, so it performs that rollback itself:
+// without it the poisoned transaction would keep its uncommitted write until
+// the engine closed, and a later writer of the same node would be refused by
+// a transaction the transcript reports as finished.
+//
+// The step must still report the COMMIT's own error, and the peer's write after
+// it must succeed.
+func TestCommitOfPoisonedTxRollsItBack(t *testing.T) {
+	t.Parallel()
+	var (
+		g        *lpg.Graph[string, float64]
+		writers  int64
+		commitEr error
+	)
+	r := &isolationtest.Runner{
+		NewEngine: func() (*isolationtest.Engine, error) {
+			g = lpg.New[string, float64](adjlist.Config{Directed: true, Multigraph: true})
+			eng := cypher.NewEngine(g)
+			return &isolationtest.Engine{Eng: eng, Close: eng.Close}, nil
+		},
+		Observe: func(o isolationtest.Observation) error {
+			if o.Step == "s1c" {
+				commitEr = o.Err
+			}
+			return nil
+		},
+	}
+	s := &isolationtest.Spec{
+		Name:  "poisoned-commit",
+		Setup: []isolationtest.Step{{Name: "mk", Query: "CREATE (:N {name:'x', v: 0})"}},
+		Sessions: []*isolationtest.Session{
+			{Name: "s1", Setup: []isolationtest.Step{{Name: "s1b", Ctl: isolationtest.Begin}}, Steps: []isolationtest.Step{
+				{Name: "s1w", Query: "MATCH (n:N {name:'x'}) SET n.v = 1"},
+				{Name: "s1e", Query: "MATCH (n:N {name:'x'}) RETURN n.v / 0 AS boom"},
+				{Name: "s1c", Ctl: isolationtest.Commit},
+				{Name: "s1st", Label: "<writers in flight>", Hook: func(context.Context) error {
+					writers = g.MVCCStats().Write.Writers
+					return nil
+				}},
+			}},
+			{Name: "s2", Steps: []isolationtest.Step{
+				{Name: "s2w", Query: "MATCH (n:N {name:'x'}) SET n.v = 2 RETURN n.v AS v"},
+			}},
+		},
+		Final:        []isolationtest.Step{{Name: "fin", Query: "MATCH (n:N {name:'x'}) RETURN n.v AS v"}},
+		Permutations: [][]string{{"s1w", "s1e", "s1c", "s1st", "s2w"}},
+	}
+	got := runToString(t, s, r)
+	if !errors.Is(commitEr, cypher.ErrTxPoisoned) {
+		t.Fatalf("COMMIT reported %v, want cypher.ErrTxPoisoned:\n%s", commitEr, got)
+	}
+	if writers != 0 {
+		t.Errorf("%d writers in flight after the COMMIT of the poisoned transaction, want 0:\n%s", writers, got)
+	}
+	if want := "step s2w: MATCH (n:N {name:'x'}) SET n.v = 2 RETURN n.v AS v\nv\n-\n2\n(1 row)\n"; !strings.Contains(got, want) {
+		t.Errorf("the peer's write after the poisoned COMMIT did not succeed\n--- want fragment ---\n%s--- got ---\n%s", want, got)
+	}
+	if want := "final fin: MATCH (n:N {name:'x'}) RETURN n.v AS v\nv\n-\n2\n(1 row)\n"; !strings.Contains(got, want) {
+		t.Errorf("final state is not the peer's write\n--- want fragment ---\n%s--- got ---\n%s", want, got)
 	}
 }

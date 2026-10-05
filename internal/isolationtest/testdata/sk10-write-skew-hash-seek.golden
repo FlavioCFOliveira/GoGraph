@@ -4,7 +4,7 @@ spec sk10-write-skew-hash-seek: 2 sessions, 20 permutations
 # is permitted (both commit), and the seek must equal the scan in every step.
 
 starting permutation: s1r s1w s1c s2r s2w s2c
-step s1r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
+step s1r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek OPTIONAL MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
 seek|scan
 ----+----
 2   |2   
@@ -15,7 +15,7 @@ who
 "alice"
 (1 row)
 step s1c: COMMIT
-step s2r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
+step s2r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek OPTIONAL MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
 seek|scan
 ----+----
 2   |2   
@@ -33,7 +33,7 @@ oncall
 (1 row)
 
 starting permutation: s1r s1w s2r s1c s2w s2c
-step s1r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
+step s1r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek OPTIONAL MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
 seek|scan
 ----+----
 2   |2   
@@ -43,7 +43,7 @@ who
 -------
 "alice"
 (1 row)
-step s2r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
+step s2r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek OPTIONAL MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
 seek|scan
 ----+----
 2   |2   
@@ -62,7 +62,7 @@ oncall
 (1 row)
 
 starting permutation: s1r s1w s2r s2w s1c s2c
-step s1r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
+step s1r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek OPTIONAL MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
 seek|scan
 ----+----
 2   |2   
@@ -72,7 +72,7 @@ who
 -------
 "alice"
 (1 row)
-step s2r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
+step s2r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek OPTIONAL MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
 seek|scan
 ----+----
 2   |2   
@@ -91,7 +91,7 @@ oncall
 (1 row)
 
 starting permutation: s1r s1w s2r s2w s2c s1c
-step s1r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
+step s1r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek OPTIONAL MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
 seek|scan
 ----+----
 2   |2   
@@ -101,7 +101,7 @@ who
 -------
 "alice"
 (1 row)
-step s2r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
+step s2r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek OPTIONAL MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
 seek|scan
 ----+----
 2   |2   
@@ -120,12 +120,12 @@ oncall
 (1 row)
 
 starting permutation: s1r s2r s1w s1c s2w s2c
-step s1r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
+step s1r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek OPTIONAL MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
 seek|scan
 ----+----
 2   |2   
 (1 row)
-step s2r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
+step s2r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek OPTIONAL MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
 seek|scan
 ----+----
 2   |2   
@@ -149,12 +149,12 @@ oncall
 (1 row)
 
 starting permutation: s1r s2r s1w s2w s1c s2c
-step s1r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
+step s1r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek OPTIONAL MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
 seek|scan
 ----+----
 2   |2   
 (1 row)
-step s2r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
+step s2r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek OPTIONAL MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
 seek|scan
 ----+----
 2   |2   
@@ -178,12 +178,12 @@ oncall
 (1 row)
 
 starting permutation: s1r s2r s1w s2w s2c s1c
-step s1r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
+step s1r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek OPTIONAL MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
 seek|scan
 ----+----
 2   |2   
 (1 row)
-step s2r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
+step s2r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek OPTIONAL MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
 seek|scan
 ----+----
 2   |2   
@@ -207,12 +207,12 @@ oncall
 (1 row)
 
 starting permutation: s1r s2r s2w s1w s1c s2c
-step s1r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
+step s1r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek OPTIONAL MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
 seek|scan
 ----+----
 2   |2   
 (1 row)
-step s2r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
+step s2r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek OPTIONAL MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
 seek|scan
 ----+----
 2   |2   
@@ -236,12 +236,12 @@ oncall
 (1 row)
 
 starting permutation: s1r s2r s2w s1w s2c s1c
-step s1r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
+step s1r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek OPTIONAL MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
 seek|scan
 ----+----
 2   |2   
 (1 row)
-step s2r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
+step s2r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek OPTIONAL MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
 seek|scan
 ----+----
 2   |2   
@@ -265,12 +265,12 @@ oncall
 (1 row)
 
 starting permutation: s1r s2r s2w s2c s1w s1c
-step s1r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
+step s1r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek OPTIONAL MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
 seek|scan
 ----+----
 2   |2   
 (1 row)
-step s2r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
+step s2r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek OPTIONAL MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
 seek|scan
 ----+----
 2   |2   
@@ -294,12 +294,12 @@ oncall
 (1 row)
 
 starting permutation: s2r s1r s1w s1c s2w s2c
-step s2r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
+step s2r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek OPTIONAL MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
 seek|scan
 ----+----
 2   |2   
 (1 row)
-step s1r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
+step s1r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek OPTIONAL MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
 seek|scan
 ----+----
 2   |2   
@@ -323,12 +323,12 @@ oncall
 (1 row)
 
 starting permutation: s2r s1r s1w s2w s1c s2c
-step s2r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
+step s2r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek OPTIONAL MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
 seek|scan
 ----+----
 2   |2   
 (1 row)
-step s1r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
+step s1r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek OPTIONAL MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
 seek|scan
 ----+----
 2   |2   
@@ -352,12 +352,12 @@ oncall
 (1 row)
 
 starting permutation: s2r s1r s1w s2w s2c s1c
-step s2r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
+step s2r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek OPTIONAL MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
 seek|scan
 ----+----
 2   |2   
 (1 row)
-step s1r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
+step s1r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek OPTIONAL MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
 seek|scan
 ----+----
 2   |2   
@@ -381,12 +381,12 @@ oncall
 (1 row)
 
 starting permutation: s2r s1r s2w s1w s1c s2c
-step s2r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
+step s2r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek OPTIONAL MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
 seek|scan
 ----+----
 2   |2   
 (1 row)
-step s1r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
+step s1r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek OPTIONAL MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
 seek|scan
 ----+----
 2   |2   
@@ -410,12 +410,12 @@ oncall
 (1 row)
 
 starting permutation: s2r s1r s2w s1w s2c s1c
-step s2r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
+step s2r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek OPTIONAL MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
 seek|scan
 ----+----
 2   |2   
 (1 row)
-step s1r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
+step s1r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek OPTIONAL MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
 seek|scan
 ----+----
 2   |2   
@@ -439,12 +439,12 @@ oncall
 (1 row)
 
 starting permutation: s2r s1r s2w s2c s1w s1c
-step s2r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
+step s2r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek OPTIONAL MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
 seek|scan
 ----+----
 2   |2   
 (1 row)
-step s1r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
+step s1r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek OPTIONAL MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
 seek|scan
 ----+----
 2   |2   
@@ -468,7 +468,7 @@ oncall
 (1 row)
 
 starting permutation: s2r s2w s1r s1w s1c s2c
-step s2r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
+step s2r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek OPTIONAL MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
 seek|scan
 ----+----
 2   |2   
@@ -478,7 +478,7 @@ who
 -----
 "bob"
 (1 row)
-step s1r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
+step s1r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek OPTIONAL MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
 seek|scan
 ----+----
 2   |2   
@@ -497,7 +497,7 @@ oncall
 (1 row)
 
 starting permutation: s2r s2w s1r s1w s2c s1c
-step s2r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
+step s2r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek OPTIONAL MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
 seek|scan
 ----+----
 2   |2   
@@ -507,7 +507,7 @@ who
 -----
 "bob"
 (1 row)
-step s1r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
+step s1r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek OPTIONAL MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
 seek|scan
 ----+----
 2   |2   
@@ -526,7 +526,7 @@ oncall
 (1 row)
 
 starting permutation: s2r s2w s1r s2c s1w s1c
-step s2r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
+step s2r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek OPTIONAL MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
 seek|scan
 ----+----
 2   |2   
@@ -536,7 +536,7 @@ who
 -----
 "bob"
 (1 row)
-step s1r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
+step s1r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek OPTIONAL MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
 seek|scan
 ----+----
 2   |2   
@@ -555,7 +555,7 @@ oncall
 (1 row)
 
 starting permutation: s2r s2w s2c s1r s1w s1c
-step s2r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
+step s2r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek OPTIONAL MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
 seek|scan
 ----+----
 2   |2   
@@ -566,7 +566,7 @@ who
 "bob"
 (1 row)
 step s2c: COMMIT
-step s1r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
+step s1r: MATCH (d:Doctor) WHERE d.oncall = 1 WITH count(d) AS seek OPTIONAL MATCH (e:Doctor) WHERE e.oncall + 0 = 1 RETURN seek, count(e) AS scan
 seek|scan
 ----+----
 2   |2   

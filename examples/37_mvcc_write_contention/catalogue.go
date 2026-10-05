@@ -6,8 +6,8 @@ package main
 // interleaving of its steps (or, where the catalogue says so, over named
 // interleavings) and pinned by a golden transcript under testdata/. The rows,
 // their sources and their expected snapshot-isolation outcomes come from
-// docs/mvcc-scenario-catalogue.md §1.1 to §1.4 (§1.3 and §1.4 in
-// catalogue_mgix.go); README.md maps each row to its
+// docs/mvcc-scenario-catalogue.md §1.1 to §1.7 (§1.3 and §1.4 in
+// catalogue_mgix.go, §1.5 to §1.7 in catalogue_ddhz.go); README.md maps each row to its
 // PostgreSQL or InnoDB source and states where GoGraph's outcome differs and why.
 //
 // # Two drivers over one graph (H3)
@@ -64,6 +64,21 @@ const (
 // A world is NOT safe for concurrent use by two runners.
 type world struct {
 	g *lpg.Graph[string, float64]
+	// eng is the Cypher engine of the permutation in force, for the Go steps that
+	// drive it directly: a sessionless read, a statement cancelled mid-flight, a
+	// client-side retry loop (catalogue_ddhz.go).
+	eng *cypher.Engine
+	// parallelScanThreshold, when non-zero, is the engine's
+	// cypher.EngineOptions.ParallelScanThreshold: RO03 lowers it so a small
+	// fixture takes the morsel-parallel count path.
+	parallelScanThreshold int
+	// held is the statement a cancelMidStatement step has in flight, parked in
+	// the cat.hold procedure; nil when there is none.
+	held *heldStatement
+	// resets run when a permutation's engine is built, and closers when it is
+	// closed: the per-permutation state of the Go steps beyond the lpg sessions.
+	resets  []func()
+	closers []func()
 	// sessions are the lpg-driver session states of the spec, reset for every
 	// permutation so no transaction or snapshot survives into the next one.
 	sessions []*lpgSession
@@ -78,18 +93,29 @@ type world struct {
 // over it, and every lpg-driver session state reset.
 func (w *world) engine() (*isolationtest.Engine, error) {
 	g := newGraph()
-	eng := cypher.NewEngine(g)
-	w.g = g
+	eng := cypher.NewEngineWithOptions(g, cypher.EngineOptions{ParallelScanThreshold: w.parallelScanThreshold})
+	if err := w.registerHold(eng); err != nil {
+		return nil, errors.Join(err, eng.Close())
+	}
+	w.g, w.eng = g, eng
 	for _, s := range w.sessions {
 		s.reset()
+	}
+	for _, r := range w.resets {
+		r()
 	}
 	return &isolationtest.Engine{
 		Eng: eng,
 		Close: func() error {
-			// An lpg-driver transaction left open by a permutation would pin a
-			// horizon slot; close it before the graph so nothing is leaked.
+			// A statement parked in cat.hold, or a transaction left open by a
+			// permutation, would pin a goroutine or a horizon slot; end them before
+			// the graph so nothing is leaked.
+			w.releaseHeld()
 			for _, s := range w.sessions {
 				s.abandon()
+			}
+			for _, c := range w.closers {
+				c()
 			}
 			return eng.Close()
 		},
@@ -139,6 +165,8 @@ type lpgSession struct {
 	w    *world
 	sess *lpg.Session[string, float64]
 	tx   lpg.WriteTx
+	// snap is the read snapshot a beginRead step holds, nil when there is none.
+	snap *lpg.Snapshot
 }
 
 func (w *world) lpgSession() *lpgSession {
@@ -147,13 +175,16 @@ func (w *world) lpgSession() *lpgSession {
 	return s
 }
 
-func (s *lpgSession) reset() { s.sess, s.tx = nil, lpg.WriteTx{} }
+func (s *lpgSession) reset() { s.sess, s.tx, s.snap = nil, lpg.WriteTx{}, nil }
 
 // abandon ends whatever the session still holds. A write transaction ended here
 // publishes, which is harmless: the graph is discarded right after.
 func (s *lpgSession) abandon() {
 	if s.tx.Valid() {
 		s.sess.EndVersionedTx(s.tx)
+	}
+	if s.snap != nil {
+		s.w.g.EndRead(s.snap)
 	}
 	s.reset()
 }
@@ -245,9 +276,9 @@ func (s *lpgSession) delProp(name, key, prop string) isolationtest.Step {
 		}}
 }
 
-// read returns key.prop for each "key.prop" named, at the session's instant: its
-// write transaction's own view or — outside any transaction — a snapshot taken
-// for this one read.
+// read returns key.prop for each "key.prop" named, at the session's instant: the
+// read snapshot it holds, its write transaction's own view or — outside both — a
+// snapshot taken for this one read.
 //
 // Under the perKeySnapshot seam every key is read at a FRESH snapshot instead.
 func (s *lpgSession) read(name string, refs ...string) isolationtest.Step {
@@ -266,6 +297,8 @@ func (s *lpgSession) read(name string, refs ...string) isolationtest.Step {
 					snap := g.BeginRead()
 					v, ok = g.GetNodePropertyAsOf(key, prop, snap)
 					g.EndRead(snap)
+				case s.snap != nil:
+					v, ok = g.GetNodePropertyAsOf(key, prop, s.snap)
 				case s.tx.Valid():
 					v, ok = g.WriterViewOf(s.tx).GetNodeProperty(key, prop)
 				default:
@@ -469,6 +502,42 @@ func catalogue() []scenario {
 		{ID: "IX08", Driver: driverCypher, build: ix08, check: seekEqualsScan},
 		{ID: "IX09", Driver: driverCypher, build: ix09, check: seekEqualsScan},
 		{ID: "IX10", Driver: driverCypher, build: ix10, check: seekEqualsScan},
+		{ID: "DD01", Driver: driverCypher, build: dd01Commit, check: seekEqualsScan},
+		{ID: "DD01", Driver: driverCypher, build: dd01Rollback, check: seekEqualsScan},
+		{ID: "DD02", Driver: driverCypher, build: dd02, check: seekEqualsScan},
+		{ID: "DD03", Driver: driverCypher, build: dd03, check: seekEqualsScan},
+		{ID: "DD04", Driver: driverCypher, build: dd04, check: seekEqualsScan},
+		{ID: "DD05", Driver: driverCypher, build: dd05Commit, check: seekEqualsScan},
+		{ID: "DD05", Driver: driverCypher, build: dd05Rollback, check: seekEqualsScan},
+		{ID: "DD06", Driver: driverCypher, build: dd06},
+		{ID: "DD07", Driver: driverCypher, build: dd07InWriteTx},
+		{ID: "DD07", Driver: driverCypher, build: dd07InReadTx},
+		{ID: "DD08", Driver: driverCypher, build: dd08},
+		{ID: "DD09", Driver: driverCypher, build: dd09, check: seekEqualsScan},
+		{ID: "AB01", Driver: driverCypher, build: ab01Commit},
+		{ID: "AB01", Driver: driverCypher, build: ab01Rollback},
+		{ID: "AB02", Driver: driverCypher, build: ab02, check: seekEqualsScan},
+		{ID: "AB03", Driver: driverCypher, build: ab03Cypher},
+		{ID: "AB03", Driver: driverLPG, build: ab03LPG},
+		{ID: "AB04", Driver: driverCypher, build: ab04, check: acknowledgedEqualsFinal},
+		{ID: "AB05", Driver: driverCypher, build: ab05, check: seekEqualsScan},
+		{ID: "AB06", Driver: driverCypher, build: ab06Commit},
+		{ID: "AB06", Driver: driverCypher, build: ab06Rollback},
+		{ID: "AB06", Driver: driverLPG, build: ab06LPG},
+		{ID: "HZ01", Driver: driverCypher, build: hz01Cypher, check: retainedThenReclaimed},
+		{ID: "HZ01", Driver: driverLPG, build: hz01LPG, check: retainedThenReclaimed},
+		{ID: "HZ02", Driver: driverCypher, build: hz02Cypher},
+		{ID: "HZ02", Driver: driverLPG, build: hz02LPG},
+		{ID: "HZ03", Driver: driverCypher, build: hz03Cypher},
+		{ID: "HZ03", Driver: driverLPG, build: hz03LPG},
+		{ID: "HZ04", Driver: driverCypher, build: hz04},
+		{ID: "RO01", Driver: driverCypher, build: ro01Cypher, check: stableRead},
+		{ID: "RO01", Driver: driverLPG, build: ro01LPG, check: stableRead},
+		{ID: "RO02", Driver: driverCypher, build: ro02Cypher},
+		{ID: "RO02", Driver: driverLPG, build: ro02LPG},
+		{ID: "RO03", Driver: driverCypher, build: ro03, check: fastPathEqualsScan},
+		{ID: "SE01", Driver: driverCypher, build: se01},
+		{ID: "SE03", Driver: driverCypher, build: se03},
 	}
 }
 
@@ -1299,9 +1368,14 @@ func sk08(*world) *isolationtest.Spec {
 
 // sk10Spec is SK01 with the on-call count read twice: once through the indexed
 // predicate (a seek) and once through a non-sargable spelling of it (a scan).
+//
+// The scan arm is an OPTIONAL MATCH, as in the index rows ([seekScan]): with a
+// plain MATCH, a scan that finds no doctor leaves no row to group, the statement
+// returns no row, and a seek that counted a doctor the scan did not would vanish
+// from the transcript instead of disagreeing in it.
 func sk10Spec(name, kind, index, seek, scan string) *isolationtest.Spec {
 	read := "MATCH (d:Doctor) WHERE " + seek + " WITH count(d) AS seek " +
-		"MATCH (e:Doctor) WHERE " + strings.ReplaceAll(scan, "d.", "e.") + " RETURN seek, count(e) AS scan"
+		"OPTIONAL MATCH (e:Doctor) WHERE " + strings.ReplaceAll(scan, "d.", "e.") + " RETURN seek, count(e) AS scan"
 	return &isolationtest.Spec{
 		Name: name,
 		Doc: "SK10, " + kind + ". SK01 write skew with the on-call count read through an index\n" +

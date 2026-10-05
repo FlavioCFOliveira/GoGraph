@@ -1,0 +1,364 @@
+spec hz02-autocommit-read-releases-slot-lpg: 2 sessions, 15 permutations
+# HZ02 through the lpg API: s1 pins Graph.BeginRead and releases it; s2 reads x.v at
+# a snapshot taken and released for that one read. Only a held snapshot occupies a
+# slot.
+
+starting permutation: s1b s1p s1c s1p2 s2r s2p
+step s1b: lpg: Graph.BeginRead
+step s1p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+1               
+(1 row)
+step s1c: lpg: Graph.EndRead
+step s1p2: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+step s2r: lpg: read x.v
+x.v
+---
+0  
+(1 row)
+step s2p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+
+starting permutation: s1b s1p s1c s2r s1p2 s2p
+step s1b: lpg: Graph.BeginRead
+step s1p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+1               
+(1 row)
+step s1c: lpg: Graph.EndRead
+step s2r: lpg: read x.v
+x.v
+---
+0  
+(1 row)
+step s1p2: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+step s2p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+
+starting permutation: s1b s1p s1c s2r s2p s1p2
+step s1b: lpg: Graph.BeginRead
+step s1p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+1               
+(1 row)
+step s1c: lpg: Graph.EndRead
+step s2r: lpg: read x.v
+x.v
+---
+0  
+(1 row)
+step s2p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+step s1p2: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+
+starting permutation: s1b s1p s2r s1c s1p2 s2p
+step s1b: lpg: Graph.BeginRead
+step s1p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+1               
+(1 row)
+step s2r: lpg: read x.v
+x.v
+---
+0  
+(1 row)
+step s1c: lpg: Graph.EndRead
+step s1p2: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+step s2p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+
+starting permutation: s1b s1p s2r s1c s2p s1p2
+step s1b: lpg: Graph.BeginRead
+step s1p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+1               
+(1 row)
+step s2r: lpg: read x.v
+x.v
+---
+0  
+(1 row)
+step s1c: lpg: Graph.EndRead
+step s2p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+step s1p2: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+
+starting permutation: s1b s1p s2r s2p s1c s1p2
+step s1b: lpg: Graph.BeginRead
+step s1p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+1               
+(1 row)
+step s2r: lpg: read x.v
+x.v
+---
+0  
+(1 row)
+step s2p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+1               
+(1 row)
+step s1c: lpg: Graph.EndRead
+step s1p2: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+
+starting permutation: s1b s2r s1p s1c s1p2 s2p
+step s1b: lpg: Graph.BeginRead
+step s2r: lpg: read x.v
+x.v
+---
+0  
+(1 row)
+step s1p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+1               
+(1 row)
+step s1c: lpg: Graph.EndRead
+step s1p2: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+step s2p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+
+starting permutation: s1b s2r s1p s1c s2p s1p2
+step s1b: lpg: Graph.BeginRead
+step s2r: lpg: read x.v
+x.v
+---
+0  
+(1 row)
+step s1p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+1               
+(1 row)
+step s1c: lpg: Graph.EndRead
+step s2p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+step s1p2: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+
+starting permutation: s1b s2r s1p s2p s1c s1p2
+step s1b: lpg: Graph.BeginRead
+step s2r: lpg: read x.v
+x.v
+---
+0  
+(1 row)
+step s1p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+1               
+(1 row)
+step s2p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+1               
+(1 row)
+step s1c: lpg: Graph.EndRead
+step s1p2: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+
+starting permutation: s1b s2r s2p s1p s1c s1p2
+step s1b: lpg: Graph.BeginRead
+step s2r: lpg: read x.v
+x.v
+---
+0  
+(1 row)
+step s2p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+1               
+(1 row)
+step s1p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+1               
+(1 row)
+step s1c: lpg: Graph.EndRead
+step s1p2: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+
+starting permutation: s2r s1b s1p s1c s1p2 s2p
+step s2r: lpg: read x.v
+x.v
+---
+0  
+(1 row)
+step s1b: lpg: Graph.BeginRead
+step s1p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+1               
+(1 row)
+step s1c: lpg: Graph.EndRead
+step s1p2: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+step s2p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+
+starting permutation: s2r s1b s1p s1c s2p s1p2
+step s2r: lpg: read x.v
+x.v
+---
+0  
+(1 row)
+step s1b: lpg: Graph.BeginRead
+step s1p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+1               
+(1 row)
+step s1c: lpg: Graph.EndRead
+step s2p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+step s1p2: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+
+starting permutation: s2r s1b s1p s2p s1c s1p2
+step s2r: lpg: read x.v
+x.v
+---
+0  
+(1 row)
+step s1b: lpg: Graph.BeginRead
+step s1p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+1               
+(1 row)
+step s2p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+1               
+(1 row)
+step s1c: lpg: Graph.EndRead
+step s1p2: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+
+starting permutation: s2r s1b s2p s1p s1c s1p2
+step s2r: lpg: read x.v
+x.v
+---
+0  
+(1 row)
+step s1b: lpg: Graph.BeginRead
+step s2p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+1               
+(1 row)
+step s1p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+1               
+(1 row)
+step s1c: lpg: Graph.EndRead
+step s1p2: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+
+starting permutation: s2r s2p s1b s1p s1c s1p2
+step s2r: lpg: read x.v
+x.v
+---
+0  
+(1 row)
+step s2p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)
+step s1b: lpg: Graph.BeginRead
+step s1p: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+1               
+(1 row)
+step s1c: lpg: Graph.EndRead
+step s1p2: <MVCCStats.ActiveSnapshots>
+active_snapshots
+----------------
+0               
+(1 row)

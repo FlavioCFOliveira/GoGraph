@@ -1,0 +1,139 @@
+spec hz03-aborted-versions-withdrawn: 2 sessions, 6 permutations
+# HZ03. s1 sets x.v = 1 and rolls back; the vacuum is drained (H1). s2 reads x and
+# then writes x.v = 2 in autocommit statements. No reader ever sees v = 1; s2's write
+# is refused only while s1's version is in flight, and succeeds once it is withdrawn.
+
+starting permutation: s1w s1rb s1dr s2r s2w
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+step s2r: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+0
+(1 row)
+step s2w: MATCH (n:Item {name:'x'}) SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+
+starting permutation: s1w s2r s1rb s1dr s2w
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s2r: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+0
+(1 row)
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+step s2w: MATCH (n:Item {name:'x'}) SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+
+starting permutation: s1w s2r s2w s1rb s1dr
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s2r: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+0
+(1 row)
+step s2w: MATCH (n:Item {name:'x'}) SET n.v = 2 RETURN n.v AS v
+ERROR: serialization conflict
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+0
+(1 row)
+
+starting permutation: s2r s1w s1rb s1dr s2w
+step s2r: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+0
+(1 row)
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+step s2w: MATCH (n:Item {name:'x'}) SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+2
+(1 row)
+
+starting permutation: s2r s1w s2w s1rb s1dr
+step s2r: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+0
+(1 row)
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+v
+-
+1
+(1 row)
+step s2w: MATCH (n:Item {name:'x'}) SET n.v = 2 RETURN n.v AS v
+ERROR: serialization conflict
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+0
+(1 row)
+
+starting permutation: s2r s2w s1w s1rb s1dr
+step s2r: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+0
+(1 row)
+step s2w: MATCH (n:Item {name:'x'}) SET n.v = 2 RETURN n.v AS v
+v
+-
+2
+(1 row)
+step s1w: MATCH (n:Item {name:'x'}) SET n.v = 1 RETURN n.v AS v
+ERROR: serialization conflict
+step s1rb: ROLLBACK
+step s1dr: <vacuum drain>
+final final: MATCH (n:Item {name:'x'}) RETURN n.v AS v
+v
+-
+2
+(1 row)

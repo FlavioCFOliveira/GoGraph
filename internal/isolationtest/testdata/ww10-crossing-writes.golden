@@ -121,14 +121,16 @@ ERROR: serialization conflict
 step s1c: COMMIT
 ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
 step s2a: MATCH (n:Item {name:'A'}) SET n.v = 2 RETURN n.v AS v
-ERROR: serialization conflict
+v
+-
+2
+(1 row)
 step s2c: COMMIT
-ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
 final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
 name|v
 ----+-
-"A" |0
-"B" |0
+"A" |2
+"B" |2
 (2 rows)
 
 starting permutation: s1a s2b2 s1b2 s2a s1c s2c
@@ -251,14 +253,16 @@ ERROR: serialization conflict
 step s2c: COMMIT
 ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
 step s1b2: MATCH (n:Item {name:'B'}) SET n.v = 1 RETURN n.v AS v
-ERROR: serialization conflict
+v
+-
+1
+(1 row)
 step s1c: COMMIT
-ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
 final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
 name|v
 ----+-
-"A" |0
-"B" |0
+"A" |1
+"B" |1
 (2 rows)
 
 starting permutation: s2b2 s1a s1b2 s1c s2a s2c
@@ -277,14 +281,16 @@ ERROR: serialization conflict
 step s1c: COMMIT
 ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
 step s2a: MATCH (n:Item {name:'A'}) SET n.v = 2 RETURN n.v AS v
-ERROR: serialization conflict
+v
+-
+2
+(1 row)
 step s2c: COMMIT
-ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
 final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
 name|v
 ----+-
-"A" |0
-"B" |0
+"A" |2
+"B" |2
 (2 rows)
 
 starting permutation: s2b2 s1a s1b2 s2a s1c s2c
@@ -407,14 +413,16 @@ ERROR: serialization conflict
 step s2c: COMMIT
 ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
 step s1b2: MATCH (n:Item {name:'B'}) SET n.v = 1 RETURN n.v AS v
-ERROR: serialization conflict
+v
+-
+1
+(1 row)
 step s1c: COMMIT
-ERROR: cypher: transaction poisoned by a prior failed Exec statement — call Rollback
 final final: MATCH (n:Item) RETURN n.name AS name, n.v AS v ORDER BY name
 name|v
 ----+-
-"A" |0
-"B" |0
+"A" |1
+"B" |1
 (2 rows)
 
 starting permutation: s2b2 s2a s1a s1b2 s1c s2c

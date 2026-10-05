@@ -1,0 +1,586 @@
+spec dd07-ddl-in-write-tx: 2 sessions, 20 permutations
+# DD07, write transactions. s1 creates t1, then issues CREATE INDEX inside its
+# explicit transaction, then COMMITs; s2 creates t2, issues CREATE CONSTRAINT, then
+# rolls back. DDL inside an explicit transaction is rejected (F9) and creates nothing.
+# This transcript pins whether the rejection poisons the transaction. MySQL commits
+# the transaction implicitly instead.
+
+starting permutation: s1w s1ddl s1c s2w s2ddl s2rb
+step s1w: CREATE (n:L {name:'t1'}) RETURN n.name AS name
+name
+----
+"t1"
+(1 row)
+step s1ddl: CREATE INDEX l_s FOR (n:L) ON (n.s)
+ERROR: cypher: DDL statement "CREATE INDEX l_s FOR (n:L) ON (n.s)" is not allowed inside an explicit transaction
+step s1c: COMMIT
+step s2w: CREATE (n:L {name:'t2'}) RETURN n.name AS name
+name
+----
+"t2"
+(1 row)
+step s2ddl: CREATE CONSTRAINT k_unique FOR (n:K) REQUIRE n.k IS UNIQUE
+ERROR: cypher: DDL statement "CREATE CONSTRAINT k_unique FOR (n:K) REQUIRE n.k IS UNIQUE" is not allowed inside an explicit transaction
+step s2rb: ROLLBACK
+final final: MATCH (n:L) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"t1"
+(2 rows)
+final fschema: <schema>
+kind|name|definition
+----+----+----------
+none|    |          
+(1 row)
+
+starting permutation: s1w s1ddl s2w s1c s2ddl s2rb
+step s1w: CREATE (n:L {name:'t1'}) RETURN n.name AS name
+name
+----
+"t1"
+(1 row)
+step s1ddl: CREATE INDEX l_s FOR (n:L) ON (n.s)
+ERROR: cypher: DDL statement "CREATE INDEX l_s FOR (n:L) ON (n.s)" is not allowed inside an explicit transaction
+step s2w: CREATE (n:L {name:'t2'}) RETURN n.name AS name
+name
+----
+"t2"
+(1 row)
+step s1c: COMMIT
+step s2ddl: CREATE CONSTRAINT k_unique FOR (n:K) REQUIRE n.k IS UNIQUE
+ERROR: cypher: DDL statement "CREATE CONSTRAINT k_unique FOR (n:K) REQUIRE n.k IS UNIQUE" is not allowed inside an explicit transaction
+step s2rb: ROLLBACK
+final final: MATCH (n:L) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"t1"
+(2 rows)
+final fschema: <schema>
+kind|name|definition
+----+----+----------
+none|    |          
+(1 row)
+
+starting permutation: s1w s1ddl s2w s2ddl s1c s2rb
+step s1w: CREATE (n:L {name:'t1'}) RETURN n.name AS name
+name
+----
+"t1"
+(1 row)
+step s1ddl: CREATE INDEX l_s FOR (n:L) ON (n.s)
+ERROR: cypher: DDL statement "CREATE INDEX l_s FOR (n:L) ON (n.s)" is not allowed inside an explicit transaction
+step s2w: CREATE (n:L {name:'t2'}) RETURN n.name AS name
+name
+----
+"t2"
+(1 row)
+step s2ddl: CREATE CONSTRAINT k_unique FOR (n:K) REQUIRE n.k IS UNIQUE
+ERROR: cypher: DDL statement "CREATE CONSTRAINT k_unique FOR (n:K) REQUIRE n.k IS UNIQUE" is not allowed inside an explicit transaction
+step s1c: COMMIT
+step s2rb: ROLLBACK
+final final: MATCH (n:L) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"t1"
+(2 rows)
+final fschema: <schema>
+kind|name|definition
+----+----+----------
+none|    |          
+(1 row)
+
+starting permutation: s1w s1ddl s2w s2ddl s2rb s1c
+step s1w: CREATE (n:L {name:'t1'}) RETURN n.name AS name
+name
+----
+"t1"
+(1 row)
+step s1ddl: CREATE INDEX l_s FOR (n:L) ON (n.s)
+ERROR: cypher: DDL statement "CREATE INDEX l_s FOR (n:L) ON (n.s)" is not allowed inside an explicit transaction
+step s2w: CREATE (n:L {name:'t2'}) RETURN n.name AS name
+name
+----
+"t2"
+(1 row)
+step s2ddl: CREATE CONSTRAINT k_unique FOR (n:K) REQUIRE n.k IS UNIQUE
+ERROR: cypher: DDL statement "CREATE CONSTRAINT k_unique FOR (n:K) REQUIRE n.k IS UNIQUE" is not allowed inside an explicit transaction
+step s2rb: ROLLBACK
+step s1c: COMMIT
+final final: MATCH (n:L) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"t1"
+(2 rows)
+final fschema: <schema>
+kind|name|definition
+----+----+----------
+none|    |          
+(1 row)
+
+starting permutation: s1w s2w s1ddl s1c s2ddl s2rb
+step s1w: CREATE (n:L {name:'t1'}) RETURN n.name AS name
+name
+----
+"t1"
+(1 row)
+step s2w: CREATE (n:L {name:'t2'}) RETURN n.name AS name
+name
+----
+"t2"
+(1 row)
+step s1ddl: CREATE INDEX l_s FOR (n:L) ON (n.s)
+ERROR: cypher: DDL statement "CREATE INDEX l_s FOR (n:L) ON (n.s)" is not allowed inside an explicit transaction
+step s1c: COMMIT
+step s2ddl: CREATE CONSTRAINT k_unique FOR (n:K) REQUIRE n.k IS UNIQUE
+ERROR: cypher: DDL statement "CREATE CONSTRAINT k_unique FOR (n:K) REQUIRE n.k IS UNIQUE" is not allowed inside an explicit transaction
+step s2rb: ROLLBACK
+final final: MATCH (n:L) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"t1"
+(2 rows)
+final fschema: <schema>
+kind|name|definition
+----+----+----------
+none|    |          
+(1 row)
+
+starting permutation: s1w s2w s1ddl s2ddl s1c s2rb
+step s1w: CREATE (n:L {name:'t1'}) RETURN n.name AS name
+name
+----
+"t1"
+(1 row)
+step s2w: CREATE (n:L {name:'t2'}) RETURN n.name AS name
+name
+----
+"t2"
+(1 row)
+step s1ddl: CREATE INDEX l_s FOR (n:L) ON (n.s)
+ERROR: cypher: DDL statement "CREATE INDEX l_s FOR (n:L) ON (n.s)" is not allowed inside an explicit transaction
+step s2ddl: CREATE CONSTRAINT k_unique FOR (n:K) REQUIRE n.k IS UNIQUE
+ERROR: cypher: DDL statement "CREATE CONSTRAINT k_unique FOR (n:K) REQUIRE n.k IS UNIQUE" is not allowed inside an explicit transaction
+step s1c: COMMIT
+step s2rb: ROLLBACK
+final final: MATCH (n:L) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"t1"
+(2 rows)
+final fschema: <schema>
+kind|name|definition
+----+----+----------
+none|    |          
+(1 row)
+
+starting permutation: s1w s2w s1ddl s2ddl s2rb s1c
+step s1w: CREATE (n:L {name:'t1'}) RETURN n.name AS name
+name
+----
+"t1"
+(1 row)
+step s2w: CREATE (n:L {name:'t2'}) RETURN n.name AS name
+name
+----
+"t2"
+(1 row)
+step s1ddl: CREATE INDEX l_s FOR (n:L) ON (n.s)
+ERROR: cypher: DDL statement "CREATE INDEX l_s FOR (n:L) ON (n.s)" is not allowed inside an explicit transaction
+step s2ddl: CREATE CONSTRAINT k_unique FOR (n:K) REQUIRE n.k IS UNIQUE
+ERROR: cypher: DDL statement "CREATE CONSTRAINT k_unique FOR (n:K) REQUIRE n.k IS UNIQUE" is not allowed inside an explicit transaction
+step s2rb: ROLLBACK
+step s1c: COMMIT
+final final: MATCH (n:L) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"t1"
+(2 rows)
+final fschema: <schema>
+kind|name|definition
+----+----+----------
+none|    |          
+(1 row)
+
+starting permutation: s1w s2w s2ddl s1ddl s1c s2rb
+step s1w: CREATE (n:L {name:'t1'}) RETURN n.name AS name
+name
+----
+"t1"
+(1 row)
+step s2w: CREATE (n:L {name:'t2'}) RETURN n.name AS name
+name
+----
+"t2"
+(1 row)
+step s2ddl: CREATE CONSTRAINT k_unique FOR (n:K) REQUIRE n.k IS UNIQUE
+ERROR: cypher: DDL statement "CREATE CONSTRAINT k_unique FOR (n:K) REQUIRE n.k IS UNIQUE" is not allowed inside an explicit transaction
+step s1ddl: CREATE INDEX l_s FOR (n:L) ON (n.s)
+ERROR: cypher: DDL statement "CREATE INDEX l_s FOR (n:L) ON (n.s)" is not allowed inside an explicit transaction
+step s1c: COMMIT
+step s2rb: ROLLBACK
+final final: MATCH (n:L) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"t1"
+(2 rows)
+final fschema: <schema>
+kind|name|definition
+----+----+----------
+none|    |          
+(1 row)
+
+starting permutation: s1w s2w s2ddl s1ddl s2rb s1c
+step s1w: CREATE (n:L {name:'t1'}) RETURN n.name AS name
+name
+----
+"t1"
+(1 row)
+step s2w: CREATE (n:L {name:'t2'}) RETURN n.name AS name
+name
+----
+"t2"
+(1 row)
+step s2ddl: CREATE CONSTRAINT k_unique FOR (n:K) REQUIRE n.k IS UNIQUE
+ERROR: cypher: DDL statement "CREATE CONSTRAINT k_unique FOR (n:K) REQUIRE n.k IS UNIQUE" is not allowed inside an explicit transaction
+step s1ddl: CREATE INDEX l_s FOR (n:L) ON (n.s)
+ERROR: cypher: DDL statement "CREATE INDEX l_s FOR (n:L) ON (n.s)" is not allowed inside an explicit transaction
+step s2rb: ROLLBACK
+step s1c: COMMIT
+final final: MATCH (n:L) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"t1"
+(2 rows)
+final fschema: <schema>
+kind|name|definition
+----+----+----------
+none|    |          
+(1 row)
+
+starting permutation: s1w s2w s2ddl s2rb s1ddl s1c
+step s1w: CREATE (n:L {name:'t1'}) RETURN n.name AS name
+name
+----
+"t1"
+(1 row)
+step s2w: CREATE (n:L {name:'t2'}) RETURN n.name AS name
+name
+----
+"t2"
+(1 row)
+step s2ddl: CREATE CONSTRAINT k_unique FOR (n:K) REQUIRE n.k IS UNIQUE
+ERROR: cypher: DDL statement "CREATE CONSTRAINT k_unique FOR (n:K) REQUIRE n.k IS UNIQUE" is not allowed inside an explicit transaction
+step s2rb: ROLLBACK
+step s1ddl: CREATE INDEX l_s FOR (n:L) ON (n.s)
+ERROR: cypher: DDL statement "CREATE INDEX l_s FOR (n:L) ON (n.s)" is not allowed inside an explicit transaction
+step s1c: COMMIT
+final final: MATCH (n:L) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"t1"
+(2 rows)
+final fschema: <schema>
+kind|name|definition
+----+----+----------
+none|    |          
+(1 row)
+
+starting permutation: s2w s1w s1ddl s1c s2ddl s2rb
+step s2w: CREATE (n:L {name:'t2'}) RETURN n.name AS name
+name
+----
+"t2"
+(1 row)
+step s1w: CREATE (n:L {name:'t1'}) RETURN n.name AS name
+name
+----
+"t1"
+(1 row)
+step s1ddl: CREATE INDEX l_s FOR (n:L) ON (n.s)
+ERROR: cypher: DDL statement "CREATE INDEX l_s FOR (n:L) ON (n.s)" is not allowed inside an explicit transaction
+step s1c: COMMIT
+step s2ddl: CREATE CONSTRAINT k_unique FOR (n:K) REQUIRE n.k IS UNIQUE
+ERROR: cypher: DDL statement "CREATE CONSTRAINT k_unique FOR (n:K) REQUIRE n.k IS UNIQUE" is not allowed inside an explicit transaction
+step s2rb: ROLLBACK
+final final: MATCH (n:L) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"t1"
+(2 rows)
+final fschema: <schema>
+kind|name|definition
+----+----+----------
+none|    |          
+(1 row)
+
+starting permutation: s2w s1w s1ddl s2ddl s1c s2rb
+step s2w: CREATE (n:L {name:'t2'}) RETURN n.name AS name
+name
+----
+"t2"
+(1 row)
+step s1w: CREATE (n:L {name:'t1'}) RETURN n.name AS name
+name
+----
+"t1"
+(1 row)
+step s1ddl: CREATE INDEX l_s FOR (n:L) ON (n.s)
+ERROR: cypher: DDL statement "CREATE INDEX l_s FOR (n:L) ON (n.s)" is not allowed inside an explicit transaction
+step s2ddl: CREATE CONSTRAINT k_unique FOR (n:K) REQUIRE n.k IS UNIQUE
+ERROR: cypher: DDL statement "CREATE CONSTRAINT k_unique FOR (n:K) REQUIRE n.k IS UNIQUE" is not allowed inside an explicit transaction
+step s1c: COMMIT
+step s2rb: ROLLBACK
+final final: MATCH (n:L) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"t1"
+(2 rows)
+final fschema: <schema>
+kind|name|definition
+----+----+----------
+none|    |          
+(1 row)
+
+starting permutation: s2w s1w s1ddl s2ddl s2rb s1c
+step s2w: CREATE (n:L {name:'t2'}) RETURN n.name AS name
+name
+----
+"t2"
+(1 row)
+step s1w: CREATE (n:L {name:'t1'}) RETURN n.name AS name
+name
+----
+"t1"
+(1 row)
+step s1ddl: CREATE INDEX l_s FOR (n:L) ON (n.s)
+ERROR: cypher: DDL statement "CREATE INDEX l_s FOR (n:L) ON (n.s)" is not allowed inside an explicit transaction
+step s2ddl: CREATE CONSTRAINT k_unique FOR (n:K) REQUIRE n.k IS UNIQUE
+ERROR: cypher: DDL statement "CREATE CONSTRAINT k_unique FOR (n:K) REQUIRE n.k IS UNIQUE" is not allowed inside an explicit transaction
+step s2rb: ROLLBACK
+step s1c: COMMIT
+final final: MATCH (n:L) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"t1"
+(2 rows)
+final fschema: <schema>
+kind|name|definition
+----+----+----------
+none|    |          
+(1 row)
+
+starting permutation: s2w s1w s2ddl s1ddl s1c s2rb
+step s2w: CREATE (n:L {name:'t2'}) RETURN n.name AS name
+name
+----
+"t2"
+(1 row)
+step s1w: CREATE (n:L {name:'t1'}) RETURN n.name AS name
+name
+----
+"t1"
+(1 row)
+step s2ddl: CREATE CONSTRAINT k_unique FOR (n:K) REQUIRE n.k IS UNIQUE
+ERROR: cypher: DDL statement "CREATE CONSTRAINT k_unique FOR (n:K) REQUIRE n.k IS UNIQUE" is not allowed inside an explicit transaction
+step s1ddl: CREATE INDEX l_s FOR (n:L) ON (n.s)
+ERROR: cypher: DDL statement "CREATE INDEX l_s FOR (n:L) ON (n.s)" is not allowed inside an explicit transaction
+step s1c: COMMIT
+step s2rb: ROLLBACK
+final final: MATCH (n:L) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"t1"
+(2 rows)
+final fschema: <schema>
+kind|name|definition
+----+----+----------
+none|    |          
+(1 row)
+
+starting permutation: s2w s1w s2ddl s1ddl s2rb s1c
+step s2w: CREATE (n:L {name:'t2'}) RETURN n.name AS name
+name
+----
+"t2"
+(1 row)
+step s1w: CREATE (n:L {name:'t1'}) RETURN n.name AS name
+name
+----
+"t1"
+(1 row)
+step s2ddl: CREATE CONSTRAINT k_unique FOR (n:K) REQUIRE n.k IS UNIQUE
+ERROR: cypher: DDL statement "CREATE CONSTRAINT k_unique FOR (n:K) REQUIRE n.k IS UNIQUE" is not allowed inside an explicit transaction
+step s1ddl: CREATE INDEX l_s FOR (n:L) ON (n.s)
+ERROR: cypher: DDL statement "CREATE INDEX l_s FOR (n:L) ON (n.s)" is not allowed inside an explicit transaction
+step s2rb: ROLLBACK
+step s1c: COMMIT
+final final: MATCH (n:L) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"t1"
+(2 rows)
+final fschema: <schema>
+kind|name|definition
+----+----+----------
+none|    |          
+(1 row)
+
+starting permutation: s2w s1w s2ddl s2rb s1ddl s1c
+step s2w: CREATE (n:L {name:'t2'}) RETURN n.name AS name
+name
+----
+"t2"
+(1 row)
+step s1w: CREATE (n:L {name:'t1'}) RETURN n.name AS name
+name
+----
+"t1"
+(1 row)
+step s2ddl: CREATE CONSTRAINT k_unique FOR (n:K) REQUIRE n.k IS UNIQUE
+ERROR: cypher: DDL statement "CREATE CONSTRAINT k_unique FOR (n:K) REQUIRE n.k IS UNIQUE" is not allowed inside an explicit transaction
+step s2rb: ROLLBACK
+step s1ddl: CREATE INDEX l_s FOR (n:L) ON (n.s)
+ERROR: cypher: DDL statement "CREATE INDEX l_s FOR (n:L) ON (n.s)" is not allowed inside an explicit transaction
+step s1c: COMMIT
+final final: MATCH (n:L) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"t1"
+(2 rows)
+final fschema: <schema>
+kind|name|definition
+----+----+----------
+none|    |          
+(1 row)
+
+starting permutation: s2w s2ddl s1w s1ddl s1c s2rb
+step s2w: CREATE (n:L {name:'t2'}) RETURN n.name AS name
+name
+----
+"t2"
+(1 row)
+step s2ddl: CREATE CONSTRAINT k_unique FOR (n:K) REQUIRE n.k IS UNIQUE
+ERROR: cypher: DDL statement "CREATE CONSTRAINT k_unique FOR (n:K) REQUIRE n.k IS UNIQUE" is not allowed inside an explicit transaction
+step s1w: CREATE (n:L {name:'t1'}) RETURN n.name AS name
+name
+----
+"t1"
+(1 row)
+step s1ddl: CREATE INDEX l_s FOR (n:L) ON (n.s)
+ERROR: cypher: DDL statement "CREATE INDEX l_s FOR (n:L) ON (n.s)" is not allowed inside an explicit transaction
+step s1c: COMMIT
+step s2rb: ROLLBACK
+final final: MATCH (n:L) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"t1"
+(2 rows)
+final fschema: <schema>
+kind|name|definition
+----+----+----------
+none|    |          
+(1 row)
+
+starting permutation: s2w s2ddl s1w s1ddl s2rb s1c
+step s2w: CREATE (n:L {name:'t2'}) RETURN n.name AS name
+name
+----
+"t2"
+(1 row)
+step s2ddl: CREATE CONSTRAINT k_unique FOR (n:K) REQUIRE n.k IS UNIQUE
+ERROR: cypher: DDL statement "CREATE CONSTRAINT k_unique FOR (n:K) REQUIRE n.k IS UNIQUE" is not allowed inside an explicit transaction
+step s1w: CREATE (n:L {name:'t1'}) RETURN n.name AS name
+name
+----
+"t1"
+(1 row)
+step s1ddl: CREATE INDEX l_s FOR (n:L) ON (n.s)
+ERROR: cypher: DDL statement "CREATE INDEX l_s FOR (n:L) ON (n.s)" is not allowed inside an explicit transaction
+step s2rb: ROLLBACK
+step s1c: COMMIT
+final final: MATCH (n:L) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"t1"
+(2 rows)
+final fschema: <schema>
+kind|name|definition
+----+----+----------
+none|    |          
+(1 row)
+
+starting permutation: s2w s2ddl s1w s2rb s1ddl s1c
+step s2w: CREATE (n:L {name:'t2'}) RETURN n.name AS name
+name
+----
+"t2"
+(1 row)
+step s2ddl: CREATE CONSTRAINT k_unique FOR (n:K) REQUIRE n.k IS UNIQUE
+ERROR: cypher: DDL statement "CREATE CONSTRAINT k_unique FOR (n:K) REQUIRE n.k IS UNIQUE" is not allowed inside an explicit transaction
+step s1w: CREATE (n:L {name:'t1'}) RETURN n.name AS name
+name
+----
+"t1"
+(1 row)
+step s2rb: ROLLBACK
+step s1ddl: CREATE INDEX l_s FOR (n:L) ON (n.s)
+ERROR: cypher: DDL statement "CREATE INDEX l_s FOR (n:L) ON (n.s)" is not allowed inside an explicit transaction
+step s1c: COMMIT
+final final: MATCH (n:L) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"t1"
+(2 rows)
+final fschema: <schema>
+kind|name|definition
+----+----+----------
+none|    |          
+(1 row)
+
+starting permutation: s2w s2ddl s2rb s1w s1ddl s1c
+step s2w: CREATE (n:L {name:'t2'}) RETURN n.name AS name
+name
+----
+"t2"
+(1 row)
+step s2ddl: CREATE CONSTRAINT k_unique FOR (n:K) REQUIRE n.k IS UNIQUE
+ERROR: cypher: DDL statement "CREATE CONSTRAINT k_unique FOR (n:K) REQUIRE n.k IS UNIQUE" is not allowed inside an explicit transaction
+step s2rb: ROLLBACK
+step s1w: CREATE (n:L {name:'t1'}) RETURN n.name AS name
+name
+----
+"t1"
+(1 row)
+step s1ddl: CREATE INDEX l_s FOR (n:L) ON (n.s)
+ERROR: cypher: DDL statement "CREATE INDEX l_s FOR (n:L) ON (n.s)" is not allowed inside an explicit transaction
+step s1c: COMMIT
+final final: MATCH (n:L) RETURN n.name AS name ORDER BY name
+name
+----
+"a" 
+"t1"
+(2 rows)
+final fschema: <schema>
+kind|name|definition
+----+----+----------
+none|    |          
+(1 row)

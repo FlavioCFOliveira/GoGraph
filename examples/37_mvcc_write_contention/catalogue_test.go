@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -45,9 +46,9 @@ func TestMain(m *testing.M) {
 const goldenDir = "../../internal/isolationtest/testdata"
 
 // catalogueGolden matches the catalogue's golden names: a catalogue row ID
-// prefix (ww01-, sk12-, mg02-, ix04-, ...). The harness's own goldens carry no
+// prefix (ww01-, sk12-, mg02-, ix04-, dd01-, ...). The harness's own goldens carry no
 // such prefix.
-var catalogueGolden = regexp.MustCompile(`^(ww|sk|mg|ix)\d{2}-.*\.golden$`)
+var catalogueGolden = regexp.MustCompile(`^(ww|sk|mg|ix|dd|ab|hz|ro|se)\d{2}-.*\.golden$`)
 
 // maxPermutations is the short-layer ceiling on one spec's interleavings. Every
 // spec is checked against it rather than assumed to fit, because the multinomial
@@ -183,24 +184,35 @@ func TestSK10AccessPaths(t *testing.T) {
 // compare a plan with itself. The label-count read (countL) is excluded: its seek
 // arm is the label store, not an index.
 //
-// IX08 creates its index in a step, not in its fixture; the test runs that step
-// first, so the read is checked in the state where the index exists.
+// A spec that creates its index or constraint in a step, not in its fixture (IX08,
+// DD01, DD02, DD05, DD09), lists that DDL here; the test runs it first, so the read
+// is checked in the state where the index exists.
 func TestIXAccessPaths(t *testing.T) {
 	t.Parallel()
-	builds := []func(*world) *isolationtest.Spec{ix01, ix02, ix03, ix04Hash, ix04Btree, ix05,
-		ix06, ix07, ix08, ix09, ix10}
-	for _, build := range builds {
+	const ixK = "CREATE INDEX l_k FOR (n:L) ON (n.k)"
+	builds := []struct {
+		build func(*world) *isolationtest.Spec
+		ddl   []string
+	}{
+		{build: ix01}, {build: ix02}, {build: ix03}, {build: ix04Hash}, {build: ix04Btree}, {build: ix05},
+		{build: ix06}, {build: ix07}, {build: ix08, ddl: []string{ixHash}}, {build: ix09}, {build: ix10},
+		{build: dd01Commit, ddl: []string{ixHash}}, {build: dd01Rollback, ddl: []string{ixHash}},
+		{build: dd02, ddl: []string{ixHash, ixK}}, {build: dd03}, {build: dd04},
+		{build: dd05Commit, ddl: []string{uniqueK}}, {build: dd05Rollback, ddl: []string{uniqueK}},
+		{build: dd09, ddl: []string{ixHash}}, {build: ab02},
+	}
+	for _, b := range builds {
 		w := &world{}
-		spec := build(w)
+		spec := b.build(w)
 		t.Run(spec.Name, func(t *testing.T) {
 			env, err := w.engine()
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer func() { _ = env.Close() }()
-			setup := spec.Setup
-			if spec.Name == "ix08-index-created-after-snapshot" {
-				setup = append(slices.Clone(setup), ixHashStep)
+			setup := slices.Clone(spec.Setup)
+			for i, ddl := range b.ddl {
+				setup = append(setup, isolationtest.Step{Name: "ddl" + strconv.Itoa(i), Query: ddl})
 			}
 			for _, st := range setup {
 				res, err := env.Eng.RunInTxAny(context.Background(), st.Query, nil)
@@ -232,9 +244,41 @@ func TestIXAccessPaths(t *testing.T) {
 	}
 }
 
-// ixHashStep is IX08's index-creating step, run by TestIXAccessPaths before it
-// plans IX08's read.
-var ixHashStep = isolationtest.Step{Name: "s2ix", Query: ixHash}
+// TestRO03TakesTheParallelPath proves RO03 compares what it claims to compare:
+// with its fixture built and its threshold set, the bare count is planned as the
+// morsel-parallel count and the filtered count is not.
+func TestRO03TakesTheParallelPath(t *testing.T) {
+	t.Parallel()
+	w := &world{}
+	spec := ro03(w)
+	env, err := w.engine()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = env.Close() }()
+	for _, st := range spec.Setup {
+		res, err := env.Eng.RunInTxAny(context.Background(), st.Query, nil)
+		if err != nil {
+			t.Fatalf("setup %s: %v", st.Name, err)
+		}
+		_ = res.Close()
+	}
+	steps := spec.Sessions[0].Steps
+	fast, err := env.Eng.Explain(steps[0].Query, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(fast, "ParallelCountScan") {
+		t.Errorf("the fast arm %q is not planned as the parallel count:\n%s", steps[0].Query, fast)
+	}
+	scan, err := env.Eng.Explain(steps[1].Query, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(scan, "Parallel") {
+		t.Errorf("the scan arm %q is planned as a parallel operator:\n%s", steps[1].Query, scan)
+	}
+}
 
 // explainParams converts a step's parameters for Engine.Explain.
 func explainParams(t *testing.T, in map[string]any) map[string]expr.Value {
