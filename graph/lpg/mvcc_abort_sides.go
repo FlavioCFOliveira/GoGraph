@@ -480,8 +480,12 @@ func (av *adjVersions) clearAbortedOf(ids []graph.NodeID) (freed int) {
 }
 
 // clearAbortedLocked clears the aborted sides of id's stamps, dropping the entry
-// when both are aborted, and reports whether it dropped it. The caller holds
-// the shard lock.
+// when both are aborted and it keeps no displaced commit, and reports whether it
+// dropped it. The caller holds the shard lock.
+//
+// A cleared side does not take the commit it displaced with it: that commit was
+// folded into floorTS when the aborted write overwrote it ([adjStamps.set]), so
+// the entry stays, floor alone, until the watermark passes it (rmp #2997).
 func (sh *adjVersionShard) clearAbortedLocked(id graph.NodeID) int {
 	e := sh.d[id]
 	if e == nil {
@@ -489,7 +493,7 @@ func (sh *adjVersionShard) clearAbortedLocked(id graph.NodeID) int {
 	}
 	a := adjEffective(e.appendInfo, e.appendTS)
 	x := adjEffective(e.exclusiveInfo, e.exclusiveTS)
-	if a == mvcc.AbortedTS && x == mvcc.AbortedTS {
+	if a == mvcc.AbortedTS && x == mvcc.AbortedTS && e.floorTS == 0 {
 		delete(sh.d, id)
 		return 1
 	}

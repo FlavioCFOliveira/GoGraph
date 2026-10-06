@@ -99,6 +99,73 @@ type adjStamps struct {
 	exclusiveInfo *commitInfo
 	appendTS      uint64
 	exclusiveTS   uint64
+	// floorTS is the newest COMMIT timestamp a stamp displaced from either side,
+	// or zero. Every check tests it beside the two sides; see [adjStamps.set].
+	floorTS uint64
+}
+
+// set records rec (tx's commit record, effective instant txID) on one side —
+// *info and *ts are that side's fields — first folding the value it displaces
+// into floorTS when that value is a COMMITTED write of another transaction.
+//
+// # Why a displaced commit must outlive its slot (rmp #2997)
+//
+// Each side is ONE slot, so a write that stamps a node overwrites the stamp it
+// found. A commit is only overwritten by a transaction that can see it, so the
+// overwrite loses nothing while the overwriter lives: in flight it refuses every
+// other writer, and once committed its own instant is later than the one it
+// replaced. But when the overwriter ABORTS, [adjVersionShard.clearAbortedLocked]
+// clears its side, and with nothing else recording it the displaced commit was
+// gone: a transaction whose snapshot predates that commit then found the node
+// unstamped and wrote over a change it never saw. Measured on the Cypher path as
+// a committed DETACH DELETE of a hub beside the incoming arcs a peer committed
+// after the deleter's snapshot — the deleter's snapshot lists no such arc to
+// remove, and the stamp that should have refused its claim on the hub had been
+// wiped by an appender refused at the hub's death claim (an append claims the
+// hub, then loses the existence cross-check and aborts).
+//
+// The floor keeps the newest such commit for as long as the entry lives, which is
+// exactly the answer the lost predecessor would have given: every check tests the
+// two sides and the floor alike, so a node conflicts for tx iff some write it
+// still records — the current ones or any displaced commit — is invisible to tx.
+// It refuses nothing a kept slot would not have refused, because a displaced
+// commit is older than the in-flight or committed stamp that displaced it. Memgraph
+// reaches the same end by unlinking an aborted transaction's deltas from the
+// object's chain, which leaves the older committed delta at the head for
+// PrepareForWrite to test (memgraph/memgraph @ 6e9c79d,
+// src/storage/v2/inmemory/storage.cpp, InMemoryAccessor::Abort, the edge pass
+// setting the head to the first delta past the aborted ones; mvcc.hpp
+// PrepareForWrite).
+//
+// A displaced write of the same transaction, an aborted one, and a still
+// in-flight one of another transaction are not folded: the first is replaced by
+// the same record, the second protects nothing, and the third is reachable only
+// by a write that skips the test — an undo replay or [adjVersions.stampAppend] on
+// a node this transaction is creating — whose displaced writer is refused by the
+// existence cross-check of the node it is racing to create.
+func (e *adjStamps) set(info **commitInfo, ts *uint64, rec *commitInfo, txID uint64) {
+	if *info != rec {
+		if h := adjEffective(*info, *ts); h != 0 && h < mvcc.TxIDBase && h > e.floorTS {
+			e.floorTS = h
+		}
+	}
+	*info, *ts = rec, txID
+}
+
+// blocking returns the instant of the first write recorded in e that tx may not
+// write over — the exclusive side, the append side, then the floor of displaced
+// commits ([adjStamps.set]) — or false when there is none.
+func (e *adjStamps) blocking(tx *writeCtx) (uint64, bool) {
+	if head := adjEffective(e.exclusiveInfo, e.exclusiveTS); tx.conflicts(head) {
+		return head, true
+	}
+	if head := adjEffective(e.appendInfo, e.appendTS); tx.conflicts(head) {
+		return head, true
+	}
+	if e.floorTS != 0 && tx.conflicts(e.floorTS) {
+		return e.floorTS, true
+	}
+	return 0, false
 }
 
 // ts resolves one side's effective instant.
@@ -194,10 +261,7 @@ func (av *adjVersions) claimAppend(src graph.NodeID, tx *writeCtx) error {
 	defer sh.mu.Unlock()
 	e := sh.d[src]
 	if e != nil && !tx.undoing.Load() {
-		if head := adjEffective(e.exclusiveInfo, e.exclusiveTS); tx.conflicts(head) {
-			return tx.conflictErr(mvcc.StoreAdjacency, head)
-		}
-		if head := adjEffective(e.appendInfo, e.appendTS); tx.conflicts(head) {
+		if head, ok := e.blocking(tx); ok {
 			return tx.conflictErr(mvcc.StoreAdjacency, head)
 		}
 	}
@@ -208,7 +272,7 @@ func (av *adjVersions) claimAppend(src graph.NodeID, tx *writeCtx) error {
 		}
 		sh.d[src] = e
 	}
-	e.appendInfo, e.appendTS = tx.record(), tx.txID
+	e.set(&e.appendInfo, &e.appendTS, tx.record(), tx.txID)
 	tx.tx.Touch(touchedAdjClaims)
 	tx.noteSide(sideAdjClaim, uint64(src), 0, 0)
 	return nil
@@ -252,10 +316,7 @@ func (av *adjVersions) claimAppendPair(ids [2]graph.NodeID, n int, tx *writeCtx)
 			if e == nil {
 				continue
 			}
-			if head := adjEffective(e.exclusiveInfo, e.exclusiveTS); tx.conflicts(head) {
-				return tx.conflictErr(mvcc.StoreAdjacency, head)
-			}
-			if head := adjEffective(e.appendInfo, e.appendTS); tx.conflicts(head) {
+			if head, ok := e.blocking(tx); ok {
 				return tx.conflictErr(mvcc.StoreAdjacency, head)
 			}
 		}
@@ -271,7 +332,7 @@ func (av *adjVersions) claimAppendPair(ids [2]graph.NodeID, n int, tx *writeCtx)
 			}
 			sh.d[id] = e
 		}
-		e.appendInfo, e.appendTS = rec, tx.txID
+		e.set(&e.appendInfo, &e.appendTS, rec, tx.txID)
 		tx.noteSide(sideAdjClaim, uint64(id), 0, 0)
 	}
 	tx.tx.Touch(touchedAdjClaims)
@@ -295,11 +356,7 @@ func (av *adjVersions) admits(ids [2]graph.NodeID, n int, tx *writeCtx) error {
 		sh.mu.Lock()
 		e := sh.d[id]
 		if e != nil {
-			if head := adjEffective(e.exclusiveInfo, e.exclusiveTS); tx.conflicts(head) {
-				sh.mu.Unlock()
-				return tx.conflictErr(mvcc.StoreAdjacency, head)
-			}
-			if head := adjEffective(e.appendInfo, e.appendTS); tx.conflicts(head) {
+			if head, ok := e.blocking(tx); ok {
 				sh.mu.Unlock()
 				return tx.conflictErr(mvcc.StoreAdjacency, head)
 			}
@@ -334,7 +391,7 @@ func (av *adjVersions) stampAppend(src graph.NodeID, tx *writeCtx) {
 		}
 		sh.d[src] = e
 	}
-	e.appendInfo, e.appendTS = tx.record(), tx.txID
+	e.set(&e.appendInfo, &e.appendTS, tx.record(), tx.txID)
 	tx.tx.Touch(touchedAdjClaims)
 	tx.noteSide(sideAdjClaim, uint64(src), 0, 0)
 }
@@ -364,10 +421,7 @@ func (av *adjVersions) noteExclusive(src graph.NodeID, tx *writeCtx) error {
 		// claim below is still stamped, so later writers order against the
 		// rollback's publication exactly as against any other write.
 		if !tx.undoing.Load() {
-			if head := adjEffective(e.exclusiveInfo, e.exclusiveTS); tx.conflicts(head) {
-				return tx.conflictErr(mvcc.StoreAdjacency, head)
-			}
-			if head := adjEffective(e.appendInfo, e.appendTS); tx.conflicts(head) {
+			if head, ok := e.blocking(tx); ok {
 				return tx.conflictErr(mvcc.StoreAdjacency, head)
 			}
 		}
@@ -378,13 +432,14 @@ func (av *adjVersions) noteExclusive(src graph.NodeID, tx *writeCtx) error {
 		}
 		sh.d[src] = e
 	}
-	e.exclusiveInfo, e.exclusiveTS = tx.record(), tx.txID
+	e.set(&e.exclusiveInfo, &e.exclusiveTS, tx.record(), tx.txID)
 	tx.tx.Touch(touchedAdjClaims)
 	tx.noteSide(sideAdjClaim, uint64(src), 0, 0)
 	return nil
 }
 
-// truncate drops every entry whose BOTH sides are at or below watermark.
+// truncate drops every entry whose BOTH sides and floor are at or below
+// watermark.
 //
 // Those stamps can no longer refuse anything: [mvcc.Conflicts] is false for a
 // head below any live transaction's start, so keeping the entry only costs
@@ -400,7 +455,7 @@ func (av *adjVersions) truncate(watermark uint64) (freed int) {
 		for id, e := range sh.d {
 			a := adjEffective(e.appendInfo, e.appendTS)
 			x := adjEffective(e.exclusiveInfo, e.exclusiveTS)
-			if a <= watermark && x <= watermark {
+			if a <= watermark && x <= watermark && e.floorTS <= watermark {
 				delete(sh.d, id)
 				freed++
 			}
